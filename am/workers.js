@@ -821,39 +821,8 @@ const stamp = (at) => new Date(at ?? Date.now()).toISOString();
 const orNull = (x) => (x === undefined || x === "" ? null : x);
 const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
 
-/** The vendors ACP's Bot login generation record carries (its `generation.json`, #1527). */
-export const LOGIN_VENDORS = ["claude", "codex"];
-/** A Bot login generation as ACP writes one: a v4 UUID. */
+/** A launch id: a v4 UUID. */
 const GENERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-/**
- * The generation and sequence a launch records, from the Bot login generation record (ACP's
- * `generation.json`, written beside its pointer, #1527) and the vendor it launches. One record
- * names both vendors and one sequence; a launch records that vendor's `generation` and the
- * record's `sequence`. Both are null when the record is absent, unreadable or not version 1,
- * names no generation for this vendor, or holds no usable sequence: never a guess.
- */
-export function loginGeneration(record, vendor) {
-  const field = record && typeof record === "object" && !Array.isArray(record) && record.version === 1
-    && LOGIN_VENDORS.includes(vendor) ? record[vendor] : null;
-  const generation = field && typeof field === "object" && !Array.isArray(field)
-    && typeof field.generation === "string" && GENERATION_ID.test(field.generation) ? field.generation : null;
-  const sequence = record && Number.isSafeInteger(record.sequence) && record.sequence >= 0 ? record.sequence : null;
-  return generation !== null && sequence !== null ? { generation, sequence } : { generation: null, sequence: null };
-}
-
-/**
- * loginGeneration for a launch on a chosen home (#1208): the record names the caller's Bot
- * login, so its pair is kept only when that vendor's folder in the same record (`claude.configDir`,
- * `codex.home`) resolves (`realpath`) to the chosen `home`; otherwise both are null, never a guess.
- */
-export function chosenLoginGeneration(record, vendor, home, realpath) {
-  const field = record && typeof record === "object" && !Array.isArray(record) && LOGIN_VENDORS.includes(vendor) ? record[vendor] : null;
-  const dir = field && typeof field === "object" ? (vendor === "claude" ? field.configDir : field.home) : null;
-  let real = null;
-  try { real = typeof dir === "string" && dir.startsWith("/") ? realpath(dir) : null; } catch { real = null; }
-  return real !== null && real === home ? loginGeneration(record, vendor) : { generation: null, sequence: null };
-}
 
 /**
  * A start row: a worker (`kind: "worker"`, `worktree` its cwd as a real path) or a bot seat
@@ -875,8 +844,9 @@ export function chosenLoginGeneration(record, vendor, home, realpath) {
  * HOME/DSH_HOME/CODEX_HOME/KIMI_CODE_HOME the seat was started with, so a search for the
  * conversation it left on disk uses its own root and never the reviving process's; null when the
  * launch named none (the search then fails closed). `generation` and `sequence`: the Bot login
- * generation and record sequence this launch used (loginGeneration), both null when it has no
- * Claude/Codex generation record (another agent or template, no pointer, or no record). A seat's
+ * generation and record sequence the reader resolved for this launch's spawn (#1532), both null
+ * when the launch had no Bot login resolution (policy off, a legacy login, an unusable sequence,
+ * or `am attach`). A seat's
  * worker-only fields are null or false. `agentHome` and `launch`: a worker on a chosen agent home
  * (#1208), its real home and launch id; a row with none has neither key.
  */

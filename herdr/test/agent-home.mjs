@@ -16,7 +16,7 @@ import { AGENT_HOME_UNSETS, CLAUDE_STORAGE_VAR, LAUNCH_VAR, agentHomeFor, agentH
 import { attachPath } from "../mods/am-sidebar/attach.js";
 import { applyBotEdit, checkBots, parseBots, workerHomeLaunchProblem, workerHomeOf } from "../mods/am-sidebar/model.js";
 import { AGENTS, configPaths, knownModels } from "../mods/am-sidebar/models.js";
-import { GUARD_DIR, KILL_GUARD_DIR, chosenLoginGeneration, readLedger, startRow, unresolvedWorker, workerArgs, workerIntent } from "../mods/am-sidebar/workers.js";
+import { GUARD_DIR, KILL_GUARD_DIR, readLedger, startRow, unresolvedWorker, workerArgs, workerIntent } from "../mods/am-sidebar/workers.js";
 import { approveProject } from "../mods/am-sidebar/approved.js";
 import { FLEET_FILE } from "../mods/am-sidebar/accountsRows.js";
 import { auth, fpr } from "./accounts-fixture.mjs";
@@ -257,13 +257,6 @@ export function agentHomeTests(cli) {
     assert.equal(Object.hasOwn(plain, "agentHome"), false);
     assert.equal(Object.hasOwn(plain, "launch"), false);
     assert.deepEqual(Object.keys(startRow({ ...base, agentHome: "/homes/b", launch: LAUNCH })).slice(-3), ["agentHome", "launch", "at"]);
-    const record = { version: 1, sequence: 7, claude: { generation: GEN.claude, configDir: "/homes/b" }, codex: { generation: GEN.codex, home: "/homes/c" } };
-    const real = (p) => p;
-    assert.deepEqual(chosenLoginGeneration(record, "claude", "/homes/b", real), { generation: GEN.claude, sequence: 7 });
-    assert.deepEqual(chosenLoginGeneration(record, "codex", "/homes/c", real), { generation: GEN.codex, sequence: 7 });
-    assert.deepEqual(chosenLoginGeneration(record, "claude", "/homes/other", real), { generation: null, sequence: null });
-    assert.deepEqual(chosenLoginGeneration(record, "codex", "/homes/b", real), { generation: null, sequence: null });
-    assert.deepEqual(chosenLoginGeneration(record, "claude", "/homes/b", () => { throw new Error("gone"); }), { generation: null, sequence: null });
   });
 
   test("#1208 the roster: checkBots refuses a malformed home, parseBots keeps a dropped worker's home for the launch to refuse", () => {

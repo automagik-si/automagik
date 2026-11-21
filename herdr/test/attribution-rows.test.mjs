@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { squadOf } from "../mods/am-sidebar/model.js";
-import { END_REASONS, endRow, finishedEnds, launchKey, loginGeneration, readLedger, reapCandidates, sessionRow, startRow, workerArgs }
+import { END_REASONS, endRow, finishedEnds, launchKey, readLedger, reapCandidates, sessionRow, startRow, workerArgs }
   from "../mods/am-sidebar/workers.js";
 import { choosesSession, ownsSession, sessionIdArgs, withoutResume } from "../mods/am-sidebar/models.js";
 import { SESSION_MASK, ledgerSession, maskedArgv, planText, restartPlan } from "../mods/am-sidebar/restart.js";
@@ -15,7 +15,6 @@ const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", sol
 const SID = "00000000-0000-4000-8000-000000000001";
 const SID2 = "00000000-0000-4000-8000-000000000002";
 const GEN1 = "11111111-1111-4111-8111-111111111111";
-const GEN2 = "22222222-2222-4222-8222-222222222222";
 const bot = (id, kind, extra = {}) => ({ id, kind, name: id, agent: "claude", ...extra });
 const file = (bots) => ({ version: 1, categories: [], bots });
 
@@ -73,17 +72,6 @@ test("startRow: core, created_ms, squad, session, generation and sequence, null 
   // An old row written before RFC 0021 has none of the new fields: it reads as it was.
   const old = readLedger('{"event":"start","kind":"worker","terminal":"t3","botId":"b-cccccccccc"}\n')[0];
   assert.equal(launchKey(old), null);
-});
-
-test("loginGeneration: this vendor's generation and the record's sequence, null for anything unusable", () => {
-  const record = { version: 1, sequence: 5, claude: { generation: GEN1 }, codex: { generation: GEN2 } };
-  assert.deepEqual(loginGeneration(record, "claude"), { generation: GEN1, sequence: 5 });
-  assert.deepEqual(loginGeneration(record, "codex"), { generation: GEN2, sequence: 5 });
-  const none = { generation: null, sequence: null };
-  for (const bad of [null, {}, { version: 2, sequence: 5, claude: { generation: GEN1 } },
-    { version: 1, sequence: -1, claude: { generation: GEN1 } }, { version: 1, sequence: 5, claude: null },
-    { version: 1, sequence: 5, claude: { generation: "not-a-uuid" } }]) assert.deepEqual(loginGeneration(bad, "claude"), none);
-  assert.deepEqual(loginGeneration(record, "antigravity"), none);
 });
 
 test("sessionRow: the harness, core and created_ms when known; Claude's rows look as the hook's always did", () => {

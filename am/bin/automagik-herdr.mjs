@@ -39,9 +39,9 @@ import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrus
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
   GUARD_DIR, KILL_GUARD_DIR, KILL_GUARD_NAME, SESSION_LABEL, TRANSCRIPT_LABEL, baseCandidates, branchNamesTask, branchSlug, guardPathWith,
-  LEDGER_MODE, endRow, finishedEnds, launchKey, ledgerLine, ledgerPath, loginGeneration, optionLike, paneArgs, readLedger, reapCandidates, reapPath, reapRow,
+  LEDGER_MODE, endRow, finishedEnds, launchKey, ledgerLine, ledgerPath, optionLike, paneArgs, readLedger, reapCandidates, reapPath, reapRow,
   prAskDue, prBranchKey, prBranches, prChecksPath, prChecksText, prLikely, prRowsFor, readPrChecks, forgeHost, forgeOf, workerTaskText,
-  sessionRow, stableGuardDir, stableKillDir, stableRootOf, chosenLoginGeneration, workerIntent, unresolvedWorker,
+  sessionRow, stableGuardDir, stableKillDir, stableRootOf, workerIntent, unresolvedWorker,
   parseWorktrees, runsTemplate, startRow, swapArm, swapByte,
   taskIdProblem, taskWorkerName, TEMPLATE_SHAPE, codexTemplateRefusal, codexTemplateWarning, templateAgent, workerArgs, workerBranch, workerKillRefusal, workerPlan, workerRole, worktreeFolder,
   workLeft, writesWorktree } from "../workers.js";
@@ -3751,25 +3751,10 @@ async function relabelPane(terminal, words, prefix, warnedRelabels) {
   return result.code === 0 ? null : relabelFailureWarning({ terminal, words, result }, prefix, warnedRelabels);
 }
 
-/**
- * The Bot login generation a launch of `vendor` records: `generation` and `sequence` from the
- * generation record ACP writes beside its pointer (#1527). The pointer reaches an am process as
- * `AUTOMAGIK_BOT_CLI_POINTER` (the entrypoint's export, #1531); without it, or with no readable
- * version-1 record naming that vendor, both are null, never a guess. Reads one small file and
- * never resolves, copies or exports a login.
- */
-function launchLogin(vendor, resolved = null) {
-  // Under the reader (#1509) the row records the login the launch itself resolved: its generation
-  // and the record's sequence, or both null for a login from before any generation (#1532's policy).
-  if (resolved) {
-    return resolved.generation && resolved.generation !== "legacy" && Number.isSafeInteger(resolved.sequence)
-      ? { generation: resolved.generation, sequence: resolved.sequence } : { generation: null, sequence: null };
-  }
-  const pointer = process.env.AUTOMAGIK_BOT_CLI_POINTER;
-  if (typeof pointer !== "string" || !pointer.startsWith("/")) return { generation: null, sequence: null };
-  try {
-    return loginGeneration(JSON.parse(readFileSync(join(dirname(pointer), "generation.json"), "utf8")), vendor);
-  } catch { return { generation: null, sequence: null }; }
+/** The row uses the launch's own Bot login resolution because the panel may switch it meanwhile. */
+function launchLogin(resolved) {
+  return resolved?.state === "ready" && resolved.generation !== "legacy" && resolved.sequence !== null
+    ? { generation: resolved.generation, sequence: resolved.sequence } : { generation: null, sequence: null };
 }
 
 /**
@@ -3794,7 +3779,7 @@ export function appendLedger(row, appHomeDir = appHome()) {
 /**
  * appendLedger's write: { notes, error }. `notes` are advisory (the app home kept out of git, a
  * ledger that couldn't be made private) and come even when the row was written; `error` is set
- * only when the row itself wasn't. A chosen-home worker's intent row (#1208) needs the difference.
+ * when the row wasn't written in full. A chosen-home worker's intent row (#1208) needs the difference.
  */
 function writeLedgerRow(row, appHomeDir = appHome()) {
   const path = ledgerPath(appHomeDir);
@@ -3811,7 +3796,8 @@ function writeLedgerRow(row, appHomeDir = appHome()) {
       } catch (e) {
         notes.push(`${path} couldn't be made private (chmod 600: ${e?.message ?? e}); usagemeter won't read a ledger others can write`);
       }
-      writeSync(fd, ledgerLine(row));
+      const line = Buffer.from(ledgerLine(row));
+      if (writeSync(fd, line) < line.length) throw new Error("short write, ledger may be incomplete");
     } finally { closeSync(fd); }
   } catch (e) {
     return { notes, error: e ?? new Error("write failed") };
@@ -5993,7 +5979,7 @@ async function launchSeat(project, bot, over = {}) {
     // #1262: hc waits 60 s for the new terminal's first status, so the run gets its own timeout
     // above that wait; a timeout after hc made the terminal is a start looked up by its name
     // (the attach row is still written), never a failed start.
-    ledgerLogin = launchLogin(agentKey, freshLogin);
+    ledgerLogin = launchLogin(freshLogin);
     const recover = over.localOnly ? (name) => localRunStartedByName(name, bot.id) : undefined;
     const { address, late, get: recovered } = await hcStartRun(hc, args, name, recover);
     if (over.localOnly && !isHcTerminalId(address)) throw localLaunchAddressRefusal(address);
@@ -6794,7 +6780,7 @@ async function rerunHelpers(plans, parent, say) {
       const unlogged = appendLedger(startRow({ kind: "worker", terminal: address, pid: await pidOf(address), botId: w.botId, task: w.task, branch: w.branch,
         project: w.project, lead: w.lead, worktree: w.worktree, base: w.base, created: false, agent: w.agent, model: w.model, effort: w.effort,
         template: w.template, role: w.role, swap: w.swap, override: w.override, overrideRequested: w.override_requested,
-        core, createdMs, squad, env: homeEnv, session: p.agent === "claude" ? p.session : null, ...launchLogin(p.agent ?? w.agent, freshLogin) }));
+        core, createdMs, squad, env: homeEnv, session: p.agent === "claude" ? p.session : null, ...launchLogin(freshLogin) }));
       if (unlogged) say(unlogged);
     }
     if (p.binding) {
@@ -6817,7 +6803,7 @@ async function rerunHelpers(plans, parent, say) {
       let tags = seatTags(null, b.bot);
       try { tags = seatTags(loadProject(b.project).file, b.bot); } catch { /* its file can't be read now: no tags */ }
       const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: await pidOf(address), botId: b.bot, worktree: p.cwd, project: b.project,
-        agent: p.agent, model: null, template: p.template ?? null, ...tags, core, createdMs, env: homeEnv, session: p.agent === "claude" ? p.session : null, ...launchLogin(p.agent, freshLogin) }));
+        agent: p.agent, model: null, template: p.template ?? null, ...tags, core, createdMs, env: homeEnv, session: p.agent === "claude" ? p.session : null, ...launchLogin(freshLogin) }));
       if (unlogged) say(unlogged);
     }
     // A session id carried onto the new terminal, any harness (RFC 0021 (f) 5): a session row.
@@ -9461,9 +9447,10 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
     const seatAgent = agentKeyOfArgv(argv, agentTable()) ?? (claude ? "claude" : bot.agent ?? null);
     // #1490: a discovered agent's launch argv names its home; record it, as a pack launch does.
     const seatHome = discoversSession(seatAgent) ? seatHomeOf(seatAgent, { argv: get.argv })?.env ?? null : null;
+    // An adopted pane has no Bot login resolution from its launch.
     const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: get.foreground?.pid ?? get.pid ?? null, botId: bot.id,
       worktree: sessionFolder, project: key, agent: seatAgent, model: detectModel(argv, seatAgent), template: paneTemplateName(get), ...seatTags(file, bot.id),
-      core: await rowCore(), createdMs: get.created_ms, env: seatHome, ...launchLogin(seatAgent) }));
+      core: await rowCore(), createdMs: get.created_ms, env: seatHome }));
     if (unlogged) hook.warnings.push(unlogged);
   }
   if (hook.written) hook.warnings.push(`${bot.name}'s briefing hook was added while its Claude session was running. If its next prompt brings no briefing, restart the bot: am restart ${bot.id} (or the bot row's Restart).`);
@@ -11267,19 +11254,6 @@ function fullGuardFirst() {
 }
 
 /**
- * launchLogin for a worker on a chosen agent home (#1208): the generation record names the
- * caller's Bot login, so its pair is recorded only when that vendor's folder in the same record
- * is the chosen home (workers.js chosenLoginGeneration); otherwise both are null.
- */
-function chosenLaunchLogin(vendor, homeDir) {
-  const pointer = process.env.AUTOMAGIK_BOT_CLI_POINTER;
-  if (typeof pointer !== "string" || !pointer.startsWith("/")) return { generation: null, sequence: null };
-  try {
-    return chosenLoginGeneration(JSON.parse(readFileSync(join(dirname(pointer), "generation.json"), "utf8")), vendor, homeDir, realpathSync);
-  } catch { return { generation: null, sequence: null }; }
-}
-
-/**
  * The pane hc run answered with for a chosen launch (#1208), checked: it is this launch's only
  * when its launch argv carries this launch's id. A verified pane has a creation time, runs on
  * the chosen home and outlives its parent. Persist the identity of a pane left unverified.
@@ -11700,7 +11674,7 @@ async function cmdWorker(opts, rest) {
     // waiting 60 s for a program that never does; the run gets its own timeout above that wait.
     // One the timeout still ends after hc made the terminal is a start whose task didn't go in,
     // never a failed start: the row below is written from the terminal looked up by its name.
-    ledgerLogin = chosen && !freshLogin ? chosenLaunchLogin(chosen.agent, chosen.home) : launchLogin(runs ?? plan.agent, freshLogin);
+    ledgerLogin = launchLogin(freshLogin);
     let core = null;
     if (chosen) {
       core = await coreId();

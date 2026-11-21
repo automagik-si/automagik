@@ -4115,6 +4115,7 @@ for (const launch of [["sh", "-c", "exec codex"], ["opaque-helper"]]) {
     assert.equal(r.code, 2, r.err);
     assert.match(r.err, /\(launch-not-direct\)/);
     assert.deepEqual(s.calls().filter((c) => ["run", "kill"].includes(c[0])), []);
+    assert.deepEqual(rowsOf_(s, "start"), []);
   });
 }
 
@@ -4124,6 +4125,7 @@ test("#1509 the final helper check ends only the new parent and leaves the old t
   state.onRunWrite = { path: join(dirname(codex.dir), "paused"), text: "" };
   save();
   const before = attachOf(s);
+  const starts = rowsOf_(s, "start");
   const r = s.cli(["restart", "Genie", "--tree", "--json"], { env });
   assert.equal(r.code, 2, r.err);
   assert.match(r.err, /\(login-paused\)/);
@@ -4132,15 +4134,20 @@ test("#1509 the final helper check ends only the new parent and leaves the old t
   assert.deepEqual(s.hcState().terminals.map(({ address, state }) => [address, state]),
     [["t5", "live"], ["t8", "live"], ["t100", "finished"]]);
   assert.deepEqual(attachOf(s), before);
+  assert.deepEqual(rowsOf_(s, "start"), starts, "the abandoned replacement adds no start row");
 });
 
-test("#1509 a restarted Codex helper records the home passed to its launch", (t) => {
-  const { s, env, codex, state, save } = managedTree(t);
+test("#1509 a restarted Codex helper records the home and login passed to its launch", (t) => {
+  const { s, env, state, save } = managedTree(t);
+  const codex = loginFixture(join(s.root, "cli-homes"), "codex", "22222222-2222-4222-8222-222222222222");
+  const record = JSON.parse(codex.text);
   const file = s.bots();
   file.bots.find((b) => b.id === ID.dev).agent = "codex";
   s.seed(file);
   const previous = join(s.root, "previous-codex");
   state.terminals[1].argv = ["/usr/bin/env", "PATH=/bin", `HOME=${s.home}`, `CODEX_HOME=${previous}`, "codex"];
+  // The parent has resolved its login by the time hc receives the run. The helper resolves later.
+  state.onRunWrite = { path: codex.recordPath, text: JSON.stringify({ ...record, sequence: record.sequence + 1 }) };
   save();
   attachSeat(s, "Dev", "t8");
   const r = s.cli(["restart", "Genie", "--tree", "--json"], { env });
@@ -4149,7 +4156,12 @@ test("#1509 a restarted Codex helper records the home passed to its launch", (t)
   assert.equal(terminal, "t101");
   const overrides = runs(s)[1].filter((word) => word.startsWith("CODEX_HOME="));
   assert.equal(overrides.at(-1), `CODEX_HOME=${codex.dir}`);
-  assert.equal(seatRows(s).find((row) => row.terminal === terminal).env.CODEX_HOME, codex.dir);
+  const rows = seatRows(s);
+  const helper = rows.find((row) => row.terminal === terminal);
+  const parent = rows.find((row) => row.terminal === r.json().terminal);
+  assert.equal(helper.env.CODEX_HOME, codex.dir);
+  assert.deepEqual([helper.generation, helper.sequence], [record.codex.generation, record.sequence + 1]);
+  assert.deepEqual([parent.generation, parent.sequence], [record.claude.generation, record.sequence]);
 });
 
 test("#1509 guarded tree recovery runs after a successful kill even when queue cleanup fails", (t) => {
@@ -5053,6 +5065,48 @@ test("RFC 0021: a seat start row carries core, created_ms, role, lead and squad;
   assert.equal(modeOf(behind), 0o644);
 });
 
+test("#1532 a worker starts on its resolved login when the ledger cannot be opened", (t) => {
+  const s = restartScene(t);
+  const login = loginFixture(join(s.root, "cli-homes"), "claude");
+  const path = ledgerPath(s.app);
+  const behind = join(s.root, "behind.jsonl");
+  const before = Buffer.from("keep\n");
+  writeFileSync(behind, before);
+  mkdirSync(dirname(path), { recursive: true });
+  symlinkSync(behind, path);
+  const r = s.cli(["worker", "fix it", "--branch", "feat/logging", "--agent", "claude", "--json"],
+    { env: { ...login.env, HC_TERMINAL_ID: "t5" } });
+  assert.equal(r.code, 0, r.err);
+  const { terminal } = r.json();
+  const run = runCall(s.calls());
+  assert.ok(run.includes(`CLAUDE_CONFIG_DIR=${login.dir}`));
+  assert.ok(s.hcState().terminals.some((pane) => pane.address === terminal && pane.state === "live"));
+  assert.ok(r.err.includes(`${terminal} runs, but it isn't in automagik-herdr/workers.jsonl, so its usage won't be tied to it: ELOOP`), r.err);
+  assert.deepEqual(readFileSync(path), before);
+  assert.deepEqual(rowsOf_(s, "start"), []);
+});
+
+test("#1532 a short ledger write warns that the ledger may be incomplete", (t) => {
+  const root = scratchRoot(t, "hb-short-ledger-");
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+import fs from "node:fs";
+import assert from "node:assert/strict";
+import { syncBuiltinESMExports } from "node:module";
+const write = fs.writeSync;
+fs.writeSync = (fd, ...args) => {
+  const [line] = args;
+  return Buffer.isBuffer(line) && line.toString().startsWith('{"event":"start"')
+    ? write(fd, line.subarray(0, line.length - 1)) : write(fd, ...args);
+};
+syncBuiltinESMExports();
+const { appendLedger } = await import(${JSON.stringify(CLI)});
+assert.equal(appendLedger({ event: "start", terminal: "t100" }, process.argv[1]),
+  "t100 runs, but it isn't in automagik-herdr/workers.jsonl, so its usage won't be tied to it: short write, ledger may be incomplete");
+`, root], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  assert.equal(readFileSync(ledgerPath(root), "utf8"), '{"event":"start","terminal":"t100"}');
+});
+
 test("RFC 0021: core comes from hc server status, created_ms from hc get", (t) => {
   const s = scene(t);
   s.seed(team());
@@ -5135,10 +5189,16 @@ test("RFC 0021: attach writes a seat row with role, lead, squad, core and create
   st.terminals[0].cwd = s.project;
   st.terminals[0].foreground.cwd = s.project;
   writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
-  const r = s.cli(["attach", "Captain", "t7"]);
+  const login = loginFixture(join(s.root, "cli-homes"), "claude");
+  const args = ["attach", "Captain", "t7"];
+  const r = s.cli(args, { env: login.env });
   assert.equal(r.code, 0, r.err);
   const row = seatRows(s)[0];
   assert.deepEqual([row.terminal, row.core, row.created_ms, row.role, row.lead, row.squad], ["t7", "fakecore0000", 4242, "captain", ID.main, ID.cap]);
+  assert.deepEqual([row.generation, row.sequence], [null, null]);
+  const again = s.cli(args, { env: login.env });
+  assert.equal(again.code, 0, again.err);
+  assert.deepEqual(seatRows(s), [row], "attaching the same pane again leaves its row alone");
 });
 
 test("#1418: attach records the trimmed native template or the pane's template label", (t) => {
