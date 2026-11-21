@@ -3969,6 +3969,11 @@ ${REST_NOTE}`);
 // src/client/viewer.js
 var VIEWER_KEY = "automagik.viewer";
 var RELOAD_KEY = "automagik.retired";
+var HIDDEN_DOCUMENT = /* @__PURE__ */ Symbol.for("automagik.hidden-document");
+var REFUSAL_BODY_MS = 5e3;
+var REVALIDATE_MS = 5e3;
+var REVALIDATE_RETRY_MS = 750;
+var CHECK_DEADLINE = Object.assign(new Error("Viewer check deadline"), { name: "AbortError" });
 var ROLES = /* @__PURE__ */ new Set(["owner", "member", "guest", "none"]);
 var guard;
 function bootView() {
@@ -3976,9 +3981,8 @@ function bootView() {
   if (boot === void 0) return;
   return boot?.version === 1 && ROLES.has(boot.role) ? boot : { role: "none" };
 }
-var mountedViewer = () => guard?.retired ? void 0 : guard?.viewer;
+var mountedViewer = () => guard?.retired || guard?.signal?.aborted ? void 0 : guard?.viewer;
 var isRetired = () => guard?.retired === true;
-var canClearDraftInMemory = () => guard?.draftsProtected === true;
 var unavailable = () => Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
 function storedViewer() {
   try {
@@ -3995,18 +3999,69 @@ function requestViewer(endpoint) {
   return guard;
 }
 function checkViewer(active2) {
-  if (active2 && guard === active2 && active2.viewer) {
+  if (!active2) return;
+  if (guard !== active2 || active2.retired || active2.signal?.aborted) throw unavailable();
+  if (active2.viewer) {
     const current = storedViewer();
-    if (current !== null && current !== active2.viewer.id) retire();
+    if ((current !== null || active2.markerSet) && current !== active2.viewer.id) {
+      retire(active2);
+      throw unavailable();
+    }
   }
-  if (active2 && (guard !== active2 || active2.retired)) throw unavailable();
 }
-function viewerRefused(code) {
-  if (guard && ["bot/viewer-changed", "HTTP_401", "HTTP_403"].includes(code)) retire();
+function viewerRefused(active2, code) {
+  if (active2 && code === "bot/viewer-changed") retire(active2);
 }
-function viewerResponse(response) {
-  if (response.status === 401 && response.headers?.get?.("x-automagik-dsh-refresh") === "1") return;
-  viewerRefused(`HTTP_${response.status}`);
+var viewerChanged = (answer) => answer?.code === "bot/viewer-changed" || answer?.error?.code === "bot/viewer-changed";
+async function refusalBody(response, signal) {
+  if (!response.body || signal?.aborted) return;
+  const reader = response.body.getReader();
+  let cancelled = false;
+  const cancel = () => {
+    cancelled = true;
+    void reader.cancel().catch(() => {
+    });
+  };
+  const timer = setTimeout(cancel, REFUSAL_BODY_MS);
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    const decoder = new TextDecoder();
+    let text2 = "";
+    while (!cancelled) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text2 += decoder.decode(value, { stream: true });
+    }
+    if (!cancelled) return JSON.parse(text2 + decoder.decode());
+  } catch {
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
+    reader.releaseLock();
+  }
+}
+async function viewerResponse(active2, response, endpoint, signal) {
+  const authRefused = response.status === 401 || response.status === 403;
+  const refresh = response.status === 401 && response.headers?.get("x-automagik-dsh-refresh") === "1";
+  if (authRefused && endpoint === "whoami" && !active2.viewer && !refresh) retire(active2);
+  const attempt = active2.checkAttempt;
+  if (authRefused && attempt && signal === attempt.controller.signal) {
+    attempt.refusal = refusalBody(response, signal).then((answer2) => {
+      if (viewerChanged(answer2)) retire(active2);
+    }).catch(() => {
+    });
+    return { refresh };
+  }
+  const answer = await refusalBody(response, signal ?? active2.signal);
+  signal?.throwIfAborted();
+  const changed = viewerChanged(answer);
+  if (changed) retire(active2);
+  else if (authRefused && endpoint !== "whoami") void active2.revalidate?.();
+  return { answer, changed, refresh };
+}
+var authRefusal = (error) => error?.code === "HTTP_401" || error?.code === "HTTP_403";
+function revalidateViewerOnRefusal(active2, error) {
+  if (authRefusal(error) && !error.refresh) void active2.revalidate?.();
 }
 function onRetire(hook) {
   if (!guard) return () => {
@@ -4016,23 +4071,33 @@ function onRetire(hook) {
   else hooks.add(hook);
   return () => hooks.delete(hook);
 }
-function retire() {
-  if (!guard || guard.retired) return;
-  guard.retired = true;
-  guard.viewer = void 0;
+function hideDocument() {
   const body = document.body;
+  const hidden = document[HIDDEN_DOCUMENT] ??= {
+    display: body?.style?.getPropertyValue("display"),
+    priority: body?.style?.getPropertyPriority("display"),
+    inert: body?.inert
+  };
   if (body) {
     body.inert = true;
     body.style?.setProperty("display", "none", "important");
   }
-  for (const hook of guard.hooks) {
+  return hidden;
+}
+function retire(active2) {
+  if (guard !== active2 || active2.retired) return;
+  active2.retired = true;
+  active2.viewer = void 0;
+  const hidden = hideDocument();
+  delete hidden.handoff;
+  for (const hook of active2.hooks) {
     try {
       hook();
     } catch {
     }
   }
-  guard.hooks.clear();
-  body?.replaceChildren?.();
+  active2.hooks.clear();
+  document.body?.replaceChildren?.();
   clearClientErrors();
   try {
     if (sessionStorage.getItem(RELOAD_KEY) === "1") return;
@@ -4045,42 +4110,45 @@ function retire() {
   } catch {
   }
 }
-function trackDrafts(active2, viewer) {
+function trackDrafts(active2, viewer, written = /* @__PURE__ */ new Map()) {
   try {
     const storage = localStorage;
     const prototype = Object.getPrototypeOf(storage);
     const set2 = prototype.setItem;
     const remove = prototype.removeItem;
     if (typeof set2 !== "function" || typeof remove !== "function") return;
-    const written = /* @__PURE__ */ new Map();
     const current = () => storage.getItem(VIEWER_KEY) === viewer.id;
     const conversation = (key) => typeof key === "string" && key.startsWith("dsh.conversation.");
     prototype.setItem = function(key, value) {
       if (this !== storage || !conversation(key)) return set2.call(this, key, value);
-      if (!active2.retired && current()) {
+      if (active2.viewer && !active2.retired && !active2.signal?.aborted && current()) {
         set2.call(this, key, value);
         written.set(key, storage.getItem(key));
       }
     };
     prototype.removeItem = function(key) {
       if (this !== storage || !conversation(key)) return remove.call(this, key);
-      if (!active2.retired && current()) {
+      if (active2.viewer && !active2.retired && !active2.signal?.aborted && current()) {
         remove.call(this, key);
         written.delete(key);
       }
     };
-    active2.hooks.add(() => {
+    const clear = (confirmingHandoff = false) => {
       try {
-        if (current()) {
+        if (confirmingHandoff || current()) {
           for (const [key, value] of written) if (storage.getItem(key) === value) remove.call(storage, key);
         }
       } finally {
         written.clear();
       }
-    });
-    return () => {
-      prototype.setItem = set2;
-      prototype.removeItem = remove;
+    };
+    return {
+      written,
+      clear,
+      stop() {
+        prototype.setItem = set2;
+        prototype.removeItem = remove;
+      }
     };
   } catch {
   }
@@ -4089,38 +4157,87 @@ function confirmed(answer, boot) {
   const viewer = answer?.viewer;
   return boot.role !== "none" && answer?.multiuser === true && answer.role === boot.role && (viewer?.role === boot.role || boot.role === "owner" && viewer?.role === "admin") && typeof viewer.id === "string" && /^[\w-]{1,64}$/.test(viewer.id);
 }
-async function startViewer(boot, signal, prepare) {
+function checkViewerAnswer(active2, answer) {
+  const viewer = active2?.viewer;
+  if (viewer && (!confirmed(answer, active2.boot) || answer.viewer.id !== viewer.id || answer.viewer.role !== viewer.role)) {
+    retire(active2);
+    throw unavailable();
+  }
+}
+async function startViewer(boot, signal, prepare, clearNativeDrafts) {
   if (guard) throw new Error("Viewer already started");
   if (signal?.aborted) throw unavailable();
-  const active2 = guard = { hooks: /* @__PURE__ */ new Set(), retired: false };
-  const previousViewer = storedViewer();
-  const body = document.body;
-  const display = body?.style?.getPropertyValue("display");
-  const priority = body?.style?.getPropertyPriority("display");
-  const inert = body?.inert;
-  const show2 = () => {
-    if (!body) return;
-    body.inert = inert;
-    body.style?.setProperty("display", display, priority);
-  };
-  if (body) {
-    body.inert = true;
-    body.style?.setProperty("display", "none", "important");
-  }
+  const active2 = guard = { hooks: /* @__PURE__ */ new Set(), retired: false, boot, signal };
+  const initialViewer = storedViewer();
+  const hidden = hideDocument();
+  const handoff = hidden.handoff;
+  const retained = handoff?.viewer;
+  let confirmingHandoff = Boolean(handoff);
   const current = () => guard === active2 && !active2.retired && !signal?.aborted;
   let cancelDelay;
+  const pause = async (delay2) => {
+    await new Promise((resolve2) => {
+      const timer2 = setTimeout(resolve2, delay2);
+      cancelDelay = () => {
+        clearTimeout(timer2);
+        resolve2();
+      };
+    });
+    cancelDelay = void 0;
+  };
   active2.hooks.add(() => cancelDelay?.());
-  let answer;
+  let drafts = handoff?.drafts;
+  let stopTrackingDrafts;
+  const startTracking = (viewer2) => {
+    const tracking = trackDrafts(active2, viewer2, drafts?.written);
+    if (tracking) {
+      drafts = tracking;
+      stopTrackingDrafts = tracking.stop;
+    }
+  };
+  if (retained) startTracking(retained);
+  const draftRole = retained?.role ?? boot.role;
+  const clearDrafts = () => {
+    try {
+      if (draftRole === "owner" || draftRole === "admin") clearNativeDrafts?.();
+    } catch {
+    }
+    try {
+      drafts?.clear(confirmingHandoff);
+    } catch {
+    }
+  };
+  if (retained) active2.hooks.add(clearDrafts);
+  let sawMarkerWrite = false;
+  const storage = (event) => {
+    if (event.key === null) return retire(active2);
+    if (event.key !== VIEWER_KEY) return;
+    if (!handoff && !active2.viewer) {
+      if (event.newValue === null) retire(active2);
+      else sawMarkerWrite = true;
+      return;
+    }
+    if (event.newValue !== (active2.viewer?.id ?? initialViewer)) retire(active2);
+  };
+  const stopStorage = () => window.removeEventListener("storage", storage);
+  window.addEventListener("storage", storage);
+  active2.hooks.add(stopStorage);
   const abort = () => {
     cancelDelay?.();
-    active2.stop?.();
     if (guard === active2 && !active2.retired) {
-      if (!active2.viewer) show2();
+      const hidden2 = hideDocument();
+      if (active2.viewer) {
+        hidden2.handoff = { viewer: active2.viewer, drafts };
+      }
+      stopStorage();
+      active2.stop?.();
+      stopTrackingDrafts?.();
       guard = void 0;
       delete globalThis.__AUTOMAGIK_MOUNTED_VIEWER__;
     }
   };
   signal?.addEventListener("abort", abort, { once: true });
+  let answer;
   let delay = 250;
   while (current()) {
     try {
@@ -4128,38 +4245,66 @@ async function startViewer(boot, signal, prepare) {
       break;
     } catch {
       if (!current()) break;
-      await new Promise((resolve2) => {
-        const timer2 = setTimeout(resolve2, delay);
-        cancelDelay = () => {
-          clearTimeout(timer2);
-          resolve2();
-        };
-      });
-      cancelDelay = void 0;
+      await pause(delay);
       delay = Math.min(15e3, delay * 2);
     }
   }
   if (!current()) throw new Error("Viewer unavailable");
   const currentViewer = storedViewer();
-  if (!confirmed(answer, boot) || currentViewer !== null && currentViewer !== previousViewer && currentViewer !== answer.viewer.id) {
-    retire();
+  const markerChanged = currentViewer !== initialViewer;
+  if (!confirmed(answer, boot) || handoff && (retained.id !== answer.viewer.id || retained.role !== answer.viewer.role || markerChanged || currentViewer !== answer.viewer.id) || (sawMarkerWrite || currentViewer !== null && markerChanged) && currentViewer !== answer.viewer.id) {
+    retire(active2);
     throw new Error("Viewer role changed");
   }
   const viewer = active2.viewer = answer.viewer;
-  try {
-    localStorage.setItem(VIEWER_KEY, viewer.id);
-  } catch {
+  if (handoff) {
+    active2.markerSet = true;
+  } else {
+    try {
+      localStorage.setItem(VIEWER_KEY, viewer.id);
+      active2.markerSet = true;
+    } catch {
+    }
   }
-  const untrackDrafts = trackDrafts(active2, viewer);
-  active2.draftsProtected = untrackDrafts !== void 0;
+  if (!stopTrackingDrafts) startTracking(viewer);
+  active2.hooks.add(clearDrafts);
+  const pendingChecks = /* @__PURE__ */ new Set();
+  const checkWhoami = async () => {
+    const controller = new AbortController();
+    const attempt = active2.checkAttempt = { controller };
+    pendingChecks.add(controller);
+    const { signal: signal2 } = controller;
+    const deadline = setTimeout(() => controller.abort(CHECK_DEADLINE), REVALIDATE_MS);
+    const aborted = new Promise((_, reject) => {
+      signal2.addEventListener("abort", () => reject(signal2.reason), { once: true });
+    });
+    try {
+      await Promise.race([call("whoami", void 0, signal2), aborted]);
+    } finally {
+      active2.checkAttempt = void 0;
+      const finish = () => {
+        clearTimeout(deadline);
+        pendingChecks.delete(controller);
+      };
+      if (attempt.refusal) void attempt.refusal.then(finish);
+      else finish();
+    }
+  };
   let checking = false;
-  const check = async () => {
-    if (checking || active2.retired || guard !== active2) return;
+  const check = active2.revalidate = async () => {
+    if (checking || !current()) return;
     checking = true;
     try {
-      const next = await call("whoami", void 0, signal);
-      if (guard === active2 && (!confirmed(next, boot) || next.viewer.id !== viewer.id || next.viewer.role !== viewer.role)) retire();
-    } catch {
+      await checkWhoami();
+    } catch (first) {
+      if (!current() || !authRefusal(first)) return;
+      await pause(REVALIDATE_RETRY_MS);
+      if (!current()) return;
+      try {
+        await checkWhoami();
+      } catch (retry) {
+        if (authRefusal(retry) && !retry.refresh) retire(active2);
+      }
     } finally {
       checking = false;
     }
@@ -4167,18 +4312,13 @@ async function startViewer(boot, signal, prepare) {
   const visibility = () => {
     if (document.visibilityState === "visible") void check();
   };
-  const storage = (event) => {
-    if ((event.key === VIEWER_KEY || event.key === null) && event.newValue !== viewer.id) retire();
-  };
   window.addEventListener("focus", check);
-  window.addEventListener("storage", storage);
   document.addEventListener("visibilitychange", visibility);
   const timer = setInterval(check, 15e3);
   active2.stop = () => {
-    if (!active2.retired) untrackDrafts?.();
+    for (const controller of pendingChecks) controller.abort();
     clearInterval(timer);
     window.removeEventListener("focus", check);
-    window.removeEventListener("storage", storage);
     document.removeEventListener("visibilitychange", visibility);
   };
   active2.hooks.add(active2.stop);
@@ -4189,19 +4329,26 @@ async function startViewer(boot, signal, prepare) {
       return active2.viewer.id;
     },
     check: checkMounted,
-    response: viewerResponse,
-    refused: viewerRefused
+    response: (response) => viewerResponse(active2, response),
+    refused: (code) => viewerRefused(active2, code)
   });
   if (prepare) {
     try {
       await prepare();
     } catch (error) {
-      if (current()) retire();
+      if (current()) retire(active2);
       throw error;
     }
     if (!current()) throw unavailable();
   }
-  show2();
+  checkViewer(active2);
+  confirmingHandoff = false;
+  const body = document.body;
+  if (body) {
+    body.inert = hidden.inert;
+    body.style?.setProperty("display", hidden.display, hidden.priority);
+  }
+  delete document[HIDDEN_DOCUMENT];
   try {
     sessionStorage.removeItem(RELOAD_KEY);
   } catch {
@@ -4235,18 +4382,25 @@ var call = async (endpoint, payload, signal) => {
       ...!vault ? { cause: error } : {}
     }));
   }
+  const whoami = endpoint === "whoami";
+  if (whoami) signal?.throwIfAborted();
   checkViewer(active2);
   if (!response.ok) {
-    viewerResponse(response);
-    const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` });
+    const refusal = active2 && await viewerResponse(active2, response, endpoint, signal);
+    const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), {
+      code: refusal?.changed ? "bot/viewer-changed" : `HTTP_${response.status}`,
+      ...refusal?.refresh ? { refresh: true } : {}
+    });
     if (!vault && !isRetired()) noteClientError(endpoint, error);
     throw error;
   }
   const result = await response.json();
+  if (whoami) signal?.throwIfAborted();
   checkViewer(active2);
-  if (!result.ok) {
-    const code = result.error?.code ?? "bot/error";
-    viewerRefused(code);
+  const changed = active2 && viewerChanged(result);
+  if (!result.ok || changed) {
+    const code = changed ? "bot/viewer-changed" : result.error?.code ?? "bot/error";
+    viewerRefused(active2, code);
     const message = hostText(result.error?.message ?? "Request failed");
     const error = Object.assign(new Error(code === "bot/internal" ? `${message} ${t("Settings → Feedback has the details.")}` : message), { code });
     if (code === "bot/refused" && result.error?.reason === "needs-new-conversation") error.reason = result.error.reason;
@@ -4257,6 +4411,7 @@ var call = async (endpoint, payload, signal) => {
     }
     throw error;
   }
+  if (whoami) checkViewerAnswer(active2, result.value);
   return result.value;
 };
 
@@ -14700,15 +14855,22 @@ function currentKey(bot, look) {
 }
 async function put(url, blob, active2) {
   checkViewer(active2);
-  const viewer = requestViewer("pet-codex")?.viewer?.id;
+  const viewer = active2?.viewer?.id;
   const headers = { "content-type": "image/webp", ...viewer ? { "x-automagik-viewer": viewer } : {} };
   const response = await fetch(url, { method: "PUT", body: blob, headers });
   checkViewer(active2);
-  const answer = await response.json().catch(() => ({}));
-  checkViewer(active2);
-  if (!response.ok) {
-    viewerResponse(response);
-    throw new Error(answer.error ?? t("Codex's pets folder could not be written"));
+  const refusal = active2 && !response.ok ? await viewerResponse(active2, response) : void 0;
+  const answer = refusal ? refusal.answer : await response.json().catch(() => ({}));
+  const changed = refusal?.changed ?? (active2 && viewerChanged(answer));
+  if (!refusal) {
+    checkViewer(active2);
+    if (changed) viewerRefused(active2, "bot/viewer-changed");
+  }
+  if (!response.ok || changed) {
+    const message = changed ? answer.error?.message ?? answer.error : answer?.error;
+    const error = new Error(message ?? t("Codex's pets folder could not be written"));
+    if (changed) error.code = "bot/viewer-changed";
+    throw error;
   }
   return answer;
 }
@@ -44887,7 +45049,15 @@ function apply(ctx) {
     const chunk = await globalThis.__dshChunk("./client.gated.js");
     gated = chunk.initialize(gated_shared_exports);
   };
-  startViewer(boot, lifetime.signal, prepare).then((viewer) => {
+  const clearNativeDrafts = () => {
+    for (const id of Object.keys(ctx.sessions.list.getSnapshot?.()?.byId ?? {})) {
+      try {
+        ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.("");
+      } catch {
+      }
+    }
+  };
+  startViewer(boot, lifetime.signal, prepare, clearNativeDrafts).then((viewer) => {
     if (lifetime.signal.aborted || ctx.fiber && ctx.fiber.state !== 2 || isRetired()) return;
     const surface = ctx.inject([], (scope) => {
       if (viewer.role === "member" || viewer.role === "guest") gated.applyMember(scope);
@@ -45082,14 +45252,6 @@ function applyOwner(ctx, { gated = false } = {}) {
     seenAt = savedPrefs = {};
     agentSessionCache.clear();
     for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear();
-    if (canClearDraftInMemory()) {
-      for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
-        try {
-          ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.("");
-        } catch {
-        }
-      }
-    }
   }), "ds-bot: clear owner state on retirement");
   ctx.effect(() => {
     let stopped = false;
@@ -45717,9 +45879,20 @@ function applyOwner(ctx, { gated = false } = {}) {
     });
   }
   const face = () => ({ actions, hooks: { roster, ui: ui2, activity, work, memoryNews, registry: registry2, turnClock, live, computer, cards: cards2, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } });
+  const ownerViewer = gated ? requestViewer("whoami") : void 0;
   const updateQueue = async (sessionId, itemId, action) => {
-    if (gated) await call("whoami");
-    return await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action) ?? { ok: false };
+    if (ownerViewer) {
+      checkViewer(ownerViewer);
+      try {
+        await call("whoami");
+      } catch (error) {
+        revalidateViewerOnRefusal(ownerViewer, error);
+        throw error;
+      }
+    }
+    const session = ctx.sessions.binding(sessionId)?.session;
+    checkViewer(ownerViewer);
+    return await session?.updateQueue(itemId, action) ?? { ok: false };
   };
   const queueFace = (sessionId) => ({
     ...face(),

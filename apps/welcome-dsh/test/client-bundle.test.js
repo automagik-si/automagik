@@ -13,11 +13,15 @@ test('client.js is the build of src/client', async () => {
   assert.equal(await bundleClient(), committed(), 'client.js is stale: run `npm run build` and commit it')
 })
 
-test('Welcome uses the mounted Bot viewer for gated writes and preserves its desktop request', async () => {
+async function bundleApi() {
   const { outputFiles } = await build({
     entryPoints: [fileURLToPath(new URL('../src/client/api.js', import.meta.url))],
     bundle: true, write: false, format: 'cjs', platform: 'browser',
   })
+  return outputFiles[0].text
+}
+
+test('Welcome uses the mounted Bot viewer for gated writes and preserves its desktop request', async () => {
   const requests = []
   let retired = false
   let reply = { ok: true, value: 'saved' }
@@ -31,7 +35,7 @@ test('Welcome uses the mounted Bot viewer for gated writes and preserves its des
       return { ok: true, json: async () => reply }
     },
   }
-  runInNewContext(outputFiles[0].text, context)
+  runInNewContext(await bundleApi(), context)
   const { call, callOmniUi } = context.module.exports
   assert.equal(await callOmniUi('omni-pair-cancel'), 'saved')
   context.__AUTOMAGIK_VIEW__ = { version: 1, role: 'owner' }
@@ -60,6 +64,48 @@ test('Welcome uses the mounted Bot viewer for gated writes and preserves its des
     ['api/omni-ui', { ...init, body: { endpoint: 'omni-pair-cancel', payload: { account: 'test' }, viewer: 'owner-viewer' } }],
     ['api/omni-ui', { ...init, body: { endpoint: 'omni-pair-cancel', payload: null, viewer: 'owner-viewer' } }],
     ['api/omni-ai', { ...init, body: { endpoint: 'done', payload: { stepId: 'omni-team' } } }],
+  ])
+})
+
+test('H2 gated Welcome reports a plain HTTP error once and forwards a non-2xx viewer change', async () => {
+  const requests = []
+  const refusals = []
+  const plain = { ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) }
+  const explicit = { ok: false, status: 403, json: async () => ({ code: 'bot/viewer-changed' }) }
+  let response = plain
+  let retired = false
+  const check = () => {
+    if (retired) throw Object.assign(new Error('Viewer unavailable'), { code: 'bot/retired' })
+  }
+  const context = {
+    module: { exports: {} },
+    __AUTOMAGIK_VIEW__: { version: 1, role: 'owner' },
+    __AUTOMAGIK_MOUNTED_VIEWER__: {
+      get id() { check(); return 'owner-viewer' },
+      check,
+      async response(value) {
+        refusals.push(value)
+        const changed = (await value.json()).code === 'bot/viewer-changed'
+        if (changed) retired = true
+        return { changed }
+      },
+    },
+    fetch: async (route, init) => { requests.push([route, JSON.parse(init.body)]); return response },
+  }
+  runInNewContext(await bundleApi(), context)
+  const { call, callOmniUi } = context.module.exports
+  await assert.rejects(call('done', { stepId: 'omni-team' }), { code: 'HTTP_401' })
+  assert.equal(retired, false)
+  response = { ok: true, json: async () => ({ ok: true, value: 'saved' }) }
+  assert.equal(await call('done', { stepId: 'omni-team' }), 'saved')
+  response = explicit
+  await assert.rejects(callOmniUi('omni-pair-cancel'), { code: 'bot/viewer-changed' })
+  await assert.rejects(call('done'), { code: 'bot/retired' })
+  assert.deepEqual(refusals, [plain, explicit])
+  assert.deepEqual(requests, [
+    ['api/omni-ai', { endpoint: 'done', payload: { stepId: 'omni-team' }, viewer: 'owner-viewer' }],
+    ['api/omni-ai', { endpoint: 'done', payload: { stepId: 'omni-team' }, viewer: 'owner-viewer' }],
+    ['api/omni-ui', { endpoint: 'omni-pair-cancel', payload: null, viewer: 'owner-viewer' }],
   ])
 })
 
@@ -202,4 +248,37 @@ test('client.js keeps the Bot team\'s client external: no copy of it is bundled'
   for (const own of ['bt-side-top', 'sidebarTools = registry', 'export const omni']) assert.ok(!text.includes(own), `client.js bundles the Bot team's ${own}`)
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.deepEqual(pkg.dsh.client.external, ['@automagik/bots-dsh/client'])
+})
+
+test('Welcome discards a sign-in status response if the mounted viewer changes during the poll', async () => {
+  const requests = []
+  const pending = Promise.withResolvers()
+  let person = 'owner-a'
+  const payload = { provider: 'kimi-coding' }
+  const status = { status: 'running', notice: { code: 'NEW-OWNER' } }
+  const check = () => {
+    if (person !== 'owner-a') throw Object.assign(new Error('Viewer unavailable'), { code: 'bot/retired' })
+  }
+  const context = {
+    module: { exports: {} },
+    fetch: async (route, init) => {
+      requests.push([route, JSON.parse(init.body)])
+      return { ok: true, json: () => pending.promise }
+    },
+  }
+  runInNewContext(await bundleApi(), context)
+  const { call } = context.module.exports
+  const desktop = call('signin-status', payload)
+  context.__AUTOMAGIK_VIEW__ = { version: 1, role: 'owner' }
+  context.__AUTOMAGIK_MOUNTED_VIEWER__ = { id: 'owner-a', check }
+  const poll = call('signin-status', payload)
+  await Promise.resolve()
+  person = 'owner-b'
+  pending.resolve({ ok: true, value: status })
+  assert.deepEqual(await desktop, status)
+  await assert.rejects(poll, { code: 'bot/retired' })
+  assert.deepEqual(requests, [
+    ['api/omni-ai', { endpoint: 'signin-status', payload }],
+    ['api/omni-ai', { endpoint: 'signin-status', payload, viewer: 'owner-a' }],
+  ])
 })

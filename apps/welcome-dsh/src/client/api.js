@@ -38,13 +38,16 @@ async function callRoute(route, endpoint, payload, viewer) {
   }
   viewer?.check()
   if (!response.ok) {
-    viewer?.response(response)
-    throw Object.assign(new Error(t('DSH answered HTTP {status}', { status: response.status })), { code: `HTTP_${response.status}` })
+    const refusal = viewer && await viewer.response(response)
+    throw Object.assign(new Error(t('DSH answered HTTP {status}', { status: response.status })), {
+      code: refusal?.changed ? 'bot/viewer-changed' : `HTTP_${response.status}`,
+    })
   }
   const result = await response.json()
   viewer?.check()
-  if (!result.ok) {
-    const code = result.error?.code ?? (route === OMNI_UI && viewer ? 'bot/error' : 'omni-ai/error')
+  const changed = viewer && (result.code === 'bot/viewer-changed' || result.error?.code === 'bot/viewer-changed')
+  if (!result.ok || changed) {
+    const code = changed ? 'bot/viewer-changed' : result.error?.code ?? (route === OMNI_UI && viewer ? 'bot/error' : 'omni-ai/error')
     viewer?.refused(code)
     throw Object.assign(new Error(result.error?.message ?? t('Request failed')), { code })
   }
