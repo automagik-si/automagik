@@ -1231,7 +1231,10 @@ test("the CLI starts a proxy, serves it, and removes its socket on SIGTERM", asy
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk; });
-  assert.ok(await waitFor(() => existsSync(socket)), `the CLI listened: ${stderr}`);
+  // Wait for the CLI's own ready line, not the socket file: the file exists from bind(), a
+  // moment before listen(), and a connect in that gap is refused (ECONNREFUSED).
+  assert.ok(await waitFor(() => stderr.includes('hc-proxy {"ev":"listening"')), `the CLI listened: ${stderr}`);
+  assert.ok(existsSync(socket), "the socket is there once the CLI says it listens");
   const answer = await (await clientFor(socket)).call("terminal.list");
   assert.ok(answer.result, JSON.stringify(answer));
   child.kill("SIGTERM");
