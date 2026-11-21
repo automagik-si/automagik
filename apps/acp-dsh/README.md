@@ -541,10 +541,10 @@ before sending the prompt. Scratch cleanup is best effort. `CODEX_HOME` comes fr
 `cli-homes.js`; the terminal's config is never written. The same checked overrides go through
 codex-acp's `CODEX_CONFIG`.
 
-2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
-the per-draw profile cannot be used); owner decision pending.
+The one-off draw fails closed (#870; decided by the owner's delegate on 2026-11-21, the
+recommended option): the draw or edit is refused when the per-draw profile cannot be used.
 
-Under the proposed default, if the per-draw profile checks fail, the draw or edit is refused
+Under this default, if the per-draw profile checks fail, the draw or edit is refused
 before any prompt and legacy `read-only` is never selected as a fallback. One warning in the
 logger and stderr names the reason without private details. With no profile, the checks and
 the session may start before the refusal. Windows has no profile modes, so `imageAccess()` can
@@ -759,8 +759,8 @@ of time leaves Codex ready. A draw always makes its own check.
   on every turn. Codex's image accessor uses a sandboxed helper, whose runtime grants widen
   the profile's requested read boundary. Images in permitted runtime directories remain
   readable. The 2026-11-11 owner decision accepted the risk of continuing in legacy
-  `read-only` for draws when the profile mode was unavailable or rejected. The draft
-  proposes refusing those draws before any prompt.
+  `read-only` for draws when the profile mode was unavailable or rejected. Since #870's
+  decision (2026-11-21) those draws are refused before any prompt.
   Ordinary chat images (`agent-image.js`) use the chat profiles above at Read only and
   Workspace when offered. Signed-in enforcement on the actual per-turn path still needs
   verification in the app.

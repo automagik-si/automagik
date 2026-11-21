@@ -145,8 +145,8 @@ export const MCP_LIST_TIMEOUT_MS = 15_000
 export const IMAGE_CHECKS_TIMEOUT_MS = 40_000
 const MCP_NAME = /^[A-Za-z0-9_.-]{1,128}$/
 export const IMAGE_MODE = 'read-only'
-// #870: fail closed (recommended option; owner decision pending in the draft PR). true restores the
-// 2026-11-11 policy: drawing falls back to read-only when the narrow profile cannot be used.
+// #870: fail closed (decided by the owner's delegate, 2026-11-21, recommended option). true restores
+// the 2026-11-11 policy: drawing falls back to read-only when the narrow profile cannot be used.
 const ALLOW_IMAGE_READ_ONLY_FALLBACK = false
 const EDIT_NEEDS_ISOLATION = true
 // An edit whose locked one-off run could not be set up: bots-dsh answers with the Bot's own
