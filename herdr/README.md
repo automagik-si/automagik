@@ -1120,11 +1120,12 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
   answer too) the pane must show that id, the folder and `die_with_parent: false`: one that is
   this launch but not that is ended, and one hc can't show to be this launch is left alone and
   named. The start row records `agentHome` and `launch`, and its `env` names the folder, so
-  Codex's session search reads that folder. The Bot login `generation` and `sequence` (#1532)
-  are recorded only when ACP's record names that same folder for the vendor; otherwise both are
-  null. A Codex worker reads its model list and its project trust from the chosen folder. The
-  folder decides the sign-in only: the model and effort pins, the pane's PATH (the agent's
-  program is found on it, as for every launch), Codex's granted folders, managed policy, and the
+  Codex's session search reads that folder. Under the Bot login policy, the chosen folder must
+  match the reader's folder for that vendor, and the row records the reader's login pair
+  (#1532). With the policy off, both fields are null. A Codex worker reads its model list and
+  its project trust from the chosen folder. The folder decides the sign-in only: the model
+  and effort pins, the pane's PATH (the agent's program is found on it, as for every launch),
+  Codex's granted folders, managed policy, and the
   folder's own settings (Claude's `settings.json` there, Codex's `config.toml` there) are the
   person's choices as for any launch. A Codex folder that is also the one the Accounts panel
   manages is switched with it: the panel replaces that folder's `auth.json`, so a separate
@@ -1237,13 +1238,15 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
     effort or template itself. `override_requested`: on a swap task, what it asked for and
     didn't get, else null.
   - `template` is the hc template a worker runs, else null (seats and agent workers).
-  - `generation` and `sequence`: the Bot login generation and the generation record's sequence
-    the launch used, read once at launch from ACP's `generation.json` beside the pointer
-    exported as `AUTOMAGIK_BOT_CLI_POINTER` (#1527, #1532). `generation` is that record's field
-    for the launch's vendor (`claude` or `codex`); `sequence` is the record's own. Both are null
-    when the launch has no such record (another agent, a template whose agent is unknown, no
-    pointer, no readable record, or no generation for that vendor), never a guessed value. The
-    entrypoint's export of the pointer is not this command's.
+  - `generation` and `sequence`: the vendor's Bot login generation and record sequence the
+    reader resolved at spawn from ACP's `generation.json` (#1527, #1532). The ledger uses that
+    resolution without reading the record again. Both fields are null for a verified legacy
+    login, an unusable advisory sequence, or a launch without a Bot login resolution. A
+    backwards sequence that the reader accepts is recorded as accepted. A launch the policy
+    refuses (a required pointer is missing, the record is unreadable, the chosen home
+    differs, or a template is used with the policy on) writes no start row. `am attach`
+    records null for both fields because it has no launch-time resolution. A failed append
+    is reported and the launch keeps running.
   - Rows written before a field have no such key. A worker row with no `branch` key predates
     the task contract: its `task` is the branch, not a Genie id.
   When a template runs, `agent`, `model` and `effort` are null: the template sets them. The

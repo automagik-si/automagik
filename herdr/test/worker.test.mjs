@@ -40,7 +40,6 @@ const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", str
 const GEN = {
   claude1: "11111111-1111-4111-8111-111111111111",
   codex1: "22222222-2222-4222-8222-222222222222",
-  claude2: "33333333-3333-4333-8333-333333333333",
   codex2: "44444444-4444-4444-8444-444444444444",
 };
 
@@ -385,6 +384,7 @@ test("#1509 reader refusals stop the worker before any launch", (t) => {
   assert.equal(required.code, 2, required.err);
   assert.match(required.err, /login-required/);
   assert.equal(s.runs().length, baseline);
+  assert.deepEqual(s.ledger(), []);
 });
 
 for (const command of ["claude", "codex --no-daemon", "bash -lc 'exec claude'",
@@ -399,6 +399,7 @@ for (const command of ["claude", "codex --no-daemon", "bash -lc 'exec claude'",
     assert.equal(r.code, 2, r.err);
     assert.equal(r.err.trim(), "am: Under the Bot login policy only a direct Claude or Codex command can start; run the agent directly. (launch-not-direct)");
     assert.deepEqual(s.runs(), []);
+    assert.deepEqual(s.ledger(), []);
   });
 }
 
@@ -458,8 +459,12 @@ printf '%s' '${next.text}' > '${next.recordPath}'
 `);
     const r = s.cli(["worker", "task", "--agent", "claude", "--branch", "feat/login-switch"], { env: first.env });
     assert.equal(r.code, usable ? 0 : 2, r.err);
-    if (usable) assert.ok(s.runs()[0].includes(`CLAUDE_CONFIG_DIR=${next.dir}`), JSON.stringify(s.runs()));
-    else {
+    if (usable) {
+      assert.ok(s.runs()[0].includes(`CLAUDE_CONFIG_DIR=${next.dir}`), JSON.stringify(s.runs()));
+      // The preflight read [first, 2]; the row must carry the pair the spawn used (#1532).
+      const row = s.ledger().find((entry) => entry.event === "start" && entry.kind === "worker");
+      assert.deepEqual([row.generation, row.sequence], [nextGeneration, JSON.parse(next.text).sequence]);
+    } else {
       assert.match(r.err, /login-paused/);
       assert.deepEqual(s.runs(), []);
     }
@@ -926,17 +931,58 @@ test("start rows record the Bot login generation and sequence a worker and a sea
   assert.deepEqual([seatRow.generation, seatRow.sequence], [GEN.claude1, 7], "the seat's vendor (Claude) generation");
 });
 
-test("a generation switch is recorded by the next launch and leaves the old row alone (#1532)", (t) => {
+test("a generation switch during hc run affects the next launch only (#1532)", (t) => {
   const s = scene(t);
+  const next = generationRecord(s.root, { sequence: 2, claude: GEN.claude1, codex: GEN.codex2 });
+  const nextRecord = readFileSync(next.record, "utf8");
   const first = generationRecord(s.root, { sequence: 1, claude: GEN.claude1, codex: GEN.codex1 });
-  const one = s.cli(["worker", "one", "--branch", "feat/gen-one", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: first.pointer } });
+  const codexPointer = join(dirname(first.pointer), "codex");
+  const hcBin = join(s.root, "bin", "hc");
+  // The worker has sent its argv before the panel changes the record beside the pointer.
+  hcStateExtra(s, { onRunWrite: { path: first.record, text: nextRecord } });
+  exe(hcBin, `#!/bin/sh
+"${process.execPath}" "${FAKE_HC}" "$@" || exit $?
+if [ "$1" = run ]; then printf '%s' '${GEN.codex2}' > "${codexPointer}"; fi
+`);
+  const env = { [POINTER_VAR]: first.pointer };
+  const one = s.cli(["worker", "one", "--branch", "feat/gen-one", "--json"], { env });
   assert.equal(one.code, 0, one.err);
-  const second = generationRecord(s.root, { sequence: 2, claude: GEN.claude2, codex: GEN.codex2 });
-  const two = s.cli(["worker", "two", "--branch", "feat/gen-two", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: second.pointer } });
+  assert.ok(s.runs()[0].includes(`CODEX_HOME=${join(s.root, "cli-homes", "homes", "codex", GEN.codex1, ".codex")}`));
+  assert.equal(readFileSync(first.record, "utf8"), nextRecord);
+  assert.equal(readFileSync(codexPointer, "utf8"), GEN.codex2);
+  const two = s.cli(["worker", "two", "--branch", "feat/gen-two", "--json"], { env });
   assert.equal(two.code, 0, two.err);
   const rows = s.ledger().filter((row) => row.event === "start" && row.kind === "worker");
   assert.deepEqual(rows.map((row) => [row.branch, row.generation, row.sequence]),
     [["feat/gen-one", GEN.codex1, 1], ["feat/gen-two", GEN.codex2, 2]]);
+});
+
+test("a worker records a backwards sequence the reader accepts and null for an unusable one (#1532)", (t) => {
+  const s = scene(t);
+  for (const [branch, sequence] of [["first", 7], ["backwards", 3], ["unusable", -1]]) {
+    const { pointer } = generationRecord(s.root, { sequence, claude: GEN.claude1, codex: GEN.codex1 });
+    const r = s.cli(["worker", branch, "--branch", `feat/${branch}`], { env: { [POINTER_VAR]: pointer } });
+    assert.equal(r.code, 0, r.err);
+  }
+  assert.deepEqual(s.ledger().filter((row) => row.event === "start").map((row) => [row.generation, row.sequence]),
+    [[GEN.codex1, 7], [GEN.codex1, 3], [null, null]]);
+});
+
+test("a chosen-home worker records a matching policy login and refuses a different home (#1532)", (t) => {
+  const s = scene(t);
+  const login = loginFixture(join(s.root, "cli-homes"), "codex");
+  const record = JSON.parse(login.text);
+  const run = (branch, folder) => s.cli(["worker", "fix it", "--branch", branch, "--agent", "codex", "--agent-home", folder],
+    { env: login.env });
+  const same = run("feat/matching-home", login.dir);
+  assert.equal(same.code, 0, same.err);
+  const other = join(s.root, "other-home");
+  mkdirSync(other, { mode: 0o700 });
+  const differs = run("feat/other-home", other);
+  assert.equal(differs.code, 2, differs.err);
+  assert.match(differs.err, /\(agent-home-differs\)/);
+  assert.deepEqual(s.ledger().filter((row) => row.event === "start").map((row) => [row.branch, row.generation, row.sequence]),
+    [["feat/matching-home", record.codex.generation, record.sequence]]);
 });
 
 test("a launch with no generation record writes null, never a guess, and the ledger still reads (#1532)", (t) => {
@@ -1321,6 +1367,21 @@ test("#1262: a seat start gets the longer hc run timeout too, and a timed-out ru
   const seat = s.ledger().find((x) => x.kind === "seat");
   assert.equal(seat.terminal, "t100");
   assert.equal(seat.botId, ID.main);
+});
+
+test("#1532 a seat found after hc run times out records the login it launched with", (t) => {
+  const s = scene(t);
+  const login = loginFixture(join(s.root, "cli-homes"), "claude");
+  const record = JSON.parse(login.text);
+  hcStateExtra(s, { runDelayMs: 10_000,
+    onRunWrite: { path: login.recordPath, text: JSON.stringify({ ...record, sequence: record.sequence + 1 }) } });
+  const r = s.cli(["start", "Genie", "--json"], { from: null,
+    env: { ...login.env, AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /hc run didn't answer .* its start is recorded/);
+  assert.ok(s.runs()[0].includes(`CLAUDE_CONFIG_DIR=${login.dir}`));
+  const [row] = s.ledger().filter((x) => x.event === "start" && x.kind === "seat");
+  assert.deepEqual([row.terminal, row.generation, row.sequence], [r.json().terminal, record.claude.generation, record.sequence]);
 });
 
 // ---- hc templates ----
@@ -4453,12 +4514,23 @@ process.stdout.write(JSON.stringify({
   };
   const exported = { [POINTER_VAR]: join(root, "current", "claude"), [REQUIRED_VAR]: "required", DSH_HOME: dsh, AUTOMAGIK_HOME: data };
   let n = 0;
-  const workerLaunch = () => {
+  const recordPath = join(root, "current", "generation.json");
+  const starts = () => s.ledger().filter((row) => row.event === "start");
+  const workerLaunch = (pair) => {
+    const before = starts();
     n += 1;
     const r = s.cli(["worker", `identity task ${n}`, "--branch", `feat/identity-${n}`, "--agent", "claude", "--json"], { env: exported });
     assert.equal(r.code, 0, r.err);
+    const rows = starts();
+    const row = rows.at(-1);
+    assert.deepEqual(rows.slice(0, -1), before, "the new launch leaves the earlier rows alone");
+    assert.deepEqual([row.terminal, row.generation, row.sequence], [r.json().terminal, ...pair]);
     const run = s.runs().at(-1);
     return run.slice(run.indexOf("--") + 1);
+  };
+  const panelPair = () => {
+    const record = JSON.parse(readFileSync(recordPath, "utf8"));
+    return [record.claude.generation, record.sequence];
   };
   const checkWorker = (launch, signedIn, account, task) => {
     assert.equal(identity([identityCli], signedIn).account, account);
@@ -4468,18 +4540,22 @@ process.stdout.write(JSON.stringify({
 
   // Before any switch: the panel's first sign-in, a login from before any generation.
   const panelA = signIn("account-a");
-  const workerA = workerLaunch();
+  const workerA = workerLaunch([null, null]);
   checkWorker(workerA, panelA, "account-a", 1);
 
   // The panel switches the Bot account: a new generation, signed in to another account.
   panel.reset("claude");
   const panelB = signIn("account-b");
   assert.notEqual(panelB.CLAUDE_CONFIG_DIR, panelA.CLAUDE_CONFIG_DIR);
-  checkWorker(workerLaunch(), panelB, "account-b", 2);
+  const pairB = panelPair();
+  checkWorker(workerLaunch(pairB), panelB, "account-b", 2);
   checkWorker(workerA, panelA, "account-a", 1);
 
   // And from one generation to the next.
   panel.reset("claude");
   const panelC = signIn("account-c");
-  checkWorker(workerLaunch(), panelC, "account-c", 3);
+  const pairC = panelPair();
+  assert.notEqual(pairC[0], pairB[0]);
+  assert.ok(pairC[1] > pairB[1]);
+  checkWorker(workerLaunch(pairC), panelC, "account-c", 3);
 });
