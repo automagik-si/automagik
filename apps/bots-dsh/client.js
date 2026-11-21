@@ -11433,6 +11433,7 @@ function ComputerPage({ roster, actions, run: run3, Section: Section3, Row: Row3
     )
   ];
 }
+var appLabel = (name, path2) => path2 === void 0 || path2 === name ? name : `${name} (${path2})`;
 function BotComputerCard({ bot, roster, actions, run: run3, Card: Card3, Row: Row3 }) {
   const computer = roster.computer ?? { enabled: false };
   const apps = Object.entries(bot.computer?.apps ?? {});
@@ -11443,7 +11444,7 @@ function BotComputerCard({ bot, roster, actions, run: run3, Card: Card3, Row: Ro
       (0, import_react22.createElement)(Row3, { key: "level", label: t("Computer use"), hint: providerWorks(computer.provider ?? { state: "loading" }) ? void 0 : t("Bots get no computer tools until the provider is ready.") }, (0, import_react22.createElement)(LevelPicker, { bot, actions, run: run3 })),
       apps.map(([key, app]) => (0, import_react22.createElement)(
         Row3,
-        { key, label: app.name },
+        { key, label: appLabel(app.name, app.path) },
         (0, import_react22.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => run3(actions.computerRevokeApp(bot.id, key)) }, t("Revoke"))
       ))
     ]
@@ -11531,7 +11532,7 @@ function PendingAppAccess({ ask, actions, inline }) {
         (0, import_react22.createElement)(
           "div",
           { className: "bt-q-text" },
-          (0, import_react22.createElement)("p", { className: "bt-q-title", id: titleId }, t("Allow {name} to use {app}?", { name: ask.botName ?? "a Bot", app: ask.appName }))
+          (0, import_react22.createElement)("p", { className: "bt-q-title", id: titleId }, t("Allow {name} to use {app}?", { name: ask.botName ?? "a Bot", app: appLabel(ask.appName, ask.appPath) }))
         )
       ),
       (0, import_react22.createElement)(

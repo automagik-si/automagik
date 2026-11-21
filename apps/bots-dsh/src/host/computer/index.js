@@ -7,7 +7,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { dshVersion } from '../diagnostics.js'
 import { LEGACY_EXECUTABLES, LEGACY_NAME } from '../legacy.mjs'
-import { classify, isComputerTool, levelAllows, LEVELS, DRIVER_GLOBAL, DRIVER_REFUSED } from './catalog.js'
+import { classify, isComputerTool, levelAllows, LEVELS, CUA_WITHOUT_HANDLE, DRIVER_GLOBAL, DRIVER_REFUSED } from './catalog.js'
 import { createLeases } from './leases.js'
 import { prepareComputerHelper } from './mac-helper.js'
 import { REPLY_KIND } from '../constants.js'
@@ -62,35 +62,72 @@ const PROTECTED_EXES = new Set(['automagik', 'dsbot', 'dsh', 'dsh-desktop', 'dsh
 
 export function isProtectedApp(app) {
   if (app === undefined || app === null) return false
-  const id = String(app.id ?? '').toLowerCase()
+  const id = normName(app.id)
   if (PROTECTED_IDS.has(id)) return true
   const name = String(app.name ?? '').trim().toLowerCase()
   if (PROTECTED_NAMES.has(name)) return true
-  const base = (String(app.path ?? app.executablePath ?? '').split(/[\\/]/).pop() ?? '').toLowerCase().replace(/\.(exe|app)$/i, '')
-  return PROTECTED_EXES.has(base)
+  const base = normName(String(app.path ?? app.executablePath ?? '').replace(/[\\/]+$/, '').split(/[\\/]/).pop()).replace(/\.(exe|app)$/i, '')
+  return PROTECTED_EXES.has(base) || PROTECTED_NAMES.has(base)
 }
 
 const normName = name => String(name ?? '').trim().toLowerCase()
+const textOf = value => (typeof value === 'string' && value.trim() !== '' ? value : undefined)
 // The key an app grant and a lease share: the platform id (macOS bundle id / the
 // provider's application id) when known, else the display name.
 const appKeyOf = app => String(app?.id ?? app?.path ?? app?.executablePath ?? normName(app?.name) ?? '')
+// The installation narrows a saved grant without changing the shared lease key.
+const grantKeyOf = app => app.id !== undefined && app.path !== undefined ? JSON.stringify([app.id, app.path]) : app.key
+const sameApp = (a, b) => a.key === b.key
+  && (a.id === undefined || b.id === undefined || a.id === b.id)
+  && (a.path === undefined || b.path === undefined || a.path === b.path)
+const sameOwner = (a, b) => sameApp(a, b) && (a.pid === undefined || b.pid === undefined || a.pid === b.pid)
+const grantRecord = grant => grant !== null && typeof grant === 'object'
+  && Object.hasOwn(grant, 'name') && textOf(grant.name) !== undefined
+  && Object.hasOwn(grant, 'grantedAt') && Number.isFinite(grant.grantedAt)
+  && (grant.id === undefined || (Object.hasOwn(grant, 'id') && textOf(grant.id) !== undefined))
+  && (grant.path === undefined || (Object.hasOwn(grant, 'path') && textOf(grant.path) !== undefined))
+const ownGrant = (grants, key) => Object.hasOwn(grants, key) && grantRecord(grants[key]) ? grants[key] : undefined
+// getApp may launch a stopped app, even though selection itself takes no lease.
+const accessKind = call => call.provider === 'cua' && call.method === 'getApp' ? 'background' : call.kind
+const DRIVER_LAUNCH_FIELDS = {
+  id: ['bundle_id', 'bundleId', 'app_id', 'appId'],
+  path: ['path', 'app_path', 'executable_path', 'executablePath'],
+  name: ['name', 'app_name', 'appName', 'app'],
+}
+const DRIVER_REFERENCES = {
+  pid: ['pid', 'appPid', 'windowPid', 'target_pid'],
+  window: ['window_id', 'windowId', 'wid', 'window'],
+  token: ['element_token', 'token', 'ref', 'element_id', 'elementId', 'element', 'target'],
+}
+const driverPidOf = item => [item?.pid, item?.appPid, item?.app_pid, item?.processId]
+  .find(value => Number.isInteger(value) && value > 0)
 
 export function install(rt) {
   const { ctx, state } = rt
   const leases = createLeases()
   /** @type {Map<string, {state:string, app?:string, waitingFor?:string, steps:any[], lastShot?:any, allowForegroundUntil:number}>} */
   const control = new Map()
-  /** @type {Map<string, {id:string, botId:string, sessionId:string, callId?:string, appName:string, icon?:string, resolve:(a:string)=>void}>} */
+  /** @type {Map<string, {id:string, botId:string, sessionId:string, callId?:string, appName:string, appPath?:string, icon?:string, resolve:(a:string)=>void}>} */
   const pendingAsks = new Map()
+  const checkingAccess = new Set()
+  const preparedCalls = new Map()
   /** @type {Map<string, Map<string, any>>} sessionId -> appHandle/pid -> app record */
   const sessionApps = new Map()
-  /** @type {Map<string, Map<string, 'once'|'deny'>>} `${botId}:${sessionId}` -> appKey -> this-session decision */
+  // Launch selectors use current driver identities across Bots. References to
+  // processes, windows and elements still have to be recorded in the calling Session.
+  const driverProcesses = new Map()
+  const driverWindows = new Map()
+  let installedDriverApps = []
+  let driverCallSeq = 0
+  let driverRefreshSeq = 0
+  const driverApps = () => [...driverProcesses.values(), ...installedDriverApps]
+  /** @type {Map<string, Map<string, Map<string|undefined, 'once'|'deny'>>>} Session -> appKey -> path -> decision */
   const sessionDecisions = new Map()
   const shotMimes = new Map()
   const SHOT_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
   /** @type {Map<string, {by:string, reason:string, note:string, callId?:string, surface:'computer'}>} */
   const holds = new Map()
-  /** @type {Map<string, {botId:string, sessionId:string, appKey?:string, abort:AbortController}>} callId -> in-flight call */
+  /** @type {Map<object, {botId:string, sessionId:string, kind:string, app?:any, abort:AbortController}>} execution -> in-flight call */
   const inFlight = new Map()
   /** @type {Map<string, {agent:any, mode:string, lifts:Array<()=>void>, handoffLift?:()=>void}>} */
   const applied = new Map()
@@ -217,6 +254,10 @@ export function install(rt) {
     }
     leases.releaseAll()
     for (const { abort } of inFlight.values()) abort.abort(new Error('Computer use was turned off'))
+    driverProcesses.clear()
+    driverWindows.clear()
+    installedDriverApps = []
+    reconcileDriverReferences(() => null)
     refreshComputer()
   }
   async function teardownProvider() {
@@ -304,6 +345,7 @@ export function install(rt) {
   })
   ctx.on('agent/disposed', ({ agent }) => {
     const id = agent?.session?.id ?? agent?.id
+    abortCalls(undefined, call => call.sessionId === id)
     sessionApps.delete(id)
     const held = applied.get(id)
     if (held?.agent === agent) applied.delete(id)
@@ -326,9 +368,56 @@ export function install(rt) {
     if (map === undefined) sessionApps.set(sessionId, map = new Map())
     return map
   }
+  const launchTarget = (args) => {
+    const selectors = Object.entries(DRIVER_LAUNCH_FIELDS).flatMap(([kind, fields]) =>
+      fields.filter(field => args[field] !== undefined).map(field => ({ kind, field, value: args[field] })))
+    if (selectors.length === 0) return undefined
+    const unknown = { name: 'the launch target', unknown: true }
+    if (selectors.some(({ value }) => textOf(value) === undefined)
+      || Object.values(DRIVER_REFERENCES).flat().some(field => args[field] !== undefined)) return unknown
+    let launchSelector = selectors.find(selector => selector.kind === 'path')
+      ?? selectors.find(selector => selector.kind === 'id') ?? selectors[0]
+    const matches = ({ kind, value }, app) => kind === 'name' ? normName(app.name) === normName(value) : app[kind] === value
+    const known = driverApps().filter(app => matches(launchSelector, app))
+    const candidate = known.find(isProtectedApp) ?? known.find(app => app.path !== undefined) ?? known[0]
+    if (known.some(app => !sameApp(app, candidate) || !selectors.every(selector => matches(selector, app)))) return unknown
+    if (known.length === 0 && selectors.some(({ kind, value }) => kind !== launchSelector.kind || value !== launchSelector.value)) return unknown
+    const identity = candidate ?? { [launchSelector.kind]: launchSelector.value }
+    if (launchSelector.kind !== 'path' && identity.path !== undefined) launchSelector = { field: 'path', value: identity.path }
+    else if (launchSelector.kind === 'name' && identity.id !== undefined) launchSelector = { field: 'bundle_id', value: identity.id }
+    return { id: identity.id, path: identity.path, key: appKeyOf(identity), name: identity.name ?? launchSelector.value, tentative: true, launchSelector }
+  }
+  // An explicit sparse owner can borrow identity only from a unique current app
+  // and process. null distinguishes ambiguity from an owner discovery has not seen.
+  const corroboratedOwner = ({ id, path, name }) => {
+    const owners = driverApps().filter(app => (id === undefined || id === app.id)
+      && (path === undefined || path === app.path)
+      && (name === undefined || normName(name) === normName(app.name)))
+    if (owners.some(app => app.key !== owners[0].key)
+      || ['id', 'path', 'pid'].some(field => new Set(owners.map(app => app[field]).filter(value => value !== undefined)).size > 1)) return null
+    return owners.find(app => app.pid !== undefined) ?? owners[0]
+  }
+  const reconcileDriverReferences = (resolve, seq) => {
+    for (const map of sessionApps.values()) {
+      for (const [key, app] of map) {
+        if (key.startsWith('handle:') || app.unknown) continue
+        const owner = resolve(app)
+        if (owner === null) map.delete(key)
+        else if (owner !== undefined) map.set(key, app.windowKey === undefined ? owner : { ...owner, windowKey: app.windowKey })
+      }
+    }
+    for (const entry of driverWindows.values()) {
+      if (entry.app === undefined || entry.invalidated) continue
+      const owner = resolve(entry.app)
+      if (owner === null) {
+        entry.invalidated = true
+        entry.changedAt = seq
+      } else if (owner !== undefined) entry.app = owner
+    }
+  }
   // The app a call works on, from its arguments and what earlier results recorded.
   // cua: getApp names it by selector, the rest by the appHandle getApp returned.
-  // driver: the pid the call names, known after a list_apps/list_windows result.
+  // driver: all PIDs, windows and elements the call names must resolve.
   const targetAppOf = (exec, call) => {
     const sessionId = exec.agent?.id
     if (call.provider === 'cua') {
@@ -337,42 +426,28 @@ export function install(rt) {
         const selector = String(params.selector ?? '')
         return { key: `selector:${normName(selector)}`, name: selector || 'an app', tentative: true }
       }
-      const handle = typeof params.appHandle === 'string' ? params.appHandle : undefined
+      const handle = textOf(params.appHandle)
       if (handle === undefined) return undefined
       return appsOfSession(sessionId).get(`handle:${handle}`) ?? { key: `handle:${handle}`, name: 'the selected app', unknown: true }
     }
     const args = exec.arguments ?? {}
-    if (call.method === 'launch_app') {
-      const id = [args.bundle_id, args.bundleId, args.app_id, args.appId].find(value => typeof value === 'string' && value !== '')
-      const path = [args.path, args.app_path, args.executable_path, args.executablePath].find(value => typeof value === 'string' && value !== '')
-      const name = [args.name, args.app_name, args.appName, args.app].find(value => typeof value === 'string' && value !== '')
-      if (id === undefined && path === undefined && name === undefined) return undefined
-      return { key: appKeyOf({ id, path, name }), name: name ?? path ?? id, id, path, tentative: true }
-    }
-    const pid = [args.pid, args.appPid, args.windowPid, args.target_pid].find(value => Number.isInteger(value))
-    if (pid !== undefined) {
-      const known = appsOfSession(sessionId).get(`pid:${pid}`)
-      return known ?? { key: `pid:${pid}`, name: `pid ${pid}`, pid, unknown: true }
-    }
-    // A window_id resolves to the app that owns the window, recorded from a
-    // list_windows/get_window_state result.
-    const windowId = [args.window_id, args.windowId, args.wid, args.window].find(value => value !== undefined && value !== null)
-    if (windowId !== undefined) {
-      const known = appsOfSession(sessionId).get(`window:${windowId}`)
-      return known ?? { key: `window:${windowId}`, name: `window ${windowId}`, unknown: true }
-    }
-    // An element token resolves to the window it was read from.
-    const token = [args.element_token, args.token, args.ref, args.element_id, args.elementId, args.element, args.target]
-      .find(value => typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value)))
-    if (token !== undefined) {
-      const known = appsOfSession(sessionId).get(`token:${token}`)
-      return known ?? { key: `token:${token}`, name: 'an element', unknown: true }
-    }
-    return undefined
+    if (call.method === 'launch_app') return launchTarget(args)
+    const apps = appsOfSession(sessionId)
+    const targets = Object.entries(DRIVER_REFERENCES).flatMap(([kind, fields]) =>
+      fields.filter(field => args[field] !== undefined).map((field) => {
+        const value = args[field]
+        const valid = kind === 'pid' ? Number.isInteger(value) : textOf(value) !== undefined || Number.isFinite(value)
+        return (valid ? apps.get(`${kind}:${value}`) : undefined)
+          ?? { name: kind === 'token' ? 'an element' : `the ${kind}`, unknown: true }
+      }))
+    const unknown = targets.find(app => app.unknown)
+    if (unknown !== undefined) return unknown
+    if (targets.some(app => !sameOwner(app, targets[0]))) return { name: 'the requested target', unknown: true }
+    return targets.find(isProtectedApp) ?? targets[0]
   }
   // What a result tells Omni about apps: getApp returns the handle plus the app's
   // identity; driver lists name pids.
-  const recordAppResult = async (exec, call, result) => {
+  const recordAppResult = async (exec, call, result, target, driverSeq) => {
     const sessionId = exec.agent?.id
     if (sessionId === undefined || result === null || typeof result !== 'object') return
     if (call.provider === 'cua' && call.method === 'getApp') {
@@ -386,79 +461,166 @@ export function install(rt) {
         // drop the provider's persistent decision too.
         const owner = rt.botOf(rt.selfOf(sessionId))
         const grant = owner === undefined || identity.id === undefined ? undefined
-          : Object.values(grantsOf(owner)).find(entry => entry.id === undefined && normName(entry.name) === normName(app.name))
+          : Object.values(grantsOf(owner)).find(entry => grantRecord(entry) && entry.id === undefined && normName(entry.name) === normName(app.name))
         if (grant !== undefined) { grant.id = identity.id; await rt.save() }
       }
       return
     }
     if (call.provider !== 'cua-driver') return
     const apps = appsOfSession(sessionId)
+    // A superseded list can record matching observations for its own session.
+    const staleList = driverSeq < driverRefreshSeq
     // DSH's MCP bridge keeps the tool's own JSON under `structuredContent`:
     // `{ content: [...], structuredContent: { windows: [...] } }`. Plain results and
     // older providers put those fields at the top, so read the body and fall back.
     const body = result.structuredContent !== null && typeof result.structuredContent === 'object' && !Array.isArray(result.structuredContent)
       ? result.structuredContent
       : result
-    const textOf = value => (typeof value === 'string' && value.trim() !== '' ? value : undefined)
-    const recordPid = (item, known = {}) => {
-      // list_apps lists installed apps too; their pid is 0 and is no target.
-      const pid = [item?.pid, item?.appPid, item?.app_pid, item?.processId].find(value => Number.isInteger(value) && value > 0)
-      if (pid === undefined) return undefined
-      const id = item.bundle_id ?? item.bundleId ?? item.id ?? item.app_id ?? item.appId ?? known.id
-      const path = item.launch_path ?? item.path ?? item.executablePath ?? item.executable_path ?? item.exe_path ?? known.path
-      const name = textOf(item.name) ?? textOf(item.app_name) ?? textOf(item.appName) ?? textOf(item.title) ?? textOf(item.window_title) ?? known.name
+    const recordOwner = (item, parent, appRow = false, readOnly = staleList) => {
+      const pid = driverPidOf(item) ?? parent?.pid
+      const prior = driverProcesses.get(pid)
+      const rowId = textOf(item?.bundle_id ?? item?.bundleId ?? item?.app_id ?? item?.appId ?? (appRow ? item?.id : undefined))
+      const rowPath = textOf(item?.launch_path ?? item?.path ?? item?.executablePath ?? item?.executable_path ?? item?.exe_path)
+      const rowName = textOf(item?.app_name ?? item?.appName) ?? (appRow || (parent === undefined && pid !== undefined) ? textOf(item?.name) : undefined)
+      if (parent !== undefined && ((parent.pid !== undefined && pid !== parent.pid)
+        || (rowId !== undefined && parent.id !== undefined && rowId !== parent.id)
+        || (rowPath !== undefined && parent.path !== undefined && rowPath !== parent.path))) return undefined
+      const compatible = prior !== undefined
+        && (rowId === undefined || prior.id === undefined || rowId === prior.id)
+        && (rowPath === undefined || prior.path === undefined || rowPath === prior.path)
+        && (rowName === undefined || normName(rowName) === normName(prior.name))
+        && (parent?.id === undefined || prior.id === undefined || parent.id === prior.id)
+        && (parent?.path === undefined || prior.path === undefined || parent.path === prior.path)
+      if (readOnly) {
+        if (pid !== undefined) {
+          if (staleList && parent === undefined && rowId === undefined && rowPath === undefined && rowName === undefined) return undefined
+          if (!compatible || (rowId !== undefined && prior.id !== rowId) || (rowPath !== undefined && prior.path !== rowPath)) return undefined
+          apps.set(`pid:${pid}`, prior)
+          return prior
+        }
+        if (parent !== undefined) return parent
+        if (rowId === undefined && rowPath === undefined && rowName === undefined) return undefined
+        return corroboratedOwner({ id: rowId, path: rowPath, name: rowName }) ?? undefined
+      }
+      let known = compatible ? prior : undefined
+      // A sparse window list can omit the PID that list_apps supplied. Reuse an
+      // owner only when the explicit owner fields corroborate one app.
+      if (!appRow && parent === undefined && pid === undefined
+        && (rowId !== undefined || rowPath !== undefined || rowName !== undefined)) {
+        known = corroboratedOwner({ id: rowId, path: rowPath, name: rowName })
+        if (known === null) return undefined
+      }
+      const id = rowId ?? parent?.id ?? known?.id
+      const path = rowPath ?? parent?.path ?? known?.path
+      const name = isProtectedApp(parent) ? parent.name : isProtectedApp(known) ? known.name : rowName ?? parent?.name ?? known?.name
+      if (id === undefined && path === undefined && name === undefined) return undefined
+      const ownerPid = pid ?? known?.pid
       const app = {
         key: appKeyOf({ id, path, name }),
-        name: name ?? `pid ${pid}`,
+        name: name ?? path ?? id,
         ...(id !== undefined ? { id } : {}),
         ...(path !== undefined ? { path } : {}),
-        pid,
+        ...(ownerPid !== undefined ? { pid: ownerPid } : {}),
       }
-      apps.set(`pid:${pid}`, app)
+      if (pid !== undefined) {
+        driverProcesses.set(pid, app)
+        if (prior !== undefined && (app.id !== prior.id || app.path !== prior.path || app.name !== prior.name)) {
+          reconcileDriverReferences(owner => owner.pid === pid ? (compatible ? app : null) : undefined, driverSeq)
+        }
+        apps.set(`pid:${pid}`, app)
+      }
       return app
     }
-    const recordTitle = (item) => {
-      const title = textOf(item?.title)
-      return title === undefined ? undefined : { key: `title:${normName(title)}`, name: title }
-    }
-    const recordItem = (item, known = {}) => {
-      const app = recordPid(item, known) ?? recordTitle(item)
-      if (app === undefined) return
-      const windowId = [item?.window_id, item?.windowId, item?.wid].find(value => value !== undefined && value !== null)
-      if (windowId !== undefined) apps.set(`window:${windowId}`, app)
-    }
-    const lists = [body.apps, body.windows, body.items, Array.isArray(body) ? body : undefined]
-    for (const list of lists) {
-      if (!Array.isArray(list)) continue
-      for (const item of list) {
-        recordItem(item)
-        // list_apps carries each app's windows; they identify the same app.
-        if (!Array.isArray(item?.windows)) continue
-        for (const win of item.windows) {
-          recordItem(win, { id: item.bundle_id ?? item.id, path: item.launch_path ?? item.path, name: textOf(item.name) })
+    // A reused window ID invalidates dependent references in every session.
+    const recordWindow = (key, app, title) => {
+      const previous = driverWindows.get(key)
+      const oldOwner = previous?.app
+      const owner = app?.unknown ? undefined : app
+      const agrees = oldOwner !== undefined && owner !== undefined && !previous.invalidated
+        && sameOwner(oldOwner, owner) && isProtectedApp(oldOwner) === isProtectedApp(owner)
+      if (staleList || previous?.seq > driverSeq) {
+        if (!agrees || previous.changedAt > driverSeq || (staleList && previous.seq < driverRefreshSeq)) return false
+        apps.set(key, oldOwner)
+        return true
+      }
+      const changed = oldOwner !== undefined && !agrees
+      if (changed) {
+        for (const map of sessionApps.values()) {
+          map.delete(key)
+          for (const [ref, tokenOwner] of map) {
+            if (ref.startsWith('token:') && (tokenOwner.windowKey === key
+              || (tokenOwner.windowKey === undefined && sameOwner(tokenOwner, oldOwner)))) map.delete(ref)
+          }
         }
       }
+      driverWindows.set(key, { seq: driverSeq, changedAt: changed ? driverSeq : previous?.changedAt, app: owner })
+      if (app === undefined && title === undefined) apps.delete(key)
+      else apps.set(key, app ?? { name: title, unknown: true })
+      return true
+    }
+    const recordItem = (item, parent, appRow = false) => {
+      const windowId = [item?.window_id, item?.windowId, item?.wid].find(value => value !== undefined && value !== null)
+      const windowKey = windowId === undefined ? undefined : `window:${windowId}`
+      const app = recordOwner(item, parent, appRow, staleList || driverWindows.get(windowKey)?.seq > driverSeq)
+      if (windowKey !== undefined) recordWindow(windowKey, app, textOf(item?.title) ?? `window ${windowId}`)
+      return app
+    }
+    const lists = [body.apps, call.method !== 'launch_app' ? body.windows : undefined, body.items, body].filter(Array.isArray)
+    if (call.method === 'list_apps' && lists.length > 0) {
+      const rows = lists.flat().map(item => ({ item, app: recordItem(item, undefined, true) }))
+      if (!staleList) {
+        driverRefreshSeq = driverSeq
+        const listed = rows.flatMap(({ app }) => app === undefined ? [] : [app])
+        const currentPids = new Set(listed.map(app => app.pid).filter(pid => pid !== undefined))
+        for (const pid of driverProcesses.keys()) {
+          if (!currentPids.has(pid)) driverProcesses.delete(pid)
+        }
+        installedDriverApps = listed.filter(app => app.pid === undefined)
+        reconcileDriverReferences(app => app.pid === undefined ? corroboratedOwner(app) : currentPids.has(app.pid) ? undefined : null, driverSeq)
+      }
+      for (const { item, app } of rows) {
+        if ((!staleList || app !== undefined) && Array.isArray(item?.windows)) for (const win of item.windows) recordItem(win, app)
+      }
+      return
+    }
+    for (const item of lists.flat()) {
+      const app = recordItem(item)
+      if (Array.isArray(item?.windows)) for (const win of item.windows) recordItem(win, app)
     }
     // launch_app answers with the launched app and its windows; the windows carry
     // the same identity as the app, so a window call resolves to that same grant.
     if (call.method === 'launch_app') {
-      const known = { id: body.bundle_id ?? body.id, path: body.launch_path ?? body.path, name: textOf(body.name) }
-      for (const win of Array.isArray(body.windows) ? body.windows : []) recordItem(win, known)
-      recordItem(body)
+      const app = recordItem(body, target, true)
+      for (const win of Array.isArray(body.windows) ? body.windows : []) recordItem(win, app)
+      return
     }
     // get_window_state reports one window and the element tokens inside it;
     // record both so a later call on either resolves to the window's app.
-    const stateWindow = [body.window_id, body.windowId, body.wid, body.window?.window_id, body.window?.id].find(value => value !== undefined && value !== null)
-    const statePid = [body.pid, body.appPid, body.app_pid, body.window?.pid, body.window?.app_pid].find(value => Number.isInteger(value) && value > 0)
-    let stateApp = statePid !== undefined ? recordPid(body) ?? apps.get(`pid:${statePid}`) : undefined
-    if (stateApp === undefined && stateWindow !== undefined) stateApp = apps.get(`window:${stateWindow}`)
-    if (stateApp === undefined && body.window !== null && typeof body.window === 'object') stateApp = recordPid(body.window)
-    if (stateWindow !== undefined && stateApp !== undefined) apps.set(`window:${stateWindow}`, stateApp)
-    if (stateApp !== undefined) {
-      const elements = [body.elements, body.interactive_elements, body.targets, body.items].find(list => Array.isArray(list)) ?? []
+    const stateWindow = [body.window_id, body.windowId, body.wid, body.window?.window_id, body.window?.id]
+      .find(value => value !== undefined && value !== null)
+    const requestedWindows = DRIVER_REFERENCES.window.map(field => exec.arguments?.[field]).filter(value => value !== undefined)
+    const requestedWindow = requestedWindows[0]
+    const windowRef = stateWindow ?? (requestedWindows.every(value => String(value) === String(requestedWindow)) ? requestedWindow : undefined)
+    const windowKey = windowRef === undefined ? undefined : `window:${windowRef}`
+    const elements = [body.elements, body.interactive_elements, body.targets, body.items].find(list => Array.isArray(list)) ?? []
+    if (stateWindow !== undefined || elements.length > 0) {
+      const observed = driverWindows.get(windowKey)
+      if (observed?.changedAt > driverSeq) return
+      if (windowKey === undefined) {
+        for (const window of driverWindows.values()) if (window.changedAt > driverSeq) return
+      }
+      const readOnly = observed?.seq > driverSeq
+      const observedPid = driverPidOf(body.window) ?? driverPidOf(body)
+      const known = apps.get(windowKey)
+      const stateApp = recordOwner(body.window, recordOwner(body, undefined, false, readOnly), false, readOnly)
+        ?? (observedPid === undefined || observedPid === known?.pid ? known : undefined)
+      if (readOnly && (stateApp === undefined || stateApp.unknown)) return
+      if (stateWindow !== undefined && !recordWindow(windowKey, stateApp)) return
       for (const element of elements) {
         const token = [element?.element_token, element?.token, element?.element_id, element?.elementId, element?.id, element?.ref, element?.handle].find(value => value !== undefined && value !== null)
-        if (token !== undefined) apps.set(`token:${token}`, stateApp)
+        if (token === undefined) continue
+        if (stateApp === undefined || stateApp.unknown) apps.delete(`token:${token}`)
+        else apps.set(`token:${token}`, { ...stateApp, windowKey })
       }
     }
   }
@@ -478,10 +640,11 @@ export function install(rt) {
     const refuse = (reason) => ({ app: app.name, reason, envelope: { isError: true, content: [{ type: 'text', text: `Error: ${reason}` }] } })
     if (isProtectedApp({ name: app.name, id: app.id, path: app.path })) return refuse(`${bot.name} cannot use ${app.name}: that application is protected.`)
     const decisions = decisionsOf(bot.id, sessionId)
-    const decision = decisions.get(app.key) ?? decisions.get(normName(app.name))
+    const decision = decisions.get(app.key)?.get(undefined) ?? decisions.get(normName(app.name))?.get(undefined)
     if (decision === 'deny') return refuse(`The user did not allow ${bot.name} to use ${app.name}.`)
     if (decision === 'once' || grantFor(bot, app) !== undefined) return undefined
-    const verdict = await driverConsent(exec, bot, sessionId, app)
+    const verdict = await checkAccess(bot, sessionId, accessKind(call), app, exec.signal,
+      access => consentForApp(exec, bot, access))
     if (verdict !== 'allow') return refuse(verdict)
     return undefined
   }
@@ -610,6 +773,8 @@ export function install(rt) {
   // The display name the lease and the card show for an appKey, from any session's
   // records or the key itself.
   const appNameOf = (key) => {
+    const driverApp = driverApps().find(app => app.key === key)
+    if (driverApp !== undefined) return driverApp.name
     for (const map of sessionApps.values()) {
       for (const app of map.values()) if (app.key === key) return app.name
     }
@@ -623,33 +788,82 @@ export function install(rt) {
     if (map === undefined) sessionDecisions.set(key, map = new Map())
     return map
   }
-  const grantFor = (bot, app) => {
+  const recordDecision = (decisions, key, path, decision) => {
+    let paths = decisions.get(key)
+    if (paths === undefined) decisions.set(key, paths = new Map())
+    paths.set(path, decision)
+  }
+  const grantFor = (bot, app, driver = false) => {
     const grants = grantsOf(bot)
-    const byKey = grants[app.key]
-    if (byKey !== undefined) return byKey
-    if (app.id !== undefined) return Object.values(grants).find(grant => grant.id === app.id)
+    const byKey = ownGrant(grants, app.key)
+    if (driver && app.id === undefined && app.path === undefined) {
+      return byKey?.id === undefined && byKey?.path === undefined ? byKey : undefined
+    }
+    const matchesPath = (grant) => {
+      if (grant.path !== undefined && app.path !== undefined) return grant.path === app.path
+      if (!driver || app.id === undefined) return true
+      if (app.launchSelector !== undefined && grant.path !== undefined) return false
+      const paths = new Set(driverApps().filter(candidate => candidate.id === app.id && candidate.path !== undefined).map(candidate => candidate.path))
+      return paths.size <= 1 && (grant.path === undefined || paths.size === 0 || paths.has(grant.path))
+    }
+    if (byKey !== undefined && (app.id === undefined || byKey.id === undefined || byKey.id === app.id) && matchesPath(byKey)) return byKey
+    if (app.id !== undefined) return Object.values(grants).find(grant => grantRecord(grant) && grant.id === app.id && matchesPath(grant))
     // The name decides only when no id or path can: the macOS consent question
     // carries a name alone. A same-named app with its own identity asks again.
     if (app.path !== undefined) return undefined
     const wanted = normName(app.name)
-    return Object.values(grants).find(grant => normName(grant.name) === wanted)
+    return Object.values(grants).find(grant => grantRecord(grant) && normName(grant.name) === wanted)
   }
   const recordGrant = async (bot, app) => {
     bot.computer ??= {}
-    bot.computer.apps ??= {}
-    bot.computer.apps[app.key] = { name: app.name, ...(app.id !== undefined ? { id: app.id } : {}), grantedAt: Date.now() }
+    bot.computer.apps = {
+      ...bot.computer.apps,
+      [grantKeyOf(app)]: {
+        name: app.name,
+        ...(app.id !== undefined ? { id: app.id } : {}),
+        ...(app.path !== undefined ? { path: app.path } : {}),
+        grantedAt: Date.now(),
+      },
+    }
     await rt.save()
+  }
+  // A check stays cancellable while the card is open and while an answer is saved.
+  const checkAccess = async (bot, sessionId, kind, app, signal, run) => {
+    const abort = new AbortController()
+    const access = { botId: bot.id, sessionId, kind, app, abort,
+      signal: signal === undefined ? abort.signal : AbortSignal.any([signal, abort.signal]),
+      reason: (method = 'this call') => {
+        if (!enabled()) return 'Computer use is off. The user can turn it on in Settings → Computer use.'
+        if (!isBotAt(sessionId) || rt.botOf(rt.selfOf(sessionId))?.id !== bot.id) return 'Only Bots on the team can use the computer.'
+        if (providerStatus.state === 'occupied') return 'Another Computer Use plugin is in use, so Bots cannot use the computer. The user can see this in Settings → Computer use.'
+        const level = levelOf(rt.botOf(bot.id))
+        if (!levelAllows(level, kind)) return `${bot.name} is set to "${LEVEL_LABEL[level]}" for computer use, so it cannot run ${method} (${kind}). The user can change this in the Bot's Control card or in Settings → Computer use.`
+        if (controlOf(bot.id).state === 'user') return `The user is operating the computer for ${bot.name}. Wait until they hand it back.`
+        if (access.signal.aborted) return `The user did not allow ${bot.name} to use ${app?.name ?? 'the computer'}.`
+        return undefined
+      },
+    }
+    checkingAccess.add(access)
+    try {
+      return await run(access)
+    } finally {
+      checkingAccess.delete(access)
+    }
   }
   // The card in the Bot's own chat. Resolves 'always' | 'once' | 'deny'.
   const askAppAccess = ({ botId, sessionId, callId, app, signal }) => new Promise((resolve) => {
+    if (signal.aborted) return resolve('deny')
     const id = randomUUID()
+    const cancel = () => entry.resolve('deny')
     const entry = {
       id, botId, sessionId, appName: app.name, ...(app.icon !== undefined ? { icon: app.icon } : {}),
+      ...(app.path !== undefined ? { appPath: app.path } : {}),
       ...(callId !== undefined ? { callId } : {}),
       resolve: (answer) => {
         pendingAsks.delete(id)
+        signal.removeEventListener('abort', cancel)
         const ctl = controlOf(botId)
-        if (ctl.waitingFor === 'app-access') ctl.waitingFor = undefined
+        if (ctl.waitingFor === 'app-access' && ![...pendingAsks.values()].some(ask => ask.botId === botId)) ctl.waitingFor = undefined
         settleControl(botId)
         resolve(answer)
       },
@@ -660,7 +874,7 @@ export function install(rt) {
       ctl.state = 'waiting'
       ctl.waitingFor = 'app-access'
     }
-    signal?.addEventListener?.('abort', () => { if (pendingAsks.has(id)) entry.resolve('deny') }, { once: true })
+    signal.addEventListener('abort', cancel, { once: true })
   })
   const answerAppAccess = (id, answer) => {
     const entry = pendingAsks.get(String(id ?? ''))
@@ -692,31 +906,40 @@ export function install(rt) {
     app.key = appKeyOf(app)
     const deny = () => ({ answers: [{ id: 'cua-app-access', selected: [DENY_LABEL] }] })
     const allow = () => ({ answers: [{ id: 'cua-app-access', selected: [ALLOW_LABEL] }] })
-    if (isProtectedApp(app)) return deny()
-    if (grantFor(bot, app) !== undefined) return allow()
     const call = [...inFlight.values()].find(item => item.sessionId === sessionId)
-    const answer = await askAppAccess({ botId: bot.id, sessionId, callId: call?.callId, app, signal: request.signal })
-    if (answer === 'always') {
-      await recordGrant(bot, { ...app, name: app.name })
-      return allow()
-    }
-    decisionsOf(bot.id, sessionId).set(app.key, answer === 'once' ? 'once' : 'deny')
-    return answer === 'once' ? allow() : deny()
+    return checkAccess(bot, sessionId, 'background', app, request.signal, async (access) => {
+      if (access.reason() !== undefined || isProtectedApp(app)) return deny()
+      if (grantFor(bot, app) !== undefined) return allow()
+      const answer = await askAppAccess({ botId: bot.id, sessionId, callId: call?.callId, app, signal: access.signal })
+      if (access.reason() !== undefined) return deny()
+      if (answer === 'always') {
+        await recordGrant(bot, app)
+        return access.reason() === undefined && grantFor(rt.botOf(bot.id), app) !== undefined ? allow() : deny()
+      }
+      recordDecision(decisionsOf(bot.id, sessionId), app.key, undefined, answer === 'once' ? 'once' : 'deny')
+      return answer === 'once' ? allow() : deny()
+    })
   }, { prepend: true })
-  // Windows/Linux: no consent inside the provider, so the first call that targets an
-  // app asks through the same card, before the call runs.
-  const driverConsent = async (exec, bot, sessionId, app) => {
-    if (grantFor(bot, app) !== undefined) return 'allow'
+  // The driver asks before dispatch because it has no provider-level consent.
+  const consentForApp = async (exec, bot, access, checkTarget = () => undefined, driver = false) => {
+    const { sessionId, app } = access
+    const blocked = access.reason(exec.arguments?.method ?? exec.name) ?? checkTarget()
+    if (blocked !== undefined) return blocked
+    if (grantFor(bot, app, driver) !== undefined) return 'allow'
     const decisions = decisionsOf(bot.id, sessionId)
-    const before = decisions.get(app.key)
+    const path = driver ? app.path : undefined
+    const before = decisions.get(app.key)?.get(path)
     if (before === 'once') return 'allow'
     if (before === 'deny') return `The user did not allow ${bot.name} to use ${app.name} in this conversation.`
-    const answer = await askAppAccess({ botId: bot.id, sessionId, callId: exec.callId, app, signal: exec.signal })
+    const answer = await askAppAccess({ botId: bot.id, sessionId, callId: exec.callId, app, signal: access.signal })
+    const resumed = access.reason(exec.arguments?.method ?? exec.name) ?? checkTarget()
+    if (resumed !== undefined) return resumed
     if (answer === 'always') {
       await recordGrant(bot, app)
-      return 'allow'
+      return access.reason(exec.arguments?.method ?? exec.name) ?? checkTarget()
+        ?? (grantFor(rt.botOf(bot.id), app, driver) !== undefined ? 'allow' : `The user did not allow ${bot.name} to use ${app.name}.`)
     }
-    decisions.set(app.key, answer === 'once' ? 'once' : 'deny')
+    recordDecision(decisions, app.key, path, answer === 'once' ? 'once' : 'deny')
     return answer === 'once' ? 'allow' : `The user did not allow ${bot.name} to use ${app.name}.`
   }
 
@@ -735,114 +958,157 @@ export function install(rt) {
     if (!isBotAt(sessionId)) {
       return { kind: 'deny', reason: 'Only Bots on the team can use the computer.' }
     }
-    if (providerStatus.state === 'occupied') return { kind: 'deny', reason: 'Another Computer Use plugin is in use, so Bots cannot use the computer. The user can see this in Settings → Computer use.' }
-    const level = levelOf(bot)
-    if (!levelAllows(level, call.kind)) {
-      return { kind: 'deny', reason: `${bot.name} is set to "${LEVEL_LABEL[level]}" for computer use, so it cannot run ${call.method} (${call.kind}). The user can change this in the Bot's Control card or in Settings → Computer use.` }
-    }
-    const ctl = controlOf(bot.id)
-    if (ctl.state === 'user') {
-      return { kind: 'deny', reason: `The user is operating the computer for ${bot.name}. Wait until they hand it back.` }
-    }
     const app = targetAppOf(exec, call)
-    // A getApp selector is checked as name, id and path, so a protected bundle
-    // id is refused the same as a protected name.
-    if (app !== undefined && isProtectedApp({ name: app.name, id: app.id ?? (app.tentative === true ? app.name : undefined), path: app.path ?? (app.tentative === true ? app.name : undefined) })) {
-      return { kind: 'deny', reason: `${bot.name} cannot use ${app.name}: that application is protected.` }
-    }
-    // Every refusal is decided before a lease is taken.
-    if (call.provider === 'cua' && app !== undefined && app.tentative !== true) {
-      if (app.unknown === true) {
-        return { kind: 'deny', reason: `Access to ${app.name} was revoked. Select it again with getApp.` }
-      }
-      // macOS: Omni requires its own Always grant or a "This time" for this
-      // Session, so a revoke bites at once. A saved DSH decision can let getApp
-      // through without asking here; then the first real call asks by card.
+    const driver = call.provider === 'cua-driver'
+    const needsConsent = app !== undefined && (driver || !app.tentative)
+    const protectedTarget = target => target !== undefined && isProtectedApp({
+      name: target.name, id: target.id ?? (target.tentative ? target.name : undefined),
+      path: target.path ?? (target.tentative ? target.name : undefined),
+    })
+    const consentDecision = () => {
       const decisions = decisionsOf(bot.id, sessionId)
-      const decision = decisions.get(app.key) ?? decisions.get(normName(app.name))
-      if (decision === 'deny') {
-        return { kind: 'deny', reason: `The user did not allow ${bot.name} to use ${app.name}.` }
-      }
-      if (decision !== 'once' && grantFor(bot, app) === undefined) {
-        const verdict = await driverConsent(exec, bot, sessionId, app)
-        if (verdict !== 'allow') return { kind: 'deny', reason: verdict }
-      }
+      return decisions.get(app.key)?.get(driver ? app.path : undefined)
+        ?? (!driver ? decisions.get(normName(app.name))?.get(undefined) : undefined)
     }
-    if (call.provider === 'cua-driver') {
-      if (DRIVER_REFUSED.has(call.method)) {
-        return { kind: 'deny', reason: `Bots may not use ${call.method}.` }
-      }
-      injectDriverSession(exec, call, bot.id)
-      await ensureDriverCursorOff(exec, bot.id)
-      if (app === undefined) {
-        if (!DRIVER_GLOBAL.has(call.method)) {
-          return { kind: 'deny', reason: 'Name the window from list_windows first.' }
-        }
-      } else if (app.unknown === true) {
-        return { kind: 'deny', reason: `${bot.name} does not know ${app.name}. List the windows or apps first.` }
+    return checkAccess(bot, sessionId, accessKind(call), app, exec.signal, async (access) => {
+      const deny = reason => ({ kind: 'deny', reason })
+      const blocked = access.reason(call.method)
+      if (blocked !== undefined) return deny(blocked)
+      if (protectedTarget(app)) return deny(`${bot.name} cannot use ${app.name}: that application is protected.`)
+      if (driver) {
+        if (DRIVER_REFUSED.has(call.method)) return deny(`Bots may not use ${call.method}.`)
+        if (app === undefined && !DRIVER_GLOBAL.has(call.method)) return deny('Name the window from list_windows first.')
+        if (app?.unknown) return deny(`${bot.name} does not know ${app.name}. List the windows or apps first.`)
       } else {
-        const verdict = await driverConsent(exec, bot, sessionId, app)
-        if (verdict !== 'allow') return { kind: 'deny', reason: verdict }
+        if (!CUA_WITHOUT_HANDLE.has(call.method) && app === undefined) return deny('Select the app with getApp and pass its appHandle.')
+        if (app?.unknown) return deny(`Access to ${app.name} was revoked. Select it again with getApp.`)
       }
-    }
-    if (call.kind !== 'observe' && app !== undefined) {
-      const held = leases.holderOfApp(app.key)
-      if (held !== undefined && held.botId !== bot.id) {
-        return { kind: 'deny', reason: `${rt.botOf(held.botId)?.name ?? 'Another Bot'} is using ${app.name}. Try a different app, or wait until it is done.` }
+      const deniedApp = () => `The user did not allow ${bot.name} to use ${app.name}.`
+      const checkTarget = () => {
+        const current = targetAppOf(exec, call)
+        if (app === undefined) return current === undefined ? undefined : 'The computer call changed after authorization.'
+        if (current === undefined || current.unknown || protectedTarget(current) || !sameOwner(app, current)) return deniedApp()
+        if (driver && (app.path !== current.path || app.pid !== current.pid)) return deniedApp()
+        if (app.launchSelector?.field !== current.launchSelector?.field || app.launchSelector?.value !== current.launchSelector?.value) return deniedApp()
+        return undefined
+      }
+      if (needsConsent) {
+        if (!driver && consentDecision() === 'deny') return deny(deniedApp())
+        if (consentDecision() !== 'once') {
+          const verdict = await consentForApp(exec, bot, access, checkTarget, driver)
+          if (verdict !== 'allow') return deny(verdict)
+        }
+      }
+      const recheck = () => access.reason(call.method) ?? checkTarget()
+        ?? (needsConsent && consentDecision() !== 'once' &&
+          ((!driver && consentDecision() === 'deny') || grantFor(rt.botOf(bot.id), app, driver) === undefined) ? deniedApp() : undefined)
+      let refused = recheck()
+      if (refused !== undefined) return deny(refused)
+      if (driver) {
+        await ensureDriverCursorOff(exec, bot.id)
+        refused = recheck()
+      }
+      if (refused !== undefined) return deny(refused)
+      if (driver) injectDriverSession(exec, call, bot.id)
+      const verdict = await next()
+      if (verdict.kind === 'allow' || verdict.kind === 'ask') preparedCalls.set(exec, { access, call, recheck })
+      return verdict
+    })
+  })
+
+  // Check and take both leases in the same synchronous step at dispatch.
+  const takeCallLeases = (botId, sessionId, call, app) => {
+    const ctl = controlOf(botId)
+    const appLease = call.kind !== 'observe' && app !== undefined
+    let leaseKey = app?.key
+    if (appLease) {
+      // A lease taken before discovery can still be held under its original selector.
+      const keys = call.provider === 'cua-driver' ? new Set([app.key, app.path, normName(app.name)]) : [app.key]
+      for (const key of keys) {
+        if (key === undefined) continue
+        const held = leases.holderOfApp(key)
+        if (held === undefined) continue
+        if (held.botId !== botId) return `${rt.botOf(held.botId)?.name ?? 'Another Bot'} is using ${app.name}. Try a different app, or wait until it is done.`
+        leaseKey = key
       }
     }
     if (call.kind === 'foreground') {
       const held = leases.holderOfForeground()
-      if (held !== undefined && held.botId !== bot.id) {
-        return { kind: 'deny', reason: `${rt.botOf(held.botId)?.name ?? 'Another Bot'} is using the foreground. Wait until it is done.` }
+      if (held !== undefined && held.botId !== botId) {
+        return `${rt.botOf(held.botId)?.name ?? 'Another Bot'} is using the foreground. Wait until it is done.`
       }
       if (Date.now() >= ctl.allowForegroundUntil && userBusy()) {
         ctl.state = 'waiting'
         ctl.waitingFor = 'user-idle'
-        return { kind: 'deny', reason: 'The user is using the computer right now, so foreground actions wait. Try again later, or wait until they let you continue.' }
+        return 'The user is using the computer right now, so foreground actions wait. Try again later, or wait until they let you continue.'
       }
     }
-    if (call.kind !== 'observe' && app !== undefined) {
-      leases.takeApp(app.key, bot.id, sessionId)
+    if (appLease) {
+      leases.takeApp(leaseKey, botId, sessionId)
       ctl.app = app.name
     }
-    if (call.kind === 'foreground') leases.takeForeground(bot.id, sessionId)
+    if (call.kind === 'foreground') leases.takeForeground(botId, sessionId)
     if (ctl.state === 'idle' || ctl.state === 'waiting') {
       ctl.state = 'bot'
       ctl.waitingFor = undefined
     }
-    return next()
-  })
+    return undefined
+  }
 
   // ---- In-flight calls: steps, app records, screenshots, abort ----
-  const abortCalls = (botId, appKey) => {
-    for (const call of inFlight.values()) {
-      if (call.botId !== botId) continue
-      if (appKey !== undefined && call.appKey !== appKey) continue
+  const abortCalls = (botId, matches = () => true) => {
+    for (const call of [...checkingAccess, ...[...preparedCalls.values()].map(prepared => prepared.access), ...inFlight.values()]) {
+      if ((botId !== undefined && call.botId !== botId) || !matches(call)) continue
       call.abort.abort(new Error('Stopped'))
     }
   }
+  // A downstream denial, cancellation or scheduler error can end a call before execute.
+  ctx.on('tools/result', (exec) => { preparedCalls.delete(exec) })
   ctx.on('tools/execute', async function computerTrack(exec, next) {
     const call = classify(exec.name, exec.arguments)
+    if (call === undefined) return next()
+    await rt.load()
     const sessionId = exec.agent?.id
-    if (call === undefined || sessionId === undefined) return next()
+    const prepared = preparedCalls.get(exec)
+    preparedCalls.delete(exec)
+    if (prepared === undefined && !rt.isBotSession(sessionId) && !mountedByUs) return next()
     const botId = rt.selfOf(sessionId)
-    if (botId === undefined || !rt.isBotSession(sessionId)) return next()
-    const app = targetAppOf(exec, call)
-    const abort = new AbortController()
-    const flight = { botId, sessionId, callId: exec.callId, appKey: app?.key, abort }
-    if (typeof exec.callId === 'string') inFlight.set(exec.callId, flight)
+    const deny = reason => ({ isError: true, content: [{ type: 'text', text: `Error: ${reason}` }] })
+    if (prepared === undefined) return deny('The computer call was not authorized. Try a fresh call.')
+    const { access } = prepared
+    if (access.sessionId !== sessionId || access.botId !== botId || prepared.call.provider !== call.provider
+      || prepared.call.method !== call.method || prepared.call.kind !== call.kind) return deny('The computer call changed after authorization.')
+    const app = access.app
     const previous = exec.signal
-    exec.signal = previous !== undefined ? AbortSignal.any([previous, abort.signal]) : abort.signal
+    if (previous?.aborted) return deny('The computer call was cancelled.')
+    const denied = prepared.recheck() ?? takeCallLeases(botId, sessionId, call, app)
+    if (denied !== undefined) return deny(denied)
+    const flight = { botId, sessionId, callId: exec.callId, kind: access.kind, app, abort: access.abort }
+    inFlight.set(exec, flight)
+    const driverSeq = call.provider === 'cua-driver' ? ++driverCallSeq : undefined
+    const previousArgs = exec.arguments
+    exec.signal = previous !== undefined ? AbortSignal.any([previous, access.signal]) : access.signal
     const started = Date.now()
     try {
+      if (app?.launchSelector !== undefined) {
+        const { field, value } = app.launchSelector
+        const { session, foreground } = exec.arguments
+        exec.arguments = {
+          [field]: value,
+          ...(session !== undefined ? { session } : {}),
+          ...(foreground !== undefined ? { foreground } : {}),
+        }
+      }
       const result = await next()
       // Tool results arrive as an envelope { isError, content, value } — the
       // recorded app identity and screenshot attachment live in `value`.
       const payload = result !== null && typeof result === 'object' && result.isError !== true
         ? (result.value !== null && typeof result.value === 'object' ? result.value : result)
         : null
-      await recordAppResult(exec, call, payload)
+      // An older observation can finish after list_apps retired its process.
+      if (driverSeq === undefined || (!access.signal.aborted && (driverSeq >= driverRefreshSeq || call.method === 'list_apps'))) {
+        await recordAppResult(exec, call, payload, app, driverSeq)
+      }
       // A successful getApp returns its handle whether or not the provider's own
       // consent ran (its session decisions persist for the Bot's whole Session,
       // so a revoked app never asks again). Omni decides here by its own rules:
@@ -874,8 +1140,9 @@ export function install(rt) {
       noteStep(botId, { time: started, callId: exec.callId, app: app?.name, action: call.method ?? exec.name, kind: call.kind, ok: false, error: String(error?.message ?? error).slice(0, 200) })
       throw error
     } finally {
-      if (typeof exec.callId === 'string') inFlight.delete(exec.callId)
+      inFlight.delete(exec)
       exec.signal = previous
+      exec.arguments = previousArgs
       settleControl(botId)
     }
   })
@@ -925,11 +1192,11 @@ export function install(rt) {
     return true
   }
   const takeOver = async (botId) => {
-    abortCalls(botId)
-    leases.releaseBot(botId)
     const ctl = controlOf(botId)
     ctl.state = 'user'
     ctl.waitingFor = undefined
+    abortCalls(botId)
+    leases.releaseBot(botId)
     const hold = holds.get(botId)
     holds.set(botId, { id: hold?.id ?? randomUUID(), by: 'user', surface: 'computer', reason: hold?.reason ?? 'takeover', note: hold?.note ?? 'The user is operating the computer.', ...(hold?.callId !== undefined ? { callId: hold.callId } : {}) })
     return true
@@ -989,9 +1256,12 @@ export function install(rt) {
       const bot = rt.botOf(rt.selfOf(id))
       if (bot === undefined || !rt.isBotSession(id) || !enabled() || providerStatus.state !== 'ready' || levelOf(bot) === 'off') return ''
       const level = levelOf(bot)
+      const viewGuidance = process.platform === 'darwin'
+        ? ' You may discover apps. Listing windows, reading app state, and taking screenshots require an already recorded appHandle. Selecting an app with getApp requires background control or higher.'
+        : ' You may only look: list apps and windows, read their state, take screenshots.'
       return [
         '## Using the computer',
-        `- Your level: ${LEVEL_LABEL[level]}.${level === 'view' ? ' You may only look: list apps and windows, read their state, take screenshots.' : level === 'background' ? ' You may read apps and operate them in the background without bringing them to the front.' : ' You may read apps, operate them in the background, and bring them to the front.'}`,
+        `- Your level: ${LEVEL_LABEL[level]}.${level === 'view' ? viewGuidance : level === 'background' ? ' You may read apps and operate them in the background without bringing them to the front.' : ' You may read apps, operate them in the background, and bring them to the front.'}`,
         '- One Bot per app at a time. If a call is refused because another Bot uses that app or the foreground, wait and try later.',
         '- After every action, look at the app again before the next one: a dispatched click or keystroke is not proof it landed. Never repeat an action without re-observing first.',
         ...(process.platform === 'win32' && level !== 'view' ? WINDOWS_INPUT_NOTES : []),
@@ -1011,6 +1281,7 @@ export function install(rt) {
     if (enabled() !== next) {
       state.computer ??= {}
       state.computer.enabled = next
+      if (!next) abortCalls()
       await rt.save()
     }
     if (next) {
@@ -1034,12 +1305,12 @@ export function install(rt) {
     // A Bot with no level of its own is off (levelOf), so every other level is written.
     if (level === 'off') delete bot.computer.level
     else bot.computer.level = level
-    await rt.save()
+    abortCalls(bot.id, call => !levelAllows(level, call.kind))
     if (level === 'off') {
-      abortCalls(bot.id)
       leases.releaseBot(bot.id)
       settleControl(bot.id)
     }
+    await rt.save()
     for (const agent of service('agents')?.list?.() ?? []) applyComputer(agent)
     return true
   }
@@ -1049,13 +1320,13 @@ export function install(rt) {
     if (readOnly !== undefined) throw new Error(readOnly)
     const bot = rt.botOf(botId)
     if (bot === undefined) throw refusal('Unknown Bot')
-    const grant = grantsOf(bot)[appKey]
-    if (grant !== undefined) {
+    const grants = grantsOf(bot)
+    const grant = ownGrant(grants, appKey)
+    const removed = Object.hasOwn(grants, appKey)
+    if (removed) {
       delete bot.computer.apps[appKey]
       if (Object.keys(bot.computer.apps).length === 0) delete bot.computer.apps
-      await rt.save()
     }
-    abortCalls(botId, appKey)
     // The provider's own session decisions are per Session, so a revoked Bot's next
     // getApp asks again through the card. The provider's persistent store is only
     // touched when no other Bot holds an Always grant for that app id.
@@ -1063,20 +1334,29 @@ export function install(rt) {
     // the provider's decision too or the Bot keeps using the app. Other Bots'
     // grants are unaffected: their next getApp is answered by Omni again.
     const access = service('cuaAccess')
-    const recorded = [...sessionApps.values()].flatMap(map => [...map.values()])
-      .find(app => app.key === appKey || app.id === appKey || normName(app.name) === normName(grant?.name ?? appKey))
+    const exact = app => app.key === appKey || app.id === appKey || app.path === appKey
+      || (grant?.id !== undefined && app.id === grant.id)
+    const records = [...driverApps(), ...[...sessionApps.values()].flatMap(map => [...map.values()])]
+    const recorded = records.find(exact) ?? records.find(app => !app.unknown && normName(app.name) === normName(grant?.name ?? appKey))
     const wanted = normName(grant?.name ?? recorded?.name ?? appKey)
+    const path = grant?.path
+    const matches = app => app !== undefined && !app.unknown
+      && (path !== undefined ? app.path === path && (grant.id === undefined || app.id === undefined || app.id === grant.id)
+        : exact(app) || (recorded?.id !== undefined && app.id === recorded.id)
+        || (recorded?.path !== undefined && app.path === recorded.path)
+        || (normName(app.name) === wanted && (app.id === undefined && app.path === undefined || normName(appKey) === wanted)))
     const aliases = new Set([appKey])
-    for (const map of sessionApps.values()) {
-      for (const [key, app] of map) {
-        if (app.key === appKey || app.id === appKey || normName(app.name) === wanted) aliases.add(key)
-      }
-    }
+    if (path !== undefined) aliases.add(path)
+    if (grant?.id !== undefined) aliases.add(grant.id)
+    for (const app of records) if (matches(app)) aliases.add(app.key)
+    abortCalls(botId, call => matches(call.app))
     // A "This time" must not outlive the revoke, in any of this Bot's Sessions.
     for (const [key, decisions] of sessionDecisions) {
       if (!key.startsWith(`${botId}:`)) continue
-      for (const entry of [...decisions.keys()]) {
-        if (aliases.has(entry) || normName(entry) === wanted) decisions.delete(entry)
+      for (const [entry, paths] of decisions) {
+        if (!aliases.has(entry) && normName(entry) !== wanted) continue
+        if (path === undefined) decisions.delete(entry)
+        else paths.delete(path)
       }
     }
     // A revoked app keeps no recorded cua handles in this Bot's Sessions: the
@@ -1086,10 +1366,17 @@ export function install(rt) {
     // calls ask by card as before.
     for (const [sessionId, map] of sessionApps) {
       if (rt.botOf(rt.selfOf(sessionId))?.id !== botId) continue
-      for (const key of aliases) {
-        if (key.startsWith('handle:')) map.delete(key)
+      for (const [key, app] of map) {
+        if (!key.startsWith('handle:') || !matches(app)) continue
+        map.delete(key)
+        if (path !== undefined) {
+          const decisions = sessionDecisions.get(`${botId}:${sessionId}`)
+          decisions?.get(app.key)?.delete(undefined)
+          decisions?.get(normName(app.name))?.delete(undefined)
+        }
       }
     }
+    if (removed) await rt.save()
     // The provider's CuaApplicationId is an opaque hash, so a bundle id cannot be
     // revoked directly; and its per-agent session grants cannot be addressed at
     // all — the guard above is what enforces a revoke. What applications() can
@@ -1113,7 +1400,6 @@ export function install(rt) {
     const ctl = controlOf(botId)
     if (ctl.state !== 'user') ctl.state = 'idle'
     ctl.waitingFor = undefined
-    for (const ask of [...pendingAsks.values()]) if (ask.botId === botId) ask.resolve('deny')
     await rt.stopChat?.(botId)
     for (const room of Object.values(state.rooms ?? {})) {
       if (room.members?.includes(botId)) await rt.stopMemberWork?.(room.id, botId)
@@ -1177,6 +1463,7 @@ export function install(rt) {
         await rt.load()
         if (body.all === true) {
           const ids = new Set([...leases.entries().map(entry => entry.botId),
+            ...[...preparedCalls.values()].filter(({ access }) => !access.signal.aborted).map(({ access }) => access.botId),
             ...[...inFlight.values()].map(flight => flight.botId),
             ...[...control.entries()].filter(([, ctl]) => ctl.state === 'bot' || ctl.state === 'waiting').map(([id]) => id)])
           for (const id of ids) await stopBot(id)
@@ -1251,6 +1538,7 @@ export function install(rt) {
     asks: Object.fromEntries([...pendingAsks.values()].map(ask => [ask.id, {
       id: ask.id,
       botId: ask.botId, sessionId: ask.sessionId, appName: ask.appName,
+      ...(ask.appPath !== undefined ? { appPath: ask.appPath } : {}),
       ...(ask.icon !== undefined ? { icon: ask.icon } : {}),
       ...(ask.callId !== undefined ? { callId: ask.callId } : {}),
     }])),
@@ -1270,9 +1558,8 @@ export function install(rt) {
     stopped = true
     leases.dispose()
     rt.closeComputerWaiters()
-    for (const { resolve } of pendingAsks.values()) resolve('deny')
-    pendingAsks.clear()
-    for (const { abort } of inFlight.values()) abort.abort(new Error('Omni stopped'))
+    abortCalls()
+    preparedCalls.clear()
     for (const held of applied.values()) {
       for (const lift of held.lifts) { try { lift() } catch {} }
       try { held.handoffLift?.() } catch {}

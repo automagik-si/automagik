@@ -213,6 +213,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/disposed',
     'on user-questions/request (prepend)',
     'on tools/pre-execute',
+    'on tools/result',
     'on tools/execute',
     'on session/event',
     'effect omni-ui: computer use section',
