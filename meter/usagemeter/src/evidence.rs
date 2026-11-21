@@ -1793,6 +1793,73 @@ pub fn freeze_unbacked(
     Ok(moved)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResidueCounts {
+    pub rows: usize,
+    pub tokens: i64,
+    pub reasoning_tokens: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResidueReport {
+    pub totals: ResidueCounts,
+    /// Residue grouped by harness and UTC day.
+    pub by_day: BTreeMap<(String, String), ResidueCounts>,
+    pub discrepancy_rows: usize,
+}
+
+/// Inventory rows with actor state whose tokens exceed their evidence at equal event counts.
+/// Rows below their evidence in any column or in events count as discrepancies.
+pub fn unbacked_residue(
+    c: &Connection,
+    from_ms: i64,
+    to_ms: i64,
+) -> rusqlite::Result<ResidueReport> {
+    let implied = implied_rollups(c)?;
+    let mut st = c.prepare(
+        "SELECT id, harness, hour_ms, input_uncached, cache_read, cache_write_5m, cache_write_1h,
+                output, reasoning, unsplit, events
+         FROM usage WHERE actor_state IS NOT NULL AND hour_ms >= ?1 AND hour_ms < ?2",
+    )?;
+    let mut rows = st.query(params![from_ms, to_ms])?;
+    let mut report = ResidueReport::default();
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let (want, want_events) = implied.get(&id).copied().unwrap_or_default();
+        let extra = Tokens {
+            input_uncached: row.get::<_, i64>(3)? - want.input_uncached,
+            cache_read: row.get::<_, i64>(4)? - want.cache_read,
+            cache_write_5m: row.get::<_, i64>(5)? - want.cache_write_5m,
+            cache_write_1h: row.get::<_, i64>(6)? - want.cache_write_1h,
+            output: row.get::<_, i64>(7)? - want.output,
+            reasoning: row.get::<_, i64>(8)? - want.reasoning,
+            unsplit: row.get::<_, i64>(9)? - want.unsplit,
+        };
+        let events = row.get::<_, i64>(10)? - want_events;
+        let parts = [
+            extra.input_uncached,
+            extra.cache_read,
+            extra.cache_write_5m,
+            extra.cache_write_1h,
+            extra.output,
+            extra.reasoning,
+            extra.unsplit,
+        ];
+        if events < 0 || parts.iter().any(|&n| n < 0) {
+            report.discrepancy_rows += 1;
+        } else if events == 0 && parts.iter().any(|&n| n > 0) {
+            let day = crate::time::format_day(row.get(2)?);
+            let day_counts = report.by_day.entry((row.get(1)?, day)).or_default();
+            for counts in [&mut report.totals, day_counts] {
+                counts.rows += 1;
+                counts.tokens += extra.total();
+                counts.reasoning_tokens += extra.reasoning;
+            }
+        }
+    }
+    Ok(report)
+}
+
 /// The rollups the evidence implies, per row id: what every schema 3 row of an hour from
 /// `evidence_from` must hold (a check, and the tests').
 pub fn implied_rollups(c: &Connection) -> rusqlite::Result<BTreeMap<String, (Tokens, i64)>> {

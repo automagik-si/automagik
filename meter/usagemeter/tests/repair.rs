@@ -20,7 +20,7 @@ fn hour(s: &str) -> i64 {
 
 struct Fx {
     _dir: tempfile::TempDir,
-    _envs: [common::Env; 2],
+    envs: [common::Env; 2],
     store: PathBuf,
     oracle: PathBuf,
     scratch: PathBuf,
@@ -42,7 +42,7 @@ impl Fx {
         fs::create_dir_all(&scratch).unwrap();
         Fx {
             _dir: dir,
-            _envs: envs,
+            envs,
             store,
             oracle,
             scratch,
@@ -278,6 +278,147 @@ fn kept_cell_keeps_evidence_free_tokens() {
     assert_eq!(free.1 + in_row.1, 2);
 }
 
+// #1126 reference totals: an evidence-only rebuild gives 2160; keep-all gives 2755.
+#[test]
+fn mixed_history_separate_groups_preserve_usage_without_an_oracle_hour() {
+    let _g = common_serial();
+    let fx = Fx::new();
+    let harness = "claude-code";
+    Fx::put(
+        &fx.store,
+        "attributed",
+        harness,
+        H8,
+        cols(CR, 1035),
+        3,
+        Some("attributed"),
+    );
+    fx.s("duplicate", harness, H8, cols(CR, 495), 2);
+    fx.s("legitimate", harness, H9, cols(CR, 100), 1);
+    fx.o("covered", harness, H8, cols(CR, 2160), 5);
+
+    let dry = repair::execute(&fx.opts(&[])).unwrap();
+    assert_eq!(dry.code, exit::OK, "{}", dry.report.to_text(dry.code));
+    assert_eq!(dry.report.total_before(), 1630);
+    assert_eq!(dry.report.total_change(), 630);
+    assert_eq!(dry.report.kept_tokens(), 0);
+    assert_eq!(dry.report.unresolved_tokens(), 100);
+    let json = dry.report.to_json(dry.code);
+    assert_eq!(json["cells"][0]["after"], 2160);
+    assert_eq!(
+        json["unresolved"],
+        serde_json::json!([{"harness": harness, "day": "2026-11-09", "hours": 1, "tokens": 100}])
+    );
+
+    let copy = fx.copy("copy.db");
+    let applied = repair::execute(&fx.apply_opts(&[], &copy)).unwrap();
+    assert_eq!(applied.code, exit::OK);
+    assert_eq!(applied.applied_days, vec!["2026-11-08"]);
+    let conn = Fx::conn(&fx.store);
+    let row = |id: &str| -> (i64, i64, Option<String>) {
+        conn.query_row(
+            "SELECT cache_read, events, actor_state FROM usage WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(row("attributed"), (1035, 3, Some("attributed".to_owned())));
+    assert_eq!(row("duplicate"), (495 + 630, 2, None));
+    assert_eq!(row("legitimate"), (100, 1, None));
+    assert_eq!(Fx::col(&fx.store, harness, H8, CR), 2160);
+    assert_eq!(
+        Fx::col(&fx.store, harness, H8, CR) + Fx::col(&fx.store, harness, H9, CR),
+        2260
+    );
+    assert_eq!(Fx::events(&fx.store), 6);
+}
+
+#[test]
+fn mixed_history_keeps_the_duplicate_where_attributed_tokens_are_intact() {
+    let _g = common_serial();
+    let fx = Fx::new();
+    let harness = "claude-code";
+    Fx::put(
+        &fx.store,
+        "attributed",
+        harness,
+        H8,
+        cols(CR, 2160),
+        3,
+        Some("attributed"),
+    );
+    fx.s("duplicate", harness, H8, cols(CR, 495), 2);
+    fx.s("legitimate", harness, H9, cols(CR, 100), 1);
+    fx.o("covered", harness, H8, cols(CR, 2160), 5);
+    fx.o("legitimate", harness, H9, cols(CR, 100), 1);
+
+    let dry = repair::execute(&fx.opts(&[])).unwrap();
+    assert_eq!(dry.code, exit::NOTHING, "{}", dry.report.to_text(dry.code));
+    assert_eq!(dry.report.total_before(), 2755);
+    assert_eq!(dry.report.total_change(), 0);
+    assert_eq!(dry.report.kept_tokens(), 495);
+    assert_eq!(
+        dry.report.to_json(dry.code)["kept"],
+        serde_json::json!([{
+            "harness": harness, "day": "2026-11-08", "column": "cache_read", "tokens": 495
+        }])
+    );
+    let copy = fx.copy("copy.db");
+    let hash = Fx::db_hash(&fx.store);
+    let applied = repair::execute(&fx.apply_opts(&[], &copy)).unwrap();
+    assert_eq!(applied.code, exit::NOTHING);
+    assert!(applied.applied_days.is_empty());
+    assert_eq!(Fx::db_hash(&fx.store), hash);
+    assert_eq!(
+        Fx::col(&fx.store, harness, H8, CR) + Fx::col(&fx.store, harness, H9, CR),
+        2755
+    );
+}
+
+#[test]
+fn mixed_history_shared_key_cannot_distinguish_legitimate_tokens() {
+    let _g = common_serial();
+    let fx = Fx::new();
+    let harness = "claude-code";
+    Fx::put(
+        &fx.store,
+        "attributed",
+        harness,
+        H8,
+        cols(CR, 1035),
+        3,
+        Some("attributed"),
+    );
+    fx.s("mixed", harness, H8, cols(CR, 495 + 100), 3);
+    fx.o("covered", harness, H8, cols(CR, 2160), 6);
+
+    // True usage is 2260. The legitimate 100 and duplicate 495 share the same key, so a
+    // successful exit at 2160 cannot certify provenance.
+    let dry = repair::execute(&fx.opts(&[])).unwrap();
+    assert_eq!(dry.code, exit::OK, "{}", dry.report.to_text(dry.code));
+    assert_eq!(dry.report.total_before(), 1630);
+    assert_eq!(dry.report.total_change(), 530);
+    assert_eq!(dry.report.kept_tokens(), 0);
+    let json = dry.report.to_json(dry.code);
+    assert_eq!(json["total"]["after"], 2160);
+    assert!(json["unresolved_groups"].as_array().unwrap().is_empty());
+
+    let copy = fx.copy("copy.db");
+    let applied = repair::execute(&fx.apply_opts(&[], &copy)).unwrap();
+    assert_eq!(applied.code, exit::OK);
+    assert_eq!(Fx::col(&fx.store, harness, H8, CR), 2160);
+    let mixed: i64 = Fx::conn(&fx.store)
+        .query_row(
+            "SELECT cache_read FROM usage WHERE id = ?1",
+            ["mixed"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mixed, 595 + 530);
+    assert_eq!(Fx::events(&fx.store), 6);
+}
+
 #[test]
 fn unresolved_hour_is_listed_and_untouched() {
     let _g = common_serial();
@@ -454,6 +595,166 @@ fn dry_run_writes_nothing() {
     };
     assert_eq!(files(&fx.store), files_before);
     assert!(fx.journal().is_none());
+}
+
+#[test]
+fn dry_run_reports_residue_without_changing_the_plan() {
+    use meter::event::Tokens;
+    use meter::evidence::{self, Actor, Dim, Evidence, Interner};
+
+    let _g = common_serial();
+    let fx = Fx::new();
+    let harness = "claude-code";
+    let call = Evidence {
+        dim: Dim {
+            harness: harness.into(),
+            model: "m".into(),
+            machine: "mach".into(),
+            precision: "exact".into(),
+            ..Dim::default()
+        },
+        actor: Actor {
+            state: "attributed".into(),
+            bot: Some("synthetic-worker".into()),
+            kind: Some("worker".into()),
+            basis: Some("session".into()),
+            ..Actor::default()
+        },
+        ..Evidence::default()
+    };
+    let (key, precision) = evidence::rollup_key(&call.dim, &call.actor, hour(H8));
+    let id = key.id(precision);
+    Fx::put(
+        &fx.store,
+        &id,
+        harness,
+        H8,
+        cols(CR, 100),
+        2,
+        Some("attributed"),
+    );
+    fx.o("covered", harness, H8, cols(CR, 100), 2);
+    fx.s("short", harness, H9, cols(CR, 20), 1);
+    fx.o("covered-later", harness, H9, cols(CR, 50), 1);
+
+    let before = repair::execute(&fx.opts(&[])).unwrap();
+    assert_eq!(before.code, exit::OK);
+    assert!(before.report.passed());
+    assert_eq!(before.report.total_change(), 30);
+    let mut before_json = before.report.to_json(before.code);
+    assert_eq!(
+        before_json
+            .as_object_mut()
+            .unwrap()
+            .remove("residue")
+            .unwrap()["rows"],
+        0
+    );
+
+    let mut conn = Fx::conn(&fx.store);
+    let tx = conn.transaction().unwrap();
+    let mut intern = Interner::default();
+    let tokens = Tokens {
+        cache_read: 30,
+        ..Tokens::default()
+    };
+    for ts in [hour(H8) + 1, hour(H8) + 2] {
+        evidence::insert(&tx, &mut intern, &call, ts, &tokens, None).unwrap();
+    }
+    tx.commit().unwrap();
+    drop(conn);
+
+    let hash = Fx::db_hash(&fx.store);
+    let run = |extra: &[&str]| {
+        fx.envs[0]
+            .command()
+            .args(["repair", "--dry-run", "--store"])
+            .arg(&fx.store)
+            .arg("--against")
+            .arg(&fx.oracle)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let text = run(&[]);
+    assert_eq!(text.status.code(), Some(i32::from(exit::OK)));
+    let text = String::from_utf8(text.stdout).unwrap();
+    let summary = "rows with actor state above their evidence, no excess events: 1 rows, 40 tokens (listed; not moved)";
+    assert!(text.contains(summary));
+    assert!(text.contains("claude-code 2026-11-08: 1 rows, 40 tokens, 0 reasoning tokens"));
+
+    let json = run(&["--json"]);
+    assert_eq!(json.status.code(), Some(i32::from(exit::OK)));
+    let mut json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let residue = json.as_object_mut().unwrap().remove("residue").unwrap();
+    assert_eq!(
+        residue,
+        serde_json::json!({
+            "rows": 1, "tokens": 40, "reasoning_tokens": 0, "discrepancy_rows": 0,
+            "by_day": [{
+                "harness": harness, "day": "2026-11-08", "rows": 1, "tokens": 40, "reasoning_tokens": 0
+            }],
+        })
+    );
+    assert_eq!(json, before_json);
+    assert_eq!(Fx::db_hash(&fx.store), hash);
+
+    let copy = fx.copy("copy.db");
+    let applied = repair::execute(&fx.apply_opts(&[], &copy)).unwrap();
+    assert_eq!(applied.code, exit::OK);
+    assert_eq!(applied.applied_days, vec!["2026-11-09"]);
+    assert!(
+        applied
+            .report
+            .to_json(applied.code)
+            .get("residue")
+            .is_none()
+    );
+    let kept: (i64, i64, String) = Fx::conn(&fx.store)
+        .query_row(
+            "SELECT cache_read, events, actor_state FROM usage WHERE id = ?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(kept, (100, 2, "attributed".to_owned()));
+}
+
+#[test]
+fn residue_inventory_is_empty_without_evidence_and_advisory_when_unavailable() {
+    let _g = common_serial();
+    for table in ["evidence", "ev_dim"] {
+        let fx = Fx::new();
+        fx.s("short", "claude-code", H8, cols(CR, 20), 1);
+        fx.o("covered", "claude-code", H8, cols(CR, 50), 1);
+        Fx::conn(&fx.store)
+            .execute(&format!("DROP TABLE {table}"), [])
+            .unwrap();
+
+        let dry = repair::execute(&fx.opts(&[])).unwrap();
+        assert_eq!(dry.code, exit::OK);
+        assert!(dry.report.passed());
+        assert_eq!(dry.report.total_change(), 30);
+        let json = dry.report.to_json(dry.code);
+        if table == "evidence" {
+            assert_eq!(
+                json["residue"],
+                serde_json::json!({
+                    "rows": 0, "tokens": 0, "reasoning_tokens": 0,
+                    "discrepancy_rows": 0, "by_day": []
+                })
+            );
+        } else {
+            assert_eq!(json["residue"], serde_json::json!({"available": false}));
+            let text = dry.report.to_text(dry.code);
+            assert!(text.contains("residue inventory unavailable"));
+        }
+
+        let copy = fx.copy("copy.db");
+        let applied = repair::execute(&fx.apply_opts(&[], &copy)).unwrap();
+        assert_eq!(applied.code, exit::OK);
+        assert_eq!(Fx::col(&fx.store, "claude-code", H8, CR), 50);
+    }
 }
 
 #[test]
@@ -747,9 +1048,7 @@ fn totals_add_the_six_counted_columns_and_never_reasoning() {
 }
 
 fn common_serial() -> impl Drop {
-    // One lock-taking test at a time: the apply tests take the store's sync lock.
-    static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    M.lock().unwrap_or_else(|e| e.into_inner())
+    common::serial()
 }
 
 #[test]

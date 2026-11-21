@@ -21,6 +21,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::evidence::{ResidueReport, unbacked_residue};
 use crate::sources::Source;
 use crate::store::SCHEMA_VERSION;
 use crate::time::{DAY_MS, HOUR_MS, format_day, format_rfc3339, parse_rfc3339};
@@ -252,6 +253,8 @@ pub struct Report {
     pub group_rows: (usize, usize, usize),
     /// Hours whose evidence is above the rollup before the repair (the damage), reported.
     pub damage_hours: Vec<i64>,
+    /// A dry-run diagnostic. A read failure here is independent of plan validation.
+    residue: Option<Result<ResidueReport, ()>>,
     /// The store this plan is for (a path the person gave).
     pub store: String,
     pub failures: Vec<String>,
@@ -308,7 +311,7 @@ impl Report {
         }
         let before = self.total_before();
         let change = self.total_change();
-        json!({
+        let mut report = json!({
             "store": self.store,
             "match": {
                 "mode": if self.coarse { "coarse" } else { "exact" },
@@ -362,7 +365,23 @@ impl Report {
             "targets": {"state": "before_evidence", "rows": self.changes.len()},
             "conservation": {"pass": self.failures.is_empty(), "failures": self.failures},
             "exit": code,
-        })
+        });
+        if let Some(residue) = &self.residue {
+            report["residue"] = match residue {
+                Ok(r) => json!({
+                    "rows": r.totals.rows,
+                    "tokens": r.totals.tokens,
+                    "reasoning_tokens": r.totals.reasoning_tokens,
+                    "by_day": r.by_day.iter().map(|((h, d), counts)| json!({
+                        "harness": h, "day": d, "rows": counts.rows, "tokens": counts.tokens,
+                        "reasoning_tokens": counts.reasoning_tokens
+                    })).collect::<Vec<_>>(),
+                    "discrepancy_rows": r.discrepancy_rows,
+                }),
+                Err(()) => json!({"available": false}),
+            };
+        }
+        report
     }
 
     pub fn to_text(&self, code: u8) -> String {
@@ -432,6 +451,31 @@ impl Report {
         ));
         for h in &self.damage_hours {
             s.push_str(&format!("  {}\n", format_rfc3339(*h)));
+        }
+        match &self.residue {
+            Some(Ok(r)) => {
+                s.push_str(&format!(
+                    "rows with actor state above their evidence, no excess events: {} rows, {} tokens (listed; not moved)\n",
+                    r.totals.rows,
+                    th(r.totals.tokens)
+                ));
+                for ((h, d), counts) in &r.by_day {
+                    s.push_str(&format!(
+                        "  {h} {d}: {} rows, {} tokens, {} reasoning tokens\n",
+                        counts.rows,
+                        th(counts.tokens),
+                        th(counts.reasoning_tokens)
+                    ));
+                }
+                if r.discrepancy_rows > 0 {
+                    s.push_str(&format!(
+                        "discrepancies (a row below its evidence): {} rows\n",
+                        r.discrepancy_rows
+                    ));
+                }
+            }
+            Some(Err(())) => s.push_str("residue inventory unavailable\n"),
+            None => {}
         }
         s.push_str(&format!(
             "new rows created: {}; existing rows changed: {}\n",
@@ -1094,9 +1138,22 @@ fn build_plan(o: &Opts) -> Result<Result<Report, u8>, String> {
     // The oracle is read whole too, so rows outside the range can be reported.
     let oracle = load(&x, 0, 0, true).map_err(err("oracle"))?;
     let ev = evidence_hours(&s, o.from_ms, o.until_ms).map_err(err("store"))?;
-    Ok(Ok(plan(
+    let mut report = plan(
         &all_store, &oracle, &ev, o.from_ms, o.until_ms, o.coarse, &o.aliases,
-    )))
+    );
+    if o.apply.is_none() {
+        let residue = || -> rusqlite::Result<ResidueReport> {
+            // Keep the evidence and usage reads on one snapshot even if sync is running.
+            let tx = s.unchecked_transaction()?;
+            if has_table(&tx, "evidence")? {
+                unbacked_residue(&tx, o.from_ms, o.until_ms)
+            } else {
+                Ok(ResidueReport::default())
+            }
+        };
+        report.residue = Some(residue().map_err(|_| ()));
+    }
+    Ok(Ok(report))
 }
 
 pub fn execute(o: &Opts) -> Result<Done, String> {

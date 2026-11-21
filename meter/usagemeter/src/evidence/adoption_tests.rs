@@ -48,6 +48,18 @@ fn logged() -> Evidence {
     }
 }
 
+fn attributed() -> Evidence {
+    let mut e = logged();
+    e.actor = Actor {
+        state: "attributed".into(),
+        bot: Some("synthetic-worker".into()),
+        kind: Some("worker".into()),
+        basis: Some("session".into()),
+        ..Actor::default()
+    };
+    e
+}
+
 fn setup() -> Store {
     let s = Store::open_in_memory().unwrap();
     s.conn.execute_batch(BACKFILL_DDL).unwrap();
@@ -82,19 +94,125 @@ fn adopt_call(tx: &Transaction<'_>, intern: &mut Interner, e: &Evidence, t: &Tok
 // Choose valid keys with the backed candidate first; no arbitrary IDs that bypass rollup_key.
 fn ordered() -> (Evidence, Evidence) {
     let a = logged();
-    let mut b = a.clone();
-    b.actor = Actor {
-        state: "attributed".into(),
-        bot: Some("synthetic-worker".into()),
-        kind: Some("worker".into()),
-        basis: Some("session".into()),
-        ..Actor::default()
-    };
+    let b = attributed();
     let id = |e: &Evidence| {
         let (k, p) = rollup_key(&e.dim, &e.actor, HOUR);
         k.id(p)
     };
     if id(&a) < id(&b) { (a, b) } else { (b, a) }
+}
+
+#[test]
+fn equal_event_residue_stays_attributed_after_freeze() {
+    let mut s = setup();
+    let e = attributed();
+    let tx = s.conn.transaction().unwrap();
+    let id = put(&tx, &e, column(1, 100), 2);
+    for ts in [HOUR + 1, HOUR + 2] {
+        insert(&tx, &mut s.intern, &e, ts, &column(1, 30), None).unwrap();
+    }
+
+    assert_eq!(implied_rollups(&tx).unwrap()[&id], (column(1, 60), 2));
+    assert_eq!(freeze_unbacked(&tx, HOUR, 2 * HOUR, 3 * HOUR).unwrap(), 0);
+    assert_eq!(stored_rollups(&tx, HOUR).unwrap()[&id], (column(1, 100), 2));
+    let state: String = tx
+        .query_row("SELECT actor_state FROM usage WHERE id = ?1", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(state, "attributed");
+
+    let counts = ResidueCounts {
+        rows: 1,
+        tokens: 40,
+        reasoning_tokens: 0,
+    };
+    let report = unbacked_residue(&tx, HOUR, 2 * HOUR).unwrap();
+    assert_eq!(report.totals, counts);
+    assert_eq!(report.discrepancy_rows, 0);
+    assert_eq!(
+        report.by_day,
+        BTreeMap::from([(("dsh-tui".into(), "1970-01-01".into()), counts)])
+    );
+    assert_eq!(
+        unbacked_residue(&tx, 0, HOUR).unwrap(),
+        ResidueReport::default()
+    );
+}
+
+#[test]
+fn residue_distinguishes_movable_events_discrepancies_and_reasoning() {
+    let call = Tokens {
+        cache_read: 30,
+        output: 50,
+        ..Tokens::default()
+    };
+    for (case, cache_read, reasoning, events, moved, counts, discrepancies) in [
+        ("excess event", 100, 0, 3, 1, ResidueCounts::default(), 0),
+        ("short column", 50, 40, 2, 0, ResidueCounts::default(), 1),
+        ("short event", 100, 0, 1, 0, ResidueCounts::default(), 1),
+        (
+            "reasoning only",
+            60,
+            40,
+            2,
+            0,
+            ResidueCounts {
+                rows: 1,
+                tokens: 0,
+                reasoning_tokens: 40,
+            },
+            0,
+        ),
+    ] {
+        let mut s = setup();
+        let e = attributed();
+        let tx = s.conn.transaction().unwrap();
+        let stored = Tokens {
+            cache_read,
+            reasoning,
+            output: 100,
+            ..Tokens::default()
+        };
+        let id = put(&tx, &e, stored, events);
+        for ts in [HOUR + 1, HOUR + 2] {
+            insert(&tx, &mut s.intern, &e, ts, &call, None).unwrap();
+        }
+
+        let report = unbacked_residue(&tx, HOUR, 2 * HOUR).unwrap();
+        assert_eq!(report.totals, counts, "{case}");
+        assert_eq!(report.discrepancy_rows, discrepancies, "{case}");
+        assert_eq!(
+            report.by_day.values().next().copied(),
+            (counts.rows != 0).then_some(counts),
+            "{case}"
+        );
+        assert_eq!(
+            freeze_unbacked(&tx, HOUR, 2 * HOUR, 3 * HOUR).unwrap(),
+            moved,
+            "{case}"
+        );
+        if moved > 0 {
+            assert_eq!(
+                stored_rollups(&tx, HOUR).unwrap(),
+                implied_rollups(&tx).unwrap()
+            );
+            let frozen: (i64, i64) = tx
+                .query_row(
+                    "SELECT cache_read, events FROM usage WHERE actor_state IS NULL",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(frozen, (40, 1));
+            assert_eq!(
+                unbacked_residue(&tx, HOUR, 2 * HOUR).unwrap(),
+                ResidueReport::default()
+            );
+        } else {
+            assert_eq!(stored_rollups(&tx, HOUR).unwrap()[&id], (stored, events));
+        }
+    }
 }
 
 #[test]
