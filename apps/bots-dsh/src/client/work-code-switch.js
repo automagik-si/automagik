@@ -1,19 +1,16 @@
-import { createElement as h, useEffect, useMemo, useSyncExternalStore } from 'react'
+import { createElement as h, useEffect, useSyncExternalStore } from 'react'
 import { t } from './i18n.js'
 
 // -------------------------------------------------------------------------
 // The Work / Code switch (RFC 0013, delivery 5), in the sidebar's top row beside the macOS
 // traffic lights. Work is this window; Code brings the real herdr-app window forward on the
 // space for the shown Bot's folder. The app hands the bridge over in its preload
-// (`omniDesktop.herdr`: status, open); in a browser, or an app without it, nothing shows, and
-// before the one install (delivery 7) nothing shows either where herdr-app is not set up.
+// (`omniDesktop.herdr`: status, open, and openCodeRow on newer desktops). The controls show
+// when the bridge is available and herdr-app is set up.
 //
-// The page only ever sends a Bot id (and, to an offer of a newer Herdr, the person's yes or
-// no), and only from a click on Code or on the offer's buttons: never on render, on focus or
-// on hover, and there is no keyboard shortcut (D27). Herdr's state is read on mount, when the
-// window gains focus and when the pointer enters the switch; there is no timer. Main does
-// everything else (apps/desktop src/main.js `automagik-herdr-open`) and answers with what
-// happened; each answer shows here with its label (the RFC's Failure modes).
+// A click on Code, a Code row's action or a notice button sends the Bot id and any update
+// answer to main (apps/desktop src/main.js `automagik-herdr-open`). The control reads status
+// on mount, when the window gains focus and when the pointer enters the switch.
 
 // What main's `note` is about (apps/desktop src/herdr-update.js NOTE_KINDS). An app from before
 // `noteKind` sends the note alone: its kind is read from main's own English wording, and a note
@@ -73,12 +70,12 @@ export function codeNotices(result) {
 }
 
 /**
- * The switch's state over one bridge: { status, busy, result, front }. `open(request)` is the
- * only way to `bridge.open()`, and the component calls it from click handlers alone; it calls
- * the bridge in the same turn as the click, so the click's user activation still holds.
+ * The footer and trees share status and the most recent open over one bridge. The click
+ * handlers call the bridge in the same turn as the click, while user activation still holds.
  */
 export function createCodeSwitch(bridge, { focused = () => true } = {}) {
-  let state = { status: null, busy: false, result: null, front: focused() }
+  let state = { ...NO_STATE, front: focused() }
+  let footers = 0
   const listeners = new Set()
   const set = (patch) => {
     state = { ...state, ...patch }
@@ -92,6 +89,26 @@ export function createCodeSwitch(bridge, { focused = () => true } = {}) {
       .finally(() => { reading = null })
     return reading
   }
+  const open = ({ botId, source, update }) => {
+    if (state.busy) return Promise.resolve(state.result)
+    set({ busy: true, result: null, target: { botId, source } })
+    const options = typeof update === 'boolean' ? { update } : undefined
+    let answer
+    try {
+      answer = Promise.resolve(source === 'code'
+        ? options ? bridge.openCodeRow(botId, options) : bridge.openCodeRow(botId)
+        : bridge.open({ botId, ...options }))
+    } catch (error) {
+      answer = Promise.reject(error)
+    }
+    return answer.then(result => result, error => ({ ok: false, reason: 'error', message: error?.message })).then((result) => {
+      // An app that refused the page answers null: that is a failed open too.
+      set({ busy: false, result: result ?? { ok: false, reason: 'error' } })
+      // Herdr went away since the last read: refresh the status behind the controls.
+      if (result?.reason === 'missing' || result?.reason === 'unsupported') void refresh()
+      return result
+    })
+  }
   return {
     subscribe(listener) {
       listeners.add(listener)
@@ -102,25 +119,16 @@ export function createCodeSwitch(bridge, { focused = () => true } = {}) {
     setFront(front) {
       if (front !== state.front) set({ front })
     },
-    open(request) {
-      if (state.busy) return Promise.resolve(state.result)
-      set({ busy: true, result: null })
-      let answer
-      try {
-        answer = Promise.resolve(bridge.open(request))
-      } catch (error) {
-        answer = Promise.reject(error)
+    mountFooter() {
+      if (++footers === 1) set({ footerMounted: true })
+      return () => {
+        if (--footers === 0) set({ footerMounted: false })
       }
-      return answer.then(result => result, error => ({ ok: false, reason: 'error', message: error?.message })).then((result) => {
-        // An app that refused the page answers null: that is a failed open too.
-        set({ busy: false, result: result ?? { ok: false, reason: 'error' } })
-        // Herdr went away since the last read: the switch hides once status says so.
-        if (result?.reason === 'missing' || result?.reason === 'unsupported') void refresh()
-        return result
-      })
     },
+    open,
+    repeat: update => state.target && open({ ...state.target, update }),
     dismiss() {
-      if (state.result !== null) set({ result: null })
+      if (state.result !== null) set({ result: null, target: null })
     },
   }
 }
@@ -143,7 +151,7 @@ export function shownBotId(roster, sessionId) {
 }
 
 const mainViewId = list => Object.values(list.byId ?? {}).find(session => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? ''
-const NO_STATE = { status: null, busy: false, result: null, front: true }
+const NO_STATE = { status: null, busy: false, result: null, front: true, target: null, footerMounted: false }
 const noSubscribe = () => () => {}
 const noState = () => NO_STATE
 
@@ -163,30 +171,62 @@ function Notice({ notice, onAnswer, onRetry, onDismiss, busy }) {
       h('button', { type: 'button', className: 'bt-code-note-btn', onClick: onDismiss }, t('Dismiss'))))
 }
 
-export function WorkCodeSwitch({ roster, useSessions }) {
+function useCodeControl(footer) {
   const bridge = globalThis.omniDesktop?.herdr
-  const control = useMemo(() => switchFor(bridge), [bridge])
-  const state = useSyncExternalStore(control?.subscribe ?? noSubscribe, control?.snapshot ?? noState)
-  const sessionId = useSessions(mainViewId)
+  const control = footer || typeof bridge?.openCodeRow === 'function' ? switchFor(bridge) : null
+  const snapshot = control?.snapshot ?? noState
+  const state = useSyncExternalStore(control?.subscribe ?? noSubscribe, snapshot, snapshot)
   useEffect(() => {
     if (!control) return undefined
+    const unmount = footer ? control.mountFooter() : undefined
     void control.refresh()
     const onFocus = () => { control.setFront(true); void control.refresh() }
     const onBlur = () => control.setFront(false)
     globalThis.addEventListener?.('focus', onFocus)
     globalThis.addEventListener?.('blur', onBlur)
     return () => {
+      unmount?.()
       globalThis.removeEventListener?.('focus', onFocus)
       globalThis.removeEventListener?.('blur', onBlur)
     }
-  }, [control])
-  if (!control || !showsSwitch(state.status)) return null
+  }, [control, footer])
+  return { control, state }
+}
+
+function HerdrNotices({ control, result, busy, row }) {
+  const notices = result ? codeNotices(result) : []
+  if (!notices.length) return null
+  return h('div', { className: 'bt-code-notes', 'data-code-row': row ? '' : undefined },
+    notices.map(notice => h(Notice, {
+      key: notice.kind, notice, busy,
+      onAnswer: update => { void control.repeat(update) },
+      onRetry: () => { void control.repeat() },
+      onDismiss: () => control.dismiss(),
+    })))
+}
+
+export function useCodeRowHerdr() {
+  const { control, state } = useCodeControl(false)
+  return {
+    visible: () => showsSwitch(state.status),
+    busy: state.busy,
+    openRow: botId => { void control?.open({ botId, source: 'code' }) },
+    notices: !state.footerMounted && state.target?.source === 'code'
+      ? h(HerdrNotices, { control, result: state.result, busy: state.busy, row: true })
+      : null,
+  }
+}
+
+export function WorkCodeSwitch({ roster, useSessions }) {
+  const { control, state } = useCodeControl(true)
+  const sessionId = useSessions(mainViewId)
+  const visible = showsSwitch(state.status)
+  const row = state.target?.source === 'code'
+  if (!control || (!visible && !(row && state.result))) return null
   const botId = shownBotId(roster, sessionId)
   const code = () => { void control.open({ botId }) }
-  const answer = (update) => { void control.open({ botId, update }) }
-  const notices = state.result ? codeNotices(state.result) : []
   return h('div', { className: 'bt-code-switch-wrap' },
-    h('div', { className: 'bt-code-switch', role: 'group', 'aria-label': t('Open Herdr'), onPointerEnter: () => { void control.refresh() } },
+    visible ? h('div', { className: 'bt-code-switch', role: 'group', 'aria-label': t('Open Herdr'), onPointerEnter: () => { void control.refresh() } },
       h('button', {
         type: 'button',
         className: 'bt-code-seg',
@@ -195,10 +235,8 @@ export function WorkCodeSwitch({ roster, useSessions }) {
         disabled: state.busy,
         title: state.busy ? t('Opening Herdr…') : botId ? t('Code: open this Bot’s folder in Herdr') : t('Code: open Herdr'),
         onClick: code,
-      }, t('Code'))),
-    notices.length > 0
-      ? h('div', { className: 'bt-code-notes' }, notices.map(notice => h(Notice, { key: notice.kind, notice, busy: state.busy, onAnswer: answer, onRetry: code, onDismiss: () => control.dismiss() })))
-      : null)
+      }, t('Code'))) : null,
+    h(HerdrNotices, { control, result: state.result, busy: state.busy, row }))
 }
 
 export const WORK_CODE_SWITCH_CSS = `
@@ -211,6 +249,9 @@ button.bt-code-seg:hover:not(:disabled):not([aria-current=true]){color:var(--bt-
 .bt-code-seg:disabled{cursor:default}
 .bt-code-seg[aria-busy]{animation:bt-code-pulse 1.2s ease-in-out infinite}
 .bt-code-notes{position:absolute;top:calc(100% + 6px);left:0;z-index:30;display:flex;flex-direction:column;gap:6px;width:240px;max-width:72vw}
+.lb-foot:has(.bt-code-notes[data-code-row]){position:relative}
+.lb-foot .bt-code-notes[data-code-row]{top:auto;bottom:calc(100% + 6px);max-width:100%}
+.bt-code-notes[data-code-row] .bt-code-note-row{flex-wrap:wrap}
 .bt-code-note{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card);color:var(--bt-ink);box-shadow:0 6px 20px rgba(0,0,0,.12);font:500 12px/17px var(--bt-font)}
 .bt-code-note-text{overflow-wrap:anywhere}
 .bt-code-note-row{display:flex;justify-content:flex-end;gap:6px}
