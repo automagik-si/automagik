@@ -138,7 +138,7 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   Object.assign(env, { ...core.env });
   Object.assign(env, { HC_SESSION: "" });
   // Worker transport discovery must never inherit a host socket into a fixture scene.
-  env.HC_SOCKET = join(root, "unproxied.sock");
+  env.HC_SOCKET = core.env.AUTOMAGIK_HERDR_CORE_SOCKET;
   env.HC_TERMINAL_SOCKET = env.HC_SOCKET;
   delete env.HC_TERMINAL_ID;
   // #1420: a Codex worker reads $CODEX_HOME/config.toml; the scene's is under its own HOME, never the host's.
@@ -3831,6 +3831,7 @@ async function proxyWorkerCli(t, { file } = {}) {
   exe(join(stableRoot, "bin", "run.sh"), stableRunnerText(process.execPath));
   writeFileSync(join(stableRoot, "hcPane.mjs"), "// fixture helper\n");
   const env = { ...s.env, PATH: `${GUARD_DIR}:${s.env.PATH}`, XDG_RUNTIME_DIR: runtime,
+    AUTOMAGIK_HERDR_TEST_ROOTS: `${s.env.AUTOMAGIK_HERDR_TEST_ROOTS}:${shortDir}`,
     TMPDIR: paneTmp, HC_FAKE_PROXY_RUN: "1", TERM: "xterm-256color", COLORTERM: "truecolor",
     TERM_PROGRAM: "fixture", TERM_PROGRAM_VERSION: "1.0", AUTOMAGIK_HERDR_TAB_WAIT_MS: "0" };
   let fake = null;
@@ -3976,16 +3977,23 @@ test("unproxied worker CLI stays on the guard path with switch off and forged en
 });
 
 async function startOneShotTransportServer(t, socketPath, result) {
-  let probes = 0;
+  const requests = [];
   const sockets = new Set();
   const server = net.createServer((socket) => {
     socket.unref();
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => { sockets.delete(socket); socket.destroy(); });
-    socket.on("data", () => {
-      probes++;
-      socket.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result }) + "\n");
+    let input = "";
+    socket.on("data", (chunk) => {
+      input += chunk;
+      const newline = input.indexOf("\n");
+      if (newline < 0) return;
+      const { id, method } = JSON.parse(input.slice(0, newline));
+      requests.push(method);
+      const answer = method === "server.status" ? { result: { core: { id: "fakecore0000" } } }
+        : method === "proxy.workerTransport" && result ? { result } : { error: { code: -32601, message: "unknown method" } };
+      socket.end(JSON.stringify({ jsonrpc: "2.0", id, ...answer }) + "\n");
     });
   });
   server.unref();
@@ -4006,22 +4014,25 @@ async function startOneShotTransportServer(t, socketPath, result) {
       resolve();
     });
   });
-  return { probes: () => probes, closeServer };
+  return { calls: (method) => requests.filter((request) => request === method).length, closeServer };
 }
 
 test("worker transport rejects a mismatched terminal for core id and routing", async (t) => {
   const s = scene(t);
-  const socketPath = join(shortSocketDir(t, "hw-"), "wrong-terminal.sock");
+  const dir = shortSocketDir(t, "hw-");
+  const socketPath = join(dir, "wrong-terminal.sock");
   const srv = await startOneShotTransportServer(t, socketPath, { v: 1, terminal: "t999", core: { id: "wrong-core" } });
   try {
     const r = await s.cliAsync(["worker", "do the task", "--branch", "feat/wrong-terminal", "--json"],
-      { env: { PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: socketPath } });
-    assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
+      { env: { PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: socketPath,
+        AUTOMAGIK_HERDR_TEST_ROOTS: `${s.env.AUTOMAGIK_HERDR_TEST_ROOTS}:${dir}` } });
+    assert.equal(srv.calls("server.status"), 1,
       "a failed terminal check must ignore the reply's core id");
-    assert.equal(srv.probes(), 1);
+    assert.equal(srv.calls("proxy.workerTransport"), 1);
     // The rejected reply means an ordinary unproxied run, which #1011's guard now allows.
     assert.equal(r.code, 0, r.err);
     assert.equal(s.runs().length, 1);
+    assert.equal(s.ledger().find((row) => row.event === "start")?.core, "fakecore0000");
   } finally {
     await srv.closeServer();
   }
@@ -4029,20 +4040,22 @@ test("worker transport rejects a mismatched terminal for core id and routing", a
 
 test("unset caller terminal keeps server.status and the guard route", async (t) => {
   const s = scene(t);
-  const socketPath = join(shortSocketDir(t, "hw-"), "missing-terminal.sock");
-  const srv = await startOneShotTransportServer(t, socketPath, { v: 1, core: { id: "wrong-core" } });
+  const dir = shortSocketDir(t, "hw-");
+  const socketPath = join(dir, "missing-terminal.sock");
+  const srv = await startOneShotTransportServer(t, socketPath);
   try {
-    const env = { ...s.env, PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: socketPath };
+    const env = { ...s.env, PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: socketPath,
+      AUTOMAGIK_HERDR_TEST_ROOTS: `${s.env.AUTOMAGIK_HERDR_TEST_ROOTS}:${dir}` };
     delete env.HC_TERMINAL_ID;
     const result = await new Promise((done) => execFile(process.execPath,
       [CLI, "whois", "t1", "--json"], { cwd: s.project, env, encoding: "utf8" },
       (error, stdout, stderr) => done({ code: error?.code ?? 0, stdout, stderr })));
-    assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
+    assert.equal(srv.calls("server.status"), 1,
       "an unset caller terminal must keep the server.status core-id lookup");
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /hc guard: refused a command without HC_TERMINAL_ID/);
     assert.equal(s.runs().length, 0, "no unguarded worker route is selected");
-    assert.equal(srv.probes(), 0, "an unset expected terminal is refused before connecting");
+    assert.equal(srv.calls("proxy.workerTransport"), 0, "an unset expected terminal skips the transport probe");
   } finally {
     await srv.closeServer();
   }

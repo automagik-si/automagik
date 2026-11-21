@@ -1099,10 +1099,10 @@ function scene(t, { programs = null, templates = [], env: more = {} } = {}) {
   // No attach ledger yet: its one-time import ties t1 to Dev by its bot label, as worker.test.mjs's scenes do.
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, LANG: "C",
     GIT_CEILING_DIRECTORIES: root, XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"),
-    HC_SOCKET: join(root, "unproxied.sock"), AUTOMAGIK_HERDR_TAB_WAIT_MS: "0", AUTOMAGIK_HERDR_RESTART_STABLE_MS: "1", ...more };
-  env.HC_TERMINAL_SOCKET = env.HC_SOCKET;
+    AUTOMAGIK_HERDR_TAB_WAIT_MS: "0", AUTOMAGIK_HERDR_RESTART_STABLE_MS: "1", ...more };
   const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
-  Object.assign(env, { ...core.env });
+  const socket = core.env.AUTOMAGIK_HERDR_CORE_SOCKET;
+  Object.assign(env, core.env, { HC_SOCKET: socket, HC_TERMINAL_SOCKET: socket });
   const cli = (args, { from = "t1" } = {}) => {
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...(from ? { HC_TERMINAL_ID: from } : {}) }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr };

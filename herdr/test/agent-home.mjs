@@ -103,7 +103,7 @@ function homeScene(t, cli, { bot = {}, callerArgv = ["/usr/bin/env", "claude"] }
     AUTOMAGIK_HERDR_TAB_WAIT_MS: "0", AUTOMAGIK_HERDR_NO_UPDATE: "1", GIT_CEILING_DIRECTORIES: root };
   const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
   Object.assign(env, core.env, { HC_SESSION: "" });
-  env.HC_SOCKET = join(root, "unproxied.sock");
+  env.HC_SOCKET = core.env.AUTOMAGIK_HERDR_CORE_SOCKET;
   env.HC_TERMINAL_SOCKET = env.HC_SOCKET;
   for (const k of ["HC_TERMINAL_ID", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "AUTOMAGIK_BOT_CLI_POINTER", LAUNCH_VAR]) delete env[k];
   // The fake core answers with the scene's own PATH: a guard a test puts first is the CLI's alone.
@@ -641,12 +641,14 @@ export function agentHomeTests(cli) {
   test("#1208 through the hc proxy: the flag, a working home or an approved home field is refused before anything", async (t) => {
     const dir = (s) => privateDir(s.root, "homes/b");
     const proxied = async (s, args) => {
-      const sock = join(shortSocketDir(t, "ahp-"), "p.sock");
+      const proxyDir = shortSocketDir(t, "ahp-");
+      const sock = join(proxyDir, "p.sock");
       const server = net.createServer((c) => c.on("data", () => c.end(`${JSON.stringify({ jsonrpc: "2.0", id: 1,
         result: { v: 1, terminal: "t1", core: { id: "fakecore0000", name: "fake" } } })}\n`)));
       await new Promise((done) => server.listen(sock, done));
       t.after(() => server.close());
-      return s.runAsync(["worker", "x", "--branch", "e2e/x", ...args], { env: { HC_SOCKET: sock, HC_TERMINAL_SOCKET: sock } });
+      return s.runAsync(["worker", "x", "--branch", "e2e/x", ...args], { env: { HC_SOCKET: sock, HC_TERMINAL_SOCKET: sock,
+        AUTOMAGIK_HERDR_TEST_ROOTS: `${s.env.AUTOMAGIK_HERDR_TEST_ROOTS}:${proxyDir}` } });
     };
     const flag = homeScene(t, cli);
     let r = await proxied(flag, ["--agent-home", dir(flag)]);

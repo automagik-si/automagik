@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
-import { coreStatus, inTestRoots, userCoreSockets } from "../coreSocket.mjs";
+import { coreSocketDiscovery, coreStatus, inTestRoots, inTestRootsReal, userCoreSockets } from "../coreSocket.mjs";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots, restartAtOf,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId, rateLimitModeOf,
@@ -124,10 +124,10 @@ async function slot(fn) {
 
 /** Runs a program: stderr falls back to the exec error, while rawStderr is the child's output.
  * Code 127 when it isn't there; killed: true when its timeout ended it. */
-export function runProgram(command, args, { cwd, timeout = 15000 } = {}) {
+export function runProgram(command, args, { cwd, env, timeout = 15000 } = {}) {
   return slot(() => new Promise((done) => {
     try {
-      execFile(command, args, { cwd, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      execFile(command, args, { cwd, env, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (!err) return done({ code: 0, stdout, stderr, rawStderr: stderr });
         done({ code: err.code === "ENOENT" ? 127 : (typeof err.code === "number" ? err.code : 1), stdout: stdout ?? "", stderr: stderr || String(err.message),
           rawStderr: stderr ?? "",
@@ -170,8 +170,11 @@ const commandKeyOf = async (opts) => {
   return key;
 };
 
+let localLockSocket;
+const localHcEnv = () => localLockSocket && !process.env.HC_SOCKET ? { ...process.env, HC_SOCKET: localLockSocket } : process.env;
+
 async function hc(args, { timeout } = {}) {
-  const r = await runProgram(hcExecutable(programPath("hc")), args, { timeout });
+  const r = await runProgram(hcExecutable(programPath("hc")), args, { timeout, env: localHcEnv() });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   return r;
 }
@@ -426,7 +429,7 @@ function realHcPath() {
   return null;
 }
 async function hcReal(args, { timeout } = {}) {
-  const r = await runProgram(hcExecutable(realHcPath()), args, { timeout });
+  const r = await runProgram(hcExecutable(realHcPath()), args, { timeout, env: localHcEnv() });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   return r;
 }
@@ -437,7 +440,7 @@ async function hcReal(args, { timeout } = {}) {
  */
 async function hcKill(terminal, { timeout } = {}) {
   const file = realHcPath();
-  const r = await runProgram(hcExecutable(file), ["kill", terminal], { timeout });
+  const r = await runProgram(hcExecutable(file), ["kill", terminal], { timeout, env: localHcEnv() });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   if (r.code === 0 || !file) return r;
   const dir = dirname(file);
@@ -1044,7 +1047,16 @@ async function hcLookup(terminal, { timeout, strictNotFound = false, ask = hc } 
 // This caches transport identity only; worker allowance is re-read by the proxy at each spawn.
 let workerTransportOnce = null;
 const workerTransport = () => (workerTransportOnce ??=
-  workerProxyTransport(process.env.HC_SOCKET, process.env.HC_TERMINAL_ID));
+  inTestRootsReal(process.env.HC_SOCKET) ? workerProxyTransport(process.env.HC_SOCKET, process.env.HC_TERMINAL_ID) : Promise.resolve(false));
+
+async function localCoreStatus(timeoutMs) {
+  const env = localHcEnv();
+  const { sockets, lockSocket } = coreSocketDiscovery(env);
+  const result = await coreStatus(env, { sockets, timeoutMs });
+  // hc does not follow the lock. Use the endpoint that actually supplied the identity.
+  if (lockSocket && result.socket === lockSocket) localLockSocket = lockSocket;
+  return result;
+}
 let coreOnce = null;
 /**
  * This computer's hc core id: `hc server status`'s core.id, "permanent random id, reset only
@@ -1054,7 +1066,7 @@ function coreId() {
   coreOnce ??= workerTransport().then(async (transport) => {
     let status = transport;
     if (!status) {
-      const r = await coreStatus();
+      const r = await localCoreStatus();
       if (r.none) throw new CliError(`hc server status failed: herdr-core isn't answering on this computer (tried ${r.tried.join(", ") || "no socket"}); nothing was started.`);
       if (r.error !== undefined) throw new CliError(`hc server status failed: ${r.error}`);
       status = r.status;
@@ -10826,7 +10838,7 @@ async function requireRestartPane(get, row, project) {
 /** Recheck the revived address and its binding under the attach lock when a poll finds chosen proof. */
 async function chosenReviveBinding(terminal, botId, observed) {
   return underLedger(async ({ core, byKey }) => {
-    const current = await coreStatus().catch(() => null);
+    const current = await coreStatus(localHcEnv()).catch(() => null);
     if (current?.status?.core?.id !== core) return null;
     const get = await hcLookup(terminal, { strictNotFound: true }).catch(() => null);
     const created_ms = paneCreated(get);
@@ -11608,7 +11620,7 @@ async function coreUp(seconds) {
     try {
       // Each poll asks the socket straight (never hc, which would start a core), bound as the
       // old hc call was: 10 s each, so the last poll still reports why, not a cut-short wait.
-      const r = await coreStatus(process.env, { timeoutMs: 10_000 });
+      const r = await localCoreStatus(10_000);
       if (Object.hasOwn(r, "status")) return;
       why = r.none ? `core is not running (no socket answers: ${r.tried.join(", ") || "no socket"})` : r.error;
     } catch (e) { why = e?.message ?? String(e); }
@@ -11618,7 +11630,7 @@ async function coreUp(seconds) {
 }
 
 /** This CLI again, as a program of its own: each bot's restart reads hc and the ledgers afresh. */
-const runSelf = (args) => runProgram(process.execPath, [fileURLToPath(import.meta.url), ...args], { timeout: REVIVE_RESTART_MS });
+const runSelf = (args) => runProgram(process.execPath, [fileURLToPath(import.meta.url), ...args], { timeout: REVIVE_RESTART_MS, env: localHcEnv() });
 
 /** A refusal's first sentence, for the report: what happened, without the advice after it. */
 const firstSentence = (text) => { const t = String(text ?? "").trim().replace(/^(?:am|automagik-herdr): /, ""); const m = /^(.*?[.!?])(\s|$)/.exec(t); return (m ? m[1] : t).replace(/[.!?]$/, ""); };
@@ -12016,13 +12028,13 @@ async function reviveLaunchd(opts, verb) {
 const hcProgram = () => realHcPath();
 /** meterFleet.js's runner: on a linked machine through `hc exec`, else here from the home folder. */
 const meterRun = (argv, { on, timeout }) => (on
-  ? runProgram(hcExecutable(hcProgram()), hcExecArgs(on, argv, timeout), { timeout: (timeout + 15) * 1000 }).then((r) => decodeExec(r, timeout))
+  ? runProgram(hcExecutable(hcProgram()), hcExecArgs(on, argv, timeout), { timeout: (timeout + 15) * 1000, env: localHcEnv() }).then((r) => decodeExec(r, timeout))
   : runProgram(argv[0], argv.slice(1), { cwd: home(), timeout: timeout * 1000 }));
 
 /** The linked machines (`{ name, connected }`), or `{ why }` when hc can't say. */
 async function meterMachines() {
   if (!hcProgram()) return { why: "hc (herdr-core) is not on PATH" };
-  const r = await runProgram(hcProgram(), ["machine", "ls", "--json"], { timeout: 20000 });
+  const r = await runProgram(hcProgram(), ["machine", "ls", "--json"], { timeout: 20000, env: localHcEnv() });
   if (r.code !== 0) return { why: `hc machine ls failed: ${(r.stderr || r.stdout).trim().split("\n")[0]}` };
   return { machines: linkedMachines(r.stdout) };
 }
@@ -13129,8 +13141,8 @@ function liveLocalAttempt(plan, tool, n, owner, now) {
 
 // A core on another socket cannot speak for the socket that dispatched this command.
 export async function coreHere(env = process.env, { sockets = userCoreSockets, status = coreStatus, deadline = Infinity } = {}) {
-  const dispatch = env.AUTOMAGIK_HERDR_CORE_SOCKET || env.HC_SOCKET || env.HC_TERMINAL_SOCKET;
-  if (!dispatch || !isAbsolute(dispatch) || !inTestRoots(dispatch, env)) return null;
+  const dispatch = env.HC_SOCKET || env.AUTOMAGIK_HERDR_CORE_SOCKET || env.HC_TERMINAL_SOCKET;
+  if (!inTestRootsReal(dispatch, env)) return null;
   const until = Math.min(Date.now() + 2000, deadline);
   if (Date.now() >= until) return null;
   let candidates;

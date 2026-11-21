@@ -2723,8 +2723,11 @@ test("#805 a queued watcher runs as its own terminal, never the caller's pane", 
     // hc carries its own core.
     exe(join(s.root, "bin", "hc"), `#!/bin/sh\nHC_FAKE_STATE="${join(s.root, "hc.json")}" `
       + `HC_FAKE_LOG="${join(s.root, "hc.log")}" exec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
-    const caller = { HC_TERMINAL_ID: "t5", HC_SOCKET: join(s.root, "caller.sock"),
-      HC_TERMINAL_SOCKET: join(s.root, "caller-terminal.sock") };
+    const callerCore = startFakeCore(t, s.env);
+    const watcherCore = startFakeCore(t, { ...s.env, AUTOMAGIK_HERDR_TEST_ROOTS: callerCore.env.AUTOMAGIK_HERDR_TEST_ROOTS });
+    const caller = { HC_TERMINAL_ID: "t5", HC_SOCKET: callerCore.env.AUTOMAGIK_HERDR_CORE_SOCKET,
+      HC_TERMINAL_SOCKET: join(s.root, "caller-terminal.sock"),
+      AUTOMAGIK_HERDR_TEST_ROOTS: watcherCore.env.AUTOMAGIK_HERDR_TEST_ROOTS };
     if (tree) {
       const state = s.hcState();
       state.terminals.find((x) => x.address === "t5").status = { app: "claude-code", state: "working" };
@@ -2746,7 +2749,7 @@ test("#805 a queued watcher runs as its own terminal, never the caller's pane", 
     const run = runCall(s.calls());
     const words = run.slice(run.indexOf("--") + 1);
     const fired = spawnSync(words[0], words.slice(1), { cwd: s.project, encoding: "utf8",
-      env: { ...s.env, HC_TERMINAL_ID: watcher, HC_SOCKET: join(s.root, "watcher.sock"),
+      env: { ...s.env, HC_TERMINAL_ID: watcher, HC_SOCKET: watcherCore.env.AUTOMAGIK_HERDR_CORE_SOCKET,
         HC_TERMINAL_SOCKET: join(s.root, "watcher-terminal.sock") } });
     const why = `${fired.stderr}${fired.stdout}`;
     assert.equal(fired.signal, null, `the watcher was ended as its own caller: ${why}`);
