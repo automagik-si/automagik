@@ -46,13 +46,7 @@ export function compilerScratchEvidence(scan, { stat = statSync, read = readFile
         unread.delete(path)
       } catch (error) {
         // A rename also reports deletion. A previously inspected file can disappear.
-        if (event === 'rename' && error?.code === 'ENOENT' && seen.has(path)) {
-          // Windows refuses to open a file once its deletion is pending (EPERM, in this private
-          // folder no access rule refuses it). After a complete read, a refusal ended by the
-          // file's removal is that deletion, not unread content. EBUSY (a lock) stays a gap.
-          if (unread.get(path)?.code === 'EPERM') unread.delete(path)
-          return
-        }
+        if (event === 'rename' && error?.code === 'ENOENT' && seen.has(path)) return
         // Keep the refusal that hid the content; a later removal adds nothing.
         if (!unread.has(path) || error?.code !== 'ENOENT') unread.set(path, { event, code: error?.code })
         if (!['ENOENT', 'EBUSY', 'EPERM', 'EACCES'].includes(error?.code)) unexpected = true

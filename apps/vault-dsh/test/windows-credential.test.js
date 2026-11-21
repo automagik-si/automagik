@@ -430,7 +430,7 @@ test('native compiler evidence accepts empty compiler logs but not content it co
   assert.equal(evidence.inspected, 2)
 })
 
-test('native compiler evidence tells a pending deletion from a lock or an unread file', () => {
+test('native compiler evidence counts every refused or lost read as a gap', () => {
   const errors = new Map()
   const files = new Map([['done.tmp', Buffer.from('compiler source')], ['locked.tmp', Buffer.from('compiler source')]])
   const evidence = compilerScratchEvidence(() => {}, {
@@ -454,8 +454,8 @@ test('native compiler evidence tells a pending deletion from a lock or an unread
     evidence.inspect(path, 'rename')
   }
   assert.equal(evidence.incomplete, true)
-  assert.equal(evidence.gaps, '(none):rename:EPERM:never read .tmp:change:EBUSY:read',
-    'only a read file whose deletion was pending is complete')
+  assert.equal(evidence.gaps, '(none):rename:EPERM:never read .tmp:change:EBUSY:read .tmp:change:EPERM:read',
+    'a change the scan could not read is a gap even after an earlier full read')
 })
 
 test('deadline invalidates its captured gate while quit independently bounds cleanup', async t => {

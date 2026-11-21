@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { watch } from 'node:fs'
+import { unlinkSync, watch, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, win32 } from 'node:path'
@@ -17,6 +17,21 @@ if (process.platform !== 'win32' || process.env.VAULT_WINDOWS_NATIVE !== '1') {
   throw new Error('This check requires the disposable native Windows CI job')
 }
 assert.equal(availability(), undefined)
+
+// Compiler scratch is held: deleting anything in an invocation folder is denied until the
+// test has read every file in it, so no compiler file can vanish between two reads.
+const icacls = win32.join(root, 'System32', 'icacls.exe')
+const account = [process.env.USERDOMAIN, process.env.USERNAME].filter(Boolean).join('\\')
+const acl = args => execFileSync(icacls, args, { stdio: 'ignore', windowsHide: true, timeout: 30_000 })
+function holdFiles(dir) {
+  acl([dir, '/deny', account + ':(OI)(CI)(DE,DC)'])
+  const check = join(dir, 'hold-check')
+  writeFileSync(check, '')
+  let held = false
+  try { unlinkSync(check) } catch (error) { held = error?.code === 'EPERM' }
+  assert.equal(held, true, 'deletion in the compiler scratch is denied')
+}
+const releaseFiles = dir => acl([dir, '/remove:d', account, '/T', '/C'])
 
 const recordHarness = String.raw`
 public static class ReaderChecks {
@@ -135,6 +150,7 @@ test('native Windows Credential Manager round trip, validation and transcript pr
   })
 
   function observeScratch(cwd, operation) {
+    holdFiles(cwd)
     const evidence = compilerScratchEvidence(bytes => {
       inspectedFiles++
       privateScratchBytes ||= privateNeedles().some(marker => bytes.includes(marker))
@@ -155,6 +171,7 @@ test('native Windows Credential Manager round trip, validation and transcript pr
     } finally {
       watcher.close()
       scratchError ||= evidence.unexpected
+      try { releaseFiles(cwd) } catch { scratchError = true }
       await rm(cwd, options)
       scratch.delete(cwd)
     }
