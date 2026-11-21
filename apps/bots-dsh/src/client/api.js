@@ -1,5 +1,5 @@
 import { hostText, t } from './i18n.js'
-import { checkViewer, isRetired, requestViewer, viewerRefused, viewerResponse } from './viewer.js'
+import { checkViewer, checkViewerAnswer, isRetired, requestViewer, viewerChanged, viewerRefused, viewerResponse } from './viewer.js'
 import { markNoted, noteClientError } from './diagnostics.js'
 
 const ROUTE = 'api/omni-ui'
@@ -32,18 +32,24 @@ export const call = async (endpoint, payload, signal) => {
       code: 'NETWORK', ...(!vault ? { cause: error } : {}),
     }))
   }
+  signal?.throwIfAborted()
   checkViewer(active)
   if (!response.ok) {
-    viewerResponse(response)
-    const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` })
+    const refusal = active && await viewerResponse(active, response, endpoint, signal)
+    const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), {
+      code: refusal?.changed ? 'bot/viewer-changed' : `HTTP_${response.status}`,
+      ...(refusal?.refresh ? { refresh: true } : {}),
+    })
     if (!vault && !isRetired()) noteClientError(endpoint, error)
     throw error
   }
   const result = await response.json()
+  signal?.throwIfAborted()
   checkViewer(active)
-  if (!result.ok) {
-    const code = result.error?.code ?? 'bot/error'
-    viewerRefused(code)
+  const changed = active && viewerChanged(result)
+  if (!result.ok || changed) {
+    const code = changed ? 'bot/viewer-changed' : result.error?.code ?? 'bot/error'
+    viewerRefused(active, code)
     const message = hostText(result.error?.message ?? 'Request failed')
     const error = Object.assign(new Error(code === 'bot/internal' ? `${message} ${t('Settings → Feedback has the details.')}` : message), { code })
     if (code === 'bot/refused' && result.error?.reason === 'needs-new-conversation') error.reason = result.error.reason
@@ -54,5 +60,6 @@ export const call = async (endpoint, payload, signal) => {
     }
     throw error
   }
+  if (endpoint === 'whoami') checkViewerAnswer(active, result.value)
   return result.value
 }

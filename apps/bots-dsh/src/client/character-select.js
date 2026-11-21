@@ -8,7 +8,7 @@ import { bakeBlobs, canBake } from './pet-bake.js'
 import { CloseIcon } from './icons.js'
 import { t } from './i18n.js'
 import { importPhotos, loadLibrary } from './avatar-library.js'
-import { checkViewer, requestViewer, viewerResponse } from './viewer.js'
+import { checkViewer, requestViewer, viewerChanged, viewerRefused, viewerResponse } from './viewer.js'
 
 // -------------------------------------------------------------------------
 // The character select: where a Bot's look is chosen, as a fighting game's select screen. The
@@ -51,15 +51,22 @@ export function currentKey(bot, look) {
 
 async function put(url, blob, active) {
   checkViewer(active)
-  const viewer = requestViewer('pet-codex')?.viewer?.id
+  const viewer = active?.viewer?.id
   const headers = { 'content-type': 'image/webp', ...(viewer ? { 'x-automagik-viewer': viewer } : {}) }
   const response = await fetch(url, { method: 'PUT', body: blob, headers })
   checkViewer(active)
-  const answer = await response.json().catch(() => ({}))
-  checkViewer(active)
-  if (!response.ok) {
-    viewerResponse(response)
-    throw new Error(answer.error ?? t('Codex\'s pets folder could not be written'))
+  const refusal = active && !response.ok ? await viewerResponse(active, response) : undefined
+  const answer = refusal ? refusal.answer : await response.json().catch(() => ({}))
+  const changed = refusal?.changed ?? (active && viewerChanged(answer))
+  if (!refusal) {
+    checkViewer(active)
+    if (changed) viewerRefused(active, 'bot/viewer-changed')
+  }
+  if (!response.ok || changed) {
+    const message = changed ? answer.error?.message ?? answer.error : answer?.error
+    const error = new Error(message ?? t('Codex\'s pets folder could not be written'))
+    if (changed) error.code = 'bot/viewer-changed'
+    throw error
   }
   return answer
 }

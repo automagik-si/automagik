@@ -1,6 +1,6 @@
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
-import { bootView, canClearDraftInMemory, isRetired, onRetire, startViewer } from './viewer.js'
+import { bootView, checkViewer, isRetired, onRetire, requestViewer, revalidateViewerOnRefusal, startViewer } from './viewer.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
@@ -159,7 +159,12 @@ export function apply(ctx) {
     const chunk = await globalThis.__dshChunk('./client.gated.js')
     gated = chunk.initialize(gatedShared)
   }
-  startViewer(boot, lifetime.signal, prepare).then(viewer => {
+  const clearNativeDrafts = () => {
+    for (const id of Object.keys(ctx.sessions.list.getSnapshot?.()?.byId ?? {})) {
+      try { ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.('') } catch { /* Storage may be unavailable. */ }
+    }
+  }
+  startViewer(boot, lifetime.signal, prepare, clearNativeDrafts).then(viewer => {
     if (lifetime.signal.aborted || (ctx.fiber && ctx.fiber.state !== 2) || isRetired()) return
     const surface = ctx.inject([], scope => {
       if (viewer.role === 'member' || viewer.role === 'guest') gated.applyMember(scope)
@@ -371,11 +376,6 @@ function applyOwner(ctx, { gated = false } = {}) {
     seenAt = savedPrefs = {}
     agentSessionCache.clear()
     for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear()
-    if (canClearDraftInMemory()) {
-      for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
-        try { ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.('') } catch { /* Storage may be unavailable. */ }
-      }
-    }
   }), 'ds-bot: clear owner state on retirement')
 
   ctx.effect(() => {
@@ -1007,9 +1007,19 @@ function applyOwner(ctx, { gated = false } = {}) {
     })
   }
   const face = () => ({ actions, hooks: { roster, ui, activity, work, memoryNews, registry, turnClock, live, computer, cards, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } })
+  const ownerViewer = gated ? requestViewer('whoami') : undefined
   const updateQueue = async (sessionId, itemId, action) => {
-    if (gated) await call('whoami')
-    return (await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action)) ?? { ok: false }
+    if (ownerViewer) {
+      checkViewer(ownerViewer)
+      try { await call('whoami') }
+      catch (error) {
+        revalidateViewerOnRefusal(ownerViewer, error)
+        throw error
+      }
+    }
+    const session = ctx.sessions.binding(sessionId)?.session
+    checkViewer(ownerViewer)
+    return (await session?.updateQueue(itemId, action)) ?? { ok: false }
   }
   // The queue dock's per-session verbs, supplied the way the shell's own dock
   // injects them (the session facade and the conversation service).

@@ -20,8 +20,30 @@ export function imports(name, hooks = react) {
   assert.fail('Unexpected client dependency: ' + name)
 }
 export const tick = () => new Promise(resolve => setImmediate(resolve))
+
+export function manualTimeouts() {
+  const pending = new Map()
+  return {
+    pending,
+    timers: {
+      setTimeout(run, delay) { pending.set(run, delay); return run },
+      clearTimeout(run) { pending.delete(run) },
+    },
+    advance(delay) {
+      const runs = [...pending].filter(([, ms]) => ms === delay)
+      for (const [run] of runs) {
+        pending.delete(run)
+        run()
+      }
+    },
+  }
+}
 export const reply = value => ({ ok: true, json: async () => ({ ok: true, value }) })
 export const refusal = (code, message) => ({ ok: true, json: async () => ({ ok: false, error: { code, message } }) })
+export const httpRefusal = (status, body, headers) => new Response(JSON.stringify(body), { status, headers })
+export function stalledResponse(status, cancel) {
+  return new Response(new ReadableStream({ cancel }), { status })
+}
 export const viewerReply = (role, id = 'viewer-id') => reply({
   multiuser: true, role: role === 'admin' ? 'owner' : role, viewer: { id, role },
 })
@@ -79,7 +101,7 @@ export function browser({ boot, fetch, session, local, hooks = react, timers = {
   const sessionStorage = storage(session)
   const globals = {
     window, document, location: { reload: () => reloads.push(true) },
-    localStorage, sessionStorage, fetch: req, AbortController, URL, URLSearchParams, Blob, console,
+    localStorage, sessionStorage, fetch: req, AbortController, URL, URLSearchParams, Blob, TextDecoder, console,
     setTimeout, clearTimeout, setInterval: fn => { intervals.add(fn); return fn }, clearInterval: fn => intervals.delete(fn), ...timers,
     require: name => imports(name, hooks),
   }
