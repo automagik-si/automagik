@@ -1,9 +1,9 @@
 // Standalone fixture. CI stages this beside the Bot plugin's src/ and the ACP evidence module.
 import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
-import { userInfo } from 'node:os'
 import { createMachineRecord } from './src/host/machine-reservations.js'
 import { createReservationCheck } from './src/host/reservation-check.js'
+import { userName } from './src/host/user-name.js'
 import { reservationDigests } from '../acp/src/host/reservation-evidence.js'
 
 const [, , op, json, ...extra] = process.argv
@@ -15,9 +15,7 @@ const sleep = new Int32Array(new SharedArrayBuffer(4))
 const machine = createMachineRecord({
   fs, dir: () => input.dir, platform: process.platform, uid: () => process.getuid(),
   pid: process.pid, random, now: Date.now, wait: ms => Atomics.wait(sleep, 0, 0, ms),
-  userName: uid => uid === process.getuid() ? userInfo().username
-    : fs.readFileSync('/etc/passwd', 'utf8').split('\n').map(line => line.split(':'))
-      .find(([, , id]) => id === String(uid))?.[0] ?? `uid ${uid}`,
+  userName,
 })
 const ready = machine.open()
 const print = value => console.log(JSON.stringify(value))
