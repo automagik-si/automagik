@@ -1061,8 +1061,10 @@ DSH capability asked in RFC 0023's form or one certified route.
   drain in "Rollback"; questions 5-8 below take effect with it. *Unlocked by:* 5d and either a DSH capability asked
   in RFC 0023's form (DSH itself enforces each input's author and a caller-scoped guard over each turn's tools,
   model route, compaction and recovery) or one certified route whose whole turn a test proves caller-safe, every
-  other route refusing member prompts. *Check:* specified with it; at least a demoted, revoked or withdrawn member's
-  queued or continuing work never reaches a model step or a tool; a member-started turn's model request holds no
+  other route refusing member prompts. The DSH capability is asked in
+  [RFC 0045](0045-dsh-upstream-authored-input-and-caller-turns.md), which also names the residuals of a certified
+  route on the pinned DSH. *Check:* specified with it; at least a demoted, revoked or withdrawn member's queued or
+  continuing work never reaches a model step or a tool; a member-started turn's model request holds no
   hidden content, MEMORY.md or recall; two admins' posts in a shared chat carry two authors and an owner's post
   without one never reaches a model step; a card answers only to its person; the rollback drains member-started
   work with a turn running and a prompt queued. *Rollback:* stop member and guest admission and drain
