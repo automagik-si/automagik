@@ -10,7 +10,7 @@ import { createAcpActions } from './acp.js'
 import { hostOf, machineOf } from './host.js'
 import { preloadOf } from './preload.js'
 import { UNFOLD_BOT } from './companion.js'
-import { needsViewer } from '../viewer-policy.js'
+import { needsViewer } from './viewer-policy.js'
 
 // The host endpoint the onboarding steps call: POST /api/omni-ai with
 // { endpoint, payload }, answered { ok: true, value } or { ok: false, error }.

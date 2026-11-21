@@ -2,7 +2,7 @@
 // working under a mounted base path. Its own errors read in the DSH language (i18n.js); the
 // host's come as the host words them.
 import { t } from './i18n.js'
-import { needsViewer } from '../viewer-policy.js'
+import { needsViewer } from '../host/viewer-policy.js'
 
 const ROUTE = 'api/omni-ai'
 // The Omni plugins' endpoint, which @automagik/omni-channels-dsh extends with discovery and

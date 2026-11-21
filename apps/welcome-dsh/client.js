@@ -9532,7 +9532,7 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 
-// src/viewer-policy.js
+// src/host/viewer-policy.js
 var READS = /* @__PURE__ */ new Set([
   "state",
   "ais",
