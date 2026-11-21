@@ -17,7 +17,7 @@
 // runnerFailureSignatures entry: 'hc-socket-mask: '.
 import { spawn, spawnSync } from 'node:child_process';
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { chmodSync, lstatSync, mkdtempSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeSync } from 'node:fs';
 import { BlockList, createServer, connect as netConnect, isIP } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
@@ -88,6 +88,43 @@ export const MORE_RUNTIME_SOCKETS = Object.freeze([
 /** All fixed runtime paths the wrapper checks by default. */
 export function runtimeSocketPaths(uid) {
   return [...containerSocketPaths(uid), ...MORE_RUNTIME_SOCKETS];
+}
+
+/** Discover the rootless containerd and BuildKit endpoints in each runtime directory. */
+export function rootlessRuntimeSockets({ uid = process.getuid?.(), env = process.env,
+  readdir = readdirSync, lstat = lstatSync, realpath = realpathSync.native } = {}) {
+  const sockets = [];
+  if (!Number.isInteger(uid) || uid < 0) return { sockets, fatal: null };
+  const roots = [`/run/user/${uid}`];
+  if (typeof env.XDG_RUNTIME_DIR === 'string' && isAbsolute(env.XDG_RUNTIME_DIR)) {
+    // lstat follows a symlink when the supplied path ends with a slash.
+    roots.push(env.XDG_RUNTIME_DIR.replace(/\/+$/, '') || '/');
+  }
+  const listed = new Set();
+  const unlistable = (root) => ({
+    sockets, fatal: `the runtime folder ${root} cannot be listed; its services cannot be inventoried`,
+  });
+  for (const [index, root] of roots.entries()) {
+    let canonical;
+    try {
+      const info = lstat(root);
+      if (index === 1 && (!info.isDirectory() || info.uid !== uid)) continue;
+      canonical = realpath(root);
+    } catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+      return unlistable(root);
+    }
+    if (listed.has(canonical)) continue;
+    let entries;
+    try { entries = readdir(canonical); } catch { return unlistable(root); }
+    listed.add(canonical);
+    sockets.push(join(canonical, 'containerd/containerd.sock'),
+      join(canonical, 'containerd/containerd.sock.ttrpc'), join(canonical, 'buildkit/buildkitd.sock'));
+    for (const entry of entries) {
+      if (entry.startsWith('buildkit-')) sockets.push(join(canonical, entry, 'buildkitd.sock'));
+    }
+  }
+  return { sockets, fatal: null };
 }
 
 /** Split the provider's argv at the first '--': the bwrap profile args, then the command. */
@@ -405,13 +442,12 @@ function existingPath(path, realpath) {
 /**
  * The pure helper the tests drive: given the runner argv and an environment, return the argv to
  * run, the fatal line (no bwrap run), or the one non-fatal notice (bwrap still runs, without a
- * proxy). `options.containerSockets` overrides the fixed defaults; env-named paths are always
+ * proxy). `options.containerSockets` overrides the fixed and discovered paths; env-named paths are always
  * checked. Tests can pass fixture paths or inject filesystem lookups. Socket masks apply to
  * readable endpoints at launch. `fatal` is a single unprefixed line; the CLI adds MSG_PREFIX.
  */
 export function maskArgs(args, env = process.env, options = {}) {
   const {
-    containerSockets = runtimeSocketPaths(options.uid),
     stat = statSync,
     realpath = realpathSync.native,
     packRoot = null,
@@ -424,6 +460,13 @@ export function maskArgs(args, env = process.env, options = {}) {
   }
   const platformProblem = netnsPlatformProblem(options.platform);
   if (platformProblem) return failed(args, platformProblem);
+  let { containerSockets } = options;
+  if (containerSockets == null) {
+    const uid = options.uid ?? process.getuid?.();
+    const discovered = rootlessRuntimeSockets({ uid, env, readdir: options.readdir, lstat: options.lstat, realpath });
+    if (discovered.fatal) return failed(args, discovered.fatal);
+    containerSockets = [...runtimeSocketPaths(uid), ...discovered.sockets];
+  }
   const { profileArgs, command } = splitRunnerArgs(args);
   if (!command) {
     return failed(args,
@@ -909,9 +952,39 @@ export function startRelay({
   return server;
 }
 
-/** Exec bwrap with inherited stdio, forwarding signals and the child's exit code. */
-export function runBwrap(args, env = process.env) {
-  const child = spawn('bwrap', args, { stdio: 'inherit', env });
+/** Write immediately before exit or re-raising a signal, including when stderr is piped. */
+function bwrapStatusLine(line) {
+  try { writeSync(2, prefix(line)); } catch { /* stderr may have closed */ }
+}
+
+/** Exec bwrap, forwarding signals and optionally reading bwrap's reported payload status. */
+export function runBwrap(args, env = process.env, { status = false } = {}) {
+  const child = spawn('bwrap', args, { stdio: status ? ['inherit', 'inherit', 'inherit', 'pipe'] : 'inherit', env });
+  // Attach immediately: a short-lived bwrap can report before its own exit event.
+  const stream = status ? child.stdio[3] : null;
+  const decoder = status ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }) : null;
+  let pending = '';
+  let unreadable = false;
+  let reported = false;
+  stream?.on('error', () => { unreadable = true; });
+  stream?.on('data', (chunk) => {
+    if (unreadable) return;
+    let text;
+    try { text = decoder.decode(chunk, { stream: true }); }
+    catch { unreadable = true; return; }
+    const lines = (pending + text).split('\n');
+    pending = lines.pop();
+    for (const line of lines) {
+      let record;
+      try { record = JSON.parse(line); } catch { /* checked below */ }
+      if (!record || typeof record !== 'object' || Array.isArray(record)) {
+        unreadable = true;
+        return;
+      }
+      const code = record['exit-code'];
+      if (Number.isInteger(code) && code >= 0 && code <= 255) reported = true;
+    }
+  });
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
   const forward = (signal) => {
     try {
@@ -926,9 +999,41 @@ export function runBwrap(args, env = process.env) {
   };
   child.on('error', (error) => {
     stop();
-    process.stderr.write(`${MSG_PREFIX}cannot start bwrap: ${error.message}\n`);
+    if (status) bwrapStatusLine(`cannot start bwrap: ${error.message}`);
+    else process.stderr.write(`${MSG_PREFIX}cannot start bwrap: ${error.message}\n`);
     process.exit(127);
   });
+  if (status) {
+    let grace;
+    let finished = false;
+    const finish = (code, signal) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(grace);
+      stop();
+      if (signal) {
+        bwrapStatusLine(`bwrap ended by signal ${signal}`);
+        process.kill(process.pid, signal);
+        return;
+      }
+      const exit = code ?? 1;
+      try { decoder.decode(); } catch { unreadable = true; }
+      if (unreadable || pending.length) {
+        bwrapStatusLine(`bwrap's status could not be read (exit ${exit})`);
+        process.exit(exit || 1);
+      }
+      if (!reported) bwrapStatusLine(`bwrap exited ${exit} without reporting payload status`);
+      process.exit(exit);
+    };
+    child.on('exit', (code, signal) => {
+      grace = setTimeout(() => {
+        stream.destroy();
+        finish(code, signal);
+      }, 2000);
+    });
+    child.on('close', finish);
+    return child;
+  }
   child.on('exit', (code, signal) => {
     stop();
     if (signal) process.kill(process.pid, signal);
@@ -994,7 +1099,7 @@ async function launch(argv, env = process.env) {
     process.exit(1);
   }
   process.once('exit', cleanup);
-  runBwrap(result.args, proxyEnvironment(env));
+  runBwrap(['--json-status-fd', '3', ...result.args], proxyEnvironment(env), { status: true });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

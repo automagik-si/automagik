@@ -38,6 +38,10 @@ remain outside this work.
 After the remaining slices land, the captain can roll out one bot at a time from an ordinary
 terminal on the computer running that bot:
 
+0. Before the first opt-in, record the computer's name, its privileged socket folders and its
+   container services (RFC 0044 Q2a). Accept `tcp://` or `ssh://` container hosts only if none is
+   reachable through the relay. Accept sockets created after launch only if no privileged
+   socket folder is visible in the pane. Record both decisions and proceed only if both conditions hold.
 1. Run `am dsh-tui update`, then `am dsh-tui doctor`.
    Install and update refresh the stable helper, proxy, guard and wrapper together. Doctor
    checks the stable execution copy and managed profile row without changing either.
@@ -47,14 +51,14 @@ terminal on the computer running that bot:
    while install checks still print. A missing proxy is reported down; doctor never starts a core,
    proxy or pane. Install and update preserve every saved switch, including an absent value.
 2. Run `am edit <bot> --hc-proxy on`, then
-   `am proxy approve --project <project>`. Review the printed roster diff,
-   including the switch change. A **roster change needs a pane restart** after approval.
+   `am proxy approve --project <project>`. Review the preview, including the switch change,
+   then run the printed command with `--confirm <digest>`. A **roster change needs a pane restart** after approval.
    After a re-approval, every worker start from an approved pane is refused until that pane
    restarts, including dsh-tui helper workers. Restart before asking the pane to start workers.
 3. Run `am restart <bot>`. Check that bot before opting in the next.
 4. To roll back, run `am edit <bot> --hc-proxy off`, then
-   `am proxy approve --project <project>` (review the diff), then
-   `am restart <bot>`. With a valid approved-on record, off without approval
+   `am proxy approve --project <project>`. Review the preview and run the printed command
+   with `--confirm <digest>`, then run `am restart <bot>`. With a valid approved-on record, off without approval
    keeps the pane proxied; the invalid-record exception above starts plain with a warning.
    Existing workers keep their launch until restarted;
    end and relaunch any workers that also need rollback.
@@ -287,16 +291,16 @@ writable tree**:
 
 The record lives outside the project and the app home; the sandbox row binds the whole data root
 read-only once, so every stable file and every approved record is reachable but not writable
-inside a sandbox. `am proxy approve --project <dir>` is the only writer: it reads
-the working roster, prints the diff against the previous record (bots added/removed,
-rank/lead/kind changes), then writes the new record. `dsh-tui install` never approves.
+inside a sandbox. `am proxy approve --project <dir>` previews the working roster and prints
+the diff against the previous record. After reviewing it, run the printed command with
+`--confirm <digest>` to write the record for those exact bytes. `dsh-tui install` never approves.
 Only `proxy approve` and a proxied start check the approved data root. Plain `dsh-tui`
 install/check keeps its stable execution root checks without validating approval storage.
 
 A working-tree roster that differs from the record **warns once and still starts**, naming
 `am proxy approve`; the approved roster stays in force. A missing record **refuses**
 a proxied pane. **A roster change therefore needs a pane restart**, after
-`am proxy approve`: the helper starts the proxy before DSH, so the new pane's proxy
+`am proxy approve --project <dir> --confirm <digest>`. The helper starts the proxy before DSH, so the new pane's proxy
 reads the newly approved record, and
 nothing in the old sandbox can write it first. The proxy's own socket folder is outside both
 trees: `$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock`, not under the app home.
@@ -328,8 +332,8 @@ made the approved snapshot authoritative for the per-bot switch. C2b-2 adds the 
 allowance above. Every switch stays off in this preparation.
 
 Residual, recorded for the person who approves: a sandboxed bot can ask an in-team unsandboxed
-pane to run `am proxy approve`. The printed diff is the check, and approving is the
-person's act. The record is outside the sandbox; the command that writes it is not automatically
+pane to run `am proxy approve`. The preview is the check, and running `--confirm <digest>`
+is the person's act. The record is outside the sandbox; the command that writes it is not automatically
 trusted because it ran in an unsandboxed pane.
 
 C2c coordinates the later sandbox profile change and mask review. This slice changes neither.

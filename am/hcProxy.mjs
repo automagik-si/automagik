@@ -33,7 +33,7 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { approvedSettingsDir, readApprovedRecord, sha256Of } from "./approved.js";
+import { APPROVAL_REVIEW, approvedSettingsDir, readApprovedRecord, sha256Of } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
 import { parseBots, workerHomeOf } from "./model.js";
 import { AGENTS, AGY_MODE_DEFAULT, agySettingsArgs, agySettingsPlan, choosesSession, promptByMessage, sessionIdArgs } from "./models.js";
@@ -949,13 +949,13 @@ export async function startProxy(options = {}) {
       // Compare only a regular file: a symlink or a FIFO planted in the writable project is
       // never opened here, and counts as different.
       const info = lstatSync(botsPath);
-      if (info.isFile() && !info.isSymbolicLink()) working = readFileSync(botsPath, "utf8");
+      if (info.isFile() && !info.isSymbolicLink()) working = readFileSync(botsPath);
     } catch { /* missing or unreadable: it differs */ }
     if (working === null || sha256Of(working) !== approved.record.sha256) {
       log({ ev: "roster_unapproved",
         message: `the working-tree roster ${botsPath} differs from the approved one; `
           + "the approved roster is in force. Run "
-          + `\`am proxy approve --project ${caller.project}\` to approve it.` });
+          + `\`am proxy approve --project ${caller.project}\` to approve it; ${APPROVAL_REVIEW}.` });
     }
   } else {
     try {
@@ -967,7 +967,7 @@ export async function startProxy(options = {}) {
   }
   if (!file.bots.some((bot) => bot.id === caller.bot)) {
     const hint = explicit
-      ? `; run \`am proxy approve --project ${caller.project}\`` : "";
+      ? `; run \`am proxy approve --project ${caller.project}\`; ${APPROVAL_REVIEW}` : "";
     throw new Error(`the caller ${terminal}'s bot ${caller.bot} `
       + `is not in the roster ${rosterPath}${hint}`);
   }

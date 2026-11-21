@@ -102,6 +102,10 @@ function fakeBwrap(root) {
     ': > "$BWRAP_ARGS_FILE"',
     'for arg in "$@"; do printf \'%s\\n\' "$arg" >> "$BWRAP_ARGS_FILE"; done',
     'printf \'%s\\n\' "$@" >> "$BWRAP_SEEN_FILE"',
+    'env > "$BWRAP_ENV_FILE"',
+    'if [ "$1" = --json-status-fd ] && [ "$2" = 3 ]; then',
+    '  printf \'{"child-pid":1}\\n{"exit-code":%s}\\n\' "${BWRAP_EXIT:-0}" >&3',
+    'fi',
     'exit "${BWRAP_EXIT:-0}"',
   ].join('\n');
   writeFileSync(file, `${script}\n`);
@@ -141,6 +145,7 @@ function makeFixture({ ssh = 'dir' } = {}) {
     bin: fakeBwrap(root),
     argsFile: join(root, 'bwrap-args'),
     seenFile: join(root, 'bwrap-seen'),
+    envFile: join(root, 'bwrap-env'),
   };
 }
 
@@ -175,6 +180,7 @@ function environment(fixture, { mask = '1', real, proxy, home, extra = {} } = {}
     HOME: home === undefined ? fixture.home : home,
     BWRAP_ARGS_FILE: fixture.argsFile,
     BWRAP_SEEN_FILE: fixture.seenFile,
+    BWRAP_ENV_FILE: fixture.envFile,
     ...extra,
   };
   if (mask !== undefined) env[SWITCH] = mask;
@@ -189,7 +195,8 @@ function run(args, env) {
 
 function recorded(fixture) {
   const text = readFileSync(fixture.argsFile, 'utf8');
-  return text.replace(/\n$/, '').split('\n');
+  const args = text.replace(/\n$/, '').split('\n');
+  return args[0] === '--json-status-fd' && args[1] === '3' ? args.slice(2) : args;
 }
 
 function bwrapRan(fixture) {
@@ -359,6 +366,21 @@ test('the pane gets the proxy environment, so only the relay is reachable', () =
   assert.equal(env.NODE_USE_ENV_PROXY, '1');
   assert.equal(env.PATH, '/bin');
   assert.equal(env.HOME, '/home/x');
+});
+
+test('masked bwrap receives the relay proxy environment', () => {
+  const fixture = makeFixture();
+  const env = environment(fixture, { real: fixture.real, proxy: fixture.proxy,
+    extra: { HTTP_PROXY: 'http://old-proxy:8080', NO_PROXY: '*' } });
+  const result = run(RUNNER_ARGS, env);
+  assert.equal(result.status, 0, result.stderr);
+  const recordedEnv = new Set(readFileSync(fixture.envFile, 'utf8').trimEnd().split('\n'));
+  for (const name of ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy']) {
+    assert.ok(recordedEnv.has(`${name}=${EGRESS_PROXY_URL}`), name);
+  }
+  assert.ok(recordedEnv.has('NO_PROXY=127.0.0.1,localhost,::1'));
+  assert.ok(recordedEnv.has('no_proxy=127.0.0.1,localhost,::1'));
+  assert.ok(recordedEnv.has('NODE_USE_ENV_PROXY=1'));
 });
 
 test('a missing proxy still masks everything, says one line and starts bwrap', () => {
@@ -959,6 +981,10 @@ test('the default fixed socket list masks CRI-O, K3s containerd, ttrpc and Build
       if (!targets.has(path)) return statSync(path);
       statCalls.push(path);
       return { isDirectory: () => false };
+    },
+    // This case is about the fixed list: keep the host's own rootless runtime folder out of it.
+    lstat(path) {
+      throw Object.assign(new Error(`no rootless runtime folder in this fixture: ${path}`), { code: 'ENOENT' });
     },
   });
   assert.equal(result.fatal, null);

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { netnsCapabilityProblem } from '../bin/hc-socket-mask.mjs';
@@ -129,3 +129,94 @@ test('bwrap masks host Unix sockets while the pane proxy answers through both co
     }, profile.join(' '));
   }
 });
+
+async function maskedScene(t) {
+  if (process.platform !== 'linux') { t.skip('network namespaces are Linux-only'); return null; }
+  const problem = netnsCapabilityProblem();
+  if (problem) { t.skip(problem); return null; }
+  const root = runtimeRoot();
+  if (!root) { t.skip('no writable XDG_RUNTIME_DIR-style folder outside /tmp'); return null; }
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const proxy = join(root, 'automagik-hc-proxy', 't1', 'pane.sock');
+  const core = join(root, 'core', 'default.sock');
+  const home = join(root, 'home');
+  const runtime = join(root, 'runtime');
+  for (const dir of [dirname(proxy), dirname(core), home, runtime]) mkdirSync(dir, { recursive: true });
+  await listen(t, proxy, 'pane-proxy');
+  await listen(t, core, 'core');
+  const env = {
+    PATH: process.env.PATH,
+    HOME: home,
+    XDG_RUNTIME_DIR: runtime,
+    DSH_SANDBOX_MASK: '1',
+    AM_HC_REAL_SOCKET: core,
+    AM_HC_PROXY_SOCKET: proxy,
+  };
+  const run = async (profile, command, extraEnv = {}) => {
+    const child = spawn(process.execPath, [WRAPPER, ...profile, '--', ...command],
+      { env: { ...env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+    const code = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    return { code, stdout, stderr };
+  };
+  return { root, runtime, run };
+}
+
+test('real bwrap masks rootless containerd and BuildKit fixture listeners', async (t) => {
+  const scene = await maskedScene(t);
+  if (!scene) return;
+  const paths = [
+    'containerd/containerd.sock', 'containerd/containerd.sock.ttrpc',
+    'buildkit/buildkitd.sock', 'buildkit-default/buildkitd.sock',
+  ].map((path) => join(scene.runtime, path));
+  for (const path of paths) {
+    mkdirSync(dirname(path), { recursive: true });
+    await listen(t, path, 'rootless runtime');
+  }
+  const probe = join(scene.root, 'rootless-probe.mjs');
+  writeFileSync(probe, `
+import net from 'node:net';
+const connect = (path) => new Promise((resolve) => {
+  const socket = net.connect(path);
+  socket.setTimeout(2000, () => { socket.destroy(); resolve('timeout'); });
+  socket.resume().once('end', () => resolve('connected'));
+  socket.once('error', (error) => resolve(error.code));
+});
+console.log(JSON.stringify(await Promise.all(process.argv.slice(2).map(connect))));
+`);
+  const command = [process.execPath, probe, ...paths];
+  const off = await scene.run(PROFILE_ARGS, command, { DSH_SANDBOX_MASK: '0' });
+  assert.equal(off.code, 0, off.stderr);
+  assert.deepEqual(JSON.parse(off.stdout), paths.map(() => 'connected'));
+  const on = await scene.run(PROFILE_ARGS, command);
+  assert.equal(on.code, 0, on.stderr);
+  assert.deepEqual(JSON.parse(on.stdout), paths.map(() => 'ECONNREFUSED'));
+});
+
+test('real bwrap reports an ordinary pane exit without a wrapper status line', async (t) => {
+  const scene = await maskedScene(t);
+  if (!scene) return;
+  const result = await scene.run(PROFILE_ARGS, [process.execPath, '-e', 'process.exit(3)']);
+  assert.equal(result.code, 3, result.stderr);
+  assert.equal(result.stderr, '');
+});
+
+for (const [name, mounts] of [
+  ['a bad bind', (root) => ['--bind', join(root, 'missing'), join(root, 'target')]],
+  ['a hidden relay executable', () => ['--tmpfs', dirname(process.execPath)]],
+]) {
+  test(`real bwrap exits without reported payload status for ${name}`, async (t) => {
+    const scene = await maskedScene(t);
+    if (!scene) return;
+    const result = await scene.run([...PROFILE_ARGS, ...mounts(scene.root)], ['/bin/true']);
+    assert.notEqual(result.code, 0, result.stderr);
+    assert.deepEqual(result.stderr.split('\n').filter((line) => line.startsWith('hc-socket-mask: ')),
+      [`hc-socket-mask: bwrap exited ${result.code} without reporting payload status`]);
+  });
+}

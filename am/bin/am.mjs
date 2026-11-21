@@ -211,6 +211,12 @@ async function main(args) {
     return 2;
   }
   try {
+    if (["update", "rollback", "self", "help", "--help", "-h"].includes(verb)) {
+      for (const word of rest) {
+        if (word === "--") break;
+        if (/^--confirm(?:=|$)/.test(word)) throw new Usage("--confirm goes with am proxy approve only.");
+      }
+    }
     if (verb === "update") return await update(rest);
     if (verb === "rollback") return rollback(rest);
     if (verb === "self") return self(rest);

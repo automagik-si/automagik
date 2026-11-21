@@ -1369,11 +1369,12 @@ guarded pane.
 ### The per-pane hc proxy (the sandbox boundary, opt-in)
 
 The proxy is **off by default** for every bot. Set the bot entry's `hcProxy` boolean with
-`am edit <bot> --hc-proxy on|off`, then run `am proxy approve`
-(review the diff), then restart that bot to apply it. The effective value comes from that bot's
+`am edit <bot> --hc-proxy on|off`, then run `am proxy approve --project <dir>`.
+Review the preview, run the printed command with `--confirm <digest>`, and restart that bot.
+The effective value comes from that bot's
 entry in the approved snapshot, read at each start, restart and worker start. Approved on stays
 on when a pane changes the working key to false or removes it. Working on with approval off
-or missing refuses with an instruction to run `am proxy approve` first.
+or missing refuses with an instruction to preview and confirm with `am proxy approve` first.
 Invalid approval refuses working on. Working off starts plain, preserving its argv, with a
 loud STDERR warning naming the record, the problem and `am proxy approve`:
 invalid approval cannot be trusted to say on. Known limit: previously approved on plus a
@@ -1386,8 +1387,9 @@ Only Linux
 pack-started dsh-tui seats and dsh-tui workers get the helper. `AM_HC_PROXY` no longer opts in
 other bots. C2b-1 prepares the approved switch; leave it off until C2b-2's approved-worker
 allowance and C2c's coordinated sandbox-row enablement have shipped. The profile row stays
-unchanged. For rollback, run `edit <bot> --hc-proxy off`, `proxy approve` (review the diff),
-then `restart <bot>`; end and relaunch any existing workers that also need rollback.
+unchanged. For rollback, run `am edit <bot> --hc-proxy off`, preview with
+`am proxy approve --project <dir>`, review and confirm with `--confirm <digest>`, then run
+`am restart <bot>`. End and relaunch any existing workers that also need rollback.
 Linked starts check the target platform and, on Linux, the target's approved switch.
 Approved on refuses until they can verify the proxy execution path; start locally on the
 target computer instead. Non-Linux targets ignore the switch.
@@ -1399,9 +1401,8 @@ When it is on, a pack-started dsh-tui pane runs through one helper,
 **before DSH starts**, then runs the agent as its child. The proxy reads the project's approved
 roster before the pane can create a sandbox, and it ends when the pane ends. The record
 lives outside the project, is written 0600 by
-`am proxy approve --project <dir>` (which prints the diff first), and is the only
-roster the proxy reads. **A roster change needs a pane restart** after
-`am proxy approve`, so the new pane's
+`am proxy approve --project <dir> --confirm <digest>`, and is the only
+roster the proxy reads. **A roster change needs a pane restart** after confirmation, so the new pane's
 proxy reads the newly approved record. A working-tree edit that differs warns once, naming
 the command, and still starts on the approved roster; a missing record refuses a proxied
 pane. A worker's record is keyed by the main checkout the pack resolved (its lead seat's
@@ -1418,7 +1419,7 @@ Approval-root checks apply only to `proxy approve` and proxied starts. Plain `ds
 install/check keeps the stable execution root checks without validating approval storage.
 
 Residual, in the command's own help too: a sandboxed bot can ask an in-team unsandboxed pane to
-run `proxy approve`. The printed diff is the check, and approving is the person's act.
+run `proxy approve`. The preview is the check, and running `--confirm <digest>` is the person's act.
 
 The helper sets `DSH_SANDBOX_MASK=1`, `AM_HC_REAL_SOCKET` and `AM_HC_PROXY_SOCKET` for the
 pane; the DSH runner wrapper applies its mount rules and binds the proxy at the real core socket
