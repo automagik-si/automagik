@@ -438,12 +438,13 @@ test('the start route requires the team lock and is absent from the read and too
   assert.equal(reads.includes(endpoint), false)
 })
 
-for (const [name, rollback, force, refusal, problem] of [
+for (const [name, rollback, force, refusal, problem, unbound] of [
   ['a forced start requires explicit rollback capability', undefined, true, 'rollback-missing'],
   ['a forced start refuses an empty rollback capability', '', true, 'rollback-missing'],
   ['a 5a boot refuses an inherited rollback flag', '1', true, 'rollback-missing'],
   ['a 5a boot refuses rollback capability from another boot', 'sup_old-boot', true, 'rollback-missing'],
-  ['a forced start with rollback for this boot follows the ordinary hold and request path', bootId, true],
+  ['an unbound forced start refuses before closing the hold', bootId, true, 'page-outdated', false, true],
+  ['a bound forced start with rollback for this boot follows the ordinary hold and request path', bootId, true],
   ['a forced start refuses invalid state even when status is available and admission is open', bootId, true, 'store-invalid', true],
   ['an ordinary start does not require rollback capability', undefined, false],
   ['an ordinary start keeps its eligibility with a reported store problem and an open hold', undefined, false, null, true],
@@ -465,7 +466,8 @@ for (const [name, rollback, force, refusal, problem] of [
     const cancel = t.mock.fn(() => rt.updateTurnEnded('running'))
     agents.push({ id: 'running', status: 'running', cancel })
     assert.equal(rt.selfUpdateStartRefusal(), null)
-    const result = force ? await rt.selfUpdateStart(undefined, { force: true }) : await rt.selfUpdateStart()
+    const result = force ? await rt.selfUpdateStart(undefined, unbound ? { force: true }
+      : { force: true, runId: 'check-run', reinstall: false }) : await rt.selfUpdateStart()
     if (refusal) {
       assert.deepEqual(result, { started: false, reason: refusal })
       for (const step of [close, notes, inboxes, flush, cancel]) assert.equal(step.mock.callCount(), 0)

@@ -8,17 +8,19 @@ import { isDeepStrictEqual } from 'node:util'
 import { compareVersions } from '../lane-verify.js'
 import { LISTENER_UNKNOWN, startChild } from './child.js'
 import { checkHealth, healthListener, listenerOf, verifyListener } from './health.js'
-import { copyVersion, installCopy, refreshCopy, runningCopy, SELF_CHECK_OK, supervisorVersion } from './copy.js'
+import { copyVersion, installCopy, refreshCopy, reinstallCopies, runningCopy, SELF_CHECK_OK, supervisorVersion } from './copy.js'
 import { checkRelinkConfig, installRegistry } from './pnpm.js'
-import { currentOf, isId, isVersion, RUNNING, runOf, TERMINAL } from './records.js'
+import { currentOf, isId, isVersion, REINSTALL_REFUSAL, reinstallRefusalReason, RUNNING, runOf, TERMINAL } from './records.js'
 import { inspectRelease, releaseSource } from './release.js'
 import { takeRequest } from './request.js'
 import { baseline, finishRolledBack, liveTeamLineage, rollbackLocation, runRollback, teamSnapshot, unpinnedPlugins, updateContract } from './rollback.js'
 import { assertRelinked, discardArchives, downloadPath, relink, stageInstall, stagePaths, takeProfileLock } from './stage.js'
-import { identity, prepareStore, readJson, regularBytes, syncDirectory, takeLifetimeLock, usableStore, writeJsonAtomic } from './store.js'
-import { candidateMatches, completeSwitch, didSwitch, planSwitch, UndoPreflightError, undoSwitch, validJournal, validTerminalJournal } from './switch.js'
+import { identity, prepareStore, readJson, regularBytes, syncDirectory, takeLifetimeLock, UPDATE_RECORD_LIMIT, usableStore, writeJsonAtomic } from './store.js'
+import { candidateMatches, completeSwitch, didSwitch, planSwitch, sweepReinstallTrash, trashReinstall, UndoPreflightError, undoSwitch, validJournal, validTerminalJournal } from './switch.js'
 
 const IDLE_POLL_MS = 1000
+// Leave room in state.json for the journal and rollback fields alongside this snapshot.
+const MAX_CURRENT_SNAPSHOT_BYTES = 4096
 const stamp = () => new Date().toISOString()
 const warn = message => console.error(`automagik supervisor: ${message}`)
 
@@ -64,6 +66,7 @@ export async function runSupervisor({
   const listener = healthListener(args)
   bootEnv[LISTENER_UNKNOWN] = listener ? '0' : '1'
   delete bootEnv.AUTOMAGIK_SUPERVISOR_RUN
+  delete bootEnv.AUTOMAGIK_SUPERVISOR_REINSTALL
   let checkedListener, listenerCheck
   const seen = new Set()
   let child, run, active, exitCode, recoveredAt
@@ -80,6 +83,12 @@ export async function runSupervisor({
     return checked && fs.realpathSync(checked) === store ? store : undefined
   }
   const read = file => readJson(checkedStore, store, file)
+  const readCurrent = () => {
+    const raw = read('current.json')
+    if (raw === undefined) return undefined
+    const current = currentOf(raw, [bootId])
+    return current && Buffer.byteLength(JSON.stringify(current)) <= MAX_CURRENT_SNAPSHOT_BYTES ? current : null
+  }
   const write = (file, value) => {
     requireLock()
     writeJsonAtomic(join(store, file), value, { profileDir, durable: true })
@@ -101,8 +110,8 @@ export async function runSupervisor({
     }
     return listenerCheck
   }
-  const save = (changes = {}) => {
-    const proposed = { ...run, ...changes, updatedAt: stamp() }
+  const save = (changes = {}, updatedAt = stamp()) => {
+    const proposed = { ...run, ...changes, updatedAt }
     try {
       write('state.json', proposed)
     } catch (error) {
@@ -171,11 +180,17 @@ export async function runSupervisor({
     fs.rmSync(staging.root, { recursive: true, force: true })
   }
 
-  function finishNotUpdated(staging, prior = run) {
-    discard(staging)
-    if (validJournal(prior) && prior.journal.undo && prior.journal.pending === null && prior.journal.done.length === 0) {
+  function cleanNotUpdatedBackup(prior = run) {
+    if (prior.reinstall === true) {
+      if (prior.journal) trashReinstall(store, prior)
+    } else if (validTerminalJournal(prior)) {
       fs.rmSync(join(store, prior.journal.keep), { recursive: true, force: true })
     }
+    cleanReinstallTrash()
+  }
+
+  function cleanReinstallTrash() {
+    try { sweepReinstallTrash(store) } catch { warn('reinstall trash could not be removed') }
   }
 
   const health = (target, expect, options) => checkHealth(target, {
@@ -191,19 +206,37 @@ export async function runSupervisor({
     if (restart && !legacy && !updateContract(profileDir)) return manualRecovery(1, 'rollback-failed')
     const unchanged = restart ? start(true) : child
     const expect = run.fromVersions ?? unpinnedPlugins(profileDir)
-    const team = run.journal && identity(join(store, run.journal.keep, 'data.json')) ? teamSnapshot(config, run) : null
+    const team = run.journal && (run.reinstall === true || identity(join(store, run.journal.keep, 'data.json')))
+      ? teamSnapshot(config, run) : null
     const result = await health(unchanged, expect, { team, legacy, ...(!restart ? { since: Date.now() } : {}) })
     const versionsMatch = !legacy || !run.fromVersions || isDeepStrictEqual(baseline(profileDir), run.fromVersions)
     signal.throwIfAborted()
     if (!result.ok || unchanged.result || !versionsMatch) return manualRecovery(unchanged.result?.code)
-    // Staging is gone before the verdict is visible (5a's order). A cut between the two replays this give-back with no
-    // snapshot to compare, which costs nothing here: the candidate never served, so the team was not touched.
-    try { finishNotUpdated(staging) } catch {
-      // The verdict still stands; the next start's cleanup of a notUpdated run removes what is left.
+    // Undo has finished and the candidate never served. Staging can go before the verdict is visible.
+    try {
+      discard(staging)
+      if (run.reinstall !== true) cleanNotUpdatedBackup()
+    } catch {
+      // The next start's cleanup of a notUpdated run removes what is left.
       warn('update cleanup did not finish')
     }
     save({ phase: 'notUpdated', reason, ...(legacy ? { detail: 'previous-unsupported' } : {}) })
     trial = false
+    // An interrupted reinstall give-back needs its snapshot to check team lineage again on replay.
+    if (run.reinstall === true) {
+      try { cleanNotUpdatedBackup() } catch { warn('update cleanup did not finish') }
+    }
+  }
+
+  function refuseReinstall(staging, detail) {
+    // An older launcher slot must be able to read this verdict. The existing child releases its own hold.
+    try {
+      write(REINSTALL_REFUSAL, { version: 1, runId: run.runId, detail })
+    } catch {
+      warn('could not record the reinstall refusal detail')
+    }
+    try { discard(staging) } catch { warn('update cleanup did not finish') }
+    phase('notUpdated', reinstallRefusalReason(detail))
   }
 
   async function manualRecovery(code = 1, reason = 'health-failed', fields = {}) {
@@ -231,7 +264,8 @@ export async function runSupervisor({
     trial = true
     if (run.phase !== 'rollingBack') {
       const { commitCurrent, ...journal } = run.journal
-      const restoreCurrent = commitCurrent === true || isDeepStrictEqual(read('current.json'), nextCurrent())
+      const restoreCurrent = commitCurrent === true
+        || (run.reinstall !== true && isDeepStrictEqual(read('current.json'), nextCurrent()))
       save({
         phase: 'rollingBack', reason: 'health-failed', journal: { ...journal, undo: true, undoReason: 'health-failed' },
         rollback: { failed, step: 'stop', tried: [], trialFrom: run.trialStartedAt ?? stamp(), restoreCurrent,
@@ -255,7 +289,19 @@ export async function runSupervisor({
     if (run.phase === 'rolledBack') {
       trial = false
       finishRolledBack(config, staging, run)
+      cleanReinstallTrash()
     }
+  }
+
+  async function undoBeforeTrial(staging, release) {
+    try {
+      signal.throwIfAborted()
+      undoSwitch(config, staging, run, save, 'stage-failed')
+      discardArchives(profileDir, staging)
+    } finally {
+      release()
+    }
+    await giveBack(staging, 'stage-failed', true)
   }
 
   async function relinkAndRestart(staging, releaseLock) {
@@ -268,36 +314,35 @@ export async function runSupervisor({
       released = true
       await relink(config, signal)
       assertRelinked(profileDir, staging)
+      if (run.reinstall === true) save({ journal: { ...run.journal, relinked: true } })
     } catch {
       const release = released ? await takeProfileLock(profileDir, signal) : releaseLock
-      try {
-        signal.throwIfAborted()
-        undoSwitch(config, staging, run, save, 'stage-failed')
-        discardArchives(profileDir, staging)
-      } finally {
-        release()
-      }
-      return giveBack(staging, 'stage-failed', true)
+      return undoBeforeTrial(staging, release)
     }
     await restartCandidate(staging)
   }
 
   const nextCurrent = () => ({
     version: 1, live: { version: run.to, sequence: run.sequence },
-    kept: { version: run.from }, lastSequence: run.sequence,
+    kept: run.reinstall === true ? run.priorCurrent?.kept ?? null : { version: run.from },
+    lastSequence: run.sequence,
   })
 
-  async function restartCandidate(staging) {
+  async function restartCandidate(staging, { recheckRelink = false } = {}) {
     const team = teamSnapshot(config, run)
     let candidate, failure, teamMissing
     const beforeSpawn = await takeProfileLock(profileDir, signal)
     try {
       signal.throwIfAborted()
+      let relinked = true
+      if (recheckRelink) {
+        try { assertRelinked(profileDir, staging) } catch { relinked = false }
+      }
       const lineage = team ? liveTeamLineage(team) : 'descended'
       if (lineage !== 'descended') {
         failure = 'roster'
         teamMissing = lineage === 'lost'
-      } else if (!candidateMatches(config, staging, run)) {
+      } else if (!relinked || !candidateMatches(config, staging, run)) {
         failure = 'plugins'
       } else {
         save({ phase: 'restarting', reason: null, trialStartedAt: run.trialStartedAt ?? stamp() })
@@ -331,13 +376,16 @@ export async function runSupervisor({
     await finishHealthy(staging)
   }
 
-  async function finishHealthy(staging, { priorKept, to, from, names } = run) {
-    if (isVersion(priorKept) && priorKept !== to && priorKept !== from) {
+  async function finishHealthy(staging, completed = run) {
+    const { priorKept, to, from, names } = completed
+    if (completed.reinstall === true) trashReinstall(store, completed)
+    else if (isVersion(priorKept) && priorKept !== to && priorKept !== from) {
       try { fs.rmSync(join(store, 'versions', priorKept), { recursive: true, force: true }) } catch {
         warn('the older kept version could not be removed')
       }
     }
     discard(staging)
+    cleanReinstallTrash()
     if (!Array.isArray(names) || !names.includes('@automagik/bots-dsh')) return
     try { await refreshCopy(store, profileDir, to, signal, executingCopy) } catch {
       if (!signal.aborted) warn('the new supervisor copy did not pass its self-check')
@@ -373,20 +421,29 @@ export async function runSupervisor({
       return rollBack(staging, run.rollback.failed)
     }
 
+    const relinked = run.reinstall !== true || run.journal.relinked === true
     // Relink finished before this trial started. Boot the candidate without touching its installer inputs.
     if (['restarting', 'health'].includes(run.phase) && !run.rollback && run.trialStartedAt
-      && didSwitch(config, staging, run)) {
-      return restartCandidate(staging)
+      && relinked && didSwitch(config, staging, run)) {
+      return restartCandidate(staging, { recheckRelink: run.reinstall === true })
     }
 
     let release = await takeProfileLock(profileDir, signal)
     try {
       // A durable commit intent means this profile already passed relink and health.
       // Also recognize a version record published by the preceding journal format.
-      const legacyCommit = !run.journal.undo && run.journal.pending === null
+      const legacyCommit = run.from !== run.to && !run.journal.undo && run.journal.pending === null
         && run.journal.done.length === run.journal.steps.length && isDeepStrictEqual(read('current.json'), nextCurrent())
-      if (run.journal.commitCurrent || legacyCommit) {
-        assertRelinked(profileDir, staging)
+      if (relinked && (run.journal.commitCurrent || legacyCommit
+        || (run.journal.relinked === true && didSwitch(config, staging, run)))) {
+        try {
+          assertRelinked(profileDir, staging)
+        } catch (error) {
+          if (run.phase !== 'switching' || run.journal.relinked !== true || run.journal.commitCurrent) throw error
+          const held = release
+          release = null
+          return await undoBeforeTrial(staging, held)
+        }
         release()
         release = null
         await restartCandidate(staging)
@@ -407,21 +464,34 @@ export async function runSupervisor({
     await giveBack(staging, run.journal.undoReason, true)
   }
 
-  async function update() {
+  async function update(expectedReinstall) {
     const staging = stagePaths(store, run.runId, profile)
-    let release, restart = false
+    let release, restart = false, liveChangesStarted = false
+    // A reinstall crosses the early-refusal boundary at the first live installer write or child stop.
+    const beginLiveChanges = () => { liveChangesStarted = true }
     try {
-      if (!listener || !await checked(child)) return phase('notUpdated', 'listener-unknown')
+      if (!listener || !await checked(child)) {
+        return expectedReinstall ? refuseReinstall(staging, 'listener-unknown') : phase('notUpdated', 'listener-unknown')
+      }
+      if (expectedReinstall && (bootEnv.AUTOMAGIK_SUPERVISOR_REINSTALL !== bootId || !reinstallCopies(store))) {
+        return refuseReinstall(staging, 'reinstall-unsupported')
+      }
       const contract = updateContract(profileDir)
-      if (!contract) return await giveBack(staging, 'profile-invalid', false, { legacy: true })
+      if (!contract) {
+        if (expectedReinstall) return refuseReinstall(staging, 'previous-unsupported')
+        return await giveBack(staging, 'profile-invalid', false, { legacy: true })
+      }
       config.stateFormats = contract.stateFormats
-      const raw = read('current.json')
-      const current = currentOf(raw, [bootId])
-      if (raw !== undefined && !current) return await giveBack(staging, 'store-invalid', false)
+      const current = readCurrent()
+      if (current === null) {
+        if (expectedReinstall) return refuseReinstall(staging, 'store-invalid')
+        return await giveBack(staging, 'store-invalid', false)
+      }
       fs.mkdirSync(staging.root, { mode: 0o700 })
       const view = {}
       const result = await inspectRelease({
         profileDir, current, view, source, fetch, signal, requireAccess: requireLock,
+        allowEqual: !!expectedReinstall, expectedReinstall,
         registry: () => installRegistry(config, staging.root, { signal }), getDshVersion: () => dshVersion(command),
         saveTarball: (plugin, bytes) => fs.writeFileSync(downloadPath(staging, plugin), bytes, { flag: 'wx', mode: 0o600 }),
         onPhase: next => {
@@ -430,14 +500,19 @@ export async function runSupervisor({
         },
       })
       signal.throwIfAborted()
-      if (result.state !== 'available') return await giveBack(staging, result.reason, false)
+      if (result.state !== 'available') {
+        if (expectedReinstall) return refuseReinstall(staging, result.reason)
+        return await giveBack(staging, result.reason, false)
+      }
       const names = view.plugins.map(plugin => plugin.name)
       const versions = new Map(view.plugins.map(plugin => [plugin.name, plugin.from]))
-      save({ phase: 'staging', sequence: view.sequence, names, priorKept: current?.kept?.version ?? null })
+      save({ phase: 'staging', sequence: view.sequence, names, priorKept: current?.kept?.version ?? null,
+        priorCurrent: current ?? null, ...(result.reinstall === true ? { reinstall: true } : {}) })
       release = await takeProfileLock(profileDir, signal)
-      await stageInstall(config, staging, result, versions, signal)
+      await stageInstall(config, staging, result, versions, signal, beginLiveChanges)
       signal.throwIfAborted()
       restart = true
+      beginLiveChanges()
       await stop()
       signal.throwIfAborted()
       const journal = planSwitch(config, staging, run)
@@ -459,6 +534,7 @@ export async function runSupervisor({
         warn('update cleanup did not finish')
         return
       }
+      if (expectedReinstall && !liveChangesStarted) return refuseReinstall(staging, 'stage-failed')
       try {
         if (error instanceof UndoPreflightError) return await undoFailure(staging)
         if (['restarting', 'health'].includes(run.phase) && validJournal(run)) {
@@ -488,6 +564,7 @@ export async function runSupervisor({
   try {
     executingCopy = runningCopy(store)
     executingCopy.prune()
+    if (reinstallCopies(store)) bootEnv.AUTOMAGIK_SUPERVISOR_REINSTALL = bootId
     for (const [sig, handler] of Object.entries(forward)) process.on(sig, handler)
     const raw = read('state.json')
     const prior = runOf(raw, [raw?.bootId].filter(isId))
@@ -522,8 +599,12 @@ export async function runSupervisor({
       } else if (prior?.phase === 'rolledBack' && raw.journal) {
         try { finishRolledBack(config, stagePaths(store, prior.runId, profile), raw) } catch { warn('update cleanup did not finish') }
       } else if (prior?.phase === 'notUpdated') {
-        try { finishNotUpdated(stagePaths(store, prior.runId, profile), raw) } catch { warn('update cleanup did not finish') }
+        try {
+          discard(stagePaths(store, prior.runId, profile))
+          cleanNotUpdatedBackup(raw)
+        } catch { warn('update cleanup did not finish') }
       }
+      cleanReinstallTrash()
     }
     while (!signal.aborted) {
       if (!active) await checked(child)
@@ -533,11 +614,19 @@ export async function runSupervisor({
         run = {
           version: 1, runId: randomUUID(), requestId: request.requestId, bootId,
           phase: 'checking', from: null, to: null, reason: null, startedAt: stamp(), startedBy: 'owner-route',
-          fromVersions: baseline(profileDir), priorCurrent: read('current.json') ?? null,
+          priorCurrent: readCurrent() ?? null,
         }
-        save()
+        const fromVersions = baseline(profileDir)
+        const updatedAt = stamp()
+        if (Buffer.byteLength(JSON.stringify({ ...run, fromVersions, updatedAt })) > UPDATE_RECORD_LIMIT) {
+          if (request.reinstall) refuseReinstall(stagePaths(store, run.runId, profile), 'profile-invalid')
+          else phase('notUpdated', 'profile-invalid')
+          announce()
+          continue
+        }
+        save({ fromVersions }, updatedAt)
         announce()
-        active = update().finally(() => {
+        active = update(request.reinstall).finally(() => {
           try {
             if (!verdictFailed && !TERMINAL.has(run.phase)) takeRequest(store, read, bootId, true, seen)
           } finally { active = null }

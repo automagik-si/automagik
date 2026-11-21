@@ -15,7 +15,8 @@ test('the supervisor copy contains exactly the main import closure and its keys'
     seen.add(name)
     if (name.endsWith('.json')) {
       const content = JSON.parse(fs.readFileSync(file))
-      assert.ok(Array.isArray(name === 'supervisor/files.json' ? content : content.keys))
+      if (name === 'supervisor/capabilities.json') assert.deepEqual(content, { version: 1, reinstall: true })
+      else assert.ok(Array.isArray(name === 'supervisor/files.json' ? content : content.keys))
       continue
     }
     const content = fs.readFileSync(file, 'utf8')

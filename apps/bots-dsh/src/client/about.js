@@ -181,6 +181,10 @@ export function selfUpdateReason(reason) {
     case 'no-writable-home': return t('there is no writable folder to keep the previous version in.')
     case 'self-update-off': return t('in-app updates are turned off for this instance.')
     case 'rollback-missing': return t("this instance's update supervisor cannot roll back automatically yet, which Force update needs.")
+    case 'reinstall-needs-force': return t('reinstalling the current version requires Force update.')
+    case 'reinstall-unsupported': return t('reinstalling the same version needs a newer update supervisor.')
+    case 'page-outdated': return t('this page is older than the installed update support. Reload the page.')
+    case 'release-changed': return t('the published release changed after the check. Check again.')
     case 'update-running': return t('an update is already running.')
     case 'check-stale': return t('the last check is too old. Check for updates again.')
     case 'team-home-custom': return t('the team is kept in a custom folder the update cannot snapshot.')
@@ -231,7 +235,9 @@ export function runMessage(run) {
   if (!run) return null
   if (RUNNING_PHASES.has(run.phase)) return runStep(run.phase)
   switch (run.phase) {
-    case 'healthy': return t('Updated to Automagik {version}.', { version: run.to })
+    case 'healthy': return run.reinstall === true
+      ? t('Reinstalled Automagik {version}.', { version: run.to })
+      : t('Updated to Automagik {version}.', { version: run.to })
     case 'rolledBack': {
       if (!run.rollback) return t('The update was undone: Automagik {version} is back. Nothing was lost.', { version: run.from })
       const versions = { from: run.from, to: run.to }
@@ -248,7 +254,7 @@ export function runMessage(run) {
     case 'notUpdated': return t('Not updated: {reason} The work that was stopped goes on.', {
       reason: run.detail === 'previous-unsupported'
         ? t('This version of Automagik cannot roll an update back from the app; update it once by hand (docs/upgrade.md).')
-        : selfUpdateReason(run.reason),
+        : selfUpdateReason(run.detail === 'reinstall-unsupported' ? run.detail : run.reason),
     })
     case 'manualRecovery': return run.rollback
       ? t('The update to Automagik {to} failed, and so did going back to {from}. See "In-app updates" in docs/upgrade.md; state.json in the update store names the step that failed.', { from: run.from, to: run.to })
@@ -281,12 +287,11 @@ function forceBlock(status, preflight) {
   if (phase === 'manualRecovery') return runMessage(status.run)
   if (RUNNING_PHASES.has(phase)) return cannotUpdate('update-running')
   if (status.run !== null && !VERDICT_PHASES.has(phase)) return cannotUpdate(null)
-  if (status.available === false) return cannotUpdate(status.reason ?? status.startRefusal)
+  if (status.available === false) return cannotUpdate(status.reason)
   if (status.startEnabled !== true) return cannotUpdate(status.available === true ? 'self-update-off' : null)
-  if (status.startRefusal !== null && !(preflight && status.startRefusal === 'check-stale')) {
-    return cannotUpdate(status.startRefusal)
-  }
-  return rollbackReady(status) ? null : cannotUpdate('rollback-missing')
+  if (status.available !== true) return cannotUpdate(null)
+  if (!rollbackReady(status)) return cannotUpdate('rollback-missing')
+  return preflight || status.forceRefusal === null ? null : cannotUpdate(status.forceRefusal)
 }
 
 function invalidateForce(flow) {
@@ -410,11 +415,15 @@ export function SelfUpdateRow({ Row, check, readResult, readStatus, start, force
     forceFlow.cancel = null
     if (value?.state !== 'available') {
       setResult(value?.state === 'checking' ? { state: 'checking' } : value ?? failedCheck())
-      endForce(value?.state === 'current' ? t('No newer signed release is available.') : null)
+      endForce(value?.state !== 'current' ? null : forceFlow.reinstall
+        ? t('No newer signed release is available.')
+        : t('No newer signed release is available. Reinstalling the same version needs a newer update supervisor.'))
       return
     }
-    if (!await readForceStatus(id) || forceFlow.id !== id) return
-    if (!freshCheck(value)) {
+    const latest = await readForceStatus(id)
+    if (!latest || forceFlow.id !== id) return
+    if (value.reinstall === true && latest.reinstall !== true) return endForce(cannotUpdate('reinstall-unsupported'))
+    if (!freshCheck(value) || typeof value.runId !== 'string' || value.runId === '') {
       endForce(cannotUpdate('check-stale'))
       return
     }
@@ -478,7 +487,9 @@ export function SelfUpdateRow({ Row, check, readResult, readStatus, start, force
     invalidateForce(forceFlow)
     const id = forceFlow.id
     setForceView({ phase: 'checking' })
-    if (!await readForceStatus(id, true) || forceFlow.id !== id) return
+    const latest = await readForceStatus(id, true)
+    if (!latest || forceFlow.id !== id) return
+    forceFlow.reinstall = latest.reinstall === true
     resetCheck()
     forceFlow.checkDeadline = Date.now() + FORCE_CHECK_DEADLINE_MS
     const timer = setTimeout(() => {
@@ -486,7 +497,7 @@ export function SelfUpdateRow({ Row, check, readResult, readStatus, start, force
     }, FORCE_CHECK_DEADLINE_MS)
     forceFlow.cancel = () => clearTimeout(timer)
     let value
-    try { value = await check() } catch (error) { value = failedCheck(error) }
+    try { value = await (forceFlow.reinstall ? check({ reinstall: true }) : check()) } catch (error) { value = failedCheck(error) }
     if (!forceCheckActive(id)) return
     if (value?.state === 'checking' && typeof value.runId === 'string' && value.runId !== '') {
       setForceView({ phase: 'checking', id, runId: value.runId })
@@ -511,7 +522,7 @@ export function SelfUpdateRow({ Row, check, readResult, readStatus, start, force
       setUpdating(false)
     }
   }
-  const requestStart = async (id, previousRunId) => {
+  const requestStart = async (id, previousRunId, checked) => {
     const forced = id !== undefined
     const active = () => !forced || forceFlow.id === id
     if (!forced) setUpdating(true)
@@ -525,7 +536,7 @@ export function SelfUpdateRow({ Row, check, readResult, readStatus, start, force
       forceFlow.cancel = () => { clearTimeout(timer); resolve(timedOut) }
     }) : null
     try {
-      const answer = forced ? await Promise.race([start({ force: true }), timeout]) : await start()
+      const answer = forced ? await Promise.race([start({ force: true, runId: checked.runId, reinstall: checked.reinstall === true }), timeout]) : await start()
       if (!active()) return
       if (forced && (answer === timedOut || Date.now() >= deadline)) {
         followAttempt({ previousRunId })
@@ -567,24 +578,27 @@ export function SelfUpdateRow({ Row, check, readResult, readStatus, start, force
       endForce(cannotUpdate('check-stale'))
       return
     }
-    await requestStart(id, latest.run?.runId)
+    if (checked.reinstall === true && latest.reinstall !== true) return endForce(cannotUpdate('reinstall-unsupported'))
+    await requestStart(id, latest.run?.runId, checked)
   }
   const forceChecking = forceView?.phase === 'checking'
   const forceBusy = forceChecking || forceView?.phase === 'starting'
-  const canStart = !checkExpired && checkFresh() && status?.startEnabled === true && status.startRefusal === null
+  const canStart = result?.reinstall !== true && !checkExpired && checkFresh() && status?.startEnabled === true && status.startRefusal === null
     && !awaitingVerdict && !runLive && typeof start === 'function'
   const runText = runMessage(run)
   if (forceView?.phase === 'confirming' && freshCheck(forceView.result)) {
     return h(Row, {
       label: 'Automagik',
-      hint: h('span', { role: 'status' }, t('Work in progress stops when you click Stop and update, and it comes back by itself once the update is done. Nothing is lost.')),
+      hint: h('span', { role: 'status' }, forceView.result.reinstall === true
+        ? t('Automagik {version} is already installed. Stop and update reinstalls the same signed version: work in progress stops and comes back by itself once it is done. Nothing is lost.', { version: forceView.result.laneVersion })
+        : t('Work in progress stops when you click Stop and update, and it comes back by itself once the update is done. Nothing is lost.')),
     },
     h('button', { type: 'button', className: 'bt-fb-primary', onClick: () => onForceConfirm(forceView) }, t('Stop and update')),
     h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => {
       if (forceFlow.id === forceView.id && !forceFlow.sent) endForce()
     } }, t('Cancel')))
   }
-  if (confirming && !forceBusy && checkFresh()) {
+  if (confirming && !forceBusy && checkFresh() && result.reinstall !== true) {
     return h(Row, {
       label: 'Automagik',
       hint: h('span', { role: 'status' }, t('Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.')),
@@ -601,6 +615,7 @@ export function SelfUpdateRow({ Row, check, readResult, readStatus, start, force
     : awaitingVerdict ? null
     : result === null || waiting ? null
     : result.state === 'available' && checkExpired ? t('Cannot update: {reason}', { reason: selfUpdateReason('check-stale') })
+    : result.reinstall === true ? t('Automagik {version} is already installed.', { version: result.laneVersion })
     : result.state === 'available' ? t('Automagik {version} is available, signed and checked.', { version: result.laneVersion })
     : result.state === 'current' ? t('Up to date.')
     : result.state === 'interrupted' ? t('The check was interrupted. Check again.')

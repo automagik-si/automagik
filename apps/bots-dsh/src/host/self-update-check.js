@@ -7,9 +7,10 @@ import { join } from 'node:path'
 import { inDesktopApp } from './constants.js'
 import { currentDsh } from './dsh-update.js'
 import { refusal } from './refusal.js'
-import { listenerUnknown, prepareStore, readCheckRecord, REASON_CODES, selfUpdateDetails, supervisorOf, writeJsonAtomic } from './self-update.js'
+import { listenerUnknown, prepareStore, readCheckRecord, REASON_CODES, reinstallCapable, selfUpdateDetails, supervisorOf, writeJsonAtomic } from './self-update.js'
 import { installRegistry } from './supervisor/pnpm.js'
 import { inspectRelease, isLaneVersion, PLUGINS, registryOnlyNpmrc, releaseSource } from './supervisor/release.js'
+import { reinstallIntent } from './supervisor/reinstall-intent.js'
 import { identity, ownerIsDead, readOwner, sameEntry, takeOwnerLock } from './supervisor/store.js'
 
 const REPLY_WAIT_MS = 5000
@@ -102,19 +103,20 @@ async function runCheck({
         folder = { path, assertIdentity: checkFolder(path) }
         folder.assertIdentity()
         writeFileSync(join(path, MARKER), JSON.stringify({ version: 1, runId, ...owner }), { flag: 'wx', mode: 0o600 })
-        const { state, reason } = await inspectRelease({
+        const { state, reason, reinstall } = await inspectRelease({
           profileDir, current, view, getDshVersion, fetch, source, registry: dir => {
             // A manager-provided registry still cannot make the staging profile reproduce other npmrc settings.
             registryOnlyNpmrc(dir)
             return registry(dir, folder.path)
           },
-          requireAccess,
+          allowEqual: run.allowEqual, requireAccess,
           saveTarball: (plugin, bytes) => {
             folder.assertIdentity()
             writeFileSync(join(path, `${plugin.name.split('/')[1]}.tgz`), bytes, { flag: 'wx', mode: 0o600 })
           },
         })
         record = result(state, reason)
+        if (reinstall === true) Object.assign(record, { version: 2, reinstall: true })
       }
     } catch {
       record = result('unavailable', 'no-store')
@@ -155,13 +157,14 @@ function startCheck(options, ownsTeam = () => true) {
   const { laneUrl, keys } = source
 
   const { profileDir } = options
+  const allowEqual = options.reinstall === true && reinstallCapable(options.env)
   const active = running.get(profileDir)
   if (active?.ownsTeam() && active.ownsStore?.() !== false) {
-    if (active.lane === laneUrl.href && active.keys === keys) return active
-    return refuseLane()
+    if (active.lane !== laneUrl.href || active.keys !== keys) return refuseLane()
+    return active.allowEqual === allowEqual ? active : { ownsTeam, promise: Promise.resolve({ state: 'checking' }) }
   }
 
-  const run = { runId: randomUUID(), ownsTeam, lane: laneUrl.href, keys }
+  const run = { runId: randomUUID(), ownsTeam, lane: laneUrl.href, keys, allowEqual }
   const inputs = { ...options, source }
   run.promise = Promise.resolve().then(async () => {
     try {
@@ -182,7 +185,10 @@ export function selfUpdateCheck(options) {
 
 export function savedResult(profileDir) {
   const record = readCheckRecord(profileDir)
-  if (record?.version !== 1) return null
+  if (record?.version !== 1 && record?.version !== 2) return null
+  const reinstall = record.version === 2
+  if (reinstall ? reinstallIntent(record, { saved: true }) === null
+    : record.reinstall !== undefined && record.reinstall !== false) return null
   const { runId, checkedAt, state, reason, laneVersion, sequence, supervisor, plugins } = record
   if (typeof runId !== 'string' || runId === '' || typeof checkedAt !== 'string' || !Number.isFinite(Date.parse(checkedAt))
     || new Date(checkedAt).toISOString() !== checkedAt
@@ -193,8 +199,9 @@ export function savedResult(profileDir) {
     || typeof supervisor !== 'boolean' || !Array.isArray(plugins) || plugins.length > PLUGINS.length
     || plugins.some(plugin => !PLUGINS.includes(plugin?.name) || !isLaneVersion(plugin.from) || !isLaneVersion(plugin.to))) return null
   return {
-    version: 1, runId, checkedAt, state, reason, laneVersion, sequence, supervisor,
-    plugins: plugins.map(({ name, from, to }) => ({ name, from, to })),
+    version: record.version, runId, checkedAt, state, reason, laneVersion, sequence, supervisor,
+    ...(reinstall ? { reinstall: true } : {}),
+    plugins: plugins.map(({ name, from, to, sha256 }) => ({ name, from, to, ...(reinstall ? { sha256 } : {}) })),
   }
 }
 
@@ -218,11 +225,11 @@ export function newerCheckedCandidate(check, current) {
 export function install(rt) {
   const profileOf = () => rt.ctx.get?.('profileContext')?.dir
   let lastRun
-  rt.selfUpdateCheck = async () => {
+  rt.selfUpdateCheck = async (reinstall = false) => {
     const profileDir = profileOf()
     const generation = rt.teamGeneration()
-    const run = startCheck({ profileDir, ctx: rt.ctx }, () => rt.sameTeam(generation))
-    lastRun = { profileDir, run }
+    const run = startCheck({ profileDir, ctx: rt.ctx, reinstall }, () => rt.sameTeam(generation))
+    if (run.runId !== undefined) lastRun = { profileDir, run }
     const { promise, runId } = run
     let timer
     try {

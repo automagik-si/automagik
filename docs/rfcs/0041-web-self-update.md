@@ -46,12 +46,12 @@ The updater reads **only** the signed lane pointer, never the releases list:
    `:24-26`); the owner asked to update "o automagik".
 4. It downloads each tarball from GitHub only, checks the **sha256**, the size and the `integrity`
    before unpacking, and refuses anything that does not match.
-5. **Refusals, all before the click:** a version not higher than the installed one (an update never
-   downgrades); a `sequence` lower than the last one this instance took (recorded in `current.json`, as
-   am refuses its own pointer at `am/lib/self.mjs:369`); a plugin whose `engines.dsh` the running DSH
-   does not satisfy (as `scripts/upgrade.ts:543-545` and `apps/desktop/src/lane.js:132` check); an
-   instance with no supervisor or no writable home; and an instance that cannot reach the package
-   registry the install needs at the moment of the check. These checks keep the nod from offering an
+5. **Refusals before the click.** An update needs a higher version. The owner's Force update
+   can reinstall the same signed version. Both reject downgrades and a `sequence` lower than the
+   last one this instance took (recorded in `current.json`, as with am's pointer in
+   `am/lib/self.mjs`). The check also refuses if the running DSH fails a plugin's `engines.dsh`
+   requirement, the instance lacks a supervisor or writable home, or the package registry is
+   unreachable. These checks keep the nod from offering an
    update that is known to fail; they cannot promise a later download or install succeeds, and a
    failure after the click takes the path in "When the update fails before the switch".
 
@@ -156,6 +156,10 @@ profile directory (`server/profile-follow.mjs:144-174`), which would carry or dr
 - `current.json` names the live version, the version kept beside it and the last lane `sequence`
   taken. At most two versions are kept; the third is removed only after a healthy run of the new one,
   and never the one a rollback would return to.
+- A same-version reinstall keeps the replaced tree, lockfile, archives, entries and team snapshot in
+  `reinstall/<runId>/` through the trial. The previous kept version stays in `versions/`. A durable
+  healthy, rolled-back or given-back verdict lets the supervisor move the replaced copy into
+  `reinstall-trash/` for removal. An unfinished reinstall keeps its recovery files.
 - **The data a person cares about — sessions, Bots, memory, settings, secrets and model keys — is not
   part of a version** and is never copied, restored or touched by an update or a rollback. Both move
   only the installer-owned files above; neither restores a whole-profile copy or backup.
@@ -215,11 +219,17 @@ The restart kills the web socket under the open page, so the modal cannot be dri
 
 Work stops at the click, before the download (Q6), so a failure before the switch must give it back:
 a refused or failed download, a failed check, a staged install that does not converge, a refused
-switch, or a supervisor restart before the switch. In each case the supervisor discards the staging
-profile, starts the unchanged DSH child again if it had stopped it, confirms the still-current
-instance answers the health checks above (or records `manualRecovery` if it does not), records `notUpdated`
-with the reason, reopens admission and releases the held work once, through the same resume as after a
-healthy update. The modal says the update did not happen, why, and that the work came back.
+switch, or a supervisor restart before the switch. For an ordinary update or a reinstall that
+reached staging, the supervisor discards the staging profile and starts the unchanged DSH child
+again if it had stopped it. It checks the still-current instance's health, records `notUpdated`
+with the reason when health passes or `manualRecovery` when health fails, and releases held work
+once on `notUpdated`.
+
+If the supervisor refuses a same-version reinstall before staging begins, it publishes `notUpdated`
+immediately. The existing DSH child resumes held work on that verdict even when a selected plugin
+failed to load. The verdict uses a reason that older supervisor copies can read, and
+`reinstall-refusal.json` records the precise cause for that run. The modal says the update did not
+happen, why, and that the work came back.
 
 ## Trust, consent and what the updater never does
 
@@ -386,12 +396,19 @@ retires `?mock-1540`.
 **Force update (coordinator, 2026-11-20).** On an identified web host, Settings > About's Automagik line
 also has Force update, as the desktop app's (#1270). It runs a fresh signed check even when the last one
 said up to date. It asks for one confirmation when the check offers the set and the running supervisor
-supports automatic rollback (delivery 6). Stop and update makes the same start as Update now, with the
-same `request.json`, hold, supervisor run and verdict. Delivery 7 adds the modal and delivery 8 brings
+supports automatic rollback (delivery 6). Stop and update binds the start to that check's run ID and
+reinstall intent. A newer release uses the usual four-key request and the same hold and supervisor
+run as Update now. A reinstall request also carries the checked version, sequence and each selected
+tarball's SHA-256. The supervisor checks these against the independently verified lane before staging. Delivery 7 adds the modal and delivery 8 brings
 the flow to Arca. The row explains refusals. A refusal before the start stops nothing. If the host
 refuses a start after stopping work, it reopens admission and gives the work back while it still holds
 the team, as it does for Update now. Both actions can lose track of an accepted request if the page
 reloads before the supervisor records the run. The browser checks rollback capability again at
-confirmation. A host downgraded by hand during confirmation may lack the Force start gate. Reinstalling
-the current version follows delivery 6 and requires changes to the supervisor's equal-version switch rule
-and version storage.
+confirmation. A host downgraded by hand during confirmation may lack the Force start gate. A same-version
+reinstall can replace damaged or missing files inside the installed plugin trees while their manifests,
+the owner route and update contract still load. It runs the same health checks and restores the original
+tree on failure. Fresh installs can reinstall at the first supervisor start. On an existing install with
+an older current copy, two healthy updates that ship capable supervisor copies and a service restart
+enable reinstall. The running copy and every populated launcher slot must support it. Arca must first
+support same-version journal recovery before image follow and preserve a committed reinstall across
+boots on a persisted volume.

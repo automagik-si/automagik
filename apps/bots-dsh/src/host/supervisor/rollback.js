@@ -5,7 +5,7 @@ import { homeLock } from '../home-lock.js'
 import { installedPlugins, PLUGINS } from './release.js'
 import { assertRelinked, discardArchives, equalFile, PROFILE_INPUTS, takeProfileLock, VENDOR, withLaneEntries } from './stage.js'
 import { directory, identity, regularBytes, syncDirectory, writeBytesAtomic } from './store.js'
-import { DATA_FILES, digest, sameInstallerManifest, UndoIOError, UndoPreflightError, undoSwitch } from './switch.js'
+import { DATA_FILES, digest, sameInstallerManifest, trashReinstall, UndoIOError, UndoPreflightError, undoSwitch } from './switch.js'
 
 const BOTS = '@automagik/bots-dsh'
 const CONTRACT = ['node_modules', BOTS, 'src/host/update-contract.json']
@@ -193,8 +193,9 @@ export function finishRolledBack(config, staging, run) {
   if (identity(join(kept, 'node_modules')) || identity(join(kept, 'pnpm-lock.yaml'))) {
     throw new Error('The previous profile has not been restored')
   }
+  if (run.reinstall === true) trashReinstall(config.store, run)
   fs.rmSync(staging.root, { recursive: true, force: true })
-  fs.rmSync(kept, { recursive: true, force: true })
+  if (run.reinstall !== true) fs.rmSync(kept, { recursive: true, force: true })
 }
 
 export async function runRollback({ config, staging, run, save, signal, stop, restoreCurrent, start, health,
