@@ -4,6 +4,8 @@ import { accessConfig, AccessConfigurationError, AccessSignIn } from './gate-acc
 import { cloudConfig, CloudConfigurationError, CloudSignIn } from './gate-cloud.mjs'
 import { createGate, pinOrigin } from './gate.mjs'
 import { writeFileSync } from 'node:fs'
+import { callerKeyDirectories, createSigner, instanceOf } from './gate-caller.mjs'
+import { multiuserMode } from './profile-multiuser.mjs'
 import { controlServer } from './gate-control.mjs'
 import { readOwner, SessionStore } from './gate-store.mjs'
 import { DshCredentials, DSH_HOST } from './gate-upstream.mjs'
@@ -28,19 +30,28 @@ try {
   const sessions = cloud ? new SessionStore(dir, { memory: true, accepts: cloud.accepts }) : new SessionStore(dir)
   // No owner means no session. Unknown owner formats already stopped startup above.
   if (!cloud && !owner) sessions.revokeAll()
-  const credentials = new DshCredentials({ launchFile: '/dsh/dsh/launch-url' })
+  const mode = multiuserMode(process.env.AUTOMAGIK_GATE_MULTIUSER)
+  if (mode === 'invalid') throw new Error('Invalid gate multiuser value')
+  const multiuser = mode === 'on'
+  let caller
+  if (multiuser) {
+    const paths = callerKeyDirectories(dir, process.env.AUTOMAGIK_GATE_CALLER_PUBLIC)
+    caller = createSigner({ ...paths, instance: () => instanceOf({ env: process.env, dir: paths.dir }) })
+    caller.publish()
+  }
+  const credentials = new DshCredentials()
   const access = config ? new AccessSignIn(config, { ownerDir: dir }) : undefined
-  const selfHosted = !claimMode ? undefined : new SelfHostedClaim({ dir, origin: origin.origin, sessions, claimMode: process.env.AUTOMAGIK_GATE_CLAIM ?? 'local' })
+  const selfHosted = !claimMode ? undefined : new SelfHostedClaim({ dir, origin: origin.origin, sessions, clearOnSignIn: multiuser, claimMode: process.env.AUTOMAGIK_GATE_CLAIM ?? 'local' })
   const published = process.env.AUTOMAGIK_GATE_HOST || DSH_HOST
   if (claimMode && ![DSH_HOST, '0.0.0.0'].includes(published)) throw new claimErrors('AUTOMAGIK_GATE_HOST must be loopback or the IPv4 wildcard bind address')
-  server = createGate({ origin: origin.origin, sessions, credentials, access, cloud, selfHosted })
+  server = createGate({ origin: origin.origin, sessions, credentials, access, cloud, selfHosted, multiuser, caller })
   if (selfHosted) {
     if (selfHosted.claimMode === 'local') {
       const bootstrapPort = Number(process.env.AUTOMAGIK_GATE_BOOTSTRAP_PORT || 3083)
       if (!Number.isInteger(bootstrapPort) || bootstrapPort < 1 || bootstrapPort > 65535 || [3081, port].includes(bootstrapPort)) {
         throw new claimErrors('AUTOMAGIK_GATE_BOOTSTRAP_PORT must be a separate valid port, never the DSH or main gate port')
       }
-      bootstrap = createGate({ origin: origin.origin, sessions, credentials, selfHosted, bootstrap: true })
+      bootstrap = createGate({ origin: origin.origin, sessions, credentials, selfHosted, multiuser, caller, bootstrap: true })
       await new Promise((resolve, reject) => {
         bootstrap.once('error', reject)
         bootstrap.listen(bootstrapPort, DSH_HOST, resolve)

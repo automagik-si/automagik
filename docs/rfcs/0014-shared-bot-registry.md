@@ -145,7 +145,7 @@ Per Bot:
 | `main` | repo file: the project's main Bot (exactly one, D2). Home file: a team Main Bot | `mainBotIds` | `kind: "main"` |
 | `pet` | `{ source: "builtin" \| "team", id }` | `avatar.pet` | `look` → `<character>-<colour>`, `team` |
 | `folder`, `machine` | home file only; `machine` is an `hc machine` name, absent for this computer | `workDir` | the project key |
-| `agent`, `model`, `worker`, `rank`, `lead`, `category`, `planned` | Herdr's seat and team fields | ignored | same |
+| `agent`, `model`, `worker` (including `worker.agentHome`), `rank`, `lead`, `category`, `planned` | Herdr's seat and team fields | ignored | same |
 | `dsh` | `{ model, effort, color }`, DSH's chat route and ink (Q14) | same | ignored |
 
 DSH's ids are the ids of Sessions it made (`roster.js:203`, `createSession` at `:109`, which

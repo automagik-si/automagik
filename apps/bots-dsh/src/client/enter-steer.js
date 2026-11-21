@@ -21,12 +21,12 @@ export const enterSteers = (event, input) => event.key === 'Enter'
 // button per row. An Agent that stopped between read and steer
 // (session/steer-unavailable) or a row it already claimed
 // (session/queue-item-not-found) converges silently; anything else reports.
-export const steerQueued = async (session) => {
+export const steerQueued = async (session, update = (id, action) => session.updateQueue(id, action)) => {
   try {
     const queued = session.projections.faceOf('inbox').getSnapshot()?.['next-turn'] ?? []
     for (const item of queued) {
       if (item.source?.kind !== 'user') continue
-      const result = await session.updateQueue(item.id, { kind: 'steer' })
+      const result = await update(item.id, { kind: 'steer' })
       if (result.ok) continue
       return result.error.code === 'session/steer-unavailable' || result.error.code === 'session/queue-item-not-found' ? 'done' : 'failed'
     }

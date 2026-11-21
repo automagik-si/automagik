@@ -243,6 +243,8 @@ const rulesAt = (path, content, allowlist = []) => {
 test('own code is the image scripts, the profile and @automagik packages; a dependency is not', () => {
   assert.equal(ownCode('opt/automagik/entrypoint.mjs'), true)
   assert.equal(ownCode('opt/automagik/profile/package.json'), true)
+  assert.equal(ownCode('opt/am/runner/locks.mjs'), true)
+  assert.equal(ownCode('opt/am/runner/proto.mjs'), true)
   assert.equal(ownCode(`${PLUGIN}/index.js`), true)
   assert.equal(ownCode('opt/automagik/profile/node_modules/.pnpm/@automagik+bots-dsh@3.0.0/node_modules/@automagik/bots-dsh/index.js'), true)
   assert.equal(ownCode('image-config'), true)

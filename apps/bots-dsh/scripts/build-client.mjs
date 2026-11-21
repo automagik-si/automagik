@@ -65,6 +65,47 @@ export async function bundleClient() {
 
 const PANE_OUTPUT = join(PLUGIN, 'client.pane.js')
 const PANE_NAME = 'client.pane.js'
+const GATED_NAME = 'client.gated.js'
+const GATED_OUTPUT = join(PLUGIN, GATED_NAME)
+
+// The gated surfaces use the main bundle's UI and viewer guard in the same document.
+export async function bundleGated() {
+  const result = await build({
+    absWorkingDir: PLUGIN,
+    entryPoints: ['src/client/gated-client.js'],
+    bundle: true,
+    format: 'cjs',
+    platform: 'browser',
+    target: 'es2022',
+    external: PLATFORM_MODULES,
+    plugins: [{
+      name: 'gated-shared',
+      setup(build) {
+        build.onResolve({ filter: /^\.\/gated-shared\.js$/ }, ({ path }) => ({ path, external: true }))
+      },
+    }],
+    charset: 'utf8',
+    write: false,
+    logLevel: 'silent',
+  })
+  if (result.warnings.length > 0) throw new Error(`esbuild warnings:\n${result.warnings.map(warning => warning.text).join('\n')}`)
+  return [
+    '// Generated from src/client/gated-client.js by scripts/build-client.mjs. Do not edit by hand.',
+    'window.__ModuleLoader__.load({',
+    `  id: '${PACKAGE_NAME}',`,
+    `  chunk: '${GATED_NAME}',`,
+    '  factory: (platformRequire) => ({',
+    '    initialize: (shared) => {',
+    "const require = (name) => name === './gated-shared.js' ? shared : platformRequire(name)",
+    'const module = { exports: {} }',
+    result.outputFiles[0].text.trimEnd(),
+    'return module.exports',
+    '    },',
+    '  }),',
+    '})',
+    '',
+  ].join('\n')
+}
 
 /**
  * The Code side's renderer as its own package-local chunk: the DSH module loader keeps it out
@@ -127,19 +168,22 @@ export async function bundleOffice() {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const next = await bundleClient()
   const pane = await bundlePane()
+  const gated = await bundleGated()
   const office = await bundleOffice()
   if (process.argv.includes('--check')) {
-    let current = null, currentPane = null, currentOffice = null
+    let current = null, currentPane = null, currentOffice = null, currentGated = null
     try { current = readFileSync(OUTPUT, 'utf8') } catch { /* missing counts as stale */ }
     try { currentPane = readFileSync(PANE_OUTPUT, 'utf8') } catch { /* missing counts as stale */ }
+    try { currentGated = readFileSync(GATED_OUTPUT, 'utf8') } catch { /* missing counts as stale */ }
     try { currentOffice = readFileSync(OFFICE_OUTPUT, 'utf8') } catch { /* missing counts as stale */ }
-    if (current !== next || currentPane !== pane || currentOffice !== office) {
-      console.error('client.js, client.pane.js or office.js is stale: run `bun run build` in apps/bots-dsh and commit the result')
+    if (current !== next || currentPane !== pane || currentGated !== gated || currentOffice !== office) {
+      console.error('client.js, client.pane.js, client.gated.js or office.js is stale: run `bun run build` in apps/bots-dsh and commit the result')
       process.exit(1)
     }
   } else {
     writeFileSync(OUTPUT, next)
     writeFileSync(PANE_OUTPUT, pane)
+    writeFileSync(GATED_OUTPUT, gated)
     writeFileSync(OFFICE_OUTPUT, office)
   }
 }

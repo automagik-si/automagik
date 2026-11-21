@@ -18,8 +18,9 @@
 // turn ended, it opens the fallback turn. A turn that started meanwhile (the person wrote
 // again) already ran on the fallback, so the notice is not sent then.
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { leavesCli } from '../shared/routes.js'
+import { commandCapableAgent, leavesCli } from '../shared/routes.js'
 import { splitRef } from './text.js'
+import { NO_BOT_RUNNER } from './bot-runner.js'
 import { MODEL_ACCESS_REQUIRED, switchFailure, switchPending } from './model-state.js'
 
 // Failures another model cannot answer better: the conversation is too long (parts.js moves
@@ -27,7 +28,7 @@ import { MODEL_ACCESS_REQUIRED, switchFailure, switchPending } from './model-sta
 // account needs a sign-in (an agent whose CLI is signed out: model-state.js; the Bot stays on
 // its pick and the person is asked to sign in, never moved silently to another model). Any
 // other failure of an agent (ACP_AGENT) falls back like any model's, with its notice.
-export const KEEP_CODES = new Set(['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'IMAGE_OFFLOAD_REQUIRED', MODEL_ACCESS_REQUIRED, 'REMOTE_HERMES'])
+export const KEEP_CODES = new Set(['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'IMAGE_OFFLOAD_REQUIRED', MODEL_ACCESS_REQUIRED, NO_BOT_RUNNER, 'REMOTE_HERMES'])
 
 const sameRoute = (a, b) => a?.provider === b?.provider && a?.model === b?.model
 const label = route => `${route.provider}/${route.model}`
@@ -79,7 +80,7 @@ export function install(rt) {
   const armed = new Map()
   // Agent id -> the notice that waits for the failed turn to end.
   const waking = new Map()
-  const fallbackRoute = async () => splitRef(config.fallbackModel ?? await rt.defaultModel())
+  const fallbackRoute = async noCommands => splitRef(config.fallbackModel ?? await rt.defaultModel({ noCommands }))
   // A switch that cannot run (switchFailure) goes back instead: the Bot's own chat with a switch
   // not yet confirmed (model-state.js) or a fresh part still waiting for its first answer
   // (parts.js, revertSwitch). Nothing runs again on its own there, so no fallback turn is woken.
@@ -94,11 +95,16 @@ export function install(rt) {
     const decided = await next()
     if (decided !== undefined || payload.signal?.aborted) return decided
     const { agent, failure, turn } = payload
+    if (!failure || KEEP_CODES.has(failure.code)) return decided
     if (!rt.isBotSession(agent.id)) return decided
-    if (goesBack(agent.session?.id ?? agent.id, failure)) return decided
+    const failedIn = agent.session?.id ?? agent.id
+    if (goesBack(failedIn, failure)) return decided
     const failed = agent.session.requestHeader?.()?.config
-    const fallback = fallbackFor({ failure, failed, fallback: await fallbackRoute().catch(() => undefined) })
+    if (failed === undefined) return decided
+    const noCommands = rt.botRunnerRequired?.(failedIn, agent) === true
+    const fallback = fallbackFor({ failure, failed, fallback: await fallbackRoute(noCommands).catch(() => undefined) })
     if (fallback === undefined) return decided
+    if (commandCapableAgent(fallback.provider) && (noCommands || rt.botRunnerRequired?.(failedIn, agent))) return decided
     // A Session at Full access on a coding CLI is not moved to another provider on its own:
     // there the CLI runs without asking, and the fallback model would run DSH's own tools
     // unasked at the same level. The turn fails as it did, and the chat says why it stays.
@@ -106,7 +112,6 @@ export function install(rt) {
     // It is the Bot's saved model that says it is on that CLI, not only the route that failed:
     // a Session left on a CLI its Bot was moved off (a selection there that failed) is not one
     // the person keeps on it, so it falls back as before. So does one whose Bot is not known.
-    const failedIn = agent.session?.id ?? agent.id
     const owner = rt.botOf?.(rt.selfOf?.(failedIn))
     const saved = typeof owner?.model === 'string' ? splitRef(owner.model).provider : undefined
     if (leavesCli(failed, fallback) && saved === failed.provider && rt.sessionWide?.(failedIn, agent.session) === true) {
@@ -125,6 +130,7 @@ export function install(rt) {
     // keeps its fixed route, so the backup runs the turn this wakes. The Bot's own selection
     // is snapshotted whole (provider, model and its explicit reasoning effort) first.
     const own = agent.model.current?.()
+    if (noCommands && commandCapableAgent(own?.provider ?? failed.provider)) return decided
     try {
       agent.model.select({ provider: fallback.provider, model: fallback.model })
     } catch (error) {
@@ -145,7 +151,7 @@ export function install(rt) {
       'ds-bot: %s failed on %s (%s); the next turn continues on %s',
       rt.botOf?.(agent.id)?.name ?? agent.id, label(failed), failure.code, label(fallback),
     )
-    wake(agent, fallbackNotice(failed, fallback, failure), turn)
+    wake(agent, fallbackNotice(failed, fallback, failure), turn, noCommands)
     return decided
   })
 
@@ -155,17 +161,23 @@ export function install(rt) {
     if (sessionId !== undefined) armed.delete(sessionId)
     rt.warn('ds-bot: the fallback turn was not woken: %s', error)
   }
-  function send(agent, notice) {
+  function send(agent, notice, noCommands) {
     try {
-      agent.followup(notice)
+      const provider = rt.botRunnerRequired === undefined ? undefined : agent.model.current?.()?.provider
+      if (!commandCapableAgent(provider) || !(noCommands || rt.botRunnerRequired?.(agent.session?.id ?? agent.id, agent))) {
+        agent.followup(notice)
+      } else {
+        armed.delete(agent.session?.id)
+        restore.delete(agent.id)
+      }
     } catch (error) {
       unarm(agent, error)
     }
   }
   // The notice opens the fallback turn once the failed one has ended (see the header). Never
   // awaited here: a request-error listener that waits for its own Agent to be idle never returns.
-  function wake(agent, notice, failedTurn) {
-    if (typeof agent.whenIdle !== 'function') return send(agent, notice)
+  function wake(agent, notice, failedTurn, noCommands) {
+    if (typeof agent.whenIdle !== 'function') return send(agent, notice, noCommands)
     const entry = { agent, failedTurn }
     waking.set(agent.id, entry)
     void Promise.resolve()
@@ -173,7 +185,7 @@ export function install(rt) {
       .then(() => {
         if (waking.get(agent.id) !== entry) return
         waking.delete(agent.id)
-        send(agent, notice)
+        send(agent, notice, noCommands)
       }, (error) => {
         if (waking.get(agent.id) !== entry) return
         waking.delete(agent.id)

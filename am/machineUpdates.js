@@ -28,6 +28,7 @@
 // for the CLI, Herdr's exec for the sidebar) is passed in, so `node --test` runs it. Apache-2.0.
 
 import { installOn, resultLine } from "./meterFleet.js";
+import { PLAN_FILE } from "./accountsPlanRecord.js";
 
 /** The record of every machine's versions and last update, in the app home's automagik-herdr folder. */
 export const STATE_FILE = "linked-updates.json";
@@ -130,6 +131,28 @@ if command -v setsid >/dev/null 2>&1; then setsid sh "$cli" machines update --js
 else nohup sh "$cli" machines update --json </dev/null >/dev/null 2>&1 &
 fi
 exit 0`;
+
+// Accounts retries share the hourly schedule and run apart from the updater.
+export const START_ACCOUNTS = `d=$1/mods/am-sidebar
+[ -f "$d/bin/accounts.mjs" ] && [ -f "$d/bin/run.sh" ] || exit 0
+HERDR_APP_HOME=$1
+export HERDR_APP_HOME
+if command -v setsid >/dev/null 2>&1; then setsid sh "$d/bin/run.sh" "$d/bin/accounts.mjs" apply --retry </dev/null >/dev/null 2>&1 &
+else nohup sh "$d/bin/run.sh" "$d/bin/accounts.mjs" apply --retry </dev/null >/dev/null 2>&1 &
+fi
+exit 0`;
+
+export async function startAccountsRetry({ exec, appHome, readText }) {
+  try {
+    if (typeof (await readText(`${appHome}/mods/am-quota/mod.json`)) !== "string") return { started: false, why: "off" };
+  } catch { return { started: false, why: "off" }; }
+  try {
+    if (typeof (await readText(`${appHome}/${PLAN_FILE}`)) !== "string") return { started: false, why: "no-plan" };
+  } catch { return { started: false, why: "no-plan" }; }
+  try { await exec("sh", ["-c", START_ACCOUNTS, "sh", appHome]); }
+  catch { return { started: false, why: "no-shell" }; }
+  return { started: true };
+}
 
 const short = (s) => String(s ?? "").trim().split("\n").filter(Boolean).pop()?.slice(0, 400) ?? "";
 const VERSION = /^[0-9][0-9A-Za-z.+-]{0,39}$/;

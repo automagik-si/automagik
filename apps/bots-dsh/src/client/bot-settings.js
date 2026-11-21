@@ -24,6 +24,11 @@ import {
   attachedRoleIds, attachmentStatus, BUILTIN_ROLES, CHOOSE_NONE_FIRST, effectiveRoleIds, GENIE_ATTACH_REFUSAL,
   isPackageRoleId, packageAttachment, packageDeclarations, packageRecoveryId, ROLE_SOURCE_UNCONFIRMED, roleTagOf, rolesOn, sameRolePin,
 } from '../shared/roles.js'
+let PeopleCard
+export function installPeopleCard(component) {
+  PeopleCard = component
+  return () => { if (PeopleCard === component) PeopleCard = undefined }
+}
 
 const capitalize = word => word[0].toUpperCase() + word.slice(1)
 
@@ -383,6 +388,7 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
         disabled: bot.private !== true && (isMainBot || inGroup || !bot.workDir),
         onChange: value => save({ private: value }),
       })),
+    PeopleCard ? h(PeopleCard, { bot, roster }) : null,
     h(Card, { title: t('Instructions') },
       h(Row, { label: t('What this Bot does'), hint: t('Its job on the team. Part of the Bot\'s system prompt.'), stack: true },
         h(InlineText, { label: t('Instructions'), value: bot.instructions, multiline: true, placeholder: t('What this Bot is responsible for…'), onSave: instructions => save({ instructions }) }))),

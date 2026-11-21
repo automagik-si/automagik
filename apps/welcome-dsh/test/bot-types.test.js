@@ -80,8 +80,10 @@ test('the Bot team installs from the source this plugin came from, else its rele
 
 test('the welcome installs Omni\'s plugins from the Omni release the desktop app carries', () => {
   const desktop = JSON.parse(readFileSync(new URL('../../desktop/omni.json', import.meta.url), 'utf8'))
-  assert.deepEqual(OMNI_RELEASE, { repository: desktop.repository, version: desktop.version, commit: desktop.commit })
+  const { tree, ...release } = OMNI_RELEASE
+  assert.deepEqual(release, { repository: desktop.repository, version: desktop.version, commit: desktop.commit })
   assert.match(OMNI_RELEASE.commit, /^[0-9a-f]{40}$/)
+  assert.match(tree, /^[0-9a-f]{40}$/)
 })
 
 test('a plain DSH reports the Omni plugins missing, and installs them in order through its plugin manager', async () => {

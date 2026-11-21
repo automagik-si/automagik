@@ -761,4 +761,244 @@ class ChatTest {
         assertEquals("dsh:session-1:19#approval-c19", s.receipts.last().id)
         assertEquals("dsh:session-1:4#approval-c4", s.receipts.first().id)
     }
+
+    // ---- groups (RFC 0040)
+
+    private val room = "dsh:room:r1"
+    private fun granted(s: Chat.State = Chat.State(room)) = s.copy(dshWrite = true, groups = true)
+    private fun card(id: String, name: String, open: Boolean = true, receipt: String? = null, summary: String = "Run tests") =
+        """{"id":"$id","kind":"approval","name":"$name","open":$open,"answerable":$open,
+            "choices":["allow","deny"],"tool":"Bash","reason":"Run a command","summary":"$summary","receipt":${receipt ?: "null"}}"""
+
+    private fun groupSnapshot(approvals: List<String> = emptyList(), settled: String = "[]", title: String = "Launch") =
+        j("""{"type":"snapshot","title":"$title","rows":[{"id":"$room:1","kind":"text","text":"Hi"}],
+            "approval":${card("legacy", "Legacy")},"question":{"id":"q1","kind":"question","open":true},
+            "approvals":[${approvals.joinToString(",")}],"settled":$settled}""")
+    private fun bothGroupCards() = Chat.reduce(granted(), groupSnapshot(listOf(card("a1", "Ana"), card("a2", "Ben"))))
+    private fun groupEvent(s: Chat.State, row: String) = Chat.reduce(s, j("""{"type":"approval","row":$row}"""), now = 100)
+    private fun groupGone(s: Chat.State, reason: String) = Chat.reduce(s, j("""{"type":"gone","reason":"$reason"}"""))
+    private fun groupCarry(s: Chat.State) = Chat.carry(s, granted())
+
+    @Test fun aGroupIsDshButNeverABot() {
+        val bot = "dsh:b1"
+        val offered = Attach.peer(offeredHello())
+        assertTrue(offered is Attach.Peer.Offered)
+        assertTrue(Chat.isDsh(room))
+        assertTrue(Chat.isGroup(room))
+        assertFalse(ChatSettings.isBot(room))
+        assertFalse(Attach.usable(offered, true, room, true))
+        assertTrue(Chat.readOnly(room, dshWrite = true))
+        assertFalse(Chat.readOnly(room, true, groups = true))
+        assertTrue(Chat.isDsh(bot))
+        assertFalse(Chat.isGroup(bot))
+        assertTrue(ChatSettings.isBot(bot))
+        assertTrue(Attach.usable(offered, true, bot, true))
+        assertFalse(Chat.readOnly(bot, dshWrite = true))
+    }
+
+    @Test fun aGroupSnapshotOpensEveryApprovalAsItsOwnCard() {
+        val s = bothGroupCards()
+        assertEquals(listOf("a1", "a2"), s.approvals.map { it.id })
+        assertNull(s.approval)
+        assertNull(s.question)
+        assertEquals(2, s.answerable)
+        assertEquals("Launch", s.title)
+        assertEquals(listOf("Ana", "Ben"), s.approvals.map { it.name })
+        assertEquals("Run a command", s.approvals.first().reason)
+        s.approvals.forEach { assertEquals(listOf("allow", "deny"), ChatActions.choices(s, it)) }
+        assertSame(s, Chat.reduce(s, j("""{"type":"question","row":{"id":"q1","kind":"question","open":true}}""")))
+    }
+
+    @Test fun denyOnOneCardLeavesTheOtherOpen() {
+        val close = card("a2", "Ben", false, """{"by":"phone","name":"Pixel","outcome":"deny"}""")
+        val s = groupEvent(bothGroupCards(), close)
+        val open = s.approvals.single()
+        val receipt = s.receipts.single()
+        assertEquals("a1", open.id)
+        assertEquals(listOf("allow", "deny"), ChatActions.choices(s, open))
+        assertEquals("a2", receipt.id)
+        assertTrue(receipt.live)
+        assertEquals("Answered on the phone (Pixel): Deny", Chat.receiptText(receipt))
+        assertTrue(Chat.receiptHeading(receipt, "Launch", "14:02").startsWith("Ben"))
+    }
+
+    @Test fun aCardClosedOnTheComputerSaysSo() {
+        for ((receipt, expected) in listOf(
+            """{"by":"computer","outcome":"allow"}""" to "Answered on the computer: Allow",
+            """{"by":null,"outcome":"withdrawn"}""" to "No longer needed",
+            null to Chat.CLOSED_AWAY
+        )) {
+            val s = groupEvent(bothGroupCards(), card("a1", "Ana", false, receipt))
+            assertEquals(expected, Chat.receiptText(s.receipts.single()))
+        }
+    }
+
+    @Test fun anOpenRowForAKnownIdUpdatesInPlace() {
+        val s = groupEvent(bothGroupCards(), card("a1", "Ana", summary = "Check status"))
+        assertEquals(listOf("a1", "a2"), s.approvals.map { it.id })
+        assertEquals("Check status", s.approvals.first().summary)
+        assertEquals("Bash: Check status", s.cards.first().label)
+        assertEquals(2, s.answerable)
+    }
+
+    @Test fun aCloseForACardThePhoneNeverShowedLeavesNoReceipt() {
+        val s = groupEvent(bothGroupCards(), card("a9", "Cid", false, """{"outcome":"allow"}"""))
+        assertEquals(listOf("a9"), s.done)
+        assertTrue(s.receipts.isEmpty())
+        assertEquals(listOf("a1", "a2"), s.approvals.map { it.id })
+    }
+
+    @Test fun aLostRaceClosesThatCardOnceWhicheverArrivesFirst() {
+        val s = bothGroupCards()
+        val receipt = """{"by":"computer","outcome":"allow","at":5}"""
+        val reply = j("""{"reason":"settled","receipt":$receipt}""")
+        val close = card("a2", "Ben", false, receipt)
+        val replied = Chat.answerReply(s, "a2", reply)
+        val eventFirst = groupEvent(s, close)
+        val withoutReceipt = Chat.answerReply(s, "a2", j("""{"reason":"settled"}"""))
+        assertEquals(Chat.CLOSED_AWAY, Chat.receiptText(withoutReceipt.receipts.single()))
+        for (state in listOf(replied, groupEvent(replied, close), Chat.answerReply(eventFirst, "a2", reply), groupEvent(withoutReceipt, close))) {
+            assertEquals("a1", state.approvals.single().id)
+            assertEquals("a2", state.receipts.single().id)
+            assertEquals("Answered on the computer: Allow", Chat.receiptText(state.receipts.single()))
+            assertNull(state.notice)
+        }
+    }
+
+    @Test fun aBotChatAnswerReplyKeepsTodaysNotice() {
+        val bot = Chat.State("dsh:b1", approval = Chat.Row("a1", "approval", open = true))
+        val s = Chat.answerReply(bot, "a1", j("""{"reason":"settled"}"""))
+        assertEquals("Already answered.", s.notice)
+        assertEquals(bot.approval, s.approval)
+        assertTrue(s.receipts.isEmpty())
+    }
+
+    @Test fun reconnectReconcilesEachCardAgainstApprovalsAndSettled() {
+        val a1 = card("a1", "Ana")
+        val s = Chat.reduce(granted(), groupSnapshot(listOf(a1, card("a2", "Ben"), card("a3", "Cid"))))
+        val event = groupSnapshot(listOf(a1), """[{"id":"a2","by":"computer","outcome":"allow","at":5}]""")
+        val back = Chat.reduce(groupCarry(s), event)
+        assertEquals("a1", back.approvals.single().id)
+        assertEquals(listOf("a2", "a3"), back.receipts.map { it.id })
+        assertEquals(listOf("Answered on the computer while you were away: Allow", Chat.CLOSED_AWAY), back.receipts.map(Chat::receiptText))
+        assertEquals(back.receipts, Chat.reduce(back, event).receipts)
+    }
+
+    @Test fun moreThanSixteenSettlementsKeepEveryKnownOutcome() {
+        fun outcome(i: Int) = if (i % 2 == 0) "deny" else "allow"
+        val open = (1..20).fold(Chat.reduce(granted(), groupSnapshot())) { s, i -> groupEvent(s, card("a$i", "Ana")) }
+        val settled = (5..20).joinToString(",", "[", "]") { i -> """{"id":"a$i","by":"computer","outcome":"${outcome(i)}"}""" }
+        val snapshot = groupSnapshot(settled = settled)
+        val s = Chat.reduce(groupCarry(open), snapshot)
+        assertEquals(20, s.receipts.size)
+        assertEquals(20, s.done.distinct().size)
+        val byId = s.receipts.associateBy { it.id }
+        for (i in 1..4) assertEquals(Chat.CLOSED_AWAY, Chat.receiptText(byId.getValue("a$i")))
+        for (i in 5..20) assertEquals(outcome(i), byId.getValue("a$i").outcome)
+        assertEquals(s.receipts, Chat.reduce(s, snapshot).receipts)
+        val live = (1..20).fold(open) { current, i ->
+            groupEvent(current, card("a$i", "Ana", false, """{"by":"computer","outcome":"${outcome(i)}"}"""))
+        }
+        assertEquals((1..20).map(::outcome), live.receipts.map { it.outcome })
+        assertTrue(live.receipts.all { it.live })
+    }
+
+    @Test fun seventyClosuresKeepTheFirstReceiptUntilDismissed() {
+        val opened = Chat.reduce(granted(), groupSnapshot())
+        val closed = (1..70).fold(opened) { s, i ->
+            val open = groupEvent(s, card("a$i", "Ana"))
+            groupEvent(open, card("a$i", "Ana", false, """{"outcome":"allow"}"""))
+        }
+        val settled = (55..70).joinToString(",", "[", "]") { """{"id":"a$it","outcome":"allow"}""" }
+        val snapshot = groupSnapshot(settled = settled)
+        val back = Chat.reduce(groupCarry(groupGone(closed, "unavailable")), snapshot)
+        assertEquals(70, back.receipts.size)
+        assertEquals("a1" to "allow", back.receipts.first().let { it.id to it.outcome })
+        assertEquals(closed.receipts, back.receipts)
+        val dismissed = Chat.dismissReceipt(back, "a1")
+        assertEquals(dismissed.receipts, Chat.reduce(dismissed, snapshot).receipts)
+        assertTrue(dismissed.receipts.none { it.id == "a1" })
+
+        val many = (1..300).fold(opened) { s, i -> groupEvent(s, card("a$i", "Ana")) }
+        assertEquals(300, many.cards.size)
+        assertEquals(300, many.approvals.size)
+        val beyondDone = (1..300).fold(many) { s, i -> groupEvent(s, card("a$i", "Ana", false, """{"outcome":"allow"}""")) }
+        assertFalse("a1" in beyondDone.done)
+        val withOldReceipt = groupSnapshot(settled = """[{"id":"a1","outcome":"allow"}]""")
+        assertEquals(beyondDone.receipts, Chat.reduce(groupCarry(beyondDone), withOldReceipt).receipts)
+    }
+
+    @Test fun aGroupGoneClearsThePane() {
+        val s = groupEvent(groupEvent(bothGroupCards(), card("a3", "Cid")), card("a3", "Cid", false, """{"outcome":"allow"}"""))
+            .copy(messages = listOf(Chat.Message("m1", "hi", "sending"), Chat.Message("m2", "hi", "sent"), Chat.Message("m3", "hi", "unknown")))
+        val revoked = groupGone(s, "not-shown")
+        assertTrue(revoked.rows.isEmpty() && revoked.approvals.isEmpty() && revoked.cards.isEmpty() && revoked.receipts.isEmpty() && revoked.messages.isEmpty())
+        assertEquals("", revoked.title)
+        assertTrue(revoked.gone)
+        assertEquals("This group isn’t open to the phone now.", revoked.error)
+        assertEquals(1, revoked.wiped)
+
+        val away = groupGone(s, "unavailable")
+        assertTrue(away.rows.isEmpty() && away.approvals.isEmpty())
+        assertTrue(away.resuming && away.hidden && away.synced)
+        assertEquals(listOf("maybe", "unknown"), away.messages.map { it.state })
+        assertEquals(s.receipts, away.receipts)
+        assertEquals(s.cards, away.cards)
+        assertEquals(s.done, away.done)
+        assertEquals(1, away.wiped)
+    }
+
+    @Test fun aResumableGoneThenASnapshotReconcilesTheCardsItHid() {
+        val a1 = card("a1", "Ana")
+        val s = Chat.reduce(granted(), groupSnapshot(listOf(a1, card("a2", "Ben"), card("a3", "Cid"))))
+        val away = groupCarry(groupGone(s, "unavailable"))
+        assertTrue(away.hidden)
+        val back = Chat.reduce(away, groupSnapshot(listOf(a1), """[{"id":"a2","by":"computer","outcome":"deny","at":5}]"""))
+        assertFalse(back.hidden)
+        assertEquals(1, back.wiped)
+        assertEquals("a1", back.approvals.single().id)
+        assertEquals(listOf("Answered on the computer while you were away: Deny", Chat.CLOSED_AWAY), back.receipts.map(Chat::receiptText))
+    }
+
+    @Test fun anUnknownGroupSendOffersSendAsNew() {
+        for (answer in listOf(j("""{"state":"unknown","reason":"no-record"}"""), j("""{"state":"unknown"}"""))) {
+            val s = Chat.answered(bothGroupCards(), "m1", "hi", answer)
+            val m = s.messages.single()
+            assertEquals("unknown", m.state)
+            assertFalse(ChatActions.canRetry(s, m))
+            assertTrue(ChatActions.canSendAsNew(s, m))
+            assertEquals(listOf(m), Chat.unknown(s))
+            val bot = Chat.answered(Chat.State("dsh:b1", connected = true, dshWrite = true), "m1", "hi", answer)
+            assertEquals("unknown", bot.messages.single().state)
+            assertFalse(ChatActions.canSendAsNew(bot, bot.messages.single()))
+            assertTrue(Chat.unknown(bot).isEmpty())
+        }
+    }
+
+    @Test fun aGroupStatusCarriesTitleAndCount() {
+        val s = Chat.reduce(bothGroupCards(), j("""{"type":"status","status":{"state":"blocked","kind":"permission"},
+            "approvals":0,"title":"Renamed"}"""))
+        assertEquals(0, s.answerable)
+        assertEquals("Renamed", s.title)
+        assertEquals("permission", s.status.kind)
+        assertEquals(2, Chat.reduce(bothGroupCards(), j("""{"type":"status","status":{"state":"working"}}""")).answerable)
+    }
+
+    @Test fun aGroupWithoutTheGrantSaysWhyItCannotSend() {
+        assertEquals(Chat.GROUPS_UNAVAILABLE, ChatActions.whyNoSend(Chat.State(room, connected = true, dshWrite = true)))
+    }
+
+    @Test fun losingTheGrantWipesTheGroup() {
+        val s = groupEvent(bothGroupCards(), card("a2", "Ben", false, """{"outcome":"deny"}"""))
+            .copy(messages = listOf(Chat.Message("m1", "hi", "maybe")))
+        for (prior in listOf(s, groupGone(s, "unavailable"))) {
+            val lost = Chat.groupLost(prior)
+            assertTrue(lost.rows.isEmpty() && lost.approvals.isEmpty() && lost.cards.isEmpty() && lost.receipts.isEmpty() && lost.messages.isEmpty())
+            assertEquals("", lost.title)
+            assertFalse(lost.hidden)
+            assertTrue(lost.gone)
+            assertEquals(Chat.GROUPS_UNAVAILABLE, lost.error)
+            assertEquals(prior.wiped + 1, lost.wiped)
+        }
+    }
 }

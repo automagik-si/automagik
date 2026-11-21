@@ -39,6 +39,8 @@ import * as folders from './src/host/folders.js'
 import * as privateBots from './src/host/private-bots.js'
 import * as agents from './src/host/agents.js'
 import * as toolDeny from './src/host/tool-deny.js'
+import * as botRunner from './src/host/bot-runner.js'
+import * as botSessions from './src/host/bot-sessions.js'
 import * as readScope from './src/host/read-scope.js'
 import * as prompt from './src/host/prompt.js'
 import * as timeContext from './src/host/time-context.js'
@@ -55,6 +57,10 @@ import * as resume from './src/host/resume.js'
 import * as wakeLog from './src/host/wake-log.js'
 import * as memory from './src/host/memory.js'
 import * as parts from './src/host/parts.js'
+import * as callerAccess from './src/host/caller-access.js'
+import * as callerView from './src/host/caller-view.js'
+import * as callerFeed from './src/host/caller-feed.js'
+import * as callerRoutes from './src/host/caller-routes.js'
 import * as images from './src/host/images.js'
 import * as avatarLibrary from './src/host/avatar-library.js'
 import * as browser from './src/host/browser.js'
@@ -70,6 +76,9 @@ import * as learning from './src/host/learning.js'
 import * as schedules from './src/host/schedules.js'
 import * as usage from './src/host/usage.js'
 import * as update from './src/host/update.js'
+import * as selfUpdate from './src/host/self-update.js'
+import * as selfUpdateCheck from './src/host/self-update-check.js'
+import * as selfUpdateHold from './src/host/self-update-hold.js'
 import * as dshUpdate from './src/host/dsh-update.js'
 import * as thinking from './src/host/thinking.js'
 import * as fallback from './src/host/fallback.js'
@@ -119,9 +128,9 @@ const instanceId = () => process.env.AUTOMAGIK_INSTANCE_ID
 // installed: channels are Omni's, and a local CLI runs a Bot through the ACP plugin's routes only.
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
-  turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, readScope, privateBots, prompt, timeContext,
+  turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, botSessions, botRunner, readScope, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory,
-  parts, fallback, modelState,
+  parts, callerAccess, callerView, callerFeed, callerRoutes, fallback, modelState,
   { install: rt => modelAccessHooks.install(rt, { machine: machineOf(rt), instanceId }) },
   { install: rt => cliLogin.install(rt, {
     path: join(rt.home, RESERVATION_FILE), fs, pid: process.pid,
@@ -131,7 +140,7 @@ const MODULES = [
   }) },
   sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
-  update, dshUpdate, thinking, agentSpace, feed, codeSide, automations, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
+  update, selfUpdate, selfUpdateCheck, selfUpdateHold, dshUpdate, thinking, agentSpace, feed, codeSide, automations, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
   officeSkills, goalSkills,
 ]
 
@@ -192,6 +201,10 @@ export function createRuntime(ctx, config = {}) {
   // After every module: cordis runs prepended listeners newest first, so Auto's judge decides an approval before Pocket
   // (pocket-chat.js) or approvals.js could show it as the person's to answer (auto-judge.js installAhead).
   autoJudge.installAhead(rt)
+  const disposeHold = botSessions.installAhead(rt)
+  if (disposeHold !== undefined) disposers.push(disposeHold)
+  const disposeRunner = botRunner.installAhead(rt)
+  if (disposeRunner !== undefined) disposers.push(disposeRunner)
   // A live Agent can be scoped before the final module adds its tools; complete that scope now.
   rt.syncScopedTools?.()
   // Reloading the plugin while DSH is live must retain turns and child agents already running.

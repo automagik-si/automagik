@@ -734,6 +734,35 @@ var ZH = {
   "This coding agent is not signed in any more. Sign in to use it.": "此编程助手已不再登录。请登录后使用。",
   "The account could not be confirmed. Try again.": "无法确认账号，请重试。",
   "The model could not be selected.": "无法选择此模型。",
+  // The web self-update preview (#1540): nod, modal, steps, success and rollback.
+  "Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.": "点击“立即更新”时，正在进行的工作会停止，更新完成后会自动继续。不会丢失任何内容。",
+  "A Bot that moves to a new part of its chat keeps what it was doing.": "Bot 换到对话的新段落时会保留它正在做的事。",
+  "A new version is ready. From now on it updates itself from this menu.": "新版本已就绪。从现在起，它会从这个菜单自行更新。",
+  "Back to the previous version": "已回到上一个版本",
+  "Checking that it is healthy": "正在检查运行状态",
+  "Checking the signature": "正在校验签名",
+  "Done: you are on the new version.": "完成：你已在新版本上。",
+  "Downloading the new version": "正在下载新版本",
+  "Example data": "示例数据",
+  "Example data: nothing is downloaded in this preview.": "示例数据：此预览不下载任何内容。",
+  "In the real thing the instance restarts here, and the chat you had open comes back where it was.": "实际运行时会在这里重启，你打开的对话会回到原来的位置。",
+  "In this preview the steps are timers and nothing is downloaded.": "在此预览中这些步骤只是计时器，不会下载任何内容。",
+  "Installing beside the current version": "正在当前版本旁边安装",
+  "Keep working. Your chats, Bots and files are where they were.": "继续使用。你的对话、Bot 和文件都在原处。",
+  "Restarting": "正在重启",
+  "See the announcement again": "再看一次更新说明",
+  "Show the failure instead": "改为演示失败",
+  "Signing in to a coding agent is one click, and a failure says why.": "登录编程助手只需一次点击，失败时会说明原因。",
+  "The new version did not answer the health check.": "新版本没有通过运行状态检查。",
+  "The new version did not start well. Automagik went back to the one that worked. Nothing was lost: your chats, Bots and files are where they were.": "新版本启动不正常。Automagik 回到了原本可用的版本。什么都没有丢失：你的对话、Bot 和文件都在原处。",
+  "The previous version stays kept for the rollback.": "上一个版本会保留，用于回滚。",
+  "This menu gets the update button, so you stop updating by hand.": "这个菜单里会有更新按钮，你不用再手动更新。",
+  "Update Automagik": "更新 Automagik",
+  "Updating Automagik": "正在更新 Automagik",
+  "What changes": "有什么变化",
+  "You are on": "你当前在",
+  "You have": "你当前",
+  "Your previous version stays kept. If the new one does not start, Automagik goes back by itself.": "上一个版本会保留。如果新版本起不来，Automagik 会自行退回。",
   // A Bot's model: what it really did (model-state.js), and a model that cannot run now.
   "the new model": "新模型",
   "{model} could not take over this conversation. This Bot stays on {kept}.": "{model} 无法接手这段对话。此 Bot 仍使用 {kept}。",
@@ -1956,6 +1985,7 @@ var ZH = {
   "{name} started on it": "{name} 开始做了",
   "You stopped {name}'s work": "你停下了 {name} 的工作",
   "{name} finished its work": "{name} 做完了",
+  "{name} was interrupted by an Automagik update and picked its work back up": "{name} 的工作被 Automagik 更新打断，已经接着做",
   "{name} was cut off by a restart and picked its work back up": "{name} 的工作被重启打断，已经接着做",
   "{name} was cut off by a restart again and stopped": "{name} 的工作又被重启打断，已停下",
   "Picked up its work after a restart": "重启后接着做之前的工作",
@@ -2173,6 +2203,11 @@ var ZH = {
   "Wi-Fi name": "Wi-Fi 名称",
   "Private key": "私钥",
   "HashiCorp Vault": "HashiCorp Vault",
+  "macOS Keychain": "macOS 钥匙串",
+  "macOS Keychain needs macOS.": "macOS 钥匙串需要 macOS。",
+  "macOS Keychain is unavailable in Automagik Cloud.": "Automagik Cloud 不支持 macOS 钥匙串。",
+  "macOS may ask on this Mac. Choose “Allow”, not “Always Allow”.": "macOS 可能会在此 Mac 上请求授权。请选择“允许”，请勿选择“始终允许”。",
+  "Find": "查找",
   "Vault address": "Vault 地址",
   "Vault token": "Vault 令牌",
   "Vault namespace (optional)": "Vault 命名空间（可选）",
@@ -2469,6 +2504,80 @@ var ZH = {
   "Check for updates": "检查更新",
   "Checking…": "正在检查…",
   "Up to date": "已是最新版本",
+  "Up to date.": "已是最新版本。",
+  "Automagik {version} is available, signed and checked.": "Automagik {version} 已发布，签名和安装包均已验证。",
+  "Cannot update: {reason}": "无法更新：{reason}",
+  "updates come with the desktop app.": "更新随桌面应用提供。",
+  "the update store is unavailable.": "更新存储不可用。",
+  "the saved update state is invalid.": "保存的更新状态无效。",
+  "the installed plugin versions could not be read.": "无法读取已安装插件的版本。",
+  "the update files could not be downloaded.": "无法下载更新文件。",
+  "the signed release could not be verified.": "无法验证已签名的发行版本。",
+  "the published release has invalid update information.": "已发布版本的更新信息无效。",
+  "the published release would downgrade an installed plugin.": "已发布版本会降级某个已安装的插件。",
+  "the published release is older than one already accepted.": "已发布版本早于已接受的版本。",
+  "the published release needs a different DeepSeek Harness version.": "已发布版本需要其他版本的 DeepSeek Harness。",
+  "a downloaded plugin package did not match the signed release.": "下载的插件包与已签名的发行版本不符。",
+  "the local DSH listener could not be determined. Use a fixed port with --public-url.": "无法确定 DSH 的本地监听地址。使用 --public-url 时请指定固定端口。",
+  "the package registry could not be reached.": "无法连接软件包仓库。",
+  "the profile .npmrc contains settings besides the registry.": "此配置的 .npmrc 含有软件包仓库以外的设置。",
+  "this window does not hold the team lock.": "此窗口未持有团队锁。",
+  "the update check is taking too long. Try again.": "更新检查耗时过长。请重试。",
+  "The check was interrupted. Check again.": "更新检查已中断。请重新检查。",
+  "A check is already running. Try again shortly.": "正在进行更新检查。请稍后重试。",
+  "the update check could not be completed.": "无法完成更新检查。",
+  "An update is running. Your message waits until it is done.": "正在更新。你的消息会等到更新完成后再处理。",
+  "this instance is not run by the update supervisor.": "此实例不是由更新监督程序运行的。",
+  "there is no writable folder to keep the previous version in.": "没有可写入的文件夹来保留上一个版本。",
+  "in-app updates are turned off for this instance.": "此实例已关闭应用内更新。",
+  "an update is already running.": "已有更新正在进行。",
+  "the last check is too old. Check for updates again.": "上次检查已过时。请重新检查更新。",
+  "the team is kept in a custom folder the update cannot snapshot.": "团队保存在自定义文件夹中，更新无法为其创建快照。",
+  "the update supervisor did not answer.": "更新监督程序没有响应。",
+  "Automagik is still picking up work from startup. Try again shortly.": "Automagik 仍在恢复启动前的工作。请稍后重试。",
+  "the notes needed to recover stopped work could not be saved.": "无法保存恢复已停止工作所需的记录。",
+  "The update status could not be confirmed. Check again shortly.": "无法确认更新状态。请稍后再检查。",
+  "the new version could not be installed beside the current one.": "无法在当前版本旁安装新版本。",
+  "the installed plugins changed while the update was being prepared.": "准备更新期间，已安装的插件发生了变化。",
+  "the update supervisor restarted before the switch.": "更新监督程序在切换前重新启动了。",
+  "the new version did not answer its health check.": "新版本没有通过健康检查。",
+  "going back to the previous version failed.": "回退到上一个版本失败。",
+  "Updating: checking the release…": "正在更新：检查发行版本…",
+  "Updating: downloading…": "正在更新：下载中…",
+  "Updating: verifying the signature and hashes…": "正在更新：验证签名和哈希…",
+  "Updating: installing beside the current version…": "正在更新：在当前版本旁安装…",
+  "Updating: switching versions…": "正在更新：切换版本…",
+  "Updating: restarting…": "正在更新：重新启动…",
+  "Updating: checking that the new version answers…": "正在更新：检查新版本是否响应…",
+  "Updating: going back to the previous version…": "正在更新：回退到上一个版本…",
+  "Updated to Automagik {version}.": "已更新到 Automagik {version}。",
+  "DSH stopped during the health check.": "DSH 在健康检查期间停止。",
+  "The local web listener did not answer.": "本地 Web 监听端口没有响应。",
+  "Local sign-in did not work.": "本地登录失败。",
+  "The expected plugins or the update hold could not be verified.": "无法验证所需插件或更新暂停状态。",
+  "The saved team could not be read.": "无法读取已保存的团队。",
+  "The web page or its scripts did not load.": "网页或其脚本未能加载。",
+  "Failed check: {check}": "未通过的检查：{check}",
+  "The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. Nothing in your sessions, memory, settings or keys was lost.": "Automagik {to} 未通过检查，更新已撤销。Automagik {from} 已恢复，团队回到了更新前的状态。你的会话、记忆、设置和密钥都没有丢失。",
+  "The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. If you changed the team between {start} and {end}, that change is in the copy kept with the update. Nothing in your sessions, memory, settings or keys was lost.": "Automagik {to} 未通过检查，更新已撤销。Automagik {from} 已恢复，团队回到了更新前的状态。如果你在 {start} 到 {end} 之间修改了团队，改动保存在此次更新保留的副本中。你的会话、记忆、设置和密钥都没有丢失。",
+  "The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back. Nothing in your sessions, memory, settings or keys was lost.": "Automagik {to} 未通过检查，更新已撤销。Automagik {from} 已恢复。你的会话、记忆、设置和密钥都没有丢失。",
+  "This version of Automagik cannot roll an update back from the app; update it once by hand (docs/upgrade.md).": "此版本的 Automagik 无法在应用内回退更新。请先手动更新一次（见 docs/upgrade.md）。",
+  'The update to Automagik {to} failed, and so did going back to {from}. See "In-app updates" in docs/upgrade.md; state.json in the update store names the step that failed.': "更新到 Automagik {to} 失败，回退到 {from} 也失败。请参阅 docs/upgrade.md 中的“In-app updates”。更新存储中的 state.json 记录了失败的步骤。",
+  "The update was undone: Automagik {version} is back. Nothing was lost.": "更新已撤销：Automagik {version} 已恢复。没有丢失任何内容。",
+  "Not updated: {reason} The work that was stopped goes on.": "未更新：{reason}被停止的工作会继续。",
+  'The update needs manual recovery. See "In-app updates" in docs/upgrade.md.': "此次更新需要手动恢复。请参阅 docs/upgrade.md 中的“In-app updates”。",
+  "No newer signed release is available. Reinstalling the same version needs a newer update supervisor.": "没有更新的已签名版本。重新安装同一版本需要更新的更新监督程序。",
+  "Automagik {version} is already installed. Stop and update reinstalls the same signed version: work in progress stops and comes back by itself once it is done. Nothing is lost.": "已安装 Automagik {version}。点击“停止并更新”会重新安装同一个已签名版本：正在进行的工作会暂停，完成后会自动恢复。不会丢失任何内容。",
+  "Automagik {version} is already installed.": "已安装 Automagik {version}。",
+  "Reinstalled Automagik {version}.": "已重新安装 Automagik {version}。",
+  "Done: the same version is installed again.": "完成：已重新安装同一版本。",
+  "reinstalling the current version requires Force update.": "重新安装当前版本需要使用“强制更新”。",
+  "reinstalling the same version needs a newer update supervisor.": "重新安装同一版本需要更新的更新监督程序。",
+  "this page is older than the installed update support. Reload the page.": "此页面早于已安装的更新功能。请重新加载此页面。",
+  "the published release changed after the check. Check again.": "发布版本在检查后发生了变化。请重新检查。",
+  "No newer signed release is available.": "没有更新的已签名版本。",
+  "Work in progress stops when you click Stop and update, and it comes back by itself once the update is done. Nothing is lost.": "点击“停止并更新”时，正在进行的工作会停止，更新完成后会自动恢复。不会丢失任何内容。",
+  "this instance's update supervisor cannot roll back automatically yet, which Force update needs.": "此实例的更新监督程序尚不能自动回滚，而强制更新需要它。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",
   "Update checks are off.": "已关闭更新检查。",
@@ -2962,6 +3071,7 @@ var ZH = {
   "Nothing running right now.": "现在没有在运行的任务。",
   "Just finished": "刚刚完成",
   "This step was withdrawn: its task ended": "这一步已撤回：它的任务结束了",
+  "This step was withdrawn: its group Session ended": "这一步已撤回：它的群会话结束了",
   "The task ended with an approval unanswered": "任务结束时还有一个审批没有回答",
   "Automations": "自动化",
   "What runs on a schedule or a trigger": "按计划或触发运行的任务",
@@ -3483,6 +3593,69 @@ Object.assign(ZH, {
   "OpenAI Codex through the Agent Client Protocol": "通过 Agent Client Protocol 使用 OpenAI Codex"
 });
 Object.assign(ZH, HOST_ZH);
+Object.assign(ZH, {
+  "Checking the signed release": "正在检查已签名的版本",
+  "Verifying the downloaded packages": "正在验证已下载的软件包",
+  "Restarting and checking health": "正在重启并检查是否正常",
+  "Automagik {version} is ready to install.": "Automagik {version} 已可安装。",
+  "{plugin} is already on {version}.": "{plugin} 已是 {version} 版。",
+  "Work in progress stops when you click Update now. Automagik will pick it up again once a healthy version is ready.": "点击立即更新后，正在进行的工作会暂停。版本确认可用后，Automagik 会接着处理这些工作。",
+  "Waiting for the update supervisor to confirm the request.": "正在等待更新监督程序确认请求。",
+  "Switching versions…": "正在切换版本…",
+  "The update status is unconfirmed.": "更新状态尚未确认。",
+  "In-app update recovery guide": "应用内更新恢复指南",
+  "The team data kept the same format.": "团队数据仍采用原来的格式。",
+  "The team data format could not be determined.": "无法确定团队数据的格式。",
+  "The team data was in use.": "团队数据当时正在使用。",
+  "The team data changed after the restore was planned.": "制定恢复计划后，团队数据发生了变化。",
+  "The saved team snapshot had changed.": "已保存的团队快照发生了变化。",
+  "Stop DSH": "停止 DSH",
+  "Restore the plugin entries": "恢复插件条目",
+  "Put back the kept files": "放回保留的文件",
+  "Restore the version record": "恢复版本记录",
+  "Restore team data": "恢复团队数据",
+  "Verify the profile": "验证配置",
+  "Check health": "检查运行状态",
+  "Live profile": "当前配置",
+  "Kept version": "保留的版本",
+  "Staging folder": "暂存文件夹",
+  "The saved team snapshot was restored. Sessions, memory, settings and keys are kept separately.": "已恢复保存的团队快照。会话、记忆、设置和密钥单独保存。",
+  "If you saved a team change between {start} and {end}, it may have been replaced. A copy of the trial team was kept if there was team data to copy.": "如果你在 {start} 至 {end} 之间保存了团队改动，改动可能已被覆盖。若试用期间有可复制的团队数据，已保留副本。",
+  "The team snapshot was skipped. {reason}": "未恢复团队快照。{reason}",
+  "The supervisor recorded no team snapshot outcome.": "监督程序未记录团队快照的恢复结果。",
+  "Work recovery results are not available yet.": "暂时没有工作恢复结果。",
+  "There was no stopped work to recover.": "没有需要恢复的中断工作。",
+  "Pending": "等待处理",
+  "Resumed": "已恢复",
+  "Could not resume": "无法恢复",
+  "Turn": "对话轮次",
+  "Queued input": "队列中的输入",
+  "Queued delivery": "队列中的投递",
+  "{name} ({kind}) · {state}": "{name}（{kind}）· {state}",
+  "Work recovery": "工作恢复",
+  "The previous plugin set passed its checks.": "上一组插件已通过检查。",
+  "Update target {version}.": "更新目标版本为 {version}。",
+  "Oldest plugin version before the update: {version}.": "更新前最旧的插件版本为 {version}。",
+  "Automagik was not updated": "Automagik 未更新",
+  "Manual recovery required": "需要手动恢复",
+  "See the recovery guide and the supervisor’s state.json before moving any files.": "移动文件前，请查看恢复指南和监督程序的 state.json。",
+  "Previous plugin version recorded for the update: {version}.": "更新记录中的旧插件版本为 {version}。",
+  "Previous version check: {reason}": "旧版本检查结果：{reason}",
+  "Last rollback step: {step}.": "最后的回退步骤：{step}。",
+  "Rollback actions tried: {actions}.": "已尝试的回退操作：{actions}。",
+  "{file}: previous — {previous}; candidate — {candidate}.": "{file}：旧版本在 {previous}，候选版本在 {candidate}。",
+  "The supervisor has not confirmed the update request.": "监督程序尚未确认更新请求。",
+  "Your previous version stays kept.": "上一个版本会保留。",
+  "The previous version can read the team data format.": "上一个版本可以读取这种格式的团队数据。",
+  "If you saved a team change between {start} and {end}, it may have been replaced.": "如果你在 {start} 至 {end} 之间保存了团队改动，改动可能已被覆盖。",
+  "A copy of the trial team data was kept.": "已保留试用期间的团队数据副本。",
+  "No copy of the trial team data was kept.": "未保留试用期间的团队数据副本。",
+  "The supervisor did not record whether a copy of the trial team data was kept.": "监督程序未记录是否保留了试用期间的团队数据副本。",
+  "More work items than can be shown here ({pending} pending, {resumed} resumed, {failed} could not resume, {unconfirmed} unconfirmed).": "部分工作未逐项列出（{pending} 项待恢复，{resumed} 项已恢复，{failed} 项无法恢复，{unconfirmed} 项未确认）。",
+  "The signed release did not offer a newer compatible plugin set.": "签名版本没有提供更新且兼容的插件组合。",
+  "Work recovery is unconfirmed because the saved notes could not be read.": "无法读取保存的记录，工作恢复情况尚未确认。",
+  "The supervisor could not confirm a healthy running instance.": "监督程序未能确认实例正常运行。"
+});
 var fill2 = (text2, params) => params ? text2.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text2;
 var service = null;
 var bound = null;
@@ -3518,11 +3691,58 @@ function addStrings(zh) {
     if (added.length > 0) publish();
   };
 }
+Object.assign(ZH, {
+  "No Bots are shared with you yet.": "还没有任何 Bot 与你共享。",
+  "Nothing to read here yet.": "这里还没有可阅读的消息。",
+  "You can read this chat, but not send messages.": "你可以阅读这段对话，但不能发送消息。",
+  "This Bot is no longer shared with you.": "这个 Bot 已停止与你共享。",
+  "Who can talk to this Bot": "谁可以与这个 Bot 对话",
+  "Only you and admins": "仅你和管理员",
+  "People you choose": "你选择的人",
+  "Anyone in the workspace": "工作区中的任何人",
+  "Sharing starts a new part of this chat; earlier parts stay yours.": "共享会开启新的对话段落；较早的段落仍归你所有。",
+  "People you add can read this Bot's chat; they can't send messages yet.": "你添加的人可以阅读这个 Bot 的对话，暂时不能发送消息。",
+  "Guests and named people": "访客和指定人员",
+  "Member": "成员",
+  "Guest": "访客",
+  "Last seen {time}": "上次在线：{time}",
+  "Not signed in since the last restart": "自上次重启后未登录",
+  "Remove": "移除",
+  "Add person": "添加人员",
+  "No one has signed in since the last restart.": "自上次重启后还没有人登录。",
+  "Who may talk to this Bot changed in another window; check it and save again.": "另一个窗口修改了此 Bot 的共享设置；请检查后重新保存。",
+  "Starting a new part of this chat for sharing…": "正在开启新的对话段落以供共享…",
+  "Shared: people you add read this chat from its new part on.": "已共享：你添加的人可以从新的段落开始阅读对话。",
+  "Sharing did not start because something moved into the new part; stop sharing and share again.": "有内容进入了新段落，未能开始共享；请停止共享后再重新共享。",
+  "{name} is already moving to a new conversation.": "{name} 正在切换到新对话。",
+  "{name} is still handing on earlier messages; try again shortly.": "{name} 仍在转交较早的消息；请稍后重试。",
+  "Answer or dismiss {name}'s open card first.": "请先回答或关闭 {name} 打开的卡片。",
+  "Pause {name}'s goal first.": "请先暂停 {name} 的目标。",
+  "Wait for {name} to finish, then share it.": "请等待 {name} 完成后再共享。",
+  "{name} has messages waiting; let them run or remove them, then share it.": "{name} 有待处理的消息；请等它处理完或移除这些消息后再共享。",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}": "{issuer} {subject} 自上次重启后未登录，或未以 {role} 身份登录",
+  "Who may talk to {name} changed in another window; check it and save again.": "另一个窗口修改了 {name} 的共享设置；请检查后重新保存。",
+  "A Main Bot is shared only with people you name": "主 Bot 只能与指定人员共享",
+  "Sharing needs multiuser mode": "共享需要多用户模式",
+  "Save who may talk to a Bot on its own": "请单独保存 Bot 的共享设置",
+  "Name at most 100 people": "最多可指定 100 人",
+  "Each person needs a valid issuer, subject and role": "每个人都需要有效的签发者、主体和角色",
+  "Name each person only once": "每个人只能指定一次",
+  "Your sign-in changed; reload this page.": "你的登录状态已更改；请重新加载此页面。"
+});
 function t(key, params) {
   return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
   "Detach {name} first.",
+  "{name} is already moving to a new conversation.",
+  "{name} is still handing on earlier messages; try again shortly.",
+  "Answer or dismiss {name}'s open card first.",
+  "Pause {name}'s goal first.",
+  "Wait for {name} to finish, then share it.",
+  "{name} has messages waiting; let them run or remove them, then share it.",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}",
+  "Who may talk to {name} changed in another window; check it and save again.",
   "A folder is in the way: {folder}",
   "{name} does not have the {tool} tool: its Genie role is off.",
   "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
@@ -3597,8 +3817,8 @@ function hostText(message) {
   return message;
 }
 function language() {
-  const active = service?.getLocale?.().active;
-  return typeof active === "string" ? active : "en";
+  const active2 = service?.getLocale?.().active;
+  return typeof active2 === "string" ? active2 : "en";
 }
 var dateLocale = () => language().startsWith("zh") ? "zh-CN" : "en-US";
 var DICTIONARY = { zh: ZH };
@@ -3685,11 +3905,256 @@ ${REST_NOTE}`);
   return { url: facts.length <= URL_LIMIT ? facts : build(PASTE_NOTE), inline: false };
 }
 
+// src/client/viewer.js
+var VIEWER_KEY = "automagik.viewer";
+var RELOAD_KEY = "automagik.retired";
+var ROLES = /* @__PURE__ */ new Set(["owner", "member", "guest", "none"]);
+var guard;
+function bootView() {
+  const boot = globalThis.__AUTOMAGIK_VIEW__;
+  if (boot === void 0) return;
+  return boot?.version === 1 && ROLES.has(boot.role) ? boot : { role: "none" };
+}
+var mountedViewer = () => guard?.retired ? void 0 : guard?.viewer;
+var isRetired = () => guard?.retired === true;
+var canClearDraftInMemory = () => guard?.draftsProtected === true;
+var unavailable = () => Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
+function storedViewer() {
+  try {
+    return localStorage.getItem(VIEWER_KEY);
+  } catch {
+    return null;
+  }
+}
+function requestViewer(endpoint) {
+  checkViewer(guard);
+  if (isRetired() || endpoint !== "whoami" && !guard?.viewer && bootView() !== void 0) {
+    throw unavailable();
+  }
+  return guard;
+}
+function checkViewer(active2) {
+  if (active2 && guard === active2 && active2.viewer) {
+    const current = storedViewer();
+    if (current !== null && current !== active2.viewer.id) retire();
+  }
+  if (active2 && (guard !== active2 || active2.retired)) throw unavailable();
+}
+function viewerRefused(code) {
+  if (guard && ["bot/viewer-changed", "HTTP_401", "HTTP_403"].includes(code)) retire();
+}
+function viewerResponse(response) {
+  if (response.status === 401 && response.headers?.get?.("x-automagik-dsh-refresh") === "1") return;
+  viewerRefused(`HTTP_${response.status}`);
+}
+function onRetire(hook) {
+  if (!guard) return () => {
+  };
+  const hooks = guard.hooks;
+  if (guard.retired) hook();
+  else hooks.add(hook);
+  return () => hooks.delete(hook);
+}
+function retire() {
+  if (!guard || guard.retired) return;
+  guard.retired = true;
+  guard.viewer = void 0;
+  const body = document.body;
+  if (body) {
+    body.inert = true;
+    body.style?.setProperty("display", "none", "important");
+  }
+  for (const hook of guard.hooks) {
+    try {
+      hook();
+    } catch {
+    }
+  }
+  guard.hooks.clear();
+  body?.replaceChildren?.();
+  clearClientErrors();
+  try {
+    if (sessionStorage.getItem(RELOAD_KEY) === "1") return;
+    sessionStorage.setItem(RELOAD_KEY, "1");
+  } catch {
+    return;
+  }
+  try {
+    location.reload();
+  } catch {
+  }
+}
+function trackDrafts(active2, viewer) {
+  try {
+    const storage = localStorage;
+    const prototype = Object.getPrototypeOf(storage);
+    const set2 = prototype.setItem;
+    const remove = prototype.removeItem;
+    if (typeof set2 !== "function" || typeof remove !== "function") return;
+    const written = /* @__PURE__ */ new Map();
+    const current = () => storage.getItem(VIEWER_KEY) === viewer.id;
+    const conversation = (key) => typeof key === "string" && key.startsWith("dsh.conversation.");
+    prototype.setItem = function(key, value) {
+      if (this !== storage || !conversation(key)) return set2.call(this, key, value);
+      if (!active2.retired && current()) {
+        set2.call(this, key, value);
+        written.set(key, storage.getItem(key));
+      }
+    };
+    prototype.removeItem = function(key) {
+      if (this !== storage || !conversation(key)) return remove.call(this, key);
+      if (!active2.retired && current()) {
+        remove.call(this, key);
+        written.delete(key);
+      }
+    };
+    active2.hooks.add(() => {
+      try {
+        if (current()) {
+          for (const [key, value] of written) if (storage.getItem(key) === value) remove.call(storage, key);
+        }
+      } finally {
+        written.clear();
+      }
+    });
+    return () => {
+      prototype.setItem = set2;
+      prototype.removeItem = remove;
+    };
+  } catch {
+  }
+}
+function confirmed(answer, boot) {
+  const viewer = answer?.viewer;
+  return boot.role !== "none" && answer?.multiuser === true && answer.role === boot.role && (viewer?.role === boot.role || boot.role === "owner" && viewer?.role === "admin") && typeof viewer.id === "string" && /^[\w-]{1,64}$/.test(viewer.id);
+}
+async function startViewer(boot, signal, prepare) {
+  if (guard) throw new Error("Viewer already started");
+  if (signal?.aborted) throw unavailable();
+  const active2 = guard = { hooks: /* @__PURE__ */ new Set(), retired: false };
+  const previousViewer = storedViewer();
+  const body = document.body;
+  const display = body?.style?.getPropertyValue("display");
+  const priority = body?.style?.getPropertyPriority("display");
+  const inert = body?.inert;
+  const show2 = () => {
+    if (!body) return;
+    body.inert = inert;
+    body.style?.setProperty("display", display, priority);
+  };
+  if (body) {
+    body.inert = true;
+    body.style?.setProperty("display", "none", "important");
+  }
+  const current = () => guard === active2 && !active2.retired && !signal?.aborted;
+  let cancelDelay;
+  active2.hooks.add(() => cancelDelay?.());
+  let answer;
+  const abort = () => {
+    cancelDelay?.();
+    active2.stop?.();
+    if (guard === active2 && !active2.retired) {
+      if (!active2.viewer) show2();
+      guard = void 0;
+      delete globalThis.__AUTOMAGIK_MOUNTED_VIEWER__;
+    }
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  let delay = 250;
+  while (current()) {
+    try {
+      answer = await call("whoami", void 0, signal);
+      break;
+    } catch {
+      if (!current()) break;
+      await new Promise((resolve2) => {
+        const timer2 = setTimeout(resolve2, delay);
+        cancelDelay = () => {
+          clearTimeout(timer2);
+          resolve2();
+        };
+      });
+      cancelDelay = void 0;
+      delay = Math.min(15e3, delay * 2);
+    }
+  }
+  if (!current()) throw new Error("Viewer unavailable");
+  const currentViewer = storedViewer();
+  if (!confirmed(answer, boot) || currentViewer !== null && currentViewer !== previousViewer && currentViewer !== answer.viewer.id) {
+    retire();
+    throw new Error("Viewer role changed");
+  }
+  const viewer = active2.viewer = answer.viewer;
+  try {
+    localStorage.setItem(VIEWER_KEY, viewer.id);
+  } catch {
+  }
+  const untrackDrafts = trackDrafts(active2, viewer);
+  active2.draftsProtected = untrackDrafts !== void 0;
+  let checking = false;
+  const check = async () => {
+    if (checking || active2.retired || guard !== active2) return;
+    checking = true;
+    try {
+      const next = await call("whoami", void 0, signal);
+      if (guard === active2 && (!confirmed(next, boot) || next.viewer.id !== viewer.id || next.viewer.role !== viewer.role)) retire();
+    } catch {
+    } finally {
+      checking = false;
+    }
+  };
+  const visibility = () => {
+    if (document.visibilityState === "visible") void check();
+  };
+  const storage = (event) => {
+    if ((event.key === VIEWER_KEY || event.key === null) && event.newValue !== viewer.id) retire();
+  };
+  window.addEventListener("focus", check);
+  window.addEventListener("storage", storage);
+  document.addEventListener("visibilitychange", visibility);
+  const timer = setInterval(check, 15e3);
+  active2.stop = () => {
+    if (!active2.retired) untrackDrafts?.();
+    clearInterval(timer);
+    window.removeEventListener("focus", check);
+    window.removeEventListener("storage", storage);
+    document.removeEventListener("visibilitychange", visibility);
+  };
+  active2.hooks.add(active2.stop);
+  const checkMounted = () => checkViewer(active2);
+  globalThis.__AUTOMAGIK_MOUNTED_VIEWER__ = Object.freeze({
+    get id() {
+      checkMounted();
+      return active2.viewer.id;
+    },
+    check: checkMounted,
+    response: viewerResponse,
+    refused: viewerRefused
+  });
+  if (prepare) {
+    try {
+      await prepare();
+    } catch (error) {
+      if (current()) retire();
+      throw error;
+    }
+    if (!current()) throw unavailable();
+  }
+  show2();
+  try {
+    sessionStorage.removeItem(RELOAD_KEY);
+  } catch {
+  }
+  return viewer;
+}
+
 // src/client/api.js
 var ROUTE = "api/omni-ui";
-var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
+var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/viewer-changed", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
 var isRefusal = (code) => REFUSALS.has(code) || code.startsWith("bot/adopt-") || code.startsWith("bot/reservation-");
 var call = async (endpoint, payload, signal) => {
+  const active2 = requestViewer(endpoint);
+  const viewer = active2?.viewer?.id;
   const vault = endpoint.startsWith("vault-");
   let response;
   try {
@@ -3697,10 +4162,11 @@ var call = async (endpoint, payload, signal) => {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ endpoint, payload: payload ?? null }),
+      body: JSON.stringify({ endpoint, payload: payload ?? null, ...viewer === void 0 ? {} : { viewer } }),
       signal
     });
   } catch (error) {
+    checkViewer(active2);
     if (error?.name === "AbortError") throw error;
     if (!vault) noteClientError(endpoint, Object.assign(new Error(`network error: ${error?.message ?? error}`), { code: "NETWORK" }));
     throw markNoted(Object.assign(new Error(t("Could not reach DSH. Check that it is still running.")), {
@@ -3708,18 +4174,23 @@ var call = async (endpoint, payload, signal) => {
       ...!vault ? { cause: error } : {}
     }));
   }
+  checkViewer(active2);
   if (!response.ok) {
+    viewerResponse(response);
     const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` });
-    if (!vault) noteClientError(endpoint, error);
+    if (!vault && !isRetired()) noteClientError(endpoint, error);
     throw error;
   }
   const result = await response.json();
+  checkViewer(active2);
   if (!result.ok) {
     const code = result.error?.code ?? "bot/error";
+    viewerRefused(code);
     const message = hostText(result.error?.message ?? "Request failed");
     const error = Object.assign(new Error(code === "bot/internal" ? `${message} ${t("Settings → Feedback has the details.")}` : message), { code });
     if (code === "bot/refused" && result.error?.reason === "needs-new-conversation") error.reason = result.error.reason;
-    if (!vault && !isRefusal(code)) {
+    const staleShare = code === "bot/stale" && endpoint === "update-bot" && Object.hasOwn(payload ?? {}, "people");
+    if (!vault && !staleShare && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? "Request failed"), { code }));
       markNoted(error);
     }
@@ -4167,6 +4638,7 @@ var botChannelSource = (bot) => {
 var headerButtons = registry();
 var sidebarTools = registry();
 var botSettings = registry();
+var officialInstall = registry();
 var chatSuggestions = registry();
 var composerPacks = registry();
 var registerComposerPack = (pack2) => composerPacks.register(pack2);
@@ -5234,23 +5706,23 @@ function listenForInput() {
     if (Date.now() - lastInput > DROWSY_MS) for (const set2 of sleepers) set2(true);
   }, 3e4).unref?.();
 }
-function useDrowsy(enabled = true) {
+function useDrowsy(enabled2 = true) {
   const [drowsy, setDrowsy] = (0, import_react6.useState)(false);
   (0, import_react6.useEffect)(() => {
-    if (!enabled) return void 0;
+    if (!enabled2) return void 0;
     listenForInput();
     sleepers.add(setDrowsy);
     return () => {
       sleepers.delete(setDrowsy);
     };
-  }, [enabled]);
-  return enabled && drowsy;
+  }, [enabled2]);
+  return enabled2 && drowsy;
 }
 var quiet = () => typeof document !== "undefined" && (document.body?.dataset.btMotion === "quiet" || globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true);
-function useLook(ref, enabled) {
+function useLook(ref, enabled2) {
   const [direction, setDirection] = (0, import_react6.useState)(void 0);
   (0, import_react6.useEffect)(() => {
-    if (!enabled) return void 0;
+    if (!enabled2) return void 0;
     let frame = 0;
     let rest2;
     let point = null;
@@ -5275,7 +5747,7 @@ function useLook(ref, enabled) {
       clearTimeout(rest2);
       window.removeEventListener("pointermove", onMove);
     };
-  }, [enabled]);
+  }, [enabled2]);
   return direction;
 }
 function PetSprite({ pet, size, state: state2 = "idle", live = false, gaze = false, onOnce }) {
@@ -5439,9 +5911,9 @@ var STATES = ["idle", "thinking", "searching", "working", "sending", "orbit", "w
 var WORK = ["thinking", "searching", "working", "sending", "orbit"];
 var botState = (running2, activity, alert, { failed = false, unread = false, notInstalled = false, installed } = {}) => notInstalled === true || installed === false ? "not-installed" : alert ? "alert" : running2 ? WORK.includes(activity) ? activity : "working" : failed ? "failed" : activity === "waiting" ? "waiting" : unread ? "review" : "idle";
 var toolState = (name) => /^(message_bot|stop_bot|create_bot|update_bot|delete_bot|create_group|update_group|delete_group|post_to_group)$/.test(name) ? "sending" : /search|fetch|browse|read|grep|glob|list|recall/i.test(name) ? "searching" : "working";
-function useGaze(ref, enabled) {
+function useGaze(ref, enabled2) {
   (0, import_react7.useEffect)(() => {
-    if (!enabled || reducedMotion()) return void 0;
+    if (!enabled2 || reducedMotion()) return void 0;
     let frame = 0;
     let point = null;
     const place = () => {
@@ -5470,7 +5942,7 @@ function useGaze(ref, enabled) {
       window.removeEventListener("pointermove", onMove);
       document.documentElement.removeEventListener("pointerleave", onLeave);
     };
-  }, [enabled]);
+  }, [enabled2]);
 }
 var FIDGETS = ["hop", "sway", "stretch", "look"];
 var GENIE_PET = Object.freeze({ source: "builtin", id: "genie-clay", version: 2, sleep: true });
@@ -5891,6 +6363,8 @@ function GitHubSteps({ bot, work }) {
 }
 var vaultLocked = "The vault is locked. Unlock it in Settings › Vault and ask again; nothing was read.";
 var vaultDetailUnavailable = "The vault item details could not be loaded.";
+var macosKeychain = "macos-keychain";
+var keychainHint = "macOS may ask on this Mac. Choose “Allow”, not “Always Allow”.";
 var GNOME_PROVIDER_ID = "secret-service";
 var GNOME_PROVIDER_LABEL = "Secret Service (GNOME Keyring)";
 var createdLabel = (created) => {
@@ -5925,17 +6399,26 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
   (0, import_react10.useEffect)(() => {
     const { id, key, digest } = displayed.current;
     if (key === null) return;
-    let active = true;
+    let active2 = true;
     Promise.resolve().then(() => fetchDetail(id)).then((value2) => {
-      if (!active) return;
+      if (!active2) return;
       const { commandDigest, snapshot: snapshot2, provider, item, field, name, collection, created } = value2 ?? {};
       let verified = commandDigest === digest && [commandDigest, snapshot2, provider, field].every((part) => typeof part === "string");
       let displayItem = item;
+      let keychainDetails;
       if (provider === GNOME_PROVIDER_ID) {
         verified &&= field === "secret" && [name, collection, created].every((part) => typeof part === "string");
         displayItem = name;
       } else verified &&= typeof item === "string";
-      if (verified && provider === "hashicorp-vault") {
+      if (verified && provider === macosKeychain) {
+        try {
+          const parts = JSON.parse(item);
+          verified = field === "password" && Array.isArray(parts) && parts.length === 3 && parts.every((part) => typeof part === "string" && part !== "");
+          if (verified) keychainDetails = { service: parts[1], account: parts[2] };
+        } catch {
+          verified = false;
+        }
+      } else if (verified && provider === "hashicorp-vault") {
         try {
           const parts = JSON.parse(item);
           verified = Array.isArray(parts) && parts.length === 2 && parts.every((part) => typeof part === "string" && part !== "");
@@ -5944,12 +6427,12 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
           verified = false;
         }
       }
-      setVaultDetail(verified ? { key, value: { commandDigest, snapshot: snapshot2, provider, item: displayItem, field, collection, created } } : { key, error: vaultDetailUnavailable });
+      setVaultDetail(verified ? { key, value: { commandDigest, snapshot: snapshot2, provider, item: displayItem, field, collection, created, keychainDetails } } : { key, error: vaultDetailUnavailable });
     }, () => {
-      if (active) setVaultDetail({ key, error: vaultDetailUnavailable });
+      if (active2) setVaultDetail({ key, error: vaultDetailUnavailable });
     });
     return () => {
-      active = false;
+      active2 = false;
     };
   }, [fetchDetail]);
   const secret = (roster.secrets ?? []).find((entry) => entry.name === request.name);
@@ -5970,6 +6453,7 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
     const hashicorp = item?.provider === "hashicorp-vault";
     const keyring = item?.provider === GNOME_PROVIDER_ID;
     const proton = item?.provider === "proton-pass";
+    const keychain = item?.provider === macosKeychain;
     const allow2 = () => {
       if (item && !busy) void run3(() => actions.secretAllow(request.id, { commandDigest: item.commandDigest, snapshot: item.snapshot }));
     };
@@ -5987,11 +6471,20 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
       item ? (0, import_react10.createElement)(
         "div",
         { className: "bt-secret-note" },
-        (0, import_react10.createElement)("div", null, t("Provider: {provider}", { provider: keyring ? t(GNOME_PROVIDER_LABEL) : hashicorp ? t("HashiCorp Vault") : proton ? t("Proton Pass") : item.provider })),
-        (0, import_react10.createElement)("div", null, t("Item: {item}", { item: item.item })),
+        (0, import_react10.createElement)("div", null, t("Provider: {provider}", { provider: keyring ? t(GNOME_PROVIDER_LABEL) : keychain ? t("macOS Keychain") : hashicorp ? t("HashiCorp Vault") : proton ? t("Proton Pass") : item.provider })),
+        keychain ? ["Service", "Account"].map((label) => (0, import_react10.createElement)(
+          "div",
+          { key: label },
+          t(label),
+          (0, import_react10.createElement)(
+            "pre",
+            { className: "bt-aa-pre", "aria-label": t(label) },
+            (0, import_react10.createElement)("code", null, item.keychainDetails[label.toLowerCase()])
+          )
+        )) : (0, import_react10.createElement)("div", null, t("Item: {item}", { item: item.item })),
         keyring ? (0, import_react10.createElement)("div", null, t("Collection: {collection}", { collection: item.collection })) : null,
         keyring ? (0, import_react10.createElement)("div", null, createdLabel(item.created)) : null,
-        (0, import_react10.createElement)("div", null, t("Field: {field}", { field: keyring ? t("Secret") : item.field }))
+        (0, import_react10.createElement)("div", null, t("Field: {field}", { field: keyring ? t("Secret") : keychain ? t("Password") : item.field }))
       ) : null,
       error || detail?.error ? (0, import_react10.createElement)("div", { className: "bt-secret-error", role: "alert" }, error || t(detail.error)) : null,
       (0, import_react10.createElement)(
@@ -6387,12 +6880,15 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
   const [fields, setFields] = (0, import_react10.useState)([]);
   const [projects, setProjects] = (0, import_react10.useState)(null);
   const [project, setProject] = (0, import_react10.useState)("");
+  const [service2, setService] = (0, import_react10.useState)("");
+  const [account, setAccount] = (0, import_react10.useState)("");
   const keyring = provider === GNOME_PROVIDER_ID;
   const item = items?.find((row) => itemId !== "" && (keyring ? row.handle : row.id) === itemId && !row.folder);
   const onePassword = provider === "onepassword";
   const proton = provider === "proton-pass";
   const hashicorp = provider === "hashicorp-vault";
   const machineAccount = provider === "bitwarden-secrets";
+  const keychain = provider === macosKeychain;
   const namedSearch = provider === "onepassword" || provider === GNOME_PROVIDER_ID;
   const optionId = (row) => hashicorp && row.folder ? row.id + "/" : row.id;
   const itemOption = (row, index) => {
@@ -6431,14 +6927,18 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
     setFields([]);
   };
   const find = async (next = hashicorp ? folder : project) => {
-    if (busy) return;
+    if (busy || keychain && (!service2 || !account)) return;
     setBusy(true);
     resetItems();
     try {
-      const listed = hashicorp ? actions.vaultItems({ mount, folder: next }, provider) : machineAccount ? actions.vaultItems(search, provider, next || void 0) : namedSearch || proton ? actions.vaultItems(search, provider) : actions.vaultItems(search);
+      const listed = keychain ? actions.vaultItems({ service: service2, account }, provider) : hashicorp ? actions.vaultItems({ mount, folder: next }, provider) : machineAccount ? actions.vaultItems(search, provider, next || void 0) : namedSearch || proton ? actions.vaultItems(search, provider) : actions.vaultItems(search);
       await run3(listed.then((answer) => {
         if (machineAccount && !next) setProjects(answer.projects);
         else setItems(answer.items);
+        if (keychain && answer.items.length === 1) {
+          setItemId(answer.items[0].id);
+          setField("password");
+        }
       }));
     } finally {
       setBusy(false);
@@ -6470,7 +6970,7 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
     try {
       const key = name.trim().replace(/-/g, "_");
       const mapping = keyring ? { name: key, purpose, scope, provider, handle: itemId } : { name: key, purpose, connection, item: hashicorp ? JSON.stringify([mount, itemId]) : itemId, field, scope };
-      if (onePassword || hashicorp || proton || machineAccount) mapping.provider = provider;
+      if (onePassword || hashicorp || proton || machineAccount || keychain) mapping.provider = provider;
       if (machineAccount) mapping.credentialRevision = credentialRevision;
       if (await run3(actions.secretSourceSet(mapping))) onDone();
     } finally {
@@ -6505,7 +7005,24 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
         event.preventDefault();
         return find();
       } },
-      hashicorp ? [
+      keychain ? [["Service", service2, setService], ["Account", account, setAccount]].map(([label, value, setValue]) => (0, import_react10.createElement)(
+        "label",
+        { key: label, className: "bt-q-field" },
+        t(label),
+        (0, import_react10.createElement)("input", {
+          className: "bt-input",
+          "aria-label": t(label),
+          value,
+          maxLength: 128,
+          disabled: busy,
+          spellCheck: false,
+          autoComplete: "off",
+          onChange: (event) => {
+            setValue(event.target.value);
+            resetItems();
+          }
+        })
+      )) : hashicorp ? [
         (0, import_react10.createElement)("input", {
           key: "mount",
           className: "bt-input",
@@ -6536,10 +7053,14 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
           }
         })
       ] : (0, import_react10.createElement)("input", { className: "bt-input", type: "search", "aria-label": t("Search the vault"), placeholder: t("Search the vault"), value: search, autoComplete: "off", onChange: (event) => setSearch(event.target.value) }),
-      (0, import_react10.createElement)("button", { type: "submit", className: "bt-soft bt-soft-sm", disabled: busy || hashicorp && !mount }, t(hashicorp ? "Browse" : "Search"))
+      (0, import_react10.createElement)(
+        "button",
+        { type: "submit", className: "bt-soft bt-soft-sm", disabled: busy || hashicorp && !mount || keychain && (!service2 || !account) },
+        t(keychain ? "Find" : hashicorp ? "Browse" : "Search")
+      )
     ) : null,
     items?.length === 0 ? (0, import_react10.createElement)("span", { className: "bt-set-hint", role: "status" }, t("No matching vault items.")) : null,
-    items?.length > 0 ? (0, import_react10.createElement)(
+    !keychain && items?.length > 0 ? (0, import_react10.createElement)(
       "select",
       {
         className: "bt-input",
@@ -6587,7 +7108,8 @@ var vaultProviders = Object.fromEntries([
   ["hashicorp-vault", "HashiCorp Vault"],
   [GNOME_PROVIDER_ID, GNOME_PROVIDER_LABEL],
   ["proton-pass", "Proton Pass"],
-  ["bitwarden-secrets", "Bitwarden Secrets Manager"]
+  ["bitwarden-secrets", "Bitwarden Secrets Manager"],
+  [macosKeychain, "macOS Keychain"]
 ]);
 function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const [status, setStatus] = (0, import_react10.useState)(null);
@@ -6608,6 +7130,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const onePassword = provider === "onepassword";
   const proton = provider === "proton-pass";
   const hashicorp = provider === "hashicorp-vault";
+  const keychain = provider === macosKeychain;
   const machineAccount = provider === "bitwarden-secrets";
   const connectionKnown = status?.connectionKnown === true;
   const target = connectionKnown ? connection : connectionLabel2 ?? connection;
@@ -6661,12 +7184,13 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   };
   const unlock = async () => {
     const input = password.current;
-    if (busy || !keyring && !input?.value || hashicorp && !address.current?.value || machineAccount && !target) return;
+    if (busy || !keyring && !keychain && !input?.value || hashicorp && !address.current?.value || machineAccount && !target) return;
     setBusy(true);
     const credential = input?.value;
     if (input) input.value = "";
     try {
       if (keyring) await run3(actions.vaultUnlockSecretService());
+      else if (keychain) await run3(actions.vaultUnlock(void 0, void 0, provider));
       else if (hashicorp) {
         const endpoint = { address: address.current.value, namespace: namespace.current.value };
         address.current.value = "";
@@ -6696,7 +7220,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
     setBusy(true);
     setAdding(false);
     try {
-      await run3(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring || proton || machineAccount ? actions.vaultLock(provider) : actions.vaultLock());
+      await run3(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring || proton || machineAccount || keychain ? actions.vaultLock(provider) : actions.vaultLock());
     } finally {
       changed();
     }
@@ -6722,8 +7246,8 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
     (0, import_react10.createElement)(
       "div",
       { className: "bt-set-row", role: "status" },
-      (0, import_react10.createElement)("span", { className: "bt-tag" }, t(status?.reason ?? vaultStates[state2] ?? "Checking vault status…")),
-      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t(keyring ? "Locking here closes Automagik’s access. Manage the keyring lock in GNOME." : hashicorp ? "The address, namespace and token are cleared when the vault locks or the app quits." : proton ? "The token is used once to sign in and needs read access to a vault; items shared on their own are not listed. The session ends when the vault locks, after at most 110 minutes, or when the app quits." : onePassword ? "The token is cleared when the vault locks or the app quits." : "The vault locks after the idle time set in the plugin’s settings.")),
+      (0, import_react10.createElement)("span", { className: "bt-tag" }, t(keychain && status?.reason ? "Unavailable" : status?.reason ?? vaultStates[state2] ?? "Checking vault status…")),
+      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t(keyring ? "Locking here closes Automagik’s access. Manage the keyring lock in GNOME." : keychain ? status?.reason ?? keychainHint : hashicorp ? "The address, namespace and token are cleared when the vault locks or the app quits." : proton ? "The token is used once to sign in and needs read access to a vault; items shared on their own are not listed. The session ends when the vault locks, after at most 110 minutes, or when the app quits." : onePassword ? "The token is cleared when the vault locks or the app quits." : "The vault locks after the idle time set in the plugin’s settings.")),
       state2 === "unlocked" && (!onePassword || local) ? (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: lock }, t(onePassword ? "Clear token" : "Lock")) : null
     ),
     credentialControls && !local ? (0, import_react10.createElement)(
@@ -6790,7 +7314,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
           setServer(event.target.value);
         }
       }) : null,
-      keyring ? null : (0, import_react10.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react10.createElement)(MaskedInput, {
+      keyring || keychain ? null : (0, import_react10.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react10.createElement)(MaskedInput, {
         key: credentialKey,
         inputRef: password,
         disabled: busy,
@@ -7455,12 +7979,12 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
   const testLease = (0, import_react15.useRef)(null);
   const testRequest = (0, import_react15.useRef)(null);
   const saving = (0, import_react15.useRef)(false);
-  const progress = (0, import_react15.useRef)(null);
+  const progress2 = (0, import_react15.useRef)(null);
   const stopProgress = () => {
-    if (!progress.current) return;
-    clearTimeout(progress.current.timer);
-    progress.current.controller.abort();
-    progress.current = null;
+    if (!progress2.current) return;
+    clearTimeout(progress2.current.timer);
+    progress2.current.controller.abort();
+    progress2.current = null;
   };
   const epoch = (0, import_react15.useRef)(0);
   const live = (0, import_react15.useRef)(true);
@@ -7674,7 +8198,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     setError(null);
     setTest(null);
     const polling = { controller: new AbortController(), timer: null };
-    progress.current = polling;
+    progress2.current = polling;
     const poll = async () => {
       try {
         const answer2 = await call("hermes-remote-test-status", { requestId }, polling.controller.signal);
@@ -7699,7 +8223,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       failed(failure, payload, detail, requestId);
       return;
     } finally {
-      if (progress.current === polling) stopProgress();
+      if (progress2.current === polling) stopProgress();
       if (live.current && generation === epoch.current) setDraft(freshSecrets);
     }
     const profiles = answer.profiles ?? [];
@@ -9332,6 +9856,8 @@ function withdrawnText(why) {
   switch (why) {
     case "task":
       return t("This step was withdrawn: its task ended");
+    case "group":
+      return t("This step was withdrawn: its group Session ended");
     default:
       return "";
   }
@@ -11966,7 +12492,7 @@ function valueAxis(values, zero) {
   const pad2 = (high - low) * 0.1 || Math.abs(high) * 0.1 || 1;
   return niceTicks(low - pad2, high + pad2);
 }
-function columns({ categories, series, unit, kind }, width, active, shown2) {
+function columns({ categories, series, unit, kind }, width, active2, shown2) {
   const visible = series.filter((_, index) => shown2[index]);
   const ticks = valueAxis(visible.flatMap((item) => item.values), kind !== "line");
   const lo = ticks[0];
@@ -12003,7 +12529,7 @@ function columns({ categories, series, unit, kind }, width, active, shown2) {
         const r = Math.min(4, barW / 2, tall);
         const up = value >= 0;
         const d = up ? `M${x},${top2 + tall}V${top2 + r}q0,-${r} ${r},-${r}h${barW - 2 * r}q${r},0 ${r},${r}V${top2 + tall}z` : `M${x},${top2}V${top2 + tall - r}q0,${r} ${r},${r}h${barW - 2 * r}q${r},0 ${r},-${r}V${top2}z`;
-        parts.push((0, import_react24.createElement)("path", { key: `b${at}-${row}`, className: "dv-chart-mark", "data-dim": active !== null && active !== at ? "" : void 0, d, style: { fill: item.color } }));
+        parts.push((0, import_react24.createElement)("path", { key: `b${at}-${row}`, className: "dv-chart-mark", "data-dim": active2 !== null && active2 !== at ? "" : void 0, d, style: { fill: item.color } }));
       });
     });
   } else {
@@ -12016,15 +12542,15 @@ function columns({ categories, series, unit, kind }, width, active, shown2) {
       }
       parts.push((0, import_react24.createElement)("path", { key: `l${row}`, className: "dv-chart-line", d: line, style: { stroke: item.color } }));
       item.values.forEach((value, at) => {
-        parts.push((0, import_react24.createElement)("circle", { key: `p${row}-${at}`, className: "dv-chart-dot", cx: xs[at], cy: y(value), r: active === at ? 4 : 2.5, style: { fill: item.color } }));
+        parts.push((0, import_react24.createElement)("circle", { key: `p${row}-${at}`, className: "dv-chart-dot", cx: xs[at], cy: y(value), r: active2 === at ? 4 : 2.5, style: { fill: item.color } }));
       });
     });
-    if (active !== null) parts.unshift((0, import_react24.createElement)("line", { key: "guide", className: "dv-chart-guide", x1: xs[active], x2: xs[active], y1: plot.y, y2: plot.y + plot.h }));
+    if (active2 !== null) parts.unshift((0, import_react24.createElement)("line", { key: "guide", className: "dv-chart-guide", x1: xs[active2], x2: xs[active2], y1: plot.y, y2: plot.y + plot.h }));
   }
   const hits = categories.map((_, at) => ({ x: plot.x + band * at, y: plot.y, w: band, h: plot.h }));
   return { parts, height, points, hits };
 }
-function rows({ categories, series, unit }, width, active, shown2) {
+function rows({ categories, series, unit }, width, active2, shown2) {
   const visible = series.filter((_, index) => shown2[index]);
   const ticks = valueAxis(visible.flatMap((item) => item.values), true);
   const lo = ticks[0];
@@ -12052,7 +12578,7 @@ function rows({ categories, series, unit }, width, active, shown2) {
       const by = rowY + row * (barH + 2);
       const left = Math.min(x(value), zero);
       const long = Math.max(1, Math.abs(x(value) - zero));
-      parts.push((0, import_react24.createElement)("rect", { key: `b${at}-${row}`, className: "dv-chart-mark", "data-dim": active !== null && active !== at ? "" : void 0, x: left, y: by, width: long, height: barH, rx: Math.min(4, long / 2), style: { fill: item.color } }));
+      parts.push((0, import_react24.createElement)("rect", { key: `b${at}-${row}`, className: "dv-chart-mark", "data-dim": active2 !== null && active2 !== at ? "" : void 0, x: left, y: by, width: long, height: barH, rx: Math.min(4, long / 2), style: { fill: item.color } }));
       parts.push((0, import_react24.createElement)("text", { key: `v${at}-${row}`, className: "dv-chart-value", x: left + long + 6, y: by + barH - 3 }, withUnit(value, unit)));
     });
     points.push({ x: Math.max(...visible.map((item) => x(item.values[at])), zero), y: rowY });
@@ -12060,7 +12586,7 @@ function rows({ categories, series, unit }, width, active, shown2) {
   const hits = categories.map((_, at) => ({ x: 0, y: plot.y + rowH * at, w: width, h: rowH }));
   return { parts, height, points, hits };
 }
-function donut({ categories, series }, width, active, hover) {
+function donut({ categories, series }, width, active2, hover) {
   const values = (series[0]?.values ?? []).map((value) => Math.max(0, value));
   const total = values.reduce((sum, value) => sum + value, 0);
   const size = Math.min(180, Math.max(120, width * 0.42));
@@ -12081,7 +12607,7 @@ function donut({ categories, series }, width, active, hover) {
       const full2 = sweep >= Math.PI * 2 - 1e-6;
       const p = (radius, theta) => `${cx + Math.cos(theta) * radius},${cy + Math.sin(theta) * radius}`;
       const d = full2 ? `M${p(r, angle)}A${r},${r} 0 1 1 ${p(r, angle + Math.PI)}A${r},${r} 0 1 1 ${p(r, angle)}M${p(inner, angle)}A${inner},${inner} 0 1 0 ${p(inner, angle + Math.PI)}A${inner},${inner} 0 1 0 ${p(inner, angle)}z` : `M${p(r, angle)}A${r},${r} 0 ${large} 1 ${p(r, end)}L${p(inner, end)}A${inner},${inner} 0 ${large} 0 ${p(inner, angle)}z`;
-      parts.push((0, import_react24.createElement)("path", { key: `s${at}`, className: "dv-chart-mark", "data-dim": active !== null && active !== at ? "" : void 0, d, fillRule: "evenodd", style: { fill: colorAt(at) }, onPointerEnter: () => hover(at) }));
+      parts.push((0, import_react24.createElement)("path", { key: `s${at}`, className: "dv-chart-mark", "data-dim": active2 !== null && active2 !== at ? "" : void 0, d, fillRule: "evenodd", style: { fill: colorAt(at) }, onPointerEnter: () => hover(at) }));
     }
     angle = end;
   });
@@ -12176,7 +12702,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   const box = (0, import_react24.useRef)(null);
   const svg2 = (0, import_react24.useRef)(null);
   const width = useWidth(box, 520);
-  const [active, setActive] = (0, import_react24.useState)(null);
+  const [active2, setActive] = (0, import_react24.useState)(null);
   const [hidden, setHidden] = (0, import_react24.useState)([]);
   const [asTable, setAsTable] = (0, import_react24.useState)(false);
   const [copied, setCopied] = (0, import_react24.useState)(false);
@@ -12192,7 +12718,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   const label = typeof node.caption === "string" && node.caption !== "" ? node.caption : ui2.t("Chart");
   const isDonut = kind === "donut";
   const legendBeside = isDonut && width >= 360;
-  const drawn2 = isDonut ? donut(data, legendBeside ? width - 200 : width, active, setActive) : kind === "hbar" ? rows(data, width, active, shown2) : columns(data, width, active, shown2);
+  const drawn2 = isDonut ? donut(data, legendBeside ? width - 200 : width, active2, setActive) : kind === "hbar" ? rows(data, width, active2, shown2) : columns(data, width, active2, shown2);
   const svgWidth = isDonut ? drawn2.size : width;
   const move2 = (event) => {
     const keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
@@ -12204,9 +12730,9 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
     event.preventDefault();
     setActive((current) => current === null ? 0 : (current + keys[event.key] + categories.length) % categories.length);
   };
-  const point = active === null ? null : drawn2.points[active];
+  const point = active2 === null ? null : drawn2.points[active2];
   const share = (at) => unit === "%" ? withUnit(drawn2.values[at], unit) : `${withUnit(drawn2.values[at], unit)} · ${drawn2.total > 0 ? Math.round(drawn2.values[at] / drawn2.total * 100) : 0}%`;
-  const tipRows = active === null || isDonut ? [] : series.filter((_, index) => shown2[index]).map((item) => ({ color: item.color, name: item.name, value: withUnit(item.values[active], unit) }));
+  const tipRows = active2 === null || isDonut ? [] : series.filter((_, index) => shown2[index]).map((item) => ({ color: item.color, name: item.name, value: withUnit(item.values[active2], unit) }));
   const copy2 = () => {
     void navigator.clipboard?.writeText(chartCsv(data, ui2.t)).then(() => {
       setCopied(true);
@@ -12239,7 +12765,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
     {
       key: at,
       className: "dv-chart-key",
-      "data-dim": active !== null && active !== at ? "" : void 0,
+      "data-dim": active2 !== null && active2 !== at ? "" : void 0,
       onPointerEnter: () => setActive(at),
       onPointerLeave: () => setActive(null)
     },
@@ -12272,17 +12798,17 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
         onPointerLeave: () => setActive(null)
       },
       drawn2.parts,
-      isDonut ? active === null ? (0, import_react24.createElement)("text", { className: "dv-chart-center", x: svgWidth / 2, y: drawn2.height / 2 + 5, textAnchor: "middle" }, unit === "%" ? "" : withUnit(drawn2.total, unit)) : (0, import_react24.createElement)(
+      isDonut ? active2 === null ? (0, import_react24.createElement)("text", { className: "dv-chart-center", x: svgWidth / 2, y: drawn2.height / 2 + 5, textAnchor: "middle" }, unit === "%" ? "" : withUnit(drawn2.total, unit)) : (0, import_react24.createElement)(
         import_react24.Fragment,
         null,
-        (0, import_react24.createElement)("text", { className: "dv-chart-center-name", x: svgWidth / 2, y: drawn2.height / 2 - 4, textAnchor: "middle" }, fit(categories[active], drawn2.size * 0.56, LABEL)),
-        (0, import_react24.createElement)("text", { className: "dv-chart-center", x: svgWidth / 2, y: drawn2.height / 2 + 14, textAnchor: "middle" }, share(active))
+        (0, import_react24.createElement)("text", { className: "dv-chart-center-name", x: svgWidth / 2, y: drawn2.height / 2 - 4, textAnchor: "middle" }, fit(categories[active2], drawn2.size * 0.56, LABEL)),
+        (0, import_react24.createElement)("text", { className: "dv-chart-center", x: svgWidth / 2, y: drawn2.height / 2 + 14, textAnchor: "middle" }, share(active2))
       ) : drawn2.hits.map((hit, at) => (0, import_react24.createElement)("rect", { key: `h${at}`, className: "dv-chart-hit", x: hit.x, y: hit.y, width: hit.w, height: hit.h, onPointerEnter: () => setActive(at) }))
     ),
     point && !asTable && !isDonut ? (0, import_react24.createElement)(
       "div",
       { className: "dv-chart-tip", role: "status", style: { left: point.x, top: point.y } },
-      (0, import_react24.createElement)("b", null, categories[active]),
+      (0, import_react24.createElement)("b", null, categories[active2]),
       tipRows.map((row, index) => (0, import_react24.createElement)("span", { key: index }, (0, import_react24.createElement)("i", { style: { background: row.color } }), row.name ? `${row.name}  ` : "", row.value))
     ) : null
   );
@@ -12525,8 +13051,8 @@ function ConfirmInput({ node, onSubmit, busy = false, footStart = null }) {
 }
 function SettledConfirm({ node, answer }) {
   const ui2 = useViewUi();
-  const confirmed = answerValues(answer, node)?.confirmed;
-  if (confirmed !== true && confirmed !== false) {
+  const confirmed2 = answerValues(answer, node)?.confirmed;
+  if (confirmed2 !== true && confirmed2 !== false) {
     return (0, import_react26.createElement)(
       "div",
       { className: "dv-q-foot" },
@@ -12534,7 +13060,7 @@ function SettledConfirm({ node, answer }) {
       (0, import_react26.createElement)("button", { type: "button", className: "dv-q-submit", disabled: true }, node.confirmLabel ?? ui2.t("Confirm"))
     );
   }
-  const label = confirmed ? node.confirmLabel ?? ui2.t("Confirm") : node.cancelLabel ?? ui2.t("Cancel");
+  const label = confirmed2 ? node.confirmLabel ?? ui2.t("Confirm") : node.cancelLabel ?? ui2.t("Cancel");
   return (0, import_react26.createElement)("span", { className: "dv-q-badge" }, label);
 }
 function FormInput({ node, onSubmit, busy = false, footStart = null }) {
@@ -13748,9 +14274,9 @@ async function copyImage(url) {
 }
 function ImageCell({ callId, prompt, size, done, content, isError, bot, onAsk }) {
   const running2 = !done;
-  const progress = useProgress(callId, running2);
+  const progress2 = useProgress(callId, running2);
   const [shown2] = (0, import_react30.useState)(() => Date.now());
-  const elapsed = useElapsed(running2, progress.started ?? shown2);
+  const elapsed = useElapsed(running2, progress2.started ?? shown2);
   const id = done ? imageIdOf(content) : void 0;
   const [image, setImage] = (0, import_react30.useState)("loading");
   const loaded = image === "loaded";
@@ -13773,8 +14299,8 @@ function ImageCell({ callId, prompt, size, done, content, isError, bot, onAsk })
     );
   }
   const url = id ? imageUrl(id) : void 0;
-  const partial = url ? void 0 : progress.partial;
-  const step2 = progress.count > 0 ? Math.min(progress.count, 2) : 0;
+  const partial = url ? void 0 : progress2.partial;
+  const step2 = progress2.count > 0 ? Math.min(progress2.count, 2) : 0;
   const state2 = url ? loaded ? "done" : "arriving" : partial ? "partial" : "drawing";
   const painting = state2 === "drawing" || state2 === "arriving";
   return (0, import_react30.createElement)(
@@ -14085,13 +14611,22 @@ function currentKey(bot, look) {
   if (look.shape === "octopus" && look.color === "deepseek") return "omni";
   return `shape:${look.shape}`;
 }
-async function put(url, blob) {
-  const response = await fetch(url, { method: "PUT", body: blob, headers: { "content-type": "image/webp" } });
+async function put(url, blob, active2) {
+  checkViewer(active2);
+  const viewer = requestViewer("pet-codex")?.viewer?.id;
+  const headers = { "content-type": "image/webp", ...viewer ? { "x-automagik-viewer": viewer } : {} };
+  const response = await fetch(url, { method: "PUT", body: blob, headers });
+  checkViewer(active2);
   const answer = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(answer.error ?? t("Codex's pets folder could not be written"));
+  checkViewer(active2);
+  if (!response.ok) {
+    viewerResponse(response);
+    throw new Error(answer.error ?? t("Codex's pets folder could not be written"));
+  }
   return answer;
 }
 async function toCodex(bot, look) {
+  const active2 = requestViewer("pet-codex");
   const id = `automagik-${slug(bot.name)}`;
   const query = (part) => `api/omni-ui/pet-codex?${new URLSearchParams({ id, name: bot.name, description: bot.role ?? "", ...part ? { part } : {} })}`;
   const wants = petOf(bot, look, { live: true, size: 64 });
@@ -14106,8 +14641,8 @@ async function toCodex(bot, look) {
   } else {
     throw new Error(t("A photo is not a pet: pick a character or a pet first."));
   }
-  await put(query(), sheet);
-  if (sleep2) await put(query("sleep"), sleep2);
+  await put(query(), sheet, active2);
+  if (sleep2) await put(query("sleep"), sleep2, active2);
   return id;
 }
 function Portrait({ item, color }) {
@@ -14457,18 +14992,18 @@ function FolderMenu({ value, group = false, team = false, actions, run: run3, on
   const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu();
   const [warning, setWarning] = (0, import_react33.useState)(null);
   (0, import_react33.useEffect)(() => {
-    let active = true;
+    let active2 = true;
     if (group && !value) {
       setWarning(null);
       return;
     }
     Promise.resolve(actions.folderProbe?.(value)).then((note) => {
-      if (active) setWarning(note);
+      if (active2) setWarning(note);
     }, () => {
-      if (active) setWarning(null);
+      if (active2) setWarning(null);
     });
     return () => {
-      active = false;
+      active2 = false;
     };
   }, [value, group, actions.folderProbe]);
   const [info, setInfo] = (0, import_react33.useState)(null);
@@ -15289,7 +15824,7 @@ function BotCapabilitiesCard({ bot, roster, actions, run: run3, Card: Card3, Swi
       label: item.name,
       hint: attached.has(item.name) ? statusText2(statuses[item.name]) : void 0,
       on: attached.has(item.name),
-      onChange: (enabled) => void run3(actions.setBotCapability(bot.id, item.name, enabled))
+      onChange: (enabled2) => void run3(actions.setBotCapability(bot.id, item.name, enabled2))
     }))
   );
 }
@@ -16142,7 +16677,7 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
   (0, import_react39.useEffect)(() => {
     setForm((current) => current?.offerId === offerId ? current : null);
   }, [offerId]);
-  const active = offerId !== void 0 && form?.offerId === offerId ? form : null;
+  const active2 = offerId !== void 0 && form?.offerId === offerId ? form : null;
   const edit = (claim) => {
     setProblem(null);
     setForm({
@@ -16168,8 +16703,8 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
     }
   };
   function submit() {
-    if (!active || busy) return;
-    const { offerId: offerId2, label, claimId, rev, machineId } = active;
+    if (!active2 || busy) return;
+    const { offerId: offerId2, label, claimId, rev, machineId } = active2;
     const claim = machineId ? { machineId } : claimId === void 0 ? void 0 : { claimId, rev };
     void change(() => claim ? actions.cliLoginReserve(offerId2, label, claim) : actions.cliLoginReserve(offerId2, label));
   }
@@ -16191,11 +16726,11 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
       "div",
       { key: claim.claimId },
       (0, import_react39.createElement)("span", null, t(!claim.mine ? "Reserved by another installation: {label}." : claim.current ? "Reserved for {label}. This holds in this installation only for now; other installations are not checked yet." : state2 === "complete" ? "Also reserved here: {label} (another {vendor} account)." : "Reserved here: {label}.", { label: claim.label, vendor: CLI_NAMES[provider] })),
-      claim.mine && claim.current && offerId ? button("Rename", () => edit(claim), busy || active !== null) : null,
+      claim.mine && claim.current && offerId ? button("Rename", () => edit(claim), busy || active2 !== null) : null,
       claim.mine ? button(
         "Make shared",
         () => void change(() => actions.cliLoginRelease(claim.claimId, claim.rev)),
-        busy || active !== null
+        busy || active2 !== null
       ) : null
     )),
     ...machineClaims.map((claim) => (0, import_react39.createElement)(
@@ -16205,11 +16740,11 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
         label: claim.label,
         vendor: CLI_NAMES[provider]
       })),
-      claim.current && offerId ? button("Rename", () => edit(claim), busy || active !== null) : null,
+      claim.current && offerId ? button("Rename", () => edit(claim), busy || active2 !== null) : null,
       button(
         "Make shared",
         () => void change(() => actions.cliLoginReleaseMachine(claim.machineId)),
-        busy || active !== null
+        busy || active2 !== null
       ),
       owner(claim.owner)
     )),
@@ -16224,8 +16759,8 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
     notice && notice !== line ? (0, import_react39.createElement)("div", null, (0, import_react39.createElement)("span", { className: "bt-set-hint" }, t(notice))) : null,
     line ? (0, import_react39.createElement)("span", { className: "bt-set-hint" }, t(line)) : null,
     !hasCurrent && offerId ? (0, import_react39.createElement)("span", null, t("Shared with other instances (default).")) : null,
-    !hasCurrent && !active ? (0, import_react39.createElement)("div", null, button("Reserve for a project", () => edit(), busy || !offerId)) : null,
-    active ? (0, import_react39.createElement)(
+    !hasCurrent && !active2 ? (0, import_react39.createElement)("div", null, button("Reserve for a project", () => edit(), busy || !offerId)) : null,
+    active2 ? (0, import_react39.createElement)(
       "div",
       null,
       (0, import_react39.createElement)(
@@ -16235,10 +16770,10 @@ function Reservation({ provider, reservation, machine, actions, refresh, updated
         (0, import_react39.createElement)("input", {
           className: "bt-input",
           autoFocus: true,
-          value: active.label,
+          value: active2.label,
           maxLength: 120,
           disabled: busy,
-          onChange: (event) => setForm({ ...active, label: event.target.value }),
+          onChange: (event) => setForm({ ...active2, label: event.target.value }),
           onKeyDown: (event) => {
             if (event.key === "Enter" && !event.nativeEvent.isComposing) {
               event.preventDefault();
@@ -16731,6 +17266,13 @@ function roleOutletVisible(outlet, id, bot, roster) {
 
 // src/client/bot-settings.js
 var import_react41 = require("react");
+var PeopleCard;
+function installPeopleCard(component) {
+  PeopleCard = component;
+  return () => {
+    if (PeopleCard === component) PeopleCard = void 0;
+  };
+}
 var capitalize2 = (word2) => word2[0].toUpperCase() + word2.slice(1);
 function InlineText({ label, value, placeholder: placeholder2, required = false, maxLength, multiline = false, onSave }) {
   const [draft, setDraft] = (0, import_react41.useState)(null);
@@ -17229,6 +17771,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         onChange: (value) => save({ private: value })
       })
     ),
+    PeopleCard ? (0, import_react41.createElement)(PeopleCard, { bot, roster }) : null,
     (0, import_react41.createElement)(
       Card2,
       { title: t("Instructions") },
@@ -20798,7 +21341,7 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
     return (0, import_react48.createElement)("div", { className: "bt-event" }, reply.idle ? t("{names} went back and forth {count} times without progress and paused. Write here to go on", { count: reply.count, names: [bot.name, ...reply.names ?? []].join(t(" and ")) }) : t("Paused after {count} Bot relays. Waiting: {names}", { count: reply.count, names: (reply.names ?? []).join(t(" and ")) }));
   }
   if (reply.kind === "resumed") {
-    return (0, import_react48.createElement)("div", { className: "bt-event" }, t("{name} was cut off by a restart and picked its work back up", { name: bot.name }));
+    return (0, import_react48.createElement)("div", { className: "bt-event" }, reply.resumedByUpdate ? t("{name} was interrupted by an Automagik update and picked its work back up", { name: bot.name }) : t("{name} was cut off by a restart and picked its work back up", { name: bot.name }));
   }
   if (reply.kind === "cut") {
     return (0, import_react48.createElement)("div", { className: "bt-event" }, t("{name} was cut off by a restart again and stopped", { name: bot.name }));
@@ -21598,7 +22141,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     grantRole: (id, role, capability, on) => after(call2("role-grant", { id, role, capability, on })),
     roleSettings: (id, role) => call2("role-settings", { id, role }),
     setRoleSettings: (id, role, values) => call2("role-settings-set", { id, role, values }),
-    voicePane: (sessionId, paneId, open, active) => call2("voice-pane", { sessionId, paneId, open, active }),
+    voicePane: (sessionId, paneId, open, active2) => call2("voice-pane", { sessionId, paneId, open, active: active2 }),
     voiceWait: (sessionId, paneId, callId, signal) => call2("voice-wait", { sessionId, paneId, callId }, signal),
     voiceSpoken: (sessionId, paneId, callId, outcome) => call2("voice-spoken", { sessionId, paneId, callId, outcome }),
     // A model on another route: the host changes it in place on a chat with nothing said.
@@ -21698,7 +22241,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     dismissView: (sessionId) => after(call2("dismiss-view", { sessionId: partFor(sessionId) })),
     deleteBtw: (sessionId, cardId) => after(call2("btw-delete", { sessionId, cardId })),
     answerApproval: (id, choice) => after(call2("approval-answer", { id, choice, client: "web" })),
-    computerSetEnabled: (enabled) => after(call2("computer-set-enabled", { enabled })),
+    computerSetEnabled: (enabled2) => after(call2("computer-set-enabled", { enabled: enabled2 })),
     computerSetLevel: (botId, level) => after(call2("computer-set-level", { botId, level })),
     computerRevokeApp: (botId, appKey) => after(call2("computer-revoke-app", { botId, appKey })),
     computerProviderRetry: () => after(call2("computer-provider-retry", {})),
@@ -21727,7 +22270,10 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     secretAllow: (requestId, approval) => after(call2("secret-allow", { ...approval, requestId })),
     secretSourceDetail: (requestId) => call2("secret-source-detail", { requestId }),
     vaultStatus: (signal, provider) => call2("vault-status", provider === void 0 ? void 0 : { provider }, signal),
-    vaultUnlock: (password, connection) => call2("vault-unlock", { provider: "bitwarden", password, connection }),
+    vaultUnlock: (password, connection, provider = "bitwarden") => call2(
+      "vault-unlock",
+      provider === "macos-keychain" ? { provider } : { provider, password, connection }
+    ),
     vaultUnlockSecretService: () => call2("vault-unlock", { provider: "secret-service" }),
     vaultUnlockSaved: (provider, connection, credentialRevision) => call2("vault-unlock", {
       provider,
@@ -21735,7 +22281,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
       ...credentialRevision === void 0 ? {} : { credentialRevision }
     }),
     vaultLock: (provider) => provider === void 0 ? call2("vault-lock") : call2("vault-lock", { provider }),
-    vaultItems: (search, provider, project) => call2("vault-items", provider === "hashicorp-vault" ? { provider, ...search } : {
+    vaultItems: (search, provider, project) => call2("vault-items", provider === "hashicorp-vault" || provider === "macos-keychain" ? { provider, ...search } : {
       search,
       ...provider === void 0 ? {} : { provider },
       ...project === void 0 ? {} : { project }
@@ -21823,6 +22369,10 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     diagnosticsClear: () => call2("diagnostics-clear"),
     diagnosticsPermissions: () => call2("diagnostics-permissions"),
     repoStars: () => call2("repo-stars"),
+    checkSelfUpdate: (body) => call2("self-update-check", body),
+    selfUpdateResult: (runId) => call2("self-update-check-result", { runId }),
+    selfUpdateStatus: (signal) => call2("self-update-status", void 0, signal),
+    startSelfUpdate: (body) => call2("self-update-start", body),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = "action") => {
       noteClientError(where, error);
@@ -21878,14 +22428,23 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
 }
 
 // src/client/styles.js
+var SHELL_LIGHT_RULE = `body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-accent-ink:#ffffff;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}`;
+var SHELL_DARK_RULE = `body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent);--bt-accent-ink:#ffffff}`;
+var SHELL_LIGHT_PALETTE = SHELL_LIGHT_RULE.slice("body{".length, -1);
+var SHELL_DARK_PALETTE = SHELL_DARK_RULE.slice("body[data-ds-dark-theme]{".length, -1);
+var roundButtonCss = (selector) => `
+${selector}{width:36px;height:36px;border-radius:50%;border:1px solid var(--bt-line);background:var(--bt-main);color:var(--bt-ink);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background-color .12s ease,transform .12s ease}
+${selector}:hover{background:var(--bt-hover)}
+${selector}:active{transform:scale(.94)}
+`;
 var SHELL_CSS = `
-body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
+body{${SHELL_LIGHT_PALETTE}}
 /* The --bt-glass-* tokens keep upstream's names, which its cards, menus and docks read, and
    hold solid surfaces here: this look is clay depth on a plain ground, not frosted glass. */
 /* iOS waits out a double-tap zoom on buttons; the plugin's own controls never zoom. */
 :is(.bt-tool,.bt-uaction,.bt-menu button,.bt-menu-item,.bt-icon-btn,.bt-round,.bt-pill,.bt-account,.bt-set-row,.bt-settings-item,.bt-react-strip button,.bt-palette-row,.bt-palette-clear,.bt-tab,.bt-ptab,.bt-ptab-x,.bt-bcard-x,.bt-plus,.bt-q-btn,.bt-q-x,.bt-x,.bt-nc-send,.bt-send,.bt-soft,.bt-mini,.bt-side-send,.bt-shape,.bt-swatch,.bt-color,.bt-newchat,.bt-task-day,.bt-task-remove,.bt-fb-btn){touch-action:manipulation}
 :is(.bt-round,.bt-you,.bt-account,.bt-color,.bt-color span,.bt-swatch,.bt-icon-btn,.bt-avatar-trigger,.bt-avatar-pencil,.bt-plus,.bt-mic,.bt-voice){corner-shape:round}
-body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent)}
+body[data-ds-dark-theme]{${SHELL_DARK_PALETTE}}
 body{--bt-gold:#f2b84b;--bt-gold-edge:#c98a1a;--bt-gold-band:#e9a636;--bt-gold-shine:#fff3d4;--bt-gem:#8fdcec;--bt-gem-2:#f0bddf;--bt-role-bg:#fbe7bf;--bt-role-ink:#8a5a12;--bt-role-edge:#e7c88a;--bt-role-shine:#fff6e2;--bt-magic-cyan:#3ccbf4;--bt-magic-violet:#9a6cf6;--bt-magic-pink:#ff4fa0;--bt-arena:#120f24;--bt-arena-2:#231a44;--bt-arena-ink:#f4f1ff}
 body[data-ds-dark-theme]{--bt-role-bg:#4a3a1c;--bt-role-ink:#f6d48f;--bt-role-edge:#2a1f0c;--bt-role-shine:rgba(255,240,200,.12)}
 ${Object.entries(INKS).map(([name, [light2]]) => `body{--bt-ink-${name}:${light2}}`).join("")}
@@ -22007,9 +22566,7 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .omni-logo{flex:none;overflow:visible}
 .omni-mark{object-fit:contain;-webkit-user-drag:none;user-select:none}
 .bt-you .omni-logo{color:var(--bt-ink)}
-.bt-round{width:36px;height:36px;border-radius:50%;border:1px solid var(--bt-line);background:var(--bt-main);color:var(--bt-ink);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background-color .12s ease,transform .12s ease}
-.bt-round:hover{background:var(--bt-hover)}
-.bt-round:active{transform:scale(.94)}
+${roundButtonCss(".bt-round")}
 .bt-list{display:flex;flex-direction:column;gap:3px;overflow-y:auto;min-height:0;flex:1 1 auto}
 /* Chromium ignores ::-webkit-scrollbar when scrollbar-width or scrollbar-color (inherited) is non-auto. */
 .bt-side:not(.bt-rail)>.bt-list{margin-right:-12px;scrollbar-gutter:stable;scrollbar-width:auto;scrollbar-color:auto}
@@ -23477,21 +24034,21 @@ var Glyph = ({ face }) => (0, import_react51.createElement)(
   { className: "lb-face-glyph", viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true, focusable: "false" },
   ...PATHS[face].map((d) => (0, import_react51.createElement)("path", { key: d, d }))
 );
-function FaceSwitch({ face, onFace, label, unavailable = {} }) {
+function FaceSwitch({ face, onFace, label, unavailable: unavailable2 = {} }) {
   return TwoPartSwitch({
     current: faceOr(face),
     onSelect: onFace,
     label: label ?? word("faces"),
-    unavailable,
+    unavailable: unavailable2,
     parts: FACES2.map((name) => ({ name, content: [(0, import_react51.createElement)(Glyph, { face: name }), faceWord(name)] }))
   });
 }
-function TwoPartSwitch({ current, onSelect, label, parts, unavailable = {} }) {
+function TwoPartSwitch({ current, onSelect, label, parts, unavailable: unavailable2 = {} }) {
   return (0, import_react51.createElement)(
     "div",
     { className: "lb-face", role: "group", "aria-label": label },
     ...parts.map(({ name, content }) => {
-      const why = name === current ? void 0 : unavailable[name];
+      const why = name === current ? void 0 : unavailable2[name];
       return (0, import_react51.createElement)("button", {
         key: name,
         type: "button",
@@ -23544,8 +24101,8 @@ function paneDetails(pane, tree) {
 function togglePane(list, pane, tree, max = MAX_PANES) {
   const selected = stillThere(pane, tree);
   if (!selected) return { list };
-  const terminal = paneDetails(selected, tree).terminal;
-  const index = list.findIndex((candidate) => candidate.botId === selected.botId && (candidate.worker ?? null) === selected.worker || terminal && paneDetails(candidate, tree)?.terminal === terminal);
+  const terminal2 = paneDetails(selected, tree).terminal;
+  const index = list.findIndex((candidate) => candidate.botId === selected.botId && (candidate.worker ?? null) === selected.worker || terminal2 && paneDetails(candidate, tree)?.terminal === terminal2);
   if (index !== -1) return { list: list.filter((_, at) => at !== index) };
   if (list.length >= max) return { list, refused: list.map((candidate) => paneDetails(candidate, tree)?.title).filter(Boolean) };
   return { list: [...list, selected] };
@@ -23556,8 +24113,8 @@ function prunePanes(list, tree) {
   for (const pane of list) {
     const selected = stillThere(pane, tree);
     if (!selected) continue;
-    const terminal = paneDetails(selected, tree).terminal;
-    const key = terminal ?? `${selected.botId}:${selected.worker ?? "seat"}`;
+    const terminal2 = paneDetails(selected, tree).terminal;
+    const key = terminal2 ?? `${selected.botId}:${selected.worker ?? "seat"}`;
     if (seen.has(key)) continue;
     seen.add(key);
     unique.push(selected);
@@ -23695,7 +24252,7 @@ function CodeSideSwitch({ current, onSelect }) {
 }
 function codePanelNavigation(layout) {
   let previous = null;
-  const active = () => layout.panelInfo.getSnapshot().activePanelId;
+  const active2 = () => layout.panelInfo.getSnapshot().activePanelId;
   return {
     open(selected, { beside = false } = {}) {
       let next = barPanes([selected]);
@@ -23705,14 +24262,14 @@ function codePanelNavigation(layout) {
         if (list === previous2 && !refused) return;
         next = barPanes(list, refused);
       }
-      if (active() !== CODE_PANEL) {
-        previous = active();
+      if (active2() !== CODE_PANEL) {
+        previous = active2();
         layout.selectPanel(CODE_PANEL);
       }
       set(next);
     },
     close() {
-      if (active() === CODE_PANEL) {
+      if (active2() === CODE_PANEL) {
         try {
           layout.selectPanel(previous);
         } catch {
@@ -23843,10 +24400,10 @@ function findHost() {
   }
   return node;
 }
-function useRunningHost(active) {
+function useRunningHost(active2) {
   const [host, setHost] = (0, import_react53.useState)(null);
   (0, import_react53.useEffect)(() => {
-    if (!active) {
+    if (!active2) {
       setHost(null);
       return void 0;
     }
@@ -23867,7 +24424,7 @@ function useRunningHost(active) {
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [active]);
+  }, [active2]);
   return host;
 }
 function useRowEntrances(replacing) {
@@ -24758,7 +25315,7 @@ html[data-automagik-desktop=darwin]:not([data-automagik-fullscreen]) .lb-bar[dat
 html[data-automagik-desktop=darwin] .lb-head{-webkit-app-region:drag}
 html[data-automagik-desktop=darwin] .lb-head :is(a,button,input,[role=button],[aria-haspopup],[tabindex]){-webkit-app-region:no-drag}
 .lb-host .bt-hint{margin:2px 10px 8px}
-.lb-foot{flex:none;padding:6px 8px 2px}
+.lb-foot{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:6px 8px 2px}
 .lb-foot:empty{display:none}
 .lb-agent .bt-agent-sub-in{margin-left:calc(8px + var(--lb-art) + var(--lb-art-gap) - 8px)}
 .lb-host .bt-threads{margin-left:calc(8px + var(--lb-art) / 2)}
@@ -24790,14 +25347,6 @@ var LEFT_BAR_CSS = `
 ${tokenCss("body", LEFT_BAR_TOKENS)}
 ${tokenCss("[data-lb-skin=flat]", LEFT_BAR_SKINS.flat)}
 ${tokenCss("[data-lb-skin=stage]", LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS2}${MARKS2}${FACES3}${HOST}`;
-
-// src/client/self-update-flag.js
-var MOCK_FLAG = "mock-1540";
-function mock1540On(location2 = globalThis.location) {
-  const search = typeof location2?.search === "string" ? location2.search : "";
-  const hash = typeof location2?.hash === "string" ? location2.hash : "";
-  return new RegExp(`(?:[?&])${MOCK_FLAG}(?:=|&|$)`).test(search) || hash.includes(MOCK_FLAG);
-}
 
 // src/client/left-bar.js
 var import_react58 = require("react");
@@ -24975,7 +25524,6 @@ function SpaceNote({ anchor, onClose }) {
   ), document.body);
 }
 function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown, sideSwitch, codeList }) {
-  const mock = mock1540On();
   const shownId = useSessions((list) => list.ids.find((id) => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? "");
   const current = currentKey2(roster, shownId);
   const status = useTeamStatus({ roster, useSessionStatus, useWork });
@@ -25028,17 +25576,13 @@ function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionSta
         (0, import_react58.createElement)(
           "div",
           { className: "lb-head" },
-          // Without the flag: the wordmark and the tools, exactly where dev draws them. With it:
-          // Search and New only, and the tools move to the foot below.
-          mock ? null : (0, import_react58.createElement)("span", { className: "lb-brand" }, (0, import_react58.createElement)(Wordmark, { height: 22 })),
-          mock ? null : tools,
           (0, import_react58.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("Search"), title: t("Search"), onClick: () => actions.openPalette() }, (0, import_react58.createElement)(SearchIcon)),
           (0, import_react58.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("New…"), title: t("New…"), onClick: () => actions.openNewChat("new") }, (0, import_react58.createElement)(PlusIcon))
         ),
         sideSwitch ?? null,
         notice,
         codeList ?? (team.bots.length === 0 && empty ? empty : (0, import_react58.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : void 0, label: t("Bot list") })),
-        mock ? (0, import_react58.createElement)("div", { className: "lb-foot" }, tools, foot ?? null) : foot ? (0, import_react58.createElement)("div", { className: "lb-foot" }, foot) : null
+        (0, import_react58.createElement)("div", { className: "lb-foot" }, tools, foot ?? null)
       )
     ),
     note ? (0, import_react58.createElement)(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null
@@ -25094,11 +25638,11 @@ function seatWithFreshPane(seat, fresh) {
   return next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal && next.agent === seat.agent && next.chat === seat.chat && next.status === seat.status ? null : next;
 }
 var NO_SEATS = Object.freeze([]);
-function useSeats(list, enabled = true) {
+function useSeats(list, enabled2 = true) {
   const [seats, setSeats] = (0, import_react59.useState)(NO_SEATS);
   (0, import_react59.useEffect)(() => {
     const empty = () => setSeats((now) => now.length === 0 ? now : NO_SEATS);
-    if (!enabled || typeof list !== "function") {
+    if (!enabled2 || typeof list !== "function") {
       empty();
       return void 0;
     }
@@ -25122,18 +25666,18 @@ function useSeats(list, enabled = true) {
       alive = false;
       clearTimeout(timer);
     };
-  }, [list, enabled]);
+  }, [list, enabled2]);
   return seats;
 }
 var EMPTY_FACE = Object.freeze({ terminal: null, rows: [], screen: [], status: null, approval: null, question: null, loading: false, error: null });
-function mergeFace(now, value, terminal) {
-  const sameSeat = now.terminal === terminal;
+function mergeFace(now, value, terminal2) {
+  const sameSeat = now.terminal === terminal2;
   const rows2 = value.reset === true || !sameSeat ? value.rows ?? [] : [...now.rows, ...value.rows ?? []];
   const seen = /* @__PURE__ */ new Set();
   const unique = rows2.filter((row) => seen.has(row.id) ? false : (seen.add(row.id), true));
   return {
     ...now,
-    terminal,
+    terminal: terminal2,
     rows: unique,
     screen: value.screen ?? (sameSeat ? now.screen : []),
     status: value.status ?? null,
@@ -25145,23 +25689,23 @@ function mergeFace(now, value, terminal) {
 }
 function useSeatFace(seat) {
   const [face, setFace] = (0, import_react59.useState)(EMPTY_FACE);
-  const terminal = typeof seat?.terminal === "string" ? seat.terminal : null;
+  const terminal2 = typeof seat?.terminal === "string" ? seat.terminal : null;
   (0, import_react59.useEffect)(() => {
     let alive = true;
     let timer;
     let cursor = null;
     let client = null;
-    if (terminal === null) {
+    if (terminal2 === null) {
       setFace(EMPTY_FACE);
       return void 0;
     }
     client = seatClientId();
     const read = async () => {
       try {
-        const value = await call("seat-chat-read", { client, terminal, after: cursor });
+        const value = await call("seat-chat-read", { client, terminal: terminal2, after: cursor });
         if (!alive) return;
         cursor = (value.rows ?? []).at(-1)?.id ?? cursor;
-        setFace((now) => mergeFace(now, value, terminal));
+        setFace((now) => mergeFace(now, value, terminal2));
       } catch (error) {
         if (alive) setFace((now) => ({ ...now, loading: false, error: hostText(error?.message ?? "") }));
         return;
@@ -25169,16 +25713,16 @@ function useSeatFace(seat) {
       if (alive) timer = setTimeout(read, READ_MS);
     };
     const open = async () => {
-      setFace((now) => now.terminal === terminal ? { ...now, loading: true, error: null } : { ...EMPTY_FACE, terminal, loading: true });
+      setFace((now) => now.terminal === terminal2 ? { ...now, loading: true, error: null } : { ...EMPTY_FACE, terminal: terminal2, loading: true });
       try {
-        const value = await call("seat-chat-open", { client, terminal });
+        const value = await call("seat-chat-open", { client, terminal: terminal2 });
         if (!alive) return;
         if (value === null) {
           setFace((now) => ({ ...now, loading: false, error: t("This seat holds the chat already open in another window.") }));
           return;
         }
         cursor = (value.rows ?? []).at(-1)?.id ?? null;
-        setFace((now) => mergeFace(now, value, terminal));
+        setFace((now) => mergeFace(now, value, terminal2));
         timer = setTimeout(read, READ_MS);
       } catch (error) {
         if (alive) setFace((now) => ({ ...now, loading: false, error: hostText(error?.message ?? "") }));
@@ -25188,10 +25732,10 @@ function useSeatFace(seat) {
     return () => {
       alive = false;
       clearTimeout(timer);
-      if (client) void call("seat-chat-close", { client, terminal }).catch(() => {
+      if (client) void call("seat-chat-close", { client, terminal: terminal2 }).catch(() => {
       });
     };
-  }, [terminal]);
+  }, [terminal2]);
   return face;
 }
 var toolText = (row) => typeof row?.summary === "string" && row.summary.trim() !== "" ? row.summary : "";
@@ -25251,9 +25795,9 @@ function SeatChatPanel({ onBack }) {
   const face = useSeatFace(seat);
   const botId = seatBotId(seat);
   const code = useCodeFace(botId, { seat: true });
-  const terminal = code.face === "terminal";
+  const terminal2 = code.face === "terminal";
   const why = seatTerminalWhy(seat);
-  const showingTerminal = terminal && why === null;
+  const showingTerminal = terminal2 && why === null;
   const scroll = (0, import_react59.useRef)(null);
   const [pinned, setPinned] = (0, import_react59.useState)(true);
   const length = face.rows.length;
@@ -25262,8 +25806,8 @@ function SeatChatPanel({ onBack }) {
     if (node && pinned) node.scrollTop = node.scrollHeight;
   }, [length, pinned, seat?.terminal]);
   (0, import_react59.useEffect)(() => {
-    if (why !== null && terminal) closeTerminal();
-  }, [why, terminal]);
+    if (why !== null && terminal2) closeTerminal();
+  }, [why, terminal2]);
   (0, import_react59.useEffect)(() => () => {
     if (showingTerminal) closeTerminal();
   }, [showingTerminal]);
@@ -25562,10 +26106,10 @@ function NativeWorkers({ bot, useWork, wide, age }) {
 // src/client/sidebar.js
 var import_react61 = require("react");
 var import_react_dom11 = require("react-dom");
-function useMarkedUnread(id, active, marked, actions) {
+function useMarkedUnread(id, active2, marked, actions) {
   (0, import_react61.useEffect)(() => {
-    if (active && marked) actions.clearUnread(id);
-  }, [active, marked]);
+    if (active2 && marked) actions.clearUnread(id);
+  }, [active2, marked]);
 }
 var PinMark = () => (0, import_react61.createElement)("span", { className: "bt-pin", "aria-hidden": true }, (0, import_react61.createElement)(PinMarkIcon));
 var nameIfCut2 = (event) => {
@@ -25589,9 +26133,9 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const part = currentPart(bot);
   const preview = useSessions((list) => previewOf(list, part, roster.exchangeTurns[part]));
   const running2 = useSessionStatus((map) => map.get(part)?.running === true);
-  const active = useSessionRetainInfo(part, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
-  const unread = useSessionStatus((map) => map.get(part)?.completionUnread === true || map.get(part)?.pendingInteraction !== void 0) || marked && !active;
-  useMarkedUnread(id, active, marked, actions);
+  const active2 = useSessionRetainInfo(part, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
+  const unread = useSessionStatus((map) => map.get(part)?.completionUnread === true || map.get(part)?.pendingInteraction !== void 0) || marked && !active2;
+  useMarkedUnread(id, active2, marked, actions);
   const main = isMainOf(roster, id);
   const crowned = roster.mainBotId === id;
   const approval = useApproval(useWork, (entry) => entry.botId === id);
@@ -25605,7 +26149,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const groups = workKeys(useGroupWork(useWork, (rooms) => Object.entries(rooms).flatMap(([roomId, entries2]) => entries2.filter((entry) => entry.botId === id).map((entry) => ({ id: roomId, ...doingOf(entry) })))));
   const away = !running2 && groups.length > 0;
   const failed = useWork ? useWork((work) => work.failed?.[id] !== void 0) : false;
-  const replied = useSessionStatus((map) => map.get(part)?.completionUnread === true) && !active;
+  const replied = useSessionStatus((map) => map.get(part)?.completionUnread === true) && !active2;
   const notInstalled = bot.installed === false;
   const notInstalledText = notInstalled ? [t("Not installed"), bot.reason ? hostText(bot.reason) : ""].filter(Boolean).join(" · ") : "";
   const state2 = botState(running2 || away, doing, alert, { failed, unread: replied, notInstalled });
@@ -25616,7 +26160,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const nativeRunning = useWork ? useWork((work) => runningWorkers(work, id)) : 0;
   const threads = runningTasksOf(roster, id).length + nativeRunning;
   const threadsLine = threads === 0 ? "" : threads === 1 ? t("Working on 1 thing") : t("Working on {n} things", { n: threads });
-  if (bot.hidden && !active && !main) return null;
+  if (bot.hidden && !active2 && !main) return null;
   const onContextMenu = (event) => {
     event.preventDefault();
     actions.openMenu({ kind: "bot", id, x: event.clientX, y: event.clientY });
@@ -25631,7 +26175,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
       type: "button",
       className: crowned ? "bt-row bt-row-crowned" : "bt-row",
       "aria-label": label,
-      "aria-current": active ? "page" : void 0,
+      "aria-current": active2 ? "page" : void 0,
       "data-bot-id": id,
       title: wide ? void 0 : bot.name,
       onMouseEnter: wide ? nameIfCut2 : void 0,
@@ -25650,7 +26194,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
     ) : null,
     // Badges other Omni plugins add (extend.js): Omni's row counts the automation runs waiting for you.
     wide ? (0, import_react61.createElement)(RowBadges, { bot, roster, useWork }) : null,
-    wide && unread && !active ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
+    wide && unread && !active2 ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
   );
 }
 function RowBadges(props) {
@@ -25732,15 +26276,15 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
   const sessionId = room2.sessionId ?? id;
   const fallback = useSessions((list) => previewOf(list, sessionId));
   const preview = room2.preview?.replace(/\s+/g, " ").trim() || fallback;
-  const active = useSessionRetainInfo(sessionId, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
-  const unread = useSessionStatus((map) => map.get(sessionId)?.completionUnread === true) || marked && !active;
-  useMarkedUnread(id, active, marked, actions);
+  const active2 = useSessionRetainInfo(sessionId, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
+  const unread = useSessionStatus((map) => map.get(sessionId)?.completionUnread === true) || marked && !active2;
+  useMarkedUnread(id, active2, marked, actions);
   const approval = useApproval(useWork, (entry) => entry.roomId === id);
   const waitingCount = useWork ? useWork((work) => approvalCount(work, (entry) => entry.roomId === id)) : 0;
   const members = workKeys(useGroupWork(useWork, (rooms) => (rooms[id] ?? []).filter((entry) => entry.botId !== void 0).map((entry) => ({ id: entry.botId, ...doingOf(entry) }))));
   const first = roster.byId[members[0]?.id];
   const workingLine = first ? workLine(first.name, members[0], members.length - 1) : null;
-  if (room2.hidden && !active) return null;
+  if (room2.hidden && !active2) return null;
   const pinned = room2.pinned === true;
   const label = [room2.name, pinned ? t("Pinned") : "", members.length > 0 ? t("Working") : "", approval ? waitingLabel(waitingCount) : ""].filter(Boolean).join(", ");
   return (0, import_react61.createElement)(
@@ -25749,7 +26293,7 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
       type: "button",
       className: "bt-row",
       "aria-label": label,
-      "aria-current": active ? "page" : void 0,
+      "aria-current": active2 ? "page" : void 0,
       "data-room-id": id,
       title: wide ? void 0 : room2.name,
       onMouseEnter: wide ? nameIfCut2 : void 0,
@@ -25767,7 +26311,7 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
       (0, import_react61.createElement)("span", { className: "bt-row-name" }, (0, import_react61.createElement)("span", { className: "bt-row-title" }, room2.name), waitingCount > 0 ? (0, import_react61.createElement)("span", { className: "bt-tag" }, String(waitingCount)) : null, pinned ? (0, import_react61.createElement)(PinMark) : null),
       workingLine ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, workingLine) : preview ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, preview) : null
     ) : null,
-    wide && approval && !active ? (0, import_react61.createElement)("span", { className: "bt-unread bt-unread-wait", "aria-hidden": true }) : wide && unread && !active ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
+    wide && approval && !active2 ? (0, import_react61.createElement)("span", { className: "bt-unread bt-unread-wait", "aria-hidden": true }) : wide && unread && !active2 ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
   );
 }
 function AgentSessionRow({ session, agent, actions, renaming, index }) {
@@ -25859,14 +26403,14 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
     };
   });
   const renaming = useUi((value) => value.renameAgent);
-  const active = sessions.some((session) => session.active);
+  const active2 = sessions.some((session) => session.active);
   const running2 = sessions.some((session) => session.running);
-  const unread = sessions.some((session) => session.unread) || marked && !active;
-  useMarkedUnread(agent.id, active, marked, actions);
+  const unread = sessions.some((session) => session.unread) || marked && !active2;
+  useMarkedUnread(agent.id, active2, marked, actions);
   if (tasks && own2.length === 0) return null;
   const preview = sessions[0]?.title ?? t("New session");
   const label = [name, running2 ? t("Working") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
-  const open = active && wide;
+  const open = active2 && wide;
   const first = tasks ? 0 : 1;
   const list = (0, import_react61.createElement)(
     "div",
@@ -25902,7 +26446,7 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
         type: "button",
         className: "bt-row",
         "aria-label": label,
-        "aria-current": active ? "page" : void 0,
+        "aria-current": active2 ? "page" : void 0,
         "data-agent-id": agent.id,
         title: wide ? void 0 : name,
         onClick: () => actions.openAgent(agent.id),
@@ -25918,7 +26462,7 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
         (0, import_react61.createElement)("span", { className: "bt-row-name" }, (0, import_react61.createElement)("span", { className: "bt-row-title" }, name), agent.pinned ? (0, import_react61.createElement)(PinMark) : null),
         preview ? (0, import_react61.createElement)("span", { className: "bt-row-preview" }, preview) : null
       ) : null,
-      wide && unread && !active ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
+      wide && unread && !active2 ? (0, import_react61.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
     ),
     list
   );
@@ -26145,6 +26689,14 @@ function SidebarTools(props) {
   const entries2 = useEntries(sidebarTools);
   return entries2.map((entry) => (0, import_react61.createElement)(toolBoundary(), { key: entry.id, entry, tool: props }));
 }
+function updatePopoverPlacement(rect, { width, height, top, bottom, left = 0 }) {
+  const inset = 8;
+  const gap = 6;
+  const below = Math.max(0, bottom - Math.max(top + inset, rect.bottom + gap) - inset);
+  const above = Math.max(0, Math.min(bottom - inset, rect.top - gap) - top - inset);
+  const x = Math.max(left + inset, Math.min(rect.left, left + width - 280 - inset));
+  return above > below ? { left: x, bottom: height - top - inset - above, maxHeight: above, maxWidth: width - 2 * inset } : { left: x, top: bottom - inset - below, maxHeight: below, maxWidth: width - 2 * inset };
+}
 function UpdateButton({ useUpdate, actions }) {
   const update = useUpdate((value) => value);
   const [open, setOpen] = (0, import_react61.useState)(false);
@@ -26179,8 +26731,20 @@ function UpdateButton({ useUpdate, actions }) {
   const tick = useViewport();
   (0, import_react61.useLayoutEffect)(() => {
     if (!open) return;
-    const rect = button2.current?.getBoundingClientRect();
-    if (rect) setBox({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)), top: rect.bottom + 6 });
+    const place = () => {
+      const rect = button2.current?.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      if (rect) setBox(updatePopoverPlacement(rect, {
+        width: viewport?.width ?? window.innerWidth,
+        height: window.innerHeight,
+        top: viewport?.offsetTop ?? 0,
+        bottom: viewBottom(),
+        left: viewport?.offsetLeft
+      }));
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
   }, [open, tick]);
   if (!update?.available && !dshRow && phase === "idle" && dshPhase === "idle") return null;
   const cloudPhase = phase === "installing" || dshPhase === "installing" ? "installing" : phase !== "idle" ? phase : dshPhase;
@@ -26694,7 +27258,7 @@ ${NATIVE_WORKERS_CSS}
 .bt-update[data-phase=installing] .bt-cloud-arrow{animation:bt-cloud-drop 1.1s cubic-bezier(.45,0,.55,1) infinite}
 @keyframes bt-cloud-drop{0%{transform:translateY(-3px);opacity:0}35%{opacity:1}70%{transform:translateY(1px);opacity:1}100%{transform:translateY(2px);opacity:0}}
 .bt-update-dot{position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:#E5484D;box-shadow:0 0 0 1.5px var(--bt-sidebar)}
-.bt-update-pop{position:fixed;z-index:60;width:280px;padding:14px 14px 12px;border-radius:14px;background:var(--bt-main);border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);box-sizing:border-box;transform-origin:top left;font-family:var(--bt-font);animation:bt-update-pop ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing}}
+.bt-update-pop{position:fixed;overflow:auto;z-index:60;width:280px;padding:14px 14px 12px;border-radius:14px;background:var(--bt-main);border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);box-sizing:border-box;transform-origin:top left;font-family:var(--bt-font);animation:bt-update-pop ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing}}
 @keyframes bt-update-pop{from{opacity:0;transform:scale(.96);filter:blur(4px)}}
 .bt-update-title{font-size:14px;line-height:20px;font-weight:600}
 .bt-update-text{margin-top:2px;font-size:12.5px;line-height:18px;color:var(--bt-ink-2)}
@@ -26987,9 +27551,11 @@ function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus, useSe
   const memoryIds = bot ? [bot.id] : room2 ? [room2.id, ...room2.members] : [];
   const notice = useMemoryNotice(memoryIds, useNews);
   const changed = useNews((map) => latestMemoryChange(map, memoryIds));
+  const updateHold = useRoster((value) => value.updateHold === true);
+  const holdText = t("An update is running. Your message waits until it is done.");
   (0, import_react63.useEffect)(() => {
-    document.body.style.setProperty("--bt-placeholder", JSON.stringify(name ? t("Message {name}", { name }) : t("Message")));
-  }, [name, t("Message")]);
+    document.body.style.setProperty("--bt-placeholder", JSON.stringify(updateHold ? holdText : name ? t("Message {name}", { name }) : t("Message")));
+  }, [name, t("Message"), updateHold, holdText]);
   (0, import_react63.useEffect)(() => {
     document.body.style.setProperty("--bt-steer-unread", JSON.stringify(t("Not read yet")));
   }, [t("Not read yet")]);
@@ -27313,9 +27879,9 @@ function usePermissionPick({ saved, onPick, askedOf, repick = false, confirmFull
   };
   const current = pending ?? saved;
   const asks = (value) => value === AUTO_ROW || value === AUTO || confirmFull && presetDanger(value);
-  const pick2 = (value, confirmed = false) => {
+  const pick2 = (value, confirmed2 = false) => {
     if (value === current && !repick) return;
-    if (asks(value) && !confirmed) {
+    if (asks(value) && !confirmed2) {
       asked2.current = askedOf?.();
       setConfirming(value);
       return;
@@ -27489,8 +28055,8 @@ function PermissionSelect({ catalog, saved, onPick, repick = false, disabled = f
     const buttons = [...menu.current.querySelectorAll("button:not(:disabled)")];
     const first = buttons[0];
     const last = buttons.at(-1);
-    const active = document.activeElement;
-    if (!first || (event.shiftKey ? active === first || active === menu.current : active === last)) {
+    const active2 = document.activeElement;
+    if (!first || (event.shiftKey ? active2 === first || active2 === menu.current : active2 === last)) {
       event.preventDefault();
       (event.shiftKey ? last ?? menu.current : first ?? menu.current).focus();
     }
@@ -27589,12 +28155,12 @@ var autoQuestion = (name, level, judge) => {
 // src/client/enter-steer.js
 var steerable = (input) => input !== void 0 && input.phase === "plain" && input.draft.trim() === "" && input.attachmentIds.length === 0 && input.queue.some((message) => message.source?.kind === "user");
 var enterSteers = (event, input) => event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && !event.getModifierState?.("AltGraph") && !event.isComposing && event.keyCode !== 229 && !event.repeat && steerable(input);
-var steerQueued = async (session) => {
+var steerQueued = async (session, update = (id, action) => session.updateQueue(id, action)) => {
   try {
     const queued = session.projections.faceOf("inbox").getSnapshot()?.["next-turn"] ?? [];
     for (const item of queued) {
       if (item.source?.kind !== "user") continue;
-      const result = await session.updateQueue(item.id, { kind: "steer" });
+      const result = await update(item.id, { kind: "steer" });
       if (result.ok) continue;
       return result.error.code === "session/steer-unavailable" || result.error.code === "session/queue-item-not-found" ? "done" : "failed";
     }
@@ -30020,15 +30586,15 @@ function CommandPalette({ start: start2, token, roster, actions, useSessions }) 
   ].filter((command) => matchesName(command.title));
   if (commands.length) sections.push([t("Commands"), commands]);
   const rows2 = sections.flatMap(([, items]) => items);
-  const active = Math.min(cursor, Math.max(rows2.length - 1, 0));
+  const active2 = Math.min(cursor, Math.max(rows2.length - 1, 0));
   const shown2 = rows2.map((row) => row.key).join("\n");
-  const glide = useGlide(`${active}
+  const glide = useGlide(`${active2}
 ${shown2}`, { axis: "y", ...QUICK_EDGES });
   const listRef = glide.box;
   useFlip(listRef, shown2, "[data-flip]");
   (0, import_react72.useEffect)(() => {
     listRef.current?.querySelector("[aria-selected=true]")?.scrollIntoView({ block: "nearest" });
-  }, [active, query]);
+  }, [active2, query]);
   const choose = (row) => {
     if (!row || leaving) return;
     void Promise.resolve(row.run()).catch((error) => actions.reportError(error, "menu"));
@@ -30062,13 +30628,13 @@ ${shown2}`, { axis: "y", ...QUICK_EDGES });
             if (event.nativeEvent.isComposing) return;
             if (event.key === "ArrowDown") {
               event.preventDefault();
-              setCursor(Math.min(active + 1, rows2.length - 1));
+              setCursor(Math.min(active2 + 1, rows2.length - 1));
             } else if (event.key === "ArrowUp") {
               event.preventDefault();
-              setCursor(Math.max(active - 1, 0));
+              setCursor(Math.max(active2 - 1, 0));
             } else if (event.key === "Enter") {
               event.preventDefault();
-              choose(rows2[active]);
+              choose(rows2[active2]);
             }
           }
         }),
@@ -30101,7 +30667,7 @@ ${shown2}`, { axis: "y", ...QUICK_EDGES });
                 type: "button",
                 role: "option",
                 className: "bt-palette-row",
-                "aria-selected": at === active,
+                "aria-selected": at === active2,
                 "data-flip": row.key,
                 onMouseMove: () => {
                   if (cursor !== at) setCursor(at);
@@ -30280,13 +30846,13 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const [effort, setEffort] = (0, import_react73.useState)(void 0);
   const [folderWarning, setFolderWarning] = (0, import_react73.useState)(null);
   (0, import_react73.useEffect)(() => {
-    let active = true;
+    let active2 = true;
     Promise.resolve(actions.folderProbe?.()).then((note) => {
-      if (active) setFolderWarning(note);
+      if (active2) setFolderWarning(note);
     }, () => {
     });
     return () => {
-      active = false;
+      active2 = false;
     };
   }, [actions.folderProbe]);
   const [busy, setBusy] = (0, import_react73.useState)(false);
@@ -30830,9 +31396,9 @@ function NewChat({ mode, sectionId = null, roster, actions }) {
     options.push({ key: bot.id, bot, label: bot.name, hint: choosingAdmin ? t("Make admin") : group || picked.length > 0 ? t("Add to group chat") : void 0, run: () => openBot(bot) });
   }
   if (wanted !== "" && !exact && mode !== "search") options.push({ key: "create", icon: (0, import_react76.createElement)(PlusIcon), label: t("Create new Bot “{name}”", { name: query.trim() }), run: createBot });
-  const active = Math.min(cursor, Math.max(options.length - 1, 0));
+  const active2 = Math.min(cursor, Math.max(options.length - 1, 0));
   const listed = options.map((option) => option.key).join("\n");
-  const glide = useGlide(`${active}
+  const glide = useGlide(`${active2}
 ${listed}`, { axis: "y", ...QUICK_EDGES });
   useFlip(glide.box, listed, "[data-flip]");
   const drop = (0, import_react76.useRef)(null);
@@ -30930,13 +31496,13 @@ ${listed}`, { axis: "y", ...QUICK_EDGES });
             if (event.nativeEvent.isComposing) return;
             if (event.key === "ArrowDown") {
               event.preventDefault();
-              setCursor(Math.min(active + 1, options.length - 1));
+              setCursor(Math.min(active2 + 1, options.length - 1));
             } else if (event.key === "ArrowUp") {
               event.preventDefault();
-              setCursor(Math.max(active - 1, 0));
-            } else if (event.key === "Enter" && options[active]) {
+              setCursor(Math.max(active2 - 1, 0));
+            } else if (event.key === "Enter" && options[active2]) {
               event.preventDefault();
-              options[active].run();
+              options[active2].run();
             } else if (event.key === "Backspace" && query === "") unpick();
           }
         }),
@@ -30960,14 +31526,14 @@ ${listed}`, { axis: "y", ...QUICK_EDGES });
             type: "button",
             role: "option",
             className: "bt-option",
-            "aria-selected": index === active,
+            "aria-selected": index === active2,
             "data-flip": option.key,
             onMouseEnter: () => setCursor(index),
             onClick: option.run
           },
           option.bot ? (0, import_react76.createElement)(BotMark, { bot: option.bot, size: 22 }) : (0, import_react76.createElement)("span", { className: "bt-option-icon" }, option.icon),
           (0, import_react76.createElement)("span", { className: "bt-option-label" }, option.label),
-          option.hint && index === active ? (0, import_react76.createElement)("span", { className: "bt-option-hint" }, option.hint) : null
+          option.hint && index === active2 ? (0, import_react76.createElement)("span", { className: "bt-option-hint" }, option.hint) : null
         ))
       )),
       (0, import_react76.createElement)("div", { className: "bt-nc-spacer" }),
@@ -31139,9 +31705,9 @@ function useRolePlayback({ sessionId, actions, paused, closing, afterSpeech }) {
       if (seen.size > 128) seen.delete(seen.values().next().value);
       setOffer({ ...next, id, signal });
     };
-    const renew = async (active) => {
+    const renew = async (active2) => {
       if (signal.aborted) return;
-      const open = await actions.voicePane(sessionId, id, true, active).catch(() => false);
+      const open = await actions.voicePane(sessionId, id, true, active2).catch(() => false);
       if (!open) return;
       if (signal.aborted) await actions.voicePane(sessionId, id, false).catch(() => {
       });
@@ -31253,10 +31819,10 @@ function watchReply(read, watch, consume) {
     off();
   };
 }
-function useMicLevel(enabled) {
+function useMicLevel(enabled2) {
   const [level, setLevel] = (0, import_react79.useState)(0);
   (0, import_react79.useEffect)(() => {
-    if (!enabled || !navigator.mediaDevices?.getUserMedia) return void 0;
+    if (!enabled2 || !navigator.mediaDevices?.getUserMedia) return void 0;
     let stream = null;
     let audio = null;
     let frame = 0;
@@ -31292,7 +31858,7 @@ function useMicLevel(enabled) {
       });
       setLevel(0);
     };
-  }, [enabled]);
+  }, [enabled2]);
   return level;
 }
 function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }) {
@@ -32085,10 +32651,10 @@ function useTween(value) {
     const started = performance.now();
     let frame;
     const step2 = (now) => {
-      const progress = Math.min(1, (now - started) / 650);
-      from.current = begin + (value - begin) * (1 - (1 - progress) ** 3);
+      const progress2 = Math.min(1, (now - started) / 650);
+      from.current = begin + (value - begin) * (1 - (1 - progress2) ** 3);
       setShown(from.current);
-      if (progress < 1) frame = requestAnimationFrame(step2);
+      if (progress2 < 1) frame = requestAnimationFrame(step2);
     };
     frame = requestAnimationFrame(step2);
     return () => cancelAnimationFrame(frame);
@@ -32328,7 +32894,7 @@ function Profile({ face, share, range }) {
 }
 var monthOf = (ms) => Date.UTC(yearOf(ms), new Date(ms).getUTCMonth(), 1);
 var addMonths = (ms, count) => Date.UTC(yearOf(ms), new Date(ms).getUTCMonth() + count, 1);
-function SpanPicker({ span, today, oldest, active, near, onPick, onClose }) {
+function SpanPicker({ span, today, oldest, active: active2, near, onPick, onClose }) {
   const box = (0, import_react82.useRef)(null);
   const todayMs = hourMs(today);
   const thisMonth = monthOf(todayMs);
@@ -32384,7 +32950,7 @@ function SpanPicker({ span, today, oldest, active, near, onPick, onClose }) {
         "data-l": flag(weekday === 0 || day2 === 1),
         "data-r": flag(weekday === 6 || day2 === length),
         "data-today": flag(key === today),
-        "data-has": flag(active.has(key)),
+        "data-has": flag(active2.has(key)),
         onMouseEnter: () => setHover(key),
         onClick: () => press(key)
       }, (0, import_react82.createElement)("b", null, day2)));
@@ -32464,8 +33030,8 @@ function Heat({ view, keep, paint, index }) {
     ...hover.week >= HEAT_WEEKS / 2 ? { right: `calc(${(HEAT_WEEKS - hover.week) / HEAT_WEEKS * 100}% + 8px)` } : { left: `calc(${(hover.week + 1) / HEAT_WEEKS * 100}% + 8px)` },
     ...hover.day < 4 ? { top: `calc(${hover.day / 7 * 100}% - 2px)` } : { top: "auto", bottom: `calc(${(6 - hover.day) / 7 * 100}% - 2px)` }
   } : null;
-  const active = [...daily.values()].filter((value) => value > 0).length;
-  const summary = active === 1 ? t("Active on 1 day in the last year") : t("Active on {count} days in the last year", { count: active });
+  const active2 = [...daily.values()].filter((value) => value > 0).length;
+  const summary = active2 === 1 ? t("Active on 1 day in the last year") : t("Active on {count} days in the last year", { count: active2 });
   return (0, import_react82.createElement)(
     "section",
     { className: "bt-us-card bt-us-heat", style: { "--i": index } },
@@ -33078,6 +33644,9 @@ function RoleShopCard({ row, roster, actions, operation }) {
 
 // src/client/connectors-page.js
 var import_react84 = require("react");
+var NO_SUBSCRIBE3 = () => () => {
+};
+var NO_VERSION = () => 0;
 var CATEGORIES = [["dev", "Developer"], ["docs", "Docs & files"], ["work", "Work"], ["design", "Design"], ["data", "Data"], ["commerce", "Commerce"], ["search", "Search"]];
 var PREVIEW = 6;
 var matches = (query, ...texts2) => query === "" || texts2.join(" ").toLowerCase().includes(query.toLowerCase());
@@ -33207,12 +33776,12 @@ function ConnectedSummary({ apps, count, onClick }) {
   );
 }
 var ACP_ROUTE = Object.freeze({ claude: "acp-claude", codex: "acp-codex" });
-function officialBot(app, roster) {
+function officialBot(app, roster, installer) {
   const bots = roster?.bots;
   if (!Array.isArray(bots)) return void 0;
   const own2 = bots.find((bot) => bot.kind === app.id);
   if (own2 !== void 0) return own2;
-  return app.id === "omni" ? roster?.byId?.[roster.mainBotId] : void 0;
+  if (app.id === "omni" && !installer?.pending?.("omni")) return roster?.byId?.[roster.mainBotId];
 }
 function officialAcp(app, roster) {
   const provider = ACP_ROUTE[app.id];
@@ -33220,11 +33789,11 @@ function officialAcp(app, roster) {
   if (provider === void 0 || !Array.isArray(models)) return void 0;
   return models.filter((model) => (model.provider ?? String(model.ref ?? "").split("/")[0]) === provider);
 }
-function officialState(app, roster) {
+function officialState(app, roster, installer) {
   if (roster?.ready === false) return { state: "unknown" };
   if (app.kind === "agent") {
     if (!Array.isArray(roster?.bots)) return { state: "unknown" };
-    const bot = officialBot(app, roster);
+    const bot = officialBot(app, roster, installer);
     return bot === void 0 ? { state: "missing" } : { state: "installed", bot };
   }
   if (app.kind === "acp") {
@@ -33241,7 +33810,7 @@ function officialStateText(state2) {
   if (state2 === "missing") return t("Not installed");
   return t("Unknown");
 }
-function officialAction(app, resolved, roster, actions) {
+function officialAction(app, resolved, roster, actions, installer, info) {
   if (resolved.state === "unknown") return null;
   if (app.kind === "agent") {
     if (resolved.state === "installed") {
@@ -33256,6 +33825,11 @@ function officialAction(app, resolved, roster, actions) {
           else actions.openSettings?.("bots", bot.id);
         }
       };
+    }
+    if (info !== null) {
+      const label = info.action === "install" ? t("Install") : info.label;
+      if (label === null) return null;
+      return { label, done: false, run: () => installer.act(app.id, { roster, actions }) };
     }
     if (typeof actions.openHarnessOnboarding !== "function") return null;
     return {
@@ -33312,10 +33886,15 @@ function OfficialButton({ action }) {
     onClick: action.run
   }, action.done ? (0, import_react84.createElement)(CheckIcon) : null, action.label);
 }
-function OfficialTile({ app, resolved, action, expanded, onToggle }) {
+function OfficialTile({ app, resolved, info, action, expanded, onToggle }) {
+  const text2 = info?.text ?? officialStateText(resolved.state);
   return (0, import_react84.createElement)(
     "div",
-    { className: "bt-app", "data-state": resolved.state === "installed" ? "ready" : "off" },
+    {
+      className: "bt-app",
+      "data-state": resolved.state === "installed" ? "ready" : "off",
+      "data-error": info?.alert ? "" : void 0
+    },
     (0, import_react84.createElement)(
       "button",
       { type: "button", className: "bt-app-main", "aria-expanded": expanded, onClick: onToggle },
@@ -33324,13 +33903,14 @@ function OfficialTile({ app, resolved, action, expanded, onToggle }) {
         "span",
         { className: "bt-app-text" },
         (0, import_react84.createElement)("span", { className: "bt-app-name" }, app.name, (0, import_react84.createElement)("span", { className: "bt-tag" }, t("Official"))),
-        (0, import_react84.createElement)("span", { className: "bt-app-status" }, officialStateText(resolved.state))
+        (0, import_react84.createElement)("span", { className: "bt-app-status" }, text2)
       )
     ),
     (0, import_react84.createElement)(OfficialButton, { action })
   );
 }
-function OfficialDetail({ app, resolved, action }) {
+function OfficialDetail({ app, resolved, info, action }) {
+  const text2 = info?.text ?? officialStateText(resolved.state);
   return (0, import_react84.createElement)(
     "div",
     { className: "bt-set-card bt-connectors-card bt-app-detail bt-app-expanded" },
@@ -33356,17 +33936,27 @@ function OfficialDetail({ app, resolved, action }) {
           "span",
           { className: "bt-set-copy" },
           (0, import_react84.createElement)("span", { className: "bt-bs-label" }, t("State")),
-          (0, import_react84.createElement)("span", { className: "bt-set-hint" }, officialStateText(resolved.state))
+          (0, import_react84.createElement)("span", { className: "bt-set-hint" }, text2)
         )
-      )
+      ),
+      info?.alert ? (0, import_react84.createElement)("div", { className: "bt-connector-error", role: "alert" }, info.alert) : null
     )
   );
 }
 function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
+  const installer = useEntries(officialInstall).findLast((e) => typeof e.row === "function") ?? null;
+  const version = installer?.version ?? NO_VERSION;
+  (0, import_react84.useSyncExternalStore)(installer?.subscribe ?? NO_SUBSCRIBE3, version, version);
+  (0, import_react84.useEffect)(() => {
+    if (installer) void installer.refresh?.()?.catch?.(() => {
+    });
+  }, [installer]);
   if (apps.length === 0) return null;
   const rows2 = apps.map((app) => {
-    const resolved = officialState(app, roster);
-    return { app, resolved, action: officialAction(app, resolved, roster, actions) };
+    const resolved = officialState(app, roster, installer);
+    const info = app.kind === "agent" && resolved.state === "missing" && installer?.kinds?.includes(app.id) ? installer.row(app.id, { roster, actions }) : null;
+    const action = officialAction(app, resolved, roster, actions, installer, info);
+    return { app, resolved, info, action };
   });
   const open = rows2.find((row) => row.app.id === expanded);
   return (0, import_react84.createElement)(
@@ -33382,11 +33972,12 @@ function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
       key: row.app.id,
       app: row.app,
       resolved: row.resolved,
+      info: row.info,
       action: row.action,
       expanded: row.app.id === expanded,
       onToggle: () => onToggle(row.app.id)
     }))),
-    open === void 0 ? null : (0, import_react84.createElement)(OfficialDetail, { app: open.app, resolved: open.resolved, action: open.action })
+    open === void 0 ? null : (0, import_react84.createElement)(OfficialDetail, open)
   );
 }
 function AppsPage({ roster, actions }) {
@@ -34580,9 +35171,46 @@ var FEEDBACK_CSS = `
 @media (prefers-reduced-motion:reduce){.bt-toast{animation:none}.bt-toast[data-leaving]{transition:none}}
 `;
 
+// src/shared/self-update.js
+var CHECK_FRESH_MS = 10 * 6e4;
+
+// src/client/self-update-recovery.js
+var stateText = { pending: "Pending", resumed: "Resumed", failed: "Could not resume" };
+var kindText = { turn: "Turn", input: "Queued input", delivery: "Queued delivery" };
+function recoveryDetails(run3, recovery) {
+  if (!recovery || recovery.runId !== run3.runId || recovery.requestId !== run3.requestId) {
+    return { message: t("Work recovery results are not available yet.") };
+  }
+  const { items, omitted, complete, inventoryUnconfirmed } = recovery;
+  const message = inventoryUnconfirmed ? t("Work recovery is unconfirmed because the saved notes could not be read.") : void 0;
+  if (complete && items.length === 0 && !omitted) {
+    return { message: message ?? t("There was no stopped work to recover.") };
+  }
+  return {
+    message,
+    items: items.map((item) => ({
+      sessionId: item.sessionId,
+      text: t("{name} ({kind}) · {state}", {
+        name: item.name,
+        kind: t(kindText[item.kind]),
+        state: t(stateText[item.state])
+      })
+    })),
+    truncation: omitted && t("More work items than can be shown here ({pending} pending, {resumed} resumed, {failed} could not resume, {unconfirmed} unconfirmed).", {
+      unconfirmed: 0,
+      ...omitted
+    })
+  };
+}
+
 // src/client/about.js
 var import_react89 = require("react");
 var CHEER_MS = 1800;
+var CHECK_POLL_MS = 2e3;
+var MAX_CHECK_POLLS = 180;
+var FORCE_CHECK_DEADLINE_MS = MAX_CHECK_POLLS * CHECK_POLL_MS;
+var FORCE_STATUS_DEADLINE_MS = 5 * CHECK_POLL_MS;
+var FORCE_START_DEADLINE_MS = 3e4;
 var starCount = (count) => new Intl.NumberFormat(dateLocale(), { notation: "compact", maximumFractionDigits: 1 }).format(count);
 var inApp = (update, app) => Boolean(app.bridge) || update.source === "app";
 var updatesOff = (versions) => versions?.updates === false;
@@ -34716,7 +35344,562 @@ function pluginReason(versions) {
       return null;
   }
 }
+function selfUpdateReason(reason) {
+  switch (reason) {
+    case "desktop-app":
+      return t("updates come with the desktop app.");
+    case "no-store":
+      return t("the update store is unavailable.");
+    case "store-invalid":
+      return t("the saved update state is invalid.");
+    case "profile-invalid":
+      return t("the installed plugin versions could not be read.");
+    case "download-failed":
+      return t("the update files could not be downloaded.");
+    case "signature-invalid":
+      return t("the signed release could not be verified.");
+    case "lane-invalid":
+      return t("the published release has invalid update information.");
+    case "not-newer":
+      return t("the published release would downgrade an installed plugin.");
+    case "sequence-lower":
+      return t("the published release is older than one already accepted.");
+    case "engines-dsh":
+      return t("the published release needs a different DeepSeek Harness version.");
+    case "hash-mismatch":
+      return t("a downloaded plugin package did not match the signed release.");
+    case "listener-unknown":
+      return t("the local DSH listener could not be determined. Use a fixed port with --public-url.");
+    case "registry-unreachable":
+      return t("the package registry could not be reached.");
+    case "profile-npmrc":
+      return t("the profile .npmrc contains settings besides the registry.");
+    case "bot/read-only":
+      return t("this window does not hold the team lock.");
+    case "check-timeout":
+      return t("the update check is taking too long. Try again.");
+    case "no-supervisor":
+      return t("this instance is not run by the update supervisor.");
+    case "no-writable-home":
+      return t("there is no writable folder to keep the previous version in.");
+    case "self-update-off":
+      return t("in-app updates are turned off for this instance.");
+    case "rollback-missing":
+      return t("this instance's update supervisor cannot roll back automatically yet, which Force update needs.");
+    case "reinstall-needs-force":
+      return t("reinstalling the current version requires Force update.");
+    case "reinstall-unsupported":
+      return t("reinstalling the same version needs a newer update supervisor.");
+    case "page-outdated":
+      return t("this page is older than the installed update support. Reload the page.");
+    case "release-changed":
+      return t("the published release changed after the check. Check again.");
+    case "update-running":
+      return t("an update is already running.");
+    case "check-stale":
+      return t("the last check is too old. Check for updates again.");
+    case "team-home-custom":
+      return t("the team is kept in a custom folder the update cannot snapshot.");
+    case "request-unanswered":
+      return t("the update supervisor did not answer.");
+    case "starting-up":
+      return t("Automagik is still picking up work from startup. Try again shortly.");
+    case "notes-unwritable":
+      return t("the notes needed to recover stopped work could not be saved.");
+    case "stage-failed":
+      return t("the new version could not be installed beside the current one.");
+    case "switch-refused":
+      return t("the installed plugins changed while the update was being prepared.");
+    case "supervisor-restarted":
+      return t("the update supervisor restarted before the switch.");
+    case "health-failed":
+      return t("the new version did not answer its health check.");
+    case "rollback-failed":
+      return t("going back to the previous version failed.");
+    default:
+      return t("the update check could not be completed.");
+  }
+}
+var RUNNING_PHASES = /* @__PURE__ */ new Set(["checking", "downloading", "verifying", "staging", "switching", "restarting", "health", "rollingBack"]);
+var UPDATE_POLL_DEADLINE_MS = 15 * 6e4;
+var VERDICT_PHASES = /* @__PURE__ */ new Set(["healthy", "rolledBack", "notUpdated", "manualRecovery"]);
+function runStep(phase) {
+  switch (phase) {
+    case "checking":
+      return t("Updating: checking the release…");
+    case "downloading":
+      return t("Updating: downloading…");
+    case "verifying":
+      return t("Updating: verifying the signature and hashes…");
+    case "staging":
+      return t("Updating: installing beside the current version…");
+    case "switching":
+      return t("Updating: switching versions…");
+    case "restarting":
+      return t("Updating: restarting…");
+    case "health":
+      return t("Updating: checking that the new version answers…");
+    case "rollingBack":
+      return t("Updating: going back to the previous version…");
+    default:
+      return null;
+  }
+}
+function failedHealthCheck(failed) {
+  switch (failed) {
+    case "exited":
+      return t("DSH stopped during the health check.");
+    case "port":
+      return t("The local web listener did not answer.");
+    case "sign-in":
+      return t("Local sign-in did not work.");
+    case "plugins":
+      return t("The expected plugins or the update hold could not be verified.");
+    case "roster":
+      return t("The saved team could not be read.");
+    case "page":
+      return t("The web page or its scripts did not load.");
+    default:
+      return null;
+  }
+}
+function runMessage(run3) {
+  if (!run3) return null;
+  if (RUNNING_PHASES.has(run3.phase)) return runStep(run3.phase);
+  switch (run3.phase) {
+    case "healthy":
+      return run3.reinstall === true ? t("Reinstalled Automagik {version}.", { version: run3.to }) : t("Updated to Automagik {version}.", { version: run3.to });
+    case "rolledBack": {
+      if (!run3.rollback) return t("The update was undone: Automagik {version} is back. Nothing was lost.", { version: run3.from });
+      const versions = { from: run3.from, to: run3.to };
+      if (run3.rollback.data?.restored) {
+        if (run3.rollback.data.trialKept === true && run3.rollback.trialFrom && run3.rollback.trialTo) {
+          return t("The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. If you changed the team between {start} and {end}, that change is in the copy kept with the update. Nothing in your sessions, memory, settings or keys was lost.", {
+            ...versions,
+            start: new Date(run3.rollback.trialFrom).toLocaleTimeString(),
+            end: new Date(run3.rollback.trialTo).toLocaleTimeString()
+          });
+        }
+        return t("The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. Nothing in your sessions, memory, settings or keys was lost.", versions);
+      }
+      return t("The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back. Nothing in your sessions, memory, settings or keys was lost.", versions);
+    }
+    case "notUpdated":
+      return t("Not updated: {reason} The work that was stopped goes on.", {
+        reason: run3.detail === "previous-unsupported" ? t("This version of Automagik cannot roll an update back from the app; update it once by hand (docs/upgrade.md).") : selfUpdateReason(run3.detail === "reinstall-unsupported" ? run3.detail : run3.reason)
+      });
+    case "manualRecovery":
+      return run3.rollback ? t('The update to Automagik {to} failed, and so did going back to {from}. See "In-app updates" in docs/upgrade.md; state.json in the update store names the step that failed.', { from: run3.from, to: run3.to }) : t('The update needs manual recovery. See "In-app updates" in docs/upgrade.md.');
+    default:
+      return null;
+  }
+}
+var failedCheck = (error) => ({ reason: error?.code === "bot/read-only" ? error.code : null });
+var cannotUpdate = (reason) => t("Cannot update: {reason}", { reason: selfUpdateReason(reason) });
+var rollbackReady = (status) => status.rollback === true;
+function matchesAttempt(run3, attempt) {
+  if (run3 == null) return false;
+  if ("requestId" in attempt) return run3.requestId === attempt.requestId;
+  if ("runId" in attempt) return run3.runId === attempt.runId;
+  return run3.runId !== attempt.previousRunId;
+}
+function freshCheck(result) {
+  const checkedAt = Date.parse(result?.checkedAt);
+  const now = Date.now();
+  return result?.state === "available" && checkedAt <= now && now < checkedAt + CHECK_FRESH_MS;
+}
+function forceBlock(status, preflight) {
+  if (!status || typeof status !== "object") return cannotUpdate(null);
+  if (status.problem) return cannotUpdate("store-invalid");
+  if (!Object.hasOwn(status, "run")) return cannotUpdate(null);
+  const phase = status.run?.phase;
+  if (phase === "manualRecovery") return runMessage(status.run);
+  if (RUNNING_PHASES.has(phase)) return cannotUpdate("update-running");
+  if (status.run !== null && !VERDICT_PHASES.has(phase)) return cannotUpdate(null);
+  if (status.available === false) return cannotUpdate(status.reason);
+  if (status.startEnabled !== true) return cannotUpdate(status.available === true ? "self-update-off" : null);
+  if (status.available !== true) return cannotUpdate(null);
+  if (!rollbackReady(status)) return cannotUpdate("rollback-missing");
+  return preflight || status.forceRefusal === null ? null : cannotUpdate(status.forceRefusal);
+}
+function invalidateForce(flow) {
+  flow.id++;
+  flow.sent = false;
+  flow.cancel?.();
+  flow.cancel = null;
+}
+function SelfUpdateRow({ Row: Row3, check, readResult, readStatus, start: start2, force = false }) {
+  const [starting, setStarting] = (0, import_react89.useState)(false);
+  const [result, setResult] = (0, import_react89.useState)(null);
+  const [checkExpired, setCheckExpired] = (0, import_react89.useState)(false);
+  const [status, setStatus] = (0, import_react89.useState)(null);
+  const [confirming, setConfirming] = (0, import_react89.useState)(false);
+  const [updating, setUpdating] = (0, import_react89.useState)(false);
+  const [refused, setRefused] = (0, import_react89.useState)(null);
+  const [attempt, setAttempt] = (0, import_react89.useState)(null);
+  const [expired2, setExpired] = (0, import_react89.useState)(false);
+  const [forceFlow] = (0, import_react89.useState)({ id: 0, sent: false, cancel: null, checkDeadline: 0 });
+  const [forceView, setForceView] = (0, import_react89.useState)(null);
+  (0, import_react89.useEffect)(() => () => invalidateForce(forceFlow), [forceFlow]);
+  const run3 = attempt === null || matchesAttempt(status?.run, attempt) ? status?.run : null;
+  const runLive = RUNNING_PHASES.has(run3?.phase);
+  const hasVerdict = VERDICT_PHASES.has(run3?.phase);
+  const unconfirmedStart = attempt !== null && "previousRunId" in attempt;
+  const awaitingVerdict = attempt !== null && !unconfirmedStart && !hasVerdict && !expired2;
+  const checkedAt = Date.parse(result?.checkedAt);
+  const checkFresh = () => freshCheck(result);
+  (0, import_react89.useEffect)(() => {
+    if (result?.state !== "available" || attempt !== null || !Number.isFinite(checkedAt)) return;
+    const timer = setTimeout(() => {
+      setCheckExpired(true);
+      setConfirming(false);
+    }, Math.max(0, checkedAt + CHECK_FRESH_MS - Date.now()));
+    return () => clearTimeout(timer);
+  }, [result, checkedAt, attempt]);
+  (0, import_react89.useEffect)(() => {
+    if (typeof readStatus !== "function") return;
+    let stopped = false;
+    let timer;
+    let following = false;
+    const expire = attempt === null ? void 0 : setTimeout(() => {
+      stopped = true;
+      clearTimeout(timer);
+      setExpired(true);
+    }, Math.max(0, attempt.deadline - Date.now()));
+    const poll = async () => {
+      let next;
+      try {
+        next = await readStatus();
+      } catch {
+      }
+      if (stopped) return;
+      if (next !== void 0) setStatus(next);
+      if (attempt !== null) {
+        if (matchesAttempt(next?.run, attempt) && VERDICT_PHASES.has(next.run.phase)) clearTimeout(expire);
+        else timer = setTimeout(poll, CHECK_POLL_MS);
+      } else {
+        if (next !== void 0) following = RUNNING_PHASES.has(next?.run?.phase);
+        if (following) timer = setTimeout(poll, CHECK_POLL_MS);
+      }
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      clearTimeout(expire);
+    };
+  }, [readStatus, attempt, result]);
+  const runId = result?.state === "checking" ? result.runId : void 0;
+  const waiting = runId !== void 0;
+  const checking = starting || waiting;
+  const busy = checking || runLive && !expired2 || updating || awaitingVerdict;
+  const followAttempt = (target) => {
+    setExpired(false);
+    setAttempt({ ...target, deadline: Date.now() + UPDATE_POLL_DEADLINE_MS });
+  };
+  const endForce = (message2 = null) => {
+    invalidateForce(forceFlow);
+    setForceView(message2 === null ? null : { message: message2 });
+  };
+  const readForceStatus = async (id, preflight = false) => {
+    let timer;
+    const deadline = Date.now() + FORCE_STATUS_DEADLINE_MS;
+    const timeout = new Promise((resolve2) => {
+      timer = setTimeout(() => resolve2(null), FORCE_STATUS_DEADLINE_MS);
+      forceFlow.cancel = () => {
+        clearTimeout(timer);
+        resolve2(null);
+      };
+    });
+    let latest;
+    let reason;
+    try {
+      latest = await Promise.race([readStatus(), timeout]);
+    } catch (error) {
+      reason = failedCheck(error).reason;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (forceFlow.id !== id) return false;
+    forceFlow.cancel = null;
+    if (Date.now() >= deadline) {
+      latest = null;
+      reason = null;
+    }
+    setStatus(latest ?? null);
+    const blocked = latest == null ? cannotUpdate(reason) : forceBlock(latest, preflight);
+    if (blocked === null) return latest;
+    if (RUNNING_PHASES.has(latest?.run?.phase)) {
+      setRefused(null);
+      followAttempt({ runId: latest.run.runId, refusal: blocked });
+      endForce();
+    } else endForce(blocked);
+    return false;
+  };
+  const forceCheckActive = (id) => {
+    if (forceFlow.id !== id) return false;
+    if (Date.now() < forceFlow.checkDeadline) return true;
+    endForce(cannotUpdate("check-timeout"));
+    return false;
+  };
+  const finishForceCheck = async (id, value) => {
+    forceFlow.cancel?.();
+    forceFlow.cancel = null;
+    if (value?.state !== "available") {
+      setResult(value?.state === "checking" ? { state: "checking" } : value ?? failedCheck());
+      endForce(value?.state !== "current" ? null : forceFlow.reinstall ? t("No newer signed release is available.") : t("No newer signed release is available. Reinstalling the same version needs a newer update supervisor."));
+      return;
+    }
+    const latest = await readForceStatus(id);
+    if (!latest || forceFlow.id !== id) return;
+    if (value.reinstall === true && latest.reinstall !== true) return endForce(cannotUpdate("reinstall-unsupported"));
+    if (!freshCheck(value) || typeof value.runId !== "string" || value.runId === "") {
+      endForce(cannotUpdate("check-stale"));
+      return;
+    }
+    setResult(value);
+    setForceView({ phase: "confirming", id, result: value });
+  };
+  const pollRunId = forceView?.runId ?? runId;
+  const forcePollId = forceView?.runId === void 0 ? void 0 : forceView.id;
+  (0, import_react89.useEffect)(() => {
+    if (pollRunId === void 0) return;
+    let stopped = false;
+    let timer;
+    let polls = 0;
+    const active2 = () => !stopped && (forcePollId === void 0 || forceCheckActive(forcePollId));
+    const finish = (value) => forcePollId === void 0 ? setResult(value) : finishForceCheck(forcePollId, value);
+    const poll = async () => {
+      if (!active2()) return;
+      try {
+        const value = await readResult(pollRunId);
+        if (!active2()) return;
+        if (value.state !== "checking") {
+          void finish(value);
+          return;
+        }
+      } catch (error) {
+        if (!active2()) return;
+        const code = error?.code;
+        if (code && code !== "NETWORK" && !/^HTTP_5\d\d$/.test(code)) {
+          void finish(failedCheck(error));
+          return;
+        }
+      }
+      if (++polls >= MAX_CHECK_POLLS) void finish({ reason: "check-timeout" });
+      else timer = setTimeout(poll, CHECK_POLL_MS);
+    };
+    timer = setTimeout(poll, CHECK_POLL_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [pollRunId, readResult, forcePollId]);
+  const resetCheck = () => {
+    setAttempt(null);
+    setExpired(false);
+    setCheckExpired(false);
+    setRefused(null);
+    setResult(null);
+  };
+  const onCheck = async () => {
+    if (forceFlow.sent) return;
+    endForce();
+    setStarting(true);
+    resetCheck();
+    try {
+      setResult(await check());
+    } catch (error) {
+      setResult(failedCheck(error));
+    } finally {
+      setStarting(false);
+    }
+  };
+  const onForce = async () => {
+    if (busy || forceFlow.sent || typeof start2 !== "function") return;
+    invalidateForce(forceFlow);
+    const id = forceFlow.id;
+    setForceView({ phase: "checking" });
+    const latest = await readForceStatus(id, true);
+    if (!latest || forceFlow.id !== id) return;
+    forceFlow.reinstall = latest.reinstall === true;
+    resetCheck();
+    forceFlow.checkDeadline = Date.now() + FORCE_CHECK_DEADLINE_MS;
+    const timer = setTimeout(() => {
+      if (forceFlow.id === id) endForce(cannotUpdate("check-timeout"));
+    }, FORCE_CHECK_DEADLINE_MS);
+    forceFlow.cancel = () => clearTimeout(timer);
+    let value;
+    try {
+      value = await (forceFlow.reinstall ? check({ reinstall: true }) : check());
+    } catch (error) {
+      value = failedCheck(error);
+    }
+    if (!forceCheckActive(id)) return;
+    if (value?.state === "checking" && typeof value.runId === "string" && value.runId !== "") {
+      setForceView({ phase: "checking", id, runId: value.runId });
+    } else {
+      await finishForceCheck(id, value);
+    }
+  };
+  const onConfirm = async () => {
+    endForce();
+    setUpdating(true);
+    setRefused(null);
+    try {
+      const latest = await readStatus();
+      setStatus(latest);
+      if (!checkFresh()) setCheckExpired(true);
+      else if (latest?.startEnabled === true && latest.startRefusal === null && !RUNNING_PHASES.has(latest.run?.phase)) setConfirming(true);
+      else setRefused(latest?.startRefusal ?? null);
+    } catch (error) {
+      setStatus(null);
+      setRefused(error?.code === "bot/read-only" ? error.code : "update-running");
+    } finally {
+      setUpdating(false);
+    }
+  };
+  const requestStart = async (id, previousRunId, checked) => {
+    const forced = id !== void 0;
+    const active2 = () => !forced || forceFlow.id === id;
+    if (!forced) setUpdating(true);
+    setRefused(null);
+    let message2 = null;
+    let timer;
+    const deadline = Date.now() + FORCE_START_DEADLINE_MS;
+    const timedOut = /* @__PURE__ */ Symbol();
+    const timeout = forced ? new Promise((resolve2) => {
+      timer = setTimeout(() => resolve2(timedOut), FORCE_START_DEADLINE_MS);
+      forceFlow.cancel = () => {
+        clearTimeout(timer);
+        resolve2(timedOut);
+      };
+    }) : null;
+    try {
+      const answer = forced ? await Promise.race([start2({ force: true, runId: checked.runId, reinstall: checked.reinstall === true }), timeout]) : await start2();
+      if (!active2()) return;
+      if (forced && (answer === timedOut || Date.now() >= deadline)) {
+        followAttempt({ previousRunId });
+      } else if (answer?.started === true) {
+        followAttempt({ requestId: answer.requestId });
+      } else setRefused(answer?.reason ?? null);
+    } catch (error) {
+      if (!active2()) return;
+      if (forced && error?.code !== "bot/read-only") {
+        message2 = t("The update status could not be confirmed. Check again shortly.");
+      } else {
+        setRefused(error?.code === "bot/read-only" ? error.code : "update-running");
+      }
+    } finally {
+      clearTimeout(timer);
+      if (!forced) setUpdating(false);
+      else if (active2()) endForce(message2);
+    }
+  };
+  const onUpdate = async () => {
+    setConfirming(false);
+    if (!checkFresh()) {
+      setCheckExpired(true);
+      return;
+    }
+    await requestStart();
+  };
+  const onForceConfirm = async ({ id, result: checked }) => {
+    if (forceFlow.id !== id || forceFlow.sent) return;
+    if (!freshCheck(checked)) {
+      endForce(cannotUpdate("check-stale"));
+      return;
+    }
+    forceFlow.sent = true;
+    setForceView({ phase: "starting" });
+    const latest = await readForceStatus(id);
+    if (!latest || forceFlow.id !== id) return;
+    if (!freshCheck(checked)) {
+      endForce(cannotUpdate("check-stale"));
+      return;
+    }
+    if (checked.reinstall === true && latest.reinstall !== true) return endForce(cannotUpdate("reinstall-unsupported"));
+    await requestStart(id, latest.run?.runId, checked);
+  };
+  const forceChecking = forceView?.phase === "checking";
+  const forceBusy = forceChecking || forceView?.phase === "starting";
+  const canStart = result?.reinstall !== true && !checkExpired && checkFresh() && status?.startEnabled === true && status.startRefusal === null && !awaitingVerdict && !runLive && typeof start2 === "function";
+  const runText = runMessage(run3);
+  if (forceView?.phase === "confirming" && freshCheck(forceView.result)) {
+    return (0, import_react89.createElement)(
+      Row3,
+      {
+        label: "Automagik",
+        hint: (0, import_react89.createElement)("span", { role: "status" }, forceView.result.reinstall === true ? t("Automagik {version} is already installed. Stop and update reinstalls the same signed version: work in progress stops and comes back by itself once it is done. Nothing is lost.", { version: forceView.result.laneVersion }) : t("Work in progress stops when you click Stop and update, and it comes back by itself once the update is done. Nothing is lost."))
+      },
+      (0, import_react89.createElement)("button", { type: "button", className: "bt-fb-primary", onClick: () => onForceConfirm(forceView) }, t("Stop and update")),
+      (0, import_react89.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => {
+        if (forceFlow.id === forceView.id && !forceFlow.sent) endForce();
+      } }, t("Cancel"))
+    );
+  }
+  if (confirming && !forceBusy && checkFresh() && result.reinstall !== true) {
+    return (0, import_react89.createElement)(
+      Row3,
+      {
+        label: "Automagik",
+        hint: (0, import_react89.createElement)("span", { role: "status" }, t("Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost."))
+      },
+      (0, import_react89.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: onUpdate }, t("Update now")),
+      (0, import_react89.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setConfirming(false) }, t("Cancel"))
+    );
+  }
+  const message = forceChecking ? t("Checking for updates…") : forceView?.message ? forceView.message : attempt?.refusal && !hasVerdict && !expired2 ? attempt.refusal : refused !== null ? cannotUpdate(refused) : runText !== null && (hasVerdict && attempt !== null || runLive && !expired2 || result === null) ? runText : expired2 || unconfirmedStart ? t("The update status could not be confirmed. Check again shortly.") : awaitingVerdict ? null : result === null || waiting ? null : result.state === "available" && checkExpired ? t("Cannot update: {reason}", { reason: selfUpdateReason("check-stale") }) : result.reinstall === true ? t("Automagik {version} is already installed.", { version: result.laneVersion }) : result.state === "available" ? t("Automagik {version} is available, signed and checked.", { version: result.laneVersion }) : result.state === "current" ? t("Up to date.") : result.state === "interrupted" ? t("The check was interrupted. Check again.") : result.state === "checking" ? t("A check is already running. Try again shortly.") : t("Cannot update: {reason}", { reason: selfUpdateReason(result.reason) });
+  const failed = message === runText && run3?.phase === "rolledBack" ? failedHealthCheck(run3.rollback?.failed) : null;
+  return (0, import_react89.createElement)(
+    Row3,
+    { label: "Automagik", hint: (0, import_react89.createElement)(
+      "span",
+      { role: "status" },
+      message,
+      failed === null ? null : " " + t("Failed check: {check}", { check: failed })
+    ) },
+    ...canStart ? [(0, import_react89.createElement)(
+      "button",
+      { type: "button", className: "bt-soft bt-soft-sm", disabled: updating || forceBusy, onClick: onConfirm },
+      t("Update now")
+    )] : [],
+    (0, import_react89.createElement)(
+      "button",
+      { type: "button", className: "bt-soft bt-soft-sm", disabled: busy || forceBusy, onClick: onCheck },
+      checking ? t("Checking…") : t("Check for updates")
+    ),
+    ...force === true ? [(0, import_react89.createElement)("button", {
+      type: "button",
+      className: "bt-soft bt-soft-sm",
+      disabled: busy || forceBusy || typeof start2 !== "function",
+      onClick: onForce
+    }, t("Force update"))] : []
+  );
+}
 var linkProps = (href) => ({ className: "bt-soft bt-soft-sm bt-about-link", href, target: "_blank", rel: "noopener noreferrer" });
+function SelfUpdateRecoveryDetail({ source }) {
+  const status = (0, import_react89.useSyncExternalStore)(source.subscribe, source.getSnapshot);
+  const run3 = status?.run;
+  if (!VERDICT_PHASES.has(run3?.phase) || run3.phase === "manualRecovery") return null;
+  const { message, items, truncation } = recoveryDetails(run3, status.recovery);
+  return (0, import_react89.createElement)(
+    "div",
+    { className: "bt-set-row" },
+    (0, import_react89.createElement)(
+      "div",
+      { className: "bt-set-copy" },
+      (0, import_react89.createElement)("span", null, t("Work recovery")),
+      (0, import_react89.createElement)(
+        "div",
+        { className: "bt-set-hint", "aria-live": "polite" },
+        message,
+        truncation ? (0, import_react89.createElement)("p", null, truncation) : null,
+        items?.length ? (0, import_react89.createElement)("ul", null, items.map(({ sessionId, text: text2 }, index) => (0, import_react89.createElement)("li", { key: index, title: sessionId }, text2))) : null
+      )
+    )
+  );
+}
 function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3 }) {
   const update = useUpdate((value) => value) ?? {};
   const app = useDesktopUpdate();
@@ -34830,6 +36013,8 @@ function AboutPage({ useUpdate, actions, run: run3, Section: Section3, Row: Row3
     (0, import_react89.createElement)(
       Section3,
       { key: "updates", title: t("Updates") },
+      !ours && update.hostAnswered ? (0, import_react89.createElement)(SelfUpdateRow, { Row: Row3, check: actions.checkSelfUpdate, readResult: actions.selfUpdateResult, readStatus: actions.selfUpdateStatus, start: actions.startSelfUpdate, force: true }) : null,
+      !ours && update.hostAnswered && actions.selfUpdateStatusSource ? (0, import_react89.createElement)(SelfUpdateRecoveryDetail, { source: actions.selfUpdateStatusSource }) : null,
       (0, import_react89.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react89.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react89.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
       ...pluginRows({ app, Row: Row3 }),
@@ -37218,7 +38403,7 @@ function menuItemFor(key, actions, subject) {
   }
 }
 var sideTitle = (chat) => chat?.entries?.[0]?.question?.trim() || t("Side chat");
-function PanelStrip({ bot, subject, view, ids, active, sides, side, canBrowse, reading: reading2, onView, actions, useBrowserPages }) {
+function PanelStrip({ bot, subject, view, ids, active: active2, sides, side, canBrowse, reading: reading2, onView, actions, useBrowserPages }) {
   const pages2 = useBrowserPages((map) => map);
   const wrap = (0, import_react96.useRef)(null);
   const ind = (0, import_react96.useRef)(null);
@@ -37229,7 +38414,7 @@ function PanelStrip({ bot, subject, view, ids, active, sides, side, canBrowse, r
     const box = wrap.current;
     const capsule = ind.current;
     if (!box || !capsule) return void 0;
-    const node = view === "details" ? box.querySelector(".bt-ptab-bot") : view === "side" ? box.querySelector(`[data-side="${side}"]`) : box.querySelector(`[data-tab="${active}"]`);
+    const node = view === "details" ? box.querySelector(".bt-ptab-bot") : view === "side" ? box.querySelector(`[data-side="${side}"]`) : box.querySelector(`[data-tab="${active2}"]`);
     if (under.current !== node) {
       if (under.current) watcher.current?.unobserve(under.current);
       under.current = node;
@@ -37303,7 +38488,7 @@ function PanelStrip({ bot, subject, view, ids, active, sides, side, canBrowse, r
       ),
       ids.map((tabId) => {
         const page = pages2[tabId] ?? EMPTY_PAGE;
-        const on = view === "browser" && tabId === active;
+        const on = view === "browser" && tabId === active2;
         return (0, import_react96.createElement)(
           "button",
           {
@@ -37755,8 +38940,8 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
   const sideChat = sideChats.find((chat) => chat?.id === pane.side);
   const view = pane.view === "browser" && canBrowse ? "browser" : pane.view === "side" && sideChat !== void 0 ? "side" : "details";
   const tabState = useBrowserTabs((map) => bot ? map[bot.id] ?? EMPTY_TABS2 : EMPTY_TABS2);
-  const active = tabState.active;
-  const page = useBrowserPages((pages2) => (active ? pages2[active] : null) ?? EMPTY_PAGE);
+  const active2 = tabState.active;
+  const page = useBrowserPages((pages2) => (active2 ? pages2[active2] : null) ?? EMPTY_PAGE);
   const hold = useBrowserHolds?.((map) => bot ? map[bot.id] ?? null : null) ?? null;
   const root = (0, import_react96.useRef)(null);
   const fly = (0, import_react96.useRef)(null);
@@ -37860,8 +39045,8 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
     if (canBrowse) actions.browserEnsure(bot.id);
   }, [bot?.id, canBrowse]);
   (0, import_react96.useEffect)(() => {
-    if (view === "browser" && (active === null || !tabState.ids.includes(active))) actions.setPanelView("details");
-  }, [view, active, tabState.ids.length]);
+    if (view === "browser" && (active2 === null || !tabState.ids.includes(active2))) actions.setPanelView("details");
+  }, [view, active2, tabState.ids.length]);
   (0, import_react96.useEffect)(() => {
     if (pane.view === "side" && sideChat === void 0) actions.setPanelView("details");
   }, [pane.view, sideChat]);
@@ -38026,8 +39211,8 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
     // Over the whole window while dragging: the cursor stays a resize cursor and the
     // pages underneath (the chat, the guest) see no pointer.
     dragging ? (0, import_react_dom16.createPortal)((0, import_react96.createElement)("div", { className: "bt-drag-shield", "aria-hidden": true }), document.body) : null,
-    hasStrip ? (0, import_react96.createElement)(PanelStrip, { bot, subject: pane.id, view, ids: tabState.ids, active, sides: sideChats, side: pane.side, canBrowse, reading: reading2, onView: switchView, actions: panelActions, useBrowserPages }) : null,
-    view === "browser" && bot ? (0, import_react96.createElement)(BrowserView, { key: `browser:${active}`, bot, tabId: active, leaving, landed: landed && !settling, actions, useBrowserPages, hold }) : view === "side" && sideChat ? (0, import_react96.createElement)("div", { key: `side:${sideChat.id}`, className: "bt-panel-view" }, (0, import_react96.createElement)(SideChatView, { subject: pane.id, chat: sideChat, roster, actions: panelActions })) : (0, import_react96.createElement)(
+    hasStrip ? (0, import_react96.createElement)(PanelStrip, { bot, subject: pane.id, view, ids: tabState.ids, active: active2, sides: sideChats, side: pane.side, canBrowse, reading: reading2, onView: switchView, actions: panelActions, useBrowserPages }) : null,
+    view === "browser" && bot ? (0, import_react96.createElement)(BrowserView, { key: `browser:${active2}`, bot, tabId: active2, leaving, landed: landed && !settling, actions, useBrowserPages, hold }) : view === "side" && sideChat ? (0, import_react96.createElement)("div", { key: `side:${sideChat.id}`, className: "bt-panel-view" }, (0, import_react96.createElement)(SideChatView, { subject: pane.id, chat: sideChat, roster, actions: panelActions })) : (0, import_react96.createElement)(
       "div",
       { key: `details:${pane.id}:${pane.renaming ? "rename" : ""}:${pane.tab ?? ""}`, className: "bt-panel-view" },
       (0, import_react96.createElement)(DetailsDrawer, {
@@ -38652,7 +39837,7 @@ function readPage(limits) {
   const started = performance.now();
   const SKIP = /* @__PURE__ */ new Set(["script", "style", "noscript", "template", "head", "title", "meta", "link", "svg", "object", "embed", "audio", "video", "source", "track", "map", "datalist", "option", "optgroup"]);
   const ITEM = 'a[href], button, input:not([type=hidden]), textarea, select, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=checkbox], [role=switch], [role=radio], [contenteditable=""], [contenteditable=true]';
-  const ROLES = { a: "link", button: "button", select: "select", textarea: "textbox", summary: "button" };
+  const ROLES2 = { a: "link", button: "button", select: "select", textarea: "textbox", summary: "button" };
   const INPUT_ROLES = { checkbox: "checkbox", radio: "radio", submit: "button", button: "button", reset: "button", image: "button", search: "searchbox", range: "slider", file: "button", color: "button" };
   const NO_VALUE_TYPES = /* @__PURE__ */ new Set(["checkbox", "radio", "submit", "button", "reset", "image", "file", "color"]);
   const SECRET_HINT = /(^|[-_\s])(cvv|cvc|csc|cc-?(num|number|csc|exp)|card-?(num|number)|otp|one-?time-?code|pin)([-_\s]|$)/i;
@@ -38699,7 +39884,7 @@ function readPage(limits) {
     else if (stats.nodes % 512 === 0 && performance.now() - started > limits.ms) stop3 = `reading took longer than ${limits.ms} ms`;
     return stop3 !== "";
   };
-  const roleOf = (el) => el.getAttribute("role") || ROLES[el.localName] || (el.localName === "input" ? INPUT_ROLES[el.type] || "textbox" : el.isContentEditable ? "textbox" : el.localName);
+  const roleOf = (el) => el.getAttribute("role") || ROLES2[el.localName] || (el.localName === "input" ? INPUT_ROLES[el.type] || "textbox" : el.isContentEditable ? "textbox" : el.localName);
   const sized = (el) => {
     const box = el.getBoundingClientRect();
     return box.width > 0 && box.height > 0;
@@ -39177,9 +40362,9 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
     if (appTabs) return ensureAppTabs(botId);
     const entries2 = saved[botId]?.tabs ?? [];
     const ids = entries2.map((entry) => entry.id);
-    const active = ids.includes(saved[botId]?.active) ? saved[botId].active : ids.at(-1) ?? null;
+    const active2 = ids.includes(saved[botId]?.active) ? saved[botId].active : ids.at(-1) ?? null;
     for (const entry of entries2) owner.set(entry.id, botId);
-    tabs.set((state2) => ({ ...state2, [botId]: { ids, active } }));
+    tabs.set((state2) => ({ ...state2, [botId]: { ids, active: active2 } }));
     for (const entry of entries2) publish3(entry.id, { url: entry.url ?? "", title: entry.title ?? "", live: false });
   };
   function ensureAppTabs(botId) {
@@ -39396,10 +40581,10 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
       if (current === void 0 || !current.ids.includes(tabId)) return snapshot2;
       const at = current.ids.indexOf(tabId);
       const ids = current.ids.filter((id) => id !== tabId);
-      const active = current.active === tabId ? ids[Math.min(at, ids.length - 1)] ?? null : current.active;
+      const active2 = current.active === tabId ? ids[Math.min(at, ids.length - 1)] ?? null : current.active;
       const next = { ...snapshot2 };
       if (ids.length === 0) delete next[botId];
-      else next[botId] = { ids, active };
+      else next[botId] = { ids, active: active2 };
       return next;
     });
     owner.delete(tabId);
@@ -41812,6 +42997,7 @@ body[data-bt-motion=quiet] .bt-genui-row[data-state=work] .bt-genui-dot{animatio
 // src/client/reopen.js
 var OPEN_CHAT = "omni-ui:open-chat";
 var REOPEN = "omni-ui:reopen";
+var UPDATE_REOPEN = "omni-ui:update-reopen";
 var storageOf = () => {
   try {
     return globalThis.sessionStorage ?? null;
@@ -41821,13 +43007,33 @@ var storageOf = () => {
 };
 function rememberOpen(id, storage = storageOf()) {
   try {
+    if (storage?.getItem(UPDATE_REOPEN) === "1" && storage.getItem(REOPEN) === "1") return;
     if (typeof id === "string" && id !== "") storage?.setItem(OPEN_CHAT, id);
     else storage?.removeItem(OPEN_CHAT);
   } catch {
   }
 }
+function armUpdateReopen(id, storage = storageOf()) {
+  try {
+    if (typeof id !== "string" || id === "" || storage?.getItem(REOPEN) === "1") return;
+    rememberOpen(id, storage);
+    storage?.setItem(UPDATE_REOPEN, "1");
+    storage?.setItem(REOPEN, "1");
+  } catch {
+  }
+}
+function endUpdateReopen(restore, storage = storageOf()) {
+  try {
+    if (storage?.getItem(UPDATE_REOPEN) !== "1") return null;
+    const id = takeReopen(storage);
+    return restore ? id : null;
+  } catch {
+    return null;
+  }
+}
 function takeReopen(storage = storageOf()) {
   try {
+    storage?.removeItem(UPDATE_REOPEN);
     if (storage?.getItem(REOPEN) !== "1") return null;
     storage.removeItem(REOPEN);
     const id = storage.getItem(OPEN_CHAT);
@@ -41835,6 +43041,55 @@ function takeReopen(storage = storageOf()) {
   } catch {
     return null;
   }
+}
+var isTeamChat = (snapshot2, id) => snapshot2.byId?.[id] !== void 0 || snapshot2.roomsById?.[id] !== void 0 || snapshot2.tasks?.[id] !== void 0;
+function ensureBotHome({ roster, mainView, openSession }) {
+  const home = (snapshot3) => {
+    const main = mainView();
+    if (snapshot3.mainBotId && main !== void 0 && !isTeamChat(snapshot3, main)) openSession(snapshot3.mainBotId);
+  };
+  const snapshot2 = roster.getSnapshot();
+  if (snapshot2.ready) home(snapshot2);
+  else {
+    const off = roster.subscribe(() => {
+      const ready = roster.getSnapshot();
+      if (!ready.ready) return;
+      off();
+      home(ready);
+    });
+  }
+}
+function watchChatReopen({ roster, sessions, mainView, isAgentSession: isAgentSession2, openSession, storage = storageOf() }) {
+  let pending = null;
+  const note = () => {
+    if (pending === null) rememberOpen(mainView(), storage);
+  };
+  const reopen = () => {
+    const snapshot2 = roster.getSnapshot();
+    if (pending === null || !snapshot2.ready) return;
+    const id = pending;
+    pending = null;
+    if (isAgentSession2(id) || isTeamChat(snapshot2, id)) {
+      if (mainView() !== id) openSession(id);
+    }
+    note();
+  };
+  const setPending = (id) => {
+    pending = id;
+    reopen();
+  };
+  const offList = sessions.subscribe(note);
+  const offRoster = roster.subscribe(reopen);
+  setPending(takeReopen(storage));
+  note();
+  return {
+    setPending,
+    getPending: () => pending,
+    dispose() {
+      offList();
+      offRoster();
+    }
+  };
 }
 
 // src/client/right-panel.js
@@ -42374,6 +43629,809 @@ function SessionReadScope({ sessionId }) {
   );
 }
 
+// src/client/self-update.js
+var classic = 'html:not(:has(style[data-dsh-bot="shell"]))';
+var CSS2 = `
+/* The dialog and nod also appear in classic Agent mode, where the Bot shell sheet is absent. */
+${classic} body :is(.su-layer,.su-nod){${SHELL_LIGHT_PALETTE}}
+${classic} body[data-ds-dark-theme] :is(.su-layer,.su-nod){${SHELL_DARK_PALETTE}}
+${roundButtonCss(`${classic} body .su-nod.bt-round`)}
+/* The nod is one of the bar's own round buttons (.bt-round), seated in the bottom row like the
+   other footer entries, never a floating pill of its own: same 36px circle, same --bt-* colours. */
+.su-nod{position:relative}
+.su-nod .su-dot{position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:var(--bt-accent);box-shadow:0 0 0 2px var(--bt-main)}
+.su-layer{position:fixed;inset:0;z-index:80;display:flex;background:var(--bt-main);animation:su-veil .18s ease-out;font-family:var(--bt-font,system-ui)}
+.su-modal{width:100%;height:100%;display:flex;flex-direction:column;background:var(--bt-main);color:var(--bt-ink);animation:su-pop .22s cubic-bezier(.34,1.3,.64,1)}
+.su-head{display:flex;align-items:flex-start;gap:12px;padding:20px max(24px,calc((100vw - 760px)/2)) 0}
+.su-head h2{margin:0;font-size:17px;line-height:24px;font-weight:600}
+.su-close{margin-left:auto;border:0;background:transparent;color:var(--bt-ink-2);font:500 13px/18px var(--bt-font,system-ui);cursor:pointer;padding:2px 4px;border-radius:8px}
+.su-close:hover{background:var(--bt-hover);color:var(--bt-ink)}
+.su-body{flex:1;overflow:auto;padding:18px max(24px,calc((100vw - 760px)/2)) 24px;display:flex;flex-direction:column;gap:14px}
+.su-body.su-fill{justify-content:safe center}
+.su-body.su-center{align-items:center;text-align:center}
+.su-line{margin:0;font-size:14px;line-height:21px;color:var(--bt-ink)}
+.su-versions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--bt-ink-2)}
+.su-version{padding:3px 8px;border-radius:8px;background:var(--bt-tag-bg);font-variant-numeric:tabular-nums;color:var(--bt-ink)}
+.su-changes{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:14px;line-height:21px}
+.su-steps{display:flex;flex-direction:column;gap:2px}
+.su-step{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;font-size:14px;line-height:20px;color:var(--bt-ink-2)}
+.su-step[data-state=active]{background:var(--bt-accent-soft);color:var(--bt-ink)}
+.su-step[data-state=active] .su-mark{border-color:var(--bt-accent);background:var(--bt-accent-soft);color:var(--bt-accent)}
+.su-step[data-state=done]{color:var(--bt-ink)}
+.su-mark{width:20px;height:20px;flex:none;border-radius:50%;border:1.5px solid var(--bt-line-2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+.su-step[data-state=done] .su-mark{border-color:transparent;background:var(--bt-accent);color:var(--bt-accent-ink)}
+.su-note{margin:0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}
+.su-caution{margin:0;padding:9px 11px;border-radius:10px;background:var(--bt-accent-soft);color:var(--bt-ink);font:500 13px/20px var(--bt-font,system-ui)}
+.su-foot{display:flex;gap:10px;align-items:center;padding:14px max(24px,calc((100vw - 760px)/2)) 18px;border-top:.5px solid var(--bt-line);background:var(--bt-main)}
+.su-foot:empty{display:none}
+.su-primary{border:0;border-radius:10px;padding:10px 16px;background:var(--bt-accent);color:var(--bt-accent-ink);font:600 14px/18px var(--bt-font,system-ui);cursor:pointer}
+.su-primary:hover{filter:brightness(1.05)}
+.su-ghost{border:.5px solid var(--bt-line-2);border-radius:10px;padding:9px 14px;background:transparent;color:var(--bt-ink);font:500 14px/18px var(--bt-font,system-ui);cursor:pointer}
+.su-ghost:hover{background:var(--bt-hover)}
+.su-result{display:flex;flex-direction:column;align-items:center;gap:10px;padding:8vh 0 4px;text-align:center}
+.su-result .su-badge{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--bt-accent-ink);background:var(--bt-accent)}
+.su-result[data-kind=rollback] .su-badge{background:var(--bt-danger)}
+.su-result h3{margin:0;font-size:16px;line-height:22px;font-weight:600}
+.su-result p{margin:0;max-width:52ch;font-size:13px;line-height:20px;color:var(--bt-ink-2)}
+@keyframes su-veil{from{opacity:0}to{opacity:1}}
+@keyframes su-pop{from{opacity:0;transform:translateY(10px) scale(.99)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.su-modal,.su-layer{animation:none}}
+`;
+var STEPS = [
+  ["checking", "Checking the signed release"],
+  ["downloading", "Downloading the new version"],
+  ["verifying", "Verifying the downloaded packages"],
+  ["staging", "Installing beside the current version"],
+  ["restarting", "Restarting and checking health"]
+];
+var PHASE_STEP = { checking: 0, downloading: 1, verifying: 2, staging: 3, switching: 3, restarting: 4, health: 4 };
+var active = (run3) => Object.hasOwn(PHASE_STEP, run3?.phase) || run3?.phase === "rollingBack";
+var terminal = (run3) => ["healthy", "rolledBack", "notUpdated", "manualRecovery"].includes(run3?.phase);
+var enabled = (status) => status?.startEnabled === true && status.supervisor != null && status.reason !== "desktop-app";
+var pendingWindowMs = 75e3;
+var statusTimeoutMs = 1e4;
+var terminalKey = "omni-ui:self-update-result:";
+var documentUpdate = /* @__PURE__ */ Symbol.for("omni-ui:web-self-update");
+function canOffer(status, now) {
+  const check = status?.check;
+  const checkedAt = Date.parse(check?.checkedAt);
+  const age = now - checkedAt;
+  return enabled(status) && status.available === true && status.startRefusal === null && !active(status.run) && status.run?.phase !== "manualRecovery" && (!terminal(status.run) || !(checkedAt <= Date.parse(status.run.startedAt))) && check?.state === "available" && check.newer === true && check.fresh === true && age >= 0 && age < CHECK_FRESH_MS;
+}
+var candidateOf = ({ check: { sequence, laneVersion, plugins }, rollback }) => JSON.stringify([
+  sequence,
+  laneVersion,
+  plugins.map(({ name, from, to }) => [name, from, to]),
+  rollback === true
+]);
+function createSelfUpdateController({
+  readStatus,
+  startUpdate,
+  present,
+  onStatus = () => {
+  },
+  keepChat = () => {
+  },
+  storage,
+  now = Date.now,
+  visible = () => true
+}) {
+  let status;
+  let run3;
+  let screen = null;
+  let dismissed;
+  let offline = false;
+  let connectionLost = false;
+  let refused = null;
+  let confirmation = null;
+  let attempt = null;
+  let latestRead = 0;
+  let reading2;
+  let disposed = false;
+  let disconnected = false;
+  let keeping = false;
+  let connection;
+  let offConnection;
+  const shown2 = /* @__PURE__ */ new Set();
+  const offer = () => !attempt && !offline && canOffer(status, now());
+  const paint = () => {
+    const nod = active(run3) || attempt ? "progress" : offer() ? "offer" : null;
+    present({
+      nod,
+      screen,
+      run: run3,
+      offline,
+      connectionLost,
+      refused,
+      check: status?.check,
+      rollback: status?.rollback === true,
+      recovery: status?.recovery,
+      retry: !confirmation && offer()
+    });
+  };
+  const holdChat = () => {
+    if (keeping) return;
+    keeping = true;
+    keepChat(true);
+  };
+  const releaseChat = (restore = false) => {
+    if (!keeping) return;
+    keeping = false;
+    keepChat(false, restore && disconnected);
+    disconnected = false;
+  };
+  const seen = (id) => {
+    if (shown2.has(id)) return true;
+    try {
+      return storage?.getItem(terminalKey + id) === "1";
+    } catch {
+      return false;
+    }
+  };
+  const noteShown = (id) => {
+    shown2.add(id);
+    try {
+      storage?.setItem(terminalKey + id, "1");
+    } catch {
+    }
+  };
+  const showResult = () => {
+    const id = run3?.runId;
+    if (!terminal(run3) || !visible() || seen(id)) return false;
+    screen = "result";
+    paint();
+    noteShown(id);
+    return true;
+  };
+  const clear = () => {
+    status = void 0;
+    run3 = void 0;
+    screen = null;
+    confirmation = null;
+    attempt = null;
+    offline = false;
+    connectionLost = false;
+    refused = null;
+    releaseChat();
+    paint();
+  };
+  const apply2 = (next) => {
+    if (!enabled(next)) {
+      clear();
+      return;
+    }
+    if (next.problem) {
+      offline = true;
+      paint();
+      return;
+    }
+    offline = false;
+    connectionLost = false;
+    status = next;
+    const live = next.run;
+    if (attempt) {
+      const expired2 = now() - attempt.at >= pendingWindowMs;
+      const matches2 = attempt.requestId ? live?.requestId === attempt.requestId : (attempt.lost || expired2) && live?.requestId && live.runId !== attempt.before;
+      if (matches2) {
+        if (attempt.dismissed) dismissed = live.runId;
+        attempt = null;
+      } else {
+        if (!expired2) {
+          paint();
+          return;
+        }
+        attempt = null;
+        refused = "unconfirmed";
+        releaseChat();
+      }
+    }
+    const previousRun = run3?.runId;
+    run3 = live;
+    if (active(run3)) {
+      holdChat();
+      if (run3.runId !== dismissed) screen = "progress";
+    } else {
+      releaseChat(terminal(run3));
+      if (showResult()) return;
+      if (screen === "progress" || screen === "offer" && !offer()) {
+        screen = refused ? "refused" : null;
+      } else if (screen === "result" && (!terminal(run3) || run3.runId !== previousRun)) {
+        screen = null;
+      }
+    }
+    paint();
+  };
+  const refresh = async ({ force = false } = {}) => {
+    if (disposed || reading2 && !force) return;
+    if (connection && ["connecting", "disconnected"].includes(connection.getSnapshot())) return;
+    const read = ++latestRead;
+    reading2?.abort();
+    const controller = new AbortController();
+    const { signal } = controller;
+    reading2 = controller;
+    const stopped = new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    const timeout = setTimeout(() => controller.abort(), statusTimeoutMs);
+    try {
+      const next = await Promise.race([stopped, readStatus(signal)]);
+      if (!disposed && read === latestRead) {
+        if (!next?.problem) onStatus(next);
+        apply2(next);
+        return next;
+      }
+    } catch (error) {
+      if (disposed || read !== latestRead) return;
+      if (error?.code === "bot/read-only") {
+        onStatus(null);
+        clear();
+        return;
+      }
+      offline = true;
+      if (error?.code === "NETWORK") {
+        connectionLost = true;
+        if (keeping) disconnected = true;
+      }
+      paint();
+    } finally {
+      clearTimeout(timeout);
+      if (read === latestRead) reading2 = void 0;
+    }
+  };
+  const cancelRead = () => {
+    latestRead += 1;
+    reading2?.abort();
+    reading2 = void 0;
+  };
+  const unconfirm = (lostConnection) => {
+    offline = true;
+    connectionLost ||= lostConnection;
+    if (keeping) disconnected = true;
+    if (attempt && !attempt.requestId) attempt.lost = true;
+    paint();
+  };
+  const watchConnection = (source, detached = false) => {
+    offConnection?.();
+    cancelRead();
+    connection = source;
+    let state2 = source?.getSnapshot();
+    offConnection = source?.subscribe(() => {
+      const next = source.getSnapshot();
+      if (state2 === next) return;
+      state2 = next;
+      cancelRead();
+      if (next === "connected") void refresh();
+      else unconfirm(true);
+    });
+    const unavailable2 = state2 === "connecting" || state2 === "disconnected";
+    if (detached || unavailable2) unconfirm(unavailable2);
+    else void refresh();
+  };
+  const open = () => {
+    if (active(run3) || attempt) {
+      dismissed = void 0;
+      if (attempt) attempt.dismissed = false;
+      screen = "progress";
+    } else if (offer()) {
+      refused = null;
+      screen = "offer";
+    }
+    paint();
+  };
+  const close = () => {
+    confirmation = null;
+    if (screen === "progress") {
+      dismissed = run3?.runId;
+      if (attempt) attempt.dismissed = true;
+    }
+    screen = null;
+    paint();
+  };
+  const start2 = async () => {
+    if (disposed || screen !== "offer" || confirmation) return;
+    if (!offer()) {
+      if (!offline) screen = null;
+      paint();
+      return;
+    }
+    const candidate = candidateOf(status);
+    const confirming = {};
+    confirmation = confirming;
+    paint();
+    const next = await refresh({ force: true });
+    if (disposed || confirmation !== confirming) return;
+    confirmation = null;
+    if (next !== status || screen !== "offer" || !offer() || candidateOf(status) !== candidate) {
+      paint();
+      return;
+    }
+    refused = null;
+    const pending = { at: now(), before: run3?.runId };
+    attempt = pending;
+    run3 = null;
+    screen = "progress";
+    holdChat();
+    paint();
+    try {
+      const reply = await startUpdate();
+      if (disposed || attempt !== pending) return;
+      if (reply?.started === true && typeof reply.requestId === "string") {
+        pending.requestId = reply.requestId;
+      } else if (reply?.started === false) {
+        attempt = null;
+        refused = reply.reason;
+        if (!pending.dismissed) screen = "refused";
+        releaseChat();
+      } else {
+        pending.lost = true;
+      }
+    } catch (error) {
+      if (disposed || attempt !== pending) return;
+      if (error?.code === "bot/read-only") {
+        clear();
+        return;
+      }
+      pending.lost = true;
+    }
+    if (!disposed) {
+      paint();
+      await refresh({ force: true });
+    }
+  };
+  return {
+    refresh,
+    open,
+    close,
+    start: start2,
+    watchConnection,
+    onVisibilityChange() {
+      if (visible()) void refresh({ force: true });
+    },
+    dispose() {
+      disposed = true;
+      reading2?.abort();
+      offConnection?.();
+    }
+  };
+}
+var RECOVERY_GUIDE = "https://github.com/automagik-si/automagik/blob/dev/docs/upgrade.md#in-app-updates-the-supervisor";
+function announcement(body, check, rollback, el) {
+  body.append(el("p", "su-line", t("Automagik {version} is ready to install.", { version: check.laneVersion })));
+  const current = check.plugins[0]?.from;
+  const versions = el("div", "su-versions");
+  if (current && check.plugins.every((plugin) => plugin.from === current)) {
+    versions.append(el("span", null, t("You have")), el("span", "su-version", current), el("span", null, "→"));
+  }
+  versions.append(el("span", "su-version", check.laneVersion));
+  body.append(versions, el("h3", null, t("What changes")));
+  const changes = el("ul", "su-changes");
+  for (const plugin of check.plugins) {
+    changes.append(el("li", null, sameVersion(plugin.from, plugin.to) ? t("{plugin} is already on {version}.", { plugin: pluginName(plugin.name), version: plugin.to }) : changeText(plugin)));
+  }
+  body.append(changes, el("p", "su-note", rollback ? t("Your previous version stays kept. If the new one does not start, Automagik goes back by itself.") : t("Your previous version stays kept.")));
+  const caution = el("p", "su-caution", t("Work in progress stops when you click Update now. Automagik will pick it up again once a healthy version is ready."));
+  caution.setAttribute("role", "note");
+  body.append(caution);
+}
+function progress(body, run3, offline, connectionLost, el) {
+  body.classList.add("su-fill");
+  const confirmedStep = PHASE_STEP[run3?.phase];
+  const phase = connectionLost && confirmedStep < PHASE_STEP.restarting ? PHASE_STEP.restarting : confirmedStep;
+  if (run3?.phase === "rollingBack") {
+    body.append(el("p", "su-line", runMessage(run3)));
+    if (failedHealthCheck(run3.rollback?.failed)) body.append(el("p", "su-note", failedHealthCheck(run3.rollback.failed)));
+  } else {
+    const list = el("div", "su-steps");
+    for (const [i, [key, label]] of STEPS.entries()) {
+      const row = el("div", "su-step");
+      row.dataset.step = key;
+      row.dataset.state = i < phase ? "done" : i === phase ? "active" : "waiting";
+      const mark2 = el("span", "su-mark", i < phase ? "✓" : i === phase ? "•" : String(i + 1));
+      mark2.setAttribute("aria-hidden", "true");
+      if (i === phase) row.setAttribute("aria-current", "step");
+      row.append(mark2, el("span", null, t(label)));
+      list.append(row);
+    }
+    body.append(list);
+    body.append(el("p", "su-note", !run3 ? t("Waiting for the update supervisor to confirm the request.") : run3.phase === "switching" ? t("Switching versions…") : run3.phase === "health" ? t("Checking that it is healthy") : t("The previous version stays kept for the rollback.")));
+  }
+  if (offline) {
+    body.append(el("p", "su-note", t("The update status is unconfirmed.")), guideLink(el));
+  }
+}
+function guideLink(el) {
+  const link = el("a", "su-note", t("In-app update recovery guide"));
+  link.href = RECOVERY_GUIDE;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
+}
+var restoreReason = (why) => {
+  switch (why) {
+    case "same-format":
+      return t("The previous version can read the team data format.");
+    case "unknown":
+      return t("The team data format could not be determined.");
+    case "team-in-use":
+      return t("The team data was in use.");
+    case "superseded":
+      return t("The team data changed after the restore was planned.");
+    case "snapshot-changed":
+      return t("The saved team snapshot had changed.");
+    default:
+      return null;
+  }
+};
+var rollbackStep = {
+  stop: "Stop DSH",
+  manifest: "Restore the plugin entries",
+  rename: "Put back the kept files",
+  current: "Restore the version record",
+  data: "Restore team data",
+  verify: "Verify the profile",
+  restart: "Restart DSH",
+  health: "Check health"
+};
+var rollbackAction = {
+  "rename-back": "Put back the kept files",
+  "data-restore": "Restore team data",
+  restart: "Restart DSH",
+  health: "Check health"
+};
+var fileLocation = { live: "Live profile", kept: "Kept version", staging: "Staging folder", missing: "Missing" };
+function rollbackFacts(card, rollback, el) {
+  if (rollback?.data?.restored) {
+    card.append(el("p", null, t("The saved team snapshot was restored. Sessions, memory, settings and keys are kept separately.")));
+    if (rollback.trialFrom && rollback.trialTo) {
+      const time = (value) => new Date(value).toLocaleString(language());
+      card.append(el("p", null, t("If you saved a team change between {start} and {end}, it may have been replaced.", {
+        start: time(rollback.trialFrom),
+        end: time(rollback.trialTo)
+      })));
+    }
+    const { trialKept } = rollback.data;
+    card.append(el("p", null, trialKept === true ? t("A copy of the trial team data was kept.") : trialKept === false ? t("No copy of the trial team data was kept.") : t("The supervisor did not record whether a copy of the trial team data was kept.")));
+  } else if (rollback?.data?.restored === false) {
+    card.append(el("p", null, t("The team snapshot was skipped. {reason}", { reason: restoreReason(rollback.data.why) ?? "" })));
+  } else {
+    card.append(el("p", null, t("The supervisor recorded no team snapshot outcome.")));
+  }
+}
+function recoveryFacts(body, run3, recovery, el) {
+  const { message, items, truncation } = recoveryDetails(run3, recovery);
+  if (message) body.append(el("p", "su-note", message));
+  if (!items) return;
+  const list = el("ul", "su-changes");
+  for (const { text: text2, sessionId } of items) {
+    const line = el("li", null, text2);
+    line.title = sessionId;
+    list.append(line);
+  }
+  body.append(el("h3", null, t("Work recovery")));
+  if (truncation) body.append(el("p", "su-note", truncation));
+  if (items.length) body.append(list);
+}
+function verdict(body, run3, recovery, el) {
+  const card = el("div", "su-result");
+  card.dataset.kind = run3.phase === "healthy" ? "success" : "rollback";
+  const badge = el("span", "su-badge", run3.phase === "healthy" ? "✓" : run3.phase === "rolledBack" ? "↩" : "!");
+  badge.setAttribute("aria-hidden", "true");
+  card.append(badge);
+  const reason = failedHealthCheck(run3.rollback?.failed);
+  switch (run3.phase) {
+    case "healthy":
+      card.append(
+        el("h3", null, run3.reinstall === true ? t("Done: the same version is installed again.") : t("Done: you are on the new version.")),
+        el("p", null, runMessage(run3))
+      );
+      break;
+    case "rolledBack":
+      card.append(
+        el("h3", null, t("Back to the previous version")),
+        el("p", null, t("The previous plugin set passed its checks."))
+      );
+      if (run3.to) card.append(el("p", null, t("Update target {version}.", { version: run3.to })));
+      if (run3.from) card.append(el("p", null, t("Oldest plugin version before the update: {version}.", { version: run3.from })));
+      if (reason) card.append(el("p", null, reason));
+      rollbackFacts(card, run3.rollback, el);
+      break;
+    case "notUpdated":
+      card.append(el("h3", null, t("Automagik was not updated")), el("p", null, run3.detail === "previous-unsupported" ? t("This version of Automagik cannot roll an update back from the app; update it once by hand (docs/upgrade.md).") : run3.reason === "not-newer" ? t("The signed release did not offer a newer compatible plugin set.") : t("Cannot update: {reason}", { reason: selfUpdateReason(run3.reason) })));
+      if (run3.detail === "previous-unsupported") card.append(guideLink(el));
+      break;
+    case "manualRecovery": {
+      const rollback = run3.rollback;
+      card.append(el("h3", null, t("Manual recovery required")), el(
+        "p",
+        null,
+        t("See the recovery guide and the supervisor’s state.json before moving any files.")
+      ));
+      if (run3.from) card.append(el("p", null, t("Previous plugin version recorded for the update: {version}.", { version: run3.from })));
+      if (run3.reason === "health-failed") {
+        card.append(el("p", null, t("The supervisor could not confirm a healthy running instance.")));
+      } else if (run3.reason) {
+        card.append(el("p", null, t("Cannot update: {reason}", { reason: selfUpdateReason(run3.reason) })));
+      }
+      if (reason) card.append(el("p", null, reason));
+      if (rollback?.previousFailed) card.append(el("p", null, t("Previous version check: {reason}", { reason: failedHealthCheck(rollback.previousFailed) })));
+      if (rollback?.step) card.append(el("p", null, t("Last rollback step: {step}.", { step: t(rollbackStep[rollback.step]) })));
+      if (rollback?.tried?.length) card.append(el("p", null, t("Rollback actions tried: {actions}.", {
+        actions: rollback.tried.map((action) => t(rollbackAction[action])).join(", ")
+      })));
+      if (rollback?.location) {
+        for (const [file, location2] of Object.entries({
+          "node_modules/": rollback.location.modules,
+          "pnpm-lock.yaml": rollback.location.lockfile
+        })) {
+          card.append(el("p", null, t("{file}: previous — {previous}; candidate — {candidate}.", {
+            file,
+            previous: t(fileLocation[location2.previous]),
+            candidate: t(fileLocation[location2.candidate])
+          })));
+        }
+      }
+      if (rollback) rollbackFacts(card, rollback, el);
+      card.append(guideLink(el));
+      break;
+    }
+  }
+  body.classList.add("su-fill", "su-center");
+  body.append(card);
+  if (run3.phase !== "manualRecovery") recoveryFacts(body, run3, recovery, el);
+}
+function installSelfUpdate({ desktop = false, document: doc = globalThis.document, ...bindings }) {
+  if (desktop || !doc?.body) return null;
+  doc[documentUpdate] ??= createDocumentUpdate(doc, bindings.storage);
+  return doc[documentUpdate].attach(bindings);
+}
+function createDocumentUpdate(doc, storage = (() => {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return null;
+  }
+})()) {
+  const el = (tag, className, text2) => {
+    const node = doc.createElement(tag);
+    if (className) node.className = className;
+    if (text2 !== void 0) node.textContent = text2;
+    return node;
+  };
+  const makeButton = (className, label, click) => {
+    const button2 = el("button", className, label);
+    button2.type = "button";
+    button2.addEventListener("click", click);
+    return button2;
+  };
+  const svgNs = "http://www.w3.org/2000/svg";
+  const icon3 = doc.createElementNS(svgNs, "svg");
+  for (const [name, value] of Object.entries({
+    viewBox: "0 0 20 20",
+    width: "18",
+    height: "18",
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": "1.5",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true"
+  })) icon3.setAttribute(name, value);
+  const path2 = doc.createElementNS(svgNs, "path");
+  path2.setAttribute("d", "M10 3v8.5M6.5 8.5 10 12l3.5-3.5M4 16h12");
+  icon3.append(path2);
+  const style = el("style", null, CSS2);
+  doc.head.append(style);
+  const nod = makeButton("su-nod bt-round", void 0, () => controller.open());
+  const dot = el("span", "su-dot");
+  dot.setAttribute("aria-hidden", "true");
+  nod.append(icon3, dot);
+  nod.setAttribute("aria-haspopup", "dialog");
+  const layer = el("div", "su-layer");
+  const box = el("div", "su-modal");
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-modal", "true");
+  box.setAttribute("aria-labelledby", "su-title");
+  box.tabIndex = -1;
+  layer.append(box);
+  const head = el("div", "su-head");
+  const title = el("h2");
+  title.id = "su-title";
+  const close = makeButton("su-close", t("Close"), () => controller.close());
+  head.append(title, close);
+  const body = el("div", "su-body");
+  body.setAttribute("aria-live", "polite");
+  const foot = el("div", "su-foot");
+  box.append(head, body, foot);
+  let nodVisible = false;
+  let modalVisible = false;
+  let focusBack = null;
+  let lastView;
+  const placeNod = () => {
+    if (!nodVisible) {
+      nod.remove();
+      return;
+    }
+    const seat = doc.querySelector(".lb-foot") ?? doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div');
+    if (!seat) nod.remove();
+    else if (nod.parentNode !== seat) seat.append(nod);
+  };
+  const placeLayer = () => {
+    if (modalVisible && doc.body && layer.parentNode !== doc.body) {
+      doc.body.append(layer);
+      close.focus();
+    }
+  };
+  const Observer = doc.defaultView?.MutationObserver;
+  const observer = Observer ? new Observer(() => {
+    placeNod();
+    placeLayer();
+  }) : null;
+  observer?.observe(doc.documentElement, { childList: true, subtree: true });
+  const present = (view) => {
+    const { screen, run: run3, check, recovery, offline, connectionLost, refused, retry, rollback } = view;
+    const key = JSON.stringify([language(), view]);
+    if (lastView === key) return;
+    lastView = key;
+    if (screen && !modalVisible) focusBack = doc.activeElement;
+    modalVisible = Boolean(screen);
+    nodVisible = !screen && view.nod !== null;
+    if (nodVisible) {
+      const label = view.nod === "progress" ? t("Updating Automagik") : t("Update available");
+      nod.title = label;
+      nod.setAttribute("aria-label", label);
+    }
+    placeNod();
+    if (!screen) {
+      if (layer.parentNode) {
+        layer.remove();
+        if (focusBack?.isConnected) focusBack.focus();
+        else if (nod.isConnected) nod.focus();
+      }
+      focusBack = null;
+      return;
+    }
+    const focused = doc.activeElement;
+    const scroll = body.scrollTop;
+    title.textContent = screen === "progress" ? t("Updating Automagik") : t("Update Automagik");
+    close.textContent = t("Close");
+    body.className = "su-body";
+    body.replaceChildren();
+    foot.replaceChildren();
+    if (screen === "offer") {
+      announcement(body, check, rollback, el);
+      if (offline) body.append(el("p", "su-note", t("The update status is unconfirmed.")));
+      const update = makeButton("su-primary", t("Update now"), () => void controller.start());
+      update.disabled = !retry;
+      foot.append(update, makeButton("su-ghost", t("Not now"), () => controller.close()));
+    } else if (screen === "progress") {
+      progress(body, run3, offline, connectionLost, el);
+    } else if (screen === "result") {
+      verdict(body, run3, recovery, el);
+      if (run3.phase === "rolledBack" && retry) {
+        foot.append(makeButton("su-ghost", t("See the announcement again"), () => controller.open()));
+      }
+    } else {
+      body.append(el("p", "su-line", refused === "unconfirmed" ? t("The supervisor has not confirmed the update request.") : t("Cannot update: {reason}", { reason: selfUpdateReason(refused) })));
+    }
+    placeLayer();
+    body.scrollTop = scroll;
+    if (focused && !focused.isConnected) close.focus();
+  };
+  let owner;
+  let readStatus;
+  let deferredChat;
+  let tracking = false;
+  let retryTimer;
+  const pollDetached = () => {
+    if (owner || !tracking) return;
+    void controller.refresh();
+    retryTimer = setTimeout(pollDetached, doc.hidden ? 1e4 : 1500);
+  };
+  const controller = createSelfUpdateController({
+    readStatus: (signal) => readStatus(signal),
+    startUpdate: () => owner.startUpdate(),
+    onStatus: (status) => owner?.onStatus?.(status),
+    keepChat(...args) {
+      if (owner) owner.keepChat?.(...args);
+      else deferredChat = args;
+    },
+    present(view) {
+      tracking = view.nod === "progress";
+      present(view);
+      if (!owner && !tracking && !view.screen) dispose();
+    },
+    storage,
+    visible: () => doc.visibilityState === "visible"
+  });
+  doc.addEventListener("visibilitychange", controller.onVisibilityChange);
+  const onKeyDown = (event) => {
+    if (!layer.isConnected) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      controller.close();
+    } else if (event.key === "Tab") {
+      const stops = [...box.querySelectorAll("button:not(:disabled),a[href]")];
+      const at = stops.indexOf(doc.activeElement);
+      event.preventDefault();
+      const next = event.shiftKey ? at <= 0 ? stops.length - 1 : at - 1 : (at + 1) % stops.length;
+      stops[next]?.focus();
+    }
+  };
+  doc.addEventListener("keydown", onKeyDown, true);
+  function dispose() {
+    delete doc[documentUpdate];
+    clearTimeout(retryTimer);
+    controller.dispose();
+    observer?.disconnect();
+    doc.removeEventListener("visibilitychange", controller.onVisibilityChange);
+    doc.removeEventListener("keydown", onKeyDown, true);
+    nod.remove();
+    layer.remove();
+    style.remove();
+    if (focusBack?.isConnected) focusBack.focus();
+  }
+  return {
+    attach(bindings) {
+      owner = bindings;
+      readStatus = bindings.readStatus;
+      clearTimeout(retryTimer);
+      if (deferredChat) {
+        bindings.keepChat?.(...deferredChat);
+        deferredChat = void 0;
+      }
+      controller.watchConnection(bindings.connection);
+      return {
+        refresh: (options) => owner === bindings ? controller.refresh(options) : void 0,
+        dispose() {
+          if (owner !== bindings) return;
+          owner = void 0;
+          if (!tracking) {
+            dispose();
+            return;
+          }
+          controller.watchConnection(void 0, true);
+          retryTimer = setTimeout(pollDetached, 1500);
+        }
+      };
+    }
+  };
+}
+
+// src/client/gated-shared.js
+var gated_shared_exports = {};
+__export(gated_shared_exports, {
+  BotMark: () => BotMark,
+  BrandMark: () => BrandMark,
+  BrandName: () => BrandName,
+  CONVERSATION_CSS: () => CONVERSATION_CSS,
+  Card: () => Card2,
+  LEFT_BAR_CSS: () => LEFT_BAR_CSS,
+  Nothing: () => Nothing,
+  Row: () => Row,
+  SHELL_CSS: () => SHELL_CSS,
+  SIDEBAR_CSS: () => SIDEBAR_CSS,
+  Segmented: () => Segmented,
+  Shimmer: () => Shimmer,
+  allThemes: () => allThemes,
+  call: () => call,
+  checkViewer: () => checkViewer,
+  createSource: () => createSource,
+  dayLabel: () => dayLabel,
+  freePriority: () => freePriority,
+  installCompiledStyles: () => installCompiledStyles,
+  installStyles: () => installStyles,
+  isMainOf: () => isMainOf,
+  isRetired: () => isRetired,
+  lookOf: () => lookOf,
+  mountedViewer: () => mountedViewer,
+  onRetire: () => onRetire,
+  relativeShort: () => relativeShort,
+  requestViewer: () => requestViewer,
+  t: () => t,
+  themeCss: () => themeCss
+});
+
 // src/client/index.js
 var inject = ["sessions", "uiWorkspace", "uiConversation", "slots", "theme", "layout"];
 var LIVE_OWN = /* @__PURE__ */ new Set(["revision", "unchanged", "activity", "work", "memoryNews", "memoryReviews", "liveKey", "computerLive"]);
@@ -42397,6 +44455,7 @@ var omni = Object.freeze({
   headerButtons,
   sidebarTools,
   botSettings,
+  officialInstall,
   chatSuggestions,
   registerComposerPack,
   setCanvasRenderer,
@@ -42447,7 +44506,33 @@ var omni = Object.freeze({
 });
 var DSH_SETTINGS = /* @__PURE__ */ new Set(["general", "account", "models", "agent-presets", "plugins"]);
 function apply(ctx) {
-  ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy");
+  const boot = bootView();
+  if (boot === void 0) return applyOwner(ctx);
+  const lifetime = new AbortController();
+  ctx.effect(() => () => lifetime.abort(), "ds-bot: gated viewer");
+  ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy (gated)");
+  let gated;
+  const prepare = async () => {
+    const chunk = await globalThis.__dshChunk("./client.gated.js");
+    gated = chunk.initialize(gated_shared_exports);
+  };
+  startViewer(boot, lifetime.signal, prepare).then((viewer) => {
+    if (lifetime.signal.aborted || ctx.fiber && ctx.fiber.state !== 2 || isRetired()) return;
+    const surface = ctx.inject([], (scope) => {
+      if (viewer.role === "member" || viewer.role === "guest") gated.applyMember(scope);
+      else {
+        scope.effect(() => installPeopleCard(gated.PeopleCard), "ds-bot: gated People card");
+        applyOwner(scope, { gated: true });
+      }
+    });
+    ctx.effect(() => onRetire(() => {
+      void Promise.resolve().then(() => surface.dispose());
+    }), "ds-bot: retire gated surface");
+  }, () => {
+  });
+}
+function applyOwner(ctx, { gated = false } = {}) {
+  if (!gated) ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy");
   const hostHolds = createSource({});
   migrateStorage();
   const PREFS_KEY = STORAGE.prefs;
@@ -42462,7 +44547,8 @@ function apply(ctx) {
   const reactionStore = sharedMap(STORAGE.reactions);
   const seenStore = sharedMap(STORAGE.seen);
   let seenAt = seenStore.read();
-  const ui2 = createSource({ details: null, view: "details", renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: unreadStore.read(), reactions: reactionStore.read(), visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null });
+  const emptyUi = { details: null, view: "details", renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: {}, reactions: {}, visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null };
+  const ui2 = createSource({ ...emptyUi, unread: unreadStore.read(), reactions: reactionStore.read() });
   const frame = createSource({ viewport: typeof window === "undefined" ? 0 : window.innerWidth });
   const surface = createSource({ mode: readMode(), plain: false });
   let agentSessionCache = /* @__PURE__ */ new Set();
@@ -42541,7 +44627,7 @@ function apply(ctx) {
     const order = ++pulls;
     const known2 = roster.getSnapshot();
     const value = await call("state", { since: known2.revision, models: known2.modelsKey ?? "", live: liveKey, locale: language(), allowPlace: allowPlace() });
-    if (order < applied) return;
+    if (order < applied || gated && isRetired()) return;
     applied = order;
     if (value.liveKey !== void 0) liveKey = value.liveKey;
     if (value.activity !== void 0) {
@@ -42571,6 +44657,7 @@ function apply(ctx) {
     if (value.connectors !== void 0 && JSON.stringify(value.connectors) !== JSON.stringify(current.connectors ?? [])) live2.connectors = value.connectors;
     if (value.secretSources !== void 0 && JSON.stringify(value.secretSources) !== JSON.stringify(current.secretSources)) live2.secretSources = value.secretSources;
     if (value.secretSourcesPresent !== void 0 && value.secretSourcesPresent !== current.secretSourcesPresent) live2.secretSourcesPresent = value.secretSourcesPresent;
+    if (value.updateHold !== void 0 && value.updateHold !== (current.updateHold === true)) live2.updateHold = value.updateHold;
     if (value.capabilityStatuses !== void 0 && JSON.stringify(value.capabilityStatuses) !== JSON.stringify(current.capabilityStatuses ?? {})) live2.capabilityStatuses = value.capabilityStatuses;
     if (value.learning !== void 0 && JSON.stringify(value.learning) !== JSON.stringify(current.learning ?? {})) live2.learning = value.learning;
     if (value.learningSettled !== void 0 && JSON.stringify(value.learningSettled) !== JSON.stringify(current.learningSettled ?? {})) live2.learningSettled = value.learningSettled;
@@ -42606,6 +44693,33 @@ function apply(ctx) {
       void Promise.resolve(ctx.sessions.refreshProjections?.(id)).catch(quietly("refresh projections"));
     }
   };
+  let selfUpdate;
+  const selfUpdateStatusSource = createSource(null);
+  if (gated) ctx.effect(() => onRetire(() => {
+    currentFace = null;
+    for (const [source, empty] of [
+      [roster, EMPTY_ROSTER],
+      [ui2, emptyUi],
+      [work, { bots: {}, approvals: [] }],
+      ...[hostHolds, activity, live, computer, cards2, heldCards, turnClock, memoryNews].map((source2) => [source2, {}])
+    ]) {
+      try {
+        source.set(empty);
+      } catch {
+      }
+    }
+    seenAt = savedPrefs = {};
+    agentSessionCache.clear();
+    for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear();
+    if (canClearDraftInMemory()) {
+      for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
+        try {
+          ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.("");
+        } catch {
+        }
+      }
+    }
+  }), "ds-bot: clear owner state on retirement");
   ctx.effect(() => {
     let stopped = false;
     let running2 = false;
@@ -42615,6 +44729,7 @@ function apply(ctx) {
       clearTimeout(timer);
       if (running2 || stopped) return;
       running2 = true;
+      void selfUpdate?.refresh();
       try {
         await pull();
         misses = 0;
@@ -42644,18 +44759,24 @@ function apply(ctx) {
     };
   }, "ds-bot: roster poll");
   const update = createSource({ available: false, phase: "idle" });
+  const takeUpdateReply = (value) => update.set((previous) => ({ ...value, app: previous.app, hostAnswered: true }));
   let wakeUpdate = () => {
   };
   ctx.effect(() => {
     let stopped = false;
     let timer;
+    const firstReplyBackoff = [5e3, 15e3, 3e4];
+    let request = 0;
     const loop = async () => {
       clearTimeout(timer);
       if (stopped) return;
+      const current = ++request;
       const value = await call("update-check", { fresh: false }).catch(() => null);
-      if (stopped) return;
-      if (value) update.set((previous) => ({ ...value, app: previous.app }));
-      timer = setTimeout(loop, value?.phase === "installing" || value?.dsh?.phase === "installing" ? 2e3 : 60 * 6e4);
+      if (stopped || current !== request) return;
+      if (value) takeUpdateReply(value);
+      const retry = update.getSnapshot().hostAnswered ? void 0 : firstReplyBackoff.shift();
+      const installing = value?.phase === "installing" || value?.dsh?.phase === "installing";
+      timer = setTimeout(loop, installing ? 2e3 : retry ?? 60 * 6e4);
     };
     wakeUpdate = loop;
     void loop();
@@ -42838,28 +44959,12 @@ function apply(ctx) {
     return frameLayout({ viewport: frame.getSnapshot().viewport, sidebarWidth: 0, pref: "hidden", panel: { view: view ?? state2.view, yielded: state2.panelYield === true } }).panel === "folded";
   };
   const yieldBrowser = (state2) => state2.panelYield === true || panelFolded("browser");
-  const homeToMainBot = () => {
-    const snapshot2 = roster.getSnapshot();
-    if (!snapshot2.ready || !snapshot2.mainBotId) return;
-    const main = mainView();
-    if (main !== void 0 && snapshot2.byId[main] === void 0 && snapshot2.roomsById[main] === void 0) {
-      actions.openSession(snapshot2.mainBotId);
-    }
-  };
-  const ensureBotHome = () => {
-    if (roster.getSnapshot().ready) homeToMainBot();
-    else {
-      const off = roster.subscribe(() => {
-        if (!roster.getSnapshot().ready) return;
-        off();
-        homeToMainBot();
-      });
-    }
-  };
+  const ensureBotHome2 = () => ensureBotHome({ roster, mainView, openSession: actions.openSession });
   let cliLogin;
   const codePanel = codePanelNavigation(ctx.layout);
   const actions = {
     ...teamActions({ call, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession: (id) => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
+    selfUpdateStatusSource,
     learningAnswer: (id, approve) => after(call("learning-answer", { id, approve })),
     // The full-pane overlays sit above the conversation, so opening one must dismiss them
     // or the click appears to do nothing.
@@ -42991,7 +45096,7 @@ function apply(ctx) {
     setSurface: (mode) => {
       if (mode !== "bot" && mode !== "agent") return;
       if (surface.getSnapshot().mode === mode) {
-        if (mode === "bot") ensureBotHome();
+        if (mode === "bot") ensureBotHome2();
         return;
       }
       if (mode === "agent") {
@@ -43000,7 +45105,7 @@ function apply(ctx) {
       writeMode(mode);
       surface.set((state2) => ({ ...state2, mode }));
       if (mode !== "bot") return;
-      ensureBotHome();
+      ensureBotHome2();
     },
     markUnread: (id) => writeUnread(id, true),
     beginVisit: (id) => {
@@ -43151,7 +45256,7 @@ function apply(ctx) {
   };
   actions.checkUpdate = async () => {
     const value = await call("update-check", { fresh: true });
-    update.set((previous) => ({ ...value, app: previous.app }));
+    takeUpdateReply(value);
     wakeUpdate();
   };
   actions.freshConversation = (botId) => after(call("bot-fresh", { id: botId }));
@@ -43241,9 +45346,13 @@ function apply(ctx) {
     });
   }
   const face = () => ({ actions, hooks: { roster, ui: ui2, activity, work, memoryNews, registry: registry2, turnClock, live, computer, cards: cards2, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } });
+  const updateQueue = async (sessionId, itemId, action) => {
+    if (gated) await call("whoami");
+    return await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action) ?? { ok: false };
+  };
   const queueFace = (sessionId) => ({
     ...face(),
-    updateQueue: async (itemId, action) => await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action) ?? { ok: false },
+    updateQueue: (itemId, action) => updateQueue(sessionId, itemId, action),
     loadImage: (attachment) => ctx.uiConversation.imageUrl(sessionId, attachment)
   });
   ctx.effect(() => noticeApprovals({
@@ -43300,7 +45409,7 @@ function apply(ctx) {
   actions.steerQueued = async (sessionId) => {
     const session = ctx.sessions.binding(sessionId)?.session;
     if (session === void 0) return;
-    if (await steerQueued(session) === "failed") {
+    if (await steerQueued(session, gated ? (id, action) => updateQueue(sessionId, id, action) : void 0) === "failed") {
       actions.reportError(new Error(t("Couldn’t steer the queued messages. Try again.")), "steer-queue");
     }
   };
@@ -43338,9 +45447,9 @@ function apply(ctx) {
       const next = rightColumnOpen(document);
       const opening = next && !open;
       open = next;
-      const verdict = opening ? columnOpened(ui2.getSnapshot().details !== null, switchWindow.pending) : null;
-      if (verdict === "close-drawer") actions.closePanel();
-      else if (verdict === "collapse-column") collapseColumn();
+      const verdict2 = opening ? columnOpened(ui2.getSnapshot().details !== null, switchWindow.pending) : null;
+      if (verdict2 === "close-drawer") actions.closePanel();
+      else if (verdict2 === "collapse-column") collapseColumn();
     });
     observer.observe(document.documentElement, {
       subtree: true,
@@ -43783,29 +45892,18 @@ function apply(ctx) {
       offRoster();
     };
   }, "ds-bot: agent surface");
+  let chatReopen;
   ctx.effect(() => {
-    let reopening = takeReopen();
-    const note = () => {
-      if (reopening === null) rememberOpen(mainView());
-    };
-    const reopen = () => {
-      const snapshot2 = roster.getSnapshot();
-      if (!snapshot2.ready) return;
-      const id = reopening;
-      reopening = null;
-      if (isAgentSessionId(id) || snapshot2.byId?.[id] !== void 0 || snapshot2.roomsById?.[id] !== void 0) actions.openSession(id);
-      note();
-    };
-    const offList = ctx.sessions.list.subscribe(note);
-    const offRoster = reopening === null ? () => {
-    } : roster.subscribe(() => {
-      if (reopening !== null) reopen();
+    chatReopen = watchChatReopen({
+      roster,
+      sessions: ctx.sessions.list,
+      mainView,
+      isAgentSession: isAgentSessionId,
+      openSession: actions.openSession
     });
-    if (reopening !== null) reopen();
-    note();
     return () => {
-      offList();
-      offRoster();
+      chatReopen.dispose();
+      chatReopen = void 0;
     };
   }, "ds-bot: keep the open chat across a DSH restart");
   ctx.effect(() => {
@@ -43845,7 +45943,7 @@ function apply(ctx) {
       verifyTimer = setTimeout(verifySidebar, 250);
     };
     reconcile();
-    if (surface.getSnapshot().mode === "bot") ensureBotHome();
+    if (surface.getSnapshot().mode === "bot") ensureBotHome2();
     const unsub = surface.subscribe(reconcile);
     return () => {
       unsub();
@@ -43853,6 +45951,28 @@ function apply(ctx) {
       groups.dispose();
     };
   }, "ds-bot: surface");
+  ctx.effect(() => {
+    const connection = ctx.get("connection")?.state;
+    const update2 = installSelfUpdate({
+      readStatus: actions.selfUpdateStatus,
+      startUpdate: actions.startSelfUpdate,
+      connection,
+      onStatus: selfUpdateStatusSource.set,
+      desktop: window.dshDesktop?.protocolVersion === 1,
+      keepChat(active2, restore) {
+        if (active2) armUpdateReopen(chatReopen?.getPending() ?? mainView());
+        else {
+          const id = endUpdateReopen(restore);
+          if (id !== null) chatReopen?.setPending(id);
+        }
+      }
+    });
+    selfUpdate = update2;
+    return () => {
+      update2?.dispose();
+      if (selfUpdate === update2) selfUpdate = null;
+    };
+  }, "ds-bot: web self-update");
 }
 return Object.defineProperty({ ...module.exports }, Symbol.toStringTag, { value: 'Module' })
   },

@@ -23,6 +23,7 @@ import {
 import {
   protonPass, protonCloud, protonItems, PROTON_FIELDS, validProtonConnection, validProtonItem, validProtonToken,
 } from './vault-proton.js'
+import { keychain as macosKeychain, keychainConnection, keychainItem, keychainItems, keychainLookup, keychainReason } from './vault-keychain.js'
 
 export const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/
 export const ENV_PREFIX = 'DSH_SECRET_'
@@ -85,7 +86,7 @@ const secretsManagerReasons = new Map([
   ['version', 'Install Bitwarden Secrets Manager CLI 2.x.'],
 ])
 const validReference = value => typeof value === 'string' && value.length > 0 && value.length <= 512
-const vaultProviders = ['bitwarden', 'onepassword', hashicorp, GNOME_PROVIDER_ID, protonPass, secretsManager]
+const vaultProviders = ['bitwarden', 'onepassword', hashicorp, GNOME_PROVIDER_ID, protonPass, secretsManager, macosKeychain]
 const fencedProvider = provider => provider === hashicorp || provider === protonPass
 const protonSetFailed = 'The Proton Pass token could not be set.'
 const validProvider = provider => vaultProviders.includes(provider)
@@ -96,6 +97,7 @@ const validVaultReference = ({ provider, connection, item, field }) =>
   && (provider !== GNOME_PROVIDER_ID || (connection === GNOME_PROVIDER_ID && field === 'secret' && secretServiceItem(item) !== undefined))
   && (provider !== protonPass || (connection === protonPass && validProtonItem(item) && PROTON_FIELDS.has(field)))
   && (provider !== secretsManager || (VAULT_ITEM_ID.test(item) && field === 'value'))
+  && (provider !== macosKeychain || (connection === keychainConnection && field === 'password' && keychainItem(item) !== undefined))
 const sameConnection = (a, b) => a.provider === b.provider && a.connection === b.connection
 const matchesLiveConnection = (service, mapping) => {
   const active = service.activeConnection?.()
@@ -146,7 +148,8 @@ async function probeVault(service, provider, settings = false) {
       return { state: 'unavailable', reason: secretServiceMessage(error?.code, 'The vault did not answer.') }
     }
     if (settings && provider === protonPass && error?.code === 'cloud') return { state: 'unavailable', reason: protonCloud }
-    const reason = settings && provider === secretsManager ? secretsManagerReasons.get(error?.code) : undefined
+    const reason = !settings ? undefined : provider === secretsManager ? secretsManagerReasons.get(error?.code)
+      : provider === macosKeychain ? keychainReason(error?.code) : undefined
     if (reason !== undefined) return { state: 'unavailable', reason }
     // The adapter's error may name its account or a vault reference.
   } finally { clearTimeout(timer) }
@@ -165,6 +168,11 @@ const sameGate = (service, gate) => {
 const hashicorpConnection = service => {
   const active = service?.activeConnection?.()
   return active?.provider === hashicorp ? active.connection : undefined
+}
+const defaultVaultProvider = service => {
+  const active = service.activeConnection?.()
+  return active?.provider === macosKeychain || (active?.provider === hashicorp && active.connection !== undefined)
+    ? active.provider : 'bitwarden'
 }
 const wrongHashicorpConnection = (service, mapping) => {
   const active = mapping?.provider === hashicorp ? hashicorpConnection(service) : undefined
@@ -759,6 +767,7 @@ export function install(rt) {
   let sourcesPresent = false
   let secretSources
   let credentialGeneration = new AbortController()
+  let keychainEntryGeneration = new AbortController()
   let credentialSelection
   let vaultExecutionInstalled = false
   const vaultRequests = new Map()
@@ -1121,6 +1130,10 @@ export function install(rt) {
   const stillListed = (botId, request) => state.secretRequests?.[botId]?.includes(request) === true
   const vaultAuditOf = (botId, request) => vaultRequests.get(request.id) ?? { botId, name: request.name }
   const mappingFor = name => sourcesBroken || secrets.has(name) ? undefined : sources.get(name)
+  // The Keychain gate: the service instance and its gate token when the request was made.
+  const keychainGateOf = service => ({ service, token: service.providerBinding?.(macosKeychain) })
+  const keychainGateCurrent = gate => gate?.token != null && gate.service === secretSources
+    && gate.token === gate.service.providerBinding?.(macosKeychain)
   const sessionFolder = (session) => {
     const folder = session && (ctx.get?.('workingDirectory')?.get?.(session) ?? session.header?.cwd)
     return typeof folder === 'string' && isAbsolute(folder) ? folder : undefined
@@ -1263,6 +1276,7 @@ export function install(rt) {
       || binding === undefined || binding.botId !== botId || binding.sessionId !== sessionId || binding.name !== name
       || commandDigest !== binding.commandDigest || commandDigestOf(shell, workdir, command) !== binding.commandDigest
       || mapping === undefined || fingerprintOf(mapping) !== binding.fingerprint) throw refusal(changedMapping(name))
+    if (mapping.provider === macosKeychain && !keychainGateCurrent(binding.keychainGate)) throw refusal(vaultLocked)
     return { binding, mapping }
   }
 
@@ -1351,6 +1365,7 @@ export function install(rt) {
         ...(mapping.provider === GNOME_PROVIDER_ID ? { gate: binding.gate, service } : {}),
         ...(mapping.provider === secretsManager ? { managerActivation: binding.managerActivation } : {}),
         fingerprint: binding.fingerprint, issuedAt, expiresAt: issuedAt + GRANT_MS,
+        ...(mapping.provider === macosKeychain ? { keychainGate: binding.keychainGate } : {}),
       })
       forgetVaultRequest(request)
     } catch (error) {
@@ -1617,6 +1632,7 @@ export function install(rt) {
       : active?.provider === secretsManager ? active.connection : undefined
   }
   const connectionOf = (service, provider) => {
+    if (provider === macosKeychain) return keychainConnection
     const mapped = sources.values().next().value
     if (mapped !== undefined) return mapped.connection
     const active = service.activeConnection?.()
@@ -1676,10 +1692,28 @@ export function install(rt) {
     return { items: hashicorpItems(mount, folder, result.items) }
   }
 
+  async function keychainPicker(service, { service: name, account }) {
+    const id = keychainLookup(name, account)
+    if (id === undefined) throw refusal('Choose a valid vault reference.')
+    const gate = keychainGateOf(service)
+    if (!keychainGateCurrent(gate)) throw refusal(vaultLocked)
+    let result
+    try {
+      result = await service.listItems({ provider: macosKeychain, connection: keychainConnection, service: name, account })
+    } catch {}
+    if (!keychainGateCurrent(gate)) throw refusal(vaultLocked)
+    matchingProvider(macosKeychain)
+    const reason = keychainReason(result?.code)
+    if (reason !== undefined) throw refusal(reason)
+    if (result?.code === 'locked') throw refusal(vaultLocked)
+    const items = keychainItems(result, id, name, account)
+    if (items === undefined) throw refusal('The vault items could not be listed.')
+    return { items }
+  }
+
   const vaultRoutes = {
     async 'vault-status'(service, body) {
-      const selected = service.providerSelection?.provider === GNOME_PROVIDER_ID ? GNOME_PROVIDER_ID
-        : hashicorpConnection(service) === undefined ? 'bitwarden' : hashicorp
+      const selected = service.providerSelection?.provider === GNOME_PROVIDER_ID ? GNOME_PROVIDER_ID : defaultVaultProvider(service)
       const provider = activeProvider(body.provider ?? selected)
       const connection = connectionOf(service, provider)
       const active = service.activeConnection?.()
@@ -1715,6 +1749,18 @@ export function install(rt) {
         if (answer?.ok !== true) throw managerRefusal(answer, 'The vault could not be unlocked.')
         return true
       }
+      if (body.provider === macosKeychain) {
+        matchingProvider(macosKeychain)
+        if (!supportedProvider(service, macosKeychain)) throw refusal('The vault did not answer.')
+        if ((body.connection !== undefined && body.connection !== keychainConnection)
+          || body.password !== undefined || body.token !== undefined) throw refusal('Choose a valid vault reference.')
+        let answer
+        try { answer = await enter(macosKeychain, { connection: keychainConnection }) } catch {}
+        const reason = keychainReason(answer?.code)
+        if (reason !== undefined) throw refusal(reason)
+        if (answer?.ok !== true) throw refusal('The vault could not be unlocked.')
+        return true
+      }
       matchingProvider('bitwarden')
       if (body.provider !== undefined && body.provider !== 'bitwarden') throw refusal('Choose a vault provider.')
       if (typeof body.password !== 'string' || body.password.length === 0 || body.password.includes('\0')) {
@@ -1730,9 +1776,11 @@ export function install(rt) {
     async 'vault-lock'(service, body) {
       if (body.provider === protonPass && !supportedProvider(service, protonPass)) throw refusal('The vault did not answer.')
       if (body.provider === secretsManager && !supportedProvider(service, secretsManager)) throw refusal('The vault did not answer.')
+      if (body.provider === macosKeychain && !supportedProvider(service, macosKeychain)) throw refusal('The vault did not answer.')
       let locked
       try {
-        const provider = fencedProvider(body.provider) || body.provider === GNOME_PROVIDER_ID || body.provider === secretsManager
+        const provider = fencedProvider(body.provider) || body.provider === GNOME_PROVIDER_ID
+          || body.provider === secretsManager || body.provider === macosKeychain
           ? { provider: body.provider } : undefined
         const result = provider === undefined ? await service.lock() : await service.lock(provider)
         locked = result === true || (!Array.isArray(service.providers) && result === undefined)
@@ -1830,6 +1878,7 @@ export function install(rt) {
       matchingProvider(body.provider ?? provider)
       if (provider === hashicorp) return hashicorpPicker(service, body, false)
       if (!supportedProvider(service, provider)) throw refusal('The vault did not answer.')
+      if (provider === macosKeychain) return keychainPicker(service, body)
       const search = typeof body.search === 'string' ? body.search.trim().slice(0, 512) : ''
       if (provider === GNOME_PROVIDER_ID) {
         const gate = gateOf(service)
@@ -1900,6 +1949,7 @@ export function install(rt) {
   let providerSwitch
   function vaultEndpoint(endpoint, body = {}, refresh = false) {
     const entry = endpoint === 'vault-unlock' || endpoint === 'vault-token-set'
+    const keychainEntry = endpoint === 'vault-unlock' && body.provider === macosKeychain
     const clear = endpoint === 'vault-token-clear'
     const managerMutation = (entry || clear) && body.provider === secretsManager
     const admitted = secretSources
@@ -1918,8 +1968,14 @@ export function install(rt) {
       secretServiceEntry = new AbortController()
     } else if (locking && managerOnly) {
       cancelManagerEntry()
+    } else if (locking && body.provider === macosKeychain) {
+      const previous = keychainEntryGeneration
+      keychainEntryGeneration = new AbortController()
+      previous.abort()
     } else if (locking) advanceCredentialGeneration()
-    const entrySignal = secretServiceOnly ? secretServiceEntry.signal : managerOnly ? managerEntry.signal : undefined
+    const entrySignal = secretServiceOnly ? secretServiceEntry.signal
+      : managerOnly ? managerEntry.signal
+      : keychainEntry ? keychainEntryGeneration.signal : undefined
     // These locks also outdate a queued credential entry.
     if (locking && fencedProvider(body.provider)) tokenRevision++
     let generation = credentialGeneration
@@ -2149,6 +2205,7 @@ export function install(rt) {
       || text.includes(row.item))
     const unsafe = 'That request cannot be shown on a card; ask again without secret material in it.'
     const mapping = sources.get(name)
+    const keychainGate = mapping.provider === macosKeychain ? keychainGateOf(service) : undefined
     const generation = credentialGeneration
     const managerSignal = managerEntry.signal
     const manager = mapping.provider === secretsManager
@@ -2170,6 +2227,7 @@ export function install(rt) {
     if (wrongHashicorpConnection(service, mapping)) return refuse(vaultUnavailable)
     if (((fencedProvider(mapping.provider) || mapping.provider === secretsManager) && generation !== credentialGeneration)
       || (mapping.provider === GNOME_PROVIDER_ID && !sameGate(service, gate))) return refuse(vaultLocked)
+    if (keychainGate !== undefined && !keychainGateCurrent(keychainGate)) return refuse(vaultLocked)
     if (sessionFolder(session) !== workdir) return refuse('No working folder is set for this chat; nothing was asked.')
     if (hasSecretMaterial(sources.get(name))) return refuse(unsafe)
     if (status === undefined || !matchesLiveConnection(service, mapping)
@@ -2206,6 +2264,7 @@ export function install(rt) {
     if (pending) vaultRequests.set(request.id, { botId, sessionId, name, fingerprint, commandDigest: entry.commandDigest,
       ...(gate === undefined ? {} : { gate }),
       ...(manager ? { managerActivation: { id: activationId, service } } : {}),
+      ...(keychainGate === undefined ? {} : { keychainGate }),
     })
     trimRequests(list)
     audits.push(auditVault(entry, pending ? 'asked' : 'locked', pending ? 'ok' : 'locked'))
@@ -2226,6 +2285,14 @@ export function install(rt) {
         await auditVault(entry, 'canceled', 'revoked')
         await rt.save()
       }
+      return vaultLocked
+    }
+    if (pending && keychainGate !== undefined && !keychainGateCurrent(keychainGate)) {
+      if (stillListed(botId, request) && request.status === 'pending') {
+        cancelVaultRequest(request)
+        await rt.save()
+      }
+      await auditVault(entry, 'locked', 'locked')
       return vaultLocked
     }
     if (!pending) {
@@ -2359,6 +2426,7 @@ export function install(rt) {
     if (staleActivation) message = vaultLocked
     else if (Date.now() >= grant.expiresAt) message = `The approval for ${grant.name} expired; ask again.`
     else if (grant.gate !== undefined && (grant.service !== secretSources || !sameGate(secretSources, grant.gate))) message = vaultLocked
+    else if (grant.keychainGate !== undefined && !keychainGateCurrent(grant.keychainGate)) message = vaultLocked
     else if (exec.parent !== undefined || Object.hasOwn(args, 'workdir')
       || commandDigestOf(exec.name, sessionFolder(session), args.command) !== grant.commandDigest) {
       message = 'The approved command, shell or folder was different; ask again.'

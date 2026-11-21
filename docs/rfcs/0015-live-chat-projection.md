@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-5: #267, #273, #280, #282, #286, #574; later work: #523, #655, #670, #675, #680; 6-8 unconfirmed; every question answered; amended 2026-11-07: writes on DSH chats, global Bots included; amended 2026-11-19 by [RFC 0036](0036-bot-management-from-pocket.md): Bot management from Pocket, approved by the owner's delegate; amended 2026-11-20 by [RFC 0033](0033-attachments-from-pocket.md): images on DSH chats, approved by the owner's delegate) |
+| Status | In delivery (deliveries 1-5: #267, #273, #280, #282, #286, #574; later work: #523, #655, #670, #675, #680; 6-8 unconfirmed; every question answered; amended 2026-11-07: writes on DSH chats, global Bots included; amended 2026-11-19 by [RFC 0036](0036-bot-management-from-pocket.md): Bot management from Pocket, approved by the owner's delegate; amended 2026-11-20 by [RFC 0033](0033-attachments-from-pocket.md): images on DSH chats, approved by the owner's delegate; amended 2026-11-20 by [RFC 0040](0040-group-chats-in-pocket.md): group chats in Pocket, approved by the owner's delegate) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr (3.N.P, Pocket Link included), plugin (3.N.P), pocket (3.N.P, [RFC 0011](0011-monorepo-parts-and-releases.md)) |
 | Created | 2026-11-03 |
@@ -683,7 +683,10 @@ connections, 8 subscriptions, 4 MiB unsent). New:
 - an answer's `text` only for a single-select question's `"other"`, one line, unchanged by the
   cleaner, at most 32 KiB in bytes (see **text** above), counted in the same 20 writes a minute;
 - a `send` only to the Bot's current chat Session, never a group, task, archived or subagent
-  Session (the same set `pocket-chat.js:10-11` follows today);
+  Session (the same set `pocket-chat.js:10-11` follows today). Amended 2026-11-20 by
+  [RFC 0040](0040-group-chats-in-pocket.md): on a connection that negotiated `groups`, also the
+  current Session of a group the phone may open, under that RFC's rules (section "RFC 0040
+  (group chats in Pocket)" below); task, archived and subagent Sessions stay refused;
 - at most 16 settled requests kept per Session (above).
 
 #### How the phone learns a bridge accepts writes
@@ -751,7 +754,13 @@ finds out what the other accepts, and fails closed to read-only.
   separately negotiated management capability, a phone may also list a shown project Bot's
   scheduled tasks without their prompts and pause, resume or rename them, change its name and
   model (a model write can clear Auto), and read, edit and add its own memory when it is not
-  private; global Bots are not managed, and every other limit here stands. Undo as before:
+  private; global Bots are not managed, and every other limit here stands. Amended 2026-11-20 by
+  [RFC 0040](0040-group-chats-in-pocket.md) (Threat model): through the separately negotiated
+  `groups` capability, a phone may also read every group it may open (every current member and
+  past speaker global or shown, no folder or permission of its own), post text into it, stop its
+  work (which parks an active goal) and allow or deny its members' own approvals one call at a
+  time; it never changes a group's settings, sends files or chat references into a group, or
+  answers a subagent's or a folder request. Undo as before:
   remove the phone in Pocket Link (its writes end within 2 s), or turn the bridge off.
 - **The per-project yes still gates the chat** (0014 Threat model, item 3; `shown[]`). A DSH
   chat of a Bot whose project has no entry in the home file's `shown[]` is listed with
@@ -1642,6 +1651,37 @@ and forward admitted cancels. Test the shared vectors and both hops.
 **4d Pocket.** Add the TXT/PDF picker, names and sizes, cancel and Retry behavior, and update
 [the privacy notice](../../apps/pocket/docs/privacy.md) in the same delivery. Broader files
 and camera capture need separate approval.
+
+### RFC 0040 (group chats in Pocket): `dsh:room:<roomId>` chats
+
+**Approved by the owner's delegate, 2026-11-20, with RFC 0040's recommendations (its Decided
+1-7).** RFC 0040 holds the full contract; this section records what it changes here.
+
+- **Wire.** A `groups` capability under `herdr-pocket/chat/1` and the socket's protocol 1, as
+  writes and attachments are: `groups: 1` in both of the bridge's socket hellos (the final
+  reply decides, on a writable connection only, bound to the team generation that answered
+  it), and `groups: 1` from a phone answered `groups: true`, a grant of that phone connection.
+  Groups are chats with the reserved terminal `dsh:room:<roomId>` (`room.id`, stable across
+  parts), `chat: 'group'`, `members`, `approvals` and an allowlisted row projection read from the
+  group's ledger book; row ids `dsh:room:<roomId>:<seq>`. A peer that did not negotiate groups
+  never sees a group row, and a direct subscribe on one is refused.
+- **Reconnect.** Room cursors follow the book's `seq`: a cursor of another room, above the
+  snapshot boundary, malformed or past one page gets `reset: true` and the newest page;
+  `backfill {before}` is exclusive.
+- **Send results.** A group send is text only (no uploads, no `dsh-session:` reference) and
+  carries `retry: true` when it is a Retry. A first send with a remembered id answers the earlier
+  result; a Retry without evidence answers `unknown` and prompts nothing, and the phone offers
+  "Send as new" with a fresh id and a warning.
+- **Receipts.** A group can hold several open cards at once, one per waiting member: a snapshot
+  carries `approvals: [...]`, an `approval` event closes only its own id, and a card offers
+  `allow` and `deny` only. One receipt per settled id, made at settlement: the winning phone by
+  name, any other winner "Answered on the computer", a cancel "No longer needed"; the last 16
+  per group, for at most 32 groups. The computer shows no receipt (RFC 0040 Decided 7). Only a
+  member's own group-Session approval is a phone card; a subagent's or a folder request stays on
+  the computer.
+- **Limits.** The limits above apply to group chats unchanged (20 writes a minute per phone, one
+  write in flight per phone and chat, one interrupt per chat every 5 s, 8 subscriptions); a
+  group's `interrupt` is the desktop's Stop, goal parking included (RFC 0040 Decided 3).
 
 ## Tracking
 

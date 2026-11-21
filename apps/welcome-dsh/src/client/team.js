@@ -6,7 +6,7 @@ import { ProductLockup } from './product-lockup.js'
 import { Stage, reducedMotion, useFinish, useGate, useGlitch } from './stage.js'
 import { InstallLog } from './terminal.js'
 import { t } from './i18n.js'
-import { WORKING, powerOf, powerSignal, runPower, showPower, stopPower, usePowerState } from './power-store.js'
+import { WORKING, powerOf, powerSignal, runPower, showPower, startPower, stopPower, usePowerState } from './power-store.js'
 import { whereOf } from './where.js'
 
 // Step omni-team (order -270): who joins the companion's team. Each Bot type is a card with
@@ -27,6 +27,10 @@ import { whereOf } from './where.js'
 export const WAKE_MS = 1100
 export const LOOK_MS = 1800
 export const POLL_MS = 900
+export const GITHUB_POLL_MS = 1000
+export const CONNECT_POLL_MS = 2000
+export const CONNECT_MS = 180_000
+export const STATUS_RETRIES = 5
 // After an install, how long the new plugins may take to come up before a restart is asked.
 export const READY_POLLS = 20
 
@@ -34,12 +38,26 @@ const abortError = () => Object.assign(new Error('Omni was switched off'), { nam
 export const sleep = (ms, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) return reject(abortError())
   if (ms <= 0) return resolve()
-  const timer = setTimeout(resolve, ms)
-  signal?.addEventListener('abort', () => {
+  const timer = setTimeout(() => {
+    signal?.removeEventListener('abort', abort)
+    resolve()
+  }, ms)
+  const abort = () => {
     clearTimeout(timer)
     reject(abortError())
-  }, { once: true })
+  }
+  signal?.addEventListener('abort', abort, { once: true })
 })
+
+const serverDone = job => job?.phase === 'done' && job.acknowledged !== true
+
+export function resumeServer(status, start = startPower, { passive = false } = {}) {
+  const job = status?.server
+  if (!job?.id || (job.phase !== 'running' && (passive || !serverDone(job))) || status.install?.phase === 'installing') return null
+  const { phase, detail } = powerOf('omni')
+  if (detail?.removed === true || WORKING.has(phase) || phase === 'pairing' || phase === 'linked') return null
+  return start('omni', options => githubInstall({ ...options, resume: job, passive }))
+}
 
 /**
  * Pressing the power button. `show(phase, detail)` draws each step: waking, installing
@@ -47,7 +65,7 @@ export const sleep = (ms, signal) => new Promise((resolve, reject) => {
  * ({ sandbox }), restart ({ plugins }) or failed ({ message }). Returns the last phase.
  * `signal` is the power going off; `quick` (reduced motion) skips the pauses.
  */
-export async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, quick = reducedMotion(), resume = null }) {
+export async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, quick = reducedMotion(), resume = null, passive = false }) {
   const check = () => { if (signal?.aborted) throw abortError() }
   const pause = ms => wait(quick ? 0 : ms, signal)
   const end = (phase, detail) => {
@@ -86,7 +104,11 @@ export async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi
     if (plugins.install?.phase === 'failed') return end('failed', { message: plugins.install.error })
     if (!plugins.ready) return end('restart', { plugins })
   }
-  show('looking')
+  const server = plugins.server
+  if (server?.phase === 'running') return githubInstall({ show, signal, omniAi, omniUi, wait, resume: server, passive })
+  if (passive && serverDone(server)) return end('asleep', null)
+  if (serverDone(server)) show('looking', detailOf(server))
+  else show('looking')
   const started = Date.now()
   // The channels plugin answers on the Omni plugins' route once it runs; a route that is not
   // there yet waits for DSH to restart.
@@ -99,8 +121,11 @@ export async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi
   check()
   if (link?.linked === true || link?.configured === true) {
     await pause(LOOK_MS / 2)
+    check()
+    if (serverDone(server)) void claimJob(omniAi, server.id, signal).catch(() => {})
     return end('linked', { origin: link.origin ?? null })
   }
+  if (link && serverDone(server)) return githubInstall({ show, signal, omniAi, omniUi, wait, resume: server, linkChecked: true })
   const found = await omniUi('omni-discover').catch(() => null)
   check()
   await pause(Math.max(0, LOOK_MS - (Date.now() - started)))
@@ -166,30 +191,79 @@ async function botPowerOn(kind, { show, signal, ai, wait = sleep, quick = reduce
  */
 export const SANDBOX_LOG_MAX = 48_000
 const TERMINAL_ENDED = new Set(['done', 'exited', 'failed', 'cancelled', 'closed'])
-export async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep, poll = 400 }) {
+const OMNI_COMMAND_VERSION = /(?:^|\s)@automagik\/omni@(\d+\.\d{6}\.\d+(?:-[0-9A-Za-z.]+)?)(?=\s|$)/
+const OMNI_RELEASE_TAG = /^v?(\d+)\.(\d{6})\.(\d+)$/
+
+function newerOmniTag(github, npm) {
+  const left = OMNI_RELEASE_TAG.exec(github)?.slice(1).map(BigInt)
+  const right = OMNI_RELEASE_TAG.exec(npm)?.slice(1).map(BigInt)
+  if (!left || !right) return false
+  const at = left.findIndex((part, i) => part !== right[i])
+  return at !== -1 && left[at] > right[at]
+}
+
+function serverRefusal({ reason, version, npm, github }) {
+  if (reason === 'no-systemd') return t('Omni\'s installer needs systemd on this computer, and it has none (a container, for example). Use an Omni on another computer.')
+  const message = t('Omni {version} is not on npm, where Omni\'s installer gets it. The newest there is {npm}.', { version, npm: npm ?? t('unknown') })
+  const newer = newerOmniTag(github, npm) ? ` ${t('Omni {github} is out on GitHub and not on npm yet.', { github })}` : ''
+  return `${message}${newer} ${t('Power Omni off and on again to take the Omni plugins that work with it, or use an Omni on another computer.')}`
+}
+
+export async function sandboxInstall({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, poll = 400, check: checkVersion }) {
   const check = () => { if (signal?.aborted) throw abortError() }
+  show('sandbox', { terminal: null, log: '', step: null })
   const opened = await omniUi('omni-terminal-open', { kind: 'install', cols: 72, rows: 8 })
-  check()
   const { terminal } = opened
+  const close = () => omniUi('omni-terminal-close', { terminal }).catch(() => {})
+  if (signal?.aborted) {
+    await close()
+    throw abortError()
+  }
   let log = ''
   let from = 0
   show('sandbox', { terminal, log, step: null })
-  let started = false
-  const start = async state => {
-    if (started || state !== 'ready') return
-    check()
-    // Install terminals open before Bun and the shell are ready. Keys sent while
-    // preparing are rejected; only an accepted Enter starts this command once.
-    const written = await omniUi('omni-terminal-write', { terminal, data: '\r' })
-    started = written?.ok === true
-  }
-  await start(opened.state)
   const end = (phase, detail) => {
-    void omniUi('omni-terminal-close', { terminal }).catch(() => {})
+    void close()
     check()
     show(phase, detail)
     return phase
   }
+  const switchToGithub = async ({ npm, ...start }) => {
+    show('sandbox', { terminal: null, log: '', step: null })
+    await close()
+    check()
+    return githubInstall({ show, signal, omniAi, omniUi, wait, start, npm })
+  }
+  let started = false
+  let checked = false
+  let checkedRun = null
+  const start = async ({ state, command }) => {
+    if (started || state !== 'ready') return
+    check()
+    const version = checkVersion && OMNI_COMMAND_VERSION.exec(command)?.[1]
+    if (version && !checked) {
+      checked = true
+      let answer
+      try { answer = await checkVersion(version) } catch { /* the lookup could not answer */ }
+      check()
+      checkedRun = { version, answer }
+      if (answer?.ok === false) {
+        if (answer.fallback || (answer.reason === 'no-systemd' && Object.hasOwn(answer, 'fallback') && answer.npmHas === true)) {
+          return { github: { version, reason: answer.reason, npm: { version, latest: answer.npm ?? null, exitCode: null } } }
+        }
+        return { refusal: serverRefusal({ ...answer, version }) }
+      }
+    }
+    // Install terminals open before Bun and the shell are ready. Keys sent while
+    // preparing are rejected; only an accepted Enter starts this command once.
+    const written = await omniUi('omni-terminal-write', { terminal, data: '\r' })
+    check()
+    started = written?.ok === true
+  }
+  const opening = await start(opened)
+  check()
+  if (opening?.github) return switchToGithub(opening.github)
+  if (opening?.refusal) return end('failed', { message: opening.refusal })
   for (;;) {
     check()
     const read = await omniUi('omni-terminal-read', { terminal, from })
@@ -198,13 +272,214 @@ export async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait =
     from = read.next ?? from
     if (read.result?.status === 'paired') return end('linked', { origin: read.result.origin ?? null })
     if (read.result?.status === 'pairing') return end('pairing', { pairing: read.result.pairing })
-    const exited = typeof read.exitCode === 'number' || TERMINAL_ENDED.has(read.state)
-    if (exited && read.exitCode === 0) return end('linked', { origin: null })
+    const linking = read.exitCode === 0 && read.state === 'linking' && !read.error
+    const exited = !linking && (typeof read.exitCode === 'number' || TERMINAL_ENDED.has(read.state))
+    if (exited && read.exitCode === 0 && !read.error) return end('linked', { origin: null })
+    if (exited && typeof read.exitCode === 'number' && read.exitCode !== 0 && read.exitCode !== 130 &&
+        checkedRun?.answer?.ok === true && checkedRun.answer.fallback) {
+      const { version } = checkedRun
+      const { exitCode } = read
+      return switchToGithub({ version, reason: 'npm-failed', exitCode, npm: { version, latest: null, exitCode } })
+    }
     if (exited) return end('failed', { message: read.error ?? (read.exitCode === 130 ? t('The install was cancelled.') : t('Omni\'s installer stopped (exit code {code}). What it printed is above.', { code: read.exitCode ?? '?' })), log })
     show('sandbox', { terminal, log, step: read.step ?? null })
-    await start(read.state)
+    const next = await start(read)
+    check()
+    if (next?.github) return switchToGithub(next.github)
+    if (next?.refusal) return end('failed', { message: next.refusal })
     await wait(poll, signal)
   }
+}
+
+const claimAttempts = new WeakSet()
+
+async function claimJob(omniAi, id, signal) {
+  if (signal && claimAttempts.has(signal)) return
+  if (signal) claimAttempts.add(signal)
+  return omniAi('omni-github-ack', { id })
+}
+
+async function cancelJob(omniAi, id, signal) {
+  const reply = await omniAi('omni-github-cancel', { id })
+  if (reply?.job?.id === id && reply.job.phase !== 'running') await claimJob(omniAi, id, signal)
+}
+
+function showStoppedJobError(error, signal) {
+  if (powerSignal('omni') === signal && powerOf('omni').detail?.removed === true) {
+    showPower('omni', 'failed', { message: error.message, removed: true })
+  }
+}
+
+const detailOf = ({ id, source, reason, npm, release, step, steps, log, error, fellBack, phase, cancelRequested }) =>
+  ({ job: id, source, reason, npm, release, step, steps, log, error: error ?? null, fellBack, phase, cancelRequested })
+
+// Keep in sync with cleanOmniUrl in omni-channels-dsh.
+function cleanUrl(text) {
+  const value = String(text ?? '').trim()
+  if (value === '') return null
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) && !/^https?:\/\//i.test(value)) return null
+  let url
+  try {
+    url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null
+  if (url.username || url.password || url.search || url.hash) return null
+  return `${url.origin}${url.pathname.replace(/\/api\/v2\/?$/, '').replace(/\/+$/, '')}`
+}
+
+const loopback = host => ['localhost', '127.0.0.1', '[::1]'].includes(host) ? 'localhost' : host
+const effectivePort = url => url.port || (url.protocol === 'https:' ? '443' : '80')
+
+function sameUrl(a, b) {
+  const left = cleanUrl(a)
+  const right = cleanUrl(b)
+  if (!left || !right) return false
+  const leftUrl = new URL(left)
+  const rightUrl = new URL(right)
+  return leftUrl.protocol === rightUrl.protocol && loopback(leftUrl.hostname) === loopback(rightUrl.hostname) &&
+    effectivePort(leftUrl) === effectivePort(rightUrl) && leftUrl.pathname === rightUrl.pathname
+}
+
+const CONNECT_DEADLINE = Symbol()
+
+async function readBefore(omniUi, endpoint, remaining, signal) {
+  let timer
+  let abort
+  const deadline = new Promise((resolve, reject) => {
+    timer = setTimeout(resolve, remaining, CONNECT_DEADLINE)
+    abort = () => reject(abortError())
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+  try {
+    const request = Promise.resolve().then(() => omniUi(endpoint)).catch(() => null)
+    return await Promise.race([deadline, request])
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
+  }
+}
+
+export async function githubInstall({
+  show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, now = Date.now,
+  poll = GITHUB_POLL_MS, connectPoll = CONNECT_POLL_MS, connectMs = CONNECT_MS,
+  start = null, npm = null, resume = null, linkChecked = false, passive = false,
+}) {
+  const check = () => { if (signal?.aborted) throw abortError() }
+  const end = (phase, detail) => {
+    check()
+    show(phase, detail)
+    return phase
+  }
+  const connectSandbox = async job => {
+    const github = detailOf(job)
+    const fail = message => end('failed', { message, github })
+    const target = cleanUrl(job.report?.apiUrl)
+    if (!target) return fail(t('Omni is installed, but its address is unknown. Power Omni on to try again.'))
+
+    show('sandbox', { ...github, step: 'connect' })
+    const deadline = now() + connectMs
+    const read = endpoint => readBefore(omniUi, endpoint, deadline - now(), signal)
+    let claimLost = false
+    while (now() < deadline) {
+      check()
+      const found = claimLost ? null : await read('omni-discover')
+      check()
+      if (found === CONNECT_DEADLINE || now() >= deadline) break
+      const omnis = Array.isArray(found?.omnis) ? found.omnis : []
+      const entry = omnis.find(entry => entry.source === 'sandbox' && entry.reachable === true &&
+        entry.version === job.report.version && sameUrl(entry.url, job.report.apiUrl))
+      const link = entry || claimLost ? await read('omni-link') : null
+      check()
+      if (link === CONNECT_DEADLINE || now() >= deadline) break
+      if (link?.linked === true || link?.configured === true) return end('linked', { origin: link.origin ?? null })
+      if (link && entry) {
+        let claim
+        try {
+          claim = await claimJob(omniAi, job.id, signal)
+        } catch (error) {
+          return end('failed', { message: error.message })
+        }
+        check()
+        if (claim?.claimed === true) {
+          let reply
+          try {
+            reply = await omniUi('omni-discover-use', { id: entry.id })
+          } catch (error) {
+            return fail(error.message)
+          }
+          check()
+          if (reply.status === 'paired') return end('linked', { origin: reply.origin ?? null })
+          if (reply.pairing) return end('pairing', { pairing: reply.pairing })
+          return fail(reply.message)
+        }
+        claimLost = true
+      }
+      await wait(Math.min(connectPoll, deadline - now()), signal)
+      check()
+    }
+    return fail(t('Omni is installed but did not answer at {url}. Power Omni on to try again.', { url: target }))
+  }
+
+  check()
+  let job = resume
+  if (resume === null) {
+    show('sandbox', { job: null, source: 'github', reason: start.reason, npm, release: null, step: 'check', steps: [], log: '', fellBack: false })
+    const { version, reason, exitCode } = start
+    const payload = { version, reason }
+    if (reason === 'npm-failed' && Number.isInteger(exitCode)) payload.exitCode = exitCode
+    try {
+      const reply = await omniAi('omni-github-install', payload)
+      job = reply.job
+    } catch (error) {
+      return end('failed', { message: error.message })
+    }
+    if (signal?.aborted) void cancelJob(omniAi, job.id, signal).catch(error => showStoppedJobError(error, signal))
+    check()
+  } else if (job.phase === 'done' && !linkChecked && !passive) {
+    show('sandbox', detailOf(job))
+    let link
+    try {
+      link = await omniUi('omni-link')
+    } catch {
+      return end('asleep', null)
+    }
+    check()
+    if (link?.linked === true || link?.configured === true) {
+      void claimJob(omniAi, job.id, signal).catch(() => {})
+      return end('linked', { origin: link.origin ?? null })
+    }
+  }
+
+  let retries = 0
+  let last
+  while (job.phase === 'running') {
+    last = detailOf(job)
+    show('sandbox', last)
+    await wait(poll, signal)
+    check()
+    let reply
+    try {
+      reply = await omniAi('omni-github-status', { id: job.id })
+    } catch (error) {
+      check()
+      retries += 1
+      if (retries === STATUS_RETRIES) return end('failed', { message: error.message, github: last, log: last.log })
+      continue
+    }
+    check()
+    retries = 0
+    if (reply.job === null) {
+      return end('failed', { message: t('The install\'s progress was lost (Automagik may have restarted). Power Omni on to try again.'), github: last, log: last.log })
+    }
+    job = reply.job
+  }
+  if (job.phase === 'done') return passive ? end('asleep', null) : connectSandbox(job)
+  if (job.phase === 'cancelled') return end('failed', { message: t('The install was cancelled.') })
+  return end('failed', {
+    message: job.error ?? t('Omni could not be installed from GitHub.'), next: job.next ?? null, log: job.log, github: detailOf(job),
+  })
 }
 
 // A translated sentence with an element where its {name} placeholder is.
@@ -455,6 +730,15 @@ export function statusOf(phase, detail) {
     return count === 1 ? t('Found an Omni') : count > 1 ? t('Found {count} Omnis', { count }) : t('Found Omnis, none ready to connect')
   }
   if (phase === 'linked') return detail?.origin ? t('Connected to {origin}', { origin: detail.origin }) : t('Connected')
+  if (phase === 'sandbox' && detail && 'job' in detail) {
+    const version = detail.release?.version ?? detail.npm?.version
+    if (detail.step === 'check') return t('Checking Omni {version}…', { version })
+    if (detail.step === 'download') return t('Downloading Omni {version} from GitHub…', { version })
+    if (detail.step === 'build') return t('Building Omni {version}…', { version })
+    if (detail.step === 'install') return detail.source === 'npm' ? t('Installing Omni {version} from npm…', { version }) : t('Installing Omni {version}…', { version })
+    if (detail.step === 'connect') return t('Connecting to your Omni…')
+    return t('Setting up your Omni…')
+  }
   return {
     waking: t('Waking up…'),
     starting: t('Starting Omni in this DSH…'),
@@ -580,7 +864,7 @@ export function destinyOf(omnis = [], { where = WORKSPACE, newOmni = true } = {}
     title: choice.action === 'use' ? t('Use {omni}', { omni: titleIn(omni, choice) }) : t('Connect {omni}', { omni: titleIn(omni, choice) }),
     sub: choice.sub || (omni.local ? place.already : t('Saved in your Omni CLI')),
   }))
-  if (newOmni && !rows.some(row => row.omni.source === 'sandbox')) {
+  if (newOmni && !rows.some(row => row.omni.source === 'sandbox' && row.omni.reachable !== false)) {
     tiles.push({ id: 'local', icon: 'sandbox', title: place.run, sub: place.on })
   }
   tiles.push({ id: 'remote', icon: 'remote', title: t('An Omni somewhere else'), sub: t('On a server, or the link Omni sent you') })
@@ -620,12 +904,74 @@ function Remote({ busy, onRemote, onBack, label = t('Where is your Omni?') }) {
     h('button', { type: 'button', className: 'oai-textlink', onClick: onBack }, t('Back to the choices')))
 }
 
+const installStepLabel = step => ({
+  check: t('Check'), download: t('Download'), build: t('Build'), install: t('Install'), connect: t('Connect'),
+})[step]
+
+function installReason({ reason, release, npm }) {
+  if (reason === 'behind' && release?.version) return t('npm\'s newest Omni is {npm}, older than Omni {version}, which this Automagik installs.', { npm: npm.latest ?? npm.version, version: release.version })
+  if (reason === 'unpublished') return t('Omni {version} is not on npm (the newest there is {npm}).', { version: npm.version, npm: npm.latest ?? t('unknown') })
+  if (reason === 'no-systemd') return t('Omni\'s npm installer needs systemd, and this computer has none.')
+  if (reason === 'npm-failed') return Number.isInteger(npm.exitCode)
+    ? t('Installing Omni from npm failed (exit code {code}).', { code: npm.exitCode })
+    : t('Installing Omni from npm failed.')
+  return null
+}
+
+function installSource({ source, fellBack, release }) {
+  if (!release) return t('Installing Omni from GitHub instead.')
+  const { version } = release
+  if (fellBack) return t('npm could not install it either. Installing Omni {version} from GitHub instead.', { version })
+  return source === 'npm' ? t('Installing Omni {version} from npm.', { version }) : t('Installing Omni {version} from GitHub instead.', { version })
+}
+
+const installLogLabel = source => source === 'npm' ? t('What Omni\'s installer printed') : t('What the GitHub install printed')
+
 // What the box shows under the status line: one thing at a time, in the same place.
 function Inside({ phase, detail, power, live }) {
   const channels = live?.configured ? live.channels ?? [] : []
   if (phase === 'installing') return h(InstallProgress, { plugins: detail?.plugins })
   if (phase === 'pairing') return h(Pairing, { pairing: detail.pairing, onCancel: power.cancelPairing })
+  // The host's install job: why npm could not, where it installs from, and its steps. The box
+  // has no room for its log as well: the log shows if it fails.
+  if (phase === 'sandbox' && detail && 'job' in detail) {
+    const reason = installReason(detail)
+    const steps = [...detail.steps, { id: 'connect', state: detail.step === 'connect' ? 'now' : 'next' }]
+    return h('div', null,
+      reason ? h('p', { className: 'oai-inside-note oai-bad' }, reason) : null,
+      h('p', { className: 'oai-inside-note' }, detail.phase === 'running' && detail.cancelRequested ? t('Stopping after this step…') : installSource(detail)),
+      h('ol', { className: 'oai-install', 'aria-label': t('The install steps') }, steps.filter(({ state }) => state !== 'skipped').map(({ id, state }) => {
+        const style = state === 'done' || state === 'now' ? state : 'next'
+        return h('li', { key: id, className: `oai-install-${style}` },
+          h('span', { className: 'oai-install-dot', 'aria-hidden': true }, style === 'done' ? h(Check) : null),
+          installStepLabel(id))
+      })))
+  }
   if (phase === 'sandbox') return h(InstallLog, { text: detail?.log ?? '', label: t('What Omni\'s installer printed') })
+  if (phase === 'failed' && detail?.github) {
+    const { github, message, next, log } = detail
+    const reason = installReason(github)
+    const stopped = github.steps.find(({ state }) => state === 'failed')
+    const advice = {
+      retry: t('Power Omni on to try again.'),
+      update: t('Update Automagik, then power Omni on again.'),
+      'other-omni': t('Use an Omni on another computer.'),
+    }[next]
+    const stoppedAt = stopped ? t('It stopped at the {step} step.', { step: installStepLabel(stopped.id) }) : null
+    // The box's inside is one small screen, too small for a log and the host's words together.
+    // The host's words say what went wrong; without them, the log does, with one note under it
+    // as the terminal's own failure draws it.
+    if (!github.error && log) {
+      const words = [stoppedAt, message, advice].filter(Boolean).join(' ')
+      return h('div', null,
+        h(InstallLog, { text: log, label: installLogLabel(github.source) }),
+        h('p', { className: 'oai-inside-note oai-bad', title: [reason, words].filter(Boolean).join(' ') }, words))
+    }
+    return h('div', null,
+      reason ? h('p', { className: 'oai-inside-note oai-bad' }, reason) : null,
+      h('p', { className: 'oai-inside-note oai-bad', title: message }, [stoppedAt, message].filter(Boolean).join(' ')),
+      advice ? h('p', { className: 'oai-inside-note' }, advice) : null)
+  }
   if (phase === 'failed' && detail?.log) return h('div', null, h(InstallLog, { text: detail.log, label: t('What Omni\'s installer printed') }), h('p', { className: 'oai-inside-note oai-bad', title: detail.message }, t('What went wrong is above. Power Omni on to try again.')))
   if ((phase === 'none' || phase === 'found') && power.unowned) return h(Unowned, { ...power.unowned, busy: power.busy, onRemote: power.remote, onBack: power.forgetUnowned })
   if (phase === 'none' || phase === 'found') return h(Destiny, { omnis: detail?.omnis ?? [], machine: power.machine, busy: power.busy, onUse: power.use, onLocal: power.local, onRemote: power.remote })
@@ -650,10 +996,19 @@ export const powerLocked = (kind, phase) => phase === 'installing' || phase === 
  * Nothing more: a linked Omni stays linked and no Bot is removed (only the team step's Continue,
  * team-save, leaves Omni out of the team).
  */
-export function powerOff(kind, { phase, detail } = powerOf(kind), omniUi = callOmniUi) {
+export function powerOff(kind, { phase, detail } = powerOf(kind), omniUi = callOmniUi, omniAi = call) {
+  const signal = powerSignal(kind)
   stopPower(kind)
   if (kind === 'omni' && phase === 'pairing') void omniUi('omni-pair-cancel').catch(() => {})
   if (kind === 'omni' && phase === 'sandbox' && detail?.terminal) void omniUi('omni-terminal-write', { terminal: detail.terminal, data: '\x03' }).catch(() => {})
+  if (kind === 'omni') {
+    const job = phase === 'failed' ? detail?.github : detail
+    if (job?.job && (job.step === 'connect' || job.phase === 'done' || job.phase === 'failed')) {
+      void claimJob(omniAi, job.job, signal).catch(error => showStoppedJobError(error, signal))
+    } else if (phase === 'sandbox' && job?.job) {
+      void cancelJob(omniAi, job.job, signal).catch(error => showStoppedJobError(error, signal))
+    }
+  }
   showPower(kind, 'asleep', { removed: true })
 }
 
@@ -804,7 +1159,7 @@ function usePower() {
   const off = () => {
     setProblem(null)
     setBusy(null)
-    powerOff('omni', { phase, detail })
+    powerOff('omni')
   }
 
   // Each connect answers `paired`, `pairing` (approve it on the phone) or a message.
@@ -862,7 +1217,17 @@ function usePower() {
     sandbox: () => {
       setProblem(null)
       back.current = { phase, detail }
-      runPower('omni', sandboxInstall)
+      runPower('omni', args => sandboxInstall({
+        ...args,
+        check: async version => {
+          try {
+            return await call('omni-server-check', { version, fallback: true })
+          } catch (error) {
+            if (error.code !== 'omni-ai/invalid' || args.signal.aborted) throw error
+            return call('omni-server-check', { version })
+          }
+        },
+      }))
     },
     remote: wanted => (wanted.kind === 'bad-link'
       ? setProblem(t('That is not a link your Omni sends. It looks like https://your-omni/api/login/app?grant=…'))
@@ -971,22 +1336,32 @@ export function TeamStep(props) {
   }, [phase, glitch])
   useEffect(() => { if (state) glitch() }, [state, glitch])
   useEffect(() => {
-    if (!state || !powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) return
-    autoPowered.current = true
-    power.toggle()
-  }, [state])
+    if (!state) return
+    if (!explicit && powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) {
+      autoPowered.current = true
+      power.toggle()
+    } else if (!autoPowered.current) {
+      void call('omni-plugins').then(status => resumeServer(status)).catch(() => {})
+    }
+  }, [state, explicit])
   useEffect(() => {
-    if (!state || !powersOnByItself(state.preload, geniePower.phase, geniePower.detail, genieAutoPowered.current, 'genie')) return
+    if (explicit || !state) return
+    if (!powersOnByItself(
+      state.preload, geniePower.phase, geniePower.detail, genieAutoPowered.current, 'genie',
+    )) return
     genieAutoPowered.current = true
     setLastPressed('genie')
     geniePower.toggle()
-  }, [state])
+  }, [state, explicit])
   useEffect(() => {
-    if (!state || !powersOnByItself(state.preload, unfoldPower.phase, unfoldPower.detail, unfoldAutoPowered.current, 'unfold')) return
+    if (explicit || !state) return
+    if (!powersOnByItself(
+      state.preload, unfoldPower.phase, unfoldPower.detail, unfoldAutoPowered.current, 'unfold',
+    )) return
     unfoldAutoPowered.current = true
     setLastPressed('unfold')
     unfoldPower.toggle()
-  }, [state])
+  }, [state, explicit])
   if (!state) return null
 
   const name = state.companionName ?? t('Your companion')

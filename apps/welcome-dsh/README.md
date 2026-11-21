@@ -67,7 +67,7 @@ The Automagik desktop app passes the product it was opened for (`omni desktop` �
 `unfold` is none). That card comes first and starts chosen: Omni's powers on by itself, through the
 same box and steps as a press, and Remove still sends it back to sleep; Genie's starts on
 the team. The other card stays to add, then or later. Without a preload Omni comes first
-and nothing is chosen.
+and nothing is chosen. Opening the team step on purpose skips the preload power-on.
 
 Unfold's card is shown only in Unfold's own Automagik instance. Anywhere else the team step has
 no Unfold card and `unfold-plugin-install` is refused, so the welcome installs no `unfold-*`
@@ -78,6 +78,17 @@ because the Unfold Bot is the instance's Main Bot, so the companion step is done
 and no other Bot is made. `state` reports it as `host`, and Omni and Genie come with the
 instance: Omni's card offers no new Omni of its own, and Genie's names the command line the
 instance brought instead of the line that installs one.
+
+When **Install Omni here** finds that npm cannot install the Omni this Automagik pins
+(npm has an older version, the version is unpublished, the install failed, or systemd is
+unavailable), the card says why and falls back to GitHub when needed. Without systemd,
+the installer can also use npm when the version is available there. The card shows
+Check, Download, Build, Install and Connect alongside the installer output, then connects
+to Omni. Powering Omni off requests cancellation. If the install step is already underway,
+it finishes that step. Reloading the team step picks up a running install and connects
+on success. Apps shows the same install progress and offers **Power Omni on** to connect
+after a successful install. See
+[Installing Omni from GitHub](#installing-omni-from-github) for the host's checks.
 
 ### Power in each Bot's settings
 
@@ -93,10 +104,15 @@ team's own `Card`, `Row` and `SwitchRow`, the team step's state words (`On · Co
 team gets the state line only. The card is registered for the Bot kinds `omni`, `genie` and
 `unfold`; a Bot of any other kind gets no card.
 
-A built-in Bot that is not installed has no settings page, so install does not move with the
-power. It stays where onboarding already offers it: the team step (`omni-team`) still has
-Omni's and Genie's cards, whose power buttons install the plugins and make the Bot, and a DSH's
-Plugins page installs the plugin directly. The old sidebar button was a second way into them; it is gone.
+A built-in Bot that is not installed has no settings page, so install does not move with
+the power. The Bot team's Apps page (Settings → Apps, Automagik official) installs it in
+one click: the Omni and Genie rows' Install runs the team step's own power-on
+(`omni-plugins-install`, `genie-plugin-install`) in place, through the Bot team's
+`officialInstall` registry, and the row shows the install's step and place. Opening the
+page reads `omni-plugins` and `genie-plugin` once and picks up an install the host is
+already running (a reload, another window); it never starts one. Nothing installs
+without a click. The team step (`omni-team`) keeps Omni's and Genie's cards, and a DSH's
+Plugins page installs the plugin directly. The old sidebar button is gone.
 
 The team step follows the DSH language. Its copy is the `welcome.team` namespace
 (`src/client/i18n.js`): the keys are the English text, registered in English and in Brazilian
@@ -116,10 +132,19 @@ release without a signed lane, stops the install before anything is installed; t
 tarballs are kept, 0600, under `<AUTOMAGIK_HOME>/welcome/tarballs`, where the profile
 installs them from. A DSH that has the team under its former name,
 `@automagik/omni-dsh`, has the team: it is switched on, not installed over. Omni's channels
-and canvases (`@automagik/omni-channels-dsh`, `@automagik/omni-canvas-dsh`) are Omni's, at
-Omni's version: they install as a git source from Omni's repository at the release
-`package.json` pins under `automagik.omni`, the same one the desktop app carries
-(`apps/desktop/omni.json`; `follow-omni.yml` moves both).
+and canvases (`@automagik/omni-channels-dsh`, `@automagik/omni-canvas-dsh`) install from one
+commit in Omni's repository. `follow-omni.yml` keeps `automagik.omni` and the desktop app's
+pin at the newest Omni release on GitHub; when npm lacks that release's Omni server, the welcome
+builds it from GitHub (below, "Installing Omni from GitHub").
+On a fresh install the welcome compares that pin with Omni's signed plugin lane. It picks
+the newest candidate that works with this DSH, the Bot team, and an Omni server it can install:
+the latest on npm, or the pinned release built from GitHub.
+If no candidate pairs with the server, it picks the newest one compatible with DSH and the Bot
+team. With one Omni plugin already installed, it looks for a candidate with that exact plugin
+version. The shared pin is the fallback.
+Genie installs from its signed lane when the plugin is compatible and at least as new as
+`automagik.genie`, its fallback pin. Both lanes are checked with their publishers' public keys,
+and the welcome records their installed sequences in `<AUTOMAGIK_HOME>/welcome/lanes.json`.
 
 ### One way to each AI
 
@@ -274,8 +299,13 @@ The shape was read from DSH 0.2.1-rc.2:
 | `ai-dedupe` | `{ id }` | Stops the other ways that row's AI is connected. |
 | `ai-subscription` | `{ provider, on }` | Shows or hides a dsh-subscriptions vendor's models. |
 | `provider-key`, `signin-*` | see `src/host/providers.js` | A key, or a sign-in run through DSH's authorization service. |
-| `omni-plugins` | none | The Omni plugins (`@automagik/bots-dsh`, `@automagik/omni-channels-dsh`, `-canvas-dsh`): each one's version and whether it is installed, `ready` once they run here, and the install in progress. |
-| `omni-plugins-install` | none | Installs the missing ones in order through DSH's plugin manager (`installBundle`: the Bot team from this plugin's own source pointed at its sibling, else this release's tarball; Omni's from Omni's repository at the pinned release), switching on any that are off. Pressing Omni's power button in the team step calls it. |
+| `omni-plugins` | none | The Omni plugins (`@automagik/bots-dsh`, `@automagik/omni-channels-dsh`, `-canvas-dsh`): each one's version and whether it is installed, `ready` once they run here, the plugin install in progress, and the local Omni installer job in `server`. |
+| `omni-plugins-install` | none | Installs the missing ones in order through DSH's plugin manager. The Bot team comes from this plugin's sibling source or checked release tarball. Omni's plugins come from the release chosen above. Switches on installed plugins that are off. |
+| `genie-plugin-install` | none | Installs the Bot team if needed, then installs Genie from its signed lane or its pin. Switches on installed plugins that are off. |
+| `omni-server-check` | `{ version, fallback?: true }` | Checks the version named by the card's installer command on its npm registry. With `fallback: true`, reports whether the local installer can take over and the pinned GitHub release it can use. |
+| `omni-github-install` | `{ version, reason, exitCode? }` | Starts the local Omni install or returns the running job. The host checks which source is usable. |
+| `omni-github-status`, `omni-github-cancel` | `{ id? }` | Reads the current or named job, or requests cancellation. Once Omni's installer starts, it runs to completion. |
+| `omni-github-ack` | `{ id }` | Claims a completed job once so a single card connects to the new Omni. |
 | `acp` | `{ refresh? }` | Claude Code and Codex, from acp-dsh's `acpAgents` service: `{ available, agents: [{ id, key, name, on, cli: { found, installUrl?, state?, version?, updating?, error?, diagnostic?, logPath? }, connector: { state, version?, error? }, signedIn?, signInCheck?, listed, restartNeeded }] }`. `signInCheck` is `timeout` or `unreadable`: why the last check could not tell, only while `signedIn` is absent. `refresh` looks for the CLIs again and asks each whether it is signed in. `{ available: false }` without acp-dsh. |
 | `acp-switch` | `{ id, on }` | Writes acp-dsh's `claude` or `codex` setting in the entry its service names (`settingsEntry`, else `acp-dsh`) at the revision `describe()` gave. |
 | `acp-retry` | `{ id }` | Starts a failed connector install again. |
@@ -284,6 +314,16 @@ The shape was read from DSH 0.2.1-rc.2:
 The host declares `inject: ['settings', 'credentials', 'connection']`; `connection` serves
 the route. It reads DSH's `llm`, `authorization`, `pluginManager`, `agentDefaultModel`, `tools`, `skills`
 and `permissionPresets` services when they are there, and acp-dsh's `acpAgents`.
+
+### Installing Omni from GitHub
+
+The welcome can build the Omni release pinned in its package manifest when the version offered by npm is behind, unpublished, or the npm terminal install fails. Without a usable service session, the welcome runs the installer itself. It uses npm when the requested version is published and at least as new as the pin. The GitHub route requires the pin to be at least as new as the requested version. An image with the Omni supervisor installs into a fresh sandbox and lets the supervisor start it. An interrupted image install can resume in the same sandbox at the same version. An existing supervised sandbox stays in place.
+
+The welcome checks that the GitHub tag resolves to the pinned commit and that its commit API names the pinned Git tree. It streams and verifies the commit archive against that tree before extraction. It verifies the Bun zip and executable against pinned SHA-256 hashes. The build installs dependencies with lifecycle scripts disabled, then runs Omni's pinned build and pack scripts with an allowlisted environment and scratch home.
+
+The Omni root is `OMNI_HOME` or `~/.omni`. It holds the sandbox in `sandbox/`, Bun in `automagik-bun/`, and the packaged CLI in `packages/`. The installer removes its temporary checkout under `automagik-build/` after the build and install processes stop. The image publishes `sandbox/automagik-supervised.json` after a successful install so the supervisor can start the sandbox. On desktop, Omni can adopt an existing sandbox once its process has stopped. Omni starts at login when the desktop has a usable login service and starts its own detached supervisor on Linux without one. Omni manages cleanup inside the sandbox home.
+
+DSH, Bots and Omni share the workspace identity. Omni's build scripts can read files accessible to that user. The local installer is unavailable in multiuser mode and in Unfold's instance. The channels plugin runs its own Bun probe when it prepares a terminal install. Omni's inner runtime install drops proxy settings, so a proxy-only network can block that step. The build and embedded runtime were exercised on Linux x64 with glibc.
 
 ## Develop
 

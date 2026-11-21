@@ -143,7 +143,7 @@ export function installRoles(rt, deps = {}) {
     if (typeof id !== 'string' || typeof on !== 'boolean') throw refusal('Invalid role grant.')
     await runtime.ready(id)
     const held = runtime.requireAttachment(id, role)
-    if (!held.runtime.manifest.capabilities.includes(capability)) throw refusal('This role does not declare that capability.')
+    if (!held.manifest.capabilities.includes(capability)) throw refusal('This role does not declare that capability.')
     const before = held.bot.roles[0]
     const check = () => {
       packages.requireWriter()
@@ -162,7 +162,7 @@ export function installRoles(rt, deps = {}) {
     if (typeof id !== 'string') throw refusal('No such Bot')
     await runtime.ready(id)
     const held = runtime.requireAttachment(id, role)
-    const declarations = held.runtime.manifest.settings
+    const declarations = held.manifest.settings
     const check = () => {
       packages.requireWriter()
       if (runtime.requireAttachment(id, role) !== held) throw refusal("This Bot's role changed. Try again.")

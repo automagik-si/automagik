@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -8,6 +9,7 @@ import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { adapters } from '../src/host/im/platforms/index.js'
 import { install as installIm } from '../src/host/im/index.js'
+import { until } from './until.js'
 
 // A platform adapter that records sends/edits and lets the test feed inbound
 // messages, actions and statuses. `fail` makes send throw once per call queued.
@@ -63,9 +65,10 @@ const TEAM = () => ({
   revision: 0,
 })
 
-async function start({ platform = 'telegram', adapter, seed } = {}) {
+async function start({ platform = 'telegram', adapter, seed, prepare } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsb-im-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify(seed ?? TEAM()))
+  prepare?.(home)
   const ctx = fakeContext()
   const prompts = []
   const agents = new Map()
@@ -636,4 +639,311 @@ test('a platform status error is redacted of the stored secret', async (t) => {
   const status = s.rt.imStatusView()[conn.id]
   assert.equal(status.state, 'error')
   assert.ok(!status.error.includes('tok-1234'), 'the token is redacted')
+})
+
+function groupTeam() {
+  const seed = TEAM()
+  seed.bots.c = { id: 'c', name: 'Reader', role: 'Read', sessionId: 'c', createdAt: 3 }
+  Object.assign(seed.rooms.r1, { members: ['a', 'b', 'c'], sessions: { b: 'gb', c: 'gc' }, seen: {} })
+  return seed
+}
+
+const bind = async (s, conn, chatKey) => {
+  s.rt.state.im.connections[conn.id].chats[chatKey] = { kind: 'group', title: 'Group', target: { roomId: 'r1' }, at: 1 }
+  await s.rt.save()
+  await until(() => s.rt.imStatusView()[conn.id]?.state === 'ready', { ms: 5000 })
+}
+const imQuiet = async s => {
+  assert.equal(s.rt.holdsLock(), true)
+  await until(() => (s.rt.ownershipBusy?.() ?? 0) === 0 && s.rt.teamCurrent(), { ms: 5000 })
+}
+const seatAsk = (s, sessionId = 'gc', signal = new AbortController().signal) => {
+  const outcome = s.fireApprovals({ agent: { session: { id: sessionId } }, reason: 'escalate sandbox', toolName: 'bash', signal },
+    () => assert.fail('the seat must hold its own ask')).then(([answer]) => answer)
+  const entry = s.rt.approvalsView().find(ask => ask.sessionId === sessionId)
+  assert.deepEqual([entry?.roomId, entry?.botId, entry?.answerable], ['r1', 'c', true])
+  return { entry, outcome }
+}
+const cardsFor = (s, ask) => s.fake.sent.flatMap((card, index) =>
+  card.buttons?.some(button => button.data === `a:${ask.entry.id}:allow`) ? [{ ...card, messageId: index + 1 }] : [])
+const editedCard = (s, card) => s.fake.edited.filter(edit => edit.chat.key === card.chat.key && edit.messageId === card.messageId)
+const runtimeFile = (s, conn) => {
+  const path = join(s.home, 'im', `${conn.id}.json`)
+  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')).cards : {}
+}
+const imRemoveReader = s => s.rt.updateRoom('r1', { remove: ['c'] })
+const removeWhileHoldingSave = (s) => {
+  const save = s.rt.save
+  const held = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  s.rt.save = async (...args) => {
+    held.resolve(true)
+    await release.promise
+    return save(...args)
+  }
+  const updating = imRemoveReader(s)
+  return {
+    held: Promise.race([held.promise, updating.then(() => false)]),
+    async finish() {
+      s.rt.save = save
+      release.resolve()
+      await updating
+    },
+  }
+}
+const pendingSend = () => {
+  const adapter = fakeAdapter()
+  const connect = adapter.connect
+  const gate = Promise.withResolvers()
+  let started = false
+  adapter.connect = (...args) => {
+    const handle = connect(...args)
+    const send = handle.send
+    handle.send = async (chat, body) => {
+      const sent = await send(chat, body)
+      if (body.buttons?.some(button => button.data.startsWith('a:'))) {
+        started = true
+        await gate.promise
+      }
+      return sent
+    }
+    return handle
+  }
+  return { adapter, release: gate.resolve, started: () => started }
+}
+const persistedPlaceholder = async (s, conn, ask, sending) => {
+  const key = `a:${ask.entry.id}`
+  await until(() => sending.started() && runtimeFile(s, conn)[key] !== undefined, { ms: 2000 })
+  const [card] = cardsFor(s, ask)
+  assert.equal(card?.chat.key, 'g1')
+  assert.deepEqual(runtimeFile(s, conn)[key], [{ chatKey: 'g1', text: card.text }])
+  return { key, card }
+}
+const savedConnection = (enabled, chats = {}) => ({
+  id: enabled ? 'im_legacy' : 'im_slow', platform: 'telegram', account: { id: 'bot1', name: '@fakebot' },
+  botId: 'a', settings: {}, secrets: {}, enabled, paired: [], requests: [], chats, createdAt: 1,
+})
+const settleOwnChat = async s => {
+  const result = await s.fireApprovals({ agent: { id: 'a' }, toolName: 'bash', reason: 'own chat', signal: new AbortController().signal },
+    () => 'allowed-once')
+  assert.deepEqual(result, ['allowed-once'])
+}
+
+test('rfc0039 D3b [P] IM1 the immediate edit says withdrawn on every connection', async t => {
+  const s = await start({ seed: groupTeam() })
+  t.after(s.stop)
+  await bind(s, await add(s), 'g1')
+  await bind(s, await add(s, { token: 'tok-two' }), 'g2')
+  const ask = seatAsk(s)
+  await until(() => cardsFor(s, ask).length === 2, { ms: 5000 })
+  const cards = cardsFor(s, ask)
+  assert.deepEqual(cards.map(card => card.chat.key), ['g1', 'g2'])
+  await imQuiet(s)
+  const dropping = removeWhileHoldingSave(s)
+  let outcome
+  void ask.outcome.then(answer => { outcome = { answer } }, error => { outcome = { error } })
+  try {
+    assert.equal(await dropping.held, true)
+    await until(() => outcome !== undefined, { ms: 5000, label: 'D3B-IM1 approval settled' })
+    assert.ifError(outcome.error)
+    assert.equal(outcome.answer, 'cancelled', 'D3B-IM1')
+    await until(() => cards.every(card => editedCard(s, card).length > 0), { ms: 5000 })
+    assert.deepEqual(cards.map(card => editedCard(s, card).map(edit => edit.text)), cards.map(card => [card.text + '\n— withdrawn']), 'D3B-IM1')
+  } finally { await dropping.finish() }
+  await s.flush()
+  assert.deepEqual(cards.map(card => editedCard(s, card).length), [1, 1])
+})
+
+test('rfc0039 D3b [P] IM2 a copy sent after the sweep is edited withdrawn by its sender', async t => {
+  const sending = pendingSend()
+  const s = await start({ seed: groupTeam(), adapter: sending.adapter })
+  t.after(s.stop)
+  const conn = await add(s)
+  await bind(s, conn, 'g1')
+  const ask = seatAsk(s)
+  try {
+    const { key, card } = await persistedPlaceholder(s, conn, ask, sending)
+    await imQuiet(s)
+    const dropping = removeWhileHoldingSave(s)
+    let outcome
+    void ask.outcome.then(answer => { outcome = { answer } }, error => { outcome = { error } })
+    try {
+      await until(() => outcome !== undefined, { ms: 5000, label: 'D3B-IM2 approval settled' })
+      assert.ifError(outcome.error)
+      assert.equal(outcome.answer, 'cancelled', 'D3B-IM2')
+    } finally { await dropping.finish() }
+    await until(() => runtimeFile(s, conn)[key] === undefined, { ms: 2000 })
+    assert.deepEqual(s.fake.edited, [])
+    sending.release()
+    await s.flush()
+    assert.deepEqual(editedCard(s, card).map(edit => edit.text), [card.text + '\n— withdrawn'], 'D3B-IM2')
+    await s.rt.save()
+    await s.flush()
+    assert.equal(editedCard(s, card).length, 1)
+  } finally { sending.release() }
+})
+
+test('rfc0039 D3b [P] IM3 a bodyless withdrawn copy is edited withdrawn', async t => {
+  const conn = savedConnection(true, { g1: { kind: 'group', title: 'G', target: { roomId: 'r1' }, at: 1 } })
+  const seed = { ...TEAM(), im: { connections: { [conn.id]: conn } } }
+  const s = await start({ seed, prepare(home) {
+    mkdirSync(join(home, 'im'))
+    writeFileSync(join(home, 'im', `${conn.id}.json`), JSON.stringify({ cards: {
+      'a:gone': [{ chatKey: 'g1', messageId: 41, answer: 'withdrawn', withdrawn: true }],
+      'a:plain': [{ chatKey: 'g1', messageId: 42, answer: 'answered' }],
+    } }))
+  } })
+  t.after(s.stop)
+  await until(() => s.fake.handlers !== null, { ms: 5000 })
+  await imQuiet(s)
+  assert.deepEqual(Object.keys(runtimeFile(s, conn)), ['a:gone', 'a:plain'])
+  await settleOwnChat(s)
+  await until(() => s.fake.edited.length === 2, { ms: 5000 })
+  assert.equal(s.fake.edited.find(edit => edit.messageId === 41)?.text, '(withdrawn)', 'D3B-IM3')
+  assert.equal(s.fake.edited.find(edit => edit.messageId === 42)?.text, '(answered)')
+})
+
+test('rfc0039 D3b [C] IM4 task and own-chat cards still end answered', async t => {
+  const task = { title: 'Fix', from: 'a', status: 'working', at: 1 }
+  const s = await start({ seed: { ...TEAM(), tasks: { t1: task } } })
+  t.after(s.stop)
+  const conn = await add(s)
+  s.rt.state.im.connections[conn.id].paired.push({ id: 'u1', name: 'U1', at: 1 })
+  await s.rt.save()
+  await dm(s, 'u1', 'hi')
+  await imQuiet(s)
+  const abort = new AbortController()
+  const waiting = request => s.fireApprovals(request, () => new Promise(() => {}))
+  const own = waiting({ agent: { id: 'a' }, toolName: 'bash', reason: 'own chat', signal: abort.signal })
+  const taskAsk = waiting({ agent: { session: { id: 't1' } }, toolName: 'bash', reason: 'task', signal: new AbortController().signal })
+  const [ownEntry, taskEntry] = s.rt.approvalsView()
+  assert.deepEqual([ownEntry?.sessionId, taskEntry?.taskId], ['a', 't1'])
+  await until(() => cardsFor(s, { entry: ownEntry }).length === 1 && cardsFor(s, { entry: taskEntry }).length === 1, { ms: 5000 })
+  abort.abort({ kind: 'user' })
+  assert.equal(await s.rt.endApprovals?.('t1', 'task', { task: s.rt.state.tasks.t1 }, () => true), 1)
+  assert.deepEqual(await Promise.all([own, taskAsk]), [['cancelled'], ['cancelled']])
+  await until(() => s.fake.edited.length === 2, { ms: 5000 })
+  for (const entry of [ownEntry, taskEntry]) {
+    const [card] = cardsFor(s, { entry })
+    assert.deepEqual(editedCard(s, card).map(edit => edit.text), [card.text + '\n— answered'])
+  }
+})
+
+test('rfc0039 D3b [C] IM5 a group card DSH cancels still ends answered', async t => {
+  const s = await start({ seed: groupTeam() })
+  t.after(s.stop)
+  await bind(s, await add(s), 'g1')
+  const abort = new AbortController()
+  const ask = seatAsk(s, 'gc', abort.signal)
+  await until(() => cardsFor(s, ask).length === 1, { ms: 5000 })
+  const [card] = cardsFor(s, ask)
+  await imQuiet(s)
+  abort.abort({ kind: 'user' })
+  assert.equal(await ask.outcome, 'cancelled')
+  assert.equal(s.rt.roomOf('r1').sessions.c, 'gc')
+  await until(() => editedCard(s, card).length === 1, { ms: 5000 })
+  assert.equal(editedCard(s, card)[0].text, card.text + '\n— answered')
+})
+
+test('rfc0039 D3b [P] IM6 the sweep gives a delivered copy the withdrawn wording while another connection settles',
+  { skip: process.platform === 'win32' }, async t => {
+    const slow = savedConnection(false)
+    const seed = { ...groupTeam(), im: { connections: { [slow.id]: slow } } }
+    let fifo
+    const s = await start({ seed, prepare(home) {
+      mkdirSync(join(home, 'im'))
+      fifo = join(home, 'im', `${slow.id}.json`)
+      execFileSync('mkfifo', [fifo], { stdio: 'inherit' })
+    } })
+    t.after(s.stop)
+    const release = () => {
+      let fd
+      try {
+        fd = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK)
+        writeSync(fd, '{"runtime":{},"cards":{}}')
+      } catch (error) {
+        if (error.code !== 'ENXIO') throw error
+      } finally { if (fd !== undefined) closeSync(fd) }
+    }
+    let card
+    try {
+      await bind(s, await add(s, { token: 'tok-2' }), 'g2')
+      const ask = seatAsk(s)
+      await until(() => cardsFor(s, ask).length === 1, { ms: 5000 })
+      ;[card] = cardsFor(s, ask)
+      assert.equal(card.chat.key, 'g2')
+      await imQuiet(s)
+      await imRemoveReader(s)
+      assert.equal(await ask.outcome, 'cancelled')
+      await until(() => editedCard(s, card).length === 1, { ms: 5000 })
+      assert.equal(editedCard(s, card)[0].text, card.text + '\n— withdrawn', 'D3B-IM6')
+    } finally {
+      release()
+      rmSync(fifo, { force: true })
+    }
+    await s.flush()
+    assert.equal(editedCard(s, card).length, 1)
+  })
+
+test('rfc0039 D3b [P] IM7 the withdrawn word in every IM locale', async t => {
+  const s = await start({ seed: groupTeam() })
+  t.after(s.stop)
+  await bind(s, await add(s), 'g1')
+  const language = s.rt.uiLanguage
+  const locales = [
+    ['English', 'withdrawn'], ['Chinese', '已撤回'], ['Traditional Chinese', '已撤回'], ['Japanese', '取り下げ済み'],
+    ['Korean', '철회됨'], ['Spanish', 'retirado'], ['French', 'retiré'], ['German', 'zurückgezogen'],
+  ]
+  const actual = []
+  try {
+    for (const [i, [label]] of locales.entries()) {
+      const sessionId = 'gc' + i
+      s.rt.roomOf('r1').sessions.c = sessionId
+      s.rt.indexSessions()
+      const ask = seatAsk(s, sessionId)
+      await until(() => cardsFor(s, ask).length === 1, { ms: 5000 })
+      const [card] = cardsFor(s, ask)
+      await imQuiet(s)
+      s.rt.uiLanguage = () => label
+      s.rt.retireGroupSession(s.rt.roomOf('r1'), 'c')
+      assert.equal(await ask.outcome, 'cancelled')
+      await until(() => editedCard(s, card).length === 1, { ms: 5000 })
+      actual.push(editedCard(s, card)[0].text.slice(card.text.length))
+    }
+  } finally { s.rt.uiLanguage = language }
+  assert.deepEqual(actual, locales.map(([, word]) => '\n— ' + word), 'D3B-IM7')
+})
+
+test('rfc0039 D3b [P] IM8 a late id from a replaced runner is never edited through its replacement', async t => {
+  const sending = pendingSend()
+  const s = await start({ seed: groupTeam(), adapter: sending.adapter })
+  t.after(s.stop)
+  const conn = await add(s)
+  await bind(s, conn, 'g1')
+  const ask = seatAsk(s)
+  try {
+    const { key, card } = await persistedPlaceholder(s, conn, ask, sending)
+    await imQuiet(s)
+    const dropping = removeWhileHoldingSave(s)
+    let outcome
+    void ask.outcome.then(answer => { outcome = { answer } }, error => { outcome = { error } })
+    try {
+      await until(() => outcome !== undefined, { ms: 5000, label: 'D3B-IM8 approval settled' })
+      assert.ifError(outcome.error)
+      assert.equal(outcome.answer, 'cancelled', 'D3B-IM8')
+    } finally { await dropping.finish() }
+    await until(() => runtimeFile(s, conn)[key] === undefined, { ms: 2000 })
+    const connects = s.fake.connects
+    const stopped = s.fake.stopped ?? 0
+    await s.rt.imEndpoint('im-update', { id: conn.id, fields: { token: 'tok-new' } })
+    await until(() => s.fake.connects === connects + 1, { ms: 5000 })
+    assert.equal(s.fake.stopped, stopped + 1)
+    sending.release()
+    await s.flush()
+    await settleOwnChat(s)
+    await s.rt.save()
+    await s.flush()
+    assert.deepEqual(s.fake.edited.filter(edit => edit.messageId === card.messageId), [], 'D3B-IM8')
+    assert.equal(runtimeFile(s, conn)[key], undefined)
+  } finally { sending.release() }
 })

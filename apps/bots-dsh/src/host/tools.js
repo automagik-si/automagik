@@ -4,17 +4,19 @@ import { randomUUID } from 'node:crypto'
 import { createEditInput } from './image-input.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { readAvatar } from './avatar.js'
-import { COLORS, EXTRA_COLORS, MESSAGE_INLINE_MAX, ROOM_MODES, SOURCE_KIND } from './constants.js'
-import { within } from './folders.js'
+import { COLORS, EXTRA_COLORS, LONG_HEAD, MESSAGE_INLINE_MAX, ROOM_MODES, SOURCE_KIND } from './constants.js'
+import { within, workingDirectoryCd } from './folders.js'
 import { absoluteLinks } from './links.js'
 import { NAME_MAX } from './requests.js'
-import { unquote } from './text.js'
+import { headOf, unquote } from './text.js'
 import { mentionSpans } from '../shared/mentions.js'
 import { BUILTIN_ROLES, genieDetached } from '../shared/roles.js'
 import { checkShownView, showViewDescription, showViewParameters } from 'deep-view/core'
 import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
 import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
+import { refusal } from './refusal.js'
+import { registerTrustedTool } from './tool-registrations.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
 // A message_bot call that sent nothing answers with this object rather than a string, so
@@ -69,7 +71,6 @@ const AVATAR_PARAM = {
   type: 'string',
   description: 'Profile picture: a local image path (a relative path starts in your working folder) or a data URL. PNG, JPEG, WebP, or GIF; square, 256x256 recommended, up to 120 KB. Images are not resized.',
 }
-const WORKING_DIRECTORY_TOOL = 'working_directory'
 // The tools a Bot never gets: absent from its surface on every Session it speaks from — its
 // chat, group Sessions, earlier parts, task runs — and refused by the executor if a call
 // reaches it anyway. A name this DSH does not serve refuses the save, so a typo cannot leave
@@ -501,47 +502,54 @@ export function install(rt) {
     },
     output,
     async execute(args, exec) {
-      await rt.load()
-      const self = rt.selfOf(exec.agent?.id)
-      const caller = rt.botOf(self)
-      if (caller === undefined) return 'Only Bots on the team can use update_bot.'
-      const bot = args.bot ? rt.findBot(args.bot) : caller
-      if (bot === undefined) return `No Bot named ${args.bot}.`
-      if (bot.id !== caller.id && !rt.isMain(self)) return 'Only a Main Bot can change another Bot. Leave out bot to change yourself, or ask a Main Bot with message_bot.'
-      try {
-        const { name: newName, role, instructions, color, model, effort, section } = args
-        let image
-        if (args.avatar !== undefined) {
-          const input = typeof args.avatar === 'string' ? args.avatar.trim() : args.avatar
-          image = input === null || input === '' ? null : await readAvatar(String(input), { baseDir: rt.sessionFolder?.(exec.agent?.session ?? exec.agent), isData: rt.inData })
-        }
-        const moving = typeof args.work_dir === 'string'
-        const workDir = moving ? await rt.cleanWorkDir(args.work_dir) : undefined
-        if (moving && workDir !== bot.workDir) await rt.approveFolder(exec, { path: workDir, sessions: rt.sessionsOfBot(bot.id), who: { en: bot.name, zh: ` ${bot.name} ` } })
-        // The photo rides on the Bot's other avatar fields, as the settings page's upload
-        // does: setting one keeps a custom character, and clearing removes only the image.
-        // They are read here, after the waits above, so a change made meanwhile stays.
-        const avatar = image === undefined ? undefined : { ...rt.botOf(bot.id)?.avatar, image }
-        // `denyTools` needs no other field, so a list-only change is a patch of its own.
-        const denyTools = args.deny_tools ?? args.denyTools
-        const next = await rt.updateBot(bot.id, {
-          ...(newName === undefined ? {} : { name: newName }),
-          ...(role === undefined ? {} : { role }),
-          ...(instructions === undefined ? {} : { instructions }),
-          ...(color === undefined ? {} : { color }),
-          ...(avatar === undefined ? {} : { avatar }),
-          ...(model ? { model } : {}),
-          ...(effort === undefined ? {} : { effort }),
-          ...(section === undefined ? {} : { section }),
-          ...(moving ? { workDir: workDir ?? '' } : {}),
-          ...(denyTools === undefined ? {} : { denyTools }),
-        }, self, exec.agent?.id)
-        if (!moving) return `Updated ${next.name}.`
-        const folder = workDir ?? 'the team workspace'
-        return bot.id === caller.id ? `Updated ${next.name}. From your next step on, you work in ${folder}.` : `Updated ${next.name}. It now works in ${folder}.`
-      } catch (error) {
-        return `Could not update the Bot: ${error.message}`
+      if (Object.hasOwn(args, 'people')) {
+        const bot = args.bot ? rt.findBot(args.bot) : rt.botOf(rt.selfOf(exec.agent?.id))
+        throw refusal('Only the user can choose who may talk to ' + (bot?.name ?? 'this Bot'))
       }
+      const leave = rt.enterOwnership?.() ?? (() => {})
+      try {
+        await rt.load()
+        const self = rt.selfOf(exec.agent?.id)
+        const caller = rt.botOf(self)
+        if (caller === undefined) return 'Only Bots on the team can use update_bot.'
+        const bot = args.bot ? rt.findBot(args.bot) : caller
+        if (bot === undefined) return `No Bot named ${args.bot}.`
+        if (bot.id !== caller.id && !rt.isMain(self)) return 'Only a Main Bot can change another Bot. Leave out bot to change yourself, or ask a Main Bot with message_bot.'
+        try {
+          const { name: newName, role, instructions, color, model, effort, section } = args
+          let image
+          if (args.avatar !== undefined) {
+            const input = typeof args.avatar === 'string' ? args.avatar.trim() : args.avatar
+            image = input === null || input === '' ? null : await readAvatar(String(input), { baseDir: rt.sessionFolder?.(exec.agent?.session ?? exec.agent), isData: rt.inData })
+          }
+          const moving = typeof args.work_dir === 'string'
+          const workDir = moving ? await rt.cleanWorkDir(args.work_dir) : undefined
+          if (moving && workDir !== bot.workDir) await rt.approveFolder(exec, { path: workDir, sessions: rt.sessionsOfBot(bot.id), who: { en: bot.name, zh: ` ${bot.name} ` } })
+          // The photo rides on the Bot's other avatar fields, as the settings page's upload
+          // does: setting one keeps a custom character, and clearing removes only the image.
+          // They are read here, after the waits above, so a change made meanwhile stays.
+          const avatar = image === undefined ? undefined : { ...rt.botOf(bot.id)?.avatar, image }
+          // `denyTools` needs no other field, so a list-only change is a patch of its own.
+          const denyTools = args.deny_tools ?? args.denyTools
+          const next = await rt.updateBot(bot.id, {
+            ...(newName === undefined ? {} : { name: newName }),
+            ...(role === undefined ? {} : { role }),
+            ...(instructions === undefined ? {} : { instructions }),
+            ...(color === undefined ? {} : { color }),
+            ...(avatar === undefined ? {} : { avatar }),
+            ...(model ? { model } : {}),
+            ...(effort === undefined ? {} : { effort }),
+            ...(section === undefined ? {} : { section }),
+            ...(moving ? { workDir: workDir ?? '' } : {}),
+            ...(denyTools === undefined ? {} : { denyTools }),
+          }, self, exec.agent?.id)
+          if (!moving) return `Updated ${next.name}.`
+          const folder = workDir ?? 'the team workspace'
+          return bot.id === caller.id ? `Updated ${next.name}. From your next step on, you work in ${folder}.` : `Updated ${next.name}. It now works in ${folder}.`
+        } catch (error) {
+          return `Could not update the Bot: ${error.message}`
+        }
+      } finally { leave() }
     },
   }))
 
@@ -573,8 +581,7 @@ export function install(rt) {
   // its own the change holds only for that conversation: the Bot's folder, its other groups
   // and its own chat keep theirs (folders.js memberDirs).
   ctx.on('tools/execute', async (exec, next) => {
-    // Resolved as DSH gets it, untrimmed, so that both mean the same folder.
-    const cd = exec.name === WORKING_DIRECTORY_TOOL && typeof exec.arguments?.cd === 'string' ? exec.arguments.cd : ''
+    const cd = workingDirectoryCd(exec)
     const session = exec.agent?.session
     if (cd === '' || session === undefined) return next()
     await rt.load()
@@ -603,6 +610,7 @@ export function install(rt) {
       const result = await next()
       if (result?.isError !== true) {
         ;(room.memberDirs ??= {})[bot.id] = workDir ?? null
+        room.scoped = true
         await rt.save()
       }
       return result
@@ -705,51 +713,54 @@ export function install(rt) {
     },
     output,
     async execute(args, exec) {
-      await rt.load()
-      const self = rt.selfOf(exec.agent?.id)
-      if (rt.botOf(self) === undefined) return 'Only Bots on the team can use update_group.'
-      const { room, error } = pickRoom(args.group, self)
-      if (error) return error
-      const moving = typeof args.work_dir === 'string'
-      if (moving && !rt.isMain(self)) return `Only a Main Bot can set the folder of "${room.name}".`
-      if (args.section !== undefined && !rt.isMain(self)) return `Only a Main Bot can move "${room.name}" between sidebar sections.`
-      const add = resolveBots(args.add_members)
-      const remove = resolveBots(args.remove_members)
-      const unknown = [...add.unknown, ...remove.unknown]
-      if (unknown.length > 0) return `No Bot named ${unknown.join(', ')}. Team: ${teamNames()}`
-      let admin
-      if (args.admin !== undefined && args.admin !== '') {
-        if (/^(none|nobody|null|无|没有)$/i.test(String(args.admin).trim())) admin = null
-        else {
-          admin = rt.findBot(args.admin)?.id
-          if (admin === undefined) return `No Bot named ${args.admin}. Team: ${teamNames()}`
-        }
-      }
+      const leave = typeof args.work_dir === 'string' ? rt.enterOwnership?.() ?? (() => {}) : () => {}
       try {
-        const workDir = moving ? await rt.cleanWorkDir(args.work_dir) : undefined
-        // A Bot that joins a group with a folder works there from its first turn.
-        const joining = add.bots.filter(bot => !room.members.includes(bot.id))
-        if (moving && workDir !== room.workDir) {
-          const members = [...room.members, ...joining.map(bot => bot.id)]
-          await rt.approveFolder(exec, { path: workDir, sessions: members.map(id => room.sessions?.[id]).filter(Boolean), who: { en: `every member of "${room.name}"`, zh: `群聊「${room.name}」的成员` } })
-        } else if (joining.length > 0) {
-          const names = joining.map(bot => bot.name)
-          await rt.approveFolder(exec, { path: room.workDir, sessions: joining.map(bot => room.sessions?.[bot.id]).filter(Boolean), who: { en: names.join(', '), zh: ` ${names.join('、')} ` } })
+        await rt.load()
+        const self = rt.selfOf(exec.agent?.id)
+        if (rt.botOf(self) === undefined) return 'Only Bots on the team can use update_group.'
+        const { room, error } = pickRoom(args.group, self)
+        if (error) return error
+        const moving = typeof args.work_dir === 'string'
+        if (moving && !rt.isMain(self)) return `Only a Main Bot can set the folder of "${room.name}".`
+        if (args.section !== undefined && !rt.isMain(self)) return `Only a Main Bot can move "${room.name}" between sidebar sections.`
+        const add = resolveBots(args.add_members)
+        const remove = resolveBots(args.remove_members)
+        const unknown = [...add.unknown, ...remove.unknown]
+        if (unknown.length > 0) return `No Bot named ${unknown.join(', ')}. Team: ${teamNames()}`
+        let admin
+        if (args.admin !== undefined && args.admin !== '') {
+          if (/^(none|nobody|null|无|没有)$/i.test(String(args.admin).trim())) admin = null
+          else {
+            admin = rt.findBot(args.admin)?.id
+            if (admin === undefined) return `No Bot named ${args.admin}. Team: ${teamNames()}`
+          }
         }
-        const { room: next, changes } = await rt.updateRoom(room.id, {
-          name: args.name,
-          notice: args.notice,
-          mode: args.mode,
-          admin,
-          add: add.bots.map(bot => bot.id),
-          remove: remove.bots.map(bot => bot.id),
-          ...(args.section === undefined ? {} : { section: args.section }),
-          ...(moving ? { workDir: workDir ?? '' } : {}),
-        }, self)
-        return changes.length === 0 ? `Nothing changed in "${next.name}".` : `Updated "${next.name}": ${changes.join('; ')}.`
-      } catch (failure) {
-        return `Could not update "${room.name}": ${failure.message}`
-      }
+        try {
+          const workDir = moving ? await rt.cleanWorkDir(args.work_dir) : undefined
+          // A Bot that joins a group with a folder works there from its first turn.
+          const joining = add.bots.filter(bot => !room.members.includes(bot.id))
+          if (moving && workDir !== room.workDir) {
+            const members = [...room.members, ...joining.map(bot => bot.id)]
+            await rt.approveFolder(exec, { path: workDir, sessions: members.map(id => room.sessions?.[id]).filter(Boolean), who: { en: `every member of "${room.name}"`, zh: `群聊「${room.name}」的成员` } })
+          } else if (joining.length > 0) {
+            const names = joining.map(bot => bot.name)
+            await rt.approveFolder(exec, { path: room.workDir, sessions: joining.map(bot => room.sessions?.[bot.id]).filter(Boolean), who: { en: names.join(', '), zh: ` ${names.join('、')} ` } })
+          }
+          const { room: next, changes } = await rt.updateRoom(room.id, {
+            name: args.name,
+            notice: args.notice,
+            mode: args.mode,
+            admin,
+            add: add.bots.map(bot => bot.id),
+            remove: remove.bots.map(bot => bot.id),
+            ...(args.section === undefined ? {} : { section: args.section }),
+            ...(moving ? { workDir: workDir ?? '' } : {}),
+          }, self)
+          return changes.length === 0 ? `Nothing changed in "${next.name}".` : `Updated "${next.name}": ${changes.join('; ')}.`
+        } catch (failure) {
+          return `Could not update "${room.name}": ${failure.message}`
+        }
+      } finally { leave() }
     },
   }))
 
@@ -814,7 +825,7 @@ export function install(rt) {
       try {
         // A post that wants the replies names the conversation it was written
         // from, so the report comes back there instead of the own chat.
-        await rt.postToRoom(room, sender, long.text, { mentions, ...(reportBack ? { reportBack: true, ...callerRoom(exec) } : {}), ...(member ? { member: true } : {}), ...(sub ? { sub } : {}), ...(long.length ? { length: long.length } : {}) }, long.files)
+        await rt.postToRoom(room, sender, long.text, { mentions, ...(reportBack ? { reportBack: true, ...callerRoom(exec) } : {}), ...(member ? { member: true } : {}), ...(sub ? { sub } : {}), ...(long.length ? { length: long.length } : {}), ...(long.files.length > 0 ? { excerpt: headOf(text, LONG_HEAD) } : {}) }, long.files)
       } catch (failure) {
         if (sub !== undefined) rt.dropWork(sub)
         return `Could not post in "${room.name}": ${failure.message}`
@@ -1144,7 +1155,7 @@ export function install(rt) {
         if (relayOnly && def.name !== 'group_relay') continue
         if (held.added?.has(def.name) === true) continue
         try {
-          const dispose = agent.ctx.tools.register(def)
+          const dispose = registerTrustedTool(agent.ctx.tools, def)
           if (typeof dispose === 'function') {
             ;(held.toolLifts ??= new Map()).set(def.name, dispose)
             held.disposers.push(dispose)
@@ -1178,7 +1189,7 @@ export function install(rt) {
     for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
       if (relayOnly && def.name !== 'group_relay') continue
       try {
-        const dispose = agent.ctx.tools.register(def)
+        const dispose = registerTrustedTool(agent.ctx.tools, def)
         if (typeof dispose === 'function') {
           disposers.push(dispose)
           ;(held ??= { relay: relayOnly, tools: false, restricted: false, filtered: false, disposers: [], unlisted: new Set() }).toolLifts ??= new Map()

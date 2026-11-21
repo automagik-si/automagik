@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
-  chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { MEASUREMENT_DIR, MEASUREMENT_MARKER, writeMeasurementMarker } from '../lib.mjs'
+import { SEED_MARKER } from '../profile-state.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const CHECK = join(ROOT, 'server', 'measurement-check.mjs')
@@ -39,11 +41,12 @@ const EXPOSED = [
 function fixture(setup) {
   const root = mkdtempSync(join(tmpdir(), 'measurement-check-'))
   TEMPS.push(root)
-  for (const dir of ['dsh/profiles/automagik-web', ...EXPOSED]) {
+  for (const dir of ['dsh/profiles/automagik-web', MEASUREMENT_DIR, ...EXPOSED]) {
     mkdirSync(join(root, dir), { recursive: true })
   }
   const marker = { version: 1, release: '3.155.0', packageSha256: 'a'.repeat(64) }
-  const markerPath = join(root, 'dsh/profiles/automagik-web/automagik-server-profile')
+  chmodSync(join(root, 'dsh'), 0o700)
+  const markerPath = join(root, MEASUREMENT_MARKER)
   writeFileSync(markerPath, `${JSON.stringify(marker)}\n`)
   writeFileSync(join(root, '.claude/projects/workspace.jsonl'), '{}\n')
   writeFileSync(join(root, '.claude/session-archive/old.jsonl'), '{}\n')
@@ -65,7 +68,20 @@ function fixture(setup) {
   return root
 }
 
-const run = (root) => spawnSync(process.execPath, [CHECK, root], { encoding: 'utf8' })
+const run = (root) => {
+  const capture = mkdtempSync(join(tmpdir(), 'measurement-output-'))
+  TEMPS.push(capture)
+  const stdout = join(capture, 'stdout'), stderr = join(capture, 'stderr')
+  const out = openSync(stdout, 'w'), err = openSync(stderr, 'w')
+  try {
+    const result = spawnSync(process.execPath, [CHECK, root], { stdio: ['ignore', out, err] })
+    assert.ifError(result.error)
+    return { status: result.status, stdout: readFileSync(stdout, 'utf8'), stderr: readFileSync(stderr, 'utf8') }
+  } finally {
+    closeSync(out)
+    closeSync(err)
+  }
+}
 
 // The measurement section is the pilot's only public contract for reading a workspace volume.
 // It must stay truthful about the one mount the image makes and the roots it does not expose.
@@ -115,9 +131,12 @@ test('the documented grant reads only the exposed roots and denies every credent
   assert.ok(setup.includes('[ -d "$view/$d" ]'), 'the grant skips an absent root')
   assert.ok(
     setup.includes('[ -e "$view/$marker" ]') &&
-      setup.includes('dsh/profiles/automagik-web/automagik-server-profile'),
+      setup.includes(`marker=${MEASUREMENT_MARKER}`),
     'the grant names the seeded marker',
   )
+  assert.ok(setup.includes(`"$view/${MEASUREMENT_DIR}"`) && setup.includes('d:u:$me:r--'),
+    'the grant survives an atomic replacement')
+  assert.doesNotMatch(setup, /dsh\/profiles|for d in .*\bdsh\b/)
   // The documented grant runs before the view is remounted read-only: setfacl needs a writable
   // mount.
   assert.ok(
@@ -133,6 +152,73 @@ test('the documented grant reads only the exposed roots and denies every credent
   ]) {
     assert.ok(deny.includes(secret), `the deny loop names ${secret}`)
   }
+})
+
+test('a second publication keeps the measurement grant under a restrictive parent', t => {
+  const volume = mkdtempSync(join(tmpdir(), 'measurement-publish-'))
+  TEMPS.push(volume)
+  chmodSync(volume, 0o701)
+  const profile = join(volume, 'dsh')
+  mkdirSync(profile, { mode: 0o700 })
+  const uid = process.geteuid() === 2200 ? 2201 : 2200
+  const output = join(profile, 'acl-output')
+  const acl = (command, args) => {
+    const out = openSync(output, 'w')
+    try {
+      const result = spawnSync(command, args, { stdio: ['ignore', out, out] })
+      return { ...result, text: readFileSync(output, 'utf8') }
+    } finally { closeSync(out) }
+  }
+  const parentAcl = acl('setfacl', ['-m', `u:${uid}:--x,d:u:${uid}:---`, volume])
+  const hasAcl = parentAcl.status === 0
+  if (!hasAcl) t.diagnostic('POSIX ACL unavailable, checking the mode-based grant')
+  const grantDir = join(volume, MEASUREMENT_DIR)
+  const marker = join(volume, MEASUREMENT_MARKER)
+  const publish = char => {
+    const seed = { version: 1, release: '3.155.0', packageSha256: char.repeat(64) }
+    writeFileSync(join(profile, SEED_MARKER), JSON.stringify(seed))
+    writeMeasurementMarker(volume, profile)
+    assert.deepEqual(JSON.parse(readFileSync(marker, 'utf8')), seed)
+  }
+  const assertGrant = () => {
+    if (hasAcl) {
+      const published = acl('getfacl', ['-cn', marker])
+      assert.equal(published.status, 0, published.text)
+      assert.match(published.text, new RegExp(`^user:${uid}:r--$`, 'm'))
+    } else {
+      assert.equal(statSync(grantDir).mode & 0o005, 0o005)
+      assert.equal(statSync(marker).mode & 0o007, 0o004)
+    }
+  }
+  const originalUmask = process.umask(0o077)
+  try {
+    publish('a')
+    if (hasAcl) {
+      const aclBefore = acl('getfacl', ['-cn', marker])
+      assert.equal(aclBefore.status, 0, aclBefore.text)
+      assert.match(aclBefore.text, new RegExp(`^user:${uid}:---$`, 'm'))
+      for (const args of [
+        ['-m', `u:${uid}:--x,d:u:${uid}:r--`, grantDir], ['-m', `u:${uid}:r--`, marker],
+      ]) {
+        const grant = acl('setfacl', args)
+        assert.equal(grant.status, 0, grant.text)
+      }
+    }
+    assertGrant()
+    const previous = openSync(marker, 'r')
+    try {
+      const inode = statSync(marker).ino
+      publish('b')
+      assert.notEqual(statSync(marker).ino, inode)
+    } finally { closeSync(previous) }
+    assertGrant()
+    if (hasAcl) {
+      const inherited = acl('getfacl', ['-cn', grantDir])
+      assert.equal(inherited.status, 0, inherited.text)
+      assert.match(inherited.text, new RegExp(`^default:user:${uid}:r--$`, 'm'))
+    }
+    assert.equal(statSync(profile).mode & 0o777, 0o700)
+  } finally { process.umask(originalUmask) }
 })
 
 test('passes on a readable read-only view', () => {
@@ -218,7 +304,11 @@ test('fails when the documented view is absent', () => {
 
 test('fails when the view is stale', () => {
   const root = fixture()
-  rmSync(join(root, 'dsh/profiles/automagik-web/automagik-server-profile'))
+  const marker = join(root, MEASUREMENT_MARKER)
+  writeFileSync(join(root, 'dsh/profiles/automagik-web/automagik-server-profile'), readFileSync(marker))
+  chmodSync(root, 0o755)
+  rmSync(marker)
+  chmodSync(root, 0o555)
   const result = run(root)
   assert.equal(result.status, 1)
   assert.match(result.stderr, /stale: /)

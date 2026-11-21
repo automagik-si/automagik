@@ -1,20 +1,24 @@
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, closeSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { gunzipSync } from 'node:zlib'
 import { createHash } from 'node:crypto'
+import { loadImageSupervisor, prepareImageLaunch, prepareImageVolume } from '../entrypoint.mjs'
 import { followImage, installOffline } from '../profile-follow.mjs'
-import { profileDirOf } from '../lib.mjs'
-import { compareRelease, FOLLOW_STATUS, installedPlugins, markSeed, ownership, packageHash, profileState, SEED_MARKER } from '../profile-state.mjs'
+import { GATE_VIEW, PROFILE, profileDirOf } from '../lib.mjs'
+import { compareRelease, FOLLOW_STATUS, installedPlugins, markSeed, ownership, packageHash, profileState, readJson, SEED_MARKER } from '../profile-state.mjs'
 import { materializePlugins, packPlugin, PLUGINS } from '../plugin-payload.mjs'
 import { buildOfflineStore } from '../offline-store.mjs'
 import { healthReport } from '../healthcheck.mjs'
+import { readProfileState, writeProfileState } from '../gate-view.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { VOLUME_LOCK, withVolumeLock } from '../volume-lock.mjs'
 import { parse, stringify } from 'yaml'
+import { installSignedProfile } from './fixtures/signed-profile.mjs'
 
 const original = JSON.parse(readFileSync(new URL('../profile/package.json', import.meta.url), 'utf8'))
 const write = (path, content) => { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, content) }
@@ -49,6 +53,26 @@ function fixture(t) {
 }
 const successful = source => ({ profile }) => cpSync(join(source, 'node_modules'), join(profile, 'node_modules'), { recursive: true })
 const prepare = async (f, img = f.old, install = successful(img.source)) => followImage({ dshHome: f.dshHome, ...img, install })
+
+test('first boot with a capable image creates the absent gate view and seeds before selecting supervision', async t => {
+  const f = fixture(t), gateView = join(f.dir, 'data', GATE_VIEW)
+  const bot = join(f.old.source, 'node_modules/@automagik/bots-dsh')
+  const supervisor = join(bot, 'src/host/supervisor')
+  write(join(supervisor, 'main.js'), 'export const IMAGE_HOST = 1; export function runSupervisor() {}')
+  write(join(bot, 'package.json'), JSON.stringify({ version: f.old.build.automagik, type: 'module' }))
+  cpSync(new URL('../../apps/bots-dsh/src/host/supervisor/store.js', import.meta.url), join(supervisor, 'store.js'))
+  const host = await loadImageSupervisor(f.old.source, assert.fail)
+  assert.ok(host)
+  assert.equal(existsSync(f.target), false)
+  assert.equal(existsSync(gateView), false)
+  const release = await prepareImageVolume({ dshHome: f.dshHome, gateView, privateDirs: { DSH_HOME: f.dshHome } })
+  t.after(release)
+  assert.equal(statSync(gateView).mode & 0o777, 0o700)
+  const seeded = await prepare(f)
+  assert.equal(seeded.result, 'seeded')
+  assert.equal(seeded.reason, 'matching-image')
+  assert.deepEqual(prepareImageLaunch(host, seeded, f.dshHome, assert.fail), { host, code: 0 })
+})
 
 // Each child imports the real implementation. File barriers hold the first mutation
 // open so the second process attempts the same volume while its peer is still active.
@@ -90,10 +114,16 @@ function startFollower(t, f, img, name, extra = {}) {
   const c = { follow: new URL('../profile-follow.mjs', import.meta.url).href, lib: new URL('../lib.mjs', import.meta.url).href,
     options: { dshHome: f.dshHome, ...img, release: img.build.automagik }, called: join(f.dir, `${name}-called`),
     entered: join(f.dir, `${name}-entered`), release: join(f.dir, 'release'), installs: join(f.dir, 'installs'), ...extra }
-  const child = spawn(process.execPath, ['--input-type=module', '-e', childProgram, JSON.stringify(c)], { stdio: ['ignore', 'pipe', 'pipe'] })
-  let stdout = '', stderr = ''
-  child.stdout.on('data', bytes => { stdout += bytes }); child.stderr.on('data', bytes => { stderr += bytes })
-  const done = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr })))
+  const output = join(f.dir, `${name}-stdout`), errors = join(f.dir, `${name}-stderr`)
+  const stdout = openSync(output, 'w'), stderr = openSync(errors, 'w')
+  let child
+  try {
+    child = spawn(process.execPath, ['--input-type=module', '-e', childProgram, JSON.stringify(c)], { stdio: ['ignore', stdout, stderr] })
+  } finally {
+    closeSync(stdout); closeSync(stderr)
+  }
+  const done = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal,
+    stdout: readFileSync(output, 'utf8'), stderr: readFileSync(errors, 'utf8') })))
   t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await done })
   return { ...c, child, done, result: async () => { const out = await done; assert.equal(out.code, 0, out.stderr); return JSON.parse(out.stdout) } }
 }
@@ -258,7 +288,7 @@ test('an owner-edited package remains byte-for-byte unchanged and is reported as
   assert.equal(installedPlugins(f.target)[PLUGINS[0]], '3.90.1')
 })
 
-function addPlugin(profile, name = '@example/channels') {
+function addPlugin(profile, name = '@example/channels', dependencySuffix = '') {
   const path = join(profile, 'package.json'), pkg = JSON.parse(readFileSync(path, 'utf8'))
   const spec = `https://example.invalid/${name.split('/')[1]}-1.2.3.tgz`
   const peer = `(@automagik/bots-dsh@${pkg.dependencies['@automagik/bots-dsh']})`
@@ -268,9 +298,151 @@ function addPlugin(profile, name = '@example/channels') {
   const lockPath = join(profile, 'pnpm-lock.yaml'), lock = parse(readFileSync(lockPath, 'utf8'))
   lock.importers['.'].dependencies[name] = { specifier: spec, version: `${spec}${peer}` }
   lock.packages[`${name}@${spec}`] = { resolution: { integrity: 'sha512-EXTRA', tarball: spec }, version: '1.2.3' }
-  lock.snapshots[`${name}@${spec}${peer}`] = { optionalDependencies: { '@automagik/bots-dsh': pkg.dependencies['@automagik/bots-dsh'] } }
+  lock.snapshots[`${name}@${spec}${peer}`] = {
+    optionalDependencies: { '@automagik/bots-dsh': pkg.dependencies['@automagik/bots-dsh'] + dependencySuffix },
+  }
   write(lockPath, stringify(lock, { lineWidth: 0 }))
   return { name, spec }
+}
+
+function signedFixture(f, version = '3.94.0') {
+  const installed = installSignedProfile(f.target, version)
+  const lockPath = join(f.target, 'pnpm-lock.yaml')
+  let bytes = readFileSync(lockPath, 'utf8')
+  for (const [name, spec] of Object.entries(installed.current.base)) {
+    bytes = bytes.replaceAll(spec, installed.current.entries[name])
+  }
+  write(lockPath, bytes)
+  return { ...installed, added: addPlugin(f.target) }
+}
+
+function profileBytes(profile) {
+  return readdirSync(profile, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => join(entry.parentPath, entry.name)).sort()
+    .map(file => [file.slice(profile.length), readFileSync(file)])
+}
+
+for (const hashOnly of [false, true]) {
+  test(`a completed signed update keeps every profile file ahead of the image (${hashOnly ? 'hash-only' : 'structured'} marker)`, async t => {
+    const f = fixture(t); await prepare(f)
+    signedFixture(f)
+    if (hashOnly) {
+      const file = join(f.target, SEED_MARKER), marker = JSON.parse(readFileSync(file, 'utf8'))
+      delete marker.imagePackage
+      write(file, JSON.stringify(marker))
+    }
+    const before = profileBytes(f.target)
+    for (const img of [f.old, f.next]) {
+      const result = await prepare(f, img, () => assert.fail('signed-ahead profile must be left in place'))
+      assert.equal(result.result, 'signed-update-ahead')
+      assert.equal(result.reason, 'signed-update-ahead')
+      assert.equal(result.ownerManaged, false)
+      assert.equal(result.followsImage, false)
+    }
+    const older = image(join(f.dir, 'older'), '3.90.0')
+    const result = await prepare(f, older, () => assert.fail('an image below the seed release must not install'))
+    assert.equal(result.reason, 'newer-than-image')
+    assert.deepEqual(profileBytes(f.target), before)
+  })
+}
+
+for (const version of ['3.94.0', '3.95.0']) {
+  test(`an image at ${version} replaces the signed base pins and moves peer references with them`, async t => {
+    const f = fixture(t); await prepare(f)
+    const { added: { name, spec }, current, path } = signedFixture(f)
+    const suffix = '(peer@1.2.3)'
+    const peerPlugin = addPlugin(f.target, '@example/peer-channels', suffix)
+    const before = readFileSync(path)
+    const img = image(join(f.dir, 'catch-up'), version)
+    const result = await prepare(f, img, ({ profile }) => {
+      const lock = parse(readFileSync(join(profile, 'pnpm-lock.yaml'), 'utf8'))
+      const bot = '@automagik/bots-dsh'
+      const pin = `file:vendor/automagik-bots-dsh-${version}.tgz`
+      const versionWithPeer = `${spec}(${bot}@${pin})`
+      assert.deepEqual(lock.importers['.'].dependencies[name], { specifier: spec, version: versionWithPeer })
+      assert.equal(lock.snapshots[`${name}@${versionWithPeer}`].optionalDependencies[bot], pin)
+      const peerSnapshot = lock.snapshots[`${peerPlugin.name}@${peerPlugin.spec}(${bot}@${pin})`]
+      assert.equal(peerSnapshot.optionalDependencies[bot], pin + suffix)
+      for (const old of Object.values(current.entries)) assert.ok(!JSON.stringify(lock).includes(old))
+      successful(img.source)({ profile })
+      cpSync(join(f.target, 'node_modules', name), join(profile, 'node_modules', name), { recursive: true })
+      cpSync(join(f.target, 'node_modules', peerPlugin.name), join(profile, 'node_modules', peerPlugin.name), { recursive: true })
+    })
+    assert.equal(result.result, 'updated')
+    assert.equal(result.followsImage, true)
+    const manifest = JSON.parse(readFileSync(join(f.target, 'package.json'), 'utf8'))
+    for (const name of PLUGINS) assert.ok(manifest.dependencies[name].endsWith(`-${version}.tgz`))
+    assert.equal(manifest.dependencies[name], spec)
+    assert.deepEqual(readFileSync(path), before)
+    const backups = join(f.dshHome, 'backups')
+    const backup = join(backups, readdirSync(backups)[0])
+    assert.equal(JSON.parse(readFileSync(join(backup, 'update.json'))).from, current.live.version)
+    assert.equal(JSON.parse(readFileSync(join(backup, PROFILE, 'node_modules/@automagik/bots-dsh/package.json'))).version, current.live.version)
+  })
+}
+
+test('an unfinished self-update blocks both image follow and first seeding before any profile writes', async t => {
+  const f = fixture(t); await prepare(f)
+  const { store } = signedFixture(f)
+  write(join(store, 'state.json'), '{"version":1,"phase":"health"}')
+  const before = profileBytes(f.target)
+  const refuse = () => assert.fail('an unfinished update must never install the image')
+  assert.equal((await prepare(f, f.next, refuse)).reason, 'self-update-unfinished')
+  assert.deepEqual(profileBytes(f.target), before)
+  const previous = `${f.target}.image-previous`
+  renameSync(f.target, previous)
+  const result = await prepare(f, f.next, refuse)
+  assert.equal(result.reason, 'self-update-unfinished')
+  assert.equal(result.seeded, false)
+  assert.equal(existsSync(f.target), false)
+  assert.deepEqual(profileBytes(previous), before)
+})
+
+test('bare startup refuses the follower recovery decision even with versions.json missing', async t => {
+  const f = fixture(t); await prepare(f)
+  const { store } = signedFixture(f)
+  write(join(store, 'state.json'), '{"version":1,"phase":"health"}')
+  const metadata = join(dirname(f.next.source), 'versions.json')
+  fs.unlinkSync(metadata)
+  const build = readJson(metadata) ?? {}
+  const seeded = await prepare(f, { ...f.next, build }, () => assert.fail('an unfinished switch must skip install'))
+  assert.equal(seeded.reason, 'invalid-image-metadata')
+  assert.equal(seeded.result, 'self-update-unfinished')
+  const warnings = []
+  const decision = prepareImageLaunch(null, seeded, f.dshHome, message => warnings.push(message))
+  assert.deepEqual(decision, { host: null, code: 1 })
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /unfinished.*server\/README\.md/)
+})
+
+for (const window of ['before cutover', 'completed', 'owner edited']) {
+  test(`recoverSwap accepts a signed previous profile in the ${window} window`, async t => {
+    const f = fixture(t); await prepare(f)
+    signedFixture(f)
+    const previous = `${f.target}.image-previous`
+    const before = profileBytes(f.target)
+    renameSync(f.target, previous)
+    const img = window === 'before cutover' ? f.next : image(join(f.dir, 'catch-up'), '3.94.0')
+    if (window !== 'before cutover') {
+      cpSync(img.source, f.target, { recursive: true })
+      markSeed(f.target, img.build.automagik)
+      if (window === 'owner edited') write(join(f.target, 'package.json'), '{"description":"owner edit"}')
+    }
+    const result = await prepare(f, img, () => assert.fail('the swap must be recovered without a new install'))
+    if (window === 'before cutover') {
+      assert.equal(result.result, 'update-rolled-back')
+      assert.equal(existsSync(previous), false)
+      assert.deepEqual(profileBytes(f.target), before)
+    } else if (window === 'completed') {
+      assert.equal(result.result, 'matching-image')
+      assert.equal(existsSync(previous), false)
+    } else {
+      assert.equal(result.reason, 'owner-managed')
+      assert.equal(readFileSync(join(f.target, 'package.json'), 'utf8'), '{"description":"owner edit"}')
+      assert.deepEqual(profileBytes(previous), before)
+    }
+  })
 }
 
 // FOLLOW_ADDITIONS_OPT_OUT / FOLLOW_DROP_ADDITIONS / FOLLOW_STALE_PEERS.
@@ -352,6 +524,147 @@ test('a matching image restores its inputs from its own lock when the workspace 
   rmSync(join(f.target, 'vendor'), { recursive: true })
   write(join(f.target, 'pnpm-lock.yaml'), 'packages: [\n')
   assert.equal((await prepare(f)).result, 'matching-image')
+  assertInstallInputs(f.target)
+})
+
+test('matching-image repair preserves a readable workspace lock when materialization fails', async t => {
+  const f = fixture(t); await prepare(f)
+  const { name } = addPlugin(f.target)
+  const file = join(f.target, 'pnpm-lock.yaml'), lock = parse(readFileSync(file, 'utf8'))
+  const imageSpec = lock.importers['.'].dependencies[PLUGINS[0]].specifier
+  delete lock.packages[`${PLUGINS[0]}@${imageSpec}`]
+  const raw = stringify(lock)
+  write(file, raw)
+  const result = await prepare(f)
+  assert.equal(result.result, 'update-rolled-back')
+  assert.equal(result.reason, 'update-rolled-back')
+  assert.equal(result.followsImage, false)
+  assert.equal(readFileSync(file, 'utf8'), raw)
+  assert.ok(parse(readFileSync(file, 'utf8')).importers['.'].dependencies[name])
+})
+
+test('matching-image repair refuses a symlinked workspace YAML and preserves its external bytes', async t => {
+  const f = fixture(t); await prepare(f)
+  const workspace = join(f.target, 'pnpm-workspace.yaml'), external = join(f.dir, 'shared-workspace.yaml')
+  const before = Buffer.from('storeDir: "/previous/store"\n')
+  write(external, before)
+  rmSync(workspace)
+  symlinkSync(external, workspace)
+  const lock = join(f.target, 'pnpm-lock.yaml')
+  const beforeLock = Buffer.concat([Buffer.from('# Owner lock comment\n'), readFileSync(lock)])
+  write(lock, beforeLock)
+
+  assert.equal((await prepare(f)).result, 'update-rolled-back')
+  assert.equal(readlinkSync(workspace), external)
+  assert.deepEqual(readFileSync(external), before)
+  assert.deepEqual(readFileSync(lock), beforeLock)
+})
+
+test('matching-image repair pins a single-link workspace YAML in place', async t => {
+  const f = fixture(t); await prepare(f)
+  const workspace = join(f.target, 'pnpm-workspace.yaml')
+  write(workspace, `packages:\n  - .\nstoreDir: "/previous/${'long-path/'.repeat(32)}store"\n`)
+  chmodSync(workspace, 0o600)
+  const before = statSync(workspace)
+  assert.equal(before.nlink, 1)
+
+  assert.equal((await prepare(f)).result, 'matching-image')
+  const after = statSync(workspace)
+  assert.equal(after.ino, before.ino)
+  assert.equal(after.mode, before.mode)
+  assert.equal(readFileSync(workspace, 'utf8'), `packages:\n  - .\nstoreDir: ${JSON.stringify(join(f.dshHome, 'pnpm-store'))}\n`)
+})
+
+test('matching-image repair pins a hard-linked workspace YAML without changing its other name', async t => {
+  const f = fixture(t); await prepare(f)
+  const workspace = join(f.target, 'pnpm-workspace.yaml'), external = join(f.dir, 'shared-workspace.yaml')
+  const before = Buffer.from('packages:\n  - .\nstoreDir: "/previous/store"\n')
+  write(external, before)
+  chmodSync(external, 0o600)
+  rmSync(workspace)
+  linkSync(external, workspace)
+
+  assert.equal((await prepare(f)).result, 'matching-image')
+  assert.deepEqual(readFileSync(external), before)
+  assert.equal(readFileSync(workspace, 'utf8'), `packages:\n  - .\nstoreDir: ${JSON.stringify(join(f.dshHome, 'pnpm-store'))}\n`)
+  assert.equal(statSync(workspace).mode & 0o777, 0o600)
+})
+
+test('a refused matching-image repair publishes rollback even when the status path is a directory', async t => {
+  const f = fixture(t); await prepare(f)
+  const workspace = join(f.target, 'pnpm-workspace.yaml'), external = join(f.dir, 'shared-workspace.yaml')
+  renameSync(workspace, external)
+  symlinkSync(external, workspace)
+  const status = join(f.dshHome, FOLLOW_STATUS)
+  rmSync(status)
+  mkdirSync(status)
+
+  const result = await prepare(f)
+  assert.equal(result.result, 'update-rolled-back')
+  assert.equal(result.reason, 'update-rolled-back')
+  assert.equal(result.followsImage, false)
+  assert.equal(statSync(status).isDirectory(), true)
+  assert.equal(profileState({ profile: f.target, ...f.old, dshHome: f.dshHome }).followsImage, false)
+
+  const viewDir = join(f.dir, 'data', 'gate-view')
+  mkdirSync(viewDir, { mode: 0o700 })
+  writeProfileState(viewDir, result)
+  const published = readProfileState(viewDir, f.old.build)
+  assert.equal(published.reason, 'update-rolled-back')
+  assert.equal(published.followsImage, false)
+
+  const report = env => healthReport({ root: dirname(f.old.source), dshHome: f.dshHome, viewDir, env, probe: async () => 401 })
+  for (const env of [{}, { AUTOMAGIK_GATE_ENABLED: '1' }]) {
+    const health = await report(env)
+    assert.equal(health.reason, 'update-rolled-back')
+    assert.equal(health.followsImage, false)
+    assert.equal(health.fence.healthy, true)
+    assert.equal(health.healthy, false)
+  }
+  // Owner-only health retains this start's refusal even after the view's normal freshness window.
+  rmSync(status, { recursive: true })
+  write(join(viewDir, 'profile-state.json'), JSON.stringify({ ...published, at: new Date(0).toISOString() }))
+  const health = await report({})
+  assert.equal(health.reason, 'update-rolled-back')
+  assert.equal(health.followsImage, false)
+  assert.equal(health.healthy, false)
+
+  rmSync(workspace)
+  const repaired = await prepare(f)
+  assert.equal(repaired.reason, 'matching-image')
+  writeProfileState(viewDir, repaired)
+  assert.equal((await report({})).healthy, true)
+})
+
+test('matching-image repair preserves an augmented lock after a partial write and succeeds on retry', async t => {
+  const f = fixture(t); await prepare(f)
+  const { name } = addPlugin(f.target)
+  const file = join(f.target, 'pnpm-lock.yaml'), before = readFileSync(file)
+  const { openSync, writeFileSync } = fs
+  let lockFd, failures = 0
+  const open = t.mock.method(fs, 'openSync', (path, ...args) => {
+    const fd = openSync(path, ...args)
+    if (typeof path === 'string' && path.startsWith(`${file}.`)) lockFd = fd
+    return fd
+  })
+  const write = t.mock.method(fs, 'writeFileSync', (path, bytes, ...args) => {
+    if (path !== file && path !== lockFd) return writeFileSync(path, bytes, ...args)
+    writeFileSync(path, Buffer.from(bytes).subarray(0, 12), ...args)
+    failures++
+    throw Object.assign(new Error('Injected partial lock write'), { code: 'ENOSPC' })
+  })
+  syncBuiltinESMExports()
+  try {
+    assert.equal((await prepare(f)).result, 'update-rolled-back')
+    assert.equal(failures, 1)
+    assert.deepEqual(readFileSync(file), before)
+    assert.equal(readdirSync(f.target).some(name => name.startsWith('pnpm-lock.yaml.')), false)
+  } finally {
+    write.mock.restore(); open.mock.restore(); syncBuiltinESMExports()
+  }
+  assert.equal((await prepare(f)).result, 'matching-image')
+  assert.deepEqual(parse(readFileSync(file, 'utf8')).importers['.'].dependencies[name],
+    parse(before.toString()).importers['.'].dependencies[name])
   assertInstallInputs(f.target)
 })
 
@@ -516,3 +829,443 @@ test('the offline cache retains only inspected files and validates each content 
   write(join(profile,'node_modules','fixture','index.js'),'changed')
   assert.throws(()=>buildOfflineStore({store,profile,out}),/differs from inspected/)
 })
+
+import { mergeImageRows } from '../profile-follow.mjs'
+import { ADAPTER, ADAPTER_SINCE, basePlugins, LEGACY_PLUGINS, legacyManifest } from '../profile-state.mjs'
+
+const adapterPatch = "- insert:\n    - id: multiuser-dsh\n      name: '@automagik/multiuser-dsh'\n"
+const disabledAdapter = '# Owner keeps this disabled.\n- id: multiuser-dsh\n  disabled: true # keep\n'
+
+function legacyImage(root, release) {
+  const { source, build, store } = image(root, release)
+  const manifest = legacyManifest(JSON.parse(readFileSync(join(source, 'package.json'))))
+  write(join(source, 'package.json'), JSON.stringify(manifest, null, 2) + '\n')
+  const lockFile = join(source, 'pnpm-lock.yaml'), lock = parse(readFileSync(lockFile, 'utf8'))
+  const adapterSpec = lock.importers['.'].dependencies[ADAPTER].specifier
+  delete lock.importers['.'].dependencies[ADAPTER]
+  delete lock.packages[`${ADAPTER}@${adapterSpec}`]
+  delete lock.snapshots[`${ADAPTER}@${adapterSpec}`]
+  write(lockFile, stringify(lock))
+  rmSync(join(source, 'node_modules', ADAPTER), { recursive: true })
+  for (const name of LEGACY_PLUGINS) {
+    const spec = manifest.dependencies[name].slice('file:'.length)
+    write(join(source, spec), packPlugin(join(source, 'node_modules', name)))
+  }
+  delete build.plugins[ADAPTER]
+  write(join(root, 'versions.json'), JSON.stringify(build))
+  return { source, build, store }
+}
+
+function legacyVolume(t, marker, release = '3.160.4') {
+  const f = fixture(t)
+  f.old = legacyImage(join(f.dir, 'legacy'), release)
+  f.next = image(join(f.dir, 'candidate'), ADAPTER_SINCE)
+  write(join(f.next.source, 'cordis.patch.yml'), adapterPatch)
+  cpSync(f.old.source, f.target, { recursive: true })
+  if (marker === 'structured') markSeed(f.target, release)
+  if (marker === 'hash-only') write(join(f.target, SEED_MARKER), JSON.stringify({
+    version: 1, release, packageSha256: packageHash(f.target),
+  }))
+  if (marker === 'unknown') write(join(f.target, SEED_MARKER), 'unknown\n')
+  return f
+}
+
+for (const marker of ['structured', 'hash-only', 'none', 'unknown']) {
+  test(`three-plugin ${marker} seed follows the four-plugin image`, async t => {
+    const f = legacyVolume(t, marker)
+    assert.deepEqual(basePlugins(ownership(f.target, f.next.source)), LEGACY_PLUGINS)
+    const state = profileState({ profile: f.target, source: f.next.source, build: f.next.build, dshHome: f.dshHome })
+    assert.equal(state.reason, 'update-required')
+    assert.equal(state.plugins[ADAPTER], null)
+    assert.equal(state.matchesImage, false)
+    const result = await prepare(f, f.next)
+    assert.equal(result.result, 'updated')
+    assert.deepEqual(result.plugins, f.next.build.plugins)
+    assert.equal(result.followsImage, true)
+    assert.equal(parse(readFileSync(join(f.target, 'cordis.patch.yml'), 'utf8'))[0].insert[0].name, ADAPTER)
+    const backup = join(f.dshHome, 'backups', readdirSync(join(f.dshHome, 'backups'))[0], 'automagik-web')
+    for (const name of ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml']) {
+      assert.deepEqual(readFileSync(join(backup, name)), readFileSync(join(f.old.source, name)))
+    }
+    assert.deepEqual(basePlugins(ownership(f.target, f.next.source)), PLUGINS)
+    assertInstallInputs(f.target)
+  })
+}
+
+test('same-release expansion preserves the owner override, Omni peer snapshot and literal undefined lock text', async t => {
+  const f = legacyVolume(t, 'hash-only', ADAPTER_SINCE)
+  const { name, spec } = addPlugin(f.target)
+  const lockFile = join(f.target, 'pnpm-lock.yaml'), lock = parse(readFileSync(lockFile, 'utf8'))
+  lock.snapshots['preserve-undefined'] = { marker: 'literal-undefined' }
+  write(lockFile, stringify(lock))
+  write(join(f.target, 'cordis.patch.yml'), disabledAdapter)
+  const result = await prepare(f, f.next, ({ profile }) => {
+    cpSync(join(f.target, 'node_modules', name), join(profile, 'node_modules', name), { recursive: true })
+    successful(f.next.source)({ profile })
+  })
+  assert.equal(result.result, 'updated')
+  const merged = readFileSync(join(f.target, 'cordis.patch.yml'), 'utf8')
+  assert.ok(merged.includes('# Owner keeps this disabled.\n'))
+  assert.ok(merged.endsWith('- id: multiuser-dsh\n  disabled: true # keep\n'))
+  assert.equal(parse(merged)[0].insert[0].name, ADAPTER)
+  const updated = parse(readFileSync(lockFile, 'utf8'))
+  const omni = updated.importers['.'].dependencies[name]
+  assert.equal(omni.specifier, spec)
+  assert.deepEqual(updated.snapshots[`${name}@${omni.version}`], lock.snapshots[`${name}@${omni.version}`])
+  assert.deepEqual(updated.snapshots['preserve-undefined'], { marker: 'literal-undefined' })
+  assert.ok(updated.importers['.'].dependencies[ADAPTER])
+  assertInstallInputs(f.target)
+  write(join(f.target, 'cordis.patch.yml'), '# Owner deleted the adapter row.\n')
+  assert.equal((await prepare(f, f.next)).result, 'matching-image')
+  assert.equal(readFileSync(join(f.target, 'cordis.patch.yml'), 'utf8'), '# Owner deleted the adapter row.\n')
+})
+
+for (const [version, expected] of [[ADAPTER_SINCE, 'updated'], ['3.160.7', 'newer-than-image']]) {
+  test(`legacy base with a hoisted adapter ${version} reports ${expected}`, async t => {
+    const f = legacyVolume(t, 'structured', ADAPTER_SINCE)
+    const { name, spec } = addPlugin(f.target)
+    write(join(f.target, 'node_modules', ADAPTER, 'package.json'), JSON.stringify({ name: ADAPTER, version }))
+    const lockFile = join(f.target, 'pnpm-lock.yaml'), lock = parse(readFileSync(lockFile, 'utf8'))
+    lock.snapshots[`${name}@${lock.importers['.'].dependencies[name].version}`].dependencies = { [ADAPTER]: version }
+    lock.packages[`${ADAPTER}@${version}`] = { resolution: { integrity: 'sha512-TRANSITIVE' } }
+    lock.snapshots[`${ADAPTER}@${version}`] = {}
+    const oldLock = stringify(lock)
+    write(lockFile, oldLock)
+    const state = profileState({ profile: f.target, source: f.next.source, build: f.next.build, dshHome: f.dshHome })
+    assert.equal(state.matchesImage, false)
+    assert.equal(state.followsImage, false)
+    assert.equal(state.reason, expected === 'updated' ? 'update-required' : expected)
+    const result = await prepare(f, f.next, ({ profile }) => {
+      assert.equal(expected, 'updated', 'the newer adapter must prevent install')
+      cpSync(join(f.target, 'node_modules', name), join(profile, 'node_modules', name), { recursive: true })
+      successful(f.next.source)({ profile })
+    })
+    assert.equal(result.result, expected)
+    if (expected === 'updated') {
+      const updated = parse(readFileSync(lockFile, 'utf8'))
+      assert.equal(updated.importers['.'].dependencies[name].specifier, spec)
+      assert.ok(updated.importers['.'].dependencies[ADAPTER])
+      assert.equal(parse(readFileSync(join(f.target, 'cordis.patch.yml'), 'utf8'))[0].insert[0].name, ADAPTER)
+      const backup = join(f.dshHome, 'backups', readdirSync(join(f.dshHome, 'backups'))[0], 'automagik-web')
+      assert.equal(readFileSync(join(backup, 'pnpm-lock.yaml'), 'utf8'), oldLock)
+    } else {
+      assert.equal(result.plugins[ADAPTER], version)
+      assert.equal(readFileSync(lockFile, 'utf8'), oldLock)
+      assert.equal(existsSync(join(f.dshHome, 'backups')), false)
+    }
+
+    const signedVersion = '3.160.8'
+    const { store } = installSignedProfile(f.target, signedVersion)
+    write(join(store, 'state.json'), '{"version":1,"phase":"healthy"}')
+    const signed = await prepare(f, f.next, () => assert.fail('a signed-ahead profile must stay installed'))
+    const reason = expected === 'updated' ? 'signed-update-ahead' : 'newer-than-image'
+    assert.equal(signed.result, reason)
+    assert.equal(signed.reason, reason)
+    assert.equal(signed.followsImage, false)
+    assert.equal(signed.ownerManaged, false)
+    assert.equal(signed.plugins[ADAPTER], version)
+    assert.ok(LEGACY_PLUGINS.every(name => signed.plugins[name] === signedVersion))
+    const view = join(f.dir, 'data', GATE_VIEW)
+    mkdirSync(view)
+    writeProfileState(view, signed)
+    const published = readProfileState(view, f.next.build)
+    assert.equal(published.reason, reason)
+    assert.deepEqual(published.plugins, signed.plugins)
+  })
+}
+
+test('stage refuses an absolute symlinked lock and keeps the external bytes', async t => {
+  const f = legacyVolume(t, 'structured')
+  const lock = join(f.target, 'pnpm-lock.yaml'), external = join(f.dir, 'shared-lock.yaml')
+  const raw = readFileSync(lock)
+  renameSync(lock, external)
+  symlinkSync(external, lock)
+  const pkg = readFileSync(join(f.target, 'package.json'))
+  const result = await prepare(f, f.next, () => assert.fail('symlinked lock reached install'))
+  assert.equal(result.reason, 'update-rolled-back')
+  assert.equal(result.plugins[ADAPTER], null)
+  assert.equal(readlinkSync(lock), external)
+  assert.deepEqual(readFileSync(external), raw)
+  assert.deepEqual(readFileSync(join(f.target, 'package.json')), pkg)
+})
+
+test('a symlinked live profile root leaves the external installation byte-equal', async t => {
+  const f = legacyVolume(t, 'structured')
+  const external = join(f.dir, 'external-profile')
+  renameSync(f.target, external)
+  symlinkSync(external, f.target)
+  const files = ['package.json', 'pnpm-lock.yaml', SEED_MARKER, ...LEGACY_PLUGINS.flatMap(name =>
+    ['package.json', 'main.js'].map(file => join('node_modules', name, file)))]
+  const before = files.map(file => readFileSync(join(external, file)))
+  const result = await prepare(f, f.next, () => assert.fail('symlinked profile reached install'))
+  assert.equal(result.result, 'invalid-profile')
+  assert.equal(result.followsImage, false)
+  assert.equal(readlinkSync(f.target), external)
+  assert.equal(existsSync(join(f.dshHome, 'backups')), false)
+  assert.deepEqual(files.map(file => readFileSync(join(external, file))), before)
+})
+
+test('stage refuses a symlinked workspace YAML and preserves the live and external files', async t => {
+  const f = legacyVolume(t, 'structured')
+  const workspace = join(f.target, 'pnpm-workspace.yaml'), external = join(f.dir, 'shared-workspace.yaml')
+  const files = ['package.json', 'pnpm-lock.yaml', SEED_MARKER, ...LEGACY_PLUGINS.map(name =>
+    join('node_modules', name, 'package.json'))]
+  const before = files.map(file => readFileSync(join(f.target, file)))
+  renameSync(workspace, external)
+  const externalBytes = readFileSync(external)
+  symlinkSync(external, workspace)
+  let installed = false
+  const result = await prepare(f, f.next, () => { installed = true })
+  assert.equal(result.result, 'update-rolled-back')
+  assert.equal(installed, false)
+  assert.equal(readlinkSync(workspace), external)
+  assert.deepEqual(readFileSync(external), externalBytes)
+  assert.deepEqual(files.map(file => readFileSync(join(f.target, file))), before)
+})
+
+for (const location of ['.plugin-manager', '.plugin-manager/logs']) {
+  test(`stage refuses a symlinked ${location} before install and preserves its external directory`, async t => {
+    const f = legacyVolume(t, 'structured')
+    const path = join(f.target, location), external = join(f.dir, 'shared-manager')
+    const existing = join(external, 'existing.log')
+    const before = Buffer.from('externally owned\n')
+    write(existing, before)
+    mkdirSync(dirname(path), { recursive: true })
+    symlinkSync(external, path)
+    let installed = false
+
+    const result = await prepare(f, f.next, () => { installed = true })
+    assert.equal(result.result, 'update-rolled-back')
+    assert.equal(result.plugins[ADAPTER], null)
+    assert.equal(installed, false)
+    assert.equal(readlinkSync(path), external)
+    assert.deepEqual(readdirSync(external), ['existing.log'])
+    assert.deepEqual(readFileSync(existing), before)
+  })
+}
+
+for (const location of ['vendor', 'archive', 'cordis.patch.yml']) {
+  test(`stage refuses a symlinked ${location} and preserves its external target`, async t => {
+    const f = legacyVolume(t, 'structured')
+    const spec = JSON.parse(readFileSync(join(f.next.source, 'package.json'))).dependencies[ADAPTER]
+    const path = join(f.target, location === 'archive' ? spec.slice('file:'.length) : location)
+    const external = join(f.dir, 'shared')
+    if (location === 'vendor') {
+      renameSync(path, external)
+      write(join(external, 'untouched'), 'externally owned')
+    } else {
+      rmSync(path, { force: true })
+      write(external, 'externally owned')
+    }
+    symlinkSync(external, path)
+    const result = await prepare(f, f.next, () => assert.fail('symlinked input reached install'))
+    assert.equal(result.reason, 'update-rolled-back')
+    assert.equal(readlinkSync(path), external)
+    assert.equal(readFileSync(location === 'vendor' ? join(external, 'untouched') : external, 'utf8'), 'externally owned')
+  })
+}
+
+test('migration preserves owner archive identities and prunes only unreferenced old base archives', async t => {
+  const f = legacyVolume(t, 'structured')
+  const added = '@example/owner', pkgFile = join(f.target, 'package.json')
+  const pkg = JSON.parse(readFileSync(pkgFile, 'utf8'))
+  const oldBots = pkg.dependencies['@automagik/bots-dsh'], ownerSpec = `${oldBots}.owner.tgz`
+  const unowned = 'vendor/automagik-multiuser-dsh-3.160.5.tgz'
+  pkg.dependencies[added] = ownerSpec
+  write(pkgFile, `${JSON.stringify(pkg, null, 2)}\n`)
+  write(join(f.target, 'node_modules', added, 'package.json'), JSON.stringify({ name: added, version: '1.2.3' }))
+  write(join(f.target, ownerSpec.slice('file:'.length)), 'owner archive')
+  write(join(f.target, unowned), 'pre-existing adapter archive')
+  const lockFile = join(f.target, 'pnpm-lock.yaml'), lock = parse(readFileSync(lockFile, 'utf8'))
+  const ownerEntry = { specifier: ownerSpec, version: ownerSpec }
+  lock.importers['.'].dependencies[added] = ownerEntry
+  lock.packages[`${added}@${ownerSpec}`] = { resolution: { tarball: ownerSpec } }
+  const ownerText = `owner note @${oldBots}`
+  lock.snapshots[`${added}@${ownerSpec}`] = { ownerText }
+  // pnpm also accepts a relative tarball path in a resolution. This lock reference
+  // is retained as written and the old archive it uses must survive pruning.
+  const oldAcp = pkg.dependencies['@automagik/acp-dsh'].slice('file:'.length)
+  lock.packages['@example/file@1.2.3'] = { resolution: { tarball: oldAcp } }
+  write(lockFile, stringify(lock))
+  const result = await prepare(f, f.next, ({ profile }) => {
+    cpSync(join(f.target, 'node_modules', added), join(profile, 'node_modules', added), { recursive: true })
+    successful(f.next.source)({ profile })
+  })
+  assert.equal(result.result, 'updated')
+  const updated = parse(readFileSync(lockFile, 'utf8'))
+  assert.deepEqual(updated.importers['.'].dependencies[added], ownerEntry)
+  assert.deepEqual(updated.packages[`${added}@${ownerSpec}`], lock.packages[`${added}@${ownerSpec}`])
+  assert.deepEqual(updated.snapshots[`${added}@${ownerSpec}`], { ownerText })
+  assert.equal(readFileSync(join(f.target, ownerSpec.slice('file:'.length)), 'utf8'), 'owner archive')
+  assert.equal(readFileSync(join(f.target, unowned), 'utf8'), 'pre-existing adapter archive')
+  assert.equal(existsSync(join(f.target, oldAcp)), true)
+  assert.equal(existsSync(join(f.target, oldBots.slice('file:'.length))), false)
+})
+
+test('clean legacy migration writes the canonical image manifest and can be adopted again', async t => {
+  const f = legacyVolume(t, 'structured')
+  assert.equal((await prepare(f, f.next)).result, 'updated')
+  assert.deepEqual(readFileSync(join(f.target, 'package.json')), readFileSync(join(f.next.source, 'package.json')))
+  rmSync(join(f.target, SEED_MARKER))
+  const restarted = await prepare(f, f.next, () => assert.fail('matching seed should only be adopted'))
+  assert.equal(restarted.result, 'matching-image')
+  assert.equal(restarted.followsImage, true)
+  assert.equal(restarted.ownerManaged, false)
+  assert.equal(existsSync(join(f.target, SEED_MARKER)), true)
+})
+
+test('swap recovery keeps a valid previous profile when the target base is unspecified or incomplete', async t => {
+  const f = legacyVolume(t, 'structured')
+  const previous = `${f.target}.image-previous`
+  cpSync(f.target, previous, { recursive: true })
+  const savedMarker = readFileSync(join(previous, SEED_MARKER))
+  const acp = LEGACY_PLUGINS[0]
+  const incomplete = { dependencies: { [acp]: JSON.parse(savedMarker).imagePackage.dependencies[acp] } }
+  const unspecified = { dependencies: {} }
+  for (const imagePackage of [{}, { dependencies: { '@example/extra': 'file:vendor/extra.tgz' } }, incomplete, unspecified]) {
+    if (imagePackage === incomplete) for (const name of LEGACY_PLUGINS.slice(1)) {
+      rmSync(join(f.target, 'node_modules', name), { recursive: true })
+    }
+    if (imagePackage === unspecified) for (const name of PLUGINS) {
+      write(join(f.target, 'node_modules', name, 'package.json'), JSON.stringify({ name, version: '3.160.4' }))
+    }
+    const marker = JSON.stringify({ ...JSON.parse(savedMarker), imagePackage })
+    write(join(f.target, SEED_MARKER), marker)
+    await assert.rejects(prepare(f, f.next, () => assert.fail('incomplete swap reached install')), /Incomplete image profile swap/)
+    assert.equal(readFileSync(join(f.target, SEED_MARKER), 'utf8'), marker)
+    assert.deepEqual(readFileSync(join(previous, SEED_MARKER)), savedMarker)
+    assert.ok(LEGACY_PLUGINS.every(name => installedPlugins(previous)[name] === '3.160.4'))
+  }
+})
+
+test('migration refuses different bytes at the exact candidate adapter archive path and accepts equal bytes', async t => {
+  const f = legacyVolume(t, 'structured')
+  const spec = JSON.parse(readFileSync(join(f.next.source, 'package.json'))).dependencies[ADAPTER]
+  const archive = join(f.target, spec.slice('file:'.length)), ownerBytes = Buffer.from('owner archive')
+  write(archive, ownerBytes)
+  const paths = [archive, ...['package.json', 'pnpm-lock.yaml', SEED_MARKER].map(file => join(f.target, file))]
+  const before = paths.map(path => readFileSync(path))
+  let installed = false
+  const result = await prepare(f, f.next, args => { installed = true; successful(f.next.source)(args) })
+  assert.equal(result.result, 'update-rolled-back')
+  assert.equal(installed, false)
+  assert.equal(result.plugins[ADAPTER], null)
+  assert.deepEqual(paths.map(path => readFileSync(path)), before)
+
+  const imageBytes = packPlugin(join(f.next.source, 'node_modules', ADAPTER))
+  write(archive, imageBytes)
+  assert.equal((await prepare(f, f.next)).result, 'updated')
+  assert.deepEqual(readFileSync(archive), imageBytes)
+  assertInstallInputs(f.target)
+})
+
+test('a late owner setting edit cancels cutover and survives the retry', async t => {
+  const f = legacyVolume(t, 'structured')
+  const file = join(f.target, 'follow-smoke-owner-setting')
+  write(file, 'old setting')
+  const result = await prepare(f, f.next, args => {
+    successful(f.next.source)(args)
+    write(file, 'late owner setting')
+  })
+  assert.equal(result.reason, 'update-rolled-back')
+  assert.equal(result.plugins[ADAPTER], null)
+  assert.equal(readFileSync(file, 'utf8'), 'late owner setting')
+  assert.equal((await prepare(f, f.next)).result, 'updated')
+  assert.equal(readFileSync(file, 'utf8'), 'late owner setting')
+})
+
+for (const editRoot of [false, true]) {
+  const name = editRoot ? 'a permission-only profile directory edit' : 'a permission-only owner edit'
+  test(`${name} cancels cutover and survives the retry`, async t => {
+    const f = legacyVolume(t, 'structured')
+    const file = join(f.target, 'owner-setting')
+    write(file, 'owner setting')
+    const path = editRoot ? f.target : file
+    const mode = editRoot ? 0o700 : 0o600
+    chmodSync(path, editRoot ? 0o755 : 0o644)
+    const before = statSync(path)
+    const result = await prepare(f, f.next, args => {
+      successful(f.next.source)(args)
+      chmodSync(path, mode)
+    })
+    const after = statSync(path)
+    assert.equal(result.result, 'update-rolled-back')
+    assert.equal(result.plugins[ADAPTER], null)
+    assert.equal(after.size, before.size)
+    assert.equal(after.mtimeMs, before.mtimeMs)
+    assert.equal(after.mode & 0o7777, mode)
+    assert.equal((await prepare(f, f.next)).result, 'updated')
+    assert.equal(statSync(path).mode & 0o7777, mode)
+    assert.equal(readFileSync(file, 'utf8'), 'owner setting')
+  })
+}
+
+test('owner-installed same-version adapter on a legacy base keeps its bytes, lock and vendor files', async t => {
+  const f = legacyVolume(t, 'structured')
+  const pkgFile = join(f.target, 'package.json'), pkg = JSON.parse(readFileSync(pkgFile))
+  pkg.dependencies[ADAPTER] = 'file:vendor/owner-adapter-undefined.tgz'
+  write(pkgFile, JSON.stringify(pkg, null, 2) + '\n')
+  const file = join(f.target, 'node_modules', ADAPTER, 'package.json')
+  write(file, JSON.stringify({ name: ADAPTER, version: ADAPTER_SINCE, description: 'owner bytes' }))
+  const archive = join(f.target, pkg.dependencies[ADAPTER].slice('file:'.length))
+  write(archive, 'custom adapter')
+  addPlugin(f.target)
+  const paths = [pkgFile, file, archive, join(f.target, 'pnpm-lock.yaml')]
+  const bytes = paths.map(path => readFileSync(path))
+  assert.equal((await prepare(f, f.next, () => assert.fail('owner adapter replaced'))).result, 'owner-managed')
+  assert.deepEqual(paths.map(path => readFileSync(path)), bytes)
+  assert.equal(existsSync(join(f.dshHome, 'backups')), false)
+})
+
+test('mergeImageRows handles empty, comment-only, empty sequence, pre-existing and same-id foreign inserts', t => {
+  const f = legacyVolume(t, 'structured')
+  const file = join(f.target, 'cordis.patch.yml')
+  for (const before of ['', '# Owner comment\n', '[]\n', disabledAdapter]) {
+    write(file, before)
+    mergeImageRows(f.next.source, f.target)
+    const after = readFileSync(file, 'utf8')
+    assert.equal(parse(after)[0].insert[0].name, ADAPTER)
+    if (before === disabledAdapter) {
+      assert.ok(after.includes('# Owner keeps this disabled.\n'))
+      assert.ok(after.endsWith('- id: multiuser-dsh\n  disabled: true # keep\n'))
+    } else if (before.startsWith('#')) assert.ok(after.includes(before))
+  }
+  for (const before of [adapterPatch, adapterPatch.replace(ADAPTER, '@owner/adapter')]) {
+    write(file, before)
+    mergeImageRows(f.next.source, f.target)
+    assert.equal(readFileSync(file, 'utf8'), before)
+  }
+})
+
+test('malformed owner patch keeps the legacy live profile intact and reports rollback', async t => {
+  const f = legacyVolume(t, 'structured')
+  const files = ['package.json', 'cordis.patch.yml', 'pnpm-lock.yaml', SEED_MARKER]
+  write(join(f.target, 'cordis.patch.yml'), 'owner settings: [\n')
+  const bytes = files.map(name => readFileSync(join(f.target, name)))
+  let installed = false
+  const result = await prepare(f, f.next, () => { installed = true })
+  assert.equal(installed, false)
+  assert.equal(result.result, 'update-rolled-back')
+  assert.equal(result.reason, 'update-rolled-back')
+  assert.equal(result.plugins[ADAPTER], null)
+  assert.deepEqual(files.map(name => readFileSync(join(f.target, name))), bytes)
+})
+
+for (const name of ['cordis.patch.yml', 'pnpm-lock.yaml']) {
+  test(`a late ${name} edit cancels adapter cutover and survives the retry`, async t => {
+    const f = legacyVolume(t, 'structured')
+    const path = join(f.target, name)
+    // The legacy seed has an empty sequence; use a comment-only profile before inserting.
+    if (name === 'cordis.patch.yml') write(path, '# Legacy patch\n')
+    const updated = readFileSync(path, 'utf8') + '# Late owner change\n'
+    const result = await prepare(f, f.next, args => {
+      successful(f.next.source)(args)
+      write(path, updated)
+    })
+    assert.equal(result.reason, 'update-rolled-back')
+    assert.equal(result.plugins[ADAPTER], null)
+    assert.equal(readFileSync(path, 'utf8'), updated)
+    assert.equal((await prepare(f, f.next)).result, 'updated')
+    if (name === 'cordis.patch.yml') assert.ok(readFileSync(path, 'utf8').includes(updated))
+  })
+}

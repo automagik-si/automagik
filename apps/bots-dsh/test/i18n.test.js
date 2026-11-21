@@ -190,3 +190,29 @@ test('rfc0039 [P] I1 Chinese withdrawn and stale texts', async () => {
     off()
   }
 })
+
+test('rfc0039 D3b [P] I2 Chinese and Brazilian Portuguese group withdrawn text', async () => {
+  const { withdrawnText } = await import('../src/client/approvals.js')
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(withdrawnText?.('group'), '这一步已撤回：它的群会话结束了', 'D3B-I2')
+    assert.equal(withdrawnText?.('bot'), '')
+    assert.equal(withdrawnText?.('part'), '')
+  } finally { off() }
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(pt['This step was withdrawn: its group Session ended'], 'Esta etapa foi retirada: a sessão do grupo terminou')
+})
+
+test('rollback messages and every failed check are translated with the same parameters', () => {
+  const about = readFileSync(new URL('../src/client/about.js', import.meta.url), 'utf8')
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
+  const rollback = about.slice(about.indexOf('function failedHealthCheck'), about.indexOf('const failedCheck'))
+  const params = text => [...text.matchAll(/\{\w+\}/g)].map(match => match[0]).sort()
+  const keys = [...rollback.matchAll(/\bt\('([^']+)'/g)].map(match => match[1]).concat('Failed check: {check}')
+  for (const key of keys) {
+    assert.notEqual(DICTIONARY.zh[key], key)
+    assert.notEqual(pt[key], key)
+    assert.deepEqual(params(DICTIONARY.zh[key]), params(key))
+    assert.deepEqual(params(pt[key]), params(key))
+  }
+})

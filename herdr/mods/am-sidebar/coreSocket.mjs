@@ -1,7 +1,7 @@
 // #1497: `hc server status` (and any hc client call) auto-starts a core when none
 // answers. The pack's core-id lookup talks JSON-RPC straight to the socket and
 // never runs a program.
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, relative } from "node:path";
 import { createConnection } from "node:net";
@@ -47,8 +47,45 @@ export function coreSockets(env = process.env, { platform = process.platform, ui
   return allowed(paths);
 }
 
+/** All this user's core candidates, including sessions other than the caller's. */
+export function userCoreSockets(env = process.env, { platform = process.platform, uid = process.getuid?.(), home = env.HOME || homedir() } = {}) {
+  if (platform === "win32") return [];
+  const allowed = (path) => isAbsolute(path) && inTestRoots(path, env);
+  const list = (dir) => {
+    if (!allowed(dir)) return [];
+    try { return readdirSync(dir, { withFileTypes: true }); }
+    catch (error) { if (error?.code === "ENOENT") return []; throw error; }
+  };
+  const paths = new Set(coreSockets(env, { platform, uid, home }));
+  for (const path of [env.AUTOMAGIK_HERDR_CORE_SOCKET, env.HC_SOCKET]) {
+    if (path && allowed(path)) paths.add(path);
+  }
+  const runtime = isAbsolute(env.XDG_RUNTIME_DIR || "") ? env.XDG_RUNTIME_DIR :
+    typeof uid === "number" ? `/run/user/${uid}` : null;
+  if (runtime) {
+    const dir = join(runtime, "herdr-core");
+    for (const entry of list(dir)) {
+      if (entry.name.endsWith(".sock")) paths.add(join(dir, entry.name));
+    }
+  }
+  const state = isAbsolute(env.XDG_STATE_HOME || "") ? env.XDG_STATE_HOME : join(home, ".local/state");
+  const dir = join(state, "herdr-core");
+  for (const session of list(dir)) {
+    if (!session.isDirectory()) continue;
+    const lock = join(dir, session.name, "core.lock");
+    if (!allowed(lock)) continue;
+    try {
+      if (!statSync(lock).isFile()) throw new Error();
+      const path = readFileSync(lock, "utf8").split("\n", 1)[0].trim();
+      if (!isAbsolute(path) || !path.endsWith(".sock")) throw new Error();
+      if (allowed(path)) paths.add(path);
+    } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+  return [...paths];
+}
+
 /** One overall deadline; only a failed connection permits trying another candidate. */
-export async function coreStatus(env = process.env, { timeoutMs = 3000, sockets } = {}) {
+export async function coreStatus(env = process.env, { timeoutMs = 3000, sockets, strict = false } = {}) {
   const paths = (sockets ?? coreSockets(env)).filter((p) => isAbsolute(p) && inTestRoots(p, env));
   const until = Date.now() + timeoutMs;
   const tried = [];
@@ -86,7 +123,8 @@ export async function coreStatus(env = process.env, { timeoutMs = 3000, sockets 
           finish({ status: reply.result, socket: path });
         });
         socket.once("error", (e) => {
-          if (!connected && ["ENOENT", "ECONNREFUSED", "ENOTSOCK", "EACCES"].includes(e.code)) return finish(null);
+          if (!connected && (["ENOENT", "ECONNREFUSED"].includes(e.code)
+            || !strict && ["ENOTSOCK", "EACCES"].includes(e.code))) return finish(null);
           error(e.message);
         });
         socket.once("close", () => error("closed before a reply line"));

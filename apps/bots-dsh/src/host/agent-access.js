@@ -6,6 +6,7 @@ import { appendFile, mkdir, open, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { replaceFile } from './files.js'
 import { createAgentRedactor } from './agent-redaction.js'
+import { multiuserMode } from './multiuser.js'
 
 export const MCP_PATH = '/api/omni-mcp'
 const VERSION = '2025-11-25'
@@ -114,7 +115,7 @@ export function agentBindAddress(value = '127.0.0.1') {
   } catch { throw invalid() }
 }
 
-export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn => fn() } = {}) {
+export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn => fn(), multiuser = () => multiuserMode(), enterRequestOwnership } = {}) {
   const tokenPath = () => join(rt.home, 'agent-tokens.json')
   const auditPath = () => join(rt.home, 'agent-audit.jsonl')
   let records
@@ -330,36 +331,40 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
         { type: 'text', text: JSON.stringify(value) },
       ] })
     }
-    return transaction(async () => {
-      const current = await authenticate(candidate)
-      if (!current || current.revokedAt !== undefined) return refuse(401, 'Invalid agent token')
-      await rt.refresh()
-      const before = snapshot()
-      // An intent persists before side effects. Audit failure therefore fails closed.
-      await audit({ ...entry, outcome: 'started' })
-      const result = await handle(definition.endpoint, clean(args), request.signal)
-      const after = snapshot()
-      const delta = changes(before, after)
-      if (args.id === undefined && definition.endpoint === 'create-bot') {
-        entry.target = result.ok ? result.value.id : null
-      }
-      if (args.id === undefined && definition.endpoint === 'create-room') {
-        entry.target = result.ok ? result.value.id : null
-      }
-      await audit({ ...entry, outcome: result.ok ? 'allowed' : 'refused', changes: delta })
-      // Mutation handlers may answer a full UI view. Never send that view over MCP.
-      const target = args.id ?? entry.target
-      const value = clean(result.ok
-        ? definition.endpoint.endsWith('bot') || definition.endpoint === 'set-main'
-          ? after.bots.find(bot => bot.id === target) ?? null
-          : after.groups.find(group => group.id === target) ?? null
-        : { error: 'Action refused', code: result.error.code })
-      return reply({ isError: !result.ok, content: [
-        { type: 'text', text: JSON.stringify(value) },
-      ] })
-    })
+    const leave = enterRequestOwnership?.(definition.endpoint, args)
+    try {
+      return await transaction(async () => {
+        const current = await authenticate(candidate)
+        if (!current || current.revokedAt !== undefined) return refuse(401, 'Invalid agent token')
+        await rt.refresh()
+        const before = snapshot()
+        // An intent persists before side effects. Audit failure therefore fails closed.
+        await audit({ ...entry, outcome: 'started' })
+        const result = await handle(definition.endpoint, clean(args), request.signal)
+        const after = snapshot()
+        const delta = changes(before, after)
+        if (args.id === undefined && definition.endpoint === 'create-bot') {
+          entry.target = result.ok ? result.value.id : null
+        }
+        if (args.id === undefined && definition.endpoint === 'create-room') {
+          entry.target = result.ok ? result.value.id : null
+        }
+        await audit({ ...entry, outcome: result.ok ? 'allowed' : 'refused', changes: delta })
+        // Mutation handlers may answer a full UI view. Never send that view over MCP.
+        const target = args.id ?? entry.target
+        const value = clean(result.ok
+          ? definition.endpoint.endsWith('bot') || definition.endpoint === 'set-main'
+            ? after.bots.find(bot => bot.id === target) ?? null
+            : after.groups.find(group => group.id === target) ?? null
+          : { error: 'Action refused', code: result.error.code })
+        return reply({ isError: !result.ok, content: [
+          { type: 'text', text: JSON.stringify(value) },
+        ] })
+      })
+    } finally { leave?.() }
   }
   const fetch = async request => {
+    if (multiuser()) return json(403, { error: 'Agent access is off in multiuser mode' })
     const context = {}
     try { return await processRequest(request, context) }
     catch {

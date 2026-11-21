@@ -1,6 +1,7 @@
 // Claude logins signed in on this computer (#453, am-quota/docs/local-logins.md): which one a
-// new Claude launch uses. The record is `<app home>/claude-logins.json`, written only by the
-// Accounts panel; the CLI reads it at each local Claude launch and never writes it. Login A
+// new Claude launch uses. The record is `<app home>/claude-logins.json`, edited through
+// `am accounts set-login` where available. Apply calls it on linked machines. Launches read the
+// record on this computer and for managed linked projects. Login A
 // (the default `~/.claude`) is chosen by launching with CLAUDE_CONFIG_DIR unset, another login
 // by setting it to that login's folder. Nothing here reads, copies or writes a credential.
 // Pure: files are read through an injected `io`, so `node --test` runs it. Apache-2.0.

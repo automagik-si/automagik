@@ -17,6 +17,10 @@ import { hostText, t } from './i18n.js'
 import { rolesOn } from '../shared/roles.js'
 import { rolePackageResult, useRolePackageAction } from './bot-settings.js'
 import { RoleShopCard, RoleShopSection, shopRoles } from './role-shop.js'
+import { officialInstall, useEntries } from './extend.js'
+
+const NO_SUBSCRIBE = () => () => {}
+const NO_VERSION = () => 0
 
 const CATEGORIES = [['dev', 'Developer'], ['docs', 'Docs & files'], ['work', 'Work'], ['design', 'Design'], ['data', 'Data'], ['commerce', 'Commerce'], ['search', 'Search']]
 const PREVIEW = 6
@@ -136,13 +140,13 @@ function ConnectedSummary({ apps, count, onClick }) {
 
 const ACP_ROUTE = Object.freeze({ claude: 'acp-claude', codex: 'acp-codex' })
 
-function officialBot(app, roster) {
+function officialBot(app, roster, installer) {
   const bots = roster?.bots
   if (!Array.isArray(bots)) return undefined
   const own = bots.find(bot => bot.kind === app.id)
   if (own !== undefined) return own
-  // The first Main Bot is Omni, whether or not its stored Bot carries the kind.
-  return app.id === 'omni' ? roster?.byId?.[roster.mainBotId] : undefined
+  // The Main Bot stands in for Omni unless the installer has a pending Omni row.
+  if (app.id === 'omni' && !installer?.pending?.('omni')) return roster?.byId?.[roster.mainBotId]
 }
 
 function officialAcp(app, roster) {
@@ -152,11 +156,11 @@ function officialAcp(app, roster) {
   return models.filter(model => (model.provider ?? String(model.ref ?? '').split('/')[0]) === provider)
 }
 
-function officialState(app, roster) {
+function officialState(app, roster, installer) {
   if (roster?.ready === false) return { state: 'unknown' }
   if (app.kind === 'agent') {
     if (!Array.isArray(roster?.bots)) return { state: 'unknown' }
-    const bot = officialBot(app, roster)
+    const bot = officialBot(app, roster, installer)
     return bot === undefined ? { state: 'missing' } : { state: 'installed', bot }
   }
   if (app.kind === 'acp') {
@@ -175,10 +179,9 @@ function officialStateText(state) {
   return t('Unknown')
 }
 
-// The one action the page can really take: install Omni or Genie through the team step, open the
-// Bot that is here, or open the ACP sign-in the app already uses (its row in a Bot's chat). A
-// missing Claude or Codex has no install flow in the app yet, so it gets no button.
-function officialAction(app, resolved, roster, actions) {
+// Omni and Genie install in place through the welcome's officialInstall entry, using the
+// team step's own power-on. Without the entry, the team step opens.
+function officialAction(app, resolved, roster, actions, installer, info) {
   if (resolved.state === 'unknown') return null
   if (app.kind === 'agent') {
     if (resolved.state === 'installed') {
@@ -192,6 +195,11 @@ function officialAction(app, resolved, roster, actions) {
           else actions.openSettings?.('bots', bot.id)
         },
       }
+    }
+    if (info !== null) {
+      const label = info.action === 'install' ? t('Install') : info.label
+      if (label === null) return null
+      return { label, done: false, run: () => installer.act(app.id, { roster, actions }) }
     }
     if (typeof actions.openHarnessOnboarding !== 'function') return null
     return {
@@ -246,17 +254,22 @@ function OfficialButton({ action }) {
   }, action.done ? h(CheckIcon) : null, action.label)
 }
 
-function OfficialTile({ app, resolved, action, expanded, onToggle }) {
-  return h('div', { className: 'bt-app', 'data-state': resolved.state === 'installed' ? 'ready' : 'off' },
+function OfficialTile({ app, resolved, info, action, expanded, onToggle }) {
+  const text = info?.text ?? officialStateText(resolved.state)
+  return h('div', {
+    className: 'bt-app', 'data-state': resolved.state === 'installed' ? 'ready' : 'off',
+    'data-error': info?.alert ? '' : undefined,
+  },
     h('button', { type: 'button', className: 'bt-app-main', 'aria-expanded': expanded, onClick: onToggle },
       h('span', { className: 'bt-app-icon' }, h(OfficialMark, { app })),
       h('span', { className: 'bt-app-text' },
         h('span', { className: 'bt-app-name' }, app.name, h('span', { className: 'bt-tag' }, t('Official'))),
-        h('span', { className: 'bt-app-status' }, officialStateText(resolved.state)))),
+        h('span', { className: 'bt-app-status' }, text))),
     h(OfficialButton, { action }))
 }
 
-function OfficialDetail({ app, resolved, action }) {
+function OfficialDetail({ app, resolved, info, action }) {
+  const text = info?.text ?? officialStateText(resolved.state)
   return h('div', { className: 'bt-set-card bt-connectors-card bt-app-detail bt-app-expanded' },
     h('div', { className: 'bt-connector', 'data-state': resolved.state === 'installed' ? 'ready' : 'off' },
       h('div', { className: 'bt-connector-head' },
@@ -268,14 +281,25 @@ function OfficialDetail({ app, resolved, action }) {
       h('div', { className: 'bt-set-row' },
         h('span', { className: 'bt-set-copy' },
           h('span', { className: 'bt-bs-label' }, t('State')),
-          h('span', { className: 'bt-set-hint' }, officialStateText(resolved.state))))))
+          h('span', { className: 'bt-set-hint' }, text))),
+      info?.alert
+        ? h('div', { className: 'bt-connector-error', role: 'alert' }, info.alert) : null))
 }
 
 function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
+  const installer = useEntries(officialInstall).findLast(e => typeof e.row === 'function') ?? null
+  const version = installer?.version ?? NO_VERSION
+  useSyncExternalStore(installer?.subscribe ?? NO_SUBSCRIBE, version, version)
+  useEffect(() => {
+    if (installer) void installer.refresh?.()?.catch?.(() => {})
+  }, [installer])
   if (apps.length === 0) return null
   const rows = apps.map((app) => {
-    const resolved = officialState(app, roster)
-    return { app, resolved, action: officialAction(app, resolved, roster, actions) }
+    const resolved = officialState(app, roster, installer)
+    const info = app.kind === 'agent' && resolved.state === 'missing'
+      && installer?.kinds?.includes(app.id) ? installer.row(app.id, { roster, actions }) : null
+    const action = officialAction(app, resolved, roster, actions, installer, info)
+    return { app, resolved, info, action }
   })
   const open = rows.find(row => row.app.id === expanded)
   return h('section', { className: 'bt-app-section' },
@@ -283,10 +307,10 @@ function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
       h('h3', null, t('Automagik official')),
       h('span', { className: 'bt-app-status' }, t('Included with Automagik'))),
     h('div', { className: 'bt-app-grid' }, rows.map(row => h(OfficialTile, {
-      key: row.app.id, app: row.app, resolved: row.resolved, action: row.action,
+      key: row.app.id, app: row.app, resolved: row.resolved, info: row.info, action: row.action,
       expanded: row.app.id === expanded, onToggle: () => onToggle(row.app.id),
     }))),
-    open === undefined ? null : h(OfficialDetail, { app: open.app, resolved: open.resolved, action: open.action }))
+    open === undefined ? null : h(OfficialDetail, open))
 }
 
 function AppsPage({ roster, actions }) {

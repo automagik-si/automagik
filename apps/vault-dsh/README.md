@@ -45,8 +45,7 @@ older host can read the mapping file. Delivery 2b covers shell delivery.
 Install a stable Vault CLI 2.0, 2.1 or 2.2 release. In local Settings › Secrets › Vault,
 select **HashiCorp Vault** and enter the server address, token and optional namespace.
 Use HTTPS. HTTP is available for loopback at `127.0.0.1`, `[::1]` or `localhost`.
-Automagik Cloud does not support this provider. Other OS keychain providers are
-deferred.
+Automagik Cloud does not support this provider.
 
 Enter a KV v1 or v2 mount to browse its folders and choose a field. The plugin checks
 the exact mount before each item read or listing. The token needs access to that
@@ -165,10 +164,44 @@ Before rolling back, remove Bitwarden Secrets Manager mappings and clear the sav
 while this version is still installed. Older Bot team versions reject the mapping file
 when it contains a Bitwarden Secrets Manager row.
 
+## macOS Keychain
+
+In local Settings › Secrets › Vault, choose **macOS Keychain** and select **Unlock**.
+This opens the plugin gate without a password. The gate closes after the configured idle
+time, on Lock, when switching providers, when disabling the plugin or when quitting.
+Only a successful read renews the idle time. You can approve from Pocket, and you can
+open the gate only in local Settings. This provider is available on macOS outside
+Automagik Cloud.
+
+Use **Add a vault key**, enter the exact **Service** and **Account**, and select **Find**.
+The picker checks one generic-password item in your login keychain
+(`~/Library/Keychains/login.keychain-db` in your system account's home). The connection
+label is `login-keychain`. Recreating an item with the same service and account in the
+same keychain counts as a rotation. Apple Passwords and iCloud Keychain are outside
+this integration.
+
+The plugin gate is the vault lock for approvals. While the gate is open, **Allow**
+records approval and issues one grant even if the macOS keychain is locked. If macOS
+refuses a later read, the adapter refuses it too. Part 2b, which would deliver the value
+to the approved shell, is held. macOS may ask on this Mac. Choose **Allow**, not
+**Always Allow**. Always Allow would let any `security` call, including a Bot's shell,
+read the item without asking. A read is refused at the 30-second deadline if nobody answers.
+
+The adapter calls the system `/usr/bin/security` with both path arguments bound to the
+login keychain. It checks the reported keychain before releasing any value. The tool
+has already attempted the read when the adapter checks the header. A rejected header
+prevents delivery. The adapter drops stdout after checking its first line and drops
+stderr after parsing the password record. Child output is capped at 4 MiB. The strings
+live in plugin memory until garbage collection.
+
+A Windows Credential Manager provider for vault items is held pending a decision on
+how to call the stock `CredReadW` API. The built-in `cmdkey` tool cannot return credential values.
+
 The host-only `secretSources` v1 service provides `status`, `unlock`, `lock`, `read`,
 `listItems` and `prepareQuit`. The `providers` property lists supported providers.
 HashiCorp Vault also exposes `listFields` for the host picker. Secret Service exposes
-`resolveHandle` and `itemDetail` for the host and `providerBinding` for gate generation checks.
+`resolveHandle` and `itemDetail` for the host. Secret Service and macOS Keychain expose
+`providerBinding` for gate generation checks.
 `status()` defaults to Bitwarden, and `status({ provider })` checks the named provider.
 Run `bun run harness` to install the pinned test harness and `bun run test` to run the
 fake-CLI tests.

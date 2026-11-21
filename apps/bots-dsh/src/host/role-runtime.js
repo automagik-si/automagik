@@ -3,6 +3,7 @@ import { packageAttachment, rolesOn, sameRolePin } from '../shared/roles.js'
 import { routeOf } from '../shared/routes.js'
 import { createRoleSettings } from './role-settings.js'
 import { createRoleVoice } from './role-voice.js'
+import { NO_BOT_RUNNER_REASON } from './no-runner.js'
 import { refusal } from './refusal.js'
 import { output } from './tools.js'
 
@@ -28,6 +29,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   const attachments = new Map()
   const turnPrompts = new Map()
   let disposed = false
+  let warnedRunner = false
 
   const owner = sessionId => rt.roomOwners?.has(sessionId) || rt.taskOwners?.has(sessionId) ? undefined
     : rt.chatOwners?.get(sessionId) ?? rt.groupOwners?.get(sessionId)?.botId
@@ -123,10 +125,15 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       }
       const details = await proof
       if (!current(held.bot.id, held)) return
+      if (rt.botRunnerRequired !== undefined) {
+        held.manifest = details.manifest
+        return
+      }
       const runtime = await stage(details, record.sha256)
       if (!runtime) return
       if (!current(held.bot.id, held)) { runtime.dispose(); return }
       held.runtime = runtime
+      held.manifest = runtime.manifest
       rt.syncScopedTools?.()
     } catch (error) {
       if (current(held.bot.id, held)) {
@@ -158,6 +165,10 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       if (!pin) continue
       const record = packages.recordOf(pin.id)
       if (!record || record.version !== pin.version || packages.damaged(record)) continue
+      if (rt.botRunnerRequired !== undefined && !warnedRunner) {
+        warnedRunner = true
+        rt.warn('ds-bot: Bot role modules skipped: %s', NO_BOT_RUNNER_REASON)
+      }
       const held = { pin, record, bot }
       attachments.set(id, held)
       held.ready = load(held)
@@ -274,8 +285,8 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
 
   function requireAttachment(id, pin) {
     if (!ownBot(id)) throw refusal('No such Bot')
-    const held = active(id)
-    if (!held || !sameRolePin(held.pin, pin)) throw refusal(inactive)
+    const held = attachments.get(id)
+    if (!held?.manifest || !current(id, held) || !sameRolePin(held.pin, pin)) throw refusal(inactive)
     return held
   }
 
@@ -295,12 +306,12 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     },
     ready: id => id === undefined ? Promise.all([...attachments.values()].map(held => held.ready)) : attachments.get(id)?.ready,
     view: () => Object.fromEntries([...attachments].flatMap(([id, held]) => {
-      if (!current(id, held) || !held.runtime) return []
+      if (!current(id, held) || !held.manifest) return []
       const ref = held.bot.appliedModel ?? held.bot.model
       return [[id, {
-        pin: held.pin, settings: held.runtime.manifest.settings,
-        capabilities: held.runtime.manifest.capabilities,
-        tools: held.runtime.tools.map(tool => tool.definition.name), acp: acp(ref) && !reaches(ref),
+        pin: held.pin, settings: held.manifest.settings,
+        capabilities: held.manifest.capabilities,
+        tools: held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp: acp(ref) && !reaches(ref),
       }]]
     })),
     dispose() {

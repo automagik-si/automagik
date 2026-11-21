@@ -22,6 +22,8 @@
 // The team's own window-only endpoints (the seat chat's reads, the Code tree, automations)
 // register through `windowEndpoint`, which is not on `rt`: only those get the route's proof of
 // the desktop window (desktop-window.js). An endpoint added through `rt.hooks` never does.
+import { isPromise } from 'node:util/types'
+
 const registrars = new WeakMap()
 const windowEntries = new WeakSet()
 export const isWindowEndpoint = entry => typeof entry === 'object' && entry !== null && windowEntries.has(entry)
@@ -36,6 +38,7 @@ export function install(rt) {
   const views = []
   const lives = []
   const sessionOwners = []
+  let sessionOwnersRevision = 0
   const senders = []
   const rules = []
   const botModels = new Map()
@@ -56,6 +59,25 @@ export function install(rt) {
       return {}
     }
   }))
+  const readSessionOwners = sessionId => {
+    const revision = sessionOwnersRevision
+    const owners = []
+    for (const fn of sessionOwners.slice()) {
+      try {
+        const owner = fn(sessionId)
+        if (owner === undefined) continue
+        if (isPromise(owner)) {
+          void owner.catch(() => {})
+          return undefined
+        }
+        if (owner === null || typeof owner !== 'object' || Array.isArray(owner)) return undefined
+        const { botId, label } = owner
+        if (typeof botId !== 'string' || (label !== undefined && typeof label !== 'string')) return undefined
+        owners.push({ botId, label })
+      } catch { return undefined }
+    }
+    return sessionOwnersRevision === revision ? owners : undefined
+  }
 
   // Frozen, so the entry another plugin gets from `endpointOf` cannot be given a new function.
   const register = (name, fn, read, window) => {
@@ -69,7 +91,11 @@ export function install(rt) {
   rt.hooks = {
     endpoint: (name, fn, { read = false } = {}) => register(name, fn, read, false),
     view: fn => add(views, fn),
-    sessionOwner: fn => add(sessionOwners, fn),
+    sessionOwner: fn => {
+      const dispose = add(sessionOwners, fn)
+      sessionOwnersRevision += 1
+      return () => { dispose(); sessionOwnersRevision += 1 }
+    },
     live: fn => add(lives, fn),
     mainRules(fn, { order = 0 } = {}) {
       const dispose = add(rules, { fn, order })
@@ -97,6 +123,7 @@ export function install(rt) {
   // What channel.js and prompt.js read.
   rt.extended = {
     endpointOf: name => (endpoints.has(name) ? endpoints.get(name) : undefined),
+    endpointNames: () => [...endpoints.keys()],
     sessionOwner(sessionId) {
       for (const fn of sessionOwners) {
         try {
@@ -107,6 +134,25 @@ export function install(rt) {
         }
       }
       return undefined
+    },
+    // A drop can certify exclusivity only when the registered hooks read cleanly.
+    sessionOwnerRead(sessionId) {
+      const owners = readSessionOwners(sessionId)
+      return owners === undefined ? 'unreadable' : owners.length === 0 ? 'free' : 'owned'
+    },
+    // The execution boundary needs a stable identity or a verified absence.
+    sessionBotOwner(sessionId) {
+      if (sessionOwners.length === 0) return null
+      const owners = readSessionOwners(sessionId)
+      if (owners === undefined) return undefined
+      const again = readSessionOwners(sessionId)
+      if (again?.length !== owners.length
+        || owners.some(({ botId, label }, i) => again[i].botId !== botId || again[i].label !== label)
+        || rt.teamCurrent?.() !== true) return undefined
+      if (owners.length === 0) return null
+      const { botId } = owners[0]
+      if (owners.some(owner => owner.botId !== botId)) return undefined
+      return rt.botOf?.(botId) === undefined ? undefined : botId
     },
     view: () => merged(views),
     live: () => merged(lives),

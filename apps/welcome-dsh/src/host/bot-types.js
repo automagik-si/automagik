@@ -18,26 +18,32 @@ import { RELEASES, checkedTarballs } from './release-lane.js'
 
 const PKG = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 
-// The Omni release whose channels and canvases this welcome installs: the same one the
-// Automagik desktop app carries (apps/desktop/omni.json; follow-omni.yml moves both).
+// The desktop app and the welcome share the same Omni pin. follow-omni.yml keeps it at
+// the newest Omni release on GitHub; the welcome builds its server from GitHub when npm lacks it.
 export const OMNI_RELEASE = Object.freeze({ ...PKG.automagik.omni })
 
 // The Omni plugins, in install order: each one after the first needs the ones before it.
 // The Bot team is Automagik's, beside this plugin (`dir` in this repository, this version);
 // it was @automagik/omni-dsh, and a DSH that has it under that name has the team. The
-// channels and canvases are Omni's, in its repository at OMNI_RELEASE.
+// channels and canvases come from Omni's repository.
 export const OMNI_PLUGINS = Object.freeze([
   { name: '@automagik/bots-dsh', formerly: '@automagik/omni-dsh', dir: 'bots-dsh', from: 'automagik', title: 'Bot team', what: 'Bots, their chats, memory and settings' },
   { name: '@automagik/omni-channels-dsh', dir: 'omni-channels-dsh', from: 'omni', title: 'Omni channels', what: 'Your channels and the chats on them' },
   { name: '@automagik/omni-canvas-dsh', dir: 'omni-canvas-dsh', from: 'omni', title: 'Omni canvases', what: 'Live views drawn in the chat' },
 ])
 
-// The Genie plugin this welcome installs: the genie repository at a pinned commit, by hand
-// in package.json (automagik.genie). It makes the Genie Bot itself, the first time it runs.
+// Genie's fallback pin (automagik.genie) also sets the minimum version taken from its lane.
+// The plugin makes the Genie Bot itself, the first time it runs.
 export const GENIE_RELEASE = Object.freeze({ ...PKG.automagik.genie })
 export const GENIE_PLUGIN = Object.freeze({ name: '@automagik/genie-dsh', title: 'Genie', what: 'Genie, and a Task for each wish' })
 export const GENIE_KIND = 'genie'
 export const genieSpec = (genie = GENIE_RELEASE) => `git+${genie.repository.replace(/\.git$/, '')}.git#${genie.commit}&path:/${genie.path}`
+
+const pinChoice = ({ version, commit }, plugins) => ({
+  from: 'pin', release: version, commit, plugins: plugins.map(({ name }) => ({ name, version })),
+})
+export const OMNI_PIN_CHOICE = pinChoice(OMNI_RELEASE, OMNI_PLUGINS.slice(1))
+export const GENIE_PIN_CHOICE = pinChoice(GENIE_RELEASE, [GENIE_PLUGIN])
 
 // The Unfold Bot type: its plugin, which makes the Unfold Bot, and its defaults, in install
 // order after the Bot team. Copied from apps/unfold-bot-dsh src/host/unfold.js (UNFOLD_PLUGINS),
@@ -162,6 +168,21 @@ export function installTargetOf(plugin, ownSource, version = PKG.version, omni =
 // A plugin's row in the profile: under its name, else under its former one.
 const rowOf = (rows, plugin) => rows?.find(bundle => bundle.name === plugin.name)
   ?? (plugin.formerly ? rows?.find(bundle => bundle.name === plugin.formerly && bundle.availability !== 'missing') : undefined)
+const present = row => row !== undefined && row.availability !== 'missing'
+const missing = (rows, plugin) => !present(rowOf(rows, plugin))
+
+export function teamVersion(rows) {
+  const [team] = OMNI_PLUGINS
+  const row = rows.find(bundle => bundle.name === team.name && present(bundle))
+  if (row) return row.version
+  return rows.some(bundle => bundle.name === team.formerly && present(bundle)) ? null : PKG.version
+}
+
+const chosenVersion = (choice, name) => choice?.plugins.find(plugin => plugin.name === name)?.version
+const refusedResolved = error => ['incompatible-version', 'unexpected-package'].includes(error?.code)
+const publicChoice = ({ from, release, commit, plugins, pair, server }) => ({
+  from, release, commit, plugins, ...(pair !== undefined ? { pair } : {}), ...(server !== undefined ? { server } : {}),
+})
 
 // The Genie install's own lines in its terminal, between pnpm's (ANSI: cyan, green, red).
 export const GENIE_LOG_MAX = 48_000
@@ -184,7 +205,7 @@ export const hasGenieSkills = (home = homedir()) => existsSync(join(home, '.agen
 // What an install in Unfold's instance says when a plugin its pack brings is not there.
 export const BUNDLED_MISSING = 'Unfold brings this plugin, and it is missing from this instance.'
 
-export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.env, checkGit = gitProblem, genieSkills = hasGenieSkills, genieCli = () => genieOnPath(env), release = {}, offersUnfold = hostOf(env) === 'unfold' }) {
+export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.env, checkGit = gitProblem, genieSkills = hasGenieSkills, genieCli = () => genieOnPath(env), release = {}, releases = null, offersUnfold = hostOf(env) === 'unfold', omniInstaller }) {
   const manager = () => service(ctx, 'pluginManager')
   // Unfold's own instance brings its plugins and Genie's command line with it: the card names
   // that command line, never the line that installs one, and nothing here installs a plugin.
@@ -249,42 +270,76 @@ export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.e
   // error, never an install from npm or git.
   async function ensure(plugin, rows, target) {
     const row = rowOf(rows, plugin)
-    const present = row !== undefined && row.availability !== 'missing'
-    if (present && row.enabled !== false) return { there: true, restart: false }
-    if (!present && bundled) throw new Error(`${plugin.title}: ${BUNDLED_MISSING}`)
+    const there = present(row)
+    if (there && row.enabled !== false) return { there: true, restart: false }
+    if (!there && bundled) throw new Error(`${plugin.title}: ${BUNDLED_MISSING}`)
     const service = manager()
-    target.onStart?.(present ? 'enable' : 'install')
-    const result = present ? await service.setBundleEnabled(row.name, true) : await service.installBundle(target.spec, { enabled: true, ...target.options })
+    target.onStart?.(there ? 'enable' : 'install')
+    const result = there ? await service.setBundleEnabled(row.name, true) : await service.installBundle(target.spec, { enabled: true, ...target.options })
     const problem = resultProblem(result)
-    if (problem !== null) throw new Error(`${plugin.title}: ${problem}`)
+    if (problem !== null) throw failure(result?.error?.code, `${plugin.title}: ${problem}`)
     return { there: false, restart: result.application === 'restart-required' }
+  }
+
+  // The network wait can outlast another install. Recheck the inventory, using the
+  // manifests already in hand to choose for the team and sibling that are now present.
+  async function resolveMissing(publisher, list, pin) {
+    const initial = await bundles()
+    if (releases === null || bundled) return { rows: initial ?? [], choice: null }
+    const needed = rows => list.some(plugin => missing(rows, plugin))
+    if (initial === null) return { rows: [], choice: pin }
+    if (!needed(initial)) return { rows: initial, choice: null }
+    const selected = await releases[publisher](initial, teamVersion(initial))
+    const rows = await bundles()
+    if (rows === null) return { rows: initial, choice: pin }
+    if (!needed(rows)) return { rows, choice: null }
+    const choice = selected?.rechoose ? selected.rechoose(rows, teamVersion(rows)) : selected
+    return { rows, choice: choice ?? pin }
   }
 
   // Where each of `list` installs from. The ones about to be installed from this release's
   // tarballs are first all checked against the release's signed lane, and then install from the
   // checked copies (release-lane.js); one that fails stops the install before anything is installed.
-  async function targetsOf(list, rows, ownSource) {
-    const targets = list.map(plugin => installTargetOf(plugin, ownSource))
-    const missing = (plugin) => {
-      const row = rowOf(rows, plugin)
-      return row === undefined || row.availability === 'missing'
-    }
-    const wanted = list.flatMap((plugin, i) => (!bundled && missing(plugin) && targets[i].spec.startsWith(RELEASES) ? [{ name: plugin.name, url: targets[i].spec }] : []))
+  async function targetsOf(list, rows, ownSource, choice) {
+    const targets = list.map((plugin) => {
+      if (plugin.from !== 'omni' || !choice || choice.from === 'pin') return installTargetOf(plugin, ownSource)
+      const { spec } = installTargetOf(plugin, ownSource, PKG.version, { ...OMNI_RELEASE, commit: choice.commit })
+      return { spec, options: { expected: { name: plugin.name, version: chosenVersion(choice, plugin.name) } } }
+    })
+    const wanted = list.flatMap((plugin, i) => (!bundled && missing(rows, plugin) && targets[i].spec.startsWith(RELEASES) ? [{ name: plugin.name, url: targets[i].spec }] : []))
     const paths = await checkedTarballs(wanted, { version: PKG.version, env, ...release })
     return targets.map((target, i) => (paths[list[i].name] ? { ...target, spec: paths[list[i].name] } : target))
   }
 
   async function runInstall() {
-    const rows = await bundles() ?? []
+    const plan = await resolveMissing('omni', OMNI_PLUGINS.slice(1), OMNI_PIN_CHOICE)
+    const { rows } = plan
+    let { choice } = plan
+    if (choice) job.release = publicChoice(choice)
     const ownSource = rows.find(bundle => bundle.name === PKG.name)?.source
-    const targets = await targetsOf(OMNI_PLUGINS, rows, ownSource)
+    const targets = await targetsOf(OMNI_PLUGINS, rows, ownSource, choice)
+    let installedOmni = false
     for (const [i, plugin] of OMNI_PLUGINS.entries()) {
       const row = rowOf(rows, plugin)
-      if (row === undefined || row.availability === 'missing' || row.enabled === false) job.current = plugin.name
-      const { restart } = await ensure(plugin, rows, targets[i])
+      const installing = !present(row)
+      if (installing || row.enabled === false) job.current = plugin.name
+      const target = targets[i].options.expected && choice?.from === 'pin' ? installTargetOf(plugin, ownSource) : targets[i]
+      let result
+      try {
+        result = await ensure(plugin, rows, target)
+      } catch (error) {
+        if (!installing || !target.options.expected || !refusedResolved(error)) throw error
+        if (installedOmni) throw new Error(`Omni's plugins stopped half way: ${plugin.title} was refused (${error.code}). Power Omni on again to finish.`)
+        choice = { ...OMNI_PIN_CHOICE, server: choice.server }
+        job.release = publicChoice(choice)
+        result = await ensure(plugin, rows, installTargetOf(plugin, ownSource))
+      }
+      const { restart } = result
       if (restart) job.restart = true
+      if (installing && plugin.from === 'omni') installedOmni = true
       job.done.push(plugin.name)
     }
+    if (installedOmni && choice?.from === 'lane') releases.recordTaken('omni', choice.sequence)
     job.current = null
     job.phase = job.restart ? 'restart' : 'done'
   }
@@ -313,7 +368,8 @@ export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.e
         name: GENIE_PLUGIN.name,
         title: GENIE_PLUGIN.title,
         what: GENIE_PLUGIN.what,
-        version: row?.version ?? GENIE_RELEASE.version,
+        version: (!present(row) ? chosenVersion(genieJob?.release ?? releases?.cachedGenie(), GENIE_PLUGIN.name) : undefined)
+          ?? row?.version ?? GENIE_RELEASE.version,
         installed: rows === null ? null : row !== undefined && row.availability !== 'missing',
         enabled: row?.enabled ?? null,
       },
@@ -329,6 +385,17 @@ export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.e
 
   // Genie runs on the Bot team, so a plain DSH that lacks it gets it first, from where the
   // Omni install would take it (a peer pnpm could not find on npm otherwise).
+  async function ensureGenie(rows, choice, requestId) {
+    const resolved = choice?.from === 'lane'
+    const release = resolved ? { ...GENIE_RELEASE, commit: choice.commit, version: chosenVersion(choice, GENIE_PLUGIN.name) } : GENIE_RELEASE
+    const expected = resolved ? { expected: { name: GENIE_PLUGIN.name, version: release.version } } : {}
+    return ensure(GENIE_PLUGIN, rows, {
+      spec: genieSpec(release),
+      options: { requestId, ...expected },
+      onStart: what => say(step(what === 'install' ? `Installing Genie (${GENIE_PLUGIN.name} ${release.version}, ${release.repository.replace(/^https:\/\/github\.com\//, '')}@${release.commit.slice(0, 7)})` : 'Switching Genie on')),
+    })
+  }
+
   async function runGenieInstall() {
     // In Unfold's instance nothing comes from git, so git is not asked for.
     // Each step as it runs ({ steps, current, done }), for the sidebar's "2 of 3".
@@ -342,7 +409,8 @@ export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.e
       say(ok('git is here'))
       passed('git')
     }
-    const rows = await bundles() ?? []
+    const { rows, choice } = await resolveMissing('genie', [GENIE_PLUGIN], GENIE_PIN_CHOICE)
+    if (choice) genieJob.release = publicChoice(choice)
     const ownSource = rows.find(bundle => bundle.name === PKG.name)?.source
     const [botTeam] = OMNI_PLUGINS
     const { requestId } = genieJob
@@ -352,7 +420,15 @@ export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.e
     if (teamStep.there) say(ok('The Bot team is here'))
     passed('team')
     at('genie')
-    const genieStep = await ensure(GENIE_PLUGIN, rows, { spec: genieSpec(), options: { requestId }, onStart: what => say(step(what === 'install' ? `Installing Genie (${GENIE_PLUGIN.name} ${GENIE_RELEASE.version}, ${GENIE_RELEASE.repository.replace(/^https:\/\/github\.com\//, '')}@${GENIE_RELEASE.commit.slice(0, 7)})` : 'Switching Genie on')) })
+    let genieStep
+    try {
+      genieStep = await ensureGenie(rows, choice, requestId)
+    } catch (error) {
+      if (choice?.from !== 'lane' || !refusedResolved(error)) throw error
+      genieJob.release = publicChoice(GENIE_PIN_CHOICE)
+      genieStep = await ensureGenie(rows, GENIE_PIN_CHOICE, requestId)
+    }
+    if (genieJob.release?.from === 'lane') releases.recordTaken('genie', choice.sequence)
     passed('genie')
     genieJob.current = null
     genieJob.restart = teamStep.restart || genieStep.restart
@@ -480,7 +556,9 @@ export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.e
         ] },
         { id: 'plugins', label: 'Plugins', rows: pluginRows.map(row => ({
           id: row.name, label: row.title, detail: row.what,
-          version: row.version ?? (row.installed === false ? versionOf(OMNI_PLUGINS.find(plugin => plugin.name === row.name)) : null),
+          version: row.installed === false
+            ? chosenVersion(job?.release ?? releases?.cachedOmni(), row.name) ?? row.version ?? versionOf(OMNI_PLUGINS.find(plugin => plugin.name === row.name))
+            : row.version,
           installed: row.installed,
         })) },
         { id: 'tools', label: 'Tools', rows: OMNI_TOOLS.map(group => ({
@@ -498,7 +576,7 @@ export function createBotTypeActions(ctx, { team, omniProjectOf, env = process.e
   }
 
   return {
-    'omni-plugins': () => status(),
+    'omni-plugins': () => status().then(answer => ({ ...answer, server: omniInstaller?.view() ?? null })),
     async 'omni-plugins-install'() {
       startInstall()
       return status()

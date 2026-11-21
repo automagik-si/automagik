@@ -326,7 +326,7 @@ export const sandboxCapable = (root = packRootOf()) => ["am-sidebar", "dsh-sandb
 export const STABLE_FILES = Object.freeze([
   "hcPane.mjs", "hcProxy.mjs", "approved.js", "dshTui.mjs", "workers.js", "models.js", "model.js",
   "hermesPair.js", "actionError.js",
-  "logins.js", "attach.js", "hcGuard.mjs", "dialog.js", "restart.js", "launchArgs.js", "layoutSafe.mjs", "release.js", "retired.js",
+  "logins.js", "loginRecord.js", "loginWords.js", "attach.js", "hcGuard.mjs", "agyPrompt.js", "dialog.js", "restart.js", "launchArgs.js", "layoutSafe.mjs", "release.js", "retired.js",
   "bin/dsh-sandbox.mjs", "bin/run.sh",
 ]);
 

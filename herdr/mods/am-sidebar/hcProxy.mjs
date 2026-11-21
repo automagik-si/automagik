@@ -34,11 +34,12 @@ import { pathToFileURL } from "node:url";
 
 import { approvedSettingsDir, readApprovedRecord, sha256Of } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
-import { parseBots } from "./model.js";
-import { AGY_MODE_DEFAULT, agySettingsArgs, agySettingsPlan, choosesSession, promptByMessage, sessionIdArgs } from "./models.js";
+import { parseBots, workerHomeOf } from "./model.js";
+import { AGENTS, AGY_MODE_DEFAULT, agySettingsArgs, agySettingsPlan, choosesSession, promptByMessage, sessionIdArgs } from "./models.js";
 import { commandArgv, sessionId } from "./restart.js";
 import { approvedDataRootProblem, executionPathProblem, shimPathOf } from "./dshTui.mjs";
 import { OWNER_QUESTION_LABEL, sharedSendAllowed, teamOf } from "./hcGuard.mjs";
+import { DIRECT_LOGIN_PROBLEM, botLoginWords, directLoginVendor, loginLaunchProblem, loginPolicyActive, loginPolicyEnv, loginPolicyWords, loginReadIo, resolveLogin } from "./loginRecord.js";
 import { ENV, guardPathWith, stableGuardDir, stableHelper, stableKillDir, stableRootOf, stableRunner, templateAgent, workerArgs, workerPlan, WORKER_OF_LABEL } from "./workers.js";
 
 /** The one core version this proxy speaks (the box's herdr-core, hc 0.1.14). */
@@ -285,7 +286,10 @@ function approvedWorkerProblem(p, snapshot, bot, templates) {
     homeDir: homedir() });
   let templateArgv = null;
   let login = [];
+  const loginEnv = snapshot.loginEnv ?? process.env;
+  const loginPolicy = loginPolicyActive(loginEnv);
   if (plan.template) {
+    if (loginPolicy) return `${DIRECT_LOGIN_PROBLEM.reason} (${DIRECT_LOGIN_PROBLEM.code})`;
     const template = templates.find((row) => row?.name === plan.template);
     if (!template || typeof template.command !== "string" || !template.command.trim()) {
       return `approved worker template ${plan.template} is not available from the core`;
@@ -304,6 +308,16 @@ function approvedWorkerProblem(p, snapshot, bot, templates) {
     login = ["-u", "CLAUDE_CONFIG_DIR"];
   } else if (plan.agent === "antigravity") {
     agySettings = agySettingsFor();
+  }
+  if (loginPolicy) {
+    const problem = loginLaunchProblem(plan.argv, plan.agent, AGENTS[plan.agent]?.run);
+    if (problem) return `${problem.reason} (${problem.code})`;
+    const vendor = directLoginVendor(plan.argv);
+    if (vendor) {
+      const reader = resolveLogin({ vendor, env: loginEnv, io: loginReadIo, readOnly: true });
+      if (reader.code) return `${reader.reason} (${reader.code})`;
+      login = botLoginWords(vendor, reader.dir);
+    }
   }
   // A chosen Antigravity mode is a worker label; auto is the default, so it has none (workers.js
   // workerArgs writes the label only when it isn't auto), and the label must name the approved mode.
@@ -406,6 +420,10 @@ export function runProblem(params, snapshot, templates = []) {
   if (snapshot.approval) {
     try { bot = workerApproval(snapshot); }
     catch (e) { return `approved worker refused: ${oneLine(e.message)}`; }
+    // #1208: a worker on a chosen agent home is a local, unproxied launch only. The approved bot
+    // naming worker.agentHome at all (any value, even one its worker defaults were dropped with)
+    // refuses both worker shapes here, before either is checked.
+    if (workerHomeOf(bot).present) return "approved worker refused: worker.agentHome needs a local, unproxied worker launch";
   }
   const namedWorker = bot?.worker?.template || (bot?.worker?.agent && bot.worker.agent !== "dsh-tui");
   const workerLabels = namedWorker
@@ -425,8 +443,10 @@ export function runProblem(params, snapshot, templates = []) {
       if (typeof value !== "string") return `env ${key} is not text`;
     }
   }
-  const argv = p.argv;
-  if (!Array.isArray(argv) || argv.length !== 14) return "argv is not the helper worker shape";
+  const policyWords = loginPolicyWords(snapshot.loginEnv ?? {});
+  if (!Array.isArray(p.argv) || p.argv.length !== 14 + policyWords.length) return "argv is not the helper worker shape";
+  if (policyWords.some((word, i) => p.argv[i + 2] !== word)) return "the worker's Bot login policy does not match the pane's";
+  const argv = [...p.argv.slice(0, 2), ...p.argv.slice(2 + policyWords.length)];
   if (argv[0] !== ENV) return `the program is not ${ENV}`;
   if (typeof argv[1] !== "string" || !argv[1].startsWith("PATH=")) return "no PATH word after the program";
   if (typeof snapshot.path !== "string" || !snapshot.path) return "the proxy has no recorded pane PATH";
@@ -482,10 +502,10 @@ export function explicitCaller(value) {
  * The proxy's frozen policy for one pane: { terminal, upstream, snapshot: { caller, file,
  * team, ... } }. The snapshot is plain data; no getter reads the writable tree again.
  */
-export function policyOf({ terminal, upstream, caller, file, bound, appHome, path, shim, stableRoot, approval, approvalEnv, coreId, projects }) {
+export function policyOf({ terminal, upstream, caller, file, bound, appHome, path, shim, stableRoot, approval, approvalEnv, loginEnv, coreId, projects }) {
   const env = approvalEnv ?? process.env;
   return {
-    terminal, upstream, caller, file, bound, appHome, path, shim, stableRoot, approval, approvalEnv, coreId,
+    terminal, upstream, caller, file, bound, appHome, path, shim, stableRoot, approval, approvalEnv, loginEnv, coreId,
     team: teamOf(file, caller, { project: caller?.project, projects, env }),
   };
 }
@@ -919,7 +939,8 @@ export async function startProxy(options = {}) {
     }
   }
   const snapshot = { terminal, upstream, caller, file, bound: Boolean(bound), appHome: home, path: panePath, shim: shimPathOf(env), stableRoot,
-    coreId: status.result?.core?.id, approval, approvalEnv: { HOME: env.HOME, XDG_DATA_HOME: env.XDG_DATA_HOME } };
+    coreId: status.result?.core?.id, approval, approvalEnv: { HOME: env.HOME, XDG_DATA_HOME: env.XDG_DATA_HOME },
+    loginEnv: loginPolicyEnv(env) };
   const policy = policyOf(snapshot);
   log({ ev: "snapshot", caller: caller.bot, project: caller.project, worker: caller.worker, bots: file.bots.length });
 

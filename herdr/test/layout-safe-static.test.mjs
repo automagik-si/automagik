@@ -11,8 +11,8 @@
 // code's. am/'s byte-equal copies (am/copies.json) share their source's entries.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
@@ -150,12 +150,30 @@ export const ALLOWLIST = [
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(lock, aside)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(aside)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(lock)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(path)", 1, "the CLI's own files: .herdr/bots.json, its lock and temp files, and the failed refresh's own Antigravity cache temp file under <app home>/automagik-herdr/ (#809)"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(path)", 5, "the CLI's own files: .herdr/bots.json, its lock and temp files, and the failed refresh's own Antigravity cache temp file under <app home>/automagik-herdr/ (#809); and RFC 0043 delivery 2's own private preview and request files under <app home>/automagik-herdr/accounts-previews and <app home>/data/am-quota/plan-requests, expired, stale or committed"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(owner)", 1, "an owner file in an Accounts lock removed only after the recorded process is proved gone"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rmdirSync(path)", 1, "an empty Accounts lock directory, beside the plan or the Claude login record"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(staged)", 1, "the Accounts lock's staged owner file removed when its creation fails"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rmdirSync(stage)", 1, "the Accounts lock's empty staging directory removed when its owner file cannot be created"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(stage, path)", 1, "publish the Accounts lock directory and owner together, beside the plan or Claude login record"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(join(dir, token))", 1, "release only the Accounts lock owner's own uniquely named marker"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rmdirSync(dir)", 1, "remove the empty Accounts lock or staging directory after releasing its owned marker"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(join(attempt.home, name))", 1, "rotate only timestamped auth.json backups within the approved local Codex home"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(unit)", 1, "the revive login service's own systemd user unit under ~/.config/systemd/user (#939), only when its first line is the pack's mark: never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(plist)", 1, "the revive login service's own launchd agent under ~/Library/LaunchAgents (#939), only after launchd let go of its label and only when the plist's second line is the pack's mark: never mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(tmp)", 4, "the queued-restarts.json and handoff-failures.json temp files in <app home>/automagik-herdr and the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, file)", 6, "queued-restarts.json, handoff-failures.json (#1556) and linked-updates.json (the linked machines' update record, #954) and their sibling temp files under <app home>/automagik-herdr, never mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, path)", 2, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them; and a bot's launch briefing file under <app home>/automagik-herdr/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rename(tmp, path)", 1, "the Accounts writer renames private temp files onto its own records, including the dispatch receipt beside claude-logins.json under the login lock"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(path, aside)", 1, "a corrupt <app home>/accounts-plan.json kept aside beside itself (accounts-plan.json.corrupt-<time>) before a Manage commit replaces it; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(aside, planPath())", 1, "the corrupt accounts-plan.json put back from its aside name when the replacing write failed; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(path, claimed)", 1, "a panel's private request file under <app home>/data/am-quota/plan-requests claimed by rename so one CLI process reads it; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(claimed)", 1, "the claimed request file under <app home>/data/am-quota/plan-requests removed once read; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-quota/main.js", "exec(\"rm\", [\"-f\", \"--\", path])", 2, "a file the panel just wrote and could not restrict to 0600, removed: its set-login writer record (<app home>/data/am-quota/writer.json) or a private request file under <app home>/data/am-quota/plan-requests; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-quota/main.js", "exec(\"rm\", [\"-f\", \"--\", `${appDir()}/${REQUESTS_DIR}/${id}.json`])", 1, "the panel's private request file under <app home>/data/am-quota/plan-requests, removed after the CLI answered; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-quota/main.js", "exec(\"rm\", [\"-f\", \"--\", files.out, files.code, `${files.code}.tmp`])", 1, "a private CLI run's own output and exit-code files under <app home>/data/am-quota/runs (RFC 0043's fleet read), removed after the panel read them: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(tmp)", 8, "the queued-restarts.json, handoff-failures.json and attention.json temp files in <app home>/automagik-herdr, the accounts fleet record's temp file in <app home>/data/am-quota (RFC 0043), and the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them; and the accounts plan's temp files beside <app home>/accounts-plan.json (RFC 0043 delivery 2)"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, file)", 8, "queued-restarts.json, handoff-failures.json (#1556) and linked-updates.json (the linked machines' update record, #954) and their sibling temp files under <app home>/automagik-herdr, and the accounts fleet record fleet.json under <app home>/data/am-quota (RFC 0043), never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, path)", 3, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them; a bot's launch briefing file under <app home>/automagik-herdr/; and the holder pool's holders.json and start reservations there (#1432), never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(fresh, path)", 1, "the Bot login reader's sequence memory under <app home>/automagik-herdr/, a bare-number file, in the source and its am copy: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(fresh)", 1, "the Bot login reader's own sequence-memory temp file under <app home>/automagik-herdr/, removed only when its rename failed, in the source and its am copy: never under mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(from, to)", 1, "the refresh's own Antigravity model cache temp file under <app home>/automagik-herdr/ renamed onto its cache: never under mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, settings.path)", 1, "the Antigravity launch permission file under <app home>/automagik-herdr/agy-settings, written 0600 and renamed onto its deterministic path: never under mods/ or layouts/"],
   ["herdr/mods/am-sidebar/modelCache.js", "rename(tmp, path)", 2, "the injected rename of the refresh's own Antigravity model cache temp file under <app home>/automagik-herdr/ onto its cache: never under mods/ or layouts/; the caller supplies rename"],
@@ -249,4 +267,49 @@ test("the scan sees the calls it is for", () => {
   // A find that only lists is not a call; one that deletes is.
   assert.ok(!scan().some((f) => f.file === "herdr/mods/am-footer/contributions.js"));
   assert.ok(scan().some((f) => f.file === "herdr/mods/am-mods/main.js" && f.call.startsWith('exec("find"')));
+});
+
+
+// Every module specifier a source names: `from "x"` closes any import/export, single or multiline
+// (`  a, b } from "x"` included); a bare `import "x"`; a dynamic `import("x")`.
+const IMPORTS = /^\s*(?:import|export)\s[^;]*?\bfrom\s*["']([^"']+)["']|^\s*import\s*["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']/gm;
+const specifiers = (source) => [...source.matchAll(IMPORTS)].map(([, from, bare, dynamic]) => from ?? bare ?? dynamic);
+
+test("#1509 the import scanner sees multiline, bare and dynamic forms", () => {
+  const sample = [
+    'import { a, b,',
+    '  c, d } from "./multi.js";',
+    'import {',
+    '  e,',
+    '} from "node:fs";',
+    'import "./bare.js";',
+    'export { f } from "./again.js";',
+    'const g = await import("node:os");',
+    // Not imports: display text and a string that read like `from "x"` (inspect.js's shape).
+    'const shown = `${who} from ${where}`;',
+    'const line = "copied from \' : \'";',
+  ].join("\n");
+  assert.deepEqual(specifiers(sample), ["./multi.js", "node:fs", "./bare.js", "./again.js", "node:os"]);
+});
+
+test("#1509 Herdr mod entry points never reach Node-prefixed imports", () => {
+  const mods = join(REPO, "herdr", "mods");
+  const seen = new Set();
+  const problems = [];
+  const visit = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = readFileSync(file, "utf8");
+    for (const specifier of specifiers(source)) {
+      if (specifier.startsWith(".")) {
+        const target = join(dirname(file), specifier);
+        if (existsSync(target)) visit(target); else problems.push(`${relative(REPO, file)} imports a missing ${specifier}`);
+      }
+      else if (specifier.startsWith("node:")) problems.push(`${relative(REPO, file)} imports ${specifier}`);
+    }
+  };
+  const entries = readdirSync(mods).map((name) => join(mods, name, "main.js")).filter(existsSync);
+  for (const entry of entries) visit(entry);
+  assert.ok(seen.has(join(mods, "am-sidebar", "restart.js")), "the sidebar's transitive imports were visited");
+  assert.deepEqual(problems, []);
 });

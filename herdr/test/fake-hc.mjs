@@ -75,6 +75,13 @@ const callNo = logged.length;
 }
 // state.fail: commands that fail as a server that is down would (exit 1).
 if ((state.fail ?? []).includes(words[0])) fail(`hc: can't reach the server (${words[0]})`);
+// state.lockProbe: record whether the ledger lock is held when this pane is checked or ended.
+const lockProbe = state.lockProbe;
+if (lockProbe && words[1] === lockProbe.terminal && ["get", "kill"].includes(words[0])) {
+  (lockProbe.seen ??= []).push({ call: words[0], held: existsSync(lockProbe.path) });
+  save();
+}
+
 // A linked machine's terminal ("vm/t8") on a machine that isn't connected: unavailable, as hc says.
 if (["get", "label", "kill", "read", "send", "keys", "interrupt"].includes(words[0]) && words[1]?.includes("/")) {
   const m = (state.machines ?? []).find((x) => x.name === words[1].split("/")[0]);
@@ -227,11 +234,16 @@ switch (words[0]) {
   case "read": {
     const t = find(words[1]);
     if (!t) fail(`no terminal ${words[1]}`);
-    out({ text: t.screen ?? "" });
+    // Live seats normally have a rendered prompt or progress line. An explicitly blank
+    // screen represents a seat that has painted nothing.
+    const normal = t.state !== "live" ? "" : t.status?.state === "working" ? "Working… (1s)"
+      : ["idle", "done"].includes(t.status?.state) ? "❯" : "";
+    out({ text: t.screen ?? normal });
     // state.onRead: the screen (and status) changes just after this answer, between two checks.
     // The look is counted across processes: `nth` can name a read later than the first (the
     // counter is saved on every look, not only on the one that fires).
-    if (state.onRead && state.onRead.terminal === t.address) {
+    if (state.onRead && state.onRead.terminal === t.address
+      && (!state.onRead.afterSend || state.sent?.some(message => message.to === t.address))) {
       state.onRead.seen = (state.onRead.seen ?? 0) + 1;
       if (state.onRead.seen === state.onRead.nth) {
         if (state.onRead.status) t.status = { ...(t.status ?? {}), state: state.onRead.status };
@@ -363,6 +375,11 @@ switch (words[0]) {
     t.finished_ms = Date.now();
     // state.surviveParent: children that outlive their parent's end anyway (a kill that didn't take).
     for (const c of state.terminals) if (c.parent === t.address && c.state === "live" && c.die_with_parent && !(state.surviveParent ?? []).includes(c.address)) c.state = "finished";
+    // A file changes exactly when the selected pane is ended.
+    if (state.onKillWrite?.terminal === t.address) {
+      writeFileSync(state.onKillWrite.path, state.onKillWrite.text);
+      delete state.onKillWrite;
+    }
     // state.afterKill: { terminal, patch }: another pane ends with this kill (a seat that dies
     // between the cancel of its queued restart and the next look).
     if (state.afterKill) {
@@ -379,6 +396,7 @@ switch (words[0]) {
   }
   case "server": {
     // `hc server status`: the core's permanent id (state.core, else a fixed one).
+    if (words[1] === "stop") { out({ stopped: true }); break; }
     if (words[1] !== "status") fail(`fake hc: no server ${words[1]}`, 2);
     out({ core: state.core ?? { id: "fakecore0000", name: "fake" }, live: state.terminals.filter((t) => t.state === "live").length });
     break;
@@ -389,8 +407,34 @@ switch (words[0]) {
     break;
   }
   case "machine": {
+    // #1432: a local holder is added as a machine (`--via`), and removed when it holds nothing.
+    if (words[1] === "add") {
+      let name = null, target = null, temporary = false;
+      for (let i = 2; i < words.length; i += 1) {
+        if (words[i] === "--name") name = words[++i];
+        else if (words[i] === "--via" || words[i] === "--target") target = words[++i];
+        else if (words[i] === "--session") target = `${target ?? ""} --session ${words[++i]}`;
+        else if (words[i] === "--temp") temporary = true;
+      }
+      if (!name) fail("machine add needs --name", 2);
+      if ((state.machines ?? []).some((m) => m.name === name)) fail(JSON.stringify({ error: { kind: "name_taken", message: `${name} is taken` } }), 2);
+      const m = { name, id: `core-${name}`, state: "connected", host: name, target: target ?? name, temporary,
+        uname: "Linux x86_64", home: process.env.HOME, path: state.machinePath ?? null };
+      state.machines = [...(state.machines ?? []), m];
+      save();
+      out(m);
+      break;
+    }
+    if (words[1] === "rm" || words[1] === "remove") {
+      const name = words[2];
+      if (!(state.machines ?? []).some((m) => m.name === name)) fail(JSON.stringify({ error: { kind: "machine_unknown", message: `no machine "${name}"` } }), 4);
+      state.machines = (state.machines ?? []).filter((m) => m.name !== name);
+      save();
+      out({ removed: name });
+      break;
+    }
     if (words[1] !== "ls") fail(`fake hc: no machine ${words[1]}`, 2);
-    out({ machines: (state.machines ?? []).map(({ name, id, state: s, temporary = false }) => ({ name, id: id ?? `core-${name}`, host: name, state: s, temporary, target: name })) });
+    out({ machines: (state.machines ?? []).map(({ name, id, state: s, temporary = false, target = null, since_ms = null }) => ({ name, id: id ?? `core-${name}`, host: name, state: s, temporary, target: target ?? name, since_ms })) });
     break;
   }
   case "exec": {

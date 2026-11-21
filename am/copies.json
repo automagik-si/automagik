@@ -2,12 +2,56 @@
   "note": "Written by node scripts/am-copies.mjs --write; do not edit. Each is a byte-equal copy (RFC 0012).",
   "files": [
     {
+      "from": "herdr/mods/am-sidebar/accountsApply.js",
+      "to": "am/accountsApply.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsFleet.js",
+      "to": "am/accountsFleet.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsHere.js",
+      "to": "am/accountsHere.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsLaunch.js",
+      "to": "am/accountsLaunch.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsPlan.js",
+      "to": "am/accountsPlan.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsPlanRecord.js",
+      "to": "am/accountsPlanRecord.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsPlanRows.js",
+      "to": "am/accountsPlanRows.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsRows.js",
+      "to": "am/accountsRows.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/accountsWrite.js",
+      "to": "am/accountsWrite.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/actionError.js",
       "to": "am/actionError.js"
     },
     {
+      "from": "herdr/mods/am-sidebar/agentHome.js",
+      "to": "am/agentHome.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/agentPath.mjs",
       "to": "am/agentPath.mjs"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/agyPrompt.js",
+      "to": "am/agyPrompt.js"
     },
     {
       "from": "herdr/mods/am-sidebar/approved.js",
@@ -16,6 +60,10 @@
     {
       "from": "herdr/mods/am-sidebar/attach.js",
       "to": "am/attach.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/bin/accounts.mjs",
+      "to": "am/bin/accounts.mjs"
     },
     {
       "from": "herdr/mods/am-sidebar/bin/automagik-herdr",
@@ -94,6 +142,10 @@
       "to": "am/hermesPair.js"
     },
     {
+      "from": "herdr/mods/am-sidebar/holderSpread.mjs",
+      "to": "am/holderSpread.mjs"
+    },
+    {
       "from": "herdr/mods/am-sidebar/inspect.js",
       "to": "am/inspect.js"
     },
@@ -106,8 +158,20 @@
       "to": "am/layoutSafe.mjs"
     },
     {
+      "from": "herdr/mods/am-sidebar/loginProbe.js",
+      "to": "am/loginProbe.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/loginRecord.js",
+      "to": "am/loginRecord.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/logins.js",
       "to": "am/logins.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/loginWords.js",
+      "to": "am/loginWords.js"
     },
     {
       "from": "herdr/mods/am-sidebar/machineUpdates.js",
@@ -176,6 +240,10 @@
     {
       "from": "herdr/mods/am-sidebar/revive.js",
       "to": "am/revive.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/sessionFiles.mjs",
+      "to": "am/sessionFiles.mjs"
     },
     {
       "from": "herdr/mods/am-sidebar/tidy.js",

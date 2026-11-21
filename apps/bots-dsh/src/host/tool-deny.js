@@ -25,6 +25,7 @@
 // that is neither a subagent child nor a task record, so no lineage would bind the
 // restriction to it (#584).
 import { isComputerTool } from './computer/catalog.js'
+import { changesWorkingFolder } from './folders.js'
 import { refusal } from './refusal.js'
 
 /** The most names one Bot may deny. */
@@ -330,11 +331,11 @@ export function install(rt) {
   // its Session in `state.tasks` only, which the store's `selfOf` does not read, so a task is
   // resolved here from the record the task run wrote. A subagent child is in none of the
   // team's maps: it follows its durable parent lineage, so a restricted Bot cannot reach its
-  // tools through one.
-  const botOfSession = (sessionId, agent) => {
+  // tools through one. The session classifier follows and checks each parent itself.
+  const botOfSession = (sessionId, agent, { followParents = true } = {}) => {
     let current = sessionId
-    let header = agent?.session?.header ?? headerOf(current)
-    for (let depth = 0; typeof current === 'string' && depth < 32; depth += 1) {
+    let header = followParents ? agent?.session?.header ?? headerOf(current) : undefined
+    for (let depth = 0; typeof current === 'string' && depth < (followParents ? 32 : 1); depth += 1) {
       const direct = rt.botOf(current)
       if (direct !== undefined) return direct
       const owner = rt.selfOf(current) ?? rt.state?.tasks?.[current]?.from
@@ -487,7 +488,14 @@ export function install(rt) {
   // The last line: a call that reaches the executor for a name this Bot denies, or for any
   // tool that runs a command when the Bot has no shell, is refused whatever put it on the
   // surface.
-  ctx.on('tools/execute', async (exec, next) => {
+  ctx.on('tools/execute', (exec, next) => {
+    // A folder change can move a Session. Hold ownership through the permission retry
+    // and the downstream folder change, starting before the guard resolves the owner.
+    if (exec.agent === undefined || !changesWorkingFolder(exec)) return guardTool(exec, next)
+    const leave = rt.enterOwnership?.()
+    return guardTool(exec, next).finally(() => leave?.())
+  })
+  async function guardTool(exec, next) {
     // And none at all on a Session whose permission level was not set (permissions.js).
     try {
       rt.assertShellChoice?.(exec.agent?.session?.id ?? exec.agent?.id)
@@ -510,7 +518,7 @@ export function install(rt) {
       throw refusal(`${bot.name} has no shell, so it cannot use the ${name} tool`)
     }
     throw refusal(`${bot.name} does not have the ${name} tool`)
-  })
+  }
 
   // Retries stop on a Session that leaves the team, so a lift is not attempted on a gone agent.
   Object.assign(rt, { botOfSession, applyToolDeny, applyToolDenyToAgent: apply, cleanDenyTools, unknownDenyTools, assertDenyTools })

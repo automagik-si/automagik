@@ -1,8 +1,10 @@
+import { NO_BOT_RUNNER } from './bot-runner.js'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { judgeOf, OWN_MODE_MARKS } from '../shared/permission-levels.js'
 import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
+import { changesWorkingFolder } from './folders.js'
 import { splitRef, textOf } from './text.js'
 
 export const REFUSALS_IN_ROW = 3
@@ -101,13 +103,35 @@ function managerRead(words) {
   const matches = (first, next) => verbs.includes(first) || verbs.includes(`${first} ${next}`)
   return matches(...operands) || args.some((word, at) => matches(word, args[at + 1]))
 }
+const SECURITY_METADATA = new Set([
+  'list-keychains', 'default-keychain', 'login-keychain', 'show-keychain-info',
+  'find-certificate', 'find-identity', 'verify-cert', 'help',
+])
+const SECURITY_SEARCH_LIST = new Set(['list-keychains', 'default-keychain', 'login-keychain'])
+function securityRead(args) {
+  let at = 0
+  while (args[at]?.startsWith('-')) {
+    const option = args[at++]
+    if (option === '--') break
+    // Only these global flags can be skipped without consuming a command word.
+    if (!/^-[qvlR]+$/.test(option)) return true
+  }
+  const command = args[at]
+  if (!command) return true
+  if (['find-generic-password', 'find-internet-password'].some(name => name.startsWith(command))) {
+    return args.slice(at + 1).some(word => /^-[^-]*[gw]/.test(word))
+  }
+  if (SECURITY_SEARCH_LIST.has(command) && args.slice(at + 1).some(word => /^-[^-]*s/.test(word))) return true
+  return !SECURITY_METADATA.has(command)
+}
+const securityCommand = words => words[0]?.split('/').at(-1) === 'security' && securityRead(words.slice(1))
 function secretCommand(words) {
   if (managerRead(words)) return true
+  if (securityCommand(words)) return true
   const text = words.join(' ')
   if (/^(export|declare -[a-z]*x[a-z]*)( -p)?$/.test(text)) return true
   if (/^git credential fill\b/.test(text) || (/^gh auth status\b/.test(text) && words.some(word => /^(-t|--show-token)$/.test(word)))) return true
   if (/^(gh auth token|gcloud auth print-(access|identity)-token|op read|aws secretsmanager get-secret-value|kubectl get secrets?)\b/.test(text)) return true
-  if (/^security find-(generic|internet)-password\b/.test(text) && words.some(word => /^-[wg]$/.test(word))) return true
   if (/^aws ssm get-parameters?\b/.test(text) || /^aws ssm get-parameters-by-path\b/.test(text)) return words.includes('--with-decryption')
   return /^(env|printenv)$/.test(words[0]) && (words.length === 1 || words.slice(1).some(word => /TOKEN|SECRET|PASSWORD|API_KEY|KEY$/i.test(word)))
 }
@@ -313,7 +337,8 @@ export function hardToUndo(step, context = {}) {
   // Terminal input can run a command whether the tool submits it now or leaves it at the prompt.
   const terminalText = tool === 'terminal_send' && typeof step.args?.text === 'string' ? [step.args.text] : []
   return [...commandTexts(step.args), ...title].some(text => HARD.some(pattern => pattern.test(text)))
-    || commands.some(command => Array.isArray(command) && command.every(word => typeof word === 'string') && managerRead(command))
+    || commands.some(command => Array.isArray(command) && command.every(word => typeof word === 'string')
+      && (managerRead(command) || securityCommand(command)))
     || [...commandTexts(commands, 0, false), ...argvShells(commands), ...title, ...terminalText].some(text => hardCommand(text, context, typeof workdir === 'string' ? workdir : undefined))
 }
 // A missing folder stays conservative; a broken sender hook asks the person.
@@ -370,9 +395,10 @@ export function install(rt) {
       if (hardToUndo(step, hardContext(rt, sessionId, step, session))) return { ...failed, code: 'hard' }
       if (JSON.stringify(cleanArgs(step.args)).length > 4000) return { ...failed, code: 'long' }
       if (refusals.tripped(sessionId)) return { ...failed, code: 'refusals' }
-      const route = splitRef(judge === 'own' ? mark.slice(4) : await rt.backgroundModel())
+      const route = splitRef(judge === 'own' ? mark.slice(4) : await rt.backgroundModel(sessionId))
       if (controller.signal.aborted) return failed
       if (!route?.model) return { ...failed, code: 'no-model' }
+      rt.assertBotRunnerProvider?.(route.provider, sessionId)
       model = `${route.provider}/${route.model}`
       const info = await ctx.llm.resolveModelInfo(route.provider, route.model).catch(() => undefined)
       if (controller.signal.aborted) return failed
@@ -386,7 +412,7 @@ export function install(rt) {
       return verdict ? { ...verdict, code: 'verdict' } : failed
     }
     let out
-    try { out = await Promise.race([deadline, review().catch(() => failed)]) }
+    try { out = await Promise.race([deadline, review().catch(error => error?.code === NO_BOT_RUNNER ? { ...failed, code: error.code, reason: error.message } : failed)]) }
     finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel) }
     if (out.decision === 'deny') refusals.refused(sessionId)
     if (out.decision === 'allow') refusals.allowed(sessionId)
@@ -408,7 +434,14 @@ export function install(rt) {
   }
   const valid = owner => { try { return rt.botOf(owner.bot.id) === owner.bot && owner.bot.permissionAuto === owner.mark && (owner.bot.permissionRev ?? 0) === owner.rev && rt.autoWhy(owner.bot, owner.args) === undefined } catch { return false } }
   const note = (owner, step, reason, agent) => rt.noteStop?.(owner.args.sessionId, { why: 'review', tool: step.tool, callId: step.callId, text: `Auto's judge refused: ${reason}` }, agent)
+  const folderCalls = new WeakMap()
   ctx.on('tools/pre-execute', async (exec, next) => {
+    // DSH services a pre-execute approval after the waterfall returns. Keep the
+    // count until the final result, including calls denied before dispatch.
+    if (exec.agent !== undefined && changesWorkingFolder(exec) && !folderCalls.has(exec)) {
+      const leave = rt.enterOwnership?.()
+      if (leave !== undefined) folderCalls.set(exec, leave)
+    }
     grants.delete(keyOf(exec.agent?.session?.id, exec.callId))
     let owner
     try {
@@ -472,7 +505,11 @@ export function install(rt) {
       return undefined
     })
   }
-  ctx.on('tools/result', exec => { grants.delete(keyOf(exec.agent?.session?.id ?? exec.agent?.id, exec.callId)) })
+  ctx.on('tools/result', exec => {
+    folderCalls.get(exec)?.()
+    folderCalls.delete(exec)
+    grants.delete(keyOf(exec.agent?.session?.id ?? exec.agent?.id, exec.callId))
+  })
   ctx.on('session/event', (session, event) => {
     if (['turn/start', 'turn/end'].includes(event.type)) dropAutoGrants([session.id])
     const source = event.data?.source

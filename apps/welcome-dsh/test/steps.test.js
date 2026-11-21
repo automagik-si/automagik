@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { install } from '../src/host/endpoint.js'
+import { fakeContext } from './fake-ctx.js'
 
 // The client modules, with a React that records elements instead of rendering them.
 // `scope` adds globals (a page's location and navigator); `gated` hands the next useState(undefined)
@@ -222,6 +224,53 @@ test('power on, in a plain DSH: the Omni plugins install, start, and then Omni l
   assert.deepEqual(phases(fake.shown), ['waking', 'installing', 'installing', 'installing', 'starting', 'looking', 'none'])
   assert.deepEqual(fake.calls, ['omni-plugins', 'omni-plugins-install', 'omni-plugins', 'omni-plugins', 'omni-plugins', 'omni-link', 'omni-discover'])
   assert.equal(fake.shown.at(-1)[1].sandbox.home, '/home/someone/.omni/sandbox')
+})
+
+test('a delayed gated Power action cannot install Omni under the next owner', async () => {
+  const installs = []
+  const { ctx, routes } = fakeContext({ entries: { 'omni-ai': {} }, services: {
+    omniTeam: { ownerViewer: request => ({ id: request.headers.get('x-automagik-principal') }) },
+    pluginManager: {
+      listBundles: async () => [{ name: '@automagik/welcome-dsh', source: 'link:/fixture/apps/welcome-dsh' }],
+      installBundle: async spec => { installs.push(spec); return { application: 'applied' } },
+    },
+  } })
+  install(ctx, { env: { AUTOMAGIK_MULTIUSER: '1' } })
+  const route = routes[0]
+  const requests = []
+  let person = 'owner-a'
+  const send = body => route.fetch(new Request('https://workspace.invalid' + route.path, {
+    method: 'POST', body, headers: { 'x-automagik-principal': person },
+  }))
+  const gated = await load('team.js', { scope: {
+    __AUTOMAGIK_VIEW__: { version: 1, role: 'owner' },
+    __AUTOMAGIK_MOUNTED_VIEWER__: { id: 'owner-a', check() {}, refused() {} },
+    fetch: (path, { body }) => {
+      assert.equal(path, 'api/omni-ai')
+      requests.push([person, JSON.parse(body)])
+      return send(body)
+    },
+  } })
+  const wake = Promise.withResolvers()
+  const shown = []
+  const power = gated.powerOn({ show: phase => shown.push(phase), wait: () => wake.promise, quick: false })
+  assert.deepEqual(shown, ['waking'])
+  assert.deepEqual(requests, [])
+  // The browser's cookie changes while the previous document is still mounted.
+  person = 'owner-b'
+  wake.resolve()
+  assert.equal(await power, 'failed')
+  assert.deepEqual(requests, [
+    ['owner-b', { endpoint: 'omni-plugins', payload: null }],
+    ['owner-b', { endpoint: 'omni-plugins-install', payload: null, viewer: 'owner-a' }],
+  ])
+  const missing = await send(JSON.stringify({ endpoint: 'omni-plugins-install', payload: null }))
+  assert.equal((await missing.json()).error?.code, 'bot/viewer-changed')
+  const status = await send(JSON.stringify({ endpoint: 'omni-plugins', payload: null }))
+  assert.equal((await status.json()).value.install, null)
+  assert.deepEqual(installs, [])
+  const current = await send(JSON.stringify({ endpoint: 'done', payload: { stepId: 'omni-team' }, viewer: 'owner-b' }))
+  assert.deepEqual(await current.json(), { ok: true, value: { teamDone: true } })
 })
 
 test('power on ends at linked, restart or failed when that is where it stands', async () => {

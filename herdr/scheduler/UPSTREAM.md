@@ -58,7 +58,8 @@ internal/config/config_test.go — patched: the grace defaults, -1, and existing
 internal/config/edit_test.go   — patched: put's merge cases for blocked_grace_minutes; existing + on-success accepted
 internal/daemon/daemon.go      — patched: a daemon told to stop ends its running commands first
 internal/daemon/daemon_test.go — patched: the stop ends a running command and waits for its record
-internal/hc/hc.go              — patched: hc read with a ten-second deadline; live terminals by label; hc send
+internal/hc/hc.go              — patched: hc read with a ten-second deadline; live terminals by label; pack delivery check before hc send
+internal/hc/delivery_test.go   — added: automatic delivery holds, an unavailable status, and sending to the checked address
 internal/history/history.go    — patched: a command run's exit code, result line, stderr and report; agent done may carry a late-start note
 internal/notify/bot.go         — added: a result line to a bot, by its label, through hc send (#938)
 internal/notify/bot_test.go    — added: label lookup, the terminal-name fallback, an undelivered report

@@ -1,21 +1,49 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { publicUrlArgs } from '../lib.mjs'
+import { spawnCapture } from './fixtures/spawn-capture.mjs'
 
 const ENTRY = fileURLToPath(new URL('../entrypoint.mjs', import.meta.url))
 const LIB = new URL('../lib.mjs', import.meta.url).href
 const FOLLOW = new URL('../profile-follow.mjs', import.meta.url).href
+const FIRST_BOOT = new URL('../first-boot.mjs', import.meta.url).href
 const BASE = ['--profile', 'automagik-web', '--no-open', '--host', '127.0.0.1', '--port', '3081']
 
-// Run the real entrypoint, replacing only data preparation and the DSH process. No service
-// or live data is touched; validation, argument wiring, logging and launch-file writes run.
+// Run the entrypoint with child process doubles and a fake profile preparation step.
 const harness = `
-  import { registerHooks } from 'node:module'
+  import { registerHooks, syncBuiltinESMExports } from 'node:module'
+  const fs = process.getBuiltinModule('node:fs')
+  globalThis.testSpawn = process.getBuiltinModule('node:child_process').spawn
+  const bot = '/opt/automagik/profile/node_modules/@automagik/bots-dsh'
+  const supervisor = 'file://' + bot + '/src/host/supervisor/'
+  const imageModules = new Map(process.env.TEST_IMAGE_SUPERVISOR ? [
+    [supervisor + 'main.js', [
+      'export const IMAGE_HOST = 1',
+      'export async function runSupervisor({ signal, onChildStart }) {',
+      '  console.log("SUPERVISOR STARTED")',
+      '  onChildStart?.()',
+      '  if (!process.env.TEST_SUPERVISOR_WAIT) return 0',
+      '  await new Promise(resolve => signal.addEventListener("abort", resolve))',
+      '  console.log("SUPERVISOR ABORTED")',
+      '  return 1',
+      '}',
+    ].join('\\n')],
+    [supervisor + 'store.js', 'export function usableStore() { return true }'],
+  ] : [])
+  const read = fs.readFileSync
+  fs.readFileSync = (path, options) => imageModules.size && path === bot + '/package.json'
+    ? '{"version":"3.161.1"}' : read(path, options)
+  const lstat = fs.lstatSync
+  fs.lstatSync = (path, options) => path === globalThis.testCoreSocket
+    ? { isSocket: () => true } : lstat(path, options)
+  // A host's own /data is never this test's: the view stays in the fixture's home.
+  const exists = fs.existsSync
+  fs.existsSync = (path) => path !== '/data' && exists(path)
+  syncBuiltinESMExports()
   const lib = await import(${JSON.stringify(`${LIB}?test-original`)})
   globalThis.serverTestLib = {
     ...lib,
@@ -23,9 +51,31 @@ const harness = `
     async seedProfile() { return { seeded: false, target: 'test-profile' } },
   }
   registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (imageModules.has(specifier)) return { url: specifier, shortCircuit: true }
+      return nextResolve(specifier, context)
+    },
     load(url, context, nextLoad) {
+      if (imageModules.has(url)) return { format: 'module', shortCircuit: true, source: imageModules.get(url) }
       if (url === ${JSON.stringify(FOLLOW)}) return { format: 'module', shortCircuit: true,
-        source: 'export async function followImage() { const result=process.env.TEST_FOLLOW_RESULT || "owner-managed"; return { seeded: false, target: "test-profile", result, reason: result } }',
+        source: \`
+          import { existsSync } from 'node:fs'
+          import { join } from 'node:path'
+          export async function followImage({ dshHome }) {
+            if (process.env.TEST_IMAGE_SUPERVISOR && existsSync(join(dshHome, 'profiles/automagik-web/package.json.lock'))) {
+              throw new Error('a stale profile lock reached the follower')
+            }
+            const result = process.env.TEST_FOLLOW_RESULT || 'owner-managed'
+            return { seeded: false, target: 'test-profile', result, reason: result }
+          }
+        \`,
+      }
+      if (url === ${JSON.stringify(FIRST_BOOT)} && process.env.TEST_FIRST_BOOT_THROW) return {
+        format: 'module', shortCircuit: true,
+        source: [
+          'export function runFirstBoot() { throw new Error("am: briefing setup failed") }',
+          'export async function installVendorClis() { return { state: "ready" } }',
+        ].join(' '),
       }
       if (url === ${JSON.stringify(LIB)}) return {
         format: 'module', shortCircuit: true,
@@ -36,8 +86,54 @@ const harness = `
         source: \`
           import { EventEmitter } from 'node:events'
           import { PassThrough } from 'node:stream'
+          import { mkdirSync, writeFileSync } from 'node:fs'
+          import { dirname } from 'node:path'
+          export function execFileSync(command, args, options) {
+            console.log('AM ' + JSON.stringify({ command, args, env: options.env }))
+            const appHome = options.env.HERDR_APP_HOME
+            const link = appHome + '/automagik-herdr/briefing.mjs'
+            mkdirSync(dirname(link), { recursive: true })
+            writeFileSync(link, '')
+            return ''
+          }
           export function spawn(command, args, options) {
-            console.log('SPAWN ' + JSON.stringify({ command, args, shell: options.shell ?? false }))
+            if (command === '/usr/bin/flock') return globalThis.testSpawn(command, args, options)
+            if (command === '/usr/local/bin/herdr-core' || args[0] === 'serve') {
+              console.log('CORE ' + JSON.stringify({ command, args, env: options.env }))
+              const core = new EventEmitter()
+              core.stdout = new PassThrough()
+              core.stderr = new PassThrough()
+              const socket = options.env?.HC_TERMINAL_SOCKET
+              if (process.env.TEST_CORE_FILE) writeFileSync(socket, '')
+              if (process.env.TEST_CORE_FAIL || process.env.TEST_CORE_FILE) {
+                setImmediate(() => {
+                  core.exitCode = Number(process.env.TEST_CORE_EXIT_CODE ?? 1)
+                  core.signalCode = null
+                  if (process.env.TEST_CORE_NOISY) {
+                    const line = 'x'.repeat(1024) + '\\\\n'
+                    core.stderr.write('earliest diagnostic\\\\n' + line.repeat(24))
+                    core.stderr.write('overlong diagnostic ' + 'x'.repeat(20 * 1024) + '\\\\n')
+                  }
+                  core.stderr.write('core map failed')
+                  core.stderr.end()
+                  core.emit('exit', core.exitCode, null)
+                })
+                return core
+              }
+              globalThis.testCoreSocket = socket
+              if (process.env.TEST_CORE_LATE_EXIT) setTimeout(() => {
+                core.exitCode = Number(process.env.TEST_CORE_LATE_EXIT)
+                core.signalCode = null
+                core.emit('exit', core.exitCode, null)
+              }, 300)
+              return core
+            }
+            const env = options.env
+            console.log('SPAWN ' + JSON.stringify({
+              command, args, shell: options.shell ?? false, socket: env.HC_TERMINAL_SOCKET,
+              appHome: env.HERDR_APP_HOME, pnpm: env.AUTOMAGIK_PNPM,
+              modelKey: env.DEEPSEEK_API_KEY,
+            }))
             const child = new EventEmitter()
             child.stdout = new PassThrough()
             child.stderr = new PassThrough()
@@ -59,18 +155,175 @@ const harness = `
   await import(${JSON.stringify(new URL('../entrypoint.mjs', import.meta.url).href)})
 `
 
-function run(value, dir, followResult = 'owner-managed') {
-  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_WORKSPACE: dir, DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult }
+function run(value, dir, followResult = 'owner-managed', extra = {}) {
+  const env = {
+    PATH: process.env.PATH, HOME: dir, DSH_HOME: join(dir, 'dsh'), AUTOMAGIK_HOME: dir,
+    AUTOMAGIK_WORKSPACE: dir, HERDR_APP_HOME: join(dir, 'herdr-app'),
+    HC_TERMINAL_SOCKET: join(dir, 'run', 'herdr-core', 'default.sock'),
+    XDG_RUNTIME_DIR: join(dir, 'run'), HC_RUNTIME: join(dir, 'unused-core-runtime'),
+    HC_SESSION: 'test-entrypoint', DEEPSEEK_API_KEY: 'test-only',
+    AUTOMAGIK_PNPM: '/usr/local/bin/pnpm', TEST_FOLLOW_RESULT: followResult, ...extra,
+  }
   delete env.AUTOMAGIK_PUBLIC_URL
   if (value !== undefined) env.AUTOMAGIK_PUBLIC_URL = value
-  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', harness], {
-    env, encoding: 'utf8', timeout: 30_000,
+  const result = spawnCapture(dir, process.execPath, ['--input-type=module', '--eval', harness], {
+    env, timeout: 30_000,
   })
   assert.ifError(result.error)
   return result
 }
 
 // ENTRY_ABORT_ROLLBACK: a failed update must not prevent starting the coherent old profile.
+test('a non-default HC_SESSION derives <session>.sock and announces it after it exists', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-env-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(join(dir, '.automagik-image-supervisor.lock')), true)
+  assert.equal(existsSync(join(dir, 'dsh', '.automagik-image-supervisor.lock')), true)
+  assert.match(result.stdout, /CORE /)
+  assert.match(result.stdout, /herdr-core: serving on .*test-entrypoint\.sock/)
+  const call = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('SPAWN ')).slice(6))
+  assert.equal(call.socket, join(dir, 'run', 'herdr-core', 'test-entrypoint.sock'))
+  assert.equal(call.appHome, join(dir, 'herdr-app'))
+})
+
+test('a core socket failure prints no serving line and logs stderr, exit code and the listing', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-fail-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { TEST_CORE_FAIL: '1' })
+  assert.equal(result.status, 1)
+  assert.doesNotMatch(result.stdout, /herdr-core: serving on /)
+  assert.match(result.stderr, /herdr-core exited before its socket .*test-entrypoint\.sock/)
+  assert.match(result.stderr, /core map failed/)
+  assert.match(result.stderr, /herdr-core exitCode=1 signal=none/)
+  assert.match(result.stderr, new RegExp(`${join(dir, 'run', 'herdr-core').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: \\(empty\\)`))
+})
+
+test('supervised startup exits 1 if core exits zero before creating the socket', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-exit-zero-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  // The fixture's DSH home is <dir>/dsh; the gate volume (<dir>) and the home each hold a lease.
+  const profile = join(dir, 'dsh', 'profiles', 'automagik-web')
+  mkdirSync(profile, { recursive: true, mode: 0o700 })
+  writeFileSync(join(profile, 'package.json.lock'), 'old-container')
+  const result = run(undefined, dir, 'matching-image', {
+    AUTOMAGIK_MULTIUSER: '0', TEST_IMAGE_SUPERVISOR: '1', TEST_CORE_FAIL: '1', TEST_CORE_EXIT_CODE: '0',
+  })
+  assert.equal(result.status, 1, result.stderr)
+  assert.equal(existsSync(join(dir, '.automagik-image-supervisor.lock')), true)
+  assert.equal(existsSync(join(dir, 'dsh', '.automagik-image-supervisor.lock')), true)
+  assert.equal(existsSync(join(profile, 'package.json.lock')), false)
+  assert.match(result.stderr, /herdr-core exited before its socket/)
+  assert.match(result.stderr, /herdr-core exitCode=0 signal=none/)
+  assert.doesNotMatch(result.stderr, /in-app update unavailable/)
+  assert.doesNotMatch(result.stdout, /serving on |SPAWN |SUPERVISOR STARTED/)
+})
+
+test('a core exit while the image supervisor serves aborts it and exits with the core code', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-late-exit-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  mkdirSync(join(dir, 'dsh', 'profiles', 'automagik-web'), { recursive: true, mode: 0o700 })
+  const result = run(undefined, dir, 'matching-image', {
+    AUTOMAGIK_MULTIUSER: '0', TEST_IMAGE_SUPERVISOR: '1', TEST_SUPERVISOR_WAIT: '1', TEST_CORE_LATE_EXIT: '23',
+  })
+  assert.equal(result.status, 23, result.stderr)
+  assert.match(result.stdout, /SUPERVISOR STARTED[\s\S]*SUPERVISOR ABORTED/)
+  assert.match(result.stderr, /herdr-core exited \(23\); stopping dsh/)
+  assert.doesNotMatch(result.stdout, /SPAWN /)
+})
+
+test('a regular file at the core socket path does not make the core ready', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-file-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { TEST_CORE_FILE: '1' })
+  assert.equal(result.status, 1)
+  assert.doesNotMatch(result.stdout, /serving on |SPAWN /)
+  assert.match(result.stderr, /herdr-core exited before its socket/)
+})
+
+test('a failed core reports a bounded stderr tail', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-stderr-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', {
+    TEST_CORE_FAIL: '1', TEST_CORE_NOISY: '1',
+  })
+  assert.equal(result.status, 1)
+  const tail = result.stderr.split('herdr-core stderr:\n')[1]
+  assert.match(tail, /core map failed/)
+  assert.match(tail, /overlong line omitted/)
+  assert.doesNotMatch(tail, /earliest diagnostic|overlong diagnostic/)
+  assert.ok(tail.length <= 16 * 1024 + 1)
+})
+
+test('the entrypoint rejects invalid sessions and a runtime on the DSH volume', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-path-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  for (const session of ['', '../ada', 'x'.repeat(65), 'ada\n']) {
+    const result = run(undefined, dir, 'owner-managed', { HC_SESSION: session })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /HC_SESSION must contain/)
+    assert.doesNotMatch(result.stdout, /CORE |SPAWN /)
+  }
+  const result = run(undefined, dir, 'owner-managed', { XDG_RUNTIME_DIR: '/data/run' })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /XDG_RUNTIME_DIR must be outside the shared \/data volume/)
+})
+
+const spawnRecord = (result, prefix) => {
+  const row = result.stdout.split('\n').find(line => line.startsWith(prefix))
+  assert.ok(row, result.stdout)
+  return JSON.parse(row.slice(prefix.length))
+}
+
+for (const source of ['environment', 'file']) {
+  test(`only DSH receives the model key from ${source}`, (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'automagik-core-key-'))
+    t.after(() => rmSync(dir, { recursive: true, force: true }))
+    const file = join(dir, 'deepseek-api-key')
+    writeFileSync(file, 'test-file-only\n', { mode: 0o600 })
+    const result = run(undefined, dir, 'owner-managed', {
+      DEEPSEEK_API_KEY: source === 'environment' ? 'test-env-only' : '',
+      DEEPSEEK_API_KEY_FILE: file,
+      LC_TIME: 'C', LC_TEST_SECRET: 'test-only', AUTOMAGIK_PNPM_TOKEN: 'test-only',
+      AUTOMAGIK_UNLISTED: 'test-only',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    for (const prefix of ['CORE ', 'AM ']) {
+      const { env } = spawnRecord(result, prefix)
+      assert.ok(Object.keys(env).every(name => !/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(name)))
+      assert.equal(env.AUTOMAGIK_UNLISTED, undefined)
+      assert.equal(env.AUTOMAGIK_PNPM, '/usr/local/bin/pnpm')
+      assert.equal(env.LC_TIME, 'C')
+      assert.equal(env.HOME, dir)
+      assert.equal(env.HC_SOCKET, join(dir, 'run', 'herdr-core', 'test-entrypoint.sock'))
+      assert.equal(env.HC_RUNTIME, join(dir, 'run', 'herdr-core'))
+      assert.equal(env.HC_SESSION, 'test-entrypoint')
+      assert.equal(env.AUTOMAGIK_NATIVE_WORKER_LOGIN, 'required')
+    }
+    const dsh = spawnRecord(result, 'SPAWN ')
+    assert.equal(dsh.modelKey, source === 'environment' ? 'test-env-only' : 'test-file-only')
+  })
+}
+
+test('turning CLI installation off withholds pnpm from DSH and skips the observer', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-cli-off-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { AUTOMAGIK_CLI_INSTALL: 'off' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(spawnRecord(result, 'SPAWN ').pnpm, undefined)
+  assert.doesNotMatch(result.stdout + result.stderr, /vendor CLIs:/)
+})
+
+test('mutant ENTRYPOINT_EXITS_ON_FIRST_BOOT_FAILURE is killed: a first-boot error does not stop DSH', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-first-boot-fail-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { TEST_FIRST_BOOT_THROW: '1' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /SPAWN /)
+  assert.match(result.stderr, /first boot: am: briefing setup failed; the server starts/)
+})
+
 test('the real entrypoint still starts DSH after the updater reports rollback', t => {
   const dir = mkdtempSync(join(tmpdir(), 'automagik-follow-entry-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
@@ -78,7 +331,21 @@ test('the real entrypoint still starts DSH after the updater reports rollback', 
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /image follow: update-rolled-back/)
   assert.match(result.stdout, /SPAWN /)
-  assert.equal(existsSync(join(dir, 'launch-url')), true)
+  assert.equal(existsSync(join(dir, 'dsh', 'launch-url')), true)
+})
+
+test('mode off refuses a legacy DSH home at the shared volume root', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-legacy-data-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  // The fixture maps the image's /data to dir.
+  const manifest = join(dir, 'existing-profile')
+  writeFileSync(manifest, 'original profile')
+  const result = run(undefined, dir, 'owner-managed', { DSH_HOME: dir, AUTOMAGIK_MULTIUSER: '0' })
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr, 'automagik-web: gate-view overlaps DSH_HOME\n')
+  assert.equal(readFileSync(manifest, 'utf8'), 'original profile')
+  assert.equal(existsSync(join(dir, 'gate-view')), false)
 })
 
 for (const value of [undefined, 'https://example.invalid/', 'https://example.invalid:8443/ui']) {
@@ -93,7 +360,7 @@ for (const value of [undefined, 'https://example.invalid/', 'https://example.inv
     const extra = value === undefined ? [] : ['--public-url', value, '--trusted-host', new URL(value).host]
     assert.deepEqual(call.args.slice(1), [...BASE, ...extra])
     assert.match(call.args[0], /\/dsh\/lib\/bin\.js$/)
-    const launchFile = join(dir, 'launch-url')
+    const launchFile = join(dir, 'dsh', 'launch-url')
     const launch = new URL(value ?? 'http://127.0.0.1:3081/')
     if (!launch.pathname.endsWith('/')) launch.pathname += '/'
     launch.searchParams.set('token', 'test-launch-value')
@@ -120,9 +387,9 @@ for (const value of [
 test('invalid configuration stops the real entrypoint before DSH or data preparation', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'automagik-public-url-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
-  const result = spawnSync(process.execPath, [ENTRY], {
+  const result = spawnCapture(dir, process.execPath, [ENTRY], {
     env: { ...process.env, AUTOMAGIK_PUBLIC_URL: 'http://example.invalid/', AUTOMAGIK_WORKSPACE: join(dir, 'unused') },
-    encoding: 'utf8', timeout: 30_000,
+    timeout: 30_000,
   })
   assert.ifError(result.error)
   assert.equal(result.status, 1)
@@ -142,11 +409,38 @@ test('shell metacharacters remain one URL argument and execute no commands', (t)
   assert.equal(call.shell, false)
   assert.deepEqual(call.args.slice(1), [...BASE, '--public-url', value, '--trusted-host', 'example.invalid'])
   // Exercise the same argv with a real process as well as the entrypoint's captured spawn.
-  const echo = spawnSync(process.execPath, ['-e', 'console.log(JSON.stringify(process.argv.slice(1)))', '--', ...call.args.slice(1)], {
-    encoding: 'utf8', timeout: 30_000,
+  const echo = spawnCapture(dir, process.execPath, ['-e', 'console.log(JSON.stringify(process.argv.slice(1)))', '--', ...call.args.slice(1)], {
+    timeout: 30_000,
   })
   assert.ifError(echo.error)
   assert.equal(echo.status, 0, echo.stderr)
   assert.deepEqual(JSON.parse(echo.stdout), call.args.slice(1))
   assert.equal(existsSync(marker), false)
+})
+
+test('real entrypoint refuses invalid mode or missing caller keys and fixes the off-mode DSH environment', t => {
+  for (const [mode, code] of [['invalid', 'invalid AUTOMAGIK_MULTIUSER'], ['1', 'caller-keys-config'], [undefined, undefined]]) {
+    const dir = mkdtempSync(join(tmpdir(), 'automagik-multiuser-main-'))
+    t.after(() => rmSync(dir, { recursive: true, force: true }))
+    const program = harness.replace('modelKey: env.DEEPSEEK_API_KEY,', 'multiuser: env.AUTOMAGIK_MULTIUSER,')
+    const env = {
+      PATH: process.env.PATH, HOME: dir, DSH_HOME: join(dir, 'dsh'), AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir,
+      XDG_RUNTIME_DIR: join(dir, 'run'), HC_SESSION: 'test-multiuser-entrypoint',
+      AUTOMAGIK_CLI_INSTALL: 'off', DEEPSEEK_API_KEY: 'test-only',
+    }
+    if (mode !== undefined) env.AUTOMAGIK_MULTIUSER = mode
+    writeFileSync(join(dir, '.env'), 'AUTOMAGIK_MULTIUSER=1\nAUTOMAGIK_CALLER_KEYS=/env/caller-keys.json\n')
+    const result = spawnCapture(dir, process.execPath, ['--input-type=module', '--eval', program], { env, timeout: 30_000 })
+    assert.ifError(result.error)
+    if (code) {
+      assert.equal(result.status, 1)
+      assert.ok(result.stderr.includes(code))
+      assert.doesNotMatch(result.stdout, /CORE |SPAWN /)
+      assert.doesNotMatch(result.stderr, /test-only|\/env\//)
+    } else {
+      assert.equal(result.status, 0, result.stderr)
+      assert.match(result.stdout, /CORE /)
+      assert.equal(spawnRecord(result, 'SPAWN ').multiuser, '0')
+    }
+  }
 })

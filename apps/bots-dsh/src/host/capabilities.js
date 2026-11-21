@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { noBotRunner } from './bot-runner.js'
 import { refusal } from './refusal.js'
 import { encodeUrlComponent } from './secrets.js'
 import { own } from './store.js'
@@ -85,6 +86,16 @@ export function install(rt) {
   // mount is kept by Session id and capability name.
   const grants = new Map()
   const grantStatuses = new Map()
+  const runnerWarnings = new Set()
+  const needsRunner = (item, sessionId, agent) => item.kind === 'mcp' && rt.botRunnerRequired?.(sessionId, agent)
+  const runnerWarning = (name) => {
+    const error = noBotRunner()
+    if (!runnerWarnings.has(name)) {
+      runnerWarnings.add(name)
+      rt.warn('ds-bot: capability %s skipped: %s', name, error.message)
+    }
+    return error
+  }
 
   const library = () => state.capabilities.items
   const ensureLibrary = () => {
@@ -448,6 +459,11 @@ export function install(rt) {
       await disposeMount(agentMounts.get(name))
       agentMounts.delete(name)
     }
+    const suspended = async () => {
+      await drop()
+      setStatus(owner, name, sessionId, { state: 'error', error: runnerWarning(name).message })
+    }
+    if (needsRunner(item, sessionId, agent)) return suspended()
     if (item.kind === 'mcp' && item.transport === 'stdio' && item.approved !== true) {
       await drop()
       setStatus(owner, name, sessionId, { state: 'needs-approval' })
@@ -483,6 +499,7 @@ export function install(rt) {
         }
         : await loadMcpPlugin()
       if (stopped) return
+      if (needsRunner(item, sessionId, agent)) return suspended()
       const fiber = item.kind === 'skill' ? agent.ctx.plugin(plugin) : agent.ctx.plugin(plugin, config)
       agentMounts.set(name, { key, fiber })
       await fiber.await()
@@ -673,6 +690,7 @@ export function install(rt) {
       throw refusal(`Session ${sessionId} is not available: ${rt.redactSecrets(String(error?.message ?? error)).slice(0, 300)}`)
     }
     if (stopped) throw refusal('The Bot team has stopped.')
+    if (needsRunner(item, sessionId, agent)) throw runnerWarning(item.name)
     await rt.bindSessionSecrets([...secrets], sessionId)
     let byName = grants.get(sessionId)
     if (!byName) grants.set(sessionId, byName = new Map())

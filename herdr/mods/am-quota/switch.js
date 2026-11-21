@@ -48,7 +48,7 @@ export async function install({ api, provider, account, ...rest }) {
  * payload, backed up, 0600 and an atomic rename. The body is never logged, and the answer is a
  * label and a fingerprint.
  */
-export async function place({ provider, body, home, appHome, env = {}, exec, writeTextFile, unlink = (p) => fs.unlink(p) }) {
+export async function place({ provider, body, home, appHome, env = {}, exec, writeTextFile, unlink = (p) => fs.unlink(p), fence, installFenced }) {
   const target = TARGETS[provider];
   if (!target) throw new Error("no writer for that provider");
   let scratch = null;
@@ -68,8 +68,12 @@ export async function place({ provider, body, home, appHome, env = {}, exec, wri
     if (tight.code !== 0) throw new Error("could not restrict the credential payload file");
 
     // Backup, then 0600, then an atomic rename — never a partial credential on disk.
-    const done = await exec("sh", ["-c", installScript(stamp), "sh", scratch, plan.file]);
-    if (done.code !== 0) throw new Error(`could not write ${displayPath(plan.file, home)}: ${(done.stderr || done.stdout).trim().slice(0, 120)}`);
+    if (fence) await fence(body);
+    if (installFenced) await installFenced(stamp);
+    else {
+      const done = await exec("sh", ["-c", installScript(stamp), "sh", scratch, plan.file]);
+      if (done.code !== 0) throw new Error(`could not write ${displayPath(plan.file, home)}: ${(done.stderr || done.stdout).trim().slice(0, 120)}`);
+    }
 
     return { label: target.label, fingerprint: tokenIdentity(provider, body) };
   } catch (err) {
