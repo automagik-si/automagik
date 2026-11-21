@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -20,12 +20,14 @@ import { CliLogins } from '../src/host/login.js'
 import { reservationDigests } from '../src/host/reservation-evidence.js'
 import { MODEL_ACCESS_REQUIRED } from '../src/host/names.js'
 import { plantWindowsRecord, proved } from './support/windows-record.js'
+import { loginReadIo, resolveLogin } from '../../../herdr/mods/am-sidebar/loginRecord.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const who = email => ({ kind: 'account', id: email, facets: { kind: 'account', email }, email })
 
-function fixture(t, { cold, root: sharedRoot, installation, deps } = {}) {
+function fixture(t, { cold, root: sharedRoot, installation, deps, onEffect } = {}) {
   const root = sharedRoot ?? mkdtempSync(join(tmpdir(), 'isolated-accounts-'))
+  chmodSync(root, 0o700)
   const terminalHomes = { claude: join(root, 'terminal', '.claude'),
     codex: join(root, 'terminal', '.codex') }
   const auth = {
@@ -63,7 +65,7 @@ function fixture(t, { cold, root: sharedRoot, installation, deps } = {}) {
     llm: { registerAdapter(ids, value) { adapter = value; return () => {} },
       listProviders: () => [], listModels: () => new Promise(() => {}) },
     on() {}, get() {}, provide(name, value) { if (name === SERVICE) service = value },
-    effect(setup) { cleanups.push(setup()) }, emit(name) { events.push(name) },
+    effect(setup) { onEffect?.(root); cleanups.push(setup()) }, emit(name) { events.push(name) },
   }
   const signedIn = async (spec, cli, { env }) => {
     calls.push({ kind: 'status', vendor: spec.key, env })
@@ -330,6 +332,44 @@ for (const rejects of [false, true]) {
     if (!rejects) { drain.resolve(); await tick() }
   })
 }
+
+test('reset and login restore reader access for a vendor that failed startup',
+  { skip: process.platform !== 'linux' }, async t => {
+    const data = mkdtempSync(join(tmpdir(), 'isolated-selection-recovery-'))
+    t.after(() => rmSync(data, { recursive: true, force: true }))
+    const root = join(data, 'acp')
+    mkdirSync(root, { mode: 0o700 })
+    const h = fixture(t, { root, cold: 'damaged' })
+    const id = 'acp-codex'
+    await h.service.accountReset(id)
+    const { env } = h.adapter.agents.get(id).spawn()
+    const resolve = () => resolveLogin({ vendor: 'codex', env, io: loginReadIo })
+    assert.equal(resolve().code, 'login-paused')
+    await h.login(id)
+    assert.equal(resolve().state, 'ready')
+  })
+
+test('the service registers disposal before publishing and withdraws from a live host',
+  { skip: !['linux', 'darwin'].includes(process.platform) }, async t => {
+    let effects = 0
+    const h = fixture(t, { onEffect(root) {
+      effects++
+      assert.equal(existsSync(join(root, 'selected')), false)
+    } })
+    assert.ok(effects > 0)
+    const selected = join(h.root, 'selected')
+    const [digest] = readdirSync(selected)
+    const [entry] = readdirSync(join(selected, digest))
+    const path = join(selected, digest, entry)
+    const panel = JSON.parse(readFileSync(path, 'utf8'))
+    const registration = join(panel.root, 'instances', 'claude', panel.instance)
+    assert.equal(panel.pid, process.pid)
+    assert.equal(existsSync(registration), true)
+    const stopping = h.stop()
+    assert.equal(existsSync(path), false)
+    assert.equal(existsSync(registration), false)
+    await stopping
+  })
 
 test('logout errors pause work, hide CLI output, and allow explicit retry', async t => {
   const h = fixture(t)

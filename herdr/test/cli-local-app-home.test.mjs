@@ -10,13 +10,14 @@ import { startFakeCore } from "./fake-core.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { attachPath, readAttach as readRows } from "../mods/am-sidebar/attach.js";
 import { GUARD_DIR, KILL_GUARD_DIR } from "../mods/am-sidebar/workers.js";
 import { readJsonLines } from "./log-lines.mjs";
+import { privateFixtureHome, selectedRootFixture } from "./login-fixture.mjs";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
@@ -785,20 +786,19 @@ test("#1195 adoption refuses a login it cannot keep across the next restart, and
 // restart's login, so the adopted home's Claude record (and its refusal above) does not apply:
 // the restart launches on the record's generation, and a refused record stops it before any
 // launch or kill.
-function pointerWorld(s) {
+function pointerWorld(t, s) {
   const root = join(s.root, "acp", "cli-homes"), current = join(root, "current"), dsh = join(s.root, "dsh");
   mkdirSync(dsh, { recursive: true });
   const generation = "33333333-3333-4333-8333-333333333333";
   const configDir = join(root, "homes", "claude", generation, ".claude");
   mkdirSync(current, { recursive: true });
   mkdirSync(configDir, { recursive: true });
-  chmodSync(configDir, 0o700);
+  privateFixtureHome(configDir);
   writeFileSync(join(current, "claude"), generation);
-  // The panel's claim on the shared root names this DSH home (acp-dsh installationCliHome, #1769).
-  writeFileSync(join(root, "installation.json"), JSON.stringify({ version: 1, identity: realpathSync(dsh) }));
+  selectedRootFixture(t, join(s.root, "acp"), root, dsh);
   writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 2,
     claude: { generation, configDir }, codex: null, updatedAt: "2026-11-20T00:00:00.000Z" }));
-  return { configDir, env: { AUTOMAGIK_BOT_CLI_POINTER: join(current, "claude"), AUTOMAGIK_NATIVE_WORKER_LOGIN: "required", DSH_HOME: dsh } };
+  return { configDir, env: { AUTOMAGIK_BOT_CLI_POINTER: join(current, "claude"), AUTOMAGIK_NATIVE_WORKER_LOGIN: "required", DSH_HOME: dsh, AUTOMAGIK_HOME: s.root } };
 }
 
 test("#1509 an adopted restart launches on the login record's generation, not the adopted home's selection", (t) => {
@@ -808,7 +808,7 @@ test("#1509 an adopted restart launches on the login record's generation, not th
   pane.argv = pane.argv.filter((word) => !word.startsWith("HERDR_APP_HOME="));
   writeFileSync(s.statePath, JSON.stringify(state));
   rmSync(attachPath(s.app), { force: true });
-  const login = pointerWorld(s);
+  const login = pointerWorld(t, s);
   writeFileSync(s.logPath, "");
   const r = cliWith(s, { HC_TERMINAL_ID: terminal, ...login.env }, ["HERDR_APP_HOME"], ["restart", "Genie", "--json"]);
   // The fake hc ends the CLI as the real kill of its own pane would: what it printed first stands.
@@ -825,7 +825,7 @@ test("#1509 a refused login record stops an adopted restart before any launch or
   pane.argv = pane.argv.filter((word) => !word.startsWith("HERDR_APP_HOME="));
   writeFileSync(s.statePath, JSON.stringify(state));
   rmSync(attachPath(s.app), { force: true });
-  const login = pointerWorld(s);
+  const login = pointerWorld(t, s);
   chmodSync(login.configDir, 0o755);
   writeFileSync(s.logPath, "");
   const r = cliWith(s, { HC_TERMINAL_ID: terminal, ...login.env }, ["HERDR_APP_HOME"], ["restart", "Genie", "--json"]);

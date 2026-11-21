@@ -759,9 +759,9 @@ test("#1509 revive names a helper with a late login refusal and records its end"
   ] });
   writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "worker", terminal: "t8",
     core: CORE, created_ms: 8, agent: "codex", botId: ID.main, project: s.project, worktree: s.project })}\n`);
-  const root = join(s.root, "cli-homes");
-  const claude = loginFixture(root, "claude");
-  const codex = loginFixture(root, "codex");
+  const root = join(s.root, "acp", "cli-homes");
+  const claude = loginFixture(t, root, "claude");
+  const codex = loginFixture(t, root, "codex");
   const state = s.hcState();
   state.onKillWrite = { terminal: "t5", path: join(dirname(codex.dir), "paused"), text: "" };
   writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));

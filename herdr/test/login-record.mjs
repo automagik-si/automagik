@@ -3,22 +3,31 @@
 // No real login, auth file, network call or hc call is read or made.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { createHash } from "node:crypto";
-import { BACKWARDS_LINE, POINTER_VAR, REQUIRED_VAR, botLoginWords, directLoginVendor, installationIdentity, loginLaunchHome, loginLaunchProblem, loginOverride, loginPolicyActive, loginReadIo, panelRoot, resolveLogin } from "../mods/am-sidebar/loginRecord.js";
+import { BACKWARDS_LINE, POINTER_VAR, REQUIRED_VAR, botLoginWords, directLoginVendor, loginLaunchHome, loginLaunchProblem, loginOverride, loginPolicyActive, loginReadIo, resolveLogin } from "../mods/am-sidebar/loginRecord.js";
 import { chooseLogin, envWords } from "../mods/am-sidebar/logins.js";
 import { paneCommand } from "../mods/am-sidebar/restart.js";
 import { workerArgs } from "../mods/am-sidebar/workers.js";
-import { installationCliHome } from "../../apps/acp-dsh/src/host/installation.js";
+import { installationDigest } from "../../apps/acp-dsh/src/host/installation.js";
+import { loginPointerFixture, privateFixtureDir, privateFixtureFile, privateFixtureHome, selectedRootFixture } from "./login-fixture.mjs";
 
 const U1 = "11111111-1111-4111-8111-111111111111";
 const U2 = "22222222-2222-4222-8222-222222222222";
-const CURRENT = "/bot/cli-homes/current";
+const ACP = "/bot/acp";
+const DSH = "/bot/dsh";
+const CURRENT = `${ACP}/cli-homes/current`;
+const SELECTED = `${ACP}/selected`;
+const SELECTIONS = `${SELECTED}/${installationDigest(DSH)}`;
+const INSTANCE = `${process.pid}-${U1}`;
+const SELECTION = `${SELECTIONS}/${INSTANCE}.json`;
+const INSTANCES = `${dirname(CURRENT)}/instances`;
+const BOOT = "/proc/sys/kernel/random/boot_id", PROC = `/proc/${process.pid}/stat`;
 const CLAUDE_DIR = `${dirname(CURRENT)}/homes/claude/${U1}/.claude`;
 const CODEX_DIR = `${dirname(CURRENT)}/homes/codex/${U2}/.codex`;
 const MEMORY = "/bot/app/automagik-herdr/login-sequence";
@@ -30,7 +39,13 @@ const RECORD = {
 };
 const textOf = (record) => (typeof record === "string" ? record : JSON.stringify(record));
 const enoent = () => { const error = new Error("ENOENT"); error.code = "ENOENT"; throw error; };
-const directory = (mode) => ({ isSymbolicLink: () => false, isDirectory: () => true, mode: 0o40000 | mode });
+const directory = (mode) => ({ isSymbolicLink: () => false, isDirectory: () => true, mode: 0o40000 | mode,
+  uid: process.getuid?.() });
+const privateFile = { isFile: () => true, size: 0, mode: 0o100600, uid: process.getuid?.(), dev: 1 };
+
+function addHomeDirectories(stats, dir) {
+  for (let at = dirname(dir); at !== dirname(CURRENT); at = dirname(at)) stats.set(at, directory(0o700));
+}
 
 /** An in-memory record world: reads are spied, folders are stat-shaped, memory writes captured. */
 function world({ record = RECORD, pointerText = U1, claudeMode = 0o700, codexMode = 0o700, claudeKind = "dir",
@@ -44,6 +59,26 @@ function world({ record = RECORD, pointerText = U1, claudeMode = 0o700, codexMod
   if (memory !== undefined) files.set(MEMORY, String(memory));
   if (activated) files.delete(`${CURRENT}/claude`);
   const stats = new Map([[CODEX_DIR, directory(codexMode)]]);
+  const birth = { platform: "linux", boot: U1, start: "1" };
+  files.set(BOOT, U1);
+  files.set(PROC, `${process.pid} (node) S ${Array(49).fill("1").join(" ")}`);
+  for (const path of [ACP, SELECTED, SELECTIONS, CURRENT, dirname(CURRENT), INSTANCES, `${INSTANCES}/claude`, `${INSTANCES}/codex`]) {
+    stats.set(path, directory(0o700));
+  }
+  const claims = new Map([
+    [SELECTION, { version: 1, identity: DSH, root: dirname(CURRENT), pid: process.pid, instance: INSTANCE, birth, descriptor: 10,
+      vendors: ["claude", "codex"] }],
+    ...["claude", "codex"].map((vendor) => [`${INSTANCES}/${vendor}/${INSTANCE}`,
+      { format: "app-birth-v1", pid: process.pid, nonce: INSTANCE, birth, marker: "root" }]),
+  ]);
+  for (const [path, value] of claims) {
+    const bytes = JSON.stringify(value);
+    files.set(path, bytes);
+    stats.set(path, { ...privateFile, size: bytes.length, ino: stats.size });
+  }
+  for (const dir of [CLAUDE_DIR, CODEX_DIR]) {
+    addHomeDirectories(stats, dir);
+  }
   if (claudeKind === "dir") stats.set(CLAUDE_DIR, directory(claudeMode));
   else if (claudeKind === "link") stats.set(CLAUDE_DIR, { isSymbolicLink: () => true, isDirectory: () => false, mode: 0o40700 });
   else if (claudeKind === "file") stats.set(CLAUDE_DIR, { isSymbolicLink: () => false, isDirectory: () => false, mode: 0o100600 });
@@ -54,6 +89,10 @@ function world({ record = RECORD, pointerText = U1, claudeMode = 0o700, codexMod
   return {
     reads, writes, files, stats,
     io: {
+      platform: "linux",
+      selectionOpen: (value) => value.descriptor === 10,
+      realpath: (path) => path,
+      readClaimBytes: (path) => { reads.push(path); return files.get(path); },
       read: (path) => {
         reads.push(path);
         if (path === `${CURRENT}/generation.json` && firstRecord !== undefined && (recordReads += 1) === 1) return firstRecord;
@@ -67,6 +106,8 @@ function world({ record = RECORD, pointerText = U1, claudeMode = 0o700, codexMod
       },
       readdir: (path) => {
         reads.push(`readdir:${path}`);
+        if (path === SELECTIONS) return [`${INSTANCE}.json`];
+        if (path === `${INSTANCES}/claude` || path === `${INSTANCES}/codex`) return [INSTANCE];
         enoent();
       },
       writeAtomic: (path, value) => { writes.push([path, value]); },
@@ -75,26 +116,29 @@ function world({ record = RECORD, pointerText = U1, claudeMode = 0o700, codexMod
 }
 
 const run = (w, vendor = "claude", extra = {}) => resolveLogin({
-  vendor, env: { [POINTER_VAR]: `${CURRENT}/claude` }, memoryPath: MEMORY, io: w.io, ...extra,
+  vendor, env: { [POINTER_VAR]: `${CURRENT}/claude`, DSH_HOME: DSH, AUTOMAGIK_HOME: "/bot" },
+  memoryPath: MEMORY, io: w.io, ...extra,
 });
 const codeOf = (result) => result.code;
 
 /** A scratch pointer world on disk: one record, both pointers, two private homes and a memory file. */
 function disk(t, { claudeMode = 0o700, codexMode = 0o700 } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "login-record-")));
+  chmodSync(root, 0o700);
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const current = join(root, "current");
-  const claudeDir = join(root, "homes", "claude", U1, ".claude"), codexDir = join(root, "homes", "codex", U2, ".codex");
+  const cliHomes = join(root, "acp", "cli-homes");
+  const current = join(cliHomes, "current");
+  const claudeDir = join(cliHomes, "homes", "claude", U1, ".claude"), codexDir = join(cliHomes, "homes", "codex", U2, ".codex");
   const app = join(root, "app"), memory = join(app, "automagik-herdr", "login-sequence");
   for (const dir of [current, claudeDir, codexDir, app]) mkdirSync(dir, { recursive: true });
+  privateFixtureHome(claudeDir); privateFixtureHome(codexDir);
   chmodSync(claudeDir, claudeMode); chmodSync(codexDir, codexMode);
   writeFileSync(join(current, "generation.json"), JSON.stringify({ ...RECORD,
     claude: { generation: U1, configDir: claudeDir }, codex: { generation: U2, home: codexDir } }));
   writeFileSync(join(current, "claude"), U1);
   writeFileSync(join(current, "codex"), U2);
-  const env = { ...process.env, HOME: root, [POINTER_VAR]: join(current, "claude"), HERDR_APP_HOME: app };
-  // A run started inside an installation must not carry that installation's own export here.
-  delete env.DSH_HOME; delete env[REQUIRED_VAR];
+  const env = { ...process.env, ...loginPointerFixture(t, join(current, "claude")), HOME: root, HERDR_APP_HOME: app };
+  delete env[REQUIRED_VAR];
   const io = {
     ...loginReadIo,
     writeAtomic: (path, text) => {
@@ -129,6 +173,7 @@ export function loginRecordTests(cli) {
     assert.equal(codeOf(run(w, "claude", { env: { [REQUIRED_VAR]: "required" } })), "login-required");
     const other = resolveLogin({ vendor: "dsh-tui", env: { [POINTER_VAR]: `${CURRENT}/claude` }, memoryPath: MEMORY, io: w.io });
     assert.deepEqual(other, { state: "absent" });
+    assert.deepEqual(w.reads, []);
   });
 
   test("#1509 a present empty pointer activates policy and refuses", () => {
@@ -206,6 +251,7 @@ export function loginRecordTests(cli) {
       const dir = `${dirname(CURRENT)}/homes/claude/${generation}/.claude`;
       const w = world({ pointerText: generation, record: { ...RECORD, claude: { generation, configDir: dir } } });
       w.stats.set(dir, directory(0o700));
+      addHomeDirectories(w.stats, dir);
       const result = run(w);
       assert.equal(result.state ?? result.code, expected);
     }
@@ -327,13 +373,16 @@ export function loginRecordTests(cli) {
     assert.deepEqual(readOnly.writes, []);
   });
 
-  test("the reader touches only the record, the requested pointer, folder and marker stats, login-tree names and its memory", () => {
+  test("the reader touches only panel evidence, generation and marker records, login-tree names and memory", () => {
     const w = world({ memory: 8 });
     run(w);
     const unexpected = w.reads.filter((path) => {
       const clean = path.replace(/^(?:lstat|readdir):/, "");
       return ![`${CURRENT}/generation.json`, `${CURRENT}/claude`, CLAUDE_DIR, MEMORY,
-        join(dirname(CLAUDE_DIR), "paused"), join(dirname(CLAUDE_DIR), "changing"), join(dirname(CLAUDE_DIR), "login-trees")].includes(clean);
+        join(dirname(CLAUDE_DIR), "paused"), join(dirname(CLAUDE_DIR), "changing"), join(dirname(CLAUDE_DIR), "login-trees"),
+        SELECTED, SELECTIONS, SELECTION, dirname(CLAUDE_DIR), dirname(dirname(CLAUDE_DIR)),
+        join(dirname(CURRENT), "homes"), ACP, CURRENT, dirname(CURRENT), INSTANCES,
+        `${INSTANCES}/claude`, `${INSTANCES}/claude/${INSTANCE}`, BOOT, PROC].includes(clean);
     });
     assert.deepEqual(unexpected, []);
   });
@@ -480,138 +529,353 @@ export function loginRecordTests(cli) {
     assert.equal(existsSync(d.memory), false);
   });
 
-  // #1509 R3: the reader retakes the panel's root decision at launch (acp-dsh installationCliHome,
-  // #1769) and refuses any difference, so an export decided earlier can never fail open onto
-  // another installation's login; and a login from before any generation launches when the
-  // pointer is exactly the panel's own root.
-  const fsIo = loginReadIo;
-
-  /** An ACP home on disk: two DSH homes, an optional claim, and one generation in a root. */
+  /** An ACP home with a live selection and a generated or legacy login fixture. */
   function acpWorld(t, acpFolder = "acp") {
     const base = realpathSync(mkdtempSync(join(tmpdir(), "login-acp-")));
+    chmodSync(base, 0o700);
     t.after(() => rmSync(base, { recursive: true, force: true }));
     const acp = join(base, acpFolder), dsh = join(base, "dsh"), other = join(base, "dsh-other");
     const shared = join(acp, "cli-homes");
+    const privateRoot = join(acp, "installations", installationDigest(dsh), "cli-homes");
     for (const dir of [shared, dsh, other]) mkdirSync(dir, { recursive: true });
-    const claim = (dshHome) => writeFileSync(join(shared, "installation.json"), JSON.stringify({ version: 1, identity: installationIdentity(dshHome) }));
-    const privateRoot = (dshHome) => join(acp, "installations", createHash("sha256").update(installationIdentity(dshHome)).digest("hex").slice(0, 32), "cli-homes");
-    /** One generation (or, with legacy, a pre-generation login) recorded in `root`. */
+    const select = (root = shared) => selectedRootFixture(t, acp, root, dsh);
     const signIn = (root, { legacy = false } = {}) => {
       const current = join(root, "current");
-      mkdirSync(current, { recursive: true });
+      privateFixtureDir(current);
       if (legacy) {
         const dir = join(root, "claude", ".claude");
-        mkdirSync(dir, { recursive: true }); chmodSync(dir, 0o700);
-        writeFileSync(join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "fixture-only" } }));
-        writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 1, claude: null, codex: null }));
+        privateFixtureDir(dir);
+        privateFixtureHome(dir);
+        privateFixtureFile(join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "fixture-only" } }));
+        privateFixtureFile(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 1, claude: null, codex: null }));
         return { pointer: join(current, "claude"), dir };
       }
       const dir = join(root, "homes", "claude", U1, ".claude");
-      mkdirSync(dir, { recursive: true }); chmodSync(dir, 0o700);
-      writeFileSync(join(current, "claude"), U1);
-      writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 3, claude: { generation: U1, configDir: dir }, codex: null }));
+      privateFixtureDir(dir);
+      privateFixtureHome(dir);
+      privateFixtureFile(join(current, "claude"), U1);
+      privateFixtureFile(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 3, claude: { generation: U1, configDir: dir }, codex: null }));
       return { pointer: join(current, "claude"), dir };
     };
-    const resolveFor = (pointer, env = {}) => resolveLogin({ vendor: "claude", io: fsIo,
-      env: { [POINTER_VAR]: pointer, [REQUIRED_VAR]: "required", DSH_HOME: dsh, ...env } });
-    return { acp, dsh, other, shared, claim, privateRoot, signIn, resolveFor };
+    const resolveFor = (pointer, env = {}, io = loginReadIo) => resolveLogin({ vendor: "claude", io,
+      env: { [POINTER_VAR]: pointer, [REQUIRED_VAR]: "required", DSH_HOME: dsh, AUTOMAGIK_HOME: dirname(acp), ...env } });
+    return { acp, dsh, other, shared, select, privateRoot, signIn, resolveFor };
   }
 
   test("#1509 an ACP home under installations can have a shared login root", (t) => {
     const w = acpWorld(t, "installations/acp");
-    w.claim(w.dsh);
     const login = w.signIn(w.shared);
+    w.select();
     assert.deepEqual(w.resolveFor(login.pointer), { state: "ready", dir: login.dir, generation: U1, sequence: 3 });
   });
 
-  const CLAIMS = {
-    "no claim": () => {},
-    "own claim": (w) => w.claim(w.dsh),
-    "foreign claim": (w) => w.claim(w.other),
-    "corrupt claim": (w) => writeFileSync(join(w.shared, "installation.json"), "{"),
-    "claim as a folder": (w) => mkdirSync(join(w.shared, "installation.json")),
-  };
-  for (const [name, plant] of Object.entries(CLAIMS)) {
-    test(`#1509 the reader's root is the panel's root once the panel has run: ${name}`, (t) => {
+  for (const [name, replace] of Object.entries({
+    missing: (path) => rmSync(path),
+    unreadable: (path) => { rmSync(path); mkdirSync(path); },
+    malformed: (path) => writeFileSync(path, "{"),
+    version: (path, record) => writeFileSync(path, JSON.stringify({ ...record, version: 2 })),
+    "foreign identity": (path, record, w) => writeFileSync(path, JSON.stringify({ ...record, identity: w.other })),
+    "wrong birth": (path, record) => writeFileSync(path, JSON.stringify({ ...record, birth: { ...record.birth, start: record.birth.start + "0" } })),
+    "unverifiable birth": (path, record) => writeFileSync(path, JSON.stringify({ ...record, birth: null })),
+    "group-writable": (path) => chmodSync(path, 0o620),
+    "other-writable": (path) => chmodSync(path, 0o602),
+  })) {
+    test(`#1509 a ${name} selected root refuses installation-unknown`, (t) => {
       const w = acpWorld(t);
-      plant(w);
-      const before = panelRoot(w.acp, w.dsh, fsIo);
-      const { root } = installationCliHome(w.acp, w.dsh);
-      // An absent claim is the panel's to take at its start; by a worker's launch it is not.
-      if (name === "no claim") assert.equal(before, null);
-      else assert.equal(before, root);
-      assert.equal(panelRoot(w.acp, w.dsh, fsIo), root, "after the panel ran, the same root");
+      const login = w.signIn(w.shared);
+      const { path, record } = w.select();
+      replace(path, record, w);
+      assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown");
     });
   }
 
-  test("#1509 the claim is opened without following links, checked by descriptor and bounded", (t) => {
+  test("#1509 a dead host with matching selection and registration refuses", (t) => {
     const w = acpWorld(t);
-    const path = join(w.shared, "installation.json"), saved = join(w.shared, "saved-claim");
-    const own = JSON.stringify({ version: 1, identity: w.dsh });
-    writeFileSync(saved, own);
+    const login = w.signIn(w.shared);
+    const panel = w.select();
+    const module = new URL("../../apps/acp-dsh/src/host/process-identity.js", import.meta.url).href;
+    const script = `import { processBirth } from ${JSON.stringify(module)};
+      console.log(JSON.stringify({ pid: process.pid, birth: processBirth(process.pid) }));`;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
+    assert.equal(child.status, 0, child.stderr);
+    const { pid, birth } = JSON.parse(child.stdout);
+    assert.ok(birth);
+    const instance = `${pid}-${U1}`;
+    rmSync(panel.path);
+    rmSync(panel.registration("claude"));
+    writeFileSync(join(dirname(panel.path), `${instance}.json`),
+      JSON.stringify({ ...panel.record, pid, birth, instance }), { mode: 0o600 });
+    writeFileSync(join(dirname(panel.registration("claude")), instance), JSON.stringify({
+      format: "app-birth-v1", marker: "root", pid, birth, nonce: instance,
+    }), { mode: 0o600 });
+    assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown");
+  });
+
+  test("#1509 a Linux selection requires readable /proc and the same boot",
+    { skip: process.platform !== "linux" }, (t) => {
+    const w = acpWorld(t);
+    w.select();
+    const login = w.signIn(w.shared);
+    const io = { ...loginReadIo, read(path) {
+      return path.startsWith("/proc/") ? enoent() : loginReadIo.read(path);
+    } };
+    assert.equal(codeOf(w.resolveFor(login.pointer, {}, io)), "installation-unknown");
+    assert.equal(codeOf(w.resolveFor(login.pointer, {}, { ...loginReadIo, read(path) {
+      return path === BOOT ? U1 : loginReadIo.read(path);
+    } })), "installation-unknown");
+  });
+
+  test("#1509 Darwin verifies the ACP birth and refuses zombies and a reused PID", () => {
+    const w = world();
+    const birth = { platform: "darwin", start: "Sat Nov 21 14:03:00 2026" };
+    for (const path of [SELECTION, `${INSTANCES}/claude/${INSTANCE}`]) {
+      w.files.set(path, JSON.stringify({ ...JSON.parse(w.files.get(path)), birth }));
+    }
+    w.io.platform = "darwin";
+    w.io.ps = (command, argv, options) => {
+      assert.equal(command, "/bin/ps");
+      assert.deepEqual(argv, ["-p", String(process.pid), "-o", "state=", "-o", "lstart="]);
+      assert.deepEqual(options.env, { LC_ALL: "C", TZ: "UTC" });
+      return `S  ${birth.start}\n`;
+    };
+    assert.equal(run(w).state, "ready");
+    w.io.ps = () => `Z  ${birth.start}\n`;
+    assert.equal(codeOf(run(w)), "installation-unknown");
+    w.io.ps = () => "S Sat Nov 21 14:02:00 2026\n";
+    assert.equal(codeOf(run(w)), "installation-unknown");
+    w.io.ps = () => `S  ${birth.start}\n`;
+    w.io.selectionOpen = () => false;
+    assert.equal(codeOf(run(w)), "installation-unknown", "the birth second alone cannot prove the same process");
+  });
+
+  for (const part of ["selected", "digest", "file"]) {
+    test(`#1509 the ${part} selection entry requires owner and safe permissions`, (t) => {
+      const w = acpWorld(t);
+      const login = w.signIn(w.shared);
+      const { path } = w.select();
+      const target = part === "file" ? path : part === "digest" ? dirname(path) : dirname(dirname(path));
+      const io = { ...loginReadIo, lstat(file) {
+        const stat = loginReadIo.lstat(file);
+        if (file === target) stat.uid += 1;
+        return stat;
+      } };
+      assert.equal(codeOf(w.resolveFor(login.pointer, {}, io)), "installation-unknown");
+      chmodSync(target, part === "file" ? 0o620 : 0o720);
+      assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown");
+    });
+  }
+
+  for (const level of ["selected", "digest"]) {
+    test(`#1509 a symlink at the ${level} directory refuses selection`, (t) => {
+      const w = acpWorld(t);
+      const login = w.signIn(w.shared);
+      const { path } = w.select();
+      const target = level === "digest" ? dirname(path) : dirname(dirname(path));
+      renameSync(target, target + ".moved");
+      symlinkSync(target + ".moved", target);
+      assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown");
+    });
+  }
+
+  test("#1509 the selected record is opened without following links, checked by descriptor and bounded", (t) => {
+    const w = acpWorld(t);
+    const login = w.signIn(w.shared);
+    const { path, record } = w.select();
+    const own = JSON.stringify(record), saved = path + ".saved";
+    renameSync(path, saved);
     symlinkSync(saved, path);
-    assert.equal(panelRoot(w.acp, w.dsh, loginReadIo), w.privateRoot(w.dsh));
+    assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown");
     rmSync(path);
-    writeFileSync(path, own.padEnd(4097));
-    assert.equal(panelRoot(w.acp, w.dsh, loginReadIo), w.privateRoot(w.dsh));
-    writeFileSync(path, own);
+    writeFileSync(path, own.padEnd(4097), { mode: 0o600 });
+    assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown");
+    writeFileSync(path, own, { mode: 0o600 });
     let opens = 0;
-    const raced = { ...loginReadIo, openClaim(file) {
+    const raced = { ...loginReadIo, openSelection(file) {
       opens++;
       rmSync(file);
       symlinkSync(saved, file);
-      return loginReadIo.openClaim(file);
+      return loginReadIo.openSelection(file);
     } };
-    assert.equal(panelRoot(w.acp, w.dsh, raced), w.privateRoot(w.dsh), "a link swapped in after lstat");
+    assert.equal(codeOf(w.resolveFor(login.pointer, {}, raced)), "installation-unknown", "a link swapped in after lstat");
     assert.equal(opens, 1);
     rmSync(path);
-    writeFileSync(path, own);
-    const grown = { ...loginReadIo, openClaim(file) {
+    writeFileSync(path, own, { mode: 0o600 });
+    const grown = { ...loginReadIo, openSelection(file) {
       writeFileSync(file, own.padEnd(4097));
-      return loginReadIo.openClaim(file);
+      return loginReadIo.openSelection(file);
     } };
-    assert.equal(panelRoot(w.acp, w.dsh, grown), w.privateRoot(w.dsh), "an oversized file swapped in after lstat");
-    writeFileSync(path, own);
+    assert.equal(codeOf(w.resolveFor(login.pointer, {}, grown)), "installation-unknown", "an oversized file swapped in after lstat");
+    rmSync(path);
+    renameSync(saved, path);
     opens = 0;
-    const retried = { ...loginReadIo, openClaim(file) {
+    const retried = { ...loginReadIo, openSelection(file) {
       if (++opens < 4) throw Object.assign(new Error("interrupted"), { code: "EINTR" });
-      return loginReadIo.openClaim(file);
+      return loginReadIo.openSelection(file);
     } };
-    assert.equal(panelRoot(w.acp, w.dsh, retried), w.shared);
-    assert.equal(opens, 4);
+    assert.equal(w.resolveFor(login.pointer, {}, retried).state, "ready");
+    assert.equal(opens, 5, "initial read and final selection recheck");
   });
 
-  test("#1509 the export's root launches; another installation's root refuses installation-mismatch", (t) => {
+  test("#1509 the live selection governs both roots even when the old claim says otherwise", (t) => {
     const w = acpWorld(t);
-    w.claim(w.other);
-    const theirs = w.signIn(w.shared);
-    const mine = w.signIn(w.privateRoot(w.dsh));
-    assert.equal(codeOf(w.resolveFor(theirs.pointer)), "installation-mismatch", "never the other installation's login");
-    assert.deepEqual(w.resolveFor(mine.pointer), { state: "ready", dir: mine.dir, generation: U1, sequence: 3 });
-    w.claim(w.dsh);
-    assert.deepEqual(w.resolveFor(theirs.pointer), { state: "ready", dir: theirs.dir, generation: U1, sequence: 3 });
-    assert.equal(codeOf(w.resolveFor(mine.pointer)), "installation-mismatch", "the private root once the shared one is ours");
+    const shared = w.signIn(w.shared);
+    const own = w.signIn(w.privateRoot);
+    writeFileSync(join(w.shared, "installation.json"), JSON.stringify({ version: 1, identity: w.dsh }));
+    const isolated = w.select(w.privateRoot);
+    assert.equal(codeOf(w.resolveFor(shared.pointer)), "installation-mismatch");
+    assert.deepEqual(w.resolveFor(own.pointer), { state: "ready", dir: own.dir, generation: U1, sequence: 3 });
+    writeFileSync(join(w.shared, "installation.json"), JSON.stringify({ version: 1, identity: w.other }));
+    w.select();
+    rmSync(isolated.path);
+    assert.deepEqual(w.resolveFor(shared.pointer), { state: "ready", dir: shared.dir, generation: U1, sequence: 3 });
+    assert.equal(codeOf(w.resolveFor(own.pointer)), "installation-mismatch");
   });
 
-  test("#1509 AUTOMAGIK_HOME binds the pointer to this data root despite a matching foreign claim", (t) => {
+  test("#1509 AUTOMAGIK_HOME binds the pointer to this data root despite a matching foreign selection", (t) => {
     const w = acpWorld(t);
     const foreign = acpWorld(t);
     const stale = foreign.signIn(foreign.shared);
-    foreign.claim(w.dsh);
-    assert.equal(w.resolveFor(stale.pointer).state, "ready", "the foreign tree has this DSH home's claim");
+    selectedRootFixture(t, foreign.acp, foreign.shared, w.dsh);
     const env = { AUTOMAGIK_HOME: dirname(w.acp) };
+    assert.equal(w.resolveFor(stale.pointer, { AUTOMAGIK_HOME: dirname(foreign.acp) }).state, "ready");
     assert.equal(codeOf(w.resolveFor(stale.pointer, env)), "installation-mismatch");
-    assert.equal(codeOf(w.resolveFor(stale.pointer, { ...env, DSH_HOME: "", [REQUIRED_VAR]: "" })), "installation-mismatch");
-    w.claim(w.dsh);
+    w.select();
     assert.equal(w.resolveFor(w.signIn(w.shared).pointer, env).state, "ready");
-    w.claim(w.other);
-    assert.equal(w.resolveFor(w.signIn(w.privateRoot(w.dsh)).pointer, env).state, "ready");
+    w.select(w.privateRoot);
+    assert.equal(w.resolveFor(w.signIn(w.privateRoot).pointer, env).state, "ready");
+    const wrongDigest = join(w.acp, "installations", "0".repeat(32), "cli-homes");
+    selectedRootFixture(t, w.acp, wrongDigest, w.dsh);
+    assert.equal(codeOf(w.resolveFor(w.signIn(wrongDigest).pointer)), "installation-mismatch");
   });
+
+  test("#1509 two panel instances in one live PID have independent records", (t) => {
+    const w = acpWorld(t);
+    const login = w.signIn(w.shared);
+    const first = w.select(), second = w.select();
+    writeFileSync(second.path, JSON.stringify({ ...second.record, pid: { toString: null } }));
+    assert.equal(w.resolveFor(login.pointer).state, "ready", "a malformed peer cannot deny the surviving panel");
+    rmSync(second.path);
+    assert.equal(w.resolveFor(login.pointer).state, "ready", "newer panel disposed before the older one");
+    const unregistered = w.select();
+    rmSync(unregistered.registration("claude"));
+    rmSync(first.registration("claude"));
+    assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown", "a live host cannot vouch for a disposed panel");
+    writeFileSync(first.registration("claude"), "", { mode: 0o600 });
+    assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown", "legacy ownership has no birth proof");
+  });
+
+  test("#1509 live panels in distinct processes survive orderly withdrawal of a peer",
+    { skip: process.platform !== "linux" }, async (t) => {
+      const w = acpWorld(t);
+      const login = w.signIn(w.shared);
+      const first = w.select();
+      const fixture = new URL("./login-fixture.mjs", import.meta.url).href;
+      const script = `import { selectedRootFixture } from ${JSON.stringify(fixture)};
+        import { rmSync } from "node:fs";
+        const panel = selectedRootFixture({ after() {} }, ...process.argv.slice(1));
+        process.stdin.resume();
+        process.stdin.on("end", () => {
+          rmSync(panel.path); panel.close(); rmSync(panel.registration("claude"));
+        });
+        console.log("ready");`;
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script, w.acp, w.shared, w.dsh],
+        { stdio: ["pipe", "pipe", "inherit"] });
+      t.after(() => { if (child.exitCode === null) child.kill(); });
+      await Promise.race([once(child.stdout, "data"), once(child, "exit").then(() => assert.fail("panel exited during setup"))]);
+      assert.notEqual(child.pid, process.pid);
+      rmSync(first.path);
+      assert.equal(w.resolveFor(login.pointer).state, "ready", "the child alone can authorize its panel");
+      w.select();
+      const exited = once(child, "exit");
+      child.stdin.end();
+      assert.deepEqual(await exited, [0, null]);
+      assert.equal(w.resolveFor(login.pointer).state, "ready", "the surviving panel can still authorize");
+    });
+
+  test("#1509 an unreadable withdrawal can revoke a selection and block stale shared evidence", (t) => {
+    const w = acpWorld(t);
+    const login = w.signIn(w.shared);
+    const first = w.select(), peer = w.select();
+    assert.equal(w.resolveFor(login.pointer).state, "ready");
+    first.close();
+    assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown");
+    rmSync(first.registration("claude"));
+    assert.equal(w.resolveFor(login.pointer).state, "ready");
+    peer.close();
+    assert.equal(codeOf(w.resolveFor(login.pointer)), "installation-unknown");
+  });
+
+  for (const removed of ["selection", "registration"]) {
+    test(`#1509 ${removed} withdrawn while checking whether the login is paused refuses`, (t) => {
+      const w = acpWorld(t);
+      const login = w.signIn(w.shared);
+      const panel = w.select();
+      const io = { ...loginReadIo, lstat(path) {
+        if (path === join(dirname(login.dir), "paused")) {
+          rmSync(removed === "selection" ? panel.path : panel.registration("claude"));
+        }
+        return loginReadIo.lstat(path);
+      } };
+      assert.equal(codeOf(w.resolveFor(login.pointer, {}, io)), "installation-unknown");
+    });
+  }
+
+  for (const [level, pick] of [
+    ["ACP", (w) => w.acp],
+    ["legacy vendor home", (_w, login) => dirname(login.dir)],
+    ["generated home", (_w, login) => dirname(login.dir)],
+    ["generated vendor", (_w, login) => dirname(dirname(login.dir))],
+    ["generated homes", (_w, login) => dirname(dirname(dirname(login.dir)))],
+  ]) {
+    test(`#1509 a private target behind a symlink at the ${level} refuses`, (t) => {
+      const w = acpWorld(t);
+      const login = w.signIn(w.shared, { legacy: level.startsWith("legacy") });
+      w.select();
+      const path = pick(w, login);
+      renameSync(path, path + ".real");
+      symlinkSync(path + ".real", path);
+      assert.equal(codeOf(w.resolveFor(login.pointer)), level === "ACP" ? "installation-unknown" : "login-unverified");
+    });
+  }
+
+  test("#1509 the ACP directory and physical home require the current UID", (t) => {
+    const w = acpWorld(t);
+    const login = w.signIn(w.shared);
+    w.select();
+    for (const [target, expected] of [
+      [w.acp, "installation-unknown"],
+      [dirname(login.dir), "login-unverified"],
+    ]) {
+      const io = { ...loginReadIo, lstat(path) {
+        const stat = loginReadIo.lstat(path);
+        if (path === target) stat.uid += 1;
+        return stat;
+      } };
+      assert.equal(codeOf(w.resolveFor(login.pointer, {}, io)), expected);
+    }
+  });
+
+  for (const [change, mutate, expected] of [
+    ["pointer", (w) => w.files.set(`${CURRENT}/claude`, U2), "generation-mismatch"],
+    ["pause", (w) => w.stats.set(join(dirname(CLAUDE_DIR), "paused"), privateFile), "login-paused"],
+  ]) {
+    test(`#1509 a ${change} change during the final selection read refuses`, () => {
+      const w = world();
+      const read = w.io.readClaimBytes;
+      let selectionReads = 0;
+      w.io.readClaimBytes = (path) => {
+        if (path === SELECTION && ++selectionReads === 2) mutate(w);
+        return read(path);
+      };
+      assert.equal(codeOf(run(w)), expected);
+      assert.deepEqual(w.writes, []);
+    });
+  }
 
   for (const legacy of [false, true]) for (const marker of ["paused", "changing"]) {
     test(`#1509 a ${legacy ? "legacy home" : "generation"} marked ${marker} refuses the login`, (t) => {
       const w = acpWorld(t);
-      w.claim(w.dsh);
+      w.select();
       const login = w.signIn(w.shared, { legacy });
       const path = join(dirname(login.dir), marker);
       if (marker === "changing") mkdirSync(path);
@@ -624,7 +888,7 @@ export function loginRecordTests(cli) {
 
   for (const legacy of [false, true]) test(`#1509 login-tree entries block a ${legacy ? "legacy home" : "generation"}`, (t) => {
     const w = acpWorld(t);
-    w.claim(w.dsh);
+    w.select();
     const login = w.signIn(w.shared, { legacy });
     const trees = join(dirname(login.dir), "login-trees");
     mkdirSync(trees);
@@ -638,27 +902,28 @@ export function loginRecordTests(cli) {
     assert.equal(codeOf(w.resolveFor(login.pointer)), "login-unverified", "an unreadable directory is refused");
   });
 
-  test("#1509 an unclaimed or untrusted shared root refuses; the marker without DSH_HOME refuses", (t) => {
+  test("#1509 every active policy requires DSH_HOME and AUTOMAGIK_HOME", (t) => {
     const w = acpWorld(t);
     const shared = w.signIn(w.shared);
-    assert.equal(codeOf(w.resolveFor(shared.pointer)), "installation-mismatch", "no claim at launch");
-    writeFileSync(join(w.shared, "installation.json"), "{");
-    assert.equal(codeOf(w.resolveFor(shared.pointer)), "installation-mismatch", "a corrupt claim");
-    w.claim(w.dsh);
-    assert.equal(codeOf(w.resolveFor(shared.pointer, { DSH_HOME: "" })), "installation-unknown");
-    assert.equal(codeOf(w.resolveFor("/elsewhere/current/claude")), "installation-mismatch", "not a cli-homes root");
-    // Without the marker and without DSH_HOME the pointer is the one ACP put in its own Bot's env.
-    assert.equal(w.resolveFor(shared.pointer, { DSH_HOME: "", [REQUIRED_VAR]: "" }).state, "ready");
+    w.select();
+    for (const name of ["DSH_HOME", "AUTOMAGIK_HOME"]) for (const policy of ["required", ""]) {
+      for (const value of ["", undefined]) {
+        assert.equal(codeOf(w.resolveFor(shared.pointer, { [name]: value, [REQUIRED_VAR]: policy })), "installation-unknown");
+      }
+    }
+    assert.equal(codeOf(w.resolveFor("/elsewhere/current/claude")), "installation-mismatch", "invalid cli-homes root");
   });
 
   test("#1509 a login from before any generation launches on the panel's own root, and only there", (t) => {
     const w = acpWorld(t);
-    w.claim(w.dsh);
+    const panel = w.select();
     const legacy = w.signIn(w.shared, { legacy: true });
     assert.deepEqual(w.resolveFor(legacy.pointer), { state: "ready", dir: legacy.dir, generation: "legacy", sequence: 1 });
-    w.claim(w.other);
+    rmSync(panel.path);
+    const isolated = w.select(w.privateRoot);
     assert.equal(codeOf(w.resolveFor(legacy.pointer)), "installation-mismatch", "another installation's legacy login");
-    w.claim(w.dsh);
+    rmSync(isolated.path);
+    w.select();
     // Anything acp-dsh's generationAt would not call legacy stays a refusal.
     for (const [why, plant, undo] of [
       ["a pointer file", () => writeFileSync(legacy.pointer, "damaged"), () => rmSync(legacy.pointer)],

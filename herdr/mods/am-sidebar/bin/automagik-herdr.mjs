@@ -11682,6 +11682,14 @@ async function cmdWorker(opts, rest) {
       // #1208: the settings as they are now, after the hook step, are the ones the agent reads.
       const again = chosenSettingsProblem(chosen.agent, place.worktree);
       if (again) throw chosenSettingsRefusal(chosen, again);
+    }
+    if (freshLogin) {
+      const current = botLogin(templateArgv ?? workerArgv, { agent: runs, readOnly: true });
+      if (current?.dir !== freshLogin.dir || current.generation !== freshLogin.generation) {
+        throw loginRefusal({ code: "generation-mismatch", reason: "The Bot login record is missing or out of date; sign in again." });
+      }
+    }
+    if (chosen) {
       // The launch is reserved before hc sees it: until its start row, a pane of this name that
       // shows no launch argv is unresolved, never a Bot's seat. No reservation, no launch.
       const intent = writeLedgerRow(workerIntent({ launch: chosen.launch, name, project: project.key, worktree: place.worktree,

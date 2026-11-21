@@ -1695,7 +1695,7 @@ for (const [vendor, worker] of [["claude", { agent: "claude" }], ["codex", { age
     file.bots.find((bot) => bot.id === ID.dev).worker = worker;
     writeFileSync(join(s.project, ".herdr", "bots.json"), JSON.stringify(file));
     const { record: approval } = approveProject({ project: s.project, env: s.env, approvedBy: "test" });
-    const login = loginFixture(join(s.root, "cli-homes"), vendor);
+    const login = loginFixture(t, join(s.root, "acp", "cli-homes"), vendor);
     const template = worker.template ? "codex --model chosen" : null;
     const templates = template ? [{ name: worker.template, command: template }] : [];
     const snapshot = { terminal: "t100", bound: true, caller: { bot: ID.dev, project: s.project },
