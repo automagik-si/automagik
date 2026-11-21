@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-2: #254, #258, #263; 3-10 not found; owner's answers in: D35; amendment proposed 2026-11-20 for #206: delivery 9a, am on a linked machine, questions 6-11) |
+| Status | In delivery (deliveries 1-2: #254, #258, #263; 3-10 not found; owner's answers in: D35; #206 amendment (delivery 9a, am on a linked machine) approved by the owner's delegate on 2026-11-20, questions 6-11 answered with its recommendations, 9a in delivery) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | am (3.N.P, D35), herdr (3.N.P), plugin (3.N.P), pocket (3.N.P), desktop (3.N) |
 | Created | 2026-11-03 |
@@ -485,10 +485,11 @@ keyed by hc's machine name. Proposed:
 - parts.json is keyed by hc's machine name (D35). This machine writes its own entry; a remote's
   entry here is only its last report, marked with when it came.
 
-### Amendment (proposed 2026-11-20, #206): am on a linked machine, before delivery 3
+### Amendment (2026-11-20, #206): am on a linked machine, before delivery 3
 
-Status: Proposed; questions 6-11 below are the owner's. Nothing above changes until they are
-answered; the amendment splits delivery 9 into 9a and 9b.
+Status: In delivery. Approved by the owner's delegate on 2026-11-20, questions 6-11 answered with
+this amendment's recommendations (see "Answers to questions 6-11" under Open questions). The
+amendment splits delivery 9 into 9a, in delivery, and 9b, after delivery 3.
 
 **What #206 still needs.** Issue #206 asks that a Bot in a project on a linked machine be
 configured, started and inspected from the desktop. On `dev` at `e7de3fde1`:
@@ -855,11 +856,12 @@ check passes on all three OSes.
    Link (t16r).
    *Check:* each part's doctor in `am doctor`; `am install work` on a fresh machine.
    *Rollback:* revert each; the part's own updater is unchanged.
-9. **Fleet** (am). Split by the 2026-11-20 amendment (#206), proposed:
+9. **Fleet** (am). Split by the 2026-11-20 amendment (#206), approved by the owner's delegate on
+   2026-11-20:
    - **9a. am on one linked machine** (herdr patch carrying am; no wait on delivery 3).
      `am machines install --machine M`, its `--check` and `--app-home` steps,
      `self install --signed`, the pack's `am-keys.json` copy, the linked hook with am's store,
-     Attach's hook, the warnings, as "Amendment (proposed 2026-11-20, #206)" says.
+     Attach's hook, the warnings, as "Amendment (2026-11-20, #206)" says.
      *Check:* the pack's and am's gates, with fake `hc`, `herdr-core` and `systemctl` first on
      PATH, a fake `hc exec` runner as the far side, and a fixture release served to it whose
      pointer a per-run key signs.
@@ -915,6 +917,23 @@ then (since settled by RFC 0017); questions 6-11 are the 2026-11-20 amendment's.
 
 Questions 6-11 are the 2026-11-20 amendment's (#206), each with the recommended option first.
 
+**Answers to questions 6-11** (approved by the owner's delegate on 2026-11-20, every
+recommendation; the owner may amend on return):
+
+- Q6: this amendment; 9a now, 9b after delivery 3.
+- Q7: the machine verifies the signed `am-lane` pointer itself, with am's public keys from this
+  computer's install (the pack gains a copy written from `am/am-keys.json`); for this path the
+  shared verifier takes the place of D35's one-liner.
+- Q8: only an explicit `am machines install --machine M`; the hourly cycle never bootstraps am.
+- Q9: the separate, project-scoped `--app-home` step.
+- Q10: no new pack UI; the Start and Attach warnings carry the exact command.
+- Q11: a working `automagik.am` on the linked machine, installed from this computer, and a linked
+  Claude bot's per-turn briefing from it replace `am install herdr.cli --machine M`; 9a's PR says
+  `Refs #206`, and #206 closes after a release whose `am-lane` names an am with
+  `self install --signed`, once both are shown on a real linked Linux machine and a macOS arm64
+  one. Remote Inspect rows and machines with their own attach ledger are left out.
+
+
 6. **Where the rest of #206 goes.** (a) *Recommended:* this amendment, delivery 9 split into 9a
    now and 9b after delivery 3; (b) a new RFC for linked installs; (c) wait for delivery 3 and
    build delivery 9 whole (a linked Claude bot gets its per-turn briefing only where the pack is
@@ -956,7 +975,7 @@ Questions 6-11 are the 2026-11-20 amendment's (#206), each with the recommended 
 
 Ledger pass (2026-11-10): the board links this RFC from its file.
 
-- Open issues: #768, #815, #206 (delivery 9a, amendment proposed 2026-11-20).
+- Open issues: #768, #815, #206 (delivery 9a; amendment approved 2026-11-20, #1932).
 - Merged changes that cite this RFC: #203, #205, #252, #254, #258, #263, #265, #288, #292, #300, #302, #330, #427, #751, #783, #806 (last merged 2026-11-09).
 
 ## Links
