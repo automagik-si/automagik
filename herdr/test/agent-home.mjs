@@ -100,7 +100,10 @@ function homeScene(t, cli, { bot = {}, callerArgv = ["/usr/bin/env", "claude"] }
   writeFileSync(appLog, "");
   const env = { ...process.env, XDG_DATA_HOME: join(root, "data"), PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app,
     HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog,
-    AUTOMAGIK_HERDR_TAB_WAIT_MS: "0", AUTOMAGIK_HERDR_NO_UPDATE: "1", GIT_CEILING_DIRECTORIES: root };
+    AUTOMAGIK_HERDR_TAB_WAIT_MS: "0", AUTOMAGIK_HERDR_NO_UPDATE: "1", GIT_CEILING_DIRECTORIES: root,
+    // git reads no one's own config here: a global ignore of .claude/settings.local.json (a common
+    // developer setting) would keep commit() from tracking the very file a case plants.
+    XDG_CONFIG_HOME: join(root, "config"), GIT_CONFIG_GLOBAL: join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
   const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
   Object.assign(env, core.env, { HC_SESSION: "" });
   env.HC_SOCKET = core.env.AUTOMAGIK_HERDR_CORE_SOCKET;
@@ -123,11 +126,11 @@ function homeScene(t, cli, { bot = {}, callerArgv = ["/usr/bin/env", "claude"] }
   const setState = (fn) => { const st = hcState(); fn(st); writeFileSync(statePath, JSON.stringify(st)); };
   const ledger = () => { const p = join(app, "automagik-herdr/workers.jsonl"); return existsSync(p) ? readLedger(readFileSync(p, "utf8")) : []; };
   const bots = () => JSON.parse(readFileSync(join(project, ".herdr/bots.json"), "utf8"));
-  const branches = () => execFileSync("git", ["branch", "--list", "e2e/*"], { cwd: project, encoding: "utf8" }).trim();
+  const branches = () => execFileSync("git", ["branch", "--list", "e2e/*"], { cwd: project, env, encoding: "utf8" }).trim();
   const commit = (files) => {
     for (const [rel, text] of Object.entries(files)) { mkdirSync(dirname(join(project, rel)), { recursive: true }); writeFileSync(join(project, rel), text); }
-    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"], { cwd: project });
-    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "settings"], { cwd: project });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"], { cwd: project, env });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "settings"], { cwd: project, env });
   };
   /** The environment a recorded launch's agent really gets, run here with credentials planted around it. */
   const effectiveEnv = (argv) => {
