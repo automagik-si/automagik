@@ -49,6 +49,7 @@ export async function applyRun({ io, retry = false, now = io.clock() }) {
   const base = io.readPlan();
   if (base.state !== "ok") return { error: base.state === "newer" ? "newer-plan" : "no-plan" };
   if (!io.quotaOn()) return { error: "off" };
+  if (io.stopped()) return { error: "stopped" };
 
   let { plan } = base;
   const { rev } = plan;
@@ -88,6 +89,7 @@ export async function applyRun({ io, retry = false, now = io.clock() }) {
 
   for (const { machine: core } of linkedDue(plan, { now, retry, fleet: io.fleet(), members: first.list })) {
     if (stopped || io.clock() >= deadline) break;
+    if (io.stopped()) { stopped = "stopped"; break; }
     await applyMachine(core, Math.min(deadline, io.clock() + MACHINE_BUDGET_MS));
   }
   return answer(null);

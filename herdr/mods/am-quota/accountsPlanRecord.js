@@ -1,7 +1,9 @@
 // The Accounts plan shared by the CLI and the panel. Rebuild records from their listed fields.
 export const PLAN_FILE = "accounts-plan.json";
 export const PLAN_V = 1;
+export const PLAN_V2 = 2;
 export const LOCK_FILE = "automagik-herdr/accounts.lock";
+export const STOP_FILE = "automagik-herdr/accounts.stop";
 export const PREVIEWS_DIR = "automagik-herdr/accounts-previews";
 export const REQUESTS_DIR = "data/am-quota/plan-requests";
 export const PREVIEW_TTL_MS = 600_000;
@@ -269,20 +271,30 @@ function linkedCodex(section) {
     || maps.some((key) => object(section?.[key]) && Object.keys(section[key]).some(linked));
 }
 
+function parseBody(value, version) {
+  const plan = fields(value, { v: oneOf([version]), rev: count, at: isIso });
+  plan.names = mapOf(value.names, (name) => need(nameOkay, name), (id) => isMachine(id) && id !== LOCAL);
+  if (Object.hasOwn(value, "exposures")) {
+    plan.exposures = mapOf(value.exposures, (at) => need(isIso, at), (id) => isMachine(id) && id !== LOCAL);
+  }
+  for (const tool of TOOLS) plan[tool] = parseSection(value[tool], tool, plan.rev);
+  if (version === PLAN_V2) Object.assign(plan, fields(value, { stopped: bool, retries: oneOf(["pack", "app"]) }));
+  return plan;
+}
+
 export function parsePlan(text) {
   if (text === null) return { state: "absent", plan: null };
   try {
     const value = JSON.parse(text);
-    if (Number.isInteger(value?.v) && (value.v > PLAN_V || value.v === PLAN_V && linkedCodex(value.codex))) {
-      return { state: "newer", plan: null };
+    const v = value?.v;
+    if (Number.isInteger(v) && (v > PLAN_V || v === PLAN_V && linkedCodex(value.codex))) {
+      let view = null;
+      if (v === PLAN_V2 && !linkedCodex(value.codex)) {
+        try { view = parseBody(value, v); } catch { /* Keep malformed v2 records read-only. */ }
+      }
+      return { state: "newer", plan: null, v, view };
     }
-    const plan = fields(value, { v: oneOf([PLAN_V]), rev: count, at: isIso });
-    plan.names = mapOf(value.names, (name) => need(nameOkay, name), (id) => isMachine(id) && id !== LOCAL);
-    if (Object.hasOwn(value, "exposures")) {
-      plan.exposures = mapOf(value.exposures, (at) => need(isIso, at), (id) => isMachine(id) && id !== LOCAL);
-    }
-    for (const tool of TOOLS) plan[tool] = parseSection(value[tool], tool, plan.rev);
-    return { state: "ok", plan };
+    return { state: "ok", plan: parseBody(value, PLAN_V) };
   } catch {
     return { state: "corrupt", plan: null };
   }

@@ -1,7 +1,7 @@
 // Process-only: a fake hc on PATH and scratch homes with no listening core sockets.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
@@ -10,7 +10,7 @@ import { buildPreview, commitPreview, startAttempt, viewsFrom } from "../mods/am
 import { planRowFor } from "../mods/am-sidebar/accountsPlanRows.js";
 import { DISCOVER, parseDiscover, RUN_HERE, RUN_SET, WRITE_SINCE } from "../mods/am-sidebar/accountsFleet.js";
 import { DRIFT_EVERY_MS, emptyPlan, linkedDue, LOCK_FILE, NO_LOGIN_EVERY_MS, parsePlan, PLAN_FILE, planText, PREVIEWS_DIR,
-  REQUESTS_DIR, RETRY_EVERY_MS } from "../mods/am-sidebar/accountsPlanRecord.js";
+  REQUESTS_DIR, RETRY_EVERY_MS, STOP_FILE } from "../mods/am-sidebar/accountsPlanRecord.js";
 import { AM, AM_READER, AT, exe, fixtureHere, json, PACK, READER, scene } from "./accounts-fixture.mjs";
 import { addMember, A, B, setupLinked, verifyLinked } from "./accounts-apply-fixture.mjs";
 
@@ -38,12 +38,14 @@ function fixture(...members) {
   plan.rev = 7;
   let time = NOW;
   let enabled = true;
+  let stopped = false;
   const calls = [], writes = [];
   for (const m of members) addMember(plan, m.id, m.name, HOME, BEFORE);
   let list = memberList(...members);
   const io = {
     readPlan: () => parsePlan(JSON.stringify(plan)),
     quotaOn: () => enabled,
+    stopped: () => stopped,
     machines: async () => { calls.push("machines"); return list; },
     fleet: () => null,
     discover: async (name) => { calls.push(["discover", name]); return copies; },
@@ -65,7 +67,7 @@ function fixture(...members) {
   return { io, calls, writes, run: (retry = false) => applyRun({ io, retry }),
     plan: () => plan, progress: (core = one.id) => plan.claude.progress[core],
     setList: (next) => { list = next; }, setPlan: (next) => { plan = next; },
-    advance: (ms) => { time += ms; }, off: () => { enabled = false; } };
+    advance: (ms) => { time += ms; }, off: () => { enabled = false; }, stop: () => { stopped = true; } };
 }
 
 const state = (p) => [p.state, p.why];
@@ -73,6 +75,37 @@ const status = (f, ...expected) => assert.deepEqual(state(f.progress()), expecte
 const switchWords = (home = HOME, before = BEFORE) => ["--use", "slot-two", "--snapshot", before, "--expect-home", home,
   "--expect-core", one.id, "--expect-rev", "7", "--attempt", "1", "--dispatch", DISPATCH,
   "--expect-slot", sha256("slot-two\n" + B), "--expect-eff", sha256("default\n" + A)];
+
+test("a stop at entry refuses apply before any machine call or plan write", async () => {
+  const f = fixture(one);
+  f.stop();
+  assert.deepEqual(await f.run(), { error: "stopped" });
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.writes, []);
+});
+
+test("a stop raised during the first machine's read or switch lets that machine finish and skips the second", async () => {
+  for (const stopIn of ["here", "setLogin"]) {
+    const f = fixture(two, one);
+    if (stopIn === "here") {
+      f.io.here = async () => { f.stop(); return onB(); };
+    } else {
+      const setLogin = f.io.setLogin;
+      f.io.setLogin = (...args) => {
+        f.stop();
+        f.io.here = async () => onB();
+        return setLogin(...args);
+      };
+    }
+    const answer = await f.run();
+    assert.equal(answer.kind, "accounts.apply");
+    assert.equal(answer.stopped, "stopped");
+    status(f, "done", null);
+    if (stopIn === "setLogin") assert.equal(f.progress().attempt.outcome, "done");
+    assert.equal(f.progress(two.id).tried, null);
+    assert.deepEqual(f.calls.filter(([step]) => step === "discover"), [["discover", one.name]]);
+  }
+});
 
 test("one machine switches through the selected writer after persisting the attempt and is read back", async () => {
   const f = fixture(one);
@@ -721,28 +754,66 @@ fi`);
   assert.equal(saved().claude.progress[vm.id].read.email, C);
 });
 
-test("a concurrent CLI apply holds accounts.lock and the second one is busy", async (t) => {
+test("a concurrent CLI apply holds accounts.lock with the executing release and the second one is busy", async (t) => {
   const { s, file } = setupLinked(t);
   const signal = join(s.root, "listing");
   const release = join(s.root, "release");
   const lock = join(s.app, LOCK_FILE);
   const before = readFileSync(file);
+  const installed = s.machine("lock-owner");
+  const pack = installed.ship("pack", "3.900.1"), am = installed.ship("am", "3.900.2");
+  const repoRelease = readFileSync(new URL("../mods/am-sidebar/VERSION", import.meta.url), "utf8").trim();
   s.hcWrapper(`if [ "$1" = machine ]; then : > "${signal}"; while [ ! -f "${release}" ]; do sleep 0.02; done; fi`);
-  const first = s.start(READER, ["apply"]);
-  try {
-    for (let i = 0; i < 250 && !existsSync(signal); i += 1) await delay(20);
-    assert.ok(existsSync(signal));
-    assert.ok(existsSync(lock));
-    const second = s.run(AM_READER, ["apply"]);
-    assert.equal(second.code, 1);
-    assert.deepEqual(second.json(), { error: "busy" });
-    assert.equal(second.stderr, "am: accounts apply: busy\n");
-    assert.deepEqual(readFileSync(file), before);
-  } finally {
-    writeFileSync(release, "");
-    assert.equal((await first).code, 0);
+  for (const [entry, version] of [[READER, repoRelease], [join(pack, "bin/accounts.mjs"), "3.900.1"],
+    [join(am, "bin/accounts.mjs"), "3.900.2"]]) {
+    writeFileSync(file, before);
+    rmSync(signal, { force: true });
+    rmSync(release, { force: true });
+    const first = s.start(entry, ["apply"]);
+    try {
+      for (let i = 0; i < 250 && !existsSync(signal); i += 1) await delay(20);
+      assert.ok(existsSync(signal));
+      const [token, ...extra] = readdirSync(lock);
+      assert.match(token, /^[0-9a-f]{32}$/);
+      assert.deepEqual(extra, []);
+      const owner = JSON.parse(readFileSync(join(lock, token), "utf8"));
+      assert.deepEqual(Object.keys(owner).sort(), ["host", "pid", "start", "version"]);
+      assert.equal(owner.version, version);
+      const second = s.run(AM_READER, ["apply"]);
+      assert.equal(second.code, 1);
+      assert.deepEqual(second.json(), { error: "busy" });
+      assert.equal(second.stderr, "am: accounts apply: busy\n");
+      assert.deepEqual(readFileSync(file), before);
+    } finally {
+      writeFileSync(release, "");
+      assert.equal((await first).code, 0);
+    }
+    assert.equal(existsSync(lock), false);
   }
-  assert.equal(existsSync(lock), false);
+});
+
+test("CLI apply and retry refuse a stop marker or a chosen-home worker before listing machines", (t) => {
+  const { s, file } = setupLinked(t);
+  const before = readFileSync(file);
+  const marker = join(s.app, STOP_FILE), canary = "CANARY-STOP\n";
+  mkdirSync(dirname(marker), { recursive: true });
+  writeFileSync(marker, canary);
+  const mtime = statSync(marker).mtimeMs;
+  for (const prefix of [[READER], [AM, "accounts"]]) {
+    const [entry, ...args] = prefix;
+    for (const flags of [[], ["--retry"]]) {
+      const command = [...args, "apply", ...flags];
+      for (const [reason, env] of [["stopped", {}], ["chosen-home", { AUTOMAGIK_AGENT_HOME_LAUNCH: "" }]]) {
+        const { code, stdout, stderr } = s.run(entry, command, env);
+        assert.deepEqual({ code, stdout, stderr }, { code: 1, stdout: `${JSON.stringify({ error: reason })}\n`,
+          stderr: `am: accounts apply: ${reason}\n` });
+      }
+    }
+  }
+  assert.deepEqual(s.log(), []);
+  assert.deepEqual(readFileSync(file), before);
+  assert.equal(readFileSync(marker, "utf8"), canary);
+  assert.equal(statSync(marker).mtimeMs, mtime);
 });
 
 test("CLI retries skip recent attempts and refuse an absent, corrupt, newer or switched-off plan", (t) => {
@@ -768,10 +839,12 @@ test("CLI retries skip recent attempts and refuse an absent, corrupt, newer or s
   writeFileSync(file, "broken");
   refused("no-plan");
   assert.equal(readFileSync(file, "utf8"), "broken");
-  const future = JSON.stringify({ ...plan, v: 2 });
-  writeFileSync(file, future);
-  refused("newer-plan");
-  assert.equal(readFileSync(file, "utf8"), future);
+  for (const record of [{ ...plan, v: 2 }, { ...plan, v: 3 }, { ...plan, v: 2, stopped: false, retries: "pack" }]) {
+    const future = JSON.stringify(record);
+    writeFileSync(file, future);
+    refused("newer-plan");
+    assert.equal(readFileSync(file, "utf8"), future);
+  }
   writeFileSync(file, before);
   rmSync(join(s.app, "mods/am-quota"), { recursive: true });
   refused("off");

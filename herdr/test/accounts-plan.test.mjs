@@ -459,11 +459,22 @@ test("parsePlan validates all entries, ignores unknown fields and protects newer
   const plan = planFor({ [M1]: A, [L]: B });
   assert.deepEqual(parsePlan(planText(plan)), { state: "ok", plan });
   assert.equal(planText(parsePlan(planText(plan)).plan), planText(plan));
-  assert.equal(parsePlan("<bad").state, "corrupt");
-  assert.equal(parsePlan("{}").state, "corrupt");
-  assert.equal(parsePlan('{"v":2}').state, "newer");
+  for (const text of ["<bad", "{}", JSON.stringify({ ...plan, v: "1" })]) {
+    assert.deepEqual(parsePlan(text), { state: "corrupt", plan: null });
+  }
+  const unreadable = (v) => ({ state: "newer", plan: null, v, view: null });
+  assert.deepEqual(parsePlan('{"v":2}'), unreadable(2));
+  assert.deepEqual(parsePlan('{"v":3}'), unreadable(3));
+  const v2 = { ...plan, v: 2, stopped: false, retries: "pack" };
+  const parsedV2 = parsePlan(JSON.stringify({ ...v2, unlisted: true }));
+  assert.deepEqual(parsedV2, { ...unreadable(2), view: v2 });
+  const stoppedV2 = { ...v2, stopped: true, retries: "app" };
+  assert.deepEqual(parsePlan(JSON.stringify(stoppedV2)), { ...unreadable(2), view: stoppedV2 });
+  assert.throws(() => planText(parsedV2.view), { message: "corrupt" });
+  for (const invalid of [{ stopped: undefined }, { stopped: "false" }, { retries: undefined }, { retries: "x" }]) {
+    assert.deepEqual(parsePlan(JSON.stringify({ ...v2, ...invalid })), unreadable(2));
+  }
   for (const change of [
-    (p) => { p.v = "1"; },
     (p) => { p.rev = -1; },
     (p) => { p.names["bad id"] = "vm-one"; },
     (p) => { p.claude.members[M1].home = "relative"; },
@@ -479,11 +490,15 @@ test("parsePlan validates all entries, ignores unknown fields and protects newer
     const damaged = structuredClone(plan);
     change(damaged);
     assert.equal(parsePlan(JSON.stringify(damaged)).state, "corrupt");
+    const damagedV2 = structuredClone(v2);
+    change(damagedV2);
+    assert.deepEqual(parsePlan(JSON.stringify(damagedV2)), unreadable(2));
   }
   for (const map of ["machines", "members", "assign", "pin", "seen", "progress"]) {
     const newer = structuredClone(plan);
     newer.codex[map] = map === "machines" ? [M1] : { [M1]: null };
-    assert.equal(parsePlan(JSON.stringify(newer)).state, "newer");
+    assert.deepEqual(parsePlan(JSON.stringify(newer)), unreadable(1));
+    assert.deepEqual(parsePlan(JSON.stringify({ ...newer, v: 2, stopped: false, retries: "pack" })), unreadable(2));
   }
   const extended = structuredClone(plan);
   extended.unlisted = "CANARY-PLAN-0043";

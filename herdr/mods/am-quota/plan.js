@@ -32,7 +32,7 @@ const REFUSALS = {
 };
 const ERRORS = ["bad-request", "no-home", "no-plan", "exists", "held", "unknown-machine", "not-member",
   "member", "not-changed", "not-gone", "too-many", "missing", "claimed", "not-pending", "not-done",
-  "changed", "conflict", "slot-changed", "off", ...PENDING_WHY, ...Object.keys(REFUSALS)];
+  "changed", "conflict", "slot-changed", "off", "stopped", ...PENDING_WHY, ...Object.keys(REFUSALS)];
 
 export const planError = (code) => ERRORS.includes(code) ? code : "failed";
 export const refusalWords = (code) => own(REFUSALS, code) ?? `The plan wasn't changed (${planError(code)}).`;
@@ -84,7 +84,9 @@ const action = (id, label, request) => ({ id, label, request });
 export function planBlock({ plan: stored, preview, rows, tool, accounts, verdict, linked, error }) {
   const { state, plan } = stored;
   if (state === "absent" && !linked && !preview && !error) return null;
-  const section = plan?.[tool];
+  const readOnly = state === "newer";
+  const shown = plan ?? (readOnly ? stored.view ?? null : null);
+  const section = shown?.[tool];
   const names = new Map(rows.map((row) => [row.machine, row.name]));
   const label = (key) => key === null ? "an unknown account" :
     tool === "claude" ? key : accounts.labels.get(key) ?? "an unknown account";
@@ -92,68 +94,71 @@ export function planBlock({ plan: stored, preview, rows, tool, accounts, verdict
   const current = options(rows.flatMap((row) => row.eligible));
   const head = [], buttons = [], list = [];
   if (error) head.push(refusalWords(error));
-  if (state === "newer") {
-    if (error !== "newer-plan") head.push(refusalWords("newer-plan"));
-  } else if (!section) {
+  if (readOnly && error !== "newer-plan") head.push(refusalWords("newer-plan"));
+  if (!section && !readOnly) {
     if (state === "corrupt") head.push("The plan can't be read: Manage across machines starts a new one.");
     buttons.push(action("manage", "Manage across machines", { kind: "manage" }));
     head.push("Pins every machine to the account it is proven on. Nothing moves.");
-  } else {
+  } else if (section) {
     head.push(section.mode === "one" ? `Plan: one account (${label(section.account)})`
       : section.mode === "pinned" ? "Plan: each machine pinned" : "Plan: spread evenly");
-    if (tool === "claude") for (const [machine, at] of Object.entries(plan.exposures ?? {})) {
+    if (tool === "claude") for (const [machine, at] of Object.entries(shown.exposures ?? {})) {
       head.push(`${machine} (${at.slice(0, 10)}): a login switch sent there may still land.`);
-      buttons.push(action(`dismiss-${machine}`, `Dismiss warning for ${machine}`, { kind: "dismiss-exposure", machine }));
+      if (!readOnly) buttons.push(action(`dismiss-${machine}`, `Dismiss warning for ${machine}`, { kind: "dismiss-exposure", machine }));
     }
-    const preferred = own(section.assign, LOCAL) ?? Object.values(section.assign).find((key) => current.includes(key));
-    const first = current.includes(preferred) ? preferred : current[0];
-    for (const mode of MODES) {
-      buttons.push(action(mode, modeWords[mode], mode === section.mode || mode === "one" && !first ? null
-        : { kind: "mode", tool, mode, ...(mode === "one" ? { account: first } : {}) }));
-    }
-    if (section.mode === "spread") buttons.push(action("spread-again", "Spread again", { kind: "spread-again", tool }));
-    if (section.mode === "one") for (const [i, account] of current.entries()) {
-      buttons.push(action(`account-${i}`, `Use ${label(account)} everywhere`, { kind: "account", tool, account }));
-    }
-    if (verdict?.from && verdict.to && Object.values(section.assign).includes(verdict.from)) {
-      buttons.push(action("move-off", `Preview moving machines off ${label(verdict.from)}`,
-        { kind: "move-off", tool, account: verdict.from, to: verdict.to }));
+    if (!readOnly) {
+      const preferred = own(section.assign, LOCAL) ?? Object.values(section.assign).find((key) => current.includes(key));
+      const first = current.includes(preferred) ? preferred : current[0];
+      for (const mode of MODES) {
+        buttons.push(action(mode, modeWords[mode], mode === section.mode || mode === "one" && !first ? null
+          : { kind: "mode", tool, mode, ...(mode === "one" ? { account: first } : {}) }));
+      }
+      if (section.mode === "spread") buttons.push(action("spread-again", "Spread again", { kind: "spread-again", tool }));
+      if (section.mode === "one") for (const [i, account] of current.entries()) {
+        buttons.push(action(`account-${i}`, `Use ${label(account)} everywhere`, { kind: "account", tool, account }));
+      }
+      if (verdict?.from && verdict.to && Object.values(section.assign).includes(verdict.from)) {
+        buttons.push(action("move-off", `Preview moving machines off ${label(verdict.from)}`,
+          { kind: "move-off", tool, account: verdict.from, to: verdict.to }));
+      }
     }
     for (const row of rows) {
       const { machine, name, actions, eligible, read, writer } = row;
       if (row.code === "held") continue; // The linked block already shows the read-only row.
       const controls = [], lines = [];
-      const offer = (id, words, kind, fields = {}) => controls.push(action(id, words, { kind, tool, machine, ...fields }));
-      const pin = own(section.pin, machine);
-      if (row.member && !["gone", "changed"].includes(row.state)) {
-        for (const [i, account] of eligible.entries()) {
-          if (account !== pin) offer(`pin-${i}`, `Pin to ${label(account)}`, "pin", { account });
+      if (!readOnly) {
+        const offer = (id, words, kind, fields = {}) => controls.push(action(id, words, { kind, tool, machine, ...fields }));
+        const pin = own(section.pin, machine);
+        if (row.member && !["gone", "changed"].includes(row.state)) {
+          for (const [i, account] of eligible.entries()) {
+            if (account !== pin) offer(`pin-${i}`, `Pin to ${label(account)}`, "pin", { account });
+          }
+          if (pin) offer("unpin", "Unpin", "unpin");
         }
-        if (pin) offer("unpin", "Unpin", "unpin");
-      }
-      if (actions.includes("add")) offer("add", "Add to the plan", "add");
-      const placement = row.wanted ?? (section.mode === "one" ? section.account
-        : section.mode === "spread" ? [...eligible].sort(cmp)[0] : null);
-      const places = placement ? eligible.filter((key) => key === placement) : eligible;
-      if (actions.includes("place")) for (const [i, account] of places.entries()) {
-        offer(`place-${i}`, `Place ${label(account)} on this Mac`, "add", { account });
-      }
-      if (actions.includes("adopt")) offer("adopt", "Adopt", "adopt");
-      if (actions.includes("reapply")) offer("reapply", "Re-apply the plan", "reapply");
-      if (actions.includes("forget")) controls.push(action("forget", "Forget", { kind: "forget", machine }));
-      if (actions.includes("rebind")) for (const target of rows.filter((r) => r.machine !== LOCAL && !r.member && r.connected)) {
-        controls.push(action(`rebind-${target.machine}`, `Rebind to ${target.name}`, { kind: "rebind", from: machine, to: target.machine }));
-      }
-      if (actions.includes("move-off")) {
-        const to = current.find((key) => key !== row.wanted);
-        if (to || section.mode !== "one" || section.account !== row.wanted) {
-          offer("move-off", `Preview moving ${name} off ${label(row.wanted)}`, "move-off",
-            { account: row.wanted, ...(to ? { to } : {}) });
+        if (actions.includes("add")) offer("add", "Add to the plan", "add");
+        const placement = row.wanted ?? (section.mode === "one" ? section.account
+          : section.mode === "spread" ? [...eligible].sort(cmp)[0] : null);
+        const places = placement ? eligible.filter((key) => key === placement) : eligible;
+        if (actions.includes("place")) for (const [i, account] of places.entries()) {
+          offer(`place-${i}`, `Place ${label(account)} on this Mac`, "add", { account });
+        }
+        if (actions.includes("adopt")) offer("adopt", "Adopt", "adopt");
+        if (actions.includes("reapply")) offer("reapply", "Re-apply the plan", "reapply");
+        if (actions.includes("forget")) controls.push(action("forget", "Forget", { kind: "forget", machine }));
+        if (actions.includes("rebind")) for (const target of rows.filter((r) => r.machine !== LOCAL && !r.member && r.connected)) {
+          controls.push(action(`rebind-${target.machine}`, `Rebind to ${target.name}`, { kind: "rebind", from: machine, to: target.machine }));
+        }
+        if (actions.includes("move-off")) {
+          const to = current.find((key) => key !== row.wanted);
+          if (to || section.mode !== "one" || section.account !== row.wanted) {
+            offer("move-off", `Preview moving ${name} off ${label(row.wanted)}`, "move-off",
+              { account: row.wanted, ...(to ? { to } : {}) });
+          }
         }
       }
       if (row.state === "no-login" && tool === "claude") {
         if (!own(section.secondLogin, machine)) {
-          controls.push(action("second-login", `Allow a second login on ${name}`, { kind: "second-login", machine, allow: true }));
+          if (!readOnly) controls.push(action("second-login", `Allow a second login on ${name}`, { kind: "second-login", machine, allow: true }));
         } else if (!read?.nextSlot) {
           lines.push("sign in a second login there, then add it in that machine's Accounts panel");
         } else {
@@ -166,8 +171,8 @@ export function planBlock({ plan: stored, preview, rows, tool, accounts, verdict
       else if (row.code === "not-eligible") lines.push(`${label(row.wanted)} can't be used there`);
       const words = row.member ? planWords({ ...row, account: row.account && label(row.account), wanted: row.wanted && label(row.wanted) })
         : actions.includes("add") || tool === "codex" ? "not in the plan" : "read it again first";
-      list.push({ machine, name, words, lines, controls, readAgain: !row.member && tool === "claude" && !actions.includes("add"),
-        command: row.state === "no-login" && own(section.secondLogin, machine) && read?.nextSlot
+      list.push({ machine, name, words, lines, controls, readAgain: !readOnly && !row.member && tool === "claude" && !actions.includes("add"),
+        command: !readOnly && row.state === "no-login" && own(section.secondLogin, machine) && read?.nextSlot
           ? `CLAUDE_CONFIG_DIR='${read.nextSlot.replace(/'/g, "'\\''")}' claude auth login` : null });
     }
   }
