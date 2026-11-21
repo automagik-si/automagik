@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync,
+  closeSync, constants, fchmodSync, fstatSync, fsyncSync, ftruncateSync, linkSync, lstatSync, mkdirSync, openSync,
   readSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -17,6 +17,8 @@ export function installationIdentity(dshHome = process.env.DSH_HOME) {
   // A home that cannot be resolved physically still names an installation: never stop the plugin.
   try { return realpathSync.native(path) } catch { return resolve(path) }
 }
+
+export const installationDigest = identity => createHash('sha256').update(identity).digest('hex').slice(0, 32)
 
 function readClaim(path) {
   if (!regularClaim(lstatSync(path))) return null
@@ -79,10 +81,55 @@ function publishClaim(path, identity) {
   } finally { rmSync(temporary, { force: true }) }
 }
 
-export function installationCliHome(acpHome, dshHome, { warn } = {}) {
-  const identity = installationIdentity(dshHome)
+export function publishSelectedRoot(directory, path, record) {
+  for (const dir of [dirname(directory), directory, dirname(path)]) {
+    try { mkdirSync(dir, { mode: 0o700 }) } catch (error) { if (error.code !== 'EEXIST') throw error }
+    const stat = lstatSync(dir)
+    if (!stat.isDirectory() || (process.getuid && stat.uid !== process.getuid()) || (stat.mode & 0o022)) {
+      throw new Error('Untrusted selection directory')
+    }
+  }
+  // Hold the inode open so disposal can revoke the bytes even if its directory starts
+  // refusing unlink. Never follow or overwrite an existing selection.
+  let fd, stat, linked
+  const temporary = `${path}.${randomUUID()}`
+  const unlink = () => {
+    const current = lstatSync(path, { throwIfNoEntry: false })
+    if (current && current.dev === stat.dev && current.ino === stat.ino) rmSync(path)
+  }
+  try {
+    fd = openSync(temporary, 'wx+', 0o600)
+    fchmodSync(fd, 0o600)
+    stat = fstatSync(fd)
+    const bytes = JSON.stringify({ ...record, descriptor: fd })
+    if (Buffer.byteLength(bytes) > CLAIM_LIMIT) throw new Error('Installation record is too large')
+    writeFileSync(fd, bytes)
+    fsyncSync(fd)
+    linkSync(temporary, path)
+    linked = true
+    syncDirectory(dirname(path))
+  } catch (error) {
+    if (fd !== undefined) {
+      try {
+        if (linked) {
+          try { unlink() } catch { ftruncateSync(fd, 0) }
+        }
+      } finally { closeSync(fd) }
+    }
+    throw error
+  } finally {
+    try { rmSync(temporary, { force: true }) } catch {}
+  }
+  return {
+    unlink,
+    revoke: () => { ftruncateSync(fd, 0); fsyncSync(fd) },
+    close: () => closeSync(fd),
+  }
+}
+
+export function installationCliHome(acpHome, dshHome, { warn, identity = installationIdentity(dshHome) } = {}) {
   const legacy = join(acpHome, 'cli-homes')
-  const digest = createHash('sha256').update(identity).digest('hex').slice(0, 32)
+  const digest = installationDigest(identity)
   const own = { root: join(acpHome, 'installations', digest, 'cli-homes'), owner: false }
   const path = join(legacy, 'installation.json')
   let claimed

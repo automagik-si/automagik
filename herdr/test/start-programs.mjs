@@ -9,7 +9,7 @@ import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { attachPath } from "../mods/am-sidebar/attach.js";
-import { loginFixture } from "./login-fixture.mjs";
+import { loginFixture, loginPointerFixture, privateFixtureHome } from "./login-fixture.mjs";
 import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/start-programs.json", import.meta.url), "utf8"));
@@ -121,19 +121,19 @@ export function startProgramsTests(cli) {
   test("restart resolves the one pointer export (#1509)", (t) => {
     const s = scene(t, cli, "codex", false, false);
     s.live();
-    const current = join(s.root, "cli-homes", "current");
+    const current = join(s.root, "acp", "cli-homes", "current");
     const claudeGen = "11111111-1111-4111-8111-111111111111";
     const codexGen = "22222222-2222-4222-8222-222222222222";
     const claudeDir = join(dirname(current), "homes", "claude", claudeGen, ".claude");
     const codexDir = join(dirname(current), "homes", "codex", codexGen, ".codex");
     for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
-    chmodSync(claudeDir, 0o700); chmodSync(codexDir, 0o700);
+    privateFixtureHome(claudeDir); privateFixtureHome(codexDir);
     writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 5,
       claude: { generation: claudeGen, configDir: claudeDir }, codex: { generation: codexGen, home: codexDir },
       updatedAt: "2026-11-16T20:00:00.000Z" }));
     writeFileSync(join(current, "claude"), claudeGen);
     writeFileSync(join(current, "codex"), codexGen);
-    const r = s.run(["restart", id], { [POINTER_VAR]: join(current, "claude") });
+    const r = s.run(["restart", id], loginPointerFixture(t, join(current, "claude")));
     assert.equal(r.status, 0, r.stderr);
     const launch = s.calls().filter((call) => call[0] === "run").at(-1);
     assert.ok(launch.includes(`CODEX_HOME=${codexDir}`), JSON.stringify(launch));
@@ -143,7 +143,7 @@ export function startProgramsTests(cli) {
     test(`#1509 linked ${action} refuses this computer's Bot login before launch`, (t) => {
       const s = scene(t, cli, "codex", false, true);
       if (action !== "start") s.live();
-      const env = action === "restart" ? { [REQUIRED_VAR]: "required" } : loginFixture(join(s.root, "cli-homes"), "codex").env;
+      const env = action === "restart" ? { [REQUIRED_VAR]: "required" } : loginFixture(t, join(s.root, "acp", "cli-homes"), "codex").env;
       const r = s.run([action === "start" ? "start" : "restart", id, ...(action === "tree" ? ["--tree", "--force"] : [])], env);
       assert.equal(r.status, 2, r.stderr);
       assert.equal(r.stderr.trim(), "am: A linked machine can't carry this computer's Bot login; start the bot on that machine. (linked-machine)");
@@ -181,7 +181,7 @@ export function startProgramsTests(cli) {
     const programs = structuredClone(fixture);
     programs.programs.omp.run = ["codex"];
     writeFileSync(join(s.app, "programs.json"), JSON.stringify(programs));
-    const login = loginFixture(join(s.root, "cli-homes"), "codex");
+    const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "codex");
     const r = s.run(["start", id], login.env);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(s.calls().find((c) => c[0] === "run").includes(`CODEX_HOME=${login.dir}`));
@@ -223,7 +223,7 @@ export function startProgramsTests(cli) {
 
   test("#1509 Claude launch settings are guarded only while the Bot login policy is active", (t) => {
     const s = scene(t, cli, "claude", false, false);
-    const login = loginFixture(join(s.root, "cli-homes"), "claude");
+    const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "claude");
     const programs = structuredClone(fixture);
     const settings = join(s.root, "settings.json");
     writeFileSync(settings, "{}");
@@ -247,7 +247,7 @@ export function startProgramsTests(cli) {
     assert.equal(baseline.status, 0, baseline.stderr);
     assert.ok(s.calls().find((c) => c[0] === "run")?.includes(settings));
     const generated = scene(t, cli, "claude", false, false);
-    const native = loginFixture(join(generated.root, "cli-homes"), "claude");
+    const native = loginFixture(t, join(generated.root, "acp", "cli-homes"), "claude");
     const started = generated.run(["start", id], native.env);
     assert.equal(started.status, 0, started.stderr);
     assert.ok(generated.calls().find((c) => c[0] === "run")?.includes(`CLAUDE_CONFIG_DIR=${native.dir}`));
@@ -262,7 +262,7 @@ export function startProgramsTests(cli) {
     const programs = structuredClone(fixture);
     programs.programs[agent] = { ...(programs.programs[agent] ?? {}), run: argv };
     writeFileSync(join(s.app, "programs.json"), JSON.stringify(programs));
-    const login = loginFixture(join(s.root, "cli-homes"), "claude");
+    const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "claude");
     const r = s.run(["start", id], login.env);
     assert.equal(r.status, 2, r.stderr);
     assert.equal(r.stderr.trim(), "am: Under the Bot login policy only a direct Claude or Codex command can start; run the agent directly. (launch-not-direct)");
@@ -271,16 +271,19 @@ export function startProgramsTests(cli) {
 
   test("#1509 start rereads the Bot login after the early check", (t) => {
     const s = scene(t, cli, "codex", false, false);
-    const root = join(s.root, "cli-homes");
+    const root = join(s.root, "acp", "cli-homes");
     const generation = "22222222-2222-4222-8222-222222222222";
-    const next = loginFixture(root, "codex", generation);
-    const first = loginFixture(root, "codex");
+    const next = loginFixture(t, root, "codex", generation);
+    const first = loginFixture(t, root, "codex");
     const hook = join(s.root, "switch.cjs");
     writeFileSync(hook, `
       const fs = require("node:fs");
       const lstat = fs.lstatSync;
+      let seen = 0;
+      // The early check reads the home's markers twice (before and after it rechecks the
+      // pointer); switch only once that read is complete, so start must reread.
       fs.lstatSync = (path, ...args) => {
-        if (path === ${JSON.stringify(join(dirname(first.dir), "changing"))}) {
+        if (path === ${JSON.stringify(join(dirname(first.dir), "changing"))} && ++seen === 2) {
           fs.writeFileSync(${JSON.stringify(next.pointer)}, ${JSON.stringify(generation)});
           fs.writeFileSync(${JSON.stringify(next.recordPath)}, ${JSON.stringify(next.text)});
         }

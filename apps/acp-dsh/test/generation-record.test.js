@@ -2,13 +2,15 @@
 // one atomic object for both vendors, written after the home and the pointer it names, on a
 // switch of either vendor, on a reset, and once at start when it is absent or stale.
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { test } from 'node:test'
-import { CliGenerations } from '../src/host/cli-generations.js'
+import { CliGenerations, ownershipAt, ownershipState } from '../src/host/cli-generations.js'
 import { CliHomes } from '../src/host/cli-homes.js'
+import { installationCliHome, installationIdentity } from '../src/host/installation.js'
+import { processBirth } from '../src/host/process-identity.js'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -16,6 +18,7 @@ const RECORD = 'generation.json'
 
 function paths(t) {
   const root = mkdtempSync(join(tmpdir(), 'acp-generation-record-'))
+  chmodSync(root, 0o700)
   t.after(() => rmSync(root, { recursive: true, force: true }))
   return { root, cliHome: join(root, 'cli-homes') }
 }
@@ -30,6 +33,152 @@ const recordOf = cliHome => JSON.parse(readFileSync(recordPath(cliHome), 'utf8')
 const pointerOf = (cliHome, vendor) => readFileSync(join(cliHome, 'current', vendor), 'utf8')
 const tempRecordNames = cliHome => readdirSync(join(cliHome, 'current'))
   .filter(name => name.startsWith(`${RECORD}.`))
+
+test('a panel publishes only after startup and either withdrawal order preserves its peer',
+  { skip: !['linux', 'darwin'].includes(process.platform) }, t => {
+  const { root: acpHome } = paths(t)
+  const dshHome = join(acpHome, 'dsh')
+  mkdirSync(dshHome)
+  const identity = installationIdentity(dshHome)
+  const digest = createHash('sha256').update(identity).digest('hex').slice(0, 32)
+  const directory = join(acpHome, 'selected', digest)
+  const options = { acpHome, identity }
+  const { root } = installationCliHome(acpHome, dshHome, { identity })
+  const open = () => {
+    const panel = new CliHomes(root, options)
+    t.after(() => panel.dispose())
+    const path = join(directory, panel.instance + '.json')
+    assert.equal(existsSync(path), false)
+    panel.startup('claude')
+    assert.equal(existsSync(path), false)
+    panel.publishSelection()
+    const registration = join(root, 'instances', 'claude', panel.instance)
+    const ownership = ownershipAt(registration, { legacy: 'root' })
+    assert.equal(ownershipState(ownership), 'live')
+    assert.equal(JSON.parse(readFileSync(registration, 'utf8')).reader, true)
+    const selection = JSON.parse(readFileSync(path, 'utf8'))
+    assert.deepEqual(selection, {
+      version: 1, identity, root, instance: panel.instance, pid: process.pid,
+      birth: processBirth(process.pid), vendors: ['claude'], startedAt: selection.startedAt,
+      descriptor: selection.descriptor,
+    })
+    assert.ok(Number.isInteger(selection.descriptor))
+    assert.match(selection.startedAt, ISO_MS)
+    const env = panel.environment('claude', { DSH_HOME: '/wrong', AUTOMAGIK_HOME: '/wrong' })
+    assert.equal(env.DSH_HOME, identity)
+    assert.equal(env.AUTOMAGIK_HOME, dirname(acpHome))
+    return { panel, path, registration }
+  }
+  const first = open(), second = open()
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(directory).mode & 0o777, 0o700)
+    assert.equal(statSync(second.path).mode & 0o777, 0o600)
+  }
+  second.panel.dispose()
+  assert.equal(existsSync(second.path), false)
+  assert.equal(existsSync(second.registration), false)
+  assert.equal(existsSync(first.path), true)
+  const third = open()
+  first.panel.dispose()
+  assert.equal(existsSync(first.path), false)
+  assert.equal(existsSync(first.registration), false)
+  assert.equal(existsSync(third.path), true)
+})
+
+test('withdrawal preserves a replacement file and revokes the original open inode',
+  { skip: !['linux', 'darwin'].includes(process.platform) }, t => {
+  const { root: acpHome, cliHome } = paths(t)
+  const errors = []
+  const panel = new CliHomes(cliHome, { acpHome, identity: join(acpHome, 'dsh'),
+    onSelectionError: action => errors.push(action) })
+  panel.startup('claude')
+  panel.publishSelection()
+  const { path } = panel.selection
+  const moved = join(acpHome, 'unlinked-panel')
+  renameSync(path, moved)
+  writeFileSync(path, 'replacement', { mode: 0o600 })
+  const registration = join(cliHome, 'instances', 'claude', panel.instance)
+  const release = panel.generations.release.bind(panel.generations)
+  let attempts = 0
+  panel.generations.release = (file, options) => {
+    if (file === registration && ++attempts < 3) throw new Error('simulated withdrawal failure')
+    return release(file, options)
+  }
+  panel.dispose()
+  assert.equal(readFileSync(moved, 'utf8'), '', 'the old bytes cannot vouch for a still-live PID')
+  assert.equal(existsSync(registration), false)
+  assert.equal(attempts, 3)
+  assert.equal(readFileSync(path, 'utf8'), 'replacement')
+  assert.deepEqual(errors, [])
+  assert.equal(panel.selection, undefined)
+})
+
+test('failed unlink, revocation and unregister still close the panel descriptor',
+  { skip: process.platform !== 'linux' }, t => {
+    const { root: acpHome, cliHome } = paths(t)
+    const errors = []
+    const panel = new CliHomes(cliHome, { acpHome, identity: join(acpHome, 'dsh'),
+      onSelectionError: action => errors.push(action) })
+    panel.startup('claude')
+    panel.publishSelection()
+    const { path, handle } = panel.selection
+    const { descriptor } = JSON.parse(readFileSync(path, 'utf8'))
+    const fdPath = `/proc/${process.pid}/fd/${descriptor}`
+    assert.equal(statSync(fdPath).ino, statSync(path).ino)
+    const blocked = () => { throw new Error('simulated durable I/O failure') }
+    t.mock.method(handle, 'unlink', blocked)
+    t.mock.method(handle, 'revoke', blocked)
+    t.mock.method(panel.generations, 'unregister', blocked)
+    panel.dispose()
+    assert.equal(existsSync(path), true)
+    assert.equal(existsSync(join(cliHome, 'instances', 'claude', panel.instance)), true)
+    assert.equal(existsSync(fdPath), false)
+    assert.deepEqual(errors, ['withdrawn', 'withdrawn', 'withdrawn'])
+  })
+
+test('a DSH symlink change cannot split root selection from the published identity',
+  { skip: process.platform === 'win32' }, t => {
+    const { root: acpHome } = paths(t)
+    const first = join(acpHome, 'first'), second = join(acpHome, 'second'), link = join(acpHome, 'dsh')
+    mkdirSync(first); mkdirSync(second)
+    symlinkSync(first, link)
+    const identity = installationIdentity(link)
+    const { root } = installationCliHome(acpHome, link, { identity })
+    unlinkSync(link)
+    symlinkSync(second, link)
+    const panel = new CliHomes(root, { acpHome, identity })
+    t.after(() => panel.dispose())
+    panel.startup('claude')
+    panel.publishSelection()
+    assert.equal(panel.environment('claude').DSH_HOME, identity)
+    assert.notEqual(identity, installationIdentity(link))
+    assert.equal(JSON.parse(readFileSync(panel.selection.path, 'utf8')).identity, identity)
+    assert.equal(JSON.parse(readFileSync(join(root, 'installation.json'), 'utf8')).identity, identity)
+  })
+
+test('a failed vendor startup and a symlinked selection directory publish no authorization',
+  { skip: process.platform === 'win32' }, t => {
+    const { root: acpHome, cliHome } = paths(t)
+    const errors = []
+    const panel = new CliHomes(cliHome, { acpHome, identity: join(acpHome, 'dsh'),
+      onSelectionError: action => errors.push(action) })
+    t.after(() => panel.dispose())
+    mkdirSync(join(cliHome, 'current'), { recursive: true })
+    writeFileSync(join(cliHome, 'current', 'codex.activated'), '')
+    assert.throws(() => panel.startup('codex'))
+    panel.publishSelection()
+    const selected = join(acpHome, 'selected')
+    assert.equal(existsSync(selected), false)
+    const other = join(acpHome, 'other')
+    mkdirSync(other)
+    symlinkSync(other, selected)
+    panel.startup('claude')
+    assert.deepEqual(errors, ['recorded'])
+    assert.deepEqual(readdirSync(other), [])
+    unlinkSync(selected)
+    panel.publishSelection()
+    assert.deepEqual(JSON.parse(readFileSync(panel.selection.path, 'utf8')).vendors, ['claude'])
+  })
 
 test('the record sits beside the pointers, one object with a field per vendor', t => {
   const { cliHome, generations } = place(t)

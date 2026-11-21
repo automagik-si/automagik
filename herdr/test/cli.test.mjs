@@ -17,7 +17,7 @@ import { GUARD_DIR, KILL_GUARD_DIR, ledgerPath, readLedger } from "../mods/am-si
 import { AGY_FIXED_DENY, AGY_SHELL_READ, CLAUDE_PERSON_SETTINGS, agySettingsDir, agySettingsFile, withoutBriefing } from "../mods/am-sidebar/models.js";
 import { WORKER_LINE, amPartHookCommand } from "../mods/am-sidebar/briefingText.mjs";
 import { claudeSlug, restartAnswer } from "../mods/am-sidebar/restart.js";
-import { loginFixture } from "./login-fixture.mjs";
+import { loginFixture, privateFixtureHome, selectedRootFixture } from "./login-fixture.mjs";
 import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 // Start and Restart put each bot's briefing in its agent's command (models.js withBriefing);
 // the tests on the rest of the command compare it with those words out.
@@ -2605,9 +2605,8 @@ test("#1509 the captured watcher resolves the new generation at fire time", asyn
     const login = join(dirname(current), "homes", "claude", generation, ".claude");
     const dsh = join(s.root, "dsh");
     mkdirSync(current, { recursive: true }); mkdirSync(login, { recursive: true }); mkdirSync(dsh, { recursive: true });
-    // The panel's claim on the shared root names this DSH home (acp-dsh installationCliHome).
-    writeFileSync(join(s.root, "acp", "cli-homes", "installation.json"), JSON.stringify({ version: 1, identity: realpathSync(dsh) }));
-    chmodSync(login, 0o700);
+    selectedRootFixture(t, join(s.root, "acp"), dirname(current), dsh);
+    privateFixtureHome(login);
     writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 6,
       claude: { generation, configDir: login }, codex: null, updatedAt: "2026-11-16T20:00:00.000Z" }));
     writeFileSync(join(current, "claude"), generation);
@@ -2634,7 +2633,7 @@ test("#1509 the captured watcher resolves the new generation at fire time", asyn
   assert.ok(first.watcher.includes(`${REQUIRED_VAR}=required`), JSON.stringify(first.watcher));
   assert.ok(first.watcher.includes(`DSH_HOME=${dsh}`), JSON.stringify(first.watcher));
   assert.ok(first.watcher.includes(`AUTOMAGIK_HOME=${s.root}`), JSON.stringify(first.watcher));
-  const next = loginFixture(dirname(current), "claude", "22222222-2222-4222-8222-222222222222");
+  const next = loginFixture(t, dirname(current), "claude", "22222222-2222-4222-8222-222222222222");
   const state = s.hcState();
   state.idleOnWait = "t5";
   writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
@@ -2659,7 +2658,7 @@ HC_FAKE_STATE="${s.env.HC_FAKE_STATE}" HC_FAKE_LOG="${s.env.HC_FAKE_LOG}" exec "
 
   // A fire whose env lost the pointer refuses at the queued fire; no launch happens.
   const required = restartScene(t, { status: "working" });
-  const second = queue(required, (({ pointer: p, dsh: d }) => ({ [POINTER_VAR]: p, [REQUIRED_VAR]: "required", DSH_HOME: d }))(setup(required)));
+  const second = queue(required, (({ pointer: p, dsh: d }) => ({ [POINTER_VAR]: p, [REQUIRED_VAR]: "required", DSH_HOME: d, AUTOMAGIK_HOME: required.root }))(setup(required)));
   assert.ok(second.watcher.includes(`${REQUIRED_VAR}=required`), JSON.stringify(second.watcher));
   const before = runs(required).length;
   const noPointer = await fire(required, second.entry, { [REQUIRED_VAR]: "required" });
@@ -4046,9 +4045,9 @@ test("restart --tree #453: the bot's own -u launch is rebuilt on login 2; a Clau
 for (const mode of ["ready", "paused", "recovery", "late refusal"]) {
   test(`#1509 restart --tree checks the helper's own Bot login (${mode})`, (t) => {
     const s = restartScene(t);
-    const root = join(s.root, "cli-homes");
-    const claude = loginFixture(root, "claude");
-    const codex = loginFixture(root, "codex");
+    const root = join(s.root, "acp", "cli-homes");
+    const claude = loginFixture(t, root, "claude");
+    const codex = loginFixture(t, root, "codex");
     const work = join(s.root, "helper-work");
     mkdirSync(work);
     const state = s.hcState();
@@ -4095,9 +4094,9 @@ test("#1509 an early start refusal opens neither a space nor a pane", (t) => {
 
 function managedTree(t, launch = ["codex"], status = "idle") {
   const s = restartScene(t, { status });
-  const root = join(s.root, "cli-homes");
-  const claude = loginFixture(root, "claude");
-  const codex = loginFixture(root, "codex");
+  const root = join(s.root, "acp", "cli-homes");
+  const claude = loginFixture(t, root, "claude");
+  const codex = loginFixture(t, root, "codex");
   const work = join(s.root, "reader-helper");
   mkdirSync(work);
   const state = s.hcState();
@@ -4139,7 +4138,7 @@ test("#1509 the final helper check ends only the new parent and leaves the old t
 
 test("#1509 a restarted Codex helper records the home and login passed to its launch", (t) => {
   const { s, env, state, save } = managedTree(t);
-  const codex = loginFixture(join(s.root, "cli-homes"), "codex", "22222222-2222-4222-8222-222222222222");
+  const codex = loginFixture(t, join(s.root, "acp", "cli-homes"), "codex", "22222222-2222-4222-8222-222222222222");
   const record = JSON.parse(codex.text);
   const file = s.bots();
   file.bots.find((b) => b.id === ID.dev).agent = "codex";
@@ -5067,7 +5066,7 @@ test("RFC 0021: a seat start row carries core, created_ms, role, lead and squad;
 
 test("#1532 a worker starts on its resolved login when the ledger cannot be opened", (t) => {
   const s = restartScene(t);
-  const login = loginFixture(join(s.root, "cli-homes"), "claude");
+  const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "claude");
   const path = ledgerPath(s.app);
   const behind = join(s.root, "behind.jsonl");
   const before = Buffer.from("keep\n");
@@ -5189,7 +5188,7 @@ test("RFC 0021: attach writes a seat row with role, lead, squad, core and create
   st.terminals[0].cwd = s.project;
   st.terminals[0].foreground.cwd = s.project;
   writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
-  const login = loginFixture(join(s.root, "cli-homes"), "claude");
+  const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "claude");
   const args = ["attach", "Captain", "t7"];
   const r = s.cli(args, { env: login.env });
   assert.equal(r.code, 0, r.err);

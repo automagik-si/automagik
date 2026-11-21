@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import {
   closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
   LOGIN_OWNER_ENV, LOGIN_RECORD_VERSION, reclaimWindowsLogins, unverifiedLogin, verifyLoginRecords,
 } from './login-ownership.js'
@@ -11,6 +11,7 @@ import {
   assertGeneration, CliGenerations, GENERATION_ENV, ownershipAt, ownershipState,
   POINTER_ENV, removeDeadOwnership,
 } from './cli-generations.js'
+import { installationDigest, installationIdentity, publishSelectedRoot } from './installation.js'
 import { processState, validBirth } from './process-identity.js'
 import { retiredHomes, writeRetiredNote } from './retired-home.js'
 import { probeWindowsLogin } from './windows-job-probe.js'
@@ -31,18 +32,46 @@ const failure = message => Object.assign(new Error(message), { code: 'acp-accoun
 
 export class CliHomes {
   constructor(root, {
+    acpHome = dirname(resolve(root)), identity = installationIdentity(),
     onRecordError = () => console.warn('acp-dsh: the generation record could not be saved at startup'),
+    onSelectionError = action => console.warn(`acp-dsh: the selected Bot sign-in root could not be ${action}`),
     onRetired = () => {}, probe = probeWindowsLogin,
   } = {}) {
     this.root = resolve(root)
+    this.acpHome = resolve(acpHome)
+    this.identity = identity
     this.onRecordError = onRecordError
+    this.onSelectionError = onSelectionError
     this.onRetired = onRetired
     this.instance = `${process.pid}-${randomUUID()}`
     this.registered = new Map()
     this.changes = new Map()
     this.probe = probe
     this.recovering = new Map()
-    this.generations = new CliGenerations(this.root, this.instance)
+    this.started = new Set()
+    this.generations = new CliGenerations(this.root, this.instance, { reader: true })
+  }
+
+  publishSelection() {
+    this.selectionEnabled = true
+    this.refreshSelection()
+  }
+
+  refreshSelection() {
+    if (!this.selectionEnabled || !this.identity || this.started.size === 0 || this.withdrawn
+      || !['linux', 'darwin'].includes(this.generations.birth?.platform)) return
+    if (this.selection?.vendors === this.started.size) return
+    this.clearSelection()
+    if (this.selection) return
+    const directory = join(this.acpHome, 'selected')
+    const path = join(directory, installationDigest(this.identity), `${this.instance}.json`)
+    try {
+      const handle = publishSelectedRoot(directory, path, {
+        version: 1, identity: this.identity, root: this.root, instance: this.instance, pid: process.pid,
+        birth: this.generations.birth, vendors: [...this.started], startedAt: new Date().toISOString(),
+      })
+      this.selection = { path, handle, vendors: this.started.size }
+    } catch { try { this.onSelectionError('recorded') } catch {} }
   }
 
   home(vendor) {
@@ -52,6 +81,7 @@ export class CliHomes {
 
   environment(vendor, source = process.env) {
     if (!vendors.has(vendor)) throw new Error('No isolated home for this agent.')
+    if (this.withdrawn) throw failure('This Bot sign-in panel has closed.')
     const registered = this.generations.registered.has(vendor)
     this.generations.register(vendor)
     try { this.generations.check(vendor) } catch (error) {
@@ -87,6 +117,8 @@ export class CliHomes {
     const selected = {
       ...env,
       HOME: home,
+      DSH_HOME: this.identity,
+      AUTOMAGIK_HOME: dirname(this.acpHome),
       USERPROFILE: home,
       APPDATA: join(home, 'roaming'),
       LOCALAPPDATA: join(home, 'local'),
@@ -212,6 +244,8 @@ export class CliHomes {
     }
     this.generations.select(vendor, generation)
     this.environment(vendor)
+    this.started.add(vendor)
+    this.refreshSelection()
     return home
   }
 
@@ -363,10 +397,13 @@ export class CliHomes {
     if (retired.length > 0) {
       try { this.onRetired(vendor, retired) } catch {}
     }
-    // ACP start: the generation record follows both pointers; a matching record is not rewritten.
+    // The generation record follows both pointers. A matching record is left in place.
     try { this.generations.ensureRecord() } catch {
       try { this.onRecordError(vendor) } catch {}
+      return
     }
+    this.started.add(vendor)
+    this.refreshSelection()
   }
 
   end(vendor) {
@@ -376,14 +413,48 @@ export class CliHomes {
     rmSync(join(home, 'changing'), { recursive: true, force: true })
   }
 
+  closeSelection() {
+    if (!this.selection) return
+    const { handle } = this.selection
+    if (!this.selection.closed && this.retryWithdrawal(() => handle.close())) this.selection.closed = true
+  }
+
+  clearSelection() {
+    if (!this.selection) return
+    const { handle, closed } = this.selection
+    const removed = this.retryWithdrawal(() => handle.unlink())
+    if (!closed) this.retryWithdrawal(() => handle.revoke())
+    this.closeSelection()
+    if (removed && this.selection.closed) this.selection = undefined
+  }
+
+  retryWithdrawal(remove) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { remove(); return true } catch {}
+    }
+    try { this.onSelectionError('withdrawn') } catch {}
+    return false
+  }
+
+  withdraw({ unregister = this.selection !== undefined } = {}) {
+    this.withdrawn = true
+    this.clearSelection()
+    if (!unregister) return
+    // Leave the physical-home ownership in place until detached runs have drained.
+    for (const vendor of this.generations.registered) {
+      this.retryWithdrawal(() => this.generations.unregister(vendor, { strict: true }))
+    }
+  }
+
   dispose() {
     this.disposed = true
+    this.closeRecovery()
+    this.withdraw({ unregister: true })
     for (const [vendor, home] of this.registered) {
-      this.generations.release(join(home, 'instances', this.instance))
-      this.generations.unregister(vendor)
+      if (this.retryWithdrawal(() => this.generations.release(join(home, 'instances', this.instance), { strict: true }))) {
+        this.registered.delete(vendor)
+      }
     }
-    this.registered.clear()
-    this.generations.dispose()
   }
 }
 

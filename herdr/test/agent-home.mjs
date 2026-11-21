@@ -395,7 +395,7 @@ export function agentHomeTests(cli) {
   // policy off every row above holds unchanged.
   test("#1509 under the login policy a chosen agent home must be the reader's own folder", (t) => {
     const s = homeScene(t, cli);
-    const login = loginFixture(join(s.root, "cli-homes"), "claude");
+    const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "claude");
     const policy = { env: { ...login.env } };
     const same = s.run(["worker", "same home", "--branch", "e2e/same", "--agent-home", realpathSync(login.dir), "--json"], policy);
     assert.equal(same.code, 0, same.err);
@@ -411,7 +411,7 @@ export function agentHomeTests(cli) {
 
   test("#1509 under the login policy the roster's worker.agentHome refuses when it is not the reader's folder", (t) => {
     const s = homeScene(t, cli);
-    const login = loginFixture(join(s.root, "cli-homes"), "claude");
+    const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "claude");
     const other = privateDir(s.root, "homes/claude-roster");
     const edit = s.run(["edit", "Genie", "--worker-agent-home", other], { from: null });
     assert.equal(edit.code, 0, edit.err);
@@ -870,7 +870,7 @@ export function agentHomeTests(cli) {
   test("#1208 under #1509: with the pointer, only the record's own vendor folder may be chosen, and its generation is kept", (t) => {
     for (const agent of ["claude", "codex"]) {
       const s = homeScene(t, cli);
-      const login = loginFixture(join(s.root, "cli-homes"), agent, GEN[agent]);
+      const login = loginFixture(t, join(s.root, "acp", "cli-homes"), agent, GEN[agent]);
       const match = realpathSync(login.dir), other = privateDir(s.root, "homes/other");
       const env = { ...login.env };
       assert.equal(s.run(["worker", "x", "--branch", "e2e/a", "--agent", agent, "--agent-home", match], { env }).code, 0);
