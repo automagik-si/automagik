@@ -85,6 +85,8 @@ export function ComputerPage({ roster, actions, run, Section, Row, Switch }) {
   ]
 }
 
+const appLabel = (name, path) => path === undefined || path === name ? name : `${name} (${path})`
+
 // The Bot's own card in its settings: its level and the apps the user Always allows.
 export function BotComputerCard({ bot, roster, actions, run, Card, Row }) {
   const computer = roster.computer ?? { enabled: false }
@@ -94,7 +96,7 @@ export function BotComputerCard({ bot, roster, actions, run, Card, Row }) {
       ? h(Row, { label: t('Computer use') }, h('span', { className: 'bt-muted' }, t('Off in Settings → Computer use')))
       : [
           h(Row, { key: 'level', label: t('Computer use'), hint: providerWorks(computer.provider ?? { state: 'loading' }) ? undefined : t('Bots get no computer tools until the provider is ready.') }, h(LevelPicker, { bot, actions, run })),
-          apps.map(([key, app]) => h(Row, { key, label: app.name },
+          apps.map(([key, app]) => h(Row, { key, label: appLabel(app.name, app.path) },
             h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => run(actions.computerRevokeApp(bot.id, key)) }, t('Revoke')))),
         ])
 }
@@ -157,7 +159,7 @@ export function PendingAppAccess({ ask, actions, inline }) {
     h('section', { className: inline ? 'bt-q' : 'bt-q bt-q-raised', role: 'group', 'aria-labelledby': titleId },
       h('div', { className: 'bt-q-head' },
         h('div', { className: 'bt-q-text' },
-          h('p', { className: 'bt-q-title', id: titleId }, t('Allow {name} to use {app}?', { name: ask.botName ?? 'a Bot', app: ask.appName })))),
+          h('p', { className: 'bt-q-title', id: titleId }, t('Allow {name} to use {app}?', { name: ask.botName ?? 'a Bot', app: appLabel(ask.appName, ask.appPath) })))),
       h('div', { className: 'bt-q-foot' },
         h('button', { type: 'button', className: 'bt-q-btn', onClick: () => answer('deny') }, t('Deny')),
         h('button', { type: 'button', className: 'bt-q-btn', onClick: () => answer('once') }, t('This time')),
