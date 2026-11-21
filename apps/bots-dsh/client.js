@@ -678,6 +678,7 @@ var ZH = {
   "The sign-in was interrupted by a restart. Get a new link.": "登录因重启而中断，请获取新链接。",
   "Sign in to {name}": "登录 {name}",
   "This message contains a sign-in code, so it was not sent. Paste the code only in the sign-in step.": "这条消息包含登录代码，因此没有发送。请只在登录步骤中粘贴代码。",
+  "Keep the queued message at or below {n} characters.": "排队消息不能超过 {n} 个字符。",
   "This model needs a sign-in to its coding agent.": "此模型需要先登录它的编程助手。",
   "This sign-in request is no longer valid. Start again.": "本次登录请求已失效，请重新开始。",
   "Paste the complete code shown by Claude, including the part after #.": "请粘贴 Claude 显示的完整代码，包括 # 后面的部分。",
@@ -2934,6 +2935,7 @@ var ZH = {
   "Leave its group chats before making it private.": "先退出所有群聊，才能设为隐私 Bot。",
   "Choose a working folder of its own first.": "先选择一个独立的工作文件夹。",
   "A private Bot cannot be a Main Bot.": "隐私 Bot 不能设为主 Bot。",
+  "A private Bot's learning proposal cannot be applied.": "无法应用隐私 Bot 的学习提案。",
   "Closed after deletion · {count}": "删除后仍受保护 · {count}",
   "Remove protection": "解除保护",
   "Click again to remove. Other Bots can then read its folder, memory and chats.": "再点一次解除。其他 Bot 之后可以读取它的文件夹、记忆和对话。",
@@ -10400,6 +10402,55 @@ body[data-bt-motion=quiet] :is(.op-task,.op-task-said,.op-task-summary,.op-orbit
 // src/client/dsh-primitives.js
 var import_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 
+// src/shared/cli-login.js
+var SIGN_IN_TEXT_MAX = 1e6;
+
+// src/client/cli-login-model.js
+var CLI_NAMES = Object.freeze({ "acp-codex": "Codex", "acp-claude": "Claude Code" });
+var cliProviderOf = (ref) => {
+  const provider = typeof ref === "string" ? ref.split("/")[0] : void 0;
+  return Object.hasOwn(CLI_NAMES, provider) ? provider : void 0;
+};
+var cliLoginBotOf = (roster, id) => typeof id === "string" ? roster?.byId?.[id] : void 0;
+var KNOWN = /* @__PURE__ */ new Set();
+var STATE = /^[A-Za-z0-9_-]{8,512}$/;
+function rememberLinkState(url) {
+  let state2;
+  try {
+    state2 = new URL(url).searchParams.get("state");
+  } catch {
+    return false;
+  }
+  if (typeof state2 !== "string" || !STATE.test(state2)) return false;
+  KNOWN.add(state2);
+  return true;
+}
+var knowsStates = () => KNOWN.size > 0;
+var squeeze = (text2) => text2.slice(0, SIGN_IN_TEXT_MAX).replace(/[\s\p{Cf}]+/gu, "");
+function carriesKnownState(text2) {
+  if (typeof text2 !== "string" || text2 === "" || KNOWN.size === 0) return false;
+  const flat = squeeze(text2);
+  for (const state2 of KNOWN) if (flat.includes(`#${state2}`)) return true;
+  return false;
+}
+function forgetKnownStates() {
+  KNOWN.clear();
+}
+var DONE_MS = 3e3;
+var APPLY_FAILED_MS = 8e3;
+
+// src/client/cli-login-guard.js
+var showSignInCodeNotice = (actions) => actions.showNotice(t("This message contains a sign-in code, so it was not sent. Paste the code only in the sign-in step."));
+function refuseKnownState(text2, actions) {
+  if (!carriesKnownState(text2)) return false;
+  showSignInCodeNotice(actions);
+  return true;
+}
+function guardSignInCodeTransfer(event, actions) {
+  const text2 = (event.clipboardData ?? event.dataTransfer)?.getData("text/plain");
+  if (refuseKnownState(text2, actions)) event.preventDefault();
+}
+
 // src/client/goal.js
 var import_react19 = require("react");
 var REPORTED = /* @__PURE__ */ new Set(["reported", "done"]);
@@ -10655,7 +10706,7 @@ function GoalCompose({ room: room2, roster, actions }) {
   };
   const submit = () => {
     const brief = text2.trim();
-    if (brief === "" || sending) return;
+    if (brief === "" || sending || refuseKnownState(brief, actions)) return;
     setSending(true);
     void Promise.resolve(actions.goalDraft(room2.id, brief)).then(
       () => {
@@ -10683,6 +10734,8 @@ function GoalCompose({ room: room2, roster, actions }) {
         box.style.height = "auto";
         box.style.height = `${box.scrollHeight}px`;
       },
+      onPaste: (event) => guardSignInCodeTransfer(event, actions),
+      onDrop: (event) => guardSignInCodeTransfer(event, actions),
       onKeyDown: (event) => {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();
@@ -16880,40 +16933,6 @@ var VOICE_SETTINGS_CSS = `
 .bt-voice-set{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .bt-voice-set select{max-width:240px}
 `;
-
-// src/client/cli-login-model.js
-var CLI_NAMES = Object.freeze({ "acp-codex": "Codex", "acp-claude": "Claude Code" });
-var cliProviderOf = (ref) => {
-  const provider = typeof ref === "string" ? ref.split("/")[0] : void 0;
-  return Object.hasOwn(CLI_NAMES, provider) ? provider : void 0;
-};
-var cliLoginBotOf = (roster, id) => typeof id === "string" ? roster?.byId?.[id] : void 0;
-var KNOWN = /* @__PURE__ */ new Set();
-var STATE = /^[A-Za-z0-9_-]{8,512}$/;
-function rememberLinkState(url) {
-  let state2;
-  try {
-    state2 = new URL(url).searchParams.get("state");
-  } catch {
-    return false;
-  }
-  if (typeof state2 !== "string" || !STATE.test(state2)) return false;
-  KNOWN.add(state2);
-  return true;
-}
-var knowsStates = () => KNOWN.size > 0;
-var squeeze = (text2) => text2.slice(0, 1e6).replace(/[\s\p{Cf}]+/gu, "");
-function carriesKnownState(text2) {
-  if (typeof text2 !== "string" || text2 === "" || KNOWN.size === 0) return false;
-  const flat = squeeze(text2);
-  for (const state2 of KNOWN) if (flat.includes(`#${state2}`)) return true;
-  return false;
-}
-function forgetKnownStates() {
-  KNOWN.clear();
-}
-var DONE_MS = 3e3;
-var APPLY_FAILED_MS = 8e3;
 
 // src/shared/cli-account.js
 var ACCOUNT_RECOVERY_CODE = "bot/account-recovery";
@@ -44214,7 +44233,7 @@ function Preview({ text: text2, renderFactorySlot }) {
   const rendered = renderFactorySlot?.("conversation.user.text", { text: text2, facts: QUEUE_TEXT_FACTS, interactive: false, ellipsis: true });
   return (0, import_react106.createElement)("span", { className: "bt-queue-preview" }, rendered ?? text2);
 }
-function EditField({ text: text2, onChange, onSave, onCancel }) {
+function EditField({ text: text2, onChange, onSave, onCancel, actions }) {
   const field = (0, import_react106.useRef)(null);
   (0, import_react106.useEffect)(() => {
     const node = field.current;
@@ -44230,6 +44249,8 @@ function EditField({ text: text2, onChange, onSave, onCancel }) {
     rows: 1,
     "aria-label": t("Edit queued message"),
     onChange: (event) => onChange(event.target.value),
+    onPaste: (event) => guardSignInCodeTransfer(event, actions),
+    onDrop: (event) => guardSignInCodeTransfer(event, actions),
     onKeyDown: (event) => {
       if (event.key === "Escape") {
         event.stopPropagation();
@@ -44289,6 +44310,11 @@ function QueueDock({ useSession, useProjection, updateQueue, loadImage: loadImag
   };
   const saveEdit = async () => {
     if (editing === null || editing.text.trim() === "") return;
+    if (editing.text.length > SIGN_IN_TEXT_MAX) {
+      actions.showNotice(t("Keep the queued message at or below {n} characters.", { n: SIGN_IN_TEXT_MAX }));
+      return;
+    }
+    if (refuseKnownState(editing.text, actions)) return;
     if (await applyAction(editing.id, { kind: "edit", content: [{ type: "text", text: editing.text }] }, t("Couldn’t edit the queued message — it may have started already."))) setEditing(null);
   };
   return (0, import_react106.createElement)(
@@ -44315,7 +44341,7 @@ function QueueDock({ useSession, useProjection, updateQueue, loadImage: loadImag
             "li",
             { key: row2.id, className: "bt-queue-row" },
             rowCount === 1 && (0, import_react106.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react106.createElement)(QueueIcon)),
-            editing?.id === row2.id ? (0, import_react106.createElement)(EditField, { text: editing.text, onChange: (text3) => setEditing({ id: row2.id, text: text3 }), onSave: saveEdit, onCancel: () => setEditing(null) }) : (0, import_react106.createElement)(
+            editing?.id === row2.id ? (0, import_react106.createElement)(EditField, { text: editing.text, onChange: (text3) => setEditing({ id: row2.id, text: text3 }), onSave: saveEdit, onCancel: () => setEditing(null), actions }) : (0, import_react106.createElement)(
               import_react106.Fragment,
               null,
               attachments.length > 0 && (0, import_react106.createElement)(
@@ -46173,7 +46199,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   }, "ds-bot: carried CLI sign-in notice");
   actions.inputActionsOf = (sessionId) => ctx.sessions.binding?.(sessionId)?.props?.inputActions;
   ctx.effect(() => () => cliLogin.dispose(), "ds-bot: CLI sign-in rows");
-  ctx.effect(() => installKnownStateGuard({ onRefused: () => actions.showNotice(t("This message contains a sign-in code, so it was not sent. Paste the code only in the sign-in step.")) }), "ds-bot: sign-in code guard");
+  ctx.effect(() => installKnownStateGuard({ onRefused: () => showSignInCodeNotice(actions) }), "ds-bot: sign-in code guard");
   ctx.effect(() => installCliLoginBridge({
     selectedBot: () => cliLoginBotOf(roster.getSnapshot(), mainView()),
     mainBot: () => {

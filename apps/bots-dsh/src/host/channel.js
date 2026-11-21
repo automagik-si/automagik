@@ -621,6 +621,7 @@ export function install(rt) {
           await rt.catalog()
           await rt.loadSecrets()
           const roles = await rt.roleRecordsView()
+          await rt.prepareLearning()
           const answer = liveAnswer(roles)
           if (body.since === state.revision && (body.models === undefined || body.models === modelsKey())) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })

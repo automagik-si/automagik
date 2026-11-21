@@ -65,6 +65,7 @@ import { PermissionChoiceDock } from './permission-card.js'
 import { MODEL_CSS, ModelChoiceDock, ModelChoiceTail, ModelLineTail, DeepSeekSignIn } from './model-menu.js'
 import { MODEL_SWITCH_CSS, ModelSwitchNotice } from './model-switch.js'
 import { announceCarried, CLI_LOGIN_CSS, CliLoginConversation, installCliLoginBridge, installKnownStateGuard } from './cli-login.js'
+import { showSignInCodeNotice } from './cli-login-guard.js'
 import { createCliLogin } from './cli-login-state.js'
 import { cliLoginBotOf } from './cli-login-model.js'
 import { installLoginCommand } from './login-command.js'
@@ -846,7 +847,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   }, 'ds-bot: carried CLI sign-in notice')
   actions.inputActionsOf = sessionId => ctx.sessions.binding?.(sessionId)?.props?.inputActions
   ctx.effect(() => () => cliLogin.dispose(), 'ds-bot: CLI sign-in rows')
-  ctx.effect(() => installKnownStateGuard({ onRefused: () => actions.showNotice(t('This message contains a sign-in code, so it was not sent. Paste the code only in the sign-in step.')) }), 'ds-bot: sign-in code guard')
+  ctx.effect(() => installKnownStateGuard({ onRefused: () => showSignInCodeNotice(actions) }), 'ds-bot: sign-in code guard')
   ctx.effect(() => installCliLoginBridge({
     selectedBot: () => cliLoginBotOf(roster.getSnapshot(), mainView()),
     mainBot: () => {

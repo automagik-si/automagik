@@ -186,6 +186,7 @@ export function install(rt) {
         ? { checkedAt: new Date().toISOString(), status: 'unverified' }
         : await probeHttpCapability(item, options.botId)
     }
+    options.admit?.(item)
     ensureLibrary()[item.name] = item
     await rt.save()
     return item

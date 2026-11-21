@@ -1468,7 +1468,7 @@ export function install(rt) {
   }
   // The panel's model calls belong to the Bot or group whose memory they serve;
   // without the tag the meter would file them under "other".
-  async function oneShot(route, system, text, tag, sessionId) {
+  async function oneShot(route, system, text, tag, sessionId, dispatch) {
     rt.assertBotRunnerProvider?.(route.provider, sessionId)
     const info = await ctx.llm.resolveModelInfo(route.provider, route.model).catch(() => undefined)
     const efforts = info?.reasoning?.efforts ?? []
@@ -1497,7 +1497,9 @@ export function install(rt) {
         maxTokens,
         signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
       }
-      const assembler = await (rt.assembleLlm ? rt.assembleLlm(callOptions) : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff }))
+      const assembler = await (rt.assembleLlm
+        ? rt.assembleLlm(callOptions, { dispatch })
+        : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff, dispatch }))
       const finish = assembler.finish
       // A cancelled call is the caller's decision, not a route that may answer again.
       if (finish.kind === 'aborted') throw modelFailure('The model call was aborted.')
@@ -1526,19 +1528,21 @@ export function install(rt) {
   // The provider's own error is not passed on: its message may quote the request.
   const answerFailure = error => (ownFailure(error) ? error : modelFailure(`The model could not answer (${failureCode(error, 'provider error')}).`))
   const shotSession = (bot, tag) => rt.botRunnerRequired === undefined ? tag?.sessionId : rt.chatOf(bot.id)
-  async function botShot(bot, system, text, tag, sessionId = shotSession(bot, tag)) {
+  async function botShot(bot, system, text, tag, dispatch) {
+    const sessionId = shotSession(bot, tag)
+    const cancelled = error => error?.code === NO_BOT_RUNNER || error?.code === 'bot/stale'
     const first = await modelFor(sessionId)
     try {
-      return await oneShot(first, system, text, tag, sessionId)
+      return await oneShot(first, system, text, tag, sessionId, dispatch)
     } catch (error) {
-      if (error?.code === NO_BOT_RUNNER) throw error
+      if (cancelled(error)) throw error
       const mine = await rt.desiredModel(bot, { aside: true, noCommands: rt.botRunnerRequired?.(sessionId) })
       const fallback = rt.answersAside(mine) ? splitRef(mine) : undefined
       if (fallback === undefined || (fallback.provider === first.provider && fallback.model === first.model)) throw answerFailure(error)
       try {
-        return await oneShot(fallback, system, text, tag, sessionId)
+        return await oneShot(fallback, system, text, tag, sessionId, dispatch)
       } catch (again) {
-        if (again?.code === NO_BOT_RUNNER) throw again
+        if (cancelled(again)) throw again
         const said = failure => failureText(failure, 'provider error')
         throw modelFailure(`${first.provider}/${first.model}: ${said(error)}; ${fallback.provider}/${fallback.model}: ${said(again)}`)
       }

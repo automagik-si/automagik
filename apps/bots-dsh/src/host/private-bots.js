@@ -87,6 +87,7 @@ export function install(rt) {
   // Deleting a private Bot does not make the files and memory it leaves behind public.
   const protectedBots = () => [...new Map([...(state.privateArchives ?? []), ...privateBots()].map(bot => [bot.id, bot])).values()]
   const sessionsOf = bot => [...new Set([bot.id, ...(bot.sessionIds ?? [rt.chatOf(bot.id), ...(bot.segments ?? []).map(segment => segment.sessionId), ...rt.groupSessionsOf(bot.id)])])]
+  const privatePathsKey = () => JSON.stringify(protectedBots().map(bot => [sessionsOf(bot), bot.workDir, bot.archivePath]))
   const dataRoots = () => [rt.dshHome, rt.home, process.env.DS_BOT_USER_DSH_HOME?.trim()].filter(Boolean)
 
   // A path as it is and as the file system resolves it, folded for comparing. realBeyond
@@ -463,5 +464,5 @@ export function install(rt) {
   // What the settings list shows. Session ids stay on the host.
   const archivesView = () => (state.privateArchives ?? []).map(({ id, name, workDir }) => ({ id, name, ...(workDir === undefined ? {} : { workDir }) }))
 
-  Object.assign(rt, { isPrivate, privateClash, checkPrivacyChange: checkChange, checkNoPrivate, releaseArchive, archivesView })
+  Object.assign(rt, { isPrivate, privateClash, privatePathOwner: ownerOfPath, privatePathsKey, checkPrivacyChange: checkChange, checkNoPrivate, releaseArchive, archivesView })
 }

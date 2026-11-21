@@ -824,7 +824,7 @@ export function install(rt) {
     redact = redactor(entries)
     redactAnywhere = redactor(entries, { wholeWords: false })
     refreshEnv()
-    rt.secretsChanged?.()
+    return rt.secretsChanged?.()
   }
 
   // Error messages from JSON.parse quote the file, so only the code or name is logged.
@@ -1249,9 +1249,10 @@ export function install(rt) {
   }
 
   async function commit(notes) {
-    changed()
+    const learningScrub = changed()
     await persist()
     await rt.save()
+    await learningScrub
     for (const [botId, text] of notes) await tell(botId, text)
   }
 

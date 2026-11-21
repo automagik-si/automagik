@@ -10,7 +10,7 @@ const WAIT_MS = 40
 
 /**
  * Moves `temp` over `path`, trying again for a moment while Windows reports `path` busy.
- * `check` runs before each new try and throws to stop, as when the lock that allows the
+ * `check` runs before each new try and can throw or reject to stop, as when the lock that allows the
  * write was lost in the meantime. `options` injects what only a test has to decide: the
  * platform that makes busy codes retried, the wait between tries, and the move itself
  * (no runner makes a real rename fail with EBUSY).
@@ -22,7 +22,8 @@ export async function replaceFile(temp, path, check = () => {}, { platform = pro
     } catch (error) {
       if (platform !== 'win32' || attempt >= TRIES || !BUSY.has(error?.code)) throw error
       await sleep(WAIT_MS * attempt)
-      check()
+      const checked = check()
+      if (checked !== undefined) await checked
     }
   }
 }
