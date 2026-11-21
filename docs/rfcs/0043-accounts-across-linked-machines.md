@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; delivery 0a found no qualified transport, so the linked trial and 3a are blocked (Delivery 0a's findings); on 2026-11-20 the owner's side left the trial and 3a to the owner and kept Codex on this computer only, Q4's fallback; deliveries 1 (#1901) and 2 (#1914) merged; amendment (RFC 0030 Q19, Q23) approved by the owner's delegate on 2026-11-21: Q12-Q17 answered with its recommendations, see Decided) |
+| Status | In delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; delivery 0a found no qualified transport, so the linked trial and 3a are blocked (Delivery 0a's findings); on 2026-11-20 the owner's side left the trial and 3a to the owner and kept Codex on this computer only, Q4's fallback; deliveries 1 (#1901) and 2 (#1914) merged; amendment (RFC 0030 Q19, Q23) approved by the owner's delegate on 2026-11-21: Q12-Q17 answered with its recommendations, see Decided; on 2026-11-21 the owner's delegate withdrew the linked trial and 3a: Codex stays on this computer only, which closes #424 and #438, see Decided 18) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr patches (the pack: am-quota and the sidebar's CLI), each carrying am's generated copies of the CLI |
 | Created | 2026-11-20 |
@@ -468,6 +468,8 @@ Bots the controller has no binding for are not listed, and the row says so.
 
 ### Codex on linked machines (delivery 3, after the trial)
 
+*Withdrawn on 2026-11-21 (Decided, 18). Kept as the design a later amendment would start from.*
+
 **3a, on a pass (the owner's #424 design).** Built only after 0a found a qualified route, the
 trial passed, and Q4 chose it. A pass covers what was tested: at most as many linked machines
 hold the grant at once as the trial had linked holders; more needs a trial with that number or
@@ -577,7 +579,7 @@ am-quota ships switched off; none of this reaches an install that has not turned
    above, a machine off `codex.machines` never written, the holder limit counting stages, backups
    and unreachable machines, **Remove from machine** with a placed file, a same-account file of
    unknown origin, a changed file and an unreachable machine. Rollback: each machine keeps its last `auth.json` and
-   backup.
+   backup. Withdrawn on 2026-11-21 with the trial (Decided, 18).
 
 Deliveries 1 and 2 copy no credential; they start before the trial (Q2).
 
@@ -948,6 +950,18 @@ needs a later amendment.
     local driver retires when delivery 5 enables the executor's.
 17. **Q17.** An independently verified `local` assignment runs even when linked discovery fails;
     linked membership, assignments and pending work stay as they were.
+18. **Codex across machines, withdrawn** (decided by the owner's delegate on 2026-11-21, the
+    recommended option). Delivery 0a found no route that keeps a Codex credential inside the hc
+    link and out of every `argv`, and the trial would put a real grant at rest on a second
+    machine. So the linked trial (0b) and delivery 3a are withdrawn, not held: Codex stays on
+    this computer only, as Q4 already did after a fail, and no Codex credential is copied between
+    machines, the same rule the owner set for Claude (#453). A linked machine's Codex is signed in
+    on that machine. Delivery 2 (#1914) meets #438's acceptance (`one`, `pinned`, `spread` with
+    its tie-breaks, every machine's account read back, a machine that did not switch named,
+    fixture tests) and #424's for Claude under the owner's 2026-11-06 design; this decision
+    settles #424's Codex half. Reopening Codex across machines needs a new amendment and a
+    qualified route; §"Codex on linked machines" stays as the design it would start from.
+    Deliveries 4 and 5 (this computer's Codex writer, the plan without the pack) are unaffected.
 
 ## The questions as put
 
