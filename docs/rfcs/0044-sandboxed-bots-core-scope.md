@@ -2,10 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed |
+| Status | Accepted (2026-11-20, approved by the owner's delegate: Q1-Q5, Q7 and Q8 answered with this RFC's recommendations; Q6 answered: post R1-R6 as one comment on herdr-core#171, in English, without offering a PR; delivery 1 approved ahead of the answers as the fix of today's defect; none merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none for this RFC (docs only). Deliveries: herdr (3.N.P), with am's byte copies when a shared file changes; `apps/dsh-sandbox/` ships only through its byte-equal copy in the pack, never alone (`scripts/lane.ts:148-151`); herdr-core for the upstream request; owner steps for enablement |
 | Created | 2026-11-20 |
+
+> Approved by the owner's delegate on 2026-11-20 while the owner is away; the owner may amend on return.
 
 ## Summary
 
@@ -394,6 +396,25 @@ Order: 1 and 2, then 3; 4 any time; 5-7 follow upstream; 8 and 9 need the hardwa
 
 Linked machines before upstream are not a question: an opted-in linked start stays refused, and the
 runbook's answer stays to start that Bot on its own computer (`hcProxy.md`, "Rollout and rollback").
+
+## Decided (owner's delegate, 2026-11-20)
+
+- **Q1, enable on Linux before upstream:** (a) yes, after deliveries 1 and 2, one canary by the
+  runbook.
+- **Q2, local residuals:** (a) fix rootless containerd and BuildKit and the bwrap prefix; accept
+  `tcp://`/`ssh://` container hosts and late sockets only under the stated conditions on the named
+  computer.
+- **Q3, the canary:** (a) a member Bot the owner names (not a captain, not the main Bot) whose workers
+  are the dsh-tui helper with no chosen worker home; expansion is a separate decision.
+- **Q4, default for new Bots:** (a) a per-Bot opt-in.
+- **Q5, `attach`:** (a) refused for sandboxed panes for good.
+- **Q6, the upstream request:** post R1-R6 as one comment on herdr-core#171, in English, without
+  offering a PR and without Bot names or anyone's data. The text is reviewed before it is posted.
+  Maintainer question 5 is not asked.
+- **Q7, macOS:** (a) a feasibility study on a Mac after the Linux canary.
+- **Q8, RFC 0028's grant:** (a) in the same request, as R3b.
+- **Delivery 1** was approved ahead of these answers, as the fix of today's defect (the proxy refuses
+  current cores, and `send` with `force: true` passes a blocked dialog).
 
 ## Links
 
