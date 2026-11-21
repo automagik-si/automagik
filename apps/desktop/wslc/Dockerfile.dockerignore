@@ -16,5 +16,8 @@
 !src/privacy.js
 !src/tar.js
 !src/update.js
+!src/relaunch-args.js
+!src/deeplink.js
+!src/bot-views.js
 !wslc/bin
 !wslc/lib

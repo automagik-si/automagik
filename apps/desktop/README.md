@@ -78,6 +78,8 @@ after you quit and reopen it. **Uninstall** in the same menu removes it again.
 
 Automagik updates itself. It checks when it starts and every 15 minutes, even when no update is available, and downloads a new version in the background. Plugin updates are also checked every 15 minutes. When it's ready, the top of the window says **Automagik X is ready** with **Restart now** and **Later**. After Later, a small **Restart to update** button stays there, and quitting Automagik installs the update too.
 
+On Linux, **Restart to update** reopens Automagik with its launch options (such as a launcher's `--remote-debugging-port`), skips any link it was opened with, and uses the saved preload choice without replaying `--preload`. Electron relaunches Automagik after the old copy exits, so the new copy can bind the debug port without inheriting the old copy's sockets.
+
 To check yourself, use **Automagik → Check for Updates…** on macOS, or right-click the top bar on Linux.
 
 The .deb version on Linux doesn't replace itself, because your package manager owns it. Instead the top bar says **Automagik X is out**, and **Download** opens the release page.

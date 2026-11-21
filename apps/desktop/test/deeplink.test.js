@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { linkInArgs, parseDeepLink, registerSchemes, SCHEMES } from '../src/deeplink.js'
+import { isAppLink, linkInArgs, parseDeepLink, registerSchemes, SCHEMES } from '../src/deeplink.js'
 
 test('a connect link gives the Omni\'s address, cleaned, and whether it is encrypted', () => {
   assert.deepEqual(parseDeepLink('omni://connect?url=https%3A%2F%2Fomni.example.com'), { action: 'connect', url: 'https://omni.example.com', host: 'omni.example.com', secure: true })
@@ -38,6 +38,13 @@ test('the link comes from the command line on Linux, among Electron\'s own argum
   assert.equal(linkInArgs(['/usr/bin/omni-desktop', '--no-sandbox', 'omni://connect?url=https://a.example']), 'omni://connect?url=https://a.example')
   assert.equal(linkInArgs(['/usr/bin/omni-desktop']), null)
   assert.equal(linkInArgs(undefined), null)
+})
+
+test('isAppLink recognizes both app schemes on string arguments', () => {
+  assert.equal(isAppLink('automagik://open'), true)
+  assert.equal(isAppLink('omni:open'), true)
+  assert.equal(isAppLink('https://example.com'), false)
+  for (const arg of [undefined, null, 1, { toString: () => 'omni:open' }]) assert.equal(isAppLink(arg), false)
 })
 
 // RFC 0013 delivery 3: automagik:// is Automagik's own, omni:// its alias.
