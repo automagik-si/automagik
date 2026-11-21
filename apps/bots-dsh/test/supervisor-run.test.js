@@ -1433,3 +1433,23 @@ test('a service cut between the previous child spawn and its health save consume
   recovered.child.kill('SIGTERM')
   assert.equal((await recovered.exit).code, 0)
 })
+
+test('a public launch URL with the patched 401 verifies its listener and can update', async t => {
+  const f = fixture(t)
+  f.env.SUPERVISOR_PATCHED_401 = '1'
+  const port = await unusedLoopbackPort()
+  const publicUrl = 'https://example.invalid/web/'
+  f.command.splice(f.command.indexOf('--host'), 4, '--port=' + port, '--public-url', publicUrl)
+  const running = driver(t, f)
+  await until(() => announced(running), 'DSH did not announce its public URL')
+  const listener = join(f.store, 'listener.json')
+  await until(() => read(listener).listener !== 'unknown', 'the public listener was not checked')
+  assert.deepEqual(read(listener), { version: 1, bootId: supervisorOf(f).bootId, listener: 'verified-argv' })
+  request(f)
+  await until(
+    () => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy',
+    'update did not become healthy',
+  )
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
+})

@@ -29,7 +29,10 @@ export const applicationRow = healthPage.match(/<link rel="preload" as="script" 
 export const cookie = 'dsh_test=fixture-cookie'
 const unauthorized = 'dsh web authentication required; reopen the URL printed by dsh web.\n'
 
-export function healthReply({ url, headers = {}, payload, plugins, run, present = true, bots = 1, legacy = false, fault }) {
+export function healthReply({
+  url, headers = {}, payload, plugins, run, present = true, bots = 1, legacy = false, fault,
+  unauthorizedBody = unauthorized,
+}) {
   const reply = (status, headers, body = '') => ({ status, headers, body, size: Buffer.byteLength(body) })
   const ok = value => reply(200, { 'content-type': 'application/json' }, JSON.stringify({ ok: true, value }))
   if (url.pathname === '/' && url.searchParams.has('token')) {
@@ -40,7 +43,7 @@ export function healthReply({ url, headers = {}, payload, plugins, run, present 
     }
   }
   if (headers.cookie !== cookie) {
-    return reply(401, { 'cache-control': 'no-store', 'content-type': 'text/plain; charset=utf-8' }, unauthorized)
+    return reply(401, { 'cache-control': 'no-store', 'content-type': 'text/plain; charset=utf-8' }, unauthorizedBody)
   }
   if (url.pathname === '/api/omni-ui') {
     if (legacy) {

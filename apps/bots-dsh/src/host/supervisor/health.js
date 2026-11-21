@@ -9,6 +9,14 @@ const DOCUMENT_LIMIT = 2 * 1024 * 1024
 const SCRIPT_LIMIT = 64 * 1024 * 1024
 const UNAUTHORIZED = 'dsh web authentication required; reopen the URL printed by dsh web.\n'
 
+export function dshUnauthorizedBodies(dshHome) {
+  const home = typeof dshHome === 'string' ? dshHome.trim() : ''
+  if (!home) return [UNAUTHORIZED]
+  // The carried client-connection-cookie-lax.patch names the launch URL file.
+  const location = home.replace(/[\\/]+$/u, '') + '/launch-url'
+  return [UNAUTHORIZED, 'dsh web authentication required; open the launch URL saved in ' + location + '.\n']
+}
+
 export function healthListener(args) {
   return webOption(args, '--tls-cert') === undefined ? localListener(args) : null
 }
@@ -67,13 +75,13 @@ export function localRequest(url, { signal, cookie, payload, stream = false } = 
   })
 }
 
-export async function verifyListener(child, args, { signal, probe = localRequest } = {}) {
+export async function verifyListener(child, args, { signal, probe = localRequest, dshHome } = {}) {
   const found = listenerOf(child, args)
   if (!found || signal?.aborted) return null
   if (!found.isPublic) return { ...found, status: 'verified' }
   try {
     const reply = await probe(found.listener, { signal })
-    if (reply.status === 401 && reply.body === UNAUTHORIZED
+    if (reply.status === 401 && dshUnauthorizedBodies(dshHome).includes(reply.body)
       && reply.headers['cache-control'] === 'no-store' && reply.headers['content-type'] === 'text/plain; charset=utf-8') {
       return { ...found, status: 'verified-argv' }
     }
@@ -196,7 +204,8 @@ function pluginsMatch(value, expect, runId) {
 }
 
 export async function checkHealth(child, {
-  args, expect, runId, signal, probe = localRequest, verifiedListener, since = Date.now(), team, legacy = false,
+  args, expect, runId, signal, probe = localRequest, verifiedListener, dshHome, since = Date.now(), team,
+  legacy = false,
   windows = { first: WINDOW_MS, second: WINDOW_MS }, retryMs = 250,
 }) {
   const exit = new AbortController()
@@ -228,7 +237,8 @@ export async function checkHealth(child, {
   const first = since + windows.first - Date.now()
   if (first <= 0) return failed(step)
   const firstPassed = await poll(deadline(first), async window => {
-    const verified = await (verifiedListener?.(window) ?? verifyListener(child, args, { signal: window, probe }))
+    const verified = await (verifiedListener?.(window)
+      ?? verifyListener(child, args, { signal: window, probe, dshHome }))
     if (!verified) return
     listener = verified.listener
     if (!cookie) {

@@ -197,6 +197,10 @@ if (action === 'plugin') {
     const fault = candidate && mode.startsWith('trial-') ? mode.slice('trial-'.length) : null
     const unhealthy = mode === 'pre-switch-unhealthy' || (mode === 'restored-unhealthy' && bootsAlready > 0)
       || (mode === 'rollback-unhealthy' && bootsAlready > 1) || fault === 'port'
+    const unauthorizedBody = process.env.SUPERVISOR_PATCHED_401 === '1'
+      ? 'dsh web authentication required; open the launch URL saved in '
+        + home.trim().replace(/[\\/]+$/u, '') + '/launch-url.\n'
+      : undefined
     let expectedRun = process.env.AUTOMAGIK_SUPERVISOR_RUN
     const server = createServer(async (req, res) => {
       const url = new URL(req.url, 'http://127.0.0.1')
@@ -217,7 +221,7 @@ if (action === 'plugin') {
       if (terminal && live.runId === expectedRun) expectedRun = undefined
       const run = live && !terminal ? live.runId : expectedRun ?? null
       const result = healthReply({
-        url, headers: req.headers, payload, plugins, run, present: rosterPresent,
+        url, headers: req.headers, payload, plugins, run, present: rosterPresent, unauthorizedBody,
         legacy: !fs.existsSync(join(profile, 'node_modules/@automagik/bots-dsh/src/host/update-contract.json')),
         bots: fs.existsSync(statePath) && read(statePath).note ? 1 : 0,
         fault: candidate && ['trial-new-format', 'trial-dsh-edit', 'trial-dependency-edit', 'trial-compatibility-edit'].includes(mode) ? 'page' : fault,

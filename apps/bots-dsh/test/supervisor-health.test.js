@@ -3,11 +3,13 @@ import fs from 'node:fs'
 import { stripTypeScriptTypes } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { setTimeout as wait } from 'node:timers/promises'
 import { localListener } from '../src/host/supervisor/child.js'
-import { checkHealth, healthListener, localRequest } from '../src/host/supervisor/health.js'
+import { checkHealth, dshUnauthorizedBodies, healthListener, localRequest, verifyListener } from '../src/host/supervisor/health.js'
+import { patchRuntime } from '../../desktop/scripts/runtime-patches.mjs'
 import { applicationRow, batch, bootGraphJson, bootstrap, bootstrapRow, cookie, frontendRow, healthReply, loaderRow, mountRow, shell } from './fixtures/supervisor-health-wire.mjs'
 
 const name = '@automagik/bots-dsh'
@@ -237,4 +239,164 @@ test('wildcard public binds probe the matching loopback and an unassigned IP is 
   const unassigned = fixture({ args: ['--host=192.0.2.1', '--port=3080'], launch: 'http://192.0.2.1:3080/' })
   assert.deepEqual(await checkHealth(unassigned.child, unassigned.options), { ok: false, failed: 'port' })
   assert.deepEqual(unassigned.calls, [])
+})
+
+const publicLaunch = 'https://example.invalid/'
+const patchedBody = 'dsh web authentication required; open the launch URL saved in /data/dsh/launch-url.\n'
+const patchedFixture = (changes = {}) => fixture({
+  args: [...defaultArgs, '--public-url=' + publicLaunch],
+  launch: publicLaunch,
+  reply: reply => reply.status === 401 ? { ...reply, body: patchedBody, ...changes } : reply,
+})
+
+test('DSH unauthorized bodies use the upstream text and the normalized home', () => {
+  const upstream = 'dsh web authentication required; reopen the URL printed by dsh web.\n'
+  assert.deepEqual(dshUnauthorizedBodies(), [upstream])
+  for (const home of ['', '  ', 42]) assert.deepEqual(dshUnauthorizedBodies(home), [upstream])
+  for (const home of ['/data/dsh', '/data/dsh/', ' /data/dsh ', ' /data/dsh//\\ ']) {
+    assert.deepEqual(dshUnauthorizedBodies(home), [upstream, patchedBody])
+  }
+})
+
+for (const dshHome of ['/data/dsh', '/data/dsh/', ' /data/dsh ']) {
+  test('verifies and checks health with a patched 401 for home ' + JSON.stringify(dshHome), async () => {
+    const { child, options } = patchedFixture()
+    const { args, probe } = options
+    assert.equal((await verifyListener(child, args, { probe, dshHome }))?.status, 'verified-argv')
+    assert.deepEqual(await checkHealth(child, { ...options, dshHome }), { ok: true })
+  })
+}
+
+const correctHome = { dshHome: '/data/dsh' }
+const genericBody = patchedBody.replace('/data/dsh', '~/.dsh')
+for (const [reason, homeOption, changes] of [
+  ['a different home in the body', correctHome, { body: patchedBody.replace('/data/dsh', '/data/other') }],
+  ['an omitted home', {}],
+  ['an empty home', { dshHome: '' }],
+  ['a whitespace-only home', { dshHome: '  ' }],
+  ['the generic launch URL path with an omitted home', {}, { body: genericBody }],
+  ['the generic launch URL path with a blank home', { dshHome: '  ' }, { body: genericBody }],
+  ['a 403 status', correctHome, { status: 403 }],
+  ['no cache-control header', correctHome, { headers: { 'content-type': 'text/plain; charset=utf-8' } }],
+  ['an HTML content type', correctHome, { headers: { 'cache-control': 'no-store', 'content-type': 'text/html' } }],
+  ['an extra trailing space', correctHome, { body: patchedBody + ' ' }],
+]) {
+  test('a patched reply with ' + reason + ' never receives credentials', async () => {
+    const { calls, child, options } = patchedFixture(changes)
+    const { args, probe } = options
+    assert.equal(await verifyListener(child, args, { probe, ...homeOption }), null)
+    assert.deepEqual(await checkHealth(child, { ...options, ...homeOption }), { ok: false, failed: 'port' })
+    assert.ok(calls.length > 1)
+    assert.ok(calls.every(({ url, cookie, payload }) =>
+      url.pathname === '/' && url.search === '' && cookie === undefined && payload === undefined))
+  })
+}
+
+test('verifies the actual 401 from the carried DSH connection patch', async t => {
+  const desktop = new URL('../../desktop/', import.meta.url)
+  const root = fs.mkdtempSync(join(tmpdir(), 'supervisor-patched-401-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const modules = join(root, 'node_modules')
+  const writePackage = (name, fields) => {
+    const dir = join(modules, name)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, type: 'module', ...fields }))
+    return dir
+  }
+  const pin = { version: '0.2.2-rc.2' }
+  writePackage('@deepseek-ai/dsh', pin)
+  const connectionDir = writePackage('@deepseek-ai/dsh-client-connection', pin)
+  const connectionFile = join(connectionDir, 'lib', 'index.js')
+  fs.mkdirSync(join(connectionDir, 'lib'))
+  fs.copyFileSync(new URL('test/fixtures/client-connection-cookie-lax/index.js', desktop), connectionFile)
+
+  // Use the dependency stubs from desktop/test/web-launch-token.test.js.
+  const stubs = {
+    '@deepseek-ai/schemastery': [
+      'const chain = () => {',
+      '  const callable = () => chain()',
+      '  callable.min = () => callable',
+      '  callable.max = () => callable',
+      '  callable.default = value => value',
+      '  return callable',
+      '}',
+      'export default {',
+      '  object: shape => Object.assign(() => shape, { default: value => value }),',
+      '  array: () => chain(),',
+      '  natural: () => chain(),',
+      '  number: () => chain(),',
+      '  string: () => chain(),',
+      '  boolean: () => chain(),',
+      '  transform: schema => schema,',
+      '}',
+      '',
+    ].join('\n'),
+    '@deepseek-ai/dsh-credentials': [
+      'export const credentialKey = (namespace, key) => `${namespace}:${key}`',
+      '',
+    ].join('\n'),
+    '@deepseek-ai/cordis': [
+      'export class Service {',
+      '  constructor(ctx, name) {',
+      '    this.ctx = ctx',
+      '    if (name !== undefined) ctx[name] = this',
+      '  }',
+      '}',
+      '',
+    ].join('\n'),
+    '@deepseek-ai/dsh-scope': [
+      'export const createScope = (owner, key) => ({ ctx: owner, dispose: async () => {} })',
+      '',
+    ].join('\n'),
+    zod: [
+      'const chain = new Proxy(function () {}, { get: () => chain, apply: () => chain })',
+      'export const z = chain',
+      '',
+    ].join('\n'),
+  }
+  for (const [name, source] of Object.entries(stubs)) {
+    const dir = writePackage(name, { version: '0.0.0-test', main: 'index.js' })
+    fs.writeFileSync(join(dir, 'index.js'), source)
+  }
+
+  const desktopPatches = new URL('runtime/patches/', desktop)
+  const patch = 'client-connection-cookie-lax.patch'
+  const entries = JSON.parse(fs.readFileSync(new URL('patches.json', desktopPatches), 'utf8'))
+    .filter(entry => entry.patch === patch)
+  assert.equal(entries.length, 1)
+  const patches = join(root, 'patches')
+  fs.mkdirSync(patches)
+  fs.writeFileSync(join(patches, 'patches.json'), JSON.stringify(entries))
+  fs.copyFileSync(new URL(patch, desktopPatches), join(patches, patch))
+  patchRuntime(modules, patches)
+
+  const { apply } = await import(pathToFileURL(connectionFile).href)
+  const { host } = new URL(address)
+  const webServer = { protocol: 'http:', host, register() {} }
+  const ctx = {
+    root: {},
+    credentials: { async modifyRecord(key, modify) { return await modify(undefined) } },
+    get(name) { return name === 'webServer' ? webServer : undefined },
+    effect() { return () => {} },
+    inject() {},
+    on() {},
+  }
+  await apply(ctx, {})
+  const home = join(root, 'dsh')
+  fs.mkdirSync(home)
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const response = {}
+  ctx.connection.authorizeIndex({ url: '/', method: 'GET', headers: { host } }, {
+    writeHead(status, headers) { Object.assign(response, { status, headers }) },
+    end(body) { response.body = body },
+  })
+  const { child, options: { args } } = patchedFixture()
+  const probe = async () => response
+  assert.equal((await verifyListener(child, args, { probe, dshHome: home }))?.status, 'verified-argv')
+  assert.equal(await verifyListener(child, args, { probe }), null)
 })
