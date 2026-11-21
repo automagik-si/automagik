@@ -2786,6 +2786,37 @@ var ZH = {
   "This automation changed. Review the list and try again.": "此自动化任务已更改。请查看列表后重试。",
   "This automation is already gone.": "此自动化任务已不存在。",
   "This host can only read automations.": "此主机只能读取自动化任务。",
+  "Choose which Claude Code login new launches use, for bots that run from this Herdr home. Running bots keep their login until they restart.": "为从这个 Herdr 主目录启动的 Bot 选择新启动时使用的 Claude Code 登录账号。运行中的 Bot 会继续使用当前账号，直到重启。",
+  "Default login": "默认登录账号",
+  "Login {id}": "登录账号 {id}",
+  "Use this login": "使用此登录账号",
+  "Use {login}": "使用：{login}",
+  "Used by new launches": "新启动时使用",
+  "An environment variable overrides this login": "此登录账号被环境变量覆盖",
+  "Its folder cannot be used": "无法使用此账号的文件夹",
+  "Two logins share this email": "两个登录账号使用同一个邮箱",
+  "Did not answer in time": "未能及时响应",
+  "Could not be read": "无法读取",
+  "The selected login cannot be used. Fix it in the Herdr Accounts panel.": "无法使用所选的登录账号。请在 Herdr 的账号面板中修复。",
+  "Claude Code starts through your own launcher here, so this page cannot tell which login it uses.": "此处通过自定义启动器启动 Claude Code，因此此页面无法判断它使用哪个登录账号。",
+  "am or the Herdr pack is not installed on this computer.": "此计算机上未安装 am 或 Herdr 软件包。",
+  "Update am or the Herdr pack to switch logins here.": "请更新 am 或 Herdr 软件包，以便在此切换登录账号。",
+  "The Herdr Accounts panel is on and older than this page. Update the Herdr pack, or switch the panel off, to switch here.": "Herdr 的账号面板已开启，但版本早于此页面。更新 Herdr 软件包或关闭账号面板后，即可在此切换。",
+  "Could not tell which version of the Herdr Accounts panel is installed.": "无法确定已安装的 Herdr 账号面板版本。",
+  "This app and the command line use different Herdr homes, so switching is off here.": "此应用与命令行使用不同的 Herdr 主目录，因此无法在此切换。",
+  "Could not read the Claude Code logins.": "无法读取 Claude Code 的登录账号。",
+  "This installation uses a separate agent home. Manage its logins in the Herdr Accounts panel.": "此安装使用独立的助手主目录。请在 Herdr 的账号面板中管理其登录账号。",
+  "Accounts are not available on Windows yet.": "Windows 上暂时无法使用账号功能。",
+  "This host can only read accounts.": "此主机只能读取账号。",
+  "am could not do this.": "am 无法完成此操作。",
+  "am took too long to reply.": "am 未能及时响应。",
+  "am returned an unexpected reply.": "am 返回了意外的响应。",
+  "The logins changed since this page read them. Read again.": "登录账号在此页面读取后已更改。请重新读取。",
+  "Another change to the logins is in progress. Read again.": "另一项登录账号更改正在进行。请重新读取。",
+  "Could not confirm the switch. Read again before trying again.": "无法确认切换结果。请重新读取后再试。",
+  "This login choice has changed or expired. Read again.": "此登录选项已更改或过期。请重新读取。",
+  "Could not switch the Claude Code login.": "无法切换 Claude Code 登录账号。",
+  "Claude Code login switched.": "已切换 Claude Code 登录账号。",
   "The scheduler could not do this.": "调度器无法完成此操作。",
   "The scheduler took too long to reply.": "调度器响应超时。",
   "The scheduler returned too much data.": "调度器返回的数据过多。",
@@ -29340,13 +29371,13 @@ function installBarWidth({ doc = globalThis.document, storage = globalThis.local
   };
   const arrival = new view.MutationObserver(later);
   arrival.observe(doc.body, { subtree: true, childList: true });
-  const states = new view.MutationObserver(later);
+  const states2 = new view.MutationObserver(later);
   const watch = (shell2, column) => {
     if (watched === column) return;
     watched = column;
     arrival.disconnect();
-    states.disconnect();
-    states.observe(shell2, { attributes: true, attributeFilter: ["data-sidebar-collapsed", "data-sidebar-drawer", "data-dragging", "data-animating"] });
+    states2.disconnect();
+    states2.observe(shell2, { attributes: true, attributeFilter: ["data-sidebar-collapsed", "data-sidebar-drawer", "data-dragging", "data-animating"] });
     arrival.observe(shell2.parentNode ?? doc.body, { childList: true });
     sized?.disconnect();
     if (typeof view.ResizeObserver !== "function") return;
@@ -29370,7 +29401,7 @@ function installBarWidth({ doc = globalThis.document, storage = globalThis.local
   return () => {
     if (frame) view.cancelAnimationFrame(frame);
     arrival.disconnect();
-    states.disconnect();
+    states2.disconnect();
     sized?.disconnect();
     doc.removeEventListener("pointerup", released, true);
   };
@@ -34957,8 +34988,107 @@ function AutomationsPage({ Section: Section3 }) {
 
 // src/client/accounts-page.js
 var import_react87 = require("react");
+var hint2 = (message, role) => (0, import_react87.createElement)("div", { className: "bt-set-hint", role }, message);
+var reasons = () => ({
+  "not-installed": t("am or the Herdr pack is not installed on this computer."),
+  "old-cli": t("Update am or the Herdr pack to switch logins here."),
+  "panel-old": t("The Herdr Accounts panel is on and older than this page. Update the Herdr pack, or switch the panel off, to switch here."),
+  "panel-unknown": t("Could not tell which version of the Herdr Accounts panel is installed."),
+  "home-mismatch": t("This app and the command line use different Herdr homes, so switching is off here."),
+  unreadable: t("Could not read the Claude Code logins."),
+  "chosen-home": t("This installation uses a separate agent home. Manage its logins in the Herdr Accounts panel."),
+  unavailable: t("Accounts are not available on Windows yet."),
+  "read-only": t("This host can only read accounts."),
+  "cli-error": t("am could not do this."),
+  "cli-timeout": t("am took too long to reply."),
+  "cli-protocol": t("am returned an unexpected reply."),
+  conflict: t("The logins changed since this page read them. Read again."),
+  busy: t("Another change to the logins is in progress. Read again."),
+  unknown: t("Could not confirm the switch. Read again before trying again."),
+  changed: t("This login choice has changed or expired. Read again."),
+  failed: t("Could not switch the Claude Code login.")
+});
+var states = () => ({
+  "not-signed-in": t("Not signed in"),
+  override: t("An environment variable overrides this login"),
+  "bad-folder": t("Its folder cannot be used"),
+  ambiguous: t("Two logins share this email"),
+  timeout: t("Did not answer in time"),
+  failed: t("Could not be read")
+});
+function AccountRow({ row: row2, launcher, canUse, busy, useLogin }) {
+  const label = row2.label === "default" ? t("Default login") : t("Login {id}", { id: row2.id });
+  const details = [row2.email, states()[row2.state]].filter(Boolean).join(" · ");
+  return (0, import_react87.createElement)(
+    "div",
+    { className: "bt-set-row" },
+    (0, import_react87.createElement)(
+      "div",
+      { className: "bt-set-copy" },
+      (0, import_react87.createElement)("span", null, label),
+      details ? (0, import_react87.createElement)("span", { className: "bt-set-hint" }, details) : null,
+      row2.effective && !launcher ? (0, import_react87.createElement)("span", { className: "bt-set-hint" }, t("Used by new launches")) : null
+    ),
+    canUse && row2.use ? (0, import_react87.createElement)("button", {
+      className: "bt-mini",
+      type: "button",
+      disabled: busy,
+      "aria-label": t("Use {login}", { login: label }),
+      onClick: () => void useLogin(row2.id)
+    }, t("Use this login")) : null
+  );
+}
+function ClaudeLogins({ Section: Section3 }) {
+  const [view, setView] = (0, import_react87.useState)(null);
+  const [busy, setBusy] = (0, import_react87.useState)(false);
+  const [result, setResult] = (0, import_react87.useState)(null);
+  const load = async (signal) => {
+    const next = await call("accounts-claude", null, signal).catch(() => ({ reason: "cli-error" }));
+    if (!signal?.aborted) setView(next);
+  };
+  (0, import_react87.useEffect)(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, []);
+  const useLogin = async (id) => {
+    if (busy || !view?.token) return;
+    setBusy(true);
+    setResult(null);
+    try {
+      const answer = await call("accounts-claude-use", { id, token: view.token }).catch((error) => ({
+        reason: error?.code === "bot/read-only" ? "read-only" : "unknown"
+      }));
+      setResult(answer);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+  const messages = reasons();
+  const reason = view?.reason === "failed" ? "unreadable" : view?.reason ?? view?.why;
+  const message = (code, fallback) => Object.hasOwn(messages, code) ? messages[code] : messages[fallback];
+  return (0, import_react87.createElement)(
+    import_react87.Fragment,
+    null,
+    !view ? hint2(t("Loading…"), "status") : null,
+    result ? hint2(result.switched ? t("Claude Code login switched.") : message(result.reason, "unknown"), "status") : null,
+    reason && reason !== "desktop-only" && reason !== result?.reason ? hint2(message(reason, "cli-error")) : null,
+    view?.readOnly && result?.reason !== "read-only" ? hint2(messages["read-only"]) : null,
+    view?.fallback ? hint2(t("The selected login cannot be used. Fix it in the Herdr Accounts panel.")) : null,
+    view?.launcher ? hint2(t("Claude Code starts through your own launcher here, so this page cannot tell which login it uses.")) : null,
+    view?.rows?.length ? (0, import_react87.createElement)(Section3, { title: t("Claude Code") }, view.rows.map((row2) => (0, import_react87.createElement)(AccountRow, {
+      key: row2.id,
+      row: row2,
+      launcher: view.launcher,
+      canUse: Boolean(view.token) && !view.readOnly,
+      busy,
+      useLogin
+    }))) : null
+  );
+}
 var FAILURE = "Could not read this computer's accounts.";
-var hint2 = (message, role) => (0, import_react87.createElement)("p", { className: "bt-set-hint", role }, t(message));
+var codexHint = (message, role) => (0, import_react87.createElement)("p", { className: "bt-set-hint", role }, t(message));
 var row = (...lines) => (0, import_react87.createElement)(
   "div",
   { className: "bt-set-row" },
@@ -34968,7 +35098,7 @@ function fileLabel({ file, account }) {
   if (file === "present") return account ? t("Account fingerprint: {account}", { account }) : t("Account unknown: the sign-in file names no account.");
   return file === "absent" ? t("No sign-in file in this folder.") : t("Could not read the sign-in file.");
 }
-function AccountsPage({ Section: Section3 }) {
+function CodexAccount({ Section: Section3 }) {
   const [view, setView] = (0, import_react87.useState)(null);
   (0, import_react87.useEffect)(() => {
     const controller = new AbortController();
@@ -34985,9 +35115,9 @@ function AccountsPage({ Section: Section3 }) {
   const codex = view?.codex;
   const refreshed = dateTimeLabel(codex?.lastRefresh);
   let content;
-  if (!view) content = hint2("Loading…", "status");
-  else if (view.reason === "desktop-only") content = hint2("Accounts show in the Automagik desktop app.");
-  else if (!codex) content = hint2(FAILURE, "alert");
+  if (!view) content = codexHint("Loading…", "status");
+  else if (view.reason === "desktop-only") content = codexHint("Accounts show in the Automagik desktop app.");
+  else if (!codex) content = codexHint(FAILURE, "alert");
   else content = (0, import_react87.createElement)(
     Section3,
     { title: t("Codex") },
@@ -35002,8 +35132,17 @@ function AccountsPage({ Section: Section3 }) {
   return (0, import_react87.createElement)(
     import_react87.Fragment,
     null,
-    hint2("This computer's Codex account, as its sign-in file shows it. Switching accounts stays in the Herdr Accounts panel."),
+    codexHint("This computer's Codex account, as its sign-in file shows it. Switching accounts stays in the Herdr Accounts panel."),
     content
+  );
+}
+function AccountsPage({ Section: Section3 }) {
+  return (0, import_react87.createElement)(
+    import_react87.Fragment,
+    null,
+    (0, import_react87.createElement)("p", { className: "bt-set-hint" }, t("Choose which Claude Code login new launches use, for bots that run from this Herdr home. Running bots keep their login until they restart.")),
+    (0, import_react87.createElement)(ClaudeLogins, { Section: Section3 }),
+    (0, import_react87.createElement)(CodexAccount, { Section: Section3 })
   );
 }
 

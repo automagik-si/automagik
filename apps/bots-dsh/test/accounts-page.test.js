@@ -40,7 +40,7 @@ for (const actions of [{}, { providers() {} }]) {
     assert.equal(page.text().includes("The proxy's state needs its management key"), true)
     assert.equal(page.text().includes('synthetic-settings-test') || page.text().includes('sample-token'), false)
     noControls(page)
-    assert.deepEqual(page.calls, [ENDPOINT])
+    assert.deepEqual(page.calls.toSorted(), ['accounts-claude', ENDPOINT])
     assert.deepEqual(f.calls(), [])
   })
 }
@@ -60,7 +60,7 @@ for (const [name, configure, expected, extra] of [
     if (name === 'absent file') assert.match(page.text(), /system keyring/)
     assert.doesNotMatch(page.text(), /Signed in|Not signed in|Last refreshed:/)
     noControls(page)
-    assert.deepEqual(page.calls, [ENDPOINT])
+    assert.deepEqual(page.calls.toSorted(), ['accounts-claude', ENDPOINT])
   })
 }
 
@@ -69,7 +69,7 @@ test('Accounts shows its desktop-only state in an unmarked window', async t => {
   page.click('Accounts')
   await until(() => page.text().includes('Accounts show in the Automagik desktop app.'), 'desktop-only response')
   noControls(page)
-  assert.deepEqual(page.calls, [ENDPOINT])
+  assert.deepEqual(page.calls.toSorted(), ['accounts-claude', ENDPOINT])
 })
 
 for (const [name, request] of [
@@ -81,6 +81,6 @@ for (const [name, request] of [
     page.click('Accounts')
     await until(() => page.text().includes("Could not read this computer's accounts."), 'accounts failure')
     noControls(page)
-    assert.deepEqual(page.calls, [ENDPOINT])
+    assert.deepEqual(page.calls.toSorted(), ['accounts-claude', ENDPOINT])
   })
 }
