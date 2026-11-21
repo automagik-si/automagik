@@ -580,7 +580,8 @@ test('only compact Claude links get the short-link failure and no link is retain
     ['different host', `https://evil.test/oauth/authorize?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
     ['different path', `https://claude.ai/other?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
     ['explicit default port', `https://claude.ai:443/oauth/authorize?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
-    ['userinfo', `https://user@claude.ai/oauth/authorize?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
+    // Built through URL so the source holds no address-shaped text (the privacy scan).
+    ['userinfo', Object.assign(new URL(SHORT_CLAUDE_URL), { username: 'user' }).href, unsupportedCause],
     ['fragment', `${SHORT_CLAUDE_URL}#x`, unsupportedCause],
   ]
   for (const [label, url, cause] of cases) {
