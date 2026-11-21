@@ -2443,8 +2443,16 @@ test("#1208 linked --force refuses a chosen descendant even if an intermediate g
   }
 });
 
-// Install the real signed part into the fake target first, with no Herdr app home there.
-function amOnly(s) {
+// The native proof (#206): CI's "am on a linked machine (native)" job sets this on a real Linux and
+// macOS arm64 runner; elsewhere the native row is skipped.
+const NATIVE = process.env.AM_LINKED_NATIVE === "1";
+// A service's PATH (launchd's, a sparse systemd unit's): no node and no user folders on it.
+const SPARSE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+// Install the real signed part into the fake target first, with no Herdr app home there. `native`:
+// that target is this computer's own system (its uname, tools and a sparse service PATH, node
+// found the way run.sh finds Homebrew's).
+function amOnly(s, { native = false } = {}) {
   const home = join(s.root, "vm"), bin = join(home, ".local/bin");
   const store = join(home, ".automagik/parts/automagik.am");
   const lane = signedRelease(s.root);
@@ -2453,8 +2461,16 @@ function amOnly(s) {
   lane.post(version, archive);
   const signed = join(lane.lane, `automagik-am-${version}.tgz`);
   writeFileSync(signed, readFileSync(archive));
-  const env = { ...process.env, PATH: `${join(s.root, "vm-bin")}:${dirname(process.execPath)}:/usr/bin:/bin`,
-    HOME: home, HERDR_APP_HOME: vmApp(s), AM_HOME: "", AUTOMAGIK_HERDR_TEST_ROOTS: s.root };
+  const runtime = join(s.root, "vm-runtime");
+  if (native) {
+    rmSync(join(s.root, "vm-bin", "uname"));
+    s.setState((state) => { state.machines[0].uname = execFileSync("uname", ["-sm"], { encoding: "utf8" }).trim(); });
+    mkdirSync(runtime);
+    symlinkSync(process.execPath, join(runtime, "node"));
+  }
+  const env = { ...process.env, PATH: native ? `${join(s.root, "vm-bin")}:${SPARSE_PATH}` : `${join(s.root, "vm-bin")}:${dirname(process.execPath)}:/usr/bin:/bin`,
+    HOME: home, HERDR_APP_HOME: vmApp(s), AM_HOME: "", AUTOMAGIK_HERDR_TEST_ROOTS: s.root,
+    ...(native ? { AUTOMAGIK_HERDR_RUNTIME_DIRS: runtime } : {}) };
   const r = spawnSync(process.execPath, [join(dir, "bin/am.mjs"), "self", "install", "--signed", lane.lane, "--json"], {
     cwd: home, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   });
@@ -2482,9 +2498,9 @@ function runPrompt(s, far, path, terminal, session, pane) {
   } finally { closeSync(fd); }
 }
 
-test("linked Start on am alone writes the am hook and a resumed prompt gets the bot's briefing", (t) => {
+function amAloneStart(t, native) {
   const s = scene(t);
-  const far = amOnly(s);
+  const far = amOnly(s, { native });
   const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
   assert.equal(start.code, 0, start.err);
   assert.equal(start.raw().hookWritten, true);
@@ -2501,6 +2517,14 @@ test("linked Start on am alone writes the am hook and a resumed prompt gets the 
   });
   assert.equal(prompt.status, 0, prompt.stderr);
   assert.match(prompt.stdout, /You are Hedge/);
+}
+
+test("linked Start on am alone writes the am hook and a resumed prompt gets the bot's briefing", (t) => amAloneStart(t, false));
+
+test("native (#206): on this computer's own system, a linked Start on am alone gets the per-turn briefing from a sparse PATH",
+  { skip: !NATIVE && "AM_LINKED_NATIVE=1 (CI's native job on Linux and macOS arm64)" }, (t) => {
+  t.diagnostic(`native target: ${execFileSync("uname", ["-sm"], { encoding: "utf8" }).trim()}`);
+  amAloneStart(t, true);
 });
 
 test("linked Start checks the effective pane PATH and names the installer when am is absent", async (t) => {

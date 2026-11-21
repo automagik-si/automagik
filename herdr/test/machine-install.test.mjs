@@ -19,7 +19,18 @@ const put = (path, contents) => { mkdirSync(dirname(path), { recursive: true });
 const exe = (path, body) => { put(path, `#!/bin/sh\n${body}\n`); chmodSync(path, 0o755); };
 const jsonFile = (path) => JSON.parse(readFileSync(path, "utf8"));
 
-function fleet(t, { node = true, target = "Linux x86_64", release = true } = {}) {
+// The native proof (#206): CI's "am on a linked machine (native)" job sets this on a real Linux and
+// macOS arm64 runner. Elsewhere the native rows are skipped: they assert this computer's own system.
+const NATIVE = process.env.AM_LINKED_NATIVE === "1";
+// A service's PATH (launchd's, a sparse systemd unit's): no node and no user folders on it.
+const SPARSE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/**
+ * `native`: the far side runs on this computer's own uname, tools and a sparse service PATH,
+ * with node found the way run.sh finds Homebrew's (its runtime folders); only the network is a
+ * stand-in (the curl that serves the signed release folder for the documented HTTPS URLs).
+ */
+function fleet(t, { node = true, target = "Linux x86_64", release = true, native = false } = {}) {
   const root = scratchRoot(t, "am-linked-");
   const home = join(root, "vm"), app = join(root, "app"), farApp = join(home, ".config/herdr-app");
   const controller = join(root, "controller"), cbin = join(root, "bin"), bin = join(root, "vm-bin");
@@ -32,14 +43,20 @@ function fleet(t, { node = true, target = "Linux x86_64", release = true } = {})
   exe(join(cbin, "hc"), `exec "${process.execPath}" "${FAKE_HC}" "$@"`);
   for (const [name, path] of [...Object.entries(tools), sha]) symlinkSync(path, join(bin, name));
   if (node) symlinkSync(process.execPath, join(bin, "node"));
-  exe(join(bin, "uname"), `[ "$*" = '-sm' ] || exit 1\nprintf '%s\\n' '${target}'`);
+  if (!native) exe(join(bin, "uname"), `[ "$*" = '-sm' ] || exit 1\nprintf '%s\\n' '${target}'`);
   lane.curl(bin);
   exe(join(bin, "test"), 'test "$@"');
+  const network = join(root, "network");
+  if (native) {
+    mkdirSync(network);
+    lane.curl(network);
+    symlinkSync(process.execPath, join(runtime, "node"));
+  }
   const cli = join(controller, "bin/automagik-herdr.mjs");
   const env = { ...process.env, HOME: join(root, "here"), HERDR_APP_HOME: app, PATH: `${cbin}:${process.env.PATH}`,
     HC_FAKE_STATE: config, HC_FAKE_LOG: log, AUTOMAGIK_HERDR_RUNTIME_DIRS: runtime, AUTOMAGIK_HERDR_NO_UPDATE: "",
     HC_SESSION: "", HC_SOCKET: "", HC_TERMINAL_ID: "", AM_HOME: "", AM_RELEASE_URL: "file:///unused", AM_TRUSTED_KEYS: '{"keys":[]}' };
-  const far = { HOME: home, PATH: bin, NODE_OPTIONS: process.env.NODE_OPTIONS, NVM_DIR: "", HERDR_APP_HOME: farApp, AM_RELEASE_URL: `file://${lane.releases}`, AM_TRUSTED_KEYS: undefined,
+  const far = { HOME: home, PATH: native ? `${network}:${SPARSE_PATH}` : bin, NODE_OPTIONS: process.env.NODE_OPTIONS, NVM_DIR: "", HERDR_APP_HOME: farApp, AM_RELEASE_URL: `file://${lane.releases}`, AM_TRUSTED_KEYS: undefined,
     TMPDIR: root, AUTOMAGIK_HERDR_RUNTIME_DIRS: runtime, GIT_CEILING_DIRECTORIES: root, AUTOMAGIK_HERDR_NO_UPDATE: "" };
   const state = { terminals: [], machines: [{ name: "vm", id: "core-vm", state: "connected", home, env: { ...far, AM_TRUSTED_KEYS: "" } }] };
   put(config, JSON.stringify(state));
@@ -333,6 +350,36 @@ test("missing am: the hourly cycle leaves it absent; signed install, current and
   assert.equal(cycle(s).status, 0);
   assert.equal(jsonFile(s.stateFile).machines.vm.install.state, "current");
   s.change((f) => { f.machines[0].state = "disconnected"; });
+  assert.equal(cycle(s).status, 0);
+  assert.equal(jsonFile(s.stateFile).machines.vm.install.state, "current");
+});
+
+test("native (#206): this computer's own system installs the signed am, a sparse service PATH runs it, and it updates itself",
+  { skip: !NATIVE && "AM_LINKED_NATIVE=1 (CI's native job on Linux and macOS arm64)" }, (t) => {
+  const system = execFileSync("uname", ["-sm"], { encoding: "utf8" }).trim();
+  t.diagnostic(`native target: ${system}`);
+  const s = fleet(t, { native: true });
+  assert.equal(s.far.PATH.split(":").slice(1).join(":"), SPARSE_PATH);
+  // A runner image's node lives outside the service PATH; a host whose /usr/bin has one says so.
+  const onPath = spawnSync("/bin/sh", ["-c", "command -v node"], { env: s.far, encoding: "utf8" }).stdout.trim();
+  t.diagnostic(onPath ? `the service PATH has a node of its own: ${onPath}` : "no node on the service PATH: run.sh's runtime folders");
+  // From this computer: the linked machine reads the signed pointer itself, then checks and installs.
+  const found = result(s.install(), "installed");
+  assert.deepEqual([found.core, found.version], ["core-vm", V]);
+  assert.equal(installed(s).current.sha256, s.posted.pointer.tarball.sha256);
+  assert.equal(s.calls().some(bootstrap), true);
+  result(s.install(), "current");
+  // Through the user-facing link, on the sparse PATH: run.sh finds node the way it finds Homebrew's.
+  const shown = s.farAm("--version");
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(shown.stdout.trim(), `am ${V}`);
+  const doctor = s.farAm("self", "doctor", "--json");
+  assert.equal(doctor.status, 0, `${doctor.stdout}\n${doctor.stderr}`);
+  // Its own next update, with its own (installed) keys.
+  const next = s.listen(NEXT);
+  const update = s.farAm("update", "automagik.am", "--json");
+  assert.equal(update.status, 0, `${update.stdout}\n${update.stderr}`);
+  assert.equal(installed(s, NEXT).current.sha256, next.pointer.tarball.sha256);
   assert.equal(cycle(s).status, 0);
   assert.equal(jsonFile(s.stateFile).machines.vm.install.state, "current");
 });
