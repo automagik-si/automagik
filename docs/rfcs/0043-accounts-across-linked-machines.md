@@ -585,7 +585,7 @@ Deliveries 1 and 2 copy no credential; they start before the trial (Q2).
 
 **Status. Approved by the owner's delegate on 2026-11-21**, with every recommendation: Q12–Q17
 are answered (a) (Decided, 12–17). Deliveries 4 and 5 below follow those answers. The options
-not taken stay listed under Open questions; taking one needs a later amendment.
+not taken stay listed under The questions as put; taking one needs a later amendment.
 
 ### What is already decided
 
@@ -890,7 +890,7 @@ Under the approved answers, the following rules replace the affected Contracts i
 
 ### The questions
 
-Q12–Q17, as put to the owner with every option, are under Open questions. The answers
+Q12–Q17, as put to the owner with every option, are under The questions as put. The answers
 are under Decided.
 
 ## Decided
@@ -949,9 +949,10 @@ needs a later amendment.
 17. **Q17.** An independently verified `local` assignment runs even when linked discovery fails;
     linked membership, assignments and pending work stay as they were.
 
-## Open questions
+## The questions as put
 
-None open. The questions as put to the owner, with the options not taken:
+Every question is decided (Decided); none is open. Each is kept here as it was put to the owner,
+with the options not taken:
 
 1. **Q1. Does this RFC's shape stand?** (a, recommended) Yes: one approved plan, read-back before
    "on", Claude per machine without copies, Codex copying only after a qualified route and a
