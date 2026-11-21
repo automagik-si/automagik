@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; delivery 0a found no qualified transport, so the linked trial and 3a are blocked (Delivery 0a's findings); on 2026-11-20 the owner's side left the trial and 3a to the owner and kept Codex on this computer only, Q4's fallback; deliveries 1 and 2 under way, none merged) |
+| Status | In delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; delivery 0a found no qualified transport, so the linked trial and 3a are blocked (Delivery 0a's findings); on 2026-11-20 the owner's side left the trial and 3a to the owner and kept Codex on this computer only, Q4's fallback; deliveries 1 (#1901) and 2 (#1914) merged; amendment (RFC 0030 Q19, Q23) approved by the owner's delegate on 2026-11-21: Q12-Q17 answered with its recommendations, see Decided) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr patches (the pack: am-quota and the sidebar's CLI), each carrying am's generated copies of the CLI |
 | Created | 2026-11-20 |
@@ -581,11 +581,324 @@ am-quota ships switched off; none of this reaches an install that has not turned
 
 Deliveries 1 and 2 copy no credential; they start before the trial (Q2).
 
+## Amendment (2026-11-21): this computer's Codex switch and the plan without the pack
+
+**Status. Approved by the owner's delegate on 2026-11-21**, with every recommendation: Q12–Q17
+are answered (a) (Decided, 12–17). Deliveries 4 and 5 below follow those answers. The options
+not taken stay listed under The questions as put; taking one needs a later amendment.
+
+### What is already decided
+
+- [RFC 0030 Q19, Answers (2026-11-20)](0030-code-mode-in-the-app.md#answers-2026-11-20)
+  requires “apply and retries moved off the pack.” The Accounts page carries the per-machine
+  view, preview, approval, apply and retries. A plan must apply from the page on a fresh install
+  with no pack, and a failed machine must be retried. This is part of the condition for the
+  pack's last release. Installed panels keep working.
+  [The pack after the move](0030-code-mode-in-the-app.md#the-pack-after-the-move)
+- [RFC 0030 Q23, Answers (2026-11-20)](0030-code-mode-in-the-app.md#answers-2026-11-20)
+  calls for “one locked CLI writer that gets the same `CODEX_HOME` and proxy key as the panel,”
+  with an older panel refused during the move. The switch stays in the panel and 5c's page
+  reads only until cutover. [The `am-quota` row](0030-code-mode-in-the-app.md#mod-by-mod)
+- Q23 supersedes Q5's writer clause, “its switch stays the panel's.” This computer remains
+  `local` in the plan and first in order. Q1–Q4 and Q6–Q11 stand. Under Q4, Codex stays on this
+  computer. The linked trial and delivery 3a remain held.
+
+### 1. Today, corrected
+
+Delivery 1 (#1901) and delivery 2 (#1914) merged.
+[RFC 0030, What moves now, 4](0030-code-mode-in-the-app.md#what-moves-now)
+
+Line numbers for the text being corrected refer to the accepted text above. `CLI` in the source
+citations means `herdr/mods/am-sidebar/bin/automagik-herdr.mjs`.
+
+- **What the code does today, lines 36–44.** Manual Use/Switch takes an in-memory lock on the
+  panel view and calls its shell installer (`herdr/mods/am-quota/main.js:1202-1241`,
+  `herdr/mods/am-quota/lock.js:12-22`, `herdr/mods/am-quota/DESIGN.md:256-262`). The panel reads
+  `CODEX_HOME` and `CLIPROXY_MGMT_KEY` from Herdr's environment with `printenv`. The key file
+  `~/.config/cliproxyapi/mgmt.key` is the fallback when the variable is empty. The proxy base
+  comes from `<app home>/cliproxy.json` (`herdr/mods/am-quota/main.js:42-43,232-241,318-342`).
+  The panel downloads through `credentials/download` (`herdr/mods/am-quota/switch.js:38-44`,
+  `herdr/mods/am-quota/proxy.js:250-261`). It stages `data/am-quota/codex-<stamp>.json` at
+  `0600`. The installer backs up, renames and keeps three backups
+  (`herdr/mods/am-quota/write.js:25-29,57-81`, `herdr/mods/am-quota/switch.js:51-82`).
+  `data/am-quota/active.json` records the name and 32-bit fingerprint of `account_id`, with a
+  refresh-token fallback on the manual path (`herdr/mods/am-quota/main.js:44,1221-1224,1405-1427`,
+  `herdr/mods/am-quota/translate.js:127-151`).
+- **What the code does today, lines 45–49 and 73–75.** The Claude panel uses `set-login` when
+  its writer is present. It falls back to Herdr's snapshot writer when the writer is absent
+  (`herdr/mods/am-quota/main.js:1247-1260`, `herdr/mods/am-quota/logins.js:26-34`). Local and
+  linked `set-login` mutations take `claude-logins.json.lock` (`herdr/mods/am-sidebar/logins.js:9-14`,
+  `CLI:13189-13218`). The write path checks writer qualification only with `--expect-core`
+  (`herdr/mods/am-sidebar/accountsWrite.js:88-91,109-119`, `CLI:13238-13253,13427-13430`). The panel
+  writes `v`, `setLogin` and `version` to `writer.json`. The capability reader requires
+  that exact shape (`herdr/mods/am-quota/main.js:402-419`,
+  `herdr/mods/am-sidebar/accountsWrite.js:12,21-53`). Restart starts its own terminal and
+  forwards a fixed list of environment values in `argv`. The list omits the key and
+  `CODEX_HOME` (`herdr/mods/am-quota/main.js:101-108,1487-1494`).
+- **The plan, lines 220–231, 236 and 262–265, and Contracts introduced, lines 524, 526 and 528.**
+  `apply` skips `local`. The panel drives `local` on reload, including due work
+  (`herdr/mods/am-sidebar/accountsApply.js:47-65,89-92`,
+  `herdr/mods/am-sidebar/accountsPlanRecord.js:351-356`,
+  `herdr/mods/am-quota/main.js:394-396,561-567,605-625`). For managed Codex, the panel supplies
+  the home from Herdr's `CODEX_HOME` in a private request. It downloads and stages the payload.
+  The CLI records the fence and renames the staged file under `accounts.lock`. The panel reads
+  back and asks the CLI to settle the attempt
+  (`herdr/mods/am-quota/main.js:433-455,474-487,680-686,723-775`,
+  `CLI:13087-13111,13281-13334,13353-13375`). The accounts CLI reads the staged payload and
+  uses no proxy key (`CLI:13289-13334,13461-13485,13523-13539`). Commits,
+  local plan verbs and `apply` can all write the plan through the CLI under the app home's
+  directory lock (`CLI:278,12961-12975,13032-13061,13461-13485`,
+  `herdr/mods/am-sidebar/accountsPlanRecord.js:2-6`). `quotaOn()` requires a `mods/am-quota`
+  directory for `apply`, `--write-local` and `--install-local`. Preview, commit, start, fence
+  and record have no such gate. `set-login` uses the separate check described above
+  (`herdr/mods/am-sidebar/accountsApply.js:47-51,74-80`, `CLI:13167,13243,13267-13321,13461-13485`).
+- **The plan and The outcome record, retry paragraphs.** The sidebar starts a detached
+  `apply --retry` only when its hourly machines cycle starts and both `mods/am-quota/mod.json`
+  and the plan exist (`herdr/mods/am-sidebar/main.js:694-708`,
+  `herdr/mods/am-sidebar/machineUpdates.js:52,135-154,360-366`). The panel checks for due linked
+  work during its 60-second poll and throttles retry starts to five minutes
+  (`herdr/mods/am-quota/main.js:38,305,345-356,394-396,561-589`,
+  `herdr/mods/am-sidebar/accountsPlanRecord.js:8`).
+- **The app and standalone `am`.** The 5c page calls only `accounts-codex`. This endpoint
+  reads `auth.json` under `AUTOMAGIK_ACCOUNTS_CODEX_HOME` or the default `~/.codex` and reports
+  the proxy as unknown. It reads no key and calls no `am accounts` verb
+  (`apps/bots-dsh/src/client/accounts-page.js:18-43`, `apps/bots-dsh/src/host/accounts.js:8-12,32-74`).
+  Standalone `am` has the CLI through byte copies. The copy script rejects imports outside
+  the sidebar source, including `am-quota` (`am/copies.json:64-74`, `scripts/am-copies.mjs:23-28,47-59`).
+- **The plan format.** The version 1 reader rebuilds the record from known fields. An extra
+  stop field in version 1 would be lost on a write by that reader
+  (`herdr/mods/am-sidebar/accountsPlanRecord.js:3,272-302`).
+
+### 2. One writer per Codex home
+
+**Call the writer.** On a press, `am accounts codex-use` consumes the private preview id and the
+chosen credential from the picker. It returns `changed` for a stale id. It is local only and
+refuses `--machine`. Hold the destination lock through the write, read-back and active record
+update. A plan operation already holding `accounts.lock` calls the internal writer without
+taking `accounts.lock` again. The order is `accounts.lock` when needed, then the destination
+lock, then `claude-logins.json.lock` if needed. Use the plan lock's stale-owner rule for the
+destination lock (`CLI:12904-12950`).
+
+**Bind one destination and controller.** Under Q12 (a), the `0600` binding and destination lock
+live under `<passwd home>/.local/state/automagik/accounts/`, a per-user `0700` directory. Every
+entry point resolves it through `getpwuid`, regardless of `XDG_STATE_HOME` or `$HOME`. Key both
+by the SHA-256 of the verified canonical Codex home. Establish the binding under the destination
+lock. It names one controller app home. A writer from another app home returns `other-controller`.
+Before creating anything for a destination, verify its path, owner and mode and check that no
+parent is foreign-writable. Reject symlinked parents and use no-follow reads of `auth.json`.
+For a missing home, verify its parents and bind the intended canonical path before creating
+the home at `0700`. Revalidate at installation under the lock. Use the verified path for reads,
+backup and rename. Return `changed` if it changed since approval. Bind the approval to the home,
+proxy base and generation. Two empty homes can have the same `none` generation.
+
+**Qualify the running panel.** Under Q16 (a), the panel writes `data/am-quota/codex-writer.json`
+on load and reload. It records `v: 1`, `version`, `home`, `keySource`, `loadedAt` and the key file's
+identity (device, inode, size and mtime). The record never contains a hash of the key. Claude's
+`writer.json` keeps its exact three fields. An enabled panel's record must belong to its current
+load, proved against a load stamp the CLI can read. A record from an earlier load of the same
+version is insufficient (`herdr/mods/am-quota/DESIGN.md:172-180` describes that case).
+The writer returns `update-first` while any older panel is installed, enabled or disabled, or the
+panel state is unknown. A disabled panel at the required version must be stopped and drained.
+An absent panel qualifies once no old writer is still running. Refuse if an older or unknown
+writer from any other app home can still reach the destination. Verify reload or drain before
+admission, including across enable and rollback. Recheck under the lock just before rename.
+From delivery 4, the pack's installer
+and updater take the same per-user accounts lock for the destination while replacing or enabling
+the `am-quota` folder. This serializes a panel swap with a new switch. A manual rollback with an
+older `install.sh` that predates the lock can still overlap a switch.
+
+**Use the binding for every caller.** Under Q12 (a) and Q16 (a), the page read, previews,
+Use/Switch, local apply and retries use the same binding. The plugin replaces
+`AUTOMAGIK_ACCOUNTS_CODEX_HOME` with it. Every writer, including the page, timer and terminal,
+checks the installed panel's real home and key source against the binding. Accept `file`, or
+`env` with the panel's confirmation that its value equals the file key. Renew the capability
+record when the key file's identity changes, including the equality check for `env`. A stale
+identity, mismatch or ambiguous binding returns `binding-differs`. Refuse a chosen-home worker
+at mutating dispatch. Today the guard is on `here` and `fleet` (`CLI:13503-13515,13523-13539`).
+
+**Send the key only to the approved proxy.** Under Q12 (a), the binding approves its origin
+and path. A changed base in `cliproxy.json` yields `proxy-changed` until a new press. Check
+before inventory and download, including the panel's automatic inventory request
+(`herdr/mods/am-quota/main.js:358-373`, `herdr/mods/am-quota/proxy.js:215-221,250-261`). Refuse
+redirects and read the user's `0600` key file without following symlinks. Keep the existing
+gates on legacy staged verbs. Refuse a staged Codex write once the destination has a binding,
+including `--install-local` with a payload already staged.
+
+**Verify the write.** Download afresh for a new attempt, run `problems` and compare the approved
+generation. Keep one `.bak-<stamp>` per replacement, three in all. Use atomic rename and read
+back before updating `active.json`. Managed placement requires the fenced generation, matching
+proxy and an account-id fingerprint. Return `no-account-id` when the credential lacks an account
+id. Manual Use can use the panel's current fingerprint rule (§1). Use fixed reason codes. Key
+and grant canaries must stay out of `argv`, child environments, output, logs, notifications,
+shared state, previews and records. Q15 covers running Codex clients. The destination lock
+only serializes Automagik writers.
+
+**Give the page a picker.** `am accounts codex-list --json` returns credential names, account-id
+fingerprints, eligibility, the bound home and the approved proxy base. It also returns a private
+preview id bound to the displayed destination, proxy base, generation and the list shown. It
+returns no tokens. The base excludes user info and query data.
+
+### 3. The plan without the pack
+
+**Build a preview from fresh reads.** First, `am accounts plan --request-new` reads the intended
+edit on stdin, creates the missing app home (`HERDR_APP_HOME`, else `~/.config/herdr-app`) and
+its `automagik-herdr/` at `0700`, creates the private `0600` request and returns its opaque id.
+Today fleet does not keep a record without an app home, and preview reads fleet evidence from
+disk (`CLI:12653-12657,12752-12757,12819-12829,12888-12890,13461-13470`). The page uses the returned
+id in the existing request flow (`herdr/mods/am-quota/main.js:433-455`). The CLI takes a fresh
+fleet observation internally and derives eligibility, proxy inventory and identity, the active
+record and complete Claude slot evidence bound to the controller home. The caller supplies
+only the edit. Show the preview's moves and flags, get approval, then run
+`plan --commit <id> --expect-rev <n>`, apply and read back. Fresh Manage keeps Codex unmanaged
+until the person explicitly places it.
+
+**Apply here first.** The executor runs approved `local` assignments for both tools. Under
+Q17 (a), it runs them before and independently of linked discovery. A failed or unreadable `hc machine ls`
+leaves linked membership and assignments alone. Under Q16 (a), the panel is absent or qualified,
+and its own `local` driver retires when the executor takes over. Local Claude shares the
+`set-login` operation and checks qualification at the mutation even without `--expect-core`.
+Local Codex goes through §2. After a lost reply or crash, read first and settle the recorded
+attempt before repeating a download or write. Verify Claude's effective slot and account after
+a write. Verify the fenced Codex placement and repair `active.json` if the credential landed
+but the record did not. Recheck the placement before repair. If the read shows a manual change,
+suspend the assignment under Q10. Report success only after matching read-back.
+
+**Stop and resume.** Under Q14 (a), a stop press with `--expect-rev` first passes the version
+checks below, then atomically records `<app home>/automagik-herdr/accounts.stop` without waiting
+for `accounts.lock`. The executor checks it and the plan before each machine. An operation
+already past its check may finish.
+The next lock holder folds the marker into the version 2 plan's `stopped` field. Resume takes
+the lock and clears the durable stop only after a press. `mods-disabled/am-quota` stops apply
+and retry while it exists. An unknown panel state blocks them. A version 1 plan found without
+a panel is treated as stopped, including after removal of a disabled panel. A press to resume
+that plan migrates it. The page shows the effective state, including stopped, panel off or
+running. Manual Use stays available while the plan is stopped, subject to §2.
+
+**Stage the format change.** Ship version 2 readers for the controller's launches, panel and
+both CLI entry points in a delivery before any writer emits version 2. Before recording a Stop
+or writing version 2, verify that each installed CLI entry point reads v2. Check the pack's
+sidebar `VERSION` and standalone `am/VERSION` when installed. The `accounts.lock` owner record
+gains `version`. Verify that any lock owner is a compatible executor. An owner record without a
+version fails the check. If these checks fail, return `update-first` and write no `accounts.stop`
+marker. Keep version 1 until the first stop press, the explicit resume of a version 1 plan treated
+as stopped because the panel is absent, or retry handover to the app under Q13 (a). Preserve
+outstanding attempts through migration and rollback. Delivery-2 readers classify version 2 as `newer`
+even with `stopped: false`. Apply refuses and the panel cannot show or edit the plan. A linked
+Claude start that reaches the managed login path gets no login words and can use another account
+(`herdr/mods/am-sidebar/accountsPlanRecord.js:3,272-279`,
+`herdr/mods/am-quota/plan.js:94-101`, `herdr/mods/am-sidebar/accountsApply.js:47-51`,
+`CLI:4709-4714,4948-4953,4996-5004`).
+
+**Retry.** Under Q13 (a), the app host starts `am accounts apply --retry` every five minutes
+on a pack-free install while a plan exists and can run. The page says automatic retry pauses
+when the app closes. On an existing pack, keep the sidebar's hourly trigger and panel's due
+checks, including local-only work. Delivery 5 moves both to the common executor. An explicit
+press on the page hands retry over to the app. Under Q14 (a), it writes `retries: "app"` in the
+v2 plan, migrating v1 if needed, with the same version checks as Stop. Under Q14 (b), it records
+the handover in `<app home>/automagik-herdr/accounts-retries.json`. From delivery 5, both pack
+triggers honor the applicable record and stop calling apply for that plan. An older pack can
+ignore the separate record under Q14 (b). Require compatible plan writers and retry callers
+before handing over. Apply and retry take `accounts.lock` with zero wait. Contention returns `busy`.
+
+### 4. Deliveries 4 and 5
+
+**4. This computer's Codex writer.** Herdr lane with `am`'s generated copies. Under Q12 (a) and
+Q16 (a), ship §2 in the sidebar source and delegate the existing panel actions after
+qualification. Keep the panel as the local plan driver until delivery 5, with its managed
+Codex writes going through the shared writer. The panel gets no new controls or text. The pack
+is fix-only under [RFC 0030](0030-code-mode-in-the-app.md#the-pack-after-the-move). Under Q14 (a),
+ship compatible plan readers here before delivery 5 can emit version 2. The terminal binding
+works for file-backed setups before the plugin update. An environment-only setup needs a
+matching private key file or a move to file-backed setup before cutover. Keep the legacy path
+available until the replacement is ready. Verify reload or drain before activating the binding
+and enabling the replacement. Admit only one writer at a time.
+
+- **Acceptance.** Use temp homes and a fake proxy. Exercise manual Use and managed `local`
+  through one writer. Try both upgrade orders and rollback with standalone `am` and the pack
+  CLI. Refuse old enabled and disabled panels, stale load stamps, stale key-file identities,
+  mismatched bindings, chosen-home workers, changed proxy base before inventory and a staged
+  write after binding. Attempt to enable an old panel mid-switch and resume one after rollback.
+  The mid-switch case has no overlapping credential or active-record writes. Concurrent callers
+  on the same canonical destination serialize. With two app homes, different `XDG_STATE_HOME`
+  and `HOME` values and one Codex destination, exactly one controller binds and locks it for
+  writing. Exercise stale picker ids, symlink, unsafe parent and changed-home refusals, private
+  creation and canaries. Under Q15 (a), cover running-client deferral and exclusive creation,
+  and require confirmation for manual Use in the terminal and on the page in the plugin.
+- **Rollback.** Keep the last credential, backups, binding and plan. Withdraw the new writer
+  and drain its writes before loading a legacy panel. A partial rollback with an older or
+  unqualified panel beside a new CLI returns `update-first`.
+
+**5. The plan without the pack.** Herdr lane with `am`'s generated copies
+(`scripts/lane.ts:50-55`). Under Q12 (a), Q13 (a), Q14 (a), Q16 (a) and Q17 (a), ship §3's
+request producer, executor, retry and stop contracts. Retire the panel's own local driver in the
+same cutover that enables the executor's. Keep the shared CLI in the sidebar source until RFC 0030
+delivery 8. The Accounts page, controls and app-host timer ship after the CLI in RFC 0030 delivery
+5's plugin remainder. Ship the two lanes in separate PRs (`docs/rfcs/0030-code-mode-in-the-app.md:540`).
+
+- **CLI acceptance.** With the temp app-home path absent and no panel or sidebar, start with
+  `plan --request-new`, commit a CLI-derived preview, resume if needed, and apply both local
+  tools and a fake linked Claude assignment.
+  Retry a failure to verified success. Test failed discovery with linked assignments untouched. Cover a lost
+  reply, a crash after rename, a failed active-record write, a missing account id and manual
+  drift between attempts. Test stop during apply, panel disable and removal, old panel refusal,
+  version 1 migration with an outstanding attempt and a delivery-2 linked start with a version
+  2 plan. With an old retry already running, Stop returns `update-first` and writes no marker
+  until the retry ends and both installed CLI versions qualify. Close the desktop with local-only
+  work pending on both a pack-free install and an installed pack. Check retry before and after
+  the installed pack's handover, including its migration to version 2 under Q14 (a).
+- **RFC 0030 Q19 page check.** From a marked desktop window with standalone `am` and no panel
+  or sidebar, show the per-machine view and preview, press approval, then apply the plan from
+  the page. If the new plan is version 1, first press Resume as in §3. Fail a fake linked Claude
+  target once and check automatic retry and verified read-back. Refuse an unmarked window. Run
+  this check in addition to the CLI fixture.
+- **Rollback.** Stop the app timer before handing retry back to an installed pack. Preserve the
+  plan, outstanding attempts and each machine's last account. Preserve an outstanding
+  `accounts.stop` marker. While the plan is stopped, rollback to readers older than v2 is
+  unsupported. Resume first before considering that rollback. A plan still at version 1 stays
+  readable by delivery 2. Stop, explicit Resume of a v1 plan treated as stopped, and retry
+  handover under Q14 (a) can all migrate the plan to v2. After version 2 is written, roll back
+  execution only to a release with compatible readers. Reverting to delivery 2 then loses plan
+  viewing, editing and the managed linked Claude launch behavior described in §3.
+
+### What each answer changes above
+
+Under the approved answers, the following rules replace the affected Contracts introduced rows.
+
+| Contract | Rule for existing installs |
+|---|---|
+| Codex binding and lock, Q12 (a) | Bind one verified home and controller before use. |
+| `accounts-plan.json` and `accounts.stop`, Q14 (a) | Keep v1 until §3's transition. Preserve the stop. |
+| Linked Claude launches, Q14 (a) | Deploy v2 readers first. Delivery 2 loses managed login words on v2. |
+| `accounts.lock`, Q14 (a) | Commits and runs take it. The owner record gains `version`. See §3 for Stop. |
+| Panel and CLI, Q16 (a) | Qualify the running panel before delegation. Keep Claude's record format. |
+
+- **Q12.** Replace the local path's dependence on Herdr's environment in The plan. Add the
+  binding, destination lock and Codex verbs to Contracts introduced. Extend the management
+  key rule in Threat model to local Codex under §2's approved proxy.
+- **Q13.** Replace the retry paragraphs in The plan and The outcome record with the chosen
+  trigger and handover. Contracts introduced and Undo say who can retry after app exit.
+- **Q14.** Replace the plan version and writer rows in Contracts introduced under (a). Replace
+  the rule below that table that requires an enabled panel for all apply. Undo becomes a durable
+  stop that preserves accounts and files. A later panel change cannot clear the stop.
+- **Q15.** Add the local refresh rule to The plan and Threat model. Undo keeps the last local
+  credential and backups. Restoring a local backup uses the same destination and refresh checks.
+- **Q16.** Replace the panel's local write and apply paths in The plan and Contracts introduced
+  at the chosen cutover. Undo specifies the order for rolling back the panel and CLI.
+- **Q17.** Under (a), The plan's “changes nothing” on failed discovery continues to cover linked
+  membership and assignments. An approved, independently verified `local` assignment can run.
+  Under (b), the discovery guard also stops `local`.
+
+### The questions
+
+Q12–Q17, as put to the owner with every option, are under The questions as put. The answers
+are under Decided.
+
 ## Decided
 
-Approved by the owner's delegate on 2026-11-20 (the note under the table), with every
-recommendation. The options not taken stay listed with each question below; taking one needs a
-later amendment.
+Q1–Q11 approved by the owner's delegate on 2026-11-20 (the note under the table), with every
+recommendation. Q12–Q17 (the Amendment's) approved by the owner's delegate on 2026-11-21, with
+every recommendation. The options not taken stay listed with each question below; taking one
+needs a later amendment.
 
 1. **Q1.** The RFC's shape stands: one approved plan, read-back before "on", Claude per machine
    without copies, Codex copying only after a qualified route and a pass.
@@ -600,7 +913,8 @@ later amendment.
    copied. No delivery reads or copies a real Codex or Claude home. Since 2026-11-20 (after
    0a's findings) the trial and 3a are left to the owner, and until the owner decides, Codex
    stays on this computer only, as after a fail; the deliveries go on with 1 and 2.
-5. **Q5.** This computer is `local` in the plan, first in order; its switch stays the panel's.
+5. **Q5.** This computer is `local` in the plan, first in order. Its writer clause ("its
+   switch stays the panel's") is superseded by RFC 0030 Q23 (Amendment, Q12 and Q16).
 6. **Q6.** A Codex credential goes only to machines the person adds to the list; none by default.
 7. **Q7.** A pin change in `spread` moves that machine only; the rest waits for **Spread again**.
 8. **Q8.** A host with no login of the account is an accepted exception under `one`; the sign-in
@@ -611,10 +925,34 @@ later amendment.
     or re-applies the plan.
 11. **Q11.** An existing Codex file is replaced only while no Codex process of that user runs
     there; the residual is accepted.
+12. **Q12.** `codex-binding.json` and the destination lock live in the private per-user state
+    directory, keyed by the verified Codex home, with one controller app home. A press in page
+    setup or `am accounts codex-bind` sets the binding; the key stays in
+    `~/.config/cliproxyapi/mgmt.key`. Without a binding the new writer returns `not-bound`
+    (Amendment §2).
+13. **Q13.** The app host's five-minute timer retries on a pack-free install. An installed pack
+    keeps its hourly and due triggers until an explicit handover press, which records `retries:
+    "app"` in the version 2 plan after Amendment §3's version checks. A pack-free or handed-over
+    plan gets no automatic run while the app is closed.
+14. **Q14.** Stopping is durable (`plan --stop|--resume --expect-rev <n>`, Amendment §3): it
+    survives installing, enabling or removing the panel, and manual Use stays available. Version 2
+    readers ship first, and both installed CLI versions and the lock owner are checked before Stop
+    or any version 2 write. The cost is accepted: a delivery-2 panel cannot view or edit a version
+    2 plan, and a linked Claude start on that reader can run with no managed login words.
+15. **Q15.** A managed replacement defers while a Codex process of this user runs. Manual Use asks
+    first (`--confirm-running` in the terminal, a confirmation on the page); the panel keeps its
+    single press. A missing file is created exclusively. A refresh landing between the last check
+    and the rename is accepted.
+16. **Q16.** After qualification, the panel's Use/Switch and managed `local` actions delegate to
+    the shared writer, as a breakage fix for the race the panel design accepts today. The panel's
+    local driver retires when delivery 5 enables the executor's.
+17. **Q17.** An independently verified `local` assignment runs even when linked discovery fails;
+    linked membership, assignments and pending work stay as they were.
 
-## Open questions
+## The questions as put
 
-None open. The questions as put to the owner, with the options not taken:
+Every question is decided (Decided); none is open. Each is kept here as it was put to the owner,
+with the options not taken:
 
 1. **Q1. Does this RFC's shape stand?** (a, recommended) Yes: one approved plan, read-back before
    "on", Claude per machine without copies, Codex copying only after a qualified route and a
@@ -655,6 +993,60 @@ None open. The questions as put to the owner, with the options not taken:
     started inside that last step can still lose one refresh, and that residual is accepted.
     (b) Never: 3a places a credential only where no `auth.json` exists, and replacing one stays a
     person's job on that machine.
+12. **Q12. Which record binds the Codex home, proxy base, key source and controller?** (a,
+    recommended) Keep `codex-binding.json` and the lock in the private per-user state directory,
+    keyed by the verified destination as in Amendment §2. Bind one controller and support
+    user-owned homes with safe parents. Set the binding by a press in page setup or through `am
+    accounts codex-bind` in a terminal. Keep the key in `~/.config/cliproxyapi/mgmt.key`. Without
+    a binding, the new writer returns `not-bound`. Page setup offers `~/.codex` and the configured
+    proxy base. (b) Keep the destination lock and resolve `CODEX_HOME` from the writer's
+    environment with `~/.codex` as the default and the key from the file. Agreement by convention
+    leaves parity and proxy approval unproved. Q23's single-writer rule blocks every new writer,
+    including the page, terminal and timer, until home and key parity and proxy approval are
+    proved. (c) Let the app hold the key in a private store. This needs a design for the same
+    binding and writer checks in the panel, terminal and timer, plus migration for file and
+    environment setups.
+13. **Q13. Who retries, and does retry continue when the app closes?** (a, recommended) Use the
+    app host's five-minute timer on a pack-free install. Keep the installed pack's hourly and due
+    triggers until an explicit handover to the app. Under Q14 (a), handover records `retries:
+    "app"` in the v2 plan and migrates v1 after Amendment §3's version checks. Under Q14 (b), both
+    pack triggers honor `accounts-retries.json` from delivery 5 as in Amendment §3. Pack-free and
+    handed-over plans get no new automatic runs while the app is closed. (b) Have `am` install a
+    user timer that runs while the app is closed. Include install, update and removal on a fresh
+    install and handover from any existing pack triggers. (c) Use a person-owned scheduler
+    automation. Q19's fresh-install check then needs a provisioning step for that automation.
+14. **Q14. What does stopping the plan do?** (a, recommended) Use Amendment §3's durable stop
+    through `plan --stop|--resume --expect-rev <n>`. It survives installing, enabling or removing
+    the panel and stops at the next per-machine check. A manual Use press stays available. Ship
+    compatible readers first. Check both installed CLI versions and the lock owner before Stop and
+    before any v2 write, including Q13 (a)'s retry handover, which also migrates v1 to v2. A
+    delivery-2 panel loses plan viewing and editing for version 2, and a linked Claude start on
+    that reader can proceed with no managed login words. (b) Keep switching the panel off as the
+    only stop. On a pack-free install, stopping means deleting the plan, including its approvals
+    and pending attempts. Keep the plan at v1. Record Q13 (a)'s handover in `<app
+    home>/automagik-herdr/accounts-retries.json`. Both pack triggers honor it from delivery 5. An
+    older pack can ignore it.
+15. **Q15. May a write replace an existing local credential while Codex is running?** (a,
+    recommended) Check just before a managed replacement. If a Codex process of this user is
+    running, defer and retry later. For manual Use while Codex runs, terminal `am accounts
+    codex-use` refuses unless `--confirm-running` is given. The page asks for the same
+    confirmation. The panel keeps its single press under Q16 (a). Create a missing file
+    exclusively. A refresh can still land between the last check and rename if a client starts in
+    that interval or the person confirms a manual replacement while one runs. (b) Keep today's
+    replacement policy (Amendment §1). A client refresh can overwrite the switch or be lost to it.
+16. **Q16. How do installed panels move to the shared writer?** (a, recommended) Qualify the
+    replacement, then delegate the existing Use/Switch and managed `local` actions. Retire the
+    panel's local driver when delivery 5 enables the executor's. This is a breakage fix for the
+    race the panel design accepts today (`herdr/mods/am-quota/DESIGN.md:256-262`). (b) A migration
+    hold. The panel keeps its installer. Every new writer, including the page, terminal and timer,
+    stays refused until cutover. The hold ends only when (a)'s conditions hold, including
+    Amendment §2's proof of home and key parity and refusal of any older installed panel, enabled
+    or disabled. Q23's single-writer rule holds throughout.
+17. **Q17. May an approved local assignment run when linked discovery fails?** (a, recommended)
+    Apply an independently verified `local` assignment first. Keep linked membership, assignments
+    and pending work as they were on failed discovery. (b) Require successful linked discovery
+    before running `local` too. A discovery failure then leaves both local and linked assignments
+    pending.
 
 ## Links
 
