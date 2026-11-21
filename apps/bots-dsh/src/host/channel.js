@@ -1547,6 +1547,7 @@ export function install(rt) {
         revokeWindowProof(proof)
       }
       const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint) || keyringDetail
+        || ['automations-entry', 'accounts-codex'].includes(endpoint)
         || endpoint === 'secret-source-detail'
         || ['role-settings', 'role-settings-set'].includes(endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)
