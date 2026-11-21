@@ -20,6 +20,7 @@ const keyPaths = [
   'am/pack-keys.json',
   'am/plugin-lane-keys.json',
   'herdr/mods/am-sidebar/meter-keys.json',
+  'herdr/mods/am-sidebar/am-keys.json',
   'herdr/install.sh',
   'apps/welcome-dsh/src/host/lane-keys.json',
   'apps/desktop/src/lane-keys.js',

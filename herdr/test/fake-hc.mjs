@@ -329,7 +329,7 @@ switch (words[0]) {
     if (state.failGetOnRun) { state.failGet = [...(state.failGet ?? []), ...state.failGetOnRun]; delete state.failGetOnRun; }
     // state.noCreated: names whose hc get gives no created_ms.
     state.terminals.push({ address, name, cwd, labels, parent, die_with_parent: Boolean(parent) && !outlive, state: runAs === "exit" ? "finished" : "live",
-      ...((state.noCreated ?? []).includes(name) ? {} : { created_ms: Date.now() }),
+      ...((state.noCreated ?? []).includes(name) ? {} : { created_ms: state.runCreatedMs ?? Date.now() }),
       argv: launch, template: template?.name ?? null,
       pid: 9000 + n, foreground: { argv: shell ? ["zsh"] : argv, cwd, pid: 5000 + n }, // state.noStatus: programs that report no status to hc (hermes): status null.
       status: (state.noStatus ?? []).includes(program) ? null : { app: program === "claude" ? "claude-code" : program, state: "working" },
@@ -436,6 +436,12 @@ switch (words[0]) {
       break;
     }
     if (words[1] !== "ls") fail(`fake hc: no machine ${words[1]}`, 2);
+    if (state.machineListUnreadable) { process.stdout.write("not JSON\n"); break; }
+    const nth = logged.filter((a) => a[0] === "machine" && a[1] === "ls").length;
+    if (state.relinkOnList?.nth === nth) {
+      const m = state.machines.find((m) => m.name === state.relinkOnList.name);
+      if (m) { m.id = state.relinkOnList.id; save(); }
+    }
     out({ machines: (state.machines ?? []).map(({ name, id, state: s, temporary = false, target = null, since_ms = null }) => ({ name, id: id ?? `core-${name}`, host: name, state: s, temporary, target: target ?? name, since_ms })) });
     break;
   }
@@ -457,6 +463,15 @@ switch (words[0]) {
     // never answers): its sh -c script, else its command, never its data words (a scratch path can hold "-lc");
     // state.execTimedOutAfterMs: how long that answer takes to come back over the link, really waited.
     const program = argv[0] === "sh" && argv[1] === "-c" ? argv[2] : argv[0];
+    const installReply = state.installExecReply;
+    if (installReply && program?.includes(installReply.contains)) {
+      const nth = logged.filter((a) => a[0] === "exec" && a.some((word) => word.includes(installReply.contains))).length;
+      if (nth === (installReply.nth ?? 1)) {
+        if (installReply.lost) fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } }));
+        out({ code: installReply.code, stdout: b64(JSON.stringify(installReply.reply)), stderr: "", timed_out: false });
+        break;
+      }
+    }
     if ((state.execTimedOut ?? []).some((w) => (program ?? "").includes(w))) { if (state.execTimedOutAfterMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.execTimedOutAfterMs); out({ code: null, stdout: "", stderr: "", timed_out: true }); break; }
     // Its login shell is fake-login-shell, never the host's, and never reads a real profile:
     // m.login { path, noise, exit }, the PATH it has (default: the one hc runs programs with).
@@ -471,6 +486,11 @@ switch (words[0]) {
         FAKE_LOGIN_NOISE: m.login?.noise ?? "", FAKE_LOGIN_EXIT: m.login?.exit ?? "", ...(m.env ?? {}) } });
     // state.loseExecAnswer: a program (by name) ran there, then the link dropped: unavailable, as hc says.
     if (state.loseExecAnswer && state.loseExecAnswer === argv[0]) { delete state.loseExecAnswer; save(); fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } })); }
+    if (state.loseExecAnswerContaining && program?.includes(state.loseExecAnswerContaining)) {
+      delete state.loseExecAnswerContaining;
+      save();
+      fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } }));
+    }
     out({ code: r.status ?? -1, stdout: b64(fromDisk(r.stdout)), stderr: b64(fromDisk(r.stderr)), timed_out: false });
     break;
   }

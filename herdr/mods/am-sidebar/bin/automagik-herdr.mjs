@@ -29,9 +29,9 @@ import { UNANSWERED, agentInForeground, attachRefusal, attachWords, detachWords,
   paneLabels, paneOf, parentArgs, placementFrom, relabel, relabelPlan, relabelWarning, relabelWords, rowsOf, spaceOnly, spacePlace,
   freshSpare, roleOf, shellIdle, spareTab, startArgs, startRefusal, unwrapKeep } from "../launchArgs.js";
 import { tabSteps, workerSpace, workerTabName } from "../workerTab.js";
-import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, confirmBindings, foldAttach, heldIn, machinesById, modeProblem, placeOf as placeOfRow, readAttach } from "../attach.js";
+import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, confirmBindings, foldAttach, heldIn, machinesById, modeProblem, placeOf as placeOfRow, readAttach, verdictOf } from "../attach.js";
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
-import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
+import { amPartEntryPath, amPartRunnerPath, briefingFilePath, briefingPath, installHook, launchBriefingText, runnerPath, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
 import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
@@ -53,12 +53,13 @@ import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME
   lastText, latestResumeIn, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { firstLineWithIdentity, passReads, wholeTextWithIdentity } from "../sessionFiles.mjs";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
-import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
+import { NO_UPDATE_ENV, OLD_PACK_NAME, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
 import { DEFAULT_HOLDER_LIMIT, HOLDERS_FILE, HOLDER_NAME, LOCAL_HOLDER, MAX_HOLDER_LIMIT, chooseHolder, holderNameProblem, holderRows, holdersText,
   lossEvent, lossLine, parseHolders, sameLoss } from "../holderSpread.mjs";
 import { readMeterLane } from "../meterLane.mjs";
-import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, entryLine, linkedUpdate, meterResults, parseState, probeOn, stateAfter, stateLines, updateOn } from "../machineUpdates.js";
+import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, entryLine, installLine, linkedUpdate, meterResults, parseState, probeOn, stateAfter, stateLines, updateOn } from "../machineUpdates.js";
+import { appHomeOn as createLinkedAppHome, installOn as installLinkedAm, selectMachine as selectInstallMachine } from "../machineInstall.js";
 import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { transcriptShape } from "../transcriptFolder.mjs";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
@@ -1761,7 +1762,7 @@ function writeAgySettingsFile(settings, bot) {
 
 const OPTIONS = {
   json: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" }, version: { type: "boolean" },
-  project: { type: "string" }, name: { type: "string" }, agent: { type: "string" }, kind: { type: "string" },
+  project: { type: "string" }, "app-home": { type: "boolean" }, name: { type: "string" }, agent: { type: "string" }, kind: { type: "string" },
   role: { type: "string" }, instructions: { type: "string" }, "instructions-file": { type: "string" },
   code: { type: "string" },
   lead: { type: "string" }, "lead-project": { type: "string" }, "no-lead-project": { type: "boolean" },
@@ -2061,6 +2062,9 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 usagemeter), both of its switches (its own pack auto setting,
                                 \`am update --auto\`, and the linked updater's, below), and how
                                 each one's last update went
+  machines install --machine M [--check | --project DIR --app-home]
+                                install am on one linked machine from the signed am-lane;
+                                --check reads it; --app-home only makes the project’s app home
   machines update [--machine M | --linked | --local]
                                 one update of them all now (Herdr starts one every hour): each
                                 connected linked machine runs its own \`am update\` (am, then the
@@ -4680,6 +4684,9 @@ async function appHomeOn(machine, { timeout = AGENT_WAIT_S, exec = remoteIo.exec
   return defaultLaunchHome(home);
 }
 
+const appHomeInstallCommand = (machine, project) =>
+  `am machines install --machine ${shellWord(machine)} --project ${shellWord(project)} --app-home`;
+
 /**
  * The app home on `machine` a launch's private file goes in (#582, #823): pane-env's
  * HERDR_APP_HOME, else that machine's ~/.config/herdr-app, and only while that folder is there
@@ -4687,14 +4694,16 @@ async function appHomeOn(machine, { timeout = AGENT_WAIT_S, exec = remoteIo.exec
  * pane-env that was left out means none at all, never the default. Resolves { dir (null: none),
  * warning (why, null when dir) }.
  */
-export async function launchHomeOn(machine, bot, paneEnv, purpose, { timeout = AGENT_WAIT_S, exec = remoteIo.exec } = {}) {
+export async function launchHomeOn(machine, bot, paneEnv, purpose, { timeout = AGENT_WAIT_S, exec = remoteIo.exec, project } = {}) {
   const none = (why) => ({ dir: null, warning: `${bot.name} runs on ${machine} without ${purpose}: ${why}` });
   if (paneEnv.refused) return none(`its ${PANE_ENV_PATH} there was left out, so no app home there is used, not even the default one`);
   const dir = paneEnv.appHome ?? await appHomeOn(machine, { timeout, exec });
   if (!dir) return none(`${machine} gave no home folder for its app home`);
   if ((await exec("test", ["-d", dir], machine, { timeout })).code !== 0) {
-    return none(`its app home there, ${dir}, isn't a folder, and a start never makes one. Install Automagik Herdr on ${machine}, `
-      + `or set HERDR_APP_HOME in the project's ${PANE_ENV_PATH} there to an app home that is there`);
+    const remedy = project ? `Run ${appHomeInstallCommand(machine, project)}`
+      : `Install Automagik Herdr on ${machine}`;
+    return { ...none(`its app home there, ${dir}, isn't a folder, and a start never makes one. ${remedy}, `
+      + `or set HERDR_APP_HOME in the project's ${PANE_ENV_PATH} there to an app home that is there`), missing: true };
   }
   return { dir, warning: null };
 }
@@ -4770,8 +4779,8 @@ export async function managedLoginOn(machine, core, paneEnv, bot, io = managedLa
 }
 
 /** launchHomeOn for the briefing (#582): { dir (null: no briefing file and no hook there), warnings (one when null) }. */
-async function briefingHomeOn(machine, bot, paneEnv) {
-  const home = await launchHomeOn(machine, bot, paneEnv, "its briefing in its system prompt or per turn");
+async function briefingHomeOn(machine, bot, paneEnv, project) {
+  const home = await launchHomeOn(machine, bot, paneEnv, "its briefing in its system prompt or per turn", { project });
   if (home.dir) return { dir: home.dir, warnings: [] };
   return { dir: null, warnings: [`${home.warning}. Its role and team still come from ${BOTS_PATH}.`] };
 }
@@ -4841,18 +4850,101 @@ const hookIoOn = (machine) => ({
   mkdir: async () => {}, // writeRemoteText's create makes the folders there (mkdir -p)
 });
 
-/**
- * writeBriefingHook on a linked machine (#582): the per-turn hook in `folder`'s
- * .claude/settings.local.json there, running the briefing entry under `boxHome`, that machine's
- * app home. No entry there (the pack isn't installed on it): nothing written, and noHookThere's
- * warning. Never throws: { written, warnings }.
- */
+/** A linked hook uses the pack's existing entry or the am part's own entry. */
 async function briefingHookOn(machine, bot, folder, boxHome) {
   const io = hookIoOn(machine);
-  let entry = null;
-  try { entry = boxHome ? await io.read(stableBriefingPath(boxHome)) : null; } catch { entry = null; }
-  if (entry === null) return { written: false, warnings: [noHookThere(bot, machine)] };
-  return installHook(bot.name, folder, boxHome, io);
+  let checkAmPath = false;
+  const no = (why) => ({ written: false, checkAmPath, warnings: [`${bot.name} runs on ${machine} without its per-turn briefing: ${why}`] });
+  const exec = (command, args) => remoteIo.exec(command, args, machine, { timeout: AGENT_WAIT_S });
+  const access = 'for p do [ -f "$p" ] && [ -r "$p" ] || { printf "%s" "$p"; exit 1; }; done';
+  const stateDir = dirname(stableBriefingPath(boxHome));
+  const writeHook = async (opts) => {
+    // The runtime keeps its per-turn state here. Project settings are checked by their
+    // own read and write in installHook, including when no write is needed.
+    const stateAccess = 'p=$1; if [ ! -e "$p" ] && [ ! -L "$p" ]; then p=$2; fi; [ -d "$p" ] && [ -w "$p" ] && [ -x "$p" ]';
+    const writable = await exec("sh", ["-c", stateAccess, "sh", stateDir, boxHome]);
+    if (writable.code !== 0) return no(`${stateDir} is not writable and searchable by the user hc exec runs as.`);
+    return { ...await installHook(bot.name, folder, boxHome, io, { ...opts, createEntry: false }), checkAmPath };
+  };
+  try {
+    const stable = stableBriefingPath(boxHome);
+    const entry = await io.read(stable);
+    const pack = await io.read(briefingPath(boxHome));
+    if (entry !== null && pack !== null) {
+      checkAmPath = true;
+      const runnerAccess = 'r=$1; [ -f "$r" ] || r=$2; shift 2; set -- "$r" "$@"; ' + access;
+      const readable = await exec("sh", ["-c", runnerAccess, "sh", runnerPath(boxHome), runnerPath(boxHome, OLD_PACK_NAME), stable]);
+      if (readable.code !== 0) return no(`${readable.stdout || stable} could not be read by the user hc exec runs as.`);
+      return await writeHook({});
+    }
+    if (pack !== null) return no(`the pack is there, but ${stable} is missing. Reinstall Automagik Herdr on ${machine}.`);
+    if (entry !== null) return no(`${stable} is there, but the pack's ${briefingPath(boxHome)} is missing.`);
+    const root = await exec("sh", ["-c", 'printf %s "${AM_HOME:-$HOME/.automagik}"']);
+    const amHome = absPath(root.stdout);
+    if (root.code !== 0 || !amHome) return no("could not read the am home as the user hc exec runs as.");
+    const amStore = under(amHome, "parts/automagik.am");
+    const paths = [amPartRunnerPath(amStore), amPartEntryPath(amStore)];
+    const test = await exec("sh", ["-c", access, "sh", ...paths]);
+    if (test.code !== 0) {
+      const found = await exec("test", ["-d", under(amStore, "current")]);
+      if (found.code === 1) return no(`am is missing on ${machine}. Run am machines install --machine ${machine}.`);
+      return no(`${test.stdout || amStore} could not be read by the user hc exec runs as.`);
+    }
+    checkAmPath = true;
+    return await writeHook({ amStore, pack: false });
+  } catch (e) { return no(`${e.message} (checked as the user hc exec runs as).`); }
+}
+
+// The hook consults that machine's own ledger first. A row from this computer isn't in it.
+async function linkedLedgerWarning(machine, boxHome, bot, pane) {
+  if (!boxHome) return null;
+  const path = attachPath(boxHome);
+  const budget = () => Math.min(5000, deadlineLeft() - 1000);
+  const prefix = `${bot.name}'s per-turn briefing on ${machine}`;
+  const late = `${prefix}: the 30 s limit left no time to check ${path}.`;
+  if (budget() <= 0) return late;
+  try {
+    const text = await readRemoteText({ hc: (args) => hcReal(args, { timeout: budget() }) }, machine, path);
+    if (text === null) return null;
+    const limit = budget();
+    if (limit <= 0) return late;
+    const r = await remoteIo.exec("sh", ["-c", 'stat -Lc %a -- "$1" 2>/dev/null || stat -L -f %Lp "$1"', "sh", path], machine,
+      { timeout: Math.max(1, Math.floor(limit / 1000)), limit });
+    const mode = r.stdout.trim();
+    if (r.code !== 0 || !/^[0-7]{3,4}$/.test(mode)) throw new Error(`could not read the mode of ${path}`);
+    if (modeProblem(path, Number.parseInt(mode, 8))) return `${prefix}: unsafe ledger at ${path} (group- or world-writable).`;
+    const { byKey } = foldAttach(readAttach(text).rows);
+    const row = byKey.get(attachKey(pane));
+    if (!row || verdictOf(row, pane) !== "live") return `${prefix}: ${path} has no live row for ${pane.terminal}; the hook will give no briefing.`;
+    if (row.bot !== bot.id) return `${prefix}: ${path} binds ${pane.terminal} to ${row.bot}; the hook will use that bot's briefing.`;
+    return null;
+  } catch (e) { return `${prefix}: ${e.message}.`; }
+}
+
+async function linkedAmPathWarning(machine, argv, cwd) {
+  let pathWord;
+  if (argv[0] === "/usr/bin/env") {
+    for (let i = 1; i < argv.length; i++) {
+      const word = argv[i];
+      if (word === "-u") { i++; continue; }
+      if (!/^[A-Za-z_][A-Za-z_0-9]*=/.test(word)) break;
+      if (word.startsWith("PATH=")) pathWord = word;
+    }
+  }
+  const script = 'store=${AM_HOME:-$HOME/.automagik}; store=${store%/}/parts/automagik.am; '
+    + '[ -x "$store/current/bin/am" ] || exit 0; '
+    + 'if [ -n "$1" ]; then export "$1"; fi; a=$(command -v am); printf "%s\\n%s" "$store" "$a"; '
+    + '[ "$a" = "$HOME/.local/bin/am" ] && [ -L "$a" ] && [ "$a" -ef "$store/current/bin/am" ]';
+  const limit = Math.min(5000, deadlineLeft() - DEADLINE_MARGIN_MS - DEADLINE_PLACE_MS);
+  if (limit <= 0) return null;
+  try {
+    const r = await remoteIo.exec("sh", ["-c", script, "sh", pathWord ?? ""], machine,
+      { cwd, timeout: Math.max(1, Math.floor(limit / 1000)), limit });
+    if (r.code === 0) return null;
+    if (r.code === -1) throw new Error(hcSaid(r.stderr));
+    const [store, resolved] = r.stdout.split("\n");
+    return `The pane PATH on ${machine} resolves am to ${resolved || "nothing"}, but the installed am is at ${store}/current/bin/am (checked as the user hc exec runs as).`;
+  } catch (e) { return `Could not check the pane's am on ${machine} as the user hc exec runs as: ${e.message}.`; }
 }
 
 /**
@@ -4937,7 +5029,10 @@ async function seatOnMachine(project, bot, over = {}) {
   let agySettings = null;
   if (agentKey === "antigravity") {
     const agyHome = await launchHomeOn(machine, bot, paneEnv, "its Antigravity permission list");
-    if (!agyHome.dir) throw new CliError(`${agyHome.warning}. Nothing was started.`);
+    if (!agyHome.dir) {
+      const create = agyHome.missing ? `\nTo create the project's app home, run ${appHomeInstallCommand(machine, key)}.` : "";
+      throw new CliError(`${agyHome.warning}. Nothing was started.${create}`);
+    }
     // #884 Low A: a linked machine's home folder, derived from its own app home (never this
     // computer's home(), and no extra remote exec): ~/.config/herdr-app sits in it.
     const remoteHome = agyHome.dir.endsWith("/.config/herdr-app") ? agyHome.dir.slice(0, -"/.config/herdr-app".length) : null;
@@ -4985,7 +5080,7 @@ async function seatOnMachine(project, bot, over = {}) {
   // The briefing there, as a local start has it (#582), in that machine's app home while it is
   // there (briefingHomeOn: asked only when a file or the hook needs one; never made).
   const needsHome = !briefingOwnConfig(agentKey) && (briefingWay(agentKey) === "file" || briefingHook(agentKey));
-  const briefingHome = needsHome ? await briefingHomeOn(machine, bot, paneEnv) : { dir: null, warnings: [] };
+  const briefingHome = needsHome ? await briefingHomeOn(machine, bot, paneEnv, key) : { dir: null, warnings: [] };
   const briefed = await briefedOn(machine, project, bot, agentKey, there.argv, briefingHome.dir,
     agentKey === "dsh-tui" ? Boolean(remoteGuard) : null);
   // #1125: a Codex seat there gets the folders that machine derives for its folder, and its own
@@ -5011,9 +5106,10 @@ async function seatOnMachine(project, bot, over = {}) {
     // No hc parent: hc run's default is the terminal it is started from, and the pane would end with it.
     parent: ["--no-parent"], argv, labels, path: there.path, env, login: managed?.words ?? [], agent: agentKey, guard: remoteGuard });
   args.splice(1, 0, "--on", machine);
+  const amPathWarning = hook.checkAmPath ? await linkedAmPathWarning(machine, args.slice(args.indexOf("--") + 1), over.cwd ?? key) : null;
   const paneWarnings = managed?.warning && (paneEnv.refused || paneEnv.unread) ? [] : paneEnv.warnings;
   const warnings = [...paneWarnings, ...(managed?.warning ? [managed.warning] : []), ...there.warnings, ...guardWarnings, ...briefingHome.warnings, ...briefed.warnings, ...hook.warnings,
-    ...(agySettings?.warnings ?? []), ...codexNotes];
+    ...(agySettings?.warnings ?? []), ...codexNotes, ...(amPathWarning ? [amPathWarning] : [])];
   const run = async () => {
     if (deadlineLeft() < DEADLINE_MARGIN_MS) throw tooLate(bot, machine, key, DEADLINE_MARGIN_MS, place?.spare ? place.space : null);
     const r = await hc(args, callBound());
@@ -5061,6 +5157,10 @@ async function seatOnMachine(project, bot, over = {}) {
     }
     return seat;
   });
+  if (!seat.running && briefingHook(agentKey)) {
+    const warning = await linkedLedgerWarning(machine, briefingHome.dir, bot, { ...seat, state: "live" });
+    if (warning) seat.warnings.push(warning);
+  }
   // A space this start made: its spare shell's tab closed once the bot shows there (closeSpare).
   if (!seat.running && place?.spare && TAB_WAIT_MS > 0) {
     // Under a deadline its waits (TAB_WAIT_MS, then four calls) don't fit: the tab stays, said.
@@ -9027,10 +9127,6 @@ async function terminalPlace(terminal, project) {
   return { machine, core: m.id, address: `${machine}/${bare}`, bare };
 }
 
-/** Why a Claude bot on a linked machine has no briefing hook yet (automagik#206 part b2). */
-const noHookThere = (bot, machine) => `${bot.name} runs on ${machine} without its per-turn briefing: the hook needs Automagik Herdr `
-  + `installed on ${machine}, which comes next (am machine install ${machine}). Its role and team still come from ${BOTS_PATH}.`;
-
 async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
   if (!terminal) throw new CliError("attach needs a bot and a terminal: am attach <bot> <terminal> [--move].", 2);
   if (terminal.startsWith("-")) throw new CliError(`"${terminal}" isn't a terminal; name one like t7.`, 2);
@@ -9116,8 +9212,18 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
   let leadRows = [];
   try { leadRows = lead ? await liveRows(lead) : []; } catch { leadRows = []; }
   await label(address, attachWords(file, bot.id, { ...have, [BOT_LABEL]: bot.id }, leadRows));
-  const hook = claude && !at.machine ? await writeBriefingHook(bot, sessionFolder) : { written: false, warnings: [] };
-  if (claude && at.machine) hook.warnings.push(noHookThere(bot, at.machine));
+  let hook = claude && !at.machine ? await writeBriefingHook(bot, sessionFolder) : { written: false, warnings: [] };
+  if (claude && at.machine) {
+    try {
+      const paneEnv = await paneEnvOn(at.machine, key);
+      const app = await briefingHomeOn(at.machine, bot, paneEnv, key);
+      if (app.dir) {
+        hook = await briefingHookOn(at.machine, bot, sessionFolder, app.dir);
+        const warning = await linkedLedgerWarning(at.machine, app.dir, bot, { ...get, core: at.core, terminal: bareId });
+        if (warning) hook.warnings.push(warning);
+      } else hook.warnings.push(...paneEnv.warnings, ...app.warnings);
+    } catch (e) { hook.warnings.push(`${bot.name} gets no per-turn briefing on ${at.machine}: ${e.message}.`); }
+  }
   hook.warnings.unshift(...warnings);
   // The workers ledger's seat rows are this computer's (restart's session lookup).
   if (!decided.already && !at.machine) {
@@ -12137,6 +12243,94 @@ async function machinesAuto(opts) {
   return `Updates from the Herdr ${machine ?? "this computer"} is linked into: ${on ? "on" : "off"}.${on ? "" : " Nothing is updated there until `am machines --auto on`."}`;
 }
 
+const MACHINES_INSTALL_OPTIONS = new Set(["machine", "project", "app-home", "check", "json"]);
+
+function readMachinesHistory(file) {
+  try {
+    if (!lstatSync(file).isFile()) throw new Error(`${file} is not a regular file`);
+    const text = readFileSync(file, "utf8");
+    const history = JSON.parse(text);
+    const entry = (e) => object(e) && (typeof e.result === "string" || typeof e.install?.state === "string");
+    if (!object(history) || !object(history.machines) || !Object.values(history.machines).every(entry)
+      || history.here != null && (!object(history.here) || typeof history.here.result !== "string")
+      || history.at != null && typeof history.at !== "string"
+      || history.schemaVersion !== undefined && history.schemaVersion !== 1) throw new Error(`invalid state in ${file}`);
+    return { text, history };
+  } catch (e) { if (e.code !== "ENOENT") throw e; return null; }
+}
+
+async function machinesInstall(opts, { env, stateDir, file, machineCount, extra }) {
+  const machine = opts.machine ?? null;
+  const result = { machine, core: null, user: null, state: "refused", at: new Date().toISOString() };
+  const note = (why) => process.stderr.write(`am: ${why}\n`);
+  const list = () => hcReal(["machine", "ls", "--json"]);
+  const run = async () => {
+    try {
+      result.core = await selectInstallMachine(list, machine);
+      const recheck = () => selectInstallMachine(list, machine, result.core);
+      if (opts["app-home"]) {
+        const key = await remoteKeyOf(opts);
+        const paneEnv = await paneEnvOn(machine, key);
+        if (paneEnv.refused) { result.why = paneEnv.warnings[0]; return; }
+        const appHome = paneEnv.appHome ?? await appHomeOn(machine);
+        if (!appHome) throw new Error(`${machine} gave no home folder for its app home`);
+        await recheck();
+        const done = await createLinkedAppHome(meterRun, machine, appHome, result);
+        await recheck();
+        Object.assign(result, done);
+      } else {
+        Object.assign(result, await installLinkedAm(meterRun, machine, result, {
+          recheck, check: opts.check, runtimeDirs: env.AUTOMAGIK_HERDR_RUNTIME_DIRS,
+        }));
+      }
+    } catch (e) { Object.assign(result, { core: result.core ?? e.core ?? null, state: e.state ?? (e.code === 2 ? "refused" : "failed"), why: e.message }); }
+  };
+  const finish = (code) => {
+    exitAfter.code = code;
+    return opts.json ? result : installLine(result);
+  };
+  if (extra.length) {
+    result.why = `machines install takes no arguments after install (got ${extra.join(" ")})`;
+    return finish(2);
+  }
+  const unsupported = Object.keys(opts).filter((name) => !MACHINES_INSTALL_OPTIONS.has(name));
+  if (unsupported.length) {
+    result.why = `machines install does not take ${unsupported.map((name) => `--${name}`).join(", ")}`;
+    return finish(2);
+  }
+  if (machineCount !== 1 || !machine) {
+    result.why = "machines install takes exactly one --machine M";
+    return finish(2);
+  }
+  if (Boolean(opts["app-home"]) !== (opts.project !== undefined) || opts.check && opts["app-home"]) {
+    result.why = "give --project DIR and --app-home together, without --check";
+    return finish(2);
+  }
+  let ran = false;
+  try {
+    if (!existsSync(dirname(stateDir))) throw new Error(`no Herdr app home here (${dirname(stateDir)})`);
+    mkdirSync(stateDir, { recursive: true });
+    await withLockAsync(join(stateDir, MACHINES_LOCK), async () => {
+      ran = true;
+      await run();
+      const history = readMachinesHistory(file)?.history ?? { schemaVersion: 1, at: null, here: null, machines: {} };
+      history.machines[machine] = { ...(Object.hasOwn(history.machines, machine) ? history.machines[machine] : {}), install: result };
+      const tmp = `${file}.${process.pid}`;
+      try {
+        writeFileSync(tmp, `${JSON.stringify(history, null, 2)}\n`);
+        renameSync(tmp, file);
+      } finally { if (existsSync(tmp)) unlinkSync(tmp); }
+    }, { wait: 0, what: "the machines' update" });
+  } catch (e) {
+    if (e instanceof LockHeld) Object.assign(result, { state: "busy-here", why: e.message });
+    else {
+      note(`Could not keep the install observation in ${file} (${e.message}).`);
+      if (!ran) await run();
+    }
+  }
+  return finish(["installed", "current", "made", "there"].includes(result.state) ? 0 : 1);
+}
+
 /**
  * `machines`: the record of what this computer and each linked machine run and how its last
  * update went; `machines update`: one cycle now (machineUpdates.js updateOn, one machine at a
@@ -12147,14 +12341,15 @@ async function machinesAuto(opts) {
 export async function cmdMachines(opts, [verb, ...rest] = [], io = {}) {
   const env = io.env ?? process.env;
   const modsDir = io.modsDir ?? defaultModsDir(env);
-  if (rest.length || (verb !== undefined && verb !== "update")) throw new CliError(`machines takes update or nothing${verb ? `, not "${[verb, ...rest].join(" ")}"` : ""}.`, 2);
+  const stateDir = stateDirOf(modsDir);
+  const file = join(stateDir, MACHINES_STATE);
+  if (verb === "install") return machinesInstall(opts, { env, stateDir, file, machineCount: io.machineCount ?? Number(opts.machine !== undefined), extra: rest });
+  if (rest.length || (verb !== undefined && verb !== "update")) throw new CliError(`machines takes install, update or nothing${verb ? `, not "${[verb, ...rest].join(" ")}"` : ""}.`, 2);
   if (opts.auto !== undefined) {
     if (verb) throw new CliError("Give --auto alone, without update.", 2);
     return machinesAuto(opts);
   }
   if ([opts.machine !== undefined, opts.linked, opts.local].filter(Boolean).length > 1) throw new CliError("Give one of --machine, --linked and --local.", 2);
-  const stateDir = stateDirOf(modsDir);
-  const file = join(stateDir, MACHINES_STATE);
   const readState = () => { try { return parseState(readFileSync(file, "utf8")); } catch { return parseState(""); } };
   if (verb === undefined) {
     if (opts.linked || opts.local) throw new CliError("--linked and --local go with machines update.", 2);
@@ -12210,7 +12405,13 @@ export async function cmdMachines(opts, [verb, ...rest] = [], io = {}) {
     mkdirSync(stateDir, { recursive: true });
     const run = async () => {
       const out = await cycle();
-      const next = stateAfter(readState(), out.entries, { at: new Date().toISOString(), linked: out.linked });
+      let prior;
+      try { prior = parseState(readMachinesHistory(file)?.text ?? ""); }
+      catch (e) {
+        out.notes.push(`Could not keep the update results in ${file} (${e.message}).`);
+        return out;
+      }
+      const next = stateAfter(prior, out.entries, { at: new Date().toISOString(), linked: out.linked });
       const tmp = `${file}.${process.pid}`;
       writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
       renameSync(tmp, file);
@@ -13635,22 +13836,24 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   }
   const { values: opts, positionals, tokens } = parsed;
   const [command, ...rest] = positionals;
+  const linkedInstall = command === "machines" && rest[0] === "install";
   // #1208: --agent-home starts one new worker (am worker "<task>") on a chosen login folder, and
   // --worker-agent-home is a create or edit field. Anywhere else (help, worker kill, any other
   // verb) each is refused before anything runs, as an unknown option is.
   const killing = command === "worker" && rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined;
-  if (opts["agent-home"] !== undefined && (command !== "worker" || killing || opts.help || opts.version)) {
+  if (!linkedInstall && opts["agent-home"] !== undefined && (command !== "worker" || killing || opts.help || opts.version)) {
     process.stderr.write(`am: --agent-home goes with am worker "<task>" only: it starts one new worker on a chosen login folder.\n\n${USAGE}\n`);
     return 2;
   }
-  if (opts["worker-agent-home"] !== undefined && (!["create", "edit"].includes(command) || opts.help || opts.version)) {
+  if (!linkedInstall && opts["worker-agent-home"] !== undefined && (!["create", "edit"].includes(command) || opts.help || opts.version)) {
     process.stderr.write(`am: --worker-agent-home goes with am create or am edit only (a bot's worker.agentHome).\n\n${USAGE}\n`);
     return 2;
   }
-  if (command !== "main") {
+  if (opts["app-home"] && !linkedInstall) { report(["--app-home is only for machines install."]); return 2; }
+  if (command !== "main" && !linkedInstall) {
     if (opts["old-lead"] !== undefined) { report(["--old-lead is only for main."]); return 2; }
     // The accounts read is read-only on every machine (RFC 0043), so it repairs nothing either;
-    // nor does the reader's read-only login --check (#1509).
+    // nor does the reader's read-only login --check (#1509), nor a linked machine's install (#206).
     if (command !== "accounts" && (command !== "login" || !opts.check)) io.repairCliLinks?.();
   }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).
@@ -13661,7 +13864,7 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     return 0;
   }
   if (opts.help && command === "proxy") { process.stdout.write(`${PROXY_USAGE}\n`); return 0; }
-  if ((opts.help && command !== "main") || !command || command === "help") {
+  if ((opts.help && command !== "main" && !linkedInstall) || !command || command === "help") {
     process.stdout.write(`${USAGE}\n`); return command || opts.help ? 0 : 2;
   }
   const run = COMMANDS[command];
@@ -13676,7 +13879,9 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     // Tidy is this computer's window and labels: never after a command on a linked machine.
     const tidy = TIDIES.has(command) && opts.machine === undefined;
     const warnedRelabels = tidy && (command === "start" || command === "attach") ? new Set() : undefined;
-    const out = command === "proxy" ? await run(opts, rest, io) : await run(opts, rest, warnedRelabels);
+    const out = command === "proxy" ? await run(opts, rest, io)
+      : linkedInstall ? await run(opts, rest, { ...io, machineCount: tokens.filter((t) => t.kind === "option" && t.name === "machine").length })
+      : await run(opts, rest, warnedRelabels);
     if (out === PRINTED) return exitAfter.code;
     const tidyBeforeJson = warnedRelabels !== undefined && opts.json;
     if (tidyBeforeJson) {

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { KEY_ID, KEYS_FILE, SLOTS, keyVerdict, ownHalfPost, pointer, postedProblem, signPointer, slotFor, verify } from './am-lane';
+import { KEY_ID, KEYS_FILE, SLOTS, keyVerdict, ownHalfPost, pointer, postedProblem, signPointer, slotFor, verify, writeKeyFiles } from './am-lane';
 
 // A throwaway key, made for this run only: no private key is ever committed.
 const pair = () => {
@@ -93,6 +93,18 @@ describe('the am lane', () => {
     expect(slotFor(one, 'AM_LANE_KEY')).toBe('AM_LANE_KEY_NEXT');
     expect(slotFor(one, 'AM_LANE_KEY_NEXT')).toBe('AM_LANE_KEY');
     expect(SLOTS).toEqual(['AM_LANE_KEY', 'AM_LANE_KEY_NEXT']);
+  });
+
+  test('keygen writes the same public keys to am and the pack', () => {
+    const files = [join(dir, 'am-keys.json'), join(dir, 'pack-am-keys.json')];
+    const keys = [{ keyId: KEY_ID, publicKey: pair().pub }];
+    writeKeyFiles(keys, files);
+    expect(JSON.parse(readFileSync(files[0], 'utf8'))).toEqual({ keys });
+    expect(readFileSync(files[0], 'utf8')).toBe(readFileSync(files[1], 'utf8'));
+    const root = join(import.meta.dir, '..');
+    expect(readFileSync(KEYS_FILE, 'utf8')).toBe(readFileSync(join(root, 'herdr/mods/am-sidebar/am-keys.json'), 'utf8'));
+    const copies = JSON.parse(readFileSync(join(root, 'am/copies.json'), 'utf8'));
+    expect(copies.files.some((file: { to: string }) => file.to === 'am/am-keys.json')).toBe(false);
   });
 
   test('am\'s own key, never the pack\'s or the plugin lane\'s: am-keys.json shares no key with them', () => {
