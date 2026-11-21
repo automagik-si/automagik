@@ -191,7 +191,7 @@ test('the redaction regex in the image code is not mistaken for a token', () => 
 // CACHE_HOME_UNPINNED: an example-path exception must not cover changed cache bytes.
 test('ACP offline-cache examples require the exact cache path, match and complete file digest', () => {
   const entries = loadAllowlist().filter(entry => entry.file.startsWith('opt/automagik/offline-store/') && /ACP SDK/.test(entry.reason))
-  assert.equal(entries.length, 12) // Six each for ACP SDK 2.7.0 and 2.8.0.
+  assert.equal(entries.length, 12) // Six each for ACP SDK 2.8.0 and 2.9.0.
   const examples = [['', 'home', 'user'].join('/'), ['C:', 'Users', 'user'].join('\\')]
   for (const entry of entries) {
     const raw = examples.find(value => sha256(value) === entry.sha256)
