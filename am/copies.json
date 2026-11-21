@@ -110,6 +110,10 @@
       "to": "am/coreSocket.mjs"
     },
     {
+      "from": "herdr/mods/am-sidebar/delivery.mjs",
+      "to": "am/delivery.mjs"
+    },
+    {
       "from": "herdr/mods/am-sidebar/dialog.js",
       "to": "am/dialog.js"
     },

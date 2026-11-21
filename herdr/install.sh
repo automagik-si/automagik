@@ -1776,15 +1776,24 @@ install() {
   # #805: the restore notifier reads the shared attach ledger through attach.js.
   # Old releases do not import it and may omit it.
   tar -xzf "$TMP/$TGZ" -C "$TMP/x" "$side/attach.js" </dev/null >/dev/null 2>&1 || :
-  for f in update.mjs release.js migrate.js migrateHome.mjs migrateHooks.mjs briefingText.mjs model.js models.js retired.js hermesPair.js layoutSafe.mjs attach.js; do
+  # New updaters check automatic delivery. Older --version archives may omit this entire set.
+  delivery_files="delivery.mjs dialog.js agyPrompt.js launchArgs.js workers.js logins.js loginWords.js"
+  for f in $delivery_files; do
+    tar -xzf "$TMP/$TGZ" -C "$TMP/x" "$side/$f" </dev/null >/dev/null 2>&1 || :
+  done
+  for f in update.mjs release.js migrate.js migrateHome.mjs migrateHooks.mjs briefingText.mjs model.js models.js retired.js hermesPair.js layoutSafe.mjs attach.js $delivery_files; do
     case $f in
       hermesPair.js) [ ! -e "$TMP/x/$side/$f" ] && [ ! -L "$TMP/x/$side/$f" ] \
-        && ! grep -q '/hermesPair\.js"' "$TMP/x/$side/model.js" && continue ;;
-      retired.js) [ ! -e "$TMP/x/$side/$f" ] && [ ! -L "$TMP/x/$side/$f" ] && continue ;;
+        && ! grep -q '/hermesPair\.js"' "$TMP/x/$side/model.js" "$TMP/x/$side/models.js" && continue ;;
+      retired.js) [ ! -e "$TMP/x/$side/$f" ] && [ ! -L "$TMP/x/$side/$f" ] \
+        && ! grep -q '/retired\.js"' "$TMP/x/$side/models.js" && continue ;;
       attach.js) [ ! -e "$TMP/x/$side/$f" ] && [ ! -L "$TMP/x/$side/$f" ] \
         && ! grep -q '/attach\.js"' "$TMP/x/$side/update.mjs" && continue ;;
       layoutSafe.mjs) [ ! -e "$TMP/x/$side/$f" ] && [ ! -L "$TMP/x/$side/$f" ] \
-        && ! grep -q '/layoutSafe\.mjs"' "$TMP/x/$side/update.mjs" && continue ;;
+        && ! grep -q '/layoutSafe\.mjs"' "$TMP/x/$side/update.mjs" "$TMP/x/$side/migrateHome.mjs" "$TMP/x/$side/migrateHooks.mjs" && continue ;;
+      delivery.mjs|dialog.js|agyPrompt.js|launchArgs.js|workers.js|logins.js|loginWords.js)
+        [ ! -e "$TMP/x/$side/$f" ] && [ ! -L "$TMP/x/$side/$f" ] \
+          && ! grep -q '/delivery\.mjs"' "$TMP/x/$side/update.mjs" && continue ;;
     esac
     { [ -f "$TMP/x/$side/$f" ] && [ ! -L "$TMP/x/$side/$f" ]; } || fail "$TGZ: $side/$f is not a plain file: nothing was installed."
   done

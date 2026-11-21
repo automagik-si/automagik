@@ -670,3 +670,13 @@ test("#1556 claudeTranscriptPath follows the folder slug Claude Code keeps", () 
   assert.equal(claudeTranscriptPath("/srv/h", "/work/a/b", SID), `/srv/h/.claude/projects/-work-a-b/${SID}.jsonl`);
   assert.equal(claudeTranscriptPath("/srv/h/", "/work/a/b", SID), `/srv/h/.claude/projects/-work-a-b/${SID}.jsonl`);
 });
+
+test("#1557 stale normal and background-shell prompts are not idle above the rate-limit dialog", async () => {
+  const { hasAgentPrompt, hasBackgroundShellAtIdlePrompt, isPaneIdle, rateLimitDialog } =
+    await import("../mods/am-sidebar/restart.js");
+  const tail = "❯ \n1 background task\nRate limit reached\nYour limit resets in 2 hours.\n❯ 1. Wait until it resets\n  2. Upgrade your plan";
+  assert.ok(rateLimitDialog(tail));
+  assert.equal(hasAgentPrompt(tail), false);
+  assert.equal(hasBackgroundShellAtIdlePrompt(tail), false);
+  for (const state of ["idle", "working"]) assert.equal(isPaneIdle({ state: "live", status: { state } }, tail), false);
+});

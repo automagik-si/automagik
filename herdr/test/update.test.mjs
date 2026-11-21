@@ -3180,6 +3180,11 @@ test("#883: tightenLedgers skips an owner-unreadable ledger for every user, name
   assert.deepEqual(fchmods, [0o600, 0o400]);
 });
 
+const restorePane = (address, cwd, fields = {}) =>
+  ({ address, cwd, state: "live", created_ms: 10, labels: { bot: "b-main" }, ...fields });
+const compactRestoreListing = (...panes) => ({ terminals: panes.map(({ address, cwd, state }) => ({ address, cwd, state })) });
+const restoreRead = { text: "❯ " };
+
 test("#805 restore notifies only the live project main bot once per version", async (t) => {
   const { notifyMainBotOfRestore } = await import("../mods/am-sidebar/update.mjs");
   assert.equal(typeof notifyMainBotOfRestore, "function");
@@ -3190,7 +3195,8 @@ test("#805 restore notifies only the live project main bot once per version", as
   writeFileSync(join(projectDir, ".herdr/bots.json"), JSON.stringify({ bots: [{ id: "b-main", kind: "main" }, { id: "b-other", kind: "member" }] }));
   const calls = [];
   let live = false;
-  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? { terminals: live ? [{ address: "t5", state: "live" }] : [] } : {}); };
+  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? compactRestoreListing(...(live ? [restorePane("t5", projectDir)] : []))
+    : args[0] === "get" ? restorePane("t5", projectDir) : restoreRead); };
   const args = { modsDir, projectDir, version: "0.2.0", restored: "0.1.0", failed: ["am-tabs"], hcRun };
   assert.deepEqual(notifyMainBotOfRestore(args), { sent: false });
   live = true;
@@ -3214,7 +3220,8 @@ test("#805 update restoration sends the main-bot notice and keeps its dedup reco
   mkdirSync(join(projectDir, ".herdr"), { recursive: true });
   writeFileSync(join(projectDir, ".herdr/bots.json"), JSON.stringify({ bots: [{ id: "b-main", kind: "main" }] }));
   const calls = [];
-  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? { terminals: [{ address: "t5", state: "live" }] } : {}); };
+  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? compactRestoreListing(restorePane("t5", projectDir))
+    : args[0] === "get" ? restorePane("t5", projectDir) : restoreRead); };
   for (let n = 0; n < 2; n += 1) {
     const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin, projectDir, hcRun });
     assert.equal(r.installed.restored.version, "0.1.0");
@@ -3235,7 +3242,7 @@ test("#805 restore falls back to a live binding and the last bound project", asy
   writeFileSync(join(state, "attach.jsonl"), attachLine(attachRow({ event: "attach", bot: "b-aaaaaaaaaa", terminal: "t5", created_ms: 10, core: "fake", project: projectDir, by: "start" })));
   const calls = [];
   let live = false;
-  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? { terminals: [] } : { state: live ? "live" : "finished", created_ms: 10 }); };
+  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? { terminals: [] } : args[0] === "get" ? restorePane("t5", projectDir, { state: live ? "live" : "finished" }) : restoreRead); };
   const args = { modsDir, version: "0.2.0", restored: "0.1.0", failed: ["am-tabs"], hcRun };
   assert.deepEqual(notifyMainBotOfRestore({ ...args, projectDir }), { sent: false });
   live = true;
@@ -3260,7 +3267,9 @@ test("#805 a blocked main bot is recorded pending and notified on the next call"
   let blocked = true;
   const hcRun = (args) => {
     calls.push(args);
-    if (args[0] === "ls") return JSON.stringify({ terminals: [{ address: "t5", state: "live" }] });
+    if (args[0] === "ls") return JSON.stringify(compactRestoreListing(restorePane("t5", projectDir)));
+    if (args[0] === "get") return JSON.stringify(restorePane("t5", projectDir));
+    if (args[0] === "read") return JSON.stringify(restoreRead);
     if (args[0] === "send" && blocked) { const error = new Error("hc send failed"); error.status = 9; throw error; }
     return "{}";
   };
@@ -3294,11 +3303,13 @@ test("#805 restore notifies every project main bot and prefers its own live bind
   const calls = [];
   const hcRun = (args) => {
     calls.push(args);
-    if (args[0] === "get") return JSON.stringify({ state: "live", created_ms: 10 });
+    if (args[0] === "get") return JSON.stringify(args[1] === "t5" ? restorePane("t5", p1)
+      : restorePane("t6", p2, { labels: { bot: "b-cccccccccc" } }));
+    if (args[0] === "read") return JSON.stringify(restoreRead);
     if (args[0] === "ls") {
       const label = args[args.indexOf("--label") + 1];
       if (label === "bot=b-aaaaaaaaaa") return JSON.stringify({ terminals: [{ address: "t9", state: "live", cwd: "/elsewhere" }] });
-      return JSON.stringify({ terminals: [{ address: "t8", state: "live", cwd: "/elsewhere" }, { address: "t6", state: "live", cwd: p2 }] });
+      return JSON.stringify(compactRestoreListing({ address: "t8", state: "live", cwd: "/elsewhere" }, restorePane("t6", p2)));
     }
     return "{}";
   };
@@ -3322,7 +3333,8 @@ test("#805 checkForUpdate retries a pending rollback notice", async (t) => {
   const calls = [];
   const hcRun = (args) => {
     calls.push(args);
-    return JSON.stringify(args[0] === "ls" ? { terminals: [{ address: "t5", state: "live", cwd: projectDir }] } : {});
+    return JSON.stringify(args[0] === "ls" ? compactRestoreListing(restorePane("t5", projectDir))
+    : args[0] === "get" ? restorePane("t5", projectDir) : restoreRead);
   };
   const r = await checkForUpdate({ modsDir, projectDir, env: {}, fetch: async () => ({ status: 404, ok: false }), hcRun });
   assert.equal(r.disabled, false);
@@ -3349,10 +3361,11 @@ test("#805 a blocked main pane is kept pending and never receives the notice", a
   const calls = [];
   const hcRun = (args) => {
     calls.push(args);
-    if (args[0] === "get") return JSON.stringify({ state: "live", created_ms: 20, status: { state: "blocked" } });
+    if (args[0] === "get") return JSON.stringify(args[1] === "t5" ? restorePane("t5", p1, { status: "blocked", labels: { bot: "b-aaaaaaaaaa" } })
+      : restorePane("t6", p2, { created_ms: 20, status: { state: "blocked" } }));
     if (args[0] === "ls") {
       const label = args[args.indexOf("--label") + 1];
-      return JSON.stringify({ terminals: label === "bot=b-aaaaaaaaaa" ? [{ address: "t5", state: "live", cwd: p1, status: "blocked" }] : [] });
+      return JSON.stringify(label === "bot=b-aaaaaaaaaa" ? compactRestoreListing(restorePane("t5", p1)) : compactRestoreListing());
     }
     throw new Error("send must not run on a blocked pane");
   };
@@ -3365,4 +3378,136 @@ test("#805 a blocked main pane is kept pending and never receives the notice", a
   assert.deepEqual(note.pendingBots, ["b-cccccccccc"]);
   assert.deepEqual(note.notifiedBots, []);
   assert.equal(calls.filter((c) => c[0] === "send").length, 0);
+});
+
+test("#1557 rollback delivery holds a footerless dialog, an unreadable tail and a reused generation", async (t) => {
+  const { notifyMainBotOfRestore } = await import("../mods/am-sidebar/update.mjs");
+  const root = mkdtempSync(join(tmpdir(), "restore-rate-limit-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const modsDir = join(root, "app/mods"), projectDir = join(root, "project");
+  mkdirSync(join(projectDir, ".herdr"), { recursive: true });
+  writeFileSync(join(projectDir, ".herdr/bots.json"), JSON.stringify({ bots: [{ id: "b-main", kind: "main" }] }));
+  const pane = restorePane("t5", projectDir, { status: { state: "working" } });
+  const sends = [];
+  let current = pane;
+  let onRead;
+  let screen = "Rate limit reached\nYour limit resets in 2 hours.\n❯ 1. Wait until it resets\n  2. Upgrade your plan";
+  let competing;
+  const run = () => notifyMainBotOfRestore({ modsDir, projectDir, version: "0.2.0", restored: "0.1.0", hcRun });
+  function hcRun([verb, ...args]) {
+    if (verb === "ls") return JSON.stringify({ terminals: [{ address: pane.address, state: pane.state }] });
+    if (verb === "get") return JSON.stringify(current);
+    if (verb === "read") {
+      onRead?.();
+      return JSON.stringify({ text: screen });
+    }
+    if (verb === "send") {
+      sends.push(args);
+      // Simulate a retry entering before the first sender can persist its acknowledgement.
+      if (sends.length === 1) competing = run();
+      return "{}";
+    }
+    assert.fail(verb);
+  }
+  for (const text of [screen, ""]) {
+    screen = text;
+    assert.deepEqual(run(), { sent: false });
+    assert.deepEqual(sends, []);
+  }
+  screen = "❯ ";
+  current = { ...pane, labels: { bot: "wrong-bot" } };
+  assert.deepEqual(run(), { sent: false });
+  current = pane;
+  onRead = () => { current = { ...pane, created_ms: 11 }; };
+  assert.deepEqual(run(), { sent: false });
+  assert.deepEqual(sends, []);
+  current = pane;
+  onRead = null;
+  assert.deepEqual(run(), { sent: true });
+  assert.deepEqual(competing, { sent: false });
+  assert.deepEqual(run(), { sent: false });
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0][0], "t5");
+});
+
+test("#1557 rollback tracks same-ID mains by project and never falls back to another clone", async (t) => {
+  const { notifyMainBotOfRestore } = await import("../mods/am-sidebar/update.mjs");
+  const root = mkdtempSync(join(tmpdir(), "restore-clones-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const modsDir = join(root, "app/mods");
+  const projects = ["one", "two"].map(name => join(root, name));
+  for (const project of projects) {
+    mkdirSync(join(project, ".herdr"), { recursive: true });
+    writeFileSync(join(project, ".herdr/bots.json"), JSON.stringify({ bots: [{ id: "b-main", kind: "main" }] }));
+  }
+  mkdirSync(dirname(modsDir));
+  writeFileSync(join(dirname(modsDir), "am-sidebar-projects.json"), JSON.stringify(projects));
+  const [one, two] = projects.map((project, i) => restorePane(`t${5 + i}`, project));
+  const sends = [];
+  let live = [one];
+  function hcRun([verb, terminal]) {
+    if (verb === "ls") return JSON.stringify(compactRestoreListing(...live));
+    if (verb === "get") return JSON.stringify(live.find(row => row.address === terminal));
+    if (verb === "read") return JSON.stringify(restoreRead);
+    if (verb === "send") sends.push(terminal);
+    return "{}";
+  }
+  const args = { modsDir, projectDir: projects[0], version: "0.2.0", restored: "0.1.0", hcRun };
+  assert.equal(notifyMainBotOfRestore(args).sent, true);
+  assert.deepEqual(sends, ["t5"]);
+  live = [one, two];
+  assert.equal(notifyMainBotOfRestore(args).sent, true);
+  assert.deepEqual(sends, ["t5", "t6"]);
+  assert.equal(notifyMainBotOfRestore(args).sent, false);
+});
+
+test("#1557 the ordinary update tick retries the second rollback notice after an interruption", async (t) => {
+  const { notifyMainBotOfRestore } = await import("../mods/am-sidebar/update.mjs");
+  const root = mkdtempSync(join(tmpdir(), "restore-interrupted-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const modsDir = join(root, "app/mods"), state = stateDirOf(modsDir);
+  const file = join(state, "restore-notified.json");
+  const projects = ["one", "two"].map(name => join(root, name));
+  const rosters = projects.map(project => join(project, ".herdr/bots.json"));
+  const ids = ["b-first", "b-second"];
+  rosters.forEach((roster, index) => {
+    mkdirSync(dirname(roster), { recursive: true });
+    writeFileSync(roster, JSON.stringify({ bots: [{ id: ids[index], kind: "main" }] }));
+  });
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(dirname(modsDir), "am-sidebar-projects.json"), JSON.stringify(projects));
+  writeFileSync(join(state, RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: "0.2.0", failed: ["am-tabs"] }));
+  const panes = projects.map((project, index) => restorePane(`t${index + 5}`, project, { labels: { bot: ids[index] } }));
+  const sent = [];
+  let interrupted;
+  function hcRun([verb, arg, label]) {
+    if (verb === "ls") {
+      if (label === "bot=b-second" && !interrupted) {
+        interrupted = readFileSync(file, "utf8");
+        throw new Error("interrupted before the second recipient");
+      }
+      return JSON.stringify(compactRestoreListing(panes.find(pane => `bot=${pane.labels.bot}` === label)));
+    }
+    if (verb === "get") return JSON.stringify(panes.find(pane => pane.address === arg));
+    if (verb === "read") return JSON.stringify(restoreRead);
+    if (verb === "send") sent.push(arg);
+    return "{}";
+  }
+  const args = { modsDir, projectDir: projects[0], hcRun };
+  assert.equal(notifyMainBotOfRestore({ ...args, version: "0.2.0", restored: "0.1.0" }).sent, true);
+  assert.deepEqual(sent, ["t5"]);
+  assert.deepEqual(JSON.parse(interrupted).pendingBots, [ids[1]]);
+  writeFileSync(file, interrupted);
+  const tick = () => checkForUpdate({ ...args, env: {}, fetch: async () => ({ status: 404, ok: false }) });
+  const roster = readFileSync(rosters[1]);
+  writeFileSync(rosters[1], "temporarily unreadable");
+  await tick();
+  assert.deepEqual(JSON.parse(readFileSync(file)).pendingBots, [ids[1]]);
+  assert.deepEqual(sent, ["t5"]);
+  writeFileSync(rosters[1], roster);
+  await tick();
+  assert.deepEqual(sent, ["t5", "t6"]);
+  assert.deepEqual(JSON.parse(readFileSync(file)).pendingBots, []);
+  await tick();
+  assert.deepEqual(sent, ["t5", "t6"]);
 });

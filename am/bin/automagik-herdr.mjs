@@ -48,7 +48,8 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, contextTokensOf, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, rateLimitDialog, rateLimitLine, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders, wakeWait } from "../restart.js";
 import { screenLines } from "../dialog.js";
-import { agyCandidate, agyPromptOf } from "../agyPrompt.js";
+import { automaticDelivery, hasRateLimitHold } from "../delivery.mjs";
+export { hasRateLimitHold } from "../delivery.mjs";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchEnvOf, launchHomeEnv, launchdNotLoaded, ledgerRivals,
   lastText, latestResumeIn, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
@@ -1677,8 +1678,8 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
 }
 
 /** The view for ls and show: { view, hcError }; a refused ledger still throws. */
-async function viewOrError() {
-  try { return { view: await attachView(), hcError: null }; } catch (e) {
+async function viewOrError({ readOnly = false } = {}) {
+  try { return { view: await attachView({ readOnly }), hcError: null }; } catch (e) {
     if (e instanceof LedgerRefusal || !(e instanceof CliError)) throw e;
     return { view: null, hcError: e.message };
   }
@@ -2050,7 +2051,8 @@ Usage: am <command> [options]                   (every command takes --json and 
   restart --due [--all] [--dry-run] [--json]   Restart from a handoff the seats whose Claude Code
                                 context is over their threshold (restartAt; a main bot defaults
                                 to 250000 tokens). Each due seat is asked to write its handoff to
-                                <app home>/automagik-herdr/handoff/<bot>.md and end its turn; an
+                                the printed path under <app home>/automagik-herdr/handoff/
+                                <project hash>/<bot>.md and end its turn; an
                                 idle seat restarts from that file now (--fresh --tree), a working
                                 or blocked one queues until its next idle. A seat that doesn't
                                 write the file in time is reported, not restarted. --dry-run
@@ -3887,9 +3889,9 @@ async function pidOf(terminal, { localOnly = false } = {}) {
   } catch { return null; }
 }
 /** A terminal's foreground pid and created_ms from one `hc get`: { pid, createdMs }, each null when hc gave none. */
-async function launchOf(terminal) {
+async function launchOf(terminal, read = hcGet) {
   let get = null;
-  try { get = await hcGet(terminal); } catch { get = null; }
+  try { get = await read(terminal); } catch { get = null; }
   return { pid: get?.foreground?.pid ?? get?.pid ?? null, createdMs: Number.isSafeInteger(get?.created_ms) ? get.created_ms : null };
 }
 /** This computer's hc core id for a ledger row, or null when hc server status can't give it (the row is still written). */
@@ -6947,21 +6949,32 @@ function readRestartQueue(dir = appHome()) {
   try { const rows = JSON.parse(text); if (Array.isArray(rows)) return rows; } catch {}
   throw new CliError(`Can't read ${queuePath(dir)}: invalid restart queue`);
 }
+function saveRestartQueue(rows, dir) {
+  const file = queuePath(dir);
+  const tmp = `${file}.${process.pid}.${randomUUID()}`;
+  try {
+    writeFileSync(tmp, JSON.stringify(rows), { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, file);
+  } finally { try { unlinkSync(tmp); } catch {} }
+}
 async function editRestartQueue(edit, dir = appHome()) {
   const file = queuePath(dir);
   mkdirSync(dirname(file), { recursive: true });
   return withLockAsync(`${file}.lock`, async () => {
     const rows = readRestartQueue(dir);
+    const before = JSON.stringify(rows);
     const result = await edit(rows);
-    const tmp = `${file}.${process.pid}.${randomUUID()}`;
-    try {
-      writeFileSync(tmp, JSON.stringify(rows), { mode: 0o600 });
-      chmodSync(tmp, 0o600);
-      renameSync(tmp, file);
-    } finally { try { unlinkSync(tmp); } catch {} }
+    if (before !== JSON.stringify(rows)) saveRestartQueue(rows, dir);
     return result;
   });
 }
+
+const isPark = (row) => row.options?.rateLimit === true && !row.options?.handoff;
+const hasEpisode = (row) => Boolean(row.episode || isPark(row));
+const sameSeat = (row, project, bot, pane, core) => row.project === project && row.botId === bot
+  && row.terminal === pane.address && row.created_ms === pane.created_ms && (!row.core || row.core === core);
+const paneIsBlocked = (pane) => pane?.status === "blocked" || pane?.status?.state === "blocked";
 
 /** No screen capture is treated as absent, just as pure callers without a capture are. */
 async function readScreenText(terminal) {
@@ -6985,17 +6998,22 @@ async function readScreenCapture(terminal) {
 }
 
 /** End the queue's live watcher, with positive chosen-home proof taking precedence over its label. */
-async function killQueuedWatcher({ watcher, project }) {
-  if (!watcher) return;
-  const { state, get } = await hcState(watcher);
-  if (state !== "live" || !get?.labels?.["herdr.queued-restart"]) return;
-  const proof = await paneProof({ get, project: { key: project } });
+async function killQueuedWatcher(entry) {
+  if (!entry.watcher) return true;
+  const { state, get } = await hcState(entry.watcher);
+  if (state === "unknown") return false;
+  if (state !== "live" || !matchesQueueWatcher(entry, get)) return true;
+  const proof = await paneProof({ get, project: { key: entry.project } });
   if (protectsChosenHome(proof)) {
     const why = proof === "chosen" ? "it is a worker on a chosen agent home" : "it may be a worker starting on a chosen agent home";
-    report([`Queued watcher ${watcher} was left as it is: ${why}.`]);
-    return;
+    report([`Queued watcher ${entry.watcher} was left as it is: ${why}.`]);
+    return false;
   }
-  await hcKill(watcher);
+  const current = await hcState(entry.watcher);
+  if (current.state === "unknown") return false;
+  if (current.state !== "live" || !matchesQueueWatcher(entry, current.get) || current.get.created_ms !== get.created_ms) return true;
+  const killed = await hcKill(entry.watcher);
+  return killed.code === 0 || ["gone", "finished"].includes((await hcState(entry.watcher)).state);
 }
 
 function queueHomes(projects) {
@@ -7016,14 +7034,18 @@ async function queuedRestarts(opts, ref) {
     for (const dir of dirs.filter((dir) => existsSync(queuePath(dir)))) entries.push(...await editRestartQueue(async (rows) => {
       for (let i = rows.length - 1; i >= 0; i -= 1) {
         const e = rows[i];
+        if (project && e.project !== project) continue;
         const state = await hcState(e.terminal);
-        // A dead watcher means this entry can never fire, even while its pane still runs.
-        let stale = ["gone", "finished"].includes(state.state) || (state.get && e.created_ms != null && state.get.created_ms !== e.created_ms);
-        if (!stale && e.watcher) {
+        // A lost watcher is terminal only for an ordinary queue entry.
+        let stale = (e.core == null || e.core === await coreId())
+          && (["gone", "finished"].includes(state.state) || (Number.isSafeInteger(state.get?.created_ms)
+            && e.created_ms != null && state.get.created_ms !== e.created_ms));
+        if (!stale && !hasEpisode(e) && !e.wasHeld && e.watcher) {
           const wState = await hcState(e.watcher);
           stale = ["gone", "finished"].includes(wState.state);
         }
         if (stale) {
+          await closeQueuedHold(e, "its pane ended", dir);
           await killQueuedWatcher(e);
           rows.splice(i, 1);
         }
@@ -7032,7 +7054,8 @@ async function queuedRestarts(opts, ref) {
     }, dir));
     // #1556: a handoff that failed or was dropped is kept in the app home, so the reader that
     // already answers "what is queued" also answers "what didn't happen" after the watcher's pane went away.
-    const record = readHandoffFailureRecord();
+    const records = dirs.map(readHandoffFailureRecord);
+    const record = { rows: records.flatMap(r => r.rows), skipped: records.flatMap(r => r.skipped) };
     const failures = record.rows.filter((f) => !project || f.project === project);
     const failureLine = (f) => `${f.botName} (${f.botId ?? "no id"}): handoff restart ${f.kind} at ${f.at}: ${f.why}`
       + `${f.handoff ? ` (handoff: ${f.handoff})` : ""}`
@@ -7060,7 +7083,9 @@ async function queuedRestarts(opts, ref) {
   const entry = await editRestartQueue(async (rows) => {
     const i = rows.findIndex((e) => e.id === matches[0]?.id && e.botId === id && (!project || e.project === project));
     if (i < 0) return null;
-    const [e] = rows.splice(i, 1);
+    const e = rows[i];
+    await closeQueuedHold(e, "its queued restart was canceled", matches[0]?.dir);
+    rows.splice(i, 1);
     await killQueuedWatcher(e);
     return e;
   }, matches[0]?.dir);
@@ -7071,7 +7096,7 @@ async function queuedRestarts(opts, ref) {
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 // #1556: the handoff a seat writes before it is restarted from a fresh conversation. The file
-// lives under the app home, one per bot, and is emptied just before each request (a stale
+// lives under the owning app home, one per project and bot, and is emptied just before each request (a stale
 // handoff from an earlier pass, or bytes appended since, are never sent).
 const HANDOFF_DIR = "automagik-herdr/handoff";
 /** How long a seat may take to write its handoff before the pass reports it and leaves it running. */
@@ -7081,8 +7106,10 @@ const HANDOFF_POLL_MS = Math.max(10, Math.min(2000, Number(process.env.AUTOMAGIK
 /** The longest handoff sent as a conversation's first message; the file keeps the rest. */
 const HANDOFF_MAX_CHARS = 64 * 1024;
 
-/** A bot's handoff file under the app home (#1556). */
-const handoffPathOf = (botId) => `${appHome()}/${HANDOFF_DIR}/${botId}.md`;
+/** Keep the file named by a legacy ask, and put each new ask in its project's folder. */
+const legacyHandoffPath = (botId, dir = appHome()) => join(dir, HANDOFF_DIR, `${botId}.md`);
+const handoffPathOf = (project, botId, dir = appHome()) =>
+  join(dir, HANDOFF_DIR, createHash("sha256").update(project).digest("hex"), `${botId}.md`);
 
 /** What the seat is asked to write (#1556): the handoff's three parts, then end the turn. */
 const handoffRequestText = (bot, path) => `Context handoff for ${bot.name} (${bot.id}): your context is over its restart threshold. `
@@ -7123,7 +7150,7 @@ function handoffWritable(path) {
       let st = null;
       try { st = statSync(dir); } catch { /* not there */ }
       if (st) {
-        if (!st.isDirectory()) return `${dir} is not a folder`;
+        if (!st.isDirectory()) return `${path} can't be written (${dir} is not a folder)`;
         accessSync(dir, constants.W_OK);
         return null;
       }
@@ -7163,10 +7190,13 @@ async function waitForHandoff({ terminal, path, since, waitMs = HANDOFF_WAIT_MS,
   const began = Date.now();
   for (;;) {
     const state = await hcState(terminal);
-    if (state.state !== "live" || (state.get && state.get.labels && state.get.state === "finished")) {
+    if (state.state === "unknown") return { ...state, held: true, expiresAt: began + waitMs };
+    if (state.state !== "live" || state.get?.state === "finished") {
       return { state: state.state, get: state.get ?? null, idle: false, timedOut: false };
     }
-    const screen = state.get?.status?.state !== "blocked" ? await readScreenText(terminal) : null;
+    const capture = await readScreenCapture(terminal);
+    const screen = capture.ok ? capture.text : null;
+    if (!capture.ok || rateLimitDialog(screen)) return { ...state, screen, held: true, expiresAt: began + waitMs };
     const idle = isPaneIdle(state.get, screen);
     if (idle && handoffReady(path, since)) return { state: "live", get: state.get, idle: true, timedOut: false };
     if (Date.now() - began >= waitMs) return { state: "live", get: state.get, idle, timedOut: true };
@@ -7194,8 +7224,8 @@ const RETRY_QUEUED = Symbol("retry-queued");
 
 // ---- #1556: a handoff restart that failed or was dropped is kept, and its owner/lead told ----
 
-/** The last failed handoff restart per bot, under the app home; `am restart --queued` reads it. */
-const HANDOFF_FAILURES_PATH = () => join(appHome(), "automagik-herdr", "handoff-failures.json");
+/** Latest failure per project and bot, under its app home. */
+const HANDOFF_FAILURES_PATH = (dir = appHome()) => join(dir, "automagik-herdr", "handoff-failures.json");
 /** How many failed bots the small record keeps; one per bot, newest first. */
 const HANDOFF_FAILURES_MAX = 20;
 
@@ -7229,8 +7259,8 @@ function handoffFailureRow(raw, index) {
 }
 
 /** The record's usable rows and the malformed ones it skipped, each with its reason. */
-function readHandoffFailureRecord() {
-  const text = readText(HANDOFF_FAILURES_PATH());
+function readHandoffFailureRecord(dir) {
+  const text = readText(HANDOFF_FAILURES_PATH(dir));
   if (text === null) return { rows: [], skipped: [] };
   let stored;
   try { stored = JSON.parse(text)?.failures; } catch { return { rows: [], skipped: [] }; }
@@ -7244,16 +7274,16 @@ function readHandoffFailureRecord() {
 }
 
 /** The recorded failures: [{ at, kind, botId, botName, project, terminal, handoff, why, report, notified }]. */
-function readHandoffFailures() {
-  return readHandoffFailureRecord().rows;
+function readHandoffFailures(dir) {
+  return readHandoffFailureRecord(dir).rows;
 }
 
 /** Keeps `failure` as its bot's only row, newest first, 0600, replaced atomically. */
-async function recordHandoffFailure(failure) {
-  const file = HANDOFF_FAILURES_PATH();
+async function recordHandoffFailure(failure, dir) {
+  const file = HANDOFF_FAILURES_PATH(dir);
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   await withLockAsync(`${file}.lock`, async () => {
-    const rows = [failure, ...readHandoffFailures().filter((row) => row.botId !== failure.botId)].slice(0, HANDOFF_FAILURES_MAX);
+    const rows = [failure, ...readHandoffFailures(dir).filter((row) => row.botId !== failure.botId || row.project !== failure.project)].slice(0, HANDOFF_FAILURES_MAX);
     const tmp = `${file}.${process.pid}.${randomUUID()}`;
     try {
       writeFileSync(tmp, unprinted(`${JSON.stringify({ version: 1, failures: rows })}\n`), { mode: 0o600 });
@@ -7264,12 +7294,12 @@ async function recordHandoffFailure(failure) {
 }
 
 /** Drops a bot's failure row after a later handoff restart reaches its new conversation. */
-async function clearHandoffFailure(botId) {
-  const rows = readHandoffFailures();
-  if (!rows.some((row) => row.botId === botId)) return;
-  const file = HANDOFF_FAILURES_PATH();
+async function clearHandoffFailure(project, botId, dir) {
+  const matches = row => row.botId === botId && row.project === project;
+  if (!readHandoffFailures(dir).some(matches)) return;
+  const file = HANDOFF_FAILURES_PATH(dir);
   await withLockAsync(`${file}.lock`, async () => {
-    const left = readHandoffFailures().filter((row) => row.botId !== botId);
+    const left = readHandoffFailures(dir).filter((row) => !matches(row));
     const tmp = `${file}.${process.pid}.${randomUUID()}`;
     try {
       writeFileSync(tmp, unprinted(`${JSON.stringify({ version: 1, failures: left })}\n`), { mode: 0o600 });
@@ -7283,22 +7313,24 @@ async function clearHandoffFailure(botId) {
  * One line to a project's main bot, the pack's existing report path: the same `hc send` `am
  * revive` uses, to the live pane the attach ledger binds. Never throws: { sent, unsent }.
  */
-async function reportToMainBot(projectKey, line) {
+async function reportToMainBot(projectKey, line, ownerHome) {
   let project;
   try { project = loadProject(projectKey); } catch (e) { return { sent: null, unsent: `its project couldn't be read (${e?.message ?? e})` }; }
   const main = mainBotOf(project.file);
   if (!main) return { sent: null, unsent: "the project has no main bot that can be read" };
-  let view;
-  try { view = await attachView(); } catch (e) { return { sent: null, unsent: `its attach ledger couldn't be read (${e?.message ?? e})` }; }
-  const held = liveFor(view, main.id, project);
-  if (!held) return { sent: null, unsent: `${main.name} has no pane` };
+  let held;
+  try {
+    held = ownerHome ? await resolvedBinding(project, main, { requestedHome: ownerHome, explicit: true })
+      : liveFor(await attachView(), main.id, project);
+  } catch (e) { return { sent: null, unsent: `its attach ledger couldn't be read (${e?.message ?? e})` }; }
+  if (!held?.get) return { sent: null, unsent: `${main.name} has no pane` };
   const terminal = held.binding.terminal;
   try {
     const state = await hcState(terminal);
     if (state.state !== "live" || state.get?.created_ms !== held.binding.created_ms || !agentInForeground(state.get)) {
       return { sent: null, unsent: `${main.name}'s pane ${terminal} runs no agent` };
     }
-    const r = await sendAutomatically(terminal, line);
+    const r = await sendAutomatically(terminal, line, hc, { terminal, created_ms: held.binding.created_ms, ownerHome });
     if (r.code === 0) return { sent: terminal, unsent: null };
     return { sent: null, unsent: `hc send ${terminal} failed (${hcSaid((r.stderr || r.stdout).trim())})` };
   } catch (e) { return { sent: null, unsent: `the report to ${terminal} couldn't be sent (${e?.message ?? e})` }; }
@@ -7310,61 +7342,66 @@ async function reportToMainBot(projectKey, line) {
  * reported it to the person running it). `kind`: "timeout", "refused", "helpers", "dropped" or
  * "send". Never throws: a failed record or send must not hide the failure itself.
  */
-async function noteHandoffFailure({ botId, botName, project, terminal }, kind, why, handoff, { notify = true } = {}) {
+async function noteHandoffFailure({ botId, botName, project, terminal, ownerHome }, kind, why, handoff, { notify = true } = {}) {
   const said = unprinted(String(why ?? ""));
   const detail = said.startsWith(`${botName}: `) ? said.slice(botName.length + 2) : said;
   const report = `${botName}: a handoff restart failed (${kind}): ${firstSentence(detail)}.`;
   let notified = null;
   if (notify) {
-    try { notified = await reportToMainBot(project, report); } catch (e) { notified = { sent: null, unsent: `the report wasn't sent (${e?.message ?? e})` }; }
+    try { notified = await reportToMainBot(project, report, ownerHome); } catch (e) { notified = { sent: null, unsent: `the report wasn't sent (${e?.message ?? e})` }; }
   }
   try {
     await recordHandoffFailure({ at: new Date().toISOString(), kind, botId, botName, project: project ?? null, terminal: terminal ?? null,
-      handoff: handoff ?? null, why: said, report, notified });
+      handoff: handoff ?? null, why: said, report, notified }, ownerHome);
   } catch { /* the thrown error and the queue entry already say it */ }
   return { report, notified };
 }
 
 
 async function runQueuedRestart(opts) {
+  const dir = appHome();
   const queueId = opts["run-queued"];
   const began = Date.now();
-  const current = () => readRestartQueue().find((e) => e.id === queueId);
+  const initial = readRestartQueue(dir).find(e => e.id === queueId);
+  if (!initial) return PRINTED;
+  const invocation = process.env.AUTOMAGIK_HERDR_QUEUE_INVOCATION ?? initial.invocation;
+  const owns = e => e.id === queueId && e.invocation === invocation;
+  const current = () => readRestartQueue(dir).find(owns);
   let entry = current();
-  if (!entry) return PRINTED;
-  // A parked seat's wake is its reset plus the grace; the default cap must outlast a 7-day
-  // window, so a wake beyond it is still honoured (a test can cap the run with the env var).
-  const park = entry.options?.rateLimit === true;
+  if (!entry || (entry.core && entry.core !== await coreId())) return PRINTED;
   const maxMs = Math.max(1000, Number(process.env.AUTOMAGIK_HERDR_QUEUE_MAX_MS) || 86_400_000);
   const helperMaxMs = Math.max(50, Number(process.env.AUTOMAGIK_HERDR_QUEUE_HELPER_WAIT_MS) || 30_000);
-  /** How long one parked wait may sleep before looking at the pane again (a cancel, a recovery). */
   const parkPollMs = Math.max(10, envMs("AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS", 60_000));
   let helperBlockedSince = null;
-  // #1556: a queued handoff restart asks for the handoff once its seat is idle, waits for a
-  // file newer than the ask, then runs the same --fresh --tree restart and sends the file as
-  // the new conversation's first message. A seat that never writes it is left running.
-  const handoff = entry.options?.handoff === true;
-  const handoffFile = handoff ? handoffPathOf(entry.botId) : null;
-  let askedAt = null;
-  const drop = () => editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === queueId); if (i >= 0) rows.splice(i, 1); });
+  let handoff = false, handoffFile = null;
+  let dropped = false;
+  const drop = (why) => editRestartQueue(async rows => {
+    const i = rows.findIndex(owns);
+    if (i < 0) return;
+    if (why) await closeQueuedHold(rows[i], why, dir);
+    rows.splice(i, 1);
+    dropped = true;
+  }, dir);
   try {
-    for (;;) {
-      const wake = park && entry.wake_at ? Date.parse(entry.wake_at) : NaN;
-      const deadline = Math.max(began + maxMs, Number.isFinite(wake) ? wake + 300_000 : 0);
-      if (Date.now() >= deadline) {
-        if (handoff) {
+    while ((entry = current())) {
+      handoff = entry.options?.handoff === true;
+      handoffFile = handoff ? entry.handoffFile ?? (entry.handoffAsk
+        ? legacyHandoffPath(entry.botId, entry.ownerHome ?? dir)
+        : handoffPathOf(entry.project, entry.botId, entry.ownerHome ?? dir)) : null;
+      const wake = hasEpisode(entry) ? Date.parse(entry.wake_at) : NaN;
+      const deadline = Math.max(began + maxMs, Number.isFinite(wake) ? wake + 120_000 : 0);
+      if (Date.now() >= deadline && !entry.handoffAsk) {
+        if (handoff && !entry.wasHeld && !hasEpisode(entry)) {
           await noteHandoffFailure(entry, "dropped", `${entry.botName}: its queued handoff restart waited `
             + `${Math.round(maxMs / 1000)}s without the seat becoming idle, so it was dropped.`, handoffFile);
         }
         return PRINTED;
       }
       const state = await hcState(entry.terminal);
-      const moved = Boolean(state.get && entry.created_ms != null && state.get.created_ms !== entry.created_ms);
+      const moved = Number.isSafeInteger(state.get?.created_ms) && entry.created_ms != null
+        && state.get.created_ms !== entry.created_ms;
       if (["gone", "finished"].includes(state.state) || moved) {
         if (handoff) {
-          // A detached watcher's stderr dies with its --rm pane: a seat that ends or is reused
-          // before the restart must leave the same record — and word to the lead — as every
-          // other failed handoff, never a silent return (#1556).
           const why = state.state === "gone"
             ? `${entry.botName}: its pane ${entry.terminal} is gone before the queued handoff restart, so it was dropped and not restarted.`
             : state.state === "finished"
@@ -7372,85 +7409,120 @@ async function runQueuedRestart(opts) {
               : `${entry.botName}: its pane ${entry.terminal} was reused (created_ms ${entry.created_ms} -> ${state.get.created_ms}) before the queued handoff restart, so it was dropped and not restarted.`;
           await noteHandoffFailure(entry, "dropped", why, handoffFile);
         }
+        await drop(moved ? "its pane was reused" : "its pane ended");
         return PRINTED;
       }
-      if (park) {
-        // The watcher can always cancel: one readable pane without the dialog is enough
-        // evidence that the seat recovered (or that the text was never the dialog), whatever
-        // the pane's status says. An unreadable pane is no evidence either way, so it waits.
-        const capture = await readScreenCapture(entry.terminal);
-        const showing = capture.ok ? rateLimitDialog(capture.text) : null;
-        if (capture.ok && !showing) {
-          await drop();
-          if (entry.episode) await healRateLimitAttention(entry.project, entry.botId, "it recovered", appHome(), entry.episode);
-          return PRINTED;
-        }
-        // hc can only kill unconditionally. A helper may start after any probe, and
-        // startup labels describe the requested session, not the provider's actual one.
-        // Even after reset, preserve the binding and wait for the person to resume.
-        const untilWake = Date.parse(entry.wake_at) - Date.now();
+      const held = hasEpisode(entry);
+      const valid = state.state === "live" && state.get?.state === "live" && state.get.address === entry.terminal
+        && (entry.created_ms == null || state.get.created_ms === entry.created_ms);
+      const blocked = paneIsBlocked(state.get);
+      const needsCapture = valid && (held || handoff || !blocked);
+      const capture = needsCapture ? await readScreenCapture(entry.terminal) : { ok: false };
+      const screen = capture.ok ? capture.text : null;
+      const showing = rateLimitDialog(screen);
+      if (held || showing) {
+        await editRestartQueue(async rows => {
+          const live = rows.find(owns);
+          if (!live || live.episode !== entry.episode || !capture.ok) return;
+          const now = await hcState(live.terminal);
+          if (now.state !== "live" || now.get?.address !== live.terminal || now.get.created_ms !== live.created_ms) return;
+          if (showing) {
+            const fresh = live.episode ? showing : rateLimitDialog((await readScreenCapture(live.terminal)).text);
+            if (!fresh) return;
+            await openQueuedHold(rows, live, { ...fresh, resets_at: showing.resets_at ?? fresh.resets_at }, dir);
+          } else if (!handoff || (!blocked && !paneIsBlocked(now.get) && !pendingDialog(screen))) {
+            const park = isPark(live);
+            await closeQueuedHold(live, "it recovered", dir);
+            if (park) rows.splice(rows.indexOf(live), 1);
+          }
+        }, dir);
+        const next = current();
+        if (!next) return PRINTED;
+        if (!hasEpisode(next)) continue;
+        const untilWake = Date.parse(next.wake_at) - Date.now();
         await sleep(untilWake > 0 ? Math.min(untilWake, parkPollMs) : parkPollMs);
-        entry = current();
-        if (!entry) return PRINTED;
         continue;
       }
-      // A blocked pane is never idle: skip the screen read (an hc RPC on every poll).
-      const screen = state.get?.status?.state !== "blocked" && state.get ? await readScreenText(entry.terminal) : null;
-      const idle = isPaneIdle(state.get, screen) && !(handoff && rateLimitDialog(screen));
+      // An acknowledged ask keeps its remaining time across a dialog or an unreadable pane.
+      const unsafeHandoff = handoff && (!capture.ok || blocked || pendingDialog(screen));
+      if (entry.handoffAsk && (unsafeHandoff || entry.handoffAsk.pausedAt != null)) {
+        await editRestartQueue(rows => {
+          const live = rows.find(owns);
+          if (!live?.handoffAsk || hasEpisode(live)) return;
+          if (unsafeHandoff) live.handoffAsk.pausedAt ??= Date.now();
+          else resumeHandoffAsk(live.handoffAsk);
+        }, dir);
+        if (!unsafeHandoff) continue;
+      }
+      if (!valid || unsafeHandoff || (entry.wasHeld && !capture.ok && !blocked)) {
+        await sleep(handoff ? HANDOFF_POLL_MS : Math.min(parkPollMs, 2000));
+        continue;
+      }
+      const idle = isPaneIdle(state.get, screen);
       // The watcher's own helper check: a live helper is waited out before cmdRestart is asked.
-      const helpers = idle ? await helpersOf(entry.terminal, { strict: Boolean(entry.options?.tree) }) : [];
+      let helpers = [];
+      try {
+        if (idle) helpers = await helpersOf(entry.terminal, { strict: Boolean(entry.options?.tree) });
+      } catch (error) {
+        if (!entry.wasHeld) throw error;
+        await sleep(Math.min(parkPollMs, 2000));
+        continue;
+      }
       let helperRefusal = idle
         ? restartRefusal({ name: entry.botName, old: { ...state.get, status: { state: "idle" } }, helpers,
           force: false, tree: entry.options?.tree })
         : null;
-      if (idle && !helperRefusal && handoff && askedAt === null) {
-        await checkDueLogins(entry.project, entry.botId, entry.terminal, entry.created_ms);
-        if (screenLines(screen).some(line => line.trim())) {
-          const attention = readAttention().find(row => row.open && isEpisode(row, entry.project, entry.botId)
-            && row.terminal === entry.terminal && row.created_ms === entry.created_ms);
-          if (attention) await healRateLimitAttention(entry.project, entry.botId, "it recovered", appHome(), attention.id);
-        }
-        // Emptied before the send: an agent that appends an answer to an earlier handoff, or
-        // merely touches the file, can never have that text sent (#1556).
-        const why = clearHandoff(handoffFile);
-        if (why) {
-          await drop();
-          throw new CliError(`${entry.botName}: ${why}, so it was not asked and was not restarted; `
+      if (idle && !helperRefusal && handoff && !entry.handoffAsk) {
+        await checkDueLogins(entry.project, entry.botId, entry);
+        const result = await editRestartQueue(async rows => {
+          const live = rows.find(owns);
+          if (!live || hasEpisode(live) || live.handoffAsk) return null;
+          const why = handoffRefusal(handoffFile) ?? clearHandoff(handoffFile);
+          if (why) throw new CliError(`${entry.botName}: ${why}, so it was not asked and was not restarted; `
             + `the seat still runs in ${entry.terminal}.`, 1, { refused: "handoff", terminal: entry.terminal, handoffKind: "refused" });
-        }
-        // Stamped BEFORE the send: an agent that writes during the send's own round trip is
-        // still answering this request, never a stale handoff from an earlier pass.
-        askedAt = Date.now();
-        const r = await sendAutomatically(entry.terminal, handoffRequestText({ name: entry.botName, id: entry.botId }, handoffFile));
-        if (r.held) {
-          askedAt = null;
-          await sleep(parkPollMs);
-          entry = current();
-          if (!entry) return PRINTED;
-          continue;
-        }
-        if (r.code !== 0) {
-          await drop();
-          throw new CliError(`${entry.botName}: couldn't be asked for its handoff in ${entry.terminal} (hc send: `
-            + `${hcSaid((r.stderr || r.stdout).trim())}); it is still running and was not restarted.`, 1,
+          const since = Date.now();
+          const r = await sendAutomatically(entry.terminal, handoffRequestText({ name: entry.botName, id: entry.botId }, handoffFile),
+            hc, { terminal: entry.terminal, created_ms: entry.created_ms });
+          if (r.code === 0) {
+            live.handoffFile = handoffFile;
+            live.handoffAsk = { since, expiresAt: since + HANDOFF_WAIT_MS };
+          }
+          return r;
+        }, dir);
+        if (!result || result.held) await sleep(HANDOFF_POLL_MS);
+        else if (result.code !== 0) throw new CliError(`${entry.botName}: couldn't be asked for its handoff in ${entry.terminal} (hc send: `
+          + `${hcSaid((result.stderr || result.stdout).trim())}); it is still running and was not restarted.`, 1,
           { refused: "handoff", terminal: entry.terminal, handoffKind: "refused" });
-        }
-        // Look again before the first wait: an agent that writes at once ends its turn in it.
-        entry = current();
-        if (!entry) return PRINTED;
         continue;
       }
-      if (idle && !helperRefusal && handoff && !handoffReady(handoffFile, askedAt)) {
-        const waited = Date.now() - askedAt;
-        if (waited >= HANDOFF_WAIT_MS) {
-          await drop();
+      if (handoff && entry.handoffAsk && (!idle || !handoffReady(handoffFile, entry.handoffAsk.since))) {
+        const remaining = entry.handoffAsk.expiresAt - Date.now();
+        if (remaining <= 0) {
+          const expired = await editRestartQueue(async rows => {
+            const live = rows.find(owns);
+            if (live?.handoffAsk?.since !== entry.handoffAsk.since || hasEpisode(live) || live.handoffAsk.pausedAt != null
+              || live.handoffAsk.expiresAt > Date.now()) return false;
+            const now = await hcState(live.terminal);
+            if (now.state !== "live" || now.get?.address !== live.terminal || now.get.created_ms !== live.created_ms) {
+              return false;
+            }
+            const confirmed = await readScreenCapture(live.terminal);
+            if (!confirmed.ok || paneIsBlocked(now.get)
+              || pendingDialog(confirmed.text) || rateLimitDialog(confirmed.text)) {
+              live.handoffAsk.pausedAt ??= Date.now();
+              return false;
+            }
+            if (isPaneIdle(now.get, confirmed.text) && handoffReady(handoffFile, live.handoffAsk.since)) return false;
+            rows.splice(rows.indexOf(live), 1);
+            dropped = true;
+            return true;
+          }, dir);
+          if (!expired) continue;
           throw new CliError(`${entry.botName}: still running in ${entry.terminal}; it didn't write ${handoffFile} `
             + `within ${Math.round(HANDOFF_WAIT_MS / 1000)}s, so it was not restarted.`, 1,
           { refused: "handoff", terminal: entry.terminal, handoffKind: "timeout" });
         }
-        await sleep(Math.max(10, Math.min(HANDOFF_POLL_MS, HANDOFF_WAIT_MS - waited)));
-        entry = current();
-        if (!entry) return PRINTED;
+        await sleep(Math.max(10, Math.min(HANDOFF_POLL_MS, remaining)));
         continue;
       }
       if (idle && !helperRefusal) {
@@ -7491,7 +7563,7 @@ async function runQueuedRestart(opts) {
             report([warning]);
             await noteHandoffFailure(entry, "send", warning, handoffFile);
           } else {
-            await clearHandoffFailure(entry.botId);
+            await clearHandoffFailure(entry.project, entry.botId, entry.ownerHome ?? dir);
           }
           return opts.json ? { ...result, handoff: handoffFile, ...(warning ? { warning } : {}) }
             : `${entry.botName}: restarted from ${handoffFile}${terminal ? ` in ${terminal}` : ""}${warning ? `; ${warning}` : ""}.`;
@@ -7502,7 +7574,7 @@ async function runQueuedRestart(opts) {
       const blockedByHelpers = Boolean(helperRefusal);
       if (blockedByHelpers) {
         helperBlockedSince ??= Date.now();
-        if (Date.now() - helperBlockedSince >= helperMaxMs) {
+        if (!entry.wasHeld && Date.now() - helperBlockedSince >= helperMaxMs) {
           await drop(); // out of the queue before the person hears why
           if (isPaneIdle(state.get, screen)) {
             try { await sendAutomatically(entry.terminal, `${entry.botName}: queued restart refused — ${helperRefusal}`); } catch {}
@@ -7524,112 +7596,209 @@ async function runQueuedRestart(opts) {
         ? Math.max(1, configured)
         : (state.get?.status?.state === "working" && !blockedByHelpers ? 250 : 2000);
       if (Date.now() - start < poll) await new Promise((done) => setTimeout(done, poll - (Date.now() - start)));
-      entry = current();
-      if (!entry) return PRINTED;
     }
+    return PRINTED;
   } catch (e) {
     // #1556: a detached watcher's stderr dies with its --rm pane, so a failed or dropped
     // handoff is kept under the app home and the project's main bot is told before it exits.
-    if (handoff) {
+    if (handoff && (dropped || current())) {
       const kind = e?.detail?.handoffKind ?? (e instanceof CliError ? "refused" : "dropped");
       await noteHandoffFailure(entry, kind, e?.message ?? String(e), handoffFile);
     }
     throw e;
   } finally {
-    // Every exit path leaves no stale entry: fired, canceled, expired, or a failed fire.
-    await drop();
+    // An expired or failed watcher releases only its invocation. A sweep can reattach it.
+    await editRestartQueue(rows => {
+      const i = rows.findIndex(owns);
+      if (i < 0) return;
+      const row = rows[i];
+      if (hasEpisode(row) || row.wasHeld) {
+        row.watcher = null;
+        // Invalidate the old process immediately, even before the new watcher exists.
+        row.invocation = randomUUID();
+      } else rows.splice(i, 1);
+    }, dir);
   }
 }
 
+async function startQueueWatcher(rows, entry, dir) {
+  const key = entry.project;
+  entry.watcher = null;
+  delete entry.watcherCreatedMs;
+  entry.invocation = randomUUID();
+  // The detached watcher may read immediately. Its invocation is durable before hc run.
+  saveRestartQueue(rows, dir);
+  // env -i: herdr-core's environment does not leak into the watcher. Only these explicit
+  // values and the queue/agent variables the watcher and its tests need are passed.
+  // HC_SOCKET, HC_TERMINAL_ID and HC_TERMINAL_SOCKET are never copied from here: the
+  // caller pane's would make the watcher that bot's own pane (#805). The sh in front of
+  // env -i adds the two hc gave the watcher's own run instead.
+  const loginPolicy = loginPolicyActive(process.env);
+  const policyEnv = loginPolicy ? loginPolicyEnv(process.env) : {};
+  const watcherEnv = [
+    `HOME=${home()}`,
+    `HERDR_APP_HOME=${dir}`,
+    ...(entry.invocation ? [`AUTOMAGIK_HERDR_QUEUE_INVOCATION=${entry.invocation}`] : []),
+    `PATH=${launchPath(process.execPath, key).path}`,
+    ...Object.entries(process.env)
+      .filter(([k, v]) => v !== undefined && (
+        (k.startsWith("AUTOMAGIK_HERDR_") && k !== "AUTOMAGIK_HERDR_QUEUE_INVOCATION") ||
+        Object.hasOwn(policyEnv, k) ||
+        ["USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "HERMES_HOME", "VIRTUAL_ENV"].includes(k)
+      ))
+      .map(([k, v]) => `${k}=${v}`),
+  ];
+  const watcherShell = [
+    'if [ -n "${HC_SOCKET-}" ]; then set -- "HC_SOCKET=$HC_SOCKET" "$@"; fi',
+    'if [ -n "${HC_TERMINAL_ID-}" ]; then set -- "HC_TERMINAL_ID=$HC_TERMINAL_ID" "$@"; fi',
+    'exec /usr/bin/env -i "$@"',
+  ].join("\n");
+  const name = queueWatcherName(entry);
+  const r = await hc(["run", "--bg", "--json", "--rm", "--no-parent", "--cwd", key, "--label", `herdr.queued-restart=${entry.botId}`,
+    ...(name ? ["--name", name] : []), "--", "/bin/sh", "-c", watcherShell, "sh", ...watcherEnv,
+    process.execPath, fileURLToPath(import.meta.url), "restart", entry.botId, "--project", key, "--run-queued", entry.id]);
+  let pane;
+  try { if (r.code === 0) pane = JSON.parse(r.stdout); } catch {}
+  if (pane?.address && !matchesQueueWatcher(entry, pane)) pane = (await hcState(pane.address)).get;
+  if (!matchesQueueWatcher(entry, pane)) pane = await findQueueWatcher(entry);
+  if (matchesQueueWatcher(entry, pane)) rememberQueueWatcher(entry, pane);
+  if (entry.watcher) saveRestartQueue(rows, dir);
+  return entry.watcher ? null : (r.stderr || r.stdout).trim() || "hc gave no watcher address";
+}
+
+const queueWatcherName = (entry) => entry.invocation && `am-watch-${entry.invocation.replaceAll("-", "").slice(0, 22)}`;
+
+function matchesQueueWatcher(entry, pane) {
+  if (!local(pane?.address) || pane.state !== "live" || !Number.isSafeInteger(pane.created_ms)
+    || pane.labels?.["herdr.queued-restart"] !== entry.botId
+    || entry.watcher && entry.watcher !== pane.address
+    || entry.watcherCreatedMs != null && entry.watcherCreatedMs !== pane.created_ms) return false;
+  const name = queueWatcherName(entry);
+  if (name) return pane.name === name;
+  // Earlier launchers supplied no name or invocation. Their recorded command is the identity.
+  const tail = ["restart", entry.botId, "--project", entry.project, "--run-queued", entry.id];
+  return [pane.argv, pane.foreground?.argv].some((argv) => {
+    if (!Array.isArray(argv)) return false;
+    const [cli, ...args] = argv.slice(-7);
+    return typeof cli === "string" && basename(cli) === "automagik-herdr.mjs"
+      && args.length === tail.length && args.every((arg, index) => arg === tail[index]);
+  });
+}
+
+function rememberQueueWatcher(entry, pane) {
+  entry.watcher = pane?.address ?? null;
+  if (Number.isSafeInteger(pane?.created_ms)) entry.watcherCreatedMs = pane.created_ms;
+}
+
+async function findQueueWatcher(entry) {
+  const name = queueWatcherName(entry);
+  if (!name) return null;
+  const state = await hcState(name);
+  if (state.state === "unknown") return { unknown: true };
+  const pane = state.get;
+  return matchesQueueWatcher(entry, pane) ? pane : null;
+}
+
+async function ensureQueueWatcher(rows, entry, dir) {
+  if (entry.watcher) {
+    const state = await hcState(entry.watcher);
+    if (state.state === "unknown") return "the previous watcher could not be checked";
+    if (matchesQueueWatcher(entry, state.get) && entry.invocation) {
+      rememberQueueWatcher(entry, state.get);
+      return null;
+    }
+    if (!entry.invocation) {
+      if (matchesQueueWatcher(entry, state.get) && !await killQueuedWatcher(entry)) {
+        return "the legacy watcher could not be retired";
+      }
+      // Old watchers cleared their handoff before sending and kept the ask in memory.
+      // A file changed during this operation may still be its reply, even if it's empty.
+      if (entry.options?.handoff && !entry.handoffAsk) {
+        const path = legacyHandoffPath(entry.botId, dir);
+        const stamp = lstatSync(path, { throwIfNoEntry: false });
+        if (stamp?.isFile() && stamp.mtimeMs >= Date.parse(entry.at)) {
+          const since = Math.floor(stamp.mtimeMs);
+          entry.handoffFile = path;
+          entry.handoffAsk = { since, expiresAt: since + HANDOFF_WAIT_MS, pausedAt: since };
+        }
+      }
+      // A legacy process cleans up by queue id alone, even after its pane begins to exit.
+      entry.id = randomUUID();
+    }
+  } else if (entry.invocation) {
+    const found = await findQueueWatcher(entry);
+    if (found?.unknown) return "the previous watcher could not be checked";
+    if (found?.address) {
+      rememberQueueWatcher(entry, found);
+      return null;
+    }
+  }
+  return startQueueWatcher(rows, entry, dir);
+}
+
 async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered, dir = appHome(), helpers = [] }) {
-  const rateLimited = opts.rateLimit === true;
-  const dialog = rateLimited ? null
-    : pendingDialog(screen) ?? (old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
-  const queueId = randomUUID();
+  const dialog = pendingDialog(screen) ?? (old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
+  const rate = rateLimitDialog(screen);
+  const ownerHome = dir;
+  const core = await coreId();
+  dir = opts._queueHome ?? locateQueue(key, bot.id, old, core, ownerHome).dir;
   const entry = await editRestartQueue(async (rows) => {
-    const loginPolicy = loginPolicyActive(process.env);
     botLogin(plan.argv, { agent: plan.agent, readOnly: true });
     checkHelperLogins(helpers);
     const i = rows.findIndex((row) => row.project === key && row.botId === bot.id);
     const previous = rows[i];
-    if (previous && rateLimited) {
-      // Keep another queued operation and its watcher. A later observation of this park can
-      // supply a missing reset without changing the queue identity or starting a second watcher.
-      if (!previous.options?.rateLimit) return previous;
-      if (previous.terminal === old.address && previous.created_ms === old.created_ms) {
-        if (!previous.wake_at && opts.wakeAt) {
-          previous.resets_at = opts.resetsAt;
-          previous.wake_at = opts.wakeAt;
-        }
-        previous.episode ??= opts.episode;
-        return previous;
+    const options = { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
+      model: opts.model ?? null, save: Boolean(opts.save), tree: Boolean(opts.tree), freshShared: Boolean(opts["fresh-shared"]),
+      cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null, force: Boolean(opts.force),
+      ...(opts.handoff ? { handoff: true, contextTokens: opts.contextTokens ?? null, restartAt: opts.restartAt ?? null } : {}),
+      ...(recovered || !sameHome(dir, ownerHome) ? { recoveredHome: true } : {}) };
+    let e;
+    if (previous && sameSeat(previous, key, bot.id, old, core) && (hasEpisode(previous) || opts.handoff)) {
+      e = previous;
+      if (!e.options?.handoff || opts._handoffAsk) e.options = options;
+      if (e.options.handoff) e.handoffFile ??= opts._handoffFile ?? handoffPathOf(key, bot.id, ownerHome);
+    } else {
+      if (previous) {
+        await closeQueuedHold(previous, "its restart was superseded", dir);
+        await killQueuedWatcher(previous);
+      }
+      e = { id: randomUUID(), botId: bot.id, botName: bot.name, project: key, core, terminal: old.address,
+        created_ms: old.created_ms ?? null, reason: opts.handoff ? "due" : dialog ? "blocked" : "working", dialog,
+        ownerHome, options, watcher: null, at: new Date().toISOString(),
+        ...(opts.handoff ? { handoffFile: opts._handoffFile ?? handoffPathOf(key, bot.id, ownerHome) } : {}) };
+      if (i < 0) rows.push(e); else rows[i] = e;
+    }
+    e.ownerHome ??= ownerHome;
+    e.core ??= core;
+    if (opts._handoffAsk) {
+      e.handoffAsk = { ...opts._handoffAsk,
+        ...(opts._holdForScreen || hasEpisode(e) ? { pausedAt: Date.now() } : {}) };
+    }
+    if (rate) {
+      const state = await hcState(e.terminal);
+      if (state.state === "live" && state.get?.address === e.terminal && state.get.created_ms === e.created_ms) {
+        const capture = await readScreenCapture(e.terminal);
+        const current = capture.ok && rateLimitDialog(capture.text);
+        if (current) await openQueuedHold(rows, e, { ...current, resets_at: rate.resets_at ?? current.resets_at }, dir);
       }
     }
-    if (previous && opts.handoff && previous.options?.rateLimit) return previous;
-    if (previous) { rows.splice(i, 1); await killQueuedWatcher(previous); }
-    const e = { id: queueId, botId: bot.id, botName: bot.name, project: key, terminal: old.address, created_ms: old.created_ms ?? null,
-      reason: opts.handoff ? "due" : rateLimited ? "rate-limited" : dialog ? "blocked" : "working", dialog,
-      ...(rateLimited ? { episode: opts.episode, ownerHome: dir } : {}),
-      ...(opts.wakeAt ? { wake_at: opts.wakeAt } : {}), ...(opts.resetsAt ? { resets_at: opts.resetsAt } : {}),
-      options: { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
-        model: opts.model ?? null, save: Boolean(opts.save), tree: Boolean(opts.tree), freshShared: Boolean(opts["fresh-shared"]),
-        cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null, force: Boolean(opts.force),
-        ...(rateLimited ? { rateLimit: true } : {}),
-        ...(opts.handoff ? { handoff: true, contextTokens: opts.contextTokens ?? null, restartAt: opts.restartAt ?? null } : {}),
-        ...(recovered ? { recoveredHome: true } : {}) }, watcher: null, at: new Date().toISOString() };
-    // Persist before starting: the detached process may read immediately, then takes this lock.
-    const file = queuePath(dir), tmp = `${file}.${process.pid}`;
-    writeFileSync(tmp, JSON.stringify([...rows, e]), { mode: 0o600 });
-    chmodSync(tmp, 0o600); renameSync(tmp, file);
-    // env -i: herdr-core's environment does not leak into the watcher. Only these explicit
-    // values and the queue/agent variables the watcher and its tests need are passed.
-    // HC_SOCKET, HC_TERMINAL_ID and HC_TERMINAL_SOCKET are never copied from here: the
-    // caller pane's would make the watcher that bot's own pane (#805). The sh in front of
-    // env -i adds the two hc gave the watcher's own run instead.
-    const policyEnv = loginPolicy ? loginPolicyEnv(process.env) : {};
-    const watcherEnv = [
-      `HOME=${home()}`,
-      `HERDR_APP_HOME=${dir}`,
-      `PATH=${launchPath(process.execPath, key).path}`,
-      ...Object.entries(process.env)
-        .filter(([k, v]) => v !== undefined && (
-          k.startsWith("AUTOMAGIK_HERDR_") ||
-          Object.hasOwn(policyEnv, k) ||
-          ["USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "HERMES_HOME", "VIRTUAL_ENV"].includes(k)
-        ))
-        .map(([k, v]) => `${k}=${v}`),
-    ];
-    const watcherShell = [
-      'if [ -n "${HC_SOCKET-}" ]; then set -- "HC_SOCKET=$HC_SOCKET" "$@"; fi',
-      'if [ -n "${HC_TERMINAL_ID-}" ]; then set -- "HC_TERMINAL_ID=$HC_TERMINAL_ID" "$@"; fi',
-      'exec /usr/bin/env -i "$@"',
-    ].join("\n");
-    const r = await hc(["run", "--bg", "--json", "--rm", "--no-parent", "--cwd", key, "--label", `herdr.queued-restart=${bot.id}`,
-      "--", "/bin/sh", "-c", watcherShell, "sh", ...watcherEnv,
-      process.execPath, fileURLToPath(import.meta.url), "restart", bot.id, "--project", key, "--run-queued", queueId]);
-    let watcher;
-    try { watcher = r.code === 0 ? JSON.parse(r.stdout)?.address : null; } catch {}
-    if (!watcher) {
-      // Roll back the unpublished entry if hc could not start the watcher.
-      writeFileSync(tmp, JSON.stringify(rows), { mode: 0o600 }); chmodSync(tmp, 0o600); renameSync(tmp, file);
-      throw new CliError(`Could not queue ${bot.name}'s restart: ${(r.stderr || r.stdout).trim()}`);
+    if (hasEpisode(e) || opts._holdForScreen || opts._handoffAsk) e.wasHeld = true;
+    const error = await ensureQueueWatcher(rows, e, dir);
+    if (error && !hasEpisode(e) && !e.wasHeld) {
+      rows.splice(rows.indexOf(e), 1);
+      saveRestartQueue(rows, dir);
+      throw new CliError(`Could not queue ${bot.name}'s restart: ${error}`);
     }
-    e.watcher = watcher;
-    rows.push(e);
+    if (error) report([`${bot.name}: the hold was kept, but its watcher could not start (${error}). A later sweep will retry.`]);
     return e;
   }, dir);
   if (opts.json) return { id: bot.id, queued: true, terminal: old.address, reason: entry.reason, dialog,
     ...(entry.episode ? { episode: entry.episode } : {}),
     ...(entry.wake_at ? { wake_at: entry.wake_at } : {}), ...(entry.resets_at ? { resets_at: entry.resets_at } : {}),
     watcher: entry.watcher, mode: plan.mode, agent: plan.agent, model: plan.model };
-  if (rateLimited) {
-    const until = entry.resets_at ? ` until ${entry.resets_at}` : "";
-    return `${bot.name}: rate-limited${until}; parked in ${old.address}, ${parkedWakeText(entry)} `
-      + `(am restart --queued lists it; am restart --cancel ${bot.id} cancels it).`;
-  }
   if (opts.handoff) {
     return `${bot.name}: handoff restart queued for ${old.address} (context ${opts.contextTokens ?? "?"} over restartAt ${opts.restartAt ?? "?"}); `
-      + `it writes its handoff at its next idle, then restarts from ${handoffPathOf(bot.id)} (am restart --queued lists it; am restart --cancel ${bot.id} cancels it).`;
+      + `it writes its handoff at its next idle, then restarts from ${entry.handoffFile} (am restart --queued lists it; am restart --cancel ${bot.id} cancels it).`;
   }
   const why = dialog ? `blocked on dialog "${dialog.question}" — ${dialog.who} must answer it in ${old.address}; Herdr never answers dialogs` : `${bot.name} is working in ${old.address}`;
   return `${bot.name}: restart queued for ${old.address} (${why}); it will restart and resume at its next idle (am restart --queued lists it; am restart --cancel ${bot.id} cancels it; pass --force to restart now).`;
@@ -7639,25 +7808,22 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
 async function paneNow(terminal) {
   const state = await hcState(terminal);
   if (state.state !== "live") return { state: state.state, get: state.get ?? null, screen: null, idle: false };
-  const screen = state.get?.status?.state !== "blocked" ? await readScreenText(terminal) : null;
-  return { state: "live", get: state.get, screen, idle: isPaneIdle(state.get, screen) };
+  const capture = await readScreenCapture(terminal);
+  const screen = capture.ok ? capture.text : null;
+  return { state: "live", get: state.get, screen, idle: capture.ok && isPaneIdle(state.get, screen), held: !capture.ok };
 }
 
-/**
- * A handoff restart already queued for `botId` (#1556), which a periodic pass must leave alone.
- * A queue entry whose watcher is gone can never fire, so that entry is dropped here.
- */
-async function queuedHandoffFor(project, botId, dir = appHome()) {
-  const entry = readRestartQueue(dir).find((e) => e.project === project && e.botId === botId && e.options?.handoff === true);
-  if (!entry) return null;
-  if (entry.watcher) {
-    const state = await hcState(entry.watcher);
-    if (["gone", "finished"].includes(state.state)) {
-      await editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === entry.id); if (i >= 0) rows.splice(i, 1); }, dir);
-      return null;
-    }
-  }
-  return entry;
+function locateQueue(project, botId, pane, core, ownerHome, dirs = queueHomes([project])) {
+  if (!dirs.some(dir => sameHome(dir, ownerHome))) dirs.push(ownerHome);
+  const matches = dirs.flatMap(dir => readRestartQueue(dir)
+    .filter(row => sameSeat(row, project, botId, pane, core)).map(entry => ({ dir, entry })));
+  if (matches.length > 1) throw new CliError(`More than one queue names ${botId} in ${pane.address}; the queues were left alone.`);
+  if (matches.length) return matches[0];
+  // A legacy sweep could write an attention item without a queue row.
+  const attentionHomes = dirs.filter(dir => readAttention(dir).some(row => row.open && isEpisode(row, project, botId)
+    && row.terminal === pane.address && row.created_ms === pane.created_ms));
+  if (attentionHomes.length > 1) throw new CliError(`More than one attention store names ${botId} in ${pane.address}.`);
+  return { dir: attentionHomes[0] ?? ownerHome, entry: null };
 }
 
 // ---- #1557: a Claude Code seat blocked on the rate-limit dialog ----
@@ -7700,16 +7866,6 @@ function readAttention(dir = appHome()) {
   return data.items.filter((row) => row && typeof row === "object");
 }
 
-/** A persisted hold for this particular live pane. A reused address alone is never a match.
- * Legacy records already stored the terminal and creation time. Invalid stores propagate to
- * the delivery caller, which can decline to send until the hold can be checked. */
-export function hasRateLimitHold(homeDir, terminal, createdMs) {
-  if (!terminal || createdMs == null) throw new CliError("Cannot check a delivery hold without the pane identity.");
-  const same = (row) => row?.terminal === terminal && row.created_ms === createdMs;
-  return readRestartQueue(homeDir).some((row) => same(row) && row.options?.rateLimit === true)
-    || readAttention(homeDir).some((row) => same(row) && row.kind === RATE_LIMIT_KIND && row.open === true);
-}
-
 /** Open items in a read that must not fail the command that shows them: a broken record is a note. */
 function openAttention(project = null) {
   try {
@@ -7727,7 +7883,9 @@ async function editAttention(edit, dir = appHome()) {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   return withLockAsync(`${file}.lock`, async () => {
     const items = readAttention(dir);
+    const before = JSON.stringify(items);
     const result = await edit(items);
+    if (before === JSON.stringify(items)) return result;
     const open = items.filter((row) => row.open);
     const closed = items.filter((row) => !row.open);
     const kept = [...closed.slice(Math.max(0, closed.length + open.length - ATTENTION_MAX)), ...open];
@@ -7749,30 +7907,62 @@ async function editAttention(edit, dir = appHome()) {
  * seat that never recovers stays at one item until a *readable* sweep sees it healthy
  * (healRateLimitAttention) and a later dialog starts a new episode.
  */
-async function noteRateLimitAttention({ project, bot, terminal, created_ms = null, text, resetsAt = null, episodeId = null, dir = appHome() }) {
+async function noteRateLimitAttention({ project, bot, terminal, created_ms, text, resetsAt, wakeAt, episodeId, dir }) {
   return editAttention((items) => {
     const open = items.find((row) => row.open === true && isEpisode(row, project, bot.id));
-    if (open && (!episodeId || open.id === episodeId)) {
+    if (open?.id === episodeId) {
       if (resetsAt && !open.resets_at) { open.resets_at = resetsAt; open.text = text; }
+      if (wakeAt && !open.wake_at) open.wake_at = wakeAt;
       return { row: open, created: false };
     }
     if (open) { open.open = false; open.closed_at = new Date().toISOString(); open.closed_because = "a new park started"; }
-    const row = { id: episodeId ?? randomUUID(), kind: RATE_LIMIT_KIND, episode: rateLimitEpisodeKey(project, bot.id), project, botId: bot.id, botName: bot.name,
-      terminal, created_ms, at: new Date().toISOString(), ...(resetsAt ? { resets_at: resetsAt } : {}), text, open: true };
+    const row = { id: episodeId, kind: RATE_LIMIT_KIND, episode: rateLimitEpisodeKey(project, bot.id), project, botId: bot.id, botName: bot.name,
+      terminal, created_ms, at: new Date().toISOString(), ...(resetsAt ? { resets_at: resetsAt, wake_at: wakeAt } : {}), text, open: true };
     items.push(row);
     return { row, created: true };
   }, dir);
 }
 
-/** The watcher may have cleared or replaced this park since the screen was read. Hold the
- * queue lock until its corresponding attention record is updated. */
-async function noteQueuedPark(details) {
-  const { dir, project, bot, terminal, created_ms, episodeId } = details;
-  return withLockAsync(`${queuePath(dir)}.lock`, async () => {
-    const queued = readRestartQueue(dir).some((row) => row.options?.rateLimit && row.episode === episodeId
-      && row.project === project && row.botId === bot.id && row.terminal === terminal && row.created_ms === created_ms);
-    return queued ? noteRateLimitAttention(details) : { row: null, created: false };
-  });
+// Called under the queue lock. Publish the hold before its attention item so delivery
+// stays held if writing the attention file is interrupted. A later observation repairs it.
+async function openQueuedHold(rows, entry, dialog, dir) {
+  const before = JSON.stringify(entry);
+  const attention = readAttention(dir);
+  if (entry.episode && attention.some(row => row.id === entry.episode && !row.open)) {
+    await closeQueuedHold(entry, "it recovered", dir);
+  }
+  const item = attention.find(row => row.open && isEpisode(row, entry.project, entry.botId)
+    && row.terminal === entry.terminal && row.created_ms === entry.created_ms);
+  entry.episode ??= item?.id ?? randomUUID();
+  entry.wasHeld = true;
+  if (!entry.resets_at) entry.resets_at = item?.resets_at ?? dialog.resets_at;
+  if (entry.resets_at && !entry.wake_at) {
+    entry.wake_at = item?.wake_at ?? new Date(Date.parse(entry.resets_at) + RATE_LIMIT_GRACE_MS).toISOString();
+  }
+  if (entry.handoffAsk) entry.handoffAsk.pausedAt ??= Date.now();
+  if (before !== JSON.stringify(entry)) saveRestartQueue(rows, dir);
+  const outcome = isPark(entry) ? `parked; resume in ${entry.terminal} when the provider allows it`
+    : entry.options?.handoff ? "pending handoff retained" : "pending restart retained";
+  const text = rateLimitLine(entry.botName, { outcome, resetsAt: entry.resets_at });
+  return noteRateLimitAttention({ project: entry.project, bot: { id: entry.botId, name: entry.botName },
+    terminal: entry.terminal, created_ms: entry.created_ms, text, resetsAt: entry.resets_at,
+    wakeAt: entry.wake_at, episodeId: entry.episode, dir });
+}
+
+async function closeQueuedHold(entry, why, dir) {
+  const item = entry.episode ?? (isPark(entry) ? readAttention(dir).find(row => row.open
+    && isEpisode(row, entry.project, entry.botId) && row.terminal === entry.terminal && row.created_ms === entry.created_ms)?.id : null);
+  if (item) await healRateLimitAttention(entry.project, entry.botId, why, dir, item);
+  delete entry.episode;
+  delete entry.resets_at;
+  delete entry.wake_at;
+  if (entry.handoffAsk) resumeHandoffAsk(entry.handoffAsk);
+}
+
+function resumeHandoffAsk(ask) {
+  if (ask.pausedAt == null) return;
+  ask.expiresAt += Date.now() - ask.pausedAt;
+  delete ask.pausedAt;
 }
 
 /** Closes the observed rate-limit item when its seat is readably healthy again, or gone. */
@@ -7794,37 +7984,115 @@ async function healRateLimitAttention(project, botId, why, dir = appHome(), epis
   }, dir);
 }
 
-/** The rate-limit dialog a bot's live Claude Code pane is blocked on, or null. Read-only. */
+/** A display reads the screen, and uses the first known reset of its exact pane. */
 async function seatRateLimit(project, bot, live) {
-  if (project?.machine || !live || live.state !== "live" || resolveAgent(bot?.agent) !== "claude") return null;
-  // A working agent is taking a turn; the dialog waits for a person, never behind a turn.
-  if (live.status?.state === "working") return null;
-  return rateLimitDialog(await readScreenText(live.address));
+  if (project?.machine || !live || live.state !== "live" || resolveAgent(bot?.agent) !== "claude"
+      || live.status?.state === "working" || !local(live.address)) return null;
+  const found = rateLimitDialog(await readScreenText(live.address));
+  if (!found) return null;
+  const { entry, dir } = locateQueue(project.key, bot.id, live, await coreId(), appHome());
+  const saved = readAttention(dir).find(row => row.open && isEpisode(row, project.key, bot.id)
+    && row.terminal === live.address && row.created_ms === live.created_ms);
+  const resets_at = entry?.resets_at ?? saved?.resets_at;
+  return resets_at ? { ...found, resets_at } : found;
 }
 
-/** This bot's parked rate-limit restart, or null; a dead watcher's entry is dropped first. */
-async function queuedParkFor(project, botId, dir = appHome()) {
-  const entry = readRestartQueue(dir).find((e) => e.project === project && e.botId === botId && e.options?.rateLimit === true);
-  if (!entry) return null;
-  if (entry.watcher) {
-    const state = await hcState(entry.watcher);
-    if (["gone", "finished"].includes(state.state)) {
-      await editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === entry.id); if (i >= 0) rows.splice(i, 1); }, dir);
+async function localSweepSeat(project, bot, view) {
+  if (project.machine) return null;
+  const own = projectAppHomeOf(project.key);
+  let selected = liveFor(view, bot.id, project);
+  if (selected && (selected.get?.address !== selected.binding.terminal
+      || selected.binding.project == null && (!selected.get.cwd || await keyOf(selected.get.cwd) !== project.key))) selected = null;
+  if (!process.env.HERDR_APP_HOME && existsSync(attachPath(own))) {
+    const held = await resolvedBinding(project, bot);
+    for (const row of held.rows) {
+      if (!row.get && (await hcState(row.binding.terminal)).state === "unknown") return null;
+    }
+    // An in-memory label import can discover another live pane before a ledger exists.
+    if (selected && held.get && (selected.get.address !== held.get.address || selected.get.created_ms !== held.get.created_ms)) {
+      throw appHomeConflict(bot, [appHome(), own]);
+    }
+    if (held.get && local(held.get.address)) return held;
+  }
+  if (!selected || !local(selected.get?.address)) return null;
+  if (!existsSync(view.path) && (await labelledPanes(project, bot, selected.get.address)).length > 1) {
+    throw new CliError(`${bot.name} has duplicate live labels; its rate-limit queue was left alone.`);
+  }
+  return { ...selected, home: appHome() };
+}
+
+const queueMatches = (row, expected) => row?.id === expected?.id && row?.episode === expected?.episode;
+const isParkedSeat = (row, seen) => row.project === seen.project && row.id === seen.id;
+
+function rateLimitAction(entry) {
+  if (!entry || isPark(entry)) return "park";
+  return entry.options?.handoff ? "retain-handoff" : "retain-restart";
+}
+
+async function applyRateLimitObservation({ project, bot, pane, core, ownerHome, dir, expected, attention, dialog }) {
+  if (!dialog && !expected && !attention) return null;
+  return editRestartQueue(async rows => {
+    let entry = rows.find(row => sameSeat(row, project, bot.id, pane, core));
+    if (!queueMatches(entry, expected ?? undefined)) {
+      // A newer episode or operation won the lock. A delayed healthy read cannot close it.
+      return dialog && entry && hasEpisode(entry) ? { entry } : null;
+    }
+    const state = await hcState(pane.address);
+    if (state.state !== "live" || state.get?.address !== pane.address || state.get.created_ms !== pane.created_ms) return null;
+    const binding = bindingInHome(ownerHome, bot.id, core, project);
+    if (binding) {
+      if (binding.terminal !== pane.address || binding.created_ms !== pane.created_ms) return null;
+    } else if (existsSync(attachPath(ownerHome)) || state.get.labels?.[BOT_LABEL] !== bot.id) {
+      // A label-only import is provisional. A real ledger can withdraw that authority
+      // while a screen read is in flight.
       return null;
     }
-  }
-  return entry;
+    if (!dialog) {
+      if (entry && hasEpisode(entry)) {
+        const park = isPark(entry);
+        await closeQueuedHold(entry, "it recovered", dir);
+        if (park) {
+          await killQueuedWatcher(entry);
+          rows.splice(rows.indexOf(entry), 1);
+        } else await ensureQueueWatcher(rows, entry, dir);
+      } else if (entry?.wasHeld) await ensureQueueWatcher(rows, entry, dir);
+      if (attention) await healRateLimitAttention(project, bot.id, "it recovered", dir, attention);
+      return null;
+    }
+    // A read may have finished after recovery. Confirm on open, with the row and generation
+    // pinned. Existing episodes keep their first countdown even when a later read differs.
+    if (!entry?.episode || readAttention(dir).some(row => row.id === entry.episode && !row.open)) {
+      const capture = await readScreenCapture(pane.address);
+      const fresh = capture.ok && rateLimitDialog(capture.text);
+      if (!fresh) return null;
+      dialog = { ...fresh, resets_at: dialog.resets_at ?? fresh.resets_at };
+    }
+    if (!entry) {
+      const stale = rows.find(row => row.project === project && row.botId === bot.id
+        && row.terminal === pane.address && row.created_ms !== pane.created_ms && (!row.core || row.core === core));
+      if (stale) {
+        await closeQueuedHold(stale, "its pane was reused", dir);
+        await killQueuedWatcher(stale);
+        rows.splice(rows.indexOf(stale), 1);
+      }
+      entry = { id: randomUUID(), project, botId: bot.id, botName: bot.name, core, terminal: pane.address,
+        created_ms: pane.created_ms, ownerHome, reason: "rate-limited", dialog: null, options: { rateLimit: true },
+        watcher: null, at: new Date().toISOString() };
+      rows.push(entry);
+    }
+    entry.ownerHome ??= ownerHome;
+    entry.core ??= core;
+    const noted = await openQueuedHold(rows, entry, dialog, dir);
+    const error = await ensureQueueWatcher(rows, entry, dir);
+    return { entry, noted, error };
+  }, dir);
 }
 
-/**
- * The `am rate-limit` sweep (#1557), and the same pass a scheduled `am restart --due` runs
- * first: every live Claude Code seat whose pane tail shows the rate-limit dialog is reported,
- * then parked for the person. A watcher checks for recovery without starting a replacement,
- * changing accounts or retiring any pane. A readable healthy seat closes the attention item.
- */
-async function rateLimitPass(opts, keys, dry) {
+/** A scheduled or manual sweep. Scan only the verified local seat and keep the same decision
+ * for preview and execution. The queue's directory and the pane's owning home may differ. */
+async function rateLimitPass(opts, keys, dry, recovered = new Set()) {
   const out = { rate_limited: [], parked: [], switched: [], attention: [], notes: [] };
-  const { view, hcError } = await viewOrError();
+  const { view, hcError } = await viewOrError({ readOnly: true });
   if (hcError) {
     out.notes.push(`hc couldn't list this computer's panes, so no rate-limit dialog was read (${hcError}).`);
     return out;
@@ -7832,97 +8100,71 @@ async function rateLimitPass(opts, keys, dry) {
   for (const key of keys) {
     let project;
     try { project = loadProject(key); } catch (e) { out.notes.push(`${key}: ${e.message}`); continue; }
-    if (project.machine) continue;
-    const mode = rateLimitModeOf(project.file);
     for (const bot of project.file.bots) {
       if (bot.planned || resolveAgent(bot.agent) !== "claude") continue;
-      // A first read in the default home can import a live pane that already has a
-      // project-local ledger. Resolve the owner before writing or launching its watcher.
-      const held = !process.env.HERDR_APP_HOME && existsSync(attachPath(projectAppHomeOf(key)))
-        ? await resolvedBinding(project, bot) : await readHeld(project, bot, view);
-      const live = held?.get ?? null;
-      const dir = held?.home ?? appHome();
-      if (!live || live.state !== "live") {
-        if (!dry) for (const homeDir of queueHomes([key])) await healRateLimitAttention(key, bot.id, "its pane ended", homeDir);
-        continue;
-      }
-      // The sweep never acts on its own pane: a person running it inside a seat would end it.
+      let held, located;
+      try {
+        held = await localSweepSeat(project, bot, view);
+        if (held) located = locateQueue(key, bot.id, held.get, view.core, held.home);
+      } catch (error) { out.notes.push(`${bot.name}: ${error.message}`); continue; }
+      if (!held) continue;
+      const live = held.get;
       if (process.env.HC_TERMINAL_ID && live.address === process.env.HC_TERMINAL_ID) {
         out.notes.push(`${bot.name}: the sweep runs inside its own pane; run it from a timer or another pane.`);
         continue;
       }
       if (live.status?.state === "working") continue;
-      const observed = readAttention(dir).find((row) => row.open && isEpisode(row, key, bot.id));
+      const { entry: expected, dir } = located;
+      const attention = readAttention(dir).find(row => row.open && isEpisode(row, key, bot.id)
+        && row.terminal === live.address && row.created_ms === live.created_ms)?.id;
       const capture = await readScreenCapture(live.address);
       if (!capture.ok) {
-        // No evidence either way: the episode stays open (never healed by a blind sweep).
         out.notes.push(`${bot.name}: its pane tail couldn't be read, so its rate-limit episode was left open.`);
         continue;
       }
       const dialog = rateLimitDialog(capture.text);
+      if (!dialog && expected?.options?.handoff
+          && (paneIsBlocked(live) || pendingDialog(capture.text))) continue;
+      const result = dry ? null : await applyRateLimitObservation({ project: key, bot, pane: live,
+        core: view.core, ownerHome: held.home, dir, expected, attention, dialog });
       if (!dialog) {
-        if (!dry && observed) await healRateLimitAttention(key, bot.id, "it recovered", dir, observed.id);
+        if (dry && expected && hasEpisode(expected)) recovered.add(expected.id);
         continue;
       }
+      const entry = result?.entry ?? expected;
+      const resets_at = entry?.resets_at ?? dialog.resets_at;
+      const action = rateLimitAction(entry);
       const seen = { id: bot.id, name: bot.name, project: key, terminal: live.address, question: dialog.question,
-        onRateLimit: mode, ...(dialog.resets_at ? { resets_at: dialog.resets_at } : {}) };
+        onRateLimit: rateLimitModeOf(project.file), ...(dry ? { action } : {}), ...(resets_at ? { resets_at } : {}) };
       out.rate_limited.push(seen);
-      if (dry) { out.notes.push(`${bot.name}: blocked on the rate-limit dialog; would be parked for manual resume.`); continue; }
-      const handoff = await queuedHandoffFor(key, bot.id, dir);
-      if (handoff) {
-        const text = rateLimitLine(bot.name, { outcome: "pending handoff retained", resetsAt: dialog.resets_at ?? null });
-        const noted = await noteRateLimitAttention({ project: key, bot, terminal: live.address, created_ms: live.created_ms,
-          text, resetsAt: dialog.resets_at, dir });
-        if (noted.created) out.attention.push(noted.row);
-        out.notes.push(`${bot.name}: its handoff is already queued; the existing watcher will wait for the dialog to clear.`);
-        continue;
+      if (result?.noted?.created) out.attention.push(result.noted.row);
+      if (result?.error) out.notes.push(`${bot.name}: its hold was kept and a later sweep will retry its watcher (${result.error}).`);
+      if (action === "park") {
+        if (result?.entry) out.parked.push({ ...seen, ...(entry.wake_at ? { wake_at: entry.wake_at } : {}) });
+        if (dry) out.notes.push(`${bot.name}: blocked on the rate-limit dialog; would be parked for manual resume.`);
+      } else {
+        const operation = action === "retain-handoff" ? "handoff" : "restart";
+        out.notes.push(`${bot.name}: its ${operation} is already queued; ${dry ? "would retain" : "retained"} its recheck on the same entry.`);
       }
-      const existing = await queuedParkFor(key, bot.id, dir);
-      // Never invent a wake: without the dialog's own reset there is no timed restart, only a
-      // watcher that cancels when the dialog clears.
-      const wakeAt = dialog.resets_at ? new Date(Date.parse(dialog.resets_at) + RATE_LIMIT_GRACE_MS).toISOString() : null;
-      let entry = existing;
-      if (!entry || !entry.episode || (!entry.wake_at && wakeAt)
-          || entry.terminal !== live.address || entry.created_ms !== live.created_ms) {
-        const episode = observed && observed.terminal === live.address && observed.created_ms === live.created_ms
-          ? observed.id : randomUUID();
-        entry = await queueRestart({ bot, key, old: live, screen: capture.text, dir,
-          opts: { json: true, rateLimit: true, episode, ...(wakeAt ? { wakeAt } : {}), ...(dialog.resets_at ? { resetsAt: dialog.resets_at } : {}) },
-          wanted: null, plan: { mode: "resume", agent: "claude", model: null } });
-      }
-      if (entry.reason !== "rate-limited" && !entry.options?.rateLimit) {
-        out.notes.push(`${bot.name}: its existing ${entry.reason} restart was kept.`);
-        continue;
-      }
-      const text = rateLimitLine(bot.name, { outcome: `parked; resume in ${live.address} when the provider allows it`, resetsAt: dialog.resets_at ?? null });
-      const noted = await noteQueuedPark({ project: key, bot, terminal: live.address, created_ms: live.created_ms,
-        text, resetsAt: entry.resets_at ?? dialog.resets_at, episodeId: entry.episode, dir });
-      if (!noted.row) continue;
-      out.parked.push({ ...seen, ...(entry.wake_at ? { wake_at: entry.wake_at } : {}) });
-      if (noted.created) out.attention.push(noted.row);
     }
   }
   return out;
 }
 
-async function deliveryStatus(terminal) {
-  const observed = await hcState(terminal);
-  const pane = observed.get;
-  if (observed.state !== "live" || !pane?.address || !Number.isSafeInteger(pane.created_ms)) {
+async function deliveryStatus(terminal, run = hc, expected = null) {
+  const got = await run(["get", terminal, "--json"]);
+  const pane = got.code === 0 ? JSON.parse(got.stdout) : null;
+  if (pane?.state !== "live" || !pane.address || !Number.isSafeInteger(pane.created_ms)) {
     throw new CliError("Could not identify the live terminal for automatic delivery.");
   }
-  const address = pane.address;
   const folders = [...new Set([pane.cwd, pane.foreground?.cwd].filter(dir => typeof dir === "string" && isAbsolute(dir)))];
   const projects = process.env.HERDR_APP_HOME ? [] : await Promise.all(folders.map(keyOf));
   const roots = queueHomes(projects);
-  if (roots.some(dir => hasRateLimitHold(dir, address, pane.created_ms)) || pane.status?.state === "blocked") {
-    return { terminal: address, held: true };
-  }
-  const capture = await readScreenCapture(address);
-  if (!capture.ok) throw new CliError("Could not read the terminal before automatic delivery.");
-  const held = pendingDialog(capture.text) || rateLimitDialog(capture.text)
-    || (agyCandidate(pane) && agyPromptOf(capture.text));
-  return { terminal: address, held: Boolean(held) };
+  if (expected?.ownerHome && !roots.some(dir => sameHome(dir, expected.ownerHome))) roots.push(expected.ownerHome);
+  const held = paneIsBlocked(pane)
+    || roots.some(dir => hasRateLimitHold(dir, pane.address, pane.created_ms));
+  const read = held ? null : await run(["read", pane.address, "--lines", "40", "--json"]);
+  return automaticDelivery(pane, roots, read?.code === 0 ? JSON.parse(read.stdout)?.text : null, expected);
 }
 
 async function cmdDeliveryStatus(opts, [terminal, ...other]) {
@@ -7930,10 +8172,10 @@ async function cmdDeliveryStatus(opts, [terminal, ...other]) {
   return deliveryStatus(terminal);
 }
 
-async function sendAutomatically(terminal, text) {
+async function sendAutomatically(terminal, text, run = hc, expected = null) {
   try {
-    const status = await deliveryStatus(terminal);
-    if (!status.held) return hc(["send", status.terminal, text]);
+    const status = await deliveryStatus(terminal, run, expected);
+    if (!status.held) return run(["send", status.terminal, text]);
     return { code: 1, held: true, stdout: "", stderr: "The terminal is waiting for a person. Automatic delivery was held." };
   } catch (error) {
     return { code: 1, held: true, stdout: "", stderr: firstSentence(error.message) };
@@ -7950,7 +8192,7 @@ async function cmdRateLimit(opts) {
   if (opts.json) return result;
   const lines = [
     ...result.attention.map((row) => `! ${row.text}`),
-    ...result.rate_limited.filter((r) => !result.parked.some((p) => p.id === r.id) && !result.switched.some((p) => p.id === r.id))
+    ...result.rate_limited.filter((r) => !result.parked.some((p) => isParkedSeat(p, r)) && !result.switched.some((p) => isParkedSeat(p, r)))
       .map((r) => `${r.name} (${r.id}) at ${r.terminal}: blocked on the rate-limit dialog "${r.question}"`
         + `${r.resets_at ? `; resets ${r.resets_at}` : ""}${dry ? " (dry run: nothing was parked or switched)." : "."}`),
     ...result.parked.map((r) => `${r.name}: parked; ${parkedWakeText(r)} (am restart --queued lists it).`),
@@ -7972,7 +8214,7 @@ async function cmdRestartDue(opts) {
     throw new CliError("--due measures this computer's Claude Code session logs; run the pass on the machine whose seats it restarts "
       + "(a linked machine's own am).", 2);
   }
-  const invalid = ["fresh", "tree", "force", "fresh-shared", "save", "cancel", "queued", "agent", "model", "cwd", "space", "tab"]
+  const invalid = ["fresh", "tree", "force", "fresh-shared", "save", "cancel", "queued", "run-queued", "agent", "model", "cwd", "space", "tab"]
     .filter((k) => opts[k] !== undefined && opts[k] !== false);
   if (invalid.length) {
     throw new CliError(`--due restarts from a handoff, fresh, with the seat's helpers: it takes no --${invalid[0]}, `
@@ -7996,18 +8238,18 @@ async function cmdRestartDue(opts) {
 }
 
 /** Check the same seat and helper commands the handoff restart will launch. */
-async function checkDueLogins(project, botId, terminal, created_ms) {
+async function checkDueLogins(project, botId, pin) {
   if (!loginPolicyActive(process.env)) return;
-  await cmdRestart({ fresh: true, tree: true, project, _checkDueLogin: true,
-    _targetPin: { terminal, created_ms } }, [botId]);
+  await cmdRestart({ fresh: true, tree: true, project, _checkDueLogin: true, _ownerHome: pin.ownerHome,
+    _targetPin: pin }, [botId]);
 }
 
 /** The measured, acted-on pass behind `cmdRestartDue` (#1556); `dry` only reports it. */
 async function restartDuePass(opts, keys, dry) {
-  // #1557 first: a seat parked on the rate-limit dialog must not be woken early by this pass,
-  // and this is the scheduled sweep that parks or switches one in the first place.
-  const rate = await rateLimitPass(opts, keys, dry);
-  const { view, hcError } = await viewOrError();
+  // The scheduled sweep establishes holds before deciding which handoffs can be asked for.
+  const recovered = new Set();
+  const rate = await rateLimitPass(opts, keys, dry, recovered);
+  const { view, hcError } = await viewOrError({ readOnly: dry });
   if (hcError) throw new CliError(`hc couldn't list this computer's panes, so no seat's context was read (${hcError}); nothing was asked or restarted.`);
   const ledger = workerLedgerRows();
   const notes = [];
@@ -8017,47 +8259,49 @@ async function restartDuePass(opts, keys, dry) {
     try { project = loadProject(key); } catch (e) { notes.push(`${key}: ${e.message}`); continue; }
     for (const bot of project.file.bots) {
       if (bot.planned) continue;
-      // A parked seat has its own wake (its reset plus the grace): no scheduled wake-up before it.
-      if (rate.rate_limited.some((seen) => seen.project === key && seen.id === bot.id)) {
-        notes.push(`${bot.name}: parked on the rate-limit dialog or handled by this sweep; this pass left it alone.`);
-        continue;
-      }
-      let parked;
-      for (const dir of queueHomes([key])) {
-        parked = await queuedParkFor(key, bot.id, dir);
-        if (parked) break;
-      }
-      if (parked) {
-        notes.push(`${bot.name}: parked on the rate-limit dialog; ${parkedWakeText(parked)}; this pass left it alone.`);
-        continue;
-      }
+      const seen = rate.rate_limited.find(row => isParkedSeat(row, { project: key, id: bot.id }));
+      if (seen) notes.push(`${bot.name}: parked on the rate-limit dialog or handled by this sweep; this pass won't ask while held.`);
       const threshold = restartAtOf(bot);
       if (threshold === null) continue;
-      const live = view ? liveFor(view, bot.id, project) : null;
+      let live, located;
+      try {
+        live = await localSweepSeat(project, bot, view);
+        if (live) located = locateQueue(key, bot.id, live.get, view.core, live.home);
+      } catch (error) { notes.push(`${bot.name}: ${error.message}`); continue; }
       if (!live) continue;
       if (process.env.HC_TERMINAL_ID && live.binding.terminal === process.env.HC_TERMINAL_ID) {
         notes.push(`${bot.name}: the pass runs inside its own pane; run it from a timer or another pane.`);
         continue;
       }
-      const context = seatContext(project, bot, live.get, ledger);
+      const context = seatContext(project, bot, live.get, sameHome(live.home, appHome()) ? ledger : workerLedgerRows(live.home));
       if (!context || !Number.isFinite(context.tokens)) continue;
       if (!(context.tokens > threshold)) continue;
-      due.push({ key, project, bot, threshold, tokens: context.tokens, terminal: live.binding.terminal,
-        created_ms: live.get?.created_ms ?? live.binding.created_ms ?? null, live: live.get });
+      const { dir } = located;
+      const healed = recovered.has(located.entry?.id);
+      const entry = healed && isPark(located.entry) ? null : located.entry;
+      const path = entry?.handoffFile ?? handoffPathOf(key, bot.id, live.home);
+      const already = entry?.options?.handoff;
+      const held = Boolean(seen || !healed && entry && hasEpisode(entry));
+      const refusal = already ? null : handoffWritable(path);
+      const pane = already || refusal ? null : await paneNow(live.get.address);
+      const action = already ? "retain-handoff" : refusal ? "refuse"
+        : !held && pane?.idle ? "ask" : "queue-handoff";
+      due.push({ key, bot, threshold, tokens: context.tokens, terminal: live.get.address,
+        created_ms: live.get.created_ms, core: view.core, ownerHome: live.home, queueHome: dir, path, action, refusal, entry });
     }
   }
   const line = (r) => `${r.bot.name} (${r.bot.id}) at ${r.terminal} in ${r.key}: context ${r.tokens} > restartAt ${r.threshold}`;
+  const queuedLine = (r) => `${r.bot.name}: already queued for a handoff restart on ${r.terminal}; this pass left that queue entry and its watcher alone.`;
   if (dry) {
-    const plans = due.map((r) => {
-      const path = handoffPathOf(r.bot.id);
-      return { ...r, path, refusal: handoffWritable(path) };
-    });
-    if (opts.json) return { due: plans.map((r) => ({ id: r.bot.id, name: r.bot.name, project: r.key,
+    if (opts.json) return { due: due.map((r) => ({ id: r.bot.id, name: r.bot.name, project: r.key,
       terminal: r.terminal, context_tokens: r.tokens, restart_at: r.threshold, handoff: r.path,
-      refused: r.refusal ?? null })), rate_limited: rate.rate_limited, attention: rate.attention, notes: [...rate.notes, ...notes] };
-    return [...plans.map((r) => `${line(r)}; ${r.refusal ? `would be refused: ${r.refusal}; it would not be asked and not restarted.`
-      : "would be asked for its handoff, then restarted from it."}`), ...rate.rate_limited.map((r) => `${r.name} (${r.id}) at ${r.terminal}: blocked on the rate-limit dialog; the sweep would park it for manual resume.`),
-    ...rate.notes, ...(plans.length || rate.rate_limited.length ? [] : ["No seat is over its context threshold."]), ...notes].join("\n");
+      action: r.action, refused: r.refusal })), rate_limited: rate.rate_limited, attention: rate.attention, notes: [...rate.notes, ...notes] };
+    return [...due.map((r) => {
+      if (r.action === "retain-handoff") return queuedLine(r);
+      if (r.refusal) return `${line(r)}; would be refused: ${r.refusal}; it would not be asked and not restarted.`;
+      return `${line(r)}; ${r.action === "queue-handoff" ? "would queue its handoff restart until its seat is ready."
+        : "would be asked for its handoff, then restarted from it."}`;
+    }), ...rate.notes, ...(due.length || rate.rate_limited.length ? [] : ["No seat is over its context threshold."]), ...notes].join("\n");
   }
   if (!due.length) {
     if (opts.json) return { due: [], restarted: [], queued: [], failed: [], rate_limited: rate.rate_limited,
@@ -8069,60 +8313,71 @@ async function restartDuePass(opts, keys, dry) {
   }
   const loginPolicy = loginPolicyActive(process.env);
   // A managed handoff must plan and check the same replacement tree it will run when it fires.
-  const queueDue = async (r, pane) => {
-    const options = { fresh: true, tree: true, handoff: true, json: true, contextTokens: r.tokens, restartAt: r.threshold };
+  const queueDue = async (r, pane, ask = null) => {
+    const options = { fresh: true, tree: true, handoff: true, json: true, contextTokens: r.tokens, restartAt: r.threshold,
+      _handoffAsk: ask, _handoffFile: r.path, _queueHome: r.queueHome, _ownerHome: r.ownerHome,
+      _holdForScreen: pane.held, _targetPin: r };
     if (loginPolicy) {
-      return cmdRestart({ ...options, project: r.key, _queueDue: true,
-        _targetPin: { terminal: r.terminal, created_ms: r.created_ms } }, [r.bot.id]);
+      return cmdRestart({ ...options, project: r.key, _queueDue: true }, [r.bot.id]);
     }
-    return queueRestart({ bot: r.bot, key: r.key, old: pane.get, screen: pane.screen, opts: { ...opts, ...options },
-      wanted: null, plan: { mode: "fresh", agent: r.bot.agent, model: r.bot.model ?? null }, recovered: false });
+    return queueRestart({ bot: r.bot, key: r.key, old: pane.get, screen: pane.screen, opts: options,
+      dir: r.ownerHome, wanted: null, plan: { mode: "fresh", agent: r.bot.agent, model: r.bot.model ?? null } });
   };
+  const queuedResult = (r, entry) => ({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, reason: entry.reason,
+    watcher: entry.watcher, context_tokens: r.tokens, restart_at: r.threshold, handoff: r.path });
   const restarted = [], queued = [], failed = [];
   const say = [];
   for (const r of due) {
-    const path = handoffPathOf(r.bot.id);
+    const { path } = r;
     const refuse = async (why, kind = "refused") => {
       failed.push({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, error: why });
       say.push(`${r.bot.name}: not restarted: ${why}`);
       report([`${r.bot.name}: not restarted: ${why}`]);
-      await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, kind, why, path, { notify: false });
+      await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal, ownerHome: r.ownerHome }, kind, why, path, { notify: false });
+    };
+    const dropped = async (why) => {
+      say.push(`${r.bot.name}: ${why}`);
+      report([`${r.bot.name}: ${why}`]);
+      await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key,
+        terminal: r.terminal, ownerHome: r.ownerHome }, "dropped", why, path, { notify: false });
     };
     // A timer can tick again while this seat's handoff watcher still waits: replacing that
     // entry would kill the watcher every tick and the seat would never restart (#1556).
-    const already = await queuedHandoffFor(r.key, r.bot.id);
-    if (already) {
-      const left = `${r.bot.name}: already queued for a handoff restart on ${already.terminal}; this pass left that queue entry `
-        + "and its watcher alone.";
+    if (r.action === "retain-handoff") {
+      const left = queuedLine(r);
       say.push(left);
       if (opts.json) notes.push(left);
+      const error = await editRestartQueue(async rows => {
+        const current = rows.find(row => queueMatches(row, r.entry));
+        return current ? ensureQueueWatcher(rows, current, r.queueHome) : null;
+      }, r.queueHome);
+      if (error) report([`${r.bot.name}: its handoff was kept and a later pass will retry its watcher (${error}).`]);
       continue;
     }
-    const why = handoffRefusal(path);
+    const why = r.refusal ?? handoffRefusal(path);
     if (why) {
       await refuse(`${why}; it was not asked for a handoff and was not restarted.`);
       continue;
     }
     try {
       const now = await paneNow(r.terminal);
-      if (now.state !== "live") {
+      if (now.state !== "live" || now.get?.created_ms !== r.created_ms) {
         // The measured seat ended before the ask. A foreground pass tells its person; the record
         // is also kept so `am restart --queued` can answer for it later (#1556).
-        const why = `not running in ${r.terminal} any more; nothing was asked or restarted.`;
-        say.push(`${r.bot.name}: ${why}`);
-        report([`${r.bot.name}: ${why}`]);
-        await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, "dropped", why, path, { notify: false });
+        await dropped(`not running in ${r.terminal} any more; nothing was asked or restarted.`);
         continue;
       }
-      if (!now.idle) {
+      if (sameHome(r.ownerHome, appHome()) && !existsSync(attachPath(r.ownerHome))) {
+        await importLabels(attachPath(r.ownerHome));
+      }
+      if (!now.idle || r.action === "queue-handoff") {
         const entry = await queueDue(r, now);
-        queued.push({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, reason: entry.reason, watcher: entry.watcher,
-          context_tokens: r.tokens, restart_at: r.threshold, handoff: path });
+        queued.push(queuedResult(r, entry));
         say.push(`${line(r)}; queued until its next idle, then asked for its handoff and restarted from it `
           + `(am restart --queued lists it; the handoff is ${path}).`);
         continue;
       }
-      await checkDueLogins(r.key, r.bot.id, r.terminal, r.created_ms);
+      await checkDueLogins(r.key, r.bot.id, r);
       // Empty before asking: only what the seat writes for THIS request can be sent (#1556).
       const cleared = clearHandoff(path);
       if (cleared) {
@@ -8131,9 +8386,23 @@ async function restartDuePass(opts, keys, dry) {
       }
       // Ask now, then wait for a file written after the ask and an idle seat.
       const since = Date.now();
-      const sent = await sendAutomatically(r.terminal, handoffRequestText(r.bot, path));
+      const sent = await sendAutomatically(r.terminal, handoffRequestText(r.bot, path),
+        hc, { terminal: r.terminal, created_ms: r.created_ms });
+      if (sent.held) {
+        const pane = await paneNow(r.terminal);
+        if (pane.get?.created_ms !== r.created_ms) continue;
+        queued.push(queuedResult(r, await queueDue(r, { ...pane, held: true })));
+        say.push(`${line(r)}; its ask was held and queued until the seat is ready.`);
+        continue;
+      }
       if (sent.code !== 0) throw new CliError(`couldn't ask for its handoff (hc send: ${hcSaid((sent.stderr || sent.stdout).trim())})`);
       const ready = await waitForHandoff({ terminal: r.terminal, path, since });
+      if (ready.held) {
+        if (ready.get && ready.get.created_ms !== r.created_ms) continue;
+        queued.push(queuedResult(r, await queueDue(r, { ...ready, get: ready.get ?? now.get }, { since, expiresAt: ready.expiresAt })));
+        say.push(`${line(r)}; its handoff will continue after the hold.`);
+        continue;
+      }
       if (ready.timedOut) {
         await refuse(`still running in ${r.terminal}; it didn't write ${path} within ${Math.round(HANDOFF_WAIT_MS / 1000)}s, so it was not restarted.`, "timeout");
         continue;
@@ -8147,40 +8416,46 @@ async function restartDuePass(opts, keys, dry) {
         await refuse(`${path} is empty; it was not restarted and ${r.terminal} still runs it.`);
         continue;
       }
-      const result = await cmdRestart({ fresh: true, tree: true, json: true, project: r.key,
-        _targetPin: { terminal: r.terminal, created_ms: r.created_ms } }, [r.bot.id]);
+      const pending = locateQueue(r.key, r.bot.id, now.get, view.core, r.ownerHome).entry;
+      if (pending && hasEpisode(pending)) {
+        const pane = await paneNow(r.terminal);
+        if (pane.get?.created_ms !== r.created_ms) continue;
+        queued.push(queuedResult(r, await queueDue(r, pane, { since, expiresAt: since + HANDOFF_WAIT_MS })));
+        continue;
+      }
+      const result = await cmdRestart({ fresh: true, tree: true, handoff: true, json: true, project: r.key,
+        _ownerHome: r.ownerHome, _queueHome: r.queueHome, _handoffFile: path,
+        _handoffAsk: { since, expiresAt: since + HANDOFF_WAIT_MS }, contextTokens: r.tokens, restartAt: r.threshold,
+        _targetPin: r }, [r.bot.id]);
       if (result === PRINTED) {
         say.push(`${r.bot.name}: restarted in place from ${path}.`);
         restarted.push({ id: r.bot.id, name: r.bot.name, terminal: null, handoff: path });
         continue;
       }
-      if (result && result.queued) {
-        // The seat took a turn between the check and the restart: take the plain queue entry
-        // back and queue the handoff-aware one instead, so the file is not lost.
-        if (!loginPolicy) await cmdRestart({ cancel: true, json: true, project: r.key }, [r.bot.id]);
-        const again = await paneNow(r.terminal);
-        if (again.state !== "live") {
-          // The seat ended between the handoff and the queued restart: the written handoff was
-          // not queued, so record the drop too (the foreground pass reports it as well, #1556).
-          const why = `its pane ended (${again.state}) after the handoff was written, so it was not queued for a handoff restart.`;
-          say.push(`${r.bot.name}: ${why}`);
-          report([`${r.bot.name}: ${why}`]);
-          await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, "dropped", why, path, { notify: false });
+      if (result?.queued) {
+        const state = await hcState(r.terminal);
+        if (["gone", "finished"].includes(state.state)) {
+          await editRestartQueue(async rows => {
+            const index = rows.findIndex(row => row.watcher === result.watcher && sameSeat(row, r.key, r.bot.id, now.get, view.core));
+            if (index < 0) return;
+            await closeQueuedHold(rows[index], "its pane ended", r.queueHome);
+            await killQueuedWatcher(rows[index]);
+            rows.splice(index, 1);
+          }, r.queueHome);
+          await dropped(`its pane ended (${state.state}) after the handoff was written, so it was not queued for a handoff restart.`);
           continue;
         }
-        const entry = await queueDue(r, again);
-        queued.push({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, reason: entry.reason, watcher: entry.watcher,
-          context_tokens: r.tokens, restart_at: r.threshold, handoff: path });
-        say.push(`${line(r)}; it took a turn, so it is queued until its next idle and restarted from ${path}.`);
+        queued.push(queuedResult(r, result));
+        say.push(`${line(r)}; its handoff will continue when its seat is ready.`);
         continue;
       }
       const terminal = result && typeof result === "object" ? result.terminal : null;
       const warning = terminal ? await sendHandoffMessage(terminal, handoff, path) : `${path} wasn't sent: the restart gave no new terminal.`;
       if (warning) {
         report([warning]);
-        await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal }, "send", warning, path, { notify: false });
+        await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal, ownerHome: r.ownerHome }, "send", warning, path, { notify: false });
       } else {
-        await clearHandoffFailure(r.bot.id);
+        await clearHandoffFailure(r.key, r.bot.id, r.ownerHome);
       }
       restarted.push({ id: r.bot.id, name: r.bot.name, terminal, handoff: path, context_tokens: r.tokens, restart_at: r.threshold,
         ...(warning ? { warning } : {}) });
@@ -8805,11 +9080,11 @@ async function cmdRestart(opts, [ref]) {
     }
     expect = expectedPane(opts["expect-pane"]);
   }
-  if (opts["run-queued"]) return runQueuedRestart(opts);
   if (opts.due) {
     if (ref) throw new CliError("restart --due takes no bot: it lists every seat over its threshold, or take one with am restart <bot>.", 2);
     return cmdRestartDue(opts);
   }
+  if (opts["run-queued"]) return runQueuedRestart(opts);
   if (opts.queued || opts.cancel) return queuedRestarts(opts, ref);
   if (opts.tab && !opts.space) throw new CliError("--tab needs --space (the space that tab is in).", 2);
   const swap = opts.agent !== undefined || opts.model !== undefined;
@@ -8843,7 +9118,10 @@ async function cmdRestart(opts, [ref]) {
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
   // #1432: a bot whose live pane is on a holder restarts there, through the machine path.
-  if (!project.machine && !opts._queuedTarget && readHolders().holders.length > 1) {
+  const queued = opts._queuedTarget;
+  const pin = queued ?? opts._targetPin;
+  if (pin && project.machine) throw new CliError("A pinned restart must run on the seat's local core.");
+  if (!project.machine && !pin && readHolders().holders.length > 1) {
     const held = holderHeld(await attachView(), bot.id, key);
     // Only this project's binding: a clone's same-id bot on a holder is another checkout's.
     if (held?.holder && held.holder !== LOCAL_HOLDER && held.binding.project === key) return restartOnHolder(opts, project, bot, held);
@@ -8862,17 +9140,26 @@ async function cmdRestart(opts, [ref]) {
   const requested = appHome();
   // New park watchers run directly in their owning home. Legacy watchers can rediscover
   // their seat's project-local binding; consume their row from the original queue below.
-  const queued = opts._queuedTarget;
-  const legacyPark = queued?.options?.rateLimit === true && !queued.ownerHome;
   if (queued) opts._queueHome = requested;
-  const target = await restartTarget(project, bot, requested, Boolean(explicit) && !legacyPark, !queued && !opts._checkDueLogin);
+  const owner = queued?.ownerHome ?? opts._ownerHome ?? requested;
+  const target = pin?.ownerHome && (!queued || queued.options?.handoff)
+    ? await pinnedRestartTarget(project, bot, pin)
+    : await restartTarget(project, bot, owner, Boolean(explicit) && (!queued || Boolean(queued.ownerHome)), !pin);
+  if (pin && (!target?.held || !local(pin.terminal) || pin.core && target.held.binding.core !== pin.core
+    || pin.ownerHome && !sameHome(pin.ownerHome, target.dir) || target.held.get.address !== pin.terminal
+    || (pin.created_ms != null && target.held.get.created_ms !== pin.created_ms))) {
+    if (queued) return queued.wasHeld ? RETRY_QUEUED : PRINTED;
+    throw new CliError(`${bot.name}: the pane this pass measured (${pin.terminal}) is no longer its live seat, so it was not restarted.`,
+      1, { refused: "handoff", terminal: pin.terminal });
+  }
+  const queueDirs = queueHomes([key]);
   const recovered = opts._queuedTarget?.options?.recoveredHome === true || !sameHome(requested, target.dir);
   if (recovered) {
     process.env.HERDR_APP_HOME = target.dir;
     viewOnce = null;
   }
   try {
-    return await restartResolved(opts, project, bot, wanted, swap, target, recovered);
+    return await restartResolved(opts, project, bot, wanted, swap, target, recovered, queueDirs);
   } finally {
     if (recovered) {
       if (explicit === undefined) delete process.env.HERDR_APP_HOME;
@@ -8882,7 +9169,18 @@ async function cmdRestart(opts, [ref]) {
   }
 }
 
-async function restartResolved(opts, project, bot, wanted, swap, target, recovered) {
+async function pinnedRestartTarget(project, bot, pin) {
+  const core = await coreId();
+  if (!local(pin.terminal) || !Number.isSafeInteger(pin.created_ms) || (pin.core && core !== pin.core)) return null;
+  const binding = bindingInHome(pin.ownerHome, bot.id, core, project.key);
+  if (binding?.terminal !== pin.terminal || binding.created_ms !== pin.created_ms) return null;
+  const get = await bindingPane(binding, project.key);
+  if (get?.address !== pin.terminal) return null;
+  await requireRestartPane(get, null, project);
+  return { held: { binding, get }, dir: pin.ownerHome };
+}
+
+async function restartResolved(opts, project, bot, wanted, swap, target, recovered, queueDirs) {
   const { file, key } = project;
   // A swap's agent and model are checked as an edit checks them (entryFrom); a new agent
   // without --model drops the old agent's pin. bots.json changes only with --save.
@@ -8914,19 +9212,13 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   const view = await attachView({ readOnly: true });
   const held = target.held;
   let old = held?.get ?? null;
-  // #1556: a due pass restarts only the pane it measured; a person's restart or another pass
-  // may have moved the seat while the handoff was being written.
-  const pin = opts._targetPin ?? null;
-  if (pin && (!old || old.address !== pin.terminal || (pin.created_ms != null && old.created_ms !== pin.created_ms))) {
-    throw new CliError(`${bot.name}: the pane this pass measured (${pin.terminal}) is no longer its live seat, so it was not restarted.`,
-      1, { refused: "handoff", terminal: pin.terminal });
-  }
+  const pin = opts._targetPin ?? (opts._queuedTarget?.options?.handoff ? opts._queuedTarget : null);
   const recheck = async ({ argv, agent }) => {
-    const current = await restartTarget(project, bot, appHome(), true);
-    if ((current.held ? attachKey(current.held.binding) : null) !== (held ? attachKey(held.binding) : null)) {
+    const current = pin?.ownerHome ? await pinnedRestartTarget(project, bot, pin) : await restartTarget(project, bot, appHome(), true);
+    if ((current?.held ? attachKey(current.held.binding) : null) !== (held ? attachKey(held.binding) : null)) {
       throw new CliError(`${bot.name}'s attachment changed while planning the restart; nothing was started.`);
     }
-    if (!current.held) return undefined;
+    if (!current?.held) return undefined;
     // The pointer record (#1509) decides this launch's login (launchSeat), so the app home's
     // Claude login record is not what the new pane runs on, and its check against the old pane
     // does not apply. A refusal of the record stops here, before anything is stopped or queued.
@@ -8934,13 +9226,12 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     if (target.adopted) return adoptedLogin(current.held.get, argv, recovered);
     return recovered ? recoveredLogin(current.held.get, argv) : undefined;
   };
-  if (opts._queuedTarget && (!old || old.address !== opts._queuedTarget.terminal
-    || (opts._queuedTarget.created_ms != null && old.created_ms !== opts._queuedTarget.created_ms))) return PRINTED;
   // attachView caches its first hc get for the whole watcher run: a queued fire must judge the
   // pane's status now, not the state it had when the watcher started.
   if (opts._queuedTarget && old) {
     const now = await hcState(old.address);
-    if (now.state !== "live" || !now.get) return PRINTED;
+    if (now.state === "unknown" || !now.get && now.state === "live") return RETRY_QUEUED;
+    if (now.state !== "live" || now.get.created_ms !== opts._queuedTarget.created_ms) return PRINTED;
     old = { ...old, ...now.get, address: old.address };
     await requireRestartPane(old, null, project);
   }
@@ -9029,7 +9320,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   };
   let plan = restartPlan(planned);
   const shouldQueue = old && (opts._queueDue || (!opts.force && !isPaneIdle(old, screen)
-    && (["working", "blocked"].includes(old.status?.state) || pendingDialog(screen))));
+    && (["working", "blocked"].includes(old.status?.state) || pendingDialog(screen) || rateLimitDialog(screen))));
   if (shouldQueue && !(opts.tree && loginPolicyActive(process.env))) {
     await recheck(plan);
     return queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered });
@@ -9100,33 +9391,56 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   checkHelperLogins(plans);
   // A queued restart claims its entry only once every check passed and the seat is about to
   // start: a cancel between the watcher's read and here wins, and nothing is launched.
-  if (opts._queuedTarget) {
-    const consumed = await editRestartQueue((rows) => {
-      const i = rows.findIndex((e) => e.id === opts._queuedTarget.id);
-      return i < 0 ? null : rows.splice(i, 1)[0];
-    }, opts._queueHome);
-    if (!consumed) return PRINTED;
-  }
-  let seat = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
+  const launch = () => launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
     carry: { ...carry, ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, resumeId),
     replacing: old ? held.binding : null, granted: plan.granted, login });
+  const targetRow = opts._queuedTarget;
+  let seat;
+  if (old && !opts.force && (opts.handoff || targetRow?.wasHeld || resolveAgent(bot.agent) === "claude")) {
+    const capture = await readScreenCapture(old.address);
+    if ((!capture.ok && (opts.handoff || targetRow?.wasHeld)) || rateLimitDialog(capture.text)) {
+      if (targetRow) return RETRY_QUEUED;
+      return queueRestart({ bot, key, old, screen: capture.text, opts: { ...opts, _holdForScreen: true },
+        wanted, plan, recovered, helpers: plans });
+    }
+  }
+  if (targetRow) {
+    seat = await editRestartQueue(async rows => {
+      const i = rows.findIndex(e => e.id === targetRow.id && e.invocation === targetRow.invocation);
+      if (i < 0) return PRINTED;
+      if (hasEpisode(rows[i])) return RETRY_QUEUED;
+      if (!rows[i].wasHeld) {
+        rows.splice(i, 1);
+        return true;
+      }
+      const launched = await launch();
+      rows.splice(i, 1);
+      return launched;
+    }, opts._queueHome);
+    if (seat === PRINTED || seat === RETRY_QUEUED) return seat;
+    if (seat === true) seat = await launch();
+  } else {
+    seat = await launch();
+  }
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   // A direct restart supersedes a queued one only once it really started: its watcher must not
   // start a second replacement while this one hands the bot over.
   const managedTree = plans.length > 0 && loginPolicyActive(process.env);
   const supersedeQueue = async () => {
-    if (opts._queuedTarget) return;
-    let queued = false;
-    try { queued = readRestartQueue().some((e) => e.project === key && e.botId === bot.id); }
+    if (opts._queuedTarget || !old) return;
+    let queued;
+    try { queued = locateQueue(key, bot.id, old, view.core, target.dir, queueDirs); }
     catch (e) { if (managedTree) throw e; }
-    if (queued) {
+    if (queued?.entry) {
       await editRestartQueue(async (rows) => {
-        const i = rows.findIndex((e) => e.project === key && e.botId === bot.id);
+        const i = rows.findIndex((e) => sameSeat(e, key, bot.id, old, view.core));
         if (i < 0) return null;
-        const [e] = rows.splice(i, 1);
+        const e = rows[i];
+        await closeQueuedHold(e, "its restart was superseded", queued.dir);
         await killQueuedWatcher(e);
+        rows.splice(i, 1);
         return e;
-      });
+      }, queued.dir);
     }
   };
   if (!managedTree) await supersedeQueue();
@@ -11038,11 +11352,11 @@ const FIRST_TASK_WAIT_S = 30;
  * that started the pane. Never throws: null, or the warning when the task did not go in (the
  * pane is left as it is, to be read and sent to by hand).
  */
-async function sendFirstTask(address, task, run) {
+async function sendFirstTask(address, task, run, created_ms) {
   let said;
   try {
     await run(["wait", address, "--timeout", String(FIRST_TASK_WAIT_S), "--json"], { timeout: (FIRST_TASK_WAIT_S + 10) * 1000 });
-    const r = await run(["send", address, task]);
+    const r = await sendAutomatically(address, task, run, { terminal: address, created_ms });
     if (r.code === 0) return null;
     said = hcSaid((r.stderr || r.stdout).trim()).split("\n")[0] || `exit ${r.code}`;
   } catch (e) { said = e?.message ?? String(e); }
@@ -11714,17 +12028,18 @@ async function cmdWorker(opts, rest) {
       warnings.push(`${name} started, but its task wasn't delivered: hc never saw its terminal report a status${why ? ` (${why})` : ""}. `
         + `Send it: hc send ${address} "<task>".`);
     }
-    return { address, name, proxied, pane, homeEnv: loginLaunchHome(homeEnv, freshLogin) };
+    return { address, name, proxied, pane, answer: started.answer, homeEnv: loginLaunchHome(homeEnv, freshLogin) };
   }, { wait: Math.max(0, deadline - Date.now()), what: `the worker lock on ${place.worktree}` });
   const started = await (taskName ? withLockAsync(taskLock(lockDir, taskName), inWorktree,
     { wait: WORKER_LOCK_WAIT, what: `the task name ${taskName}` }) : inWorktree())
     .catch((e) => { throw e instanceof CliError ? e : new CliError(e?.message ?? String(e)); });
   const terminal = started.address;
+  const workerHc = started.proxied ? hcReal : hc;
   // The ledger row first, as launchSeat writes its rows before anything waits on the window.
   // #1208: a chosen launch's row is the pane its check read, and names its home and launch id.
   const { pid, createdMs } = started.pane
     ? { pid: started.pane.foreground?.pid ?? started.pane.pid ?? null, createdMs: Number.isSafeInteger(started.pane.created_ms) ? started.pane.created_ms : null }
-    : await launchOf(terminal);
+    : await launchOf(terminal, started.proxied ? address => hcRealJson(["get", address]) : hcGet);
   const unlogged = appendLedger(startRow({ kind: "worker", terminal, pid, botId: bot.id, task: taskId, branch: place.branch,
     project: project.key, lead, worktree, base, created: place.created, agent: plan.agent, model: plan.model, effort: plan.effort,
     template: plan.template, role, swap, override, overrideRequested, core: await rowCore(), createdMs, env: started.homeEnv, squad: squadOf(project.file, bot.id),
@@ -11733,7 +12048,10 @@ async function cmdWorker(opts, rest) {
   // An agent that takes no first prompt on its command line (kimi, #1032) started bare: its task
   // goes in as its first message, through the hc that started it, outside the worktree's lock.
   if (!plan.template && promptByMessage(plan.agent)) {
-    const why = await sendFirstTask(terminal, prompt, started.proxied ? hcReal : hc);
+    // Pin to the launch reply when it carries a generation, then check the live pane on the
+    // same transport. An address reused before the first get cannot receive the task.
+    const generation = paneCreated(started.answer) ?? createdMs;
+    const why = await sendFirstTask(terminal, prompt, workerHc, generation);
     if (why) warnings.push(why);
   }
   // Herdr shows a labelled worker at once, so the sidebar's tab setup (workerTab.js) never
@@ -14124,6 +14442,7 @@ async function dispatch(argv, io) {
       return refusal.code;
     }
   }
+  const preview = opts["dry-run"] && (command === "rate-limit" || (command === "restart" && opts.due));
   const linkedInstall = command === "machines" && rest[0] === "install";
   // #1208: --agent-home starts one new worker (am worker "<task>") on a chosen login folder, and
   // --worker-agent-home is a create or edit field. Anywhere else (help, worker kill, any other
@@ -14142,7 +14461,7 @@ async function dispatch(argv, io) {
     if (opts["old-lead"] !== undefined) { report(["--old-lead is only for main."]); return 2; }
     // The accounts read is read-only on every machine (RFC 0043), so it repairs nothing either;
     // nor does the reader's read-only login --check (#1509), nor a linked machine's install (#206).
-    if (command !== "accounts" && command !== "proxy" && (command !== "login" || !opts.check))
+    if (!preview && command !== "accounts" && command !== "proxy" && (command !== "login" || !opts.check))
       io.repairCliLinks?.();
   }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).
@@ -14171,7 +14490,7 @@ async function dispatch(argv, io) {
     }
     exitAfter.code = 0;
     // Tidy is this computer's window and labels: never after a command on a linked machine.
-    const tidy = TIDIES.has(command) && opts.machine === undefined;
+    const tidy = !preview && TIDIES.has(command) && opts.machine === undefined;
     const warnedRelabels = tidy && (command === "start" || command === "attach") ? new Set() : undefined;
     const out = command === "proxy" ? await run(opts, rest, io)
       : linkedInstall ? await run(opts, rest, { ...io, machineCount: tokens.filter((t) => t.kind === "option" && t.name === "machine").length })
@@ -14192,7 +14511,7 @@ async function dispatch(argv, io) {
     return exitAfter.code;
   } catch (e) {
     const botAction = command === "start" || command === "restart";
-    if (botAction) {
+    if (botAction && !preview) {
       try {
         const dir = join(appHome(), "automagik-herdr");
         mkdirSync(dir, { recursive: true, mode: 0o700 });

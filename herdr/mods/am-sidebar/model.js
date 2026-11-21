@@ -35,13 +35,13 @@ export function restartAtProblem(value) {
 
 /**
  * How a project reacts to a Claude Code seat blocked on its rate-limit dialog (#1557):
- * `park` (the default) records the reset time and restarts the seat a minute after it;
- * `switch` restarts it on another signed-in login with headroom, falling back to `park`.
+ * `park` keeps the pane and rechecks one minute after the recorded reset.
+ * `switch` is the legacy spelling and round-trips in the project file.
  * The setting is the project file's top-level `onRateLimit`, beside `version` and `categories`.
  */
 export const RATE_LIMIT_MODES = ["park", "switch"];
 
-/** The project's rate-limit reaction: "switch" only when the file says so, else "park". */
+/** The stored spelling of the project's pane-preserving rate-limit policy. */
 export const rateLimitModeOf = (file) => (file?.onRateLimit === "switch" ? "switch" : "park");
 
 /** Why a project's `onRateLimit` can't be used, or null: absent, or park/switch. */

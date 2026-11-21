@@ -418,7 +418,8 @@ export function loginRecordTests(cli) {
 
   test("#1509 watcher policy env is gated before building its argv", () => {
     const source = readFileSync(cli, "utf8");
-    const queue = source.slice(source.indexOf("async function queueRestart("), source.indexOf("\n}", source.indexOf("async function queueRestart(")));
+    // #1557: queueRestart starts its watcher through startQueueWatcher, which builds the argv.
+    const queue = source.slice(source.indexOf("async function startQueueWatcher("), source.indexOf("\n}", source.indexOf("async function startQueueWatcher(")));
     assert.match(queue, /const policyEnv = loginPolicy \? loginPolicyEnv\(process.env\) : \{\};/);
     assert.match(queue, /Object.hasOwn\(policyEnv, k\)/);
     assert.doesNotMatch(queue, /k === "DSH_HOME"/);
@@ -431,7 +432,9 @@ export function loginRecordTests(cli) {
     assert.match(due, /if \(loginPolicy\) \{\s*return cmdRestart\(\{ \.\.\.options, project: r.key, _queueDue: true/);
     const queue = since("queueRestart").split("\n}")[0];
     const helperCheck = queue.indexOf("checkHelperLogins(helpers)");
-    assert.ok(helperCheck >= 0 && helperCheck < queue.indexOf("killQueuedWatcher") && helperCheck < queue.indexOf("writeFileSync"));
+    // #1557: the queue file is written through saveRestartQueue (one writer for every queue edit).
+    assert.ok(queue.indexOf("killQueuedWatcher") > 0 && queue.indexOf("saveRestartQueue(") > 0);
+    assert.ok(helperCheck >= 0 && helperCheck < queue.indexOf("killQueuedWatcher") && helperCheck < queue.indexOf("saveRestartQueue("));
   });
 
   test("#1509 revive preserves a late helper login refusal instead of truncating its code", () => {

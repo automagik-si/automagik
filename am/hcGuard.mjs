@@ -265,15 +265,23 @@ export async function runKillGuard(argv, env = process.env) {
     if (send.target && send.texts.length) {
       let hit;
       try {
-        hit = resolvedTargetOf(real, send.target, send.on, env);
+        hit = checkedTargetOf(real, send.target, send.on, env);
       } catch {
         if (prefix) return sendRefused(prefix, send.target, "the target could not be checked");
         return passthrough(real, args, env, { plain: true });
       }
+      if (hit.why) {
+        say(`hc send: refused ${oneLine(hit.why)}.`);
+        return 2;
+      }
+      if (send.on && hit.address && !hit.address.startsWith(`${send.on}/`)) {
+        say("hc send: refused because hc resolved the target off the --on machine (#628).");
+        return 2;
+      }
       if (prefix && sendTextProblem(send.texts, hit.get)) return sendRefused(prefix, send.target);
       const held = heldTarget(real, hit, env);
       if (held) return heldRefusal(held);
-      if (prefix && hit.address) args[send.targetIndex] = hit.address;
+      if (hit.address) args[send.targetIndex] = send.on ? hit.address.split("/").at(-1) : hit.address;
     }
     return passthrough(real, args, env, { plain: true });
   }
@@ -858,19 +866,6 @@ function sendArgs(args) {
   return { target: args[targetIndex], targetIndex, texts: texts.map((i) => args[i]), on };
 }
 
-/** The target's address and hc get answer; a failed get is unknown, labels are optional. */
-function resolvedTargetOf(real, word, on, env) {
-  let address = word;
-  if (on && !address.includes("/")) address = `${on}/${address}`;
-  if (!address.includes("/")) {
-    const rows = rowsOf(hcJson(real, ["ls"], env));
-    const hit = rows.find((r) => r?.address === address) ?? rows.find((r) => r?.name === address);
-    if (hit?.address) address = hit.address;
-  }
-  const get = hcJson(real, ["get", address], env);
-  return { address, get: get && typeof get === "object" && !get.error ? get : null };
-}
-
 const TERMINAL_ADDRESS = /^(?:[^\s/]+\/)?t[0-9a-z]+$/;
 
 /** The canonical address from hc get, with agreement required when hc ls supplied an address. */
@@ -893,7 +888,7 @@ function checkedTargetOf(real, word, on, env) {
     return { why: "the target's address from hc is not a terminal id" };
   }
   if (provenance === "ls" && address !== get.address) {
-    return { why: "hc resolved the target to two different panes" };
+    return { why: `because hc resolved the target to two different panes (${address} and ${get.address})` };
   }
   return { address: get.address, get };
 }

@@ -442,8 +442,9 @@ assistant message's input plus cache-read and cache-creation tokens; `am ls --js
 `am show <bot>` report it. A bot may store a threshold in tokens (`restartAt`, set with
 `am edit <bot> --restart-at N` or cleared with `--no-restart-at`): a main bot defaults to 250000,
 a member has none until one is set. `am restart --due [--dry-run] [--all]` asks every seat over
-its threshold to write a handoff to `<app home>/automagik-herdr/handoff/<bot>.md` (what is in
-flight, what waits on whom, the next three actions) and end its turn; an idle seat then restarts
+its threshold to write a handoff to the exact path printed by the command, under
+`<app home>/automagik-herdr/handoff/<project hash>/<bot>.md`. The handoff covers what's in
+flight, what waits on whom, and the next three actions. After the seat ends its turn, it restarts
 fresh with its helpers (`--fresh --tree`) and the handoff becomes its new conversation's first
 message. A working or blocked seat is queued until its next idle (`am restart --queued` lists
 it). The old conversation is not resumed: what survives is the handoff file, the bot's definition
@@ -476,8 +477,10 @@ A raw, unmarked paste that ends the pane tail is the accepted limit of a text-on
 byte-for-byte the live modal, so the rule cannot tell them apart, and every marked form (a
 quote, a fence, a patch) is refused. An ordinary report
 whose text says "rate limit" and lists findings is not the dialog, and an unreadable or empty tail
-is never a match. The detection reads the pane tail only: the dialog is never answered, and no key
-is sent. Both project settings for `onRateLimit` (`"park"` and `"switch"`) preserve the original
+is never a match. Detection only reads the pane tail. Automatic delivery checks that tail
+before sending and holds delivery on a dialog or an unreadable screen. A dialog can still open
+between the read and the paste. Closing that interval requires a conditional paste in herdr-core.
+Both project settings for `onRateLimit` (`"park"` and `"switch"`) preserve the original
 pane and its workers. Resume in that pane when the provider allows it. Herdr cannot atomically
 retire a pane only if it has no dependent workers, and a session named in a launch command
 does not confirm which conversation the provider actually opened.
@@ -486,8 +489,11 @@ does not confirm which conversation the provider actually opened.
 the dialog first. Each episode writes one item in `<app home>/automagik-herdr/attention.json`
 for `am ls` and `am show`. If the dialog names a reset time, `am restart --queued` shows a
 recheck one minute later. An unknown reset has no timed recheck. The watcher observes the
-original pane until it recovers or the watch expires. An unreadable screen keeps its attention
-item open. The updated Herdr automations scheduler checks `am delivery-status` before sending
+original pane until it recovers or the watch expires. A live watcher on a reachable core rechecks
+within two minutes of the scheduled time. An unreadable screen or expired watcher keeps the hold,
+attention item and first deadline. A later sweep reattaches the watcher. Canceling the queued
+entry closes its attention item. An already queued restart keeps its operation, and a handoff
+continues after recovery with the same ask and response file. The updated Herdr automations scheduler checks `am delivery-status` before sending
 to a target or a notification recipient and preserves each automation's `enabled` setting.
 The installed scheduler (0.12.1-am.2) needs a separate release to gain that check.
 

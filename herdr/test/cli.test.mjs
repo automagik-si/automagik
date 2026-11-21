@@ -2578,13 +2578,14 @@ test("#805 restart queues working panes, lists, replaces and cancels watchers", 
   assert.equal(forced.code, 0, forced.err);
 });
 
-test("#1509 policy-off watcher argv is byte-identical to 4beec409f with DSH_HOME set", (t) => {
+test("#1509 policy-off watcher argv keeps 4beec409f login behavior with DSH_HOME set", (t) => {
   const s = restartScene(t, { status: "working" });
   const path = `${s.root}/bin:${dirname(process.execPath)}:/usr/bin:/bin`;
   const env = { ...s.env, PATH: path, DSH_HOME: join(s.root, "dsh"), AUTOMAGIK_HOME: s.root, [REQUIRED_VAR]: "off" };
   const queued = s.cli(["restart", "Genie", "--json"], { env });
   assert.equal(queued.code, 0, queued.err);
-  const [{ id }] = JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"));
+  const [{ id, invocation }] = JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"));
+  assert.match(invocation, SID_SHAPE);
   const inherited = Object.entries(env).filter(([key, value]) => value !== undefined &&
     (key.startsWith("AUTOMAGIK_HERDR_") || ["USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "HERMES_HOME", "VIRTUAL_ENV"].includes(key)));
   const shell = [
@@ -2592,9 +2593,11 @@ test("#1509 policy-off watcher argv is byte-identical to 4beec409f with DSH_HOME
     'if [ -n "${HC_TERMINAL_ID-}" ]; then set -- "HC_TERMINAL_ID=$HC_TERMINAL_ID" "$@"; fi',
     'exec /usr/bin/env -i "$@"',
   ].join("\n");
+  // #1557 adds only watcher identity to the old argv. Login policy off still adds no login words.
   assert.deepEqual(runCall(s.calls()), ["run", "--bg", "--json", "--rm", "--no-parent", "--cwd", s.project,
-    "--label", `herdr.queued-restart=${ID.main}`, "--", "/bin/sh", "-c", shell, "sh",
-    `HOME=${s.home}`, `HERDR_APP_HOME=${s.app}`, `PATH=${path}`, ...inherited.map(([key, value]) => `${key}=${value}`),
+    "--label", `herdr.queued-restart=${ID.main}`, "--name", `am-watch-${invocation.replaceAll("-", "").slice(0, 22)}`,
+    "--", "/bin/sh", "-c", shell, "sh", `HOME=${s.home}`, `HERDR_APP_HOME=${s.app}`,
+    `AUTOMAGIK_HERDR_QUEUE_INVOCATION=${invocation}`, `PATH=${path}`, ...inherited.map(([key, value]) => `${key}=${value}`),
     process.execPath, CLI, "restart", ID.main, "--project", s.project, "--run-queued", id]);
 });
 
@@ -4167,8 +4170,8 @@ test("#1509 guarded tree recovery runs after a successful kill even when queue c
   const { s, env, state, save } = managedTree(t);
   const queue = join(s.app, "automagik-herdr/queued-restarts.json");
   mkdirSync(dirname(queue), { recursive: true });
-  // Since #1880 a queue row is the project's and the bot's together.
-  writeFileSync(queue, JSON.stringify([{ project: realpathSync(s.project), botId: ID.main }]));
+  writeFileSync(queue, JSON.stringify([{ id: "guarded-tree-queue", project: realpathSync(s.project),
+    botId: ID.main, terminal: "t5", created_ms: state.terminals[0].created_ms }]));
   // Make the queue unreadable only after cleanup has found the row and entered its write path.
   const hook = join(s.root, "queue-error.cjs");
   writeFileSync(hook, `
@@ -6302,7 +6305,7 @@ async function waitUntil(what, fn, ms = 15_000) {
   }
   throw new Error(`timed out waiting for ${what}`);
 }
-const handoffFile = (s, botId) => join(s.app, "automagik-herdr/handoff", `${botId}.md`);
+const handoffFile = (s, botId) => join(s.app, "automagik-herdr/handoff", createHash("sha256").update(s.project).digest("hex"), `${botId}.md`);
 /**
  * Replaces a file a running CLI pass may read at the same moment: a file of its own beside it,
  * renamed over it, so the pass reads the old bytes or the new ones, never a truncated half.
@@ -6405,7 +6408,7 @@ test("#1556 restart --due asks an idle seat for its handoff and restarts it fres
     AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10" } });
   await waitUntil("the handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
   const asked = s.calls().find((c) => c[0] === "send" && c[1] === "t5")[2];
-  assert.match(asked, /Write your handoff to .*automagik-herdr\/handoff\/b-aaaaaaaaaa\.md/);
+  assert.match(asked, /Write your handoff to .*automagik-herdr\/handoff\/[a-f0-9]{64}\/b-aaaaaaaaaa\.md/);
   assert.match(asked, /what is in flight, what waits on whom/);
   assert.match(asked, /end your turn/);
   const path = handoffFile(s, ID.main);
@@ -6757,11 +6760,10 @@ test("#1556 the direct pass records a pane that ends after the handoff", (t) => 
   const s = captainDueScene(t, { status: "idle" });
   const path = handoffFile(s, ID.cap);
   const state = s.hcState();
-  // The ask writes the handoff as it lands; the seat then takes a turn, so the restart queues;
-  // the cancel of that plain entry happens just as the pane ends.
+  // The seat writes the handoff, takes another turn, and ends as the continuation is queued.
   state.onSendWrite = { terminal: "t6", path, text: "Racing handoff: the pane ends after the ask.\n" };
   state.onRead = { terminal: "t6", afterSend: true, nth: 1, status: "working" };
-  state.afterKill = { terminal: "t6", patch: { state: "finished" } };
+  state.finishOnQueueRun = "t6";
   writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
   const r = s.cli(["restart", "--due", "--json"]);
   assert.equal(r.code, 0, r.err);
@@ -7068,6 +7070,7 @@ test("#1557 scheduled detection and automatic delivery share the evidence for an
   const preview = s.cli(["restart", "--due", "--dry-run", "--json"]);
   assert.equal(preview.code, 0, preview.err);
   assert.ok(preview.json().rate_limited.some(seat => seat.terminal === "t5"));
+  assert.equal(preview.json().rate_limited.find(seat => seat.terminal === "t5").action, "park");
   assert.deepEqual(status().json(), { terminal: "t5", held: true });
   assert.ok(!existsSync(queueFileOf(s)), "both reads leave the queue alone");
   setScreen(s, "t5", "Ready for work");
@@ -7454,13 +7457,20 @@ test("#1557 a parked seat keeps a pending handoff and a clone's independent queu
   writeFileSync(file, JSON.stringify([clone, handoff]));
   const sweep = s.cli(["rate-limit", "--json"]);
   assert.equal(sweep.code, 0, sweep.err);
-  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), [clone, handoff]);
+  const [untouched, held] = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(untouched, clone);
+  assert.equal(held.id, handoff.id);
+  assert.equal(held.episode, sweep.json().attention[0].id);
   assert.match(sweep.json().notes.join(" "), /handoff/);
   assert.equal(sweep.json().attention.length, 1);
-  assert.equal(s.calls().filter(words => words.includes("--run-queued")).length, 0);
+  assert.equal(s.calls().filter(words => words.includes("--run-queued")).length, 1);
   setScreen(s, "t5", "Claude is ready");
   assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
-  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), [clone, handoff]);
+  const [sameClone, resumed] = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(sameClone, clone);
+  assert.equal(resumed.id, handoff.id);
+  assert.equal(resumed.watcher, held.watcher);
+  assert.equal(resumed.episode, undefined);
 });
 
 test("#1557 a queue entry in a different clone cannot absorb this seat's park", (t) => {
@@ -8030,4 +8040,624 @@ exec "${process.execPath}" "${FAKE_HC}" "$@"
   assert.equal(at(s.calls(), "kill", "t7"), -1, "the pane at t7 now is not the helper: never killed");
   assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "live");
   assert.deepEqual(r.json().helpers.map((h) => [h.replaced, h.up]), [["t7", true], ["t8", true]]);
+});
+
+test("#1557 a managed Claude login can park without planning any replacement", (t) => {
+  const { s, env } = managedTree(t, ["opaque-helper"]);
+  setScreen(s, "t5", rateDialog());
+  const sweep = s.cli(["rate-limit", "--json"], { env });
+  assert.equal(sweep.code, 0, sweep.err);
+  assert.equal(sweep.json().parked.length, 1);
+  assert.equal(sweep.json().attention.length, 1);
+  assert.equal(s.calls().filter(c => c[0] === "run").length, 1);
+  assert.ok(s.calls().find(c => c[0] === "run").includes("--run-queued"));
+  assert.deepEqual(s.calls().filter(c => c[0] === "kill" || c[0] === "send"), []);
+});
+
+function rateDueFixture(s) {
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+}
+
+const savedRateQueue = (s) => JSON.parse(readFileSync(queueFileOf(s), "utf8"));
+const watcherRuns = (s) => s.calls().filter(c => c[0] === "run" && c.includes("--run-queued"));
+const handoffAsks = (s) => s.calls().filter(c => c[0] === "send" && /^Context handoff /.test(c[2]));
+const saveRateState = (s, state) => writeWhole(s.env.HC_FAKE_STATE, JSON.stringify(state));
+
+test("#1557 an active watcher keeps its acknowledged ask through an unreadable tail and a blocked pane", async (t) => {
+  const s = restartScene(t, { status: "working" });
+  rateDueFixture(s);
+  assert.equal(s.cli(["restart", "--due", "--json"]).json().queued.length, 1);
+  const [queued] = savedRateQueue(s);
+  const observe = (status, screen) => {
+    const state = s.hcState();
+    Object.assign(state.terminals[0], { status: { state: status }, screen });
+    saveRateState(s, state);
+  };
+  observe("idle", "❯ ");
+  const running = s.cliAsync(["restart", ID.main, "--run-queued", queued.id, "--json"], {
+    env: { AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "2500", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "15",
+      AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "25" },
+  });
+  await waitUntil("the acknowledged ask", () => savedRateQueue(s)[0]?.handoffAsk);
+  const [asked] = savedRateQueue(s);
+  observe("idle", "");
+  await waitUntil("an unreadable tail pausing the wait", () => savedRateQueue(s)[0]?.handoffAsk?.pausedAt);
+  observe("blocked", rateDialog());
+  await waitUntil("the blocked pane opening an episode", () => savedRateQueue(s)[0]?.episode);
+  await waitUntil("the original ask deadline passing", () => Date.now() > asked.handoffAsk.expiresAt + 100);
+  assert.equal(savedRateQueue(s)[0].handoffAsk.since, asked.handoffAsk.since);
+  assert.equal(openItems(s).length, 1);
+  assert.equal(handoffAsks(s).length, 1);
+  writeWhole(queued.handoffFile, "Finish the acknowledged handoff.\n");
+  observe("idle", "❯ ");
+  const result = await running;
+  assert.equal(result.code, 0, result.err);
+  assert.equal(handoffAsks(s).length, 1);
+  assert.deepEqual(savedRateQueue(s), []);
+  assert.deepEqual(openItems(s), []);
+  assert.ok(s.calls().some(c => c[0] === "send" && c[1] === JSON.parse(result.out).terminal && /acknowledged handoff/.test(c[2])));
+});
+
+for (const status of ["working", "idle"]) {
+  test(`#1557 a managed due ${status} seat stays on the measured project-home core despite a linked holder binding`, (t) => {
+    const s = restartScene(t, { status });
+    const owner = join(s.project, ".herdr/app-home");
+    const localCtx = { HERDR_APP_HOME: owner };
+    mkdirSync(join(owner, "mods/am-sidebar"), { recursive: true });
+    writeFileSync(join(owner, "mods/am-sidebar/briefing.mjs"), "// fixture\n");
+    assert.equal(s.cli(["attach", "Genie", "t5"], { env: localCtx }).code, 0);
+    assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"], { env: localCtx }).code, 0);
+    seatTranscript(s, SID, [assistantUsage(5000)]);
+    const home = join(s.home, ".config/herdr-app");
+    mkdirSync(dirname(attachFile(home)), { recursive: true });
+    writeFileSync(attachFile(home), JSON.stringify({
+      v: 1, event: "attach", bot: ID.main, project: s.project, terminal: "t23", core: "holder-core",
+      machine: "h2", created_ms: 23, at: new Date().toISOString(), by: "start",
+    }) + "\n");
+    writeFileSync(join(home, "automagik-herdr/holders.json"), JSON.stringify({ holders: ["h2"] }));
+    const state = s.hcState();
+    state.machines = [{ id: "holder-core", name: "h2", state: "connected" }];
+    state.terminals.push({ ...term("h2/t23", { bot: ID.main, cwd: s.project }), created_ms: 23 });
+    const path = handoffFile({ ...s, app: owner }, ID.main);
+    state.onSendWrite = { terminal: "t5", path, text: "Keep this handoff on its own core.\n" };
+    saveRateState(s, state);
+    const { env } = loginFixture(t, join(s.root, "acp", "cli-homes"), "claude");
+    const result = s.cli(["restart", "--due", "--json"], { env: { ...env, HERDR_APP_HOME: "" } });
+    assert.equal(result.code, 0, result.err);
+    assert.deepEqual(result.json().failed, []);
+    const calls = s.calls();
+    assert.ok(calls.some(c => c[0] === "get" && c[1] === "h2/t23"), "the default view observed the other holder");
+    assert.deepEqual(calls.filter(c => ["run", "kill", "exec", "send"].includes(c[0]) && (c.includes("--on") || c.includes("h2/t23"))), []);
+    if (status === "working") {
+      assert.equal(result.json().queued[0].terminal, "t5");
+      assert.ok(watcherRuns(s)[0].includes(`HERDR_APP_HOME=${owner}`));
+      assert.deepEqual(handoffAsks(s), []);
+    } else {
+      assert.equal(handoffAsks(s).length, 1);
+      assert.equal(handoffAsks(s)[0][1], "t5");
+      assert.ok(result.json().restarted[0].terminal);
+    }
+  });
+}
+
+test("#1557 a reused watcher address cannot keep a hold unwatched or be retired as its watcher", (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog());
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  const [old] = savedRateQueue(s);
+  const state = s.hcState();
+  const reused = state.terminals.find(pane => pane.address === old.watcher);
+  assert.equal(reused.created_ms, old.watcherCreatedMs);
+  // Even a pane with the same label and name is a different launch.
+  reused.created_ms += 1;
+  saveRateState(s, state);
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  const [current] = savedRateQueue(s);
+  assert.equal(current.episode, old.episode);
+  assert.notEqual(current.watcher, old.watcher);
+  assert.equal(watcherRuns(s).length, 2);
+  assert.equal(s.cli(["restart", "--cancel", ID.main, "--json"]).code, 0);
+  assert.deepEqual(s.calls().filter(c => c[0] === "kill"), [["kill", current.watcher]]);
+  assert.equal(s.hcState().terminals.find(pane => pane.address === old.watcher).state, "live");
+});
+
+test("#1557 a live legacy handoff watcher is retired with its existing ask and file intact", async (t) => {
+  const s = restartScene(t);
+  rateDueFixture(s);
+  const file = join(s.app, "automagik-herdr/handoff", `${ID.main}.md`);
+  mkdirSync(dirname(file), { recursive: true });
+  const legacy = { id: "legacy-live", botId: ID.main, botName: "Genie", project: s.project, terminal: "t5",
+    created_ms: 1, reason: "due", options: { handoff: true, fresh: true, tree: true },
+    watcher: "t88", at: new Date(Date.now() - 1000).toISOString() };
+  writeWhole(queueFileOf(s), JSON.stringify([legacy]));
+  const state = s.hcState();
+  state.terminals.push({ address: "t88", state: "live", created_ms: 88, cwd: s.project,
+    labels: { "herdr.queued-restart": ID.main },
+    argv: [RUNTIME, CLI, "restart", ID.main, "--project", s.project, "--run-queued", legacy.id] });
+  saveRateState(s, state);
+  execFileSync(process.execPath, [FAKE_HC, "send", "t5", `Context handoff for Genie: write ${file}`], { env: s.env });
+  writeFileSync(file, "Complete the legacy request.\n");
+  setScreen(s, "t5", rateDialog());
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  const [successor] = savedRateQueue(s);
+  assert.notEqual(successor.id, legacy.id, "the old watcher's cleanup only knows its previous id");
+  assert.notEqual(successor.watcher, legacy.watcher);
+  assert.equal(successor.handoffFile, file);
+  assert.ok(successor.handoffAsk.pausedAt);
+  assert.equal(s.hcState().terminals.find(pane => pane.address === legacy.watcher).state, "finished");
+  setScreen(s, "t5", "❯ ");
+  const result = await s.cliAsync(["restart", ID.main, "--run-queued", successor.id, "--json"]);
+  assert.equal(result.code, 0, result.err);
+  assert.equal(handoffAsks(s).length, 1);
+  assert.ok(s.calls().some(c => c[0] === "send" && c[1] === JSON.parse(result.out).terminal && /legacy request/.test(c[2])));
+});
+
+test("#1557 preview and execution both ask immediately for a recovered plain park", (t) => {
+  const s = restartScene(t);
+  rateDueFixture(s);
+  setScreen(s, "t5", rateDialog());
+  assert.equal(s.cli(["rate-limit", "--json"]).json().parked.length, 1);
+  const bytes = readFileSync(queueFileOf(s));
+  setScreen(s, "t5", "❯ ");
+  const state = s.hcState();
+  state.onSendWrite = { terminal: "t5", path: handoffFile(s, ID.main), text: "The recovered park can restart.\n" };
+  saveRateState(s, state);
+  const preview = s.cli(["restart", "--due", "--dry-run", "--json"]);
+  assert.equal(preview.code, 0, preview.err);
+  assert.equal(preview.json().due[0].action, "ask");
+  assert.deepEqual(readFileSync(queueFileOf(s)), bytes);
+  assert.deepEqual(handoffAsks(s), []);
+  const active = s.cli(["restart", "--due", "--json"]);
+  assert.equal(active.code, 0, active.err);
+  assert.equal(active.json().restarted.length, 1);
+  assert.deepEqual(active.json().queued, []);
+  assert.equal(handoffAsks(s).length, 1);
+});
+
+for (const queueHome of ["default", "project"]) {
+  test(`#1557 a forced restart closes the superseded episode from the ${queueHome} queue`, (t) => {
+    // The recovered home also selects the default login. The old launch must prove that match.
+    const s = restartScene(t, { paneArgv: ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR", "claude"] });
+    const owner = join(s.project, ".herdr/app-home");
+    const projectCtx = { HERDR_APP_HOME: owner };
+    const implicit = { HERDR_APP_HOME: "" };
+    const defaultHome = join(s.home, ".config/herdr-app");
+    mkdirSync(join(owner, "mods/am-sidebar"), { recursive: true });
+    writeFileSync(join(owner, "mods/am-sidebar/briefing.mjs"), "// fixture\n");
+    assert.equal(s.cli(["attach", "Genie", "t5"], { env: projectCtx }).code, 0);
+    const dir = queueHome === "default" ? defaultHome : owner;
+    const store = join(dir, "automagik-herdr");
+    const queue = join(store, "queued-restarts.json");
+    if (queueHome === "default") {
+      mkdirSync(store, { recursive: true });
+      writeFileSync(queue, JSON.stringify([{ id: "legacy-default-park", botId: ID.main, project: s.project,
+        botName: "Genie", terminal: "t5", created_ms: 1, watcher: null, options: { rateLimit: true } }]));
+    }
+    setScreen(s, "t5", rateDialog());
+    const sweep = s.cli(["rate-limit", "--json"], { env: implicit });
+    assert.equal(sweep.code, 0, sweep.err);
+    const [park] = JSON.parse(readFileSync(queue, "utf8"));
+    const result = s.cli(["restart", "Genie", "--force", "--json"], { env: implicit });
+    assert.equal(result.code, 0, result.err);
+    assert.deepEqual(JSON.parse(readFileSync(queue, "utf8")), []);
+    const [item] = JSON.parse(readFileSync(join(store, "attention.json"), "utf8")).items;
+    assert.equal(item.id, park.episode);
+    assert.equal(item.open, false);
+    for (const env of [implicit, projectCtx]) {
+      const listed = s.cli(["ls", "--json"], { env });
+      assert.equal(listed.code, 0, listed.err);
+      assert.ok(!listed.out.includes(park.episode), "the superseded attention is absent");
+    }
+  });
+}
+
+test("#1557 a timed first read survives the untimed confirmation in the queue, attention and sweep", (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog());
+  const state = s.hcState();
+  state.onRead = { terminal: "t5", nth: 1, screen: rateDialog("Try again later.") };
+  saveRateState(s, state);
+  const result = s.cli(["rate-limit", "--json"]);
+  assert.equal(result.code, 0, result.err);
+  const [seen] = result.json().rate_limited;
+  const [entry] = savedRateQueue(s);
+  const [item] = openItems(s);
+  assert.ok(seen.resets_at);
+  assert.equal(entry.resets_at, seen.resets_at);
+  assert.equal(item.resets_at, entry.resets_at);
+  assert.ok(entry.wake_at);
+  assert.equal(item.wake_at, entry.wake_at);
+});
+
+test("#1557 help and the pack README direct operators to the printed project-scoped handoff", (t) => {
+  const s = restartScene(t);
+  const help = s.cli(["restart", "--help"]);
+  assert.equal(help.code, 0, help.err);
+  assert.match(help.out, /the printed path under <app home>\/automagik-herdr\/handoff\/\s*<project hash>\/<bot>\.md/);
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  assert.match(readme, /exact path printed by the command, under\s*`<app home>\/automagik-herdr\/handoff\/<project hash>\/<bot>\.md`/);
+});
+
+for (const first of ["handoff", "park"]) {
+  test(`#1557 ${first}-first uses the same watcher through the replacement's first message`, async (t) => {
+    const s = restartScene(t, { status: first === "handoff" ? "working" : "idle" });
+    rateDueFixture(s);
+    if (first === "handoff") {
+      assert.equal(s.cli(["restart", "--due", "--json"]).json().queued.length, 1);
+      const state = s.hcState();
+      state.terminals[0].status = { state: "idle" };
+      state.terminals[0].screen = rateDialog();
+      saveRateState(s, state);
+    } else {
+      setScreen(s, "t5", rateDialog());
+      assert.equal(s.cli(["rate-limit", "--json"]).json().parked.length, 1);
+    }
+    const [initial] = savedRateQueue(s);
+    const next = first === "handoff" ? s.cli(["rate-limit", "--json"]) : s.cli(["restart", "--due", "--json"]);
+    assert.equal(next.code, 0, next.err);
+    const [held] = savedRateQueue(s);
+    assert.equal(savedRateQueue(s).length, 1);
+    assert.equal(held.id, initial.id);
+    assert.equal(held.watcher, initial.watcher);
+    assert.equal(held.options.handoff, true);
+    assert.equal(held.episode, openItems(s)[0].id);
+    assert.ok(held.wake_at);
+    assert.deepEqual(handoffAsks(s), []);
+    assert.equal(watcherRuns(s).length, 1);
+    const readsBefore = s.calls().filter(c => c[0] === "read" && c[1] === "t5").length;
+    const active = s.cliAsync(["restart", ID.main, "--run-queued", held.id, "--json"], {
+      env: { AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "15",
+        AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "25" },
+    });
+    await waitUntil("the running watcher reads the dialog",
+      () => s.calls().filter(c => c[0] === "read" && c[1] === "t5").length > readsBefore);
+    assert.deepEqual(handoffAsks(s), []);
+    setScreen(s, "t5", "❯ ");
+    await waitUntil("the recovered seat's ask", () => handoffAsks(s).length === 1);
+    writeWhole(held.handoffFile, "Finish the original handoff.\n");
+    const result = await active;
+    assert.equal(result.code, 0, result.err);
+    assert.equal(handoffAsks(s).length, 1);
+    assert.deepEqual(openItems(s), []);
+    assert.deepEqual(savedRateQueue(s), []);
+    assert.ok(s.calls().some(c => c[0] === "send" && c[1] === JSON.parse(result.out).terminal && /original handoff/.test(c[2])));
+  });
+}
+
+for (const afterReady of [false, true]) {
+  test(`#1557 a dialog after the ${afterReady ? "handoff is ready" : "foreground ask"} preserves the ask and file`, async (t) => {
+    const s = restartScene(t);
+    rateDueFixture(s);
+    const state = s.hcState();
+    const path = handoffFile(s, ID.main);
+    const text = "The first ask's response survives.\n";
+    state.onSendWrite = { terminal: "t5", path, text };
+    state.onRead = { terminal: "t5", afterSend: true, nth: 1, screen: rateDialog() };
+    // In this case the foreground waiter sees the dialog before it has any file to accept.
+    if (!afterReady) delete state.onSendWrite;
+    saveRateState(s, state);
+    const ran = s.cli(["restart", "--due", "--json"], {
+      env: { AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "1200", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "15" },
+    });
+    assert.equal(ran.code, 0, ran.err);
+    assert.equal(ran.json().queued.length, 1);
+    const [held] = savedRateQueue(s);
+    assert.equal(held.handoffFile, path);
+    assert.ok(held.handoffAsk.since);
+    assert.ok(held.handoffAsk.pausedAt);
+    assert.equal(handoffAsks(s).length, 1);
+    assert.equal(watcherRuns(s).length, 1);
+    assert.deepEqual(s.calls().filter(c => c[0] === "kill" || (c[0] === "run" && !c.includes("--run-queued"))), []);
+    if (!afterReady) writeWhole(path, text);
+    await new Promise(done => setTimeout(done, 1250));
+    assert.equal(s.calls().filter(c => c[0] === "send").length, 1, "no paste during the hold");
+    setScreen(s, "t5", "❯ ");
+    const active = await s.cliAsync(["restart", ID.main, "--run-queued", held.id, "--json"],
+      { env: { AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "15" } });
+    assert.equal(active.code, 0, active.err);
+    assert.equal(handoffAsks(s).length, 1);
+    assert.ok(s.calls().some(c => c[0] === "send" && c[1] === JSON.parse(active.out).terminal && c[2] === text));
+  });
+}
+
+test("#1557 a legacy default-home queue keeps its row while its project-home owner has no launch-home word", async (t) => {
+  const s = restartScene(t, { paneArgv: ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR", "claude"] });
+  const owner = join(s.project, ".herdr/app-home");
+  mkdirSync(owner, { recursive: true });
+  const selected = { HERDR_APP_HOME: owner };
+  assert.equal(s.cli(["attach", "Genie", "t5", "--json"], { env: selected }).code, 0);
+  assert.ok(!s.hcState().terminals.find(row => row.address === "t5").argv?.some(word => word.startsWith("HERDR_APP_HOME=")));
+  const implicit = { HERDR_APP_HOME: "" };
+  const defaultHome = join(s.home, ".config/herdr-app");
+  const queue = join(defaultHome, "automagik-herdr/queued-restarts.json");
+  mkdirSync(dirname(queue), { recursive: true });
+  const legacy = { id: "legacy-queue", botId: ID.main, botName: "Genie", project: s.project,
+    terminal: "t5", created_ms: 1, reason: "working", options: { fresh: true }, watcher: null };
+  writeFileSync(queue, JSON.stringify([legacy]));
+  setScreen(s, "t5", rateDialog());
+  const sweep = s.cli(["rate-limit", "--json"], { env: implicit });
+  assert.equal(sweep.code, 0, sweep.err);
+  const [held] = JSON.parse(readFileSync(queue, "utf8"));
+  assert.equal(held.id, legacy.id);
+  assert.equal(held.ownerHome, owner);
+  assert.ok(held.episode);
+  assert.equal(existsSync(join(owner, "automagik-herdr/queued-restarts.json")), false);
+  const [run] = watcherRuns(s);
+  assert.ok(run.includes(`HERDR_APP_HOME=${defaultHome}`));
+  assert.deepEqual(s.cli(["restart", "--queued", "--json"], { env: implicit }).json().queued.map(row => row.id), [legacy.id]);
+  const oldBytes = readFileSync(queue, "utf8");
+  const state = s.hcState();
+  state.failGet = ["t5"];
+  saveRateState(s, state);
+  assert.equal(s.cli(["rate-limit", "--json"], { env: implicit }).code, 0);
+  assert.equal(readFileSync(queue, "utf8"), oldBytes);
+  delete state.failGet;
+  state.terminals[0].screen = "❯ ";
+  saveRateState(s, state);
+  const active = startRecordedWatcher(s, run);
+  const code = await new Promise((done, reject) => {
+    active.once("exit", done);
+    active.once("error", reject);
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(JSON.parse(readFileSync(queue, "utf8")), []);
+  assert.equal(s.hcState().terminals.find(row => row.address === "t5").state, "finished");
+});
+
+test("#1557 public previews retain the same handoff without repairing, pruning, logging or relabeling", (t) => {
+  const s = restartScene(t);
+  rateDueFixture(s);
+  const file = queueFileOf(s);
+  const entry = { id: "stale-handoff", botId: ID.main, botName: "Genie", project: s.project,
+    terminal: "t5", created_ms: 1, watcher: "t999", reason: "due", options: { handoff: true } };
+  writeFileSync(file, JSON.stringify([entry]));
+  const bin = join(s.home, ".local/bin");
+  mkdirSync(bin, { recursive: true });
+  const link = join(bin, "am");
+  if (existsSync(link)) rmSync(link);
+  const staleLink = join(s.app, "mods/am-sidebar/bin/automagik-herdr.mjs");
+  mkdirSync(dirname(staleLink), { recursive: true });
+  writeFileSync(staleLink, "// stale link target");
+  writeFileSync(join(dirname(staleLink), "automagik-herdr"), "#!/bin/sh\nexit 0\n");
+  symlinkSync(staleLink, link);
+  const state = s.hcState();
+  state.terminals[0].labels.role = "wrong-role";
+  saveRateState(s, state);
+  const watch = [file, join(s.app, "automagik-herdr/attach.jsonl"), attentionFileOf(s),
+    ledgerPath(s.app), join(s.app, "automagik-herdr/actions.log")];
+  const snapshot = () => watch.map(path => existsSync(path) ? readFileSync(path, "utf8") : null);
+  const before = snapshot();
+  const at = s.calls().length;
+  for (const json of [false, true]) {
+    const preview = s.cli(["restart", "--due", "--dry-run", ...(json ? ["--json"] : [])]);
+    assert.equal(preview.code, 0, preview.err);
+    if (json) assert.equal(preview.json().due[0].action, "retain-handoff");
+    else assert.match(preview.out, /already queued for a handoff restart/);
+  }
+  setScreen(s, "t5", rateDialog());
+  const rate = s.cli(["rate-limit", "--dry-run", "--json"]);
+  assert.equal(rate.json().rate_limited[0].action, "retain-handoff");
+  assert.match(s.cli(["rate-limit", "--dry-run"]).out, /would retain its recheck/);
+  assert.equal(s.cli(["restart", "--due", "--dry-run", "--tree"]).code, 2);
+  const failedRead = s.hcState();
+  failedRead.fail = ["read"];
+  saveRateState(s, failedRead);
+  const failed = s.cli(["rate-limit", "--dry-run", "--json"]);
+  assert.match(failed.json().notes.join(" "), /couldn't be read/);
+  const dueFailedRead = s.cli(["restart", "--due", "--dry-run", "--json"]);
+  assert.equal(dueFailedRead.code, 0, dueFailedRead.err);
+  assert.match(dueFailedRead.json().notes.join(" "), /couldn't be read/);
+  assert.equal(dueFailedRead.json().due[0].action, "retain-handoff");
+  assert.deepEqual(snapshot(), before);
+  assert.equal(realpathSync(link), staleLink);
+  assert.deepEqual(s.calls().slice(at).filter(c => ["label", "send", "run", "kill", "keys", "attach"].includes(c[0])), []);
+});
+
+test("#1557 the watcher learns and rechecks the first deadline, then expiry retains one hold", async (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog("Try again later."));
+  assert.equal(s.cli(["rate-limit", "--json"], { env: { AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS: "0" } }).code, 0);
+  const [initial] = savedRateQueue(s);
+  setScreen(s, "t5", rateDialog("Your limit resets in 1 second."));
+  const before = s.calls().length;
+  const run = s.cliAsync(["restart", ID.main, "--run-queued", initial.id, "--json"], { env: {
+    AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS: "0", AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS: "50",
+    AUTOMAGIK_HERDR_QUEUE_MAX_MS: "1000",
+  } });
+  await waitUntil("the watcher learns the reset", () => savedRateQueue(s)[0]?.wake_at && openItems(s)[0]?.wake_at);
+  const learned = savedRateQueue(s)[0];
+  assert.equal(openItems(s)[0].resets_at, learned.resets_at);
+  assert.equal(openItems(s)[0].wake_at, learned.wake_at);
+  const count = () => s.calls().slice(before).filter(c => c[0] === "read" && c[1] === "t5").length;
+  await waitUntil("the wake time", () => Date.now() >= Date.parse(learned.wake_at));
+  const previous = count();
+  await waitUntil("a watcher read at the wake", () => count() > previous);
+  const admitted = savedRateQueue(s)[0];
+  admitted.wake_at = new Date(Date.now() - 121_000).toISOString();
+  writeWhole(queueFileOf(s), JSON.stringify([admitted]));
+  assert.equal((await run).code, 0);
+  assert.equal(savedRateQueue(s)[0].episode, initial.episode);
+  assert.equal(savedRateQueue(s)[0].watcher, null);
+  assert.equal(s.cli(["restart", "--queued", "--json"]).json().queued.length, 1);
+  setScreen(s, "t5", rateDialog("Your limit resets in 3 hours."));
+  const scans = await Promise.all([s.cliAsync(["rate-limit", "--json"]), s.cliAsync(["rate-limit", "--json"])]);
+  assert.ok(scans.every(r => r.code === 0));
+  const [recoveredWatcher] = savedRateQueue(s);
+  assert.equal(recoveredWatcher.episode, initial.episode);
+  assert.equal(recoveredWatcher.resets_at, learned.resets_at);
+  assert.equal(watcherRuns(s).length, 2);
+  const previousInvocation = { AUTOMAGIK_HERDR_QUEUE_INVOCATION: initial.invocation };
+  assert.equal(s.cli(["restart", ID.main, "--run-queued", initial.id], { env: previousInvocation }).code, 0);
+  assert.deepEqual(savedRateQueue(s), [recoveredWatcher]);
+  const ls = s.cli(["ls", "--json"]).json().projects[0].bots.find(row => row.id === ID.main);
+  const show = s.cli(["show", "Genie", "--json"]).json();
+  assert.equal(ls.rate_limited.resets_at, learned.resets_at);
+  assert.equal(show.rate_limited.resets_at, learned.resets_at);
+  assert.ok(scans.every(r => JSON.parse(r.out).rate_limited[0].resets_at === learned.resets_at));
+});
+
+test("#1557 a healthy sweep retires episode A before B and a late positive cannot recreate it", (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog("Your limit resets in 1 hour."));
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  const [a] = savedRateQueue(s);
+  setScreen(s, "t5", "❯ ");
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  assert.deepEqual(savedRateQueue(s), []);
+  const state = s.hcState();
+  state.terminals[0].screen = rateDialog();
+  state.onRead = { terminal: "t5", nth: 1, screen: "❯ " };
+  saveRateState(s, state);
+  assert.equal(s.cli(["rate-limit", "--json"]).json().parked.length, 0);
+  assert.deepEqual(savedRateQueue(s), []);
+  setScreen(s, "t5", rateDialog("Your limit resets in 3 hours."));
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  const [b] = savedRateQueue(s);
+  assert.notEqual(b.episode, a.episode);
+  assert.notEqual(b.wake_at, a.wake_at);
+  assert.deepEqual(attentionItems(s).map(row => [row.id, row.open]), [[a.episode, false], [b.episode, true]]);
+  assert.equal(s.cli(["restart", ID.main, "--run-queued", a.id]).code, 0);
+  assert.deepEqual(savedRateQueue(s), [b]);
+  assert.equal(s.cli(["restart", "--cancel", ID.main]).code, 0);
+  assert.deepEqual(openItems(s), []);
+});
+
+test("#1557 a delayed healthy response for A cannot close B", async (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog("Your limit resets in 1 hour."));
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  const [a] = savedRateQueue(s);
+  const ready = join(s.root, "healthy-read-returning");
+  const state = s.hcState();
+  state.terminals[0].screen = "❯ ";
+  state.delayReadOnce = { terminal: "t5", ready, ms: 3000 };
+  saveRateState(s, state);
+  const stale = s.cliAsync(["rate-limit", "--json"]);
+  await waitUntil("the delayed read", () => existsSync(ready));
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  setScreen(s, "t5", rateDialog("Your limit resets in 3 hours."));
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  const [b] = savedRateQueue(s);
+  assert.notEqual(a.episode, b.episode);
+  assert.equal((await stale).code, 0);
+  assert.deepEqual(savedRateQueue(s), [b]);
+  assert.equal(openItems(s)[0].id, b.episode);
+});
+
+test("#1557 a missing watcher reply retains the hold and a later sweep attaches only once", (t) => {
+  const s = restartScene(t);
+  setScreen(s, "t5", rateDialog());
+  const state = s.hcState();
+  // The fake saves a launched pane but drops the RPC address. A named watcher can be recovered.
+  state.runNoAddress = true;
+  saveRateState(s, state);
+  const first = s.cli(["rate-limit", "--json"]);
+  assert.equal(first.code, 0, first.err);
+  const [row] = savedRateQueue(s);
+  assert.ok(row.episode);
+  assert.equal(openItems(s)[0].id, row.episode);
+  assert.equal(s.cli(["rate-limit", "--json"]).code, 0);
+  assert.equal(watcherRuns(s).length, 1);
+  assert.equal(savedRateQueue(s)[0].episode, row.episode);
+});
+
+test("#1557 two real clone projects retain their own handoff paths, queues and failure rows", (t) => {
+  const s = restartScene(t);
+  const checkout = join(s.root, "clone");
+  execFileSync(REAL_GIT, ["clone", "--quiet", s.project, checkout]);
+  mkdirSync(join(checkout, ".herdr"), { recursive: true });
+  writeFileSync(join(checkout, ".herdr/bots.json"), readFileSync(s.botsPath));
+  const defaultHome = join(s.home, ".config/herdr-app");
+  const owner = join(checkout, ".herdr/app-home");
+  const implicit = { HERDR_APP_HOME: "" };
+  const clone = { HERDR_APP_HOME: owner };
+  mkdirSync(join(owner, "automagik-herdr"), { recursive: true });
+  writeFileSync(join(owner, "automagik-herdr/attach.jsonl"), "");
+  const state = s.hcState();
+  state.terminals.push(term("t6", { bot: ID.main, cwd: checkout, status: "idle" }));
+  state.terminals[1].foreground.cwd = checkout;
+  state.terminals[1].labels["agent.session"] = SID;
+  saveRateState(s, state);
+  const attach = (project, terminal, env) => s.cli(["attach", "Genie", terminal, "--project", project], { env });
+  for (const [project, terminal, env] of [[s.project, "t5", implicit], [checkout, "t6", clone]]) {
+    const attached = attach(project, terminal, env);
+    assert.equal(attached.code, 0, attached.err);
+  }
+  writeFileSync(join(defaultHome, PROJECTS_FILE), JSON.stringify([s.project, checkout]));
+  for (const [project, env] of [[s.project, implicit], [checkout, clone]]) {
+    const edited = s.cli(["edit", "Genie", "--restart-at", "1000", "--project", project], { env });
+    assert.equal(edited.code, 0, edited.err);
+  }
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  seatTranscript({ ...s, project: checkout }, SID, [assistantUsage(5000)]);
+  const paths = [defaultHome, owner].map((app, i) => handoffFile({ ...s, app, project: i === 0 ? s.project : checkout }, ID.main));
+  for (const path of paths) mkdirSync(path, { recursive: true }); // Each project fails to open only its own path.
+  const due = s.cli(["restart", "--due", "--all", "--json"], { env: implicit });
+  assert.equal(due.code, 1, due.err);
+  assert.equal(due.json().failed.length, 2);
+  const failures = s.cli(["restart", "--queued", "--json"], { env: implicit }).json().handoff_failures;
+  assert.deepEqual(failures.map(row => row.handoff).sort(), paths.sort());
+  assert.deepEqual(new Set(failures.map(row => row.project)), new Set([s.project, checkout]));
+  // Only the first checkout can park. Text must still mention the clone retaining its operation.
+  const cloneQueue = join(owner, "automagik-herdr/queued-restarts.json");
+  writeFileSync(cloneQueue, JSON.stringify([{ id: "clone-handoff", project: checkout, botId: ID.main, botName: "Genie",
+    terminal: "t6", created_ms: state.terminals[1].created_ms, reason: "due", options: { handoff: true }, watcher: null }]));
+  setScreen(s, "t5", rateDialog());
+  setScreen(s, "t6", rateDialog());
+  const rate = s.cli(["rate-limit", "--all"], { env: implicit });
+  assert.equal(rate.code, 0, rate.err);
+  assert.match(rate.out, /Genie .* at t6: blocked on the rate-limit dialog/);
+  assert.match(rate.out, /Genie: parked/);
+  assert.equal(s.cli(["restart", "--cancel", ID.main, "--project", checkout], { env: implicit }).code, 0);
+  const still = s.cli(["restart", "--queued", "--json"], { env: implicit }).json().queued;
+  assert.deepEqual(still.map(row => row.project), [s.project]);
+});
+
+test("#1557 ambiguous label-only ownership creates no park or attention", (t) => {
+  const s = restartScene(t);
+  const state = s.hcState();
+  state.terminals.push(term("t6", { bot: ID.main, cwd: s.project, created: 2 }));
+  for (const pane of state.terminals) pane.screen = rateDialog();
+  saveRateState(s, state);
+  const result = s.cli(["rate-limit", "--json"]);
+  assert.equal(result.code, 0, result.err);
+  assert.match(result.json().notes.join(" "), /duplicate live labels/);
+  assert.equal(existsSync(queueFileOf(s)), false);
+  assert.equal(existsSync(attentionFileOf(s)), false);
+  assert.deepEqual(watcherRuns(s), []);
+});
+
+test("#1557 a held restart keeps its operation through helper contention after recovery", async (t) => {
+  const s = restartScene(t, { status: "working" });
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["restart", "Genie", "--json"]).json().queued, true);
+  const state = s.hcState();
+  state.terminals[0].screen = rateDialog();
+  state.terminals[0].status = { state: "idle" };
+  saveRateState(s, state);
+  const sweep = s.cli(["rate-limit", "--json"]);
+  assert.equal(sweep.code, 0, sweep.err);
+  const [held] = savedRateQueue(s);
+  assert.ok(held.episode);
+  const recovered = s.hcState();
+  recovered.terminals[0].screen = "❯ ";
+  recovered.terminals.push({ ...term("t8", { parent: "t5", cwd: s.project }), die_with_parent: true });
+  saveRateState(s, recovered);
+  const run = s.cliAsync(["restart", ID.main, "--run-queued", held.id, "--json"], {
+    env: { AUTOMAGIK_HERDR_QUEUE_POLL_MS: "20", AUTOMAGIK_HERDR_QUEUE_HELPER_WAIT_MS: "50" },
+  });
+  await waitUntil("the watcher closes its hold", () => !openItems(s).length);
+  await new Promise(done => setTimeout(done, 850));
+  assert.equal(savedRateQueue(s)[0].id, held.id);
+  assert.equal(s.calls().some(args => args[0] === "run" && !args.includes("--run-queued")), false);
+  const unblocked = s.hcState();
+  unblocked.terminals.find(pane => pane.address === "t8").state = "finished";
+  saveRateState(s, unblocked);
+  const result = await run;
+  assert.equal(result.code, 0, result.err);
+  assert.equal(JSON.parse(result.out).replaced, "t5");
+  assert.deepEqual(savedRateQueue(s), []);
 });

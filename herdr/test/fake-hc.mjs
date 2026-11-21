@@ -122,26 +122,33 @@ function foregroundOf(launch) {
   return launch;
 }
 
-// Worker routing integration: this stand-in's run uses the fixture proxy's real RPC path.
-// Every other command keeps the existing file-backed fake; no real core is ever contacted.
-if (process.env.HC_FAKE_PROXY_RUN === "1" && words[0] === "run") {
-  const params = { argv: [], env: {}, labels: {}, caller: process.env.HC_TERMINAL_ID,
-    die_with_parent: true };
-  for (let i = 1; i < words.length; i++) {
-    const word = words[i];
-    if (word === "--") { params.argv = words.slice(i + 1); break; }
-    if (word === "--bg") continue;
-    if (["--name", "--cwd", "--parent"].includes(word)) {
-      params[word.slice(2)] = words[++i]; continue;
+// Use the fixture proxy for worker starts and the first-message operations on its worker.
+if (process.env.HC_FAKE_PROXY_RUN === "1" && (words[0] === "run"
+  || (words[1] === "t200" && ["get", "read", "wait", "send"].includes(words[0])))) {
+  const [method, target] = words;
+  const params = { caller: process.env.HC_TERMINAL_ID };
+  if (method === "run") {
+    Object.assign(params, { argv: [], env: {}, labels: {}, die_with_parent: true });
+    for (let i = 1; i < words.length; i++) {
+      const word = words[i];
+      if (word === "--") { params.argv = words.slice(i + 1); break; }
+      if (word === "--bg") continue;
+      if (["--name", "--cwd", "--parent"].includes(word)) {
+        params[word.slice(2)] = words[++i]; continue;
+      }
+      if (word === "--label") {
+        const value = words[++i], eq = value.indexOf("=");
+        params.labels[value.slice(0, eq)] = value.slice(eq + 1); continue;
+      }
+      params.argv = words.slice(i); break;
     }
-    if (word === "--label") {
-      const value = words[++i], eq = value.indexOf("=");
-      params.labels[value.slice(0, eq)] = value.slice(eq + 1); continue;
+    for (const key of ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"]) {
+      if (process.env[key]) params.env[key] = process.env[key];
     }
-    params.argv = words.slice(i); break;
-  }
-  for (const key of ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"]) {
-    if (process.env[key]) params.env[key] = process.env[key];
+  } else {
+    params.terminal = target;
+    if (method === "read") params.lines = Number(words[words.indexOf("--lines") + 1]);
+    if (method === "send") params.text = words[2];
   }
   const reply = await new Promise((done, reject) => {
     const socket = net.connect(process.env.HC_SOCKET);
@@ -149,7 +156,7 @@ if (process.env.HC_FAKE_PROXY_RUN === "1" && words[0] === "run") {
     socket.setTimeout(3000, () => socket.destroy(new Error("fixture proxy did not answer")));
     socket.on("error", reject);
     socket.on("connect", () => socket.write(JSON.stringify({ jsonrpc: "2.0", id: 1,
-      method: "terminal.run", params }) + "\n"));
+      method: `terminal.${method}`, params }) + "\n"));
     socket.on("data", (chunk) => {
       buffer += chunk;
       if (!buffer.includes("\n")) return;
@@ -157,6 +164,10 @@ if (process.env.HC_FAKE_PROXY_RUN === "1" && words[0] === "run") {
     });
   });
   if (reply.error) fail(reply.error.message);
+  if (method !== "run") {
+    out(reply.result);
+    process.exit(0);
+  }
   // herdr-core's RunResult flattens the terminal record into the result (both tagged versions).
   const { argv: _argv, ...record } = reply.result;
   const terminal = { ...record, cwd: params.cwd, labels: params.labels,
@@ -258,6 +269,13 @@ switch (words[0]) {
       }
       save();
     }
+    if (state.delayReadOnce?.terminal === t.address) {
+      const { ready, ms } = state.delayReadOnce;
+      delete state.delayReadOnce;
+      save();
+      writeFileSync(ready, "");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    }
     break;
   }
   case "label": {
@@ -341,6 +359,11 @@ switch (words[0]) {
       ...(runAs === "flaky" ? { exitAfterGets: 1 } : {}),
       // state.runScreen: what the new pane's screen holds (hc read), its agent's last words, say.
       ...(typeof runScreen === "string" ? { screen: runScreen } : {}) });
+    if (state.finishOnQueueRun && labels["herdr.queued-restart"]) {
+      const seat = find(state.finishOnQueueRun);
+      if (seat) seat.state = "finished";
+      delete state.finishOnQueueRun;
+    }
     // state.onRunWrite: { path, text }: a file edit that lands while this run happens.
     if (state.onRunWrite) writeFileSync(state.onRunWrite.path, state.onRunWrite.text);
     save();
