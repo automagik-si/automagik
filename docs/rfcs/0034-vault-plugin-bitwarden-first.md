@@ -6,7 +6,7 @@
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-11-19 |
-| Amended | 2026-11-19: the review's blocking findings — the freshness rule, the command-bound approval, the dual-name refusal — and its other gaps, as rules with numbers. Re-amended the same day: the vault Allow path, the sync gate, Bot-safe refusals, the always-read sources file, and a grant bound to command, shell and folder. Q1-Q12 answered the same day as decided, Q6 by the delegated #1668 contract; that contract pins `bw` 2026.10.1, allows only its network-failure list, and refuses and locks every other failure |
+| Amended | 2026-11-19: the review's blocking findings — the freshness rule, the command-bound approval, the dual-name refusal — and its other gaps, as rules with numbers. Re-amended the same day: the vault Allow path, the sync gate, Bot-safe refusals, the always-read sources file, and a grant bound to command, shell and folder. Q1-Q12 answered the same day as decided, Q6 by the delegated #1668 contract; that contract pins `bw` 2026.10.1, allows only its network-failure list, and refuses and locks every other failure. 2026-11-21: destination grants for delivery 5 decided and held for DSH upstream; the 1Password desktop app integration deferred out of delivery 4 |
 
 > Approved by Guga's delegation while the owner is away (19/11); the owner may amend on return.
 
@@ -637,17 +637,25 @@ Each delivery is on one release lane, per [RFC 0011](0011-monorepo-parts-and-rel
    row; `bw lock` runs after the idle lock; turning the plugin off makes the name unavailable and
    still refuses a typed fallback. *Rollback:* turn off or remove the plugin; mappings remain and
    no value is converted.
-4. **1Password, then Secrets Manager** (plugin, 3.N.P). Service accounts first, then the desktop
-   app integration; `bws` machine accounts second. A `bws` access token is kept in the OS keychain
-   where the platform has one, and the adapter is unshipped where it does not. *Check:* fake `op`
-   and `bws`, least-privilege reads, refusal when the account cannot see the item, and the token
-   absent from every file and log. *Rollback:* remove that adapter; other sources keep working.
+4. **1Password, then Secrets Manager** (plugin, 3.N.P). Service accounts first; `bws` machine
+   accounts second. A `bws` access token is kept in the OS keychain where the platform has one,
+   and the adapter is unshipped where it does not. The 1Password desktop app integration is
+   deferred out of this delivery (Decided questions, 2026-11-21) and cannot be reached until it
+   is qualified. *Check:* fake `op` and `bws`, least-privilege reads, refusal when the account
+   cannot see the item, and the token absent from every file and log. *Rollback:* remove that
+   adapter; other sources keep working.
 5. **Async consumers** (plugin, 3.N.P). MCP capabilities, the GitHub connector, Remote Hermes and
-   persistent shells, with the grant bound to the destination and its config revision. It reuses
-   the existing Session scope (`canUseInSession`, `secrets.js:42-43`) as the nearest seam: a
-   destination's Session receives a source-scoped secret only through it, with the destination
-   and its revision bound on top. *Check:* a changed destination or config revision refuses; the
-   sync shell path is unchanged. *Rollback:* revert; the shell path still works.
+   persistent shells. **Held.** The grant contract is decided (Decided questions, "Destination
+   grants", 2026-11-21); its first slice waits for the DeepSeek Harness (DSH) MCP client changes
+   listed there. On DSH 0.2.2-rc.2 with `@modelcontextprotocol/client` 2.2.0, starting a stdio MCP
+   server also starts a version-negotiation process with the same environment, outside any check
+   a plugin can make. So no vault value can be kept to the one process the person approved. Until
+   those changes land, a vault-mapped name stays refused in MCP capabilities, connectors and
+   Session mounts, as today: nothing is read and no server starts with it. Persistent shells wait
+   for the shell part of the same DSH request; Remote Hermes is frozen. *Check (first slice, once
+   unblocked):* a changed capability, mapping, Bot or attachment refuses; a revoked grant starts no
+   process; the value is absent from every file and log; the sync shell path is unchanged.
+   *Rollback:* revert; capabilities refuse vault-mapped names again.
 6. **Other managers** (plugin, 3.N.P). Proton Pass, HashiCorp Vault, OS keychains, and KeePassXC
    through its Secret Service integration. *Check:* a fake CLI per manager, and the same refusal
    and audit cases. *Rollback:* remove that adapter.
@@ -662,6 +670,56 @@ its range, 5 minutes. No question is open.
 
 On 2026-11-20 the owner's delegate chose option (a) for Windows Credential Manager, PowerShell Add-Type P/Invoke of CredReadW with the target on stdin, following delivery 4c. Hosts that block the reader show the provider as unavailable. Windows' own credential-access auditing can record the target name and stays enabled.
 
+On 2026-11-21 the owner's delegate decided two more points, the recommended option in each.
+
+**Destination grants (Q3, delivery 5).** Decided by the owner's delegate, 2026-11-21,
+recommended option; held until DSH upstream lands the client changes below. The contract:
+
+- The person issues the grant in Settings › Secrets, on the vault name's row: "this capability may
+  receive this vault name when it runs for this Bot." A Bot never issues, sees or revokes one.
+- The first slice is narrow. The recipient is a Bot, in its own chat Session only (no group, task
+  or subagent). The capability is one stdio MCP server with an absolute command, attached to that
+  Bot directly (not through a pack). It names one mapped name, as the whole value of one
+  environment entry, and no other secret. The mapping's scope must include the Bot. HTTP servers,
+  plugin Sessions, connectors and other recipients wait for their own amendment.
+- Allow carries a snapshot of what the person saw: the capability's saved command, arguments and
+  environment entry, the mapping, the Bot and its attachment. A different snapshot at commit
+  refuses. A later change to any of them, a detach or the Bot's removal ends the grant.
+- The grant lives only in the Bot team's memory, on the host that holds the team lock. A restart,
+  a plugin reload or a lost lock ends it. There is no grant file to restore or edit.
+- A grant is usable only after its issue row is written to `vault-audit.jsonl`. Each start reads
+  the vault once and writes its use row before the value goes anywhere. Revoke and every other
+  end are audited too.
+- The value goes only into that server's environment, never its command line. A lock stops no
+  running server; a start while locked refuses, and only the person's Retry reads again (Q6:
+  never a queued read).
+- Masking lasts until the server's stop is confirmed, then 15 minutes. An unconfirmed stop stays
+  masked and is shown. `list_secrets` is unchanged.
+- The server, anything it starts, and any program running as the same user can read the value
+  while the server runs. The approval says so.
+
+The DSH client changes it waits for:
+
+1. Credentials given per client instance and resolved at every process start (first connect,
+   reconnect, reload); a refusal means no start.
+2. One process per start when credentials are resolved: no negotiation sibling, or a sibling
+   under the same resolver and closure report.
+3. A stdio stderr setting: inherit, discard, or a capped in-memory buffer.
+4. Redaction at the source of every diagnostic and error, covering URL-encoded, JSON-escaped and
+   `\uXXXX` forms.
+5. Refusal of a tool list or server instructions that contain a resolved value, on every refresh.
+6. Per-instance switches that turn off resources and image attachments.
+7. A check right before each tool call and resource request.
+8. A closure result that covers every process the instance started.
+
+Until then, capabilities, connectors and Session mounts keep refusing vault-mapped names.
+
+**1Password desktop app integration (delivery 4).** Deferred out of #1271. It needs vendor
+evidence or a real-app qualification per OS, launch mode and CLI range, and the owner's approval
+of the route (Routes). Until then it cannot be reached: the adapter refuses every `op` call except
+`--version` without a service-account token, and strips inherited `OP_*` variables from the child.
+Service accounts (delivery 4a) are the supported 1Password path.
+
 1. **Transport for the first cut.** **Decided: the installed `bw` CLI**; the Management API does
    not enter now, because the CLI reaches Bitwarden cloud, self-hosted and Vaultwarden through the
    person's existing login, while the API is not a stable personal-vault contract. `bws` follows
@@ -673,7 +731,8 @@ On 2026-11-20 the owner's delegate chose option (a) for Windows Credential Manag
 3. **Default approval: once, session or standing?** **Decided: allow once only**, for the named
    command, shell and folder, 10 minutes, one execution. A session or standing grant waits for
    its own contract: a record, a revoke in Settings, an audit on issue, use and revoke, and a
-   delivery of its own.
+   delivery of its own. That contract for an MCP destination is "Destination grants" above
+   (2026-11-21), held for DSH.
 4. **Idle lock time.** **Decided: 5 minutes by default**, the conservative end of the recommended
    5–15-minute range, person-set, with an 8-hour maximum, because a longer lock weakens revocation
    and a much shorter one makes a Bot fail often.
