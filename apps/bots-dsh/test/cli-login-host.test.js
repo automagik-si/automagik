@@ -384,6 +384,7 @@ test('a failed attempt says why, from acp-dsh’s fixed cause, and never from CL
     ['no sign-in link in time', 'The CLI did not offer a sign-in link in time. Try again.'],
     ['the CLI could not be started', 'The CLI could not be started. Run it once in a terminal, then try again.'],
     ['unsupported sign-in link', 'The CLI returned an old sign-in link. Update it, then try again.'],
+    ['short sign-in link unsupported', 'The CLI returned a short sign-in link Automagik cannot use yet. Update Automagik, then try again.'],
     ['the CLI did not confirm the sign-in', 'The CLI did not confirm the sign-in. Try again.'],
     ['the CLI exited', 'The CLI exited before the sign-in finished. Try again.'],
     ['unknown', 'Sign-in did not finish. Try again.'],
