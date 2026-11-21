@@ -1898,7 +1898,7 @@ jobs:
           done
           sudo dscacheutil -flushcache
           sudo sh scripts/reservations-setup.sh --group automagik-ci
-          ls -ld "${dir}" "${dir}/key"
+          sudo ls -ld "${dir}" "${dir}/key"
           sudo install -d -m 0755 "${root}/bin" "${root}/plugin" \
             "${root}/acp/src/host" "${root}/run"
           sudo install -m 0755 "$(command -v node)" "${root}/bin/node"
