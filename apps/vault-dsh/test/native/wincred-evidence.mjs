@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync, statSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { extname, join } from 'node:path'
 
 export async function* filesBelow(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
@@ -33,14 +33,13 @@ export function compilerScratchEvidence(scan, { stat = statSync, read = readFile
     inspect(path, event) {
       try {
         if (stat(path).isFile()) {
+          // The compiler also writes empty files (its output and error logs) and deletes them.
+          // Content written later reports a change; a change whose file is gone is a gap.
           const bytes = read(path)
-          if (bytes.length === 0) {
-            seen.delete(path)
-            unread.add(path)
-            return
+          if (bytes.length) {
+            nonempty.add(path)
+            scan(bytes)
           }
-          nonempty.add(path)
-          scan(bytes)
         }
         seen.add(path)
         unread.delete(path)
@@ -53,6 +52,8 @@ export function compilerScratchEvidence(scan, { stat = statSync, read = readFile
     },
     get inspected() { return nonempty.size },
     get incomplete() { return unread.size !== 0 },
+    // File extensions only: the names are the compiler's random temp names, never values.
+    get gaps() { return [...unread].map(path => extname(path) || '(none)').sort().join(' ') },
     get unexpected() { return unexpected },
   }
 }

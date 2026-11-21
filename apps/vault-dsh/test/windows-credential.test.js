@@ -406,27 +406,28 @@ test('native compiler observations belong to each invocation and track unresolve
   assert.equal(seen.length, 9)
 })
 
-test('native compiler evidence rejects a deleted file observed only while empty', () => {
-  let content = Buffer.alloc(0)
+test('native compiler evidence accepts empty compiler logs but not content it could not read', () => {
+  const files = new Map([['log.err', Buffer.alloc(0)], ['source.cs', Buffer.from('compiler source')]])
   const evidence = compilerScratchEvidence(() => {}, {
     stat: () => ({ isFile: () => true }),
     read(path) {
-      if (path === 'other.tmp') return Buffer.from('compiler source')
-      if (content !== undefined) return content
+      if (files.has(path)) return files.get(path)
       throw Object.assign(new Error('fixture removed'), { code: 'ENOENT' })
     },
   })
-  evidence.inspect('empty.tmp', 'rename')
-  evidence.inspect('other.tmp', 'change')
+  evidence.inspect('log.err', 'rename')
+  evidence.inspect('source.cs', 'change')
+  files.delete('log.err')
+  evidence.inspect('log.err', 'rename')
   assert.equal(evidence.inspected, 1)
-  assert.equal(evidence.incomplete, true)
-  content = undefined
-  evidence.inspect('empty.tmp', 'rename')
-  assert.equal(evidence.incomplete, true, 'another inspected file cannot cover the empty observation')
-  content = Buffer.from('compiler source')
-  evidence.inspect('empty.tmp', 'change')
-  assert.equal(evidence.inspected, 2)
+  assert.equal(evidence.incomplete, false, 'an empty log the compiler deletes is no gap')
+  evidence.inspect('late.tmp', 'change')
+  assert.equal(evidence.incomplete, true, 'a change whose file is already gone is a gap')
+  assert.equal(evidence.gaps, '.tmp')
+  files.set('late.tmp', Buffer.from('compiler source'))
+  evidence.inspect('late.tmp', 'change')
   assert.equal(evidence.incomplete, false)
+  assert.equal(evidence.inspected, 2)
 })
 
 test('deadline invalidates its captured gate while quit independently bounds cleanup', async t => {

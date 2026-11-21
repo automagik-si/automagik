@@ -314,7 +314,7 @@ test('native Windows Credential Manager round trip, validation and transcript pr
     assert.equal(sensitiveScratch.some(({ operation }) => operation === 'writer write'), true, 'writer scratch tracked')
     for (const { operation, evidence } of sensitiveScratch) {
       assert.equal(evidence.inspected > 0, true, `nonempty compiler files inspected for ${operation}`)
-      assert.equal(evidence.incomplete, false, `missing or unreadable compiler files for ${operation}`)
+      assert.equal(evidence.incomplete, false, `missing or unreadable compiler files for ${operation}: ${evidence.gaps}`)
     }
   })
   for (const key of policyKeys.reverse()) {
