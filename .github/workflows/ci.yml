@@ -105,9 +105,14 @@ jobs:
           else
             # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the
             # first match, and pipefail reads that as "did not change" (#895).
+            # The pull request's own commits, from where it left the base to its head: the
+            # checked-out HEAD is GitHub's merge with today's base, and BASE (the event's
+            # base.sha) can be an older base commit, so BASE...HEAD also listed every base
+            # commit since then: a release bump marked herdr, am, Pocket and usagemeter as
+            # changed on a docs-only pull request. The base itself is checked by its own runs.
             names="${RUNNER_TEMP}/changed-names.txt"
-            if ! git diff --name-only "${BASE}...HEAD" > "${names}"; then
-              echo "::error::git diff ${BASE}...HEAD failed"
+            if ! git diff --name-only "${BASE}...${HEAD_SHA}" > "${names}"; then
+              echo "::error::git diff ${BASE}...${HEAD_SHA} failed"
               exit 1
             fi
             # Pocket Link's own rule: complete before/after trees, never a rename followed.
