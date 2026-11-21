@@ -471,7 +471,8 @@ function verdict(body, run, recovery, el) {
   const reason = failedHealthCheck(run.rollback?.failed)
   switch (run.phase) {
     case 'healthy':
-      card.append(el('h3', null, t('Done: you are on the new version.')), el('p', null, runMessage(run)))
+      card.append(el('h3', null, run.reinstall === true ? t('Done: the same version is installed again.') : t('Done: you are on the new version.')),
+        el('p', null, runMessage(run)))
       break
     case 'rolledBack':
       card.append(el('h3', null, t('Back to the previous version')),

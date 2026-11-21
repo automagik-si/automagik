@@ -156,17 +156,29 @@ export function sourceMatches(profileDir, source) {
   return PROFILE_INPUTS.every(file => equalFile(profileDir, source, file))
 }
 
-function pinArchives(profileDir, staging, plugins) {
-  const live = directory(join(directory(join(profileDir, 'vendor')), 'automagik-update'))
+function pinArchives(profileDir, staging, plugins, beginLiveChanges) {
   const target = directory(join(directory(join(staging.profileDir, 'vendor')), 'automagik-update'))
+  let live = profileDir
+  for (const part of VENDOR.split('/')) {
+    live = join(live, part)
+    const entry = identity(live)
+    if (!entry) {
+      beginLiveChanges?.()
+      directory(live)
+    } else if (!entry.isDirectory()) {
+      throw new Error('Expected a directory')
+    }
+  }
   const created = []
   try {
     for (const plugin of plugins) {
       const name = archiveName(plugin)
       const from = join(live, name)
       if (!identity(from)) {
+        const bytes = regularBytes(downloadPath(staging, plugin))
         writeBytesAtomic(join(staging.root, ARCHIVE_RECORD), JSON.stringify([...created, name]), { durable: true })
-        writeBytesAtomic(from, regularBytes(downloadPath(staging, plugin)), { exclusive: true, durable: true })
+        beginLiveChanges?.()
+        writeBytesAtomic(from, bytes, { exclusive: true, durable: true })
         created.push(name)
       } else {
         const entry = identity(from)
@@ -266,7 +278,7 @@ function verifyCandidate(profileDir, staging, plugins, expectedEntries) {
   }
 }
 
-export async function stageInstall(config, staging, { plugins, registry }, versions, signal) {
+export async function stageInstall(config, staging, { plugins, registry }, versions, signal, beginLiveChanges) {
   const { profileDir, profile } = config
   registryOnlyNpmrc(profileDir)
   assertVersions(profileDir, versions)
@@ -275,7 +287,7 @@ export async function stageInstall(config, staging, { plugins, registry }, versi
   const expectedEntries = Object.fromEntries(plugins.map(plugin => [plugin.name, `file:${VENDOR}/${archiveName(plugin)}`]))
   mirrorLocalInputs(profileDir, staging)
   await checkWriteDestinations(config, staging, signal)
-  pinArchives(profileDir, staging, plugins)
+  pinArchives(profileDir, staging, plugins, beginLiveChanges)
   try {
     const options = [`--registry=${registry}`, '--ignore-pnpmfile']
     await runDsh(config, staging.root, staging.profileDir, [

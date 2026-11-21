@@ -3,17 +3,19 @@ import { setImmediate as immediate } from 'node:timers/promises'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
+import { gunzipSync } from 'node:zlib'
 import { build } from 'esbuild'
 import { CHECK_FRESH_MS } from '../src/shared/self-update.js'
+import { frozen6Bytes } from './fixtures/supervisor-6.mjs'
 
-const bundle = await build({
+const bundle = (await build({
   stdin: {
     contents: "export { AboutPage, SelfUpdateRow } from './src/client/about.js'; export { teamActions } from './src/client/team-actions.js';",
     resolveDir: fileURLToPath(new URL('..', import.meta.url)),
   },
   bundle: true, format: 'cjs', platform: 'node', write: false,
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
-})
+})).outputFiles[0].text
 
 const force = 'Force update'
 const stop = 'Stop and update'
@@ -23,9 +25,9 @@ const unconfirmedUpdate = 'The update status could not be confirmed. Check again
 const unreadableStatus = 'Cannot update: the update check could not be completed.'
 const staleCheck = 'Cannot update: the last check is too old. Check for updates again.'
 const checkTimeout = 'Cannot update: the update check is taking too long. Try again.'
-const ready = { available: true, reason: null, startEnabled: true, startRefusal: null, rollback: true, run: null }
+const ready = { available: true, reason: null, startEnabled: true, startRefusal: null, forceRefusal: null, rollback: true, run: null }
 const noSupervisor = { available: false, reason: 'no-supervisor', run: null }
-const available = now => ({ state: 'available', laneVersion: '1.2.4', checkedAt: new Date(now).toISOString() })
+const available = (now, runId = 'checked-run') => ({ state: 'available', runId, laneVersion: '1.2.4', checkedAt: new Date(now).toISOString() })
 const readOnly = () => Object.assign(new Error('no team lock'), { code: 'bot/read-only' })
 
 const text = node => typeof node === 'string' ? node : node?.children?.map(text).join('') ?? ''
@@ -46,8 +48,8 @@ function findComponent(nodes, type) {
 }
 
 function rowFixture({
-  check = available, readResult = () => assert.fail('unexpected poll'),
-  start = () => ({ started: true, requestId: 'new-request' }), forceProp = true, fromAbout = false,
+  check = now => available(now), readResult = () => assert.fail('unexpected poll'),
+  start = () => ({ started: true, requestId: 'new-request' }), forceProp = true, fromAbout = false, compiled = bundle,
 } = {}) {
   let now = 0
   let counter = 0
@@ -58,7 +60,7 @@ function rowFixture({
   const timers = new Map()
   const state = []
   const effects = []
-  const calls = { checks: 0, polls: [], starts: [], statuses: 0 }
+  const calls = { checks: 0, checkBodies: [], polls: [], starts: [], statuses: 0 }
   const react = {
     createElement: (type, props, ...children) => ({ type, props, children: children.flat() }),
     useState(initial) {
@@ -90,12 +92,14 @@ function rowFixture({
     },
     clearTimeout: id => timers.delete(id),
   }
-  runInNewContext(bundle.outputFiles[0].text, sandbox)
+  runInNewContext(compiled, sandbox)
   const { AboutPage, SelfUpdateRow, teamActions } = sandbox.module.exports
   const actions = teamActions({
     async call(endpoint, body) {
       switch (endpoint) {
-        case 'self-update-check': calls.checks++; return check(now, calls.checks)
+        case 'self-update-check':
+          calls.checkBodies.push(body === undefined ? body : { ...body })
+          return check(now, ++calls.checks)
         case 'self-update-check-result': calls.polls.push(body.runId); return readResult(body.runId, now)
         case 'self-update-status': calls.statuses++; return readStatus(calls.statuses)
         case 'self-update-start': calls.starts.push(body === undefined ? body : { ...body }); return start(body)
@@ -268,7 +272,7 @@ test('a fresh immediate check re-reads readiness, asks once and follows the acce
   assert.equal(hint(confirm), 'Work in progress stops when you click Stop and update, and it comes back by itself once the update is done. Nothing is lost.')
   assert.equal(button(confirm, stop).className, 'bt-fb-primary')
   await click(confirm, stop)
-  assert.deepEqual(b.calls.starts, [{ force: true }])
+  assert.deepEqual(b.calls.starts, [{ force: true, runId: 'checked-run', reinstall: false }])
   const waiting = await b.draw()
   assert.equal(button(waiting, force).disabled, true)
   assert.doesNotMatch(hint(waiting), /1\.2\.3/)
@@ -283,7 +287,7 @@ for (const runId of ['our-check', 'another-tab']) {
     let answered = false
     const b = rowFixture({
       check: () => ({ state: 'checking', runId }),
-      readResult: (id, now) => answered ? available(now) : { state: 'checking', runId: id },
+      readResult: (id, now) => answered ? available(now, id) : { state: 'checking', runId: id },
     })
     await click(await b.draw(), force)
     const busy = await b.draw()
@@ -294,7 +298,7 @@ for (const runId of ['our-check', 'another-tab']) {
     answered = true
     await click(await b.advance(2000), stop)
     assert.deepEqual(b.calls.polls, [runId, runId])
-    assert.deepEqual(b.calls.starts, [{ force: true }])
+    assert.deepEqual(b.calls.starts, [{ force: true, runId, reinstall: false }])
     assert.equal(b.calls.checks, 1)
   })
 }
@@ -306,6 +310,7 @@ for (const [name, reply, message] of [
 ]) {
   test(`a ${name} Force check leaves the controls idle and sends no start`, async () => {
     const b = rowFixture({ check: () => reply })
+    if (name === 'current') b.status({ ...ready, reinstall: true })
     await click(await b.draw(), force)
     const row = await b.draw()
     assert.equal(hint(row), message)
@@ -357,7 +362,7 @@ test('a Force confirmation expires at exactly ten minutes and a retained click c
 
 test('Force refuses changed saved eligibility after the check', async () => {
   const b = rowFixture({ check: now => {
-    b.status({ ...ready, startRefusal: 'check-stale' })
+    b.status({ ...ready, startRefusal: 'check-stale', forceRefusal: 'check-stale' })
     return available(now)
   } })
   await click(await b.draw(), force)
@@ -399,12 +404,12 @@ test('Force consumes confirmation synchronously and never retries an ambiguous s
   const first = click(confirm, stop)
   await click(confirm, stop)
   await immediate()
-  assert.deepEqual(b.calls.starts, [{ force: true }])
+  assert.deepEqual(b.calls.starts, [{ force: true, runId: 'checked-run', reinstall: false }])
   reply.reject(new Error('connection lost'))
   await first
   assert.equal(hint(await b.draw()), 'The update status could not be confirmed. Check again shortly.')
   await click(confirm, stop)
-  assert.deepEqual(b.calls.starts, [{ force: true }])
+  assert.deepEqual(b.calls.starts, [{ force: true, runId: 'checked-run', reinstall: false }])
   assert.equal(b.calls.checks, 1)
 })
 
@@ -422,7 +427,7 @@ test('a hung Force start times out without resending and follows the later super
   assert.equal(hint(timedOut), unconfirmedUpdate)
   assert.equal(button(timedOut, checkButton).disabled, false)
   await click(confirm, stop)
-  assert.deepEqual(b.calls.starts, [{ force: true }])
+  assert.deepEqual(b.calls.starts, [{ force: true, runId: 'checked-run', reinstall: false }])
 
   b.status({ ...ready, run: { runId: 'new-run', requestId: 'new-request', phase: 'staging' } })
   const running = await b.advance(2000)
@@ -432,7 +437,7 @@ test('a hung Force start times out without resending and follows the later super
   const healthy = await b.advance(2000)
   assert.equal(hint(healthy), 'Updated to Automagik 1.2.4.')
   assert.equal(button(healthy, checkButton).disabled, false)
-  assert.deepEqual(b.calls.starts, [{ force: true }])
+  assert.deepEqual(b.calls.starts, [{ force: true, runId: 'checked-run', reinstall: false }])
 })
 
 test('Cancel invalidates Force consent without starting work', async () => {
@@ -508,6 +513,52 @@ for (const [reason, start, message] of [
     assert.equal(hint(row), message)
     assert.equal(button(row, force).disabled, false)
     assert.equal(b.calls.checks, 1)
-    assert.deepEqual(b.calls.starts, [{ force: true }])
+    assert.deepEqual(b.calls.starts, [{ force: true, runId: 'checked-run', reinstall: false }])
   })
 }
+
+test('a capable Force check binds same-version consent, allows Cancel and retry, and shows the repair verdict', async () => {
+  const b = rowFixture({ check(now) { return { ...available(now), reinstall: true } } })
+  b.status({ ...ready, reinstall: true, startRefusal: 'reinstall-needs-force', forceRefusal: 'check-stale' })
+  const idle = await b.draw()
+  const checking = click(idle, force)
+  b.status({ ...ready, reinstall: true, startRefusal: 'reinstall-needs-force', forceRefusal: null })
+  await checking
+  const confirmation = await b.draw()
+  assert.equal(hint(confirmation), 'Automagik 1.2.4 is already installed. Stop and update reinstalls the same signed version: work in progress stops and comes back by itself once it is done. Nothing is lost.')
+  assert.equal(button(confirmation, 'Update now'), undefined)
+  click(confirmation, 'Cancel')
+  const canceled = await b.draw()
+  assert.equal(button(canceled, 'Update now'), undefined)
+  assert.equal(hint(canceled), 'Automagik 1.2.4 is already installed.')
+  await click(canceled, force)
+  const consent = await b.draw()
+  await click(consent, stop)
+  assert.deepEqual(b.calls.checkBodies, [{ reinstall: true }, { reinstall: true }])
+  assert.deepEqual(b.calls.starts, [{ force: true, runId: 'checked-run', reinstall: true }])
+  b.status({ ...ready, reinstall: true, run: { requestId: 'new-request', phase: 'healthy', to: '1.2.4', reinstall: true } })
+  assert.equal(hint(await b.draw()), 'Reinstalled Automagik 1.2.4.')
+})
+
+test('a rollback-only supervisor gets a plain Force check while an older host cannot confirm an available reply', async () => {
+  const current = rowFixture({ check: () => ({ state: 'current' }) })
+  current.status({ ...ready, startRefusal: 'reinstall-needs-force', forceRefusal: 'reinstall-unsupported' })
+  await click(await current.draw(), force)
+  assert.deepEqual(current.calls.checkBodies, [undefined])
+  assert.equal(hint(await current.draw()), 'No newer signed release is available. Reinstalling the same version needs a newer update supervisor.')
+  const { forceRefusal, ...olderStatus } = ready
+  const oldHost = rowFixture()
+  oldHost.status(olderStatus)
+  await click(await oldHost.draw(), force)
+  assert.equal(hint(await oldHost.draw()), unreadableStatus)
+  noStart(oldHost)
+})
+
+test('the delivery 6 page displays its fallback when the host refuses an unbound Force start', async () => {
+  const compiled = gunzipSync(frozen6Bytes('self-update-client.cjs.gz')).toString('utf8')
+  const b = rowFixture({ compiled, start: () => ({ started: false, reason: 'page-outdated' }) })
+  await click(await b.draw(), force)
+  await click(await b.draw(), stop)
+  assert.deepEqual(b.calls.starts, [{ force: true }])
+  assert.equal(hint(await b.draw()), unreadableStatus)
+})

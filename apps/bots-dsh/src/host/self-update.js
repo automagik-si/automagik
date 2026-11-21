@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import { LISTENER_UNKNOWN } from './supervisor/child.js'
 import { inDesktopApp } from './constants.js'
-import { currentOf, hasBootId, isId, publicVersion, runOf, supervisorStateOf } from './supervisor/records.js'
+import { currentOf, hasBootId, isId, publicVersion, REINSTALL_REFUSAL, reinstallRefusalReason, runOf, supervisorStateOf } from './supervisor/records.js'
 import { PLUGINS } from './supervisor/release.js'
 import { readJson, usableStore } from './supervisor/store.js'
 
@@ -66,6 +66,16 @@ function runView(run) {
   return view
 }
 
+function reinstallRefusal(run, store, profileDir, readMountInfo) {
+  if (run?.phase !== 'notUpdated') return run
+  const refusal = readJson(() => usableStore(profileDir, readMountInfo), store, REINSTALL_REFUSAL)
+  if (refusal?.version !== 1 || refusal.runId !== run.runId || reinstallRefusalReason(refusal.detail) !== run.reason) {
+    return run
+  }
+  const { detail } = refusal
+  return { ...run, reinstall: true, detail, reason: detail === 'release-changed' ? detail : run.reason }
+}
+
 export function selfUpdateDetails(profileDir, env, readMountInfo) {
   const records = readStore(profileDir, fs, readMountInfo)
   const bootIds = bootIdsOf(records, env?.AUTOMAGIK_SUPERVISOR_BOOT)
@@ -78,7 +88,7 @@ export function selfUpdateDetails(profileDir, env, readMountInfo) {
     currentInvalid,
     supervisor: supervisor === null ? null : { version: supervisor.version },
     ...status,
-    run: runView(status.run),
+    run: runView(reinstallRefusal(status.run, records.storeDir, profileDir, readMountInfo)),
   }
 }
 
@@ -118,8 +128,11 @@ export function pluginHealth(ctx, versions = new WeakMap()) {
 
 // A supervisor that runs health and rollback names its own boot here. A pre-d6 supervisor copies the service's
 // environment to DSH, so an inherited value is trusted only when it names this boot, which is new on every start.
-const rollbackCapable = env => typeof env?.AUTOMAGIK_SUPERVISOR_ROLLBACK === 'string' && env.AUTOMAGIK_SUPERVISOR_ROLLBACK !== ''
+export const rollbackCapable = env => typeof env?.AUTOMAGIK_SUPERVISOR_ROLLBACK === 'string' && env.AUTOMAGIK_SUPERVISOR_ROLLBACK !== ''
   && env.AUTOMAGIK_SUPERVISOR_ROLLBACK === env.AUTOMAGIK_SUPERVISOR_BOOT
+
+export const reinstallCapable = (env = process.env) => rollbackCapable(env)
+  && env.AUTOMAGIK_SUPERVISOR_REINSTALL === env.AUTOMAGIK_SUPERVISOR_BOOT
 
 function statusOf(profileDir, env, inDesktop, readMountInfo) {
   const { storeDir, currentInvalid, ...status } = selfUpdateDetails(profileDir, env, readMountInfo)
@@ -127,7 +140,8 @@ function statusOf(profileDir, env, inDesktop, readMountInfo) {
     : listenerUnknown(profileDir, env, readMountInfo) ? 'listener-unknown'
     : storeDir === undefined ? 'no-store' : currentInvalid ? 'store-invalid' : null
   return { available: reason === null, reason, ...status,
-    ...(rollbackCapable(env) ? { rollback: true } : {}) }
+    ...(rollbackCapable(env) ? { rollback: true } : {}),
+    ...(reinstallCapable(env) ? { reinstall: true } : {}) }
 }
 
 export function selfUpdateStatus({ profileDir, env = process.env, inDesktop = inDesktopApp(), readMountInfo }) {
@@ -140,6 +154,7 @@ export function install(rt) {
     AUTOMAGIK_SUPERVISOR_BOOT: process.env.AUTOMAGIK_SUPERVISOR_BOOT,
     AUTOMAGIK_SUPERVISOR_VERSION: process.env.AUTOMAGIK_SUPERVISOR_VERSION,
     AUTOMAGIK_SUPERVISOR_ROLLBACK: process.env.AUTOMAGIK_SUPERVISOR_ROLLBACK,
+    AUTOMAGIK_SUPERVISOR_REINSTALL: process.env.AUTOMAGIK_SUPERVISOR_REINSTALL,
   }
   const inDesktop = inDesktopApp()
   rt.selfUpdateStatus = () => statusOf(rt.ctx.get?.('profileContext')?.dir, env, inDesktop)

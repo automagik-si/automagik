@@ -13,7 +13,8 @@ import { join, resolve } from 'node:path'
 import { UPDATE_CUT } from './constants.js'
 import { teamHomeOf } from './folders.js'
 import { savedResult } from './self-update-check.js'
-import { supervisorOf, usableStore, writeJsonAtomic } from './self-update.js'
+import { reinstallCapable, rollbackCapable, supervisorOf, usableStore, writeJsonAtomic } from './self-update.js'
+import { reinstallIntent } from './supervisor/reinstall-intent.js'
 import { isId, RUNNING } from './supervisor/records.js'
 import { readJson } from './supervisor/store.js'
 
@@ -114,9 +115,11 @@ export function createUpdateHold({ readStatus, expectedRun, requestPresent = () 
     firstAt ??= now()
     const known = status.profileKnown && status.readable !== false
     const run = status.supervised && !known ? null : status.run
+    // A validated live verdict can answer a tracked run even when current.json is unreadable.
+    const tracked = run ?? (VERDICTS.has(status.run?.phase) ? status.run : null)
     if (ours !== null) {
       // A verdict from an earlier run cannot answer this click.
-      if (run?.requestId === ours.requestId) return decide(run)
+      if (tracked?.requestId === ours.requestId) return decide(tracked)
       if (observedRun !== undefined) return
       const time = now()
       if (requestPresent(ours.requestId)) {
@@ -134,12 +137,12 @@ export function createUpdateHold({ readStatus, expectedRun, requestPresent = () 
       return
     }
     if (expectedRun !== undefined) {
-      if (run?.runId === expectedRun) return decide(run)
+      if (tracked?.runId === expectedRun) return decide(tracked)
       if (state === 'unknown') state = 'closed'
       return
     }
     if (observedRun !== undefined) {
-      if (run?.runId === observedRun) return decide(run)
+      if (tracked?.runId === observedRun) return decide(tracked)
       return
     }
     if (status.supervised && !known) {
@@ -273,15 +276,22 @@ export function install(rt) {
     }
   }
 
-  function startEligibility({ ownsTeam, status, force } = {}) {
+  function freshResult(profileDir) {
+    const saved = savedResult(profileDir)
+    const checkedAt = Date.parse(saved?.checkedAt)
+    const age = Date.now() - checkedAt
+    return saved?.state === 'available' && age >= 0 && age < CHECK_FRESH_MS ? saved : null
+  }
+
+  const boundTo = (saved, binding) => saved?.runId === binding.runId
+    && typeof binding.reinstall === 'boolean' && (saved.reinstall === true) === binding.reinstall
+
+  function startEligibility({ ownsTeam, status, force, binding } = {}) {
     if (rt.config?.selfUpdate !== true) return { reason: 'self-update-off' }
-    if (force) {
-      // A supervisor can inherit this variable from its service. Only this boot's value counts.
-      const rollback = env.AUTOMAGIK_SUPERVISOR_ROLLBACK
-      if (typeof rollback !== 'string' || rollback === '' || rollback !== env.AUTOMAGIK_SUPERVISOR_BOOT) {
-        return { reason: 'rollback-missing' }
-      }
+    if (force && binding && (typeof binding.runId !== 'string' || binding.runId === '')) {
+      return { reason: 'page-outdated' }
     }
+    if (force && !rollbackCapable(env)) return { reason: 'rollback-missing' }
     status ??= rt.selfUpdateStatus()
     if (force && status.problem) return { reason: 'store-invalid' }
     if (hold.closed || (status.run && (RUNNING.has(status.run.phase) || status.run.phase === 'manualRecovery'))) {
@@ -289,11 +299,11 @@ export function install(rt) {
     }
     if (!status.available) return { reason: status.reason }
     const profileDir = profileOf()
-    const saved = savedResult(profileDir)
-    const checkedAt = Date.parse(saved?.checkedAt)
-    const now = Date.now()
-    if (saved?.state !== 'available' || !Number.isFinite(checkedAt) || now - checkedAt >= CHECK_FRESH_MS || now < checkedAt) {
-      return { reason: 'check-stale' }
+    const saved = freshResult(profileDir)
+    if (!saved || (binding && !boundTo(saved, binding))) return { reason: 'check-stale' }
+    if (saved.reinstall === true) {
+      if (!force) return { reason: 'reinstall-needs-force' }
+      if (!reinstallCapable(env)) return { reason: 'reinstall-unsupported' }
     }
     // The startup pass owns the predecessor's notes until it finishes.
     if (rt.resumeBootPending?.()) return { reason: 'starting-up' }
@@ -305,10 +315,11 @@ export function install(rt) {
     if (supervisor === null || store === undefined) return { reason: 'no-store' }
     return { reason: null, profileDir, supervisor, path: join(store, 'request.json') }
   }
-  rt.selfUpdateStartRefusal = status => startEligibility({ status }).reason
+  rt.selfUpdateStartRefusal = (status, force = false) => startEligibility({ status, force }).reason
 
-  rt.selfUpdateStart = async (ownsTeam = () => rt.holdsLock?.() === true, { force } = {}) => {
-    const { reason, profileDir, supervisor, path } = startEligibility({ ownsTeam, force })
+  rt.selfUpdateStart = async (ownsTeam = () => rt.holdsLock?.() === true, { force, runId, reinstall } = {}) => {
+    const binding = force ? { runId, reinstall } : undefined
+    const { reason, profileDir, supervisor, path } = startEligibility({ ownsTeam, force, binding })
     if (reason !== null) return refuse(reason)
 
     const requestId = randomUUID()
@@ -342,9 +353,21 @@ export function install(rt) {
       const result = await rt.flushUpdateNotes(() => {
         if (!stillOwnsTeam()) return giveBack('bot/read-only')
         if (!hold.owns(requestId)) return giveBack('update-running')
+        let intent
+        if (binding) {
+          const saved = freshResult(profileDir)
+          if (!saved || !boundTo(saved, binding)) return giveBack('check-stale')
+          if (binding.reinstall) {
+            intent = reinstallIntent(saved, { saved: true })
+            if (!intent) return giveBack('check-stale')
+            if (!reinstallCapable(env)) return giveBack('reinstall-unsupported')
+          }
+        }
         try {
-          writeJsonAtomic(path, { version: 1, requestId, bootId: supervisor.bootId, requestedAt: new Date().toISOString() },
-            { profileDir, durable: true })
+          writeJsonAtomic(path, {
+            version: 1, requestId, bootId: supervisor.bootId, requestedAt: new Date().toISOString(),
+            ...(intent ? { reinstall: intent } : {}),
+          }, { profileDir, durable: true })
         } catch (error) {
           // A directory sync can fail after rename. The supervisor can already see that request.
           if (!error?.renamed && !requestPresent(requestId, profileDir)) throw error

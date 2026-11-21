@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { isDeepStrictEqual } from 'node:util'
+import { isId } from './records.js'
 import { isLaneVersion, PLUGINS } from './release.js'
 import { ARCHIVE, equalFile, laneEntries, lockPins, PROFILE_INPUTS, sourceMatches, VENDOR, withLaneEntries } from './stage.js'
 import { directory, identity, regularBytes, syncDirectory, syncFile, writeBytesAtomic } from './store.js'
@@ -54,8 +55,9 @@ export function planSwitch(config, staging, run) {
     throw error
   }
 
-  const keep = `versions/${run.from}`
-  const kept = join(directory(join(store, 'versions')), run.from)
+  const keep = keepPath(run)
+  const parent = directory(join(store, dirname(keep)))
+  const kept = join(store, keep)
   // A cut before publishing a journal can leave preparation metadata, but never a moved lock or module tree.
   if (identity(join(kept, LOCKFILE)) || identity(join(kept, MODULES))) throw new Error('Previous version already kept')
   directory(kept)
@@ -84,11 +86,12 @@ export function planSwitch(config, staging, run) {
     syncFile(join(profileDir, file))
   }
   syncFile(join(staging.profileDir, LOCKFILE))
-  for (const dir of [join(profileDir, VENDOR), profileDir, join(kept, 'vendor'), kept, join(store, 'versions'),
+  for (const dir of [join(profileDir, VENDOR), profileDir, join(kept, 'vendor'), kept, parent,
     staging.source, staging.profileDir, dirname(staging.profileDir), staging.root, store]) syncDirectory(dir)
 
   const journal = {
     op: 'switch', from: run.from, to: run.to, keep, lockHash: digest(candidateLock),
+    ...(run.reinstall === true ? { reinstall: true } : {}),
     sourceHash: digest(sourceManifest), candidateHash: digest(candidateManifest),
     steps: ['keep-modules', ...vendor.map(name => `${VENDOR_STEP}${name}`), ...STEPS],
     done: [], pending: null,
@@ -112,10 +115,18 @@ function verifyRecoveryInputs(staging, journal) {
   }
 }
 
+function keepPath(run) {
+  if (run.reinstall !== true) return `versions/${run.from}`
+  if (!isId(run.runId) || run.from !== run.to) throw new Error('Invalid reinstall run')
+  return `reinstall/${run.runId}`
+}
+
 export function validJournal(run) {
   const { journal: j } = run
-  if (j?.op !== 'switch' || !isLaneVersion(j.from) || !isLaneVersion(j.to) || j.from === j.to
-    || j.from !== run.from || j.to !== run.to || j.keep !== `versions/${j.from}`
+  const reinstall = run.reinstall === true
+  if (j?.op !== 'switch' || !isLaneVersion(j.from) || !isLaneVersion(j.to) || (j.from === j.to) !== reinstall
+    || (reinstall ? j.reinstall !== true || !isId(run.runId) : j.reinstall !== undefined)
+    || j.from !== run.from || j.to !== run.to || j.keep !== keepPath(run)
     || !isHash(j.lockHash) || (j.rollbackManifestHash !== undefined && !isHash(j.rollbackManifestHash))
     || ((j.sourceHash !== undefined || j.candidateHash !== undefined) && (!isHash(j.sourceHash) || !isHash(j.candidateHash)))
     || !Array.isArray(run.names) || run.names.length === 0 || new Set(run.names).size !== run.names.length
@@ -129,6 +140,7 @@ export function validJournal(run) {
     || (j.pending !== null && (typeof j.pending !== 'string' || j.pending !== j.steps[j.done.length]))) return false
   return (j.undo === undefined || j.undo === true)
     && (j.relinking === undefined || j.relinking === true)
+    && (j.relinked === undefined || (reinstall && j.relinked === true && j.relinking === true))
     && (j.commitCurrent === undefined || (j.commitCurrent === true && !j.undo && j.pending === null && j.done.length === j.steps.length))
     && (j.undoReason === undefined || ['stage-failed', 'supervisor-restarted', 'health-failed'].includes(j.undoReason))
 }
@@ -136,7 +148,40 @@ export function validJournal(run) {
 export function validTerminalJournal(run) {
   if (!validJournal(run) || run.journal.pending !== null) return false
   const { undo, done, steps } = run.journal
-  return run.phase === 'healthy' ? !undo && done.length === steps.length : undo === true && done.length === 0
+  return run.phase === 'healthy'
+    ? !undo && done.length === steps.length && (run.reinstall !== true || run.journal.relinked === true)
+    : undo === true && done.length === 0
+}
+
+// Only a durable, disposable verdict may move a backup into the cleanup directory.
+export function trashReinstall(store, run) {
+  if (run.reinstall !== true || !['healthy', 'rolledBack', 'notUpdated'].includes(run.phase)
+    || !validTerminalJournal(run)) throw new Error('Invalid reinstall cleanup verdict')
+  const source = join(store, keepPath(run))
+  const parent = dirname(source)
+  if (!identity(parent)) return
+  directory(parent)
+  if (!identity(source)) return
+  directory(source)
+  const trash = directory(join(store, 'reinstall-trash'))
+  const destination = join(trash, run.runId)
+  if (identity(destination)) throw new Error('Reinstall trash already exists')
+  syncDirectory(store)
+  fs.renameSync(source, destination)
+  syncDirectory(trash)
+  syncDirectory(parent)
+}
+
+export function sweepReinstallTrash(store) {
+  const trash = join(store, 'reinstall-trash')
+  if (!identity(trash)) return
+  directory(trash)
+  const parent = join(store, 'reinstall')
+  syncDirectory(store)
+  syncDirectory(trash)
+  if (identity(parent)) syncDirectory(directory(parent))
+  // Sync before unlinking so even a previous interruption immediately after rename is safe.
+  for (const entry of fs.readdirSync(trash)) fs.rmSync(join(trash, entry), { recursive: true, force: true })
 }
 
 function pathsFor(config, staging, journal) {

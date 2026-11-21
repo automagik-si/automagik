@@ -2,17 +2,18 @@ import { createHash } from 'node:crypto'
 import { createReadStream, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
+import { isDeepStrictEqual } from 'node:util'
 import { compareVersions, satisfies, verifyLane } from '../lane-verify.js'
 import { boundedGet } from '../bounded-get.js'
+import { isLaneVersion, PLUGINS, reinstallIntent } from './reinstall-intent.js'
 import { regularBytes } from './store.js'
 
 export const LANE_URL = 'https://github.com/automagik-si/automagik/releases/download/plugin-lane/lane.json'
 export const ROLE_KEYS = Object.freeze(JSON.parse(readFileSync(new URL('../role-keys.json', import.meta.url), 'utf8')).keys.map(Object.freeze))
 export const OFFICIAL_REGISTRY = 'https://registry.npmjs.org/'
 export const FETCH_TIMEOUT_MS = 8000
-export const PLUGINS = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'].map(name => `@automagik/${name}`)
+export { isLaneVersion, PLUGINS }
 const MAX_TARBALL = 64 * 1024 * 1024
-export const isLaneVersion = value => typeof value === 'string' && value.trim() === value && compareVersions(value, value) === 0
 const readJson = path => JSON.parse(readFileSync(path, 'utf8'))
 
 export function installedPlugins(profileDir) {
@@ -103,7 +104,7 @@ async function verifyTarballs(plugins, saveTarball, fetch, requireAccess, signal
 const deadline = (signal, ms) => signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms)
 
 export async function inspectRelease({
-  profileDir, current, view, getDshVersion, fetch, source, registry, saveTarball, signal,
+  profileDir, current, view, getDshVersion, fetch, source, registry, saveTarball, signal, allowEqual = false, expectedReinstall,
   requireAccess = () => {}, onPhase = () => {},
 }) {
   const result = (state, reason) => ({ state, reason })
@@ -141,11 +142,25 @@ export async function inspectRelease({
   }
   const plugins = lane.plugins.filter(plugin => installed.has(plugin?.name))
   if (plugins.length !== installed.size || new Set(plugins.map(plugin => plugin.name)).size !== installed.size
-    || plugins.some(plugin => plugin.version !== lane.version)) return result('refused', 'lane-invalid')
+    || plugins.some(plugin => plugin.version !== lane.version)) {
+    return result('refused', expectedReinstall ? 'release-changed' : 'lane-invalid')
+  }
   view.plugins = plugins.map(({ name, version }) => ({ name, from: installed.get(name), to: version }))
   const versions = view.plugins.map(({ from, to }) => compareVersions(to, from))
-  if (!versions.some(order => order > 0)) return result('current', 'not-newer')
-  if (versions.some(order => order < 0)) return result('refused', 'not-newer')
+  const reinstall = allowEqual === true && plugins.length > 0 && view.plugins.every(({ from, to }) => from === to)
+  const selected = reinstall ? view.plugins.map((plugin, i) => ({ ...plugin, sha256: plugins[i].sha256 }))
+    .sort((a, b) => a.name.localeCompare(b.name)) : null
+  if (expectedReinstall) {
+    const intent = reinstall && reinstallIntent({
+      version: 2, state: 'available', reinstall: true, laneVersion: lane.version, sequence: lane.sequence, plugins: selected,
+    }, { saved: true })
+    if (!isDeepStrictEqual(intent, expectedReinstall)) return result('refused', 'release-changed')
+  }
+  const newer = versions.some(order => order > 0)
+  if ((allowEqual === true || newer) && versions.some(order => order < 0)) {
+    return result('refused', 'not-newer')
+  }
+  if (!reinstall && !newer) return result('current', 'not-newer')
 
   let dshVersion
   try { dshVersion = await getDshVersion() } catch { return result('refused', 'engines-dsh') }
@@ -166,5 +181,6 @@ export async function inspectRelease({
   } catch (error) {
     return result('refused', error?.reason === 'profile-npmrc' ? error.reason : 'registry-unreachable')
   }
-  return { ...result('available', null), plugins, registry: registryUrl }
+  if (reinstall) view.plugins = selected
+  return { ...result('available', null), plugins, registry: registryUrl, ...(reinstall ? { reinstall: true } : {}) }
 }

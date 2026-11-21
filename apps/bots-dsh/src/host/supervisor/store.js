@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'node:path'
 
 const { constants } = fs
-const FILE_LIMIT = 64 * 1024
+export const UPDATE_RECORD_LIMIT = 64 * 1024
 const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino
 
 export function storeDirOf(profileDir) {
@@ -129,7 +129,7 @@ export function prepareStore(profileDir, readMountInfo) {
 
 export function writeJsonAtomic(path, value, { profileDir, readMountInfo, durable = false } = {}) {
   const json = JSON.stringify(value)
-  if (durable && Buffer.byteLength(json) > FILE_LIMIT) throw new Error('Update record exceeds its size limit')
+  if (durable && Buffer.byteLength(json) > UPDATE_RECORD_LIMIT) throw new Error('Update record exceeds its size limit')
   const checkStore = () => usableStore(profileDir, readMountInfo)
   const storeDir = checkStore()
   const dir = dirname(path)
@@ -186,16 +186,16 @@ export function readJson(checkStore, storeDir, file, io = fs) {
       try {
         const stat = io.fstatSync(fd, { bigint: true })
         if (!sameFile(entry, stat)) continue
-        if (!stat.isFile() || stat.size > FILE_LIMIT || checkStore() !== storeDir) return null
+        if (!stat.isFile() || stat.size > UPDATE_RECORD_LIMIT || checkStore() !== storeDir) return null
 
-        const buffer = Buffer.alloc(FILE_LIMIT + 1)
+        const buffer = Buffer.alloc(UPDATE_RECORD_LIMIT + 1)
         let length = 0
         while (length < buffer.length) {
           const count = io.readSync(fd, buffer, length, buffer.length - length, null)
           if (count === 0) break
           length += count
         }
-        if (length > FILE_LIMIT) return null
+        if (length > UPDATE_RECORD_LIMIT) return null
         return JSON.parse(buffer.toString('utf8', 0, length))
       } finally {
         io.closeSync(fd)

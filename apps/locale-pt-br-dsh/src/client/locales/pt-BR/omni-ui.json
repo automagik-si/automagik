@@ -3338,6 +3338,14 @@
   "You are on": "Você está na",
   "You have": "Você tem",
   "Your previous version stays kept. If the new one does not start, Automagik goes back by itself.": "Sua versão anterior fica guardada. Se a nova não começar, o Automagik volta sozinho.",
+  "No newer signed release is available. Reinstalling the same version needs a newer update supervisor.": "Não há versão assinada mais nova. Para reinstalar a mesma versão, é preciso um supervisor de atualização mais recente.",
+  "Automagik {version} is already installed. Stop and update reinstalls the same signed version: work in progress stops and comes back by itself once it is done. Nothing is lost.": "O Automagik {version} já está instalado. Parar e atualizar reinstala a mesma versão assinada: o trabalho em andamento é interrompido e volta sozinho ao terminar. Nada se perde.",
+  "Automagik {version} is already installed.": "O Automagik {version} já está instalado.",
+  "Reinstalled Automagik {version}.": "O Automagik {version} foi reinstalado.",
+  "reinstalling the current version requires Force update.": "para reinstalar a versão atual, use Forçar atualização.",
+  "reinstalling the same version needs a newer update supervisor.": "para reinstalar a mesma versão, é preciso um supervisor de atualização mais recente.",
+  "this page is older than the installed update support. Reload the page.": "esta página é anterior ao recurso de atualização instalado. Recarregue a página.",
+  "the published release changed after the check. Check again.": "a versão publicada mudou após a verificação. Verifique novamente.",
   "No newer signed release is available.": "Não há versão assinada mais nova.",
   "Work in progress stops when you click Stop and update, and it comes back by itself once the update is done. Nothing is lost.": "O trabalho em andamento para quando você clica em Parar e atualizar e volta sozinho quando a atualização termina. Nada se perde.",
   "this instance's update supervisor cannot roll back automatically yet, which Force update needs.": "o supervisor de atualização desta instância ainda não volta sozinho para a versão anterior, e Forçar atualização precisa disso.",
@@ -3401,5 +3409,6 @@
   "More work items than can be shown here ({pending} pending, {resumed} resumed, {failed} could not resume, {unconfirmed} unconfirmed).": "Alguns itens de trabalho ficaram fora da lista ({pending} pendentes, {resumed} retomados, {failed} que não puderam ser retomados e {unconfirmed} sem confirmação).",
   "The signed release did not offer a newer compatible plugin set.": "A versão assinada não ofereceu um conjunto de plugins compatível e mais recente.",
   "Work recovery is unconfirmed because the saved notes could not be read.": "Não foi possível ler as anotações salvas para confirmar a retomada do trabalho.",
-  "The supervisor could not confirm a healthy running instance.": "O supervisor não conseguiu confirmar que a instância estava funcionando corretamente."
+  "The supervisor could not confirm a healthy running instance.": "O supervisor não conseguiu confirmar que a instância estava funcionando corretamente.",
+  "Done: the same version is installed again.": "Pronto: a mesma versão foi instalada de novo."
 }

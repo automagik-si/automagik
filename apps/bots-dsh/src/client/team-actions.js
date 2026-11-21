@@ -336,7 +336,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     diagnosticsClear: () => call('diagnostics-clear'),
     diagnosticsPermissions: () => call('diagnostics-permissions'),
     repoStars: () => call('repo-stars'),
-    checkSelfUpdate: () => call('self-update-check'),
+    checkSelfUpdate: body => call('self-update-check', body),
     selfUpdateResult: runId => call('self-update-check-result', { runId }),
     selfUpdateStatus: signal => call('self-update-status', undefined, signal),
     startSelfUpdate: body => call('self-update-start', body),

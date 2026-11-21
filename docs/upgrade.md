@@ -257,6 +257,15 @@ and the team lives at the home the service's environment names (`$AUTOMAGIK_BOTS
 `$AUTOMAGIK_HOME/bots`), because the supervisor snapshots that team file. Only the window that holds
 the team can start it; it is not a Bot tool.
 
+**Force update** runs a fresh signed check. With a capable supervisor, it can reinstall the same
+signed version to replace missing or damaged files inside installed plugin trees whose manifests,
+owner route and update contract still load. The check binds the confirmation to the selected signed
+tarballs. A fresh capable install can reinstall after its first supervisor start. An existing
+installation with an older copy needs two healthy updates that ship capable supervisor copies,
+then a service restart. The executing copy, `current` and any `kept` copy must support reinstall.
+If an already-open older page shows “Cannot update: the update check could not be completed.”
+after Stop and update, reload the page and check again.
+
 What the click does, in order:
 
 1. New work is held: every step of every agent waits before its next model call or tool, and the
@@ -296,7 +305,9 @@ If the DSH profile lock times out, confirm its writer has exited before removing
 | `listener.json` | The current boot's listener eligibility, unknown until DSH announces and the supervisor verifies it |
 | `request.json`, `check.json` | A pending one-use request and the most recent Settings check |
 | `state.json`, `current.json` | Update progress and verdict, and the live version, kept version and last accepted lane sequence |
+| `reinstall-refusal.json` | The precise cause of a reinstall refusal before staging, matched to its run |
 | `stage-<runId>/`, `versions/<version>/` | Temporary install and source files, and the previous installer files and data snapshot |
+| `reinstall/<runId>/`, `reinstall-trash/<runId>/` | Same-version recovery files and backups moved aside for removal after a durable verdict |
 | `rollback-data/<runId>/` | The kept team snapshot and any trial team replaced by rollback |
 
 Read `state.json` with `jq . "$DSH_HOME/update/web/state.json"` or a text viewer. Its
@@ -406,13 +417,22 @@ for the source manifest and installer inputs before following the steps below.
    to the recorded team path. If the hashes differ or a restore already completed, leave the
    current team in place and retain the saved copies.
 5. If `current.json` names the trial, restore the recorded `priorCurrent` or remove the file if
-   the record says it was originally absent. Use the previous backup if the journal lacks this
+   the record says it was originally absent. For a same-version reinstall, use the journal's
+   `commitCurrent` or rollback's `restoreCurrent` flag because the version can identify both trees. Use the previous backup if the journal lacks this
    information. Set `state.json` aside with the trial files, start the unit and verify the
    previous version locally.
 
 A 5b supervisor copy refuses an in-progress delivery 6 rollback. The fixed launcher allows its
 bare fallback after a durable `rolledBack` verdict when both copies are broken. For an unfinished
 rollback, restore a working delivery 6 supervisor copy or follow the manual steps above.
+
+An unfinished reinstall needs a reinstall-capable supervisor for automatic recovery. If both
+supervisor copies fail self-check, the fixed launcher can start DSH directly after a completed
+`healthy`, `rolledBack` or `notUpdated` reinstall. For `switching` or `rollingBack`, restore a working
+capable copy and restart. For `manualRecovery`, follow the manual steps above. A backup left in
+`reinstall/<runId>/` may be needed for recovery, including when its journal has been set aside.
+`reinstall-trash/` holds backups already released by a durable verdict and is cleared on a later
+supervised start if cleanup was interrupted.
 
 ## Rollback
 

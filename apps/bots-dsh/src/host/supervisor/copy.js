@@ -9,6 +9,7 @@ const DEFAULT_HOST = resolve(fileURLToPath(new URL('../', import.meta.url)))
 const LAUNCHER = 'launcher.sh'
 const VERSION = 'version.json'
 const INVENTORY = 'supervisor/files.json'
+const CAPABILITIES = fileURLToPath(new URL('./capabilities.json', import.meta.url))
 const DEFAULT_INVENTORY = new URL('./files.json', import.meta.url)
 export const MAIN = 'supervisor/main.js'
 export const SELF_CHECK_OK = 'automagik-supervisor-ok'
@@ -20,6 +21,28 @@ function inventory(root) {
     || !files.every(file => typeof file === 'string' && /^(?:[\w-]+\/)*[\w-]+\.(?:js|json)$/.test(file)
       && !['package.json', VERSION].includes(file))) throw new Error('Invalid supervisor file inventory')
   return files
+}
+
+function supportsReinstall(path) {
+  try {
+    const value = JSON.parse(regularBytes(path))
+    return value?.version === 1 && value.reinstall === true
+  } catch { return false }
+}
+
+const executingSupportsReinstall = supportsReinstall(CAPABILITIES)
+
+export function reinstallCopies(store) {
+  const root = join(store, 'supervisor')
+  const current = join(root, 'current')
+  const kept = join(root, 'kept')
+  const capable = path => identity(path)?.isDirectory() && identity(join(path, 'supervisor'))?.isDirectory()
+    && supportsReinstall(join(path, 'supervisor', 'capabilities.json'))
+  try {
+    return executingSupportsReinstall && capable(current) && (!identity(kept) || capable(kept))
+  } catch {
+    return false
+  }
 }
 
 export const SUPERVISOR_FILES = Object.freeze(inventory(DEFAULT_HOST))

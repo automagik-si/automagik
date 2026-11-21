@@ -561,14 +561,19 @@ export function install(rt) {
           if (rt.config.selfUpdate === true) {
             reply.startEnabled = true
             reply.startRefusal = rt.selfUpdateStartRefusal(status)
+            reply.forceRefusal = rt.selfUpdateStartRefusal(status, true)
           }
           return reply
         }
         const result = endpoint === 'self-update-status'
           ? ownerStatus()
           : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId)
-            : endpoint === 'self-update-start' ? await rt.selfUpdateStart(() => rt.sameTeam(generation), { force: body.force === true })
-              : await rt.selfUpdateCheck()
+            : endpoint === 'self-update-start' ? await rt.selfUpdateStart(() => rt.sameTeam(generation), {
+              force: body.force === true,
+              ...(Object.hasOwn(body, 'runId') ? { runId: body.runId } : {}),
+              ...(Object.hasOwn(body, 'reinstall') ? { reinstall: body.reinstall } : {}),
+            })
+              : body.reinstall === true ? await rt.selfUpdateCheck(true) : await rt.selfUpdateCheck()
         return rt.sameTeam(generation) ? ok(result) : fail(CHECK_READ_ONLY, 'bot/read-only')
       }
       // A plugin install while the web self-update holds the team would race the supervisor's switch.
