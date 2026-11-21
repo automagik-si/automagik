@@ -2829,6 +2829,28 @@ var ZH = {
   "This login choice has changed or expired. Read again.": "此登录选项已更改或过期。请重新读取。",
   "Could not switch the Claude Code login.": "无法切换 Claude Code 登录账号。",
   "Claude Code login switched.": "已切换 Claude Code 登录账号。",
+  "That folder does not exist yet. Make it first, then sign in there.": "该文件夹尚不存在。请先创建它，然后在其中登录。",
+  "Claude Code is not signed in there yet. Sign in with the command, then press Add.": "Claude Code 尚未在那里登录。请用该命令登录，然后按“添加”。",
+  "Claude Code settings move this login to another folder, so this page will not change it.": "Claude Code 设置把此登录移到了另一个文件夹，因此此页面不会更改它。",
+  "Could not tell whether Claude Code is signed in there. Try again.": "无法确定 Claude Code 是否已在那里登录。请重试。",
+  "Claude Code is not found where launches look for it.": "在启动时查找的位置找不到 Claude Code。",
+  "That folder cannot be used: it must be a folder of its own, not a link. Make it again, then sign in there.": "该文件夹无法使用：它必须是独立的文件夹，而不是链接。请重新创建，然后在其中登录。",
+  "New launches use this login. Switch to another login first.": "新的启动正在使用此登录账号。请先切换到其他登录账号。",
+  "A terminal still runs on this login. Restart or stop it first.": "仍有终端在使用此登录账号。请先重启或停止它。",
+  "A terminal runs on a login folder this page cannot match. Restart or stop it first.": "有终端在使用此页面无法匹配的登录文件夹。请先重启或停止它。",
+  "Could not check the running terminals, so nothing was removed.": "无法检查正在运行的终端，因此未移除任何内容。",
+  "Could not confirm the change. Read again before trying again.": "无法确认更改结果。请重新读取后再试。",
+  "Could not change the Claude Code logins.": "无法更改 Claude Code 登录账号。",
+  "Remove {login} from this list? Its folder stays.": "要从此列表中移除 {login} 吗？其文件夹会保留。",
+  "Remove {login} now": "立即移除 {login}",
+  "Remove {login}": "移除 {login}",
+  "Add {login}": "添加 {login}",
+  "Make the folder {folder} (link settings.json and CLAUDE.md from ~/.claude into it to share them), sign in there from a terminal with this command, then press Add.": "创建文件夹 {folder}（如需共享，请从 ~/.claude 链接 settings.json 和 CLAUDE.md），在终端中用此命令在其中登录，然后按“添加”。",
+  "Login {id} added. Use it to start new Claude launches there.": "已添加登录账号 {id}。使用它即可让新的 Claude 启动在那里运行。",
+  "Login {id} removed. Its folder stays; delete it by hand if you want.": "已移除登录账号 {id}。其文件夹会保留；如需要请手动删除。",
+  "Login {id} is still signed in. Sign it out in a terminal with this command, then remove it again.": "登录账号 {id} 仍处于登录状态。请在终端中用此命令退出登录，然后再次移除。",
+  "Read again": "重新读取",
+  "The Herdr home folder does not exist yet, so no login can be added here.": "Herdr 主文件夹尚不存在，因此无法在此添加登录账号。",
   "The scheduler could not do this.": "调度器无法完成此操作。",
   "The scheduler took too long to reply.": "调度器响应超时。",
   "The scheduler returned too much data.": "调度器返回的数据过多。",
@@ -35425,6 +35447,8 @@ function AutomationsPage({ Section: Section3 }) {
 
 // src/client/accounts-page.js
 var import_react88 = require("react");
+var CONFIRM_MS = 5e3;
+var SIGNED_IN = ["eligible", "override", "ambiguous"];
 var hint2 = (message, role) => (0, import_react88.createElement)("div", { className: "bt-set-hint", role }, message);
 var reasons = () => ({
   "not-installed": t("am or the Herdr pack is not installed on this computer."),
@@ -35445,6 +35469,21 @@ var reasons = () => ({
   changed: t("This login choice has changed or expired. Read again."),
   failed: t("Could not switch the Claude Code login.")
 });
+var editReasons = () => ({
+  "no-folder": t("That folder does not exist yet. Make it first, then sign in there."),
+  "not-signed-in": t("Claude Code is not signed in there yet. Sign in with the command, then press Add."),
+  moved: t("Claude Code settings move this login to another folder, so this page will not change it."),
+  "probe-failed": t("Could not tell whether Claude Code is signed in there. Try again."),
+  "no-claude": t("Claude Code is not found where launches look for it."),
+  "bad-folder": t("That folder cannot be used: it must be a folder of its own, not a link. Make it again, then sign in there."),
+  "in-use": t("New launches use this login. Switch to another login first."),
+  running: t("A terminal still runs on this login. Restart or stop it first."),
+  "running-unknown": t("A terminal runs on a login folder this page cannot match. Restart or stop it first."),
+  "no-home": t("The Herdr home folder does not exist yet, so no login can be added here."),
+  "panes-unknown": t("Could not check the running terminals, so nothing was removed."),
+  unknown: t("Could not confirm the change. Read again before trying again."),
+  failed: t("Could not change the Claude Code logins.")
+});
 var states = () => ({
   "not-signed-in": t("Not signed in"),
   override: t("An environment variable overrides this login"),
@@ -35453,38 +35492,99 @@ var states = () => ({
   timeout: t("Did not answer in time"),
   failed: t("Could not be read")
 });
-function AccountRow({ row: row2, launcher, canUse, busy, useLogin }) {
-  const label = row2.label === "default" ? t("Default login") : t("Login {id}", { id: row2.id });
+var loginLabel = (row2) => row2.label === "default" ? t("Default login") : t("Login {id}", { id: row2.id });
+function AccountRow({ row: row2, launcher, canUse, busy, useLogin, confirming, askRemove, keep, removeLogin }) {
+  const label = loginLabel(row2);
   const details = [row2.email, states()[row2.state]].filter(Boolean).join(" · ");
+  return (0, import_react88.createElement)(
+    "div",
+    { className: "bt-set-row", "data-confirm": confirming ? "" : void 0 },
+    (0, import_react88.createElement)(
+      "div",
+      { className: "bt-set-copy" },
+      (0, import_react88.createElement)("span", null, label),
+      confirming ? (0, import_react88.createElement)("span", { className: "bt-set-hint" }, t("Remove {login} from this list? Its folder stays.", { login: label })) : details ? (0, import_react88.createElement)("span", { className: "bt-set-hint" }, details) : null,
+      !confirming && row2.effective && !launcher ? (0, import_react88.createElement)("span", { className: "bt-set-hint" }, t("Used by new launches")) : null
+    ),
+    confirming ? (0, import_react88.createElement)(
+      "div",
+      { className: "bt-set-control" },
+      (0, import_react88.createElement)("button", { className: "bt-mini", type: "button", autoFocus: true, onClick: keep }, t("Keep")),
+      (0, import_react88.createElement)("button", {
+        className: "bt-mini",
+        type: "button",
+        disabled: busy,
+        "data-confirm": "",
+        "aria-label": t("Remove {login} now", { login: label }),
+        onClick: () => void removeLogin(row2.id)
+      }, t("Remove"))
+    ) : [
+      canUse && row2.use ? (0, import_react88.createElement)("button", {
+        key: "use",
+        className: "bt-mini",
+        type: "button",
+        disabled: busy,
+        "aria-label": t("Use {login}", { login: label }),
+        onClick: () => void useLogin(row2.id)
+      }, t("Use this login")) : null,
+      row2.remove ? (0, import_react88.createElement)("button", {
+        key: "remove",
+        className: "bt-mini",
+        type: "button",
+        disabled: busy,
+        "aria-label": t("Remove {login}", { login: label }),
+        onClick: () => askRemove(row2.id)
+      }, t("Remove")) : null
+    ]
+  );
+}
+function AddLogin({ add, busy, addLogin }) {
+  const label = t("Login {id}", { id: add.id });
   return (0, import_react88.createElement)(
     "div",
     { className: "bt-set-row" },
     (0, import_react88.createElement)(
       "div",
       { className: "bt-set-copy" },
-      (0, import_react88.createElement)("span", null, label),
-      details ? (0, import_react88.createElement)("span", { className: "bt-set-hint" }, details) : null,
-      row2.effective && !launcher ? (0, import_react88.createElement)("span", { className: "bt-set-hint" }, t("Used by new launches")) : null
+      (0, import_react88.createElement)("span", null, t("Add {login}", { login: label })),
+      (0, import_react88.createElement)("span", { className: "bt-set-hint" }, t("Make the folder {folder} (link settings.json and CLAUDE.md from ~/.claude into it to share them), sign in there from a terminal with this command, then press Add.", { folder: add.folder })),
+      (0, import_react88.createElement)("code", { className: "bt-aa-address" }, add.signIn)
     ),
-    canUse && row2.use ? (0, import_react88.createElement)("button", {
-      className: "bt-mini",
-      type: "button",
-      disabled: busy,
-      "aria-label": t("Use {login}", { login: label }),
-      onClick: () => void useLogin(row2.id)
-    }, t("Use this login")) : null
+    (0, import_react88.createElement)(
+      "div",
+      { className: "bt-set-control" },
+      (0, import_react88.createElement)("button", {
+        className: "bt-mini",
+        type: "button",
+        disabled: busy,
+        "aria-label": t("Add {login}", { login: label }),
+        onClick: () => void addLogin(add.id)
+      }, t("Add"))
+    )
   );
 }
 function ClaudeLogins({ Section: Section3 }) {
   const [view, setView] = (0, import_react88.useState)(null);
   const [busy, setBusy] = (0, import_react88.useState)(false);
   const [result, setResult] = (0, import_react88.useState)(null);
-  const load = async (signal) => {
+  const [confirm, setConfirm] = (0, import_react88.useState)(null);
+  (0, import_react88.useEffect)(() => {
+    if (confirm === null) return void 0;
+    const timer = setTimeout(() => setConfirm(null), CONFIRM_MS);
+    return () => clearTimeout(timer);
+  }, [confirm]);
+  const [editing, setEditing] = (0, import_react88.useState)(false);
+  const life = (0, import_react88.useRef)(null);
+  const load = async (signal = life.current?.signal) => {
+    setConfirm(null);
     const next = await call("accounts-claude", null, signal).catch(() => ({ reason: "cli-error" }));
-    if (!signal?.aborted) setView(next);
+    if (signal?.aborted) return;
+    setView(next);
+    if (next?.editToken) setEditing(true);
   };
   (0, import_react88.useEffect)(() => {
     const controller = new AbortController();
+    life.current = controller;
     void load(controller.signal);
     return () => controller.abort();
   }, []);
@@ -35502,26 +35602,74 @@ function ClaudeLogins({ Section: Section3 }) {
       setBusy(false);
     }
   };
+  const edit = async (endpoint, id) => {
+    if (busy || !view?.editToken) return;
+    setBusy(true);
+    setResult(null);
+    setConfirm(null);
+    try {
+      const signal = life.current?.signal;
+      const answer = await call(endpoint, { id, token: view.editToken }, signal).catch((error) => ({
+        reason: error?.code === "bot/read-only" ? "read-only" : "unknown"
+      }));
+      if (signal?.aborted) return;
+      setResult({ ...answer, edit: true, id });
+      await load(signal);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const addLogin = (id) => edit("accounts-claude-add", id);
+  const removeLogin = (id) => edit("accounts-claude-remove", id);
+  const readAgain = async () => {
+    if (busy) return;
+    setBusy(true);
+    setResult(null);
+    try {
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
   const messages = reasons();
+  const edits = editReasons();
   const reason = view?.reason === "failed" ? "unreadable" : view?.reason ?? view?.why;
   const message = (code, fallback) => Object.hasOwn(messages, code) ? messages[code] : messages[fallback];
+  const stillRemovable = result?.reason === "signed-in" && !busy && Boolean(view?.editToken) && typeof result.key === "string" && view.rows?.some((row2) => row2.id === result.id && row2.remove === true && row2.key === result.key && SIGNED_IN.includes(row2.state));
+  const editMessage = (answer) => {
+    if (answer.added) return t("Login {id} added. Use it to start new Claude launches there.", { id: answer.id });
+    if (answer.removed) return t("Login {id} removed. Its folder stays; delete it by hand if you want.", { id: answer.id });
+    if (answer.reason === "signed-in" && busy) return null;
+    if (answer.reason === "signed-in") return stillRemovable ? t("Login {id} is still signed in. Sign it out in a terminal with this command, then remove it again.", { id: answer.id }) : messages.changed;
+    if (Object.hasOwn(edits, answer.reason)) return edits[answer.reason];
+    return Object.hasOwn(messages, answer.reason) && answer.reason !== "failed" ? messages[answer.reason] : edits.failed;
+  };
+  const resultText = !result ? null : result.edit ? editMessage(result) : result.switched ? t("Claude Code login switched.") : message(result.reason, "unknown");
   return (0, import_react88.createElement)(
     import_react88.Fragment,
     null,
     !view ? hint2(t("Loading…"), "status") : null,
-    result ? hint2(result.switched ? t("Claude Code login switched.") : message(result.reason, "unknown"), "status") : null,
+    resultText ? hint2(resultText, "status") : null,
+    stillRemovable && typeof result.signOut === "string" ? (0, import_react88.createElement)("code", { className: "bt-aa-address" }, result.signOut) : null,
     reason && reason !== "desktop-only" && reason !== result?.reason ? hint2(message(reason, "cli-error")) : null,
     view?.readOnly && result?.reason !== "read-only" ? hint2(messages["read-only"]) : null,
     view?.fallback ? hint2(t("The selected login cannot be used. Fix it in the Herdr Accounts panel.")) : null,
     view?.launcher ? hint2(t("Claude Code starts through your own launcher here, so this page cannot tell which login it uses.")) : null,
+    view?.editWhy === "no-home" ? hint2(edits["no-home"]) : null,
     view?.rows?.length ? (0, import_react88.createElement)(Section3, { title: t("Claude Code") }, view.rows.map((row2) => (0, import_react88.createElement)(AccountRow, {
       key: row2.id,
-      row: row2,
+      row: view.editToken ? row2 : { ...row2, remove: false },
       launcher: view.launcher,
       canUse: Boolean(view.token) && !view.readOnly,
       busy,
-      useLogin
-    }))) : null
+      useLogin,
+      confirming: confirm === row2.id && row2.remove === true && Boolean(view.editToken),
+      askRemove: setConfirm,
+      keep: () => setConfirm(null),
+      removeLogin
+    })), view.add && view.editToken ? (0, import_react88.createElement)(AddLogin, { add: view.add, busy, addLogin }) : null) : null,
+    // After a sign-in in a terminal the page reads again on demand; shown where Add or Remove is offered.
+    view && (view.editToken || editing) ? (0, import_react88.createElement)("button", { className: "bt-mini", type: "button", disabled: busy, onClick: () => void readAgain() }, t("Read again")) : null
   );
 }
 var FAILURE = "Could not read this computer's accounts.";

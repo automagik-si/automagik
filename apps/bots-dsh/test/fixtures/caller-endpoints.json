@@ -164,6 +164,8 @@
     ],
     "bot-admin": [
       "accounts-claude",
+      "accounts-claude-add",
+      "accounts-claude-remove",
       "accounts-claude-use",
       "accounts-codex",
       "add-agent",

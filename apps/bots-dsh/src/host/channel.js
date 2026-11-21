@@ -588,7 +588,8 @@ export function install(rt) {
       if (readOnly !== undefined && !READS.has(endpoint) && !AGENT_TOOLS.some(tool => tool.read
         && tool.endpoint === endpoint) && added?.read !== true) {
         // A window endpoint's refusal never carries the reason itself: it names the team's files and host.
-        const fixed = { 'accounts-claude-use': 'This host can only read accounts.', 'code-start': 'This host can only read the team.' }
+        const fixed = { 'accounts-claude-use': 'This host can only read accounts.', 'accounts-claude-add': 'This host can only read accounts.',
+          'accounts-claude-remove': 'This host can only read accounts.', 'code-start': 'This host can only read the team.' }
         return fail(Object.hasOwn(fixed, endpoint) ? fixed[endpoint] : readOnly, 'bot/read-only')
       }
       if (CODE_GUARDED.has(endpoint) && textsOf(body).some(text => rt.loginTextMatches?.(text) === true)) return fail(CODE_REFUSED, 'bot/refused')
@@ -1568,7 +1569,7 @@ export function install(rt) {
       const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint) || keyringDetail
         || ['automations-entry', 'accounts-codex'].includes(endpoint)
         || endpoint === 'secret-source-detail'
-        || endpoint === 'accounts-claude' || endpoint === 'accounts-claude-use'
+        || ['accounts-claude', 'accounts-claude-use', 'accounts-claude-add', 'accounts-claude-remove'].includes(endpoint)
         || ['role-settings', 'role-settings-set'].includes(endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)
       return new Response(JSON.stringify(result), { status: 200, headers: {

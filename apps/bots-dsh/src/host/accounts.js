@@ -5,7 +5,13 @@ import { createHash, randomBytes } from 'node:crypto'
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { homedir as osHomedir } from 'node:os'
-import { isAbsolute, join, normalize, relative, sep } from 'node:path'
+import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { askAuthStatus, folderProblem, isDirectoryAsync, nextSlotOf, panesOn, shapeOkay, signInCommand, signOutCommand, trimSlash } from './accounts-guards.js'
+import { connectCore } from './code-core.js'
+import { trustedHc } from './code-env.js'
+import { checkoutRoots, readRegistryTree, startFacts } from './code-tree.js'
+import { answersStatus, probeCore } from './core-probe.js'
 import { fromWindow } from './desktop-window.js'
 import { windowEndpoint } from './extend.js'
 import { compareVersions } from './lane-verify.js'
@@ -152,9 +158,9 @@ function discover(env) {
     reason: !override && found.length ? 'old-cli' : 'not-installed' }
 }
 
-export function runAccounts(cli, args, { cwd, env, timeout }) {
+export function runAccounts(cli, args, { cwd, env, timeout, script = join(cli.dir, 'bin/accounts.mjs') }) {
   return new Promise(resolve => {
-    const child = execFile('sh', [join(cli.dir, 'bin/run.sh'), join(cli.dir, 'bin/accounts.mjs'), ...args], {
+    const child = execFile('sh', [join(cli.dir, 'bin/run.sh'), script, ...args], {
       cwd, env, timeout, encoding: 'buffer', maxBuffer: MAX_BYTES, killSignal: 'SIGKILL',
     }, (error, stdout) => {
       if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || stdout.length > MAX_BYTES) return resolve(refusal('cli-protocol'))
@@ -204,7 +210,8 @@ function projectClaude(claude) {
     rows.push({ id, label: id === 'default' ? 'default' : 'slot', email: slot.email?.toLowerCase() ?? null,
       state: slot.state, selected: id === selected, effective: id === effective, use: false })
   }
-  return { rows, snapshot, effective, email: email?.toLowerCase() ?? null, slotsComplete,
+  const dirs = slots.map(slot => ({ id: slot.id, dir: typeof slot.dir === 'string' && isAbsolute(slot.dir) ? slot.dir : null }))
+  return { rows, dirs, record, selected, nextSlot: claude.nextSlot, snapshot, effective, email: email?.toLowerCase() ?? null, slotsComplete,
     fallback: record === 'bad' || selected !== effective, launcher: state === 'unresolved' || route === 'unresolved',
     switchable: route !== null && (state === 'eligible' || state === 'not-signed-in') }
 }
@@ -217,19 +224,146 @@ function readWhy(answer, appHome, writer) {
   if (!writerQualified(answer.writer)) return answer.writer.panel === 'on' ? 'panel-old' : 'panel-unknown'
 }
 
-export function install(rt, { env = process.env, homedir = osHomedir, platform = process.platform, now = Date.now, run = runAccounts } = {}) {
+// ---- Add and Remove login (5b; RFC 0030 Decisions (2026-11-21), 1): the panel's checks, then set-login ----
+const EDIT_MS = 15 * 60_000
+const EDIT_DEADLINE_MS = 90_000
+const MAX_TERMINALS = 500
+const TERMINALS_AT_ONCE = 8
+const EDIT_REFUSALS = new Map([
+  ['conflict', 'conflict'], ['slot-changed', 'conflict'], ['timeout', 'conflict'], ['busy', 'busy'],
+  ['home', 'home-mismatch'], ['exists', 'changed'], ['no-slot', 'changed'], ['in-use', 'in-use'],
+  ['bad-folder', 'bad-folder'], ['update-first', 'panel-old'], ['no-home', 'no-home'],
+])
+const WRITER_MS = 30_000
+const SCAN_MS = 30_000
+const WHERE_SCRIPT = fileURLToPath(new URL('./accounts-where.mjs', import.meta.url))
+
+/**
+ * Whether a read allows Add and Remove at all (the panel offers neither while the record has a
+ * problem): a qualified writer, a writable team, the record followed as written, and a selected
+ * login whose folder check neither failed nor ran out of time.
+ */
+async function editable(claude, why, readOnly, check = folderProblem) {
+  if (why || readOnly || claude.fallback || (claude.record !== 'ok' && claude.record !== 'absent')) return false
+  const selected = claude.rows.find(row => row.id === claude.selected)
+  if (selected === undefined || selected.state === 'bad-folder') return false
+  // `timeout` is either the folder check or claude's own answer running out of time: ask the folder again.
+  if (selected.state !== 'timeout' || selected.id === 'default') return true
+  const dir = claude.dirs.find(slot => slot.id === selected.id)?.dir
+  return typeof dir === 'string' && await check(dir) === null
+}
+
+/** The folder new launches use when the record is followed as written: the selected slot's, or the default one. */
+const selectedDir = (claude, home) => claude.selected === 'default' ? `${trimSlash(home)}/.claude`
+  : claude.dirs.find(slot => slot.id === claude.selected)?.dir ?? null
+
+/** Whether `id` may be removed by the panel's rule: listed, not default, not selected, well shaped, not the selected folder. */
+function removable(claude, id, home) {
+  const dir = claude.dirs.find(slot => slot.id === id)?.dir
+  return id !== 'default' && id !== claude.selected && shapeOkay(dir, home) && dir !== selectedDir(claude, home) ? dir : null
+}
+
+/** An opaque name for a slot as read (its id and folder), so the page can tell the same login again. */
+const slotKey = (id, dir) => createHash('sha256').update(`slot\n${id}\n${dir}`).digest('hex').slice(0, 32)
+
+const sameCli = (a, b) => a.kind === b.kind && a.dir === b.dir && a.version === b.version
+
+/** Where a launch finds claude, from the writer CLI's own launch-path handler: { program, path } or null. */
+async function claudeWhere(cli, { run, home, env }) {
+  const result = await run(cli, [join(cli.dir, 'bin/automagik-herdr.mjs')], { cwd: home, env, timeout: 20_000, script: WHERE_SCRIPT })
+  if (result.reason || result.code !== 0) return null
+  const answer = parseReply(result.stdout)
+  if (!object(answer) || Object.keys(answer).length !== 2 || !Object.hasOwn(answer, 'program') || !Object.hasOwn(answer, 'path')) return null
+  if (answer.program === null) return { program: null, path: null }
+  if (typeof answer.program !== 'string' || answer.program === '' || typeof answer.path !== 'string') return null
+  // A relative PATH entry gives a relative program: the resolver and the probe both run in `home`.
+  return { program: isAbsolute(answer.program) ? answer.program : resolve(home, answer.program), path: answer.path }
+}
+
+/**
+ * The launch argv of every live terminal this computer's core lists (`terminal.list`, then
+ * `terminal.get`; linked `machine/tN` rows too, as the panel's `hc ls` and `hc get` read them),
+ * found the way the Code tree finds its core and only when its hello names `core` (the accounts
+ * CLI's own core). Null whenever the list can't be read whole.
+ */
+export async function readLocalArgvs({ env = process.env, core: expected, socket, connect = connectCore, deadline = Infinity, now = Date.now, signal } = {}) {
+  if (typeof expected !== 'string' || expected === '' || typeof socket !== 'string') return null
+  const late = () => now() >= deadline || signal?.aborted === true
+  const registry = readRegistryTree({ env })
+  const facts = await startFacts(registry, env)
+  const bin = trustedHc(env, checkoutRoots(registry.projects.map(project => project.folder), facts.keys))
+  if (!bin || late()) return null
+  let core
+  try { core = await connect({ env, bin, socket }) } catch { return null }
+  try {
+    if (core.info?.core?.id !== expected || late()) return null
+    const answer = await core.call('terminal.list')
+    if (!object(answer) || !Array.isArray(answer.terminals)) return null
+    // A missing state, or one that is not a word, can't be told finished: the scan stops rather than skip it.
+    const stateOkay = state => typeof state === 'string' && state !== ''
+    if (answer.terminals.some(terminal => !object(terminal) || typeof terminal.address !== 'string' || terminal.address === ''
+      || !stateOkay(terminal.state))) return null
+    const live = answer.terminals.filter(terminal => terminal.state === 'live')
+    if (live.length > MAX_TERMINALS) return null
+    const argvs = []
+    for (let at = 0; at < live.length; at += TERMINALS_AT_ONCE) {
+      if (late()) return null
+      const batch = await Promise.all(live.slice(at, at + TERMINALS_AT_ONCE).map(terminal =>
+        core.call('terminal.get', { terminal: terminal.address }).then(got => ({ got }), error => ({ error }))))
+      for (const { got, error } of batch) {
+        if (error) {
+          if (error?.kind === 'not_found') continue
+          return null
+        }
+        if (!object(got) || !stateOkay(got.state)) return null
+        if (got.state !== 'live') continue
+        // Stricter than the panel: a live terminal whose launch argv can't be read is not passed over.
+        if (!Array.isArray(got.argv) || got.argv.length === 0 || !got.argv.every(word => typeof word === 'string')) return null
+        argvs.push(got.argv)
+      }
+    }
+    return late() ? null : argvs
+  } catch { return null } finally { core.close() }
+}
+
+export function install(rt, { env = process.env, homedir = osHomedir, platform = process.platform, now = Date.now, run = runAccounts,
+  probe = askAuthStatus, argvs = readLocalArgvs, findCore = probeCore, checkSocket = answersStatus } = {}) {
   const offCodex = installCodex(rt, { env, homedir })
   let pending = Promise.resolve()
+  // A write already on its way when the plugin stops may still land: keep the team lock until it ends.
+  rt.holdLockUntil?.(() => pending)
   let epoch = 0
   const offers = new Map()
-  const unknown = () => {
+  const edits = new Map()
+  // Edit offers have their own generation: a read that began before any write mints none.
+  let editEpoch = 0
+  const forget = () => {
     offers.clear()
+    edits.clear()
     epoch += 1
+    editEpoch += 1
+  }
+  const unknown = () => {
+    forget()
     return refusal('unknown')
   }
   const canWrite = gen => rt.sameTeam(gen) === true && rt.readOnly() === undefined
   const unavailable = () => platform === 'win32' ? 'unavailable'
     : Object.hasOwn(env, 'AUTOMAGIK_AGENT_HOME_LAUNCH') ? 'chosen-home' : undefined
+
+  // `accounts here` through `cli`: { why, claude, core } (claude null when the CLI read none), or { reason }.
+  const readHere = async (cli, { home, appHome, writer, childEnv = env }) => {
+    const result = await run(cli, ['here', '--within', '15', '--json'], { cwd: home, env: childEnv, timeout: 20_000 })
+    if (result.reason) return refusal(result.reason)
+    if (result.code !== 0) return refusal('cli-error')
+    const answer = parseReply(result.stdout)
+    if (!object(answer) || answer.v !== 1 || answer.kind !== 'accounts.here') return refusal('cli-protocol')
+    const why = readWhy(answer, appHome, writer)
+    const core = typeof answer.core === 'string' ? answer.core : null
+    if (answer.claude === null) return { why, claude: null, core }
+    const claude = projectClaude(answer.claude)
+    return claude ? { why, claude, core } : refusal('cli-protocol')
+  }
 
   const offRead = windowEndpoint(rt, 'accounts-claude', async (_body, _signal, proof) => {
     if (!fromWindow(proof)) return refusal('desktop-only')
@@ -238,21 +372,44 @@ export function install(rt, { env = process.env, homedir = osHomedir, platform =
       if (blocked) return refusal(blocked)
       const gen = rt.teamGeneration()
       const readEpoch = epoch
+      const readEditEpoch = editEpoch
       const { home, appHome, reader, writer, reason } = discover(env)
       if (!reader) return refusal(reason)
-      const result = await run(reader, ['here', '--within', '15', '--json'], { cwd: home, env, timeout: 20_000 })
-      if (result.reason) return refusal(result.reason)
-      if (result.code !== 0) return refusal('cli-error')
-      const answer = parseReply(result.stdout)
-      if (!object(answer) || answer.v !== 1 || answer.kind !== 'accounts.here') return refusal('cli-protocol')
-      const why = readWhy(answer, appHome, writer)
-      if (answer.claude === null) return { why }
-      const claude = projectClaude(answer.claude)
-      if (!claude) return refusal('cli-protocol')
+      const read = await readHere(reader, { home, appHome, writer })
+      if (read.reason) return read
+      const { why, claude } = read
+      if (!claude) return { why }
 
       const { rows, fallback, launcher, snapshot } = claude
       const readOnly = !canWrite(gen) || rt.canWriteTeam?.() === false
       const view = { rows, fallback, launcher, readOnly, ...(why ? { why } : {}) }
+      const canEdit = writer && await editable(claude, why, readOnly)
+      // am alone with no Herdr home yet: the writer has nowhere to keep a login, so the page says why.
+      const homeThere = canEdit ? await isDirectoryAsync(appHome) : false
+      if (canEdit && homeThere === false) view.editWhy = 'no-home'
+      else if (canEdit && homeThere === true && readEpoch === epoch && readEditEpoch === editEpoch) {
+        // Remove: a listed login with a usable folder that new launches do not use (the panel's rule).
+        const remove = new Map()
+        if (claude.record === 'ok') {
+          for (const row of rows) {
+            const dir = removable(claude, row.id, home)
+            if (!dir) continue
+            row.remove = true
+            row.key = slotKey(row.id, dir)
+            remove.set(row.id, dir)
+          }
+        }
+        // Add: only the writer's next slot, and only in the panel's own form.
+        const next = nextSlotOf(claude.nextSlot, home)
+        const add = next && !claude.dirs.some(slot => slot.id === next.id || slot.dir === next.dir) ? next : null
+        if (add) view.add = { id: add.id, folder: `~/.claude-${add.id}`, signIn: signInCommand(add.id) }
+        if (add || remove.size) {
+          const editToken = randomBytes(16).toString('hex')
+          edits.set(editToken, { at: now(), gen, appHome, cli: writer, snapshot: snapshot ?? 'none', selected: claude.selected, add, remove })
+          if (edits.size > MAX_OFFERS) edits.delete(edits.keys().next().value)
+          view.editToken = editToken
+        }
+      }
       if (why || readOnly || readEpoch !== epoch || fallback || launcher || !claude.switchable || !claude.slotsComplete) return view
       const slots = new Map()
       for (const row of rows) {
@@ -293,7 +450,12 @@ export function install(rt, { env = process.env, homedir = osHomedir, platform =
       if (!object(answer)) return unknown()
       if (result.code === 1) return refusal(WRITE_REFUSALS.get(answer.error) ?? 'failed')
       if (result.code === 0 && answer.ok === true && answer.use === id && matches(HASH, answer.snapshot)
-        && Object.keys(answer).length === 3) return { switched: true }
+        && Object.keys(answer).length === 3) {
+        // The record moved: every edit offer is stale (Use offers keep 5b's rules: single use, bound to the snapshot).
+        edits.clear()
+        editEpoch += 1
+        return { switched: true }
+      }
       return unknown()
     } catch {
       // A child error can contain argv and output. Keep only the fixed outcome.
@@ -307,5 +469,120 @@ export function install(rt, { env = process.env, homedir = osHomedir, platform =
     return next
   })
 
-  return () => { offCodex(); offRead(); offWrite(); offers.clear(); epoch += 1 }
+  // The checks before the write, on a fresh read: { dir } to go on, or the refusal to answer.
+  const guard = async (kind, id, offer, { home, appHome, writer, late, deadline, signal }) => {
+    // Remove reads the core it will scan: one socket that answers, pinned for the CLI's read and the scan,
+    // whose core id the CLI's read and the connection's hello must both name.
+    // An explicit socket (the CLI's own order) is honoured as it is; with none, the one that answers is pinned
+    // as HC_SOCKET. The CLI's read still sees every other candidate and names no core when they disagree.
+    // Two different explicit sockets may be two cores: the scan could miss one, so nothing is removed.
+    const explicit = [...new Set([env.HC_SOCKET, env.AUTOMAGIK_HERDR_CORE_SOCKET, env.HC_TERMINAL_SOCKET].filter(Boolean))]
+    let socket, childEnv = env
+    if (kind === 'remove') {
+      if (explicit.length > 1) return refusal('panes-unknown')
+      const [dispatch] = explicit
+      socket = dispatch ? (await checkSocket(dispatch, 3000) ? dispatch : null) : await findCore(env)
+      if (typeof socket !== 'string') return refusal('panes-unknown')
+      if (!dispatch) childEnv = { ...env, HC_SOCKET: socket }
+      if (late()) return refusal('changed')
+    }
+    const read = await readHere(writer, { home, appHome, writer, childEnv })
+    if (read.reason) return read
+    if (late()) return refusal('changed')
+    const { why, claude, core } = read
+    if (why) return refusal(why)
+    if (!claude) return refusal('unreadable')
+    if (!await editable(claude, why, false) || (claude.snapshot ?? 'none') !== offer.snapshot || claude.selected !== offer.selected) return refusal('changed')
+    let dir
+    if (kind === 'add') {
+      const next = nextSlotOf(claude.nextSlot, home)
+      if (!next || next.id !== id || next.dir !== offer.add.dir || claude.dirs.some(slot => slot.id === id || slot.dir === next.dir)) return refusal('changed')
+      dir = next.dir
+      // The panel's folder check comes before claude runs there.
+      const problem = await folderProblem(dir)
+      if (problem) return refusal(problem)
+    } else {
+      const slot = claude.dirs.find(candidate => candidate.id === id)
+      if (claude.record !== 'ok' || !slot || slot.dir !== offer.remove.get(id)) return refusal('changed')
+      if (id === claude.selected || slot.dir === selectedDir(claude, home)) return refusal('in-use')
+      if (removable(claude, id, home) !== slot.dir) return refusal('changed')
+      dir = slot.dir
+    }
+    // The panel's sign-in probe: signed in, in that folder, before an add; signed out before a remove.
+    const where = await claudeWhere(writer, { run, home, env })
+    if (!where) return refusal('probe-failed')
+    if (!where.program) return refusal('no-claude')
+    if (late()) return refusal('changed')
+    const status = await probe(dir, where, { env, cwd: home })
+    if (status.state === 'nobin') return refusal('no-claude')
+    if (kind === 'add') {
+      if (status.state === 'out') return refusal('not-signed-in')
+      if (status.state !== 'in' || status.loggedIn !== true) return refusal('probe-failed')
+      if (status.configDirectory && trimSlash(status.configDirectory) !== dir) return refusal('moved')
+      return { dir }
+    }
+    // Claude settings that send this login to another folder (the selected one, say): no logout command, no write.
+    if (status.configDirectory && trimSlash(status.configDirectory) !== dir) return refusal('moved')
+    if (status.state === 'in') return { reason: 'signed-in', signOut: signOutCommand(dir, home), key: slotKey(id, dir) }
+    if (status.state !== 'out') return refusal('probe-failed')
+    if (late()) return refusal('changed')
+    const seen = await argvs({ env, core, socket, deadline: Math.min(now() + SCAN_MS, deadline - WRITER_MS), now, signal }).catch(() => null)
+    if (!Array.isArray(seen)) return refusal('panes-unknown')
+    const on = await panesOn(seen, { id, dir }, claude.dirs.filter(slot => slot.dir), home, { late: () => late() || now() >= deadline - WRITER_MS })
+    return on ? refusal(on) : { dir }
+  }
+
+  // Add or Remove: the page names the login and the edit offer it was shown; every check runs again here.
+  const editLogin = async (kind, body, { gen, deadline, signal }) => {
+    // Past the deadline (queue time included) or with the page gone, nothing more starts.
+    const late = () => now() >= deadline || signal?.aborted === true
+    try {
+      const { id, token } = body ?? {}
+      const offer = edits.get(token)
+      edits.delete(token)
+      const blocked = unavailable()
+      if (blocked) return refusal(blocked)
+      if (!offer || now() - offer.at >= EDIT_MS || late() || typeof id !== 'string'
+        || (kind === 'add' ? offer.add?.id !== id : !offer.remove.has(id))) return refusal('changed')
+      const { home, appHome, writer } = discover(env)
+      if (appHome !== offer.appHome || !writer || !sameCli(writer, offer.cli)) return refusal('changed')
+      // The team this request arrived in and the one the offer was made in must both still be this host's.
+      if (!canWrite(gen) || !canWrite(offer.gen) || rt.canWriteTeam?.() === false) return refusal('read-only')
+      const checked = await guard(kind, id, offer, { home, appHome, writer, late, deadline, signal })
+      if (!checked.dir) return checked
+      const args = ['set-login', `--${kind}`, id, ...(kind === 'add' ? ['--dir', checked.dir] : []),
+        '--snapshot', offer.snapshot, '--expect-home', appHome, '--json']
+      // The writer starts only with its whole time left before the deadline.
+      if (late() || deadline - now() < WRITER_MS) return refusal('changed')
+      if (!canWrite(offer.gen) || rt.canWriteTeam?.() === false) return refusal('read-only')
+      const result = await run(writer, args, { cwd: home, env, timeout: WRITER_MS })
+      if (result.reason === 'cli-error') return refusal('failed')
+      if (result.reason) return unknown()
+      if (result.code === 2) return refusal('failed')
+      const answer = parseReply(result.stdout)
+      if (!object(answer)) return unknown()
+      if (result.code === 1) return refusal(EDIT_REFUSALS.get(answer.error) ?? 'failed')
+      if (result.code === 0 && answer.ok === true && matches(HASH, answer.snapshot) && answer.use === offer.selected
+        && Object.keys(answer).length === 3) {
+        // The record moved: every Use and edit offer is stale.
+        forget()
+        return kind === 'add' ? { added: true } : { removed: true }
+      }
+      return unknown()
+    } catch {
+      // A child error can contain argv and output. Keep only the fixed outcome.
+      return unknown()
+    }
+  }
+  const editEndpoint = kind => (body, signal, proof) => {
+    if (!fromWindow(proof)) return refusal('desktop-only')
+    const at = { gen: rt.teamGeneration(), deadline: now() + EDIT_DEADLINE_MS, signal }
+    const next = pending.then(() => editLogin(kind, body, at))
+    pending = next
+    return next
+  }
+  const offAdd = windowEndpoint(rt, 'accounts-claude-add', editEndpoint('add'))
+  const offRemove = windowEndpoint(rt, 'accounts-claude-remove', editEndpoint('remove'))
+
+  return () => { offCodex(); offRead(); offWrite(); offAdd(); offRemove(); forget() }
 }
