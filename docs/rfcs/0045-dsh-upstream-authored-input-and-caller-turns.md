@@ -9,10 +9,12 @@
 
 ## Summary
 
-Four extension points we would ask DeepSeek Harness (DSH) to add, so that a person who is not the
+Five extension points we would ask DeepSeek Harness (DSH) to add, so that a person who is not the
 owner can send a prompt to a shared Session and DSH itself proves who wrote each input, which
-Session it was admitted for, and that nothing the person may not see or do runs in their turn.
-They come from RFC 0038 delivery 5e (#1928): members and guests prompt a shared Bot.
+Session it was admitted for, and that nothing the person may not see or do runs in their turn. The
+first four come from RFC 0038 delivery 5e (#1928): members and guests prompt a shared Bot; the
+fifth from RFC 0030 delivery 4's remainder (#1007): a conversation's history never crosses a
+harness.
 
 1. **Authored input.** DSH stamps every inbox message with the author of the Peer that admitted
    it, keeps that author through every move of the message, and asks the host one question,
@@ -24,6 +26,10 @@ They come from RFC 0038 delivery 5e (#1928): members and guests prompt a shared 
    matching turns and resolves once they have settled and the removal is durable.
 4. **A route that owns its tools or context.** A provider can say that its model keeps its own
    tools or its own context (an agent over ACP), so DSH refuses a scoped turn on it.
+5. **A route change bound to a Session revision.** DSH records a model selection only if nothing was
+   admitted since the host looked, keeps each input's origin part, and forwards input with a durable
+   receipt, so a host can change a conversation's route without carrying history or pending input to
+   another harness (RFC 0030, Q7).
 
 Each one removes plugin machinery that three review rounds of a plugin-only design could not make
 complete (RFC 0038, "Deliveries for this amendment", 5e). This RFC is the proposal only: it names
@@ -242,6 +248,60 @@ interface ModelInfo {
 
 **What we remove.** The plugin's pinned list of adapters a member turn may use.
 
+### 5. A route change bound to a Session revision, and input bound to its part
+
+From RFC 0030 (Code mode in the app), Decided 6 and Answers Q7: a conversation's history never
+crosses a harness (DSH's own tools, or an agent over ACP such as Claude Code or Codex). The Bot
+team refuses that crossing when the person picks a new route for a chat that has history (Q7a,
+#1863). It cannot enforce the same rule for the other writers — failover, migrations, a reopened
+part, automatic rollovers, a group member's Session — or for input pending during a managed move.
+Three review rounds of a plugin-only design (#1007, 2026-11-21) found the same two gaps every
+time.
+
+```ts
+// A selection that DSH records only if nothing was admitted since the host looked.
+interface SessionRevision { readonly sessionId: string; readonly seq: number }   // durable, monotonic
+controller.revisionOf(sessionId): SessionRevision      // bumps on every admitted input or turn start
+controller.selectModel(request & { ifRevision?: SessionRevision }):
+  Promise<{ selected: ModelSelection } | { refused: 'revision-changed', revision: SessionRevision }>
+
+// Input that keeps the part it was meant for, with a durable receipt when it moves.
+interface MessageOrigin { readonly sessionId: string; readonly exchangeId?: string; readonly cardCallId?: string }
+agent.forward(messages: Message[], to: SessionId, opts: { receiptKey: string }):
+  Promise<{ delivered: string[]; alreadyDelivered: string[] }>   // idempotent across restarts
+```
+
+- **The fence.** `selectModel` with `ifRevision` checks the revision and records the selection
+  inside the same admission lock that prompt, steer, followup and the inbox use, after
+  `requireModel` and `resolveCallConfig` have resolved, so no input is admitted and no turn starts
+  between the check and the write. Today `selectModel` awaits agent resolution, model validation
+  and call-config resolution before the selection is recorded, and text prompts are admitted
+  outside `serializeImageAdmission` (`dsh-api-session-controller/src/commands.ts:166-168, 386`: a
+  prompt without an image is admitted without it), so a turn can start on the old route after any
+  host check. A refused selection changes nothing, and the host reads the history again.
+- **Input bound to its part.** Every inbox message keeps a `MessageOrigin`: the Session it was
+  admitted for and, where it answers something (a question card, a browser handoff, a reply to
+  another Bot), the exchange or call it answers. A host can ask DSH to hold input whose origin is
+  not the current part instead of running it on another route, and to list input claimed by a step
+  (pre-step batches) without losing it.
+- **Durable forwarding.** `forward` writes each moved message to the destination and retires it
+  from the source in one durable step keyed by `receiptKey`. A restart after delivery and before
+  the source removal does not deliver it twice, and a message without an `exchangeId` is still
+  found.
+- A host-wide form of the fence (`drainAll` in § 3 already has the barrier) lets a host apply one
+  route change to several Sessions of one Bot (its own chat and its group Sessions) and see which
+  of them were refused.
+
+**What we remove.** In the Bot team (apps/bots-dsh):
+- the single history read in `switchRoute`'s in-place path, and the "conversation changed or is
+  busy" re-check around it (`parts.js`);
+- the plan for a per-Session route hold that the Bot-wide `model`/`appliedModel` pair cannot
+  express;
+- the forwarding's inbox-based deduplication (`parts.js` `forward`);
+- the sign-in-code drop on forwarded input, which becomes a check on the input's origin
+  (`cli-login.js`). With the fence and origins, RFC 0030 delivery 4's remainder (Q7b, Q7c beyond
+  failover, and the managed history-free move with its pending input) can be built as plugin work.
+
 ## What a plugin can do on DSH 0.2.2-rc.2
 
 Delivery 5e may also start from one certified route (RFC 0038). On the pinned DSH that route has
@@ -302,10 +362,13 @@ stays a residual of that route, and the narrowing itself is the cost each piece 
 6. Is the route marker one field on the model, or one on the provider (RFC 0023 question 1)?
 7. Where does this go first: an issue on DSH's tracker, a patch in the desktop's runtime patches
    (a desktop release, RFC 0011), or both?
+8. Is the revision one counter per Session (input and turn starts), or should it also cover a
+   selection made through DSH's own composer picker, so the host learns of it?
 
 ## Tracking
 
 - Issue #1928 (RFC 0038 delivery 5e), Refs #1373.
+- Issue #1007 (RFC 0030 delivery 4's remainder: Q7b, Q7c, pending input).
 
 ## Links
 
@@ -314,3 +377,4 @@ stays a residual of that route, and the narrowing itself is the cost each piece 
 - [0023](0023-dsh-upstream-agent-context-and-chat-rows.md): the form of this proposal, and § 1's
   provider-managed context flag that § 4 extends.
 - [0024](0024-automagik-cloud.md) (f): per-message authorship.
+- [0030](0030-code-mode-in-the-app.md), Decided 6, Handoff note, Answers Q7: § 5.
