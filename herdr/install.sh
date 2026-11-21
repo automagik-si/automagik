@@ -161,7 +161,14 @@ main() {
 
   TMP=
   REVIVE_ANSWER=
-  trap 'rm -rf "$TMP"; [ -z "$REVIVE_ANSWER" ] || rm -f "$REVIVE_ANSWER"' EXIT
+  # The cleanup runs in this installer's own shell only. bash runs a background child (a
+  # watchdog) with these traps for a moment after the fork, and a TERM sent to that child at once
+  # (the watchdog stopped as soon as its command answered) ran `exit 130` and so this EXIT trap
+  # there: the child removed $TMP under the running installer (the held hooks notice and the
+  # usagemeter smoke answer went with it). $$ is the installer's pid in a subshell too, so the
+  # check reads the real pid of the shell running the trap: the parent of a program it starts.
+  INSTALLER_PID=$(exec sh -c 'echo "$PPID"')
+  trap 'cleanup_tmp' EXIT
   trap 'exit 130' INT TERM
 
   if [ "$UNINSTALL" = 1 ]; then uninstall; else install; fi
@@ -211,6 +218,13 @@ EOF
 }
 
 say() { printf '%s\n' "$*"; }
+# The EXIT trap's cleanup ($TMP and the revive answer file), only in the installer's own shell
+# (INSTALLER_PID, set with the traps): a forked child that runs the inherited trap leaves them.
+cleanup_tmp() {
+  [ -n "${INSTALLER_PID:-}" ] && [ "$(exec sh -c 'echo "$PPID"')" = "$INSTALLER_PID" ] || return 0
+  rm -rf "$TMP"
+  [ -z "$REVIVE_ANSWER" ] || rm -f "$REVIVE_ANSWER"
+}
 # With the pack's AUTOMAGIK_HERDR_DIAG=1 (the install e2e rows set it; a person's run never prints
 # these): one `diag:` line where the hooks notice is held and where it is printed, so a notice that
 # went missing between the two is named instead of silent.
