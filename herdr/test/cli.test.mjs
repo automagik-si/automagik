@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -6245,6 +6245,15 @@ async function waitUntil(what, fn, ms = 15_000) {
 }
 const handoffFile = (s, botId) => join(s.app, "automagik-herdr/handoff", `${botId}.md`);
 /**
+ * Replaces a file a running CLI pass may read at the same moment: a file of its own beside it,
+ * renamed over it, so the pass reads the old bytes or the new ones, never a truncated half.
+ */
+const writeWhole = (file, text, options) => {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, text, options);
+  renameSync(tmp, file);
+};
+/**
  * The fake `hc run --bg` records the watcher's launch but never spawns it, so a detached
  * watcher's timeout is otherwise only code-read. This starts the very argv that call recorded
  * (past hc's `/bin/sh -c ... sh K=V ...` wrapper), detached, keeping the fake's own env words.
@@ -6929,18 +6938,22 @@ test("#1556 --due refuses to restart a pane other than the one it measured", asy
   seatTranscript(s, SID, [assistantUsage(5000)]);
   const running = s.cliAsync(["restart", "--due", "--json"], { env: {
     AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10" } });
-  await waitUntil("the handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  // Wait for the send's saved state, not its log line: the fake hc logs a call first and saves
+  // its state last, so a state written between the two would be lost under the send's save
+  // (the pass then restarted t5, which this test refuses).
+  await waitUntil("the handoff request", () => (s.hcState().sent ?? []).some((m) => m.to === "t5"));
   // The seat is attached elsewhere while the pass waits for the handoff: t9 is its live seat
-  // now, and t5 is no longer labelled for it.
+  // now, and t5 is no longer labelled for it. The pass polls every 10 ms, so each file is
+  // replaced whole: a half-written hc.json read as no terminal at all ended t5 "unknown".
   const rows = attachOf(s);
   const state = s.hcState();
   delete state.terminals.find((x) => x.address === "t5").labels.bot;
   state.terminals.push({ address: "t9", name: "t9", cwd: s.project, state: "live", created_ms: 77,
     labels: { bot: ID.main }, foreground: { argv: ["claude"], cwd: s.project }, status: { app: "claude-code", state: "idle" } });
-  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  writeWhole(join(s.root, "hc.json"), JSON.stringify(state));
   const moved = { ...rows.find((x) => x.terminal === "t5"), terminal: "t9", created_ms: 77, by: "attach", at: new Date().toISOString() };
-  writeFileSync(attachFile(s.app), [...rows, moved].map((x) => `${JSON.stringify(x)}\n`).join(""), { mode: 0o600 });
-  writeFileSync(handoffFile(s, ID.main), "Moved handoff: nothing may restart from this.\n");
+  writeWhole(attachFile(s.app), [...rows, moved].map((x) => `${JSON.stringify(x)}\n`).join(""), { mode: 0o600 });
+  writeWhole(handoffFile(s, ID.main), "Moved handoff: nothing may restart from this.\n");
   const r = await running;
   assert.equal(r.code, 1);
   assert.match(JSON.parse(r.out).failed[0].error, /the pane this pass measured \(t5\) is no longer its live seat/);
