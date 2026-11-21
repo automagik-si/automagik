@@ -575,6 +575,103 @@ test('SDK sessions through the exact web gate route require the agent token', as
   assert.equal(without.status, 401)
 })
 
+test("P14: one workspace's agent token is refused at another's listener and gate origin",
+  async t => {
+    async function gateRoute({ home, mcpRoute }, origin) {
+      const upstream = createServer(async (req, res) => {
+        if (req.headers.cookie !== 'dsh-fixture=value' || req.url !== '/api/omni-mcp') {
+          res.writeHead(401).end()
+          return
+        }
+        try {
+          const response = await mcpRoute.fetch(new Request(`http://localhost${req.url}`, {
+            method: req.method, headers: req.headers, body: Readable.toWeb(req), duplex: 'half',
+          }))
+          res.writeHead(response.status, Object.fromEntries(response.headers))
+          res.end(Buffer.from(await response.arrayBuffer()))
+        } catch (error) { res.destroy(error) }
+      })
+      t.after(() => new Promise(resolve => {
+        upstream.close(resolve)
+        upstream.closeAllConnections()
+      }))
+      upstream.listen(0, '127.0.0.1')
+      await once(upstream, 'listening')
+      const { port } = upstream.address()
+      const gate = createGate({ origin, sessions: new SessionStore(join(home, 'gate')),
+        credentials: { port, authority: `127.0.0.1:${port}`, cookie: async () => 'dsh-fixture=value' },
+        auditAccess: () => {},
+      })
+      t.after(() => gate.closeGate())
+      gate.listen(0, '127.0.0.1')
+      await once(gate, 'listening')
+      return { url: `http://127.0.0.1:${gate.address().port}/api/omni-mcp`,
+        host: new URL(origin).host }
+    }
+
+    function listTools({ url, host }, token) {
+      return new Promise((resolve, reject) => {
+        const req = httpRequest(url, { method: 'POST', headers: {
+          ...(host ? { host } : {}), authorization: `Bearer ${token}`,
+          accept: 'application/json, text/event-stream', 'content-type': 'application/json',
+        } }, res => {
+          let body = ''
+          res.setEncoding('utf8')
+          res.on('data', chunk => { body += chunk })
+          res.on('error', reject)
+          res.on('end', () => resolve({ status: res.statusCode, body }))
+        })
+        req.on('error', reject)
+        req.setTimeout(5000, () => req.destroy(new Error('MCP fixture request timed out')))
+        req.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+      })
+    }
+
+    const a = await fixture(t)
+    const b = await fixture(t)
+    const workspaces = [
+      { label: 'A', owner: a, other: b, gate: await gateRoute(a, 'https://workspace-a.invalid') },
+      { label: 'B', owner: b, other: a, gate: await gateRoute(b, 'https://workspace-b.invalid') },
+    ]
+    for (const workspace of workspaces) {
+      const direct = { url: (await workspace.owner.view()).url }
+      assert.match(direct.url, /^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
+      workspace.routes = [['listener', direct], ['gate', workspace.gate]]
+      for (const [route, target] of workspace.routes) {
+        const label = `Workspace ${workspace.label} ${route} own-token control`
+        const response = await listTools(target, workspace.owner.token)
+        assert.equal(response.status, 200, label)
+        assert.ok(Array.isArray(JSON.parse(response.body).result?.tools), label)
+      }
+    }
+
+    for (const { label, owner, other, routes } of workspaces) {
+      const auditPath = join(owner.home, 'agent-audit.jsonl')
+      for (const [route, target] of routes) {
+        const request = `Workspace ${label} ${route} cross-home request`
+        const before = await readFile(auditPath, 'utf8')
+        const response = await listTools(target, other.token)
+        assert.notEqual(response.status, 502, `${request}: fixture upstream unavailable`)
+        assert.equal(response.status, 401, request)
+        const after = await readFile(auditPath, 'utf8')
+        assert.equal(after.startsWith(before), true, request)
+        const lines = after.slice(before.length).trimEnd().split('\n')
+        assert.equal(lines.length, 1, request)
+        const { time, callId, ...refusal } = JSON.parse(lines[0])
+        assert.ok(Number.isFinite(time), request)
+        assert.match(callId, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
+          request)
+        assert.deepEqual(refusal, { tokenName: 'Unknown token', action: 'http', target: null,
+          outcome: 'refused', reason: 'Invalid agent token' }, request)
+      }
+    }
+    // After every cross-home request: neither home's audit holds either raw token.
+    for (const { owner } of workspaces) {
+      const audit = await readFile(join(owner.home, 'agent-audit.jsonl'), 'utf8')
+      assert.equal(audit.includes(a.token), false)
+      assert.equal(audit.includes(b.token), false)
+    }
+  })
 
 test('Origin admission requires an explicit exact origin in a list', async t => {
   const { rt, rpc, token } = await fixture(t)
