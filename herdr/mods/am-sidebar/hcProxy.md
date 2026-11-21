@@ -103,9 +103,9 @@ is refused with the named error before the folder or socket exists.
 
 ## What it speaks
 
-Plain-mode JSON-RPC 2.0, one message per line, exactly hc 0.1.14. It opens **one upstream
-connection per downstream client connection**, so one client's long `terminal.wait` cannot block
-another's read. `hello` is refused, so the connection never switches to framed mode and
+Plain-mode JSON-RPC 2.0, one message per line, for hc 0.1.14 and 0.1.21. It opens **one
+upstream connection per downstream client connection** for forwarding, so one client's long
+`terminal.wait` cannot block another's read. `hello` is refused, so the connection never switches to framed mode and
 `terminal.attach` is unreachable. Every reply line is capped at 2 MiB and `terminal.read` is
 capped at 5,000 lines: a 6 MiB read is a clear `hc-proxy:` error, never a buffered line. A
 request line is capped at 256 KiB. A pane socket accepts at most 16 client connections at once;
@@ -114,7 +114,7 @@ or a `send` with `wait`, keeps it alive); a forwarded call other than those is a
 error after 30 seconds.
 
 `params.caller` is always overwritten with the pane's terminal id, fixed at start. A caller the
-client supplies is never forwarded. Every allowed call is resolved first with one short
+client supplies is never forwarded. A targeted call is resolved first with one short
 `terminal.get`, checked against the policy, then forwarded by the **resolved address**; terminal
 ids are never reused, so a rename between the check and the call cannot redirect it.
 
@@ -129,6 +129,7 @@ ids are never reused, so a rename between the check and the call cannot redirect
 | `terminal.label` | the same own-worker rule, plus a caller (bot or worker) may set or clear `automagik-herdr.needs-owner` on its own pane |
 | `terminal.run` | the helper shape, or the exact approved template/agent shape below; bound bot panes only |
 | `templates.list` | only the approved worker template, with its metadata unchanged |
+| `proxy.status` | local status for any pane: protocol `v: 1`, its `terminal`, and the verified core `version`; no params or upstream call |
 | `proxy.workerTransport` | local transport identification for the wrapper's verified bot pane; never forwarded |
 
 The guard and proxy use the same shared send check. Tester targets require a roster rank;
@@ -143,9 +144,10 @@ can only resolve a name it may type into. A linked machine's pane is never kept,
 labels say: this proxy refuses every machine address on every forwarded verb, so a sandboxed bot
 can neither read nor type into one, and naming it would only leak another team's pane or the
 machine. For the same reason the reply's `machines` inventory is emptied: a machine's name and
-target are not information this pane can use. The remaining fields (`hidden_finished`) are kept
-as the core answered them; an error reply never carries rows, and a reply that cannot be read is
-a `hc-proxy:` error, never the unfiltered rows.
+target are not information this pane can use. The success result contains only `terminals`,
+the numeric `hidden_finished` count as answered, and `machines: []` when the core included
+`machines`. The reply keeps `jsonrpc`, `id`, and either the filtered `result` or the core's
+`error`. A malformed or uncorrelated reply returns a correlated `hc-proxy:` error.
 
 A worker start needs `--bg`, `parent` = the caller, `cwd` under the caller's project
 `.claude/worktrees/`, `worker.of` = the caller's bot, only the worker labels, and this argv:
@@ -163,8 +165,13 @@ read-only (covering the stable folder and `approved/`), so its guard, helper and
 be rewritten. Any other guard is refused inside the writable project and app home. Only a
 bound bot pane (the helper's seat, or a by-hand ledger row) starts a worker.
 
-`terminal.send` keeps hc's `force`, `if` and `timeout`; `force` only skips the busy wait, and the
-target is still team-scoped.
+`terminal.send` forwards an absent `force` or the CLI's explicit `force: false` as sent.
+It refuses `force: true`, which types past a blocked dialog, and rejects other values as
+malformed. The `if` and `timeout` parameters retain their usual meaning.
+
+`terminal.wait --children any|all` always waits on the caller's own children. The proxy
+discards any supplied target in those modes. An absent or null `children` uses normal
+target resolution, and any other value is refused.
 
 Everything else is refused with a JSON-RPC error whose message starts `hc-proxy: `, including
 `terminal.put`, `terminal.keys`, `terminal.attach`, `terminal.interrupt`, `terminal.keep`,
@@ -299,11 +306,13 @@ the enablement: it still reads the attach ledger, `<app home>/automagik-herdr/at
 (`modeProblem` still refuses a group- or world-writable ledger), and the working
 `.herdr/bots.json` (the team graph via `teamOf`). An explicit caller never opens the ledger.
 
-## Version pin and fail-closed behaviour
+## Supported versions and fail-closed behaviour
 
-At start the proxy calls `server.status`; the core must answer `version: "0.1.14"` (the box's
-core, hc 0.1.14), or the proxy refuses to start. One constant names it: `HC_PIN` in
-`hcProxy.mjs`. The wslc image's separate 0.1.18 pin is a separate note, not this pin.
+At start the proxy checks `server.status` against `HC_SUPPORTED` in `hcProxy.mjs`: the exact
+strings `0.1.14` and `0.1.21`. Each new upstream connection checks `server.status` again before
+sending a lookup or forwarded call. The check has a deadline even for a long wait. A missing,
+malformed, stalled, or different version reply stops the proxy and its pane. The wslc image
+has its own 0.1.18 pin.
 
 A dead or vanished upstream is a JSON-RPC error on every call; it never falls back to another
 socket or to a locally started core. `hc` auto-starts a core when it cannot connect, so a pane
@@ -325,7 +334,7 @@ trusted because it ran in an unsandboxed pane.
 
 C2c coordinates the later sandbox profile change and mask review. This slice changes neither.
 
-## Limits and the real hc 0.1.14 params
+## Limits and the hc wire parameters
 
 The proxy trusts any same-uid client (Node cannot check peer credentials); the 0700 folder and
 0600 socket are the only access control, and every pane has its own folder.
@@ -335,7 +344,9 @@ The proxy trusts any same-uid client (Node cannot check peer credentials); the 0
 `die_with_parent`, `env`, `keep`, `labels`, `name`, `no_notify`, `no_parent`, `outlive_parent`,
 `parent`, `rm`, `timeout` and `wait`. `--json` is CLI output only and is not an RPC member, so
 there is no `json` gap; `line` and `on` are listed by the schema but the proxy refuses them by
-design, as the worker shape. The `terminal.list` caller refusal stays as it is.
+design, as the worker shape. The 0.1.21 API also has `size` and `display`. They are marked
+`#[arg(skip)]` and omitted by the CLI, and the proxy refuses them. The `terminal.list`
+caller refusal stays as it is.
 
 ## What a filesystem mask cannot do
 

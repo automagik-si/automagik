@@ -1423,9 +1423,9 @@ path, so the real socket folder is hidden, and binds the data parent read-only o
 stable execution folder and `approved/` both live there) so a sandboxed bot cannot rewrite its
 helper, runner or guard, or its project's approved roster. The wrapper is copied byte-equal from
 `mods/am-sidebar/bin/hc-socket-mask.mjs` to `~/.local/share/automagik-herdr/dsh-sandbox/` by
-`dsh-tui install`, which also installs the profile's managed sandbox row. The proxy pins
-herdr-core 0.1.14 and refuses any other version; its socket lives in
-`$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock` (0700 folder, 0600 socket), outside
+`dsh-tui install`, which also installs the profile's managed sandbox row. The proxy supports
+herdr-core 0.1.14 and 0.1.21 and checks the serving version on every upstream connection. Its
+socket lives in `$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock` (0700 folder, 0600 socket), outside
 the worktree and the app home. **Fail closed:** if the proxy cannot start, the pane's command is
 never started, so no sandbox exists and `hc` cannot auto-start a core inside one; a proxy that
 dies takes its pane with it. The wrapper also gives the pane its own network namespace
