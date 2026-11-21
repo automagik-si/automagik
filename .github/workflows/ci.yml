@@ -1852,6 +1852,71 @@ jobs:
         if: ${{ matrix.app == 'acp-dsh' && !cancelled() }}
         run: node ../../scripts/integration-gate.mjs summary --job "acp-dsh (plugin tests)"
 
+  reservations-macos:
+    # RFC 0024 R4 on a native Mac: the documented macOS setup (dseditgroup, the default
+    # /Users/Shared/Automagik/reservations) and the same two-user test as the Linux plugin step.
+    name: Machine reservations (native macOS, two OS users)
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Record macOS image
+        run: |
+          sw_vers
+          printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+
+      - name: Two OS users and the documented setup
+        working-directory: apps/bots-dsh
+        run: |
+          set -euo pipefail
+          root=/opt/automagik-ci
+          dir=/Users/Shared/Automagik/reservations
+          sudo dseditgroup -o create -r 'Automagik CI' automagik-ci
+          gid=$(dscl . -read /Groups/automagik-ci PrimaryGroupID | awk '{print $2}')
+          uid=5101
+          for u in amres-a amres-b; do
+            sudo dscl . -create "/Users/${u}"
+            sudo dscl . -create "/Users/${u}" UniqueID "${uid}"
+            sudo dscl . -create "/Users/${u}" PrimaryGroupID "${gid}"
+            sudo dscl . -create "/Users/${u}" UserShell /usr/bin/false
+            sudo dscl . -create "/Users/${u}" NFSHomeDirectory /var/empty
+            sudo dseditgroup -o edit -a "${u}" -t user automagik-ci
+            uid=$((uid + 1))
+          done
+          sudo dscacheutil -flushcache
+          sudo sh scripts/reservations-setup.sh --group automagik-ci
+          ls -ld "${dir}" "${dir}/key"
+          sudo install -d -m 0755 "${root}/bin" "${root}/plugin" \
+            "${root}/acp/src/host" "${root}/run"
+          sudo install -m 0755 "$(command -v node)" "${root}/bin/node"
+          sudo cp -R src "${root}/plugin/src"
+          sudo install -m 0644 test/fixtures/reservation-driver.mjs "${root}/plugin/"
+          sudo install -m 0644 ../acp-dsh/src/host/reservation-evidence.js "${root}/acp/src/host/"
+          sudo chmod -R a+rX "${root}"
+          for u in amres-a amres-b; do
+            (cd "${root}/run" && sudo -n -u "$u" -- "${root}/bin/node" \
+              "${root}/plugin/reservation-driver.mjs" probe "{\"dir\":\"${dir}\"}")
+          done
+          printf 'RESERVATION_TWO_USERS={"root":"%s","dir":"%s","a":"%s","b":"%s"}\n' \
+            "$root" "$dir" amres-a amres-b >> "$GITHUB_ENV"
+
+      - name: Two-user reservation test
+        working-directory: apps/bots-dsh
+        run: node --test test/reservation-two-users.test.js
+
   vault-macos:
     name: vault-dsh (native macOS Keychain)
     runs-on: macos-15
@@ -2161,7 +2226,7 @@ jobs:
     name: CI result
     needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am,
             pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
-            plugin, vault-macos, vault-windows, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, boot]
+            plugin, reservations-macos, vault-macos, vault-windows, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, boot]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
