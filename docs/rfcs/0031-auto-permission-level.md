@@ -197,7 +197,7 @@ remain. Four categories are added:
   `kubectl get secret`, and bare `env` / `printenv`, or those commands with a name matching
   `TOKEN|SECRET|PASSWORD|API_KEY|KEY$`. Ordinary `printenv PATH` and public SSH keys stay out.
 - **External messages:** `rt.stepHooks.sendsOutside(fn)` registers a disposer-backed classifier
-  receiving `{ tool, args }`; true means the step sends to people outside the team. A
+  receiving `{ tool, args, sessionId }`; true means the step sends to people outside the team. A
   throwing hook also asks. The Bot team ships no Omni sender names; Omni registers its own.
   Shell cases are `mail`, `mailx`, `sendmail`, `msmtp`,
   `gh (issue|pr) (comment|create|review|close|edit|merge|reopen|delete|ready|lock)` and

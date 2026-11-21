@@ -619,8 +619,14 @@ test('#1092 every new hard category reaches the person without a judge call', as
     assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall: { title: 'bash', input: { command }, allowOnce: true } }), 'person')
     assert.equal(w.rt.autoAuditRows().at(-1).code, 'hard')
   }
-  w.rt.stepHooks.sendsOutside(() => true)
-  assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall: { title: 'team_send', input: {}, allowOnce: true } }), 'person')
+  let classified
+  w.rt.stepHooks.sendsOutside(input => {
+    classified = input
+    return input.tool === 'team_send'
+  })
+  const mirrorCall = { title: 'team_send', input: {}, allowOnce: true }
+  assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall }), 'person')
+  assert.deepEqual(classified, { tool: mirrorCall.title, args: mirrorCall.input, sessionId: w.session.id })
   assert.equal(w.requests.length, 0)
 })
 for (const stuck of ['background', 'info', 'stream']) test(`#1092 total judge deadline bounds ${stuck}`, async t => {
