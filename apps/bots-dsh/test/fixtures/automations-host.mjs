@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
+import { install as installAccounts } from '../../src/host/accounts.js'
 import { install as installAutomations } from '../../src/host/automations.js'
 import { install as installChannel } from '../../src/host/channel.js'
 import { install as installHooks } from '../../src/host/extend.js'
@@ -31,7 +32,7 @@ export function automationFixture(t, listing = {}) {
 }
 
 // Use the registered /api route and DSH's own shared handler so both layers admit the call.
-export function automationHost(t, { root, env }, { readOnly, loginTextMatches } = {}) {
+export function automationHost(t, { root, env }, { readOnly, loginTextMatches, homedir } = {}) {
   const ctx = fakeContext()
   t.after(() => ctx.dispose())
   const previousSend = Object.getOwnPropertyDescriptor(process, 'send')
@@ -50,6 +51,7 @@ export function automationHost(t, { root, env }, { readOnly, loginTextMatches } 
   }
   installHooks(rt)
   t.after(installAutomations(rt, { env }))
+  t.after(installAccounts(rt, { env, homedir }))
   installChannel(rt)
   const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
   const request = (endpoint, payload, { peer = OWNER, marker = WINDOW } = {}) => handler.fetch(new Request('http://127.0.0.1/api/omni-ui', {

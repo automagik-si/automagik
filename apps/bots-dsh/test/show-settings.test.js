@@ -133,3 +133,10 @@ test('an empty, unchanged or bad proposal is refused, and so are groups and stra
   assert.match((await show.propose({ role: 'x' }, 'g-b2')).text, /^Proposal cards only work in your own chat/)
   assert.equal((await show.propose({ role: 'x' }, 'stranger')).text, 'Only Bots on the team can use propose_bot_change.')
 })
+
+test('show_settings refuses the window-only Accounts page', async t => {
+  const show = start(t)
+  const result = await show({ page: 'accounts' }, 'b2')
+  assert.match(result.text, /^No Settings page named "accounts"\./)
+  assert.equal(result.concluded, false)
+})
