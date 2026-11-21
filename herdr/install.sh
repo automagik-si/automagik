@@ -211,9 +211,19 @@ EOF
 }
 
 say() { printf '%s\n' "$*"; }
+# With the pack's AUTOMAGIK_HERDR_DIAG=1 (the install e2e rows set it; a person's run never prints
+# these): one `diag:` line where the hooks notice is held and where it is printed, so a notice that
+# went missing between the two is named instead of silent.
+diag() { [ "${AUTOMAGIK_HERDR_DIAG:-}" != 1 ] || say "diag: $*"; }
+notice_state() {
+  if [ ! -d "$TMP" ]; then echo "$TMP is gone"
+  elif [ ! -e "$TMP/notice" ]; then echo "$TMP/notice is missing"
+  else echo "$(grep -c '' "$TMP/notice") line(s) in $TMP/notice"; fi
+}
 # The briefing hooks' notice update.mjs gave (its `notice: ` lines), held in $TMP/notice for the
 # end of the run: printed once, there or before any failure after it, so it is never lost.
 held_notice() {
+  if [ -n "${TMP:-}" ]; then diag "hooks notice at the end of the run: $(notice_state)"; fi
   { [ -n "${TMP:-}" ] && [ -s "$TMP/notice" ]; } || return 0
   say ""
   cat "$TMP/notice"
@@ -1779,6 +1789,7 @@ install() {
     else
       sed -e '/^notice: /d' -e 's/^/  /' "$TMP/log"
       sed -n 's/^notice: //p' "$TMP/log" >"$TMP/notice"
+      diag "hooks notice held after the repair: $(notice_state)"
       case $out in *'"changed":false'*) changed=no ;; esac
       if [ "$changed" = yes ]; then say "Repaired the pack $VERSION in $MODS: what differed from the release is listed above."; fi
     fi
@@ -1798,6 +1809,7 @@ install() {
     sed -e '/^notice: /d' -e 's/^/  /' "$TMP/log"
     # The briefing hooks' notice (update.mjs): kept for the end of the run, where it is read.
     sed -n 's/^notice: //p' "$TMP/log" >"$TMP/notice"
+    diag "hooks notice held after the install: $(notice_state)"
     say "Installed the pack $VERSION in $MODS: $(mods_said)."
     if [ -f "$STATE/.prev/.pack" ] && [ "$installed" != none ]; then
       kept_pack="The folders it replaced ($installed) are kept in $STATE/.prev"
