@@ -1203,9 +1203,9 @@ export const KO = {
   // About
   'About Omni': 'Omni 정보',
   'Version {version}': '버전 {version}',
-  'Star Omni on GitHub': 'GitHub에서 Omni에 Star 누르기',
+  'Star Automagik on GitHub': 'GitHub에서 Automagik에 Star 누르기',
   '{count} stars': 'Star {count}개',
-  'If Omni helps you, a star on GitHub helps more people find it.': 'Omni이 도움이 되었다면 더 많은 사람이 찾을 수 있도록 GitHub에서 Star를 눌러 주세요.',
+  'If Automagik helps you, a star on GitHub helps more people find it.': 'Automagik이 도움이 되었다면 더 많은 사람이 찾을 수 있도록 GitHub에서 Star를 눌러 주세요.',
   Updates: '업데이트',
   'Check for updates': '업데이트 확인',
   'Checking…': '확인 중…',
