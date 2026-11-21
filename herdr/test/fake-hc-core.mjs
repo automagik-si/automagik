@@ -113,11 +113,14 @@ export async function startFakeCore({ socket, version = "0.1.14", terminals = []
       case "templates.list":
         ok(sock, id, { templates: state.templates });
         return;
-      case "terminal.run":
-        ok(sock, id, { address: "t200", state: "live", argv: params.argv, cwd: params.cwd,
+      case "terminal.run": {
+        const pane = { address: "t200", state: "live", argv: params.argv, cwd: params.cwd,
           name: params.name ?? null, parent: params.parent ?? null, labels: params.labels ?? {},
-          created_ms: 200, screen: "exact", cols: 200, rows: 120 });
+          created_ms: 200, screen: "exact", cols: 200, rows: 120 };
+        if (state.trackRuns) state.terminals.push(pane);
+        ok(sock, id, pane);
         return;
+      }
       default:
         fail(sock, id, "refused", `fake core has no ${method}`);
         return;

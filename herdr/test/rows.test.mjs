@@ -104,7 +104,7 @@ test("liveFrom: label + live + agent in front; newest holder wins and is flagged
   ];
   const live = liveFrom(terms, knownBots([{ key: KEY, file }]));
   assert.deepEqual(Object.keys(live).sort(), ["b-captaincap", "b-devdevdevd", "b-mainmainma", "b-pmpmpmpmpm"]);
-  assert.deepEqual({ ...live["b-captaincap"], program: undefined }, { terminal: "t3", duplicate: true, parent: null, status: "idle", status_ms: NOW - 1000, program: undefined, argv: null, panes: ["t3", "t2"] });
+  assert.deepEqual({ ...live["b-captaincap"], program: undefined }, { terminal: "t3", created_ms: 20, duplicate: true, parent: null, status: "idle", status_ms: NOW - 1000, program: undefined, argv: null, panes: ["t3", "t2"] });
   assert.equal(live["b-mainmainma"].duplicate, false);
   assert.ok(!("panes" in live["b-mainmainma"]), "one holder: the entry is as before");
   assert.equal(live["b-devdevdevd"].terminal, "box/t4");
@@ -895,20 +895,48 @@ test("#1557 the sidebar marks a live Claude seat's rate-limit record on its node
   assert.equal(RATE_LIMITED, "Rate limited");
   const trees = buildTree({
     projects: [{ key: KEY, file }],
-    live: { "b-mainmainma": { terminal: "t1", status: "idle", status_ms: NOW } },
+    live: { "b-mainmainma": { terminal: "t1", created_ms: 1, status: "idle", status_ms: NOW } },
     terminals: [], now: NOW,
-    rateLimited: new Map([["t1", { question: "Rate limit reached", resets_at: "2026-11-19T14:10:00.000Z" }]]),
+    rateLimited: new Map([["t1", { question: "Rate limit reached", created_ms: 1, resets_at: "2026-11-19T14:10:00.000Z" }]]),
   });
-  assert.deepEqual(trees[0].main.rateLimited, { question: "Rate limit reached", resets_at: "2026-11-19T14:10:00.000Z" });
+  assert.deepEqual(trees[0].main.rateLimited, { question: "Rate limit reached", created_ms: 1, resets_at: "2026-11-19T14:10:00.000Z" });
   assert.equal(trees[0].main.status, "idle", "the core status is kept beside the added word");
   assert.equal(trees[0].main.pose, "idle", "the character keeps its core pose; the chip carries the word");
   const clean = buildTree({
     projects: [{ key: KEY, file }],
-    live: { "b-mainmainma": { terminal: "t1", status: "idle", status_ms: NOW } },
+    live: { "b-mainmainma": { terminal: "t1", created_ms: 1, status: "idle", status_ms: NOW } },
     terminals: [], now: NOW, rateLimited: new Map(),
   });
   assert.equal("rateLimited" in clean[0].main, false);
   const noLive = buildTree({ projects: [{ key: KEY, file }], live: {}, terminals: [], now: NOW,
     rateLimited: new Map([["t1", { question: "x" }]]) });
   assert.equal("rateLimited" in noLive[0].main, false, "a record on a stopped seat's old address is never drawn");
+});
+
+test("#1557 the sidebar never draws a former occupant's rate-limit chip at a reused address", () => {
+  const bot = "b-mainmainma";
+  const terminals = [{ address: "t1", created_ms: 2, state: "live", status: "idle",
+    labels: { bot }, program: { agent: true, key: "claude" } }];
+  const live = liveFrom(terminals);
+  assert.equal(live[bot].created_ms, 2);
+  const treeFor = created_ms => buildTree({ projects: [{ key: KEY, file }], live, terminals,
+    rateLimited: new Map([["t1", { created_ms, question: "Rate limit reached" }]]) })[0].main;
+  assert.equal(treeFor(1).rateLimited, undefined);
+  assert.equal(treeFor(2).rateLimited.question, "Rate limit reached");
+});
+
+
+test("#1557 a late sidebar read is ignored and a live episode keeps its first deadline", async () => {
+  const { rateLimitObservation } = await import("../mods/am-sidebar/rows.js");
+  const pane = { address: "t1", created_ms: 2, labels: { bot: "b-mainmainma" } };
+  const found = { question: "Rate limit reached", resets_at: "2026-11-19T15:00:00.000Z" };
+  const saved = [
+    { terminal: "t1", created_ms: 1, botId: pane.labels.bot, resets_at: "2026-11-19T13:00:00.000Z" },
+    { terminal: "t1", created_ms: 2, botId: pane.labels.bot, resets_at: "2026-11-19T14:00:00.000Z" },
+  ];
+  assert.equal(rateLimitObservation(pane, { ...pane, created_ms: 3 }, found, saved), undefined);
+  assert.deepEqual(rateLimitObservation(pane, pane, found, saved), {
+    question: found.question, created_ms: 2, resets_at: saved[1].resets_at,
+  });
+  assert.equal(rateLimitObservation(pane, pane, null, saved), null);
 });

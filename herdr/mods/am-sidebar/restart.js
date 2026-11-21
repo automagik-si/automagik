@@ -12,7 +12,7 @@ import { CONFIG_VAR, envWords } from "./logins.js";
 import { DIRECT_LOGIN_PROBLEM, POINTER_VAR, botLoginCommandIndex, loginLaunchProblem, loginPolicyActive } from "./loginWords.js";
 import { hermesPairRun } from "./hermesPair.js";
 import { actionError } from "./actionError.js";
-import { isPromptLine, pendingDialog, screenLines } from "./dialog.js";
+import { isPromptLine, pendingDialog, rateLimitDialog, screenLines } from "./dialog.js";
 
 /** The prompt and dialog helpers stay available from here, their old home (#805, #1414). */
 export { isPromptLine, pendingDialog };
@@ -469,13 +469,13 @@ export function hasAgentPrompt(screenText) {
   if (screenText == null || String(screenText).trim() === "") return true;
   const screen = screenLines(screenText);
   const lines = screen.slice(-12);
-  if (pendingDialog(screenText) || MID_TURN_SCREEN.test(screen.join("\n"))) return false;
+  if (pendingDialog(screenText) || rateLimitDialog(screenText) || MID_TURN_SCREEN.test(screen.join("\n"))) return false;
   return lines.some(isPromptLine);
 }
 
 /** A harness may report working while its background shell runs at an empty prompt. */
 export function hasBackgroundShellAtIdlePrompt(screenText) {
-  if (typeof screenText !== "string" || !screenText.trim() || pendingDialog(screenText)) return false;
+  if (typeof screenText !== "string" || !screenText.trim() || pendingDialog(screenText) || rateLimitDialog(screenText)) return false;
   const screen = screenLines(screenText);
   const tail = screen.slice(-12).join("\n");
   // The spinner can be many lines above the prompt (todos in between): scan the whole screen.
@@ -486,7 +486,7 @@ export function hasBackgroundShellAtIdlePrompt(screenText) {
 
 /** The single restart idle rule, including panes that still have background work. */
 export function isPaneIdle(get, screenText = null) {
-  if (!get || get.state === "finished" || get.status?.state === "blocked" || pendingDialog(screenText)) return false;
+  if (!get || get.state === "finished" || get.status?.state === "blocked" || pendingDialog(screenText) || rateLimitDialog(screenText)) return false;
   if (["idle", "done"].includes(get.status?.state)) return hasAgentPrompt(screenText);
   return get.status?.state === "working" && hasBackgroundShellAtIdlePrompt(screenText);
 }

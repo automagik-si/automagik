@@ -1752,13 +1752,14 @@ test("#1421 shim plain texts pass unchanged after the target check", (t) => {
         const r = shimRun(s, args);
         assert.ifError(r.error);
         assert.equal(r.status, 0, r.stderr);
-        assert.equal(r.stdout, `stub-out ${JSON.stringify(args)}\n`);
+        const forwarded = args.map((word, i) => i === args.indexOf("send") + 1 && word === "cap" ? "t101" : word);
+        assert.equal(r.stdout, `stub-out ${JSON.stringify(forwarded)}\n`);
         assert.equal(r.stderr, `stub-err ${args[0]}\n`);
-        // #1414: every send checks the target first; the text and its address then go on unchanged.
+        // The checked target is canonical. The message text and flag order are preserved.
         const expected = target === "t999"
-          ? [["ls", "--json"], ["get", "t999", "--json"], args]
-          : [["ls", "--json"], ["get", "t101", "--json"], ["read", "t101", "--lines", "40", "--json"], args];
-        assert.deepEqual(calls(s), expected, "the target check, then the send unchanged");
+          ? [["ls", "--json"], ["get", "t999", "--json"], forwarded]
+          : [["ls", "--json"], ["get", "t101", "--json"], ["read", "t101", "--lines", "40", "--json"], forwarded];
+        assert.deepEqual(calls(s), expected);
       }
     }
   }
@@ -2415,7 +2416,9 @@ test("RFC 0042 the kill shim reads and names the address hc get answered, never 
   assert.doesNotMatch(result.stderr, /agy-solo/);
 
   editPane(s, address, { status: { state: "idle" }, screen: DIALOG_SCREEN });
-  assertAgyHeld(s, agySend(s, st, shim, args), name, [readOf(address)]);
+  const generic = agySend(s, st, shim, args);
+  assertAgyHeld(s, generic, address, [readOf(address)]);
+  assert.doesNotMatch(generic.stderr, /agy-solo/);
   assert.equal(stableFilesCurrent(MOD, st.dir), true);
 });
 
@@ -2575,4 +2578,37 @@ test("RFC 0042 the stable folder from STABLE_FILES runs the guard; a missing fil
   }
   assert.equal(stableFilesCurrent(MOD, st.dir), true);
   assert.equal(stableFilesCurrent(MOD, short.dir), false);
+});
+
+test("#1557 the kill shim sends to the canonical address it inspected, including with --on", (t) => {
+  const s = killScene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get["only-in-get"] = { ...state.get.t105, address: "t105", screen: FREE_SCREEN };
+  state.get["m/only-in-get"] = { ...state.get.t105, address: "m/t105", screen: FREE_SCREEN };
+  state.get["m/off-machine"] = { ...state.get.t105, address: "other/t105", screen: FREE_SCREEN };
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const [input, expected, inspected] of [
+    [["send", "only-in-get", "ping"], ["send", "t105", "ping"], "t105"],
+    [["send", "--on=m", "only-in-get", "ping"], ["send", "--on=m", "t105", "ping"], "m/t105"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const result = shimRun(s, input, { HC_TERMINAL_ID: "t103" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(calls(s).some(args => args[0] === "read" && args[1] === inspected));
+    assert.deepEqual(calls(s).at(-1), expected);
+  }
+  writeFileSync(s.logPath, "");
+  const offMachine = shimRun(s, ["send", "--on=m", "off-machine", "ping"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(offMachine.status, 2, offMachine.stderr);
+  assert.match(offMachine.stderr, /off the --on machine/);
+  assert.equal(calls(s).some(args => args[0] === "send"), false);
+});
+
+test("#1557 the kill shim refuses a plain send when ls and get disagree", (t) => {
+  const s = killScene(t);
+  editPane(s, "t101", { address: "m/t105", screen: DIALOG_SCREEN });
+  const result = shimRun(s, ["send", "cap", "plain text"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /different panes \(t101 and m\/t105\)/);
+  assert.equal(calls(s).some(args => args.includes("send")), false);
 });

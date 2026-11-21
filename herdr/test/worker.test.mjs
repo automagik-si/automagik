@@ -3880,7 +3880,7 @@ test("worker #899: a pr row that can't be written is said as what it is", (t) =>
   assert.doesNotMatch(r.out, /undefined/);
 });
 
-// Refs #631: the real PATH guard plus a fake hc that forwards only run to the fixture proxy.
+// Refs #631: the real PATH guard plus a fake hc that forwards worker operations to the fixture proxy.
 async function proxyWorkerCli(t, { file } = {}) {
   const s = scene(t, file ? { file } : {});
   const shortDir = shortSocketDir(t, "hw-");
@@ -3911,6 +3911,8 @@ async function proxyWorkerCli(t, { file } = {}) {
     fake = await startFakeCore({ socket: join(shortDir, "f.sock"), terminals: [
       { address: "t1", labels: { bot: ID.dev }, cwd: s.project, state: "live" },
     ] });
+    fake.state.trackRuns = true;
+    fake.state.templates = TEMPLATES;
     s.approve();
     proxy = await startProxy({ terminal: "t1", upstream: fake.socket, appHome: s.app, env,
       caller: { bot: ID.dev, project: s.project }, bound: true,
@@ -3982,11 +3984,12 @@ test("proxied worker CLI #1032: an approved Kimi worker starts bare through the 
   const { s, env, fake, proxy, closeAll } = await proxyWorkerCli(t, { file });
   try {
     exe(join(s.root, "bin", "kimi"), "#!/bin/sh\nexit 0\n");
-    // The fixture core names the new pane t200; the file-backed hc knows it as a plain live
-    // pane with no labels, which the pane's guard would refuse a send to.
-    const state = s.hcState();
-    state.terminals.push({ address: "t200", name: "t200", cwd: s.project, state: "live", parent: "t1", labels: {} });
-    writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+    let firstGet = true;
+    fake.state.reply = ({ id, method, params }) => {
+      if (!firstGet || method !== "terminal.get" || params.terminal !== "t200") return undefined;
+      firstGet = false;
+      return { jsonrpc: "2.0", id, error: { code: -32000, message: "the first observation is unavailable" } };
+    };
     const r = await s.cliAsync(["worker", TASK, "--branch", "feat/proxied-kimi", "--json"], { env: { ...env, HC_SOCKET: proxy.socket } });
     assert.equal(r.code, 0, r.err);
     const out = JSON.parse(r.out);
@@ -3994,8 +3997,11 @@ test("proxied worker CLI #1032: an approved Kimi worker starts bare through the 
     const argv = fake.calls("terminal.run")[0].params.argv;
     assert.equal(argv.at(-1), "kimi", `the proxy approved an argv with no task word: ${JSON.stringify(argv)}`);
     assert.equal(argv.includes(TASK), false);
-    assert.deepEqual(s.hcState().sent, [{ to: "t200", text: `${TASK}\n\n${DONE_LINE}` }], r.err);
-    assert.deepEqual(s.calls().filter((c) => ["wait", "send"].includes(c[0])).map((c) => c.slice(0, 2)), [["wait", "t200"], ["send", "t200"]]);
+    assert.deepEqual(fake.calls("terminal.send").map(({ params }) => [params.terminal, params.text]),
+      [["t200", `${TASK}\n\n${DONE_LINE}`]], r.err);
+    assert.ok(fake.calls("terminal.get").some(({ params }) => params.terminal === "t200"));
+    assert.deepEqual(fake.log.filter(({ method }) => ["terminal.wait", "terminal.read", "terminal.send"].includes(method))
+      .map(({ method }) => method), ["terminal.wait", "terminal.read", "terminal.send"]);
     assert.deepEqual(out.warnings, [], r.err);
   } finally {
     await closeAll();

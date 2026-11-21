@@ -1044,6 +1044,30 @@ test("a failing herdr-app check exits 1 after installing, naming the mod; a firs
   assert.deepEqual(s.versions(), s.all("9.9.0"));
 });
 
+test("#1557 the staged updater imports from the installer bootstrap for install and repair", (t) => {
+  const s = scratch(t);
+  s.addHerdrApp();
+  const loads = join(s.root, "bootstrap-loads");
+  exe(join(s.bin, "node"), `#!/bin/sh
+case "$1" in
+  */x/am-sidebar/update.mjs)
+    "${process.execPath}" --input-type=module -e 'await import(process.argv.pop())' "$1" || exit 1
+    printf '%s\\n' "$2" >> "${loads}" ;;
+esac
+exec "${process.execPath}" "$@"
+`);
+  s.publish("9.9.0");
+  const installed = s.run("--yes");
+  assert.equal(installed.code, 0, installed.out + installed.err);
+  const broken = join(s.pack, "delivery.mjs");
+  writeFileSync(broken, "broken");
+  const repaired = s.run("--yes");
+  assert.equal(repaired.code, 0, repaired.out + repaired.err);
+  assert.match(repaired.out, /Repaired the pack/);
+  assert.deepEqual(readFileSync(broken), readFileSync(join(PACK_SRC, "delivery.mjs")));
+  assert.equal(readFileSync(loads, "utf8"), "install\nrepair\n");
+});
+
 // #44: a rerun of the installed release checks every file against it before saying "up to date".
 test("a same-version rerun repairs a corrupted main.js, a deleted layout and a missing mod; nothing else", (t) => {
   const s = scratch(t);
@@ -2561,6 +2585,26 @@ test("#805 installer refuses an updater missing its attach-ledger dependency", (
   assert.equal(r.code, 1, r.out);
   assert.match(r.err, /am-sidebar\/attach\.js is not a plain file: nothing was installed\./);
   assert.equal(existsSync(s.pack), false);
+});
+
+test("#1557 bootstrap refuses a missing delivery dependency while --version can load an older updater", (t) => {
+  const s = scratch(t);
+  s.addHerdrApp();
+  s.publish("9.9.0", { edit: src => rmSync(join(src, "am-sidebar/loginWords.js")) });
+  const missing = s.run("--yes");
+  assert.equal(missing.code, 1, missing.out);
+  assert.match(missing.err, /am-sidebar\/loginWords\.js is not a plain file: nothing was installed/);
+  assert.equal(existsSync(s.pack), false);
+
+  s.publish("9.8.0", { latest: false, edit: src => {
+    const side = join(src, "am-sidebar");
+    const updater = join(side, "update.mjs");
+    writeFileSync(updater, readFileSync(updater, "utf8").replace(/^import .* from "\.\/delivery\.mjs";\n/m, ""));
+    rmSync(join(side, "delivery.mjs"));
+  } });
+  const older = s.run("--yes", "--version", "9.8.0");
+  assert.equal(older.code, 0, older.out + older.err);
+  assert.match(older.out, /Installed the pack 9\.8\.0/);
 });
 
 /**

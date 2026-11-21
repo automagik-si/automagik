@@ -34,7 +34,7 @@ import { actionError } from "./actionError.js";
 import { parseCommand } from "./launchArgs.js";
 import { characterSvg, characterFile, inkOf, isDark } from "./characters.js";
 import { workerClick, rowWorker, openWorkerTab } from "./workerTab.js";
-import { liveFrom, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, heldClickOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED } from "./rows.js";
+import { liveFrom, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, heldClickOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED, rateLimitObservation } from "./rows.js";
 import { rateLimitDialog } from "./restart.js";
 
 // The pack itself as a dialog: the bot form (create.js), or the attach picker, the Bots list
@@ -500,7 +500,9 @@ export default class Spaces extends View {
     // #1557: the rate-limit chip, beside (never instead of) the core status the row keeps.
     if (a.status === "rate-limited") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold()
       .text_color(t.blocked).flex().items_center()
-      .tooltip(rate?.resets_at ? `Rate-limited until ${rate.resets_at}; am parks or switches it` : "Rate-limited; am parks or switches it")
+      .tooltip(rate?.resets_at
+        ? `Rate-limited until ${rate.resets_at}. am keeps this pane and rechecks one minute after reset.`
+        : "Rate-limited. am keeps this pane and rechecks for recovery.")
       .child(RATE_LIMITED);
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
     if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child(needsYouText(report))
@@ -1058,7 +1060,7 @@ export default class Spaces extends View {
   scanRateLimits(cx) {
     if (this.rateLimitBusy) return;
     const bots = new Map((this.bots ?? []).flatMap((p) => (p.file?.bots ?? []).map((b) => [b.id, b])));
-    const seats = terminals().filter((t) => t.state === "live" && !String(t.address).includes("/")
+    const seats = terminals().filter((t) => t.state === "live" && Number.isSafeInteger(t.created_ms) && !String(t.address).includes("/")
       && bots.get(t.labels?.[BOT_LABEL])?.agent === "claude" && t.status?.state !== "working");
     if (!seats.length) {
       if (this.rateLimited.size) { this.rateLimited.clear(); cx.notify(); }
@@ -1071,20 +1073,43 @@ export default class Spaces extends View {
     cx.spawn(async (cx) => {
       let changed = false;
       try {
-        await Promise.all(ask.map(async (t) => {
-          let found = null;
-          try { const r = await hc(["read", t.address]); if (r.code === 0) found = rateLimitDialog(r.stdout); } catch {}
-          const next = found ? { ...found, created_ms: t.created_ms ?? null } : null;
+        const homes = new Set([appHome(), ...(this.bots ?? []).filter(p => !p.machine).map(p => `${p.key}/.herdr/app-home`)]);
+        const readRows = async (home, file, field) => {
+          try {
+            const value = JSON.parse(await readTextFile(`${home}/automagik-herdr/${file}.json`));
+            const rows = field ? value[field] : value;
+            return Array.isArray(rows) ? rows : [];
+          } catch { return []; }
+        };
+        const [captures, saved] = await Promise.all([
+          Promise.all(ask.map(async t => {
+            try {
+              const r = await hc(["read", t.address]);
+              if (r.code === 0) return rateLimitDialog(r.stdout);
+            } catch {}
+            return null;
+          })),
+          Promise.all([...homes].map(async home => {
+            const [queue, attention] = await Promise.all([
+              readRows(home, "queued-restarts"), readRows(home, "attention", "items"),
+            ]);
+            return [...queue.filter(row => row?.episode), ...attention.filter(row => row?.kind === "rate-limit" && row.open)];
+          })),
+        ]);
+        const live = new Map(terminals().filter(t => t.state === "live").map(t => [t.address, t]));
+        const episodes = saved.flat();
+        for (const [i, t] of ask.entries()) {
+          const next = rateLimitObservation(t, live.get(t.address), captures[i], episodes);
+          if (next === undefined) continue;
           const prev = this.rateLimited.get(t.address) ?? null;
           if (JSON.stringify(prev) !== JSON.stringify(next)) {
             if (next) this.rateLimited.set(t.address, next); else this.rateLimited.delete(t.address);
             changed = true;
           }
-        }));
-        // A pane that ended or stopped being a live Claude seat keeps no record.
-        const live = new Set(seats.map((t) => t.address));
-        for (const address of [...this.rateLimited.keys()]) {
-          if (live.has(address)) continue;
+        }
+        const seatsNow = new Set(seats.map(t => t.address));
+        for (const [address, observed] of this.rateLimited) {
+          if (seatsNow.has(address) && live.has(address) && (live.get(address).created_ms ?? null) === observed.created_ms) continue;
           this.rateLimited.delete(address);
           changed = true;
         }

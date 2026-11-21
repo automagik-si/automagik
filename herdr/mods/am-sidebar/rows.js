@@ -102,7 +102,7 @@ export function liveFrom(terminals, known = null, argvOf = () => null, keyOf = (
   const entry = (rows) => {
     const pick = rows.reduce((a, b) => ((b.created_ms ?? -1) > (a.created_ms ?? -1) ? b : a));
     return {
-      terminal: addressOf(pick), duplicate: rows.length > 1, parent: pick.parent ?? null, status: pick.status ?? null,
+      terminal: addressOf(pick), created_ms: pick.created_ms ?? null, duplicate: rows.length > 1, parent: pick.parent ?? null, status: pick.status ?? null,
       status_ms: typeof pick.status_ms === "number" ? pick.status_ms : null, program: pick.program ?? null,
       argv: Array.isArray(pick.foreground?.argv) ? pick.foreground.argv : readArgv(pick),
       ...(rows.length > 1 ? { panes: [addressOf(pick), ...rows.filter((r) => r !== pick).map(addressOf)] } : {}),
@@ -122,6 +122,15 @@ export function liveFrom(terminals, known = null, argvOf = () => null, keyOf = (
  * `pid`, for its pane with no project: liveOf reads either.
  */
 export const liveKey = (botId, pid = null) => (pid === null ? botId : `${pid}\n${botId}`);
+
+/** An asynchronous screen capture may belong to a pane that has since been reused. */
+export function rateLimitObservation(observed, current, found, episodes) {
+  if (!current || current.address !== observed.address || current.created_ms !== observed.created_ms) return undefined;
+  if (!found) return null;
+  const saved = episodes.find(row => row.terminal === observed.address && row.created_ms === observed.created_ms
+    && row.botId === observed.labels?.[BOT_LABEL] && row.resets_at);
+  return { ...found, created_ms: observed.created_ms, ...(saved ? { resets_at: saved.resets_at } : {}) };
+}
 
 /** Bot `botId`'s live pane for `project` in liveFrom()'s map (paneCounts), or null. */
 export const liveOf = (live, project, botId) => live?.[liveKey(botId, projectId(project))] ?? live?.[botId] ?? null;
@@ -368,7 +377,8 @@ export function buildTree({ projects, live = {}, terminals = [], now = Date.now(
             .map(node);
       // #1557: the rate-limit dialog a live Claude seat is blocked on, read from its pane tail
       // by the sidebar's own look (main.js) and keyed by the pane it was read on.
-      const rate = l ? rateLimited?.get(l.terminal) ?? null : null;
+      const observed = l && rateLimited?.get(l.terminal);
+      const rate = Number.isSafeInteger(l?.created_ms) && observed?.created_ms === l.created_ms ? observed : null;
       const n = {
         bot, planned, pose: poseOf(l, now), members,
         live: l ? { terminal: l.terminal, duplicate: l.duplicate, parent: l.parent ?? null } : null,

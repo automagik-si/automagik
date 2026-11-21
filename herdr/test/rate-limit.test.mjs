@@ -277,3 +277,14 @@ test("a project's onRateLimit is park by default, switch when written, and never
   assert.ok(parsed.warnings.some((w) => /onRateLimit "nope".*parks rate-limited seats/.test(w)));
   assert.equal(parseBots(JSON.stringify({ ...base, onRateLimit: "switch" })).file.onRateLimit, "switch");
 });
+
+test("#1557 automatic delivery checks working seats and requires a readable exact generation", async () => {
+  const { automaticDelivery } = await import("../mods/am-sidebar/delivery.mjs");
+  const pane = { state: "live", address: "t5", created_ms: 10, status: { state: "working" } };
+  const pin = { terminal: "t5", created_ms: 10 };
+  assert.deepEqual(automaticDelivery(pane, [], DIALOG, pin), { terminal: "t5", held: true });
+  assert.throws(() => automaticDelivery(pane, [], " \n", pin), /Could not read/);
+  assert.throws(() => automaticDelivery(pane, [], "❯ ", { ...pin, created_ms: 11 }), /Could not identify/);
+  assert.deepEqual(automaticDelivery(pane, [], "❯ ", pin), { terminal: "t5", held: false });
+  assert.deepEqual(automaticDelivery({ ...pane, status: "blocked" }, [], null, pin), { terminal: "t5", held: true });
+});
