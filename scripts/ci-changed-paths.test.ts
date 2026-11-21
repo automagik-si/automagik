@@ -29,6 +29,7 @@ const GATED: Record<string, string> = {
   meter: 'meter',
   usagemeter: 'usagemeter',
   'dsh-sandbox': 'sandbox',
+  'runner-vm': 'runnervm',
   id: 'id',
   'brand-font': 'font',
 };
@@ -47,6 +48,7 @@ const RULES: Record<string, [string, string, string]> = {
   meter: ['METER_CHANGED_PATHS', 'meter/statusline/x', 'meter/usagemeter/x'],
   usagemeter: ['USAGEMETER_CHANGED_PATHS', 'meter/usagemeter/x', 'meter/statusline/x'],
   sandbox: ['SANDBOX_CHANGED_PATHS', 'apps/dsh-sandbox/x', 'apps/x'],
+  runnervm: ['RUNNER_VM_CHANGED_PATHS', 'am/runner/spawn.mjs', 'am/bin/am'],
   id: ['ID_CHANGED_PATHS', 'apps/id/x', 'apps/landing/x'],
   font: ['BRAND_FONT_CHANGED_PATHS', 'scripts/brand-font/rebuild.mjs', 'docs/brand/tokens/tokens.json'],
 };
@@ -64,6 +66,16 @@ const CROSS = [
   ['USAGEMETER_CHANGED_PATHS', 'meter/schema/query/v1/envelope.schema.json'],
   ['METER_CHANGED_PATHS', '.github/workflows/ci.yml'],
   ['SANDBOX_CHANGED_PATHS', '.github/workflows/ci.yml'],
+  ['RUNNER_VM_CHANGED_PATHS', 'am/test/vm-run.sh'],
+  ['RUNNER_VM_CHANGED_PATHS', 'apps/bots-dsh/src/host/runner-client.js'],
+  ['RUNNER_VM_CHANGED_PATHS', 'apps/bots-dsh/src/host/bot-shell.js'],
+  ['RUNNER_VM_CHANGED_PATHS', 'apps/bots-dsh/src/shared/registry.js'],
+  ['RUNNER_VM_CHANGED_PATHS', 'apps/bots-dsh/test/member-wall-probe.test.js'],
+  ['RUNNER_VM_CHANGED_PATHS', 'apps/bots-dsh/test/harness-resolve.mjs'],
+  ['RUNNER_VM_CHANGED_PATHS', 'apps/bots-dsh/dev/harness/package.json'],
+  ['RUNNER_VM_CHANGED_PATHS', '.github/scripts/apt-canonical-sources.sh'],
+  ['RUNNER_VM_CHANGED_PATHS', '.github/workflows/ci.yml'],
+  ['RUNNER_VM_CHANGED_PATHS', '.github/node-versions.json'],
   ['ID_CHANGED_PATHS', '.github/workflows/ci.yml'],
   ['ID_CHANGED_PATHS', '.github/scripts/apt-canonical-sources.sh'],
   ['BRAND_FONT_CHANGED_PATHS', 'docs/brand/fonts/fredoka-latin.woff2'],
@@ -247,6 +259,25 @@ describe('the changes job', () => {
     }
   });
 
+  test('moving the runner VM script away still checks the runner VM', () => {
+    // Rename detection would list only the new name, which the rule does not match.
+    const { dir, commits: [base] } = scratchRepo([
+      { 'README.md': 'first\n', 'am/test/vm-run.sh': '#!/bin/sh\necho rows\n' },
+    ]);
+    try {
+      git(dir, 'mv', 'am/test/vm-run.sh', 'am/test/rows.sh');
+      git(dir, 'commit', '-q', '-m', 'move the VM script');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      const { outputs } = decide({ base, head, cwd: dir });
+      expect(outputs.runnervm).toBe('true');
+      expect(outputs.herdr).toBe('false');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const assert = ci.jobs['runner-vm'].steps.find((step: any) => step.name === 'Assert the steps ran');
+    expect(assert.run).toContain('git diff --no-renames --name-only');
+  });
+
   test('a schema-only pull request checks Pocket and usagemeter', () => {
     const { dir, commits: [base, head] } = scratchRepo([
       { 'README.md': 'first\n' },
@@ -304,6 +335,7 @@ describe('a gated job', () => {
     expect(ci.jobs.meter.name).toBe('Meter status line');
     expect(ci.jobs.id.name).toBe('Automagik ID (local Workers runtime)');
     expect(ci.jobs['brand-font'].name).toBe('Brand font rebuild');
+    expect(ci.jobs['runner-vm'].name).toBe('Member runner on a throwaway VM');
   });
 
   test('reads a rule defined once, with the cross-area inputs each rule carries', () => {

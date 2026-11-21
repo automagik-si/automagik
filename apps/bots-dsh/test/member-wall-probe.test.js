@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import fs, { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -570,6 +571,161 @@ test('MEASURE skill catalog, body and resource reach for each provider', async t
   }
 })
 
-test.todo('delivery 3: bot-shell')
-test.todo('delivery 3: gate-credential')
-test.todo('delivery 3: bot-owner-rights')
+// RFC 0038 delivery 3 (#1374): the OS half of the probe, against the real member runner with real
+// uids. CI's runner-vm job sets it up as root on a throwaway VM (am/test/vm-run.sh, VM-RUN.md rows
+// 1-32), then runs these three rows as root with AUTOMAGIK_RUNNER_VM_PROBE naming the endpoint it
+// wrote. Each Bot command goes through the shipped bot_shell client (src/host/runner-client.js) in a
+// child that drops from root to DSH's account first. Anywhere else the rows skip, saying why; with
+// the variable set they must run, so a broken VM setup fails instead of skipping.
+const RUNNER_VM = process.env.AUTOMAGIK_RUNNER_VM_PROBE
+const runnerVm = RUNNER_VM ? false
+  : 'needs the real-uid member runner: CI runner-vm sets AUTOMAGIK_RUNNER_VM_PROBE as root after am/test/vm-run.sh'
+const RUNNER_CLIENT = new URL('../src/host/runner-client.js', import.meta.url).href
+const BOT_SHELL_TOOL = new URL('../src/host/bot-shell.js', import.meta.url).href
+const HARNESS = new URL('./harness-resolve.mjs', import.meta.url).href
+// Imports the client (and, for a tool request, the bot_shell tool) while still root, since the
+// checkout may be closed to DSH's account, then drops to DSH's uid, gid and groups for good, then
+// asks the runner for one Bot command: through run(), or through the tool's own execute() with
+// the request shellRequest() makes from the model's arguments.
+const AS_DSH = `
+const { client, tool, groups, gid, uid, request } = JSON.parse(process.argv[1])
+const { run } = await import(client)
+const shell = tool ? await import(tool) : undefined
+process.setgroups(groups)
+process.setgid(gid)
+process.setuid(uid)
+const extra = process.getgroups().filter(group => group !== gid)
+if (process.getuid() !== uid || process.geteuid() !== uid || process.getegid() !== gid
+  || JSON.stringify(extra) !== JSON.stringify(groups)) process.exit(70)
+let result
+if (shell) {
+  const config = { workRoot: process.env.AUTOMAGIK_BOT_RUNNER_WORK_ROOT }
+  const dispatch = args => shell.shellRequest(config, request.botId, args, 'workspace-write', why => new Error(why))
+  result = await shell.createBotShell(dispatch).execute(request.args, { signal: new AbortController().signal })
+} else {
+  result = await run(request)
+}
+process.stdout.write(JSON.stringify(result))
+`
+
+function runnerVmEndpoint() {
+  assert.equal(process.platform, 'linux', 'AUTOMAGIK_RUNNER_VM_PROBE is set: the runner VM is Linux')
+  assert.equal(process.getuid(), 0, 'AUTOMAGIK_RUNNER_VM_PROBE is set: these rows run as root on the VM')
+  const vm = JSON.parse(readFileSync(RUNNER_VM, 'utf8'))
+  for (const key of ['socket', 'proofs', 'workRoot', 'homesRoot', 'node', 'launch', 'gateStore', 'ownerCanary', 'dshHome', 'gateUser']) {
+    assert.equal(typeof vm[key], 'string', `probe endpoint ${key}`)
+  }
+  for (const key of ['runnerUid', 'socketGid', 'dshUid', 'dshGid', 'uidStart', 'uidCount']) {
+    assert.ok(Number.isInteger(vm[key]) && vm[key] > 0, `probe endpoint ${key}`)
+  }
+  return vm
+}
+
+// `tool` sends model arguments ({ command, cwd?, timeoutMs? }) through bot_shell instead of argv.
+function botCommand(vm, botId, argv, { socketGroup = true, cwd = join(vm.workRoot, '.bots', botId), tool } = {}) {
+  const request = tool ? { botId, args: tool } : { botId, argv, cwd, timeoutMs: 60_000 }
+  const input = JSON.stringify({
+    client: RUNNER_CLIENT, tool: tool ? BOT_SHELL_TOOL : undefined,
+    groups: socketGroup ? [vm.socketGid] : [], gid: vm.dshGid, uid: vm.dshUid, request,
+  })
+  const child = spawnSync(process.execPath, ['--import', HARNESS, '--input-type=module', '-e', AS_DSH, input], {
+    cwd: '/',
+    encoding: 'utf8',
+    timeout: 120_000,
+    env: {
+      PATH: process.env.PATH,
+      AUTOMAGIK_BOT_RUNNER_SOCKET: vm.socket,
+      AUTOMAGIK_BOT_RUNNER_PROOFS: vm.proofs,
+      AUTOMAGIK_BOT_RUNNER_WORK_ROOT: vm.workRoot,
+      AUTOMAGIK_BOT_RUNNER_UID: String(vm.runnerUid),
+      AUTOMAGIK_BOT_RUNNER_GID: String(vm.socketGid),
+    },
+  })
+  assert.equal(child.status, 0, `the DSH-side child for ${tool?.command ?? argv.join(' ')}: ${child.stderr}`)
+  return JSON.parse(child.stdout)
+}
+
+// The account's own read, as that account (setpriv), proving each canary is there to be refused.
+function readAs(user, file) {
+  const out = spawnSync('setpriv', ['--reuid', user, '--regid', user, '--init-groups', '--', 'cat', file], {
+    cwd: '/', encoding: 'utf8', timeout: 30_000,
+  })
+  assert.equal(out.status, 0, `${user} reads ${file}: ${out.stderr}`)
+  return out.stdout
+}
+
+// cat and touch exit 1 on a refused file; ls exits 2 on a folder named on its command line.
+const denied = (result, label, code = 1) => {
+  assert.equal(result.code, code, `${label}: exit code (${JSON.stringify(result)})`)
+  assert.equal(result.refusal, undefined, `${label}: the runner ran it`)
+  assert.match(result.stderr, /Permission denied/, label)
+  assert.doesNotMatch(result.stdout, /canary|secret/, label)
+}
+
+test('delivery 3: bot-shell', { skip: runnerVm }, () => {
+  const vm = runnerVmEndpoint()
+  const inRange = uid => Number.isInteger(uid) && uid >= vm.uidStart && uid < vm.uidStart + vm.uidCount
+  // Through the shipped bot_shell tool, as a model's call reaches it (timeoutMs within this
+  // runner's maxTimeoutMs: the tool's own default is 120000).
+  const a = botCommand(vm, A, null, { tool: { command: 'id -u; echo "$HOME"; pwd', timeoutMs: 60_000 } })
+  assert.equal(a.code, 0, JSON.stringify(a))
+  const [uidA, home, cwd] = a.stdout.trim().split('\n')
+  const b = botCommand(vm, B, ['id', '-u'])
+  assert.equal(b.code, 0, JSON.stringify(b))
+  const uidB = Number(b.stdout.trim())
+  for (const uid of [Number(uidA), uidB]) {
+    assert.ok(inRange(uid), `Bot uid ${uid} is in the runner's range`)
+    assert.notEqual(uid, vm.dshUid, 'a Bot is not DSH')
+    assert.notEqual(uid, vm.runnerUid, 'a Bot is not the runner')
+    assert.notEqual(uid, 0, 'a Bot is not root')
+  }
+  assert.notEqual(Number(uidA), uidB, 'two Bots, two uids')
+  assert.equal(home, join(vm.homesRoot, '.bots', A))
+  assert.equal(cwd, join(vm.workRoot, '.bots', A))
+  // No fallback, from the client: without the runner endpoint the bot_shell tool refuses with 125
+  // before it connects, and runs nothing itself.
+  const alone = botCommand(vm, A, null, { socketGroup: false, tool: { command: 'echo ran-locally', timeoutMs: 60_000 } })
+  assert.equal(alone.code, 125, JSON.stringify(alone))
+  assert.equal(alone.refusal?.code, 'UNAVAILABLE')
+  assert.equal(alone.stdout, '')
+  // No fallback, from the real runner: a cwd that leaves the Bot's area through a link inside it
+  // passes the tool's and the client's path checks, and the runner refuses it over the connection
+  // with 125. The marker is in DSH's own folder, which a command run as DSH (a fallback) could
+  // write: DSH makes a sibling there first, as the control.
+  const link = botCommand(vm, A, ['ln', '-sfn', '/etc', 'probe-escape'])
+  assert.equal(link.code, 0, JSON.stringify(link))
+  const control = spawnSync('setpriv', ['--reuid', String(vm.dshUid), '--regid', String(vm.dshGid), '--init-groups', '--',
+    'touch', join(vm.dshHome, 'probe-control')], { cwd: '/', encoding: 'utf8', timeout: 30_000 })
+  assert.equal(control.status, 0, `DSH can write its own folder: ${control.stderr}`)
+  const marker = join(vm.dshHome, 'probe-escape-ran')
+  const escaped = botCommand(vm, A, null, { tool: { command: `touch '${marker}'`, cwd: 'probe-escape', timeoutMs: 60_000 } })
+  assert.equal(escaped.code, 125, JSON.stringify(escaped))
+  assert.equal(escaped.refusal?.code, 'BAD_CWD', JSON.stringify(escaped))
+  assert.equal(escaped.stdout, '')
+  assert.equal(existsSync(marker), false, 'the refused command did not run, as the Bot or as DSH')
+})
+
+test('delivery 3: gate-credential', { skip: runnerVm }, () => {
+  const vm = runnerVmEndpoint()
+  assert.equal(readAs(String(vm.dshUid), vm.launch), 'launch-canary\n')
+  assert.equal(readAs(vm.gateUser, vm.gateStore), 'gate-canary\n')
+  denied(botCommand(vm, A, ['cat', vm.launch]), 'Bot read of the launch file')
+  denied(botCommand(vm, A, ['cat', vm.gateStore]), 'Bot read of the gate store')
+})
+
+test('delivery 3: bot-owner-rights', { skip: runnerVm }, () => {
+  const vm = runnerVmEndpoint()
+  assert.equal(readAs(String(vm.dshUid), vm.ownerCanary), 'canary\n')
+  denied(botCommand(vm, A, ['cat', vm.ownerCanary]), 'Bot read of an owner file')
+  const touched = join(vm.dshHome, 'probe-x')
+  denied(botCommand(vm, A, ['touch', touched]), 'Bot write in the owner folder')
+  assert.equal(existsSync(touched), false)
+  const socket = botCommand(vm, A, [vm.node, '-e',
+    "require('net').connect(process.argv[1]).on('error',e=>{console.log(e.code);process.exit(1)})", vm.socket])
+  assert.equal(socket.code, 1, JSON.stringify(socket))
+  assert.equal(socket.stdout.trim(), 'EACCES', 'a Bot cannot reach the runner to ask for another identity')
+  const wrote = botCommand(vm, A, ['sh', '-c', 'echo secret-probe > "$HOME/.probe-a"'])
+  assert.equal(wrote.code, 0, JSON.stringify(wrote))
+  denied(botCommand(vm, B, ['cat', join(vm.homesRoot, '.bots', A, '.probe-a')]), "Bot B read of Bot A's home")
+  denied(botCommand(vm, B, ['ls', join(vm.workRoot, '.bots', A)]), "Bot B listing of Bot A's work area", 2)
+})
