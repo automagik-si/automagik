@@ -29,6 +29,7 @@ const GATED: Record<string, string> = {
   meter: 'meter',
   usagemeter: 'usagemeter',
   'dsh-sandbox': 'sandbox',
+  id: 'id',
 };
 const AREAS = Object.values(GATED);
 
@@ -45,6 +46,7 @@ const RULES: Record<string, [string, string, string]> = {
   meter: ['METER_CHANGED_PATHS', 'meter/statusline/x', 'meter/usagemeter/x'],
   usagemeter: ['USAGEMETER_CHANGED_PATHS', 'meter/usagemeter/x', 'meter/statusline/x'],
   sandbox: ['SANDBOX_CHANGED_PATHS', 'apps/dsh-sandbox/x', 'apps/x'],
+  id: ['ID_CHANGED_PATHS', 'apps/id/x', 'apps/landing/x'],
 };
 
 /** The inputs each rule carries beyond its own folder, which must still count as a change. */
@@ -60,6 +62,8 @@ const CROSS = [
   ['USAGEMETER_CHANGED_PATHS', 'meter/schema/query/v1/envelope.schema.json'],
   ['METER_CHANGED_PATHS', '.github/workflows/ci.yml'],
   ['SANDBOX_CHANGED_PATHS', '.github/workflows/ci.yml'],
+  ['ID_CHANGED_PATHS', '.github/workflows/ci.yml'],
+  ['ID_CHANGED_PATHS', '.github/scripts/apt-canonical-sources.sh'],
 ];
 
 /** Runs the `changes` job's real script the way the runner does, with an output file. */
@@ -176,6 +180,29 @@ describe('the changes job', () => {
     }
   });
 
+  test('an ID-only pull request checks ID alone, and its job asserts the steps it gates', () => {
+    const { dir, commits: [base, head] } = scratchRepo([
+      { 'README.md': 'first\n' },
+      { 'apps/id/src/index.ts': 'export {};\n' },
+    ]);
+    try {
+      const { outputs } = decide({ base, head, cwd: dir });
+      for (const area of AREAS) expect(outputs[area]).toBe(area === 'id' ? 'true' : 'false');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const steps = ci.jobs.id.steps;
+    // The second read of the diff (#895) needs the base commit, so the checkout keeps history.
+    expect(steps[0].with['fetch-depth']).toBe(0);
+    const assert = steps.find((step: any) => step.name === 'Assert the steps ran');
+    expect(assert.if).toBe('always()');
+    expect(assert.run).toContain('grep -E "${ID_CHANGED_PATHS}"');
+    for (const id of ['check', 'test', 'mutations']) {
+      expect(steps.some((step: any) => step.id === id)).toBe(true);
+      expect(assert.env.OUTCOMES).toContain(`${id}=\${{ steps.${id}.outcome }}`);
+    }
+  });
+
   test('a schema-only pull request checks Pocket and usagemeter', () => {
     const { dir, commits: [base, head] } = scratchRepo([
       { 'README.md': 'first\n' },
@@ -231,6 +258,7 @@ describe('a gated job', () => {
     expect(ci.jobs['pocket-link'].name).toBe('Pocket Link bridge (${{ matrix.os }})');
     expect(ci.jobs.usagemeter.name).toBe('usagemeter (${{ matrix.os }})');
     expect(ci.jobs.meter.name).toBe('Meter status line');
+    expect(ci.jobs.id.name).toBe('Automagik ID (local Workers runtime)');
   });
 
   test('reads a rule defined once, with the cross-area inputs each rule carries', () => {
