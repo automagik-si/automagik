@@ -323,12 +323,14 @@ shown_layout() {
   herdr-app status </dev/null >"$st" 2>/dev/null &
   asked=$!
   # Nothing of the watchdog's stays on stdout: callers read this function through $(…), which would
-  # wait for its sleep. Stopped, it stops its sleep too, so no run leaves one behind.
+  # wait for its sleep. Its trap is set only once the sleep is started and its pid kept: dash loses
+  # a trapped TERM that lands while it forks, and the caller then waited out the whole bound. From
+  # then on a TERM stops the sleep too, so no run leaves one behind; a TERM before the trap ends the
+  # watchdog at once, and a sleep it had just started runs out alone, its pid unused.
   (
-    nap=
-    trap '[ -z "$nap" ] || { kill "$nap"; wait "$nap"; }; exit 0' TERM
     sleep "$STATUS_SECONDS" &
     nap=$!
+    trap 'kill "$nap" 2>/dev/null; wait "$nap"; exit 0' TERM
     wait "$nap" || true
     kill "$asked" 2>/dev/null
   ) >/dev/null 2>&1 &
@@ -971,16 +973,16 @@ sha_of() {
   printf '%s\n' "${sha_out%% *}"
 }
 # Runs "$@" with no stdin and its stdout in the file $2, killed after $1 seconds (macOS has no
-# `timeout`). The watchdog stops its own sleep when stopped, so no run leaves one behind.
+# `timeout`). The watchdog stops its own sleep when stopped, so no run leaves one behind; its trap
+# is set only once the sleep's pid is kept, as shown_layout's (a TERM during the fork is lost).
 bounded() {
   bsec=$1; bout=$2; shift 2
   "$@" </dev/null >"$bout" 2>/dev/null &
   basked=$!
   (
-    nap=
-    trap '[ -z "$nap" ] || { kill "$nap"; wait "$nap"; }; exit 0' TERM
     sleep "$bsec" &
     nap=$!
+    trap 'kill "$nap" 2>/dev/null; wait "$nap"; exit 0' TERM
     wait "$nap" || true
     kill -9 "$basked" 2>/dev/null
   ) >/dev/null 2>&1 &
