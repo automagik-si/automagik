@@ -76,8 +76,9 @@ export function registerSchemes(app) {
   return SCHEMES.filter(scheme => app.setAsDefaultProtocolClient(scheme))
 }
 
+export const isAppLink = arg => typeof arg === 'string' && SCHEMES.some(scheme => arg.startsWith(`${scheme}:`))
+
 /** The first of the app's links in a command line (Linux and Windows pass it as an argument). */
 export function linkInArgs(argv) {
-  const ours = arg => typeof arg === 'string' && SCHEMES.some(scheme => arg.startsWith(`${scheme}:`))
-  return (Array.isArray(argv) ? argv : []).find(ours) ?? null
+  return (Array.isArray(argv) ? argv : []).find(isAppLink) ?? null
 }

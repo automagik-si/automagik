@@ -70,7 +70,8 @@ COPY build/dsh-launch /opt/automagik/dsh-launch
 COPY package.json /opt/automagik/desktop/package.json
 COPY build/runtime/node_modules/yaml /opt/automagik/desktop/node_modules/yaml
 COPY src/dsh.js src/profile-patch.mjs src/child-paths.js src/close-inherited.cjs src/close-inherited-preload.cjs \
-     src/lane.js src/lane-keys.js src/owner-record.js src/privacy.js src/tar.js src/update.js /opt/automagik/desktop/src/
+     src/lane.js src/lane-keys.js src/owner-record.js src/privacy.js src/tar.js src/update.js \
+     src/relaunch-args.js src/deeplink.js src/bot-views.js /opt/automagik/desktop/src/
 COPY wslc/bin /opt/automagik/desktop/wslc/bin
 COPY wslc/lib /opt/automagik/desktop/wslc/lib
 

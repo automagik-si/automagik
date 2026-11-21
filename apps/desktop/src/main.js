@@ -719,6 +719,7 @@ function watchUpdates() {
   log.info(`update: ${app.getVersion()} checks for updates (${mode})`)
   updates = startUpdates({
     updater: updaterModule.autoUpdater,
+    relaunch: options => app.relaunch(options),
     current: app.getVersion(),
     platform: process.platform,
     env: process.env,
