@@ -511,6 +511,26 @@ test("managed linked Claude start and plain restart follow the target's record a
   assert.equal(s.calls().filter((c) => c[0] === "exec" && c.includes("--launch-login")).length, 2);
 });
 
+// #1509 over RFC 0043 (#1914): under this computer's Bot login policy a managed machine's Claude
+// start and plain restart are refused before any remote call (no --launch-login exec, no run); with
+// the policy off the managed login above is untouched.
+test("#1509 under the login policy a managed linked Claude start and restart refuse before any remote call", (t) => {
+  const s = scene(t, { accounts: true });
+  writeLaunchPlan(s);
+  shipLaunchReader(s);
+  writeLinkedLogin(s);
+  const policy = { AUTOMAGIK_NATIVE_WORKER_LOGIN: "required" };
+  for (const args of [["start", "Hedge", ...s.on, "--json"], ["restart", "Hedge", ...s.on, "--force", "--json"]]) {
+    const before = s.calls().length;
+    const r = s.cli(args, policy);
+    assert.equal(r.code, 2, `${args[0]}: ${r.out}${r.err}`);
+    assert.match(r.err, /\(linked-machine\)/);
+    const after = s.calls().slice(before);
+    assert.equal(after.some((c) => c[0] === "exec" && c.includes("--launch-login")), false, `${args[0]}: no managed login read`);
+    assert.equal(after.some((c) => c[0] === "run"), false, `${args[0]}: nothing launched`);
+  }
+});
+
 test("managed linked Claude start unsets an inherited slot when the target uses default", (t) => {
   const s = scene(t, { accounts: true });
   writeLaunchPlan(s);

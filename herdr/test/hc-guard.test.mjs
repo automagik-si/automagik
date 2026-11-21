@@ -1305,7 +1305,7 @@ test("a guard copy that calls its caller stops at once instead of looping", (t) 
   const s = scene(t);
   const mod = join(s.root, "other-guard"), copyGuard = join(mod, "guard");
   mkdirSync(copyGuard, { recursive: true });
-  for (const file of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
+  for (const file of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "loginWords.js", "retired.js", "hermesPair.js"]) {
     copyFileSync(join(GUARD_DIR, "..", file), join(mod, file));
   }
   appendFileSync(join(mod, "hcGuard.mjs"), "\n// not this guard\n");
@@ -1326,7 +1326,7 @@ test("an older guard copy after this one cannot turn a refusal into an allow", (
   const mod = join(s.root, "older-guard"), olderGuard = join(mod, "guard");
   const log = join(mod, "older.log");
   mkdirSync(olderGuard, { recursive: true });
-  for (const file of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
+  for (const file of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "loginWords.js", "retired.js", "hermesPair.js"]) {
     copyFileSync(join(GUARD_DIR, "..", file), join(mod, file));
   }
   // An older copy: it predates the re-entry marker, so it ignores the marker on its env.

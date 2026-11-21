@@ -6,9 +6,10 @@ import { startFakeCore } from "./fake-core.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { symlinkSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { loginFixture } from "./login-fixture.mjs";
 
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
@@ -749,6 +750,34 @@ test("#1418: when a gone seat's template resume exits, revive keeps the template
   assertRevivedSeat(s, "t101", ["sh", "-c", seatTemplate.command], seatTemplate.name);
 });
 
+test("#1509 revive names a helper with a late login refusal and records its end", (t) => {
+  const s = world(t, { terminals: (p) => [
+    pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }),
+    // A Codex helper all through: its launch, its foreground and the app hc reports.
+    { ...pane("t8", { cwd: p, parent: "t5", created: 8, front: ["codex"], argv: ["codex"], status: "idle" }),
+      name: "reader-helper", status: { app: "codex", state: "idle" } },
+  ] });
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "worker", terminal: "t8",
+    core: CORE, created_ms: 8, agent: "codex", botId: ID.main, project: s.project, worktree: s.project })}\n`);
+  const root = join(s.root, "cli-homes");
+  const claude = loginFixture(root, "claude");
+  const codex = loginFixture(root, "codex");
+  const state = s.hcState();
+  state.onKillWrite = { terminal: "t5", path: join(dirname(codex.dir), "paused"), text: "" };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.cli(["revive", "--json"], { env: claude.env });
+  assert.equal(r.code, 1, r.err);
+  const project = r.json().projects[0];
+  const [helper] = project.results[0].helpers;
+  assert.ok(helper, JSON.stringify(r.json()) + r.err);
+  assert.equal(helper.login, "login-paused");
+  assert.equal(helper.why, "The Bot login record is missing or out of date; sign in again. (login-paused)");
+  assert.match(project.report, /reader-helper \(under Genie\), .*\(login-paused\)/);
+  assert.deepEqual(s.ledger().filter((row) => row.event === "end" && row.terminal === "t8")
+    .map((row) => [row.kind, row.core, row.created_ms, row.reason]), [["worker", CORE, 8, "replaced"]]);
+  assert.equal(runsOf(s).length, 1, "only the parent restarted");
+});
+
 test("revive brings a bot's helpers back under its new pane (--tree): a helper at a bare shell is run again from its launch command, resumed by its own session", (t) => {
   const s = world(t, { terminals: (p) => [
     pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }),
@@ -837,6 +866,45 @@ test("revive --wait: with herdr-core not answering it starts nothing and says so
   assert.equal(s.cli(["revive", "--wait", "soon"]).code, 2);
   assert.equal(s.cli(["revive", "everything"]).code, 2);
   assert.equal(s.cli(["revive", "--machine", "lab"]).code, 2);
+});
+
+for (const os of ["Linux", "Darwin"]) test(`#1509 revive service on ${os} preserves a present empty pointer without a marker`, () => {
+  const env = { AUTOMAGIK_BOT_CLI_POINTER: "", PATH: "/usr/bin" };
+  const text = (os === "Linux" ? unitText : plistText)({ runner: "/bin/am", env });
+  const line = os === "Linux" ? 'Environment="AUTOMAGIK_BOT_CLI_POINTER="' : "<key>AUTOMAGIK_BOT_CLI_POINTER</key><string></string>";
+  assert.ok(text.includes(line), text);
+  assert.doesNotMatch(text, /AUTOMAGIK_NATIVE_WORKER_LOGIN/);
+});
+
+for (const os of ["Linux", "Darwin"]) test(`#1509 revive service on ${os} keeps the Bot login policy`, (t) => {
+  const home = scratchRoot(t, "revive-login-service-");
+  const bin = join(home, "bin"), app = join(home, "app"), log = join(home, "service.log");
+  mkdirSync(bin);
+  mkdirSync(app);
+  exe(join(bin, "uname"), `#!/bin/sh\necho ${os}\n`);
+  for (const program of ["systemctl", "launchctl"]) {
+    exe(join(bin, program), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\n`);
+  }
+  const env = { AUTOMAGIK_BOT_CLI_POINTER: join(home, "cli-homes/current/claude"),
+    AUTOMAGIK_NATIVE_WORKER_LOGIN: "required", DSH_HOME: join(home, "dsh"), AUTOMAGIK_HOME: home };
+  const errorPath = join(home, "stderr");
+  const stderr = openSync(errorPath, "w", 0o600);
+  let installed;
+  try {
+    installed = spawnSync(RUNTIME, [CLI, "revive", "service", "install", "--json"], {
+      cwd: home, env: { ...process.env, ...env, HOME: home, HERDR_APP_HOME: app, PATH: `${bin}:${process.env.PATH}`,
+        AUTOMAGIK_HERDR_TEST_ROOTS: home },
+      stdio: ["ignore", "ignore", stderr],
+    });
+  } finally { closeSync(stderr); }
+  assert.equal(installed.status, 0, installed.error?.message ?? readFileSync(errorPath, "utf8"));
+  const text = readFileSync(os === "Linux" ? unitPath(home) : plistPath(home), "utf8");
+  for (const [name, value] of Object.entries(env)) {
+    const line = os === "Linux" ? `Environment="${name}=${value}"` : `<key>${name}</key><string>${value}</string>`;
+    assert.ok(text.includes(line), line);
+  }
+  if (os === "Linux") assert.equal(readFileSync(log, "utf8"), `--user daemon-reload\n--user enable ${UNIT_NAME}\n`);
+  else assert.equal(existsSync(log), false);
 });
 
 test("revive service: installs and enables a systemd user unit that runs revive --boot, never starts it, and removes only a unit it wrote", { skip: process.platform !== "linux" }, (t) => {

@@ -22,7 +22,7 @@ export const DSH_TUI_LOG = 'dsh-tui.log'
 export const DSH_TUI_TIMEOUT_MS = 20 * 60_000
 /** The installer's local import closure and sandbox wrapper; prepare-runtime keeps folders. */
 export const DSH_TUI_FILES = Object.freeze([
-  'dshTui.mjs', 'approved.js', 'workers.js', 'models.js', 'model.js', 'logins.js',
+  'dshTui.mjs', 'approved.js', 'workers.js', 'models.js', 'model.js', 'logins.js', 'loginWords.js',
   'hermesPair.js',
   'retired.js', 'layoutSafe.mjs', 'release.js', 'bin/dsh-sandbox.mjs', 'bin/hc-socket-mask.mjs',
 ])

@@ -162,8 +162,16 @@
       "to": "am/loginProbe.js"
     },
     {
+      "from": "herdr/mods/am-sidebar/loginRecord.js",
+      "to": "am/loginRecord.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/logins.js",
       "to": "am/logins.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/loginWords.js",
+      "to": "am/loginWords.js"
     },
     {
       "from": "herdr/mods/am-sidebar/machineUpdates.js",

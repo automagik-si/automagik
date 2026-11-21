@@ -375,6 +375,11 @@ switch (words[0]) {
     t.finished_ms = Date.now();
     // state.surviveParent: children that outlive their parent's end anyway (a kill that didn't take).
     for (const c of state.terminals) if (c.parent === t.address && c.state === "live" && c.die_with_parent && !(state.surviveParent ?? []).includes(c.address)) c.state = "finished";
+    // A file changes exactly when the selected pane is ended.
+    if (state.onKillWrite?.terminal === t.address) {
+      writeFileSync(state.onKillWrite.path, state.onKillWrite.text);
+      delete state.onKillWrite;
+    }
     // state.afterKill: { terminal, patch }: another pane ends with this kill (a seat that dies
     // between the cancel of its queued restart and the next look).
     if (state.afterKill) {

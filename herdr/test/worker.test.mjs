@@ -20,6 +20,8 @@ import { ENV, GUARD_DIR, WORKER_OF_LABEL, stableGuardDir, stableHelper, stableRu
   prBranches, prChecksPath, prChecksText, prLikely, prRow, prRowsFor, prTime, prWatch, readPrChecks } from "../mods/am-sidebar/workers.js";
 import { approveProject, recordFileOf } from "../mods/am-sidebar/approved.js";
 import { stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
+import { loginFixture } from "./login-fixture.mjs";
+import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 import { startProxy } from "../mods/am-sidebar/hcProxy.mjs";
 import { startFakeCore } from "./fake-hc-core.mjs";
 import { fixturePaneEdit } from "./fixture-pane-edit.mjs";
@@ -68,14 +70,22 @@ const term = (address, { bot: b, cwd }) => ({ address, name: address, cwd, state
  * both vendors' generations and one sequence. The launch's pointer only needs its folder.
  */
 function generationRecord(root, { sequence, claude = null, codex = null }) {
+  // ACP's own layout (#1509's reader checks it): each vendor's pointer, its private 0700 config
+  // folder under homes/<vendor>/<generation>, and the record written last.
   const current = join(root, "cli-homes", "current");
   mkdirSync(current, { recursive: true });
+  const home = (vendor, generation) => join(root, "cli-homes", "homes", vendor, generation, `.${vendor}`);
+  for (const [vendor, generation] of [["claude", claude], ["codex", codex]]) {
+    if (!generation) continue;
+    mkdirSync(home(vendor, generation), { recursive: true, mode: 0o700 });
+    chmodSync(home(vendor, generation), 0o700);
+    writeFileSync(join(current, vendor), generation);
+  }
   const pointer = join(current, "claude");
-  writeFileSync(pointer, claude ?? codex ?? "");
   const record = join(current, "generation.json");
   writeFileSync(record, JSON.stringify({ version: 1, sequence,
-    claude: claude ? { generation: claude, configDir: join(root, "cli-homes", "homes", "claude", claude, ".claude") } : null,
-    codex: codex ? { generation: codex, home: join(root, "cli-homes", "homes", "codex", codex, ".codex") } : null,
+    claude: claude ? { generation: claude, configDir: home("claude", claude) } : null,
+    codex: codex ? { generation: codex, home: home("codex", codex) } : null,
     updatedAt: "2026-11-19T00:00:00.000Z" }));
   return { pointer, record };
 }
@@ -161,8 +171,8 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
     assert.ok(readFileSync(join(bin, "hc"), "utf8").includes(FAKE_HC));
     assert.ok(CLI.endsWith("/herdr/mods/am-sidebar/bin/automagik-herdr.mjs"));
   };
-  const cli = (args, { from = "t1", cwd = project, env: extra = {} } = {}) => {
-    core.control({ ...env, ...extra });
+  const cli = (args, { from = "t1", cwd = project, env: extra = {}, coreEnv = extra } = {}) => {
+    core.control({ ...env, ...coreEnv });
     preflight(extra, cwd);
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd, env: { ...env, ...extra, ...(from ? { HC_TERMINAL_ID: from } : {}) }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
@@ -247,6 +257,14 @@ const after = (args) => {
   assert.equal(at === 3, rest[0] === "claude", `only a Claude worker gets the login words: ${JSON.stringify(argv)}`);
   return withoutPerson(rest);
 };
+/** A reader launch (#1509): /usr/bin/env, its `-u NAME` and NAME=value words, then the command. */
+const afterLogin = (args) => {
+  const argv = runArgv(args);
+  assert.equal(argv[0], "/usr/bin/env", JSON.stringify(argv));
+  let i = 1;
+  while (i < argv.length && (argv[i] === "-u" || /^[A-Z_][A-Z0-9_]*=/.test(argv[i]))) i += argv[i] === "-u" ? 2 : 1;
+  return withoutPerson(argv.slice(i));
+};
 const labelsOf = (args) => args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
 
 /** A window whose space sp-bot shows a shell (t2, tab tb-a), the bot's pane (t1, tab tb-bot) and t3 (tab tb-c). */
@@ -276,6 +294,177 @@ test("M4: switch off keeps the complete worker argv byte for byte against C1", (
   assert.deepEqual(s.runs()[0].map((word) => word.split(s.root).join("<root>")
     .split(GUARD_DIR).join("<guard>")), baseline);
 });
+
+test("#1509 no pointer leaves the vendor env exactly as it was", (t) => {
+  const s = scene(t);
+  const r = s.cli(["worker", "no pointer task", "--branch", "feat/no-pointer", "--agent", "claude", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = s.runs().at(-1);
+  assert.deepEqual(runArgv(run).slice(0, 3), ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR"]);
+  assert.equal(run.some((word) => word.startsWith("CLAUDE_CONFIG_DIR=")), false);
+  assert.equal(run.some((word) => word.startsWith("CODEX_HOME=")), false);
+});
+
+test("#1509 a nested DSH worker carries policy from its caller into an unguarded core", (t) => {
+  const file = team();
+  Object.assign(file.bots[2], { agent: "dsh-tui", worker: { agent: "dsh-tui" }, hcProxy: false });
+  const s = scene(t, { file });
+  const env = { [POINTER_VAR]: "", [REQUIRED_VAR]: "required", DSH_HOME: join(s.root, "dsh"), AUTOMAGIK_HOME: s.root };
+  exe(join(s.root, "bin", "dsh-tui"), `#!${process.execPath}
+process.stdout.write(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(env))}.map((key) => [key, process.env[key]]))));
+`);
+  const r = s.cli(["worker", "nested DSH task", "--branch", "feat/dsh-policy", "--json"], { env, coreEnv: {} });
+  assert.equal(r.code, 0, r.err);
+  const [command, ...args] = runArgv(s.runs().at(-1));
+  const launched = spawnSync(command, args, { env: s.env, encoding: "utf8" });
+  assert.equal(launched.status, 0, launched.error?.message ?? launched.stderr);
+  assert.deepEqual(JSON.parse(launched.stdout), env);
+});
+
+test("one exported pointer resolves BOTH vendors to their recorded homes (#1509)", (t) => {
+  const s = scene(t);
+  const current = join(s.root, "cli-homes", "current");
+  const claudeGen = "11111111-1111-4111-8111-111111111111";
+  const codexGen = "22222222-2222-4222-8222-222222222222";
+  const claudeDir = join(dirname(current), "homes", "claude", claudeGen, ".claude");
+  const codexDir = join(dirname(current), "homes", "codex", codexGen, ".codex");
+  for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
+  chmodSync(claudeDir, 0o700); chmodSync(codexDir, 0o700);
+  writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 4,
+    claude: { generation: claudeGen, configDir: claudeDir }, codex: { generation: codexGen, home: codexDir },
+    updatedAt: "2026-11-16T20:00:00.000Z" }));
+  writeFileSync(join(current, "claude"), claudeGen);
+  writeFileSync(join(current, "codex"), codexGen);
+  // The one export names current/claude; the Codex launch must derive current/codex from it.
+  const pointer = { [POINTER_VAR]: join(current, "claude") };
+
+  const claude = s.cli(["worker", "claude pointer task", "--branch", "feat/pointer-claude", "--agent", "claude", "--json"], { env: pointer });
+  assert.equal(claude.code, 0, claude.err);
+  const claudeRun = s.runs().at(-1);
+  assert.ok(claudeRun.includes(`CLAUDE_CONFIG_DIR=${claudeDir}`), JSON.stringify(claudeRun));
+  assert.equal(claudeRun.some((word) => word.startsWith("CODEX_HOME=")), false);
+
+  const codex = s.cli(["worker", "codex pointer task", "--branch", "feat/pointer-codex", "--agent", "codex", "--json"], { env: pointer });
+  assert.equal(codex.code, 0, codex.err);
+  const codexRun = s.runs().at(-1);
+  assert.ok(codexRun.includes(`CODEX_HOME=${codexDir}`), JSON.stringify(codexRun));
+  assert.equal(codexRun.some((word) => word.startsWith("CLAUDE_CONFIG_DIR=")), false);
+});
+
+test("#1509 reader refusals stop the worker before any launch", (t) => {
+  const s = scene(t);
+  const current = join(s.root, "cli-homes", "current");
+  const claudeGen = "11111111-1111-4111-8111-111111111111";
+  const codexGen = "22222222-2222-4222-8222-222222222222";
+  const claudeDir = join(dirname(current), "homes", "claude", claudeGen, ".claude");
+  const codexDir = join(dirname(current), "homes", "codex", codexGen, ".codex");
+  for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
+  chmodSync(claudeDir, 0o700); chmodSync(codexDir, 0o700);
+  const writeRecord = (mode = 0o700) => {
+    chmodSync(codexDir, mode);
+    writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 4,
+      claude: { generation: claudeGen, configDir: claudeDir }, codex: { generation: codexGen, home: codexDir },
+      updatedAt: "2026-11-16T20:00:00.000Z" }));
+    writeFileSync(join(current, "claude"), claudeGen);
+    writeFileSync(join(current, "codex"), codexGen);
+  };
+  writeRecord();
+  const pointer = { [POINTER_VAR]: join(current, "claude") };
+  const baseline = s.runs().length;
+  const args = (extra = []) => ["worker", "reader refusal task", "--branch", "feat/reader-refusal", "--agent", "codex", ...extra, "--json"];
+
+  chmodSync(codexDir, 0o755);
+  const mode = s.cli(args(), { env: pointer });
+  assert.equal(mode.code, 2, mode.err);
+  assert.match(mode.err, /missing or out of date/);
+  assert.match(mode.err, /folder-mode/);
+  assert.equal(mode.err.includes(s.root), false, "the refusal names no path");
+  assert.equal(s.runs().length, baseline, "no launch after a bad mode");
+
+  const required = s.cli(args(), { env: { [REQUIRED_VAR]: "required" } });
+  assert.equal(required.code, 2, required.err);
+  assert.match(required.err, /login-required/);
+  assert.equal(s.runs().length, baseline);
+});
+
+for (const command of ["claude", "codex --no-daemon", "bash -lc 'exec claude'",
+  "CLAUDE_CONFIG_DIR=/other claude", "export CLAUDE_SECURESTORAGE_CONFIG_DIR=/other; exec claude",
+  "env CODEX_HOME=/other codex --no-daemon", "my-unknown-wrapper", "claude;", "codex --no-daemon;"]) {
+  test(`#1509 refuses shell-form worker template ${command}`, (t) => {
+    const s = scene(t, { templates: [{ name: "login-test", command }] });
+    const root = join(s.root, "cli-homes");
+    loginFixture(root, "codex");
+    const login = loginFixture(root, "claude");
+    const r = s.cli(["worker", "task", "--template", "login-test", "--branch", "feat/login-template"], { env: login.env });
+    assert.equal(r.code, 2, r.err);
+    assert.equal(r.err.trim(), "am: Under the Bot login policy only a direct Claude or Codex command can start; run the agent directly. (launch-not-direct)");
+    assert.deepEqual(s.runs(), []);
+  });
+}
+
+test("#1509 a worker alias picks the vendor its programs.json command runs", (t) => {
+  const s = scene(t);
+  writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { alternate: { run: ["codex"] } } }));
+  const login = loginFixture(join(s.root, "cli-homes"), "codex");
+  const r = s.cli(["worker", "task", "--agent", "alternate", "--branch", "feat/alternate"], { env: login.env });
+  assert.equal(r.code, 0, r.err);
+  assert.ok(s.runs()[0].includes(`CODEX_HOME=${login.dir}`));
+});
+
+for (const vendor of ["claude", "codex"]) test(`#1509 ${vendor} drops inherited credentials and uses the panel home`, (t) => {
+  const s = scene(t);
+  const login = loginFixture(join(s.root, "cli-homes"), vendor);
+  const variables = vendor === "claude"
+    ? ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_FOUNDRY"]
+    : ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"];
+  const inherited = Object.fromEntries(variables.map((name) => [name, "fixture-override"]));
+  const executable = join(s.root, "bin", vendor);
+  const names = [...variables, "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CODEX_HOME"];
+  const probe = join(s.root, "probe.mjs");
+  writeFileSync(probe, `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(names)}.map(name => [name, process.env[name]]))));`);
+  exe(executable, `#!/bin/sh
+exec "${process.execPath}" "${probe}"
+`);
+  const r = s.cli(["worker", "task", "--agent", vendor, "--branch", "feat/login-env"],
+    { env: { ...login.env, ...inherited, CODEX_HOME: join(s.root, "caller-codex") } });
+  assert.equal(r.code, 0, r.err);
+  const [env, ...words] = runArgv(s.runs()[0]);
+  const seen = spawnSync(env, words, { env: { PATH: s.env.PATH, ...inherited }, encoding: "utf8" });
+  assert.equal(seen.status, 0, seen.stderr);
+  const actual = JSON.parse(seen.stdout);
+  if (vendor === "claude") {
+    assert.equal(actual.CLAUDE_CONFIG_DIR, login.dir);
+    assert.equal(actual.CLAUDE_SECURESTORAGE_CONFIG_DIR, login.dir);
+  } else {
+    assert.equal(actual.CODEX_HOME, login.dir);
+    assert.equal(s.ledger().find((row) => row.event === "start").env.CODEX_HOME, login.dir);
+  }
+  for (const name of variables) assert.equal(actual[name], undefined, name);
+});
+
+for (const usable of [true, false]) {
+  test(`#1509 worker rereads the generation after worktree creation (${usable ? "ready" : "paused"})`, (t) => {
+    const s = scene(t);
+    const root = join(s.root, "cli-homes");
+    const nextGeneration = "22222222-2222-4222-8222-222222222222";
+    const next = loginFixture(root, "claude", nextGeneration);
+    const first = loginFixture(root, "claude");
+    if (!usable) writeFileSync(join(dirname(next.dir), "paused"), "");
+    exe(join(s.project, ".git", "hooks", "post-checkout"),
+      `#!/bin/sh
+printf '%s' '${nextGeneration}' > '${next.pointer}'
+printf '%s' '${next.text}' > '${next.recordPath}'
+`);
+    const r = s.cli(["worker", "task", "--agent", "claude", "--branch", "feat/login-switch"], { env: first.env });
+    assert.equal(r.code, usable ? 0 : 2, r.err);
+    if (usable) assert.ok(s.runs()[0].includes(`CLAUDE_CONFIG_DIR=${next.dir}`), JSON.stringify(s.runs()));
+    else {
+      assert.match(r.err, /login-paused/);
+      assert.deepEqual(s.runs(), []);
+    }
+  });
+}
 
 test("M7: fixture pane edits cannot disable the approved switch at the next worker start",
   { skip: process.platform !== "linux" }, (t) => {
@@ -752,16 +941,20 @@ test("a generation switch is recorded by the next launch and leaves the old row 
 
 test("a launch with no generation record writes null, never a guess, and the ledger still reads (#1532)", (t) => {
   const s = scene(t);
-  const absent = s.cli(["worker", "no pointer", "--branch", "feat/no-pointer", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: "" } });
+  // No pointer: the launch is as before and its row names no generation.
+  const absent = s.cli(["worker", "no pointer", "--branch", "feat/no-pointer", "--json"]);
   assert.equal(absent.code, 0, absent.err);
+  // A pointer with no record beside it: since #1509's reader that launch refuses, so no row
+  // can name a generation nobody recorded.
   const pointer = join(s.root, "cli-homes", "current", "claude");
   mkdirSync(dirname(pointer), { recursive: true });
-  writeFileSync(pointer, GEN.claude1); // a pointer with no record beside it
+  writeFileSync(pointer, GEN.claude1);
   const missing = s.cli(["worker", "no record", "--branch", "feat/no-record", "--json"], { env: { AUTOMAGIK_BOT_CLI_POINTER: pointer } });
-  assert.equal(missing.code, 0, missing.err);
+  assert.equal(missing.code, 2, missing.err);
+  assert.match(missing.err, /\(record-absent\)/);
   const rows = s.ledger().filter((row) => row.event === "start" && row.kind === "worker");
-  assert.deepEqual(rows.map((row) => [row.generation, row.sequence]), [[null, null], [null, null]]);
-  assert.equal(rows.length, 2, "both rows read back");
+  assert.deepEqual(rows.map((row) => [row.generation, row.sequence]), [[null, null]]);
+  assert.equal(rows.length, 1, "the row reads back");
 });
 
 test("a start row written before generation and sequence still reads beside a new launch (#1532)", (t) => {
@@ -3954,6 +4147,18 @@ test("worker #1420: --worktree gets the word too; the person's untrusted worktre
   assert.match(root.err.match(TRUST_LOST)[1], /settings mark the worktree or its repository untrusted/);
 });
 
+test("#1509 Codex trust uses the reader's home instead of the caller's", (t) => {
+  const s = scene(t);
+  const login = loginFixture(join(s.root, "cli-homes"), "codex");
+  const empty = join(s.root, "caller-codex");
+  mkdirSync(empty);
+  codexConfig(s, untrustedToml(realpathSync(s.project)), login.dir);
+  const r = s.cli(["worker", "task", "--agent", "codex", "--branch", "feat/login-trust"], { env: { ...login.env, CODEX_HOME: empty } });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(trustWords(afterLogin(s.runs()[0])), []);
+  assert.match(r.err, /settings mark the worktree or its repository untrusted/);
+});
+
 test("worker #1420: CODEX_HOME's config is the one read; an unreadable config or a relative CODEX_HOME withholds the word", (t) => {
   const s = scene(t);
   const other = join(s.root, "other-codex");
@@ -4189,4 +4394,79 @@ test("#1208 a normal seat reply to a reused address binds neither a chosen nor a
     assert.equal(s.ledger().some((row) => row.kind === "seat"), false);
     assert.notEqual(s.cli(["whois", "--bot", ID.main, "--json"], { from: null }).json().terminal, "t100");
   }
+});
+
+// #1509's identity row, isolated: the panel is acp-dsh's own CliHomes on a scratch data folder,
+// "signing in" writes a fake account file into the config folder the panel launches its CLI with,
+// and the identity read is a stand-in vendor CLI that prints the account its CLAUDE_CONFIG_DIR
+// holds. The worker is the real `am worker` under the image's export contract (the pointer under
+// the panel's root, the required marker and DSH_HOME; server/native-worker-login.mjs), its launch
+// recorded by the fake hc and then run as the pane would run it. No real login, account or hc.
+test("#1509 identity row: a native worker reads the panel's account before and after a generation switch", async (t) => {
+  const s = scene(t);
+  const { installationCliHome } = await import("../../apps/acp-dsh/src/host/installation.js");
+  const { CliHomes } = await import("../../apps/acp-dsh/src/host/cli-homes.js");
+  const data = join(s.root, "data"), acp = join(data, "acp"), dsh = join(data, "dsh");
+  mkdirSync(dsh, { recursive: true });
+  const { root } = installationCliHome(acp, dsh);
+  const panel = new CliHomes(root, { onRecordError: () => { throw new Error("record not saved"); } });
+  t.after(() => panel.dispose());
+  panel.startup("claude");
+  const identityCli = join(s.root, "bin", "claude");
+  exe(identityCli, `#!${process.execPath}
+const { readFileSync } = require("node:fs");
+const argv = process.argv.slice(2);
+const settingsAt = argv.indexOf("--settings");
+process.stdout.write(JSON.stringify({
+  account: readFileSync(process.env.CLAUDE_CONFIG_DIR + "/fake-account", "utf8"),
+  storage: process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR,
+  inherited: process.env.IDENTITY_INHERITED,
+  authOverride: process.env.ANTHROPIC_API_KEY ?? null,
+  settings: settingsAt < 0 ? null : argv[settingsAt + 1],
+  task: argv.at(-1),
+}));
+`);
+  const identity = ([program, ...args], env) => {
+    const r = spawnSync(program, args, { env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.error?.message ?? r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  const paneEnv = { ...s.env, IDENTITY_INHERITED: "preserved", ANTHROPIC_API_KEY: "fixture-override" };
+  const signIn = (account) => {
+    const env = panel.environment("claude", paneEnv);
+    writeFileSync(join(env.CLAUDE_CONFIG_DIR, "fake-account"), account, { mode: 0o600 });
+    panel.resume("claude");
+    return env;
+  };
+  const exported = { [POINTER_VAR]: join(root, "current", "claude"), [REQUIRED_VAR]: "required", DSH_HOME: dsh, AUTOMAGIK_HOME: data };
+  let n = 0;
+  const workerLaunch = () => {
+    n += 1;
+    const r = s.cli(["worker", `identity task ${n}`, "--branch", `feat/identity-${n}`, "--agent", "claude", "--json"], { env: exported });
+    assert.equal(r.code, 0, r.err);
+    const run = s.runs().at(-1);
+    return run.slice(run.indexOf("--") + 1);
+  };
+  const checkWorker = (launch, signedIn, account, task) => {
+    assert.equal(identity([identityCli], signedIn).account, account);
+    assert.deepEqual(identity(launch, paneEnv), { account, storage: signedIn.CLAUDE_CONFIG_DIR,
+      inherited: "preserved", authOverride: null, settings: CLAUDE_PERSON_SETTINGS, task: `identity task ${task}\n\n${DONE_LINE}` });
+  };
+
+  // Before any switch: the panel's first sign-in, a login from before any generation.
+  const panelA = signIn("account-a");
+  const workerA = workerLaunch();
+  checkWorker(workerA, panelA, "account-a", 1);
+
+  // The panel switches the Bot account: a new generation, signed in to another account.
+  panel.reset("claude");
+  const panelB = signIn("account-b");
+  assert.notEqual(panelB.CLAUDE_CONFIG_DIR, panelA.CLAUDE_CONFIG_DIR);
+  checkWorker(workerLaunch(), panelB, "account-b", 2);
+  checkWorker(workerA, panelA, "account-a", 1);
+
+  // And from one generation to the next.
+  panel.reset("claude");
+  const panelC = signIn("account-c");
+  checkWorker(workerLaunch(), panelC, "account-c", 3);
 });

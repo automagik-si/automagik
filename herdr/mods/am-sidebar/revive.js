@@ -6,6 +6,7 @@
 // `node --test` runs it. Apache-2.0.
 
 import { unwrapKeep } from "./launchArgs.js";
+import { POINTER_VAR } from "./loginWords.js";
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "fish", "ksh"]);
 const base = (p) => String(p ?? "").split("/").pop();
@@ -441,6 +442,7 @@ const unitWord = (w) => `"${String(w).replace(/[\\"]/g, "\\$&").replace(/%/g, "%
 
 /** Environment= expands `%` specifiers, but leaves `$` literal. */
 const envWord = (w) => `"${String(w).replace(/[\\"]/g, "\\$&").replace(/%/g, "%%")}"`;
+const serviceEnv = (env) => Object.entries(env).filter(([k, v]) => typeof v === "string" && (v || k === POINTER_VAR));
 
 /**
  * The systemd user unit: once per login, after the session is up, `<runner> revive --boot
@@ -449,7 +451,7 @@ const envWord = (w) => `"${String(w).replace(/[\\"]/g, "\\$&").replace(/%/g, "%%
  * when it isn't the default.
  */
 export function unitText({ runner, env = {}, wait = SERVICE_WAIT_S }) {
-  const vars = Object.entries(env).filter(([, v]) => typeof v === "string" && v).map(([k, v]) => `Environment=${envWord(`${k}=${v}`)}`);
+  const vars = serviceEnv(env).map(([k, v]) => `Environment=${envWord(`${k}=${v}`)}`);
   return [UNIT_MARK, "[Unit]", "Description=Automagik Herdr: bring the bots back after a restart", "",
     "[Service]", "Type=oneshot", ...vars,
     `ExecStart=${unitWord(runner)} revive --boot --wait ${wait}`,
@@ -503,7 +505,7 @@ const xml = (w) => String(w).replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
  * and HERDR_APP_HOME when it isn't the default.
  */
 export function plistText({ runner, env = {}, wait = SERVICE_WAIT_S }) {
-  const vars = Object.entries(env).filter(([, v]) => typeof v === "string" && v);
+  const vars = serviceEnv(env);
   const args = [runner, "revive", "--boot", "--wait", String(wait)];
   return [PLIST_DECL, PLIST_MARK, '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
     '<plist version="1.0"><dict>',

@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 
 import { HC_PIN, MAX_CONNECTIONS, MAX_READ_LINES, MAX_REPLY_BYTES, METHOD_PARAMS, runProblem, socketPathLimit, startProxy } from "../mods/am-sidebar/hcProxy.mjs";
 import { approveProject, approvedSettingsDir, recordFileOf, sha256Of } from "../mods/am-sidebar/approved.js";
+import { loginFixture } from "./login-fixture.mjs";
+import { botLoginWords } from "../mods/am-sidebar/loginRecord.js";
 import { ENV, GUARD_DIR, KILL_GUARD_DIR, WORKER_OF_LABEL, stableGuardDir, stableHelper, stableKillDir, stableRootOf, stableRunner, templateAgent, workerArgs, workerPlan } from "../mods/am-sidebar/workers.js";
 import { stableRootProblem, stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
 import { commandArgv } from "../mods/am-sidebar/restart.js";
@@ -1313,7 +1315,7 @@ async function approvedWorkerScene(t, worker, botExtra = {}) {
   return { ...result, proxy, client };
 }
 
-function approvedParams(s, worker, templateCommand = null, { killGuard = stableKillDir(s.stableRoot) } = {}) {
+function approvedParams(s, worker, templateCommand = null, { killGuard = stableKillDir(s.stableRoot), loginDir = null } = {}) {
   const plan = workerPlan({ agent: "dsh-tui", worker });
   const task = "do the task";
   const runs = plan.agent ?? (templateCommand ? templateAgent(templateCommand) : null);
@@ -1323,10 +1325,10 @@ function approvedParams(s, worker, templateCommand = null, { killGuard = stableK
   const args = workerArgs({ botId: ID.dev, branch: "feat/worker", role: "dev", name: "worker-one",
     cwd: s.worktree, parent: "t100", ...plan, task, path: s.env.PATH,
     project: s.project, taskId: "gn-1", lead: ID.dev,
-    login: claude ? ["-u", "CLAUDE_CONFIG_DIR"] : [], agySettingsPath,
+    login: loginDir ? botLoginWords(runs, loginDir) : claude ? ["-u", "CLAUDE_CONFIG_DIR"] : [], agySettingsPath,
     // #955: an approved worker's `hc kill` shim is the stable folder's copy, first on its PATH.
     killGuard,
-    templateArgv: plan.template && runs === "claude" ? commandArgv({ shell: templateCommand }, [task])
+    templateArgv: plan.template && (claude || loginDir) ? commandArgv({ shell: templateCommand }, [task])
       : plan.template && runs === "antigravity" ? commandArgv({ shell: templateCommand }, [...agySettingsArgs("antigravity", agySettingsPath), task])
         : null });
   const labels = {};
@@ -1336,8 +1338,34 @@ function approvedParams(s, worker, templateCommand = null, { killGuard = stableK
       labels[key] = value.join("=");
     }
   }
-  return runParams(s, { argv: plan.template && !claude && !agySettingsPath ? args.slice(-2)
+  return runParams(s, { argv: plan.template && !claude && !agySettingsPath && !loginDir ? args.slice(-2)
     : args.slice(args.indexOf("--") + 1), labels, env: {} });
+}
+
+for (const [vendor, worker] of [["claude", { agent: "claude" }], ["codex", { agent: "codex" }], ["codex", { template: "dev-sol" }]]) {
+  test(worker.template ? "#1509 the proxy refuses an approved shell-form template"
+    : `#1509 the proxy compares the approved ${vendor} reader argv exactly`, (t) => {
+    const s = scene();
+    t.after(() => rmSync(s.root, { recursive: true, force: true }));
+    const file = team();
+    file.bots.find((bot) => bot.id === ID.dev).worker = worker;
+    writeFileSync(join(s.project, ".herdr", "bots.json"), JSON.stringify(file));
+    const { record: approval } = approveProject({ project: s.project, env: s.env, approvedBy: "test" });
+    const login = loginFixture(join(s.root, "cli-homes"), vendor);
+    const template = worker.template ? "codex --model chosen" : null;
+    const templates = template ? [{ name: worker.template, command: template }] : [];
+    const snapshot = { terminal: "t100", bound: true, caller: { bot: ID.dev, project: s.project },
+      appHome: s.app, approval, approvalEnv: s.env, path: s.env.PATH, stableRoot: s.stableRoot, loginEnv: login.env };
+    const params = approvedParams(s, worker, template, { loginDir: login.dir });
+    if (template) {
+      assert.equal(runProblem(params, snapshot, templates),
+        "Under the Bot login policy only a direct Claude or Codex command can start; run the agent directly. (launch-not-direct)");
+      return;
+    }
+    assert.equal(runProblem(params, snapshot, templates), null);
+    const wrong = { ...params, argv: params.argv.map((word) => word.replace(login.dir, "/wrong-login")) };
+    assert.match(runProblem(wrong, snapshot, templates), /does not match approved/);
+  });
 }
 
 test("approved worker (#955): a sandboxed bot's worker of another agent keeps the pane's full guard, with no shim; the pack's own shim first is refused", async (t) => {

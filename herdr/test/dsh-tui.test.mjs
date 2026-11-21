@@ -161,8 +161,13 @@ exec "${process.execPath}" "${helper}" "$@"
   assert.equal(pane.config, "~/.profile");
   if (!dsh) assert.equal(findDsh({ ...env, PATH: pane.path }), null, "no dsh on the scene's pane PATH");
   const calls = () => readFileSync(log, "utf8").split("\n").filter(Boolean);
-  const runShim = (args, extra = {}) => spawnSync("sh", [join(home, ".local", "bin", SHIM), ...args], { env: { ...env, ...extra }, encoding: "utf8" });
-  const cli = (args, extra = {}) => spawnSync(process.execPath, [CLI, ...args], { cwd: root, env: { ...env, ...extra }, encoding: "utf8" });
+  const checkedSpawn = (...args) => {
+    const result = spawnSync(...args);
+    if (result.error) throw result.error;
+    return result;
+  };
+  const runShim = (args, extra = {}) => checkedSpawn("sh", [join(home, ".local", "bin", SHIM), ...args], { env: { ...env, ...extra }, encoding: "utf8" });
+  const cli = (args, extra = {}) => checkedSpawn(process.execPath, [CLI, ...args], { cwd: root, env: { ...env, ...extra }, encoding: "utf8" });
   return { root, home, bin, env, calls, runShim, cli, dsh: join(bin, "dsh"), profile: join(home, ".dsh", "profiles", PROFILE) };
 }
 
@@ -273,12 +278,14 @@ test("XDG_DATA_HOME names one stable root for install and the pane start", async
   assert.ok(tail.includes(join(root, "bin", "run.sh")));
 });
 
-test("the stable copy from STABLE_FILES loads hcPane.mjs", async (t) => {
+test("#1509 the clean stable copy loads hcPane.mjs and hcProxy.mjs with policy off", async (t) => {
   const s = scene(t);
-  const installed = await installDshTui({ forbiddenRoots: rootsOf(s), env: s.env, publishedAt: PUBLISHED });
-  assert.equal(installed.status, "installed", installed.detail);
-  const mod = await import(`${pathToFileURL(join(sandboxRootOf(s.env), "hcPane.mjs")).href}?t=${Date.now()}`);
-  assert.equal(typeof mod.runPane, "function");
+  mkdirSync(join(s.home, ".dsh", "profiles", PROFILE), { recursive: true });
+  const { stableRoot } = installSandboxRow({ forbiddenRoots: rootsOf(s), env: s.env });
+  const pane = await import(pathToFileURL(join(stableRoot, "hcPane.mjs")).href);
+  const proxy = await import(pathToFileURL(join(stableRoot, "hcProxy.mjs")).href);
+  assert.equal(typeof pane.runPane, "function");
+  assert.equal(typeof proxy.startProxy, "function");
 });
 
 test("STABLE_FILES is closed under its modules' and the guard entries' local imports (RFC 0042)", () => {
