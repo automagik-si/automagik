@@ -179,3 +179,9 @@ test('rollback messages and every failed check are translated with the same para
     assert.deepEqual(params(pt[key]), params(key))
   }
 })
+
+test('the Code row Herdr action has a Chinese and Brazilian Portuguese accessible label', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
+  assert.equal(DICTIONARY.zh['Open in Herdr'], '在 Herdr 中打开')
+  assert.equal(pt['Open in Herdr'], 'Abrir no Herdr')
+})

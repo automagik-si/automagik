@@ -3036,6 +3036,7 @@ var ZH = {
   "Work, in this window": "工作，就在这个窗口",
   "Code: open this Bot’s folder in Herdr": "代码：在 Herdr 中打开这个 Bot 的文件夹",
   "Open Herdr": "打开 Herdr",
+  "Open in Herdr": "在 Herdr 中打开",
   "Team or Code": "团队或代码",
   "Code: open Herdr": "代码：打开 Herdr",
   "Opening Herdr…": "正在打开 Herdr…",
@@ -24144,10 +24145,270 @@ function loadPane() {
   return paneLoading;
 }
 
-// src/client/code-side.js
+// src/client/work-code-switch.js
 var import_react52 = require("react");
+var NOTE_PATTERNS = [
+  ["offline", /^Herdr couldn't check for updates \(no connection\)/],
+  ["check-failed", /^Herdr couldn't check for updates /],
+  ["update-failed", /^Herdr couldn't update to /],
+  ["updated-restart", /^Herdr \S+ is installed; it starts when Herdr restarts$/]
+];
+function noteKindOf(result) {
+  if (typeof result?.noteKind === "string" && NOTE_PATTERNS.some(([kind]) => kind === result.noteKind)) return result.noteKind;
+  if (typeof result?.note !== "string") return null;
+  return NOTE_PATTERNS.find(([, pattern]) => pattern.test(result.note))?.[0] ?? null;
+}
+function noteNotice(result) {
+  const kind = noteKindOf(result);
+  switch (kind) {
+    case "offline":
+      return { kind, label: t("No connection: Herdr opened on the installed version"), title: result.note };
+    case "check-failed":
+      return { kind, label: t("Herdr couldn't check for updates: it opened on the installed version"), title: result.note };
+    case "update-failed":
+      return { kind, label: t("Herdr couldn't update: it opened on the installed version"), title: result.note };
+    case "updated-restart":
+      return { kind, label: t("Herdr {version} is installed: it starts when Herdr restarts", { version: result.version ?? "" }), title: result.note };
+    default:
+      return { kind: "note", label: t("Herdr says: {message}", { message: result.note }) };
+  }
+}
+function showsSwitch(status) {
+  return status?.state === "open" || status?.state === "closed" || status?.state === "error" && Boolean(status.source);
+}
+function codeNotices(result) {
+  if (!result || typeof result !== "object") return [{ kind: "error", label: t("Herdr didn't open"), retry: true }];
+  if (result.ok !== true) {
+    switch (result.reason) {
+      case "update":
+        return [{ kind: "offer", label: t("Herdr {version} is out", { version: result.latest ?? "" }), latest: result.latest }];
+      case "missing":
+        return [{ kind: "missing", label: t("Herdr is not set up") }];
+      case "unsupported":
+        return [{ kind: "unsupported", label: t("Herdr has no build for this computer") }];
+      default:
+        return [{ kind: "error", label: t("Herdr didn't open"), title: result.detail || result.message || void 0, retry: true }];
+    }
+  }
+  const notes = [];
+  if (result.raised !== true) notes.push({ kind: "no-focus", label: t("Herdr is open in another window"), title: result.detail || void 0 });
+  if (typeof result.note === "string" && result.note !== "") notes.push(noteNotice(result));
+  if (typeof result.space?.error === "string" && result.space.error !== "") notes.push({ kind: "space", label: t("Herdr says: {message}", { message: result.space.error }) });
+  return notes;
+}
+function createCodeSwitch(bridge, { focused = () => true } = {}) {
+  let state2 = { ...NO_STATE, front: focused() };
+  let footers = 0;
+  const listeners3 = /* @__PURE__ */ new Set();
+  const set2 = (patch) => {
+    state2 = { ...state2, ...patch };
+    for (const listener of listeners3) listener();
+  };
+  let reading2 = null;
+  const refresh = () => {
+    reading2 ??= Promise.resolve().then(() => bridge.status()).then((status) => set2({ status: status ?? null }), () => set2({ status: null })).finally(() => {
+      reading2 = null;
+    });
+    return reading2;
+  };
+  const open = ({ botId, source, update }) => {
+    if (state2.busy) return Promise.resolve(state2.result);
+    set2({ busy: true, result: null, target: { botId, source } });
+    const options = typeof update === "boolean" ? { update } : void 0;
+    let answer;
+    try {
+      answer = Promise.resolve(source === "code" ? options ? bridge.openCodeRow(botId, options) : bridge.openCodeRow(botId) : bridge.open({ botId, ...options }));
+    } catch (error) {
+      answer = Promise.reject(error);
+    }
+    return answer.then((result) => result, (error) => ({ ok: false, reason: "error", message: error?.message })).then((result) => {
+      set2({ busy: false, result: result ?? { ok: false, reason: "error" } });
+      if (result?.reason === "missing" || result?.reason === "unsupported") void refresh();
+      return result;
+    });
+  };
+  return {
+    subscribe(listener) {
+      listeners3.add(listener);
+      return () => listeners3.delete(listener);
+    },
+    snapshot: () => state2,
+    refresh,
+    setFront(front) {
+      if (front !== state2.front) set2({ front });
+    },
+    mountFooter() {
+      if (++footers === 1) set2({ footerMounted: true });
+      return () => {
+        if (--footers === 0) set2({ footerMounted: false });
+      };
+    },
+    open,
+    repeat: (update) => state2.target && open({ ...state2.target, update }),
+    dismiss() {
+      if (state2.result !== null) set2({ result: null, target: null });
+    }
+  };
+}
+var switches = /* @__PURE__ */ new WeakMap();
+function switchFor(bridge) {
+  if (!bridge || typeof bridge.status !== "function" || typeof bridge.open !== "function") return null;
+  if (!switches.has(bridge)) switches.set(bridge, createCodeSwitch(bridge, { focused: () => globalThis.document?.hasFocus?.() ?? true }));
+  return switches.get(bridge);
+}
+function shownBotId(roster, sessionId) {
+  if (!sessionId) return null;
+  const bot = roster?.byId?.[sessionId];
+  if (bot) return bot.id;
+  const from = roster?.tasks?.[sessionId]?.from;
+  return typeof from === "string" && roster?.byId?.[from] ? from : null;
+}
+var mainViewId = (list) => Object.values(list.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? "";
+var NO_STATE = { status: null, busy: false, result: null, front: true, target: null, footerMounted: false };
+var noSubscribe2 = () => () => {
+};
+var noState = () => NO_STATE;
+function Notice({ notice, onAnswer, onRetry, onDismiss, busy }) {
+  if (notice.kind === "offer") {
+    return (0, import_react52.createElement)(
+      "div",
+      { className: "bt-code-note", role: "status" },
+      (0, import_react52.createElement)("span", { className: "bt-code-note-text" }, notice.label),
+      (0, import_react52.createElement)(
+        "span",
+        { className: "bt-code-note-row" },
+        (0, import_react52.createElement)("button", { type: "button", className: "bt-code-note-go", disabled: busy, onClick: () => onAnswer(true) }, t("Update and open")),
+        (0, import_react52.createElement)("button", { type: "button", className: "bt-code-note-btn", disabled: busy, onClick: () => onAnswer(false) }, t("Open this version")),
+        (0, import_react52.createElement)("button", { type: "button", className: "bt-code-note-btn", onClick: onDismiss }, t("Dismiss"))
+      )
+    );
+  }
+  return (0, import_react52.createElement)(
+    "div",
+    { className: `bt-code-note bt-code-note-${notice.kind}`, role: "status", title: notice.title },
+    (0, import_react52.createElement)("span", { className: "bt-code-note-text" }, notice.label),
+    (0, import_react52.createElement)(
+      "span",
+      { className: "bt-code-note-row" },
+      notice.retry ? (0, import_react52.createElement)("button", { type: "button", className: "bt-code-note-go", disabled: busy, onClick: onRetry }, t("Retry")) : null,
+      (0, import_react52.createElement)("button", { type: "button", className: "bt-code-note-btn", onClick: onDismiss }, t("Dismiss"))
+    )
+  );
+}
+function useCodeControl(footer) {
+  const bridge = globalThis.omniDesktop?.herdr;
+  const control2 = footer || typeof bridge?.openCodeRow === "function" ? switchFor(bridge) : null;
+  const snapshot2 = control2?.snapshot ?? noState;
+  const state2 = (0, import_react52.useSyncExternalStore)(control2?.subscribe ?? noSubscribe2, snapshot2, snapshot2);
+  (0, import_react52.useEffect)(() => {
+    if (!control2) return void 0;
+    const unmount = footer ? control2.mountFooter() : void 0;
+    void control2.refresh();
+    const onFocus = () => {
+      control2.setFront(true);
+      void control2.refresh();
+    };
+    const onBlur = () => control2.setFront(false);
+    globalThis.addEventListener?.("focus", onFocus);
+    globalThis.addEventListener?.("blur", onBlur);
+    return () => {
+      unmount?.();
+      globalThis.removeEventListener?.("focus", onFocus);
+      globalThis.removeEventListener?.("blur", onBlur);
+    };
+  }, [control2, footer]);
+  return { control: control2, state: state2 };
+}
+function HerdrNotices({ control: control2, result, busy, row: row2 }) {
+  const notices = result ? codeNotices(result) : [];
+  if (!notices.length) return null;
+  return (0, import_react52.createElement)(
+    "div",
+    { className: "bt-code-notes", "data-code-row": row2 ? "" : void 0 },
+    notices.map((notice) => (0, import_react52.createElement)(Notice, {
+      key: notice.kind,
+      notice,
+      busy,
+      onAnswer: (update) => {
+        void control2.repeat(update);
+      },
+      onRetry: () => {
+        void control2.repeat();
+      },
+      onDismiss: () => control2.dismiss()
+    }))
+  );
+}
+function useCodeRowHerdr() {
+  const { control: control2, state: state2 } = useCodeControl(false);
+  return {
+    visible: () => showsSwitch(state2.status),
+    busy: state2.busy,
+    openRow: (botId) => {
+      void control2?.open({ botId, source: "code" });
+    },
+    notices: !state2.footerMounted && state2.target?.source === "code" ? (0, import_react52.createElement)(HerdrNotices, { control: control2, result: state2.result, busy: state2.busy, row: true }) : null
+  };
+}
+function WorkCodeSwitch({ roster, useSessions }) {
+  const { control: control2, state: state2 } = useCodeControl(true);
+  const sessionId = useSessions(mainViewId);
+  const visible = showsSwitch(state2.status);
+  const row2 = state2.target?.source === "code";
+  if (!control2 || !visible && !(row2 && state2.result)) return null;
+  const botId = shownBotId(roster, sessionId);
+  const code = () => {
+    void control2.open({ botId });
+  };
+  return (0, import_react52.createElement)(
+    "div",
+    { className: "bt-code-switch-wrap" },
+    visible ? (0, import_react52.createElement)(
+      "div",
+      { className: "bt-code-switch", role: "group", "aria-label": t("Open Herdr"), onPointerEnter: () => {
+        void control2.refresh();
+      } },
+      (0, import_react52.createElement)("button", {
+        type: "button",
+        className: "bt-code-seg",
+        "aria-current": state2.front ? void 0 : "true",
+        "aria-busy": state2.busy || void 0,
+        disabled: state2.busy,
+        title: state2.busy ? t("Opening Herdr…") : botId ? t("Code: open this Bot’s folder in Herdr") : t("Code: open Herdr"),
+        onClick: code
+      }, t("Code"))
+    ) : null,
+    (0, import_react52.createElement)(HerdrNotices, { control: control2, result: state2.result, busy: state2.busy, row: row2 })
+  );
+}
+var WORK_CODE_SWITCH_CSS = `
+.bt-side-top .bt-code-switch-wrap{position:relative;margin-right:auto;min-width:0}
+.bt-code-switch{display:inline-flex;align-items:center;max-width:100%;padding:2px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-main)}
+.bt-code-seg{display:inline-flex;align-items:center;min-width:0;height:24px;padding:0 9px;border:0;border-radius:999px;background:none;color:var(--bt-ink-2);font:600 12px/16px var(--bt-font);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.bt-code-seg[aria-current=true]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 0 0 1px var(--bt-line)}
+span.bt-code-seg{cursor:default}
+button.bt-code-seg:hover:not(:disabled):not([aria-current=true]){color:var(--bt-ink)}
+.bt-code-seg:disabled{cursor:default}
+.bt-code-seg[aria-busy]{animation:bt-code-pulse 1.2s ease-in-out infinite}
+.bt-code-notes{position:absolute;top:calc(100% + 6px);left:0;z-index:30;display:flex;flex-direction:column;gap:6px;width:240px;max-width:72vw}
+.lb-foot:has(.bt-code-notes[data-code-row]){position:relative}
+.lb-foot .bt-code-notes[data-code-row]{top:auto;bottom:calc(100% + 6px);max-width:100%}
+.bt-code-notes[data-code-row] .bt-code-note-row{flex-wrap:wrap}
+.bt-code-note{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card);color:var(--bt-ink);box-shadow:0 6px 20px rgba(0,0,0,.12);font:500 12px/17px var(--bt-font)}
+.bt-code-note-text{overflow-wrap:anywhere}
+.bt-code-note-row{display:flex;justify-content:flex-end;gap:6px}
+.bt-code-note-go,.bt-code-note-btn{height:26px;padding:0 12px;border-radius:999px;font:600 12px/16px var(--bt-font);cursor:pointer}
+.bt-code-note-go{border:0;background:var(--bt-accent);color:var(--bt-accent-ink)}
+.bt-code-note-btn{border:1px solid var(--bt-line);background:none;color:var(--bt-ink)}
+.bt-code-note-go:disabled,.bt-code-note-btn:disabled{opacity:.6;cursor:default}
+@keyframes bt-code-pulse{50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.bt-code-seg[aria-busy]{animation:none}}
+`;
+
+// src/client/code-side.js
+var import_react53 = require("react");
 var CODE_PANEL = "automagik-code";
-var NO_STATE = {
+var NO_STATE2 = {
   side: "team",
   face: "chat",
   botId: null,
@@ -24164,7 +24425,7 @@ var NO_STATE = {
   barRefused: null
 };
 var listeners2 = /* @__PURE__ */ new Set();
-var state = NO_STATE;
+var state = NO_STATE2;
 var set = (patch) => {
   state = { ...state, ...patch };
   for (const listener of listeners2) listener();
@@ -24222,7 +24483,7 @@ function selectPane(selected, { beside = false } = {}) {
   if (list !== previous || refused) set(seatPanes(list, refused));
 }
 function useCodeFace(botId, { seat = false } = {}) {
-  const current = (0, import_react52.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
+  const current = (0, import_react53.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
   return {
     face: current.face === "terminal" && current.botId === botId && current.seat === seat ? "terminal" : "chat",
     // Whether a Bot has a pane is the renderer's own answer, read when Terminal is pressed:
@@ -24235,10 +24496,10 @@ function useCodeFace(botId, { seat = false } = {}) {
 }
 function BotFaceSwitch({ bot }) {
   const code = useCodeFace(bot?.id, { seat: true });
-  return bot?.seat === true ? (0, import_react52.createElement)(FaceSwitch, { face: code.face, onFace: code.onFace }) : null;
+  return bot?.seat === true ? (0, import_react53.createElement)(FaceSwitch, { face: code.face, onFace: code.onFace }) : null;
 }
 function useCodeSide() {
-  return (0, import_react52.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
+  return (0, import_react53.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
 }
 function setCodeSide(side) {
   set({ side, ...side === "team" ? barPanes([]) : {} });
@@ -24249,8 +24510,8 @@ function CodeSideSwitch({ current, onSelect }) {
     (sum, bot) => sum + Number(bot.status === "needs-you") + bot.workers.filter((worker) => worker.status === "needs-you").length,
     0
   ), 0);
-  const badge = needs > 0 ? (0, import_react52.createElement)("span", { className: "lb-count", title: t("Needs you") }, needs > 99 ? "99+" : String(needs)) : null;
-  return (0, import_react52.createElement)(TwoPartSwitch, {
+  const badge = needs > 0 ? (0, import_react53.createElement)("span", { className: "lb-count", title: t("Needs you") }, needs > 99 ? "99+" : String(needs)) : null;
+  return (0, import_react53.createElement)(TwoPartSwitch, {
     current: current.side,
     onSelect,
     label: t("Team or Code"),
@@ -24289,32 +24550,44 @@ function codePanelNavigation(layout) {
 }
 function CodeBody() {
   const current = useCodeSide();
-  return (0, import_react52.createElement)(CodeRenderer, { current, render: (pane) => (0, import_react52.createElement)(pane.CodeBody, { code: codeApi }) });
+  return (0, import_react53.createElement)(CodeRenderer, { current, render: (pane) => (0, import_react53.createElement)(CodeTreeHerdr, {
+    render: (herdr) => (0, import_react53.createElement)(pane.CodeBody, { code: { ...codeApi, herdr } })
+  }) });
 }
 function CodeBarList({ current, onSelect }) {
-  return (0, import_react52.createElement)(CodeRenderer, {
+  return (0, import_react53.createElement)(CodeRenderer, {
     current,
     showLoading: true,
-    render: (pane) => (0, import_react52.createElement)(pane.CodeTree, { current: { ...current, selected: current.barSelected, beside: current.barBeside }, onSelect, sidebar: true })
+    render: (pane) => (0, import_react53.createElement)(CodeTreeHerdr, {
+      render: (herdr) => (0, import_react53.createElement)(pane.CodeTree, {
+        current: { ...current, selected: current.barSelected, beside: current.barBeside },
+        onSelect,
+        sidebar: true,
+        herdr
+      })
+    })
   });
+}
+function CodeTreeHerdr({ render }) {
+  return render(useCodeRowHerdr());
 }
 function CodeMainPanel({ onBack }) {
   const current = useCodeSide();
-  return (0, import_react52.createElement)(
+  return (0, import_react53.createElement)(
     "div",
     { className: "bt-seat", "data-code-panel": "" },
-    (0, import_react52.createElement)(
+    (0, import_react53.createElement)(
       "header",
       { className: "bt-seat-head" },
-      (0, import_react52.createElement)("button", { type: "button", className: "bt-seat-back", "aria-label": t("Back"), title: t("Back"), onClick: onBack }, "←")
+      (0, import_react53.createElement)("button", { type: "button", className: "bt-seat-back", "aria-label": t("Back"), title: t("Back"), onClick: onBack }, "←")
     ),
-    (0, import_react52.createElement)(
+    (0, import_react53.createElement)(
       "div",
       { className: "bt-seat-body" },
-      (0, import_react52.createElement)(CodeRenderer, { current, render: (pane) => (0, import_react52.createElement)(
+      (0, import_react53.createElement)(CodeRenderer, { current, render: (pane) => (0, import_react53.createElement)(
         "section",
         { className: "cs-host" },
-        (0, import_react52.createElement)(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, beside: current.barBeside, refused: current.barRefused, loading: current.loading })
+        (0, import_react53.createElement)(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, beside: current.barBeside, refused: current.barRefused, loading: current.loading })
       ) })
     )
   );
@@ -24322,9 +24595,9 @@ function CodeMainPanel({ onBack }) {
 function CodeRenderer({ current, render, showLoading }) {
   const desktopOnly = current.tree?.reason === "desktop-only";
   const shouldLoadPane = current.loadedAt !== 0 && !desktopOnly;
-  const [pane, setPane] = (0, import_react52.useState)(null);
-  const [failed, setFailed] = (0, import_react52.useState)(false);
-  (0, import_react52.useEffect)(() => {
+  const [pane, setPane] = (0, import_react53.useState)(null);
+  const [failed, setFailed] = (0, import_react53.useState)(false);
+  (0, import_react53.useEffect)(() => {
     if (!shouldLoadPane) return;
     let live = true;
     loadPane().then((module2) => {
@@ -24336,12 +24609,12 @@ function CodeRenderer({ current, render, showLoading }) {
       live = false;
     };
   }, [shouldLoadPane]);
-  if (desktopOnly) return (0, import_react52.createElement)("div", { className: "cs-host" }, (0, import_react52.createElement)("p", { className: "cs-empty" }, t("Terminals show in the Automagik desktop app.")));
+  if (desktopOnly) return (0, import_react53.createElement)("div", { className: "cs-host" }, (0, import_react53.createElement)("p", { className: "cs-empty" }, t("Terminals show in the Automagik desktop app.")));
   if (shouldLoadPane && pane) return render(pane);
-  if (failed) return (0, import_react52.createElement)("div", { className: "cs-host" }, (0, import_react52.createElement)("p", { className: "cs-empty" }, t("The Code side could not load here.")));
-  return showLoading ? (0, import_react52.createElement)("p", { className: "bt-hint", role: "status" }, t("Reading this computer’s team…")) : null;
+  if (failed) return (0, import_react53.createElement)("div", { className: "cs-host" }, (0, import_react53.createElement)("p", { className: "cs-empty" }, t("The Code side could not load here.")));
+  return showLoading ? (0, import_react53.createElement)("p", { className: "bt-hint", role: "status" }, t("Reading this computer’s team…")) : null;
 }
-function mainViewId(sessions) {
+function mainViewId2(sessions) {
   const list = sessions?.list?.getSnapshot?.();
   return Object.values(list?.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? null;
 }
@@ -24355,10 +24628,10 @@ function installCodeSide(ctx) {
       listOff();
       listOff = null;
     }
-    openedFor = mainViewId(ctx.sessions);
+    openedFor = mainViewId2(ctx.sessions);
     listOff = ctx.sessions?.list?.subscribe?.(() => {
       if (state.face !== "terminal" || openedFor === null) return;
-      if (mainViewId(ctx.sessions) !== openedFor) closeTerminal();
+      if (mainViewId2(ctx.sessions) !== openedFor) closeTerminal();
     }) ?? null;
   };
   const sync = () => {
@@ -24385,10 +24658,10 @@ function installCodeSide(ctx) {
     if (state.face === "terminal") closeTerminal();
   };
 }
-var codeStore = { subscribe: storeSubscribe, snapshot, loadTree, openTerminal, closeTerminal, selectPane, reset: () => set({ ...NO_STATE }) };
+var codeStore = { subscribe: storeSubscribe, snapshot, loadTree, openTerminal, closeTerminal, selectPane, reset: () => set({ ...NO_STATE2 }) };
 
 // src/client/activity-row.js
-var import_react53 = require("react");
+var import_react54 = require("react");
 var import_react_dom8 = require("react-dom");
 var PHRASE_HOLD_MS = 800;
 var drawPhrase = (pool) => t(pool[Math.min(pool.length - 1, Math.floor(Math.random() * pool.length))]);
@@ -24408,8 +24681,8 @@ function findHost() {
   return node;
 }
 function useRunningHost(active2) {
-  const [host, setHost] = (0, import_react53.useState)(null);
-  (0, import_react53.useEffect)(() => {
+  const [host, setHost] = (0, import_react54.useState)(null);
+  (0, import_react54.useEffect)(() => {
     if (!active2) {
       setHost(null);
       return void 0;
@@ -24435,9 +24708,9 @@ function useRunningHost(active2) {
   return host;
 }
 function useRowEntrances(replacing) {
-  const check = (0, import_react53.useRef)(replacing);
+  const check = (0, import_react54.useRef)(replacing);
   check.current = replacing;
-  (0, import_react53.useEffect)(() => {
+  (0, import_react54.useEffect)(() => {
     const seen = /* @__PURE__ */ new WeakSet();
     const started = Date.now();
     let column = null;
@@ -24485,7 +24758,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   const roster = useRoster((value) => value);
   const running2 = useSessionStatus((map) => map.get(sessionId)?.running === true);
   const turnAt = useWork?.((work) => work.turns?.[sessionId]);
-  const runAt = (0, import_react53.useRef)(0);
+  const runAt = (0, import_react54.useRef)(0);
   if (!running2) runAt.current = 0;
   else if (runAt.current === 0) runAt.current = Date.now();
   const liveKey = useLive((state2) => JSON.stringify(state2[sessionId] ?? {}));
@@ -24497,21 +24770,21 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
     const entry = bot !== void 0 ? work.bots?.[bot.id] : room2 !== void 0 ? work.rooms?.[room2.id]?.find((item) => item.self === true) : void 0;
     return entry?.switching === true && entry.folder === true && entry.roomId === void 0 ? entry.since : 0;
   }) ?? 0;
-  const entries2 = (0, import_react53.useMemo)(() => Object.values(JSON.parse(liveKey)), [liveKey]);
+  const entries2 = (0, import_react54.useMemo)(() => Object.values(JSON.parse(liveKey)), [liveKey]);
   const streaming = entries2.some((entry) => entry.text);
   const tools = entries2.filter((entry) => !entry.text).sort((a, b) => a.at - b.at);
   const relaying = tools.some((entry) => entry.relay);
   const visible = moveAt !== 0 || rowVisible({ running: running2, streaming, tools, relaying, bot, room: room2 });
   const tool = tools.at(-1);
-  const inputRef = (0, import_react53.useRef)(0);
+  const inputRef = (0, import_react54.useRef)(0);
   const inputAt = Math.max(inputRef.current, pendingInput);
   inputRef.current = inputAt;
   const want = !visible ? null : moveAt !== 0 ? { key: "move", label: t("Switching working folder"), state: "thinking" } : inputAt > (tool?.at ?? 0) ? { key: `input:${inputAt}`, pool: PHRASES.thinking, state: "thinking" } : tool ? { key: tool.label ? `tool:${tool.label}` : "working", label: tool.label, pool: PHRASES.working, state: tool.state ?? "working" } : { key: "thinking", pool: PHRASES.thinking, state: "thinking" };
-  const [shown2, setShown] = (0, import_react53.useState)(null);
+  const [shown2, setShown] = (0, import_react54.useState)(null);
   const wantKey = want?.key ?? null;
-  const markState = (0, import_react53.useRef)("thinking");
+  const markState = (0, import_react54.useRef)("thinking");
   if (want) markState.current = want.state;
-  (0, import_react53.useEffect)(() => {
+  (0, import_react54.useEffect)(() => {
     if (wantKey === null || shown2?.key === wantKey) return void 0;
     const make = () => setShown({ key: wantKey, text: want.label ?? drawPhrase(want.pool), at: Date.now() });
     const wait = shown2 ? shown2.at + PHRASE_HOLD_MS - Date.now() : 0;
@@ -24522,12 +24795,12 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
     const timer = setTimeout(make, wait);
     return () => clearTimeout(timer);
   }, [wantKey, shown2]);
-  const [phase, setPhase] = (0, import_react53.useState)(null);
-  const endedAt = (0, import_react53.useRef)(0);
-  const shift = (0, import_react53.useRef)(null);
-  const leaving = (0, import_react53.useRef)(false);
+  const [phase, setPhase] = (0, import_react54.useState)(null);
+  const endedAt = (0, import_react54.useRef)(0);
+  const shift = (0, import_react54.useRef)(null);
+  const leaving = (0, import_react54.useRef)(false);
   leaving.current = phase !== null && !visible;
-  (0, import_react53.useEffect)(() => {
+  (0, import_react54.useEffect)(() => {
     if (visible) {
       setPhase("in");
       return void 0;
@@ -24539,7 +24812,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
     }, 140);
     return () => clearTimeout(timer);
   }, [visible]);
-  (0, import_react53.useLayoutEffect)(() => {
+  (0, import_react54.useLayoutEffect)(() => {
     if (phase !== null) return;
     endedAt.current = Date.now();
     setShown(null);
@@ -24550,21 +24823,21 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
     const delta = before - scroller.scrollTop;
     if (delta > 0) scroller.querySelector("[data-chat-flow]")?.animate([{ transform: `translateY(${-delta}px)` }, { transform: "none" }], { duration: 140, easing: "cubic-bezier(.23,1,.32,1)" });
   }, [phase]);
-  (0, import_react53.useEffect)(() => {
+  (0, import_react54.useEffect)(() => {
     if (!running2) actions.clearLive(sessionId);
   }, [running2, sessionId]);
   useRowEntrances(() => leaving.current || Date.now() - endedAt.current < 300);
   const host = useRunningHost(running2 || moveAt !== 0);
   if (!host || phase === null || !shown2) return null;
-  return (0, import_react_dom8.createPortal)((0, import_react53.createElement)(
+  return (0, import_react_dom8.createPortal)((0, import_react54.createElement)(
     "div",
     { className: "bt-typing", "data-exiting": phase === "out" ? "" : void 0, "aria-hidden": true },
-    bot ? (0, import_react53.createElement)(BotMark, { bot, size: 28, state: markState.current, live: true, pokeable: true }) : (0, import_react53.createElement)(RoomAvatar, { room: room2, roster, size: 28 }),
-    (0, import_react53.createElement)(
+    bot ? (0, import_react54.createElement)(BotMark, { bot, size: 28, state: markState.current, live: true, pokeable: true }) : (0, import_react54.createElement)(RoomAvatar, { room: room2, roster, size: 28 }),
+    (0, import_react54.createElement)(
       "span",
       { className: "bt-typing-text" },
-      (0, import_react53.createElement)("span", { key: `${shown2.key}:${shown2.at}`, className: "bt-typing-label" }, (0, import_react53.createElement)(Shimmer, null, `${shown2.text}…`)),
-      (0, import_react53.createElement)(Elapsed, { at: moveAt !== 0 ? moveAt : Math.max(turnAt ?? runAt.current, inputAt), className: "bt-typing-time" })
+      (0, import_react54.createElement)("span", { key: `${shown2.key}:${shown2.at}`, className: "bt-typing-label" }, (0, import_react54.createElement)(Shimmer, null, `${shown2.text}…`)),
+      (0, import_react54.createElement)(Elapsed, { at: moveAt !== 0 ? moveAt : Math.max(turnAt ?? runAt.current, inputAt), className: "bt-typing-time" })
     )
   ), host);
 }
@@ -24578,217 +24851,6 @@ function showsDshRow(dsh, app) {
   if (dsh.kind === "npm") return true;
   return dsh.kind === "app" && APP_OFFER.has(app?.phase) && sameVersion(app.version, dsh.verified);
 }
-
-// src/client/work-code-switch.js
-var import_react54 = require("react");
-var NOTE_PATTERNS = [
-  ["offline", /^Herdr couldn't check for updates \(no connection\)/],
-  ["check-failed", /^Herdr couldn't check for updates /],
-  ["update-failed", /^Herdr couldn't update to /],
-  ["updated-restart", /^Herdr \S+ is installed; it starts when Herdr restarts$/]
-];
-function noteKindOf(result) {
-  if (typeof result?.noteKind === "string" && NOTE_PATTERNS.some(([kind]) => kind === result.noteKind)) return result.noteKind;
-  if (typeof result?.note !== "string") return null;
-  return NOTE_PATTERNS.find(([, pattern]) => pattern.test(result.note))?.[0] ?? null;
-}
-function noteNotice(result) {
-  const kind = noteKindOf(result);
-  switch (kind) {
-    case "offline":
-      return { kind, label: t("No connection: Herdr opened on the installed version"), title: result.note };
-    case "check-failed":
-      return { kind, label: t("Herdr couldn't check for updates: it opened on the installed version"), title: result.note };
-    case "update-failed":
-      return { kind, label: t("Herdr couldn't update: it opened on the installed version"), title: result.note };
-    case "updated-restart":
-      return { kind, label: t("Herdr {version} is installed: it starts when Herdr restarts", { version: result.version ?? "" }), title: result.note };
-    default:
-      return { kind: "note", label: t("Herdr says: {message}", { message: result.note }) };
-  }
-}
-function showsSwitch(status) {
-  return status?.state === "open" || status?.state === "closed" || status?.state === "error" && Boolean(status.source);
-}
-function codeNotices(result) {
-  if (!result || typeof result !== "object") return [{ kind: "error", label: t("Herdr didn't open"), retry: true }];
-  if (result.ok !== true) {
-    switch (result.reason) {
-      case "update":
-        return [{ kind: "offer", label: t("Herdr {version} is out", { version: result.latest ?? "" }), latest: result.latest }];
-      case "missing":
-        return [{ kind: "missing", label: t("Herdr is not set up") }];
-      case "unsupported":
-        return [{ kind: "unsupported", label: t("Herdr has no build for this computer") }];
-      default:
-        return [{ kind: "error", label: t("Herdr didn't open"), title: result.detail || result.message || void 0, retry: true }];
-    }
-  }
-  const notes = [];
-  if (result.raised !== true) notes.push({ kind: "no-focus", label: t("Herdr is open in another window"), title: result.detail || void 0 });
-  if (typeof result.note === "string" && result.note !== "") notes.push(noteNotice(result));
-  if (typeof result.space?.error === "string" && result.space.error !== "") notes.push({ kind: "space", label: t("Herdr says: {message}", { message: result.space.error }) });
-  return notes;
-}
-function createCodeSwitch(bridge, { focused = () => true } = {}) {
-  let state2 = { status: null, busy: false, result: null, front: focused() };
-  const listeners3 = /* @__PURE__ */ new Set();
-  const set2 = (patch) => {
-    state2 = { ...state2, ...patch };
-    for (const listener of listeners3) listener();
-  };
-  let reading2 = null;
-  const refresh = () => {
-    reading2 ??= Promise.resolve().then(() => bridge.status()).then((status) => set2({ status: status ?? null }), () => set2({ status: null })).finally(() => {
-      reading2 = null;
-    });
-    return reading2;
-  };
-  return {
-    subscribe(listener) {
-      listeners3.add(listener);
-      return () => listeners3.delete(listener);
-    },
-    snapshot: () => state2,
-    refresh,
-    setFront(front) {
-      if (front !== state2.front) set2({ front });
-    },
-    open(request) {
-      if (state2.busy) return Promise.resolve(state2.result);
-      set2({ busy: true, result: null });
-      let answer;
-      try {
-        answer = Promise.resolve(bridge.open(request));
-      } catch (error) {
-        answer = Promise.reject(error);
-      }
-      return answer.then((result) => result, (error) => ({ ok: false, reason: "error", message: error?.message })).then((result) => {
-        set2({ busy: false, result: result ?? { ok: false, reason: "error" } });
-        if (result?.reason === "missing" || result?.reason === "unsupported") void refresh();
-        return result;
-      });
-    },
-    dismiss() {
-      if (state2.result !== null) set2({ result: null });
-    }
-  };
-}
-var switches = /* @__PURE__ */ new WeakMap();
-function switchFor(bridge) {
-  if (!bridge || typeof bridge.status !== "function" || typeof bridge.open !== "function") return null;
-  if (!switches.has(bridge)) switches.set(bridge, createCodeSwitch(bridge, { focused: () => globalThis.document?.hasFocus?.() ?? true }));
-  return switches.get(bridge);
-}
-function shownBotId(roster, sessionId) {
-  if (!sessionId) return null;
-  const bot = roster?.byId?.[sessionId];
-  if (bot) return bot.id;
-  const from = roster?.tasks?.[sessionId]?.from;
-  return typeof from === "string" && roster?.byId?.[from] ? from : null;
-}
-var mainViewId2 = (list) => Object.values(list.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? "";
-var NO_STATE2 = { status: null, busy: false, result: null, front: true };
-var noSubscribe2 = () => () => {
-};
-var noState = () => NO_STATE2;
-function Notice({ notice, onAnswer, onRetry, onDismiss, busy }) {
-  if (notice.kind === "offer") {
-    return (0, import_react54.createElement)(
-      "div",
-      { className: "bt-code-note", role: "status" },
-      (0, import_react54.createElement)("span", { className: "bt-code-note-text" }, notice.label),
-      (0, import_react54.createElement)(
-        "span",
-        { className: "bt-code-note-row" },
-        (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-go", disabled: busy, onClick: () => onAnswer(true) }, t("Update and open")),
-        (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-btn", disabled: busy, onClick: () => onAnswer(false) }, t("Open this version")),
-        (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-btn", onClick: onDismiss }, t("Dismiss"))
-      )
-    );
-  }
-  return (0, import_react54.createElement)(
-    "div",
-    { className: `bt-code-note bt-code-note-${notice.kind}`, role: "status", title: notice.title },
-    (0, import_react54.createElement)("span", { className: "bt-code-note-text" }, notice.label),
-    (0, import_react54.createElement)(
-      "span",
-      { className: "bt-code-note-row" },
-      notice.retry ? (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-go", disabled: busy, onClick: onRetry }, t("Retry")) : null,
-      (0, import_react54.createElement)("button", { type: "button", className: "bt-code-note-btn", onClick: onDismiss }, t("Dismiss"))
-    )
-  );
-}
-function WorkCodeSwitch({ roster, useSessions }) {
-  const bridge = globalThis.omniDesktop?.herdr;
-  const control2 = (0, import_react54.useMemo)(() => switchFor(bridge), [bridge]);
-  const state2 = (0, import_react54.useSyncExternalStore)(control2?.subscribe ?? noSubscribe2, control2?.snapshot ?? noState);
-  const sessionId = useSessions(mainViewId2);
-  (0, import_react54.useEffect)(() => {
-    if (!control2) return void 0;
-    void control2.refresh();
-    const onFocus = () => {
-      control2.setFront(true);
-      void control2.refresh();
-    };
-    const onBlur = () => control2.setFront(false);
-    globalThis.addEventListener?.("focus", onFocus);
-    globalThis.addEventListener?.("blur", onBlur);
-    return () => {
-      globalThis.removeEventListener?.("focus", onFocus);
-      globalThis.removeEventListener?.("blur", onBlur);
-    };
-  }, [control2]);
-  if (!control2 || !showsSwitch(state2.status)) return null;
-  const botId = shownBotId(roster, sessionId);
-  const code = () => {
-    void control2.open({ botId });
-  };
-  const answer = (update) => {
-    void control2.open({ botId, update });
-  };
-  const notices = state2.result ? codeNotices(state2.result) : [];
-  return (0, import_react54.createElement)(
-    "div",
-    { className: "bt-code-switch-wrap" },
-    (0, import_react54.createElement)(
-      "div",
-      { className: "bt-code-switch", role: "group", "aria-label": t("Open Herdr"), onPointerEnter: () => {
-        void control2.refresh();
-      } },
-      (0, import_react54.createElement)("button", {
-        type: "button",
-        className: "bt-code-seg",
-        "aria-current": state2.front ? void 0 : "true",
-        "aria-busy": state2.busy || void 0,
-        disabled: state2.busy,
-        title: state2.busy ? t("Opening Herdr…") : botId ? t("Code: open this Bot’s folder in Herdr") : t("Code: open Herdr"),
-        onClick: code
-      }, t("Code"))
-    ),
-    notices.length > 0 ? (0, import_react54.createElement)("div", { className: "bt-code-notes" }, notices.map((notice) => (0, import_react54.createElement)(Notice, { key: notice.kind, notice, busy: state2.busy, onAnswer: answer, onRetry: code, onDismiss: () => control2.dismiss() }))) : null
-  );
-}
-var WORK_CODE_SWITCH_CSS = `
-.bt-side-top .bt-code-switch-wrap{position:relative;margin-right:auto;min-width:0}
-.bt-code-switch{display:inline-flex;align-items:center;max-width:100%;padding:2px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-main)}
-.bt-code-seg{display:inline-flex;align-items:center;min-width:0;height:24px;padding:0 9px;border:0;border-radius:999px;background:none;color:var(--bt-ink-2);font:600 12px/16px var(--bt-font);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
-.bt-code-seg[aria-current=true]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 0 0 1px var(--bt-line)}
-span.bt-code-seg{cursor:default}
-button.bt-code-seg:hover:not(:disabled):not([aria-current=true]){color:var(--bt-ink)}
-.bt-code-seg:disabled{cursor:default}
-.bt-code-seg[aria-busy]{animation:bt-code-pulse 1.2s ease-in-out infinite}
-.bt-code-notes{position:absolute;top:calc(100% + 6px);left:0;z-index:30;display:flex;flex-direction:column;gap:6px;width:240px;max-width:72vw}
-.bt-code-note{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card);color:var(--bt-ink);box-shadow:0 6px 20px rgba(0,0,0,.12);font:500 12px/17px var(--bt-font)}
-.bt-code-note-text{overflow-wrap:anywhere}
-.bt-code-note-row{display:flex;justify-content:flex-end;gap:6px}
-.bt-code-note-go,.bt-code-note-btn{height:26px;padding:0 12px;border-radius:999px;font:600 12px/16px var(--bt-font);cursor:pointer}
-.bt-code-note-go{border:0;background:var(--bt-accent);color:var(--bt-accent-ink)}
-.bt-code-note-btn{border:1px solid var(--bt-line);background:none;color:var(--bt-ink)}
-.bt-code-note-go:disabled,.bt-code-note-btn:disabled{opacity:.6;cursor:default}
-@keyframes bt-code-pulse{50%{opacity:.45}}
-@media (prefers-reduced-motion:reduce){.bt-code-seg[aria-busy]{animation:none}}
-`;
 
 // src/client/capability-pills.js
 var import_react55 = require("react");

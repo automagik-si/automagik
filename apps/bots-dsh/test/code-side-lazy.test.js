@@ -101,3 +101,17 @@ test('the main bundle stays free of xterm and of the pane module', () => {
   const pane = readFileSync(new URL('../src/client/code-side-pane.js', import.meta.url), 'utf8')
   assert.match(pane, /@xterm\/xterm/, 'the chunk is where the renderer and xterm live')
 })
+
+test('the pane chunk does not bundle the shared Herdr control', async () => {
+  const pane = fileURLToPath(new URL('../src/client/code-side-pane.js', import.meta.url))
+  const bundle = await build({
+    entryPoints: [pane], bundle: true, format: 'cjs', platform: 'browser', write: false,
+    metafile: true, logLevel: 'silent', loader: { '.css': 'text' },
+    external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
+  })
+  assert.equal(
+    Object.keys(bundle.metafile.inputs).some(input => input.endsWith('/work-code-switch.js')),
+    false,
+    'only the main bundle owns the Herdr control',
+  )
+})

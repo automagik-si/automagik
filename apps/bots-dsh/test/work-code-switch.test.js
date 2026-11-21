@@ -212,3 +212,50 @@ test('a failed or refused open shows its label and can be dismissed', async () =
   await first
   assert.equal(slow.calls.open.length, 1)
 })
+
+test('the footer retries a failed Code row without using the shown Bot or the legacy open', async () => {
+  const bridge = fakeBridge({ state: 'open' })
+  const calls = []
+  bridge.openCodeRow = (...args) => {
+    calls.push(plain(args))
+    return { ok: false, reason: 'start' }
+  }
+  mount(bridge)
+  await settle()
+  const herdr = context.module.exports.useCodeRowHerdr()
+  herdr.openRow('b-aaaaaaaaaa')
+  assert.deepEqual(calls, [['b-aaaaaaaaaa']])
+  await settle()
+  button(mount(bridge), 'Retry').props.onClick()
+  assert.deepEqual(calls, [['b-aaaaaaaaaa'], ['b-aaaaaaaaaa']])
+  assert.deepEqual(bridge.calls.open, [])
+  await settle()
+  button(mount(bridge), 'Code').props.onClick()
+  assert.deepEqual(bridge.calls.open, [{ botId: 'writer' }])
+})
+
+test('a footer click after a Code row retargets its offer answer and Retry to the shown Bot', async () => {
+  const offer = { ok: false, reason: 'update', latest: '2.0.0' }
+  const bridge = fakeBridge({ state: 'open' }, [offer, { ok: false, reason: 'start' }, { ok: true, raised: true }])
+  const rowCalls = []
+  bridge.openCodeRow = (...args) => { rowCalls.push(plain(args)); return offer }
+  mount(bridge)
+  await settle()
+
+  context.module.exports.useCodeRowHerdr().openRow('b-aaaaaaaaaa')
+  await settle()
+  assert.deepEqual(rowCalls, [['b-aaaaaaaaaa']])
+  button(mount(bridge), 'Code').props.onClick()
+  await settle()
+  button(mount(bridge), 'Update and open').props.onClick()
+  await settle()
+  button(mount(bridge), 'Retry').props.onClick()
+  await settle()
+
+  assert.deepEqual(bridge.calls.open, [
+    { botId: 'writer' },
+    { botId: 'writer', update: true },
+    { botId: 'writer' },
+  ])
+  assert.deepEqual(rowCalls, [['b-aaaaaaaaaa']])
+})

@@ -2953,6 +2953,7 @@ const ZH = {
   'Work, in this window': '工作，就在这个窗口',
   'Code: open this Bot’s folder in Herdr': '代码：在 Herdr 中打开这个 Bot 的文件夹',
   'Open Herdr': '打开 Herdr',
+  'Open in Herdr': '在 Herdr 中打开',
   'Team or Code': '团队或代码',
   'Code: open Herdr': '代码：打开 Herdr',
   'Opening Herdr…': '正在打开 Herdr…',

@@ -12,6 +12,7 @@ import { t } from './i18n.js'
 import { FaceSwitch, TwoPartSwitch } from './left-bar-faces.js'
 import { botRowOf, codeHasPane, paneFor, prunePanes, statusKey, stillThere, togglePane } from './code-side-model.js'
 import { PANE_CHUNK, loadPane } from './code-side-lazy.js'
+import { useCodeRowHerdr } from './work-code-switch.js'
 
 export const CODE_PANEL = 'automagik-code'
 
@@ -164,14 +165,24 @@ export function codePanelNavigation(layout) {
  */
 export function CodeBody() {
   const current = useCodeSide()
-  return h(CodeRenderer, { current, render: pane => h(pane.CodeBody, { code: codeApi }) })
+  return h(CodeRenderer, { current, render: pane => h(CodeTreeHerdr, {
+    render: herdr => h(pane.CodeBody, { code: { ...codeApi, herdr } }),
+  }) })
 }
 
 export function CodeBarList({ current, onSelect }) {
   return h(CodeRenderer, {
     current, showLoading: true,
-    render: pane => h(pane.CodeTree, { current: { ...current, selected: current.barSelected, beside: current.barBeside }, onSelect, sidebar: true }),
+    render: pane => h(CodeTreeHerdr, {
+      render: herdr => h(pane.CodeTree, {
+        current: { ...current, selected: current.barSelected, beside: current.barBeside }, onSelect, sidebar: true, herdr,
+      }),
+    }),
   })
+}
+
+function CodeTreeHerdr({ render }) {
+  return render(useCodeRowHerdr())
 }
 
 export function CodeMainPanel({ onBack }) {

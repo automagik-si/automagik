@@ -1834,6 +1834,7 @@ const pack = createPack({
     "Work, in this window": "Trabalho, nesta janela",
     "Code: open this Bot’s folder in Herdr": "Código: abrir a pasta deste Bot no Herdr",
     "Open Herdr": "Abrir o Herdr",
+    "Open in Herdr": "Abrir no Herdr",
     "Team or Code": "Equipe ou Código",
     "Code: open Herdr": "Código: abrir o Herdr",
     "Opening Herdr…": "Abrindo o Herdr…",

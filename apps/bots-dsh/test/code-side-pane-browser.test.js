@@ -144,6 +144,172 @@ const LIVE_TREE = {
 }
 const portuguese = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
 
+const REGISTRY_BOT = {
+  id: 'session-12345678-1234-1234-1234-123456789abc', name: 'Builder', status: 'not-running', terminal: null,
+  workers: [],
+}
+const REVIEWER = { terminal: 't2', role: 'Reviewer', status: 'idle' }
+const withRegistryBot = () => {
+  const tree = structuredClone(LIVE_TREE)
+  tree.projects[0].bots.push(structuredClone(REGISTRY_BOT))
+  return tree
+}
+const codeRow = (document, label) => [...document.querySelectorAll('.cs-row')].find(row => row.querySelector('.cs-row-label').textContent === label)
+const herdrButton = (document, label) => {
+  const action = codeRow(document, label)?.nextElementSibling
+  return action?.getAttribute('aria-label') === 'Open in Herdr' ? action : null
+}
+
+test('a Code list with no footer checks Herdr on mount and keeps the registry Bot through the offer and Retry', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  const tree = withRegistryBot()
+  const shown = tree.projects[0].bots[0].id
+  tree.projects[0].bots[0].workers.push(REVIEWER)
+  const calls = []
+  const status = Promise.withResolvers()
+  let statusReads = 0
+  const offer = { ok: false, reason: 'update', latest: '2.0.0' }
+  const answers = [offer, { ok: false, reason: 'start' }, { ok: true, raised: true }, offer, { ok: true, raised: true }]
+  window.omniDesktop = { herdr: {
+    status: () => { statusReads++; return status.promise },
+    open: request => calls.push(['legacy', request]),
+    openCodeRow: (...args) => { calls.push(args); return answers.shift() },
+  } }
+  await window.mountCodeBarFixture(tree, shown)
+  await waitFor(() => statusReads === 1 && codeRow(document, REGISTRY_BOT.name), 'the cold Code list reads status')
+  assert.equal(herdrButton(document, REGISTRY_BOT.name), null)
+  status.resolve({ state: 'closed' })
+  const action = () => herdrButton(document, REGISTRY_BOT.name)
+  await waitFor(action, 'the registry Bot has an action after status arrives')
+  assert.equal(action().title, 'Code: open this Bot’s folder in Herdr')
+  assert.equal(action().className, 'cs-btn cs-row-note')
+  assert.equal(action().textContent, 'Herdr')
+  assert.equal(action().tabIndex, 0)
+  action().focus()
+  assert.equal(document.activeElement, action())
+  assert.equal(codeRow(document, REGISTRY_BOT.name).hasAttribute('aria-current'), false)
+  assert.deepEqual(calls, [])
+
+  action().dispatchEvent(new window.MouseEvent('click', { bubbles: true, ctrlKey: true, detail: 1 }))
+  assert.deepEqual(calls, [[REGISTRY_BOT.id]], 'the bridge runs during the click')
+  assert.deepEqual(Array.from(window.__codePicks), [])
+  assert.equal(window.__codeBubbles, 0)
+  const noticeButton = (place, label) => [...document.querySelectorAll(`${place} .bt-code-note button`)].find(button => button.textContent === label)
+  await waitFor(() => noticeButton('.lb-rows', 'Open this version'), 'the list shows the offer with the footer collapsed')
+  noticeButton('.lb-rows', 'Open this version').click()
+  await waitFor(() => noticeButton('.lb-rows', 'Retry'), 'the list shows the failure')
+  noticeButton('.lb-rows', 'Retry').click()
+  await waitFor(() => !document.querySelector('.bt-code-note') && !action().disabled, 'Retry completes')
+
+  window.showCodeFooter(true)
+  action().click()
+  await waitFor(() => noticeButton('.lb-foot', 'Update and open'), 'the mounted footer shows the next offer')
+  assert.equal(document.querySelector('.lb-rows .bt-code-note'), null)
+  window.showCodeFooter(false)
+  await waitFor(() => noticeButton('.lb-rows', 'Update and open'), 'the offer returns to the list when the footer unmounts')
+  window.showCodeFooter(true)
+  await waitFor(() => noticeButton('.lb-foot', 'Update and open'), 'the footer shows the same offer again')
+  noticeButton('.lb-foot', 'Update and open').click()
+  await waitFor(() => !document.querySelector('.bt-code-note') && !action().disabled, 'the footer answer completes')
+  assert.deepEqual(structuredClone(calls), [
+    [REGISTRY_BOT.id], [REGISTRY_BOT.id, { update: false }], [REGISTRY_BOT.id],
+    [REGISTRY_BOT.id], [REGISTRY_BOT.id, { update: true }],
+  ])
+  codeRow(document, REGISTRY_BOT.name).click()
+  codeRow(document, 'Reviewer').dispatchEvent(new window.MouseEvent('click', { bubbles: true, metaKey: true, detail: 1 }))
+  assert.deepEqual(structuredClone(window.__codePicks), [
+    [{ botId: REGISTRY_BOT.id, worker: null }, { beside: false }],
+    [{ botId: shown, worker: 't2' }, { beside: true }],
+  ])
+})
+
+test('the Code row action renders its Brazilian Portuguese accessible label', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  window.setCodeLocale('pt', portuguese)
+  window.omniDesktop = { herdr: {
+    status: () => ({ state: 'open' }),
+    open: () => ({ ok: true, raised: true }),
+    openCodeRow: () => ({ ok: true, raised: true }),
+  } }
+  await window.mountCodeBarFixture(withRegistryBot(), REGISTRY_BOT.id)
+  const action = () => codeRow(document, REGISTRY_BOT.name)?.nextElementSibling
+  await waitFor(() => action()?.getAttribute('aria-label') === 'Abrir no Herdr', 'the row has a translated action')
+})
+
+test('the seat Code tree sends a worker action to its parent Bot without switching terminals', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  const calls = []
+  window.omniDesktop = { herdr: {
+    status: () => ({ state: 'open' }),
+    open: request => calls.push(['legacy', request]),
+    openCodeRow: (...args) => { calls.push(args); return { ok: true, raised: true } },
+  } }
+  const tree = withRegistryBot()
+  tree.projects[0].bots[1].workers.push(REVIEWER)
+  window.mountSeatFixture(tree)
+  await waitFor(() => document.querySelector('[data-face=terminal]'), 'the seat switch appeared')
+  document.querySelector('[data-face=terminal]').click()
+  const worker = () => herdrButton(document, 'Reviewer')
+  await waitFor(() => worker() && window.__streams.length === 1, 'the seat shows the worker action')
+  worker().click()
+  assert.deepEqual(calls, [[REGISTRY_BOT.id]])
+  assert.equal(window.codeSnapshot().selected.botId, tree.projects[0].bots[0].id)
+  assert.equal(window.codeSnapshot().beside.length, 0)
+  assert.equal(window.__streams.length, 1)
+})
+
+test('the seat tree keeps a worker offer and its answer on the parent Bot without a footer', async (t) => {
+  const window = codeDocument(t)
+  const { document } = window
+  const calls = []
+  const offer = { ok: false, reason: 'update', latest: '2.0.0' }
+  window.omniDesktop = { herdr: {
+    status: () => ({ state: 'open' }),
+    open: request => calls.push(['legacy', request]),
+    openCodeRow: (...args) => { calls.push(args); return calls.length === 1 ? offer : { ok: true, raised: true } },
+  } }
+  const tree = withRegistryBot()
+  tree.projects[0].bots[1].workers.push(REVIEWER)
+  window.mountSeatFixture(tree)
+  await waitFor(() => document.querySelector('[data-face=terminal]'), 'the seat switch appeared')
+  document.querySelector('[data-face=terminal]').click()
+  await waitFor(() => herdrButton(document, 'Reviewer'), 'the seat shows the worker action')
+  herdrButton(document, 'Reviewer').click()
+  const answer = () => [...document.querySelectorAll('.cs-tree .bt-code-note button')]
+    .find(button => button.textContent === 'Update and open')
+  await waitFor(answer, 'the seat tree shows the offer without a footer')
+  answer().click()
+  await waitFor(() => !document.querySelector('.cs-tree .bt-code-note'), 'the offer answer completes')
+  assert.deepEqual(structuredClone(calls), [[REGISTRY_BOT.id], [REGISTRY_BOT.id, { update: true }]])
+})
+
+for (const bridge of ['none', 'legacy', 'missing']) {
+  test(`the Code list hides its row actions with a ${bridge} bridge`, async (t) => {
+    const window = codeDocument(t)
+    const { document } = window
+    const tree = withRegistryBot()
+    const calls = []
+    let statusReads = 0
+    if (bridge !== 'none') window.omniDesktop = { herdr: {
+      status: () => { statusReads++; return { state: bridge === 'missing' ? 'missing' : 'open' } },
+      open: request => calls.push(['legacy', request]),
+      ...(bridge === 'missing' ? { openCodeRow: (...args) => calls.push(args) } : {}),
+    } }
+    await window.mountCodeBarFixture(tree, REGISTRY_BOT.id)
+    if (bridge === 'legacy') window.showCodeFooter(true) // The legacy lookup also knows this Session id.
+    await waitFor(() => codeRow(document, REGISTRY_BOT.name)
+      && (bridge === 'legacy' ? document.querySelector('.lb-foot .bt-code-seg') : bridge !== 'missing' || statusReads > 0),
+    'the Code list and available legacy footer rendered')
+    await delay(0)
+    assert.equal(document.querySelector('[aria-label="Open in Herdr"]'), null)
+    codeRow(document, REGISTRY_BOT.name).click()
+    assert.deepEqual(calls, [])
+  })
+}
+
 for (const [language, message] of [
   ['en', 'Terminals show in the Automagik desktop app.'],
   ['zh', '终端会显示在 Automagik 桌面应用中。'],

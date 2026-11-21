@@ -11941,6 +11941,7 @@ var ZH = {
   "Work, in this window": "工作，就在这个窗口",
   "Code: open this Bot’s folder in Herdr": "代码：在 Herdr 中打开这个 Bot 的文件夹",
   "Open Herdr": "打开 Herdr",
+  "Open in Herdr": "在 Herdr 中打开",
   "Team or Code": "团队或代码",
   "Code: open Herdr": "代码：打开 Herdr",
   "Opening Herdr…": "正在打开 Herdr…",
@@ -16013,37 +16014,55 @@ function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${botId}:
 }
 var onMac = () => /^mac/i.test(globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || "");
 var besideKey = (event) => event.ctrlKey || event.metaKey;
-function TreeRow({ label, status, depth = 0, current, note, title, onClick }) {
+function TreeRow({ label, status, depth = 0, current, note, title, onClick, action }) {
   const keyboardPick = (0, import_react3.useRef)(false);
   const hint = onMac() ? t("⌘-click to show beside") : t("Ctrl-click to show beside");
   return (0, import_react3.createElement)(
-    "button",
-    {
-      type: "button",
-      className: "cs-row",
-      "data-depth": depth,
-      "aria-current": current ? "true" : void 0,
-      title: title ? `${title}
+    "div",
+    null,
+    (0, import_react3.createElement)(
+      "button",
+      {
+        type: "button",
+        className: "cs-row",
+        "data-depth": depth,
+        "aria-current": current ? "true" : void 0,
+        title: title ? `${title}
 ${hint}` : hint,
-      onClick: (event) => {
-        const duplicate = keyboardPick.current && event.detail === 0;
-        keyboardPick.current = false;
-        if (!duplicate) onClick({ beside: besideKey(event) });
-      },
-      onKeyDown: (event) => {
-        if (event.key !== "Enter" || !besideKey(event)) {
+        onClick: (event) => {
+          const duplicate = keyboardPick.current && event.detail === 0;
           keyboardPick.current = false;
-          return;
+          if (!duplicate) onClick({ beside: besideKey(event) });
+        },
+        onKeyDown: (event) => {
+          if (event.key !== "Enter" || !besideKey(event)) {
+            keyboardPick.current = false;
+            return;
+          }
+          event.preventDefault();
+          keyboardPick.current = true;
+          if (!event.repeat) onClick({ beside: true });
         }
-        event.preventDefault();
-        keyboardPick.current = true;
-        if (!event.repeat) onClick({ beside: true });
-      }
-    },
-    (0, import_react3.createElement)("span", { className: "cs-row-label" }, label),
-    note ? (0, import_react3.createElement)("span", { className: "cs-row-note" }, note) : null,
-    (0, import_react3.createElement)("span", { className: `cs-mark cs-mark-${status}`, title: statusLabel(status) }, (0, import_react3.createElement)("span", { className: "cs-mark-word" }, statusLabel(status)))
+      },
+      (0, import_react3.createElement)("span", { className: "cs-row-label" }, label),
+      note ? (0, import_react3.createElement)("span", { className: "cs-row-note" }, note) : null,
+      (0, import_react3.createElement)("span", { className: `cs-mark cs-mark-${status}`, title: statusLabel(status) }, (0, import_react3.createElement)("span", { className: "cs-mark-word" }, statusLabel(status)))
+    ),
+    action
   );
+}
+function herdrAction(herdr, botId) {
+  return (0, import_react3.createElement)("button", {
+    type: "button",
+    className: "cs-btn cs-row-note",
+    "aria-label": t("Open in Herdr"),
+    title: t("Code: open this Bot’s folder in Herdr"),
+    disabled: herdr.busy,
+    onClick: (event) => {
+      event.stopPropagation();
+      herdr.openRow(botId);
+    }
+  }, t("Herdr"));
 }
 var TreeFold = ({ label, title, open, onClick }) => (0, import_react3.createElement)(
   "button",
@@ -16057,7 +16076,7 @@ var TreeFold = ({ label, title, open, onClick }) => (0, import_react3.createElem
   (0, import_react3.createElement)("span", { className: "lb-name" }, label),
   (0, import_react3.createElement)("span", { className: open ? "lb-chev lb-chev-open" : "lb-chev" }, (0, import_react3.createElement)(ChevronRightIcon))
 );
-function CodeTree({ current, onSelect, sidebar = false }) {
+function CodeTree({ current, onSelect, sidebar = false, herdr }) {
   const { tree, loading, error, selected, beside = [] } = current;
   const shown = [selected, ...beside].filter(Boolean);
   const isCurrent = (botId, worker = null) => shown.some((pane) => pane.botId === botId && (pane.worker ?? null) === worker);
@@ -16070,6 +16089,7 @@ function CodeTree({ current, onSelect, sidebar = false }) {
   });
   const machine = tree?.machine?.name || t("This computer");
   const projects = tree?.projects ?? [];
+  const canOpenRow = herdr?.visible();
   const machineOpen = !folded.has(null);
   const treeRows = machineOpen ? projects.map((project) => {
     const label = project.global === true ? t("Global Bots") : project.name ?? project.folder;
@@ -16088,7 +16108,8 @@ function CodeTree({ current, onSelect, sidebar = false }) {
           status: bot.status,
           current: isCurrent(bot.id),
           note: sidebar ? bot.agent ?? (bot.main ? t("lead") : null) : bot.main ? t("lead") : null,
-          onClick: (options) => onSelect(paneFor(tree, bot.id) ?? { botId: bot.id, worker: null }, options)
+          onClick: (options) => onSelect(paneFor(tree, bot.id) ?? { botId: bot.id, worker: null }, options),
+          action: canOpenRow ? herdrAction(herdr, bot.id) : null
         }),
         bot.workers.map((worker) => (0, import_react3.createElement)(TreeRow, {
           key: worker.terminal,
@@ -16097,7 +16118,8 @@ function CodeTree({ current, onSelect, sidebar = false }) {
           depth: 1,
           current: isCurrent(bot.id, worker.terminal),
           title: [worker.role, worker.branch?.replace(/^refs\/heads\//, "")].filter(Boolean).join(" · "),
-          onClick: (options) => onSelect({ botId: bot.id, worker: worker.terminal }, options)
+          onClick: (options) => onSelect({ botId: bot.id, worker: worker.terminal }, options),
+          action: canOpenRow ? herdrAction(herdr, bot.id) : null
         }))
       )) : null
     );
@@ -16105,6 +16127,7 @@ function CodeTree({ current, onSelect, sidebar = false }) {
   return (0, import_react3.createElement)(
     "nav",
     { className: sidebar ? "lb-rows" : "cs-tree", "aria-label": t("Code team") },
+    herdr?.notices,
     sidebar && tree?.machine ? (0, import_react3.createElement)(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }) : null,
     error || sidebar && tree?.reason === "no-core" ? (0, import_react3.createElement)("p", { className: "cs-empty" }, t("The Code side could not read this computer’s team.")) : null,
     !error && projects.length === 0 && !loading && (!sidebar || tree?.reason !== "no-core") ? (0, import_react3.createElement)("p", { className: "cs-empty" }, t("No project has a Bot on this computer yet.")) : null,
@@ -16134,9 +16157,10 @@ function CodeTerminal({ tree, selected, beside = [], refused, loading }) {
 function CodeBody({ code }) {
   const current = (0, import_react3.useSyncExternalStore)(code.subscribe, code.snapshot, code.snapshot);
   const { tree, loading, error, selected, beside, refused } = current;
+  const { loadTree, selectPane, herdr } = code;
   (0, import_react3.useEffect)(() => {
-    if (!tree && !loading && !error) void code.loadTree();
-  }, [code, tree, loading, error]);
+    if (!tree && !loading && !error) void loadTree();
+  }, [loadTree, tree, loading, error]);
   const realProjects = (tree?.projects ?? []).filter((project) => project.global !== true);
   const projectCount = realProjects.length === 1 ? t("1 project") : t("{n} projects", { n: realProjects.length });
   return (0, import_react3.createElement)(
@@ -16151,7 +16175,7 @@ function CodeBody({ code }) {
     (0, import_react3.createElement)(
       "div",
       { className: "cs-body" },
-      (0, import_react3.createElement)(CodeTree, { current, onSelect: code.selectPane }),
+      (0, import_react3.createElement)(CodeTree, { current, onSelect: selectPane, herdr }),
       (0, import_react3.createElement)("section", { className: "cs-view" }, (0, import_react3.createElement)(CodeTerminal, { tree, selected, beside, refused, loading }))
     )
   );
@@ -16172,6 +16196,13 @@ var CODE_SIDE_CSS = `
 .cs-project{margin:0 0 10px}
 .cs-project-name{padding:6px 10px 5px;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:var(--bt-weight-title,600) 10.5px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:.16em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cs-bot{display:block}
+.cs-bot>div:has(>.cs-btn){display:flex;align-items:center}
+.cs-bot .cs-btn{flex:none}
+.cs-bot .cs-btn:focus-visible{outline:3px solid var(--st-ring,var(--bt-accent));outline-offset:-3px}
+.lb-rows .cs-row:has(+.cs-btn) .cs-mark-word{display:none}
+.cs-row:has(+.cs-btn) .cs-mark{min-width:0}
+.cs-row:has(+.cs-btn) .cs-mark::before{flex:none}
+.cs-tree>.bt-code-notes[data-code-row],.lb-rows>.bt-code-notes[data-code-row]{position:sticky;top:0;width:auto;max-width:none}
 .cs-row{display:flex;align-items:center;gap:var(--lb-art-gap,10px);width:100%;min-width:0;height:var(--lb-row-h,34px);padding:0 10px 0 8px;margin:0;border:0;border-radius:var(--lb-row-r,8px);background:none;color:var(--bt-ink);font:var(--bt-weight-label,500) 15px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:-.005em;text-align:left;cursor:pointer}
 .cs-row[data-depth='1']{height:var(--lb-channel-h,26px);padding-left:calc(8px + var(--lb-art,28px) + var(--lb-art-gap,10px));color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 13.5px/1.3 var(--bt-font);letter-spacing:0}
 .cs-row:hover{background:var(--bt-hover)}
