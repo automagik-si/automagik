@@ -660,9 +660,11 @@ export async function runSupervisor({
         const fromVersions = baseline(profileDir)
         const updatedAt = stamp()
         if (Buffer.byteLength(JSON.stringify({ ...run, fromVersions, updatedAt })) > UPDATE_RECORD_LIMIT) {
+          // Announce the run before its verdict: a reader that sees the verdict in state.json must also find this
+          // run in supervisor.json, or the verdict reads as a stale run.
+          announce()
           if (request.reinstall) refuseReinstall(stagePaths(store, run.runId, profile), 'profile-invalid')
           else phase('notUpdated', 'profile-invalid')
-          announce()
           continue
         }
         save({ fromVersions }, updatedAt)
