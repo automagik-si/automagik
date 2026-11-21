@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; amended 2026-11-19: the durable wake log defined as delivery 0b, amendment approved by the owner's delegate on 2026-11-19; delivery 0b merged (#1827); amended 2026-11-20: reports are not batched on DSH rc.2, one message each in order, approved by the owner's delegate on 2026-11-20; delivery 1 waits for delivery 0, the grant, upstream) |
+| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; amended 2026-11-19: the durable wake log defined as delivery 0b, amendment approved by the owner's delegate on 2026-11-19; delivery 0b merged (#1827); amended 2026-11-20: reports are not batched on DSH rc.2, one message each in order, approved by the owner's delegate on 2026-11-20; delivery 1 waits for delivery 0, the grant, upstream; amended 2026-11-21: a second worker kind, `lead`, writing in RFC 0030's Q8 answer (approved 2026-11-19); Q5 (leads per Bot) and Q6 (held sends) proposed for the owner's delegate) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr-core (the scoped grant), plugin (3.N.P) for each Automagik delivery |
 | Created | 2026-11-10 |
@@ -12,6 +12,9 @@
 > Approved by the owner's delegate on 2026-11-19, while the owner is away; the owner may amend on return.
 > The durable wake log (Design, and delivery 0b) is an amendment approved by the owner's delegate on
 > 2026-11-19.
+> Lead workers (Design, and delivery 1b) are written here on 2026-11-21. Their four rules are RFC
+> 0030's Q8 answer, approved by the owner's delegate on 2026-11-19 ("RFC 0028 gains a worker kind
+> `lead`"). What that answer left open is asked as Q5 and Q6, proposed, not decided.
 
 ## Summary
 
@@ -20,6 +23,9 @@ running a squad with `hc` does today. The Bot starts a worker with a task, ends 
 woken when the worker finishes, blocks or fails. It can then read the worker's reply, send it a
 follow-up or stop it. The person watches every worker live in Code and answers its approvals
 there.
+
+A second kind of worker, a **lead**, is a long-lived seat such as a Genie's orchestrator (RFC
+0030). Its events wake no one: it reaches its Bot through RFC 0030's mailbox (Lead workers).
 
 The Bot never runs `hc` itself. Five tools in the Bot team's host process do it, through a grant
 that reaches only terminals the Bot started. RFC 0022's delivery H stays as written: a Bot's
@@ -53,6 +59,7 @@ The word "Code" now names three things. This RFC fixes them:
 | **Code** | The coding product: herdr-app, opened from the sidebar's Code card | RFC 0013 |
 | **Code mode** | The chat view's switch to xterm on the same terminal | RFC 0022 |
 | **Code worker** | A terminal a Bot started with a task, through this RFC's tools | this RFC |
+| **Lead worker** | A Code worker of the kind `lead`: a long-lived seat a Bot keeps, such as a Genie's orchestrator | this RFC (Lead workers), from RFC 0030's Q8 |
 
 The person-facing words are "Code" and "worker". "Herdr" does not appear in the UI.
 
@@ -73,13 +80,14 @@ All five run in the host. None takes a shell string from the model.
 | Tool | Does | Refuses |
 |---|---|---|
 | `code_start` | Starts a worker: a template or agent from an allowlist, a task, a folder, a short name | a folder outside the Bot's allowed folders, an unknown template, the caps below |
-| `code_send` | Types a follow-up into one of the Bot's workers (`hc send --if idle`) | a worker that is working or blocked, a terminal the Bot did not start |
+| `code_send` | Types a follow-up into one of the Bot's workers (`hc send --if idle`); for a lead that is working, holds the text and sends it when that turn ends (Lead workers) | a worker of the kind `worker` that is working or blocked, a lead that is blocked, a terminal the Bot did not start |
 | `code_read` | Returns a worker's last reply, or its screen and history | a terminal the Bot did not start |
 | `code_list` | The Bot's workers with status, folder and elapsed time | nothing |
 | `code_stop` | Ends a worker (`hc kill`), keeps its record for reading | a terminal the Bot did not start |
 
-There is no wait tool. A Bot ends its turn after `code_start` and is woken (below). This also
-avoids the bash tool's 60-second limit that the outside bridge works around with a loop.
+There is no wait tool. A Bot ends its turn after `code_start` and is woken (below); a lead's
+events wake no one (Lead workers). This also avoids the bash tool's 60-second limit that the
+outside bridge works around with a loop.
 
 `code_start` runs `hc run --bg --no-notify` with these labels, which the grant enforces:
 
@@ -112,7 +120,9 @@ for delivery 0). The durable wake log (delivery 0b) does not reach core and may 
 ### Waking the Bot
 
 The host follows `hc events --label automagik.bot=<botId>` for each Bot with workers. When a
-worker's turn ends, it blocks, it errors or it exits:
+worker's turn ends, it blocks, it errors or it exits (a worker of the kind `worker`; a lead's
+events wake no one, and only a mailbox row admitted by RFC 0030's follower wakes the Bot for it,
+Lead workers):
 
 1. The host notes a wake intent in the Bot team's durable wake log (`wake.jsonl`, below) before
    anything else, naming the worker, its event and the event's transcript position; the reply
@@ -334,12 +344,45 @@ in the threat model.
 - Workers do not get rows of their own. They stay in Code, as D29 decided ("Workers and helpers
   stay in Herdr").
 
+### Lead workers
+
+Amendment of 2026-11-21. It writes in RFC 0030's Q8 answer, approved by the owner's delegate on
+2026-11-19. Every worker above is of the kind `worker`. RFC 0030 needs a second kind for a seat
+that runs for days, the Genie's hidden orchestrator, because a worker's cleanup and its wake on
+every turn end do not fit it. That kind is `lead`. Everything above holds for a lead, except
+these four rules from Q8:
+
+- **Long-lived.** The automatic cleanup (Caps and cleanup) never removes a lead's terminal while
+  its Bot exists. `code_stop` still ends a lead, as it ends a worker.
+- **Outside the per-Bot cap.** A lead is not counted in the running workers per Bot. The per-team
+  cap still counts it. It is one terminal under the Bot's grant and is metered like any start.
+- **Its events never wake the Bot.** A worker's turn end, block, error or exit queues a report
+  into the Bot's Session (Waking the Bot). A lead's do not. Only a mailbox row that RFC 0030's
+  follower admits wakes the Bot for a lead, through the durable wake log, after the follower's
+  checks (RFC 0030, The Genie's two seats and the mailbox). A lead that blocks, errors or exits
+  shows it on its worker card and in `code_list` (delivery 2).
+- **A send while it works is held, not refused.** If the lead is working, `code_send` does not
+  refuse: the host holds the text, and when that turn ends it sends the text with
+  `hc send --if idle`. `hc send --wait` is not this: it waits for the turn the send itself starts.
+
+What stays as it is: a lead starts with `code_start` from the owner's allowlist of templates (Q2),
+with the same labels (`automagik.bot`, `automagik.worker`), so the grant reaches a lead exactly as
+it reaches a worker and never reaches the lead's own children. `code_send` to a blocked lead is
+refused, as for a worker: the Bot never answers an approval (Approvals). A lead's permission
+level follows Approvals.
+
+Left open by Q8, and asked below: how many leads a Bot may run (Q5), and what the host does with
+several sends during one turn, a host restart while a text is held, and `code_stop` while a text
+is held (Q6).
+
 ### Caps and cleanup
 
 - At most 3 running workers per Bot and 6 per team by default, settable by the owner. A start
-  past a cap is refused with the running workers named.
+  past a cap is refused with the running workers named. The per-Bot cap does not count leads
+  (Lead workers).
 - A finished worker's terminal is removed after its report is accepted and 24 hours pass, or at
-  `code_stop`. The record (task, status, last reply) stays in the Bot's store.
+  `code_stop`. A lead's terminal is not removed automatically; `code_stop` still ends it (Lead
+  workers). The record (task, status, last reply) stays in the Bot's store.
 - When a worker runs in a git repository, `code_start` may ask for a worktree. The host makes it
   under the repository's worktree folder and removes it at cleanup only when it has no
   uncommitted changes and no unpushed commits.
@@ -358,6 +401,9 @@ in the threat model.
 - Bot setting `codeWorkers` (boolean, default off) and the caps `codeWorkers.perBot` and
   `codeWorkers.perTeam`. Compatibility: new.
 - Tool names `code_start`, `code_send`, `code_read`, `code_list`, `code_stop`.
+- The worker kind (`worker`, `lead`) in `code_start`'s input and in `code_list` (amendment of
+  2026-11-21). Compatibility: new; a worker without a kind is a `worker`. How `code_send` reports a
+  held text waits for Q6.
 - Terminal label `automagik.worker=<workerId>`, beside RFC 0006's `automagik.bot`.
 - Space prefix `automagik:` (RFC 0006's contract, kept).
 - A worker report message kind in the Bot's Session.
@@ -383,7 +429,7 @@ in the threat model.
 
 ## Deliveries
 
-Each is one PR on one lane. The order is 0, 0b, 1, 2, 3, 4, 5. Deliveries 0 and 0b may ship in
+Each is one PR on one lane. The order is 0, 0b, 1, 1b, 2, 3, 4, 5. Deliveries 0 and 0b may ship in
 either order; delivery 1 needs both.
 
 - **0. The grant** (herdr-core, filed upstream from #628 and #631). *Check:* with the grant, `run`
@@ -404,11 +450,18 @@ either order; delivery 1 needs both.
   Needs deliveries 0 and 0b on dev.
   *Check:* a Bot starts a worker in a temporary core session, ends its turn, and is woken with
   its reply; a crash between intent and acceptance delivers the report once; every refusal in the tools
-  table is tested.
+  table for the kind `worker` is tested (a lead's are delivery 1b's).
+- **1b. Lead workers** (plugin, after delivery 1; amendment of 2026-11-21). The kind in
+  `code_start` and `code_list`; no wake on a lead's events; the held send. RFC 0030's delivery 3b
+  needs it, with deliveries 0 and 1. *Check:* a lead's turn end, block and exit queue no report
+  into the Session while a worker's still do; a `code_send` while the lead works is typed after
+  that turn ends, with `--if idle`; a send to a blocked lead is refused. Delivery 3 adds the
+  cap and cleanup checks for leads.
 - **2. The worker card and the sidebar pill** (plugin). *Check:* the card updates in place
   through working, blocked and done; Open in Code and Stop act on the right worker.
 - **3. Caps, cleanup and worktrees** (plugin). *Check:* the fourth start for one Bot is refused;
-  cleanup keeps a worktree with uncommitted changes.
+  cleanup keeps a worktree with uncommitted changes; a lead is not counted in the per-Bot cap and
+  is counted in the per-team cap; cleanup removes a finished worker and leaves a lead.
 - **4. Approvals from the chat** (plugin, after herdr-core#122). *Check:* answering in the chat
   and in Code at once leaves one answer and one receipt.
 - **5. Workers on linked machines** (plugin and herdr-core, after #206 and delivery H's link
@@ -430,7 +483,8 @@ each is answered with it, restated; the questions below stay as they were asked.
 
 ## Open questions
 
-Answered on 2026-11-19 (Answers, above); kept as asked.
+Q1-Q4 were answered on 2026-11-19 (Answers, above) and are kept as asked. Q5 and Q6 come with the
+amendment of 2026-11-21.
 
 1. **The Main Bot's default.** Recommended: off like every Bot, with a one-time offer in the Main
    Bot's chat the first time the owner asks for coding work.
@@ -441,6 +495,20 @@ Answered on 2026-11-19 (Answers, above); kept as asked.
    later.
 4. **Default caps.** Recommended: 3 per Bot and 6 per team, matching the shared Mac's limit on
    busy processes.
+5. **How many leads a Bot may run.** RFC 0030's Q8 puts a lead outside the per-Bot cap, which
+   leaves no per-Bot limit (the per-team cap still counts it). (a, recommended) One running lead
+   per Bot: a Genie has one orchestrator, and a second start is refused naming the one that runs.
+   (b) One per Bot and folder, for a Bot that leads several projects. (c) An owner-settable
+   number, default 1.
+6. **Sends held for a lead.** Q8 says a send while the lead works is held and sent when the turn
+   ends. It does not say: (i) several sends during one turn; (ii) a host restart while a text is
+   held; (iii) `code_stop` while a text is held; (iv) what `code_send` answers. (a, recommended)
+   Sends are kept in order, at most 5 per lead (a sixth is refused, naming the five), and each is
+   sent at the next idle, one per turn; held texts are kept in the Bot's store (owner-only, never
+   logged) and sent after a restart; `code_stop` drops them and says how many; `code_send`
+   answers `held` with the text's place in line. (b) One held text at a time, the next send while
+   one is held refused; nothing kept across a restart. (c) Join all texts held during one turn
+   into one send.
 
 ## Links
 
