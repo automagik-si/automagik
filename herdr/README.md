@@ -495,13 +495,13 @@ attention item and first deadline. A later sweep reattaches the watcher. Canceli
 entry closes its attention item. An already queued restart keeps its operation, and a handoff
 continues after recovery with the same ask and response file. The updated Herdr automations scheduler checks `am delivery-status` before sending
 to a target or a notification recipient and preserves each automation's `enabled` setting.
-The installed scheduler (0.12.1-am.2) needs a separate release to gain that check.
+The pinned scheduler release (0.12.1-am.3) has that check; an older installed scheduler needs the update.
 
 **Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
 `am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
 including for a linked project named with `--machine M --project DIR`. Its scheduler must
-be running, with backend `hc` and bot targets (`herdr-automations` 0.12.1-am.2 or later, the
-pinned release). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
+be running, with backend `hc` and bot targets (`herdr-automations` 0.12.1-am.2 or later; the
+pack pins 0.12.1-am.3). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
 just before the send, hc refuses to type into it and the failed run shows the reason.
 A new wake starts at its next occurrence. An already registered wake missed while the
 scheduler was stopped can catch up once on startup within 1380 elapsed minutes (23 hours).
