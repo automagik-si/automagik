@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
-import { coreSocketDiscovery, coreStatus, inTestRoots, inTestRootsReal, userCoreSockets } from "../coreSocket.mjs";
+import { coreSocketDiscovery, coreSockets, coreStatus, inTestRoots, inTestRootsReal, userCoreSockets } from "../coreSocket.mjs";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots, restartAtOf,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId, rateLimitModeOf,
@@ -29,7 +29,8 @@ import { UNANSWERED, agentInForeground, attachRefusal, attachWords, detachWords,
   paneLabels, paneOf, parentArgs, placementFrom, relabel, relabelPlan, relabelWarning, relabelWords, rowsOf, spaceOnly, spacePlace,
   freshSpare, roleOf, shellIdle, spareTab, startArgs, startRefusal, unwrapKeep } from "../launchArgs.js";
 import { tabSteps, workerSpace, workerTabName } from "../workerTab.js";
-import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, confirmBindings, foldAttach, heldIn, machinesById, modeProblem, placeOf as placeOfRow, readAttach, verdictOf } from "../attach.js";
+import { addressOf, attachKey, attachLine, attachPath, attachRow, BOT_SHAPE, closingRow, confirmBindings, foldAttach, heldIn, machinesById, modeProblem, placeOf as placeOfRow, readAttach, verdictOf } from "../attach.js";
+import { isHcTerminalId } from "../hcProxy.mjs";
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { amPartEntryPath, amPartRunnerPath, briefingFilePath, briefingPath, installHook, launchBriefingText, runnerPath, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
@@ -98,6 +99,8 @@ import { fixNonVisual, readState, spacesOf } from "./state.mjs";
 export class CliError extends Error {
   constructor(message, code = 1, detail = null) { super(message); this.code = code; this.detail = detail; }
 }
+
+const localStartRefusal = (refused, message, code = 1) => new CliError(message, code, { refused });
 
 // ---- files and programs ----
 
@@ -246,20 +249,43 @@ async function runStartedByName(name) {
   if (!get || (get.state !== undefined && get.state !== "live")) return null;
   return { address: get.address ?? name, get };
 }
+
+/** A local timeout may resolve a name only in ls, never in get. */
+async function localRunStartedByName(name, botId) {
+  if (!name) return null;
+  const reply = await hcJson(["ls"]);
+  if (!Array.isArray(reply) && !Array.isArray(reply?.terminals)) throw new CliError("hc ls gave no pane list.");
+  const matches = rowsOf(reply).filter((row) => row?.name === name && row.state !== "finished");
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) throw new CliError(`Terminal name ${name} is ambiguous; the terminals were left as they are.`);
+  const { address } = matches[0];
+  if (!isHcTerminalId(address)) throw localLaunchAddressRefusal(address);
+  const get = await localLookup(["get", address], null);
+  if (get?.state !== "live") return null;
+  if (get.labels?.[BOT_LABEL] !== botId) {
+    throw new CliError(`hc get ${address} did not verify the live pane's bot label; the terminal was left as it is.`);
+  }
+  return { address, get };
+}
+
+const localLaunchAddressRefusal = (address) =>
+  localStartRefusal("not-local", `hc returned an invalid local terminal address (${address}); the terminal was left as it is.`);
+
 /**
  * `hc run --bg` for a start: { address, late, answer, get }. A call the timeout ended whose terminal
  * hc already made is a start the CLI must record (late: true, its task not delivered), never a
  * failed start; a timeout with no live terminal under `name`, or any other failure, throws.
- * `get` carries the lookup by name for a late start. The caller can check that reply for
+ * `get` carries the pane found during recovery for a late start. The caller can check it for
  * chosen-home evidence before continuing its regular start flow.
  */
-async function hcStartRun(run, args, name) {
+async function hcStartRun(run, args, name, recover = runStartedByName) {
   const guardWhy = launchGuardProblem(args, name);
   if (guardWhy) throw new CliError(guardWhy);
   const r = await run(args, { timeout: HC_RUN_TIMEOUT_MS });
   let late = null;
   if (r.killed) {
-    try { late = await runStartedByName(name); } catch (e) {
+    try { late = await recover(name); } catch (e) {
+      if (e?.detail?.refused === "not-local") throw e;
       throw new CliError(`hc run didn't answer within ${HC_RUN_TIMEOUT_MS / 1000}s, and the terminal it may have started (${name}) can't be looked up: ${e?.message ?? e}`);
     }
   }
@@ -1079,6 +1105,54 @@ function coreId() {
   return coreOnce;
 }
 
+/** Verify the transport without starting hc, then pin every child call to that core. */
+async function pinLocalStartCore() {
+  const { AUTOMAGIK_HERDR_CORE_SOCKET: socket, HC_SOCKET: hcSocket, HC_TERMINAL_ID: terminal, HC_SESSION: session } = process.env;
+  if (socket && hcSocket && socket !== hcSocket) {
+    throw localStartRefusal("transport", "AUTOMAGIK_HERDR_CORE_SOCKET and HC_SOCKET name different sockets.", 2);
+  }
+  const config = readHolders({ strict: true });
+  const env = { ...process.env };
+  const socketPath = (path) => {
+    try { return realpathSync(path); } catch { return resolvePath(path); }
+  };
+  const holderSockets = new Map();
+  for (const holder of config.holders) {
+    if (!holder.session) continue;
+    for (const path of coreSockets({ ...env, HC_SESSION: holder.session, HC_SOCKET: "", AUTOMAGIK_HERDR_CORE_SOCKET: "" })) {
+      holderSockets.set(socketPath(path), holder.name);
+    }
+  }
+  const holderAt = (path) => holderSockets.get(socketPath(path));
+  const holderRefusal = (name) => localStartRefusal("transport", `The core socket belongs to holder "${name}"; set this computer's local core socket.`, 2);
+  const explicit = socket || hcSocket;
+  const explicitHolder = explicit && holderAt(explicit);
+  if (explicitHolder) throw holderRefusal(explicitHolder);
+  if (!socket && !hcSocket && session && session !== "default") {
+    const isHolder = config.holders.some((holder) => holder.session === session);
+    if (config.warnings.length || (!isHolder && session.startsWith("am-holder-"))) {
+      throw localStartRefusal("transport", `Can't identify this computer's core from HC_SESSION=${session}; set the local core socket or repair holders.json.`, 2);
+    }
+    if (isHolder) delete env.HC_SESSION;
+  }
+  if (terminal && await workerTransport()) return;
+  const candidates = coreSockets(env);
+  // Only failed connections fall through to the next candidate. Stop before any holder.
+  const firstHolder = candidates.findIndex(holderAt);
+  const r = await coreStatus(env, { sockets: firstHolder < 0 ? candidates : candidates.slice(0, firstHolder) });
+  if (r.none) {
+    if (firstHolder >= 0) throw holderRefusal(holderAt(candidates[firstHolder]));
+    throw localStartRefusal("no-core", `hc server status failed: herdr-core isn't answering on this computer (tried ${r.tried.join(", ") || "no socket"}); nothing was started.`);
+  }
+  if (r.error !== undefined) throw localStartRefusal("no-core", `hc server status failed: ${r.error}`);
+  const id = r.status?.core?.id;
+  if (typeof id !== "string" || !id) throw localStartRefusal("no-core", "hc server status gave no core id.");
+  process.env.HC_SOCKET = r.socket;
+  process.env.AUTOMAGIK_HERDR_CORE_SOCKET = r.socket;
+  delete process.env.HC_SESSION;
+  coreOnce = Promise.resolve(id);
+}
+
 /** The ledger's rows, or null when there is no file. A group- or world-writable file is refused. */
 export function readAttachFile(path = attachPath(appHome())) {
   const flags = (constants.O_RDONLY ?? 0) | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
@@ -1147,18 +1221,23 @@ async function importLabels(path, proposed) {
 }
 
 /** The one-time import's rows (importLabels), worked out and not written. */
-async function labelRows({ readOnly = false } = {}) {
+async function labelRows({ readOnly = false, localOnly = false } = {}) {
   const core = await coreId();
   let own = null;
   try { own = await keyOf(process.cwd()); } catch { /* the import can still use the remembered list */ }
   const known = localProjectsFor(own ? { key: own } : null, appHome(), [...namedKeys]);
-  const rows = rowsOf(await hcJson(["ls"])).filter((r) => local(r?.address) && r.state !== "finished");
-  // One terminal hc fails to answer for is left out, never the whole import.
-  const gets = await Promise.all(rows.map((r) => hcLookup(r.address).catch(() => null)));
+  const allowedId = localOnly ? isHcTerminalId : local;
+  const reply = await hcJson(["ls"]);
+  if (localOnly && !Array.isArray(reply) && !Array.isArray(reply?.terminals)) {
+    throw new CliError("hc ls gave no pane list for the first attach ledger import.");
+  }
+  const rows = rowsOf(reply).filter((r) => allowedId(r?.address) && r.state !== "finished");
+  // A local-only import needs a verified view. Other callers keep the best-effort import.
+  const gets = localOnly ? await localPaneGets(rows) : await Promise.all(rows.map((r) => hcLookup(r.address).catch(() => null)));
   const byBot = new Map();
   for (const [i, get] of gets.entries()) {
     const bot = get?.labels?.[BOT_LABEL];
-    if (get?.state !== "live" || !local(get.address) || typeof bot !== "string" || !Number.isSafeInteger(get.created_ms)) continue;
+    if (get?.state !== "live" || !allowedId(get.address) || typeof bot !== "string" || !Number.isSafeInteger(get.created_ms)) continue;
     byBot.set(bot, [...(byBot.get(bot) ?? []), { get, row: rows[i] }]);
   }
   const found = [];
@@ -1197,12 +1276,15 @@ async function sweep(path, ended) {
  * readOnly (the import's dry run, #486): the one-time import's rows as it would write them,
  * and no file made.
  */
-async function ledgerRows(path, readOnly = false) {
+async function ledgerRows(path, readOnly = false, local = false) {
   const rows = readAttachFile(path);
   if (rows !== null) return rows;
+  if (local && await workerTransport()) {
+    throw localStartRefusal("transport", "The first attach ledger import needs the core's direct socket. Run am start from the host.");
+  }
   if (!existsSync(appHome())) return [];
   if (readOnly) return labelRows({ readOnly });
-  await importLabels(path);
+  await importLabels(path, local ? await labelRows({ localOnly: true }) : undefined);
   return readAttachFile(path) ?? [];
 }
 
@@ -1247,6 +1329,21 @@ export function attachView({ readOnly = false } = {}) {
   return viewOnce;
 }
 
+/** Confirm only bindings for this computer, without reading the machine list or writing end rows. */
+async function localAttachView() {
+  const path = attachPath(appHome());
+  const { byBot } = foldAttach(await ledgerRows(path, false, true));
+  const core = await coreId();
+  let addresses;
+  const listAddresses = () => (addresses ??= localAddresses());
+  // Let queued gets finish on the pinned transport before a refusal restores the environment.
+  let failure;
+  const lookup = (args) => localLookup(args, listAddresses).catch((e) => { failure ??= e; return UNANSWERED; });
+  const { live, ended } = await confirmBindings([...byBot.values()], core, lookup, UNANSWERED);
+  if (failure) throw failure;
+  return { core, path, ended, live: new Map(live.map((seat) => [seat.binding.bot, seat])) };
+}
+
 /** The view's key for a bot in a place (attach.js placeOf: null, or a machine's core id). */
 const atKey = (bot, place) => `${place ?? ""}\n${bot}`;
 /** The core id hc gives the machine named `name` now (`machines`, machinesById), or null. */
@@ -1275,16 +1372,50 @@ function unknownFor(view, botId, project) {
 // unknown (UNANSWERED), never failing the whole view.
 const lookup = (args) => (args[1].includes("/") ? hcLookup(args[1]).catch(() => UNANSWERED) : hcLookup(args[1]));
 
+async function localAddresses() {
+  // Finished panes can still carry the reason used by the attach sweep.
+  const reply = await hcJson(["ls", "--all"]);
+  if (!Array.isArray(reply) && !Array.isArray(reply?.terminals)) throw new CliError("hc ls gave no pane list.");
+  const rows = rowsOf(reply);
+  // Absence is decided from this list, so one row without an address makes it unusable (fail closed).
+  if (rows.some((row) => typeof row?.address !== "string" || !row.address)) throw localStartRefusal("incomplete-identity", "hc ls gave a pane with no address; nothing was started.");
+  return new Set(rows.map((row) => row.address));
+}
+
+/** Passing null for listAddresses means the operand came from the pinned core's pane list. */
+async function localLookup([, terminal], listAddresses = localAddresses) {
+  if (!isHcTerminalId(terminal)) {
+    throw localStartRefusal("not-local", `The attach ledger names ${terminal}, which is not a local hc terminal id; nothing was started.`);
+  }
+  const listed = !listAddresses || (await listAddresses()).has(terminal);
+  const get = listed ? await hcLookup(terminal, { strictNotFound: true }) : null;
+  if (!get) {
+    if (await workerTransport()) throw localStartRefusal("transport", `Can't verify ${terminal} through the pane proxy; use the core's direct socket.`);
+    return null;
+  }
+  verifyPaneIdentity(terminal, get);
+  return get;
+}
+
+/** Complete the batch on the pinned transport even when one of the gets fails. */
+async function localPaneGets(rows) {
+  const replies = await Promise.allSettled(rows.map((row) => localLookup(["get", row.address], null)));
+  return replies.map((reply) => {
+    if (reply.status === "rejected") throw reply.reason;
+    return reply.value;
+  });
+}
+
 /**
  * Runs `fn` under the ledger's lock with the fold read again: fn({ core, byBot, byKey, holds,
  * write }). `holds(binding)` confirms a binding with hc ({ binding, get } or null; an ended
  * one gets its end row), `write(rows)` appends. Two CLIs never both attach one bot.
  */
-async function underLedger(fn) {
+async function underLedger(fn, { local = false } = {}) {
   const path = attachPath(appHome());
-  await ledgerRows(path);
+  await ledgerRows(path, false, local);
   const core = await coreId();
-  const machines = await machinesNow();
+  const machines = local ? new Map() : await machinesNow();
   try {
     return await withLockAsync(ledgerLock(path), async () => {
       const fold = foldAttach(readAttachFile(path) ?? []);
@@ -1294,7 +1425,7 @@ async function underLedger(fn) {
       const ends = [];
       const holds = async (binding) => {
         if (!binding) return null;
-        const { live, ended, unknown } = await confirmBindings([binding], core, lookup, UNANSWERED, machines);
+        const { live, ended, unknown } = await confirmBindings([binding], core, local ? localLookup : lookup, UNANSWERED, machines);
         if (live.length) return live[0];
         if (unknown.length) return { binding, get: null };
         ends.push(closingRow(binding, "end", "sweep", ended[0].reason));
@@ -1311,8 +1442,8 @@ const whoisOf = ({ binding }) => ({ terminal: binding.terminal, core: binding.co
   project: binding.project, since: binding.at });
 
 /** The `hc get` of a bot's attached terminal on this computer, or null. */
-async function attachedGet(botId) {
-  const held = (await attachView()).live.get(botId);
+async function attachedGet(botId, view) {
+  const held = (view ?? await attachView()).live.get(botId);
   return held?.get && local(held.get.address ?? held.binding.terminal) ? { ...held.get, address: held.get.address ?? held.binding.terminal } : null;
 }
 
@@ -1791,7 +1922,7 @@ const OPTIONS = {
   fresh: { type: "boolean" }, force: { type: "boolean" }, save: { type: "boolean" }, tree: { type: "boolean" }, "fresh-shared": { type: "boolean" },
   cwd: { type: "string" }, "expect-pane": { type: "string" },
   revive: { type: "boolean" }, boot: { type: "boolean" }, wait: { type: "string" }, "dry-run": { type: "boolean" }, last: { type: "boolean" },
-  machine: { type: "string" }, linked: { type: "boolean" }, local: { type: "boolean" },
+  machine: { type: "string" }, linked: { type: "boolean" }, local: { type: "boolean" }, "local-only": { type: "boolean" },
   holder: { type: "string" }, limit: { type: "string" }, losses: { type: "boolean" }, up: { type: "boolean" },
   "from-hc": { type: "boolean" }, "squad-label": { type: "string" }, apply: { type: "boolean" },
 };
@@ -1879,6 +2010,7 @@ Usage: am <command> [options]                   (every command takes --json and 
   start <bot> [--space ID] [--tab ID] [--holder NAME]
                                 a new pane on this computer (prints its terminal); with more
                                 than one holder, the least loaded one (am holders)
+  start <bot-id> --project DIR --local-only   this computer's core only; no linked terminal or holder is asked
   revive [--dry-run] [--boot] [--wait SECONDS] | revive --last
                                 after a restart of this computer: every bot the attach ledger
                                 binds here whose pane is gone, or is the bare shell herdr-core
@@ -3322,8 +3454,8 @@ async function cmdShow(opts, [ref]) {
 // ---- A16 pane labels (launchArgs.js): this computer's panes only ----
 
 /** The `hc get` of a bot's attached live pane on this computer, as a list (launchArgs relabel's io.rows). */
-async function liveRows(botId) {
-  const get = await attachedGet(botId);
+async function liveRows(botId, view) {
+  const get = await attachedGet(botId, view);
   return get ? [get] : [];
 }
 const labelIo = { rows: liveRows, label: async (address, words) => (await hc(["label", address, ...words])).code === 0 };
@@ -3761,8 +3893,11 @@ export function keepAppHomeOutOfGit(appHomeDir) {
 }
 
 /** A terminal's foreground pid from `hc get`, or null (hc failing, or no pid yet). */
-async function pidOf(terminal) {
-  try { const get = await hcGet(terminal); return get?.foreground?.pid ?? get?.pid ?? null; } catch { return null; }
+async function pidOf(terminal, { localOnly = false } = {}) {
+  try {
+    const get = localOnly ? await localLookup(["get", terminal]) : await hcGet(terminal);
+    return get?.foreground?.pid ?? get?.pid ?? null;
+  } catch { return null; }
 }
 /** A terminal's foreground pid and created_ms from one `hc get`: { pid, createdMs }, each null when hc gave none. */
 async function launchOf(terminal) {
@@ -3792,8 +3927,9 @@ const newSessionId = () => holdId(randomUUID());
  * windowSpaces(), read once by the caller; null (no window to ask): the first labelled
  * terminal's place.
  */
-async function placementOf(key, seen = null) {
-  const rows = rowsOf(await hcJson(["ls"])).filter((r) => local(r?.address) && r.state === "live" && typeof r.cwd === "string");
+async function placementOf(key, seen = null, { localOnly = false } = {}) {
+  const allowedId = localOnly ? isHcTerminalId : local;
+  const rows = rowsOf(await hcJson(["ls"])).filter((r) => allowedId(r?.address) && r.state === "live" && typeof r.cwd === "string");
   const keys = new Map();
   await Promise.all([...new Set(rows.map((r) => r.cwd))].map(async (cwd) => {
     try { keys.set(cwd, await keyOf(cwd)); } catch { /* a folder gone: not this project */ }
@@ -3834,7 +3970,7 @@ async function windowSpaces() {
  * Two starts at once can each open one: both then use the first space on the project in the
  * window, and the one that opened another closes it (it holds only its new shell).
  */
-async function windowPlace(key, labelled = null, seen = null) {
+async function windowPlace(key, labelled = null, seen = null, { localOnly = false } = {}) {
   if (!seen) return labelled;
   if (labelled && seen.spaces.some((s) => s.id === labelled.space)) return labelled;
   // This ls is the check right before space.new: nothing else runs between them.
@@ -3847,15 +3983,29 @@ async function windowPlace(key, labelled = null, seen = null) {
   try { out = JSON.parse(r.stdout) ?? {}; } catch { /* the space is found in ls instead */ }
   const now = await windowSpaces();
   const first = now && spacePlace(now.spaces, now.keys, key);
-  const ours = now?.spaces.find((s) => s.id === out.space || s.tabs.some((t) => t.panes.some((p) => p.terminal === out.terminal)));
-  if (first && ours && ours.id !== first.space) {
+  const showsSpare = (s) => s.tabs.some((t) => t.panes.some((p) => p.terminal === out.terminal));
+  const matchesReply = (s) => s.id === out.space || showsSpare(s);
+  let ours;
+  if (localOnly) {
+    const matches = now?.spaces.filter(matchesReply) ?? [];
+    const [match] = matches;
+    if (matches.length === 1 && typeof match.id === "string" && match.id
+        && !match.machine && now.keys.get(match.folder) === key
+        && !seen.spaces.some((s) => s.id === match.id)
+        && (out.space === undefined || out.space === match.id)
+        && isHcTerminalId(out.terminal) && showsSpare(match)) ours = match;
+  } else {
+    ours = now?.spaces.find(matchesReply);
+  }
+  const spare = ours && freshSpare(ours, out.terminal);
+  if (first && ours && ours.id !== first.space
+      && (!localOnly || spare?.fresh && ours.tabs[0].paneCount === 1 && await idleLocalSpare(spare.terminal))) {
     await runProgram("herdr-app", ["do", "space.close", JSON.stringify({ id: ours.id, confirmed: true })]);
   }
-  const place = first || (typeof out.space === "string" ? { space: out.space, tab: null, from: null } : null);
+  const place = first || (!localOnly && typeof out.space === "string" ? { space: out.space, tab: null, from: null } : null);
   // The space is this start's: its first tab holds only the shell space.new started, closed
   // once the bot shows in a tab of its own there (launchSeat, closeSpare).
-  const spare = ours && place?.space === ours.id ? freshSpare(ours, out.terminal) : null;
-  return spare ? { ...place, spare } : place;
+  return spare && place?.space === ours.id ? { ...place, spare } : place;
 }
 
 /**
@@ -3939,12 +4089,12 @@ const holdersLock = () => `${holdersPath()}.lock`;
 
 let holdersWarned = false;
 /** The pool from its file, or the conservative default when there is none; bad input says so. */
-function readHolders() {
+function readHolders({ strict = false } = {}) {
   let text = null;
   try { text = readFileSync(holdersPath(), "utf8"); } catch (e) {
     if (e?.code !== "ENOENT") throw new CliError(`holders: ${HOLDERS_FILE} can't be read: ${e?.message ?? e}`);
   }
-  const config = parseHolders(text);
+  const config = parseHolders(text, { strict });
   // #1881: a corrupt file used to fall back to one holder in silence, quietly turning spreading
   // off. Say it once per run (on stderr, so --json still parses) and keep the safe default.
   if (config.warnings.length && !holdersWarned) {
@@ -3954,11 +4104,14 @@ function readHolders() {
   return config;
 }
 
-/** Writes one of the holder files 0600 in a 0700 folder, never through a symlink. */
-function writeHoldersFile(path, text) {
-  const dir = dirname(path);
+function ensurePrivateStateDir(dir) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir} is a symlink`);
+}
+
+/** Writes private state 0600 in a 0700 folder, never through a symlink. */
+function writePrivateStateFile(path, text) {
+  ensurePrivateStateDir(dirname(path));
   try { if (lstatSync(path).isSymbolicLink()) throw new Error(`${path} is a symlink`); } catch (e) { if (e?.code !== "ENOENT") throw e; }
   const tmp = `${path}.${randomUUID()}.tmp`;
   writeFileSync(tmp, text, { mode: 0o600, flag: "wx" });
@@ -3970,7 +4123,7 @@ function writeHoldersFile(path, text) {
 /** Writes the pool 0600 in a 0700 folder, never through a symlink. */
 function writeHolders(config) {
   try {
-    writeHoldersFile(holdersPath(), holdersText(config));
+    writePrivateStateFile(holdersPath(), holdersText(config));
   } catch (e) {
     throw new CliError(`holders: the setting was not saved: ${e?.message ?? e}`);
   }
@@ -4005,7 +4158,7 @@ function reservedCounts(list) {
 /** Writes the reservations 0600 in a 0700 folder, never through a symlink (writeHolders' rule). */
 function writeReservations(list) {
   try {
-    writeHoldersFile(holderReservationsPath(), `${JSON.stringify({ v: 1, reserved: list }, null, 2)}\n`);
+    writePrivateStateFile(holderReservationsPath(), `${JSON.stringify({ v: 1, reserved: list }, null, 2)}\n`);
   } catch (e) {
     throw new CliError(`holders: the start reservation was not saved: ${e?.message ?? e}`);
   }
@@ -4015,24 +4168,24 @@ function writeReservations(list) {
  * Attached bindings per holder, read straight from the ledger, and the bots they bind. The
  * view's counts are confirmed with hc before the lock; this fast local read under the lock sees
  * attach rows another start wrote meanwhile, so a decision never rests on a count taken before
- * that start finished. `attached` lets a reservation whose real row has just landed stop
- * counting even before its CLI has released it, so one seat is never counted twice. `bound`
+ * that start finished. `attached` keys bindings by bot and holder so a reservation stops
+ * counting when its own attach row lands, even before the CLI releases it. `bound`
  * maps each bot to its binding and holder for the same-bot guard: both a live binding and an
  * unknown one (a holder whose line is down) are rows here, so neither can be missed before a
  * second seat is reserved (#1881).
  */
-function holderCountsFromLedger(machines, config) {
+function holderCountsFromLedger(machines, config, fold = foldAttach(readAttachFile(attachPath(appHome())) ?? [])) {
   const counts = new Map(config.holders.map((h) => [h.name, 0]));
+  const holdersByMachine = new Map(config.holders.filter((h) => h.machine).map((h) => [h.machine, h.name]));
   const attached = new Set();
   const bound = new Map();
-  const rows = readAttachFile(attachPath(appHome())) ?? [];
-  for (const binding of foldAttach(rows).byKey.values()) {
-    attached.add(binding.bot);
+  for (const binding of fold.byKey.values()) {
     const place = placeOfRow(binding);
     const name = place === null ? LOCAL_HOLDER : (machines.get(place)?.name ?? binding.machine ?? null);
     if (binding.bot && !bound.has(binding.bot)) bound.set(binding.bot, { binding, holder: name });
-    if (!name || !counts.has(name)) continue;
-    counts.set(name, counts.get(name) + 1);
+    const holder = place === null ? LOCAL_HOLDER : holdersByMachine.get(name);
+    if (holder) attached.add(atKey(binding.bot, holder));
+    if (counts.has(name)) counts.set(name, counts.get(name) + 1);
   }
   return { counts, attached, bound };
 }
@@ -4112,7 +4265,7 @@ async function reserveHolder({ view, counts, connected, holder, bot }) {
     // killed CLI) is dropped: neither takes a seat. The spent one leaves the file here too, so
     // the release that failed has no effect.
     const { counts: fresh, attached, bound } = holderCountsFromLedger(view.machines, config);
-    const live = liveReservations(readReservations(), now).filter((r) => !attached.has(r.bot));
+    const live = liveReservations(readReservations(), now).filter((r) => !attached.has(atKey(r.bot, r.holder)));
     const seat = bound.get(bot.id);
     if (seat) throw startSeatRefusal(bot, seat.holder, seat.binding.terminal);
     const starting = live.find((r) => r.bot === bot.id);
@@ -4131,6 +4284,33 @@ async function reserveHolder({ view, counts, connected, holder, bot }) {
     live.push({ id, holder: pick.name, bot: bot.id, at: new Date(now).toISOString() });
     writeReservations(live);
     return { pick, config, reservation: { id, holder: pick.name } };
+  }, { wait: LOCK_STALE + 2000, what: "holders.json" });
+}
+
+/** Reserve even in a one-holder pool, so a second holder added during launch sees this start. */
+async function reserveLocalOnly(bot) {
+  ensurePrivateStateDir(dirname(holdersPath()));
+  return withLockAsync(holdersLock(), async () => {
+    const config = readHolders({ strict: true });
+    const fold = foldAttach(readAttachFile(attachPath(appHome())) ?? []);
+    const holderMachines = holderMachineNames(config);
+    const bindings = [...fold.byKey.values()];
+    const elsewhere = bindings.find((binding) => binding.bot === bot.id && binding.machine
+      && (config.holders.length > 1 || config.warnings.length || holderMachines.has(binding.machine)));
+    if (elsewhere) {
+      throw localStartRefusal("held-elsewhere", `${bot.name} has a seat recorded on ${elsewhere.machine}; am start run in a terminal checks it again.`);
+    }
+    const { counts, attached } = holderCountsFromLedger(new Map(), config, fold);
+    const now = Date.now();
+    const live = liveReservations(readReservations(), now).filter((r) => !attached.has(atKey(r.bot, r.holder)));
+    const starting = live.find((r) => r.bot === bot.id);
+    if (starting) {
+      throw localStartRefusal("held-elsewhere", `${bot.name} is already starting on holder "${starting.holder}"; am start run in a terminal checks it again.`);
+    }
+    const pick = chooseHolder({ config, counts, holder: LOCAL_HOLDER, reserved: reservedCounts(live) });
+    const reservation = { id: randomUUID(), holder: LOCAL_HOLDER };
+    writeReservations([...live, { ...reservation, bot: bot.id, at: new Date(now).toISOString() }]);
+    return { reservation, limitWarning: pick.atLimit ? limitWarning(bot, pick.name, pick.count, config.limit) : undefined };
   }, { wait: LOCK_STALE + 2000, what: "holders.json" });
 }
 
@@ -4447,22 +4627,31 @@ async function holderForStart(opts, project, bot) {
 }
 
 async function cmdStart(opts, [ref], warnedRelabels) {
+  const localOnly = opts["local-only"];
   if (opts.tab && !opts.space) throw new CliError("--tab needs --space (the space that tab is in).", 2);
   if (opts.holder !== undefined && opts.machine !== undefined) {
     throw new CliError("--holder picks one of this computer's holders; --machine starts on a linked machine (give one).", 2);
   }
-  const project = await projectFor(opts);
+  const project = await projectFor(opts).catch((e) => {
+    if (localOnly && e instanceof CliError && e.code === 2) throw localStartRefusal("no-folder", e.message, 2);
+    throw e;
+  });
   const { file, key } = project;
-  if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
-  const bot = await botIn(project, ref, opts);
+  if (project.text === null) {
+    const message = `No ${BOTS_PATH} in ${key}.`;
+    throw localOnly ? localStartRefusal("no-roster", message) : new CliError(message);
+  }
+  const bot = localOnly ? file.bots.find((b) => b.id === ref) : await botIn(project, ref, opts);
+  if (localOnly && !bot) throw localStartRefusal("not-in-roster", `No bot ${ref} in ${fileName(project)}.`);
   if (project.machine && loginPolicyActive(process.env)) refuseLinkedLogin(agentTable()[bot.agent]?.run, bot.agent);
   warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
-  if (why) throw new CliError(why);
+  if (why) throw localOnly ? localStartRefusal("not-startable", why) : new CliError(why);
   // launch.js checks the folder Start launches in against the project (attachRefusal on
   // keyOf(projectKey)). Here that folder is `key`, which keyOf already returned, and a key
   // keys to itself, so the check can't refuse: it is left out, not forgotten.
   if (project.machine) return startOnMachine(opts, project, bot);
+  if (localOnly) await pinLocalStartCore();
   // #1432: a pool with more than one holder puts the new pane on the least loaded one; the
   // holder is a local hc session exposed as a linked machine, so its launch is the pack's own
   // linked-machine start, delegated to a child CLI. One holder (the default) places exactly as
@@ -4471,11 +4660,25 @@ async function cmdStart(opts, [ref], warnedRelabels) {
     const why = opts.holder === LOCAL_HOLDER ? null : `no holder "${opts.holder}": the pool is this computer's core (am holders add --local <name>)`;
     if (why) throw new CliError(why, 2);
   }
-  const decision = await holderForStart(opts, project, bot);
+  // The local view must settle before reserving, including any sweep of an ended local seat.
+  const localView = localOnly ? await localAttachView() : null;
+  const running = async (view) => {
+    const held = view.live.get(bot.id) ?? await projectHomeHeld(project, bot, { localOnly });
+    if (!held) return null;
+    const elsewhere = held.binding.project && held.binding.project !== key ? `, for ${held.binding.project}` : "";
+    return opts.json ? { id: bot.id, running: held.binding.terminal } : `${bot.name} is already running in ${held.binding.terminal}${elsewhere}.`;
+  };
+  if (localView) {
+    const out = await running(localView);
+    const { path, core, ended } = localView;
+    const losses = holderLossEvents({ ended, core });
+    if (losses.length) recordHolderLosses(losses);
+    if (ended.length) await sweep(path, ended);
+    if (out) return out;
+  }
+  const decision = localOnly ? await reserveLocalOnly(bot) : await holderForStart(opts, project, bot);
   // #1881: the seat chosen above is reserved; release it when the real attach row is written
-  // (both start paths write it before they return) or when the start fails, so the next start
-  // sees the seat freed. A bot that already had a binding, or another start's reservation, was
-  // refused under the lock with nothing reserved.
+  // (both start paths write it before they return) or when the start fails.
   try {
     if (decision.holder) {
       if (decision.limitWarning) report([decision.limitWarning]);
@@ -4486,14 +4689,13 @@ async function cmdStart(opts, [ref], warnedRelabels) {
     // One terminal plays a bot: the one the attach ledger names is reported, never a second
     // start (decided again under the ledger's lock, below, with hc run). A bot that lives in the
     // project's own app home is found by the same resolver every read shares (#1128).
-    const view = await attachView();
-    // By id alone, whatever the project (the fold binds a bot once per place): a clone's start
-    // names the checkout whose pane it is (automagik#227).
-    const held = view.live.get(bot.id) ?? await projectHomeHeld(project, bot);
-    const elsewhere = held?.binding.project && held.binding.project !== key ? `, for ${held.binding.project}` : "";
-    if (held) return opts.json ? { id: bot.id, running: held.binding.terminal } : `${bot.name} is already running in ${held.binding.terminal}${elsewhere}.`;
+    if (!localOnly) {
+      const out = await running(await attachView());
+      if (out) return out;
+    }
     const seat = await launchSeat(project, bot, {
-      warnedRelabels, place: opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : undefined,
+      warnedRelabels, localOnly, view: localView,
+      place: opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : undefined,
     });
     if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
     if (decision.limitWarning) report([decision.limitWarning]);
@@ -5693,6 +5895,7 @@ const seatJson = (bot, seat) => ({ id: bot.id, terminal: seat.terminal, parent: 
  * ledger names another terminal for the bot by the time the lock is taken.
  */
 async function launchSeat(project, bot, over = {}) {
+  const ledgerOpts = { local: over.localOnly };
   const { file, key } = project;
   const agentKey = over.agent ?? bot.agent;
   const model = over.argv ? (over.model ?? null) : bot.model;
@@ -5717,11 +5920,11 @@ async function launchSeat(project, bot, over = {}) {
   if (agySettings) writeAgySettingsFile(agySettings, bot);
   // A1: the effective lead's live terminal as parent, outliving it; the main bot has none.
   const lead = bot.kind === "member" ? effectiveLead(file, bot.id).lead : "";
-  const leadGet = lead ? await attachedGet(lead) : null;
+  const leadGet = lead ? await attachedGet(lead, over.view) : null;
   const leadLive = leadGet?.address ?? null;
   const parent = parentArgs(file, bot.id, (id) => (id === lead ? leadLive : null));
   const carry = over.carry ?? {};
-  const labels = { ...paneLabels(file, bot.id, carry, lead ? leadPane(await liveRows(lead))?.labels ?? null : null), ...carry }; // A16
+  const labels = { ...paneLabels(file, bot.id, carry, lead ? leadPane(await liveRows(lead, over.view))?.labels ?? null : null), ...carry }; // A16
   const taken = new Set(rowsOf(await hcJson(["ls"])).map((r) => r?.name).filter(Boolean));
   // A Start's command, on a new session whose id Herdr chooses (Claude), unless it picks its own.
   const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, localWhere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model),
@@ -5758,7 +5961,8 @@ async function launchSeat(project, bot, over = {}) {
   let place = over.place;
   if (place === undefined) {
     const seen = await windowSpaces();
-    place = spaceOnly(await windowPlace(key, await placementOf(key, seen), seen));
+    const locality = { localOnly: over.localOnly };
+    place = spaceOnly(await windowPlace(key, await placementOf(key, seen, locality), seen, locality));
   }
   // The pointer record wins when the entrypoint exported it. Otherwise the Claude login
   // record (#453) chooses at the same point as a start without the Bot login policy.
@@ -5790,7 +5994,9 @@ async function launchSeat(project, bot, over = {}) {
     // above that wait; a timeout after hc made the terminal is a start looked up by its name
     // (the attach row is still written), never a failed start.
     ledgerLogin = launchLogin(agentKey, freshLogin);
-    const { address, late, get: recovered } = await hcStartRun(hc, args, name);
+    const recover = over.localOnly ? (name) => localRunStartedByName(name, bot.id) : undefined;
+    const { address, late, get: recovered } = await hcStartRun(hc, args, name, recover);
+    if (over.localOnly && !isHcTerminalId(address)) throw localLaunchAddressRefusal(address);
     if (late) {
       const proof = await paneProof({ get: recovered, project });
       if (protectsChosenHome(proof)) {
@@ -5801,14 +6007,19 @@ async function launchSeat(project, bot, over = {}) {
       hook.warnings.push(warning);
       report([warning]);
     }
-    const get = await hcGet(address).catch(() => null);
+    const get = over.localOnly ? recovered ?? await localLookup(["get", address]) : await hcGet(address).catch(() => null);
+    if (over.localOnly && !get) throw localLaunchAddressRefusal(address);
+    if (over.localOnly && (get.state !== "live" || get.labels?.[BOT_LABEL] !== bot.id)) {
+      throw new CliError(`hc get ${address} did not verify the live pane and its bot label; the terminal was left as it is.`);
+    }
     const proof = await paneProof({ get, project });
     if (protectsChosenHome(proof)) throw new CliError(chosenSeatRefusal(address, proof));
     if (ledger) {
       if (!Number.isSafeInteger(get?.created_ms)) {
         throw new CliError(`${address} runs, but hc get gave no created_ms, so it has no attach row: attach it with am attach ${bot.id} ${address}`);
       }
-      try { ledger.write([attachRow({ event: "attach", bot: bot.id, project: key, terminal: address, core: ledger.core, created_ms: get.created_ms, by: "start" })]); } catch (e) {
+      const row = attachRow({ event: "attach", bot: bot.id, project: key, terminal: address, core: ledger.core, created_ms: get.created_ms, by: "start" });
+      try { ledger.write([row]); } catch (e) {
         throw new CliError(`${address} runs, but its attach row wasn't written (${e?.message ?? e}): attach it with am attach ${bot.id} ${address}`);
       }
     }
@@ -5816,25 +6027,26 @@ async function launchSeat(project, bot, over = {}) {
   };
   // Start: under the ledger's lock, still unattached, then hc run and the attach row (by
   // "start"). Restart: hc run alone (the old pane still holds the bot).
-  const started = over.replacing ? await run(null) : await underLedger(async ({ core, byBot, holds, write }) => {
-    const now = await holds(byBot.get(bot.id));
-    if (now) return { running: now.binding.terminal };
-    return run({ core, write });
-  });
+  const started = over.replacing ? await run(null)
+    : await underLedger(async (ledger) => {
+      const held = await ledger.holds(ledger.byBot.get(bot.id));
+      return held ? { running: held.binding.terminal } : run(ledger);
+    }, ledgerOpts);
   if (started.running) return { running: started.running };
   const { terminal } = started;
   // Restart writes the seat row only once the pane has proved itself. Its tags come from the
   // file this launch started from, frozen in the row (RFC 0021 (e)).
   const tags = seatTags(file, bot.id);
   const logSeat = async (createdMs = started.created_ms) => {
-    const unlogged = appendLedger(startRow({ kind: "seat", terminal, pid: started.pid ?? await pidOf(terminal), botId: bot.id, worktree: cwd,
+    const pid = started.pid ?? await pidOf(terminal, { localOnly: over.localOnly });
+    const unlogged = appendLedger(startRow({ kind: "seat", terminal, pid, botId: bot.id, worktree: cwd,
       project: key, agent: agentKey, model, template: carry[WORKER_TEMPLATE_LABEL] ?? null,
       ...tags, core: await rowCore(), createdMs, env: started.homeEnv, session: agentKey === "claude" ? session : null, ...ledgerLogin }));
     if (unlogged) { hook.warnings.push(unlogged); report([unlogged]); }
   };
   if (!over.replacing) await logSeat();
-  if (place?.spare && TAB_WAIT_MS > 0) {
-    const why = await closeSpare(place.spare, terminal);
+  if (place?.spare && TAB_WAIT_MS > 0 && (!over.localOnly || isHcTerminalId(place.spare.terminal))) {
+    const why = await closeSpare(place.spare, terminal, null, { localOnly: over.localOnly });
     if (why) { hook.warnings.push(why); report([why]); }
   }
   listProject(key);
@@ -5880,6 +6092,12 @@ async function shellChildren(get, machine = null) {
   return r.code === 0 && pids.length && pids.every((x) => /^\d+$/.test(x)) ? pids : null;
 }
 
+async function idleLocalSpare(terminal) {
+  if (!isHcTerminalId(terminal)) return false;
+  const get = await localLookup(["get", terminal]).catch(() => null);
+  return get?.state === "live" && shellIdle(get, await shellChildren(get));
+}
+
 /**
  * Closes the spare shell's tab of a space this start made (windowPlace's or windowPlaceOn's
  * `spare`) once the window shows the bot's pane (`terminal`; on `machine`, a linked one's) in
@@ -5888,12 +6106,16 @@ async function shellChildren(get, machine = null) {
  * running (spareTab, shellIdle, shellChildren). Never `confirmed`: Herdr asks the person only
  * before closing a space's last tab, which this never is. Null, or a warning when it failed.
  */
-async function closeSpare(spare, terminal, machine = null) {
+async function closeSpare(spare, terminal, machine = null, { localOnly = false } = {}) {
   const shown = await windowShows(terminal, TAB_WAIT_MS, machine);
   if (!shown || shown.space.id !== spare.space) return null;
   if (!spareTab(spare, shown.space.tabs, terminal, true)) return null;
-  const get = await hcGet(machine ? `${machine}/${spare.terminal}` : spare.terminal).catch(() => null);
-  const idle = shellIdle(get, await shellChildren(get, machine));
+  let idle;
+  if (localOnly) idle = await idleLocalSpare(spare.terminal);
+  else {
+    const get = await hcGet(machine ? `${machine}/${spare.terminal}` : spare.terminal).catch(() => null);
+    idle = shellIdle(get, await shellChildren(get, machine));
+  }
   const tab = spareTab(spare, shown.space.tabs, terminal, idle);
   if (!tab) return null;
   const why = await windowDo("tab.close", { id: tab });
@@ -6093,10 +6315,12 @@ const codexFirstLine = (file) => sessionReads.once(file, (f) => firstLineWithIde
 const kimiIndexText = (file) => sessionReads.once(file, (f) => wholeTextWithIdentity(f));
 
 /** hc's live panes on this computer, or null when hc can't list them or can't read one of them. */
-async function livePanes() {
+async function livePanes({ localOnly = false } = {}) {
   try {
-    const rows = rowsOf(await hcJson(["ls"])).filter((r) => local(r?.address) && r.state === "live");
-    const panes = await Promise.all(rows.map((r) => hcLookup(r.address, { strictNotFound: true })));
+    const allowedId = localOnly ? isHcTerminalId : local;
+    const rows = rowsOf(await hcJson(["ls"])).filter((r) => allowedId(r?.address) && r.state === "live");
+    const panes = localOnly ? await localPaneGets(rows)
+      : await Promise.all(rows.map((r) => hcLookup(r.address, { strictNotFound: true })));
     if (panes.some((p) => p !== null && (typeof p.address !== "string" || !p.address || typeof p.state !== "string"))) return null;
     return panes.filter((p) => p?.state === "live");
   } catch { return null; }
@@ -6205,7 +6429,7 @@ function discoveredSession(agentKey, get, ledger, panes, seat) {
  * is never looked at again, so nothing found later can replace what it holds. Never fails: what
  * it couldn't do is left for the next run. Resolves how many it recorded.
  */
-async function recordSessions() {
+async function recordSessions({ localOnly = false } = {}) {
   let recorded = 0;
   resetSessionDiscovery();
   const ledger = workerLedgerRows();
@@ -6213,7 +6437,7 @@ async function recordSessions() {
   if (!sessionsOnDisk() && !seatHomesRecorded(ledger)) return recorded;
   try {
     const agents = agentTable();
-    const gets = await livePanes();
+    const gets = await livePanes({ localOnly });
     for (const get of gets ?? []) {
       if (!get.labels?.[BOT_LABEL] && !get.labels?.[WORKER_OF_LABEL]) continue;
       const start = ledger.findLast((r) => r?.event === "start" && r.terminal === get.address && r.created_ms === get.created_ms) ?? null;
@@ -8008,13 +8232,17 @@ function paneLaunchEnv(get) {
 
 const sameHome = (left, right) => (realDir(left) ?? resolvePath(left)) === (realDir(right) ?? resolvePath(right));
 
-async function checkedPane(address, options) {
-  const get = await hcLookup(address, options);
-  if (!get) return null;
+function verifyPaneIdentity(address, get) {
   if (get.address !== address || !["live", "finished"].includes(get.state)
       || (get.state === "live" && !Number.isSafeInteger(get.created_ms))) {
     throw new CliError(`hc get ${address} gave incomplete pane identity; nothing was started.`);
   }
+}
+
+async function checkedPane(address, options) {
+  const get = await hcLookup(address, options);
+  if (!get) return null;
+  verifyPaneIdentity(address, get);
   return get.state === "live" ? get : null;
 }
 
@@ -8088,9 +8316,9 @@ function bindingInHome(home, botId, core, key) {
  * evidence, and `created_ms` is the terminal's identity, so a finished, vanished or reused
  * terminal reads as stale.
  */
-async function bindingPane(row, key) {
-  const get = await checkedPane(row.terminal);
-  if (get?.created_ms !== row.created_ms) return null;
+async function bindingPane(row, key, { localOnly = false } = {}) {
+  const get = localOnly ? await localLookup(["get", row.terminal]) : await checkedPane(row.terminal);
+  if (get?.state !== "live" || get.created_ms !== row.created_ms) return null;
   if (row.project == null && (!get.cwd || await keyOf(get.cwd) !== key)) return null;
   return get;
 }
@@ -8102,7 +8330,8 @@ async function bindingPane(row, key) {
  * carries (a live pane's launch home). Each row comes with the hc get that says whether it is
  * live, by the one rule above.
  */
-async function botBindings(project, botId, { requestedHome = appHome(), explicit = Boolean(process.env.HERDR_APP_HOME), extraHomes = [] } = {}) {
+async function botBindings(project, botId, { requestedHome = appHome(), explicit = Boolean(process.env.HERDR_APP_HOME),
+  extraHomes = [], localOnly = false } = {}) {
   const core = await coreId();
   const homes = [requestedHome];
   const add = (dir) => { if (dir && !homes.some((h) => sameHome(h, dir))) homes.push(dir); };
@@ -8111,7 +8340,7 @@ async function botBindings(project, botId, { requestedHome = appHome(), explicit
   const rows = [];
   for (const home of homes) {
     const binding = bindingInHome(home, botId, core, project.key);
-    if (binding) rows.push({ home, binding, get: await bindingPane(binding, project.key) });
+    if (binding) rows.push({ home, binding, get: await bindingPane(binding, project.key, { localOnly }) });
   }
   return { core, homes, rows };
 }
@@ -8125,8 +8354,9 @@ async function botBindings(project, botId, { requestedHome = appHome(), explicit
  * Resolves { home, binding, get, live, rows }: the home that owns the bot, its row (null when
  * no ledger names it), the hc get of a live winner, and every row weighed.
  */
-async function resolvedBinding(project, bot, { requestedHome = appHome(), explicit = Boolean(process.env.HERDR_APP_HOME), extraHomes = [] } = {}) {
-  const { rows } = await botBindings(project, bot.id, { requestedHome, explicit, extraHomes });
+async function resolvedBinding(project, bot, { requestedHome = appHome(), explicit = Boolean(process.env.HERDR_APP_HOME),
+  extraHomes = [], localOnly = false } = {}) {
+  const { rows } = await botBindings(project, bot.id, { requestedHome, explicit, extraHomes, localOnly });
   const live = rows.filter((r) => r.get);
   const panes = new Map();
   for (const row of live) if (!panes.has(attachKey(row.binding))) panes.set(attachKey(row.binding), row);
@@ -8153,11 +8383,11 @@ async function resolvedBinding(project, bot, { requestedHome = appHome(), explic
  * app home, when it has a ledger and the selected home's view found no live binding. Never
  * writes; the full refusal stays restart's, and two stale rows read as no live binding here.
  */
-async function projectHomeHeld(project, bot) {
+async function projectHomeHeld(project, bot, { localOnly = false } = {}) {
   if (!project || project.machine || Boolean(process.env.HERDR_APP_HOME)) return null;
   if (!existsSync(attachPath(projectAppHomeOf(project.key)))) return null;
   try {
-    const resolved = await resolvedBinding(project, bot, { requestedHome: appHome() });
+    const resolved = await resolvedBinding(project, bot, { requestedHome: appHome(), localOnly });
     return resolved.get ? { binding: resolved.binding, get: resolved.get, home: resolved.home } : null;
   } catch (e) {
     if (e?.detail?.refused === "app-home") return null;
@@ -11689,7 +11919,7 @@ async function cmdTidy(opts) {
  * prune's note only when the command succeeded: a failed one's last stderr line stays its own
  * error (the sidebar shows that line, restart.js restartAnswer).
  */
-async function tidyQuietly(warnedRelabels) {
+async function tidyQuietly(warnedRelabels, { localOnly = false } = {}) {
   const warnings = [];
   const onRelabelFailure = warnedRelabels ? (failure) => {
     const { terminal, words } = failure;
@@ -11698,7 +11928,7 @@ async function tidyQuietly(warnedRelabels) {
   } : undefined;
   try {
     const io = tidyIo();
-    const actions = tidyPlan(await readState(io, { window: false }), { now: Date.now(), home: io.home, appHome: io.appHome });
+    const actions = tidyPlan(await readState(io, { window: false, localOnly }), { now: Date.now(), home: io.home, appHome: io.appHome });
     report(await fixNonVisual(actions.filter((a) => !a.visual), io, { notes: exitAfter.code === 0, onRelabelFailure }));
   } catch (e) { report([`tidy: ${e?.message ?? e}`]); }
   report(warnings);
@@ -13821,8 +14051,28 @@ const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, m
   proxy: cmdProxy, "launch-path": cmdLaunchPath, accounts: cmdAccounts, revive: cmdRevive, "rate-limit": cmdRateLimit, "delivery-status": cmdDeliveryStatus, holders: cmdHolders, login: cmdLogin, "login-env": cmdLoginEnv };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 
+/** Check local-only usage before help or any project or core work. */
+function localStartUsage(command, opts, ref) {
+  if (command !== "start" || opts.help || opts.version) {
+    return localStartRefusal("usage", "--local-only goes with am start <bot-id> --project DIR only.", 2);
+  }
+  const incompatible = ["machine", "holder", "space", "tab"].find((flag) => opts[flag] !== undefined);
+  if (incompatible) return localStartRefusal("usage", `--local-only can't be used with --${incompatible}.`, 2);
+  if (!opts.project) return localStartRefusal("usage", "--local-only needs a nonempty --project folder.", 2);
+  if (!ref || !BOT_SHAPE.test(ref)) return localStartRefusal("bot-id", "--local-only needs the exact bot id.", 2);
+  return null;
+}
+
 /** Runs one command line; resolves with the exit code. Output goes to stdout, problems to stderr. */
-export async function main(argv = process.argv.slice(2), io = {}) {
+export function main(argv = process.argv.slice(2), io = {}) {
+  // The CLI caches and the pinned process environment belong to one dispatch at a time.
+  const result = lastDispatch.then(() => dispatch(argv, io));
+  lastDispatch = result.catch(() => {});
+  return result;
+}
+
+let lastDispatch = Promise.resolve();
+async function dispatch(argv, io) {
   const at = argv.findIndex((word) => !word.startsWith("-"));
   if (argv[at] === "accounts" && argv.slice(0, at).every((word) => word === "--json")) {
     return accountsMain(argv.slice(at + 1));
@@ -13836,6 +14086,14 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   }
   const { values: opts, positionals, tokens } = parsed;
   const [command, ...rest] = positionals;
+  if (opts["local-only"]) {
+    const refusal = localStartUsage(command, opts, rest[0]);
+    if (refusal) {
+      process.stderr.write(`am: ${refusal.message}\n`);
+      if (opts.json) process.stdout.write(`${JSON.stringify({ error: refusal.message, ...refusal.detail })}\n`);
+      return refusal.code;
+    }
+  }
   const linkedInstall = command === "machines" && rest[0] === "install";
   // #1208: --agent-home starts one new worker (am worker "<task>") on a chosen login folder, and
   // --worker-agent-home is a create or edit field. Anywhere else (help, worker kill, any other
@@ -13869,6 +14127,11 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   }
   const run = COMMANDS[command];
   if (!run) { process.stderr.write(`am: unknown command "${command}"\n\n${USAGE}\n`); return 2; }
+  const transportEnv = opts["local-only"]
+    ? ["HC_SOCKET", "AUTOMAGIK_HERDR_CORE_SOCKET", "HC_SESSION"].map((name) => [name, process.env[name]])
+    : [];
+  const transportCache = [workerTransportOnce, coreOnce, machinesOnce, viewOnce];
+  workerTransportOnce = coreOnce = machinesOnce = viewOnce = null;
   try {
     if (command === "main") checkMainArgs(rest, tokens);
     if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"] || opts.due))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
@@ -13884,15 +14147,16 @@ export async function main(argv = process.argv.slice(2), io = {}) {
       : await run(opts, rest, warnedRelabels);
     if (out === PRINTED) return exitAfter.code;
     const tidyBeforeJson = warnedRelabels !== undefined && opts.json;
+    const locality = { localOnly: opts["local-only"] };
     if (tidyBeforeJson) {
-      const warnings = await tidyQuietly(warnedRelabels);
-      if (warnings.length) (out.warnings ??= []).push(...warnings);
+      const warnings = await tidyQuietly(warnedRelabels, locality);
+      if (warnings.length && !(opts["local-only"] && out.running)) (out.warnings ??= []).push(...warnings);
     }
     if (opts.json) process.stdout.write(unprinted(`${JSON.stringify(out, null, 2)}\n`));
     else if (out) process.stdout.write(unprinted(`${out}\n`));
     if (tidy) {
-      if (!tidyBeforeJson) await tidyQuietly(warnedRelabels);
-      await recordSessions();
+      if (!tidyBeforeJson) await tidyQuietly(warnedRelabels, locality);
+      await recordSessions(locality);
     }
     return exitAfter.code;
   } catch (e) {
@@ -13911,6 +14175,12 @@ export async function main(argv = process.argv.slice(2), io = {}) {
       process.stdout.write(unprinted(`${JSON.stringify({ error: message, ...e.detail, ...(opts.revive && e.loginCode ? { login: e.loginCode } : {}) }, null, 2)}\n`));
     }
     return e instanceof CliError ? e.code : 1;
+  } finally {
+    for (const [name, value] of transportEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    [workerTransportOnce, coreOnce, machinesOnce, viewOnce] = transportCache;
   }
 }
 

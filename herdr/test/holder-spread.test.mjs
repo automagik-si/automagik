@@ -20,6 +20,16 @@ test("the default pool is one local holder and the documented limit", () => {
   assert.match(parseHolders("{not json").warnings[0], /isn't JSON/);
 });
 
+test("strict parsing distinguishes missing holder configuration from malformed present content", () => {
+  const strict = { strict: true };
+  assert.deepEqual(parseHolders(null, strict).warnings, []);
+  assert.deepEqual(parseHolders('{"holders":[]}', strict).warnings, []);
+  for (const text of ["", "  ", '{"holders":"h2"}', '{"holders":[{"name":"h2","session":2}]}']) {
+    assert.ok(parseHolders(text, strict).warnings.length, JSON.stringify(text));
+    assert.deepEqual(parseHolders(text).warnings, []);
+  }
+});
+
 test("the limit and holder names are validated, and bad entries are said and left out", () => {
   const c = parseHolders(JSON.stringify({ limit: 999, holders: [
     { name: "h2" }, "h3", { name: "../bad" }, { name: "h2" }, { name: "local" }, { name: "h4", machine: "x/y" },

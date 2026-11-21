@@ -203,6 +203,13 @@ async function forward(args) {
 
 async function main(args) {
   const [verb, ...rest] = args;
+  if (["update", "rollback", "self", "help", "--help", "-h"].includes(verb)
+    && rest.some((word) => word === "--local-only" || word.startsWith("--local-only="))) {
+    const error = "--local-only goes with am start <bot-id> --project DIR only.";
+    process.stderr.write(`am: ${error}\n`);
+    if (rest.includes("--json")) say(JSON.stringify({ error, refused: "usage" }));
+    return 2;
+  }
   try {
     if (verb === "update") return await update(rest);
     if (verb === "rollback") return rollback(rest);

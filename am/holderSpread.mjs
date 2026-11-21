@@ -41,15 +41,18 @@ export function holderNameProblem(name, holders = []) {
  * default (one local holder); bad JSON or a bad field is said in `warnings` and replaced by its
  * default, never silently reinterpreted. Every pool starts with `local`, unique names only.
  */
-export function parseHolders(text) {
+export function parseHolders(text, { strict = false } = {}) {
   const warnings = [];
   const config = { limit: DEFAULT_HOLDER_LIMIT, holders: [localHolder()] };
-  if (text === null || text === undefined || String(text).trim() === "") return { ...config, warnings };
+  if (text === null || text === undefined || (!strict && String(text).trim() === "")) return { ...config, warnings };
   let raw;
   try { raw = JSON.parse(String(text)); } catch (e) {
     return { ...config, warnings: [`holders: the file isn't JSON (${String(e?.message ?? e).split("\n")[0]}); using one local holder`] };
   }
   if (!isObject(raw)) return { ...config, warnings: ["holders: the file isn't an object; using one local holder"] };
+  if (strict && raw.holders !== undefined && !Array.isArray(raw.holders)) {
+    warnings.push("holders: the holder list isn't an array; using one local holder");
+  }
   if (raw.limit !== undefined) {
     const n = typeof raw.limit === "string" && raw.limit.trim() !== "" ? Number(raw.limit) : raw.limit;
     if (Number.isSafeInteger(n) && n >= 1 && n <= MAX_HOLDER_LIMIT) config.limit = n;
@@ -68,6 +71,11 @@ export function parseHolders(text) {
     const machine = typeof held.machine === "string" && held.machine ? held.machine : name;
     if (!HOLDER_NAME.test(machine)) { warnings.push(`holders: ${name}'s machine ${JSON.stringify(held.machine)} isn't a machine name; left out`); continue; }
     const session = typeof held.session === "string" && held.session ? held.session : null;
+    if (strict && held.session != null && (session === null || !/^[A-Za-z0-9._-]+$/.test(session)
+        || [".", "..", "default"].includes(session))) {
+      warnings.push(`holders: ${name}'s session isn't an extra holder session; left out`);
+      continue;
+    }
     seen.add(name);
     config.holders.push({ name, machine, session });
   }

@@ -23,6 +23,10 @@ import { appendLine, readJsonLines } from "./log-lines.mjs";
 
 const args = process.argv.slice(2);
 appendLine(process.env.HC_FAKE_LOG, JSON.stringify(args));
+const { HC_SOCKET, HC_SESSION, HC_TERMINAL_ID, HC_TERMINAL_SOCKET, AUTOMAGIK_HERDR_CORE_SOCKET, HC_FAKE_ORIGIN } = process.env;
+if (process.env.HC_FAKE_ENV_LOG) appendLine(process.env.HC_FAKE_ENV_LOG, JSON.stringify({
+  argv: args, HC_SOCKET, HC_SESSION, HC_TERMINAL_ID, HC_TERMINAL_SOCKET, AUTOMAGIK_HERDR_CORE_SOCKET, origin: HC_FAKE_ORIGIN,
+}));
 const state = JSON.parse(readFileSync(process.env.HC_FAKE_STATE, "utf8"));
 // The CLI runs several hc calls at once: a save writes a file of its own beside the state and
 // renames it over it (atomic in one folder), so another call never reads one half written.
@@ -312,7 +316,8 @@ switch (words[0]) {
     // state.failRun: names whose hc run fails (a name taken, the server refusing).
     if ((state.failRun ?? []).includes(name)) fail(`hc: can't start ${name}`);
     const n = state.next ?? 100;
-    const address = on ? `${on}/t${n}` : `t${n}`;
+    // Both the run reply and a later get by name return this address.
+    const address = state.runAddress ?? (on ? `${on}/t${n}` : `t${n}`);
     state.next = n + 1;
     // state.runAs: "shell" (the agent never comes in front), "exit" (it ends at once) or
     // "flaky" (its agent is in front for one hc get, then it exits); state.runAsFor[name]: the

@@ -5,6 +5,7 @@
 // the CLI and the tests share it. Apache-2.0.
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { verdictOf } from "../attach.js";
+import { isHcTerminalId } from "../hcProxy.mjs";
 import { BOTS_PATH, PROJECTS_FILE, listedProjects, projectOf } from "../model.js";
 import { labelWordsOf } from "../tidy.js";
 
@@ -57,8 +58,9 @@ export function spacesOf(ls) {
  * herdr-app call rejects: a plan from half a picture would be wrong (except no hc at all with
  * `window: false`: no terminals, so only the registry is checked). With live local terminals,
  * `io.ledger()` gives this core's bindings and the IDs ever recorded locally, or null.
+ * `localOnly: true` reads only canonical local terminal ids.
  */
-export async function readState(io, { window = true } = {}) {
+export async function readState(io, { window = true, localOnly = false } = {}) {
   const json = async (command, args) => {
     const r = await io.run(command, args);
     if (r.code === 127) throw new Error(`${command} is not on PATH`);
@@ -67,16 +69,18 @@ export async function readState(io, { window = true } = {}) {
   };
   // With no hc there are no labels to fix: the window-free read goes on without terminals.
   const ls = await json("hc", ["ls", "--json"]).catch((e) => { if (!window && /is not on PATH/.test(e.message)) return { terminals: [] }; throw e; });
-  const rows = (Array.isArray(ls?.terminals) ? ls.terminals : Array.isArray(ls) ? ls : []).filter((r) => r?.address && r.state === "live");
+  const rows = (Array.isArray(ls?.terminals) ? ls.terminals : Array.isArray(ls) ? ls : [])
+    .filter((r) => r?.address && r.state === "live" && (!localOnly || isHcTerminalId(r.address)));
   const gets = new Map();
-  const terminals = await Promise.all(rows.map(async (row) => {
+  const terminals = (await Promise.all(rows.map(async (row) => {
     if (!local(row.address)) return terminalOf(row, null);
     const r = await io.run("hc", ["get", row.address, "--json"]);
     let get = null;
     try { get = r.code === 0 ? JSON.parse(r.stdout) : null; } catch { get = null; }
+    if (localOnly && get?.address !== row.address) return null;
     gets.set(row.address, get);
     return terminalOf(row, get);
-  }));
+  }))).filter(Boolean);
   const recorded = gets.size && typeof io.ledger === "function" ? await io.ledger() : null;
   // An unanswered get can't confirm the binding, but its bot is still known to the ledger.
   const ledger = recorded && { bound: recorded.bindings.filter((b) => verdictOf(b, gets.get(b.terminal)) === "live")
