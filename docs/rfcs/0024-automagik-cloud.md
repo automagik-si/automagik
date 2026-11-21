@@ -1118,6 +1118,7 @@ host name, issuer or client id in a test or a default config.
    same Bots and chats; the private network, the build host and other workspaces are unreachable
    from inside. *Rollback:* stop the workspace; the image without Cloud mode is a self-hosted
    instance.
+   *Record:* [the public delivery 4 evidence](../cloud/0024-delivery-4-evidence.md).
    *Acceptance (from review):*
    - the gate's session lasts no longer than a workspace token, or rechecks the role; a lowered
      role drops sessions as a removal does;
