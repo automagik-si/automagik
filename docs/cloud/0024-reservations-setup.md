@@ -70,7 +70,8 @@ Verify A's bytes, owner, group, mode and modification time are unchanged. Each o
 able to remove their own file. For the app check, use the fake identity in
 `apps/bots-dsh/test/fixtures/reservation-driver.mjs` with the staged layout in the plugin CI
 step. Reserve as A, then run the `check` operation as B and verify it reports A's label and a
-guarded sign-out of the fake Bot account. This macOS procedure has yet to be run for R4.
+guarded sign-out of the fake Bot account. CI's `reservations-macos` job runs this procedure on a
+native Mac on every change, with the default folder and the setup above.
 
 <!-- setup-script:start -->
 ```sh

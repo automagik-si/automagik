@@ -6,7 +6,6 @@
 // DSH's and from other plugins'.
 import { randomBytes } from 'node:crypto'
 import fs, { cpSync, existsSync } from 'node:fs'
-import os from 'node:os'
 import { join } from 'node:path'
 import { selectorRoutePolicy } from './src/shared/routes.js'
 import { DEFAULT_ROUTE_POLICY } from './src/shared/route-policy.js'
@@ -20,6 +19,7 @@ import * as modelAccessHooks from './src/host/model-access-hooks.js'
 import * as cliLogin from './src/host/cli-login.js'
 import { RESERVATION_FILE } from './src/host/account-reservations.js'
 import { createMachineRecord, reservationsDir } from './src/host/machine-reservations.js'
+import { userName } from './src/host/user-name.js'
 import * as acpAdoption from './src/host/acp-adoption.js'
 import * as subscriptionMove from './src/host/subscription-move.js'
 import * as providers from './src/host/providers.js'
@@ -104,16 +104,6 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 const random = (size, encoding) => randomBytes(size).toString(encoding)
 const sleepWord = new Int32Array(new SharedArrayBuffer(4))
 const sleep = ms => Atomics.wait(sleepWord, 0, 0, ms)
-let passwd
-function userName(uid) {
-  try {
-    if (uid === process.getuid?.()) return os.userInfo().username
-    passwd ??= fs.readFileSync('/etc/passwd', 'utf8').split('\n').map(line => line.split(':'))
-    const entry = passwd.find(([, , id]) => id === String(uid))
-    if (entry?.[0]) return entry[0]
-  } catch {}
-  return `uid ${uid}`
-}
 
 const machineOf = rt => rt.machineRecord ??= createMachineRecord({
   fs, platform: process.platform, pid: process.pid, dir: () => reservationsDir(),

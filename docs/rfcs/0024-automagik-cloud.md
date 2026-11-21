@@ -1391,7 +1391,8 @@ Each is one PR per lane, in this order.
   and is ignored.
 - **R5. The Cloud registry** (later, after delivery 6). The same record version 1 served by the
   Cloud service per organisation, with a key per organisation, so a reservation holds across the
-  owner's machines. Its own amendment when delivery 6 is planned.
+  owner's machines. Its own amendment when delivery 6 is planned. R0-R4 closed #1426 (decided by the
+  owner's delegate, 2026-11-21): R5 is tracked here, with delivery 6, not in that issue.
 
 ### Questions for the owner
 
