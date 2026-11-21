@@ -38,6 +38,7 @@ import { QuestionCard, QuestionDock } from './questions.js'
 import { DesktopUpdate, DESKTOP_UPDATE_CSS } from './desktop-update.js'
 import { WORK_CODE_SWITCH_CSS } from './work-code-switch.js'
 import { CODE_PANEL, CodeMainPanel, codePanelNavigation, installCodeSide } from './code-side.js'
+import { CodeStartMenu, CodeStartStatus } from './code-start-menu.js'
 import { LEFT_BAR_CSS } from './left-bar-css.js'
 import { installBarWidth } from './left-bar-width.js'
 import { PRIVACY_CSS } from './privacy.js'
@@ -1246,7 +1247,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   // so a surface change withdraws the whole group and the outlets re-render.
   const installShell = () => [
     () => installCompiledStyles(SHELL_CSS, 'shell'),
-    () => installCodeSide(ctx),
+    () => installCodeSide(ctx, { start: { Menu: CodeStartMenu, Status: CodeStartStatus } }),
     () => installCompiledStyles(SIDEBAR_CSS, 'sidebar'),
     () => installCompiledStyles(LEFT_BAR_CSS, 'left-bar'),
     () => installBarWidth(),

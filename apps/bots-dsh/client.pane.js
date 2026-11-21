@@ -12416,6 +12416,29 @@ var HOST_ZH = {
   "Reading…": "读取中…",
   "Code team": "代码团队",
   "Global Bots": "全局 Bot",
+  "Start an existing Bot": "启动已有的 Bot",
+  "Every Bot on this computer is running.": "本机的每个 Bot 都在运行。",
+  "Starting {name}…": "正在启动 {name}…",
+  "{name} started.": "{name} 已启动。",
+  "{name} is already running.": "{name} 已在运行。",
+  "Still starting. The tree updates when it is up.": "仍在启动。启动后列表会自动更新。",
+  "Another start is running. Try again in a moment.": "另一个启动正在进行。请稍后再试。",
+  "Start Bots from the Automagik app on this computer.": "请在本机的 Automagik 应用中启动 Bot。",
+  "This team is read only here.": "此团队在这里是只读的。",
+  "This Bot is not on this computer.": "此 Bot 不在本机上。",
+  "A Bot with no folder can’t be started from here yet.": "没有文件夹的 Bot 暂时无法从这里启动。",
+  "This Bot’s folder is missing.": "此 Bot 的文件夹不存在。",
+  "This Bot is listed in more than one folder. Start it with am start in the folder you mean.": "此 Bot 出现在多个文件夹中。请在你要的文件夹中用 am start 启动它。",
+  "This Bot isn’t in its project’s Herdr team file, so am can’t start it.": "此 Bot 不在其项目的 Herdr 团队文件中，因此 am 无法启动它。",
+  "This Bot can’t start yet. Check it with am show.": "此 Bot 暂时无法启动。请用 am show 检查。",
+  "This Bot already has a seat elsewhere, or another start is placing it.": "此 Bot 已在别处运行，或另一个启动正在安置它。",
+  "herdr-core isn’t running on this computer.": "herdr-core 未在本机运行。",
+  "Update am to start Bots from here: am update.": "更新 am 后即可从这里启动 Bot：am update。",
+  "am isn’t installed on this computer.": "本机未安装 am。",
+  "The start failed. Run am start in a terminal to see why.": "启动失败。请在终端运行 am start 查看原因。",
+  "The start’s result is unknown. The tree was read again.": "启动结果未知。已重新读取列表。",
+  "This Bot’s project file can’t be checked from here. Start it with am start in a terminal.": "无法在这里检查此 Bot 的项目文件。请在终端用 am start 启动它。",
+  "Starts in {folder}": "在 {folder} 中启动",
   "The Code side could not read this computer’s team.": "代码端无法读取本机的团队。",
   "No project has a Bot on this computer yet.": "本机还没有任何项目包含 Bot。",
   "Reading this computer’s team…": "正在读取本机的团队…",
@@ -16120,7 +16143,7 @@ var TreeFold = ({ label, title, open, onClick }) => (0, import_react3.createElem
   (0, import_react3.createElement)("span", { className: "lb-name" }, label),
   (0, import_react3.createElement)("span", { className: open ? "lb-chev lb-chev-open" : "lb-chev" }, (0, import_react3.createElement)(ChevronRightIcon))
 );
-function CodeTree({ current, onSelect, sidebar = false, herdr }) {
+function CodeTree({ current, onSelect, sidebar = false, herdr, newControl = null, newStatus = null }) {
   const { tree, loading, error, selected, beside = [] } = current;
   const shown = [selected, ...beside].filter(Boolean);
   const isCurrent = (botId, worker = null) => shown.some((pane) => pane.botId === botId && (pane.worker ?? null) === worker);
@@ -16172,7 +16195,8 @@ function CodeTree({ current, onSelect, sidebar = false, herdr }) {
     "nav",
     { className: sidebar ? "lb-rows" : "cs-tree", "aria-label": t("Code team") },
     herdr?.notices,
-    sidebar && tree?.machine ? (0, import_react3.createElement)(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }) : null,
+    sidebar && tree?.machine ? (0, import_react3.createElement)("div", { className: "cs-machine-line" }, (0, import_react3.createElement)(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }), newControl) : null,
+    sidebar ? newStatus : null,
     error || sidebar && tree?.reason === "no-core" ? (0, import_react3.createElement)("p", { className: "cs-empty" }, t("The Code side could not read this computer’s team.")) : null,
     !error && projects.length === 0 && !loading && (!sidebar || tree?.reason !== "no-core") ? (0, import_react3.createElement)("p", { className: "cs-empty" }, t("No project has a Bot on this computer yet.")) : null,
     loading && !tree ? (0, import_react3.createElement)("p", { className: "cs-empty" }, t("Reading this computer’s team…")) : null,
@@ -16201,7 +16225,7 @@ function CodeTerminal({ tree, selected, beside = [], refused, loading }) {
 function CodeBody({ code }) {
   const current = (0, import_react3.useSyncExternalStore)(code.subscribe, code.snapshot, code.snapshot);
   const { tree, loading, error, selected, beside, refused } = current;
-  const { loadTree, selectPane, herdr } = code;
+  const { loadTree, selectPane, herdr, newControl = null, newStatus = null } = code;
   (0, import_react3.useEffect)(() => {
     if (!tree && !loading && !error) void loadTree();
   }, [loadTree, tree, loading, error]);
@@ -16214,7 +16238,9 @@ function CodeBody({ code }) {
       "div",
       { className: "cs-top" },
       (0, import_react3.createElement)("span", { className: "cs-machine" }, tree?.machine?.name ?? t("This computer")),
-      (0, import_react3.createElement)("span", { className: "cs-count" }, projectCount)
+      (0, import_react3.createElement)("span", { className: "cs-count" }, projectCount),
+      newStatus,
+      tree?.machine ? newControl : null
     ),
     (0, import_react3.createElement)(
       "div",
@@ -16235,6 +16261,10 @@ var CODE_SIDE_CSS = `
 .cs-count{color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 12.5px/1.3 var(--bt-font)}
 .cs-btn{margin-left:auto;height:26px;padding:0 12px;border:1px solid var(--lb-line,var(--bt-line));border-radius:999px;background:none;color:var(--bt-ink);font:var(--bt-weight-label,500) 13px/1 var(--bt-head-font,var(--bt-font));cursor:pointer}
 .cs-btn:disabled{opacity:.55;cursor:default}
+.cs-machine-line{display:flex;align-items:center;gap:6px}
+.cs-machine-line>.lb-row{flex:1;min-width:0}
+.cs-start-menu button:disabled{color:var(--bt-ink-3);cursor:default;background:none}
+.cs-start-menu .bt-folder-path[data-wrap]{white-space:normal}
 .cs-body{display:flex;flex:1;min-height:0}
 .cs-tree{width:var(--lb-list-w,264px);min-width:184px;max-width:42%;overflow:auto;padding:8px;border-right:1px solid var(--lb-line,var(--bt-line));background:var(--bt-card);flex:none}
 .cs-project{margin:0 0 10px}

@@ -190,6 +190,7 @@
       "capability-delete",
       "capability-save",
       "checkpoint-bot",
+      "code-start",
       "create-bot",
       "delete-bot",
       "duplicate-bot",

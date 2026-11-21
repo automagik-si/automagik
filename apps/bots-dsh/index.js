@@ -84,6 +84,7 @@ import * as thinking from './src/host/thinking.js'
 import * as fallback from './src/host/fallback.js'
 import * as channel from './src/host/channel.js'
 import * as codeSide from './src/host/code-side.js'
+import * as codeStart from './src/host/code-start.js'
 import * as automations from './src/host/automations.js'
 import * as accounts from './src/host/accounts.js'
 import * as agentSpace from './src/host/agent-space.js'
@@ -131,7 +132,7 @@ const MODULES = [
   }) },
   sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
-  update, selfUpdate, selfUpdateCheck, selfUpdateHold, dshUpdate, thinking, agentSpace, feed, codeSide, automations, accounts, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
+  update, selfUpdate, selfUpdateCheck, selfUpdateHold, dshUpdate, thinking, agentSpace, feed, codeSide, codeStart, automations, accounts, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
   officeSkills, goalSkills,
 ]
 

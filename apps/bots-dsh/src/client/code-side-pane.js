@@ -474,7 +474,7 @@ const TreeFold = ({ label, title, open, onClick }) => h('button', {
   h('span', { className: 'lb-name' }, label),
   h('span', { className: open ? 'lb-chev lb-chev-open' : 'lb-chev' }, h(ChevronRightIcon)))
 
-export function CodeTree({ current, onSelect, sidebar = false, herdr }) {
+export function CodeTree({ current, onSelect, sidebar = false, herdr, newControl = null, newStatus = null }) {
   const { tree, loading, error, selected, beside = [] } = current
   const shown = [selected, ...beside].filter(Boolean)
   const isCurrent = (botId, worker = null) => shown.some(pane => pane.botId === botId && (pane.worker ?? null) === worker)
@@ -519,7 +519,8 @@ export function CodeTree({ current, onSelect, sidebar = false, herdr }) {
   }) : null
   return h('nav', { className: sidebar ? 'lb-rows' : 'cs-tree', 'aria-label': t('Code team') },
     herdr?.notices,
-    sidebar && tree?.machine ? h(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }) : null,
+    sidebar && tree?.machine ? h('div', { className: 'cs-machine-line' }, h(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }), newControl) : null,
+    sidebar ? newStatus : null,
     error || (sidebar && tree?.reason === 'no-core') ? h('p', { className: 'cs-empty' }, t('The Code side could not read this computer’s team.')) : null,
     !error && projects.length === 0 && !loading && (!sidebar || tree?.reason !== 'no-core') ? h('p', { className: 'cs-empty' }, t('No project has a Bot on this computer yet.')) : null,
     loading && !tree ? h('p', { className: 'cs-empty' }, t('Reading this computer’s team…')) : null,
@@ -550,7 +551,7 @@ export function CodeTerminal({ tree, selected, beside = [], refused, loading }) 
 export function CodeBody({ code }) {
   const current = useSyncExternalStore(code.subscribe, code.snapshot, code.snapshot)
   const { tree, loading, error, selected, beside, refused } = current
-  const { loadTree, selectPane, herdr } = code
+  const { loadTree, selectPane, herdr, newControl = null, newStatus = null } = code
   useEffect(() => {
     if (!tree && !loading && !error) void loadTree()
   }, [loadTree, tree, loading, error])
@@ -559,7 +560,9 @@ export function CodeBody({ code }) {
   return h('div', { className: 'cs-host' },
     h('div', { className: 'cs-top' },
       h('span', { className: 'cs-machine' }, tree?.machine?.name ?? t('This computer')),
-      h('span', { className: 'cs-count' }, projectCount)),
+      h('span', { className: 'cs-count' }, projectCount),
+      newStatus,
+      tree?.machine ? newControl : null),
     h('div', { className: 'cs-body' },
       h(CodeTree, { current, onSelect: selectPane, herdr }),
       h('section', { className: 'cs-view' }, h(CodeTerminal, { tree, selected, beside, refused, loading }))))
@@ -579,6 +582,10 @@ export const CODE_SIDE_CSS = `
 .cs-count{color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 12.5px/1.3 var(--bt-font)}
 .cs-btn{margin-left:auto;height:26px;padding:0 12px;border:1px solid var(--lb-line,var(--bt-line));border-radius:999px;background:none;color:var(--bt-ink);font:var(--bt-weight-label,500) 13px/1 var(--bt-head-font,var(--bt-font));cursor:pointer}
 .cs-btn:disabled{opacity:.55;cursor:default}
+.cs-machine-line{display:flex;align-items:center;gap:6px}
+.cs-machine-line>.lb-row{flex:1;min-width:0}
+.cs-start-menu button:disabled{color:var(--bt-ink-3);cursor:default;background:none}
+.cs-start-menu .bt-folder-path[data-wrap]{white-space:normal}
 .cs-body{display:flex;flex:1;min-height:0}
 .cs-tree{width:var(--lb-list-w,264px);min-width:184px;max-width:42%;overflow:auto;padding:8px;border-right:1px solid var(--lb-line,var(--bt-line));background:var(--bt-card);flex:none}
 .cs-project{margin:0 0 10px}

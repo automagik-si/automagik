@@ -587,7 +587,9 @@ export function install(rt) {
       const added = rt.extended.endpointOf(endpoint)
       if (readOnly !== undefined && !READS.has(endpoint) && !AGENT_TOOLS.some(tool => tool.read
         && tool.endpoint === endpoint) && added?.read !== true) {
-        return fail(endpoint === 'accounts-claude-use' ? 'This host can only read accounts.' : readOnly, 'bot/read-only')
+        // A window endpoint's refusal never carries the reason itself: it names the team's files and host.
+        const fixed = { 'accounts-claude-use': 'This host can only read accounts.', 'code-start': 'This host can only read the team.' }
+        return fail(Object.hasOwn(fixed, endpoint) ? fixed[endpoint] : readOnly, 'bot/read-only')
       }
       if (CODE_GUARDED.has(endpoint) && textsOf(body).some(text => rt.loginTextMatches?.(text) === true)) return fail(CODE_REFUSED, 'bot/refused')
       if (CLI_LOGIN.has(endpoint)) return ok(await rt.cliLoginActions[endpoint](body))
