@@ -142,6 +142,12 @@ test("a Bot gets its own layout, environment, uid and gid through the socket", a
   }
   const calls = f.bin.calls("unshare");
   assert.equal(calls.length, 2);
+  // Provisioning: the runner as 0 inside and the Bot's own ids, with ONE range each. util-linux
+  // 2.39 (ubuntu-24.04) keeps only the last of several --map-users (CI runner-vm measured it).
+  assert.deepEqual(calls[0].filter((arg) => arg.startsWith("--map-")), [
+    "--map-user=0", `--map-users=${uidStart}:${uidStart}:1`,
+    "--map-group=0", `--map-groups=${gidStart}:${gidStart}:1`,
+  ]);
   assert.deepEqual(calls[1].filter((arg) => arg.startsWith("--map-")), [
     `--map-users=${uidStart}:${uidStart}:1`, `--map-groups=${gidStart}:${gidStart}:1`,
   ]);

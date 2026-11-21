@@ -187,12 +187,18 @@ export function provisionCli(argv) {
   }
 }
 
-/** A user namespace for the member's own uid, unshare's newuidmap/newgidmap path. */
+/**
+ * A user namespace for the member's own uid, unshare's newuidmap/newgidmap path: the runner's own
+ * uid and gid become 0 inside (--map-user=0, --map-group=0) and the member's map to themselves (one
+ * --map-users and one --map-groups range). util-linux 2.39 keeps only the last of several
+ * --map-users, so two ranges there would leave the helper as nobody and every home the runner's;
+ * one --map-user plus one range is the same newuidmap call on 2.39 and on later versions.
+ */
 export function provisionArgs(host, ids, home, area, cwd) {
   return [
-    `--map-users=0:${host.uid}:1`,
+    "--map-user=0",
     `--map-users=${ids.uid}:${ids.uid}:1`,
-    `--map-groups=0:${host.gid}:1`,
+    "--map-group=0",
     `--map-groups=${ids.gid}:${ids.gid}:1`,
     "--",
     process.execPath,
