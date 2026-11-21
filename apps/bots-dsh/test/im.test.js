@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -109,7 +110,7 @@ async function start({ platform = 'telegram', adapter, seed, prepare } = {}) {
   // the one after it, and the last one's is the test's. Automagik has answerers ahead
   // of the team's own (the phone's, the Auto review), which pass a request on.
   const fireApprovals = async (request, next) => {
-    const chain = ctx.listeners.get('approval/request') ?? []
+    const chain = [...(ctx.listeners.get('approval/request') ?? [])].reverse()
     const run = at => (at === chain.length ? next() : chain[at](request, () => run(at + 1)))
     return [await run(0)]
   }
@@ -397,6 +398,59 @@ test('own-chat approval races DSH: IM allow resolves and withdraws the card; lat
   await s.fake.handlers.onAction({ chat: { key: 'dm-u1', kind: 'direct', title: 'U1' }, sender: { id: 'u1', name: 'U1' }, data: `a:${approvalId}:allow`, messageId: 1 })
   assert.match(s.fake.sent.at(-1).text, /already answered/)
   void seenSignal
+})
+
+test('an active IM connection sends and stores only the placeholder for a credential approval', async t => {
+  const s = await start()
+  t.after(s.stop)
+  const conn = await add(s)
+  s.rt.state.im.connections[conn.id].paired.push({ id: 'u1', name: 'U1', at: 1 })
+  await s.rt.save()
+  await dm(s, 'u1', 'hi')
+  s.fake.sent.length = 0
+  const target = randomUUID(), value = randomUUID()
+  const command = 'cmdkey /generic:' + target + ' /' + 'pass' + ':' + value
+  t.mock.method(s.rt, 'callDetail', () => ({ text: target, code: value }))
+  const original = new AbortController()
+  const pending = s.fireApprovals({
+    agent: s.agentOf('a'), toolName: 'bash', callId: 'im-credential',
+    reason: 'Run ' + command, input: { command }, signal: original.signal,
+  }, () => new Promise(() => {}))
+  t.after(() => original.abort())
+  const hidden = 'a credential command, not shown'
+  const guidance = 'Review this approval on your computer.'
+  await until(() => s.fake.sent.some(row => row.text.includes(hidden)))
+  const card = s.fake.sent.find(row => row.text.includes(hidden))
+  assert.equal(card.buttons, undefined)
+  assert.match(card.text, /Review this approval on your computer/)
+  const [localApproval] = s.rt.approvalsView()
+  const cardKey = 'a:' + localApproval.id
+  assert.equal(localApproval.detail.text === target && localApproval.detail.code === value, true)
+  const path = join(s.home, 'im', conn.id + '.json')
+  let disk
+  await until(() => {
+    if (!existsSync(path)) return false
+    disk = readFileSync(path, 'utf8')
+    return JSON.parse(disk).cards[cardKey]?.some(row => row.chatKey === 'dm-u1')
+  }, { label: 'the IM card receipt is saved' })
+  assert.equal(card.text.includes(hidden), true)
+  assert.equal(disk.includes(hidden), true)
+  const needles = [target, value].flatMap(marker => [marker, Buffer.from(marker).toString('base64')])
+  for (const surface of [JSON.stringify(s.fake.sent), disk]) {
+    assert.equal(needles.some(needle => surface.includes(needle)), false, 'IM keeps both canaries private')
+  }
+  const chat = { key: 'dm-u1', kind: 'direct', title: 'U1' }
+  for (const choice of ['allow', 'reject']) {
+    await s.fake.handlers.onAction({ chat, sender: { id: 'u1', name: 'U1' }, data: cardKey + ':' + choice, messageId: 1 })
+    assert.equal(s.fake.sent.at(-1).text, guidance)
+  }
+  const beforeNumber = s.prompts.length
+  await dm(s, 'u1', '1')
+  assert.equal(s.fake.sent.at(-1).text, guidance)
+  assert.equal(s.prompts.length, beforeNumber)
+  assert.equal(s.rt.approvalsView().some(row => row.id === localApproval.id && row.answerable), true)
+  original.abort()
+  assert.deepEqual(await pending, ['cancelled'])
 })
 
 test('an approval button answers its own card, not the newest one in the chat', async (t) => {

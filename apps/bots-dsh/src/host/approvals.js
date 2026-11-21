@@ -36,6 +36,8 @@ export function install(rt) {
   /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string, decidedBy?:string, why?:string)=>boolean}>} */
   const pending = new Map()
   const folderIds = new Set()
+  // Approvals whose command is credential-sensitive are answered only on the local card.
+  const localOnly = new WeakSet()
   let pendingRevision = 0
   const admit = (id, entry) => {
     pending.set(id, entry)
@@ -148,9 +150,11 @@ export function install(rt) {
     owners.set(entry, owner !== undefined ? ownerRecord('group', owner.botId, { roomId: owner.roomId })
       : chat !== undefined ? ownerRecord('chat', chat)
         : task !== undefined ? ownerRecord('task', task.from, { task }) : ownerRecord('run', runOwner?.botId))
-    rt.noteApproval?.(sessionId, { tool: entry.tool, reason: entry.reason.slice(0, 200) })
+    const privateNote = rt.privateApprovalNote?.(request)
+    if (privateNote !== undefined) localOnly.add(entry)
+    rt.noteApproval?.(sessionId, privateNote ?? { tool: entry.tool, reason: entry.reason.slice(0, 200) })
     rt.approvalWaiting?.(entry)
-    emit('open', { ...entry, answerable: true })
+    emit('open', { ...entry, ...(privateNote && { ...privateNote, detail: {}, localReview: true }), answerable: true })
     const settle = (outcome, decidedBy = 'dsh', why) => {
       if (!take(id)) return false
       folderIds.delete(id)
@@ -263,6 +267,9 @@ export function install(rt) {
   function answerApproval(id, choice, client = 'web') {
     const entry = pending.get(String(id ?? ''))
     if (entry?.answer === undefined) throw Object.assign(new Error('This approval is no longer open'), { code: 'bot/stale' })
+    if (client === 'im' && localOnly.has(entry)) {
+      throw Object.assign(new Error('Review this approval on your computer.'), { code: 'bot/local-approval' })
+    }
     const outcome = OUTCOMES[choice]
     if (outcome === undefined) throw Object.assign(new Error('Choose allow or reject'), { code: 'bot/invalid' })
     // The record of the decision names the kind of client that made it, and `settle` adds
