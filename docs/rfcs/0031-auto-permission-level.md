@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1092; questions 1-6 answered with this RFC's own recommendations, see Answers; merged: delivery 1 (#1085), delivery 2 (#1106), the 2026-11-13 amendment (#1264), and Auto on every route (#1110), which went past this RFC's "Not scheduled" list; owed: question 5's capture of Claude Code's `auto` mode, and the amendment's unmet dependency on Codex; the 2026-11-19 amendment (#870, Auto on Codex under the Workspace profile) approved by the owner's delegate on 2026-11-20, A1 and A2 answered with its recommendations, owes delivery 3 (the wording) and delivery 4 (waits for codex-acp); amends RFC 0003 with its delivery 2) |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1092; questions 1-6 answered with this RFC's own recommendations, see Answers; merged: delivery 1 (#1085), delivery 2 (#1106), the 2026-11-13 amendment (#1264), and Auto on every route (#1110), which went past this RFC's "Not scheduled" list; question 5 answered by the owner's delegate on 2026-11-21 (Claude Code stays off Auto until a signed-in capture, see Answers); the amendment's Omni senders registered (automagik-si/omni#1813) and its Codex dependency prepared as an upstream request for the owner (2026-11-21; submission and enforcement outstanding); the 2026-11-19 amendment (#870, Auto on Codex under the Workspace profile) approved by the owner's delegate on 2026-11-20, A1 and A2 answered with its recommendations, owes delivery 3 (the wording) and delivery 4 (waits for codex-acp); amends RFC 0003 with its delivery 2) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-11 |
@@ -257,6 +257,25 @@ blocking pre-execution request carrying tool, arguments and cwd. Until then Auto
 keeps Codex's reviewer as the only check for built-ins. The confirmation text is in the
 client, so this amendment records the gap without changing the client.
 
+Status of the dependency (2026-11-21): the request is written for the owner and not yet
+submitted: in codex-acp's `agent` mode, a per-session list of actions that always reach the
+client as `session/request_permission` before Codex's reviewer, or a blocking pre-execution
+request. Its acceptance case is a matching built-in that waits for the client's answer even when
+the reviewer would approve it. Codex's app-server picks the reviewer, so Codex itself may need
+the matching setting. Enforcement stays outstanding until upstream ships it. The per-mode
+reviewer of the 2026-11-19 amendment (#870) is a separate request.
+
+**Omni's senders (2026-11-21, decided by the owner's delegate, recommended option):** Omni
+registers the outside messages that leave with no confirmation card of its own and that the call
+alone shows (automagik-si/omni#1813): an `omni_call` post into a group or channel, and a presence
+update that shows text. Its classifier uses the Session the team now passes
+(`{ tool, args, sessionId }`) and flags nothing in Omni's automation event runs and chat threads,
+which confirm or refuse every outside act by Omni's own rules. Sends to a person and deletes are
+left off because Omni's `omniPermit` already confirms them on its card when the tool executes,
+where no judge answers; flagging them would add a second question. Also left off: `omni_send`
+(its destination is only known after a lookup at execute, so a group send through it keeps Omni's
+grant rules, given by the person or by a Main or Omni Bot's role) and reactions.
+
 Delivery acceptance: the total judge deadline includes background-model lookup and model
 information lookup, and ignores a late stream even if it ignores abort. Own-model grants
 bind the cleaned arguments as well as call id, tool, reason, route and revision; when the
@@ -393,6 +412,15 @@ answer, the answer says so.
    Code is not captured yet"). Owed: that capture, or the owner's decision to keep Claude Code on
    Auto without it. Until then Auto is withheld on Claude Code again: acp-dsh no longer asks it
    for its own mode, and a saved Claude Code Auto runs as Workspace and is cleared (#1092).
+   Decided by the owner's delegate on 2026-11-21 (recommended option): Claude Code stays off Auto
+   until a signed-in capture and the bridge's design exist; that answers this question for now.
+   A scripted local model cannot stand in for the capture: it cannot show whether a given CLI,
+   adapter and model really enter `auto`, because the adapter can fall back to `acceptEdits` and the
+   CLI's review can happen inside the main model exchange. The capture is the owner's step, because
+   it needs a signed-in account. It should pin the CLI, adapter, model and tool surface, run in an
+   isolated environment with synthetic files, and record per turn: requested and effective mode,
+   fallback notices, tool and permission ids, offered and chosen options, final status and effect.
+   Leave out headers and raw transcripts.
 6. **Question 6:** keep both names, "Auto" and DSH's "Auto review"; they are different levels and
    the second is marked Experimental.
 
