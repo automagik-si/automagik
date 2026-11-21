@@ -170,8 +170,9 @@ endpoints) refuse `anthropic` and `openai-codex`: nothing here starts DSH's own 
 ChatGPT plan sign-in. Images and the companion's drawing on a ChatGPT plan go through Codex's
 own sign-in (acp-dsh's `generateImage`); an `openai-codex` record an earlier version stored is
 read as a last resort only when acp-dsh answers normally and declares a shared auth scope.
-An OpenAI API key draws as before. dsh-subscriptions no
-longer ships `claude` or `codex` (0.7.21-omni.1), so nothing stands for them.
+An OpenAI API key given to the app draws as before; one only inherited from the environment
+does not (#869). dsh-subscriptions no longer ships `claude` or `codex` (0.7.21-omni.1), so
+nothing stands for them.
 
 The route earlier versions added for DSH's Claude sign-in did not retry a 429 (`retryPolicy`
 without `RATE_LIMIT`). A route on an API key keeps DSH's default retries, also one such a

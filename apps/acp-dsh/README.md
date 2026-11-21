@@ -688,8 +688,9 @@ an injected request could put a local file's contents into a picture shown in ch
 Tool checks and permission refusals alone do not prevent these reads. Prompt text itself is
 outside the file boundary and still reaches the model.
 
-To avoid `generate_image`'s one-off Codex session, configure an OpenAI API key for the Images
-API, or turn Codex off in the agent settings. Keep secrets out of the prompt. A Bot running
+To avoid `generate_image`'s one-off Codex session, give the app an OpenAI API key for the Images
+API (one only inherited from the environment is not used, #869), or turn Codex off in the agent
+settings. Keep secrets out of the prompt. A Bot running
 on Codex can still invoke its own image tool even with an API key configured. Use a different
 Bot model or turn Codex off to avoid that route. Avoid forwarding untrusted channel messages
 or other outside text into Codex drawing requests. Prompt review cannot enforce a file boundary.

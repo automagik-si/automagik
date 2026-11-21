@@ -1747,6 +1747,7 @@
   "Not connected": "Não conectado",
   "Your ChatGPT account": "Sua conta do ChatGPT",
   "Your OpenAI key": "Sua chave da OpenAI",
+  "An OPENAI_API_KEY from the environment is not used for images. Sign in to Codex from a Bot's chat, or save that key in Settings → Models.": "Uma OPENAI_API_KEY do ambiente não é usada para imagens. Entre no Codex pelo chat de um Bot, ou salve essa chave em Configurações → Modelos.",
   "Sign in to Codex from a Bot's chat, and every Bot can draw images in its chats.": "Entre no Codex pelo chat de um Bot, e cada Bot pode desenhar imagens nos chats.",
   "Codex, on your ChatGPT plan": "Codex, no seu plano do ChatGPT",
   "Every Bot can draw images in its chats. They are saved in the team workspace's images folder.": "Cada Bot pode desenhar imagens nos chats. As imagens são salvas na pasta images da área de trabalho da equipe.",

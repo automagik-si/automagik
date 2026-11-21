@@ -1147,8 +1147,9 @@ export function install(rt) {
           return ok(rt.roleRuntime.voice.acknowledge(body))
         // The Privacy page (privacy.js): what the desktop app may share, all off until switched on.
         // Images (imagegen.js): how they are made here, and a generation's progress for its card.
+        // `detail: true` also asks why an inherited key was skipped when nothing can draw.
         case 'image-access':
-          return ok(await rt.images.access())
+          return ok(body.detail === true ? await rt.images.accessDetail() : await rt.images.access())
         case 'image-progress':
           return ok(rt.images.progress(String(body.callId ?? ''), body.seen))
         // Pets (pets.js): the Codex-format avatars on this computer, and codex-pets.net's.

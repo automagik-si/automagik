@@ -3004,6 +3004,7 @@ var ZH = {
   "Drawn with": "绘制方式",
   "Your ChatGPT account": "你的 ChatGPT 账户",
   "Your OpenAI key": "你的 OpenAI 密钥",
+  "An OPENAI_API_KEY from the environment is not used for images. Sign in to Codex from a Bot's chat, or save that key in Settings → Models.": "环境中的 OPENAI_API_KEY 不会用于图片。请在 Bot 的聊天中登录 Codex，或将该密钥保存在设置 → 模型中。",
   "Sign in to Codex from a Bot's chat, and every Bot can draw images in its chats.": "在 Bot 的聊天中登录 Codex 后，每个 Bot 都能在聊天中绘制图片。",
   "Codex, on your ChatGPT plan": "Codex，使用你的 ChatGPT 套餐",
   "Every Bot can draw images in its chats. They are saved in the team workspace's images folder.": "每个 Bot 都能在聊天中绘制图片，图片保存在团队工作区的 images 文件夹中。",
@@ -14474,17 +14475,24 @@ body[data-bt-motion=quiet] :is(.bt-img-omni,.bt-img-dot,.bt-img-partial,.bt-img-
 body[data-bt-motion=quiet] :is(.bt-img-dab,.bt-img-spark,.bt-img-pic){display:none}
 body[data-bt-motion=quiet] .bt-img-glow{opacity:.6}
 ${IMAGE_VIEWER_CSS}`;
-function ImagesSection({ Section: Section3, Row: Row3 }) {
-  const [access, setAccess] = (0, import_react30.useState)(void 0);
-  (0, import_react30.useEffect)(() => {
-    void call("image-access").then(setAccess, () => setAccess(null));
-  }, []);
+function imagesRowOf(reply) {
+  const detailed = reply !== null && typeof reply === "object" && Object.hasOwn(reply, "access");
+  const access = detailed ? reply.access : reply;
+  const ignored = detailed && reply.environmentKey === "ignored";
   const label = access === void 0 ? t("Loading…") : access === null ? t("Not connected") : access.kind === "codex" ? t("Codex, on your ChatGPT plan") : access.kind === "chatgpt" ? t("Your ChatGPT account") : t("Your OpenAI key");
-  const hint3 = access === null ? t("Sign in to Codex from a Bot's chat, and every Bot can draw images in its chats.") : t("Every Bot can draw images in its chats. They are saved in the team workspace's images folder.");
+  const hint3 = access === null ? ignored ? t("An OPENAI_API_KEY from the environment is not used for images. Sign in to Codex from a Bot's chat, or save that key in Settings → Models.") : t("Sign in to Codex from a Bot's chat, and every Bot can draw images in its chats.") : t("Every Bot can draw images in its chats. They are saved in the team workspace's images folder.");
+  return { label, hint: hint3, value: access?.model ? `${label} · ${access.model}` : label };
+}
+function ImagesSection({ Section: Section3, Row: Row3 }) {
+  const [reply, setReply] = (0, import_react30.useState)(void 0);
+  (0, import_react30.useEffect)(() => {
+    void call("image-access", { detail: true }).then(setReply, () => setReply(null));
+  }, []);
+  const { hint: hint3, value } = imagesRowOf(reply);
   return (0, import_react30.createElement)(
     Section3,
     { title: t("Images") },
-    (0, import_react30.createElement)(Row3, { label: t("Drawn with"), hint: hint3 }, (0, import_react30.createElement)("span", { className: "bt-set-hint" }, access?.model ? `${label} · ${access.model}` : label))
+    (0, import_react30.createElement)(Row3, { label: t("Drawn with"), hint: hint3 }, (0, import_react30.createElement)("span", { className: "bt-set-hint" }, value))
   );
 }
 

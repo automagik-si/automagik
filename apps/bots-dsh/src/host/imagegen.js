@@ -1,6 +1,13 @@
 // Image generation for the Bots (the generate_image tool), through what the person connected,
 // in this order (owner decision D-g; the welcome's companion step draws through the same):
-// 1. an OpenAI API key (the Images API), exactly as before;
+// 1. an OpenAI API key the person gave the app: the key record saved in the app, or
+//    OPENAI_API_KEY from DSH's credential file or the app's own `.env` files. One inherited
+//    from the environment Automagik was started in (DSH's `env` credential layer) is not used
+//    for images, nor one whose source DSH does not name: decided by the owner's delegate,
+//    2026-11-21 (#869 delivery B), a key the person gave the app is the explicit opt-in and
+//    there is no new setting. An exported variable hides the app's `.env` keys, so the remedy
+//    is saving the key in Settings → Models. A vault mapping would count too, but it never
+//    reaches this selector;
 // 2. the Codex CLI on its own ChatGPT sign-in, through acp-dsh's `acpAgents.generateImage` (a
 //    one-off read-only Codex session that uses Codex's built-in image tool). Nothing here reads
 //    or copies the CLI's sign-in: Codex holds it;
@@ -23,6 +30,18 @@ import { uploadOsText } from './shared-uploads.js'
 export const CODEX_RECORD = 'llm-pi-ai/openai-codex'
 export const OPENAI_RECORD = 'llm-pi-ai/openai'
 export const OPENAI_ENV = 'OPENAI_API_KEY'
+
+// DSH's credential layers (dsh-credentials ResolvedCredential.source): `env` is the
+// environment Automagik inherited. Only a key the person gave the app draws (#869 delivery B).
+export const INHERITED_SOURCE = 'env'
+/** Whether a resolved OPENAI_API_KEY is one the person gave the app: a value from a named
+ *  layer other than the inherited environment. A resolution with no named layer is not. */
+export const givenKey = resolved => typeof resolved?.value === 'string' && resolved.value !== ''
+  && typeof resolved.source === 'string' && resolved.source !== '' && resolved.source !== INHERITED_SOURCE
+/** Whether a resolved OPENAI_API_KEY is one only inherited from the environment (skipped). */
+export const inheritedKey = resolved => typeof resolved?.value === 'string' && resolved.value !== ''
+  && resolved.source === INHERITED_SOURCE
+
 export const CODEX_IMAGES = 'https://chatgpt.com/backend-api/codex/images/generations'
 export const CODEX_IMAGE_MODEL = 'gpt-image-2'
 export const OPENAI_IMAGES = 'https://api.openai.com/v1/images/generations'
@@ -62,6 +81,13 @@ const codexEditDetail = (codex) => {
   if (codex?.signedIn === false) return 'Codex is not signed in here'
   return 'Codex is not ready to edit here'
 }
+// #869 delivery B: why an inherited key did not draw, and where the person's own key goes.
+// Codex stays the first remedy; nothing here suggests getting a key.
+const ENV_KEY_NOTE = 'an OPENAI_API_KEY inherited from the environment Automagik was started in is not used for images; to use that key, save it in Settings → Models'
+const ENV_KEY_REFUSAL = 'No image service is connected: an OPENAI_API_KEY inherited from the environment Automagik was started in is not used for images. Ask the user to sign in to Codex (from a Bot\'s chat or Connect AI), or to save that key in Settings → Models; then generate_image can draw.'
+// A Codex-specific refusal keeps its own text first; the inherited-key note follows it.
+const withEnvKeyNote = (environmentKey, text) => environmentKey ? `${text} Also, ${ENV_KEY_NOTE}.` : text
+
 // What the person can do about it, naming the same access state and never a key.
 const codexEditGuidance = (codex) => {
   if (codex?.reason === 'account') return 'Editing a picture needs Codex\'s account confirmed. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there), then try again.'
@@ -152,42 +178,56 @@ export function createImageGen({
     }
   }
 
-  /**
-   * What draws images here: { kind: 'openai', token }, { kind: 'codex', service }, or the
-   * earlier ChatGPT grant { kind: 'chatgpt', token, accountId? }; undefined when nothing does.
-   */
-  async function source({ refresh = true } = {}) {
+  async function pick({ refresh = true } = {}) {
     const credentials = credentialsOf()
     const record = await credentials?.readRecord?.(OPENAI_RECORD).catch(() => undefined)
-    if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key !== '') return { kind: 'openai', token: record.key }
+    if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key !== '') return { found: { kind: 'openai', token: record.key }, environmentKey: false }
     const env = await credentials?.resolve?.(OPENAI_ENV).catch(() => undefined)
-    if (typeof env?.value === 'string' && env.value !== '') return { kind: 'openai', token: env.value }
+    if (givenKey(env)) return { found: { kind: 'openai', token: env.value }, environmentKey: false }
+    // A skipped key is never kept: only whether it came from the inherited environment.
+    const environmentKey = inheritedKey(env)
     const check = reservation()
-    if (check && await check.imageGate?.('acp-codex')) return undefined
+    if (check && await check.imageGate?.('acp-codex')) return { found: undefined, environmentKey }
     const service = codexService()
     const access = await service?.imageAccess().catch(() => undefined)
     if (access?.ready === true) return {
-      kind: 'codex', service, accountGeneration: access.accountGeneration,
+      found: { kind: 'codex', service, accountGeneration: access.accountGeneration }, environmentKey,
     }
     // Legacy shared hosts must positively declare their scope. Missing/reloading/unreadable
     // ACP cannot authorize billing an older grant; the shipped ACP only declares isolated.
-    if (service?.authScope !== 'shared' || access === undefined) return undefined
+    if (service?.authScope !== 'shared' || access === undefined) return { found: undefined, environmentKey }
     const grant = await credentials?.readRecord?.(CODEX_RECORD).catch(() => undefined)
     const payload = grant?.kind === 'grant' ? grant.payload : undefined
     if (payload && typeof payload.access === 'string') {
       const live = refresh ? await chatgptToken(payload) : payload
-      if (live) return { kind: 'chatgpt', token: live.access, accountId: live.accountId ?? accountIdOf(live.access), access }
+      if (live) return { found: { kind: 'chatgpt', token: live.access, accountId: live.accountId ?? accountIdOf(live.access), access }, environmentKey }
     }
-    return undefined
+    return { found: undefined, environmentKey }
   }
+
+  /**
+   * What draws images here: { kind: 'openai', token }, { kind: 'codex', service }, or the
+   * earlier ChatGPT grant { kind: 'chatgpt', token, accountId? }; undefined when nothing does.
+   */
+  async function source(options) {
+    return (await pick(options)).found
+  }
+
+  // Codex chooses its own image model.
+  const viewOf = found => found.kind === 'codex' ? { kind: 'codex' }
+    : { kind: found.kind, model: found.kind === 'chatgpt' ? CODEX_IMAGE_MODEL : OPENAI_IMAGE_MODEL }
 
   /** For settings and the tool's refusal: how images are made here, never what is stored. */
   async function access() {
-    const found = await source({ refresh: false })
-    if (!found) return null
-    // Codex chooses its own image model.
-    if (found.kind === 'codex') return { kind: 'codex' }
-    return { kind: found.kind, model: found.kind === 'chatgpt' ? CODEX_IMAGE_MODEL : OPENAI_IMAGE_MODEL }
+    const { found } = await pick({ refresh: false })
+    return found ? viewOf(found) : null
+  }
+
+  /** For Settings → Bots: `access` as above, and `environmentKey: 'ignored'` when nothing draws
+   *  and an OPENAI_API_KEY inherited from the environment was skipped. Never a value. */
+  async function accessDetail() {
+    const { found, environmentKey } = await pick({ refresh: false })
+    return { access: found ? viewOf(found) : null, ...(!found && environmentKey ? { environmentKey: 'ignored' } : {}) }
   }
 
   const note = (callId, patch) => {
@@ -270,7 +310,7 @@ export function createImageGen({
   }) {
     const text = String(prompt ?? '').trim().slice(0, PROMPT_MAX)
     if (text === '') throw Object.assign(new Error('Say what to draw.'), { code: 'bot/invalid' })
-    const found = await source(input ? { refresh: false } : undefined)
+    const { found, environmentKey } = await pick(input ? { refresh: false } : undefined)
     if (!found) {
       const check = reservation()
       const held = check && await check.imageGate?.('acp-codex')
@@ -281,14 +321,14 @@ export function createImageGen({
       // An edit does not need Codex to draw: when its locked run cannot be set up, the Bot is
       // given its own verified copy and the change is made on the file (the tool's fallback).
       if (input) {
-        const detail = codexEditDetail(codex)
+        const detail = environmentKey ? `${codexEditDetail(codex)}; ${ENV_KEY_NOTE}` : codexEditDetail(codex)
         throw editWithoutLockedRun(detail, `Codex could not edit the picture here: ${detail}.`)
       }
-      if (codex?.reason === 'account') throw refused('Codex is signed in on this computer, but the user has not confirmed its account for Bots. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there); then generate_image can draw.')
-      if (codex?.unsupported === true) throw refused('Codex is signed in, but this Codex version is not supported for drawing yet. Ask the user to update Automagik; then generate_image can draw.')
-      if (codex?.reason === 'config') throw refused('Codex is signed in, but it could not load its own configuration, so it cannot draw. Ask the user to fix Codex\'s config file; then generate_image can draw.')
-      if (codex?.reason === 'unreadable') throw refused('Codex is signed in, but it could not be checked for safe drawing, so it cannot draw now. Ask the user to try again later.')
-      throw refused('No image service is connected. Ask the user to sign in to Codex (from a Bot\'s chat or Connect AI); then generate_image can draw.')
+      if (codex?.reason === 'account') throw refused(withEnvKeyNote(environmentKey, 'Codex is signed in on this computer, but the user has not confirmed its account for Bots. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there); then generate_image can draw.'))
+      if (codex?.unsupported === true) throw refused(withEnvKeyNote(environmentKey, 'Codex is signed in, but this Codex version is not supported for drawing yet. Ask the user to update Automagik; then generate_image can draw.'))
+      if (codex?.reason === 'config') throw refused(withEnvKeyNote(environmentKey, 'Codex is signed in, but it could not load its own configuration, so it cannot draw. Ask the user to fix Codex\'s config file; then generate_image can draw.'))
+      if (codex?.reason === 'unreadable') throw refused(withEnvKeyNote(environmentKey, 'Codex is signed in, but it could not be checked for safe drawing, so it cannot draw now. Ask the user to try again later.'))
+      throw refused(environmentKey ? ENV_KEY_REFUSAL : 'No image service is connected. Ask the user to sign in to Codex (from a Bot\'s chat or Connect AI); then generate_image can draw.')
     }
     const chatgpt = found.kind === 'chatgpt'
     note(callId, { phase: 'generating', via: found.kind, partials: [], started: now(), error: undefined })
@@ -418,7 +458,7 @@ export function createImageGen({
     return readFile(join(dir, 'images', `${id}.png`)).catch(() => undefined)
   }
 
-  return { access, generate, progress: progressOf, imageFile, source, agentImages }
+  return { access, accessDetail, generate, progress: progressOf, imageFile, source, agentImages }
 }
 
 // The generate_image tool, for every Bot (Genie and Omni among them), and `rt.images` for the

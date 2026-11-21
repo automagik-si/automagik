@@ -1,7 +1,8 @@
 // The person's own companion: the character they create in onboarding, which becomes their
 // Main Bot (the orchestrator). Two ways to make one: describe it and have an image model draw
-// it, when an OpenAI API key or a signed-in Codex CLI is here (or, last, a ChatGPT grant an
-// earlier version stored through DSH's openai-codex sign-in, only on a shared auth scope);
+// it, when an OpenAI API key the person gave the app (not one only inherited from the
+// environment, #869 delivery B) or a signed-in Codex CLI is here (or, last, a ChatGPT grant
+// an earlier version stored through DSH's openai-codex sign-in, only on a shared auth scope);
 // or pick one of Omni's characters. The look and name are applied to the Main Bot through
 // @automagik/bots-dsh's `omniTeam` service when that plugin is present. The team step then
 // adds the Omni Bot, which keeps the person's channels.
@@ -15,6 +16,12 @@ import { CompanionPayload, GeneratePayload, TeamPayload, parse } from './payload
 export const CODEX_RECORD = 'llm-pi-ai/openai-codex'
 export const OPENAI_RECORD = 'llm-pi-ai/openai'
 export const OPENAI_ENV = 'OPENAI_API_KEY'
+
+// Same rule as bots-dsh imagegen.js givenKey (#869 delivery B); the plugins share no module.
+const INHERITED_SOURCE = 'env'
+const givenKey = resolved => typeof resolved?.value === 'string' && resolved.value !== ''
+  && typeof resolved.source === 'string' && resolved.source !== '' && resolved.source !== INHERITED_SOURCE
+
 // ChatGPT plans generate images through the Codex backend (the same request the Codex CLI makes).
 export const CODEX_IMAGES = 'https://chatgpt.com/backend-api/codex/images/generations'
 export const CODEX_IMAGE_MODEL = 'gpt-image-2'
@@ -94,14 +101,21 @@ const codexOf = (ctx) => {
 }
 
 // Which image source this DSH can use right now, without revealing anything stored. The Bots'
-// order (bots-dsh imagegen.js, owner decision D-g): an OpenAI key, then Codex on its own
-// sign-in, then the earlier ChatGPT grant. That grant is not refreshed here, so a run-out one
-// gives way to anything after it and is offered (not ready) only when nothing else draws.
+// order (bots-dsh imagegen.js, owner decision D-g, and #869 delivery B's opt-in rule): an OpenAI
+// key the person gave the app (an inherited environment key, or one of unnamed source, is
+// skipped), then Codex on its own sign-in, then the earlier ChatGPT grant. That grant is not
+// refreshed here, so a run-out one gives way to anything after it and is offered (not ready)
+// only when nothing else draws.
+// An OPENAI_API_KEY inherited from the environment Automagik was started in (DSH's `env`
+// credential layer) is not used for images unless the person opted in explicitly, and a key
+// the person gave the app counts as that opt-in: the key record saved in the app, DSH's own
+// credential file, the app's own `.env` files, a vault mapping (owner's delegate, #869 delivery
+// B, 2026-11-21; a vault mapping never reaches this selector). No new setting.
 async function imageSource(ctx, now = Date.now()) {
   const record = await ctx.credentials.readRecord?.(OPENAI_RECORD).catch(() => undefined)
   if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key !== '') return { kind: 'openai', fresh: true, token: record.key }
   const env = await ctx.credentials.resolve?.(OPENAI_ENV).catch(() => undefined)
-  if (typeof env?.value === 'string' && env.value !== '') return { kind: 'openai', fresh: true, token: env.value }
+  if (givenKey(env)) return { kind: 'openai', fresh: true, token: env.value }
   const service = codexOf(ctx)
   let access
   try {

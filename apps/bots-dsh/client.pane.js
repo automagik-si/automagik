@@ -11909,6 +11909,7 @@ var ZH = {
   "Drawn with": "绘制方式",
   "Your ChatGPT account": "你的 ChatGPT 账户",
   "Your OpenAI key": "你的 OpenAI 密钥",
+  "An OPENAI_API_KEY from the environment is not used for images. Sign in to Codex from a Bot's chat, or save that key in Settings → Models.": "环境中的 OPENAI_API_KEY 不会用于图片。请在 Bot 的聊天中登录 Codex，或将该密钥保存在设置 → 模型中。",
   "Sign in to Codex from a Bot's chat, and every Bot can draw images in its chats.": "在 Bot 的聊天中登录 Codex 后，每个 Bot 都能在聊天中绘制图片。",
   "Codex, on your ChatGPT plan": "Codex，使用你的 ChatGPT 套餐",
   "Every Bot can draw images in its chats. They are saved in the team workspace's images folder.": "每个 Bot 都能在聊天中绘制图片，图片保存在团队工作区的 images 文件夹中。",

@@ -87,8 +87,9 @@ test('companion says which image source is ready, and never what it holds', asyn
   assert.deepEqual(keyed.value.generate, { kind: 'openai', ready: true })
   assert.doesNotMatch(JSON.stringify(keyed), new RegExp(KEY))
 
-  const fromEnv = await host({ credentials: { OPENAI_API_KEY: KEY } }).handle('companion')
-  assert.deepEqual(fromEnv.value.generate, { kind: 'openai', ready: true })
+  // A key saved in the app (DSH's credential file: fake-ctx resolves source: 'file').
+  const saved = await host({ credentials: { OPENAI_API_KEY: KEY } }).handle('companion')
+  assert.deepEqual(saved.value.generate, { kind: 'openai', ready: true })
 
   // The Bots' order: a key, then a signed-in Codex, then a grant on a shared scope.
   const both = await host({ recordValues: { ...grant(), [OPENAI_RECORD]: { kind: 'api-key', key: KEY } }, codex: codexOf() }).handle('companion')
@@ -97,6 +98,34 @@ test('companion says which image source is ready, and never what it holds', asyn
   assert.deepEqual(codex.value.generate, { kind: 'codex', ready: true })
   const signedOut = await host({ recordValues: grant(), codex: codexOf({ ready: false }) }).handle('companion')
   assert.equal(signedOut.value.generate, null)
+})
+
+test('an OPENAI_API_KEY inherited from the environment is not used for the companion', async () => {
+  const codex = codexOf()
+  for (const { source, service, kind } of [
+    { source: 'env' }, { source: 'env', service: codex, kind: 'codex' },
+    {}, { source: '' }, { source: 'user-env', kind: 'openai' }, { source: 'keychain', kind: 'openai' },
+  ]) {
+    const drawing = host({ codex: service })
+    drawing.ctx.credentials.resolve = async ref => ref === 'OPENAI_API_KEY'
+      ? { value: KEY, ...(source === undefined ? {} : { source }) } : undefined
+
+    const status = await drawing.handle('companion')
+    const reply = await drawing.handle('companion-generate', { description: 'a fox' })
+    assert.deepEqual(status.value.generate, kind ? { kind, ready: true } : null)
+    assert.doesNotMatch(JSON.stringify([status, reply]), new RegExp(KEY))
+    if (kind === undefined) {
+      assert.equal(reply.error.code, 'omni-ai/refused')
+      assert.match(reply.error.message, /Sign in to Codex first/)
+    } else assert.equal(reply.value.via, kind)
+    assert.equal(drawing.requests.length, kind === 'openai' ? 1 : 0)
+    if (kind === 'openai') {
+      assert.equal(drawing.requests[0].url, OPENAI_IMAGES)
+      assert.equal(drawing.requests[0].init.headers.authorization, `Bearer ${KEY}`)
+    }
+  }
+  assert.equal(codex.calls.length, 1)
+  assert.doesNotMatch(JSON.stringify(codex.calls), new RegExp(KEY))
 })
 
 for (const [name, codex] of [
