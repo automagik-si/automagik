@@ -1207,19 +1207,6 @@ jobs:
             exit 1
           fi
 
-      # A Mac's desktop session has a default (login) keychain, and a linked Start checks for it
-      # there (#1033's `security show-keychain-info`): a runner has none, so the job makes a
-      # throwaway one, empty password, in its own temp folder. It holds nothing.
-      - name: A default keychain, as a desktop session has
-        if: ${{ startsWith(matrix.os, 'macos-') }}
-        run: |
-          set -euo pipefail
-          keychain="${RUNNER_TEMP}/am-linked-native.keychain-db"
-          security create-keychain -p '' "${keychain}"
-          security default-keychain -d user -s "${keychain}"
-          security unlock-keychain -p '' "${keychain}"
-          security show-keychain-info
-
       - name: Native rows
         env:
           AM_LINKED_NATIVE: '1'

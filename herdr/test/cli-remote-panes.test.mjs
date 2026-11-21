@@ -2467,6 +2467,17 @@ function amOnly(s, { native = false } = {}) {
     s.setState((state) => { state.machines[0].uname = execFileSync("uname", ["-sm"], { encoding: "utf8" }).trim(); });
     mkdirSync(runtime);
     symlinkSync(process.execPath, join(runtime, "node"));
+    // A Mac's desktop session has a default (login) keychain in that home, and a linked Start
+    // checks for it there (#1033). The runner's scratch home has none: make a throwaway one.
+    if (process.platform === "darwin") {
+      const keychain = join(home, "Library/Keychains/login.keychain-db");
+      mkdirSync(dirname(keychain), { recursive: true });
+      const security = (...args) => execFileSync("/usr/bin/security", args, { env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+      security("create-keychain", "-p", "", keychain);
+      security("default-keychain", "-d", "user", "-s", keychain);
+      security("unlock-keychain", "-p", "", keychain);
+      security("show-keychain-info");
+    }
   }
   const env = { ...process.env, PATH: native ? `${join(s.root, "vm-bin")}:${SPARSE_PATH}` : `${join(s.root, "vm-bin")}:${dirname(process.execPath)}:/usr/bin:/bin`,
     HOME: home, HERDR_APP_HOME: vmApp(s), AM_HOME: "", AUTOMAGIK_HERDR_TEST_ROOTS: s.root,
