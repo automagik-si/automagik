@@ -44,6 +44,7 @@ export const RULES = [
 // recorded at the hand-over commit.
 export const OMNI_PLUGIN_STRINGS = [
   '../test/fixtures/unfold-session-strings.json',
+  '../test/fixtures/omni-channels-history-strings.json',
 ]
 
 // The omni-ui keys: the Bot team's (its locale hook registers them as the zh dictionary's keys),

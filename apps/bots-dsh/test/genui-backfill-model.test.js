@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  backfillDay, backfillRange, backfillSummaryText, backfillView, canCancel, proposalView, runView,
+  backfillDay, backfillRange, backfillSummaryText, backfillView, canCancel, proposalView, runView, shortDate,
 } from '../src/client/genui-model.js'
 
 const FROM = '2026-03-01T00:00:00.000Z'
@@ -138,6 +138,43 @@ test('a run says its range and how its chats move, and only a live job can be st
   assert.equal(backfillSummaryText(undefined, [{ outcome: null }]), '1 running')
   // A run with no id is not a card.
   assert.equal(runView({ rows }), undefined)
+})
+
+test('an ended row prefers an empty window over the oldest held date', () => {
+  const later = { ...coverage, oldest: '2026-11-16T00:00:00Z' }
+  const rows = [
+    { chatId: 'empty', outcome: 'done', coverage: { countInWindow: 0 } },
+    { chatId: 'partial', outcome: 'phone-did-not-answer', coverage },
+    { chatId: 'after-end', outcome: 'done', coverage: { ...later, countInWindow: 0 } },
+    { chatId: 'same-day', outcome: 'done', coverage: { ...coverage, oldest: '2026-03-01T23:59:59Z' } },
+    { chatId: 'no-coverage', outcome: 'done', coverage: null },
+    { chatId: 'no-outcome', state: 'done', outcome: null, coverage: { countInWindow: 0 } },
+    { chatId: 'unknown-outcome', state: 'done', coverage },
+  ]
+  const run = { id: 'r1', from: FROM, to: TO, rows }
+  assert.deepEqual(runView(run).rows.map(row => row.windowLine), [
+    'Omni holds nothing in this window',
+    'Omni holds nothing before Mar 2, 2026',
+    'Omni holds nothing in this window',
+    '',
+    '',
+    '',
+    '',
+  ])
+  assert.equal(runView({ ...run, from: null }).rows[1].windowLine, '')
+})
+
+test('the oldest held date uses the UTC day even west of UTC', (test) => {
+  const previous = process.env.TZ
+  process.env.TZ = 'America/Los_Angeles'
+  test.after(() => {
+    if (previous === undefined) delete process.env.TZ
+    else process.env.TZ = previous
+  })
+  const oldest = '2026-03-02T00:00:00Z'
+  assert.equal(shortDate(oldest), 'Mar 1, 2026')
+  const row = { chatId: 'c1', outcome: 'done', coverage: { oldest, countInWindow: 1 } }
+  assert.equal(runView({ id: 'r1', from: FROM, to: TO, rows: [row] }).rows[0].windowLine, 'Omni holds nothing before Mar 2, 2026')
 })
 
 test('the card shows the first three valid runs in producer order', () => {

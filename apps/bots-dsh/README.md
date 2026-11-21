@@ -238,15 +238,22 @@ the endpoint for a plugin with a read of its own.
 
 ### The backfill card (K2)
 
-`omni.genui.BackfillCard({ roster, start?, cancel? })` draws the interactive per-chat history
+`omni.genui.BackfillCard({ roster, proposalId?, runId?, start?, cancel? })` draws the interactive per-chat history
 backfill: a Bot proposes reading a chat's history over a date range, the person ticks the
 chats and sets the dates, and presses **Start** once. Nothing starts on its own, and the card
-never sends a message. A plugin mounts it from its own tool card, with the same roster every
-tool card gets:
+never sends a message. A tool card passes its `roster` and the ID from that call's successful
+result. With React's `createElement` as `h`, a proposal renderer can return:
 
 ```js
-omni.toolCards.register('propose_backfill', p => omni.genui.BackfillCard({ roster: p.roster }))
+return h(omni.genui.BackfillCard, { roster: p.roster, proposalId })
 ```
+
+`proposalId` shows that proposal while it is open and follows the run that shares its ID.
+When both disappear, the card says the request is no longer open. `runId` selects a single
+run and takes precedence for the rows when both IDs are passed. If the requested run is
+absent, the card says so. With neither ID, the card shows all open proposals and the first
+three runs. When `roster.readOnly` is set, the foot explains where to act and **Start** and
+**Stop** are disabled.
 
 It reads the two fields Omni's channels plugin publishes (`omni-channels-dsh`, #1772):
 
@@ -279,10 +286,16 @@ run appears in `omniBackfills`. A row offers **Stop** only while it has a `jobId
 `outcome` is `null`; `cancel_backfill` stops that one job. A refusal is shown in the card, as
 the host worded it, and the proposal stays for another try.
 
+An ended backfill row with coverage says when Omni holds no messages in the selected
+window. Otherwise, if the oldest message Omni holds falls after the start day, the row
+names that oldest day. Both comparisons and dates use UTC. The line describes the history
+Omni holds.
+
 `start` and `cancel` replace the two actions for a plugin or a test (`(payload) => Promise`).
 The words and formats live in `genui-model.js`: `proposalView`, `runView`, `backfillView`,
 `backfillRange`, `backfillDay`, `backfillSummaryText`, `canCancel`. `BACKFILL_RUNS_SHOWN` (3)
-and `BACKFILL_ROWS_SHOWN` (20) cap what the card draws; a run says how many chats it leaves out.
+and `BACKFILL_ROWS_SHOWN` (20) cap the displayed runs and rows. A run says how many chats it
+leaves out.
 
 ### What the rest of the kit gives a card
 
