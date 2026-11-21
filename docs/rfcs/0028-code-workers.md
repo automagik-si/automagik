@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; amended 2026-11-19: the durable wake log defined as delivery 0b, amendment approved by the owner's delegate on 2026-11-19; delivery 0b merged (#1827); amended 2026-11-20: reports are not batched on DSH rc.2, one message each in order, approved by the owner's delegate on 2026-11-20; delivery 1 waits for delivery 0, the grant, upstream; amended 2026-11-21: a second worker kind, `lead`, writing in RFC 0030's Q8 answer (approved 2026-11-19); Q5 (leads per Bot) and Q6 (held sends) answered with their recommendations, approved by the owner's delegate on 2026-11-21) |
+| Status | Accepted (approved by the owner's delegate on 2026-11-19; Q1-Q4 answered with this RFC's own recommendations, see Answers; owner's direction 2026-11-10; amended 2026-11-19: the durable wake log defined as delivery 0b, amendment approved by the owner's delegate on 2026-11-19; delivery 0b merged (#1827); amended 2026-11-20: reports are not batched on DSH rc.2, one message each in order, approved by the owner's delegate on 2026-11-20; delivery 1 waits for delivery 0, the grant, upstream; amended 2026-11-21: a second worker kind, `lead`, writing in RFC 0030's Q8 answer (approved 2026-11-19); Q5 (leads per Bot) and Q6 (held sends) answered with their recommendations, approved by the owner's delegate on 2026-11-21; wording amended 2026-11-21 (RFC 0030 Q9: Code mode means the Code side; one pane's xterm face is the terminal face), no design change) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr-core (the scoped grant), plugin (3.N.P) for each Automagik delivery |
 | Created | 2026-11-10 |
@@ -22,8 +22,8 @@
 A DSH Bot can hand coding work to agents in Herdr, called **Code workers**, the way a person
 running a squad with `hc` does today. The Bot starts a worker with a task, ends its turn, and is
 woken when the worker finishes, blocks or fails. It can then read the worker's reply, send it a
-follow-up or stop it. The person watches every worker live in Code and answers its approvals
-there.
+follow-up or stop it. The person watches every worker live in herdr-app (Herdr's own window)
+and answers its approvals there.
 
 A second kind of worker, a **lead**, is a long-lived seat such as a Genie's orchestrator (RFC
 0030). Its events wake no one: it reaches its Bot through RFC 0030's mailbox (Lead workers).
@@ -53,12 +53,14 @@ any DSH Bot delegate to Herdr workers under a scoped permission.
 
 ## Words
 
-The word "Code" now names three things. This RFC fixes them:
+This RFC uses the following terms for the app, Herdr and workers.
 
 | Word | Meaning | Where |
 |---|---|---|
-| **Code** | The coding product: herdr-app, opened from the sidebar's Code card | RFC 0013 |
-| **Code mode** | The chat view's switch to xterm on the same terminal | RFC 0022 |
+| **Code** | The app's Code side | RFC 0022 (i), RFC 0030 Q9 |
+| **Code mode** | The same Code side | RFC 0030 Q9 |
+| **Terminal face** | One pane drawn by xterm in the chat view | RFC 0022 (c) |
+| **herdr-app** | Herdr's own window | RFC 0013 |
 | **Code worker** | A terminal a Bot started with a task, through this RFC's tools | this RFC |
 | **Lead worker** | A Code worker of the kind `lead`: a long-lived seat a Bot keeps, such as a Genie's orchestrator | this RFC (Lead workers), from RFC 0030's Q8 |
 
@@ -325,7 +327,7 @@ in the threat model.
 ### Approvals
 
 - A worker's approval dialog shows in the chat on the worker's card: what it asks, with
-  **Open in Code** to answer it in the real terminal.
+  **Open in Code** to answer it in the real terminal (the worker's pane in herdr-app).
 - The Bot never answers a worker's approval. `code_send` refuses a blocked worker, and the grant
   gives the host no `send --force`. A Bot cannot raise its own reach through its workers.
 - After herdr-core#122 (a conditional key call), the card gets Allow once and Deny, with RFC
@@ -337,13 +339,14 @@ in the threat model.
 ### In the chat and the sidebar
 
 - **A worker card** in the Bot's chat, one per `code_start`: name, agent, folder, status with
-  elapsed time, and Watch (opens the worker in Code mode or Code) and Stop. It updates in place
-  and is never a new message per change. Failures are loud, routine turns are quiet.
+  elapsed time, and Watch (opens the worker's pane in the terminal face or in herdr-app) and
+  Stop. It updates in place and is never a new message per change. Failures are loud, routine
+  turns are quiet.
 - **The sidebar** shows a working pill with a timer on the Bot's row while any of its workers
-  works, and the Code card counts running workers. The mockup this RFC was drafted with is
-  outside the repository.
-- Workers do not get rows of their own. They stay in Code, as D29 decided ("Workers and helpers
-  stay in Herdr").
+  works, and RFC 0013's Code card counts running workers. The mockup this RFC was drafted with
+  is outside the repository.
+- Workers get no rows on Team. The Code side lists every worker in a read-only row (RFC 0022
+  Q15). D29 still applies: "Workers and helpers stay in Herdr".
 
 ### Lead workers
 
@@ -401,8 +404,8 @@ sends during one turn, a host restart while a text is held, and `code_stop` whil
 
 ## What does not change
 
-- RFC 0022: Chat's seat, the view, Code mode and delivery H are unchanged. Its rejected design
-  stays rejected: no Bot reaches Chat's seat.
+- RFC 0022: Chat's seat, the view, the terminal face and delivery H are unchanged. Its
+  rejected design stays rejected: no Bot reaches Chat's seat.
 - RFC 0014 and D29: Herdr's own bots, their helpers and their briefing hook are unchanged.
 - Bot-to-Bot work (`message_bot`, tasks, group reports) is unchanged and stays the way one Bot
   asks another.
@@ -476,7 +479,7 @@ either order; delivery 1 needs both.
   cleanup keeps a worktree with uncommitted changes; a lead is not counted in the per-Bot cap and
   is counted in the per-team cap; cleanup removes a finished worker and leaves a lead.
 - **4. Approvals from the chat** (plugin, after herdr-core#122). *Check:* answering in the chat
-  and in Code at once leaves one answer and one receipt.
+  and in the worker's pane in herdr-app at once leaves one answer and one receipt.
 - **5. Workers on linked machines** (plugin and herdr-core, after #206 and delivery H's link
   scoping). *Check:* `--on` works only for machines the owner allowed for that Bot.
 
@@ -536,7 +539,7 @@ asked.
 
 ## Links
 
-- RFC 0006 (Workers), RFC 0013 (Code), RFC 0014 (D29), RFC 0015 (race rule, transcripts),
+- RFC 0006 (Workers), RFC 0013 (herdr-app), RFC 0014 (D29), RFC 0015 (race rule, transcripts),
   RFC 0021 (metering), RFC 0022 (delivery H, Decided 6 and 8), RFC 0023 (tail slot).
 - herdr-core#122, #206, #628, #631.
 - Prior art, read and not run:
