@@ -163,6 +163,8 @@
       "usage-stats"
     ],
     "bot-admin": [
+      "accounts-claude",
+      "accounts-claude-use",
       "accounts-codex",
       "add-agent",
       "agent-adopt",
