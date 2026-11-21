@@ -4,13 +4,13 @@ import { once } from 'node:events'
 import * as fs from 'node:fs'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { delimiter, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 import { createServer } from 'node:net'
 import { test } from 'node:test'
 import {
-  appHome, backupSettings, backupSettingsOrLog, dshEnv, dshRun, forgetDshLogins, freePort,
+  appHome, automagikHome, backupSettings, backupSettingsOrLog, dshEnv, dshRun, forgetDshLogins, freePort,
   guardContents, installProfile, keepPort, LAUNCH_URL_FILE, launchPort, launchUrlFileOf,
   launchUrlFromFile, launchUrlOf, listenFailed, mergeProfilePackage, mergeProfilePatch,
   migrateRenamed, migrateRetired, navigationOf, pageUrlOf, pinProfileStore, PORT_WAIT_MS,
@@ -19,7 +19,9 @@ import {
   storeLayoutOf, toolFileOf, writeTools,
 } from '../src/dsh.js'
 import { ensureOwnerRecord, launchInstance, ownerFileOf } from '../src/owner-record.js'
+import { codeRowPlace } from '../src/herdr-space.js'
 import { batchSafe } from '../scripts/batch-spawn.mjs'
+import { readRegistryTree } from '../../bots-dsh/src/host/code-tree.js'
 
 const posixOnly = { skip: process.platform === 'win32' ? 'the tools are sh scripts here' : false }
 const windowsOnly = { skip: process.platform === 'win32' ? false : 'Windows only' }
@@ -68,6 +70,60 @@ test('the app keeps everything in one folder under ~/.automagik, apart from a ds
   // The person's PATH comes first; the usual tool folders follow (see toolDirs below).
   assert.ok(env.PATH.startsWith(`/bin${delimiter}`))
   assert.equal(dshEnv({ base: {}, home: '/a' }).ELECTRON_RUN_AS_NODE, undefined)
+})
+
+test('DSH and the desktop Code row share one registry with tilde and relative home overrides', async t => {
+  const fixture = fs.realpathSync(scratch(t, 'desktop-dsh-registry-').root)
+  const relativeBase = { AUTOMAGIK_HOME: ' ./registry ' }
+  const previous = process.cwd()
+  let relativeRoot
+  try {
+    process.chdir(fixture)
+    relativeRoot = automagikHome(relativeBase)
+  } finally {
+    process.chdir(previous)
+  }
+  assert.equal(relativeRoot, join(fixture, 'registry'))
+  const token = 'desktop-dsh-registry'
+  const botId = 'b-abcdefghij'
+  const { root: tildeParent } = scratch(t, 'desktop-dsh-user-home-')
+  const homeVar = process.platform === 'win32' ? 'USERPROFILE' : 'HOME'
+  const oldHome = process.env[homeVar]
+  const tildeBase = { AUTOMAGIK_HOME: ` ~/${token} ` }
+  let tildeRoot
+  try {
+    process.env[homeVar] = tildeParent
+    tildeRoot = automagikHome(tildeBase)
+  } finally {
+    if (oldHome === undefined) delete process.env[homeVar]
+    else process.env[homeVar] = oldHome
+  }
+  assert.equal(tildeRoot, join(tildeParent, token))
+
+  for (const [root, base, raw] of [[tildeRoot, tildeBase, `~/${token}`], [relativeRoot, relativeBase, './registry']]) {
+    const home = join(root, 'desktop')
+    const project = join(root, 'project')
+    const decoy = join(root, 'decoy')
+    mkdirSync(project, { recursive: true })
+    mkdirSync(decoy)
+    function writeRegistry(root, folder) {
+      const file = join(root, 'bots', 'bots.json')
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, JSON.stringify({ version: 2, bots: [{ id: botId, name: 'Bot', folder }], shown: [{ project: folder, bots: [] }] }))
+    }
+    writeRegistry(root, project)
+    writeRegistry(resolve(home, raw), decoy)
+    writeRegistry(home, decoy)
+    // DSH starts with desktop/ as cwd. Resolve any relative file reads in that directory.
+    const read = env => readRegistryTree({ env, readFile: (file, encoding) => readFileSync(resolve(home, file), encoding) })
+    assert.equal(read({ AUTOMAGIK_HOME: raw }).bots[0].folder, decoy)
+    const env = dshEnv({ base, home, root })
+    assert.equal(env.AUTOMAGIK_HOME, root)
+    const windows = dshEnv({ base: { ...base, Automagik_Home: decoy }, home, root, platform: 'win32' })
+    assert.deepEqual(Object.keys(windows).filter(key => key.toUpperCase() === 'AUTOMAGIK_HOME'), ['AUTOMAGIK_HOME'])
+    assert.equal(read(env).bots[0].folder, project)
+    assert.deepEqual(await codeRowPlace(botId, { registryRoot: root }), { folder: project, machine: null })
+  }
 })
 
 test('settings come back from a copy, once per dsh version, before an upgrade can move them', (t) => {
