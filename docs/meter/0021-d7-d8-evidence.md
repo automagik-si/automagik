@@ -7,7 +7,7 @@ sessions or prompt text. Token counts are raw counts; times are UTC.
 | Delivery | Check (the RFC's words) | Conclusion |
 |---|---|---|
 | 7 | a machine that took the pack release runs a meter whose `query --by bot` answers (the wording when this was taken) | **Met**: the owner accepted the reading in "How the meter reached this machine" on 2026-11-12, and the RFC's Check now names the signed meter lane |
-| 8 | `actor_unattributed` falls for the backfilled hours; rows before the ledger stay unknown | **Not met**: both halves of the Check hold, but the backfill changed the store's rollup totals by 0.70% (reported in #1114; cause fixed by #1127); open until #1126 explains and repairs the loss on this store |
+| 8 | `actor_unattributed` falls for the backfilled hours; rows before the ledger stay unknown | **Open**. Both halves of the Check hold. The backfill changed the rollup totals by 0.70% (#1114, cause fixed by #1127). Delivery waits for the owner-approved `repair --apply` on the affected store and one clean week afterward. |
 
 ## How the meter reached this machine
 
@@ -160,7 +160,62 @@ Before the backfill the only rows with a state were Antigravity's (218,603,721 t
   "before" and the backfill, so this run alone does not say which of the two (the backfill or the
   newer meter's sync) moved the total. Nothing was rerun.
 
-**Conclusion: not met.** The Check's two halves hold, but the backfill's own guarantee, that no
-total changes, failed on this machine. Reported in issue #1114, since closed into #1126. #1127
-(merged 2026-11-12) fixed the cause, so a backfill on a later meter loses nothing new; it does not
-explain or repair the 0.70% already lost on this store. Delivery 8 waits on #1126 for that.
+**Delivery 8 stays open.** The backfill changed totals by 0.70% despite meeting both halves of
+the Check. #1127 fixed the cause reported in #1114. Delivery 8 now waits for the owner-approved
+`repair --apply` on the affected store and one clean week afterward.
+
+## Repair design (#1126)
+
+A scratch rebuild from retained logs supplies an oracle for the calls that survived. An
+evidence-only rebuild can omit legitimate usage whose logs have expired. Reconciliation
+preserves existing usage. In exact mode it groups both stores by harness, hour, model,
+machine, repo, branch and precision, summing across actor states. For each matched group
+with an evidence-free receiving row, repair takes the maximum of the store and oracle in
+each of the seven token columns. It adds only the shortfall and keeps every excess.
+Event counts stay fixed, and an event mismatch in a planned top-up blocks the repair. A
+short group with no evidence-free row and a store hour with no oracle coverage are reported
+and kept.
+
+At a fixed cut, completeness is a property of each exact group. Verify all seven columns
+and events against retained calls, an untouched snapshot or authoritative source records
+covering that group. Matching aggregates alone cannot establish which part of a row is
+legitimate. Inventory frozen rows with no actor state and count their tokens and events
+within each exact group. The dry run also inventories residue in rows with actor state
+whose retained evidence implies the same number of events and fewer tokens in at least
+one column, with no column below the evidence. It gives row and token counts by harness
+and day, with reasoning separate, and counts rows below their evidence as discrepancies.
+
+Propose reclassification only where independent evidence proves which usage the row
+holds. A reclassification preserves every token column and event count and creates no
+call. Recovering the actor also requires retained launch and link evidence. When that
+proof is missing, report the ambiguity and keep the row. The backfill controls check
+preservation with complete logs and with a missing log.
+[Complete logs](../../meter/usagemeter/tests/backfill_totals.rs#L139)
+[Missing log](../../meter/usagemeter/tests/backfill_totals.rs#L198)
+
+The mixed-history example has 2,260 legitimate tokens. An evidence-only rebuild yields
+2,160. Topping up the attributed portion and keeping all 595 frozen tokens would yield
+2,755. Placement of the frozen tokens determines what an exact repair can recover.
+
+| Case | Store before | Result |
+|---|---:|---|
+| V1. Duplicate and legitimate usage in separate groups | 1,630 | The covered group gains 630 and reaches 2,160. The separate 100 with no oracle hour is reported as unresolved and preserved, for 2,260 in the store. |
+| V2. Attributed portion intact | 2,755 | The covered group already exceeds the oracle by 495. Repair reports those tokens as kept and writes nothing. |
+| V3. Duplicate and legitimate usage share the same key | 1,630 | Repair adds 530 and reaches 2,160. True usage is 2,260. The legitimate 100 cannot be distinguished from the duplicate 495, so provenance remains unresolved even on success. |
+
+[Mixed-history tests](../../meter/usagemeter/tests/repair.rs#L283)
+[Dry-run integration test](../../meter/usagemeter/tests/repair.rs#L601)
+[Residue classification tests](../../meter/usagemeter/src/evidence/adoption_tests.rs#L106)
+
+Start with the read-only dry run and verify a separate copy of the store before apply.
+Apply writes one transaction per UTC day and rolls back any day that fails conservation.
+The journal records the last committed day. A retry rebuilds the plan from live rows so
+days already repaired contribute no further top-up. If a rollback of committed changes is
+needed, restore the verified copy while holding the sync lock.
+
+At the original cut ending **2026-11-10 14:00Z (exclusive)**, a 3.130.1 rebuild from
+retained logs recovered all **167,846,523** tokens in a scratch store with **0 unresolved**.
+The #1114 replay reproduced **73,082,160** in aggregate and **49,606,697** cell by cell.
+The historical accounting remains unresolved for **94,764,363** tokens in aggregate and
+**118,239,826** cell by cell. No pre-backfill store survives to explain the remaining
+differences.
