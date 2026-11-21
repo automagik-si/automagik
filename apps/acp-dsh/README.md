@@ -527,7 +527,11 @@ stand-in places the credential where the CLI reads it.
   gone before B is written, the Bot record changes between A and B, and the terminal's
   records stay byte-identical. The same vendor binary can read both names in the keychain.
 
-The job logs `ImageOS`, `ImageVersion` and the P5 result. The first native run is pending.
+First native run (2026-11-21, `ImageOS` macos15, `ImageVersion` 20261118.0550.1, macOS 15.8.2,
+Apple silicon): every phase passed. P5 recorded `auto-logout-keyring-error`: with no keychain
+reachable from the Bot's home, Codex 0.171.0 in `auto` mode saves to the file but its logout
+stops on the keyring error and keeps the file, so acp-dsh reports that sign-out did not finish.
+Bots use Codex's default file mode, which signs out cleanly (P3).
 Real OAuth with real accounts and the vendor exchanges for Claude sign-in and Codex
 device-code sign-in remain untested. Claude Code has no offline sign-in writer for these
 fixtures, so the job exercises its reads and logout against planted credentials. Codex's
