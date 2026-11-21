@@ -102,6 +102,8 @@ export function GitHubSteps({ bot, work }) {
 
 const vaultLocked = 'The vault is locked. Unlock it in Settings › Vault and ask again; nothing was read.'
 const vaultDetailUnavailable = 'The vault item details could not be loaded.'
+const macosKeychain = 'macos-keychain'
+const keychainHint = 'macOS may ask on this Mac. Choose “Allow”, not “Always Allow”.'
 
 const GNOME_PROVIDER_ID = 'secret-service'
 const GNOME_PROVIDER_LABEL = 'Secret Service (GNOME Keyring)'
@@ -142,18 +144,26 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
       const { commandDigest, snapshot, provider, item, field, name, collection, created } = value ?? {}
       let verified = commandDigest === digest && [commandDigest, snapshot, provider, field].every(part => typeof part === 'string')
       let displayItem = item
+      let keychainDetails
       if (provider === GNOME_PROVIDER_ID) {
         verified &&= field === 'secret' && [name, collection, created].every(part => typeof part === 'string')
         displayItem = name
       } else verified &&= typeof item === 'string'
-      if (verified && provider === 'hashicorp-vault') {
+      if (verified && provider === macosKeychain) {
+        try {
+          const parts = JSON.parse(item)
+          verified = field === 'password' && Array.isArray(parts) && parts.length === 3
+            && parts.every(part => typeof part === 'string' && part !== '')
+          if (verified) keychainDetails = { service: parts[1], account: parts[2] }
+        } catch { verified = false }
+      } else if (verified && provider === 'hashicorp-vault') {
         try {
           const parts = JSON.parse(item)
           verified = Array.isArray(parts) && parts.length === 2 && parts.every(part => typeof part === 'string' && part !== '')
           if (verified) displayItem = parts.join('/')
         } catch { verified = false }
       }
-      setVaultDetail(verified ? { key, value: { commandDigest, snapshot, provider, item: displayItem, field, collection, created } } : { key, error: vaultDetailUnavailable })
+      setVaultDetail(verified ? { key, value: { commandDigest, snapshot, provider, item: displayItem, field, collection, created, keychainDetails } } : { key, error: vaultDetailUnavailable })
     }, () => {
       if (active) setVaultDetail({ key, error: vaultDetailUnavailable })
     })
@@ -177,6 +187,7 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
     const hashicorp = item?.provider === 'hashicorp-vault'
     const keyring = item?.provider === GNOME_PROVIDER_ID
     const proton = item?.provider === 'proton-pass'
+    const keychain = item?.provider === macosKeychain
     const allow = () => {
       if (item && !busy) void run(() => actions.secretAllow(request.id, { commandDigest: item.commandDigest, snapshot: item.snapshot }))
     }
@@ -187,11 +198,14 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
       }),
       h(VaultRequestContext, { request }),
       item ? h('div', { className: 'bt-secret-note' },
-        h('div', null, t('Provider: {provider}', { provider: keyring ? t(GNOME_PROVIDER_LABEL) : hashicorp ? t('HashiCorp Vault') : proton ? t('Proton Pass') : item.provider })),
-        h('div', null, t('Item: {item}', { item: item.item })),
+        h('div', null, t('Provider: {provider}', { provider: keyring ? t(GNOME_PROVIDER_LABEL) : keychain ? t('macOS Keychain') : hashicorp ? t('HashiCorp Vault') : proton ? t('Proton Pass') : item.provider })),
+        keychain ? ['Service', 'Account'].map(label => h('div', { key: label }, t(label),
+          h('pre', { className: 'bt-aa-pre', 'aria-label': t(label) },
+            h('code', null, item.keychainDetails[label.toLowerCase()]))))
+          : h('div', null, t('Item: {item}', { item: item.item })),
         keyring ? h('div', null, t('Collection: {collection}', { collection: item.collection })) : null,
         keyring ? h('div', null, createdLabel(item.created)) : null,
-        h('div', null, t('Field: {field}', { field: keyring ? t('Secret') : item.field }))) : null,
+        h('div', null, t('Field: {field}', { field: keyring ? t('Secret') : keychain ? t('Password') : item.field }))) : null,
       error || detail?.error ? h('div', { className: 'bt-secret-error', role: 'alert' }, error || t(detail.error)) : null,
       h('div', { className: 'bt-q-actions' },
         h('button', { type: 'button', className: 'bt-q-btn', disabled: busy, onClick: cancel }, t('Cancel')),
@@ -458,12 +472,15 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
   const [fields, setFields] = useState([])
   const [projects, setProjects] = useState(null)
   const [project, setProject] = useState('')
+  const [service, setService] = useState('')
+  const [account, setAccount] = useState('')
   const keyring = provider === GNOME_PROVIDER_ID
   const item = items?.find(row => itemId !== '' && (keyring ? row.handle : row.id) === itemId && !row.folder)
   const onePassword = provider === 'onepassword'
   const proton = provider === 'proton-pass'
   const hashicorp = provider === 'hashicorp-vault'
   const machineAccount = provider === 'bitwarden-secrets'
+  const keychain = provider === macosKeychain
   // Providers whose picker search names the provider explicitly (Bitwarden keeps the legacy call).
   const namedSearch = provider === 'onepassword' || provider === GNOME_PROVIDER_ID
   const optionId = row => hashicorp && row.folder ? row.id + '/' : row.id
@@ -498,17 +515,22 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
     setFields([])
   }
   const find = async (next = hashicorp ? folder : project) => {
-    if (busy) return
+    if (busy || (keychain && (!service || !account))) return
     setBusy(true)
     resetItems()
     try {
       // A HashiCorp folder or a Secrets Manager project ('' lists the projects).
-      const listed = hashicorp ? actions.vaultItems({ mount, folder: next }, provider)
+      const listed = keychain ? actions.vaultItems({ service, account }, provider)
+        : hashicorp ? actions.vaultItems({ mount, folder: next }, provider)
         : machineAccount ? actions.vaultItems(search, provider, next || undefined)
-          : (namedSearch || proton) ? actions.vaultItems(search, provider) : actions.vaultItems(search)
+        : (namedSearch || proton) ? actions.vaultItems(search, provider) : actions.vaultItems(search)
       await run(listed.then(answer => {
         if (machineAccount && !next) setProjects(answer.projects)
         else setItems(answer.items)
+        if (keychain && answer.items.length === 1) {
+          setItemId(answer.items[0].id)
+          setField('password')
+        }
       }))
     } finally { setBusy(false) }
   }
@@ -536,7 +558,7 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
       const key = name.trim().replace(/-/g, '_')
       const mapping = keyring ? { name: key, purpose, scope, provider, handle: itemId }
         : { name: key, purpose, connection, item: hashicorp ? JSON.stringify([mount, itemId]) : itemId, field, scope }
-      if (onePassword || hashicorp || proton || machineAccount) mapping.provider = provider
+      if (onePassword || hashicorp || proton || machineAccount || keychain) mapping.provider = provider
       if (machineAccount) mapping.credentialRevision = credentialRevision
       if (await run(actions.secretSourceSet(mapping))) onDone()
     } finally { setBusy(false) }
@@ -552,15 +574,20 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
       onChange: event => { const selected = event.target.value; setProject(selected); void find(selected) },
     }, h('option', { value: '' }, t('Choose a project')), projects.map(row => h('option', { key: row.id, value: row.id }, row.name))) : null,
     (!machineAccount || project) ? h('form', { className: 'bt-secret-inline', onSubmit: event => { event.preventDefault(); return find() } },
-      hashicorp ? [
+      keychain ? [['Service', service, setService], ['Account', account, setAccount]].map(([label, value, setValue]) =>
+        h('label', { key: label, className: 'bt-q-field' }, t(label),
+          h('input', { className: 'bt-input', 'aria-label': t(label), value, maxLength: 128, disabled: busy,
+            spellCheck: false, autoComplete: 'off', onChange: event => { setValue(event.target.value); resetItems() } })))
+        : hashicorp ? [
         h('input', { key: 'mount', className: 'bt-input', 'aria-label': t('Vault mount'), placeholder: t('Vault mount'), value: mount,
           disabled: busy, spellCheck: false, autoComplete: 'off', onChange: event => { setMount(event.target.value); setFolder(''); resetItems() } }),
         h('input', { key: 'folder', className: 'bt-input', 'aria-label': t('Vault folder (optional)'), placeholder: t('Vault folder (optional)'), value: folder,
           disabled: busy, spellCheck: false, autoComplete: 'off', onChange: event => { setFolder(event.target.value); resetItems() } }),
       ] : h('input', { className: 'bt-input', type: 'search', 'aria-label': t('Search the vault'), placeholder: t('Search the vault'), value: search, autoComplete: 'off', onChange: event => setSearch(event.target.value) }),
-      h('button', { type: 'submit', className: 'bt-soft bt-soft-sm', disabled: busy || (hashicorp && !mount) }, t(hashicorp ? 'Browse' : 'Search'))) : null,
+      h('button', { type: 'submit', className: 'bt-soft bt-soft-sm', disabled: busy || (hashicorp && !mount) || (keychain && (!service || !account)) },
+        t(keychain ? 'Find' : hashicorp ? 'Browse' : 'Search'))) : null,
     items?.length === 0 ? h('span', { className: 'bt-set-hint', role: 'status' }, t('No matching vault items.')) : null,
-    items?.length > 0 ? h('select', {
+    !keychain && items?.length > 0 ? h('select', {
       className: 'bt-input', 'aria-label': t('Vault item'), value: itemId,
       disabled: hashicorp ? busy : undefined, onChange: selectItem,
     }, h('option', { value: '' }, t('Choose an item')),
@@ -588,6 +615,7 @@ const vaultStates = {
 const vaultProviders = Object.fromEntries([
   ['bitwarden', 'Bitwarden'], ['onepassword', '1Password'], ['hashicorp-vault', 'HashiCorp Vault'],
   [GNOME_PROVIDER_ID, GNOME_PROVIDER_LABEL], ['proton-pass', 'Proton Pass'], ['bitwarden-secrets', 'Bitwarden Secrets Manager'],
+  [macosKeychain, 'macOS Keychain'],
 ])
 
 function VaultSection({ roster, actions, run, Section }) {
@@ -609,6 +637,7 @@ function VaultSection({ roster, actions, run, Section }) {
   const onePassword = provider === 'onepassword'
   const proton = provider === 'proton-pass'
   const hashicorp = provider === 'hashicorp-vault'
+  const keychain = provider === macosKeychain
   const machineAccount = provider === 'bitwarden-secrets'
   const connectionKnown = status?.connectionKnown === true
   const target = connectionKnown ? connection : connectionLabel ?? connection
@@ -653,12 +682,13 @@ function VaultSection({ roster, actions, run, Section }) {
   }
   const unlock = async () => {
     const input = password.current
-    if (busy || (!keyring && !input?.value) || (hashicorp && !address.current?.value) || (machineAccount && !target)) return
+    if (busy || (!keyring && !keychain && !input?.value) || (hashicorp && !address.current?.value) || (machineAccount && !target)) return
     setBusy(true)
     const credential = input?.value
     if (input) input.value = ''
     try {
       if (keyring) await run(actions.vaultUnlockSecretService())
+      else if (keychain) await run(actions.vaultUnlock(undefined, undefined, provider))
       else if (hashicorp) {
         const endpoint = { address: address.current.value, namespace: namespace.current.value }
         address.current.value = ''
@@ -686,7 +716,7 @@ function VaultSection({ roster, actions, run, Section }) {
     if (busy) return
     setBusy(true)
     setAdding(false)
-    try { await run(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring || proton || machineAccount ? actions.vaultLock(provider) : actions.vaultLock()) }
+    try { await run(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring || proton || machineAccount || keychain ? actions.vaultLock(provider) : actions.vaultLock()) }
     finally { changed() }
   }
   return h(Section, { title: t('Vault') },
@@ -695,9 +725,10 @@ function VaultSection({ roster, actions, run, Section }) {
         disabled: readOnly || busy || (roster.secretSources?.rows?.length ?? 0) > 0, onChange: choose },
       status.providers.map(id => h('option', { key: id, value: id }, t(vaultProviders[id]))))) : null,
     h('div', { className: 'bt-set-row', role: 'status' },
-      h('span', { className: 'bt-tag' }, t(status?.reason ?? vaultStates[state] ?? 'Checking vault status…')),
+      h('span', { className: 'bt-tag' }, t(keychain && status?.reason ? 'Unavailable' : status?.reason ?? vaultStates[state] ?? 'Checking vault status…')),
       h('span', { className: 'bt-set-hint' }, t(keyring
         ? 'Locking here closes Automagik’s access. Manage the keyring lock in GNOME.'
+        : keychain ? status?.reason ?? keychainHint
         : hashicorp ? 'The address, namespace and token are cleared when the vault locks or the app quits.'
         : proton ? 'The token is used once to sign in and needs read access to a vault; items shared on their own are not listed. The session ends when the vault locks, after at most 110 minutes, or when the app quits.'
         : onePassword ? 'The token is cleared when the vault locks or the app quits.' : 'The vault locks after the idle time set in the plugin’s settings.')),
@@ -727,7 +758,7 @@ function VaultSection({ roster, actions, run, Section }) {
           value: server, disabled: busy, spellCheck: false, autoComplete: 'off',
           onChange: event => { clearCredential(); setServer(event.target.value) },
         }) : null,
-        keyring ? null : h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, {
+        keyring || keychain ? null : h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, {
           key: credentialKey,
           inputRef: password, disabled: busy, onEnter: unlock, passwordType: hashicorp || proton,
           label: t(hashicorp ? 'Vault token' : proton ? 'Proton Pass personal access token' : machineAccount ? 'Bitwarden Secrets Manager access token'
