@@ -20,6 +20,7 @@ import { scopeSessions } from '../src/host/member-wall/principals.js'
 import { install as installParts } from '../src/host/parts.js'
 import { install, RESUME_DELAY_MS } from '../src/host/resume.js'
 import { createUpdateHold, install as installHold, STOP_WAIT_MS } from '../src/host/self-update-hold.js'
+import { readUpdateRecovery } from '../src/host/self-update-recovery.js'
 import { storeDirOf, writeJsonAtomic } from '../src/host/self-update.js'
 import { mountBrowserPlugin } from '../src/host/browser/mount.js'
 import { install as installTurns } from '../src/host/turns.js'
@@ -75,8 +76,8 @@ function useBootHold(rt, phase = 'health', expectedRun) {
   return phase => { run = liveRun(phase); hold.tick() }
 }
 
-function replayBench(t, home, { agents = new Map(), logs = new Map(), before, gate = true } = {}) {
-  const ctx = fakeContext()
+function replayBench(t, home, { agents = new Map(), logs = new Map(), before, gate = true, profileDir, updateRun } = {}) {
+  const ctx = fakeContext(profileDir === undefined ? undefined : { services: { profileContext: { dir: profileDir } } })
   const sent = []
   ctx.sessions = {
     flush: async () => true,
@@ -93,7 +94,15 @@ function replayBench(t, home, { agents = new Map(), logs = new Map(), before, ga
     return args
   }
   before?.(rt)
-  install(rt)
+  if (updateRun) {
+    rt.selfUpdateStatus = () => ({ run: updateRun })
+    const previousRun = process.env.AUTOMAGIK_SUPERVISOR_RUN
+    process.env.AUTOMAGIK_SUPERVISOR_RUN = updateRun.runId
+    try { install(rt) } finally {
+      if (previousRun === undefined) delete process.env.AUTOMAGIK_SUPERVISOR_RUN
+      else process.env.AUTOMAGIK_SUPERVISOR_RUN = previousRun
+    }
+  } else install(rt)
   const verdict = gate ? useBootHold(rt, typeof gate === 'string' ? gate : undefined, gate === 'rollingBack' ? 'test-update' : undefined) : undefined
   t.after(() => ctx.dispose())
   return { ctx, rt, sent, verdict }
@@ -105,6 +114,66 @@ async function finishBoot(t, b, phase = 'healthy') {
   t.mock.timers.tick(RESUME_DELAY_MS)
   return b.rt.resumesDone
 }
+
+test('boot recovery waits for a blocked delivery and replays held input after independent task healing fails', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = temp(t)
+  const profileDir = join(home, 'profiles', 'web')
+  mkdirSync(profileDir, { recursive: true })
+  const run = liveRun('healthy')
+  const exchangeId = 'blocked-delivery'
+  const input = user('keep this input')
+  seed(home, {
+    queued: { chat: [{ at: Date.now(), args: { toId: 'ada', text: 'pick this up', role: 'continue', exchangeId } }] },
+    held: { chat: [entry(input)] },
+  })
+  const blocked = Promise.withResolvers()
+  const healingFailed = Promise.withResolvers()
+  const messages = []
+  const chat = { session: { id: 'chat' }, followup: message => messages.push(message) }
+  const task = { status: 'idle', followup() {}, session: { id: 'ordinary-task', seq: 1,
+    eventAt: () => ({ type: 'turn/end', time: Date.now(), data: { reason: { kind: 'interrupted' } } }) } }
+  const previousRun = process.env.AUTOMAGIK_SUPERVISOR_RUN
+  process.env.AUTOMAGIK_SUPERVISOR_RUN = run.runId
+  let b
+  try {
+    b = replayBench(t, home, {
+      profileDir, gate: false, agents: new Map([['chat', chat], ['ordinary-task', task]]), logs: new Map([['chat', []]]),
+      before(rt) {
+        rt.selfUpdateStatus = () => ({ run })
+        rt.chatOwners.set('chat', 'ada')
+        rt.state.agents.worker = { sessions: ['ordinary-task'] }
+        const deliver = rt.deliver
+        rt.deliver = async (args, options) => {
+          if (args.exchangeId === exchangeId) await blocked.promise
+          return deliver(args, options)
+        }
+        rt.ctx.sessions.flush = async session => {
+          if (session === task.session) {
+            healingFailed.resolve()
+            throw new Error('fixture task flush failed')
+          }
+          return true
+        }
+      },
+    })
+  } finally {
+    if (previousRun === undefined) delete process.env.AUTOMAGIK_SUPERVISOR_RUN
+    else process.env.AUTOMAGIK_SUPERVISOR_RUN = previousRun
+  }
+  const done = finishBoot(t, b)
+  await healingFailed.promise
+  await immediate()
+  const pending = readUpdateRecovery(profileDir, run)
+  blocked.resolve()
+  assert.equal(pending.complete, false)
+  assert.deepEqual(pending.items.map(item => item.state), ['pending', 'pending'])
+  assert.equal((await done).failed, 'fixture task flush failed')
+  assert.deepEqual(messages.map(message => message.source.exchangeId ?? message.id), [exchangeId, input.id])
+  const report = readUpdateRecovery(profileDir, run)
+  assert.equal(report.complete, true)
+  assert.deepEqual(report.items.map(({ kind, state }) => [kind, state]), [['delivery', 'resumed'], ['input', 'resumed']])
+})
 
 test('adoption merges disk and local message IDs and recovers an old running cut task past its restart limit', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
@@ -270,7 +339,7 @@ function supervise(home, profileDir) {
   }
 }
 
-async function realLoop(t, home, { run = null, supervised = false, logs = new Map(),
+async function realLoop(t, home, { run = null, expectedRun, supervised = false, logs = new Map(),
   turns = false, subagents = false, stream } = {}) {
   const ctx = new Context()
   const profileDir = join(home, 'profiles', 'web')
@@ -339,7 +408,12 @@ async function realLoop(t, home, { run = null, supervised = false, logs = new Ma
   rt.isFolder = async path => path === home
   ctx.on('session/event', (session, event) => events.push({ id: session.id, ...event }))
   if (turns) installTurns(rt)
-  install(rt)
+  const previousRun = process.env.AUTOMAGIK_SUPERVISOR_RUN
+  if (expectedRun !== undefined) process.env.AUTOMAGIK_SUPERVISOR_RUN = expectedRun
+  try { install(rt) } finally {
+    if (previousRun === undefined) delete process.env.AUTOMAGIK_SUPERVISOR_RUN
+    else process.env.AUTOMAGIK_SUPERVISOR_RUN = previousRun
+  }
   installWakeLog(rt)
   const earlier = new Set(preSteps(ctx))
   installParts(rt)
@@ -525,7 +599,7 @@ async function stopLoop(bench) {
   await bench.ctx.fiber.dispose()
 }
 
-test('a verdict that beats a slow DSH cancellation replays the claim once after turn end', async t => {
+async function slowCancellation(t, failReplay) {
   const home = temp(t)
   const assembling = Promise.withResolvers()
   const release = Promise.withResolvers()
@@ -542,6 +616,10 @@ test('a verdict that beats a slow DSH cancellation replays the claim once after 
     return next()
   })
   const input = user('claim pending when the verdict arrives')
+  const exchangeId = 'slow-cancellation-delivery'
+  await b.rt.deliver({ toId: 'ada', text: 'team delivery pending with the input', role: 'continue', exchangeId }, {
+    enqueue(target, message) { target.inject(message); return true },
+  })
   agent.followup(input)
   await assembling.promise
   const timer = setTimeout
@@ -550,20 +628,52 @@ test('a verdict that beats a slow DSH cancellation replays the claim once after 
   const answer = await b.rt.selfUpdateStart()
   assert.equal(answer.started, true)
   assert.equal(answer.stillRunning, 1)
+  const initialReplay = Promise.withResolvers()
+  const events = b.ctx.sessionController.events
+  t.mock.method(b.ctx.sessionController, 'events', async options => {
+    const value = await events(options)
+    if (options.address.sessionId === agent.id) initialReplay.resolve()
+    return value
+  })
   b.verdict('notUpdated', answer.requestId)
   await b.rt.updateHold.wait()
+  await initialReplay.promise
+  await immediate()
   await b.rt.flushUpdateNotes()
-  assert.deepEqual(notesOf(home).held.chat.map(item => item.message.id), [input.id])
+  const heldBefore = notesOf(home).held
+  assert.deepEqual(heldBefore.chat.map(item => item.message.id), [input.id])
   assert.equal(messagesOf(b, 'chat')().some(message => message.id === input.id), false)
+  const summary = () => readUpdateRecovery(join(home, 'profiles', 'web'), b.rt.selfUpdateStatus().run)
+  const outcome = kind => summary()?.items.find(item => item.kind === kind)?.state
+  assert.equal(summary().complete, false)
+  assert.equal(outcome('input'), 'pending')
+  assert.equal(outcome('delivery'), 'pending')
+  if (failReplay) {
+    const followup = agent.followup.bind(agent)
+    t.mock.method(agent, 'followup', message => {
+      if (message.id === input.id || message.source?.exchangeId === exchangeId) throw new Error('fixture replay failed')
+      return followup(message)
+    })
+  }
   off()
   release.resolve()
+  await until(() => summary()?.complete === true).catch(reportLoop(t, b))
+  assert.equal(outcome('input'), failReplay ? 'failed' : 'resumed')
+  assert.equal(outcome('delivery'), failReplay ? 'failed' : 'resumed')
   const messages = messagesOf(b, 'chat')
-  await until(() => messages().some(message => message.id === input.id)).catch(reportLoop(t, b))
+  if (!failReplay) {
+    await until(() => messages().some(message => message.id === input.id)
+      && messages().some(message => message.source.exchangeId === exchangeId)).catch(reportLoop(t, b))
+  }
   await agent.whenIdle()
   await b.rt.flushUpdateNotes()
-  assert.equal(messages().filter(message => message.id === input.id).length, 1)
-  assert.deepEqual(notesOf(home).held, {})
-})
+  assert.equal(messages().filter(message => message.id === input.id).length, failReplay ? 0 : 1)
+  assert.equal(messages().filter(message => message.source.exchangeId === exchangeId).length, failReplay ? 0 : 1)
+  assert.deepEqual(notesOf(home).held, failReplay ? { chat: heldBefore.chat } : {})
+}
+
+test('a verdict that beats a slow DSH cancellation replays the claims once after turn end', t => slowCancellation(t, false))
+test('slow-cancellation input and delivery claims stay pending until a failed replay', t => slowCancellation(t, true))
 
 for (const recovery of ['notUpdated', 'boot']) {
   test(`a claimed wake report is replayed once after ${recovery}`, async t => {
@@ -598,6 +708,8 @@ for (const recovery of ['notUpdated', 'boot']) {
     const report = { role: 'task-done', taskSessionId: 'task', note: 'Check', text: 'Task finished' }
     const fields = { id, kind: 'task-report', key: 'task:task', botId: 'ada', sessionId: 'chat',
       report, outcome: { status: 'done', endedAt: Date.now(), summary: 'Task finished' } }
+    const title = 'Check the update report'
+    b.rt.state.tasks.task = { title }
     assert.equal(b.rt.wakeLog.intent(fields), 'written')
     await b.rt.deliver({ toId: 'ada', ...report, exchangeId: id, wake: true }, b.rt.wakeLog.firstOptions(id))
     await assembling.promise
@@ -615,7 +727,9 @@ for (const recovery of ['notUpdated', 'boot']) {
     let destination = agent
     if (recovery === 'boot') {
       await stopLoop(b)
-      recovering = await realLoop(t, home, { logs: logsOf(b) })
+      const run = { ...liveRun('healthy'), requestId: answer.requestId }
+      recovering = await realLoop(t, home, { logs: logsOf(b), run, expectedRun: run.runId, supervised: true })
+      recovering.rt.state.tasks.task = { title }
       recovering.rt.chatOwners.set('chat', 'ada')
       destination = (await recovering.create('chat')).agent
     } else {
@@ -623,12 +737,23 @@ for (const recovery of ['notUpdated', 'boot']) {
       await continuing.promise
       await until(() => b.delivered.some(args => args.exchangeId === id && args.resent)).catch(reportLoop(t, b))
       assert.equal(messagesOf(b, 'chat')().some(message => message.source.exchangeId === id), false)
+      const summary = () => readUpdateRecovery(join(home, 'profiles', 'web'), b.rt.selfUpdateStatus().run)
+      await until(() => summary()?.complete === true).catch(reportLoop(t, b))
+      assert.deepEqual(summary().items.filter(item => item.kind === 'delivery'),
+        [{ kind: 'delivery', sessionId: 'chat', name: title, state: 'resumed' }])
       continueReply.resolve()
     }
     const messages = messagesOf(recovering, 'chat')
     await until(() => messages().some(message => message.source.exchangeId === id)).catch(reportLoop(t, recovering))
     await destination.whenIdle()
     await recovering.rt.wakeLog.replayed
+    if (recovery === 'boot') {
+      await recovering.rt.resumesDone
+      const summary = readUpdateRecovery(join(home, 'profiles', 'web'), recovering.rt.selfUpdateStatus().run)
+      assert.equal(summary.complete, true)
+      assert.deepEqual(summary.items.filter(item => item.kind === 'delivery'),
+        [{ kind: 'delivery', sessionId: 'chat', name: title, state: 'resumed' }])
+    }
     await recovering.rt.flushUpdateNotes()
     assert.equal(messages().filter(message => message.source.exchangeId === id).length, 1)
     assert.equal(recovering.delivered.filter(args => args.exchangeId === id && args.resent).length, 1)
@@ -810,24 +935,77 @@ test('the Windows inflight write updates the file in place', async t => {
 test('a failed Bot continuation stays durable and is delivered once by the next runtime', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const home = temp(t)
+  const profileDir = join(home, 'profiles', 'web')
+  mkdirSync(profileDir, { recursive: true })
+  const updateRun = liveRun('healthy')
   const record = { botId: 'ada', since: 1, stoppedBy: 'update' }
-  seed(home, { turns: { chat: record } })
-  const first = replayBench(t, home, { before(rt) {
-    rt.deliver = async () => { throw new Error('capability setup failed') }
-  } })
-  assert.deepEqual((await finishBoot(t, first)).resumed, [])
-  await first.rt.flushUpdateNotes()
-  assert.deepEqual(notesOf(home).turns.chat, record)
-  await first.ctx.dispose()
-
+  seed(home, { turns: { chat: record, 'sender-chat': { ...record, botId: 'sender' } } })
   const messages = []
-  const agent = { session: { id: 'chat' }, followup: message => messages.push(message) }
-  const next = replayBench(t, home, { agents: new Map([['chat', agent]]) })
-  assert.deepEqual((await finishBoot(t, next)).resumed, ['chat'])
-  await next.rt.flushUpdateNotes()
-  assert.equal(messages.filter(message => message.source.resumedByUpdate).length, 1)
+  let bench
+  const agents = new Map(['chat', 'sender-chat'].map(id => [id, {
+    session: { id },
+    followup(message) {
+      messages.push(message)
+      emit(bench.ctx, id, 'user/message', message)
+    },
+  }]))
+  bench = replayBench(t, home, { agents, profileDir, updateRun, before(rt) {
+    const deliver = rt.deliver
+    rt.deliver = async (args, options) => {
+      if (args.toId === 'ada') throw new Error('capability setup failed')
+      return deliver(args, options)
+    }
+  } })
+  assert.deepEqual((await finishBoot(t, bench)).resumed, ['sender-chat'])
+  await bench.rt.flushUpdateNotes()
+  assert.deepEqual(notesOf(home), { ...empty, turns: { chat: record } })
+  const recovery = () => readUpdateRecovery(profileDir, updateRun)
+  const items = [
+    { kind: 'turn', sessionId: 'chat', name: 'Ada', state: 'failed' },
+    { kind: 'turn', sessionId: 'sender-chat', name: 'Sender', state: 'resumed' },
+  ]
+  assert.deepEqual(recovery(), { runId: updateRun.runId, requestId: updateRun.requestId, complete: true, items })
+  await bench.ctx.dispose()
+
+  bench = replayBench(t, home, { agents, profileDir, updateRun })
+  assert.deepEqual((await finishBoot(t, bench)).resumed, ['chat'])
+  await bench.rt.flushUpdateNotes()
+  assert.deepEqual(messages.filter(message => message.source.resumedByUpdate).map(message => message.source.exchangeId),
+    ['resume:sender-chat:1', 'resume:chat:1'])
   assert.equal(notesOf(home).turns.chat, undefined)
+  assert.deepEqual(recovery(), {
+    runId: updateRun.runId, requestId: updateRun.requestId, complete: true,
+    items: [{ ...items[0], state: 'resumed' }, items[1]],
+  })
 })
+
+for (const [label, contents, unconfirmed] of [
+  ['valid empty', JSON.stringify(empty), false],
+  ['malformed JSON', '{', true],
+  ['invalid inventory', '{}', true],
+  ['missing', undefined, true],
+]) {
+  test(`boot reports whether ${label} inflight notes establish an empty recovery inventory`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const home = temp(t)
+    const profileDir = join(home, 'profiles', 'web')
+    mkdirSync(profileDir, { recursive: true })
+    if (contents !== undefined) writeFileSync(join(home, 'inflight.json'), contents)
+    const updateRun = liveRun('healthy')
+    const b = replayBench(t, home, { profileDir, updateRun, gate: false })
+    await finishBoot(t, b)
+    const expected = {
+      runId: updateRun.runId, requestId: updateRun.requestId, complete: true, items: [],
+      ...(unconfirmed ? { inventoryUnconfirmed: true } : {}),
+    }
+    assert.deepEqual(readUpdateRecovery(profileDir, updateRun), expected)
+    await b.rt.flushUpdateNotes()
+    await b.ctx.dispose()
+    assert.deepEqual(notesOf(home), empty)
+    await finishBoot(t, replayBench(t, home, { profileDir, updateRun, gate: false }))
+    assert.deepEqual(readUpdateRecovery(profileDir, updateRun), expected)
+  })
+}
 
 test('a failed hand-back retains a queued continuation and the next runtime sends only the remaining exchange', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })

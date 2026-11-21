@@ -239,6 +239,17 @@ for (const phase of ['preflight', 'after the check', 'at confirmation']) {
   })
 }
 
+test('Force preflight starts a fresh signed check even when the saved candidate was just consumed', async () => {
+  const b = rowFixture()
+  b.status({
+    ...ready, run: { requestId: 'just-updated', phase: 'healthy', to: '1.2.3' },
+    check: { ...available(0), laneVersion: '1.2.3', fresh: true, newer: false },
+  })
+  await click(await b.draw(), force)
+  noStart(b)
+  assert.ok(button(await b.draw(), stop))
+})
+
 test('a fresh immediate check re-reads readiness, asks once and follows the accepted request', async () => {
   let published = false
   const progress = [

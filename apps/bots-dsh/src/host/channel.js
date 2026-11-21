@@ -20,7 +20,8 @@ import { isWindowEndpoint } from './extend.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
-import { CHECK_READ_ONLY } from './self-update-check.js'
+import { CHECK_READ_ONLY, newerCheckedCandidate, savedCheckSummary } from './self-update-check.js'
+import { readUpdateRecovery } from './self-update-recovery.js'
 import { callerService } from './multiuser.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
@@ -550,10 +551,21 @@ export function install(rt) {
         }
         const generation = rt.teamGeneration()
         const status = endpoint === 'self-update-status' ? rt.selfUpdateStatus() : undefined
+        const ownerStatus = () => {
+          const profileDir = rt.ctx.get?.('profileContext')?.dir
+          const check = healthForm ? null : savedCheckSummary(profileDir)
+          const recovery = healthForm ? null : readUpdateRecovery(profileDir, status.run)
+          const reply = { ...status, ...(healthForm ? rt.selfUpdateHealth() : {}) }
+          if (check !== null) reply.check = { ...check, newer: newerCheckedCandidate(check, status.current) }
+          if (recovery !== null) reply.recovery = recovery
+          if (rt.config.selfUpdate === true) {
+            reply.startEnabled = true
+            reply.startRefusal = rt.selfUpdateStartRefusal(status)
+          }
+          return reply
+        }
         const result = endpoint === 'self-update-status'
-          // Only an instance whose owner turned in-app updates on (`selfUpdate: true`) offers Update now.
-          ? { ...status, ...(healthForm ? rt.selfUpdateHealth() : {}), ...(rt.config.selfUpdate === true
-            ? { startEnabled: true, startRefusal: rt.selfUpdateStartRefusal(status) } : {}) }
+          ? ownerStatus()
           : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId)
             : endpoint === 'self-update-start' ? await rt.selfUpdateStart(() => rt.sameTeam(generation), { force: body.force === true })
               : await rt.selfUpdateCheck()

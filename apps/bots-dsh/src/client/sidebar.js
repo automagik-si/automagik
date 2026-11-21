@@ -553,7 +553,7 @@ export function TeamSidebar(props) {
           : h(AgentRow, { key: entry.item.id, ...rowProps, agent: entry.item, marked: markedUnread[entry.item.id] === true })))))
 }
 
-// Other plugins' buttons in the top row and the rail (extend.js sidebarTools). Each is drawn on
+// Other plugins' buttons in the wide footer and the rail (extend.js sidebarTools). Each is drawn on
 // its own: one that throws draws nothing, and the row around it stays.
 let ToolBoundary = null
 const toolBoundary = () => (ToolBoundary ??= class SidebarTool extends Component {
@@ -574,10 +574,21 @@ function SidebarTools(props) {
   return entries.map(entry => h(toolBoundary(), { key: entry.id, entry, tool: props }))
 }
 
-// The update button at the sidebar's top right: a cloud while a newer Omni —
+// The sidebar's update button: a cloud while a newer Omni —
 // or a newer verified DSH — is available, then the install's progress and
 // result. Its card has one row each for the bot and DSH, with their versions,
 // the release notes link, and each row's own button.
+export function updatePopoverPlacement(rect, { width, height, top, bottom, left = 0 }) {
+  const inset = 8
+  const gap = 6
+  const below = Math.max(0, bottom - Math.max(top + inset, rect.bottom + gap) - inset)
+  const above = Math.max(0, Math.min(bottom - inset, rect.top - gap) - top - inset)
+  const x = Math.max(left + inset, Math.min(rect.left, left + width - 280 - inset))
+  return above > below
+    ? { left: x, bottom: height - top - inset - above, maxHeight: above, maxWidth: width - 2 * inset }
+    : { left: x, top: bottom - inset - below, maxHeight: below, maxWidth: width - 2 * inset }
+}
+
 function UpdateButton({ useUpdate, actions }) {
   const update = useUpdate(value => value)
   const [open, setOpen] = useState(false)
@@ -605,8 +616,17 @@ function UpdateButton({ useUpdate, actions }) {
   const tick = useViewport()
   useLayoutEffect(() => {
     if (!open) return
-    const rect = button.current?.getBoundingClientRect()
-    if (rect) setBox({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)), top: rect.bottom + 6 })
+    const place = () => {
+      const rect = button.current?.getBoundingClientRect()
+      const viewport = window.visualViewport
+      if (rect) setBox(updatePopoverPlacement(rect, {
+        width: viewport?.width ?? window.innerWidth, height: window.innerHeight,
+        top: viewport?.offsetTop ?? 0, bottom: viewBottom(), left: viewport?.offsetLeft,
+      }))
+    }
+    place()
+    window.addEventListener('resize', place)
+    return () => window.removeEventListener('resize', place)
   }, [open, tick])
   if (!update?.available && !dshRow && phase === 'idle' && dshPhase === 'idle') return null
   const cloudPhase = phase === 'installing' || dshPhase === 'installing' ? 'installing' : phase !== 'idle' ? phase : dshPhase
@@ -1086,7 +1106,7 @@ ${NATIVE_WORKERS_CSS}
 .bt-update[data-phase=installing] .bt-cloud-arrow{animation:bt-cloud-drop 1.1s cubic-bezier(.45,0,.55,1) infinite}
 @keyframes bt-cloud-drop{0%{transform:translateY(-3px);opacity:0}35%{opacity:1}70%{transform:translateY(1px);opacity:1}100%{transform:translateY(2px);opacity:0}}
 .bt-update-dot{position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:#E5484D;box-shadow:0 0 0 1.5px var(--bt-sidebar)}
-.bt-update-pop{position:fixed;z-index:60;width:280px;padding:14px 14px 12px;border-radius:14px;background:var(--bt-main);border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);box-sizing:border-box;transform-origin:top left;font-family:var(--bt-font);animation:bt-update-pop ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing}}
+.bt-update-pop{position:fixed;overflow:auto;z-index:60;width:280px;padding:14px 14px 12px;border-radius:14px;background:var(--bt-main);border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);box-sizing:border-box;transform-origin:top left;font-family:var(--bt-font);animation:bt-update-pop ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing}}
 @keyframes bt-update-pop{from{opacity:0;transform:scale(.96);filter:blur(4px)}}
 .bt-update-title{font-size:14px;line-height:20px;font-weight:600}
 .bt-update-text{margin-top:2px;font-size:12.5px;line-height:18px;color:var(--bt-ink-2)}
