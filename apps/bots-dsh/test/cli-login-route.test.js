@@ -264,6 +264,38 @@ for (const evidence of ['pending', 'damaged', 'legacy']) {
   })
 }
 
+test('the isolated account card asks both vendors’ recovery at once', async t => {
+  const h = await fixture(t)
+  const claude = Promise.withResolvers()
+  const calls = []
+  let recoveriesAtCodexRead
+  h.acp.authScope = 'isolated'
+  h.acp.accountRecovery = id => {
+    calls.push(id)
+    if (id === CLAUDE) return claude.promise
+    return { required: false }
+  }
+  h.acp.account = async id => {
+    if (id !== CODEX) return { signedIn: false }
+    recoveriesAtCodexRead = [...calls]
+    return { signedIn: true, account: { email: 'healthy@example.test' } }
+  }
+  h.acp.accountReset = t.mock.fn()
+  const pending = h.call('cli-login-accounts', {})
+  try {
+    // A turn is enough for the in-process route to call both recovery readers.
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual([...calls].sort(), [CLAUDE, CODEX])
+  } finally { claude.resolve({ required: false }) }
+  const { result } = await pending
+  assert.equal(result.ok, true)
+  assert.deepEqual(recoveriesAtCodexRead?.sort(), [CLAUDE, CODEX])
+  assert.equal(Object.hasOwn(result.value.accounts[CLAUDE], 'recoveryRequired'), false)
+  assert.equal(result.value.accounts[CODEX].signedIn, true)
+  assert.equal(result.value.accounts[CODEX].account.email, 'healthy@example.test')
+  assert.equal(h.acp.accountReset.mock.callCount(), 0)
+})
+
 test('reset stays owner-only, uses only the isolated ACP action and preserves Bot history',
   async t => {
     const h = await fixture(t)

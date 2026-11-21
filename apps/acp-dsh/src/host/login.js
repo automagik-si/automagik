@@ -22,7 +22,8 @@ import { spawn as spawnProcess } from 'node:child_process'
 import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { LoginProcess } from './login-process.js'
 import { recordLogin } from './login-ownership.js'
-import { launchWindowsLogin } from './windows-login.js'
+import { launchWindowsLogin, windowsJobName } from './windows-login.js'
+import { processBirth } from './process-identity.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
@@ -422,11 +423,16 @@ export class CliLogins {
     }
     // Write the pending record before spawning: a crash before PID persistence cannot let
     // recovery assume that no vendor started. Only verified full-tree exit clears it.
-    const ownership = this.record(env)
+    const windows = process.platform === 'win32' && this.spawn === spawnProcess
+    const launch = windows ? randomUUID() : undefined
+    const appBirth = windows ? processBirth(process.pid) : null
+    const ownership = windows ? this.record(env, { id: launch, job: windowsJobName(launch), appBirth })
+      : this.record(env)
     let owned
     try {
-      owned = process.platform === 'win32' && this.spawn === spawnProcess
-        ? launchWindowsLogin(selected.cli, args, options)
+      owned = windows
+        ? launchWindowsLogin(selected.cli, args, { ...options, launch,
+          appStart: appBirth?.platform === 'win32' ? appBirth.start : null })
         : new LoginProcess(this.spawn(...batchSafe(selected.cli, args, options)), {
           grouped: process.platform !== 'win32' && this.spawn === spawnProcess,
           timers: this.timers,

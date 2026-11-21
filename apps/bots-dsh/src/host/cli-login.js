@@ -459,10 +459,14 @@ export function install(rt, reservationDeps) {
     }
     if (typeof service?.account !== 'function') return view(out)
     if (service.authScope === 'isolated') {
+      const recoveries = new Map([...PROVIDERS].map(id => [id, Promise.resolve()
+        .then(() => service.accountRecovery?.(id))]))
+      // Observe early failures while the other vendor's reads are pending.
+      for (const recovery of recoveries.values()) recovery.catch(() => {})
       for (const id of PROVIDERS) {
         let seen, terminal, recoveryRequired = false, unread = false
         try {
-          recoveryRequired = (await service.accountRecovery?.(id))?.required === true
+          recoveryRequired = (await recoveries.get(id))?.required === true
           if (!recoveryRequired) seen = await service.account(id, { fresh: true })
         } catch (error) {
           recoveryRequired = error?.code === 'acp-account/unverified-login'
