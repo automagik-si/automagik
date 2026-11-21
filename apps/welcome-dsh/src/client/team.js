@@ -212,7 +212,16 @@ function serverRefusal({ reason, version, npm, github }) {
 export async function sandboxInstall({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, poll = 400, check: checkVersion }) {
   const check = () => { if (signal?.aborted) throw abortError() }
   show('sandbox', { terminal: null, log: '', step: null })
-  const opened = await omniUi('omni-terminal-open', { kind: 'install', cols: 72, rows: 8 })
+  const payload = { kind: 'install', cols: 72, rows: 8 }
+  let opened
+  try {
+    opened = await omniUi('omni-terminal-open', { ...payload, via: 'welcome' })
+  } catch (error) {
+    if (error?.code !== 'bot/invalid') throw error
+    check()
+    // Older teams give this request straight to Omni's strict open schema.
+    opened = await omniUi('omni-terminal-open', payload)
+  }
   const { terminal } = opened
   const close = () => omniUi('omni-terminal-close', { terminal }).catch(() => {})
   if (signal?.aborted) {
@@ -342,6 +351,16 @@ function sameUrl(a, b) {
     effectivePort(leftUrl) === effectivePort(rightUrl) && leftUrl.pathname === rightUrl.pathname
 }
 
+// Omni exposes the pending pairing's origin as a host and port.
+function sameOrigin(origin, target) {
+  if (typeof origin !== 'string' || /[/\\?#@\s]/.test(origin)) return false
+  const url = new URL(target)
+  try {
+    const candidate = new URL(`${url.protocol}//${origin}`)
+    return loopback(candidate.hostname) === loopback(url.hostname) && candidate.port === url.port
+  } catch { return false }
+}
+
 const CONNECT_DEADLINE = Symbol()
 
 async function readBefore(omniUi, endpoint, remaining, signal) {
@@ -394,6 +413,11 @@ export async function githubInstall({
       check()
       if (link === CONNECT_DEADLINE || now() >= deadline) break
       if (link?.linked === true || link?.configured === true) return end('linked', { origin: link.origin ?? null })
+      if (link?.pairing && !sameOrigin(link.pairing.origin, target)) {
+        return fail(t('Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.', {
+          origin: link.pairing.origin ?? t('unknown'), url: target,
+        }))
+      }
       if (link && entry) {
         let claim
         try {

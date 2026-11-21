@@ -4,6 +4,7 @@ import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { createOmniTerminalGuard } from '../src/host/omni-terminal-guard.js'
 import { fakeLocale } from './fake-locale.js'
 
 const bundle = await build({
@@ -149,6 +150,110 @@ const connectAnswers = {
   'omni-github-ack': claim({ ...done, acknowledged: true }),
 }
 
+test('the welcome retries once without its marker when an older team exposes Omni’s strict open schema', async () => {
+  const payload = { kind: 'install', cols: 72, rows: 8 }
+  const marked = { ...payload, via: 'welcome' }
+  const invalid = Object.assign(new Error('Pick what the terminal is for'), { code: 'bot/invalid' })
+  const c = client({
+    ...terminalAnswers,
+    'omni-terminal-open': body => {
+      if (Object.hasOwn(body, 'via')) throw invalid
+      assert.deepEqual(plain(body), payload)
+      return terminalAnswers['omni-terminal-open']
+    },
+    'omni-terminal-read': { state: 'done', result: paired },
+  })
+  assert.equal(await c.sandboxInstall(), 'linked')
+  assert.deepEqual(c.requests.slice(0, 2), [['omni-terminal-open', marked], ['omni-terminal-open', payload]])
+  for (const [error, tries] of [[invalid, 2], [Object.assign(new Error('Read-only'), { code: 'bot/read-only' }), 1]]) {
+    const refused = client({ 'omni-terminal-open': () => { throw error } })
+    await assert.rejects(refused.sandboxInstall(), error)
+    assert.deepEqual(refused.names(), Array(tries).fill('omni-terminal-open'))
+  }
+})
+
+test('old welcome polling and a passive Apps refresh share the terminal guard’s install', async t => {
+  for (const fails of [false, true]) {
+    const answer = { ok: true, fallback }
+    const error = 'The install ran out of space.'
+    const installerPoll = deferred()
+    const welcomePolled = deferred()
+    const welcomePoll = deferred()
+    const appsPoll = deferred()
+    const calls = []
+    let exited = false
+    let jobView = { ...running, reason: 'npm-failed', npm: { ...npm, exitCode: 1 } }
+    const native = {
+      'omni-terminal-open': () => ({ terminal, ...ready() }),
+      'omni-terminal-read': ({ from }) => {
+        const output = exited ? 'prompt\r\nnpm error' : 'prompt'
+        return {
+          terminal, ...ready(), data: output.slice(from), next: output.length,
+          ...(exited ? { state: 'failed', exitCode: 1 } : {}),
+        }
+      },
+      'omni-terminal-write': () => { calls.push('native Enter'); exited = true; return { ok: true } },
+      'omni-terminal-close': () => ({ ok: true }),
+      'omni-discover': () => ({ omnis: [sandbox] }),
+      'omni-link': () => ({ linked: false }),
+      'omni-discover-use': () => { calls.push('use'); return paired },
+    }
+    const guard = createOmniTerminalGuard({
+      check: () => { calls.push('guard check'); return answer },
+      installer: {
+        start: payload => {
+          assert.deepEqual(plain(payload), { version: V, reason: 'npm-failed', exitCode: 1 })
+          calls.push('start')
+          return job(jobView)
+        },
+        status: () => job(jobView),
+        ack: () => { calls.push('ack'); return claim(jobView) },
+      },
+      endpointOf: name => native[name],
+      readOnly: () => undefined,
+      wait: () => installerPoll.promise,
+    })
+    t.after(guard.dispose)
+    const routed = Object.fromEntries(['open', 'write', 'read', 'close'].map(action => {
+      const name = `omni-terminal-${action}`
+      // The old client sent the same terminal calls without `via` in its open payload.
+      return [name, ({ via: _via, ...body }) => guard[action](body, undefined, native[name])]
+    }))
+    const c = client({
+      ...routed,
+      'omni-server-check': () => { calls.push('welcome check'); return answer },
+      'omni-plugins': () => ({ server: jobView }),
+      'omni-github-status': () => job(jobView),
+    })
+    const welcome = c.ui.sandboxInstall({
+      ...c.options,
+      check: version => c.request('omni-server-check', { version, fallback: true }),
+      wait: () => { welcomePolled.resolve(); return welcomePoll.promise },
+    })
+    await welcomePolled.promise
+    await settle()
+    assert.deepEqual(calls, ['welcome check', 'guard check', 'native Enter', 'start'])
+
+    const refresh = await c.request('omni-plugins')
+    assert.equal(refresh.server.phase, 'running')
+    const apps = c.ui.resumeServer(refresh, (_kind, run) => run({ ...c.options, show() {}, wait: () => appsPoll.promise }), { passive: true })
+    assert.ok(apps)
+    jobView = fails ? { ...jobView, phase: 'failed', error, next: 'retry' } : done
+    appsPoll.resolve()
+    assert.equal(await apps, fails ? 'failed' : 'asleep')
+    assert.deepEqual(calls, ['welcome check', 'guard check', 'native Enter', 'start'])
+
+    installerPoll.resolve()
+    await settle()
+    welcomePoll.resolve()
+    assert.equal(await welcome, fails ? 'failed' : 'linked')
+    assert.equal(c.names().filter(name => name === 'omni-terminal-read').length, 2)
+    assert.deepEqual(c.names().filter(name => name.startsWith('omni-github-')), ['omni-github-status'])
+    assert.deepEqual(calls.slice(4), fails ? [] : ['ack', 'use'])
+    assert.equal(fails ? c.last()[1].message : c.last()[1].origin, fails ? error : base)
+  }
+})
+
 test('behind closes the terminal and uses only the reachable sandbox with the reported address and version', async () => {
   const c = client({
     ...terminalAnswers, ...connectAnswers,
@@ -164,7 +269,7 @@ test('behind closes the terminal and uses only the reachable sandbox with the re
   })
   assert.equal(await c.sandboxInstall(), 'linked')
   assert.deepEqual(c.requests, [
-    ['omni-terminal-open', { kind: 'install', cols: 72, rows: 8 }],
+    ['omni-terminal-open', { kind: 'install', cols: 72, rows: 8, via: 'welcome' }],
     ['omni-server-check', { version: V, fallback: true }],
     ['omni-terminal-close', { terminal }],
     ['omni-github-install', { version: V, reason: 'behind' }],
@@ -431,6 +536,40 @@ test('a link chosen before the claim wins over the discovered sandbox', async ()
     assert.deepEqual(c.last(), ['linked', { origin }])
     assert.deepEqual(c.names(), ['omni-github-install', 'omni-discover', 'omni-link'])
   }
+})
+
+test('resuming a done job preserves a pending sign-in for another Omni', async () => {
+  for (const origin of ['other.example:18882', 'localhost:18883']) {
+    const pairing = Object.freeze({ origin, code: 'ABCD' })
+    const link = { linked: false, pairing }
+    const c = client({ 'omni-link': link, 'omni-discover': { omnis: [sandbox] } })
+    assert.equal(await c.github({ resume: done }), 'failed')
+    assert.equal(c.last()[1].message,
+      `Another Omni sign-in is waiting (${origin}). Finish or cancel it, then connect to the new Omni at ${base} from the Omni list.`)
+    assert.deepEqual(c.names(), ['omni-link', 'omni-discover', 'omni-link'])
+    assert.equal(link.pairing, pairing)
+  }
+})
+
+test('a newly finished GitHub install does not claim a foreign pending sign-in', async () => {
+  const pairing = Object.freeze({ origin: 'other.example:18882', code: 'ABCD' })
+  const link = { linked: false, pairing }
+  const c = client({
+    'omni-github-install': job(done),
+    'omni-discover': { omnis: [sandbox] },
+    'omni-link': link,
+  })
+  assert.equal(await c.github(), 'failed')
+  assert.equal(c.last()[1].message,
+    `Another Omni sign-in is waiting (${pairing.origin}). Finish or cancel it, then connect to the new Omni at ${base} from the Omni list.`)
+  assert.deepEqual(c.names(), ['omni-github-install', 'omni-discover', 'omni-link'])
+  assert.equal(link.pairing, pairing)
+})
+
+test('a pending sign-in for the same loopback host and port allows the welcome to claim the job', async () => {
+  const c = client({ ...connectAnswers, 'omni-link': { pairing: { origin: '[::1]:18882' } } })
+  assert.equal(await c.github({ resume: done }), 'linked')
+  assert.deepEqual(c.names(), ['omni-link', 'omni-discover', 'omni-link', 'omni-github-ack', 'omni-discover-use'])
 })
 
 test('a refused claim shows the host message without using the discovery entry', async () => {
@@ -808,7 +947,7 @@ async function clickInstallTile(answers) {
 test('the real Install Omni tile sends the fallback capability with the terminal version', async () => {
   const c = await clickInstallTile({ 'omni-server-check': { ok: false, reason: 'no-systemd' } })
   assert.deepEqual(c.requests.slice(-3), [
-    ['omni-terminal-open', { kind: 'install', cols: 72, rows: 8 }],
+    ['omni-terminal-open', { kind: 'install', cols: 72, rows: 8, via: 'welcome' }],
     ['omni-server-check', { version: V, fallback: true }], ['omni-terminal-close', { terminal }],
   ])
 })
@@ -821,7 +960,7 @@ test('an older host rejecting the fallback field gets one legacy check and its r
     },
   })
   assert.deepEqual(c.requests.slice(c.names().indexOf('omni-terminal-open')), [
-    ['omni-terminal-open', { kind: 'install', cols: 72, rows: 8 }],
+    ['omni-terminal-open', { kind: 'install', cols: 72, rows: 8, via: 'welcome' }],
     ['omni-server-check', { version: V, fallback: true }], ['omni-server-check', { version: V }], ['omni-terminal-close', { terminal }],
   ])
   assert.equal(c.ui.powerOf('omni').phase, 'failed')
@@ -896,6 +1035,7 @@ test('all job words and aria labels render through both Portuguese locale IDs', 
         ['Omni could not be installed from GitHub.'],
         ['Omni is installed, but its address is unknown. Power Omni on to try again.'],
         ['Omni is installed but did not answer at {url}. Power Omni on to try again.', { url: base }],
+        ['Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.', { origin: 'other.example:18882', url: base }],
       ]) {
         const translated = c.ui.t(key, params)
         const english = key.replace(/\{(\w+)\}/g, (_, name) => params[name])
