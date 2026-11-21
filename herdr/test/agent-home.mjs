@@ -242,7 +242,7 @@ export function agentHomeTests(cli) {
     assert.equal(codex(""), null);
   });
 
-  test("#1208 ledger rows: the intent row, the start row's two keys only with a home, and the login generation's own folder", () => {
+  test("#1208 ledger rows: the intent row, the start row's two keys only with a home", () => {
     const row = workerIntent({ launch: LAUNCH, name: "e2e-x", project: "/p", worktree: "/p/.claude/worktrees/x", agent: "codex", agentHome: "/homes/b", at: 5 });
     assert.deepEqual(row, { event: "intent", kind: "worker", launch: LAUNCH, name: "e2e-x", project: "/p", worktree: "/p/.claude/worktrees/x", agent: "codex", agentHome: "/homes/b", at: 5 });
     const lines = [row, { ...row, launch: "nope" }, { ...row, agent: "dsh-tui" }, { ...row, agentHome: "relative" }, { event: "start", terminal: "t1" }, { event: "mystery" }]
