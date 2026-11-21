@@ -75,6 +75,9 @@ export function install(rt) {
   let stuck
   let warnedReadOnly = false
   let stopped = false
+  // Other notes kept beside the team (resume.js's inflight.json) end their last write before
+  // the lock is released at stop (rt.holdLockUntil).
+  const lockWaits = new Set()
   // mtime and size of the state.json this host last read or wrote.
   let seen = ''
   // Bumped each time the in-memory state is replaced from the file, so a queued
@@ -574,6 +577,10 @@ export function install(rt) {
 
   rt.canWriteTeam = () => stuck === undefined && (lockBroken || (holder === undefined && lock.owns()))
   rt.holdsLock = () => !stopped && !lockBroken && stuck === undefined && holder === undefined && lock.owns()
+  // A write that was already on its way when the plugin stopped may still land: the lock is
+  // released only after the writes registered here end (holdLockUntil), so it is still ours.
+  rt.ownsLockForPendingWrite = () => !lockBroken && stuck === undefined && holder === undefined && lock.owns()
+  rt.holdLockUntil = (pending) => { lockWaits.add(pending) }
   // RFC 0039 delivery 3: the team an ending operation began in. An adopt replaces the team in memory (`epoch`);
   // a lost and re-claimed lock ends this host's term (`term`, claimLock). Only a host that holds the team now,
   // in the same epoch and term, may publish an end.
@@ -712,7 +719,7 @@ export function install(rt) {
 
   ctx.effect(() => () => {
     stopped = true
-    return writing.finally(() => lock.release())
+    return Promise.allSettled([writing, ...[...lockWaits].map(pending => pending())]).finally(() => lock.release())
   }, 'omni-ui: state lock')
 
   const botOf = id => (id === undefined ? undefined : own(state.bots, id))
