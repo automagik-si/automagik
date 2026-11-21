@@ -303,6 +303,7 @@ export function install(rt) {
   const controller = new AbortController()
   rt.resumeBootPending = () => !passTook || settle !== undefined || resumingAdopted
   let writing = Promise.resolve()
+  rt.holdLockUntil?.(() => writing)
   let stopped = false
   let latest
   let flushLatest = false
@@ -335,7 +336,9 @@ export function install(rt) {
       const flush = flushLatest
       flushLatest = false
       await mkdir(home, { recursive: true })
-      const current = () => !notesFenced() && rt.lockTerm() === term && (term === 0 || rt.holdsLock())
+      // Noted before the stop: it still lands, since the store keeps the lock until this write ends.
+      const current = () => !notesFenced() && rt.lockTerm() === term
+        && (term === 0 || (rt.ownsLockForPendingWrite?.() ?? rt.holdsLock()))
       if (!current()) return false
       const options = { encoding: 'utf8', flush }
       // Windows can refuse to replace the file while another process has it open for reading.
