@@ -1903,6 +1903,8 @@ const pack = createPack({
     "Team or Code": "Equipe ou Código",
     "Code: open Herdr": "Código: abrir o Herdr",
     "Opening Herdr…": "Abrindo o Herdr…",
+    "Needs the scoped link": "Precisa da conexão com escopo",
+    "This Bot is on {machine}. It opens here once the link to that computer is scoped.": "Este Bot está em {machine}. Abre aqui quando a conexão com esse computador tiver escopo.",
     "Herdr {version} is out": "O Herdr {version} está disponível",
     "Update and open": "Atualizar e abrir",
     "Open this version": "Abrir esta versão",

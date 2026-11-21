@@ -18,8 +18,9 @@ import { HOME_PATH, REPO_PATH } from '../src/shared/registry.js'
 import { foldWorkers, readWorkers } from '../src/shared/workers-journal.js'
 import { buildCodeTree, readCodeTree, readRegistryTree, resolvePane, statusWord } from '../src/host/code-tree.js'
 import { connectCore } from '../src/host/code-core.js'
-import { coreProbeFixture } from './fixtures/fake-core-probe.mjs'
-import { connectFakeCore } from './fixtures/fake-core-connection.mjs'
+import { forgetConfirmations } from '../src/host/bar-registry.js'
+import { coreProbeFixture, coreProbeStandIn } from './fixtures/fake-core-probe.mjs'
+import { connectFakeCore, pipeHcThroughWorker } from './fixtures/fake-core-connection.mjs'
 import { aWindowProof } from './fixtures/window-proof.mjs'
 import { CODE_STREAM_ROUTE, CODE_TREE_ENDPOINT, MAX_QUEUED_BYTES, install, openPaneStream, streamAdmission, streamTarget, streamTargets } from '../src/host/code-side.js'
 import { CODE_INPUT_ROUTE, CODE_RELEASE_ROUTE, CODE_TAKE_ROUTE } from '../src/host/code-typing.js'
@@ -70,7 +71,7 @@ function fixture(t, { probe = true } = {}) {
     { v: 1, event: 'attach', bot: LEAD, project, terminal: 't7', core: CORE, created_ms: 700, machine: null, at, by: 'start' },
     { v: 1, event: 'attach', bot: DEV, project, terminal: 't8', core: CORE, created_ms: 800, machine: null, at, by: 'start' },
   ]
-  writeFileSync(join(ledgerDir, 'attach.jsonl'), attachRows.map(row => `${JSON.stringify(row)}\n`).join(''))
+  writeFileSync(join(ledgerDir, 'attach.jsonl'), attachRows.map(row => `${JSON.stringify(row)}\n`).join(''), { mode: 0o600 })
   writeFileSync(join(ledgerDir, 'workers.jsonl'), [
     { event: 'start', kind: 'worker', terminal: 't9', botId: LEAD, lead: LEAD, role: 'reviewer', agent: 'claude', model: null, branch: 'feat/one', project, worktree: project, core: CORE, created_ms: 900, at },
     { event: 'start', kind: 'worker', terminal: 't8', botId: DEV, lead: LEAD, role: 'dev', agent: 'claude', model: null, branch: 'feat/other', project, worktree: project, core: CORE, created_ms: 800, at },
@@ -547,6 +548,13 @@ test('the same runtime can dispose and reinstall the Code side with or without d
   assert.equal(endpoint(), undefined)
 })
 
+test('the Code-side fixture forwards only its scratch socket and test root to the probe', (t) => {
+  const f = fixture(t)
+  assert.equal(f.probeEnv?.AUTOMAGIK_HERDR_TEST_ROOTS, f.root)
+  assert.equal(f.probeEnv?.AUTOMAGIK_HERDR_CORE_SOCKET, join(f.root, 'core.sock'))
+  assert.equal(f.probeEnv?.HC_SOCKET, '')
+})
+
 test('a real Cordis plugin stop closes an open stream and its core attach', async (t) => {
   const f = fixture(t)
   const team = join(f.root, 'team')
@@ -649,7 +657,10 @@ test('the Code tree and pane resolver skip projects without a local shown entry'
 })
 
 test('the real owner dispatcher requires the window marker for the tree and seat screen', async (t) => {
-  const f = fixture(t)
+  const f = fixture(t, { probe: false })
+  const probe = coreProbeStandIn(t, f.root).env
+  Object.assign(f.env, probe)
+  pipeHcThroughWorker(t, FAKE)
   const ctx = fakeContext()
   const connection = { fetchRoutes: new Map(), interceptors: new Map() }
   ctx.connection.fetch.register = options => HostConnectionService.prototype.registerFetchRoute.call(connection, { effect: setup => setup() }, options)
@@ -664,14 +675,18 @@ test('the real owner dispatcher requires the window marker for the tree and seat
     if (saved === undefined) delete process.send
     else process.send = saved
   })
-  const was = { flag: process.env.AUTOMAGIK_APP_BROWSER, digest: process.env.AUTOMAGIK_WINDOW_DIGEST }
-  process.env.AUTOMAGIK_APP_BROWSER = '1'
-  process.env.AUTOMAGIK_WINDOW_DIGEST = DIGEST
+  const env = {
+    ...probe, AUTOMAGIK_APP_BROWSER: '1', AUTOMAGIK_WINDOW_DIGEST: DIGEST,
+    ...Object.fromEntries(['HOME', 'AUTOMAGIK_HOME', 'HERDR_APP_HOME', 'HERDR_HC', 'FAKE_CORE_LOG', 'FAKE_CORE_TERMINALS'].map(key => [key, f.env[key]])),
+  }
+  const was = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]))
+  Object.assign(process.env, env)
   t.after(() => {
-    if (was.flag === undefined) delete process.env.AUTOMAGIK_APP_BROWSER
-    else process.env.AUTOMAGIK_APP_BROWSER = was.flag
-    if (was.digest === undefined) delete process.env.AUTOMAGIK_WINDOW_DIGEST
-    else process.env.AUTOMAGIK_WINDOW_DIGEST = was.digest
+    for (const [key, value] of Object.entries(was)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    forgetConfirmations()
   })
 
   installHooks(rt)
@@ -682,7 +697,7 @@ test('the real owner dispatcher requires the window marker for the tree and seat
     approval: () => null, question: () => null, close() {},
   }))
   installSeats(rt, { engine: {
-    ready: async () => {}, hub: { all: () => [{ address: 't7', labels: { bot: LEAD } }] }, watch, close() {},
+    ready: async () => {}, hub: { current: address => TERMINALS.find(row => row.address === address) }, watch, drop() {}, close() {},
   } })
   installChannel(rt)
   const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
@@ -697,7 +712,7 @@ test('the real owner dispatcher requires the window marker for the tree and seat
   const call = async (endpoint, marker, payload) => (await request('/api/omni-ui', { marker, body: { endpoint, payload } })).json()
   for (const marker of [undefined, 'cd'.repeat(32), DIGEST]) {
     assert.deepEqual(await call('code-tree', marker), { ok: true, value: DESKTOP_ONLY })
-    for (const endpoint of ['seat-chat-open', 'seat-chat-read']) {
+    for (const endpoint of ['seat-chat-list', 'seat-chat-open', 'seat-chat-read']) {
       const answer = await call(endpoint, marker, seat)
       assert.deepEqual(answer, { ok: false, error: { code: 'bot/refused', message: 'desktop-only', details: {} } })
       assert.equal(JSON.stringify(answer).includes('screen'), false)
@@ -711,13 +726,16 @@ test('the real owner dispatcher requires the window marker for the tree and seat
   assert.equal(watch.mock.callCount(), 0)
   assert.equal(readLog(f.log).length, 0)
   assert.equal((await call('code-tree', WINDOW)).value.machine.core, CORE)
-  assert.deepEqual((await call('seat-chat-open', WINDOW, seat)).value.screen, screen)
+  assert.equal((await call('seat-chat-list', WINDOW)).value.seats.find(row => row.id === LEAD)?.terminal, 't7')
+  const opened = (await call('seat-chat-open', WINDOW, seat)).value
+  assert.deepEqual(opened.screen, screen)
   assert.deepEqual((await call('seat-chat-read', WINDOW, seat)).value.screen, screen)
   assert.equal((await call('seat-chat-read', undefined, seat)).error.message, 'desktop-only')
   // An unmarked close is refused and leaves the watch; the window's own close releases it.
-  assert.equal((await call('seat-chat-close', undefined, seat)).error.message, 'desktop-only')
+  const closeSeat = { ...seat, generation: opened.generation }
+  assert.equal((await call('seat-chat-close', undefined, closeSeat)).error.message, 'desktop-only')
   assert.deepEqual((await call('seat-chat-read', WINDOW, seat)).value.screen, screen)
-  assert.deepEqual((await call('seat-chat-close', WINDOW, seat)).value, { closed: true })
+  assert.deepEqual((await call('seat-chat-close', WINDOW, closeSeat)).value, { closed: true })
   assert.match((await call('seat-chat-read', WINDOW, seat)).error.message, /not open/)
   // Another plugin's endpoint, called by the window itself, gets no proof to keep.
   const seen = []
@@ -804,9 +822,11 @@ test('a slow reader sees only the newest queued reset and its paint, after the o
   const credits = []
   const detached = []
   const core = {
+    info: { core: { id: CORE } },
+    call: async (_method, { terminal }) => TERMINALS.find(row => row.address === terminal),
     async attach() {
       const channel = ++attachCount
-      return { channel, terminal: { cols: 80 + channel, rows: 24 } }
+      return { channel, terminal: { ...TERMINALS[0], cols: 80 + channel, rows: 24 } }
     },
     detach: channel => detached.push(channel),
     close() {},
@@ -942,7 +962,8 @@ function controlledCore(f, { attachGrid, refuseAttach } = {}) {
         const attachment = { ...params, channel }
         attaches.push(attachment)
         channels.set(channel, attachment)
-        return { channel, terminal: attachGrid?.(channel) ?? { cols: params.cols, rows: params.rows } }
+        const terminal = terminals.find(row => row.address === params.terminal)
+        return { channel, terminal: { ...terminal, cols: params.cols, rows: params.rows, ...attachGrid?.(channel) } }
       },
       watch(channel, handlers) {
         const attachment = channels.get(channel)

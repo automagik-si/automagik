@@ -17,8 +17,7 @@ const rules = parseRules(stripComments(css))
 const APP_REGION = new Set(['-webkit-app-region', 'app-region'])
 
 // The interactive kinds in the shell bar's no-drag list. The shell rule also names its
-// own `.brand` and `.controls` surfaces; the sidebar's top row substitutes `.bt-brand` and
-// `.bt-code-switch`, so those two are compared separately from the kinds.
+// own `.brand` and `.controls` surfaces. The sidebar's `.bt-brand` is compared separately.
 const SHELL_NO_DRAG = [
   'a', 'button', 'input', 'label', 'select', 'summary', 'textarea', '[contenteditable]',
   '[role=button]', '[role=checkbox]', '[role=link]', '[role=menu]', '[role=menubar]',
@@ -26,7 +25,7 @@ const SHELL_NO_DRAG = [
   '[role=radio]', '[role=slider]', '[role=switch]', '[role=tab]', '[aria-haspopup]',
   '[tabindex]', '[data-menu]',
 ]
-const TOP_SURFACES = ['.bt-brand', '.bt-code-switch']
+const TOP_SURFACES = ['.bt-brand']
 const ROLES = [
   'button', 'checkbox', 'link', 'menu', 'menubar', 'menuitem', 'menuitemcheckbox',
   'menuitemradio', 'option', 'radio', 'slider', 'switch', 'tab',
@@ -546,7 +545,7 @@ const INTERACTIVE_TAGS = new Set(['a', 'button', 'input', 'label', 'select', 'su
 
 function isInteractive(element) {
   return INTERACTIVE_TAGS.has(element.tag) ||
-    element.classes.has('bt-brand') || element.classes.has('bt-code-switch') ||
+    element.classes.has('bt-brand') ||
     'contenteditable' in element.attrs ||
     ROLES.includes(element.attrs.role) ||
     'aria-haspopup' in element.attrs ||
@@ -564,11 +563,6 @@ function sidebarTree(platform) {
   const side = append(body, 'div', { class: 'bt-side' })
   const top = append(side, 'div', { class: 'bt-side-top' })
   const brand = append(top, 'span', { class: 'bt-brand' })
-  const switchWrap = append(top, 'div', { class: 'bt-code-switch-wrap' })
-  const codeSwitch = append(switchWrap, 'div', {
-    class: 'bt-code-switch', role: 'group', 'aria-label': 'Work or code',
-  })
-  append(codeSwitch, 'button', { type: 'button', class: 'bt-code-seg' })
   append(top, 'button', {
     type: 'button', class: 'bt-round bt-update', 'aria-haspopup': 'dialog',
   })
@@ -585,12 +579,12 @@ function sidebarTree(platform) {
   })
   const panel = append(body, 'div', { class: 'bt-panel' })
   append(panel, 'button', { type: 'button', class: 'bt-ptab', role: 'tab' })
-  return { html, body, top, header, leading, head, panel, brand, codeSwitch }
+  return { html, body, top, header, leading, head, panel, brand }
 }
 
 // --- rows ----------------------------------------------------------------------
 
-test('the darwin top row names every shell kind plus its brand and code switch', () => {
+test('the darwin top row names every shell kind plus its brand', () => {
   const found = noDragListFor('top')
   assert.ok(found, 'the darwin top row has a no-drag :is(...) list')
   assertDarwinGated(found.selector)
@@ -617,7 +611,7 @@ test('the built darwin top-row and header controls take clicks', () => {
       if (node !== container && isInteractive(node)) controls.push(node)
     })
   }
-  assert.ok(controls.length >= 10, `the fixture covers the built controls: ${controls.length}`)
+  assert.ok(controls.length >= 8, `the fixture covers the built controls: ${controls.length}`)
   for (const control of controls) {
     assert.equal(effectiveRegion(control), 'no-drag',
       `darwin ${describe(control)} must take clicks, not drag the window`)
@@ -716,5 +710,5 @@ test('the bots-dsh lists match the shell top bar list as #878 lands it', () => {
   assert.deepEqual([...headerFound.args].sort(), [...SHELL_NO_DRAG].sort(),
     'the header opts out exactly the shell bar kinds')
   assert.deepEqual([...topFound.args].sort(), [...SHELL_NO_DRAG, ...TOP_SURFACES].sort(),
-    'the top row opts out the shell bar kinds plus its own surfaces')
+    'the top row opts out the shell bar kinds and its brand')
 })

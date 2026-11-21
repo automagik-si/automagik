@@ -4,7 +4,9 @@
 // endpoint's function: calling it with `true`, or any value it makes itself, is refused.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import fs, { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import { Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -65,8 +67,8 @@ test('only the team\'s window-only endpoints are marked, and no entry can be giv
   disposers.push(rt.hooks.endpoint('another-plugin', async () => 'ok'))
   // A caller of the public hook cannot ask for the mark.
   disposers.push(rt.hooks.endpoint('asks-for-window', async () => 'ok', { read: true, window: true }))
-  for (const name of ['seat-chat-open', 'seat-chat-read', 'seat-chat-close']) assert.equal(isWindowEndpoint(rt.extended.endpointOf(name)), true, name)
-  for (const name of ['seat-chat-list', 'another-plugin', 'asks-for-window']) assert.equal(isWindowEndpoint(rt.extended.endpointOf(name)), false, name)
+  for (const name of ['seat-chat-list', 'seat-chat-open', 'seat-chat-read', 'seat-chat-close']) assert.equal(isWindowEndpoint(rt.extended.endpointOf(name)), true, name)
+  for (const name of ['another-plugin', 'asks-for-window']) assert.equal(isWindowEndpoint(rt.extended.endpointOf(name)), false, name)
   const entry = rt.extended.endpointOf('seat-chat-read')
   assert.throws(() => { entry.fn = async () => 'swapped' }, TypeError)
   assert.equal(Object.isFrozen(rt.extended.endpointOf('another-plugin')), true)
@@ -74,11 +76,17 @@ test('only the team\'s window-only endpoints are marked, and no entry can be giv
 
 test("another plugin's call to the seat chat's reads with a forged window is refused", async (t) => {
   const { rt, disposers } = team(t)
+  writeFileSync(rt.registryPath, JSON.stringify({ version: 2, bots: [{ id: 'b-aaaaaaaaaa', name: 'Atlas' }] }))
+  const openFile = fs.openSync
+  const reads = t.mock.method(fs, 'openSync', (path, ...args) => openFile(path, ...args))
+  syncBuiltinESMExports()
+  t.after(() => { reads.mock.restore(); syncBuiltinESMExports() })
+  const connects = t.mock.method(Socket.prototype, 'connect', () => assert.fail('a refused read connects to no core'))
   const hc = createFakeHc({ terminals: [] })
   const engine = new Engine({ hc, home: rt.home })
   t.after(() => engine.close())
   disposers.push(installSeats(rt, { engine }))
-  for (const name of ['seat-chat-open', 'seat-chat-read', 'seat-chat-close']) {
+  for (const name of ['seat-chat-list', 'seat-chat-open', 'seat-chat-read', 'seat-chat-close']) {
     const entry = rt.extended.endpointOf(name)
     assert.equal(typeof entry?.fn, 'function', name)
     for (const forged of FORGED) {
@@ -87,6 +95,8 @@ test("another plugin's call to the seat chat's reads with a forged window is ref
   }
   // The engine subscribes to events when it starts; a refused read adds no call of its own.
   assert.deepEqual(hc.calls.filter(call => call.method !== 'events.subscribe'), [], 'a refused read reaches no hc call')
+  assert.equal(reads.mock.calls.filter(({ arguments: [path] }) => path === rt.registryPath).length, 0, 'a refused read reads no registry')
+  assert.equal(connects.mock.callCount(), 0, 'a refused read connects to no core')
   // The same call with the route's proof gets past the gate (to the seat's own refusal).
   await assert.rejects(() => rt.extended.endpointOf('seat-chat-read').fn({ client: 'win-1', terminal: 't1' }, undefined, aWindowProof()), /not open/)
 })

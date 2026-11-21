@@ -24,7 +24,8 @@ import { mkdir, open } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { isBotId } from '../shared/registry.js'
 import { connectCore, KINDS } from './code-core.js'
-import { resolvePane } from './code-tree.js'
+import { paneStillGranted, paneStillOwned, resolvePane } from './code-tree.js'
+import { confirmAttached, samePane } from './code-side.js'
 
 export const CODE_TAKE_ROUTE = '/api/omni-ui/code/take'
 export const CODE_INPUT_ROUTE = '/api/omni-ui/code/input'
@@ -130,7 +131,8 @@ export function createTypingService({ env = process.env, connect = connectCore, 
       try {
         if (held) await close(held, 'moved')
         if (reservation.cancelled) return refuse(409, 'not-typing')
-        const pane = await resolvePane({ botId: bot, worker: worker ?? null, env, connect, readFile, warn })
+        const resolve = connect => resolvePane({ botId: bot, worker: worker ?? null, env, connect, readFile, warn })
+        const pane = await resolve(connect)
         if (reservation.cancelled) return refuse(409, 'not-typing')
         if (!pane) return refuse(404, 'no-pane')
         const identity = JSON.stringify([pane.core, pane.terminal])
@@ -150,11 +152,16 @@ export function createTypingService({ env = process.env, connect = connectCore, 
           core.close()
           return refuse(409, 'not-typing')
         }
+        const current = await resolve(async () => ({ info: core.info, call: (...args) => core.call(...args), close() {} }))
+        if (reservation.cancelled || !samePane(pane, current)) {
+          core.close()
+          return reservation.cancelled ? refuse(409, 'not-typing') : refuse(404, 'no-pane')
+        }
         let attached
         try {
           // Not a watcher: this viewer may type. The size is the terminal's own, and no RESIZE
           // frame is ever sent: the app does not resize a terminal.
-          attached = await core.attach({ terminal: pane.terminal, cols: pane.cols, rows: pane.rows, history: 0, observe: false })
+          attached = await core.attach({ terminal: pane.terminal, cols: current.cols, rows: current.rows, history: 0, observe: false })
         } catch (error) {
           core.close()
           if (reservation.cancelled) return refuse(409, 'not-typing')
@@ -165,6 +172,10 @@ export function createTypingService({ env = process.env, connect = connectCore, 
           core.detach(attached.channel)
           core.close()
           return refuse(409, 'not-typing')
+        }
+        if (!confirmAttached(core, pane, attached)) {
+          core.close()
+          return refuse(404, 'no-pane')
         }
         let session
         let ended = false
@@ -191,6 +202,11 @@ export function createTypingService({ env = process.env, connect = connectCore, 
           core.detach(attached.channel)
           core.close()
           return refuse(409, 'not-typing')
+        }
+        if (!paneStillGranted(pane, worker, { env, readFile, warn }) || !paneStillOwned(pane, worker, { env, readFile })) {
+          core.detach(attached.channel)
+          core.close()
+          return refuse(404, 'no-pane')
         }
         session = sessionOf({ viewer, pane: { ...pane, key, worker: worker ?? null }, core, channel: attached.channel })
         byId.set(session.id, session)

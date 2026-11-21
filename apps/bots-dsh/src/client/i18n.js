@@ -3022,6 +3022,8 @@ const ZH = {
   'Code: open this Bot’s folder in Herdr': '代码：在 Herdr 中打开这个 Bot 的文件夹',
   'Open Herdr': '打开 Herdr',
   'Open in Herdr': '在 Herdr 中打开',
+  'Needs the scoped link': '需要限定范围的连接',
+  'This Bot is on {machine}. It opens here once the link to that computer is scoped.': '此 Bot 在 {machine} 上。为该电脑设置限定范围的连接后，即可在此打开。',
   'Team or Code': '团队或代码',
   'Code: open Herdr': '代码：打开 Herdr',
   'Opening Herdr…': '正在打开 Herdr…',

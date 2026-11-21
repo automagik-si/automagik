@@ -13,7 +13,7 @@
 import { isBotId } from '../shared/registry.js'
 import { validGrid } from '../shared/code-grid.js'
 import { connectCore, HISTORY_LINES } from './code-core.js'
-import { readCodeTree, resolvePane } from './code-tree.js'
+import { paneStillOwned, readCodeTree, resolvePane } from './code-tree.js'
 import { createTypingService, typingRecordPath, typingRoutes } from './code-typing.js'
 import { appBrowserBridge } from './constants.js'
 import { fromWindow, verifiedWindow } from './desktop-window.js'
@@ -85,6 +85,18 @@ export function streamAdmission(request) {
   return null
 }
 
+export function samePane(pane, current) {
+  return current?.terminal === pane.terminal && current.core === pane.core && current.created_ms === pane.created_ms
+}
+
+/** Attach can race a replacement. Discard the channel before exposing buffered frames. */
+export function confirmAttached(core, pane, attached) {
+  const terminal = attached.terminal
+  if (terminal?.address === pane.terminal && terminal.created_ms === pane.created_ms) return true
+  try { core.detach(attached.channel) } catch { /* the connection is going */ }
+  return false
+}
+
 /** One observer connection, including its resize resync and credit. */
 function paneObserver(target, { push, reset, end, warn, connect, env, readFile }) {
   let pane
@@ -97,6 +109,23 @@ function paneObserver(target, { push, reset, end, warn, connect, env, readFile }
   let resyncing = false
 
   const attach = ({ cols, rows }) => core.attach({ terminal: pane.terminal, cols, rows, history: HISTORY_LINES, observe: true })
+  const resolve = (connect) => resolvePane({ botId: target.bot, worker: target.worker, env, connect, readFile, warn })
+  const ownership = {}
+  const stillOwned = () => paneStillOwned(pane, target.worker, { env, readFile, cache: ownership })
+  const stillBound = async (lastGrid) => {
+    // A resize can briefly report zero columns or rows. The resolver needs a grid, so use
+    // the live observer's grid for this identity check and validate the new size after attach.
+    const current = await resolve(async () => ({
+      info: core.info,
+      async call(method, params) {
+        const terminal = await core.call(method, params)
+        return method === 'terminal.get' && terminal && lastGrid
+          ? { ...terminal, cols: lastGrid.cols, rows: lastGrid.rows } : terminal
+      },
+      close() {},
+    }))
+    return samePane(pane, current)
+  }
   const stop = (reason) => {
     if (closed) return false
     closed = true
@@ -119,7 +148,9 @@ function paneObserver(target, { push, reset, end, warn, connect, env, readFile }
   function watch(attachment) {
     core.watch(attachment.channel, {
       onData: (bytes) => {
-        if (!closed && watching === attachment) push('data', bytes, bytes.length, attachment)
+        if (closed || watching !== attachment) return
+        if (!stillOwned()) { stop('no-pane'); return }
+        push('data', bytes, bytes.length, attachment)
       },
       onClose: (reason) => { if (watching === attachment) stop(reason || 'ended') },
       onResize: () => {
@@ -134,11 +165,14 @@ function paneObserver(target, { push, reset, end, warn, connect, env, readFile }
     resyncing = true
     resyncAt = null
     try {
+      if (!await stillBound(grid)) { stop('no-pane'); return }
+      if (closed) return
       const previous = watching
       watching = null
       core.detach(previous.channel)
       const next = await attach(grid)
       if (closed) return
+      if (!confirmAttached(core, pane, next)) { stop('no-pane'); return }
       watching = next
       const size = validGrid(next.terminal) ? next.terminal : await core.call('terminal.get', { terminal: pane.terminal })
       if (closed) return
@@ -156,7 +190,7 @@ function paneObserver(target, { push, reset, end, warn, connect, env, readFile }
 
   return {
     async open() {
-      pane = await resolvePane({ botId: target.bot, worker: target.worker, env, connect, readFile, warn })
+      pane = await resolve(connect)
       if (closed) return
       if (!pane) { stop('no-pane'); return 'no-pane' }
       try {
@@ -167,10 +201,14 @@ function paneObserver(target, { push, reset, end, warn, connect, env, readFile }
         stop('no-core')
         return 'no-core'
       }
+      if (!await stillBound()) { stop('no-pane'); return 'no-pane' }
+      if (closed) return
       try {
         const attached = await attach(pane)
         if (closed) return
+        if (!confirmAttached(core, pane, attached)) { stop('no-pane'); return 'no-pane' }
         watching = attached
+        if (!stillOwned()) { stop('no-pane'); return 'no-pane' }
       } catch (error) {
         if (closed) return
         warn(`the Code pane could not attach ${pane.terminal}: ${error?.kind ?? error?.message ?? error}`)

@@ -56,7 +56,7 @@ const rowOf = (wide) => {
   const list = flat(flat(side.props.children)[0].props.children)[1]
   return flat(flat(list.props.children)[0].props.children)
 }
-// The wide footer contains the existing tools and the Work and Code switch.
+// The wide footer contains the existing tools (RFC 0022 Q9: the Work and Code switch left the bar).
 const footOf = (wide) => {
   const tree = sidebar(wide)
   const side = tree.type(tree.props)
@@ -71,12 +71,12 @@ const drawn = (wide) => {
   return { outlet, entries: outlet.type(outlet.props) }
 }
 
-test('wide and narrow layouts keep the cloud, tools, Work and Code switch and sidebar controls', () => {
+test('wide and narrow layouts keep the cloud, tools and sidebar controls, with no Work and Code switch', () => {
   const Tool = () => null
   const off = sidebarTools.register({ id: 'power', Component: Tool })
   try {
     assert.deepEqual(rowOf(true).map(nameOf), ['Search', 'New…'])
-    assert.deepEqual(footOf(true).map(nameOf), ['UpdateButton', 'SidebarTools', 'WorkCodeSwitch'])
+    assert.deepEqual(footOf(true).map(nameOf), ['UpdateButton', 'SidebarTools'])
     assert.deepEqual(rowOf(false).map(nameOf), ['UpdateButton', 'SidebarTools', 'New…'])
     const { outlet, entries } = drawn(true)
     assert.equal(entries.length, 1)

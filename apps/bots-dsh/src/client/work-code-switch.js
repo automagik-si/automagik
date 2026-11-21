@@ -1,16 +1,8 @@
-import { createElement as h, useEffect, useSyncExternalStore } from 'react'
+import { createElement as h, useEffect, useState, useSyncExternalStore } from 'react'
 import { t } from './i18n.js'
 
-// -------------------------------------------------------------------------
-// The Work / Code switch (RFC 0013, delivery 5), in the sidebar's top row beside the macOS
-// traffic lights. Work is this window; Code brings the real herdr-app window forward on the
-// space for the shown Bot's folder. The app hands the bridge over in its preload
-// (`omniDesktop.herdr`: status, open, and openCodeRow on newer desktops). The controls show
-// when the bridge is available and herdr-app is set up.
-//
-// A click on Code, a Code row's action or a notice button sends the Bot id and any update
-// answer to main (apps/desktop src/main.js `automagik-herdr-open`). The control reads status
-// on mount, when the window gains focus and when the pointer enters the switch.
+// The Code row opens Herdr through the desktop preload. Status refreshes on mount,
+// window focus and pointer entry. Only the row or a notice button opens Herdr.
 
 // What main's `note` is about (apps/desktop src/herdr-update.js NOTE_KINDS). An app from before
 // `noteKind` sends the note alone: its kind is read from main's own English wording, and a note
@@ -70,12 +62,11 @@ export function codeNotices(result) {
 }
 
 /**
- * The footer and trees share status and the most recent open over one bridge. The click
+ * The trees share status and the most recent open over one bridge. The click
  * handlers call the bridge in the same turn as the click, while user activation still holds.
  */
-export function createCodeSwitch(bridge, { focused = () => true } = {}) {
-  let state = { ...NO_STATE, front: focused() }
-  let footers = 0
+export function createCodeSwitch(bridge) {
+  let state = NO_STATE
   const listeners = new Set()
   const set = (patch) => {
     state = { ...state, ...patch }
@@ -89,15 +80,15 @@ export function createCodeSwitch(bridge, { focused = () => true } = {}) {
       .finally(() => { reading = null })
     return reading
   }
-  const open = ({ botId, source, update }) => {
+  const open = ({ botId, owner, update }) => {
     if (state.busy) return Promise.resolve(state.result)
-    set({ busy: true, result: null, target: { botId, source } })
+    set({ busy: true, result: null, target: { botId, owner } })
     const options = typeof update === 'boolean' ? { update } : undefined
     let answer
     try {
-      answer = Promise.resolve(source === 'code'
+      answer = Promise.resolve(typeof bridge.openCodeRow === 'function'
         ? options ? bridge.openCodeRow(botId, options) : bridge.openCodeRow(botId)
-        : bridge.open({ botId, ...options }))
+        : bridge.open({ botId: null, ...options }))
     } catch (error) {
       answer = Promise.reject(error)
     }
@@ -116,15 +107,6 @@ export function createCodeSwitch(bridge, { focused = () => true } = {}) {
     },
     snapshot: () => state,
     refresh,
-    setFront(front) {
-      if (front !== state.front) set({ front })
-    },
-    mountFooter() {
-      if (++footers === 1) set({ footerMounted: true })
-      return () => {
-        if (--footers === 0) set({ footerMounted: false })
-      }
-    },
     open,
     repeat: update => state.target && open({ ...state.target, update }),
     dismiss() {
@@ -137,21 +119,11 @@ export function createCodeSwitch(bridge, { focused = () => true } = {}) {
 const switches = new WeakMap()
 function switchFor(bridge) {
   if (!bridge || typeof bridge.status !== 'function' || typeof bridge.open !== 'function') return null
-  if (!switches.has(bridge)) switches.set(bridge, createCodeSwitch(bridge, { focused: () => globalThis.document?.hasFocus?.() ?? true }))
+  if (!switches.has(bridge)) switches.set(bridge, createCodeSwitch(bridge))
   return switches.get(bridge)
 }
 
-/** The Bot the main view shows: its own chat or a part of it, or a task it started; else null. */
-export function shownBotId(roster, sessionId) {
-  if (!sessionId) return null
-  const bot = roster?.byId?.[sessionId]
-  if (bot) return bot.id
-  const from = roster?.tasks?.[sessionId]?.from
-  return typeof from === 'string' && roster?.byId?.[from] ? from : null
-}
-
-const mainViewId = list => Object.values(list.byId ?? {}).find(session => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? ''
-const NO_STATE = { status: null, busy: false, result: null, front: true, target: null, footerMounted: false }
+const NO_STATE = { status: null, busy: false, result: null, target: null }
 const noSubscribe = () => () => {}
 const noState = () => NO_STATE
 
@@ -171,32 +143,10 @@ function Notice({ notice, onAnswer, onRetry, onDismiss, busy }) {
       h('button', { type: 'button', className: 'bt-code-note-btn', onClick: onDismiss }, t('Dismiss'))))
 }
 
-function useCodeControl(footer) {
-  const bridge = globalThis.omniDesktop?.herdr
-  const control = footer || typeof bridge?.openCodeRow === 'function' ? switchFor(bridge) : null
-  const snapshot = control?.snapshot ?? noState
-  const state = useSyncExternalStore(control?.subscribe ?? noSubscribe, snapshot, snapshot)
-  useEffect(() => {
-    if (!control) return undefined
-    const unmount = footer ? control.mountFooter() : undefined
-    void control.refresh()
-    const onFocus = () => { control.setFront(true); void control.refresh() }
-    const onBlur = () => control.setFront(false)
-    globalThis.addEventListener?.('focus', onFocus)
-    globalThis.addEventListener?.('blur', onBlur)
-    return () => {
-      unmount?.()
-      globalThis.removeEventListener?.('focus', onFocus)
-      globalThis.removeEventListener?.('blur', onBlur)
-    }
-  }, [control, footer])
-  return { control, state }
-}
-
-function HerdrNotices({ control, result, busy, row }) {
+function HerdrNotices({ control, result, busy }) {
   const notices = result ? codeNotices(result) : []
   if (!notices.length) return null
-  return h('div', { className: 'bt-code-notes', 'data-code-row': row ? '' : undefined },
+  return h('div', { className: 'bt-code-notes', 'data-code-row': '' },
     notices.map(notice => h(Notice, {
       key: notice.kind, notice, busy,
       onAnswer: update => { void control.repeat(update) },
@@ -206,51 +156,30 @@ function HerdrNotices({ control, result, busy, row }) {
 }
 
 export function useCodeRowHerdr() {
-  const { control, state } = useCodeControl(false)
+  const [owner] = useState(() => Symbol())
+  const control = switchFor(globalThis.omniDesktop?.herdr)
+  const snapshot = control?.snapshot ?? noState
+  const state = useSyncExternalStore(control?.subscribe ?? noSubscribe, snapshot, snapshot)
+  useEffect(() => {
+    if (!control) return undefined
+    const refresh = () => { void control.refresh() }
+    refresh()
+    globalThis.addEventListener?.('focus', refresh)
+    return () => globalThis.removeEventListener?.('focus', refresh)
+  }, [control])
   return {
     visible: () => showsSwitch(state.status),
     busy: state.busy,
-    openRow: botId => { void control?.open({ botId, source: 'code' }) },
-    notices: !state.footerMounted && state.target?.source === 'code'
-      ? h(HerdrNotices, { control, result: state.result, busy: state.busy, row: true })
+    refresh: () => { void control?.refresh() },
+    openRow: botId => { void control?.open({ botId, owner }) },
+    notices: state.target?.owner === owner
+      ? h(HerdrNotices, { control, result: state.result, busy: state.busy })
       : null,
   }
 }
 
-export function WorkCodeSwitch({ roster, useSessions }) {
-  const { control, state } = useCodeControl(true)
-  const sessionId = useSessions(mainViewId)
-  const visible = showsSwitch(state.status)
-  const row = state.target?.source === 'code'
-  if (!control || (!visible && !(row && state.result))) return null
-  const botId = shownBotId(roster, sessionId)
-  const code = () => { void control.open({ botId }) }
-  return h('div', { className: 'bt-code-switch-wrap' },
-    visible ? h('div', { className: 'bt-code-switch', role: 'group', 'aria-label': t('Open Herdr'), onPointerEnter: () => { void control.refresh() } },
-      h('button', {
-        type: 'button',
-        className: 'bt-code-seg',
-        'aria-current': state.front ? undefined : 'true',
-        'aria-busy': state.busy || undefined,
-        disabled: state.busy,
-        title: state.busy ? t('Opening Herdr…') : botId ? t('Code: open this Bot’s folder in Herdr') : t('Code: open Herdr'),
-        onClick: code,
-      }, t('Code'))) : null,
-    h(HerdrNotices, { control, result: state.result, busy: state.busy, row }))
-}
-
 export const WORK_CODE_SWITCH_CSS = `
-.bt-side-top .bt-code-switch-wrap{position:relative;margin-right:auto;min-width:0}
-.bt-code-switch{display:inline-flex;align-items:center;max-width:100%;padding:2px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-main)}
-.bt-code-seg{display:inline-flex;align-items:center;min-width:0;height:24px;padding:0 9px;border:0;border-radius:999px;background:none;color:var(--bt-ink-2);font:600 12px/16px var(--bt-font);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
-.bt-code-seg[aria-current=true]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 0 0 1px var(--bt-line)}
-span.bt-code-seg{cursor:default}
-button.bt-code-seg:hover:not(:disabled):not([aria-current=true]){color:var(--bt-ink)}
-.bt-code-seg:disabled{cursor:default}
-.bt-code-seg[aria-busy]{animation:bt-code-pulse 1.2s ease-in-out infinite}
 .bt-code-notes{position:absolute;top:calc(100% + 6px);left:0;z-index:30;display:flex;flex-direction:column;gap:6px;width:240px;max-width:72vw}
-.lb-foot:has(.bt-code-notes[data-code-row]){position:relative}
-.lb-foot .bt-code-notes[data-code-row]{top:auto;bottom:calc(100% + 6px);max-width:100%}
 .bt-code-notes[data-code-row] .bt-code-note-row{flex-wrap:wrap}
 .bt-code-note{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card);color:var(--bt-ink);box-shadow:0 6px 20px rgba(0,0,0,.12);font:500 12px/17px var(--bt-font)}
 .bt-code-note-text{overflow-wrap:anywhere}
@@ -259,6 +188,4 @@ button.bt-code-seg:hover:not(:disabled):not([aria-current=true]){color:var(--bt-
 .bt-code-note-go{border:0;background:var(--bt-accent);color:var(--bt-accent-ink)}
 .bt-code-note-btn{border:1px solid var(--bt-line);background:none;color:var(--bt-ink)}
 .bt-code-note-go:disabled,.bt-code-note-btn:disabled{opacity:.6;cursor:default}
-@keyframes bt-code-pulse{50%{opacity:.45}}
-@media (prefers-reduced-motion:reduce){.bt-code-seg[aria-busy]{animation:none}}
 `

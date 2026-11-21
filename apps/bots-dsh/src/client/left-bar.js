@@ -134,7 +134,7 @@ function currentKey(roster, shownId) {
  * the DSH bots in today's order, then the group chats. `order` is the sidebar's own order of
  * everything but the Main Bot ({ kind: 'bot' | 'room' | 'agent', item }).
  */
-export function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
+export function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [], front = null }) {
   const main = roster.byId?.[roster.mainBotId]
   const shown = key => key === current
   const unread = (id, key, own) => !shown(key) && (own || marked[id] === true)
@@ -154,27 +154,51 @@ export function teamOf({ roster = {}, order, status, marked = {}, current, now =
     const seen = status.dsh.get(item.id) ?? { status: 'idle', unread: false }
     return { id: item.id, name: tasks ? t('Tasks') : item.name, dsh: tasks ? 'tasks' : 'agent', channels: [], status: seen.status, unread: unread(item.id, `bot:${item.id}`, seen.unread) }
   }
-  // The seats on this computer are Team rows too (RFC 0022 (i)): each orchestrator as a chat.
-  // They sit under the Main Bot, before the DSH Bots, and no row starts or stops anything.
-  // `artId` is the registry Bot's own id, so the seat wears the same character and colour a
-  // Bot row would (the row's id keeps the `seat:` prefix so a seat and a DSH Bot never collide).
   const seating = seats.map(seat => ({
-    id: `seat:${seat.id}`, seat: true, artId: seat.id, name: seat.name, project: seat.project,
-    terminal: seat.terminal, agent: seat.agent, chat: seat.chat, status: seat.status,
-    channels: [], unread: false,
+    id: `seat:${seat.key ?? seat.id}`, key: seat.key ?? seat.id, seat: true, artId: seat.id,
+    name: seat.name, project: seat.project, folder: seat.folder ?? null, machine: seat.machine,
+    kind: seat.kind, main: seat.main, terminal: seat.terminal, agent: seat.agent, chat: seat.chat, status: seat.status,
+    projectTag: seat.project, remote: seat.machine != null, channels: [], unread: false,
   }))
-  const bots = [
-    ...(main ? [bot(main)] : []),
-    ...seating,
+  const globals = seating.filter(seat => (seat.kind ?? (seat.project ? 'main' : 'global')) === 'global')
+  const globalMains = globals.filter(seat => seat.main === true)
+  const go = globals.length === 1 ? globals[0] : globalMains.length === 1 ? globalMains[0] : null
+  const projectMains = seating.filter(seat => (seat.kind ?? (seat.project ? 'main' : 'global')) === 'main')
+    .sort((a, b) => String(a.project ?? '').localeCompare(String(b.project ?? '')))
+  const orchestrators = [go, ...globals.filter(seat => seat !== go), ...projectMains].filter(Boolean)
+  const dsh = [
+    main ? bot(main) : null,
     ...order.filter(entry => entry.kind === 'bot').map(entry => bot(entry.item)),
     ...order.filter(entry => entry.kind === 'agent').map(entry => agent(entry.item)),
   ].filter(Boolean)
+  const frontSeat = front && seating.find(seat =>
+    seat.artId === front.bot && seat.folder === front.project && (seat.machine ?? null) === (front.machine ?? null))
+  const frontBot = front && front.machine === undefined && roster.byId?.[front.bot]
+  const frontRow = frontSeat || (frontBot && sameFolder(front.project, frontBot.workDir) ? dsh.find(row => row.id === frontBot.id) : null)
+  const sequence = frontRow ? [frontRow, ...orchestrators, ...dsh] : [dsh.find(row => row.id === main?.id), ...orchestrators, ...dsh]
+  const bots = [...new Map(sequence.filter(Boolean).map(row => [row.id, row])).values()]
   const groups = order.filter(entry => entry.kind === 'room' && (!entry.item.hidden || shown(`group:${entry.item.id}`)))
     .map((entry) => {
       const seen = status.groups?.get(entry.item.id) ?? { status: 'idle', unread: false }
       return { id: entry.item.id, name: entry.item.name, members: entry.item.members ?? [], status: seen.status, unread: unread(entry.item.id, `group:${entry.item.id}`, seen.unread) }
     })
-  return { frontId: main?.id, bots, groups }
+  return { frontId: frontRow?.id ?? main?.id, bots, groups }
+}
+
+function sameFolder(project, workDir) {
+  if (!workDir) return project === null
+  // The browser has no cwd. Both values name absolute folders on the host.
+  const normalized = (folder) => {
+    const drive = /^[A-Za-z]:[\\/]/.exec(folder)
+    const parts = drive ? folder.slice(3).split(/[\\/]/) : folder.split('/')
+    const path = []
+    for (const part of parts) {
+      if (part === '..') path.pop()
+      else if (part && part !== '.') path.push(part)
+    }
+    return `${drive ? drive[0].slice(0, 2) : ''}/${path.join('/')}`
+  }
+  return typeof project === 'string' && /^(?:\/|[A-Za-z]:[\\/])/.test(workDir) && normalized(project) === normalized(workDir)
 }
 
 // A seat with no registry Bot behind it has no character of its own: a plain pane glyph.
@@ -225,18 +249,17 @@ function SpaceNote({ anchor, onClose }) {
 /**
  * The bar. `order` and the stores are the sidebar's (sidebar.js TeamSidebar); `tools` are the
  * head's other buttons (the update button, other plugins' tools); `notice` is a line above
- * the list (a read-only team, the Main Bot being set up); `foot` sits under the list (the Herdr
- * action, where the app has it). `open(row)` opens a row as today's rows do,
+ * the list for a read-only team or while the Main Bot is being set up. `open(row)` opens a row,
  * `menu(row, event)` its context menu, `renderAfter(row)` draws what hangs under a row and
  * `renderEnd(row)` what other plugins add at the end of a Bot's row.
  *
  * Search and New are in the head; the sidebar tools and update controls sit at the foot.
  */
-export function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown, sideSwitch, codeList }) {
+export function LeftBar({ roster, order, marked, seats = [], front, useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, empty, collapse, onKeyDown, sideSwitch, codeList }) {
   const shownId = useSessions(list => list.ids.find(id => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? '')
   const current = currentKey(roster, shownId)
   const status = useTeamStatus({ roster, useSessionStatus, useWork })
-  const team = teamOf({ roster, order, status, marked, current, seats })
+  const team = teamOf({ roster, order, status, marked, current, seats, front })
   const currentId = current?.slice(current.indexOf(':') + 1)
   // A row marked unread clears once it is open, as today's rows do.
   useEffect(() => {
@@ -282,6 +305,6 @@ export function LeftBar({ roster, order, marked, seats = [], useSessions, useSes
         notice,
         codeList ?? (team.bots.length === 0 && empty ? empty
           : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : undefined, label: t('Bot list') })),
-        h('div', { className: 'lb-foot' }, tools, foot ?? null))),
+        h('div', { className: 'lb-foot' }, tools))),
     note ? h(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null)
 }

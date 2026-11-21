@@ -273,7 +273,7 @@ test('the "This computer" mark opens nothing and has no hover state; the "+" kee
   }
 })
 
-test('the 390px drawer keeps Code across a terminal pick, and Team or Back restores the seat', async (t) => {
+test('the 390px drawer keeps Code across a terminal pick and Back restores the seat', async (t) => {
   const page = await fixture(t, { width: 390, height: 844 })
   if (!page) return
   await page.evaluate(() => window.mountCodeDrawer())
@@ -313,10 +313,24 @@ test('the 390px drawer keeps Code across a terminal pick, and Team or Back resto
   assert.equal(await code.getAttribute('aria-pressed'), 'true', 'the reopened drawer retains Code')
 
   await team.click()
+  assert.equal(await panel.count(), 1, 'flipping to Team keeps the open Code panel (P5)')
+  // At 390px the drawer is DSH's overlay: while it is open it covers Back (as it covers any panel),
+  // so a person closes it first; with it closed, Back is what the pointer reaches.
+  const atBack = () => page.evaluate(() => {
+    const back = document.querySelector('[data-code-panel] .bt-seat-back')
+    const r = back.getBoundingClientRect()
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+    return hit === back ? 'back' : document.querySelector('#col').contains(hit) ? 'drawer' : 'other'
+  })
+  assert.equal(await atBack(), 'drawer', 'the open drawer covers the panel')
+  await page.evaluate(() => window.setState({ collapsed: true }))
+  assert.equal(await atBack(), 'back', 'with the drawer closed, Back is reachable')
+  await panel.getByRole('button', { name: 'Back' }).click()
   await seat.waitFor()
   await page.waitForFunction(() => window.codeTraffic.closed.length === 1
     && window.codeTraffic.calls.some(call => call.url.endsWith('/release') && call.body.session === 'fixture-typing'))
   assert.equal(await team.getAttribute('aria-pressed'), 'true')
+  await page.evaluate(() => window.setState({ collapsed: false }))
   await code.click()
   await worker.click()
   await page.waitForFunction(() => window.codeTraffic.streams.length === 2)
@@ -330,7 +344,7 @@ test('the 390px drawer keeps Code across a terminal pick, and Team or Back resto
   await page.waitForFunction(() => window.codeTraffic.calls.filter(call => call.url.endsWith('/release')).length === 2)
 })
 
-test('the Code bar toggles beside panes and clears them on Team and Back', async (t) => {
+test('the Code bar toggles beside panes and clears them on Back', async (t) => {
   const page = await fixture(t)
   if (!page) return
   await page.evaluate(() => window.mountCodeDrawer({ multi: true }))
@@ -372,6 +386,7 @@ test('the Code bar toggles beside panes and clears them on Team and Back', async
   await beside('Reviewer')
   await page.waitForFunction(() => document.querySelectorAll('.cs-screen[aria-label="View only · click to type"]').length === 2)
   await switchTo('team')
+  await panel.getByRole('button', { name: 'Back' }).click()
   await page.locator('[data-fixture-seat]').waitFor()
   assert.deepEqual(await selection(), [null, [], null])
   await page.waitForFunction(() => window.codeTraffic.closed.length === window.codeTraffic.streams.length)
