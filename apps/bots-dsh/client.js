@@ -3615,6 +3615,11 @@ var HOST_ZH = {
   "Stop the backfill of {chat}": "停止 {chat} 的回填",
   "The backfill could not be started.": "无法开始回填。",
   "The backfill could not be stopped.": "无法停止回填。",
+  "This request is no longer open.": "此请求已关闭。",
+  "This run is no longer listed.": "列表中已没有这次回填。",
+  "This window only reads the team; open the team where it runs to act.": "此窗口只能查看团队。请在团队运行的位置打开它以执行操作。",
+  "Omni holds nothing in this window": "Omni 在这段时间内没有保存任何消息",
+  "Omni holds nothing before {date}": "Omni 在 {date} 之前没有保存任何消息",
   "Started {date}": "开始于 {date}",
   "{count} more chats": "还有 {count} 个聊天",
   "Showing only {count} runs": "仅显示 {count} 次运行",
@@ -43241,6 +43246,7 @@ var BACKFILL_RUNS_SHOWN = 3;
 var BACKFILL_ROWS_SHOWN = 20;
 var BACKFILL_CHATS_MAX = 200;
 var BACKFILL_ID_MAX = 200;
+var BACKFILL_OUTCOMES = /* @__PURE__ */ new Set(["done", "phone-did-not-answer", "stopped", "failed", "not-started"]);
 var backfillId = (value) => genuiLabel(value, BACKFILL_ID_MAX);
 function backfillDay(value) {
   const date = genuiInstant(value);
@@ -43321,11 +43327,25 @@ function backfillSummaryText(summary, rows2) {
   if (parts.length === 0 && (counted("total") > 0 || list.length > 0)) parts.push(t("{count} chats", { count: countText2(counted("total") || list.length) }));
   return parts.join(" · ");
 }
-function backfillRowView(row2) {
+function backfillWindowLine(row2, fromDay) {
+  if (!BACKFILL_OUTCOMES.has(row2.outcome)) return "";
+  const coverage = coverageOf(row2.coverage);
+  if (coverage === void 0) return "";
+  if (coverage.countInWindow === 0) return t("Omni holds nothing in this window");
+  const oldestDay = backfillDay(coverage.oldest);
+  return fromDay !== "" && oldestDay > fromDay ? t("Omni holds nothing before {date}", { date: backfillDayText(coverage.oldest) }) : "";
+}
+function backfillRowView(row2, fromDay) {
   if (row2 === null || typeof row2 !== "object" || Array.isArray(row2)) return void 0;
   const chatId = backfillId(row2.chatId);
   if (chatId === void 0) return void 0;
-  return { ...rowView(row2), chatId, jobId: backfillId(row2.jobId) ?? null, cancelable: canCancel(row2) };
+  return {
+    ...rowView(row2),
+    chatId,
+    jobId: backfillId(row2.jobId) ?? null,
+    cancelable: canCancel(row2),
+    windowLine: backfillWindowLine(row2, fromDay)
+  };
 }
 function backfillRunId(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
@@ -43335,7 +43355,8 @@ function runView(value) {
   const id = backfillRunId(value);
   if (id === void 0) return void 0;
   const rows2 = Array.isArray(value.rows) ? value.rows : [];
-  const shown2 = rows2.slice(0, BACKFILL_ROWS_SHOWN).map(backfillRowView).filter(Boolean);
+  const fromDay = backfillDay(value.from);
+  const shown2 = rows2.slice(0, BACKFILL_ROWS_SHOWN).map((row2) => backfillRowView(row2, fromDay)).filter(Boolean);
   return {
     id,
     botId: backfillId(value.botId),
@@ -43347,15 +43368,20 @@ function runView(value) {
     more: Math.max(0, rows2.length - shown2.length)
   };
 }
-function backfillView(roster) {
+function backfillView(roster, { proposalId, runId = proposalId } = {}) {
   const proposals = Array.isArray(roster?.omniBackfillProposals) ? roster.omniBackfillProposals : [];
   const runs = Array.isArray(roster?.omniBackfills) ? roster.omniBackfills : [];
   const validRuns = runs.filter((run3) => backfillRunId(run3) !== void 0);
-  const shown2 = validRuns.slice(0, BACKFILL_RUNS_SHOWN).map(runView);
+  const scopedRuns = runId === void 0 ? validRuns : validRuns.filter((run3) => backfillRunId(run3) === runId);
+  const shown2 = scopedRuns.slice(0, BACKFILL_RUNS_SHOWN).map(runView);
+  const open = proposals.map(proposalView).filter(Boolean).filter((proposal) => proposalId === void 0 && runId === void 0 || proposal.id === proposalId);
   return {
-    proposals: proposals.map(proposalView).filter(Boolean),
+    proposals: open,
     runs: shown2,
-    moreRuns: validRuns.length - shown2.length
+    moreRuns: scopedRuns.length - shown2.length,
+    ...proposalId !== void 0 && {
+      proposalSettled: open.length === 0 && !validRuns.some((run3) => backfillRunId(run3) === proposalId)
+    }
   };
 }
 
@@ -43378,6 +43404,7 @@ function revisionOf(roster) {
 }
 function ProgressRow({ row: row2, view: given, action }) {
   const view = given ?? rowView(row2);
+  const windowLine = view.windowLine ?? "";
   return (0, import_react104.createElement)(
     "li",
     { className: "bt-genui-row", "data-state": view.state },
@@ -43394,11 +43421,12 @@ function ProgressRow({ row: row2, view: given, action }) {
         view.progress !== "" ? (0, import_react104.createElement)("span", { className: "bt-genui-num" }, view.progress) : null,
         view.span !== "" ? (0, import_react104.createElement)("span", { className: "bt-genui-num bt-genui-span" }, view.span) : null
       ),
-      view.media !== "" || view.marks !== "" ? (0, import_react104.createElement)(
+      view.media !== "" || view.marks !== "" || windowLine !== "" ? (0, import_react104.createElement)(
         "div",
         { className: "bt-genui-line bt-genui-sub" },
         view.media !== "" ? (0, import_react104.createElement)("span", null, view.media) : null,
-        view.marks !== "" ? (0, import_react104.createElement)("span", null, view.marks) : null
+        view.marks !== "" ? (0, import_react104.createElement)("span", null, view.marks) : null,
+        windowLine !== "" ? (0, import_react104.createElement)("span", null, windowLine) : null
       ) : null
     ),
     // A card of the kit's own may hang one action off a row (a backfill's Stop).
@@ -43496,7 +43524,7 @@ function cancelBackfill(payload) {
   return call(CANCEL_BACKFILL, { jobId });
 }
 var toggleChat = (list, id) => list.includes(id) ? list.filter((item) => item !== id) : [...list, id];
-function BackfillCard({ roster, start: start2, cancel }) {
+function BackfillCard({ roster, proposalId, runId, start: start2, cancel }) {
   const starter = (0, import_react104.useRef)(start2 ?? startBackfill);
   starter.current = start2 ?? startBackfill;
   const stopper = (0, import_react104.useRef)(cancel ?? cancelBackfill);
@@ -43507,7 +43535,9 @@ function BackfillCard({ roster, start: start2, cancel }) {
   const [errors, setErrors] = (0, import_react104.useState)({});
   const [stopping, setStopping] = (0, import_react104.useState)({});
   const prefix = (0, import_react104.useId)();
-  const view = backfillView(roster);
+  const view = backfillView(roster, { proposalId, runId });
+  const readOnly = Boolean(roster?.readOnly);
+  const readOnlyNote = readOnly ? (0, import_react104.createElement)("span", { className: "bt-genui-muted" }, t("This window only reads the team; open the team where it runs to act.")) : null;
   const formOf = (proposal) => forms[proposal.id] ?? { from: proposal.from, to: proposal.to, chats: proposal.ticked };
   const update = (proposal, patch) => setForms((all) => ({
     ...all,
@@ -43515,7 +43545,7 @@ function BackfillCard({ roster, start: start2, cancel }) {
   }));
   const onStart = async (proposal, form) => {
     const ready = form.chats.length > 0 && form.from !== "" && form.to !== "" && form.from <= form.to;
-    if (busy !== void 0 || !ready) return;
+    if (readOnly || busy !== void 0 || !ready) return;
     setBusy(proposal.id);
     setErrors((all) => {
       const next = { ...all };
@@ -43532,7 +43562,7 @@ function BackfillCard({ roster, start: start2, cancel }) {
     }
   };
   const onCancel = async (run3, row2) => {
-    if (stopping[row2.jobId] === true) return;
+    if (readOnly || stopping[row2.jobId] === true) return;
     setStopping((all) => ({ ...all, [row2.jobId]: true }));
     setErrors((all) => {
       const next = { ...all };
@@ -43551,12 +43581,19 @@ function BackfillCard({ roster, start: start2, cancel }) {
       });
     }
   };
-  const waiting = sent !== void 0 && !view.runs.some((run3) => run3.id === sent.runId) ? sent : void 0;
-  if (waiting === void 0 && view.proposals.length === 0 && view.runs.length === 0) return null;
+  const sentRunListed = sent?.runId !== void 0 && Array.isArray(roster?.omniBackfills) && roster.omniBackfills.some((run3) => run3?.id === sent.runId);
+  (0, import_react104.useEffect)(() => {
+    if (sentRunListed) setSent((current) => current === sent ? void 0 : current);
+  }, [sent, sentRunListed]);
+  const showsSentProposal = proposalId === void 0 ? runId === void 0 : sent?.proposalId === proposalId;
+  const waiting = showsSentProposal && !sentRunListed ? sent : void 0;
+  const proposalSettled = view.proposalSettled && waiting === void 0;
+  const runMissing = runId !== void 0 && view.runs.length === 0;
+  if (waiting === void 0 && view.proposals.length === 0 && view.runs.length === 0 && !proposalSettled && !runMissing) return null;
   const pickers = view.proposals.filter((proposal) => waiting?.proposalId !== proposal.id).map((proposal) => {
     const form = formOf(proposal);
     const starting = busy === proposal.id;
-    const held = busy !== void 0;
+    const held = readOnly || busy !== void 0;
     const ordered2 = form.chats.length > 0 && form.from !== "" && form.to !== "" && form.from <= form.to;
     const backwards = form.from !== "" && form.to !== "" && form.from > form.to;
     return (0, import_react104.createElement)(
@@ -43637,7 +43674,8 @@ function BackfillCard({ roster, start: start2, cancel }) {
         (0, import_react104.createElement)("span", { className: "bt-genui-muted" }, t("{count} chats selected", { count: countText2(form.chats.length) })),
         backwards ? (0, import_react104.createElement)("span", { className: "bt-genui-error" }, t("The start date must be before the end date.")) : null,
         errors[proposal.id] !== void 0 ? (0, import_react104.createElement)("span", { className: "bt-genui-error", role: "status" }, errors[proposal.id]) : null,
-        starting ? (0, import_react104.createElement)("span", { className: "bt-genui-muted" }, t("Sending your approval…")) : null
+        starting ? (0, import_react104.createElement)("span", { className: "bt-genui-muted" }, t("Sending your approval…")) : null,
+        readOnlyNote
       )
     );
   });
@@ -43657,7 +43695,8 @@ function BackfillCard({ roster, start: start2, cancel }) {
     (0, import_react104.createElement)(
       "div",
       { className: "bt-genui-foot" },
-      (0, import_react104.createElement)("span", { className: "bt-genui-muted" }, t("Starting…"))
+      (0, import_react104.createElement)("span", { className: "bt-genui-muted" }, t("Starting…")),
+      readOnlyNote
     )
   );
   const runsNode = view.runs.length === 0 ? null : (0, import_react104.createElement)(
@@ -43688,7 +43727,7 @@ function BackfillCard({ roster, start: start2, cancel }) {
           action: row2.cancelable ? (0, import_react104.createElement)("button", {
             type: "button",
             className: "bt-genui-cancel",
-            disabled: stopping[row2.jobId] === true,
+            disabled: readOnly || stopping[row2.jobId] === true,
             "aria-label": t("Stop the backfill of {chat}", { chat: row2.name }),
             onClick: () => onCancel(run3, row2)
           }, stopping[row2.jobId] === true ? t("Stopping…") : t("Stop")) : null
@@ -43697,9 +43736,21 @@ function BackfillCard({ roster, start: start2, cancel }) {
       run3.more > 0 ? (0, import_react104.createElement)("div", { className: "bt-genui-more" }, t("{count} more chats", { count: countText2(run3.more) })) : null,
       errors[`run:${run3.id}`] !== void 0 ? (0, import_react104.createElement)("div", { className: "bt-genui-foot" }, (0, import_react104.createElement)("span", { className: "bt-genui-error", role: "status" }, errors[`run:${run3.id}`])) : null
     )),
-    view.moreRuns > 0 ? (0, import_react104.createElement)("div", { className: "bt-genui-more" }, t("Showing only {count} runs", { count: countText2(view.runs.length) })) : null
+    view.moreRuns > 0 ? (0, import_react104.createElement)("div", { className: "bt-genui-more" }, t("Showing only {count} runs", { count: countText2(view.runs.length) })) : null,
+    readOnly ? (0, import_react104.createElement)("div", { className: "bt-genui-foot" }, readOnlyNote) : null
   );
-  return (0, import_react104.createElement)(import_react104.Fragment, null, waitingNode, pickers, runsNode);
+  const settledNode = proposalSettled || runMissing ? (0, import_react104.createElement)(
+    "section",
+    { className: "bt-q bt-genui-backfill" },
+    (0, import_react104.createElement)(
+      "div",
+      { className: "bt-genui-foot" },
+      proposalSettled ? (0, import_react104.createElement)("span", { className: "bt-genui-muted" }, t("This request is no longer open.")) : null,
+      runMissing ? (0, import_react104.createElement)("span", { className: "bt-genui-muted" }, t("This run is no longer listed.")) : null,
+      readOnlyNote
+    )
+  ) : null;
+  return (0, import_react104.createElement)(import_react104.Fragment, null, waitingNode, pickers, runsNode, settledNode);
 }
 var GENUI_CSS = `
 .bt-genui-row{display:flex;align-items:flex-start;gap:10px;min-width:0;padding:8px;border-radius:10px;font:inherit}

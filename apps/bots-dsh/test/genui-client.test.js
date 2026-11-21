@@ -78,6 +78,8 @@ test('the kit hands a plugin its rows and the slice revision, and draws one row'
   const row = omni.genui.ProgressRow({ row: rows[0] })
   assert.equal(row.type, 'li')
   assert.equal(row.props['data-state'], 'work')
+  const ended = omni.genui.ProgressRow({ row: { state: 'done', outcome: 'done', coverage: { countInWindow: 0 } } })
+  assert.equal(ended.props.children[1].props.children[1], null, 'plain progress has no backfill subline')
   assert.equal(omni.genui.ProgressRows({ rows: [] }), null)
   assert.equal(omni.genui.CoverageRow({ coverage: null }), null)
 })

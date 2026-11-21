@@ -35,6 +35,7 @@ export function revisionOf(roster) {
 export function ProgressRow({ row, view: given, action }) {
   // A kit card that already built the view (the backfill card) passes it; a plain row is read here.
   const view = given ?? rowView(row)
+  const windowLine = view.windowLine ?? ''
   return h('li', { className: 'bt-genui-row', 'data-state': view.state },
     h('span', { className: 'bt-genui-dot', 'aria-hidden': true }),
     h('div', { className: 'bt-genui-body' },
@@ -44,10 +45,11 @@ export function ProgressRow({ row, view: given, action }) {
         view.page !== '' ? h('span', { className: 'bt-genui-num' }, view.page) : null,
         view.progress !== '' ? h('span', { className: 'bt-genui-num' }, view.progress) : null,
         view.span !== '' ? h('span', { className: 'bt-genui-num bt-genui-span' }, view.span) : null),
-      view.media !== '' || view.marks !== ''
+      view.media !== '' || view.marks !== '' || windowLine !== ''
         ? h('div', { className: 'bt-genui-line bt-genui-sub' },
           view.media !== '' ? h('span', null, view.media) : null,
-          view.marks !== '' ? h('span', null, view.marks) : null)
+          view.marks !== '' ? h('span', null, view.marks) : null,
+          windowLine !== '' ? h('span', null, windowLine) : null)
         : null),
     // A card of the kit's own may hang one action off a row (a backfill's Stop).
     action === undefined || action === null ? null : h('div', { className: 'bt-genui-action' }, action))
@@ -159,12 +161,13 @@ const toggleChat = (list, id) => (list.includes(id) ? list.filter(item => item !
 /**
  * The interactive backfill card. It reads the open proposals and the live runs from the
  * same roster every kit card reads (`omniBackfillProposals`, `omniBackfills`), so a plugin
- * mounts it with `roster: p.roster`. The person ticks chats, sets dates and presses Start
+ * mounts it with `roster: p.roster`. A bound card takes a proposalId, a runId, or both.
+ * The person ticks chats, sets dates and presses Start
  * once; that single approval goes through `start_backfill`. A running row offers Stop,
  * which sends `cancel_backfill` for that job. Nothing here starts on its own, and nothing
  * sends a message: the card draws labels, dates, states and counts only.
  */
-export function BackfillCard({ roster, start, cancel }) {
+export function BackfillCard({ roster, proposalId, runId, start, cancel }) {
   // A plugin may pass its own actions (a test, another host half); the ref keeps a
   // re-render from swapping the function under a request already in flight.
   const starter = useRef(start ?? startBackfill)
@@ -177,7 +180,11 @@ export function BackfillCard({ roster, start, cancel }) {
   const [errors, setErrors] = useState({})
   const [stopping, setStopping] = useState({})
   const prefix = useId()
-  const view = backfillView(roster)
+  const view = backfillView(roster, { proposalId, runId })
+  const readOnly = Boolean(roster?.readOnly)
+  const readOnlyNote = readOnly
+    ? h('span', { className: 'bt-genui-muted' }, t('This window only reads the team; open the team where it runs to act.'))
+    : null
   const formOf = proposal => forms[proposal.id] ?? { from: proposal.from, to: proposal.to, chats: proposal.ticked }
   const update = (proposal, patch) => setForms(all => ({
     ...all,
@@ -185,7 +192,7 @@ export function BackfillCard({ roster, start, cancel }) {
   }))
   const onStart = async (proposal, form) => {
     const ready = form.chats.length > 0 && form.from !== '' && form.to !== '' && form.from <= form.to
-    if (busy !== undefined || !ready) return
+    if (readOnly || busy !== undefined || !ready) return
     setBusy(proposal.id)
     setErrors(all => { const next = { ...all }; delete next[proposal.id]; return next })
     try {
@@ -198,7 +205,7 @@ export function BackfillCard({ roster, start, cancel }) {
     }
   }
   const onCancel = async (run, row) => {
-    if (stopping[row.jobId] === true) return
+    if (readOnly || stopping[row.jobId] === true) return
     setStopping(all => ({ ...all, [row.jobId]: true }))
     setErrors(all => { const next = { ...all }; delete next[`run:${run.id}`]; return next })
     try {
@@ -209,14 +216,22 @@ export function BackfillCard({ roster, start, cancel }) {
       setStopping(all => { const next = { ...all }; delete next[row.jobId]; return next })
     }
   }
-  // The approval is out but the run has not arrived yet: say so, never show the picker
-  // again and invite a second Start. Once the run is in the live answer, the rows speak.
-  const waiting = sent !== undefined && !view.runs.some(run => run.id === sent.runId) ? sent : undefined
-  if (waiting === undefined && view.proposals.length === 0 && view.runs.length === 0) return null
+  // Once the live roster lists an approved run, retire its waiting message even if
+  // the run is outside this card's scope or is later pruned from the roster.
+  const sentRunListed = sent?.runId !== undefined && Array.isArray(roster?.omniBackfills)
+    && roster.omniBackfills.some(run => run?.id === sent.runId)
+  useEffect(() => {
+    if (sentRunListed) setSent(current => current === sent ? undefined : current)
+  }, [sent, sentRunListed])
+  const showsSentProposal = proposalId === undefined ? runId === undefined : sent?.proposalId === proposalId
+  const waiting = showsSentProposal && !sentRunListed ? sent : undefined
+  const proposalSettled = view.proposalSettled && waiting === undefined
+  const runMissing = runId !== undefined && view.runs.length === 0
+  if (waiting === undefined && view.proposals.length === 0 && view.runs.length === 0 && !proposalSettled && !runMissing) return null
   const pickers = view.proposals.filter(proposal => waiting?.proposalId !== proposal.id).map((proposal) => {
     const form = formOf(proposal)
     const starting = busy === proposal.id
-    const held = busy !== undefined
+    const held = readOnly || busy !== undefined
     const ordered = form.chats.length > 0 && form.from !== '' && form.to !== '' && form.from <= form.to
     const backwards = form.from !== '' && form.to !== '' && form.from > form.to
     return h('section', { key: proposal.id, className: 'bt-q bt-genui-backfill', 'aria-busy': starting ? 'true' : undefined },
@@ -259,7 +274,8 @@ export function BackfillCard({ roster, start, cancel }) {
         h('span', { className: 'bt-genui-muted' }, t('{count} chats selected', { count: countText(form.chats.length) })),
         backwards ? h('span', { className: 'bt-genui-error' }, t('The start date must be before the end date.')) : null,
         errors[proposal.id] !== undefined ? h('span', { className: 'bt-genui-error', role: 'status' }, errors[proposal.id]) : null,
-        starting ? h('span', { className: 'bt-genui-muted' }, t('Sending your approval…')) : null))
+        starting ? h('span', { className: 'bt-genui-muted' }, t('Sending your approval…')) : null,
+        readOnlyNote))
   })
   const waitingNode = waiting === undefined ? null : h('section', { className: 'bt-q bt-genui-backfill', 'aria-busy': 'true' },
     h('div', { className: 'bt-q-head' },
@@ -267,7 +283,8 @@ export function BackfillCard({ roster, start, cancel }) {
         h('p', { className: 'bt-q-title' }, t('Backfill')),
         h('div', { className: 'bt-q-detail' }, t('Your approval was sent. One backfill is starting for each chat you chose.')))),
     h('div', { className: 'bt-genui-foot' },
-      h('span', { className: 'bt-genui-muted' }, t('Starting…'))))
+      h('span', { className: 'bt-genui-muted' }, t('Starting…')),
+      readOnlyNote))
   const runsNode = view.runs.length === 0 ? null : h('section', { className: 'bt-q bt-genui-backfill-runs' },
     h('div', { className: 'bt-q-head' },
       h('div', { className: 'bt-q-text' }, h('p', { className: 'bt-q-title' }, t('Backfills')))),
@@ -282,7 +299,7 @@ export function BackfillCard({ roster, start, cancel }) {
           key: row.chatId, view: row,
           action: row.cancelable
             ? h('button', {
-              type: 'button', className: 'bt-genui-cancel', disabled: stopping[row.jobId] === true,
+              type: 'button', className: 'bt-genui-cancel', disabled: readOnly || stopping[row.jobId] === true,
               'aria-label': t('Stop the backfill of {chat}', { chat: row.name }),
               onClick: () => onCancel(run, row),
             }, stopping[row.jobId] === true ? t('Stopping…') : t('Stop'))
@@ -290,8 +307,14 @@ export function BackfillCard({ roster, start, cancel }) {
         }))),
       run.more > 0 ? h('div', { className: 'bt-genui-more' }, t('{count} more chats', { count: countText(run.more) })) : null,
       errors[`run:${run.id}`] !== undefined ? h('div', { className: 'bt-genui-foot' }, h('span', { className: 'bt-genui-error', role: 'status' }, errors[`run:${run.id}`])) : null)),
-    view.moreRuns > 0 ? h('div', { className: 'bt-genui-more' }, t('Showing only {count} runs', { count: countText(view.runs.length) })) : null)
-  return h(Fragment, null, waitingNode, pickers, runsNode)
+    view.moreRuns > 0 ? h('div', { className: 'bt-genui-more' }, t('Showing only {count} runs', { count: countText(view.runs.length) })) : null,
+    readOnly ? h('div', { className: 'bt-genui-foot' }, readOnlyNote) : null)
+  const settledNode = proposalSettled || runMissing ? h('section', { className: 'bt-q bt-genui-backfill' },
+    h('div', { className: 'bt-genui-foot' },
+      proposalSettled ? h('span', { className: 'bt-genui-muted' }, t('This request is no longer open.')) : null,
+      runMissing ? h('span', { className: 'bt-genui-muted' }, t('This run is no longer listed.')) : null,
+      readOnlyNote)) : null
+  return h(Fragment, null, waitingNode, pickers, runsNode, settledNode)
 }
 
 // The kit's own surface: the same card, hairline and muted text as the team's question
