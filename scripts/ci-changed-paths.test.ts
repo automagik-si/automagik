@@ -30,6 +30,7 @@ const GATED: Record<string, string> = {
   usagemeter: 'usagemeter',
   'dsh-sandbox': 'sandbox',
   id: 'id',
+  'brand-font': 'font',
 };
 const AREAS = Object.values(GATED);
 
@@ -47,6 +48,7 @@ const RULES: Record<string, [string, string, string]> = {
   usagemeter: ['USAGEMETER_CHANGED_PATHS', 'meter/usagemeter/x', 'meter/statusline/x'],
   sandbox: ['SANDBOX_CHANGED_PATHS', 'apps/dsh-sandbox/x', 'apps/x'],
   id: ['ID_CHANGED_PATHS', 'apps/id/x', 'apps/landing/x'],
+  font: ['BRAND_FONT_CHANGED_PATHS', 'scripts/brand-font/rebuild.mjs', 'docs/brand/tokens/tokens.json'],
 };
 
 /** The inputs each rule carries beyond its own folder, which must still count as a change. */
@@ -64,6 +66,9 @@ const CROSS = [
   ['SANDBOX_CHANGED_PATHS', '.github/workflows/ci.yml'],
   ['ID_CHANGED_PATHS', '.github/workflows/ci.yml'],
   ['ID_CHANGED_PATHS', '.github/scripts/apt-canonical-sources.sh'],
+  ['BRAND_FONT_CHANGED_PATHS', 'docs/brand/fonts/fredoka-latin.woff2'],
+  ['BRAND_FONT_CHANGED_PATHS', 'docs/brand/fonts/README.md'],
+  ['BRAND_FONT_CHANGED_PATHS', '.github/workflows/ci.yml'],
 ];
 
 /** Runs the `changes` job's real script the way the runner does, with an output file. */
@@ -298,6 +303,7 @@ describe('a gated job', () => {
     expect(ci.jobs.usagemeter.name).toBe('usagemeter (${{ matrix.os }})');
     expect(ci.jobs.meter.name).toBe('Meter status line');
     expect(ci.jobs.id.name).toBe('Automagik ID (local Workers runtime)');
+    expect(ci.jobs['brand-font'].name).toBe('Brand font rebuild');
   });
 
   test('reads a rule defined once, with the cross-area inputs each rule carries', () => {
@@ -317,6 +323,29 @@ describe('a gated job', () => {
     for (const [name, path] of CROSS) {
       expect(new RegExp(ci.env[name]).test(path)).toBe(true);
     }
+  });
+});
+
+describe('the brand font gate', () => {
+  test('a font-only pull request checks the font alone, and its job asserts the rebuild', () => {
+    const { dir, commits: [base, head] } = scratchRepo([
+      { 'README.md': 'first\n' },
+      { 'docs/brand/fonts/fredoka-latin.woff2': 'font\n' },
+    ]);
+    try {
+      const { outputs } = decide({ base, head, cwd: dir });
+      for (const area of AREAS) expect(outputs[area]).toBe(area === 'font' ? 'true' : 'false');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const steps = ci.jobs['brand-font'].steps;
+    // The second read of the diff (#895) needs the base commit, so the checkout keeps history.
+    expect(steps[0].with['fetch-depth']).toBe(0);
+    const assert = steps.find((step: any) => step.name === 'Assert the steps ran');
+    expect(assert.if).toBe('always()');
+    expect(assert.run).toContain('grep -E "${BRAND_FONT_CHANGED_PATHS}"');
+    expect(steps.some((step: any) => step.id === 'rebuild')).toBe(true);
+    expect(assert.env.OUTCOMES).toBe('rebuild=${{ steps.rebuild.outcome }}');
   });
 });
 
