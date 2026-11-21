@@ -24848,6 +24848,7 @@ var chatStatusOf = (chat) => statusOr(CHAT_STATUS[chat?.status] ?? chat?.status)
 var chatStatuses = (bot) => (bot.channels ?? []).flatMap((channel) => (channel.chats ?? []).map(chatStatusOf));
 function botRowStatus(bot) {
   const status = statusOr(bot.status);
+  if (status === "not-installed") return status;
   if (status === "needs" && chatStatuses(bot).includes("needs")) return "idle";
   const channels = bot.channels ?? [];
   const closed = channels.length > 0 && channels.every((channel) => channel.chats === void 0);
