@@ -1339,7 +1339,23 @@ export function install(rt) {
           await rt.diagnostics.clear()
           return ok(true)
         default:
-          if (added !== undefined) return ok(await added.fn(body, signal, isWindowEndpoint(added) ? windowSeen : false))
+          if (added !== undefined) {
+            if (isWindowEndpoint(added)) return ok(await added.fn(body, signal, windowSeen))
+            const around = rt.extended.aroundOf(endpoint)
+            if (around === undefined) return ok(await added.fn(body, signal, false))
+            let canCall = true
+            const next = (nextBody = body) => {
+              if (!canCall) throw new Error('ds-bot: next can serve an endpoint once during its wrapper')
+              canCall = false
+              return added.fn(nextBody, signal, false)
+            }
+            try {
+              const value = around(body, signal, next)
+              return ok(typeof value?.then === 'function' ? await value : value)
+            } finally {
+              canCall = false
+            }
+          }
           if (endpoint.startsWith('computer-')) {
             await rt.load()
             return ok(await rt.computerEndpoint(endpoint.slice('computer-'.length), body))

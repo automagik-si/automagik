@@ -317,6 +317,8 @@ and `permissionPresets` services when they are there, and acp-dsh's `acpAgents`.
 
 ### Installing Omni from GitHub
 
+Omni's own Connect card uses the welcome's install check for **Set it up** and **Update and connect**. When it uses the GitHub install job, the terminal shows the install source and progress, then connects to the sandbox when it is ready.
+
 The welcome can build the Omni release pinned in its package manifest when the version offered by npm is behind, unpublished, or the npm terminal install fails. Without a usable service session, the welcome runs the installer itself. It uses npm when the requested version is published and at least as new as the pin. The GitHub route requires the pin to be at least as new as the requested version. An image with the Omni supervisor installs into a fresh sandbox and lets the supervisor start it. An interrupted image install can resume in the same sandbox at the same version. An existing supervised sandbox stays in place.
 
 The welcome checks that the GitHub tag resolves to the pinned commit and that its commit API names the pinned Git tree. It streams and verifies the commit archive against that tree before extraction. It verifies the Bun zip and executable against pinned SHA-256 hashes. The build installs dependencies with lifecycle scripts disabled, then runs Omni's pinned build and pack scripts with an allowlisted environment and scratch home.

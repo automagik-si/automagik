@@ -6,6 +6,7 @@ import { createCompanionActions } from './companion.js'
 import { createBotTypeActions } from './bot-types.js'
 import { createOmniServerCheck } from './release-resolve.js'
 import { createOmniInstaller, omniInstallAvailable } from './omni-github.js'
+import { createOmniTerminalGuard } from './omni-terminal-guard.js'
 import { createAcpActions } from './acp.js'
 import { hostOf, machineOf } from './host.js'
 import { preloadOf } from './preload.js'
@@ -259,12 +260,56 @@ export function install(ctx, deps = {}) {
   })
   const actions = { ...createActions(ctx, { ...deps, anyOn }), ...createProviderActions(ctx), ...aiEndpoints, ...createAcpActions(ctx), ...companion, ...botTypes }
   const checkOmniServer = deps.releases?.checkOmniServer ?? createOmniServerCheck(omniOptions)
+  const available = (login, version) => readOnly() === undefined
+    && omniInstallAvailable({ env: omniOptions.env, kill: omniOptions.kill, login, version })
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['omniTeam', 'omniChannels'], (sub) => {
+      const rt = sub.omniTeam
+      if (typeof rt?.hooks?.around !== 'function') return
+      sub.effect(() => {
+        const guard = createOmniTerminalGuard({
+          check: (version, available) => checkOmniServer(version, true, available),
+          available,
+          installer: omniInstaller,
+          endpointOf(name) {
+            const run = rt.extended.endpointOf(name)?.fn
+            if (name !== 'omni-link' || !run) return run
+            return async (body, signal) => {
+              const link = await run(body, signal)
+              // The public reply carries only a host and port. Compare the saved URL, too.
+              if (typeof rt.omniLink !== 'function') return link
+              const url = rt.omniLink()?.url
+              if (!url) return link?.linked ? null : link
+              return { ...link, linked: true, origin: new URL(url).host, url }
+            }
+          },
+          readOnly: () => team() === rt ? rt.readOnly() : 'The Bot team changed.',
+          generation: () => rt.teamGeneration?.(),
+          sameTeam: g => g === undefined || rt.sameTeam?.(g) !== false,
+          language: () => rt.uiLanguage?.(),
+        })
+        const off = []
+        const dispose = () => {
+          guard.dispose()
+          for (const remove of off) remove()
+        }
+        try {
+          for (const name of ['open', 'read', 'write', 'resize', 'close']) {
+            off.push(rt.hooks.around('omni-terminal-' + name, guard[name]))
+          }
+        } catch (error) {
+          dispose()
+          throw error
+        }
+        return dispose
+      }, 'omni-ai: Connect card install')
+    })
+  }
   actions['omni-server-check'] = (payload) => {
     const fields = parse(OmniServerPayload, payload)
     if (fields === undefined) throw invalid('Name an Omni server version.')
     if (fields.fallback !== true) return checkOmniServer(fields.version)
-    return checkOmniServer(fields.version, true, (login, version) => readOnly() === undefined
-      && omniInstallAvailable({ env: omniOptions.env, kill: omniOptions.kill, login, version }))
+    return checkOmniServer(fields.version, true, available)
   }
   for (const [action, schema, run] of [
     ['omni-github-install', OmniGithubInstallPayload, omniInstaller.start],

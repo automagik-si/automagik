@@ -190,6 +190,7 @@ export const PT_BR = {
   'Omni could not be installed from GitHub.': 'Não foi possível instalar o Omni pelo GitHub.',
   'Omni is installed, but its address is unknown. Power Omni on to try again.': 'O Omni está instalado, mas não foi possível identificar o endereço. Ligue o Omni para tentar novamente.',
   'Omni is installed but did not answer at {url}. Power Omni on to try again.': 'O Omni está instalado, mas não respondeu em {url}. Ligue o Omni para tentar novamente.',
+  'Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.': 'Há outro login do Omni aguardando ({origin}). Conclua ou cancele esse login e depois conecte-se ao novo Omni em {url} pela lista de Omnis.',
   'Installed · restart DSH to start it': 'Instalação concluída · reinicie o DSH para começar',
   'Could not install Omni': 'Não foi possível instalar o Omni',
   'Installing Genie…': 'Instalando o Genie…',

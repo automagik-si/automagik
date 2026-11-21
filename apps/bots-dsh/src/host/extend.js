@@ -5,6 +5,8 @@
 //
 //   endpoint(name, fn, { read })   one POST /api/omni-ui endpoint; `read` lets a host that
 //                                  only reads the team (store.js) answer it too
+//   around(name, fn)               wrap a plugin endpoint with fn(body, signal, next)
+//                                  next(nextBody = body) serves it once during that call
 //   view(fn)                       fields merged into the team view (revisioned)
 //   sessionOwner(fn)               the team Bot and label of an external run Session
 //   live(fn)                       fields merged into every state answer (no revision)
@@ -35,6 +37,7 @@ export function windowEndpoint(rt, name, fn, { read = false } = {}) {
 
 export function install(rt) {
   const endpoints = new Map()
+  const around = new Map()
   const views = []
   const lives = []
   const sessionOwners = []
@@ -90,6 +93,12 @@ export function install(rt) {
   registrars.set(rt, register)
   rt.hooks = {
     endpoint: (name, fn, { read = false } = {}) => register(name, fn, read, false),
+    around(name, fn) {
+      if (around.has(name)) throw new Error(`ds-bot: endpoint ${name} is already wrapped`)
+      const entry = { fn }
+      around.set(name, entry)
+      return () => { if (around.get(name) === entry) around.delete(name) }
+    },
     view: fn => add(views, fn),
     sessionOwner: fn => {
       const dispose = add(sessionOwners, fn)
@@ -123,6 +132,7 @@ export function install(rt) {
   // What channel.js and prompt.js read.
   rt.extended = {
     endpointOf: name => (endpoints.has(name) ? endpoints.get(name) : undefined),
+    aroundOf: name => around.get(name)?.fn,
     endpointNames: () => [...endpoints.keys()],
     sessionOwner(sessionId) {
       for (const fn of sessionOwners) {

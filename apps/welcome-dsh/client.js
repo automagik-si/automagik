@@ -9140,6 +9140,7 @@ var PT_BR = {
   "Omni could not be installed from GitHub.": "Não foi possível instalar o Omni pelo GitHub.",
   "Omni is installed, but its address is unknown. Power Omni on to try again.": "O Omni está instalado, mas não foi possível identificar o endereço. Ligue o Omni para tentar novamente.",
   "Omni is installed but did not answer at {url}. Power Omni on to try again.": "O Omni está instalado, mas não respondeu em {url}. Ligue o Omni para tentar novamente.",
+  "Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.": "Há outro login do Omni aguardando ({origin}). Conclua ou cancele esse login e depois conecte-se ao novo Omni em {url} pela lista de Omnis.",
   "Installed · restart DSH to start it": "Instalação concluída · reinicie o DSH para começar",
   "Could not install Omni": "Não foi possível instalar o Omni",
   "Installing Genie…": "Instalando o Genie…",
@@ -10928,7 +10929,15 @@ async function sandboxInstall({ show, signal, omniAi = call, omniUi = callOmniUi
     if (signal?.aborted) throw abortError();
   };
   show("sandbox", { terminal: null, log: "", step: null });
-  const opened = await omniUi("omni-terminal-open", { kind: "install", cols: 72, rows: 8 });
+  const payload = { kind: "install", cols: 72, rows: 8 };
+  let opened;
+  try {
+    opened = await omniUi("omni-terminal-open", { ...payload, via: "welcome" });
+  } catch (error) {
+    if (error?.code !== "bot/invalid") throw error;
+    check();
+    opened = await omniUi("omni-terminal-open", payload);
+  }
   const { terminal } = opened;
   const close = () => omniUi("omni-terminal-close", { terminal }).catch(() => {
   });
@@ -11047,6 +11056,16 @@ function sameUrl(a, b2) {
   const rightUrl = new URL(right);
   return leftUrl.protocol === rightUrl.protocol && loopback(leftUrl.hostname) === loopback(rightUrl.hostname) && effectivePort(leftUrl) === effectivePort(rightUrl) && leftUrl.pathname === rightUrl.pathname;
 }
+function sameOrigin(origin, target) {
+  if (typeof origin !== "string" || /[/\\?#@\s]/.test(origin)) return false;
+  const url = new URL(target);
+  try {
+    const candidate = new URL(`${url.protocol}//${origin}`);
+    return loopback(candidate.hostname) === loopback(url.hostname) && candidate.port === url.port;
+  } catch {
+    return false;
+  }
+}
 var CONNECT_DEADLINE = /* @__PURE__ */ Symbol();
 async function readBefore(omniUi, endpoint, remaining, signal) {
   let timer;
@@ -11108,6 +11127,12 @@ async function githubInstall({
       check();
       if (link === CONNECT_DEADLINE || now() >= deadline) break;
       if (link?.linked === true || link?.configured === true) return end("linked", { origin: link.origin ?? null });
+      if (link?.pairing && !sameOrigin(link.pairing.origin, target)) {
+        return fail(t("Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.", {
+          origin: link.pairing.origin ?? t("unknown"),
+          url: target
+        }));
+      }
       if (link && entry) {
         let claim;
         try {
