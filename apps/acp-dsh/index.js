@@ -166,7 +166,7 @@ export function apply(ctx, config = {}, {
   cliStore,
   find = name => findCommand(name), signedIn = signedInOf,
   catalogHome = store.home ? join(dirname(store.home), 'catalog') : undefined,
-  loginSpawn, loginTimers, loginRecord, imageSetup, account = accountOf, evidenceOf = accountEvidenceOf,
+  loginSpawn, loginTimers, loginRecord, loginProbe, imageSetup, account = accountOf, evidenceOf = accountEvidenceOf,
   installation = process.env.DSH_HOME,
   cliHome = store.home ? defaultCliHome(ctx, store.home, installation) : undefined,
   consentFile = cliHome ? join(cliHome, CONSENT_FILE)
@@ -175,12 +175,14 @@ export function apply(ctx, config = {}, {
   logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile,
 } = {}) {
   const homes = cliHome === undefined ? undefined : new CliHomes(cliHome, {
+    probe: loginProbe,
     onRecordError: vendor => warn(ctx, `the ${vendor} generation record could not be saved at startup`),
     onRetired: (vendor, retired) => info(ctx, retiredLine(vendor, retired)),
   })
   if (homes) for (const vendor of ['claude', 'codex']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.
   }
+  if (homes) for (const vendor of ['claude', 'codex']) void homes.recoverLogins(vendor).catch(() => {})
   if (cliStore === undefined && !config.fakeAgent
     && (process.env.AUTOMAGIK_APP_BROWSER === '1' || process.env.AUTOMAGIK_PNPM)) {
     cliStore = new CliStore({ log: message => info(ctx, message),
@@ -1112,12 +1114,25 @@ export function apply(ctx, config = {}, {
     }
   }
 
+  async function awaitRecovery(id) {
+    const key = AGENTS[id].key
+    const version = authVersions.get(id) ?? 0
+    const home = homes.home(key)
+    await homes.recoverLogins(key).catch(() => false)
+    restartGuard()
+    if (disposed) throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
+    if ((authVersions.get(id) ?? 0) !== version || homes.home(key) !== home) {
+      throw accountFailure('changed', 'The Bot account changed. Look again.')
+    }
+  }
+
   async function signOutAccount(id, { expect } = {}) {
     restartGuard()
     const matched = expect === undefined ? undefined : await expectAccount(id, expect)
     if (!homes || !consentIds.includes(id) || disposed) {
       throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
     }
+    await awaitRecovery(id)
     if (accountChanges.has(id)) throw accountFailure('busy', 'The Bot account is changing.')
     const spec = AGENTS[id]
     const cli = clis.get(id)
@@ -1204,6 +1219,7 @@ export function apply(ctx, config = {}, {
   async function startLogin(id, label, alreadySignedOut = false) {
     restartGuard()
     if (!homes || !consentIds.includes(id)) return logins.start(id, { label })
+    await awaitRecovery(id)
     if (accountChanges.has(id)) throw accountFailure('busy', 'The Bot account is changing.')
     const current = logins.current(id)
     if (current) return current
@@ -1372,8 +1388,12 @@ export function apply(ctx, config = {}, {
     },
     accountSignOut: (id, options) => signOutAccount(id, options),
     accountReset: id => resetAccount(id),
-    accountRecovery: id => ({ required: !!(homes && consentIds.includes(id)
-      && homes.recovery(AGENTS[id].key)) }),
+    accountRecovery: async id => {
+      if (!homes || !consentIds.includes(id)) return { required: false }
+      const { key } = AGENTS[id]
+      await homes.recoverLogins(key).catch(() => false)
+      return { required: homes.recovery(key) }
+    },
     accountSwitch: async (id, { label } = {}) => {
       await signOutAccount(id)
       return startLogin(id, label, true)
@@ -1683,6 +1703,7 @@ export function apply(ctx, config = {}, {
   // Cordis 4 has no 'dispose' event: an effect's cleanup is what runs when the plugin stops.
   ctx.effect?.(() => () => {
     disposed = true
+    homes?.closeRecovery()
     // First, so a throwing cleanup below never leaves the wrapper on a live engine.
     pressure.dispose()
     clearTimeout(first)

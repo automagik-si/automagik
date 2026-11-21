@@ -5,7 +5,7 @@ import {
 } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
-  LOGIN_OWNER_ENV, LOGIN_RECORD_VERSION, unverifiedLogin, verifyLoginRecords,
+  LOGIN_OWNER_ENV, LOGIN_RECORD_VERSION, reclaimWindowsLogins, unverifiedLogin, verifyLoginRecords,
 } from './login-ownership.js'
 import {
   assertGeneration, CliGenerations, GENERATION_ENV, ownershipAt, ownershipState,
@@ -13,6 +13,7 @@ import {
 } from './cli-generations.js'
 import { processState, validBirth } from './process-identity.js'
 import { retiredHomes, writeRetiredNote } from './retired-home.js'
+import { probeWindowsLogin } from './windows-job-probe.js'
 
 export const HOME_ENV = 'AUTOMAGIK_BOT_CLI_HOME'
 const VERSION_ENV = 'AUTOMAGIK_BOT_CLI_VERSION'
@@ -29,13 +30,18 @@ const inherited = new RegExp([
 const failure = message => Object.assign(new Error(message), { code: 'acp-account/busy' })
 
 export class CliHomes {
-  constructor(root, { onRecordError = () => console.warn('acp-dsh: the generation record could not be saved at startup'), onRetired = () => {} } = {}) {
+  constructor(root, {
+    onRecordError = () => console.warn('acp-dsh: the generation record could not be saved at startup'),
+    onRetired = () => {}, probe = probeWindowsLogin,
+  } = {}) {
     this.root = resolve(root)
     this.onRecordError = onRecordError
     this.onRetired = onRetired
     this.instance = `${process.pid}-${randomUUID()}`
     this.registered = new Map()
     this.changes = new Map()
+    this.probe = probe
+    this.recovering = new Map()
     this.generations = new CliGenerations(this.root, this.instance)
   }
 
@@ -126,6 +132,38 @@ export class CliHomes {
       return false
     } catch { return true }
   }
+
+  recoverLogins(vendor) {
+    if (this.disposed || this.recoveryClosed) return Promise.resolve(false)
+    const pending = this.recovering.get(vendor)
+    if (pending) return pending
+    let generation
+    try { generation = this.generations.current(vendor) } catch { return Promise.resolve(false) }
+    const home = this.generations.folder(vendor, generation)
+    if (!existsSync(join(home, 'login-trees'))) return Promise.resolve(false)
+    const commit = change => {
+      if (this.disposed || this.recoveryClosed) return false
+      try {
+        return this.generations.exclusive(vendor, () => (
+          !this.disposed && !this.recoveryClosed && this.generations.current(vendor) === generation
+            ? change() : false
+        ))
+      } catch { return false }
+    }
+    const recovery = reclaimWindowsLogins({
+      home, owner: this.instance, controlRoot: join(this.root, 'login-jobs'), probe: this.probe, commit,
+    }).then(removed => {
+      if (removed > 0 && !this.disposed && !this.recoveryClosed) {
+        commit(() => this.recoverChanging(home))
+        try { this.generations.ensureRecord() } catch {}
+      }
+      return removed > 0
+    }).finally(() => this.recovering.delete(vendor))
+    this.recovering.set(vendor, recovery)
+    return recovery
+  }
+
+  closeRecovery() { this.recoveryClosed = true }
 
   // Reset changes only the pointer. Never move the old physical path or reuse it: a vendor
   // that survived the app still has that absolute path in its environment and may write late.
@@ -339,6 +377,7 @@ export class CliHomes {
   }
 
   dispose() {
+    this.disposed = true
     for (const [vendor, home] of this.registered) {
       this.generations.release(join(home, 'instances', this.instance))
       this.generations.unregister(vendor)

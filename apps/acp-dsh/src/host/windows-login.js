@@ -1,15 +1,17 @@
 // Windows login ownership: a Job Object outlives a .cmd wrapper and owns its descendants.
-// The supervisor starts the vendor suspended, assigns the job, then resumes it. Raw stdio
-// remains the vendor's protocol. No process exit authorizes an auth change without job proof.
+// The supervisor starts the vendor suspended inside a named Job using JOB_LIST. Raw stdio
+// remains the vendor's protocol. No process exit authorizes an auth change without Job proof.
 import { execFile, spawn as spawnProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join, win32 } from 'node:path'
+import { dirname, join, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { batchSafe } from './batch-spawn.js'
 
 const SUPERVISOR = fileURLToPath(new URL('./windows-login.ps1', import.meta.url))
+export const WINDOWS_LOGIN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+export const validWindowsStart = start => typeof start === 'string' && /^[1-9][0-9]{0,18}$/.test(start)
 const failed = () => new Error('The complete sign-in process tree could not be stopped.')
 const read = (env, key) => Object.entries(env).find(([name]) => (
   name.toLowerCase() === key.toLowerCase()
@@ -29,16 +31,19 @@ export function windowsLoginCommand(file, args, env) {
   return { executable: file, line: [file, ...args].map(nativeArg).join(' ') }
 }
 
-export function launchWindowsLogin(file, args, options = {}, {
-  spawn = spawnProcess, taskkill = execFile, stopMs = 5000,
-} = {}) {
-  const directory = mkdtempSync(join(options.cwd ?? tmpdir(), '.login-job-'))
-  const stopFile = join(directory, 'stop')
-  const doneFile = join(directory, 'done')
-  const nonce = randomUUID()
-  const env = options.env ?? process.env
-  const request = { ...windowsLoginCommand(file, args, env), cwd: options.cwd,
-    stop: stopFile, done: doneFile, nonce, modulePath: read(env, 'PSModulePath') ?? null }
+export function windowsJobName(id) {
+  if (typeof id !== 'string' || !WINDOWS_LOGIN_ID.test(id)) throw new Error('Invalid sign-in launch id.')
+  return `Global\\automagik-login-${id}`
+}
+
+export function loginControlRoot(env) {
+  if (!env.AUTOMAGIK_BOT_CLI_HOME) return join(tmpdir(), 'automagik-login-jobs')
+  const pointer = env.AUTOMAGIK_BOT_CLI_POINTER
+  if (!pointer) throw new Error('The Bot sign-in folder is incomplete.')
+  return join(dirname(dirname(pointer)), 'login-jobs')
+}
+
+export function systemPowerShell(env) {
   const system = read(env, 'SystemRoot') ?? 'C:\\Windows'
   const powershell = win32.join(system, 'System32', 'WindowsPowerShell', 'v1.0',
     'powershell.exe')
@@ -49,13 +54,36 @@ export function launchWindowsLogin(file, args, options = {}, {
     name.toLowerCase() !== 'psmodulepath'
   )))
   supervisorEnv.PSModulePath = win32.join(win32.dirname(powershell), 'Modules')
+  return { powershell, env: supervisorEnv }
+}
+
+export function launchWindowsLogin(file, args, options = {}, {
+  spawn = spawnProcess, taskkill = execFile, stopMs = 5000,
+} = {}) {
+  const id = options.launch
+  const job = windowsJobName(id)
+  const appStart = options.appStart ?? null
+  if (appStart !== null && !validWindowsStart(appStart)) throw new Error('Invalid sign-in app birth.')
+  const env = options.env ?? process.env
+  const root = options.control ?? loginControlRoot(env)
+  const directory = join(root, id)
+  const stopFile = join(directory, 'stop')
+  const doneFile = join(directory, 'done')
+  const nonce = randomUUID()
+  const request = { ...windowsLoginCommand(file, args, env), cwd: options.cwd,
+    stop: stopFile, done: doneFile, nonce, modulePath: read(env, 'PSModulePath') ?? null,
+    launch: id, job, app: process.pid, appStart,
+    identity: join(directory, 'supervisor'), members: join(directory, 'members') }
+  const system = systemPowerShell(env)
+  mkdirSync(root, { recursive: true, mode: 0o700 })
+  mkdirSync(directory, { mode: 0o700 })
   let child
   try {
-    child = spawn(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive',
+    child = spawn(system.powershell, ['-NoLogo', '-NoProfile', '-NonInteractive',
       '-ExecutionPolicy', 'Bypass', '-File', SUPERVISOR], {
-      // Keep libuv's app-lifetime Job: a crash leaves ownership blocked until an owner Reset.
+      // Keep libuv's app-lifetime Job in addition to the supervisor's parent watch.
       ...options, detached: false, shell: false, windowsHide: true,
-      env: { ...supervisorEnv, AUTOMAGIK_LOGIN_JOB: JSON.stringify(request) },
+      env: { ...system.env, AUTOMAGIK_LOGIN_JOB: JSON.stringify(request) },
     })
   } catch (error) {
     rmSync(directory, { recursive: true, force: true })
@@ -116,6 +144,5 @@ export function launchWindowsLogin(file, args, options = {}, {
     return stopping
   }
   return { child, done, stop, dispose,
-    identity: { kind: 'windows', supervisor: child.pid,
-      directory: basename(directory), nonce } }
+    identity: { kind: 'windows', supervisor: child.pid, job } }
 }

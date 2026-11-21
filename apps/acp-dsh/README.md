@@ -463,12 +463,45 @@ Generation checks prevent work delayed across a switch from starting on the next
 the old drawing request. A missing/reloading ACP service never authorizes legacy image billing.
 A failed logout stays paused until the owner retries. Authentication changes hold an installation
 lock; close other app instances registered on that vendor home before changing accounts.
-Automatic app-crash recovery is Unix-only and requires proof that the recorded login group
-ended. On Windows, a dead app's login record stays blocked, even if an old Job nonce exists;
-Windows crash recovery is the owner's Reset Bot sign-in action, followed by fresh sign-in.
-Automatic Windows recovery is deferred to
-[follow-up #1076](https://github.com/automagik-si/automagik/issues/1076).
-The normal Windows sign-in and stop path still waits for its live supervisor's empty-Job proof.
+Unix app-crash recovery requires proof that the recorded login group ended. On Windows the
+app records a unique `Global\` Job name before spawning the supervisor. The supervisor creates
+the kill-on-close Job and uses `PROC_THREAD_ATTRIBUTE_JOB_LIST` with `CREATE_SUSPENDED` to
+start the vendor inside the Job. It records the initial member before resuming the vendor
+and refreshes the member list about every 20 ms. Normal Windows sign-in and stop still wait
+for the supervisor's empty-Job acknowledgement. [Job objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+and [process creation attributes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+describe these APIs.
+
+The supervisor watches the app because libuv's Job permits silent breakaway and assigns
+non-detached children after creation. The app can exit before that assignment, which also
+tolerates access denied. [Node 24.9.0's libuv source](https://github.com/nodejs/node/blob/v24.9.0/deps/uv/src/win/process.c#L1052-L1101)
+shows the assignment, and [the Job flags](https://github.com/nodejs/node/blob/v24.9.0/deps/uv/src/win/process.c#L70-L102)
+govern breakaway.
+
+At startup and before sign-in, sign-out or the account recovery read, a foreign Windows
+record can trigger one PowerShell probe per launch. A cold compile takes about 10–20 seconds
+and each vendor's recovery probes share a 60-second budget. The app, supervisor and recorded
+members must have exited, and opening the Job must return error 2 (file not found). PID birth
+times distinguish reused PIDs. The record and its evidence must still match under the installation mutex before
+removal. Missing proof keeps sign-in blocked and leaves Reset available. Pre-change Windows
+records need one Reset.
+
+The Job object's name disappears on last handle close, which starts termination of its members.
+Recovery checks full exit for each recorded member. A process created since the last sample
+may still have pending I/O from before termination. It can no longer run user code, issue new
+I/O or create processes, but already submitted I/O can complete after the name disappears.
+The proof runs in a later app start after the PowerShell compile. Vendor work delegated to
+other services, such as COM, WMI, Task Scheduler or credential-manager RPC, is outside the Job
+on recovery and on normal stop. See [object name lifetime](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/life-cycle-of-an-object),
+[Job destruction](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-createjobobjectw)
+and [process termination](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess).
+
+This path requires Windows 10 or Windows Server 2016 or later, the Node 24 runtime floor, and
+a token that can create a `Global\` Job. If creation is refused, sign-in fails at `create-job`.
+The global namespace supports lookup across logon sessions. The native CI gate exercises a
+single session. [Windows kernel object namespaces](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces)
+document global lookup.
+
 A dead app PID alone never clears ownership. Dead recovery claimants can be reclaimed under
 installation-level serialization after the lock owner and applicable proof are revalidated.
 `accountRecovery(id)` reports `{ required }` per vendor without running its CLI. Cold Bot settings
@@ -487,8 +520,7 @@ proved to be the retired generation's own is refused and left untouched; a missi
 or unparseable `RETIRED.json` is refused too, because the record of what was decided is then
 ambiguous. An absent note is reported as absent and a corrupt one as corrupt. A startup line
 counts kept, missing and refused homes separately: it claims retention at a bound path only for
-a home that is still there. Unproved folders,
-including Windows crash records, remain retained. Within the installation's CLI root, each
+a home that is still there. Unproved folders remain retained. Within the installation's CLI root, each
 0-byte marker under `retired/<vendor>/` names a retired generation; its home is
 `homes/<vendor>/<generation>` (the legacy home is `<vendor>`), and
 `RETIRED.json` inside it says what is kept, for how long, and how to keep it.
