@@ -226,8 +226,8 @@ administrator or someone who controls the boot configuration and can substitute 
 different Windows tree could substitute the read result. The reader respects execution
 policy and AMSI. The child's environment contains SystemRoot, windir, PATH, TEMP and
 TMP. Node or Windows may add HOMEDRIVE, HOMEPATH, LOGONSERVER, SYSTEMDRIVE, USERDOMAIN,
-USERNAME, USERPROFILE or NODE_V8_COVERAGE. PowerShell initializes PSModulePath before
-compilation and the script clears it before passing control to the reader.
+USERNAME, USERPROFILE or NODE_V8_COVERAGE. PowerShell initializes PSModulePath and
+PATHEXT before compilation and the script clears both before passing control to the reader.
 Compiler scratch is private to the invocation under the plugin's profile data folder.
 The probe has a 30-second deadline and reads have 15 seconds. Cancellation and deadlines
 trigger separately bounded process-tree cleanup when the child is still running.

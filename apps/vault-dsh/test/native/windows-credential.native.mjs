@@ -88,6 +88,7 @@ public static class EnvCheck {
     var optional = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
       "HOMEDRIVE", "HOMEPATH", "LOGONSERVER", "SYSTEMDRIVE", "USERDOMAIN", "USERNAME", "USERPROFILE", "NODE_V8_COVERAGE"
     };
+    var problems = new List<string>();
     string line;
     while ((line = Console.In.ReadLine()) != null) {
       int sep = line.IndexOf(' ');
@@ -96,10 +97,13 @@ public static class EnvCheck {
     foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables()) {
       string key = (string)entry.Key;
       string value;
-      if (!expected.TryGetValue(key, out value) || value != (string)entry.Value) return 13;
+      if (!expected.TryGetValue(key, out value)) problems.Add("unexpected " + key);
+      else if (value != (string)entry.Value) problems.Add("different " + key);
       expected.Remove(key);
     }
-    foreach (string key in expected.Keys) if (!optional.Contains(key)) return 13;
+    foreach (string key in expected.Keys) if (!optional.Contains(key)) problems.Add("missing " + key);
+    // Names only, never values.
+    if (problems.Count > 0) { Console.Out.WriteLine(string.Join(" ", problems)); return 13; }
     Console.Out.WriteLine("environment matches");
     return 0;
   }
@@ -209,6 +213,7 @@ test('native Windows Credential Manager round trip, validation and transcript pr
     return { target, userName }
   }
 
+  let primary
   try {
     for (const [key, type, value] of [
       ['OutputDirectory', 'REG_SZ', transcriptDir], ['EnableInvocationHeader', 'REG_DWORD', '1'], ['EnableTranscripting', 'REG_DWORD', '1'],
@@ -233,7 +238,8 @@ test('native Windows Credential Manager round trip, validation and transcript pr
         const frame = Object.entries(expected).map(([key, value]) => key + ' ' + b64(value) + '\n').join('')
         const result = await invokeFixture(powershell, encodedArgs(windowsScript(envHarness, '[EnvCheck]::Run()')),
           { cwd, env: environment(cwd), stdin: Buffer.from(frame) })
-        assert.equal(clean(result) && result.stdout.toString().trim() === 'environment matches', true, 'child env values')
+        const seen = result.stdout.toString().trim()
+        assert.equal(clean(result) && seen === 'environment matches', true, 'child env values: ' + (/^[\w ()]*$/.test(seen) ? seen : 'unreadable'))
       })
     } finally {
       if (oldTemp === undefined) delete process.env.TEMP
@@ -273,8 +279,15 @@ test('native Windows Credential Manager round trip, validation and transcript pr
 
     const missingRaw = await raw('meta', missing)
     assert.equal(missingRaw.code === 10 && missingRaw.stdout.length === 0 && missingRaw.stderr.length === 0, true, 'clean missing-target frame')
-  } finally {
-    let tidy = (await adapter.prepareQuit()).ok
+  } catch (error) {
+    primary = error
+  }
+  // Cleanup and privacy checks run after a failure too, but never hide the failure that stopped the run.
+  const failures = []
+  const check = async work => { try { await work() } catch (error) { failures.push(error) } }
+  let tidy = false
+  await check(async () => {
+    tidy = (await adapter.prepareQuit()).ok
     tidy = (await cleanupTargets(targets, {
       async remove(target) {
         const result = await native(writerArgs, Buffer.from('D ' + b64(target) + '\n'), false, 'writer delete')
@@ -286,29 +299,32 @@ test('native Windows Credential Manager round trip, validation and transcript pr
         return result.code === 10 && result.stdout.length === 0 && result.stderr.length === 0
       },
     })) && tidy
-    try {
-      if (executions.length > 0) {
-        await checkTranscripts(transcriptDir, executions, privateNeedles())
-        assert.equal(scratch.size, 0, 'each invocation directory was inspected and removed')
-        assert.equal(scratchError, false, 'compiler scratch inspection completed')
-        assert.equal(inspectedFiles > 0, true, 'compiler files inspected before deletion')
-        assert.equal(sensitiveScratch.some(({ operation }) => operation === 'reader read'), true, 'raw read scratch tracked')
-        assert.equal(sensitiveScratch.some(({ operation }) => operation === 'adapter read'), true, 'adapter read scratch tracked')
-        assert.equal(sensitiveScratch.some(({ operation }) => operation === 'writer write'), true, 'writer scratch tracked')
-        for (const { operation, evidence } of sensitiveScratch) {
-          assert.equal(evidence.inspected > 0, true, `nonempty compiler files inspected for ${operation}`)
-          assert.equal(evidence.incomplete, false, `missing or unreadable compiler files for ${operation}`)
-        }
-        assert.equal(privateScratchBytes, false, 'private bytes in compiler scratch')
-      }
-    } finally {
-      for (const key of policyKeys.reverse()) {
-        const result = await registryCommand('delete', policy, '/v', key, '/f').catch(() => ({}))
-        tidy = result.code === 0 && tidy
-      }
-      for (const { watcher } of scratch.values()) watcher.close()
-      await rm(dir, { force: true, recursive: true })
-      assert.equal(tidy, true, 'all known writers exited and registered generic targets were cleaned up')
+  })
+  await check(async () => {
+    if (executions.length === 0) return
+    await checkTranscripts(transcriptDir, executions, privateNeedles())
+    assert.equal(scratch.size, 0, 'each invocation directory was inspected and removed')
+    assert.equal(scratchError, false, 'compiler scratch inspection completed')
+    assert.equal(privateScratchBytes, false, 'private bytes in compiler scratch')
+    // Coverage holds only for a run that reached every operation.
+    if (primary !== undefined) return
+    assert.equal(inspectedFiles > 0, true, 'compiler files inspected before deletion')
+    assert.equal(sensitiveScratch.some(({ operation }) => operation === 'reader read'), true, 'raw read scratch tracked')
+    assert.equal(sensitiveScratch.some(({ operation }) => operation === 'adapter read'), true, 'adapter read scratch tracked')
+    assert.equal(sensitiveScratch.some(({ operation }) => operation === 'writer write'), true, 'writer scratch tracked')
+    for (const { operation, evidence } of sensitiveScratch) {
+      assert.equal(evidence.inspected > 0, true, `nonempty compiler files inspected for ${operation}`)
+      assert.equal(evidence.incomplete, false, `missing or unreadable compiler files for ${operation}`)
     }
+  })
+  for (const key of policyKeys.reverse()) {
+    const result = await registryCommand('delete', policy, '/v', key, '/f').catch(() => ({}))
+    tidy = result.code === 0 && tidy
   }
+  for (const { watcher } of scratch.values()) watcher.close()
+  await rm(dir, { force: true, recursive: true })
+  await check(() => assert.equal(tidy, true, 'all known writers exited and registered generic targets were cleaned up'))
+  const errors = [primary, ...failures].filter(error => error !== undefined)
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1) throw new AggregateError(errors, errors.map(error => error.message).join(' | '))
 })

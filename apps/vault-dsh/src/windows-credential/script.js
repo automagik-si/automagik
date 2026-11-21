@@ -145,8 +145,9 @@ ${source}
 '@
 } catch { exit 14 }
 try {
-  # Windows PowerShell populates this variable at startup.
+  # Windows PowerShell populates these variables at startup.
   $env:PSModulePath = $null
+  $env:PATHEXT = $null
   exit (${invocation})
 } catch { exit 13 }
 `
