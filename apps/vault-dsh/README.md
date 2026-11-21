@@ -194,14 +194,57 @@ prevents delivery. The adapter drops stdout after checking its first line and dr
 stderr after parsing the password record. Child output is capped at 4 MiB. The strings
 live in plugin memory until garbage collection.
 
-A Windows Credential Manager provider for vault items is held pending a decision on
-how to call the stock `CredReadW` API. The built-in `cmdkey` tool cannot return credential values.
+## Windows Credential Manager
+
+In local Settings › Secrets › Vault, choose **Windows Credential Manager** and select
+**Unlock**. The unlock probes the reader without accessing the store. If it fails to
+start, Settings offers **Retry**. The plugin gate closes after idle time, explicit Lock,
+switching providers, plugin disposal or a read deadline. Only a successful value read
+renews idle time. Approval checks the gate and issues one command-bound grant. Part 2b
+holds delivery to the approved shell.
+
+In **Add a vault key**, enter the exact **Target** and select **Find**. The picker makes
+one native read and copies no secret from the record. Its optional user name is display
+metadata. Cards show the saved target with its original spelling. The fixed
+`current-user` connection resolves the target case-insensitively in the current token's
+logon-session credential set. Two logon sessions of the same user can have different
+sets. A copied mapping resolves in the reader's set. Replacing a credential under the
+same target, including its user name, counts as a rotation. Generic credentials with
+session, local machine or enterprise persistence are supported. The
+`automagik-vault:` namespace is reserved for Automagik. There is no enumeration or
+writing. Domain credentials, Web Credentials and certificates are outside this provider.
+
+Passwords are decoded as strict UTF-16LE text, the Windows convention. Leading BOM
+and whitespace are preserved. Empty, malformed or NUL-containing values are refused.
+Bytes from a UTF-8 or arbitrary binary writer can decode as different UTF-16LE text
+or be refused. The RFC's four-character use floor applies independently of decoding.
+
+The reader is available on x64 Windows outside Automagik Cloud when both Windows root
+variables name `C:\Windows` and the fixed Windows PowerShell 5.1 and taskkill binaries
+exist there. The fixed-root check relies on those paths and environment values. An
+administrator or someone who controls the boot configuration and can substitute a
+different Windows tree could substitute the read result. The reader respects execution
+policy and AMSI. The child's environment contains SystemRoot, windir, PATH, TEMP and
+TMP. Node or Windows may add HOMEDRIVE, HOMEPATH, LOGONSERVER, SYSTEMDRIVE, USERDOMAIN,
+USERNAME, USERPROFILE or NODE_V8_COVERAGE. PowerShell initializes PSModulePath before
+compilation and the script clears it before passing control to the reader.
+Compiler scratch is private to the invocation under the plugin's profile data folder.
+The probe has a 30-second deadline and reads have 15 seconds. Cancellation and deadlines
+trigger separately bounded process-tree cleanup when the child is still running.
+Quit reports unconfirmed cleanups. The invocation’s scratch folder can remain in that case.
+
+The target and value use private pipes. The privacy checks cover Automagik-controlled
+files, diagnostics, audit and judge payloads, and PowerShell transcripts in the native
+test. Windows' own credential-access auditing, such as Security event 5379, can record
+the target and stays enabled. Programs running as the same Windows user can call the OS
+API outside the plugin gate. Credential Guard supplies no per-read confirmation for these
+generic credentials.
 
 The host-only `secretSources` v1 service provides `status`, `unlock`, `lock`, `read`,
 `listItems` and `prepareQuit`. The `providers` property lists supported providers.
 HashiCorp Vault also exposes `listFields` for the host picker. Secret Service exposes
-`resolveHandle` and `itemDetail` for the host. Secret Service and macOS Keychain expose
-`providerBinding` for gate generation checks.
+`resolveHandle` and `itemDetail` for the host. Secret Service, macOS Keychain and Windows Credential Manager
+expose `providerBinding` for gate generation checks.
 `status()` defaults to Bitwarden, and `status({ provider })` checks the named provider.
 Run `bun run harness` to install the pinned test harness and `bun run test` to run the
 fake-CLI tests.
