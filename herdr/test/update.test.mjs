@@ -110,7 +110,7 @@ test("pickUpdate offers only a newer pack than the installed one", () => {
   assert.equal(up.version, "0.2.0");
   assert.equal(up.tarball.name, "automagik-herdr-pack-0.2.0.tgz");
   assert.match(up.sha256, /^[0-9a-f]{64}$/);
-  assert.equal(up.page, "https://github.com/automagik-dev/automagik/releases/tag/v0.2.0");
+  assert.equal(up.page, "https://github.com/automagik-si/automagik/releases/tag/v0.2.0");
   assert.equal(pickUpdate("0.2.0", packOf("0.2.0")), null, "same version");
   assert.equal(pickUpdate("0.3.0", packOf("0.2.0")), null, "older");
   assert.equal(pickUpdate("0.1.0", null), null, "no pointer");
@@ -148,7 +148,7 @@ test("packOfPointer refuses a pointer whose signed publisher, repository or tag 
 });
 
 test("fetchPointer: a good signature names the pack; a bad one, an untrusted key or no signature is refused", async () => {
-  assert.equal(POINTER_URL, "https://github.com/automagik-dev/automagik/releases/download/herdr-lane/pack.json");
+  assert.equal(POINTER_URL, "https://github.com/automagik-si/automagik/releases/download/herdr-lane/pack.json");
   assert.equal(POINTER_SIG_URL, `${POINTER_URL}.sig`);
   const calls = [];
   const got = await fetchPointer({ fetch: fakeFetch(served("3.57.1"), calls), env: {}, keys });

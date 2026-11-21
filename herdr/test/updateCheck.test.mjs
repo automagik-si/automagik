@@ -13,7 +13,7 @@ import { POINTER_SIG_URL, POINTER_URL } from "../mods/am-sidebar/release.js";
 import { keys, pointerBytes, signatureOf } from "./pointer.mjs";
 import { cmdUpdate, CliError } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
 
-const UP = { version: "0.2.0", tag: "v0.2.0", page: "https://github.com/automagik-dev/automagik/releases/tag/v0.2.0" };
+const UP = { version: "0.2.0", tag: "v0.2.0", page: "https://github.com/automagik-si/automagik/releases/tag/v0.2.0" };
 const line = (o) => `${JSON.stringify(o)}\n`;
 /** Herdr's exec over a table node path → result, "missing" (rejects: can't start) or a function. */
 const fakeExec = (table, calls = []) => async (command, args) => {
@@ -144,7 +144,7 @@ test("am update --check reports current and latest", async (t) => {
   assert.equal(await cmdUpdate({ check: true }, [], { ...io, fetch: fetchOf(served("0.1.0")) }),
     "Automagik Herdr 0.1.0 is installed; the latest release is 0.1.0. Up to date.");
   assert.match(await cmdUpdate({ check: true }, [], { ...io, fetch: fetchOf(served("0.2.0")) }),
-    /^Automagik Herdr 0\.1\.0 is installed; 0\.2\.0 is out \(https:\/\/github\.com\/automagik-dev\/automagik\/releases\/tag\/v0\.2\.0\)\. Run `am update` to install it\.$/);
+    /^Automagik Herdr 0\.1\.0 is installed; 0\.2\.0 is out \(https:\/\/github\.com\/automagik-si\/automagik\/releases\/tag\/v0\.2\.0\)\. Run `am update` to install it\.$/);
   const json = await cmdUpdate({ check: true, json: true }, [], { ...io, fetch: fetchOf(served("0.2.0")) });
   assert.deepEqual([json.current, json.latest, json.update.version], ["0.1.0", "0.2.0", "0.2.0"]);
   await assert.rejects(cmdUpdate({ check: true }, [], { ...io, fetch: fetchOf(served("0.2.0", { untrusted: true })) }),

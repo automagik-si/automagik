@@ -20,7 +20,7 @@
 //                     point resolves into am's parts store, and the pack leaves such a link alone.
 //                     It replaces the pack's plain copy; anyone else's link is left alone.
 //
-// am-lane is read from https://github.com/automagik-dev/automagik/releases/download/am-lane/. For
+// am-lane is read from https://github.com/automagik-si/automagik/releases/download/am-lane/. For
 // tests only: AM_RELEASE_URL, a file:// folder (files at <url>/download/<tag>/<file>), and with a
 // file:// one only, AM_TRUSTED_KEYS (am-keys.json's shape, a test's own keys): never honoured for
 // a GitHub URL. Apache-2.0.
@@ -38,7 +38,7 @@ import { fileURLToPath } from "node:url";
 import { removePath } from "../layoutSafe.mjs";
 import { classify, installState, liveInstallLock, packEntries as packEntriesAt, PENDING, recordAt, sameRealPath, storeProblem } from "../amInstallState.js";
 import { hookDoctorLine } from "../briefingText.mjs";
-import { LANE_RELEASE, PART, POINTER, RELEASES, REPOSITORY, SIGNATURE, VERSION, sequenceOf, verifyPointer } from "./lane.mjs";
+import { LANE_RELEASE, PART, POINTER, RELEASES, REPO, SIGNATURE, VERSION, sequenceOf, verifyPointer } from "./lane.mjs";
 
 /** This am's own folder (the extract it runs from). */
 export const OWN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -66,7 +66,7 @@ export function sourceOf(env = process.env, keys = ownKeys()) {
   const url = env.AM_RELEASE_URL;
   if (!url) return { releases: RELEASES, keys, file: false };
   const file = url.startsWith("file://");
-  if (!file && !url.startsWith(`${REPOSITORY}/`)) throw new Error(`AM_RELEASE_URL must be a file:// folder or ${REPOSITORY}/…; not ${url}`);
+  if (!file && !url.startsWith(`https://github.com/${REPO}/`)) throw new Error(`AM_RELEASE_URL must be a file:// folder or https://github.com/${REPO}/…; not ${url}`);
   // A test's own keys: honoured for a file:// folder only, never for a GitHub URL.
   const override = file && env.AM_TRUSTED_KEYS ? JSON.parse(env.AM_TRUSTED_KEYS).keys : null;
   return { releases: url.replace(/\/+$/, ""), keys: override ?? keys, file };

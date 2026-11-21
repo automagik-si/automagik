@@ -51,7 +51,7 @@ async function panel() {
 
 test("the repair command: our pinned release for this Mac's arch, hash-checked, into ~/.local/bin", () => {
   const arm = repairCommand("arm64");
-  assert.match(arm, /\/automagik-dev\/automagik\/releases\/download\/herdr-automations-v0\.12\.1-am\.2\/herdr-automations_darwin_arm64 /);
+  assert.match(arm, /\/automagik-si\/automagik\/releases\/download\/herdr-automations-v0\.12\.1-am\.2\/herdr-automations_darwin_arm64 /);
   assert.ok(arm.includes(`echo "${SCHEDULER.sha256.arm64}  herdr-automations" | shasum -a 256 -c`));
   assert.match(arm, /shasum -a 256 -c && chmod 755 herdr-automations && mv herdr-automations ~\/\.local\/bin\/; s=\$\?; /, "moved in only once the hash matches");
   // Its scratch folder goes whether it worked or not, and the subshell keeps the install's status.
@@ -98,7 +98,7 @@ test("the repair command never removes a folder it did not make: a preset d surv
 // The release the Integrator cuts carries the checksums; until they are pasted in, this fails loudly
 // so nothing merges with the repair command pointing at placeholder hashes.
 test("the scheduler pin is a real release hash, never the PENDING-SHA256 placeholder", () => {
-  assert.equal(SCHEDULER.repo, "automagik-dev/automagik");
+  assert.equal(SCHEDULER.repo, "automagik-si/automagik");
   assert.equal(SCHEDULER.version, "0.12.1-am.2");
   for (const arch of ["arm64", "amd64"]) {
     assert.notEqual(SCHEDULER.sha256[arch], "PENDING-SHA256", `${arch}: paste the release's checksums.txt sha256`);

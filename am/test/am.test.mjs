@@ -12,7 +12,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RELEASES, sequenceOf } from "../lib/lane.mjs";
+import { REPOSITORY, sequenceOf } from "../lib/lane.mjs";
 import { lockStore } from "../lib/self.mjs";
 import { signedRelease } from "./signed-release.mjs";
 
@@ -61,7 +61,7 @@ function post(s, version, { tgz = join(s.releases, "download", `v${version}`, `a
   const pointer = Buffer.from(JSON.stringify({
     schemaVersion: 1, publisher: "automagik", part: "automagik.am", keyId: "am-test", sequence: sequenceOf(version),
     issuedAt: "2026-11-03T00:00:00Z", repository: "https://github.com/automagik-dev/automagik", version, tag: `v${version}`, commit: "c".repeat(40),
-    tarball: { name: `automagik-am-${version}.tgz`, url: `${RELEASES}/download/v${version}/automagik-am-${version}.tgz`,
+    tarball: { name: `automagik-am-${version}.tgz`, url: `${REPOSITORY}/releases/download/v${version}/automagik-am-${version}.tgz`,
       sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength },
   }, null, 2));
   const lane = join(s.releases, "download", "am-lane");

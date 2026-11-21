@@ -32,7 +32,7 @@ export function signedRelease(root) {
     const body = readFileSync(archive), name = basename(archive);
     const pointer = { schemaVersion: 1, publisher: "automagik", part: "automagik.am", keyId, sequence: sequenceOf(version),
       repository: REPOSITORY, version, tag: `v${version}`, commit: "a".repeat(40),
-      tarball: { name, url: `${RELEASES}/download/v${version}/${name}`, sha256: createHash("sha256").update(body).digest("hex"), size: body.length } };
+      tarball: { name, url: `${REPOSITORY}/releases/download/v${version}/${name}`, sha256: createHash("sha256").update(body).digest("hex"), size: body.length } };
     edit?.(pointer);
     const bytes = Buffer.from(JSON.stringify(pointer));
     const signature = sig ?? sign(null, bytes, privateKey).toString("base64");

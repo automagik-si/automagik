@@ -167,7 +167,7 @@ describe('the am lane', () => {
       expect(ownHalfPost(mine.bytes, posted, null)).toBe(false);
     }
     // The repository defaults to am's own.
-    expect(postedProblem(mine.bytes, null, mine.sig, keys)).toContain('--repo automagik-dev/automagik --yes');
+    expect(postedProblem(mine.bytes, null, mine.sig, keys)).toContain('--repo automagik-si/automagik --yes');
   });
 
   test('posted: am.json alone that names this same am is this release\'s own half-written post, and is finished', () => {

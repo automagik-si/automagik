@@ -12,7 +12,7 @@
 // its exact bytes, base64), checked against the keys this pack carries (pack-keys.json). The
 // signature is checked in update.mjs and install.sh (node:crypto); this file only reads the pointer.
 
-export const REPO = "automagik-dev/automagik";
+export const REPO = "automagik-si/automagik";
 /** The rolling release that names the newest pack, and its two files. */
 export const LANE_RELEASE = "herdr-lane";
 export const POINTER_URL = `https://github.com/${REPO}/releases/download/${LANE_RELEASE}/pack.json`;
@@ -61,7 +61,7 @@ export const OFF_BY_DEFAULT = Object.freeze(["am-automations", "am-quota"]);
  * with its sha256 (meterLane.mjs checks it against meter-keys.json; RFC 0017 delivery 6). No version
  * or hash is pinned here any more.
  */
-export const USAGEMETER = Object.freeze({ repo: "automagik-dev/automagik", lane: "meter-lane" });
+export const USAGEMETER = Object.freeze({ repo: "automagik-si/automagik", lane: "meter-lane" });
 /** The one layout the pack ships, beside the mod folders in the tarball. */
 export const PACK_LAYOUT = "layouts/automagik.json";
 

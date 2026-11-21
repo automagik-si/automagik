@@ -20,9 +20,14 @@ import { fileURLToPath } from "node:url";
 import { USAGEMETER } from "./release.js";
 
 export const METER_KEYS_FILE = "meter-keys.json";
-export const METER_REPOSITORY = `https://github.com/${USAGEMETER.repo}`;
+/**
+ * The repository the signed pointer names, and its assets' URLs: still the pre-transfer name, which
+ * scripts/meter-lane.ts writes and every installed pack and am compare exactly. Only where the
+ * pointer and the builds are downloaded from (USAGEMETER.repo) moved to the new name.
+ */
+export const METER_REPOSITORY = "https://github.com/automagik-dev/automagik";
 /** A release's download folder is `${METER_DOWNLOADS}/<tag>`. */
-export const METER_DOWNLOADS = `${METER_REPOSITORY}/releases/download`;
+export const METER_DOWNLOADS = `https://github.com/${USAGEMETER.repo}/releases/download`;
 export const METER_POINTER_URL = `${METER_DOWNLOADS}/${USAGEMETER.lane}/meter.json`;
 /** Target (`<os>-<arch>`) to asset name: the four every meter release carries (meter/usagemeter/part.json `artifact`). */
 export const METER_TARGETS = Object.freeze({
@@ -74,7 +79,7 @@ export function verifyMeterPointer(bytes, signature, keys) {
   for (const [target, name] of Object.entries(METER_TARGETS)) {
     const a = assets[target] && typeof assets[target] === "object" ? assets[target] : {};
     if (a.name !== name) refuse(`names ${a.name} for ${target}, not ${name}`);
-    if (a.url !== `${METER_DOWNLOADS}/${p.tag}/${name}`) refuse(`has ${name} at ${a.url}, off the tag ${p.tag}`);
+    if (a.url !== `${METER_REPOSITORY}/releases/download/${p.tag}/${name}`) refuse(`has ${name} at ${a.url}, off the tag ${p.tag}`);
     if (typeof a.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(a.sha256)) refuse(`names no sha256 for ${name}`);
     if (!Number.isSafeInteger(a.size) || a.size <= 0) refuse(`names no size for ${name}`);
     checked[target] = Object.freeze({ name, sha256: a.sha256, size: a.size });
