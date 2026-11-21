@@ -229,7 +229,7 @@ TMP. Node or Windows may add HOMEDRIVE, HOMEPATH, LOGONSERVER, SYSTEMDRIVE, USER
 USERNAME, USERPROFILE or NODE_V8_COVERAGE. PowerShell initializes PSModulePath and
 PATHEXT before compilation and the script clears both before passing control to the reader.
 Compiler scratch is private to the invocation under the plugin's profile data folder.
-The probe has a 30-second deadline and reads have 15 seconds. Cancellation and deadlines
+The probe and each read have a 30-second deadline. Cancellation and deadlines
 trigger separately bounded process-tree cleanup when the child is still running.
 Quit reports unconfirmed cleanups. The invocation’s scratch folder can remain in that case.
 

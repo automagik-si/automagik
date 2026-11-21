@@ -262,7 +262,7 @@ test('native Windows Credential Manager round trip, validation and transcript pr
     const row = picker.items?.[0]
     assert.equal(picker.ok && picker.items.length === 1 && row.id === variant && row.target === variant
       && row.userName === userName && row.fields.length === 1 && row.fields[0] === 'password'
-      && Object.keys(row).length === 4, true, 'metadata only and request spelling')
+      && Object.keys(row).length === 4, true, 'metadata only and request spelling: ' + (picker.ok ? 'row differs' : picker.code))
     assert.equal((await adapter.read(ref(variant))).value === value, true, 'adapter reads the writer’s UTF-16LE bytes')
 
     const missing = target + '-missing'

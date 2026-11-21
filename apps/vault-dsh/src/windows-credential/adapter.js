@@ -5,7 +5,8 @@ import { createRunner } from './run.js'
 const fail = code => ({ ok: false, code })
 
 export function createWindowsCredential({ idleLockMinutes = 5 } = {}, {
-  timers = globalThis, timeouts = { probe: 30_000, meta: 15_000, read: 15_000 },
+  // Every operation compiles the reader first, so each gets the probe's deadline.
+  timers = globalThis, timeouts = { probe: 30_000, meta: 30_000, read: 30_000 },
   runner = createRunner({ timers }), run = runner.run,
 } = {}) {
   const state = createLifecycle({ idleLockMinutes, timers, timeouts, run: ([op, target], limits) => run(op, target, limits) })
