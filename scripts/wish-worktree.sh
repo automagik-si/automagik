@@ -121,10 +121,16 @@ ensure_shared() {
   elif ! git clone --quiet --no-hardlinks --no-checkout -- "$repo" "$SHARED"; then
     die "cannot initialise the shared clone: $SHARED"
   fi
-  if "$SHARED_CLONE" && ! git -C "$SHARED" config --local gc.pruneExpire never; then
-    die "cannot set object retention for the shared clone: $SHARED"
+  if "$SHARED_CLONE"; then
+    if ! git -C "$SHARED" config --local gc.pruneExpire never; then
+      die "cannot set object retention for the shared clone: $SHARED"
+    fi
+    # A borrowing clone negotiates all the source's branches, tags and HEAD, including
+    # orphan tags and a detached HEAD. Name them in the store so Git can advertise them.
+    set -- --no-tags '+refs/heads/*:refs/remotes/origin/*' \
+      '+refs/tags/*:refs/remotes/wish-cache/tags/*' '+HEAD*:refs/remotes/wish-cache/source-head*'
   fi
-  if ! git -C "$SHARED" fetch --quiet --prune origin; then
+  if ! git -C "$SHARED" fetch --quiet --prune origin "$@"; then
     die "cannot fetch the shared clone: $SHARED"
   fi
 }

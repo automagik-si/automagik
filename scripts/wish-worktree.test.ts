@@ -278,3 +278,34 @@ test('refresh and normal Git GC preserve objects borrowed from a deleted source 
   git(shared, 'gc', '--quiet');
   expect(git(first, 'show', '-s', '--format=%s', tip)).toBe('only borrowed by the first wish');
 });
+
+test('refresh hydrates orphan tags and detached source HEAD before another clone borrows', () => {
+  const { dir, remote } = remoteFixture();
+  const project = join(dir, 'project');
+  git(dir, 'clone', '-q', remote, project);
+  const shared = join(dir, 'shared');
+  const create = (copy: string, branch: string) => run(['--shared', shared, '--shared-clone', 'create',
+    project, copy, branch]);
+  expect(create(join(dir, 'one'), 'wish/one').code).toBe(0);
+
+  git(project, 'checkout', '-q', '--orphan', 'archive');
+  writeFileSync(join(project, 'tag-only.txt'), 'reachable only through the annotated tag\n');
+  git(project, 'add', 'tag-only.txt');
+  git(project, 'commit', '-qm', 'archive');
+  git(project, 'tag', '-am', 'archived', 'archive-v1');
+  const tag = git(project, 'rev-parse', 'archive-v1');
+  git(project, 'checkout', '-q', '--detach', 'dev');
+  git(project, 'branch', '-D', 'archive');
+  git(project, 'commit', '--allow-empty', '-qm', 'only at detached HEAD');
+  const detached = git(project, 'rev-parse', 'HEAD');
+
+  for (const name of ['two', 'three']) {
+    const copy = join(dir, name);
+    expect(create(copy, 'wish/' + name).code).toBe(0);
+    expect(git(copy, 'rev-parse', 'archive-v1')).toBe(tag);
+    expect(git(copy, 'cat-file', '-t', detached)).toBe('commit');
+    const objects = git(copy, 'count-objects', '-v');
+    expect(objects).toContain('count: 0\n');
+    expect(objects).toContain('in-pack: 0\n');
+  }
+});
