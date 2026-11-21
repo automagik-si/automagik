@@ -85,7 +85,7 @@ function renderDialog(t, answer, { hasModels = false } = {}) {
   }
   const find = text => [...document.querySelectorAll('.bt-settings-page .bt-set-hint')].find(node => node.textContent === text)
   const until = async check => {
-    const deadline = Date.now() + 5000
+    const deadline = Date.now() + 10_000
     while (!check()) {
       assert.ok(Date.now() < deadline, document.querySelector('.bt-settings-page')?.textContent)
       await new Promise(resolve => setTimeout(resolve, 10))
@@ -200,4 +200,124 @@ test('every switch result triggers a re-read, and a read-only admission error ig
     assert.deepEqual(page.calls.map(call => call.endpoint), [READ, USE, READ])
     assert.doesNotMatch(page.document.body.textContent, /private-path-canary/)
   })
+})
+
+// ---- Add and Remove login (RFC 0030 delivery 5b; Decisions (2026-11-21), 1) ----
+
+const ADD = 'accounts-claude-add'
+const REMOVE = 'accounts-claude-remove'
+const editToken = 'e'.repeat(32)
+const editRows = [
+  { id: 'default', label: 'default', state: 'eligible', email: 'a@example.test', selected: true, effective: true, use: false },
+  { id: '2', label: 'slot', state: 'eligible', email: 'b@example.test', use: false, remove: true },
+  { id: '3', label: 'slot', state: 'not-signed-in', email: null, use: false, remove: true },
+]
+const add = { id: '4', folder: '~/.claude-4', signIn: 'CLAUDE_CONFIG_DIR="$HOME/.claude-4" claude auth login' }
+const editView = (extra = {}) => ok({ rows: editRows, add, editToken, ...extra })
+
+test('Add shows the next slot, its folder and the sign-in command, then adds it and reads again', async t => {
+  const added = Promise.withResolvers()
+  const page = renderDialog(t, (endpoint, index) => {
+    if (endpoint === ADD) return added.promise
+    return index === 1 ? editView() : ok({ rows: [...editRows, { id: '4', label: 'slot', state: 'eligible', email: 'd@example.test', use: false, remove: true }], editToken })
+  })
+  page.click('Accounts')
+  await page.until(() => page.button('Add Login 4'))
+  const row = page.button('Add Login 4').closest('.bt-set-row')
+  assert.ok(row.textContent.includes('Make the folder ~/.claude-4 (link settings.json and CLAUDE.md from ~/.claude into it to share them), sign in there from a terminal with this command, then press Add.'))
+  assert.equal(row.querySelector('code').textContent, add.signIn)
+  assert.deepEqual(page.actions().map(node => node.getAttribute('aria-label') ?? node.textContent),
+    ['Remove Login 2', 'Remove Login 3', 'Add Login 4', 'Read again'])
+  page.click('Add Login 4')
+  assert.equal(page.actions().every(node => node.disabled), true)
+  assert.deepEqual(page.calls[1], { endpoint: ADD, payload: { id: '4', token: editToken } })
+  added.resolve(ok({ added: true }))
+  await page.until(() => page.find('Login 4 added. Use it to start new Claude launches there.'))
+  await page.until(() => page.button('Remove Login 4'))
+  assert.deepEqual(page.calls.map(call => call.endpoint), [READ, ADD, READ])
+})
+
+test('Remove asks once more, Keep or a lapse of five seconds drops the question, and Remove sends the edit', async t => {
+  const page = renderDialog(t, (endpoint, index) => endpoint === REMOVE ? ok({ removed: true }) : index === 1 ? editView() : editView({ rows: editRows.slice(0, 2) }))
+  page.click('Accounts')
+  await page.until(() => page.button('Remove Login 3'))
+  page.click('Remove Login 3')
+  const question = 'Remove Login 3 from this list? Its folder stays.'
+  assert.ok(page.find(question))
+  page.click('Keep')
+  assert.equal(page.find(question), undefined)
+  assert.equal(page.calls.length, 1)
+  page.click('Remove Login 3')
+  await page.until(() => !page.find(question))
+  assert.equal(page.calls.length, 1)
+  page.click('Remove Login 3')
+  page.click('Remove Login 3 now')
+  await page.until(() => page.find('Login 3 removed. Its folder stays; delete it by hand if you want.'))
+  assert.deepEqual(page.calls[1], { endpoint: REMOVE, payload: { id: '3', token: editToken } })
+  await page.until(() => !page.button('Remove Login 3'))
+  assert.deepEqual(page.calls.map(call => call.endpoint), [READ, REMOVE, READ])
+})
+
+test('every edit refusal shows a fixed text, the signed-in one with its logout command, and reads again', async t => {
+  for (const [answer, line] of [
+    [{ reason: 'no-folder' }, 'That folder does not exist yet. Make it first, then sign in there.'],
+    [{ reason: 'not-signed-in' }, 'Claude Code is not signed in there yet. Sign in with the command, then press Add.'],
+    [{ reason: 'moved' }, 'Claude Code settings move this login to another folder, so this page will not change it.'],
+    [{ reason: 'probe-failed' }, 'Could not tell whether Claude Code is signed in there. Try again.'],
+    [{ reason: 'no-claude' }, 'Claude Code is not found where launches look for it.'],
+    [{ reason: 'bad-folder' }, 'That folder cannot be used: it must be a folder of its own, not a link. Make it again, then sign in there.'],
+    [{ reason: 'in-use' }, 'New launches use this login. Switch to another login first.'],
+    [{ reason: 'running' }, 'A terminal still runs on this login. Restart or stop it first.'],
+    [{ reason: 'running-unknown' }, 'A terminal runs on a login folder this page cannot match. Restart or stop it first.'],
+    [{ reason: 'panes-unknown' }, 'Could not check the running terminals, so nothing was removed.'],
+    [{ reason: 'unknown' }, 'Could not confirm the change. Read again before trying again.'],
+    [{ reason: 'failed' }, 'Could not change the Claude Code logins.'],
+    [{ reason: 'private-text' }, 'Could not change the Claude Code logins.'],
+    [{ reason: 'conflict' }, 'The logins changed since this page read them. Read again.'],
+    [{ reason: 'changed' }, 'This login choice has changed or expired. Read again.'],
+    [{ reason: 'signed-in', signOut: `CLAUDE_CONFIG_DIR="$HOME"/'.claude-3' claude auth logout`, key: 'k3' }, 'Login 3 is still signed in. Sign it out in a terminal with this command, then remove it again.'],
+  ]) await t.test(answer.reason, async sub => {
+    // The read after a signed-in refusal names the same login, still signed in.
+    const signedIn = editRows.map(row => row.id === '3' ? { ...row, state: 'eligible', email: 'c@example.test', key: 'k3' } : row)
+    const page = renderDialog(sub, (endpoint, index) => endpoint === REMOVE ? ok(answer) : index === 1 ? editView() : editView({ rows: signedIn }))
+    page.click('Accounts')
+    await page.until(() => page.button('Remove Login 3'))
+    page.click('Remove Login 3')
+    page.click('Remove Login 3 now')
+    await page.until(() => page.find(line) && page.calls.length === 3)
+    const code = [...page.document.querySelectorAll('.bt-settings-page code')].map(node => node.textContent)
+    assert.equal(code.includes(answer.signOut), answer.reason === 'signed-in')
+    assert.doesNotMatch(page.document.body.textContent, /private-text/)
+  })
+})
+
+test('Read again reads once; a read without an edit offer hides Add and Remove and keeps Read again for a retry', async t => {
+  const page = renderDialog(t, (_endpoint, index) => index === 1 ? editView() : index === 2 ? ok({ rows: editRows, add }) : ok({ reason: 'cli-error' }))
+  page.click('Accounts')
+  await page.until(() => page.button('Read again'))
+  page.click('Read again')
+  await page.until(() => page.calls.length === 2 && !page.button('Add Login 4') && !page.button('Read again').disabled)
+  assert.deepEqual(page.actions().map(node => node.textContent), ['Read again'])
+  page.click('Read again')
+  await page.until(() => page.find('am could not do this.') && !page.button('Read again').disabled)
+  assert.deepEqual(page.calls.map(call => call.endpoint), [READ, READ, READ])
+})
+
+test('am alone with no Herdr home says why no login can be added', async t => {
+  const page = renderDialog(t, () => ok({ rows: editRows.map(row => ({ ...row, remove: false })), editWhy: 'no-home' }))
+  page.click('Accounts')
+  await page.until(() => page.find('The Herdr home folder does not exist yet, so no login can be added here.'))
+  assert.deepEqual(page.actions(), [])
+})
+
+test('the logout command shows only while the read after the refusal still names that same login', async t => {
+  const signOut = `CLAUDE_CONFIG_DIR="$HOME"/'.claude-3' claude auth logout`
+  const page = renderDialog(t, (endpoint, index) => endpoint === REMOVE ? ok({ reason: 'signed-in', signOut, key: 'k3' })
+    : index === 1 ? editView() : editView({ rows: editRows.map(row => row.id === '3' ? { ...row, state: 'eligible', key: 'k9' } : row) }))
+  page.click('Accounts')
+  await page.until(() => page.button('Remove Login 3'))
+  page.click('Remove Login 3')
+  page.click('Remove Login 3 now')
+  await page.until(() => page.calls.length === 3 && page.find('This login choice has changed or expired. Read again.'))
+  assert.equal([...page.document.querySelectorAll('.bt-settings-page code')].some(node => node.textContent === signOut), false)
 })
