@@ -423,11 +423,39 @@ test('native compiler evidence accepts empty compiler logs but not content it co
   assert.equal(evidence.incomplete, false, 'an empty log the compiler deletes is no gap')
   evidence.inspect('late.tmp', 'change')
   assert.equal(evidence.incomplete, true, 'a change whose file is already gone is a gap')
-  assert.equal(evidence.gaps, '.tmp')
+  assert.equal(evidence.gaps, '.tmp:change:ENOENT:never read')
   files.set('late.tmp', Buffer.from('compiler source'))
   evidence.inspect('late.tmp', 'change')
   assert.equal(evidence.incomplete, false)
   assert.equal(evidence.inspected, 2)
+})
+
+test('native compiler evidence tells a pending deletion from a lock or an unread file', () => {
+  const errors = new Map()
+  const files = new Map([['done.tmp', Buffer.from('compiler source')], ['locked.tmp', Buffer.from('compiler source')]])
+  const evidence = compilerScratchEvidence(() => {}, {
+    stat: () => ({ isFile: () => true }),
+    read(path) {
+      if (errors.has(path)) throw Object.assign(new Error('fixture refusal'), { code: errors.get(path) })
+      if (files.has(path)) return files.get(path)
+      throw Object.assign(new Error('fixture removed'), { code: 'ENOENT' })
+    },
+  })
+  for (const path of files.keys()) evidence.inspect(path, 'rename')
+  errors.set('done.tmp', 'EPERM')
+  evidence.inspect('done.tmp', 'change')
+  errors.set('locked.tmp', 'EBUSY')
+  evidence.inspect('locked.tmp', 'change')
+  errors.set('never', 'EPERM')
+  evidence.inspect('never', 'rename')
+  for (const path of ['done.tmp', 'locked.tmp', 'never']) {
+    errors.delete(path)
+    files.delete(path)
+    evidence.inspect(path, 'rename')
+  }
+  assert.equal(evidence.incomplete, true)
+  assert.equal(evidence.gaps, '(none):rename:EPERM:never read .tmp:change:EBUSY:read',
+    'only a read file whose deletion was pending is complete')
 })
 
 test('deadline invalidates its captured gate while quit independently bounds cleanup', async t => {

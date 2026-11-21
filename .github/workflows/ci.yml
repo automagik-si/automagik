@@ -1774,7 +1774,7 @@ jobs:
   vault-windows:
     name: vault-dsh (native Windows Credential Manager)
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
     env:

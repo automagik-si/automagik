@@ -27,7 +27,8 @@ export async function checkTranscripts(dir, executions, needles) {
 export function compilerScratchEvidence(scan, { stat = statSync, read = readFileSync } = {}) {
   const seen = new Set()
   const nonempty = new Set()
-  const unread = new Set()
+  // path -> what stopped the last read: { event, code }
+  const unread = new Map()
   let unexpected = false
   return {
     inspect(path, event) {
@@ -45,15 +46,25 @@ export function compilerScratchEvidence(scan, { stat = statSync, read = readFile
         unread.delete(path)
       } catch (error) {
         // A rename also reports deletion. A previously inspected file can disappear.
-        if (event === 'rename' && error?.code === 'ENOENT' && seen.has(path)) return
-        unread.add(path)
+        if (event === 'rename' && error?.code === 'ENOENT' && seen.has(path)) {
+          // Windows refuses to open a file once its deletion is pending (EPERM, in this private
+          // folder no access rule refuses it). After a complete read, a refusal ended by the
+          // file's removal is that deletion, not unread content. EBUSY (a lock) stays a gap.
+          if (unread.get(path)?.code === 'EPERM') unread.delete(path)
+          return
+        }
+        // Keep the refusal that hid the content; a later removal adds nothing.
+        if (!unread.has(path) || error?.code !== 'ENOENT') unread.set(path, { event, code: error?.code })
         if (!['ENOENT', 'EBUSY', 'EPERM', 'EACCES'].includes(error?.code)) unexpected = true
       }
     },
     get inspected() { return nonempty.size },
     get incomplete() { return unread.size !== 0 },
     // File extensions only: the names are the compiler's random temp names, never values.
-    get gaps() { return [...unread].map(path => extname(path) || '(none)').sort().join(' ') },
+    get gaps() {
+      return [...unread].map(([path, { event, code }]) =>
+        `${extname(path) || '(none)'}:${event ?? 'scan'}:${code}:${seen.has(path) ? 'read' : 'never read'}`).sort().join(' ')
+    },
     get unexpected() { return unexpected },
   }
 }
