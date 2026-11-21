@@ -317,6 +317,9 @@ export function BackfillCard({ roster, proposalId, runId, start, cancel }) {
   return h(Fragment, null, waitingNode, pickers, runsNode, settledNode)
 }
 
+// Plugins can check whether this kit honors proposalId and runId.
+BackfillCard.binds = true
+
 // The kit's own surface: the same card, hairline and muted text as the team's question
 // cards (.bt-q in styles.js), a dot and a word for every state, and the four parts of a
 // person card a step down from its title. Colors and corners are the brand's variables.

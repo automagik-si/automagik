@@ -93,6 +93,7 @@ test('one approval posts start_backfill once, and a stop posts one job id', asyn
     },
   }).omni
   assert.equal(typeof omni.genui.BackfillCard, 'function')
+  assert.equal(omni.genui.BackfillCard.binds, true)
   assert.equal(omni.genui.START_BACKFILL, 'start_backfill')
   assert.equal(omni.genui.CANCEL_BACKFILL, 'cancel_backfill')
   const started = await omni.genui.startBackfill({ proposalId: 'p1', chats: ['c1', 'c1', 'c2'], from: '2026-03-01', to: '2026-11-15' })

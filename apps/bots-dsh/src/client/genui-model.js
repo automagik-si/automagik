@@ -53,7 +53,7 @@ export function shortDate(value) {
 
 const genuiMonth = (date, withYear) => new Intl.DateTimeFormat(dateLocale(), { month: 'short', ...(withYear ? { year: 'numeric' } : {}) }).format(date)
 
-/** The months a coverage spans, "Mar–Nov", or the years too when they differ. */
+/** The months a coverage spans, such as "Aug 2026", "Mar–Nov" or "Mar 2025 – Nov 2026". */
 export function spanOf(value) {
   const coverage = coverageOf(value)
   if (coverage === undefined) return ''
@@ -62,7 +62,10 @@ export function spanOf(value) {
   if (oldest === undefined && newest === undefined) return ''
   if (oldest === undefined) return shortDate(coverage.newest)
   if (newest === undefined) return shortDate(coverage.oldest)
-  if (oldest.getFullYear() === newest.getFullYear()) return `${genuiMonth(oldest, false)}–${genuiMonth(newest, false)}`
+  if (oldest.getFullYear() === newest.getFullYear()) {
+    if (oldest.getMonth() === newest.getMonth()) return genuiMonth(oldest, true)
+    return `${genuiMonth(oldest, false)}–${genuiMonth(newest, false)}`
+  }
   return `${genuiMonth(oldest, true)} – ${genuiMonth(newest, true)}`
 }
 

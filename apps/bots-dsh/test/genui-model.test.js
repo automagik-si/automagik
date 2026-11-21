@@ -90,6 +90,8 @@ test('a coverage line and its months, also across a year', () => {
   assert.equal(coverageLine({ count: 12 }), '12 messages')
   assert.equal(coverageLine(null), '')
   assert.equal(coverageLine({ none: true }), '')
+  assert.equal(spanOf({ oldest: '2026-08-02T12:00:00Z', newest: '2026-08-20T12:00:00Z' }), 'Aug 2026')
+  assert.equal(spanOf({ oldest: '2025-08-02T12:00:00Z', newest: '2026-08-20T12:00:00Z' }), 'Aug 2025 – Aug 2026')
   assert.equal(spanOf({ oldest: '2025-03-02T12:00:00Z', newest: '2026-11-20T12:00:00Z' }), 'Mar 2025 – Nov 2026')
   assert.equal(spanOf({ oldest: '2026-03-02T12:00:00Z' }), 'Mar 2, 2026')
   assert.equal(spanOf({}), '')

@@ -43025,7 +43025,10 @@ function spanOf2(value) {
   if (oldest === void 0 && newest === void 0) return "";
   if (oldest === void 0) return shortDate(coverage.newest);
   if (newest === void 0) return shortDate(coverage.oldest);
-  if (oldest.getFullYear() === newest.getFullYear()) return `${genuiMonth(oldest, false)}–${genuiMonth(newest, false)}`;
+  if (oldest.getFullYear() === newest.getFullYear()) {
+    if (oldest.getMonth() === newest.getMonth()) return genuiMonth(oldest, true);
+    return `${genuiMonth(oldest, false)}–${genuiMonth(newest, false)}`;
+  }
   return `${genuiMonth(oldest, true)} – ${genuiMonth(newest, true)}`;
 }
 function coverageOf(value) {
@@ -43752,6 +43755,7 @@ function BackfillCard({ roster, proposalId, runId, start: start2, cancel }) {
   ) : null;
   return (0, import_react104.createElement)(import_react104.Fragment, null, waitingNode, pickers, runsNode, settledNode);
 }
+BackfillCard.binds = true;
 var GENUI_CSS = `
 .bt-genui-row{display:flex;align-items:flex-start;gap:10px;min-width:0;padding:8px;border-radius:10px;font:inherit}
 .bt-genui-row+.bt-genui-row{box-shadow:inset 0 1px 0 var(--bt-q-rule-2,var(--bt-line-weak))}
