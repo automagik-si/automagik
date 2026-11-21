@@ -165,7 +165,7 @@ describe('the changes job', () => {
       { 'meter/statusline/statusline.mjs': 'export {};\n' },
     ]);
     try {
-      // The areas grep the checked-out HEAD, as the job does; the link rule reads HEAD_SHA.
+      // Every rule reads the pull request's head (HEAD_SHA); the job also checks it out.
       git(dir, 'checkout', '-q', '--detach', commits[1]);
       const botsOnly = decide({ base: commits[0], head: commits[1], cwd: dir });
       for (const area of AREAS) expect(botsOnly.outputs[area]).toBe('false');
@@ -200,6 +200,45 @@ describe('the changes job', () => {
     for (const id of ['check', 'test', 'mutations']) {
       expect(steps.some((step: any) => step.id === id)).toBe(true);
       expect(assert.env.OUTCOMES).toContain(`${id}=\${{ steps.${id}.outcome }}`);
+    }
+  });
+
+  test('reads only the pull request, not base commits newer than its base.sha', () => {
+    // GitHub checks out a merge with today's base, while the event's base.sha can be the
+    // older base the pull request was opened on: a release bump on the base since then must
+    // not mark herdr, am, Pocket or usagemeter as changed on a docs-only pull request.
+    const { dir, commits: [base] } = scratchRepo([{ 'README.md': 'first\n' }]);
+    try {
+      git(dir, 'checkout', '-q', '-b', 'pr');
+      mkdirSync(join(dir, 'docs'), { recursive: true });
+      writeFileSync(join(dir, 'docs', 'note.md'), 'docs only\n');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-q', '-m', 'docs only');
+      const docsHead = git(dir, 'rev-parse', 'HEAD');
+      git(dir, 'checkout', '-q', '--detach', base);
+      for (const path of ['package.json', 'herdr/package.json', 'am/VERSION', 'meter/usagemeter/Cargo.toml']) {
+        mkdirSync(dirname(join(dir, path)), { recursive: true });
+        writeFileSync(join(dir, path), '3.165.0\n');
+      }
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-q', '-m', 'release bump on the base');
+      git(dir, 'merge', '-q', '--no-ff', '-m', 'merge', docsHead);
+      const docsOnly = decide({ base, head: docsHead, cwd: dir });
+      for (const area of AREAS) expect(docsOnly.outputs[area]).toBe('false');
+
+      // The same base move under a pull request that does touch herdr/ still checks herdr.
+      git(dir, 'checkout', '-q', 'pr');
+      writeFileSync(join(dir, 'README.md'), 'second\n');
+      mkdirSync(join(dir, 'herdr'), { recursive: true });
+      writeFileSync(join(dir, 'herdr', 'x.mjs'), 'export {};\n');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-q', '-m', 'herdr change');
+      const herdrHead = git(dir, 'rev-parse', 'HEAD');
+      const herdr = decide({ base, head: herdrHead, cwd: dir });
+      expect(herdr.outputs.herdr).toBe('true');
+      expect(herdr.outputs.pocket).toBe('false');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
