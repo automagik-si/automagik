@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { signedRelease } from "../../am/test/signed-release.mjs";
@@ -39,7 +39,7 @@ function fleet(t, { node = true, target = "Linux x86_64", release = true } = {})
   const env = { ...process.env, HOME: join(root, "here"), HERDR_APP_HOME: app, PATH: `${cbin}:${process.env.PATH}`,
     HC_FAKE_STATE: config, HC_FAKE_LOG: log, AUTOMAGIK_HERDR_RUNTIME_DIRS: runtime, AUTOMAGIK_HERDR_NO_UPDATE: "",
     HC_SESSION: "", HC_SOCKET: "", HC_TERMINAL_ID: "", AM_HOME: "", AM_RELEASE_URL: "file:///unused", AM_TRUSTED_KEYS: '{"keys":[]}' };
-  const far = { HOME: home, PATH: bin, NODE_OPTIONS: process.env.NODE_OPTIONS, HERDR_APP_HOME: farApp, AM_RELEASE_URL: `file://${lane.releases}`, AM_TRUSTED_KEYS: undefined,
+  const far = { HOME: home, PATH: bin, NODE_OPTIONS: process.env.NODE_OPTIONS, NVM_DIR: "", HERDR_APP_HOME: farApp, AM_RELEASE_URL: `file://${lane.releases}`, AM_TRUSTED_KEYS: undefined,
     TMPDIR: root, AUTOMAGIK_HERDR_RUNTIME_DIRS: runtime, GIT_CEILING_DIRECTORIES: root, AUTOMAGIK_HERDR_NO_UPDATE: "" };
   const state = { terminals: [], machines: [{ name: "vm", id: "core-vm", state: "connected", home, env: { ...far, AM_TRUSTED_KEYS: "" } }] };
   put(config, JSON.stringify(state));
@@ -205,7 +205,7 @@ test("linked retry preserves the recorded rollback and trees when the saved slot
     const saved = { ...previous, version: "3.162.2", dir: "3.162.2", sequence: 1620002 };
     if (mode === "wrong version") cpSync(join(s.store, current.dir), join(s.store, saved.dir), { recursive: true });
     else {
-      rmSync(join(s.store, "previous"));
+      unlinkSync(join(s.store, "previous"));
       symlinkSync(saved.dir, join(s.store, "previous"));
     }
     const marker = join(s.store, ".verification-pending");
@@ -429,7 +429,7 @@ test("a lower sequence, damaged record or floor, dangling store link and foreign
       if (mode === "damage") put(path, "{");
       if (mode === "valid JSON damaged floor") put(path, JSON.stringify({ ...s.record(), seen: 0 }));
       if (mode === "dangling" || mode === "store disagrees") {
-        rmSync(join(s.store, "current"));
+        unlinkSync(join(s.store, "current"));
         if (mode === "store disagrees") mkdirSync(join(s.store, "other"));
         symlinkSync("other", join(s.store, "current"));
       }

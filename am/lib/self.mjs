@@ -243,7 +243,7 @@ function lockLocalStore(store, env) {
 function swapLink(store, name, target) {
   const tmp = join(store, `.${name}-${randomBytes(4).toString("hex")}`);
   symlinkSync(target, tmp);
-  try { renameSync(tmp, join(store, name)); } finally { rmSync(tmp, { force: true }); }
+  try { renameSync(tmp, join(store, name)); } finally { removePath(tmp, { force: true }); }
 }
 
 /** What is wrong with an am extract in `dir`: empty when it is one, of `version` when given. */
@@ -349,7 +349,7 @@ export function linkCommands(env = process.env, linked = () => {}) {
     }
     const tmp = join(bin, `.${name}-${randomBytes(4).toString("hex")}`);
     symlinkSync(want, tmp);
-    try { renameSync(tmp, link); } finally { rmSync(tmp, { force: true }); }
+    try { renameSync(tmp, link); } finally { removePath(tmp, { force: true }); }
     linked(link);
     return { link, state: to === null ? "created" : "moved", detail: to ?? undefined };
   };
