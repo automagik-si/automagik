@@ -4,10 +4,13 @@ import {
 } from '@better-auth/oauth-provider';
 import { createAuth, type Env } from './auth';
 import { getCookies } from 'better-auth/cookies';
+import { APIError } from 'better-auth/api';
 import { inbound, readChallenge, whatsappEnabled } from './whatsapp';
 import { passkeySiteName } from './site';
-import { ADD_PASSKEY_HEADER, ADD_PASSKEY_ROUTES, PASSKEY_ACCOUNT_ROUTES, passkeyView } from './passkeys';
+import { ADD_PASSKEY_HEADER, ADD_PASSKEY_ROUTES, PASSKEY_ACCOUNT_ROUTES, freshPasskeySession, FRESH_SIGN_IN_MS, passkeyView } from './passkeys';
 import { cleanupOrphanUsers } from './cleanup';
+import { authorizeCredential, passkeyAdmissionFailure, refusal } from './gate';
+import { ADMISSION_MESSAGES } from './admission';
 
 function publicData(value: unknown, hidden: readonly string[] = ['email', 'emailVerified']): unknown {
   if (Array.isArray(value)) return value.map(entry => publicData(entry, hidden));
@@ -105,7 +108,24 @@ const router = {
         !url.pathname.startsWith('/api/') && !url.pathname.startsWith('/.well-known/')) {
       return env.PAGES.fetch(request);
     }
-    const auth = createAuth(env, ctx);
+    const path = url.pathname.replace(/^\/api\/auth/, '');
+    const addTarget = ADD_PASSKEY_ROUTES.get(path);
+    let verifiedSignup: { userId: string; credentialId: string } | undefined;
+    // The original public route selects the operation before the provider receives its mapped URL.
+    const auth = createAuth(env, ctx, async (endpoint, userId, credentialId) => {
+      if (addTarget === '/passkey/verify-registration') {
+        const owner = await freshPasskeySession(endpoint);
+        if (owner.user.id !== userId) throw new APIError('FORBIDDEN');
+        await authorizeCredential(env.DB, userId, credentialId, { purpose: 'add', sessionId: owner.session.id,
+          freshUntil: new Date(owner.session.createdAt).getTime() + FRESH_SIGN_IN_MS });
+        return;
+      }
+      if (path !== '/passkey/verify-registration') throw new APIError('FORBIDDEN');
+      const code = await passkeyAdmissionFailure(env.DB, userId);
+      if (code) throw refusal(code);
+      await authorizeCredential(env.DB, userId, credentialId, { purpose: 'signup' });
+      verifiedSignup = { userId, credentialId };
+    });
     if (url.pathname === '/.well-known/openid-configuration' ||
         url.pathname === '/api/auth/.well-known/openid-configuration') {
       return oauthProviderOpenIdConfigMetadata(auth)(request);
@@ -114,7 +134,6 @@ const router = {
       return oauthProviderAuthServerMetadata(auth)(request);
     }
     // Expose only the authentication surface we support. Managed client CRUD is server only.
-    const path = url.pathname.replace(/^\/api\/auth/, '');
     const allowed = new Set([
       '/get-session', '/sign-out', '/jwks',
       '/list-sessions', '/revoke-session', '/revoke-sessions',
@@ -147,7 +166,6 @@ const router = {
     }
     // Adding a passkey to the signed-in account: the same plugin step, with the session kept.
     // The passkey-account plugin refuses it without a fresh passkey session (src/passkeys.ts).
-    const addTarget = ADD_PASSKEY_ROUTES.get(path);
     if (addTarget) {
       const headers = new Headers(request.headers);
       headers.set(ADD_PASSKEY_HEADER, '1');
@@ -179,6 +197,13 @@ const router = {
       request = new Request(url, { method: 'POST', headers, body: JSON.stringify({ token }) });
     }
     const response = await auth.handler(request);
+    if (response.status === 500 && verifiedSignup) {
+      // A D1 outage may also prevent the diagnostic read. Keep the provider's original error.
+      const code = await passkeyAdmissionFailure(env.DB, verifiedSignup.userId, verifiedSignup.credentialId)
+        .catch(() => null);
+      if (code) return Response.json({ code, message: ADMISSION_MESSAGES[code] },
+        { status: 403, headers: response.headers });
+    }
     if (response.headers.get('content-type')?.includes('application/json')) {
       const text = await response.text();
       if (!text) return new Response(null, response);

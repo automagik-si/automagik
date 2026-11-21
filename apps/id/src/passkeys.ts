@@ -1,7 +1,7 @@
 import {
   APIError, createAuthEndpoint, createAuthMiddleware, getAuthoritativeSessionFromCtx, sessionMiddleware,
 } from 'better-auth/api';
-import type { BetterAuthPlugin } from 'better-auth';
+import type { BetterAuthPlugin, GenericEndpointContext } from 'better-auth';
 import type { Env } from './auth';
 import { whatsappEnabled } from './whatsapp';
 
@@ -65,6 +65,14 @@ function requireFreshPasskeySession(session: SessionRecord | null) {
   if (Date.now() - new Date(session.session.createdAt).getTime() >= FRESH_SIGN_IN_MS) throw notFresh();
 }
 
+/** The authoritative owner session and its original freshness deadline for a key change. */
+export async function freshPasskeySession(ctx: GenericEndpointContext) {
+  const session = await getAuthoritativeSessionFromCtx(ctx);
+  if (!session) throw unauthorized();
+  requireFreshPasskeySession(session as SessionRecord);
+  return session;
+}
+
 function passkeyId(body: unknown, extra: string[] = []): string {
   if (!body || typeof body !== 'object' || Array.isArray(body) ||
       Object.keys(body).some(key => key !== 'id' && !extra.includes(key))) throw invalid();
@@ -89,9 +97,7 @@ export function passkeyAccountPlugin(env: Env): BetterAuthPlugin {
     hooks: { before: [{
       matcher: ctx => ADD_TARGETS.has(ctx.path ?? '') && Boolean(ctx.headers?.get(ADD_PASSKEY_HEADER)),
       handler: createAuthMiddleware(async ctx => {
-        const session = await getAuthoritativeSessionFromCtx(ctx);
-        if (!session) throw unauthorized();
-        requireFreshPasskeySession(session as SessionRecord);
+        await freshPasskeySession(ctx);
         // Adding a passkey keeps the current session; it never starts another one.
         if (ctx.path === '/passkey/verify-registration') {
           const body = ctx.body && typeof ctx.body === 'object' ? ctx.body : {};

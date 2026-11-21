@@ -4,7 +4,28 @@ One identity for Automagik products, implemented with Better Auth 1.7.21 (MIT),
 its matching passkey and OAuth provider plugins, and a Cloudflare Worker with D1.
 This service deploys independently; repository releases never package it.
 
-Passkey registration creates an account without a prior session. The authenticator
+Sign-up is invite only (RFC 0032, Decided 9). Passkey registration creates an
+account without a prior session, but only for a request carrying an admission
+ticket in the `X-Automagik-Admission` header: a short-lived Ed25519 JWS that
+Automagik Cloud signs after it redeems an invitation, checked against the public
+keys in `ADMISSION_KEYS` and the issuer in `ADMISSION_ISSUER`. Invitations stay
+Cloud records; this service keeps only each ticket's `jti`, in D1. Without a
+valid, unused ticket, `generate-register-options` answers 403 before any row is
+written; with no admission key configured, no account can be created, while
+sign-in and OIDC keep working. One ticket reserves one user row: a retry after a
+cancelled prompt reuses it (at most ten ceremonies per ticket), and only the
+first ceremony to finish takes the ticket; the others are refused. The
+credential insert checks the ticket's expiry with the same 30-second clock skew
+as the admission check. D1 commits the credential and the ticket claim
+together. A failed insert leaves the live ticket available for a fresh ceremony.
+When a signed-in owner adds a passkey, the verified credential is instead bound
+to the owner's fresh passkey session. That insert consumes its own short-lived
+authorization and leaves invitations alone, including for accounts created before admission. `src/admission.ts` checks tickets; `src/gate.ts` applies them. See
+[DEPLOY.md](DEPLOY.md) for the keys and the operator's stand-in signer
+(`scripts/admission.ts`), and [PAGES-CONTRACT.md](PAGES-CONTRACT.md) for the
+header and the refusals.
+
+Passkey registration needs no prior session. The authenticator
 must support a discoverable credential and user verification. Authentication uses
 discoverable credential options without requiring a username. The pages start the
 authenticator from an explicit passkey action. No email, password, social login
@@ -49,7 +70,10 @@ messages receive no reply.
 One D1 batch deduplicates both event IDs, enforces ten events per sender per
 minute and three per challenge per five minutes, and consumes the challenge.
 The browser can claim the verified proof once. Better Auth creates the session
-for the account owning the verified number, or creates a separate phone account.
+for the account owning the verified number, or creates a separate phone account,
+but only when the start request carried an unused admission ticket that remains
+valid when D1 inserts the account. The insert also spends the ticket. Without
+one, the proof ends with `invitation_required` and nothing is created.
 The browser's existing passkey account is never selected or modified. The
 receiving number, sender, code and secret are never logged.
 
@@ -66,7 +90,7 @@ up to 100 such users per run once they are a day old and still have no passkey,
 phone number, OAuth client or live session, with their sessions, accounts and
 challenges.
 
-Sessions, WebAuthn and WhatsApp challenges, OAuth codes, grants, signing keys,
+Sessions, WebAuthn and WhatsApp challenges, admission ticket ids, OAuth codes, grants, signing keys,
 and rate limits live in D1. There is no secondary storage or session cookie cache.
 Only Cloudflare's replaced `cf-connecting-ip` header supplies the limiter's IP.
 The default limit is 60 requests per rolling minute per IP and path; Better Auth
@@ -164,7 +188,8 @@ ignore the passkey, age, phone-number, live-session or batch-size condition, dro
 Content-Security-Policy or nosniff, let inline script run, send files and API
 answers without the security headers, let a direct `.html` path through, rebuild
 the headers losing Better Auth's cookies, lengthen a token lifetime and allow
-rotated refresh-token replay, one at a time. Further checks edit the pinned OAuth
+rotated refresh-token replay, one at a time. The admission tests also cover the
+invite requirement, ticket verification, one-time use and public-key configuration. Further checks edit the pinned OAuth
 provider's own bundle in `node_modules` (replaced, never rewritten in place, since
 it may be a hard link into the package cache) so a version bump that drops one of
 its refresh checks fails a test: issuing a refresh token without `offline_access`,
