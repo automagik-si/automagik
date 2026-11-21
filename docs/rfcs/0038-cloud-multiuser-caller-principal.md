@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892, 5b, #1911, 5c, #1923, and 5d, #1940; the owner's delegate chose 5e-1 first and 5e-2' for owner authorship after it; member and guest prompting waits on DSH) |
+| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892, 5b, #1911, 5c, #1923, 5d, #1940, and 5e-1, #1960; the owner's delegate chose 5e-1 first and 5e-2' for owner authorship after it; member and guest prompting waits on DSH; amended 2026-11-21: the gated owner's proof for the Code side, as RFC 0030's Q18 answer approved by the owner's delegate on 2026-11-20, narrowed by the owner's delegate on 2026-11-21: the Code side in a gated browser needs member admission on and delivery 3's readiness, and Cloud mode stays off; delivery 7 open) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P); the gate and the server image |
 | Created | 2026-11-20 |
@@ -671,7 +671,7 @@ and the current assertion's role.
 | Settings, credentials, Bot admin, schedules, jobs, workspace writes | yes | never | never |
 | Rooms, side conversations (btw, side), Bot-to-Bot exchanges | yes | no (Q3) | no (Q3) |
 | Generated images, gen-UI media, pets | yes | not in delivery 5 | not in delivery 5 |
-| Terminals and Code mode | yes | refused; per-Bot grant with delivery 4 | never |
+| Terminals and Code mode | yes; in a gated browser, the owner only, with the Code proof (amendment 2026-11-21) | refused; per-Bot grant with delivery 4 | never |
 | Agent access (MCP) in multiuser mode | refused | refused | refused |
 
 **Authored** (from delivery 5e) is RFC 0024 (f)'s provenance and § 2's rule: every message in a shared chat carries
@@ -1189,6 +1189,307 @@ area owned by the Bot's uid with a per-Bot group that DSH's uid belongs to (`277
 accepting that owner and group pair for the Bot's own folder. A Bot's commands and file tools would
 then see the same files. It needs the runner to provision the group, the wall's own-folder rule to
 change, and its own review of what DSH's group membership exposes.
+
+## Amendment (2026-11-21): the gated owner's proof for the Code side (RFC 0030 Q18)
+
+Refs #1007. This specifies RFC 0030's Q18 answer, approved by the owner's delegate on 2026-11-20
+(`docs/rfcs/0030-code-mode-in-the-app.md:682-694, 758-766`), as narrowed by the owner's delegate on
+2026-11-21 (below). In the gate's claim and passkey mode, every request to the Code side's routes
+carries a proof bound to that request and to the owner's own passkey session. An admin, a request
+with no verified caller and a direct request without a valid proof are refused. DSH does not
+change, and no RFC is amended: linked machines stay unlisted, and their seats keep RFC 0022 (l)'s
+conditions and delivery H. This is the owner proof RFC 0030's browser half (1b) waits on, beside
+RFC 0022's delivery B (`0030-code-mode-in-the-app.md:460-466, 647`). File:line citations below are
+at `81a192058`; those marked `origin/dev` are at `e6def7a71`, after 5e-1 (#1960) merged.
+
+**Member admission on and delivery 3** (decided 2026-11-21, approved by the owner's delegate;
+option (a)). This replaces Q18's "whether member admission is on or off". In a gated browser the
+Code side turns on only when member admission is on and RFC 0038 delivery 3's readiness has been
+verified. With member admission off it stays off, as in Access and Cloud mode, until a later
+amendment: one logged reason, and the owner's other routes work as today.
+
+**Access and Cloud mode.** In the gate's Access mode the Code side stays off in a browser (Q18).
+In its Cloud mode it stays off too, fail closed, until a later amendment opens it with a proof bound
+to the Cloud session (decided 2026-11-21, approved by the owner's delegate).
+
+**Why delivery 3.** The verifier and the Code routes run inside DSH. They hold only while DSH's
+process and executable profile are intact: whoever controls DSH's uid controls them, the
+host-compromise limit RFC 0024 (c) already states. Before delivery 3 a Bot's commands run as DSH's
+uid and could change that code ("Migration and rollout"). With member admission on, the image starts
+DSH only after its readiness passes in full, delivery 3's Bot runner and image integrity included
+(`server/entrypoint.mjs:119-130`, `server/profile-multiuser.mjs:41-46, 470-545`).
+
+**The role table.** For the gated browser this supersedes the "Owner, admin: yes" cell of the
+role table's "Terminals and Code mode" row: the owner needs the Code proof and an admin is refused.
+The desktop is unchanged. The member cell's per-Bot grant stays delivery 4's, a scoped member route
+that delivery 4 defines; it is not this owner bridge, and until then the carrier refuses the Code
+prefix.
+
+### What is true today
+
+- **The Code side's routes.** RFC 0030 delivery 1 (with delivery 2's typing) gives bots-dsh the
+  team tree, a `code-tree` endpoint on the shared `POST /api/omni-ui`, registered on every host
+  before the Electron check (`apps/bots-dsh/src/host/code-side.js:357-363`); the pane stream,
+  `GET /api/omni-ui/code/stream` (`:23, 394-460`); and typing, `POST /api/omni-ui/code/take`,
+  `/input` and `/release` (`code-typing.js:29-31, 281-296`, `code-side.js:378-392`). The last four
+  register only under Electron's bridge, an IPC channel plus `AUTOMAGIK_APP_BROWSER`
+  (`code-side.js:364`, `constants.js:36`), and each request needs the window secret matching
+  `AUTOMAGIK_WINDOW_DIGEST` (`desktop-window.js:4-9`). The desktop launcher copies its parent's
+  environment, removing only the digest and the instance id (`apps/desktop/src/dsh.js:832-861` on
+  `origin/dev`). The image starts DSH with no IPC channel (`server/entrypoint.mjs:571`).
+- **Typing is not bound to a person.** `take` takes the Bot, the worker and the viewer from its
+  body; `input` checks a typing-session id and writes the bytes; `release` checks the id
+  (`code-typing.js:112-119, 215-227, 250-255`).
+- **The owner path.** An owner family's request goes to DSH's own `/api` with DSH's owner cookie
+  and the unsigned `x-automagik-principal` hint (`server/gate.mjs:479-492`,
+  `server/gate-upstream.mjs:71-81`). Nothing is signed for it: the signer refuses `owner` and
+  `admin` (`server/gate-caller.mjs:216-220`). Whoever holds DSH's owner cookie is the owner to DSH,
+  a Bot that reads the launch credential on loopback included (`server/README.md:1022-1024`). The
+  mounted viewer (`apps/bots-dsh/src/client/viewer.js:15`), derived on this path from that hint
+  (`host/caller-routes.js:32-45`), guards against a changed sign-in; it is never an authority.
+- **Access mode cannot tell people apart.** Every allowlisted address gets the one owner principal
+  (`server/gate-access.mjs:130, 137-143`), the same value a passkey sign-in gets
+  (`server/gate-store.mjs:13-16, 59-60`, `server/gate-claim.mjs:262, 290`), in the same session
+  file. Back in claim mode on a claimed instance, startup keeps active families
+  (`gate-claim.mjs:88-89`), and any active family may manage passkeys and recovery codes
+  (`:145, 293-313`). The first claim offers a second passkey at once, with the claim's own session
+  (RFC 0024's promise, `docs/rfcs/0024-automagik-cloud.md:331`; `server/gate-claim-ui.mjs:23`).
+- **With member admission on**, the gate's signer exists and a failure there stops gate startup
+  (`server/gate-entrypoint.mjs:33-40, 73-81`); owner requests are tracked, so a revocation closes
+  them at both ends (`gate.mjs:483-487, 198-201`); and the adapter's nonce store is made when an
+  activation owns the reserved namespace, reads its watermark file then and advances it at every
+  verification, with `iat` required later than the cutoff plus 5 seconds
+  (`apps/multiuser-dsh/index.js:217, 279-282`, `src/nonces.js:37-45, 99-124`, `assertion.js:41`).
+  A waiting activation refuses its predecessor's consumed request
+  (`apps/multiuser-dsh/test/gate-interop.test.js:1127-1156`).
+
+### The proof: caller assertion v1, typed for the Code side
+
+The proof is caller assertion v1 (§ 1) under its own protected-header type,
+`automagik-code-owner`, with the same claims `{version: 1, aud, principal, session, method, path,
+iat, exp, nonce}`, signed with Ed25519 by the gate's caller key; `exp` is `iat` plus 30 seconds and
+`session` the hash of the family id (`gate-caller.mjs:229-236`). Its own type means a member's
+assertion (`automagik-caller`, `apps/multiuser-dsh/src/assertion.js:29`) or 5e-1's owner/admin
+assertion (5e-1, #1960) is never a Code proof, and the reverse. It travels in `x-automagik-code-proof`,
+from the gate only: the gate's header allowlist never forwards a browser's value
+(`gate-upstream.mjs:51, 61-69`).
+
+The gate signs one only when all four hold:
+
+1. Member admission is on (`AUTOMAGIK_GATE_MULTIUSER`), so the signer exists as today.
+2. The request reached the main listener in claim mode: not Access, not Cloud, not the local
+   bootstrap listener (`gate-entrypoint.mjs:15-21, 47-56`).
+3. The family is active and marked `signIn: "passkey"`, set only at a fresh passkey sign-in
+   (`signin/verify`, `gate-claim.mjs:276-291`) and never added to an existing family. The first
+   claim's session is marked `"claim"`: it may enrol the offered second passkey and manage recovery
+   codes, but gets no proof; adding a passkey already ends every session (`gate-claim.mjs:145-150`),
+   and the owner signs in fresh. Access sessions are marked `"access"`, and claim-mode startup
+   revokes them. A family from before this delivery has no mark. Managing passkeys or recovery
+   codes needs `"passkey"` or `"claim"`, so no other family can enrol a passkey and come back marked.
+4. The principal is the local owner: roles exactly `["owner"]`, issuer `local:<instance>`
+   (`gate-store.mjs:13-16`).
+
+**How the routes are marked.** Every Code-side route lives under one prefix, `/api/omni-ui/code/`.
+The tree gets an exact route there, `GET /api/omni-ui/code/tree`, which a gated browser reads first
+to learn whether Code is on. The legacy `code-tree` endpoint stays as it is. bots-dsh exports the
+prefix and refuses to register a Code-side route outside it, so a later RFC 0030 route is covered by
+where it lives. The gate treats as Code-side any target that is, or normalizes in any case or
+encoding to, that prefix, by its private-path exploration (`gate.mjs:56-86`), and refuses with 400
+such a target that is not exactly canonical.
+
+### Refusals, and what the browser shows
+
+A Code-side request that does not qualify is refused 403 before DSH is called, or by bots-dsh before
+any Code registry, ledger or core access, with `{ error, message }`. 1b's client shows the message
+where Code mode would be; it says why Code is off and what turns it on:
+
+| `error` | Where | When | The message says |
+|---|---|---|---|
+| `code/access-mode` | gate | Access mode | Code is off with Access sign-in; it needs the instance's own passkey sign-in, with member admission on and each Bot under its own user |
+| `code/cloud-mode` | gate | Cloud mode | Code is off in an Automagik Cloud browser for now; use the desktop app |
+| `code/admission-off` | gate | member admission off | Code is off because member admission is off; turn member admission on, with each Bot under its own user (RFC 0038 delivery 3) |
+| `code/boundary-missing` | bots-dsh | a running DSH without `AUTOMAGIK_CODE_SIDE=gated` (with member admission on, failed readiness stops DSH before launch) | Code is off because this instance has not verified that each Bot runs under its own user; it turns on when member admission starts with that check passed |
+| `code/signer-unavailable` | gate | a signing failure while the gate is serving (no instance yet, a failed republication); an initial publication failure stops gate startup, so no browser sees it | Code is off because the sign-in key is unavailable; restart the gate, and see its log |
+| `code/passkey-sign-in` | gate | a family not marked `"passkey"` | Sign in again with your passkey to open Code |
+| `code/owner-only` | gate | an admin, or any principal but the local owner | Code is for the instance's owner |
+
+The gate logs each refusal's code once per family. A member's or guest's Code request is refused as
+today (`gate-roles.mjs:20-34`), and the carrier's `restore` (`carrier.js:28-35`) gains a refusal of
+the prefix. Every other owner route keeps DSH's owner cookie and no proof, in every mode; 5e-1's owner
+assertion on `POST /api/omni-ui` is unaffected. An owner upgrade to the prefix is refused 403.
+
+### Verification inside DSH
+
+**Server or desktop, never both.** Each launcher sets `AUTOMAGIK_CODE_SIDE` itself, in DSH's
+environment before DSH starts, so no `.env` file can fill or change it (DSH fills only unset
+variables from them):
+
+- The image's entrypoint always sets it, as 5e-1 pins its decision socket name: `gated` with member
+  admission on once readiness has passed, `off` otherwise.
+- The desktop launcher always sets `desktop`, after removing every inherited spelling of the name
+  (case-insensitively on Windows), as it does for the instance id (`apps/desktop/src/dsh.js:841-845` on `origin/dev`).
+  An inherited `gated`, `AUTOMAGIK_CALLER_KEYS` or `AUTOMAGIK_MULTIUSER` changes nothing.
+
+bots-dsh reads it once at start. `gated`: every Code-side handler admits only by `verifyCode`, and
+the window marker is never accepted. `desktop`, or absent (an older launcher): the window proof,
+under Electron's bridge only (`constants.js:36`), as today. `off` or any other value: the Code side
+is off. A `.env` value is possible only where neither launcher set one: under an older desktop
+launcher, where `gated` refuses the window (fail closed, never open), or in a DSH run by hand, where
+`gated` still needs multiuser on, the caller keys and a gate-signed proof. With the adapter in
+multiuser mode and no `gated`, the Code-side routes register only to answer `code/boundary-missing`.
+bots-dsh reads `verifyCode` from the adapter's service with multiuser on
+(`apps/bots-dsh/src/host/multiuser.js:11-14`) and reads its absence as refusal. The browser client
+carries no proof code: the gate adds it.
+
+**`verifyCode(request)`**, added optionally to `automagikCaller` by multiuser-dsh like 5e-1's
+`verify`, answers only with multiuser on and while its activation still owns the reserved namespace
+(`owner.live()`, checked immediately before verification and again before consumption, as 5e-1's
+`verify` does, `apps/multiuser-dsh/index.js:335-338` on `origin/dev`): once the namespace is
+released for a drain, nothing new is admitted and no nonce is consumed. It returns the verified
+`session` or refuses, unless all of these hold:
+
+- one `x-automagik-code-proof` value and a protected header of exactly `EdDSA`, a known `kid` and
+  type `automagik-code-owner`, with canonical encodings (`assertion.js:28-31, 42`);
+- `version` 1; `aud`, the principal's `workspace` and the key set's instance equal, and equal to
+  `AUTOMAGIK_INSTANCE_ID` (`keys.js:23-24`); issuer exactly `local:<aud>`; roles exactly
+  `["owner"]`; `session` present, 32 bytes;
+- `exp - iat` at most 30 seconds, `exp` in the future, `iat` at most 5 seconds ahead and later than
+  the cutoff plus 5 seconds (`assertion.js:40-41`); `method` equal to the request's; `path` equal to
+  the canonical path and query of `request.url`;
+- the Ed25519 signature (`assertion.js:45-48`); then the nonce consumed once.
+
+**Single use.** `verifyCode` consumes nonces in the member carrier's store, unchanged from
+`origin/dev`: made at ownership, its watermark read then and advanced at every verification. A
+consumed proof therefore fails after a connection replacement, a new activation or a restart, and
+two concurrent uses admit one, since consumption is synchronous. An unwritable watermark refuses.
+
+**Typing belongs to a family and a viewer together.** Streams, pending takes and held typing
+sessions are keyed by `(session, viewer)`, not by the viewer alone (today `code-side.js:423-426`,
+`code-typing.js:237-246`); on the desktop the session is the fixed value `window`. `take` admits only a
+viewer whose open stream carries the proof's `session`; the typing session records it; `input` and
+`release` need a proof with that `session`. Two families that reuse one viewer string hold separate
+entries, and closing or revoking either releases only its own attach.
+
+**What one proof authorises.** A valid proof authorises exactly one request: its signed method and
+canonical path and query, once, within 30 seconds, with an unsigned body. The holder of an unused
+proof and DSH's owner cookie can therefore make that one request directly, with a body of their
+choosing, and nothing more: for the stream, one direct stream of the panes the query names; for
+`take`, one take for a viewer of that family's own open stream, of any Bot or worker the body names;
+for `input`, one batch of any bytes to that family's held terminal; for `release`, one release of
+that family's typing session. A direct stream sits outside the gate's request table, so a gate
+revocation does not close it; it ends when its client leaves, at the stream's idle rule or when the
+plugin stops (`code-side.js:294-300`). Only gate-proxied streams close on revocation. An unused proof
+exists only on the gate's loopback hop to DSH.
+
+| Where | The Code side in a browser |
+|---|---|
+| Claim and passkey mode, member admission on, readiness passed | The owner's `"passkey"` session, each request proved |
+| Claim and passkey mode, member admission off | Off: `code/admission-off` |
+| Access mode | Off: `code/access-mode` |
+| Cloud mode | Off: `code/cloud-mode` (decided 2026-11-21) |
+| No gate (the single-container run), or a browser reaching the desktop's DSH | Off: no proof is signed, no window secret |
+| The desktop app's window | As today, by the window proof |
+
+### Contracts introduced or extended
+
+- **Caller assertion v1** gains a third type, `automagik-code-owner`, in `x-automagik-code-proof`;
+  the claims are unchanged, the lifetime is capped at 30 seconds, and a changed claim is a new
+  version.
+- **The Code-side prefix** `/api/omni-ui/code/` and the exact route `GET /api/omni-ui/code/tree`; no
+  existing route is renamed. **The refusal codes** in the table above.
+- **`automagikCaller` version 2** gains an optional `verifyCode(request)`.
+- **`AUTOMAGIK_CODE_SIDE`** (`gated`, `off` or `desktop`), always set by the image's entrypoint or the
+  desktop launcher before DSH starts.
+- **The gate's session family** gains `signIn` (`"passkey"`, `"claim"` or `"access"`), which an
+  older gate ignores.
+
+### Delivery 7: the Code proof
+
+One pull request for bots-dsh, multiuser-dsh, the gate, the image's entrypoint and the desktop
+launcher's `AUTOMAGIK_CODE_SIDE=desktop`. The launcher change makes it a full release
+(`scripts/lane.ts:396-417`); the gate and the entrypoint reach instances with the server image's own
+rollout. It builds on delivery 5e-1 (#1960, merged), which changed the same `server/gate.mjs`,
+`server/gate-caller.mjs` and `apps/multiuser-dsh` files. Mixed versions fail closed or keep today's
+desktop: an older launcher with the new plugin sets nothing, so the desktop window keeps its window
+proof; a new launcher with an older plugin is ignored; an older image with the new plugin sets
+nothing and has no Electron bridge, so Code is off; a new image with an older plugin registers no
+`/code/` route on the server. It opens no view by itself: Code mode in the gated browser is RFC 0030's
+1b, which still waits on RFC 0022's delivery B. *Unlocked by:* 5e-1 (merged); for the Code side to
+open on an instance, member admission on there, which needs delivery 3's readiness.
+
+*Check:* on fixtures, with temp homes, a fake core and fake ledgers:
+
+- With member admission on and readiness passing, a `"passkey"` session's tree GET, pane stream and
+  typing posts succeed.
+- Each refusal code is returned in its mode, with its message: Access, Cloud, member admission off,
+  a DSH without `AUTOMAGIK_CODE_SIDE=gated`, a signer that cannot sign, an unmarked family, an admin.
+  With member admission off, every ordinary owner route works and one reason is logged.
+- The legacy `code-tree` POST, per mode, its checks in their order:
+  - Member admission off, the gated owner: no viewer check applies (`channel.js:1406, 1519`), so
+    dispatch reaches the endpoint and answers the empty `desktop-only` tree, after the dispatcher's
+    usual team refresh (`channel.js:546`, `code-side.js:357-363`).
+  - Member admission on, the gated owner: first the viewer, where a missing or stale one gets
+    `bot/viewer-changed`; then, with a matching viewer and the adapter missing, 503; with both, the
+    empty tree (`channel.js:1519-1525`).
+  - Member admission on, a member or guest through the carrier: first the viewer, where a stale one
+    gets `bot/viewer-changed`; then, with a matching viewer, `bot/refused` (`caller-routes.js:54-60`,
+    `caller-policy.js:8-16`).
+  - Each path makes no Code registry, ledger or core access.
+- Through the route inventory (`apps/bots-dsh/test/caller-role-paths.test.js`), the tree GET, stream,
+  take, input and release are each exercised from direct DSH (owner cookie, no proof), the member and
+  guest carrier, Cloud owner and admin, Access, the bootstrap listener, a missing adapter, and a new
+  gate with an old adapter or bots-dsh and the reverse; each is refused with no Code registry, ledger
+  or core access.
+- A server host with a matching window marker and DSH's cookie is refused before any access. A
+  desktop window whose launcher inherited `AUTOMAGIK_CODE_SIDE=gated` (in another case on Windows),
+  `AUTOMAGIK_CALLER_KEYS` and `AUTOMAGIK_MULTIUSER`, with a conflicting `.env` in the project and the
+  DSH home, still admits by the window proof; so does a window under an older launcher; the positive
+  desktop-window case is kept.
+- A draining activation refuses a fresh proof without consuming its nonce.
+- A replayed proof, one for another path, query or method, a member's or 5e-1's assertion, one with
+  no session, one with a lifetime over 30 seconds and an expired one are refused with 403; two
+  concurrent uses of one proof admit one. The waiting-owner test (`gate-interop.test.js:1127-1156`) is
+  extended to Code, and the member carrier's restart test
+  (`apps/multiuser-dsh/test/carrier.test.js:118-140`) is kept: a consumed proof fails after a
+  connection replacement, a new activation and a restart.
+- A `take` for a viewer whose stream another family opened, and an `input` or `release` with a proof
+  of another family, are refused. Two families with one viewer string each hold their own attach,
+  and revoking either releases only its own.
+- The whole first claim, its immediate second passkey included, completes
+  (`server/test/gate-claim.test.mjs:241-252`), and the claim's session gets `code/passkey-sign-in`
+  until a fresh sign-in. In Access mode with two allowlisted addresses, the second address's Code
+  request is refused (and the first's). On an already-claimed store, an Access round trip back to
+  claim mode leaves no Access family, and an unmarked family can neither get a proof nor add a
+  passkey or recovery code.
+- A revoked session's gate-proxied stream closes, and its typing ends with it; a non-canonical alias of the
+  prefix gets 400.
+
+*Rollback:* revert the release. Success is no Code registry, ledger or core access from a gated
+browser. The old plugin omits the exact `/code/` routes on a gated host but still registers the shared
+POST's `code-tree` endpoint, which answers as on `origin/dev`. Each half fails closed alone: a gate
+that stops signing leaves bots-dsh refusing, and a bots-dsh without it registers no Code-side route on
+a gated host. An older gate ignores the `signIn` field.
+
+### Threat model additions
+
+- **Replay.** A proof is good for one request: one method, one canonical target, 30 seconds, a nonce
+  consumed once in a store whose watermark every new store reads.
+- **A stolen DSH owner cookie** opens the owner's other routes, the documented limit until delivery 3
+  takes the launch credential out of a Bot's reach, and never the Code side. With an unused proof as
+  well, it gives the one request "What one proof authorises" describes.
+- **A stolen gate session cookie** marked `"passkey"` obtains fresh proofs, and reaches the Code side,
+  until it stops authenticating. Ordinary renewal keeps the family and its open streams
+  (`gate.mjs:460-462`, `gate-store.mjs:140-147`); reuse of a superseded secret, "sign out everywhere"
+  and idle expiry end the family (`gate-store.mjs:129-131`), and its gate-proxied streams close with
+  it.
+- **A Bot's process.** It cannot mint a proof: the key is on the gate's volume, which DSH never mounts
+  (`gate-caller.mjs:32-48`). Before delivery 3 it runs as DSH's uid and could change the verifier,
+  which is why the Code side needs member admission on and its readiness. A process that controls
+  DSH's uid, or reads loopback traffic as root, is inside the host boundary the gate already states
+  (`gate-store.mjs:9`).
+- **An admin, an Access address or a Cloud session.** No proof is signed for any of them: the gate
+  signs only for the local owner of a `"passkey"` family in claim mode, and the adapter refuses any
+  other role.
 
 ## Open questions
 

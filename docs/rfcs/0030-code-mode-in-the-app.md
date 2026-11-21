@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; delivery 0 met on 2026-11-19, when the owner's delegate approved RFC 0022's revision; amended 2026-11-20: what moves now and what waits, approved by the owner's delegate on 2026-11-20, Q15-Q23 answered with the amendment's recommendations; what has merged is in that amendment's inventory, see Amendment (2026-11-20); owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; delivery 0 met on 2026-11-19, when the owner's delegate approved RFC 0022's revision; amended 2026-11-20: what moves now and what waits, approved by the owner's delegate on 2026-11-20, Q15-Q23 answered with the amendment's recommendations; Q18 narrowed by the owner's delegate on 2026-11-21 (the Code side in a gated browser needs member admission on and RFC 0038 delivery 3); what has merged is in that amendment's inventory, see Amendment (2026-11-20); owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) only if the preload must change; the server image; herdr (3.N.P) for the pack's fix-only period, the `am mailbox send` verb (the pack's CLI is its source; `am/` gets it as a byte copy) and the retirement notice; am (3.N.P) for those copies |
 | Created | 2026-11-10 |
@@ -459,7 +459,10 @@ Herdr install.
    the flip back shows the human-facing bot's DSH chat, which never moved. The desktop app first;
    the browser half needs RFC 0024 delivery 2's gate and, behind it, a proof bound to each
    request of the claimed owner's passkey session (Q18, 2026-11-20, an amendment to RFC 0038);
-   in the gate's Access mode the Code side stays off in a browser.
+   in the gate's Access mode the Code side stays off in a browser. The owner's delegate decided on
+   2026-11-21 that the browser half also requires member admission on and RFC 0038 delivery 3's
+   readiness; with member admission off, and in Cloud mode, it stays off (RFC 0038's amendment of
+   2026-11-21).
    *Acceptance:* the flip starts, resumes and sends nothing; no row runs anything; linked
    machines are not listed; the transport question (socket or streamed output) is answered;
    without the gate, a browser shows no terminal.
@@ -641,7 +644,7 @@ Each needs nothing from another repository. In this order:
 | 3a, `am mailbox send` | 3b (Q16) | herdr-core, through 3b |
 | The mailbox for a DSH Bot that runs in a terminal | RFC 0023's session terminal field (The Genie's two seats and the mailbox); until DSH ships it, the mailbox reaches app-hosted Sessions only | DSH (another repository) |
 | 2's take-over from another typer | a signal from herdr-core that says which client is typing into a terminal. Until then a refused take stays "Typing elsewhere · view only" | herdr-core |
-| 1b, the browser half | RFC 0022's delivery B (paused for scheduling, not for its design), with the owner's approval of its drawing; and the owner proof behind the gate that Q18 set (an amendment to RFC 0038). The gate is in the image (`server/gate*.mjs`) and RFC 0038's delivery 1 (#1892) checks its caller assertion, but only for members and guests; the owner reaches DSH through the stock app's fallback (`apps/multiuser-dsh/README.md`), so the core bridge cannot yet tell the claimed owner from any browser | the owner (B's drawing), then this repository (an RFC 0038 amendment, then the plugin) |
+| 1b, the browser half | RFC 0022's delivery B (paused for scheduling, not for its design), with the owner's approval of its drawing; and the owner proof behind the gate that Q18 set (RFC 0038's amendment of 2026-11-21, which, by the owner's delegate's decision of 2026-11-21, also requires member admission on and RFC 0038 delivery 3's readiness). The gate is in the image (`server/gate*.mjs`) and RFC 0038's delivery 1 (#1892) checks its caller assertion, but only for members and guests; the owner reaches DSH through the stock app's fallback (`apps/multiuser-dsh/README.md`), so the core bridge cannot yet tell the claimed owner from any browser | the owner (B's drawing), then this repository (an RFC 0038 amendment, then the plugin) |
 | 7, Code mode in the image | 1b; delivery 3 for its end-to-end check (Q21 and Q22 keep #1869's provisioning) | herdr-core (through delivery 3), then this repository |
 | 5c's switch | an amendment to RFC 0043's Q5 (Q23) | this repository |
 | 6b, starting on a linked machine | deferred (Q17): RFC 0022's delivery H allows a shown terminal's view and input but refuses `run`, `exec` and file writes on a link, and H's own scoping is upstream in herdr-core | herdr-core and a later decision of the owner's |
@@ -757,6 +760,10 @@ recommended option:
     on or off; an admin, a request with no verified caller and a direct browser request outside
     the gate are refused; in Access mode the Code side stays off in a browser. Designed as an
     amendment to RFC 0038, with no DSH change.
+    *Narrowed by the owner's delegate on 2026-11-21:* this decision replaces "whether member
+    admission is on or off". The Code side in a gated browser requires member admission on and RFC
+    0038 delivery 3's readiness, and it is off otherwise, as in Access and in Cloud mode, until a
+    later amendment (RFC 0038, Amendment (2026-11-21)).
 19. **Q19:** the pack's last release goes once one stable release carries delivery 1 (the desktop
     half), delivery 2 as shipped (the take-over left out), all of 5 (5c's switch included) and 6a,
     and the Accounts page carries RFC 0043's per-machine view, the plan's preview, approval and
