@@ -4382,7 +4382,8 @@ var call = async (endpoint, payload, signal) => {
       ...!vault ? { cause: error } : {}
     }));
   }
-  signal?.throwIfAborted();
+  const whoami = endpoint === "whoami";
+  if (whoami) signal?.throwIfAborted();
   checkViewer(active2);
   if (!response.ok) {
     const refusal = active2 && await viewerResponse(active2, response, endpoint, signal);
@@ -4394,7 +4395,7 @@ var call = async (endpoint, payload, signal) => {
     throw error;
   }
   const result = await response.json();
-  signal?.throwIfAborted();
+  if (whoami) signal?.throwIfAborted();
   checkViewer(active2);
   const changed = active2 && viewerChanged(result);
   if (!result.ok || changed) {
@@ -4410,7 +4411,7 @@ var call = async (endpoint, payload, signal) => {
     }
     throw error;
   }
-  if (endpoint === "whoami") checkViewerAnswer(active2, result.value);
+  if (whoami) checkViewerAnswer(active2, result.value);
   return result.value;
 };
 

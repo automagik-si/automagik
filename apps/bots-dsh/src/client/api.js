@@ -32,7 +32,10 @@ export const call = async (endpoint, payload, signal) => {
       code: 'NETWORK', ...(!vault ? { cause: error } : {}),
     }))
   }
-  signal?.throwIfAborted()
+  // Only a whoami answer must not apply once its check was aborted; other callers (a cancelled Hermes test that
+  // must still close its late resources) keep the answer that arrives after an abort, as before.
+  const whoami = endpoint === 'whoami'
+  if (whoami) signal?.throwIfAborted()
   checkViewer(active)
   if (!response.ok) {
     const refusal = active && await viewerResponse(active, response, endpoint, signal)
@@ -44,7 +47,7 @@ export const call = async (endpoint, payload, signal) => {
     throw error
   }
   const result = await response.json()
-  signal?.throwIfAborted()
+  if (whoami) signal?.throwIfAborted()
   checkViewer(active)
   const changed = active && viewerChanged(result)
   if (!result.ok || changed) {
@@ -60,6 +63,6 @@ export const call = async (endpoint, payload, signal) => {
     }
     throw error
   }
-  if (endpoint === 'whoami') checkViewerAnswer(active, result.value)
+  if (whoami) checkViewerAnswer(active, result.value)
   return result.value
 }
