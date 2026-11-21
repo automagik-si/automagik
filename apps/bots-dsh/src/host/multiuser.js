@@ -12,3 +12,9 @@ export function callerService(ctx) {
   const service = ctx?.get?.('automagikCaller')
   return service?.version === 2 && service.multiuser === true ? service : undefined
 }
+
+export const hasCallerLock = rt => rt.holdsLock() === true && rt.readOnly() === undefined
+
+export function matchesFeedViewer(request, viewer) {
+  return viewer !== undefined && new URL(request.url).search === `?viewer=${viewer.id}.${viewer.role}`
+}

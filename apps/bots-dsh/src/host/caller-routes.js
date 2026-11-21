@@ -2,7 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto'
 import { callerEndpoint } from './caller-policy.js'
 import { ROUTE } from './constants.js'
 import { FEED_ROUTE } from './feed.js'
-import { callerService } from './multiuser.js'
+import { callerService, multiuserMode } from './multiuser.js'
 
 const PUBLIC_ERRORS = new Set(['bot/not-found', 'bot/invalid', 'bot/read-only', 'bot/refused'])
 const ROLES = new Set(['owner', 'admin', 'member', 'guest'])
@@ -22,7 +22,10 @@ export function install(rt) {
   const secret = randomBytes(32)
   const viewerOf = (principal, role = callerService(ctx)?.roleOf(principal)) => {
     const { issuer, subject } = principal.person
-    const digest = createHmac('sha256', secret).update(issuer + '\n' + subject).digest()
+    const identity = createHmac('sha256', secret).update(issuer + '\n' + subject)
+    // A viewer issued before a promotion cannot be used on the owner route.
+    if (role === 'owner' || role === 'admin') identity.update('\n' + role)
+    const digest = identity.digest()
     return { id: digest.subarray(0, 16).toString('base64url'), role }
   }
   rt.viewerOf = viewerOf
@@ -36,9 +39,9 @@ export function install(rt) {
           if (person.roles.includes('owner')) return viewerOf({ person }, 'owner')
           if (person.roles.includes('admin')) return viewerOf({ person }, 'admin')
         }
-      } catch { /* Missing or malformed gate identity falls back to the local owner. */ }
+      } catch { /* A malformed gate identity cannot identify a viewer. */ }
     }
-    return { id: 'local', role: 'owner' }
+    if (!multiuserMode() && header === null) return { id: 'local', role: 'owner' }
   }
 
   async function post(request, principal) {
@@ -92,10 +95,10 @@ export function install(rt) {
   }))
   const offIndex = ctx.on('webserver/index-inject', (table, peer) => {
     const service = callerService(ctx)
-    if (disposed || !service) return
+    if (disposed || (!multiuserMode() && !service)) return
     const principal = peer?.principal
     const role = principal?.kind === 'owner' ? 'owner' :
-      principal?.kind === 'automagik' ? service.roleOf(principal) : undefined
+      principal?.kind === 'automagik' ? service?.roleOf(principal) : undefined
     table.push({ kind: 'global', name: '__AUTOMAGIK_VIEW__', value: { version: 1, role: role ?? 'none' } })
   })
   return () => {

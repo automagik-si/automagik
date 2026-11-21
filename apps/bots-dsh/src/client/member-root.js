@@ -11,7 +11,7 @@ import { CONVERSATION_CSS, SHELL_CSS, installCompiledStyles, installStyles } fro
 import { applyPage, botLabels, changedBot, feedEnded, initialMember, isCurrent, pageRows, requestView, selectBot, updateRoster } from './member-model.js'
 import { allThemes, themeCss } from './themes.js'
 import { dayLabel } from './text.js'
-import { isRetired, onRetire } from './viewer.js'
+import { isRetired, mountedViewer, onRetire } from './viewer.js'
 
 const mark = bot => h(BotMark, { bot, look: { ...lookOf(bot), pet: undefined }, live: false, size: 28 })
 const plain = text => (text ?? '').split('\n').flatMap((line, index) => index === 0 ? [line] : [h('br', { key: index }), line])
@@ -66,6 +66,7 @@ export function applyMember(ctx) {
   let stopped = false
   let connected = true
   let needsChat = false
+  let selection = null
   let feed, retry, pageRequest, rosterRequest
   const current = source.getSnapshot
   const active = () => !stopped && !isRetired()
@@ -77,6 +78,7 @@ export function applyMember(ctx) {
   }
   const clear = () => {
     cancelReads()
+    selection = current().botId ?? selection
     source.set(feedEnded)
   }
   function load(cursor) {
@@ -92,6 +94,7 @@ export function applyMember(ctx) {
       if (!accepts(request) || pageRequest !== pending) return
       if (error?.code === 'bot/not-found') {
         clear()
+        selection = null
         source.set(view => selectBot(view, null, true))
         refresh()
       } else source.set(view => ({ ...view, loading: false, failed: true, cursor: cursor ?? null }))
@@ -105,7 +108,8 @@ export function applyMember(ctx) {
     const pending = rosterRequest = new AbortController()
     void call('state', undefined, pending.signal).then(answer => {
       if (!accepts(request) || rosterRequest !== pending) return
-      const next = updateRoster(current(), Array.isArray(answer.bots) ? answer.bots : [])
+      const next = updateRoster({ ...current(), botId: selection ?? current().botId }, Array.isArray(answer.bots) ? answer.bots : [])
+      selection = null
       if (!isCurrent(next, request)) {
         pageRequest?.abort()
         pageRequest = undefined
@@ -127,7 +131,8 @@ export function applyMember(ctx) {
   }
   function connect() {
     if (!active()) return
-    const stream = feed = new EventSource('api/omni-ui/feed')
+    const viewer = mountedViewer()
+    const stream = feed = new EventSource(`api/omni-ui/feed?viewer=${viewer.id}.${viewer.role}`)
     const live = () => active() && feed === stream
     stream.addEventListener('hello', () => {
       if (!live()) return
@@ -158,6 +163,7 @@ export function applyMember(ctx) {
     feed?.close()
     clearTimeout(retry)
     clear()
+    selection = null
     source.set(initialMember)
   }
   ctx.effect(() => {

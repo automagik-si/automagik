@@ -22,7 +22,7 @@ import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
 import { CHECK_READ_ONLY, newerCheckedCandidate, savedCheckSummary } from './self-update-check.js'
 import { readUpdateRecovery } from './self-update-recovery.js'
-import { callerService } from './multiuser.js'
+import { callerService, multiuserMode } from './multiuser.js'
 import { callerJson } from './caller-routes.js'
 import { peopleOf } from './people.js'
 
@@ -1491,8 +1491,14 @@ export function install(rt) {
       let body
       try { body = await request.json() } catch { body = {} }
       const endpoint = String(body?.endpoint ?? '')
-      if (endpoint === 'whoami' && callerService(ctx)) return callerJson(ok({ role: 'owner', multiuser: true, viewer: rt.ownerViewer(request) }))
-      if (callerService(ctx) && typeof body?.viewer === 'string' && body.viewer !== rt.ownerViewer(request).id) return callerJson(fail('Your sign-in changed; reload this page.', 'bot/viewer-changed'))
+      if ((endpoint === 'whoami' || body?.viewer !== undefined) && (multiuserMode() || callerService(ctx) || body?.viewer !== undefined)) {
+        const viewer = rt.ownerViewer(request)
+        if (!viewer || (body?.viewer !== undefined && body.viewer !== viewer.id)) {
+          return callerJson(fail('Your sign-in changed; reload this page.', 'bot/viewer-changed'))
+        }
+        if (!callerService(ctx)) return new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } })
+        if (endpoint === 'whoami') return callerJson(ok({ role: 'owner', multiuser: true, viewer }))
+      }
       // The proof goes only to endpoints; this route's own checks read it as a boolean.
       const proof = appBrowserBridge() ? windowProof(request) : false
       const desktopWindow = proof !== false

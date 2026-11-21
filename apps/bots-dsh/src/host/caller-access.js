@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto'
-import { callerService, multiuserMode } from './multiuser.js'
+import { callerService, hasCallerLock, multiuserMode } from './multiuser.js'
 import { cleanPeople, ownersOnly, peopleOf } from './people.js'
 import { closesPart } from './caller-view.js'
 import { refusal } from './refusal.js'
 
 const inSegments = (segments, id) => Array.isArray(segments) && segments.some(segment => segment?.sessionId === id)
 const unavailable = () => refusal('Sharing needs multiuser mode')
+const modes = ['owners', 'allowlist', 'workspace']
+const hasPerson = (list, entry) => list.some(person => person.issuer === entry.issuer &&
+  person.subject === entry.subject && person.role === entry.role)
 
 export function install(rt) {
   const { ctx, state } = rt
@@ -56,8 +59,7 @@ export function install(rt) {
   function readableParts(botId) {
     const share = shares.get(botId)
     const bot = rt.botOf(botId)
-    if (!enabled() || share?.state !== 'open' || !bot || rt.readOnly() !== undefined ||
-        !rt.canWriteTeam() || peopleOf(bot).mode === 'owners') return []
+    if (!enabled() || share?.state !== 'open' || !bot || !hasCallerLock(rt) || peopleOf(bot).mode === 'owners') return []
     const published = new Set(share.parts)
     return rt.partsOf(botId).filter(({ sessionId }) => {
       if (!published.has(sessionId) || closed.has(sessionId) ||
@@ -104,13 +106,23 @@ export function install(rt) {
       if (readOnly !== undefined) throw refusal(readOnly, { code: 'bot/read-only' })
       const main = rt.isMain(botId)
       const prev = peopleOf(bot, { main })
-      const next = cleanPeople(input, { main, current: prev, seen: service.seen() })
-      const widens = (prev.mode === 'owners' && next.mode !== 'owners') ||
-        (next.mode === 'workspace' && prev.mode !== 'workspace') ||
-        next.allow.some(entry => !prev.allow.some(person => person.issuer === entry.issuer &&
-          person.subject === entry.subject && person.role === entry.role))
-      if (widens && expect !== undefined && JSON.stringify(peopleOf({ people: expect })) !== JSON.stringify(prev)) {
-        throw refusal('Who may talk to ' + bot.name + ' changed in another window; check it and save again.', { code: 'bot/stale' })
+      const expected = expect === undefined ? prev : peopleOf({ people: expect }, { main })
+      const stale = JSON.stringify(expected) !== JSON.stringify(prev)
+      let next = input?.mode === 'owners'
+        ? cleanPeople({ ...input, allow: prev.allow }, { main, current: prev })
+        : cleanPeople(input, { main, current: expected, seen: service.seen() })
+      if (stale && next.mode !== 'owners') {
+        // Validate the edit against the window's list first. A stale narrowing can
+        // only keep grants that also exist in the committed list and mode.
+        const mode = modes.indexOf(next.mode)
+        const expectedMode = modes.indexOf(expected.mode)
+        const currentMode = modes.indexOf(prev.mode)
+        const removes = next.allow.length < expected.allow.length && next.allow.every(entry => hasPerson(expected.allow, entry))
+        if (mode < expectedMode || (mode === expectedMode && removes)) {
+          next = { mode: modes[Math.min(mode, currentMode)], allow: next.allow.filter(entry => hasPerson(prev.allow, entry)) }
+        } else if (mode > currentMode || next.allow.some(entry => !hasPerson(prev.allow, entry))) {
+          throw refusal('Who may talk to ' + bot.name + ' changed in another window; check it and save again.', { code: 'bot/stale' })
+        }
       }
       // A spoiled or withdrawn share can be reopened only by an explicit owners-to-shared edit.
       if (prev.mode !== 'owners' || next.mode === 'owners') {
@@ -157,7 +169,7 @@ export function install(rt) {
     return peopleQueue(() => {
       const share = shares.get(botId)
       const bot = rt.botOf(botId)
-      if (!enabled() || !rt.canWriteTeam() || rt.readOnly() !== undefined || !bot || rt.chatOf(botId) !== freshId ||
+      if (!enabled() || !hasCallerLock(rt) || !bot || rt.chatOf(botId) !== freshId ||
           peopleOf(bot).mode === 'owners' || !share || share.id !== shareId || closed.has(freshId) || claims(botId, freshId).length > 0) {
         if (kind === 'share') spoilShare(botId, shareId)
         return
@@ -261,7 +273,7 @@ export function install(rt) {
 
   const provider = {
     *bots() {
-      if (!enabled() || !rt.canWriteTeam() || rt.readOnly() !== undefined) return
+      if (!enabled() || !hasCallerLock(rt)) return
       for (const [id, bot] of Object.entries(state.bots)) {
         if (bot.id !== id) continue
         const main = rt.isMain(id)

@@ -1,5 +1,5 @@
 import { closesPart } from './caller-view.js'
-import { callerService } from './multiuser.js'
+import { callerService, hasCallerLock, matchesFeedViewer } from './multiuser.js'
 import { personKey } from './people.js'
 
 const MAX_FEEDS = 4
@@ -15,7 +15,7 @@ const keepalive = encoder.encode(': keepalive\n\n')
 export function install(rt) {
   const { ctx } = rt
   const people = new Map()
-  let timer, disposed
+  let timer, unsubscribers, disposed
 
   function* feeds() {
     for (const person of people.values()) yield* person.feeds
@@ -31,6 +31,8 @@ export function install(rt) {
     if (people.size === 0) {
       clearInterval(timer)
       timer = undefined
+      for (const off of unsubscribers ?? []) off?.()
+      unsubscribers = undefined
     }
     request.signal.removeEventListener('abort', feed.abort)
     feed.request = undefined
@@ -41,17 +43,21 @@ export function install(rt) {
     feed.pull = undefined
   }
 
-  function valid(feed, entry) {
+  function live(feed) {
     if (feed.closed) return false
-    if (callerService(ctx) !== feed.service) {
+    if (callerService(ctx) !== feed.service || !rt.sameTeam(feed.team) || rt.readOnly() !== undefined) {
       close(feed)
       return false
     }
-    if (entry.chunk === hello || entry.chunk === revision) return true
+    return true
+  }
+
+  function valid(feed, entry) {
+    if (!live(feed)) return false
+    if (entry.botId === undefined) return true
     try {
-      if (rt.readOnly() !== undefined || !rt.canWriteTeam()) return false
-      return entry.botId === undefined || (feed.service.visibleBotIds(feed.principal).has(entry.botId) &&
-        rt.readableParts(entry.botId).length > 0 && !feed.closed)
+      return feed.service.visibleBotIds(feed.principal).has(entry.botId) &&
+        rt.readableParts(entry.botId).length > 0 && !feed.closed
     } catch {
       close(feed)
       return false
@@ -100,10 +106,7 @@ export function install(rt) {
 
   function refreshAccess() {
     for (const feed of feeds()) {
-      if (callerService(ctx) !== feed.service) {
-        close(feed)
-        continue
-      }
+      if (!live(feed)) continue
       let next
       try { next = allowed(feed) } catch {
         close(feed)
@@ -120,21 +123,16 @@ export function install(rt) {
     }
   }
 
-  const offAccess = rt.onAccessLoss(refreshAccess)
-  const offSaved = rt.onSaved(() => {
+  const saved = () => {
     for (const feed of feeds()) enqueue(feed, revision)
-  })
-  const offService = ctx.on('internal/service', name => {
-    if (name !== 'automagikCaller') return
-    for (const feed of feeds()) if (callerService(ctx) !== feed.service) close(feed)
-  })
-  const offEvent = ctx.on('session/event', (session, event) => {
-    if (people.size === 0 || (event.type !== 'user/message' && event.type !== 'assistant/message') || closesPart(event)) return
+  }
+  const sessionEvent = (session, event) => {
+    if ((event.type !== 'user/message' && event.type !== 'assistant/message') || closesPart(event)) return
     const id = rt.chatOwners.get(session?.id)
     if (id === undefined || !rt.readableParts(id).some(part => part.sessionId === session.id)) return
     const chunk = frame('changed', { botId: id })
     for (const feed of feeds()) enqueue(feed, chunk, id)
-  })
+  }
 
   rt.callerFeed = async (request, principal) => {
     const service = callerService(ctx)
@@ -142,12 +140,16 @@ export function install(rt) {
     if (disposed || (role !== 'member' && role !== 'guest')) {
       return new Response(null, { status: 403, headers: HEADERS })
     }
+    if (!matchesFeedViewer(request, rt.viewerOf(principal, role))) {
+      return new Response(null, { status: 403, headers: HEADERS })
+    }
+    if (!hasCallerLock(rt)) return new Response(null, { status: 503, headers: HEADERS })
     const key = personKey(principal.person)
     const person = people.get(key) ?? { feeds: new Set(), bytes: 0 }
     if (person.feeds.size >= MAX_FEEDS) return new Response('Too many open feeds', { status: 429, headers: HEADERS })
 
     // Retain the request so that its signal keeps following the connection.
-    const feed = { key, person, request, service, principal, bytes: 0, queue: [], changed: new Set() }
+    const feed = { key, person, request, service, principal, team: rt.teamGeneration(), bytes: 0, queue: [], changed: new Set() }
     feed.abort = () => close(feed)
     feed.allowed = allowed(feed)
     const body = new ReadableStream({
@@ -165,8 +167,9 @@ export function install(rt) {
     request.signal.addEventListener('abort', feed.abort, { once: true })
     if (request.signal.aborted) close(feed)
     else {
+      unsubscribers ??= [rt.onAccessLoss(refreshAccess), rt.onSaved(saved), ctx.on('session/event', sessionEvent)]
       timer ??= setInterval(() => {
-        for (const client of feeds()) if (client.queue.length === 0) enqueue(client, keepalive)
+        for (const client of feeds()) if (live(client) && client.queue.length === 0) enqueue(client, keepalive)
       }, KEEPALIVE_MS).unref()
       enqueue(feed, hello)
     }
@@ -175,10 +178,6 @@ export function install(rt) {
 
   return () => {
     disposed = true
-    offAccess()
-    offSaved()
-    offService?.()
-    offEvent?.()
     for (const feed of feeds()) close(feed)
   }
 }

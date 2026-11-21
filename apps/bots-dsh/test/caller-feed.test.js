@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { setImmediate } from 'node:timers/promises'
 import { SOURCE_KIND } from '../src/host/constants.js'
+import { install } from '../src/host/caller-feed.js'
 import { allowlist, code, fixture, guest, member, owners, stranger } from './caller-fixture.js'
 
 const url = 'http://fixture.invalid/api/omni-ui/feed'
-const open = (f, principal = member, request = new Request(url)) => f.ctx.get('automagikCallerRoutes').match('/api/omni-ui/feed', 'GET')(request, principal)
+const feedURL = (f, principal) => {
+  const viewer = f.rt.viewerOf(principal)
+  return `${url}?viewer=${viewer.id}.${viewer.role}`
+}
+const open = (f, principal = member, request = new Request(feedURL(f, principal))) =>
+  f.ctx.get('automagikCallerRoutes').match('/api/omni-ui/feed', 'GET')(request, principal)
 const read = async reader => {
   const { value, done } = await reader.read()
   return done ? null : new TextDecoder().decode(value)
@@ -33,7 +42,7 @@ test('CF1 caller frames contain only hello, revision and visible Bot ids, alongs
   const allowed = await f.open('a', allowlist)
   const hidden = await f.open()
   const caller = await readerFor(f, guest)
-  const ownerResponse = await f.routes.get('/api/omni-ui/feed').fetch(new Request(url))
+  const ownerResponse = await f.routes.get('/api/omni-ui/feed').fetch(new Request(url + '?viewer=local.owner'))
   const owner = ownerResponse.body.getReader()
   assert.match(await read(owner), /^event: hello\ndata: {"revision":\d+/)
   user(f, hidden)
@@ -81,10 +90,19 @@ test('CF3 a queued change is revalidated after the lock or current visibility is
     user(f, part)
     const spy = loss === 'lock' ? t.mock.method(f.rt, 'readOnly', () => 'lock lost')
       : t.mock.method(f.service, 'visibleBotIds', () => new Set())
-    const pending = read(reader)
-    // revision can pass while the queued Bot-specific frame is dropped at pull.
+    let pending = read(reader)
     await setImmediate()
     spy.mock.restore()
+    if (loss === 'lock') {
+      assert.equal(await pending, null)
+      const reopened = await readerFor(f)
+      pending = read(reopened)
+      f.rt.accessChanged()
+      assert.equal(await pending, revision)
+      await reopened.cancel()
+      continue
+    }
+    // The revision can pass once visibility returns, without the queued Bot-specific frame.
     f.rt.accessChanged()
     assert.equal(await pending, revision)
     await reader.cancel()
@@ -167,7 +185,7 @@ test('CF7 an abort, service loss and disposal release the caller feed', async t 
   const f = fixture(t)
   await f.start()
   const abort = new AbortController()
-  const first = await readerFor(f, member, new Request(url, { signal: abort.signal }))
+  const first = await readerFor(f, member, new Request(feedURL(f, member), { signal: abort.signal }))
   const second = await readerFor(f)
   abort.abort()
   assert.equal(await read(first), null)
@@ -179,4 +197,71 @@ test('CF7 an abort, service loss and disposal release the caller feed', async t 
   const next = await readerFor(f)
   f.rt.dispose()
   assert.equal(await read(next), null)
+})
+
+test('CF8 feed opens are bound to the mounted viewer and role even after an owner cookie replaces a member cookie', async t => {
+  const f = fixture(t)
+  await f.start()
+  const oldMode = process.env.AUTOMAGIK_MULTIUSER
+  process.env.AUTOMAGIK_MULTIUSER = '1'
+  t.after(() => {
+    if (oldMode === undefined) delete process.env.AUTOMAGIK_MULTIUSER
+    else process.env.AUTOMAGIK_MULTIUSER = oldMode
+  })
+  for (const target of [url, feedURL(f, stranger), feedURL(f, guest), feedURL(f, member).replace('.member', '.owner')]) {
+    assert.equal((await open(f, member, new Request(target))).status, 403)
+  }
+  const owner = f.routes.get('/api/omni-ui/feed').fetch
+  for (const subject of [member.person.subject, 'another-owner']) {
+    const headers = { 'x-automagik-principal': Buffer.from(JSON.stringify({ ...member.person, subject, roles: ['owner'] })).toString('base64url') }
+    assert.equal((await owner(new Request(url, { headers }))).status, 403)
+    assert.equal((await owner(new Request(feedURL(f, member), { headers }))).status, 403)
+    assert.equal((await owner(new Request(feedURL(f, member).replace('.member', '.owner'), { headers }))).status, 403)
+    const viewer = f.rt.ownerViewer(new Request(url, { headers }))
+    const response = await owner(new Request(`${url}?viewer=${viewer.id}.${viewer.role}`, { headers }))
+    assert.equal(response.status, 200)
+    await response.body.cancel()
+  }
+  await (await readerFor(f)).cancel()
+})
+
+test('CF9 a broken team lock closes caller reads and an already open feed', async t => {
+  const f = fixture(t)
+  await f.start()
+  const part = await f.open()
+  const reader = await readerFor(f)
+  user(f, part)
+
+  const lockPath = join(dirname(f.statePath), 'state.lock')
+  fs.rmSync(lockPath)
+  const originalWrite = fs.writeFileSync
+  const patch = t.mock.method(fs, 'writeFileSync', (path, ...args) => {
+    if (path === lockPath) throw Object.assign(new Error('synthetic lock failure'), { code: 'EACCES' })
+    return originalWrite(path, ...args)
+  })
+  syncBuiltinESMExports()
+  try { await f.rt.refresh() }
+  finally { patch.mock.restore(); syncBuiltinESMExports() }
+  assert.equal(f.rt.readOnly(), undefined)
+  assert.equal(f.rt.canWriteTeam(), true)
+  assert.equal(f.rt.holdsLock(), false)
+  assert.deepEqual([...f.service.visibleBotIds(member)], [])
+  assert.deepEqual(f.readable(), [])
+  assert.throws(() => f.rt.callerBots(member), code('read-only'))
+  assert.throws(() => f.rt.callerBot(member, 'b'), code('read-only'))
+  await assert.rejects(f.rt.callerChat(member, 'b'), code('read-only'))
+  assert.equal(await read(reader), null)
+  assert.equal((await open(f)).status, 503)
+})
+
+test('CF10 idle desktop installs no caller feed subscriptions', () => {
+  const subscriptions = []
+  const register = name => { subscriptions.push(name); return () => {} }
+  const dispose = install({
+    ctx: { on: register },
+    onAccessLoss: () => register('access'),
+    onSaved: () => register('save'),
+  })
+  assert.deepEqual(subscriptions, [])
+  dispose()
 })

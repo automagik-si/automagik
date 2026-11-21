@@ -189,3 +189,31 @@ test('CR8 gated owner whoami uses the gate principal and rejects stale requests 
   assert.equal((await f.call('state')).ok, true)
   assert.equal((await f.call('whoami')).ok, false)
 })
+
+test('CR9 adapter teardown keeps the configured owner boot gated and closes calls from a mounted owner tab', async t => {
+  const f = fixture(t)
+  await f.start()
+  const previous = process.env.AUTOMAGIK_MULTIUSER
+  process.env.AUTOMAGIK_MULTIUSER = '1'
+  t.after(() => {
+    if (previous === undefined) delete process.env.AUTOMAGIK_MULTIUSER
+    else process.env.AUTOMAGIK_MULTIUSER = previous
+  })
+  const headers = subject => ({ 'x-automagik-principal': Buffer.from(JSON.stringify({ ...identity, subject, roles: ['owner'] })).toString('base64url') })
+  const viewer = (await f.call('whoami', null, { headers: headers('first') })).value.viewer.id
+  let dispatched = 0
+  f.rt.hooks.endpoint('queued-owner-action', () => { dispatched++; return true })
+  await f.emitService(undefined)
+  const switched = await f.call('queued-owner-action', null, { headers: headers('second'), viewer })
+  assert.equal(switched.ok, false)
+  assert.equal(switched.error.code, 'bot/viewer-changed')
+  assert.equal((await f.postOwner('queued-owner-action', null, { headers: headers('first'), viewer })).status, 503)
+  assert.equal((await f.postOwner('whoami', null, { headers: headers('first') })).status, 503)
+  const table = []
+  for (const inject of f.ctx.listeners.get('webserver/index-inject')) inject(table, { principal: { kind: 'owner' } })
+  assert.deepEqual(table, [{ kind: 'global', name: '__AUTOMAGIK_VIEW__', value: { version: 1, role: 'owner' } }])
+  assert.equal(dispatched, 0)
+  await f.emitService(f.service)
+  assert.equal((await f.call('queued-owner-action', null, { headers: headers('first'), viewer })).ok, true)
+  assert.equal(dispatched, 1)
+})

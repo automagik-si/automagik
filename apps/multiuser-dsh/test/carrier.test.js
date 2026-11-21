@@ -430,3 +430,21 @@ test('C5D3 the matched handler runs in the admitted scope with its registered Pe
   assert.equal(f.scope.current(), undefined)
   assert.equal(registry.live(admitted), false)
 })
+
+test('C5D4 a viewer-bound feed signs the full target, matches the exact GET route and admits no body', async t => {
+  const received = []
+  const f = carrier(t, { callerRoutes: () => ({
+    version: 1,
+    match(path, method) {
+      assert.equal(path, '/api/omni-ui/feed')
+      assert.equal(method, 'GET')
+      return request => { received.push(new URL(request.url).search); return new Response() }
+    },
+  }) })
+  const path = '/api/omni-ui/feed?viewer=mounted.member'
+  const assertion = f.key.assertion({ method: 'GET', path })
+  assert.equal((await f.call(path.replace('.member', '.guest'), { method: 'GET', assertion })).status, 401)
+  assert.equal((await f.call(path, { method: 'GET', body: 'x' })).status, 413)
+  assert.equal((await f.call(path, { method: 'GET', assertion })).status, 200)
+  assert.deepEqual(received, ['?viewer=mounted.member'])
+})

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { browser, bundle, load, nodes, react, refusal, reply, text, tick, viewerReply } from './viewer-fixture.js'
+import { fixture as hostFixture, member, serviceStub, stranger } from './caller-fixture.js'
 
 const code = await bundle(`
 export { PeopleCard } from './src/client/people-card.js'
@@ -43,16 +44,22 @@ function hooks(t) {
   return { api, render: node => { index = 0; return node.type(node.props) } }
 }
 
-async function fixture(t, { off = false, main = false, refused = false, initial = workspace, state = 'open' } = {}) {
+async function fixture(t, { off = false, main = false, refused = false, initial = workspace, state = 'open', host } = {}) {
   let committed = initial, save
-  const calls = []
+  const calls = [], results = []
   const h = hooks(t)
   const f = browser({ hooks: h.api, boot: off ? undefined : { version: 1, role: 'owner' }, fetch: ({ body }) => {
     if (body.endpoint === 'whoami') return viewerReply('owner')
     if (body.endpoint === 'people-seen') return refused ? refusal('bot/refused', 'Not available') : reply(people)
+    if (host && body.endpoint === 'people-share') return { ok: true, json: () => host.call(body.endpoint, body.payload) }
     if (body.endpoint === 'people-share') return reply({ state, people: committed })
     if (body.endpoint === 'update-bot') {
       calls.push(body.payload)
+      if (host) {
+        const result = host.call(body.endpoint, body.payload)
+        results.push(result)
+        return { ok: true, json: () => result }
+      }
       if (save) return save(body.payload)
       committed = body.payload.people
       return reply({ id: bot.id, people: committed })
@@ -65,7 +72,7 @@ async function fixture(t, { off = false, main = false, refused = false, initial 
   const draw = () => form ? h.render(form) : null
   draw()
   await tick()
-  return { draw, calls, requests: f.calls, mockSave: fn => { save = fn },
+  return { draw, calls, results, requests: f.calls, mockSave: fn => { save = fn },
     current: next => { committed = next } }
 }
 
@@ -136,5 +143,30 @@ test('PC4 in-flight and refused edits keep the committed mode, then stale refres
   ]) {
     const status = await fixture(t, { state })
     assert.ok(text(status.draw()).includes(message))
+  }
+})
+
+test('PC5 a second window applies the real card narrowing with a stale guest list', async t => {
+  for (const [mode, label] of [['owners', 'Only you and admins'], ['allowlist', 'People you choose']]) {
+    const service = serviceStub()
+    service.seen = () => [stranger.person]
+    const host = hostFixture(t, { service })
+    await host.start()
+    const { issuer, subject } = stranger.person
+    const previous = { mode: 'workspace', allow: [{ issuer, subject, role: 'guest' }] }
+    await host.open('b', previous)
+    const first = await fixture(t, { host })
+    const second = await fixture(t, { host })
+    named(first.draw(), 'Remove').props.onClick()
+    assert.equal((await first.results[0]).ok, true)
+    assert.equal(host.service.visibleBotIds(member).has('b'), true)
+    assert.equal(host.service.visibleBotIds(stranger).has('b'), false)
+    named(second.draw(), label).props.onClick()
+    await tick()
+    assert.deepEqual(second.calls, [{ id: 'b', people: { ...previous, mode }, expect: previous }])
+    assert.equal((await second.results[0]).ok, true)
+    assert.deepEqual(host.saved().bots.b.people, { mode, allow: [] })
+    assert.equal(host.service.visibleBotIds(member).has('b'), false)
+    assert.equal(host.service.visibleBotIds(stranger).has('b'), false)
   }
 })

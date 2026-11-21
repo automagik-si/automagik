@@ -6,7 +6,6 @@ import { carrier, localHTTP, prefix, send, wire } from '../../multiuser-dsh/test
 import { allowlist, fixture, guest } from './caller-fixture.js'
 
 const post = '/api/omni-ui'
-const feed = post + '/feed'
 const person = { ...wire.payload.principal, ...guest.person }
 const body = (endpoint, viewer) => JSON.stringify({ endpoint, viewer })
 
@@ -91,6 +90,8 @@ test('CC3 a fifth in-flight upload of the same person is refused before reading 
 test('CC4 disconnecting one carrier connection releases only its feed', { timeout: 5000 }, async t => {
   const f = fixture(t)
   await f.start()
+  const viewer = f.rt.viewerOf(guest)
+  const feed = `${post}/feed?viewer=${viewer.id}.${viewer.role}`
   let authority
   const adapter = transport(t, f, () => authority)
   const ended = Promise.withResolvers()

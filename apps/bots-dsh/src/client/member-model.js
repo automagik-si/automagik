@@ -31,7 +31,7 @@ export function applyPage(view, request, page, earlier) {
   }
 }
 
-export const feedEnded = view => selectBot(view, view.botId, view.withdrawn)
+export const feedEnded = view => selectBot({ ...initialMember, generation: view.generation }, null, view.withdrawn)
 export const pageRows = pages => pages.map((items, page) =>
   items.map((row, index) => ({ row, key: `${page}:${index}` }))).reverse().flat()
 

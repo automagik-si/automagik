@@ -1,6 +1,6 @@
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
-import { bootView, isRetired, startViewer } from './viewer.js'
+import { bootView, isRetired, onRetire, startViewer } from './viewer.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
@@ -155,13 +155,16 @@ export function apply(ctx) {
   ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy (gated)')
   startViewer(boot, lifetime.signal).then(viewer => {
     if (lifetime.signal.aborted || (ctx.fiber && ctx.fiber.state !== 2) || isRetired()) return
-    if (viewer.role === 'member' || viewer.role === 'guest') applyMember(ctx)
-    else applyOwner(ctx, { skipLocale: true })
+    const surface = ctx.inject([], scope => {
+      if (viewer.role === 'member' || viewer.role === 'guest') applyMember(scope)
+      else applyOwner(scope, { gated: true })
+    })
+    ctx.effect(() => onRetire(() => { void Promise.resolve().then(() => surface.dispose()) }), 'ds-bot: retire gated surface')
   }, () => {})
 }
 
-function applyOwner(ctx, { skipLocale = false } = {}) {
-  if (!skipLocale) ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
+function applyOwner(ctx, { gated = false } = {}) {
+  if (!gated) ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
   // A Bot's own browser hold, from the team view, where no browser bridge reports holds.
   const hostHolds = createSource({})
   migrateStorage()
@@ -178,7 +181,8 @@ function applyOwner(ctx, { skipLocale = false } = {}) {
   let seenAt = seenStore.read()
   // `details` is the panel's subject (a Session id); `view` picks details or the
   // subject Bot's browser inside it.
-  const ui = createSource({ details: null, view: 'details', renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: unreadStore.read(), reactions: reactionStore.read(), visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null })
+  const emptyUi = { details: null, view: 'details', renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: {}, reactions: {}, visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null }
+  const ui = createSource({ ...emptyUi, unread: unreadStore.read(), reactions: reactionStore.read() })
   // The window's width, which the Bot panel's fit rule reads (frame-layout.js). The team's bar
   // sits in the shell's own sidebar, which keeps its own track: no column of ours takes room.
   const frame = createSource({ viewport: typeof window === 'undefined' ? 0 : window.innerWidth })
@@ -284,7 +288,7 @@ function applyOwner(ctx, { skipLocale = false } = {}) {
     const order = ++pulls
     const known = roster.getSnapshot()
     const value = await call('state', { since: known.revision, models: known.modelsKey ?? '', live: liveKey, locale: language(), allowPlace: allowPlace() })
-    if (order < applied) return
+    if (order < applied || (gated && isRetired())) return
     applied = order
     if (value.liveKey !== undefined) liveKey = value.liveKey
     if (value.activity !== undefined) {
@@ -349,6 +353,20 @@ function applyOwner(ctx, { skipLocale = false } = {}) {
 
   let selfUpdate
   const selfUpdateStatusSource = createSource(null)
+  if (gated) ctx.effect(() => onRetire(() => {
+    currentFace = null
+    for (const [source, empty] of [[roster, EMPTY_ROSTER], [ui, emptyUi], [work, { bots: {}, approvals: [] }],
+      ...[hostHolds, activity, live, computer, cards, heldCards, turnClock, memoryNews].map(source => [source, {}])]) {
+      try { source.set(empty) } catch { /* Continue even if a subscriber is being removed. */ }
+    }
+    seenAt = savedPrefs = {}
+    agentSessionCache.clear()
+    for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear()
+    for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
+      try { ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.('') } catch { /* Storage may be unavailable. */ }
+    }
+  }), 'ds-bot: clear owner state on retirement')
+
   ctx.effect(() => {
     let stopped = false
     let running = false

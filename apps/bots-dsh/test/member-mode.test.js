@@ -2,15 +2,16 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { browser, loadClient, nodes, reply, text, tick, viewerReply } from './viewer-fixture.js'
 
-function slotsOf(t, f, member) {
+function slotsOf(t, f, member, { ownerEffects = [], sessions } = {}) {
   const registered = [], effects = [], disposers = []
+  let surfaceDisposals = 0
   let panel = 'other-panel'
   const panelListeners = new Set()
   const forbidden = new Proxy({}, { get(_target, key) { assert.fail('Member UI read a native surface: ' + String(key)) } })
   const ctx = {
     effect(fn, label) {
       effects.push(label)
-      if (member && !/styles|theme|interface copy/.test(label)) disposers.push(fn())
+      if ((member && !/styles|theme|interface copy/.test(label)) || ownerEffects.includes(label)) disposers.push(fn())
       return () => {}
     },
     slots: {
@@ -25,15 +26,30 @@ function slotsOf(t, f, member) {
       },
       selectPanel(id) { panel = id; for (const fn of panelListeners) fn() },
     },
-    sessions: member ? forbidden : { list: {} },
+    sessions: member ? forbidden : sessions ?? { list: {} },
     uiConversation: member ? forbidden : {},
     uiWorkspace: member ? forbidden : {},
-    get: () => undefined, inject: () => () => {},
+    get: () => undefined,
+    inject(deps, apply) {
+      if (deps.length !== 0) return
+      const scoped = []
+      apply({ ...ctx, effect(fn, label) {
+        effects.push(label)
+        if ((member && !/styles|theme|interface copy/.test(label)) || ownerEffects.includes(label)) scoped.push(fn())
+      } })
+      const dispose = () => {
+        surfaceDisposals++
+        for (const cleanup of scoped.splice(0).reverse()) cleanup?.()
+      }
+      disposers.push(dispose)
+      return { dispose }
+    },
   }
   t.after(() => { for (const dispose of disposers.reverse()) dispose?.() })
   const client = loadClient(f.globals)
   client.apply(ctx)
-  return { ctx, registered, effects, panel: () => panel, get: name => registered.find(row => row.options.name === name) }
+  return { ctx, client, registered, effects, surfaceDisposals: () => surfaceDisposals,
+    panel: () => panel, get: name => registered.find(row => row.options.name === name) }
 }
 
 function feedFixture(f) {
@@ -75,7 +91,8 @@ test('MM1 member and guest use only caller requests, read-only slots and the vie
     assert.equal(app.panel(), null)
     app.ctx.layout.selectPanel('later-panel')
     assert.equal(app.panel(), null)
-    assert.deepEqual(feeds.map(feed => feed.url), ['api/omni-ui/feed'])
+    assert.deepEqual(feeds.map(feed => feed.url.split('?')[0]), ['api/omni-ui/feed'])
+    assert.equal(feeds[0].url, `api/omni-ui/feed?viewer=viewer-id.${role}`)
     assert.deepEqual(f.writes, [['automagik.viewer', 'viewer-id']])
     const tree = render(main)
     const line = 'You can read this chat, but not send messages.'
@@ -125,4 +142,69 @@ test('MM3 gated owner waits for whoami before mounting the owner path', async t 
   await tick()
   assert.ok(app.effects.includes('ds-bot: roster poll'))
   assert.deepEqual(f.calls.map(call => call.body.endpoint), ['whoami'])
+})
+
+test('MM4 owner retirement clears rendered content, drafts and state even when reload cannot happen', async t => {
+  for (const blocked of ['storage throws', 'reload latch']) {
+    const pending = Promise.withResolvers()
+    const f = browser({ boot: { version: 1, role: 'owner' }, fetch: ({ body }) => {
+      if (body.endpoint === 'whoami') return viewerReply('owner')
+      return pending.promise
+    } })
+    let draft = 'private draft'
+    const app = slotsOf(t, f, false, {
+      ownerEffects: ['ds-bot: clear owner state on retirement', 'ds-bot: retire gated surface'],
+      sessions: { list: { getSnapshot: () => ({ byId: { 'private-chat': {} } }) },
+        binding: () => ({ props: { inputActions: { setDraft(value) { draft = value } } } }) },
+    })
+    await tick()
+    const { hooks } = app.client.omni.face()
+    hooks.roster.set({ bots: [{ name: 'Private Bot' }] })
+    hooks.ui.set({ quote: 'private quote' })
+    f.document.body.replaceChildren({ text: 'private transcript' }, { value: 'private draft' })
+    if (blocked === 'storage throws') {
+      f.localStorage.key = () => { throw new Error('local storage blocked') }
+      f.sessionStorage.getItem = () => { throw new Error('session storage blocked') }
+    } else f.sessionStorage.setItem('automagik.retired', '1')
+    const late = app.client.omni.call('state')
+    f.window.emit('storage', { key: 'automagik.viewer', newValue: 'another' })
+    assert.deepEqual(f.document.body.children, [])
+    assert.equal(draft, '')
+    assert.equal(app.client.omni.face(), null)
+    assert.deepEqual(Array.from(hooks.roster.getSnapshot().bots), [])
+    assert.equal(hooks.ui.getSnapshot().quote, null)
+    assert.deepEqual(f.reloads, [])
+    pending.resolve(reply({ bots: [{ name: 'late private Bot' }] }))
+    await assert.rejects(late, { code: 'bot/retired' })
+    assert.equal(app.surfaceDisposals(), 1)
+  }
+})
+
+test('MM5 feed loss hides the roster and header until a fresh state authorizes the selection', async t => {
+  let state = bots
+  const f = browser({ boot: { version: 1, role: 'member' }, fetch: ({ body }) => {
+    if (body.endpoint === 'whoami') return viewerReply('member')
+    if (body.endpoint === 'state') return state ? reply({ bots: state }) : { ok: false, status: 503 }
+    return reply({ items: [], cursor: null })
+  } })
+  const feeds = feedFixture(f)
+  const app = slotsOf(t, f, true)
+  await tick()
+  const main = app.get('main'), sidebar = app.get('sidebar.workspaces')
+  assert.ok(text(render(main)).includes(bots[0].name))
+  assert.ok(text(render(sidebar)).includes(bots[0].name))
+  feeds[0].emit('error')
+  assert.ok(!text(render(main)).includes(bots[0].name))
+  assert.ok(!nodes(render(main)).some(node => node.type === 'header'))
+  assert.ok(!text(render(sidebar)).includes(bots[0].name))
+  state = undefined
+  feeds[0].emit('hello')
+  await tick()
+  assert.ok(!text(render(main)).includes(bots[0].name))
+  assert.ok(!text(render(sidebar)).includes(bots[0].name))
+  state = bots
+  feeds[0].emit('revision')
+  await tick()
+  assert.ok(text(render(main)).includes(bots[0].name))
+  assert.ok(text(render(sidebar)).includes(bots[0].name))
 })

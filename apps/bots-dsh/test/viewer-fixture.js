@@ -51,7 +51,7 @@ function events(props = {}) {
   })
 }
 
-export function browser({ boot, fetch, session, hooks = react } = {}) {
+export function browser({ boot, fetch, session, hooks = react, timers = {} } = {}) {
   const calls = [], writes = [], reloads = [], intervals = new Set()
   const req = (url, args) => {
     const call = { url, method: args.method, body: JSON.parse(args.body), signal: args.signal }
@@ -59,13 +59,24 @@ export function browser({ boot, fetch, session, hooks = react } = {}) {
     return fetch ? fetch(call) : viewerReply(boot?.role)
   }
   const window = events()
-  const document = events({ body: {}, visibilityState: 'visible' })
+  const styles = new Map()
+  const body = {
+    inert: false,
+    children: [],
+    replaceChildren(...children) { this.children = children },
+    style: {
+      setProperty(name, value, priority) { styles.set(name, { value, priority }) },
+      getPropertyValue: name => styles.get(name)?.value ?? '',
+      getPropertyPriority: name => styles.get(name)?.priority ?? '',
+    },
+  }
+  const document = events({ body, visibilityState: 'visible' })
   const localStorage = storage(new Map([['dsh.conversation.a', 'draft'], ['dsh.conversation.b', 'draft'], ['keep', 'yes']]), writes)
   const sessionStorage = storage(session)
   const globals = {
     window, document, location: { reload: () => reloads.push(true) },
     localStorage, sessionStorage, fetch: req, AbortController, URL, URLSearchParams, console,
-    setTimeout, clearTimeout, setInterval: fn => { intervals.add(fn); return fn }, clearInterval: fn => intervals.delete(fn),
+    setTimeout, clearTimeout, setInterval: fn => { intervals.add(fn); return fn }, clearInterval: fn => intervals.delete(fn), ...timers,
     require: name => imports(name, hooks),
   }
   if (boot !== undefined) globals.__AUTOMAGIK_VIEW__ = boot

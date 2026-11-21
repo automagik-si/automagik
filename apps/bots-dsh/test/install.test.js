@@ -170,8 +170,6 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/status',
     'on llm/stream',
     'on session/event',
-    'on internal/service',
-    'on session/event',
     'provide automagikCallerRoutes',
     'on webserver/index-inject',
     'on agent/request-error',

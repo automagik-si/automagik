@@ -1,4 +1,5 @@
 import { call } from './api.js'
+import { clearClientErrors } from './diagnostics.js'
 
 const VIEWER_KEY = 'automagik.viewer'
 const RELOAD_KEY = 'automagik.retired'
@@ -13,11 +14,16 @@ export function bootView() {
 
 export const mountedViewer = () => guard?.retired ? undefined : guard?.viewer
 export const isRetired = () => guard?.retired === true
+const unavailable = () => Object.assign(new Error('Viewer unavailable'), { code: 'bot/retired' })
 export function requestViewer(endpoint) {
   if (isRetired() || (endpoint !== 'whoami' && !guard?.viewer && bootView() !== undefined)) {
-    throw Object.assign(new Error('Viewer unavailable'), { code: 'bot/retired' })
+    throw unavailable()
   }
-  return guard?.viewer?.id
+  return guard
+}
+
+export function checkViewer(active) {
+  if (active && (guard !== active || active.retired)) throw unavailable()
 }
 
 export function viewerRefused(code) {
@@ -35,10 +41,18 @@ export function onRetire(hook) {
 function retire() {
   if (!guard || guard.retired) return
   guard.retired = true
-  if (document.body) document.body.inert = true
+  guard.viewer = undefined
+  const body = document.body
+  if (body) {
+    body.inert = true
+    body.style?.setProperty('display', 'none', 'important')
+  }
   for (const hook of guard.hooks) {
     try { hook() } catch { /* Other retirement hooks still need to run. */ }
   }
+  guard.hooks.clear()
+  body?.replaceChildren?.()
+  clearClientErrors()
   try {
     for (let i = localStorage.length - 1; i >= 0; i--) {
       const key = localStorage.key(i)
@@ -49,25 +63,62 @@ function retire() {
     if (sessionStorage.getItem(RELOAD_KEY) === '1') return
     sessionStorage.setItem(RELOAD_KEY, '1')
   } catch { return } // Hold closed if a reload cannot be bounded.
-  location.reload()
+  try { location.reload() } catch { /* The page is already closed. */ }
 }
 
 function confirmed(answer, boot) {
   const viewer = answer?.viewer
   return boot.role !== 'none' && answer?.multiuser === true && answer.role === boot.role &&
     (viewer?.role === boot.role || (boot.role === 'owner' && viewer?.role === 'admin')) &&
-    typeof viewer.id === 'string' && viewer.id.length > 0 && viewer.id.length <= 64
+    typeof viewer.id === 'string' && /^[\w-]{1,64}$/.test(viewer.id)
 }
 
 export async function startViewer(boot, signal) {
   if (guard) throw new Error('Viewer already started')
+  if (signal?.aborted) throw unavailable()
   const active = guard = { hooks: new Set(), retired: false }
-  signal?.addEventListener('abort', () => {
+  const body = document.body
+  const display = body?.style?.getPropertyValue('display')
+  const priority = body?.style?.getPropertyPriority('display')
+  const inert = body?.inert
+  const show = () => {
+    if (!body) return
+    body.inert = inert
+    body.style?.setProperty('display', display, priority)
+  }
+  if (body) {
+    body.inert = true
+    body.style?.setProperty('display', 'none', 'important')
+  }
+  const current = () => guard === active && !active.retired && !signal?.aborted
+  let cancelDelay
+  active.hooks.add(() => cancelDelay?.())
+  let answer
+  const abort = () => {
+    cancelDelay?.()
     active.stop?.()
-    if (guard === active) guard = undefined
-  }, { once: true })
-  const answer = await call('whoami', undefined, signal)
-  if (guard !== active || active.retired) throw new Error('Viewer unavailable')
+    if (guard === active && !active.retired) {
+      if (!active.viewer) show()
+      guard = undefined
+    }
+  }
+  signal?.addEventListener('abort', abort, { once: true })
+  let delay = 250
+  while (current()) {
+    try {
+      answer = await call('whoami', undefined, signal)
+      break
+    } catch {
+      if (!current()) break
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, delay)
+        cancelDelay = () => { clearTimeout(timer); resolve() }
+      })
+      cancelDelay = undefined
+      delay = Math.min(15_000, delay * 2)
+    }
+  }
+  if (!current()) throw new Error('Viewer unavailable')
   if (!confirmed(answer, boot)) {
     retire()
     throw new Error('Viewer role changed')
@@ -103,5 +154,6 @@ export async function startViewer(boot, signal) {
     document.removeEventListener('visibilitychange', visibility)
   }
   active.hooks.add(active.stop)
+  show()
   return viewer
 }

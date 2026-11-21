@@ -2,6 +2,7 @@ const ROLES = new Set(['owner', 'admin', 'member', 'guest'])
 export const CALLER_HTTP = new Set(['POST /api/omni-ui', 'GET /api/omni-ui/feed'])
 export const CALLER_UPGRADE = 'GET /api/remote.mux'
 export const CLEAR_SITE_DATA = '"cache", "storage"'
+const VIEWER_FEED = /^GET \/api\/omni-ui\/feed\?viewer=[\w-]{1,64}\.(?:owner|admin|member|guest)$/
 
 export function effectiveRole(roles) {
   if (!Array.isArray(roles) || roles.length < 1 || roles.length > ROLES.size ||
@@ -21,7 +22,7 @@ export function callerTarget({ role, method, raw, upgrade, origin }) {
   if (role !== 'member' && role !== 'guest') return refused
   const pair = method + ' ' + raw
   if (upgrade) return pair === CALLER_UPGRADE ? { allow: true } : refused
-  if (CALLER_HTTP.has(pair)) return { allow: true }
+  if (CALLER_HTTP.has(pair) || VIEWER_FEED.test(pair)) return { allow: true }
   try {
     const { pathname } = new URL(raw, origin)
     const decoded = decodeURIComponent(raw.split('?', 1)[0].toLowerCase()).toLowerCase()

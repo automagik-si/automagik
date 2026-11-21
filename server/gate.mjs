@@ -137,27 +137,26 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const clearSite = res => { if (multiuser) res.setHeader('clear-site-data', CLEAR_SITE_DATA) }
   const sessionRequired = (req, res) => {
     if (res.destroyed) return
-    if (multiuser && req.headers.cookie?.split(';').some(part => part.trimStart().startsWith(COOKIE + '='))) clearSite(res)
+    if (trustedRequest(req, origin, false) && cookieSecret(req.headers.cookie)) clearSite(res)
     answer(res, 401, { error: 'Session required' })
   }
   const isMcpTarget = raw => new URL(raw, origin).pathname === '/api/omni-mcp'
   const sockets = new Map()
   const pendingUpgrades = new Map()
   let pendingUpgradeCount = 0
-  // A member's HTTP responses are piped apart from the socket table; each request has its own
-  // record, so revocation, expiry, renewal and rebind end it too. A request still waiting for its
-  // probe is answered 401 by its handler; a forwarded one is cut at both ends.
-  const callerRequests = new Set()
+  // Gated HTTP responses are piped apart from the socket table. Family changes cut
+  // forwarded requests at both ends, including owner streams.
+  const httpRequests = new Set()
   const transports = new WeakMap()
   const endRequest = (record, hard = false) => {
-    if (!callerRequests.delete(record)) return
+    if (!httpRequests.delete(record)) return
     record.detach()
     record.abort.abort()
     record.probe?.destroy()
     record.proxy?.destroy()
     if ((record.proxy || hard) && !record.res.writableFinished) record.res.destroy()
   }
-  function trackRequest(req, res, family) {
+  function trackRequest(req, res, family, owner) {
     const socket = req.socket
     let transport = transports.get(socket)
     if (socket && !transport) {
@@ -167,7 +166,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       transports.set(socket, transport)
       socket.once('close', close)
     }
-    const record = { family, res, abort: new AbortController(), probe: undefined, proxy: undefined, detach() {
+    const record = { family, owner, res, abort: new AbortController(), probe: undefined, proxy: undefined, detach() {
       res.off('close', closed)
       res.off('finish', finished)
       if (transport && transport.records.delete(record) && !transport.records.size) {
@@ -177,7 +176,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     } }
     const closed = () => endRequest(record, true)
     const finished = () => endRequest(record)
-    callerRequests.add(record)
+    httpRequests.add(record)
     transport?.records.add(record)
     res.once('close', closed)
     res.once('finish', finished)
@@ -394,8 +393,14 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       if (!sessions.active(family)) { sessionRequired(req, res); return }
       let path = req.url, headers, cookie, probe, record
       if (owner) {
+        if (multiuser) {
+          record = trackRequest(req, res, family, true)
+          if (!httpRequests.has(record)) return
+        }
         cookie = await credentials.cookie()
-        if (!sessions.active(family) || res.destroyed) { sessionRequired(req, res); return }
+        if (res.destroyed) return
+        if (!sessions.active(family)) { sessionRequired(req, res); return }
+        if (record && !httpRequests.has(record)) return
         headers = upstreamHeaders(req, credentials, cookie, family.principal)
       } else {
         const decision = callerTarget({ role, method: req.method, raw: req.url, origin })
@@ -406,19 +411,19 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
           if (!frontendPath(url)) { answer(res, 404, { error: 'Unknown frontend path' }); return }
         }
         const target = url.pathname + url.search
-        record = trackRequest(req, res, family)
-        if (!callerRequests.has(record)) return
+        record = trackRequest(req, res, family, false)
+        if (!httpRequests.has(record)) return
         try { probe = await connectDsh({ port: credentials.port, host: DSH_HOST, signal: record.abort.signal }) }
         catch {
           // Nothing is signed: no adapter answered on this connection, or the session ended.
           if (!res.destroyed) {
-            if (callerRequests.has(record)) answer(res, 503, { error: 'DSH unavailable' })
+            if (httpRequests.has(record)) answer(res, 503, { error: 'DSH unavailable' })
             else sessionRequired(req, res)
           }
           return
         }
         record.probe = probe
-        if (!sessions.active(family) || res.destroyed || !callerRequests.has(record)) {
+        if (!sessions.active(family) || res.destroyed || !httpRequests.has(record)) {
           probe.destroy()
           if (!res.destroyed) sessionRequired(req, res)
           return
@@ -434,6 +439,11 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       const options = { hostname: DSH_HOST, port: credentials.port, method: req.method, path, headers, timeout: 30_000 }
       if (probe) options.createConnection = reuseProbe(probe)
       const proxy = http.request(options, upstream => {
+        if (record && (!httpRequests.has(record) || !sessions.active(family))) {
+          upstream.destroy()
+          endRequest(record)
+          return
+        }
         // A 401 drops the refused cookie. The next owner request checks its family before minting.
         // Never replay a body.
         if (owner && upstream.statusCode === 401) credentials.invalidate(cookie)
@@ -452,7 +462,11 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       if (record) record.proxy = proxy
       proxy.on('timeout', () => proxy.destroy(new Error('DSH timeout')))
       // A member's probed connection that breaks before an answer (a DSH restart) is a 503.
-      proxy.on('error', () => { if (!res.headersSent) answer(res, owner ? 502 : 503, { error: 'DSH unavailable' }); else res.destroy() })
+      proxy.on('error', () => {
+        if (res.destroyed) return
+        if (!res.headersSent) answer(res, owner ? 502 : 503, { error: 'DSH unavailable' })
+        else res.destroy()
+      })
       if (!record) res.on('close', () => proxy.destroy())
       req.pipe(proxy)
     } catch { if (!res.headersSent) answer(res, 502, { error: 'DSH unavailable' }); else res.destroy() }
@@ -614,12 +628,12 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   }
   const revoke = id => {
     for (const record of sockets.values()) if (record.family.id === id) record.socket.destroy()
-    for (const record of [...callerRequests]) if (record.family.id === id) endRequest(record)
+    for (const record of httpRequests) if (record.family.id === id) endRequest(record)
   }
   sessions.on('revoke', revoke)
   const timer = setInterval(() => {
     for (const record of sockets.values()) if (!sessions.active(record.family)) record.socket.destroy()
-    for (const record of [...callerRequests]) if (!sessions.active(record.family)) endRequest(record)
+    for (const record of httpRequests) if (!sessions.active(record.family)) endRequest(record)
   }, 1000).unref()
   // Section 6's poll fallback: at least every 5 minutes while the gate holds sessions, and
   // while a removal is still pending (it may have ended the last session, and only a later
@@ -642,7 +656,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   server.rebind = (port, target, drop = false) => {
     if (drop) {
       for (const record of sockets.values()) record.socket.destroy()
-      for (const record of [...callerRequests]) endRequest(record, true)
+      for (const record of httpRequests) endRequest(record, true)
       server.closeAllConnections()
     }
     const task = binding.then(async () => {
@@ -656,7 +670,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
           // Stop accepting first, then drop member connections and any other connections
           // covered by drop that were accepted while this rebind was queued.
           for (const record of sockets.values()) if (drop || record.member) record.socket.destroy()
-          for (const record of [...callerRequests]) endRequest(record, true)
+          for (const record of httpRequests) if (drop || !record.owner) endRequest(record, true)
           if (drop) server.closeAllConnections()
         })
         await new Promise((resolve, reject) => {
@@ -673,7 +687,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   }
   server.closeGate = () => {
     for (const record of sockets.values()) record.socket.destroy()
-    for (const record of [...callerRequests]) endRequest(record, true)
+    for (const record of httpRequests) endRequest(record, true)
     server.closeAllConnections()
     return new Promise(resolve => server.close(resolve))
   }

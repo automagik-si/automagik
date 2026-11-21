@@ -3812,115 +3812,6 @@ function language() {
 var dateLocale = () => language().startsWith("zh") ? "zh-CN" : "en-US";
 var DICTIONARY = { zh: ZH };
 
-// src/client/viewer.js
-var VIEWER_KEY = "automagik.viewer";
-var RELOAD_KEY = "automagik.retired";
-var ROLES = /* @__PURE__ */ new Set(["owner", "member", "guest", "none"]);
-var guard;
-function bootView() {
-  const boot = globalThis.__AUTOMAGIK_VIEW__;
-  if (boot === void 0) return;
-  return boot?.version === 1 && ROLES.has(boot.role) ? boot : { role: "none" };
-}
-var mountedViewer = () => guard?.retired ? void 0 : guard?.viewer;
-var isRetired = () => guard?.retired === true;
-function requestViewer(endpoint) {
-  if (isRetired() || endpoint !== "whoami" && !guard?.viewer && bootView() !== void 0) {
-    throw Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
-  }
-  return guard?.viewer?.id;
-}
-function viewerRefused(code) {
-  if (guard && ["bot/viewer-changed", "HTTP_401", "HTTP_403"].includes(code)) retire();
-}
-function onRetire(hook) {
-  if (!guard) return () => {
-  };
-  const hooks = guard.hooks;
-  if (guard.retired) hook();
-  else hooks.add(hook);
-  return () => hooks.delete(hook);
-}
-function retire() {
-  if (!guard || guard.retired) return;
-  guard.retired = true;
-  if (document.body) document.body.inert = true;
-  for (const hook of guard.hooks) {
-    try {
-      hook();
-    } catch {
-    }
-  }
-  try {
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const key = localStorage.key(i);
-      if (key?.startsWith("dsh.conversation.")) localStorage.removeItem(key);
-    }
-  } catch {
-  }
-  try {
-    if (sessionStorage.getItem(RELOAD_KEY) === "1") return;
-    sessionStorage.setItem(RELOAD_KEY, "1");
-  } catch {
-    return;
-  }
-  location.reload();
-}
-function confirmed(answer, boot) {
-  const viewer = answer?.viewer;
-  return boot.role !== "none" && answer?.multiuser === true && answer.role === boot.role && (viewer?.role === boot.role || boot.role === "owner" && viewer?.role === "admin") && typeof viewer.id === "string" && viewer.id.length > 0 && viewer.id.length <= 64;
-}
-async function startViewer(boot, signal) {
-  if (guard) throw new Error("Viewer already started");
-  const active2 = guard = { hooks: /* @__PURE__ */ new Set(), retired: false };
-  signal?.addEventListener("abort", () => {
-    active2.stop?.();
-    if (guard === active2) guard = void 0;
-  }, { once: true });
-  const answer = await call("whoami", void 0, signal);
-  if (guard !== active2 || active2.retired) throw new Error("Viewer unavailable");
-  if (!confirmed(answer, boot)) {
-    retire();
-    throw new Error("Viewer role changed");
-  }
-  const viewer = active2.viewer = answer.viewer;
-  try {
-    localStorage.setItem(VIEWER_KEY, viewer.id);
-    sessionStorage.removeItem(RELOAD_KEY);
-  } catch {
-  }
-  let checking = false;
-  const check = async () => {
-    if (checking || active2.retired || guard !== active2) return;
-    checking = true;
-    try {
-      const next = await call("whoami", void 0, signal);
-      if (guard === active2 && (!confirmed(next, boot) || next.viewer.id !== viewer.id || next.viewer.role !== viewer.role)) retire();
-    } catch {
-    } finally {
-      checking = false;
-    }
-  };
-  const visibility = () => {
-    if (document.visibilityState === "visible") void check();
-  };
-  const storage = (event) => {
-    if ((event.key === VIEWER_KEY || event.key === null) && event.newValue !== viewer.id) retire();
-  };
-  window.addEventListener("focus", check);
-  window.addEventListener("storage", storage);
-  document.addEventListener("visibilitychange", visibility);
-  const timer = setInterval(check, 15e3);
-  active2.stop = () => {
-    clearInterval(timer);
-    window.removeEventListener("focus", check);
-    window.removeEventListener("storage", storage);
-    document.removeEventListener("visibilitychange", visibility);
-  };
-  active2.hooks.add(active2.stop);
-  return viewer;
-}
-
 // src/client/diagnostics.js
 var MAX = 30;
 var REPEAT_MS = 5 * 60 * 1e3;
@@ -4003,12 +3894,178 @@ ${REST_NOTE}`);
   return { url: facts.length <= URL_LIMIT ? facts : build(PASTE_NOTE), inline: false };
 }
 
+// src/client/viewer.js
+var VIEWER_KEY = "automagik.viewer";
+var RELOAD_KEY = "automagik.retired";
+var ROLES = /* @__PURE__ */ new Set(["owner", "member", "guest", "none"]);
+var guard;
+function bootView() {
+  const boot = globalThis.__AUTOMAGIK_VIEW__;
+  if (boot === void 0) return;
+  return boot?.version === 1 && ROLES.has(boot.role) ? boot : { role: "none" };
+}
+var mountedViewer = () => guard?.retired ? void 0 : guard?.viewer;
+var isRetired = () => guard?.retired === true;
+var unavailable = () => Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
+function requestViewer(endpoint) {
+  if (isRetired() || endpoint !== "whoami" && !guard?.viewer && bootView() !== void 0) {
+    throw unavailable();
+  }
+  return guard;
+}
+function checkViewer(active2) {
+  if (active2 && (guard !== active2 || active2.retired)) throw unavailable();
+}
+function viewerRefused(code) {
+  if (guard && ["bot/viewer-changed", "HTTP_401", "HTTP_403"].includes(code)) retire();
+}
+function onRetire(hook) {
+  if (!guard) return () => {
+  };
+  const hooks = guard.hooks;
+  if (guard.retired) hook();
+  else hooks.add(hook);
+  return () => hooks.delete(hook);
+}
+function retire() {
+  if (!guard || guard.retired) return;
+  guard.retired = true;
+  guard.viewer = void 0;
+  const body = document.body;
+  if (body) {
+    body.inert = true;
+    body.style?.setProperty("display", "none", "important");
+  }
+  for (const hook of guard.hooks) {
+    try {
+      hook();
+    } catch {
+    }
+  }
+  guard.hooks.clear();
+  body?.replaceChildren?.();
+  clearClientErrors();
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key?.startsWith("dsh.conversation.")) localStorage.removeItem(key);
+    }
+  } catch {
+  }
+  try {
+    if (sessionStorage.getItem(RELOAD_KEY) === "1") return;
+    sessionStorage.setItem(RELOAD_KEY, "1");
+  } catch {
+    return;
+  }
+  try {
+    location.reload();
+  } catch {
+  }
+}
+function confirmed(answer, boot) {
+  const viewer = answer?.viewer;
+  return boot.role !== "none" && answer?.multiuser === true && answer.role === boot.role && (viewer?.role === boot.role || boot.role === "owner" && viewer?.role === "admin") && typeof viewer.id === "string" && /^[\w-]{1,64}$/.test(viewer.id);
+}
+async function startViewer(boot, signal) {
+  if (guard) throw new Error("Viewer already started");
+  if (signal?.aborted) throw unavailable();
+  const active2 = guard = { hooks: /* @__PURE__ */ new Set(), retired: false };
+  const body = document.body;
+  const display = body?.style?.getPropertyValue("display");
+  const priority = body?.style?.getPropertyPriority("display");
+  const inert = body?.inert;
+  const show2 = () => {
+    if (!body) return;
+    body.inert = inert;
+    body.style?.setProperty("display", display, priority);
+  };
+  if (body) {
+    body.inert = true;
+    body.style?.setProperty("display", "none", "important");
+  }
+  const current = () => guard === active2 && !active2.retired && !signal?.aborted;
+  let cancelDelay;
+  active2.hooks.add(() => cancelDelay?.());
+  let answer;
+  const abort = () => {
+    cancelDelay?.();
+    active2.stop?.();
+    if (guard === active2 && !active2.retired) {
+      if (!active2.viewer) show2();
+      guard = void 0;
+    }
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  let delay = 250;
+  while (current()) {
+    try {
+      answer = await call("whoami", void 0, signal);
+      break;
+    } catch {
+      if (!current()) break;
+      await new Promise((resolve2) => {
+        const timer2 = setTimeout(resolve2, delay);
+        cancelDelay = () => {
+          clearTimeout(timer2);
+          resolve2();
+        };
+      });
+      cancelDelay = void 0;
+      delay = Math.min(15e3, delay * 2);
+    }
+  }
+  if (!current()) throw new Error("Viewer unavailable");
+  if (!confirmed(answer, boot)) {
+    retire();
+    throw new Error("Viewer role changed");
+  }
+  const viewer = active2.viewer = answer.viewer;
+  try {
+    localStorage.setItem(VIEWER_KEY, viewer.id);
+    sessionStorage.removeItem(RELOAD_KEY);
+  } catch {
+  }
+  let checking = false;
+  const check = async () => {
+    if (checking || active2.retired || guard !== active2) return;
+    checking = true;
+    try {
+      const next = await call("whoami", void 0, signal);
+      if (guard === active2 && (!confirmed(next, boot) || next.viewer.id !== viewer.id || next.viewer.role !== viewer.role)) retire();
+    } catch {
+    } finally {
+      checking = false;
+    }
+  };
+  const visibility = () => {
+    if (document.visibilityState === "visible") void check();
+  };
+  const storage = (event) => {
+    if ((event.key === VIEWER_KEY || event.key === null) && event.newValue !== viewer.id) retire();
+  };
+  window.addEventListener("focus", check);
+  window.addEventListener("storage", storage);
+  document.addEventListener("visibilitychange", visibility);
+  const timer = setInterval(check, 15e3);
+  active2.stop = () => {
+    clearInterval(timer);
+    window.removeEventListener("focus", check);
+    window.removeEventListener("storage", storage);
+    document.removeEventListener("visibilitychange", visibility);
+  };
+  active2.hooks.add(active2.stop);
+  show2();
+  return viewer;
+}
+
 // src/client/api.js
 var ROUTE = "api/omni-ui";
-var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/stale", "bot/viewer-changed", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
+var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/viewer-changed", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
 var isRefusal = (code) => REFUSALS.has(code) || code.startsWith("bot/adopt-") || code.startsWith("bot/reservation-");
 var call = async (endpoint, payload, signal) => {
-  const viewer = requestViewer(endpoint);
+  const active2 = requestViewer(endpoint);
+  const viewer = active2?.viewer?.id;
   const vault = endpoint.startsWith("vault-");
   let response;
   try {
@@ -4020,6 +4077,7 @@ var call = async (endpoint, payload, signal) => {
       signal
     });
   } catch (error) {
+    checkViewer(active2);
     if (error?.name === "AbortError") throw error;
     if (!vault) noteClientError(endpoint, Object.assign(new Error(`network error: ${error?.message ?? error}`), { code: "NETWORK" }));
     throw markNoted(Object.assign(new Error(t("Could not reach DSH. Check that it is still running.")), {
@@ -4027,20 +4085,23 @@ var call = async (endpoint, payload, signal) => {
       ...!vault ? { cause: error } : {}
     }));
   }
+  checkViewer(active2);
   if (!response.ok) {
     viewerRefused(`HTTP_${response.status}`);
     const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` });
-    if (!vault) noteClientError(endpoint, error);
+    if (!vault && !isRetired()) noteClientError(endpoint, error);
     throw error;
   }
   const result = await response.json();
+  checkViewer(active2);
   if (!result.ok) {
     const code = result.error?.code ?? "bot/error";
     viewerRefused(code);
     const message = hostText(result.error?.message ?? "Request failed");
     const error = Object.assign(new Error(code === "bot/internal" ? `${message} ${t("Settings → Feedback has the details.")}` : message), { code });
     if (code === "bot/refused" && result.error?.reason === "needs-new-conversation") error.reason = result.error.reason;
-    if (!vault && !isRefusal(code)) {
+    const staleShare = code === "bot/stale" && endpoint === "update-bot" && Object.hasOwn(payload ?? {}, "people");
+    if (!vault && !staleShare && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? "Request failed"), { code }));
       markNoted(error);
     }
@@ -24030,21 +24091,21 @@ var Glyph = ({ face }) => (0, import_react51.createElement)(
   { className: "lb-face-glyph", viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true, focusable: "false" },
   ...PATHS[face].map((d) => (0, import_react51.createElement)("path", { key: d, d }))
 );
-function FaceSwitch({ face, onFace, label, unavailable = {} }) {
+function FaceSwitch({ face, onFace, label, unavailable: unavailable2 = {} }) {
   return TwoPartSwitch({
     current: faceOr(face),
     onSelect: onFace,
     label: label ?? word("faces"),
-    unavailable,
+    unavailable: unavailable2,
     parts: FACES2.map((name) => ({ name, content: [(0, import_react51.createElement)(Glyph, { face: name }), faceWord(name)] }))
   });
 }
-function TwoPartSwitch({ current, onSelect, label, parts, unavailable = {} }) {
+function TwoPartSwitch({ current, onSelect, label, parts, unavailable: unavailable2 = {} }) {
   return (0, import_react51.createElement)(
     "div",
     { className: "lb-face", role: "group", "aria-label": label },
     ...parts.map(({ name, content }) => {
-      const why = name === current ? void 0 : unavailable[name];
+      const why = name === current ? void 0 : unavailable2[name];
       return (0, import_react51.createElement)("button", {
         key: name,
         type: "button",
@@ -43888,8 +43949,8 @@ function createSelfUpdateController({
       if (next === "connected") void refresh();
       else unconfirm(true);
     });
-    const unavailable = state2 === "connecting" || state2 === "disconnected";
-    if (detached || unavailable) unconfirm(unavailable);
+    const unavailable2 = state2 === "connecting" || state2 === "disconnected";
+    if (detached || unavailable2) unconfirm(unavailable2);
     else void refresh();
   };
   const open = () => {
@@ -44428,7 +44489,7 @@ function applyPage(view, request, page, earlier) {
     failed: false
   };
 }
-var feedEnded = (view) => selectBot(view, view.botId, view.withdrawn);
+var feedEnded = (view) => selectBot({ ...initialMember, generation: view.generation }, null, view.withdrawn);
 var pageRows = (pages2) => pages2.map((items, page) => items.map((row, index) => ({ row, key: `${page}:${index}` }))).reverse().flat();
 function botLabels(bots) {
   const counts2 = /* @__PURE__ */ new Map();
@@ -44498,6 +44559,7 @@ function applyMember(ctx) {
   let stopped = false;
   let connected = true;
   let needsChat = false;
+  let selection = null;
   let feed, retry, pageRequest, rosterRequest;
   const current = source.getSnapshot;
   const active2 = () => !stopped && !isRetired();
@@ -44509,6 +44571,7 @@ function applyMember(ctx) {
   };
   const clear = () => {
     cancelReads();
+    selection = current().botId ?? selection;
     source.set(feedEnded);
   };
   function load(cursor) {
@@ -44524,6 +44587,7 @@ function applyMember(ctx) {
       if (!accepts(request) || pageRequest !== pending) return;
       if (error?.code === "bot/not-found") {
         clear();
+        selection = null;
         source.set((view) => selectBot(view, null, true));
         refresh();
       } else source.set((view) => ({ ...view, loading: false, failed: true, cursor: cursor ?? null }));
@@ -44539,7 +44603,8 @@ function applyMember(ctx) {
     const pending = rosterRequest = new AbortController();
     void call("state", void 0, pending.signal).then((answer) => {
       if (!accepts(request) || rosterRequest !== pending) return;
-      const next = updateRoster(current(), Array.isArray(answer.bots) ? answer.bots : []);
+      const next = updateRoster({ ...current(), botId: selection ?? current().botId }, Array.isArray(answer.bots) ? answer.bots : []);
+      selection = null;
       if (!isCurrent(next, request)) {
         pageRequest?.abort();
         pageRequest = void 0;
@@ -44563,7 +44628,8 @@ function applyMember(ctx) {
   }
   function connect() {
     if (!active2()) return;
-    const stream = feed = new EventSource("api/omni-ui/feed");
+    const viewer = mountedViewer();
+    const stream = feed = new EventSource(`api/omni-ui/feed?viewer=${viewer.id}.${viewer.role}`);
     const live = () => active2() && feed === stream;
     stream.addEventListener("hello", () => {
       if (!live()) return;
@@ -44600,6 +44666,7 @@ function applyMember(ctx) {
     feed?.close();
     clearTimeout(retry);
     clear();
+    selection = null;
     source.set(initialMember);
   };
   ctx.effect(() => {
@@ -44723,13 +44790,18 @@ function apply(ctx) {
   ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy (gated)");
   startViewer(boot, lifetime.signal).then((viewer) => {
     if (lifetime.signal.aborted || ctx.fiber && ctx.fiber.state !== 2 || isRetired()) return;
-    if (viewer.role === "member" || viewer.role === "guest") applyMember(ctx);
-    else applyOwner(ctx, { skipLocale: true });
+    const surface = ctx.inject([], (scope) => {
+      if (viewer.role === "member" || viewer.role === "guest") applyMember(scope);
+      else applyOwner(scope, { gated: true });
+    });
+    ctx.effect(() => onRetire(() => {
+      void Promise.resolve().then(() => surface.dispose());
+    }), "ds-bot: retire gated surface");
   }, () => {
   });
 }
-function applyOwner(ctx, { skipLocale = false } = {}) {
-  if (!skipLocale) ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy");
+function applyOwner(ctx, { gated = false } = {}) {
+  if (!gated) ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy");
   const hostHolds = createSource({});
   migrateStorage();
   const PREFS_KEY = STORAGE.prefs;
@@ -44744,7 +44816,8 @@ function applyOwner(ctx, { skipLocale = false } = {}) {
   const reactionStore = sharedMap(STORAGE.reactions);
   const seenStore = sharedMap(STORAGE.seen);
   let seenAt = seenStore.read();
-  const ui2 = createSource({ details: null, view: "details", renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: unreadStore.read(), reactions: reactionStore.read(), visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null });
+  const emptyUi = { details: null, view: "details", renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: {}, reactions: {}, visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null };
+  const ui2 = createSource({ ...emptyUi, unread: unreadStore.read(), reactions: reactionStore.read() });
   const frame = createSource({ viewport: typeof window === "undefined" ? 0 : window.innerWidth });
   const surface = createSource({ mode: readMode(), plain: false });
   let agentSessionCache = /* @__PURE__ */ new Set();
@@ -44823,7 +44896,7 @@ function applyOwner(ctx, { skipLocale = false } = {}) {
     const order = ++pulls;
     const known2 = roster.getSnapshot();
     const value = await call("state", { since: known2.revision, models: known2.modelsKey ?? "", live: liveKey, locale: language(), allowPlace: allowPlace() });
-    if (order < applied) return;
+    if (order < applied || gated && isRetired()) return;
     applied = order;
     if (value.liveKey !== void 0) liveKey = value.liveKey;
     if (value.activity !== void 0) {
@@ -44891,6 +44964,29 @@ function applyOwner(ctx, { skipLocale = false } = {}) {
   };
   let selfUpdate;
   const selfUpdateStatusSource = createSource(null);
+  if (gated) ctx.effect(() => onRetire(() => {
+    currentFace = null;
+    for (const [source, empty] of [
+      [roster, EMPTY_ROSTER],
+      [ui2, emptyUi],
+      [work, { bots: {}, approvals: [] }],
+      ...[hostHolds, activity, live, computer, cards2, heldCards, turnClock, memoryNews].map((source2) => [source2, {}])
+    ]) {
+      try {
+        source.set(empty);
+      } catch {
+      }
+    }
+    seenAt = savedPrefs = {};
+    agentSessionCache.clear();
+    for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear();
+    for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
+      try {
+        ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.("");
+      } catch {
+      }
+    }
+  }), "ds-bot: clear owner state on retirement");
   ctx.effect(() => {
     let stopped = false;
     let running2 = false;

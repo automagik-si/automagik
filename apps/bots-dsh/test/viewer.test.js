@@ -5,6 +5,7 @@ import { browser, bundle, load, refusal, reply, tick, viewerReply } from './view
 const code = await bundle(`
 export { bootView, isRetired, mountedViewer, onRetire, startViewer } from './src/client/viewer.js'
 export { call } from './src/client/api.js'
+export { clientErrors } from './src/client/diagnostics.js'
 `)
 function fixture(options) {
   const f = browser(options)
@@ -83,4 +84,44 @@ test('VW4 desktop calls keep their body and install no watcher or storage entry'
   assert.equal(f.window.listeners.size, 0)
   assert.equal(f.document.listeners.size, 0)
   assert.equal(f.intervals.size, 0)
+})
+
+test('VW5 startup whoami retries rate limits, unavailability and network failure while the page stays closed', async () => {
+  const timeouts = []
+  const delays = []
+  const responses = [
+    () => ({ ok: false, status: 429 }),
+    () => ({ ok: false, status: 503 }),
+    () => { throw new TypeError('network failure') },
+    () => viewerReply('member'),
+  ]
+  const f = fixture({ boot, fetch: () => responses.shift()(), timers: {
+    setTimeout(run, delay) { timeouts.push(run); delays.push(delay); return run },
+  } })
+  const starting = f.api.startViewer(f.api.bootView())
+  void starting.catch(() => {})
+  for (const count of [1, 2, 3]) {
+    await tick()
+    assert.equal(f.calls.length, count)
+    assert.equal(f.api.mountedViewer(), undefined)
+    assert.equal(f.document.body.inert, true)
+    assert.equal(f.document.body.style.getPropertyValue('display'), 'none')
+    await assert.rejects(f.api.call('state'), { code: 'bot/retired' })
+    assert.equal(f.calls.length, count)
+    timeouts.shift()()
+  }
+  assert.equal((await starting).role, 'member')
+  assert.deepEqual(delays, [250, 500, 1000])
+  assert.equal(f.document.body.inert, false)
+  assert.equal(f.document.body.style.getPropertyValue('display'), '')
+  assert.deepEqual(f.reloads, [])
+})
+
+test('VW6 a stale image retains API diagnostics while a stale sharing save goes to the People card', async () => {
+  const f = fixture({ fetch: () => refusal('bot/stale', 'Stale fixture') })
+  await assert.rejects(f.api.call('send', { sessionId: 'b', images: ['expired'] }), { code: 'bot/stale' })
+  await assert.rejects(f.api.call('update-bot', { id: 'b', people: { mode: 'owners' } }), { code: 'bot/stale' })
+  const entries = f.api.clientErrors()
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].text, 'send: Stale fixture')
 })

@@ -9,6 +9,7 @@
 // `hello` carries the team's revision and, for the mobile API, its version and the
 // latest notice, so a client that reconnects knows what it missed.
 import { ROUTE } from './constants.js'
+import { callerService, matchesFeedViewer, multiuserMode } from './multiuser.js'
 
 export const FEED_ROUTE = `${ROUTE}/feed`
 // A comment line now and then keeps an idle connection open.
@@ -112,6 +113,12 @@ export function install(rt) {
     methods: ['GET'],
     requestBody: 'buffered',
     fetch: async (request) => {
+      const service = callerService(ctx)
+      if (multiuserMode() || service) {
+        const headers = { 'cache-control': 'no-store' }
+        if (!service) return new Response(null, { status: 503, headers })
+        if (!matchesFeedViewer(request, rt.ownerViewer?.(request))) return new Response(null, { status: 403, headers })
+      }
       let controller
       const body = new ReadableStream({
         start(own) {

@@ -6,6 +6,7 @@ import { createPeerRegistry } from './peers.js'
 
 export const DEFAULT_MAX_REQUEST_BODY_BYTES = 314572800
 export const CALLER_PAIRS = new Map([['POST /api/omni-ui', 16_384], ['GET /api/omni-ui/feed', 0]])
+const VIEWER_FEED = /^GET \/api\/omni-ui\/feed\?viewer=[\w-]{1,64}\.(?:owner|admin|member|guest)$/
 const DRAIN_TIMEOUT_MS = 30_000
 const PREFIX = '/_automagik/caller'
 export const READY_PATH = PREFIX + '/_ready'
@@ -171,7 +172,8 @@ export function createCarrier({ connection, staticResource, clientModules, appRe
     try {
       const { method } = req
       const raw = req.url.slice(PREFIX.length)
-      const pairLimit = CALLER_PAIRS.get(method + ' ' + raw)
+      const pair = method + ' ' + raw
+      const pairLimit = VIEWER_FEED.test(pair) ? 0 : CALLER_PAIRS.get(pair)
       const routes = pairLimit === undefined ? undefined : callerRoutes()
       const callerHandler = routes?.version === 1 ? routes.match(url.pathname, method) : undefined
       if (callerHandler && method === 'POST') {

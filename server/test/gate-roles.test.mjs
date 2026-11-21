@@ -26,6 +26,15 @@ test('G1 role precedence and raw target decisions are shared across gate and ada
   }
 })
 
+test('G1 the viewer-bound feed permits only its canonical query on GET', () => {
+  const path = '/api/omni-ui/feed?viewer=mounted.member'
+  const allow = (raw, method = 'GET') => callerTarget({ role: 'member', raw, method, origin }).allow
+  assert.equal(allow(path), true)
+  assert.equal(allow(path, 'POST'), false)
+  for (const raw of [path + '&since=1', path + '&viewer=other.member', path.replace('mounted', '%6Dounted'),
+    path.replace('.member', '.none'), path.replace('/feed', '/./feed')]) assert.equal(allow(raw), false, raw)
+})
+
 async function listen(server) {
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
