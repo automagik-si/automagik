@@ -1,9 +1,11 @@
 import { afterEach, expect, test } from 'bun:test';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync,
   writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
+import { parseArgs, reap } from './wish-reap.mjs';
 
 const SCRIPT = join(import.meta.dir, 'wish-worktree.sh');
 const ENV = {
@@ -41,7 +43,7 @@ function remoteFixture() {
   git(seed, 'add', '-A');
   git(seed, 'commit', '-qm', 'base');
   git(seed, 'push', '-q', 'origin', 'dev');
-  return { dir, remote };
+  return { dir, remote, seed };
 }
 
 test('create shares one clone, and remove refuses dirty but removes and prunes clean', () => {
@@ -128,4 +130,151 @@ test('remove refuses every *.lock under the shared git dir', () => {
   expect(existsSync(copy)).toBe(false);
   const admin = join(shared, '.git', 'worktrees');
   expect(existsSync(admin) ? readdirSync(admin).length : 0).toBe(0);
+});
+
+test('concurrent worktrees and borrowing clones initialise a single shared store', async () => {
+  const { dir, remote } = remoteFixture();
+  const sharedRoot = join(dir, 'wishes', '.shared');
+  const root = join(dir, 'wishes', 'remote');
+  const copies = ['one', 'two', 'three', 'four'].map((name) => join(root, name));
+  const runAsync = promisify(execFile);
+  const results = await Promise.allSettled(copies.map((copy, index) => {
+    const mode = index < 2 ? [] : ['--shared-clone'];
+    return runAsync('sh', [SCRIPT, '--shared-root', sharedRoot, ...mode, 'create', remote,
+      copy, 'wish/concurrent-' + index], { env: ENV });
+  }));
+  expect(results.map((result) => result.status === 'fulfilled' ? 'created' : result.reason.stderr))
+    .toEqual(['created', 'created', 'created', 'created']);
+
+  const shared = join(sharedRoot, 'remote');
+  const common = join(shared, '.git');
+  expect(readdirSync(sharedRoot)).toEqual(['remote']);
+  expect(existsSync(join(shared, 'product.txt'))).toBe(false);
+  for (const [index, copy] of copies.entries()) {
+    expect(git(copy, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+      .toBe(index < 2 ? common : join(copy, '.git'));
+    expect(git(copy, 'branch', '--show-current')).toBe(`wish/concurrent-${index}`);
+  }
+  git(copies[0], 'commit', '--allow-empty', '-qm', 'only in the first wish');
+  expect(git(copies[0], 'rev-parse', 'HEAD')).not.toBe(git(copies[1], 'rev-parse', 'HEAD'));
+
+  const other = join(dir, 'other', 'remote.git');
+  mkdirSync(dirname(other));
+  git(dir, 'clone', '-q', '--bare', remote, other);
+  const mismatched = run(['--shared-root', sharedRoot, 'create', other, join(root, 'wrong'),
+    'wish/wrong']);
+  expect(mismatched.stderr).toContain('different origin');
+  expect(existsSync(join(root, 'wrong'))).toBe(false);
+}, 15_000);
+
+test('shared clones borrow objects and keep git writes and publish setup inside each copy', () => {
+  const { dir, remote } = remoteFixture();
+  const project = join(dir, 'project');
+  git(dir, 'clone', '-q', remote, project);
+  git(project, 'branch', 'wish/granted');
+  const shared = join(dir, 'wishes', '.shared', 'project');
+  const root = join(dir, 'wishes', 'project');
+  const published = join(root, 'published');
+  const retained = join(root, 'retained');
+
+  function create(copy: string, branch: string, base: string) {
+    const result = run(['--shared', shared, '--shared-clone', 'create', project, copy, branch, base]);
+    expect(result.stderr).toBe('');
+    expect(result.code).toBe(0);
+  }
+
+  create(published, 'wish/published', 'origin/dev');
+  const publishedBase = git(published, 'rev-parse', 'HEAD');
+  const objects = git(shared, 'count-objects', '-v');
+  create(retained, 'wish/retained', 'origin/dev');
+  expect(git(shared, 'count-objects', '-v')).toBe(objects);
+
+  for (const copy of [published, retained]) {
+    expect(lstatSync(join(copy, '.git')).isDirectory()).toBe(true);
+    expect(git(copy, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+      .toBe(join(copy, '.git'));
+    expect(git(copy, 'count-objects', '-v')).toContain('count: 0\n');
+    expect(git(copy, 'count-objects', '-v')).toContain('in-pack: 0\n');
+    expect(git(copy, 'count-objects', '-v')).toContain(`alternate: ${shared}/.git/objects`);
+    expect(git(copy, 'remote', 'get-url', 'origin')).toBe(project);
+    expect(git(copy, 'remote', 'get-url', '--push', 'origin'))
+      .toBe('/dev/null/genie-wish-copies-push-nowhere');
+    expect(git(copy, 'config', '--local', '--get', 'credential.helper')).toBe('');
+    expect(git(copy, 'rev-parse', 'origin/wish/granted')).toBe(publishedBase);
+  }
+
+  expect(git(published, 'branch', '--show-current')).toBe('wish/published');
+  expect(git(retained, 'branch', '--show-current')).toBe('wish/retained');
+  git(published, 'commit', '--allow-empty', '-qm', 'publish only this wish');
+  const lockedOut = spawnSync('git', ['push', 'origin', 'HEAD:refs/heads/wish/published'],
+    { cwd: published, env: ENV });
+  expect(lockedOut.status).not.toBe(0);
+  git(published, 'config', '--local', '--unset-all', 'credential.helper');
+  git(published, 'remote', 'add', 'publish', remote);
+  git(published, 'push', '-q', 'publish', 'HEAD:refs/pull/271/head');
+  expect(git(retained, 'remote')).toBe('origin');
+  expect(git(retained, 'config', '--local', '--get', 'credential.helper')).toBe('');
+  expect(git(retained, 'rev-parse', 'HEAD')).toBe(publishedBase);
+  expect(git(shared, 'count-objects', '-v')).toBe(objects);
+
+  writeFileSync(join(retained, 'product.txt'), 'dirty work stays here\n');
+  const options = parseArgs(['--root', root, '--shared', shared, '--remote', 'publish',
+    '--idle-minutes', '0', '--apply']);
+  const result = reap(options);
+  expect(result.copies).toEqual([
+    expect.objectContaining({ name: 'published', decision: 'remove', reason: 'head-on-remote' }),
+    expect.objectContaining({ name: 'retained', decision: 'keep', reason: 'dirty' }),
+  ]);
+  expect(result.summary.removed).toBe(1);
+  expect(existsSync(published)).toBe(false);
+
+  git(retained, 'add', 'product.txt');
+  git(retained, 'commit', '-qm', 'unpushed change');
+  git(retained, 'remote', 'add', 'publish', remote);
+  const head = git(retained, 'rev-parse', 'HEAD');
+  git(project, 'fetch', '-q', retained, 'HEAD:refs/heads/wish/retained');
+  const afterFetchBack = reap(options);
+  expect(afterFetchBack.copies[0]).toMatchObject({ sha: head, decision: 'keep', reason: 'unpublished' });
+  expect(git(retained, 'rev-parse', 'HEAD')).toBe(head);
+});
+
+test('shared clones can start from an exact source commit available only in FETCH_HEAD', () => {
+  const { dir, remote, seed } = remoteFixture();
+  const project = join(dir, 'project');
+  git(dir, 'clone', '-q', remote, project);
+  const shared = join(dir, 'shared');
+  const create = (...args: string[]) => run(['--shared', shared, '--shared-clone', 'create',
+    project, ...args]);
+  expect(create(join(dir, 'one'), 'wish/one').code).toBe(0);
+  git(seed, 'commit', '--allow-empty', '-qm', 'upstream tip fetched without a destination');
+  git(seed, 'push', '-q', 'origin', 'HEAD:refs/pull/94/head');
+  git(project, 'fetch', '-q', '--no-tags', remote, 'refs/pull/94/head');
+  const tip = git(project, 'rev-parse', 'FETCH_HEAD');
+  expect(git(project, 'for-each-ref', '--points-at', tip)).toBe('');
+
+  const copy = join(dir, 'two');
+  expect(create(copy, 'wish/two', tip).code).toBe(0);
+  expect(git(copy, 'rev-parse', 'HEAD')).toBe(tip);
+  expect(git(copy, 'count-objects', '-v')).toContain('count: 0\n');
+  expect(git(copy, 'count-objects', '-v')).toContain('in-pack: 0\n');
+});
+
+test('refresh and normal Git GC preserve objects borrowed from a deleted source branch', () => {
+  const { dir, remote } = remoteFixture();
+  const project = join(dir, 'project');
+  git(dir, 'clone', '-q', remote, project);
+  git(project, 'checkout', '-qb', 'temporary');
+  git(project, 'commit', '--allow-empty', '-qm', 'only borrowed by the first wish');
+  const tip = git(project, 'rev-parse', 'HEAD');
+  git(project, 'checkout', '-q', 'dev');
+  const shared = join(dir, 'shared');
+  const create = (...args: string[]) => run(['--shared', shared, '--shared-clone', 'create',
+    project, ...args]);
+  const first = join(dir, 'one');
+  expect(create(first, 'wish/one', tip).code).toBe(0);
+  git(project, 'branch', '-D', 'temporary');
+  expect(create(join(dir, 'two'), 'wish/two').code).toBe(0);
+  expect(git(shared, 'for-each-ref', '--points-at', tip)).toBe('');
+  git(shared, 'gc', '--quiet');
+  expect(git(first, 'show', '-s', '--format=%s', tip)).toBe('only borrowed by the first wish');
 });
