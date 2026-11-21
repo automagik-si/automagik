@@ -4,7 +4,7 @@ import {
   renameSync, rmSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
-import { PLUGINS, readJson, releaseVersion } from './profile-state.mjs'
+import { ADAPTER, LEGACY_PLUGINS, PLUGINS, compareRelease, readJson, releaseVersion } from './profile-state.mjs'
 
 export const LAUNCH_FILE = 'launch-url'
 const PROFILE_STATE_FILE = 'profile-state.json'
@@ -19,11 +19,11 @@ const STATE_KEYS = ['schemaVersion', 'at', 'plugins', 'followsImage', 'ownerMana
 const REASONS = new Set([
   'invalid-profile', 'unsupported-seed-marker', 'owner-managed', 'invalid-image-metadata',
   'matching-image', 'update-rolled-back', 'missing-plugins', 'newer-than-image',
-  'update-required', 'invalid-profile-state',
+  'update-required', 'invalid-profile-state', 'signed-update-ahead', 'self-update-unfinished',
 ])
 
 // Resolve existing symlinks even when the private directory is yet to be created.
-function realLocation(path) {
+export function realLocation(path) {
   try {
     return realpathSync.native(path)
   } catch (error) {
@@ -37,7 +37,7 @@ function contains(parent, path) {
   return child !== '..' && !child.startsWith('..' + sep) && !isAbsolute(child)
 }
 
-export function prepareGateView(view, volumeRoot, privateDirs, { uid = process.getuid?.() ?? 1000 } = {}) {
+export function prepareGateView(view, volumeRoot, privateDirs, { uid = process.getuid?.() ?? 1000, checkOnly = false } = {}) {
   const current = lstatSync(view, { throwIfNoEntry: false })
   // Owned by the uid DSH runs as (1000 in the image), never another account's folder.
   if (current && (!current.isDirectory() || current.uid !== uid)) {
@@ -53,6 +53,7 @@ export function prepareGateView(view, volumeRoot, privateDirs, { uid = process.g
       throw new Error(`gate-view overlaps ${name}`)
     }
   }
+  if (checkOnly) return
   if (!current) mkdirSync(view, { recursive: true, mode: 0o700 })
   const info = lstatSync(view)
   if (!info.isDirectory() || info.uid !== uid || realpathSync.native(view) !== location) {
@@ -122,7 +123,16 @@ function isProfileState(state, build) {
   }
   // profileState: ownerManaged only with reason owner-managed.
   if (state.ownerManaged && state.reason !== 'owner-managed') return false
-  return versions.every(version => version === null || releaseVersion(version))
+  if (!versions.every(version => version === null || releaseVersion(version))) return false
+  if (state.reason === 'signed-update-ahead') {
+    const laneVersion = state.plugins[LEGACY_PLUGINS[0]]
+    const adapter = state.plugins[ADAPTER]
+    return releaseVersion(build?.automagik) && laneVersion !== null &&
+      LEGACY_PLUGINS.every(name => state.plugins[name] === laneVersion) &&
+      compareRelease(laneVersion, build.automagik) > 0 &&
+      (adapter === null || compareRelease(adapter, build.automagik) <= 0)
+  }
+  return true
 }
 
 function unavailableProfileState(reason) {

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (owner decisions 2026-11-18: Q2, Q6, Q7; technical decisions named below: Q1, Q3, Q4, Q5; mock approved and repaired in #1546 and landed by its takeover with this RFC (deliveries 1 and 2); layout follow-up #1719; technical amendment 2026-11-20: Q5 re-decided, the version store, the update set, the Arca path, the stop-and-resume order and the verifier's shipping, see "Amendment 2026-11-20"; deliveries 3-8 open) |
+| Status | Accepted (owner decisions 2026-11-18: Q2, Q6, Q7; technical decisions named below: Q1, Q3, Q4, Q5; mock approved and repaired in #1546 and landed by its takeover with this RFC (deliveries 1 and 2); layout follow-up #1719; technical amendment 2026-11-20: Q5 re-decided, the version store, the update set, the in-process DSH restart in Arca, the stop-and-resume order and the verifier's shipping, see "Amendment 2026-11-20"; deliveries 3-8 open) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin only (3.N.P) for deliveries 3-7: `apps/bots-dsh` gains the UI, the host half and the supervisor; delivery 8 changes the server image (`server/`), which reaches Arca through the image workflow; nothing here builds the desktop app |
 | Created | 2026-11-18 |
@@ -77,11 +77,12 @@ with it (`server/entrypoint.mjs:158-159`). So the **supervisor is the process th
   the Bots plugin under an already shipped path (`src/host/`), so adding it does not change the
   package's install fields.
 - **Arca (a server image):** the supervisor is the image's own entrypoint (`server/entrypoint.mjs`),
-  which already starts DSH and prepares the profile before it (`:117`, `:134`). Arca keeps doing what
-  the owner chose (Q2): it restarts the container. The entrypoint records the pending step in the
-  version store, stops DSH and exits; Arca's restart brings the container back, and the next
-  entrypoint finishes the step (switch, health, or rollback) before and after it starts DSH. The
-  store is on the same writable volume, so it survives the container restart.
+  which prepares the profile before it starts DSH. It runs the supervisor shipped in the image
+  and restarts its DSH child in process for an update or rollback. In Compose the gate uses
+  `network_mode: service:dsh` and loses its network when the DSH container restarts. The Compose
+  file also has no restart policy. A container restart is the crash fallback. On the next start
+  the supervisor recovers the interrupted update from the same writable volume. Instances with
+  multiuser mode on update through the image.
 
 The host plugin only asks for an update and reads its state. Where no supervisor runs (a DSH started
 by hand, the desktop app), it offers no update and says why in Settings; the desktop app keeps its own
@@ -164,10 +165,10 @@ profile directory (`server/profile-follow.mjs:144-174`), which would carry or dr
   part of a version** and is never copied, restored or touched by an update or a rollback. Both move
   only the installer-owned files above; neither restores a whole-profile copy or backup.
   That is what "nothing was lost" means here, and the rollback screen says it in those words.
-- **In Arca** the in-app update moves the profile ahead of the image. The image's follow learns that a
-  profile a signed in-app update put there, recorded in `current.json`, is followed and healthy: it
-  leaves that profile as it is until the image's own release reaches that version, and then follows the
-  image as today (delivery 8). The follow's own backup stays the follow's; the in-app rollback uses the
+- **In Arca** the in-app update moves the profile ahead of the image. The follow checks the committed
+  dependency pins and their original base specs in `current.json` against the installed profile and
+  its image seed. It leaves that signed-ahead profile as it is until the image's release reaches the
+  update, and then follows the image as today. The follow's own backup stays the follow's, and the in-app rollback uses the
   version store above. If a host offers no writable home, the updater refuses and says why — it never
   installs in place with nothing kept.
 
@@ -265,9 +266,8 @@ they are his, and marks the card options as choices, not sentences.
   hoje". This is an option choice, not a sentence of his.
 - **Q2 — who keeps the previous version.** The owner chose the card option **"A instância, e o Arca
   reinicia (Recomendado)"**, described as "Funciona igual no Arca e numa máquina comum; o Arca só faz
-  o restart e fornece a pasta". An option choice, as designed in "Who runs the update" (Arca restarts
-  the container) and "Where the previous version is kept" (the instance keeps the version, on the
-  folder Arca provides).
+  o restart e fornece a pasta". The instance keeps the version on the folder Arca provides. The
+  technical restart design is recorded in the amendment below.
 
 Decided by the chief of staff on 2026-11-18 — technical, not the owner's:
 
@@ -336,9 +336,8 @@ and the sections above now carry the corrected design:
 
 1. **Q5 re-decided: the supervisor is the process that starts DSH**, not a host plugin, which dies
    with the restart it supervises ("Who runs the update").
-2. **Q2 kept as the owner chose it:** in Arca the restart is Arca's container restart; the entrypoint
-   records the pending step and finishes it on the next start. On a plain host the wrapper restarts its
-   DSH child.
+2. **The instance keeps the previous version on the folder Arca provides.** The plain-host wrapper
+   restarts its DSH child. Item 15 records how the image restarts DSH.
 3. **The version store moved beside the profile** (`$DSH_HOME/update/<profile>/`); what a version
    keeps is the inventory in "Where the previous version is kept". A rollback never restores a
    whole-profile backup, so settings, secrets and model keys written after the update survive it.
@@ -373,6 +372,15 @@ and the sections above now carry the corrected design:
 14. **Failed live relink (delivery 6):** the supervisor reverses the switch and checks the previous
     version. It records `notUpdated` with `stage-failed` if that version passes health. The candidate
     never reached its trial.
+15. **Arca restarts DSH in process.** In Compose the gate shares DSH's network namespace with
+    `network_mode: service:dsh` and loses its network when the DSH container restarts. The Compose
+    file has no restart policy. The entrypoint restarts its child for updates and rollbacks. A
+    container restart after a crash runs the same supervisor recovery on the next start. Multiuser
+    mode on updates through the image. The follow recognizes a signed-ahead profile by its
+    installed versions and the committed pins and base specs in `current.json`. The image host does
+    not announce same-version reinstall (Force update) until the entrypoint recovers a pending
+    reinstall before the image follow and recognizes a committed signed reinstall at the image's
+    version.
 
 ## Deliveries (each one PR)
 
@@ -386,7 +394,7 @@ and the sections above now carry the corrected design:
 | 5b | The setting, `self-update-start`, the hold at the click, resume after the verdict and the "Update now" line | a real update behind a setting, off by default |
 | 6 | Health and automatic rollback by renaming the kept version back; the resume held until health | the rollback screen tells the truth |
 | 7 | The nod and the full-screen modal wired to the real state instead of the mock's timers; the mock and its flag retire | the approved flow, working |
-| 8 | Arca: the entrypoint as the supervisor (record, exit for Arca's restart, finish on the next start), and the follow and the health check keeping a profile a signed update moved ahead; a server image change, documented in `server/README.md` (closes #1540) | an instance in Arca updating itself |
+| 8 | Arca: the entrypoint hosts the supervisor, restarts DSH in process and recovers after a crash. The follow and health check recognize a profile a signed update moved ahead. Multiuser mode on updates through the image. See `server/README.md` (closes #1540). | an instance in Arca updating itself |
 
 Delivery 5 ships as two PRs, 5a then 5b, as approved by the coordinator on 2026-11-20.
 

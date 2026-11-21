@@ -11,12 +11,12 @@ import { createUpdateHold, install as installUpdateHold } from '../src/host/self
 import { install as installSelfUpdate, selfUpdateStatus } from '../src/host/self-update.js'
 import { LISTENER_UNKNOWN } from '../src/host/supervisor/child.js'
 import { selfUpdateCheck } from '../src/host/self-update-check.js'
-import { refreshCopy, runningCopy, SELF_CHECK_OK, SUPERVISOR_FILES } from '../src/host/supervisor/copy.js'
+import { refreshCopy, reinstallCopies, runningCopy, SELF_CHECK_OK, SUPERVISOR_FILES } from '../src/host/supervisor/copy.js'
 import { stageInstall, takeProfileLock, VENDOR } from '../src/host/supervisor/stage.js'
 import { completeSwitch, planSwitch } from '../src/host/supervisor/switch.js'
 import { writeJsonAtomic } from '../src/host/supervisor/store.js'
 import { batch, bootstrap, shell } from './fixtures/supervisor-health-wire.mjs'
-import { BOTS, eventsOf, fixture, FROM, HOST, lane, putDownloads, read, RUN_ID, TO, WELCOME, write } from './fixtures/supervisor.mjs'
+import { BOTS, digest, eventsOf, fixture, FROM, HOST, lane, putDownloads, read, RUN_ID, TO, WELCOME, write } from './fixtures/supervisor.mjs'
 
 const DRIVER = fileURLToPath(new URL('./fixtures/supervisor-driver.mjs', import.meta.url))
 const stateOf = f => read(join(f.store, 'state.json'))
@@ -91,12 +91,12 @@ function request(f, overrides = {}) {
   writeJsonAtomic(join(f.store, 'request.json'), value, { profileDir: f.profileDir })
 }
 
-function driver(t, f) {
+function driver(t, f, imageHost) {
   // One signed lane per fixture: a second driver must not re-sign the file the first one trusts.
   const signed = f.signed ??= lane(f)
   const options = {
     home: f.home, profile: f.profile, command: f.command, version: FROM, laneUrl: signed.laneUrl, keys: signed.keys,
-    tarballs: [...f.tarballs].map(([url, bytes]) => [url, bytes.toString('base64')]),
+    tarballs: [...f.tarballs].map(([url, bytes]) => [url, bytes.toString('base64')]), imageHost,
   }
   return launch(t, process.execPath, [DRIVER], { ...f.env, SUPERVISOR_DRIVER: JSON.stringify(options) },
     f.env.SUPERVISOR_CUT_AFTER !== undefined)
@@ -104,6 +104,14 @@ function driver(t, f) {
 
 const boots = f => eventsOf(f).filter(item => item.event === 'boot')
 const announced = running => running.stdout().includes('token=<redacted>')
+const pinsFor = f => Object.fromEntries(f.release.map(item => [item.name, `file:${VENDOR}/${item.sha256}.tgz`]))
+
+function imageDriver(t, f, mode = 'normal') {
+  // Delivery 6's fake health transport, on the announce-only fake DSH.
+  fakeTransport(f)
+  f.env.SUPERVISOR_IMAGE_HOOKS = '1'
+  return driver(t, f, mode)
+}
 
 async function unusedLoopbackPort() {
   const server = createServer()
@@ -183,6 +191,7 @@ test('a boot-bound request updates once, keeps the old version and rotates the s
   assert.equal(state.journal.keep, `versions/${FROM}`)
   assert.deepEqual(read(join(f.store, 'current.json')), {
     version: 1, live: { version: TO, sequence: 42 }, kept: { version: FROM }, lastSequence: 42,
+    entries: pinsFor(f), base: { [BOTS]: f.manifest.dependencies[BOTS] },
   })
   assert.deepEqual(read(join(f.store, 'supervisor/kept/version.json')), { version: FROM })
   assert.ok(fs.existsSync(launcher))
@@ -447,27 +456,32 @@ async function interruptedCandidate(f, edit = () => {}) {
   save()
 }
 
-for (const cut of ['after intent', 'after current.json', 'legacy current.json']) {
+for (const cut of ['after intent', 'after current.json', 'legacy current.json', 'after current.json in the image', 'after intent in the image']) {
   test('finishes the version-record commit ' + cut + ' without relinking again', async t => {
     const f = fixture(t, { mode: 'relink-fails' })
     const previous = { version: 1, live: { version: FROM, sequence: 41 }, kept: null, lastSequence: 41 }
     const next = { version: 1, live: { version: TO, sequence: 42 }, kept: { version: FROM }, lastSequence: 42 }
     const current = join(f.store, 'current.json')
-    write(current, cut === 'after intent' ? previous : next)
+    const inImage = cut.endsWith('in the image')
+    const afterIntent = cut.startsWith('after intent')
+    const base = { [BOTS]: inImage && !afterIntent ? 'file:vendor/image-bots.tgz' : f.manifest.dependencies[BOTS] }
+    const committed = { ...next, entries: pinsFor(f), base }
+    write(current, afterIntent ? previous : inImage ? committed : next)
     await interruptedCandidate(f, run => {
       run.phase = 'health'
       run.journal.relinking = true
       if (cut !== 'legacy current.json') run.journal.commitCurrent = true
     })
-    const running = driver(t, f)
+    if (inImage) fs.unlinkSync(join(f.staging.profileDir, 'package.json'))
+    const running = inImage ? imageDriver(t, f) : driver(t, f)
     await until(() => stateOf(f).phase === 'healthy', 'version-record recovery did not finish')
-    assert.deepEqual(read(current), next)
+    assert.deepEqual(read(current), committed)
     assert.equal(stateOf(f).journal.commitCurrent, true)
     assert.equal(read(join(f.profileDir, 'node_modules', BOTS, 'package.json')).version, TO)
     assert.equal(eventsOf(f).filter(event => event.event === 'install' && event.live).length, 0)
     assert.equal(boots(f).length, 1)
-    running.child.kill('SIGTERM')
-    assert.equal((await running.exit).code, 0)
+    running.child.kill(inImage ? 'SIGINT' : 'SIGTERM')
+    assert.equal((await running.exit).code, inImage ? 1 : 0)
   })
 }
 
@@ -490,6 +504,125 @@ test('discards a distinct boot-bound request posted during recovery', async t =>
   assert.equal(stateOf(f).reason, 'not-newer')
   running.child.kill('SIGTERM')
   assert.equal((await running.exit).code, 0)
+})
+
+test('image callbacks run for each child and preserve the original base through a second update', async t => {
+  const f = fixture(t)
+  const first = imageDriver(t, f, 'throw-on-start')
+  await until(() => announced(first), 'the initial image child did not announce')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', 'the image trial did not finish')
+  assert.equal(fs.existsSync(join(f.store, 'supervisor')), false)
+  const current = join(f.store, 'current.json')
+  const base = { [BOTS]: f.manifest.dependencies[BOTS] }
+  assert.deepEqual(read(current).entries, pinsFor(f))
+  assert.deepEqual(read(current).base, base)
+  const hooks = eventsOf(f).filter(event => event.event === 'image-start' || event.event === 'image-launch')
+  assert.deepEqual(hooks, [1, 2].flatMap(index => [
+    { event: 'image-start' }, { event: 'image-launch', url: `http://127.0.0.1:3080/?token=image-child-${index}` },
+  ]))
+  assert.equal(boots(f)[0].boot, boots(f)[1].boot)
+  const notes = eventsOf(f).filter(event => event.event === 'image-line').map(event => event.line)
+  assert.equal(notes.filter(line => line === 'diagnostic token=<redacted>').length, 2)
+  assert.equal(notes.filter(line => line === 'dsh web: http://127.0.0.1:3080/?token=<redacted>').length, 2)
+  await until(() => eventsOf(f).some(event => event.event === 'image-save' && event.phase === 'healthy'),
+    'the image host did not receive the terminal save')
+  const saves = eventsOf(f).filter(event => event.event === 'image-save')
+  assert.equal(saves[0].phase, 'checking')
+  assert.equal(saves.at(-1).phase, 'healthy')
+  assert.ok(saves.every(event => event.matchesDisk))
+  first.child.kill('SIGINT')
+  const stopped = await first.exit
+  assert.equal(stopped.code, 1)
+  assert.match(stopped.stdout, /token=<redacted>/)
+  assert.match(stopped.stderr, /diagnostic token=<redacted>/)
+  assert.equal((stopped.stderr.match(/could not notify the host before starting DSH/g) ?? []).length, 2)
+  assert.match(stopped.stderr, /could not notify the host of the saved update state/)
+  assert.doesNotMatch(stopped.stderr, /private hook details|example\.invalid\/secret/)
+  assert.doesNotMatch(stopped.stdout + stopped.stderr, /image-child-|image-diagnostic/)
+  assert.equal(eventsOf(f).at(-1).signal, 'SIGTERM')
+
+  const next = '3.160.4', bytes = Buffer.from('the second signed archive')
+  const url = `https://github.com/example/fixture/releases/download/v${next}/bots-dsh.tgz`
+  f.release = [{ ...f.release[0], url, version: next, size: bytes.length,
+    sha256: digest('sha256', bytes), integrity: `sha512-${digest('sha512', bytes, 'base64')}` }]
+  f.tarballs = new Map([[url, bytes]])
+  f.env.SUPERVISOR_PACKAGES = JSON.stringify({ [f.release[0].sha256]: { name: BOTS, version: next } })
+  f.signed = lane(f, pointer => { pointer.version = next; pointer.sequence = 43 })
+  const second = imageDriver(t, f)
+  await until(() => announced(second), 'the replacement supervisor did not start DSH')
+  request(f)
+  await until(() => stateOf(f).phase === 'healthy' && stateOf(f).to === next, 'the second update did not finish')
+  assert.deepEqual(read(current), {
+    version: 1, live: { version: next, sequence: 43 }, kept: { version: TO }, lastSequence: 43,
+    entries: pinsFor(f), base,
+  })
+  second.child.kill('SIGINT')
+  assert.equal((await second.exit).code, 1)
+})
+
+test('only the current child can publish a launch URL while the previous pipes drain', async t => {
+  const f = fixture(t, { mode: 'retired-announcement' })
+  const running = imageDriver(t, f)
+  await until(() => boots(f).length === 1, 'initial child did not start')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', 'the image trial did not finish')
+  // Both children's announcements and the retired child's late line reach stdout, redacted.
+  await until(() => (running.stdout().match(/token=<redacted>/g)?.length ?? 0) === 3 &&
+    running.stderr().includes('dsh web: http://127.0.0.1:3080/?token=<redacted>'), 'retired output did not drain')
+  assert.deepEqual(eventsOf(f).filter(event => event.event === 'image-launch'), [
+    { event: 'image-launch', url: 'http://127.0.0.1:3080/?token=image-child-1' },
+    { event: 'image-launch', url: 'http://127.0.0.1:3080/?token=image-child-2' },
+  ])
+  running.child.kill('SIGINT')
+  const result = await running.exit
+  assert.equal(result.code, 1)
+  assert.doesNotMatch(result.stdout + result.stderr, /retired-(?:stdout|stderr)/)
+})
+
+test('an image candidate that fails health rolls back in process and the previous child publishes its own URL', async t => {
+  const f = fixture(t, { mode: 'trial-sign-in' })
+  const running = imageDriver(t, f)
+  await until(() => announced(running), 'the initial image child did not start')
+  request(f)
+  await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'rolledBack', 'the image rollback did not finish')
+  assert.equal(stateOf(f).rollback.failed, 'sign-in')
+  assert.equal(previousVersion(f), FROM)
+  // Initial child, the failed trial and the restored previous child: one supervisor boot, three children.
+  await until(() => eventsOf(f).filter(event => event.event === 'image-launch').length === 3, 'the restored child did not publish')
+  assert.deepEqual(eventsOf(f).filter(event => event.event === 'image-launch').map(event => event.url), [1, 2, 3]
+    .map(index => `http://127.0.0.1:3080/?token=image-child-${index}`))
+  assert.equal(eventsOf(f).filter(event => event.event === 'image-start').length, 3)
+  assert.equal(new Set(boots(f).map(item => item.boot)).size, 1)
+  assert.equal(fs.existsSync(join(f.store, 'supervisor')), false)
+  running.child.kill('SIGINT')
+  assert.equal((await running.exit).code, 1)
+})
+
+test('the image host never announces same-version reinstall, even beside capable store copies (RFC 0041 R9)', async t => {
+  const f = fixture(t)
+  await setup(t, f)
+  // A plain-host supervisor would announce it here: the store holds capable current and kept copies.
+  assert.equal(reinstallCopies(f.store), true)
+  const dsh = f.command[1]
+  fs.writeFileSync(dsh, fs.readFileSync(dsh, 'utf8')
+    .replace("event: 'boot', args", "event: 'boot', reinstall: process.env.AUTOMAGIK_SUPERVISOR_REINSTALL, args"))
+  f.env.AUTOMAGIK_SUPERVISOR_REINSTALL = 'inherited-boot-id'
+  const running = imageDriver(t, f)
+  await until(() => announced(running), 'the image child did not start')
+  assert.equal(boots(f).length, 1)
+  assert.equal(boots(f)[0].reinstall, undefined)
+  running.child.kill('SIGINT')
+  assert.equal((await running.exit).code, 1)
+})
+
+test('an already aborted image supervisor returns without opening the store or starting DSH', async t => {
+  const f = fixture(t)
+  const result = await imageDriver(t, f, 'already-aborted').exit
+  assert.equal(result.code, 1)
+  assert.deepEqual(eventsOf(f), [])
+  assert.equal(fs.existsSync(join(f.store, 'supervisor.json')), false)
+  assert.equal(fs.existsSync(join(f.store, 'update.lock')), false)
 })
 
 test('a candidate publishes its own inventory while the executing generation survives two rotations', async t => {

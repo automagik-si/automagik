@@ -13,7 +13,7 @@ import { DshCredentials } from '../gate-upstream.mjs'
 import { prepareGateView, writeProfileState } from '../gate-view.mjs'
 import { healthReport } from '../healthcheck.mjs'
 import { GATE_VIEW, gateViewDir, profileDirOf } from '../lib.mjs'
-import { markSeed, PLUGINS, profileState } from '../profile-state.mjs'
+import { ADAPTER, markSeed, PLUGINS, profileState } from '../profile-state.mjs'
 
 const version = '3.93.0'
 const plugins = Object.fromEntries(PLUGINS.map(name => [name, version]))
@@ -65,7 +65,9 @@ function entrypoint(t, extra = {}) {
       if (process.env.TEST_DSH_HOME && fs.readlinkSync('/proc/self/fd/' + fd) === process.env.TEST_DSH_HOME) info.uid++
       return info
     }
-    childProcess.spawn = () => {
+    const spawn = childProcess.spawn
+    childProcess.spawn = (command, ...args) => {
+      if (command === '/usr/bin/flock') return spawn(command, ...args)
       console.error('unexpected child process')
       process.exit(97)
     }
@@ -202,6 +204,18 @@ test('preparing the view repairs its mode and removes only writer leftovers', t 
   prepareGateView(viewDir, root, dirs)
   assert.equal(statSync(viewDir).mode & 0o7777, 0o700)
   assert.deepEqual(readdirSync(viewDir).sort(), ['launch-url', 'profile-state.json'])
+})
+
+test('checking the view before acquiring the volume lease leaves a writer’s files alone', t => {
+  const { root, viewDir } = fixture(t)
+  const dirs = { DSH_HOME: join(root, 'dsh') }
+  const temp = join(viewDir, 'launch-url.' + tempId + '.tmp')
+  writeFileSync(temp, 'in progress')
+  prepareGateView(viewDir, root, dirs, { checkOnly: true })
+  assert.equal(readFileSync(temp, 'utf8'), 'in progress')
+  assert.throws(() => prepareGateView(viewDir, root, { DSH_HOME: join(viewDir, 'dsh') }, { checkOnly: true }),
+    /gate-view overlaps DSH_HOME/)
+  assert.deepEqual(readdirSync(viewDir), ['launch-url.' + tempId + '.tmp'])
 })
 
 test('recordLaunch atomically replaces both private launch files with identical bytes', t => {
@@ -344,6 +358,38 @@ test('gate health expires stale and future snapshots without affecting DSH', asy
     assert.equal(gate.reason, 'stale-profile-state')
     assert.equal((await report()).healthy, true)
     assert.equal((await report(gateEnv)).healthy, true)
+  }
+})
+
+test('gate validates signed-ahead inventory and keeps an unfinished trial unhealthy', async t => {
+  const { report, viewDir } = fixture(t)
+  const base = { followsImage: false, ownerManaged: false }
+  const ahead = Object.fromEntries(PLUGINS.map(name => [name, name === ADAPTER ? version : '3.94.0']))
+  for (const adapter of [version, null]) {
+    writeProfileState(viewDir, { ...base, reason: 'signed-update-ahead', plugins: { ...ahead, [ADAPTER]: adapter } })
+    const result = await report(gateEnv)
+    assert.equal(result.reason, 'signed-update-ahead')
+    assert.equal(result.healthy, true)
+    assert.equal(result.followsImage, false)
+  }
+  for (const inventory of [
+    plugins, { ...ahead, [PLUGINS[0]]: null }, { ...ahead, [PLUGINS[0]]: '3.94.1' },
+    { ...ahead, [PLUGINS[0]]: '3.92.0' },
+    { ...plugins, [ADAPTER]: '3.94.0' }, { ...ahead, [ADAPTER]: '3.94.0' },
+  ]) {
+    writeProfileState(viewDir, { ...base, reason: 'signed-update-ahead', plugins: inventory })
+    assert.equal((await report(gateEnv)).reason, 'no-profile-state')
+  }
+  writeProfileState(viewDir, { ...base, reason: 'self-update-unfinished', plugins: ahead })
+  const trial = await report(gateEnv)
+  assert.equal(trial.reason, 'self-update-unfinished')
+  assert.equal(trial.fence.healthy, true)
+  assert.equal(trial.healthy, false)
+  for (const reason of ['self-update-unfinished', 'signed-update-ahead']) {
+    for (const flags of [{ ownerManaged: true }, { followsImage: true }]) {
+      writeProfileState(viewDir, { ...base, ...flags, reason, plugins: ahead })
+      assert.equal((await report(gateEnv)).reason, 'no-profile-state')
+    }
   }
 })
 

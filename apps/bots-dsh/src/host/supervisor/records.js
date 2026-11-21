@@ -1,4 +1,5 @@
 import { compareVersions } from '../lane-verify.js'
+import { PLUGINS } from './release.js'
 
 const VERSION = /^v?(\d+\.\d+\.\d+(?:-[\w.]+)?)(?:\+[\w.]+)?$/
 
@@ -45,17 +46,27 @@ export function isTimestamp(value) {
 
 export function currentOf(value, bootIds) {
   if (value?.version !== 1) return null
-  const { live, kept, lastSequence } = value
+  const { live, kept, lastSequence, entries, base } = value
   if (kept !== null && !publicVersion(kept?.version, bootIds)) return null
   const firstUse = live === null && kept === null && lastSequence === null
   if (!firstUse && !isSequence(lastSequence)) return null
   if (live !== null && (!publicVersion(live?.version, bootIds) || !isSequence(live.sequence)
     || lastSequence < live.sequence)) return null
+  const plain = object => object != null && Object.getPrototypeOf(object) === Object.prototype
+  if (entries != null || base != null) {
+    if (!plain(entries) || !plain(base)) return null
+    const names = Object.keys(entries)
+    if (!names.length || names.length > PLUGINS.length || names.length !== Object.keys(base).length ||
+      !names.every(name => PLUGINS.includes(name) && Object.hasOwn(base, name) &&
+        typeof entries[name] === 'string' && /^file:vendor\/automagik-update\/[0-9a-f]{64}\.tgz$/.test(entries[name]) &&
+        typeof base[name] === 'string' && base[name].length > 0 && base[name].length <= 512)) return null
+  }
   return {
     version: 1,
     live: live === null ? null : { version: live.version, sequence: live.sequence },
     kept: kept === null ? null : { version: kept.version },
     lastSequence,
+    ...(entries == null ? {} : { entries, base }),
   }
 }
 

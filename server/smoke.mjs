@@ -7,8 +7,9 @@
 //
 //   node server/smoke.mjs [automagik-server:local]
 import { execFile } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
 import { promisify } from 'node:util'
-import { GATE_VIEW, GATE_VIEW_MOUNT, MEASUREMENT_MARKER, RUN_SECRETS_DIR } from './lib.mjs'
+import { GATE_VIEW, GATE_VIEW_MOUNT, MEASUREMENT_MARKER, PROFILE, RUN_SECRETS_DIR } from './lib.mjs'
 import { BOTS_GUARD_SINCE, compareRelease } from './profile-state.mjs'
 import { herdrCoreSocket, SMOKE_HC_SESSION } from './toolchain.mjs'
 
@@ -292,6 +293,36 @@ async function main() {
   await docker(['exec', name, '/nodejs/bin/node', '-e', `
     const { mode, uid, gid } = require('node:fs').lstatSync('/data/${GATE_VIEW}')
     if ((mode & 0o7777) !== 0o700 || uid !== 1000 || gid !== 1000) process.exit(1)
+  `])
+  const checkoutMain = new URL('../apps/bots-dsh/src/host/supervisor/main.js', import.meta.url)
+  const expected = process.env.SMOKE_INPUT_KIND === 'checkout'
+    ? existsSync(checkoutMain) && /^export const IMAGE_HOST\s*=\s*1[ \t]*;?[ \t]*$/m.test(readFileSync(checkoutMain, 'utf8'))
+    : null
+  await docker(['exec', name, '/nodejs/bin/node', '-e', `
+    const { existsSync, readFileSync, statSync } = require('node:fs')
+    const bot = '/opt/automagik/profile/node_modules/@automagik/bots-dsh'
+    const host = bot + '/src/host/'
+    const main = host + 'supervisor/main.js'
+    const file = '/data/dsh/update/${PROFILE}/supervisor.json'
+    async function check() {
+      const expected = ${JSON.stringify(expected)}
+      if (expected) {
+        const files = JSON.parse(readFileSync(host + 'supervisor/files.json', 'utf8'))
+        if (!Array.isArray(files) || !files.length || !files.every(file => statSync(host + file).isFile())) {
+          throw new Error('incomplete image supervisor inventory')
+        }
+      }
+      const capable = existsSync(main) && (await import(main)).IMAGE_HOST === 1
+      if (expected === true && !capable) throw new Error('expected a capable image supervisor')
+      if (expected === false && capable) throw new Error('unexpected capable image supervisor')
+      if (capable) {
+        const record = JSON.parse(readFileSync(file, 'utf8'))
+        if (record.version !== 1 || typeof record.bootId !== 'string' || !record.bootId.startsWith('sup_')) {
+          throw new Error('no image supervisor boot record')
+        }
+      } else if (existsSync(file)) throw new Error('unexpected image supervisor boot record')
+    }
+    check().catch(error => { console.error(error.message); process.exitCode = 1 })
   `])
 
   const logs = await logsOf()

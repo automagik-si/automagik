@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict'
-import fs, { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, closeSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { gunzipSync } from 'node:zlib'
 import { createHash } from 'node:crypto'
+import { loadImageSupervisor, prepareImageLaunch, prepareImageVolume } from '../entrypoint.mjs'
 import { followImage, installOffline } from '../profile-follow.mjs'
-import { profileDirOf } from '../lib.mjs'
-import { compareRelease, FOLLOW_STATUS, installedPlugins, markSeed, ownership, packageHash, profileState, SEED_MARKER } from '../profile-state.mjs'
+import { GATE_VIEW, PROFILE, profileDirOf } from '../lib.mjs'
+import { compareRelease, FOLLOW_STATUS, installedPlugins, markSeed, ownership, packageHash, profileState, readJson, SEED_MARKER } from '../profile-state.mjs'
 import { materializePlugins, packPlugin, PLUGINS } from '../plugin-payload.mjs'
 import { buildOfflineStore } from '../offline-store.mjs'
 import { healthReport } from '../healthcheck.mjs'
@@ -17,6 +18,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { VOLUME_LOCK, withVolumeLock } from '../volume-lock.mjs'
 import { parse, stringify } from 'yaml'
+import { installSignedProfile } from './fixtures/signed-profile.mjs'
 
 const original = JSON.parse(readFileSync(new URL('../profile/package.json', import.meta.url), 'utf8'))
 const write = (path, content) => { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, content) }
@@ -51,6 +53,26 @@ function fixture(t) {
 }
 const successful = source => ({ profile }) => cpSync(join(source, 'node_modules'), join(profile, 'node_modules'), { recursive: true })
 const prepare = async (f, img = f.old, install = successful(img.source)) => followImage({ dshHome: f.dshHome, ...img, install })
+
+test('first boot with a capable image creates the absent gate view and seeds before selecting supervision', async t => {
+  const f = fixture(t), gateView = join(f.dir, 'data', GATE_VIEW)
+  const bot = join(f.old.source, 'node_modules/@automagik/bots-dsh')
+  const supervisor = join(bot, 'src/host/supervisor')
+  write(join(supervisor, 'main.js'), 'export const IMAGE_HOST = 1; export function runSupervisor() {}')
+  write(join(bot, 'package.json'), JSON.stringify({ version: f.old.build.automagik, type: 'module' }))
+  cpSync(new URL('../../apps/bots-dsh/src/host/supervisor/store.js', import.meta.url), join(supervisor, 'store.js'))
+  const host = await loadImageSupervisor(f.old.source, assert.fail)
+  assert.ok(host)
+  assert.equal(existsSync(f.target), false)
+  assert.equal(existsSync(gateView), false)
+  const release = await prepareImageVolume({ dshHome: f.dshHome, gateView, privateDirs: { DSH_HOME: f.dshHome } })
+  t.after(release)
+  assert.equal(statSync(gateView).mode & 0o777, 0o700)
+  const seeded = await prepare(f)
+  assert.equal(seeded.result, 'seeded')
+  assert.equal(seeded.reason, 'matching-image')
+  assert.deepEqual(prepareImageLaunch(host, seeded, f.dshHome, assert.fail), { host, code: 0 })
+})
 
 // Each child imports the real implementation. File barriers hold the first mutation
 // open so the second process attempts the same volume while its peer is still active.
@@ -92,10 +114,16 @@ function startFollower(t, f, img, name, extra = {}) {
   const c = { follow: new URL('../profile-follow.mjs', import.meta.url).href, lib: new URL('../lib.mjs', import.meta.url).href,
     options: { dshHome: f.dshHome, ...img, release: img.build.automagik }, called: join(f.dir, `${name}-called`),
     entered: join(f.dir, `${name}-entered`), release: join(f.dir, 'release'), installs: join(f.dir, 'installs'), ...extra }
-  const child = spawn(process.execPath, ['--input-type=module', '-e', childProgram, JSON.stringify(c)], { stdio: ['ignore', 'pipe', 'pipe'] })
-  let stdout = '', stderr = ''
-  child.stdout.on('data', bytes => { stdout += bytes }); child.stderr.on('data', bytes => { stderr += bytes })
-  const done = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr })))
+  const output = join(f.dir, `${name}-stdout`), errors = join(f.dir, `${name}-stderr`)
+  const stdout = openSync(output, 'w'), stderr = openSync(errors, 'w')
+  let child
+  try {
+    child = spawn(process.execPath, ['--input-type=module', '-e', childProgram, JSON.stringify(c)], { stdio: ['ignore', stdout, stderr] })
+  } finally {
+    closeSync(stdout); closeSync(stderr)
+  }
+  const done = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal,
+    stdout: readFileSync(output, 'utf8'), stderr: readFileSync(errors, 'utf8') })))
   t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await done })
   return { ...c, child, done, result: async () => { const out = await done; assert.equal(out.code, 0, out.stderr); return JSON.parse(out.stdout) } }
 }
@@ -260,7 +288,7 @@ test('an owner-edited package remains byte-for-byte unchanged and is reported as
   assert.equal(installedPlugins(f.target)[PLUGINS[0]], '3.90.1')
 })
 
-function addPlugin(profile, name = '@example/channels') {
+function addPlugin(profile, name = '@example/channels', dependencySuffix = '') {
   const path = join(profile, 'package.json'), pkg = JSON.parse(readFileSync(path, 'utf8'))
   const spec = `https://example.invalid/${name.split('/')[1]}-1.2.3.tgz`
   const peer = `(@automagik/bots-dsh@${pkg.dependencies['@automagik/bots-dsh']})`
@@ -270,9 +298,151 @@ function addPlugin(profile, name = '@example/channels') {
   const lockPath = join(profile, 'pnpm-lock.yaml'), lock = parse(readFileSync(lockPath, 'utf8'))
   lock.importers['.'].dependencies[name] = { specifier: spec, version: `${spec}${peer}` }
   lock.packages[`${name}@${spec}`] = { resolution: { integrity: 'sha512-EXTRA', tarball: spec }, version: '1.2.3' }
-  lock.snapshots[`${name}@${spec}${peer}`] = { optionalDependencies: { '@automagik/bots-dsh': pkg.dependencies['@automagik/bots-dsh'] } }
+  lock.snapshots[`${name}@${spec}${peer}`] = {
+    optionalDependencies: { '@automagik/bots-dsh': pkg.dependencies['@automagik/bots-dsh'] + dependencySuffix },
+  }
   write(lockPath, stringify(lock, { lineWidth: 0 }))
   return { name, spec }
+}
+
+function signedFixture(f, version = '3.94.0') {
+  const installed = installSignedProfile(f.target, version)
+  const lockPath = join(f.target, 'pnpm-lock.yaml')
+  let bytes = readFileSync(lockPath, 'utf8')
+  for (const [name, spec] of Object.entries(installed.current.base)) {
+    bytes = bytes.replaceAll(spec, installed.current.entries[name])
+  }
+  write(lockPath, bytes)
+  return { ...installed, added: addPlugin(f.target) }
+}
+
+function profileBytes(profile) {
+  return readdirSync(profile, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => join(entry.parentPath, entry.name)).sort()
+    .map(file => [file.slice(profile.length), readFileSync(file)])
+}
+
+for (const hashOnly of [false, true]) {
+  test(`a completed signed update keeps every profile file ahead of the image (${hashOnly ? 'hash-only' : 'structured'} marker)`, async t => {
+    const f = fixture(t); await prepare(f)
+    signedFixture(f)
+    if (hashOnly) {
+      const file = join(f.target, SEED_MARKER), marker = JSON.parse(readFileSync(file, 'utf8'))
+      delete marker.imagePackage
+      write(file, JSON.stringify(marker))
+    }
+    const before = profileBytes(f.target)
+    for (const img of [f.old, f.next]) {
+      const result = await prepare(f, img, () => assert.fail('signed-ahead profile must be left in place'))
+      assert.equal(result.result, 'signed-update-ahead')
+      assert.equal(result.reason, 'signed-update-ahead')
+      assert.equal(result.ownerManaged, false)
+      assert.equal(result.followsImage, false)
+    }
+    const older = image(join(f.dir, 'older'), '3.90.0')
+    const result = await prepare(f, older, () => assert.fail('an image below the seed release must not install'))
+    assert.equal(result.reason, 'newer-than-image')
+    assert.deepEqual(profileBytes(f.target), before)
+  })
+}
+
+for (const version of ['3.94.0', '3.95.0']) {
+  test(`an image at ${version} replaces the signed base pins and moves peer references with them`, async t => {
+    const f = fixture(t); await prepare(f)
+    const { added: { name, spec }, current, path } = signedFixture(f)
+    const suffix = '(peer@1.2.3)'
+    const peerPlugin = addPlugin(f.target, '@example/peer-channels', suffix)
+    const before = readFileSync(path)
+    const img = image(join(f.dir, 'catch-up'), version)
+    const result = await prepare(f, img, ({ profile }) => {
+      const lock = parse(readFileSync(join(profile, 'pnpm-lock.yaml'), 'utf8'))
+      const bot = '@automagik/bots-dsh'
+      const pin = `file:vendor/automagik-bots-dsh-${version}.tgz`
+      const versionWithPeer = `${spec}(${bot}@${pin})`
+      assert.deepEqual(lock.importers['.'].dependencies[name], { specifier: spec, version: versionWithPeer })
+      assert.equal(lock.snapshots[`${name}@${versionWithPeer}`].optionalDependencies[bot], pin)
+      const peerSnapshot = lock.snapshots[`${peerPlugin.name}@${peerPlugin.spec}(${bot}@${pin})`]
+      assert.equal(peerSnapshot.optionalDependencies[bot], pin + suffix)
+      for (const old of Object.values(current.entries)) assert.ok(!JSON.stringify(lock).includes(old))
+      successful(img.source)({ profile })
+      cpSync(join(f.target, 'node_modules', name), join(profile, 'node_modules', name), { recursive: true })
+      cpSync(join(f.target, 'node_modules', peerPlugin.name), join(profile, 'node_modules', peerPlugin.name), { recursive: true })
+    })
+    assert.equal(result.result, 'updated')
+    assert.equal(result.followsImage, true)
+    const manifest = JSON.parse(readFileSync(join(f.target, 'package.json'), 'utf8'))
+    for (const name of PLUGINS) assert.ok(manifest.dependencies[name].endsWith(`-${version}.tgz`))
+    assert.equal(manifest.dependencies[name], spec)
+    assert.deepEqual(readFileSync(path), before)
+    const backups = join(f.dshHome, 'backups')
+    const backup = join(backups, readdirSync(backups)[0])
+    assert.equal(JSON.parse(readFileSync(join(backup, 'update.json'))).from, current.live.version)
+    assert.equal(JSON.parse(readFileSync(join(backup, PROFILE, 'node_modules/@automagik/bots-dsh/package.json'))).version, current.live.version)
+  })
+}
+
+test('an unfinished self-update blocks both image follow and first seeding before any profile writes', async t => {
+  const f = fixture(t); await prepare(f)
+  const { store } = signedFixture(f)
+  write(join(store, 'state.json'), '{"version":1,"phase":"health"}')
+  const before = profileBytes(f.target)
+  const refuse = () => assert.fail('an unfinished update must never install the image')
+  assert.equal((await prepare(f, f.next, refuse)).reason, 'self-update-unfinished')
+  assert.deepEqual(profileBytes(f.target), before)
+  const previous = `${f.target}.image-previous`
+  renameSync(f.target, previous)
+  const result = await prepare(f, f.next, refuse)
+  assert.equal(result.reason, 'self-update-unfinished')
+  assert.equal(result.seeded, false)
+  assert.equal(existsSync(f.target), false)
+  assert.deepEqual(profileBytes(previous), before)
+})
+
+test('bare startup refuses the follower recovery decision even with versions.json missing', async t => {
+  const f = fixture(t); await prepare(f)
+  const { store } = signedFixture(f)
+  write(join(store, 'state.json'), '{"version":1,"phase":"health"}')
+  const metadata = join(dirname(f.next.source), 'versions.json')
+  fs.unlinkSync(metadata)
+  const build = readJson(metadata) ?? {}
+  const seeded = await prepare(f, { ...f.next, build }, () => assert.fail('an unfinished switch must skip install'))
+  assert.equal(seeded.reason, 'invalid-image-metadata')
+  assert.equal(seeded.result, 'self-update-unfinished')
+  const warnings = []
+  const decision = prepareImageLaunch(null, seeded, f.dshHome, message => warnings.push(message))
+  assert.deepEqual(decision, { host: null, code: 1 })
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /unfinished.*server\/README\.md/)
+})
+
+for (const window of ['before cutover', 'completed', 'owner edited']) {
+  test(`recoverSwap accepts a signed previous profile in the ${window} window`, async t => {
+    const f = fixture(t); await prepare(f)
+    signedFixture(f)
+    const previous = `${f.target}.image-previous`
+    const before = profileBytes(f.target)
+    renameSync(f.target, previous)
+    const img = window === 'before cutover' ? f.next : image(join(f.dir, 'catch-up'), '3.94.0')
+    if (window !== 'before cutover') {
+      cpSync(img.source, f.target, { recursive: true })
+      markSeed(f.target, img.build.automagik)
+      if (window === 'owner edited') write(join(f.target, 'package.json'), '{"description":"owner edit"}')
+    }
+    const result = await prepare(f, img, () => assert.fail('the swap must be recovered without a new install'))
+    if (window === 'before cutover') {
+      assert.equal(result.result, 'update-rolled-back')
+      assert.equal(existsSync(previous), false)
+      assert.deepEqual(profileBytes(f.target), before)
+    } else if (window === 'completed') {
+      assert.equal(result.result, 'matching-image')
+      assert.equal(existsSync(previous), false)
+    } else {
+      assert.equal(result.reason, 'owner-managed')
+      assert.equal(readFileSync(join(f.target, 'package.json'), 'utf8'), '{"description":"owner edit"}')
+      assert.deepEqual(profileBytes(previous), before)
+    }
+  })
 }
 
 // FOLLOW_ADDITIONS_OPT_OUT / FOLLOW_DROP_ADDITIONS / FOLLOW_STALE_PEERS.
@@ -783,6 +953,24 @@ for (const [version, expected] of [[ADAPTER_SINCE, 'updated'], ['3.160.7', 'newe
       assert.equal(readFileSync(lockFile, 'utf8'), oldLock)
       assert.equal(existsSync(join(f.dshHome, 'backups')), false)
     }
+
+    const signedVersion = '3.160.8'
+    const { store } = installSignedProfile(f.target, signedVersion)
+    write(join(store, 'state.json'), '{"version":1,"phase":"healthy"}')
+    const signed = await prepare(f, f.next, () => assert.fail('a signed-ahead profile must stay installed'))
+    const reason = expected === 'updated' ? 'signed-update-ahead' : 'newer-than-image'
+    assert.equal(signed.result, reason)
+    assert.equal(signed.reason, reason)
+    assert.equal(signed.followsImage, false)
+    assert.equal(signed.ownerManaged, false)
+    assert.equal(signed.plugins[ADAPTER], version)
+    assert.ok(LEGACY_PLUGINS.every(name => signed.plugins[name] === signedVersion))
+    const view = join(f.dir, 'data', GATE_VIEW)
+    mkdirSync(view)
+    writeProfileState(view, signed)
+    const published = readProfileState(view, f.next.build)
+    assert.equal(published.reason, reason)
+    assert.deepEqual(published.plugins, signed.plugins)
   })
 }
 

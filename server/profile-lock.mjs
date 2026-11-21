@@ -17,7 +17,7 @@ function manifest(profile) {
   return JSON.parse(readFileSync(file, 'utf8'))
 }
 
-export function mergeImageProfile({ source, target, base = PLUGINS }) {
+export function mergeImageProfile({ source, target, base = PLUGINS, signedEntries }) {
   const image = manifest(source), current = manifest(target)
   const imageLock = readLock(source), currentLock = readLock(target)
   for (const lock of [imageLock, currentLock]) {
@@ -27,10 +27,11 @@ export function mergeImageProfile({ source, target, base = PLUGINS }) {
   }
   // Peer contexts encode the image package's file spec in both snapshot keys and
   // dependency values. Rewrite those references as well as the root importer.
-  const replacements = new Map(base.filter(name => vendorRelease(name, current.dependencies[name]))
+  const replacements = new Map(base.filter(name => vendorRelease(name, current.dependencies[name]) ||
+      (signedEntries?.[name] !== undefined && current.dependencies[name] === signedEntries[name]))
     .map(name => [current.dependencies[name], image.dependencies[name]]))
   const specs = [...replacements.keys()].map(RegExp.escape).join('|')
-  const identities = new RegExp(`((?:^|\\()(?:@[\\w.-]+/)?[\\w.-]+@)(${specs})(?=$|[()])`, 'g')
+  const identities = new RegExp(`(^|(?:^|\\()(?:@[\\w.-]+/)?[\\w.-]+@)(${specs})(?=$|[()])`, 'g')
   const rewrite = value => {
     if (typeof value === 'string') return replacements.get(value) ??
       (replacements.size ? value.replace(identities, (_, prefix, spec) => prefix + replacements.get(spec)) : value)

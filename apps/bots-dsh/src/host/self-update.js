@@ -135,11 +135,14 @@ export const reinstallCapable = (env = process.env) => rollbackCapable(env)
   && env.AUTOMAGIK_SUPERVISOR_REINSTALL === env.AUTOMAGIK_SUPERVISOR_BOOT
 
 function statusOf(profileDir, env, inDesktop, readMountInfo) {
-  const { storeDir, currentInvalid, ...status } = selfUpdateDetails(profileDir, env, readMountInfo)
+  const { storeDir, currentInvalid, current, ...status } = selfUpdateDetails(profileDir, env, readMountInfo)
   const reason = inDesktop ? 'desktop-app' : status.supervisor === null ? 'no-supervisor'
     : listenerUnknown(profileDir, env, readMountInfo) ? 'listener-unknown'
     : storeDir === undefined ? 'no-store' : currentInvalid ? 'store-invalid' : null
-  return { available: reason === null, reason, ...status,
+  const publicCurrent = current === null ? null : {
+    version: current.version, live: current.live, kept: current.kept, lastSequence: current.lastSequence,
+  }
+  return { available: reason === null, reason, ...status, current: publicCurrent,
     ...(rollbackCapable(env) ? { rollback: true } : {}),
     ...(reinstallCapable(env) ? { reinstall: true } : {}) }
 }

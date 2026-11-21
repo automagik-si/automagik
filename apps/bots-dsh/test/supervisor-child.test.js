@@ -53,7 +53,11 @@ test('discards oversized child lines and waits for log backpressure between comp
       output.emit('line-written')
     },
   })
-  const forwarded = forwardChildOutput(input, output, url => launches.push(url))
+  const observed = []
+  const forwarded = forwardChildOutput(input, output, url => launches.push(url), line => {
+    observed.push(line)
+    if (line.startsWith('first')) throw new Error('fixture line hook failed')
+  })
   input.write('dsh web: http://localhost/?token=oversize-secret' + 'x'.repeat(65 * 1024))
   const first = once(output, 'line-written')
   input.write('discarded-fragment\nfirst token=first-secret\nsecond\n')
@@ -68,4 +72,5 @@ test('discards oversized child lines and waits for log backpressure between comp
   pending.shift()()
   await forwarded
   assert.deepEqual(launches, [])
+  assert.deepEqual(observed, ['first token=<redacted>', 'second'])
 })

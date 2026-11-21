@@ -14,7 +14,7 @@ import { currentOf, isId, isVersion, REINSTALL_REFUSAL, reinstallRefusalReason, 
 import { inspectRelease, releaseSource } from './release.js'
 import { takeRequest } from './request.js'
 import { baseline, finishRolledBack, liveTeamLineage, rollbackLocation, runRollback, teamSnapshot, unpinnedPlugins, updateContract } from './rollback.js'
-import { assertRelinked, discardArchives, downloadPath, relink, stageInstall, stagePaths, takeProfileLock } from './stage.js'
+import { assertRelinked, discardArchives, downloadPath, laneEntries, relink, stageInstall, stagePaths, takeProfileLock } from './stage.js'
 import { identity, prepareStore, readJson, regularBytes, syncDirectory, takeLifetimeLock, UPDATE_RECORD_LIMIT, usableStore, writeJsonAtomic } from './store.js'
 import { candidateMatches, completeSwitch, didSwitch, planSwitch, sweepReinstallTrash, trashReinstall, UndoPreflightError, undoSwitch, validJournal, validTerminalJournal } from './switch.js'
 
@@ -23,6 +23,8 @@ const IDLE_POLL_MS = 1000
 const MAX_CURRENT_SNAPSHOT_BYTES = 4096
 const stamp = () => new Date().toISOString()
 const warn = message => console.error(`automagik supervisor: ${message}`)
+
+export const IMAGE_HOST = 1
 
 function configure(home, profile, command, env) {
   if (!isAbsolute(home ?? '') || !/^[A-Za-z0-9._-]+$/.test(profile ?? '') || ['.', '..'].includes(profile)) {
@@ -49,8 +51,9 @@ function storeLock(store) {
 
 export async function runSupervisor({
   home, profile, command, version, env = process.env, laneUrl, keys, fetch = globalThis.fetch,
-  healthTimeout, healthProbe,
+  healthTimeout, healthProbe, onChildStart, onLaunchUrl, onLine, onSave, signal: externalSignal, refreshCopy: refresh = true,
 }) {
+  if (externalSignal?.aborted) return 1
   if (!isVersion(version)) throw new Error('Invalid supervisor copy version')
   const source = releaseSource(laneUrl, keys)
   if (!source) throw new Error('Invalid supervisor release source')
@@ -137,6 +140,7 @@ export async function runSupervisor({
         warn('a request posted during the update could not be discarded')
       }
     }
+    try { onSave?.(run) } catch { warn('could not notify the host of the saved update state') }
   }
   const phase = (next, reason = null) => save({ phase: next, reason })
 
@@ -146,14 +150,20 @@ export async function runSupervisor({
   }
   function start(forRun = false) {
     signal.throwIfAborted()
+    try { onChildStart?.() } catch { warn('could not notify the host before starting DSH') }
+    signal.throwIfAborted()
     checkedListener = undefined
     listenerCheck = undefined
     announceListener('unknown')
     const env = forRun ? { ...bootEnv, AUTOMAGIK_SUPERVISOR_RUN: run.runId } : bootEnv
     const startedAt = Date.now()
-    child = startChild(command, env, ended => {
+    const started = startChild(command, env, ended => {
       if (!ended.expectedExit && !trial) shutdown(ended.result.code)
+    }, {
+      onLaunchUrl: url => { if (child === started) onLaunchUrl?.(url) },
+      onLine,
     })
+    child = started
     const target = child
     target.onLaunchUrl = () => {
       if (target !== child || target.result || signal.aborted) return
@@ -168,6 +178,10 @@ export async function runSupervisor({
   }
   const stop = async (sig) => {
     if (child) await child.stop(sig)
+  }
+  const abort = () => {
+    void stop()
+    shutdown(1)
   }
   // The signal the service sent goes to DSH first; the shutdown that follows never sends a second one.
   const forward = Object.fromEntries(['SIGTERM', 'SIGINT', 'SIGHUP'].map(sig => [sig, () => {
@@ -264,8 +278,10 @@ export async function runSupervisor({
     trial = true
     if (run.phase !== 'rollingBack') {
       const { commitCurrent, ...journal } = run.journal
-      const restoreCurrent = commitCurrent === true
-        || (run.reinstall !== true && isDeepStrictEqual(read('current.json'), nextCurrent()))
+      const published = read('current.json')
+      // This run's own record, in either shape: with its committed pins, or the version-only form.
+      const restoreCurrent = commitCurrent === true || (run.reinstall !== true
+        && (isDeepStrictEqual(published, nextCurrent()) || isDeepStrictEqual(published, versionRecord())))
       save({
         phase: 'rollingBack', reason: 'health-failed', journal: { ...journal, undo: true, undoReason: 'health-failed' },
         rollback: { failed, step: 'stop', tried: [], trialFrom: run.trialStartedAt ?? stamp(), restoreCurrent,
@@ -322,11 +338,30 @@ export async function runSupervisor({
     await restartCandidate(staging)
   }
 
-  const nextCurrent = () => ({
+  const versionRecord = () => ({
     version: 1, live: { version: run.to, sequence: run.sequence },
     kept: run.reinstall === true ? run.priorCurrent?.kept ?? null : { version: run.from },
     lastSequence: run.sequence,
   })
+  function nextCurrent() {
+    const record = versionRecord()
+    const prior = currentOf(read('current.json'), [bootId])
+    const committed = prior?.live?.version === run.to && prior.live.sequence === run.sequence && prior.entries
+      ? prior : null
+    try {
+      const staging = stagePaths(store, run.runId, profile)
+      const entries = laneEntries(JSON.parse(regularBytes(join(staging.source, 'candidate.json'))), run.names)
+      if (committed && isDeepStrictEqual(committed.entries, entries)) return committed
+      const pre = read(join('versions', run.from, 'entries.json'))?.dependencies
+      if (!pre || !run.names.every(name => typeof pre[name] === 'string')) return record
+      const base = Object.fromEntries(run.names.map(name => [
+        name, prior?.entries?.[name] === pre[name] && prior?.base?.[name] !== undefined ? prior.base[name] : pre[name],
+      ]))
+      return currentOf({ ...record, entries, base }, [bootId]) ?? record
+    } catch {
+      return committed ?? record
+    }
+  }
 
   async function restartCandidate(staging, { recheckRelink = false } = {}) {
     const team = teamSnapshot(config, run)
@@ -386,7 +421,7 @@ export async function runSupervisor({
     }
     discard(staging)
     cleanReinstallTrash()
-    if (!Array.isArray(names) || !names.includes('@automagik/bots-dsh')) return
+    if (!refresh || !Array.isArray(names) || !names.includes('@automagik/bots-dsh')) return
     try { await refreshCopy(store, profileDir, to, signal, executingCopy) } catch {
       if (!signal.aborted) warn('the new supervisor copy did not pass its self-check')
     }
@@ -433,7 +468,8 @@ export async function runSupervisor({
       // A durable commit intent means this profile already passed relink and health.
       // Also recognize a version record published by the preceding journal format.
       const legacyCommit = run.from !== run.to && !run.journal.undo && run.journal.pending === null
-        && run.journal.done.length === run.journal.steps.length && isDeepStrictEqual(read('current.json'), nextCurrent())
+        && run.journal.done.length === run.journal.steps.length
+        && [nextCurrent(), versionRecord()].some(record => isDeepStrictEqual(read('current.json'), record))
       if (relinked && (run.journal.commitCurrent || legacyCommit
         || (run.journal.relinked === true && didSwitch(config, staging, run)))) {
         try {
@@ -564,8 +600,11 @@ export async function runSupervisor({
   try {
     executingCopy = runningCopy(store)
     executingCopy.prune()
-    if (reinstallCopies(store)) bootEnv.AUTOMAGIK_SUPERVISOR_REINSTALL = bootId
-    for (const [sig, handler] of Object.entries(forward)) process.on(sig, handler)
+    // Only a supervisor that runs the store's own copy announces same-version reinstall: the image host
+    // (refreshCopy false) never does until it handles a reinstall at the image's version (RFC 0041, R9).
+    if (refresh && reinstallCopies(store)) bootEnv.AUTOMAGIK_SUPERVISOR_REINSTALL = bootId
+    if (externalSignal) externalSignal.addEventListener('abort', abort, { once: true })
+    else for (const [sig, handler] of Object.entries(forward)) process.on(sig, handler)
     const raw = read('state.json')
     const prior = runOf(raw, [raw?.bootId].filter(isId))
     if (raw !== undefined && prior === null) throw new Error('Invalid state.json in the update store')
@@ -640,6 +679,7 @@ export async function runSupervisor({
       if (!verdictFailed) await stop()
       await active
     } finally {
+      externalSignal?.removeEventListener('abort', abort)
       for (const [sig, handler] of Object.entries(forward)) process.off(sig, handler)
       try { executingCopy?.release() } finally { lock.release() }
     }

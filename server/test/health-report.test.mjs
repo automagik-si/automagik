@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict'
-import { once } from 'node:events'
+import { spawnSync } from 'node:child_process'
+import { EventEmitter, once } from 'node:events'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { imageProfilePublisher, superviseDsh } from '../entrypoint.mjs'
+import { readProfileState, writeProfileState } from '../gate-view.mjs'
 import { healthReport } from '../healthcheck.mjs'
-import { FOLLOW_STATUS, markSeed, packageHash, SEED_MARKER } from '../profile-state.mjs'
+import { ADAPTER, FOLLOW_STATUS, markSeed, packageHash, SEED_MARKER } from '../profile-state.mjs'
+import { updateStoreOf } from '../profile-update.mjs'
 import { PLUGINS } from '../plugin-payload.mjs'
 import { GATE_VIEW, profileDirOf } from '../lib.mjs'
+import { installSignedProfile } from './fixtures/signed-profile.mjs'
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(),'automagik-report-')), home=join(root,'data','dsh'), source=join(root,'profile'), profile=profileDirOf(home)
@@ -33,6 +38,142 @@ async function listener(t, initial=401) {
 }
 const report = (f, port, env = {}) => healthReport({
   root: f.root, dshHome: f.home, viewDir: f.viewDir, dshPort: port, env,
+})
+
+test('a 401 fence accepts a signed-ahead commit, while an unfinished trial stays unhealthy', async t => {
+  const f = fixture(t)
+  const get = (env = {}) => healthReport({
+    root: f.root, dshHome: f.home, viewDir: f.viewDir, env, probe: async () => 401,
+  })
+  assert.equal((await get()).reason, 'matching-image')
+  const { current, path, store } = installSignedProfile(f.profile, '3.94.0', { commit: false })
+  const state = join(store, 'state.json')
+  writeFileSync(state, '{"version":1,"phase":"health"}')
+  assert.equal((await get()).reason, 'self-update-unfinished')
+  for (const env of [{}, { AUTOMAGIK_GATE_ENABLED: '1' }]) {
+    const trial = await get(env)
+    assert.equal(trial.reason, 'self-update-unfinished')
+    assert.equal(trial.fence.healthy, true)
+    assert.equal(trial.healthy, false)
+    assert.equal(trial.ownerManaged, false)
+  }
+  writeFileSync(path, JSON.stringify(current))
+  writeFileSync(state, '{"version":1,"phase":"healthy"}')
+  const result = await get()
+  assert.equal(result.reason, 'signed-update-ahead')
+  assert.equal(result.healthy, true)
+  assert.equal(result.followsImage, false)
+  assert.equal((await get({ AUTOMAGIK_GATE_ENABLED: '1' })).healthy, true)
+  writeFileSync(join(f.profile, 'node_modules', ADAPTER, 'package.json'), '{"version":"3.92.0"}')
+  assert.equal((await get()).reason, 'update-required')
+  assert.equal((await get()).healthy, false)
+})
+
+test('the gate sees the saved running phase and terminal verdict before any DSH healthcheck', async t => {
+  const f = fixture(t)
+  const readGate = () => healthReport({
+    root: f.root, viewDir: f.viewDir, env: { AUTOMAGIK_GATE_ENABLED: '1' }, probe: async () => 401,
+  })
+  const publish = imageProfilePublisher({ dshHome: f.home, gateView: f.viewDir, source: f.source, build: f.build })
+  const completed = new EventEmitter()
+  const refreshView = async () => {
+    try { await publish() } finally { completed.emit('publication') }
+  }
+  const afterPublication = async action => {
+    const publication = once(completed, 'publication')
+    assert.equal(action(), undefined, 'the supervisor hook returns synchronously')
+    await publication
+    return readGate()
+  }
+  const host = {
+    version: f.build.automagik,
+    async runSupervisor({ onChildStart, onSave }) {
+      assert.equal((await afterPublication(onChildStart)).reason, 'matching-image')
+      const store = updateStoreOf(f.profile)
+      mkdirSync(store, { recursive: true })
+      const state = join(store, 'state.json')
+      const save = phase => {
+        const run = { version: 1, phase }
+        writeFileSync(state, JSON.stringify(run))
+        return onSave(run)
+      }
+      const running = await afterPublication(() => save('checking'))
+      assert.equal(running.reason, 'self-update-unfinished')
+      assert.equal(running.fence.healthy, true)
+      assert.equal(running.healthy, false)
+
+      const { current, path } = installSignedProfile(f.profile, '3.94.0', { commit: false })
+      writeFileSync(path, JSON.stringify(current))
+      const terminal = await afterPublication(() => save('healthy'))
+      assert.equal(terminal.reason, 'signed-update-ahead')
+      assert.equal(terminal.healthy, true)
+      return 0
+    },
+  }
+  const warnings = []
+  assert.equal(await superviseDsh({
+    host, dshHome: f.home, gateView: f.viewDir, env: {}, lifecycle: { finish: code => code },
+    observeVendors() {}, noteDsh() {}, log() {}, warn: message => warnings.push(message), refreshView,
+  }), 0, warnings.join('\n'))
+  assert.deepEqual(warnings, [])
+})
+
+test('an older health report holds the publication lock until its view write finishes', async t => {
+  const f = fixture(t)
+  const paused = Promise.withResolvers(), resume = Promise.withResolvers()
+  const refreshView = imageProfilePublisher({ dshHome: f.home, gateView: f.viewDir, source: f.source, build: f.build })
+  const older = healthReport({
+    root: f.root, dshHome: f.home, viewDir: f.viewDir, env: {}, probe: async () => 401,
+    async publish(view, state) {
+      paused.resolve(state)
+      await resume.promise
+      writeProfileState(view, state)
+    },
+  })
+  const oldState = await Promise.race([paused.promise, older.then(() => assert.fail('health did not publish'))])
+  let newer
+  try {
+    assert.equal(oldState.reason, 'matching-image')
+    const store = updateStoreOf(f.profile)
+    mkdirSync(store, { recursive: true })
+    writeFileSync(join(store, 'state.json'), '{"version":1,"phase":"checking"}')
+    assert.equal(spawnSync('/usr/bin/flock', [
+      '--nonblock', join(f.home, '.automagik-profile-state.lock'), process.execPath, '-e', '',
+    ]).status, 1)
+    newer = refreshView()
+  } finally {
+    resume.resolve()
+    await Promise.all([older, newer])
+  }
+  assert.equal((await older).reason, 'matching-image')
+  const published = readProfileState(f.viewDir, f.build)
+  assert.equal(published.reason, 'self-update-unfinished')
+  assert.equal(published.followsImage, false)
+})
+
+test('health reports skip publishing when DSH did not answer or the state lock was unavailable', async t => {
+  const f = fixture(t)
+  const viewFile = join(f.viewDir, 'profile-state.json')
+  writeProfileState(f.viewDir, { plugins: f.build.plugins, followsImage: false, ownerManaged: false, reason: 'update-rolled-back' })
+  const before = readFileSync(viewFile)
+  for (const dshStatus of [null, 401]) {
+    const calls = []
+    const result = await healthReport({
+      root: f.root, dshHome: f.home, viewDir: f.viewDir, env: {},
+      probe: async () => { calls.push('probed'); return dshStatus },
+      async lock(home) {
+        calls.push('locked')
+        assert.equal(home, f.home)
+        throw new Error('state lock busy')
+      },
+      publish: () => calls.push('published'),
+    })
+    assert.deepEqual(calls, dshStatus === null ? ['probed'] : ['probed', 'locked'])
+    assert.deepEqual(result.dsh, { up: dshStatus !== null, status: dshStatus })
+    assert.equal(result.reason, 'update-rolled-back')
+    assert.equal(result.healthy, false)
+    assert.deepEqual(readFileSync(viewFile), before)
+  }
 })
 
 // HEALTH_FENCE_200: treating a successful HTTP response as a healthy authentication fence fails open.
@@ -105,11 +246,9 @@ test('missing or mixed plugins in a canonical legacy seed never receive an owner
   }
 })
 
-import { EventEmitter } from 'node:events'
 import { createCarrier } from '../../apps/multiuser-dsh/src/carrier.js'
 import { reservationOf } from '../../apps/multiuser-dsh/src/reservation.js'
 import { followImage } from '../profile-follow.mjs'
-import { readProfileState } from '../gate-view.mjs'
 
 function mockHealthHttp(t, replies) {
   t.mock.method(http, 'get', (options, callback) => {

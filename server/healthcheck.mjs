@@ -9,6 +9,7 @@ import { GATE_VIEW_MOUNT, PORT, gateViewDir, profileDirOf } from './lib.mjs'
 import {
   installedPlugins, profileState, readJson, releaseVersion, validBuild,
 } from './profile-state.mjs'
+import { withProfileStateLock } from './volume-lock.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const CALLER_PROBE = '/_automagik/caller/api/__automagik_probe'
@@ -49,34 +50,44 @@ export async function multiuserProbe(port) {
 
 export async function healthReport({
   root = ROOT, env = process.env, dshHome, viewDir, dshPort = PORT, probe = fenceProbe,
+  lock = withProfileStateLock, publish = writeProfileState,
 } = {}) {
   const enabled = env.AUTOMAGIK_GATE_ENABLED === '1'
   const modeOn = env.AUTOMAGIK_MULTIUSER === '1' || env.AUTOMAGIK_GATE_MULTIUSER === '1'
   const build = readJson(join(root, 'versions.json'))
+  const [dshStatus, gateStatus, carrier] = await Promise.all([
+    probe(dshPort), enabled ? probe(Number(env.AUTOMAGIK_GATE_PORT || 3082)) : null,
+    modeOn ? multiuserProbe(dshPort) : null,
+  ])
   let state
   if (enabled) {
     state = readProfileState(viewDir ?? GATE_VIEW_MOUNT, build)
   } else {
     const home = dshHome ?? env.DSH_HOME ?? '/data/dsh'
     const profile = profileDirOf(home)
-    try { state = profileState({ profile, source: join(root, 'profile'), build, dshHome: home }) }
-    catch {
-      state = { plugins: installedPlugins(profile), followsImage: false, ownerManaged: false,
-        reason: 'invalid-profile-state' }
-    }
-    if (viewDir) {
-      // Startup publishes the refusal even when the follower cannot write its status file.
-      if (state.followsImage && readProfileState(viewDir, build, { keepRollback: true }).reason === 'update-rolled-back') {
-        state = { ...state, followsImage: false, reason: 'update-rolled-back' }
+    const assess = () => {
+      let result
+      try { result = profileState({ profile, source: join(root, 'profile'), build, dshHome: home }) }
+      catch {
+        return { plugins: installedPlugins(profile), followsImage: false, ownerManaged: false,
+          reason: 'invalid-profile-state' }
       }
-      // A failed publication leaves DSH's own health report intact.
-      try { writeProfileState(viewDir, state) } catch {}
+      // Startup publishes the refusal even when the follower cannot write its status file.
+      if (viewDir && result.followsImage && readProfileState(viewDir, build, { keepRollback: true }).reason === 'update-rolled-back') {
+        return { ...result, followsImage: false, reason: 'update-rolled-back' }
+      }
+      return result
     }
+    if (viewDir && dshStatus !== null) {
+      try {
+        await lock(home, async () => {
+          state = assess()
+          await publish(viewDir, state)
+        })
+      } catch { /* A failed publication leaves DSH's own health report intact. */ }
+    }
+    state ??= assess()
   }
-  const [dshStatus, gateStatus, carrier] = await Promise.all([
-    probe(dshPort), enabled ? probe(Number(env.AUTOMAGIK_GATE_PORT || 3082)) : null,
-    modeOn ? multiuserProbe(dshPort) : null,
-  ])
   const multiuser = carrier && { ...carrier, healthy: carrier.caller && carrier.reservation }
   const fenced = dshStatus === 401 && (!enabled || gateStatus === 401)
   const version = releaseVersion(build?.automagik) ? build.automagik : null
@@ -92,7 +103,8 @@ export async function healthReport({
     gate: { enabled, up: enabled ? gateStatus !== null : null, status: gateStatus },
     fence: { healthy: fenced, status: enabled ? gateStatus : dshStatus },
     ...(multiuser ? { multiuser } : {}),
-    healthy: (!multiuser || multiuser.healthy) && fenced && validBuild(build) && revision !== null && (state.followsImage || state.ownerManaged),
+    healthy: (!multiuser || multiuser.healthy) && fenced && validBuild(build) && revision !== null &&
+      (state.followsImage || state.ownerManaged || state.reason === 'signed-update-ahead'),
   }
 }
 

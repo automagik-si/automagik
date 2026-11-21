@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
@@ -171,7 +171,28 @@ if (action === 'plugin') {
     })
     fs.writeFileSync(join(root, 'dsh-child-pid'), String(process.pid))
     const url = arg('--public-url') ?? 'http://127.0.0.1:' + arg('--port') + '/'
-    fs.writeSync(1, 'dsh web: ' + url + '?token=fixture-token\n')
+    if (mode === 'retired-announcement' && bootsAlready === 0) {
+      // Delivery 6 starts an update only with this child's listener verified, so it announces first.
+      fs.writeSync(1, 'dsh web: ' + url + '?token=image-child-1\n')
+      // The previous child exits first, while a descendant still holds both output pipes.
+      const program = `
+        const { existsSync, writeSync } = require('node:fs')
+        const interval = setInterval(() => {
+          if (!existsSync(process.argv[1])) return
+          clearInterval(interval)
+          writeSync(1, 'dsh web: http://127.0.0.1:3080/?token=retired-stdout\\n')
+          writeSync(2, 'dsh web: http://127.0.0.1:3080/?token=retired-stderr\\n')
+        }, 10)
+        setTimeout(() => process.exit(), 5000).unref()
+      `
+      const retired = spawn(process.execPath, ['-e', program, join(root, 'release-retired-output')], { stdio: ['ignore', 1, 2] })
+      retired.unref()
+    } else if (process.env.SUPERVISOR_IMAGE_HOOKS) {
+      fs.writeSync(1, 'dsh web: ' + url + `?token=image-child-${bootsAlready + 1}\n`)
+      fs.writeSync(2, 'diagnostic token=image-diagnostic\n')
+    } else {
+      fs.writeSync(1, 'dsh web: ' + url + '?token=fixture-token\n')
+    }
   } else {
     const fault = candidate && mode.startsWith('trial-') ? mode.slice('trial-'.length) : null
     const unhealthy = mode === 'pre-switch-unhealthy' || (mode === 'restored-unhealthy' && bootsAlready > 0)
