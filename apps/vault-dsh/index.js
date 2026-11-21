@@ -11,6 +11,9 @@ import { checkSetToken, createBitwardenSecrets } from './src/bws/adapter.js'
 import { keychainIdentity } from './src/keychain/index.js'
 import { createMacosKeychain } from './src/macos-keychain/adapter.js'
 import { provider as macosKeychain } from './src/macos-keychain/parse.js'
+import { createWindowsCredential } from './src/windows-credential/adapter.js'
+import { provider as windowsCredential } from './src/windows-credential/parse.js'
+import { createRunner as createWindowsRunner } from './src/windows-credential/run.js'
 
 const secretsManager = 'bitwarden-secrets'
 
@@ -20,7 +23,7 @@ export const Config = Schema.object({
     .description('Minutes after unlocking or reading a field before the vault locks.'),
 })
 
-export function apply(ctx, config = {}, { keychain } = {}) {
+export function apply(ctx, config = {}, { keychain, windows } = {}) {
   const adapters = new Map([
     ['bitwarden', createVault(config)],
     ['onepassword', createOnePassword(config)],
@@ -29,12 +32,16 @@ export function apply(ctx, config = {}, { keychain } = {}) {
     [protonPass, createProtonPass(config)],
     [secretsManager, createBitwardenSecrets(config, { identity: keychainIdentity(ctx), keychain })],
     [macosKeychain, createMacosKeychain(config)],
+    [windowsCredential, createWindowsCredential(config, windows ?? {
+      runner: createWindowsRunner({ profileDir: () => ctx.get?.('profileContext')?.dir }),
+    })],
   ])
   let selection = Object.freeze({ provider: 'bitwarden', generation: 0 })
   let generation = 0
   let secretServiceRevision = 0
   let managerLockRevision = 0
   let retiring
+  let windowsEntry
   let disposed = false
   const refused = () => ({ ok: false, code: 'refused' })
   async function enter(provider, options, operation) {
@@ -59,19 +66,33 @@ export function apply(ctx, config = {}, { keychain } = {}) {
       const code = adapter.availability()
       if (code !== undefined) return { ok: false, code }
     }
+    let windowsSignal
+    const gateBound = provider === macosKeychain || provider === windowsCredential
+    const binding = gateBound ? adapter.binding : undefined
+    if (provider === windowsCredential) {
+      if (!adapter.validUnlock(options)) return refused()
+      const before = selection
+      windowsEntry?.abort()
+      windowsEntry = new AbortController()
+      windowsSignal = options.signal ? AbortSignal.any([windowsEntry.signal, options.signal]) : windowsEntry.signal
+      const current = () => !disposed && before === selection && binding === adapter.binding && !windowsSignal.aborted
+      const answer = await adapter.preflight({ ...options, signal: windowsSignal }, current)
+      if (!answer.ok) return answer
+      if (!current()) return { ok: false, code: 'locked' }
+    }
     const revision = secretServiceRevision
     const managerRevision = managerLockRevision
     const switching = provider !== selection.provider
-    const binding = provider === macosKeychain ? adapter.binding : undefined
     const current = switching || retiring !== undefined ? ++generation : generation
     if (switching) {
+      if (provider !== windowsCredential) windowsEntry?.abort()
       retiring ??= adapters.get(selection.provider).retire().catch(() => false).finally(() => { retiring = undefined })
     }
     const retired = await retiring
     if (disposed || current !== generation || options.signal?.aborted
       || (provider === secretService && revision !== secretServiceRevision)
       || (provider === secretsManager && managerRevision !== managerLockRevision)
-      || (provider === macosKeychain && binding !== adapter.binding)) return { ok: false, code: 'locked' }
+      || (gateBound && binding !== adapter.binding) || windowsSignal?.aborted) return { ok: false, code: 'locked' }
     if (switching) {
       if (retired !== true) return { ok: false, code: 'unavailable' }
       selection = Object.freeze({ provider, generation: current })
@@ -91,8 +112,9 @@ export function apply(ctx, config = {}, { keychain } = {}) {
     async lock({ provider } = {}) {
       if (provider === secretService) secretServiceRevision++
       else if (provider === secretsManager) managerLockRevision++
-      // The Keychain gate invalidates its own queued entry synchronously on retire.
-      else if (provider !== macosKeychain) generation++
+      // These gates invalidate their own queued entries synchronously on retire.
+      else if (provider !== macosKeychain && provider !== windowsCredential) generation++
+      if (provider === undefined || provider === windowsCredential) windowsEntry?.abort()
       if (provider !== undefined && !adapters.has(provider)) return false
       const targets = provider === undefined ? [...adapters.values()] : [adapters.get(provider)]
       const results = await Promise.allSettled(targets.map(adapter => adapter.retire()))
@@ -106,8 +128,10 @@ export function apply(ctx, config = {}, { keychain } = {}) {
     },
     async prepareQuit() {
       disposed = true
+      windowsEntry?.abort()
       const results = await Promise.all([...adapters.values()].map(adapter => adapter.prepareQuit()))
-      return { ok: results.every(result => result.ok) }
+      const unconfirmed = results.reduce((count, result) => count + (result.unconfirmed ?? 0), 0)
+      return { ok: results.every(result => result.ok), ...(unconfirmed ? { unconfirmed } : {}) }
     },
   }
   // Capability metadata is discovered directly. Keep the enumerable v1 method surface.
@@ -139,7 +163,7 @@ export function apply(ctx, config = {}, { keychain } = {}) {
     connectionFor: { value: ({ provider, address, namespace }) =>
       provider === hashicorp ? endpointOf(address, namespace)?.connection : undefined },
     providerBinding: { value: provider =>
-      provider === secretService || provider === macosKeychain ? adapters.get(provider).binding : undefined },
+      provider === secretService || provider === macosKeychain || provider === windowsCredential ? adapters.get(provider).binding : undefined },
     resolveHandle: { value: ({ provider, ...options }) => adapters.get(provider)?.resolveHandle?.(options) ?? refused() },
     itemDetail: { value: ({ provider, ...options }) => adapters.get(provider)?.detail?.(options) ?? refused() },
     sessionOf: { value: ({ provider } = {}) => provider === protonPass ? adapters.get(provider).session : undefined },

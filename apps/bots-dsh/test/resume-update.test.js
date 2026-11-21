@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import fs, { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { hostname, tmpdir } from 'node:os'
@@ -13,6 +14,8 @@ import * as SessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as SpawnSubagents from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { apply } from '../index.js'
+import { install as installApprovals } from '../src/host/approvals.js'
+import { install as installAutoJudge, installAhead } from '../src/host/auto-judge.js'
 import { install as installLogin } from '../src/host/cli-login.js'
 import { SOURCE_KIND, UPDATE_CUT } from '../src/host/constants.js'
 import MemberWallFileSystem from '../src/host/member-wall/fs.js'
@@ -318,6 +321,55 @@ test('disposing during the boot delay leaves disk notes for the next runtime alo
   const next = replayBench(t, home, { agents, logs, gate: false })
   await finishBoot(t, next)
   assert.deepEqual(received, [waiting.id])
+})
+
+test('a pending credential approval leaves only the fixed placeholder across restart', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = temp(t)
+  const old = replayBench(t, home, { gate: false })
+  old.rt.chatOwners.set('chat', 'ada')
+  old.rt.botOf('ada').permissionAuto = 'acp-hermes'
+  old.rt.autoWhy = () => undefined
+  const target = randomUUID(), value = randomUUID()
+  const command = 'cmdkey /generic:' + target + ' /' + 'pass' + ':' + value
+  const pending = Promise.withResolvers()
+  const card = Promise.withResolvers()
+  t.after(() => pending.resolve('cancelled'))
+  installApprovals(old.rt)
+  installAutoJudge(old.rt)
+  installAhead(old.rt)
+  emit(old.ctx, 'chat', 'turn/start')
+  const [approve, auto] = old.ctx.listeners.get('approval/request')
+  const request = {
+    agent: { session: { id: 'chat' } }, toolName: 'acp_tool', callId: 'fixture-step',
+    reason: 'Run ' + command, mirrorCall: { allowOnce: true, title: command, input: { command } },
+  }
+  const result = auto(request, () => approve(request, () => { card.resolve(); return pending.promise }))
+  await card.promise
+  await old.rt.flushUpdateNotes()
+  const hidden = 'a credential command, not shown'
+  const disk = readFileSync(join(home, 'inflight.json'), 'utf8')
+  const approval = JSON.parse(disk).turns.chat?.approval
+  assert.equal(approval?.tool === hidden && approval.reason === '', true, 'only the placeholder is persisted')
+  emit(old.ctx, 'chat', 'turn/end', { reason: { kind: 'interrupted' } })
+  await old.ctx.dispose()
+  t.mock.timers.tick(RESUME_DELAY_MS)
+  await old.rt.resumesDone
+
+  const messages = []
+  const agent = { status: 'idle', session: { id: 'chat' }, followup: message => messages.push(message) }
+  const next = replayBench(t, home, { gate: false, agents: new Map([['chat', agent]]), before(rt) {
+    rt.chatOwners.set('chat', 'ada')
+  } })
+  assert.deepEqual((await finishBoot(t, next)).resumed, ['chat'])
+  assert.equal(messages.length, 1)
+  const resumed = JSON.stringify(messages[0])
+  assert.equal(resumed.includes(hidden), true)
+  for (const surface of [disk, resumed]) {
+    assert.equal([target, value].some(marker => surface.includes(marker)), false)
+  }
+  pending.resolve('cancelled')
+  await result
 })
 
 function supervise(home, profileDir) {

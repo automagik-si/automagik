@@ -1830,6 +1830,43 @@ jobs:
       - name: Native Keychain checks
         run: node apps/vault-dsh/test/native/macos-keychain.native.mjs
 
+  vault-windows:
+    name: vault-dsh (native Windows Credential Manager)
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      VAULT_WINDOWS_NATIVE: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        shell: pwsh
+        run: |
+          $version = (Get-Content .github/node-versions.json -Raw | ConvertFrom-Json).release
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Record Windows image
+        shell: powershell
+        run: |
+          "ImageOS=$env:ImageOS"
+          "ImageVersion=$env:ImageVersion"
+          "WindowsBuild=$([System.Environment]::OSVersion.Version.Build)"
+          "PowerShellEdition=$($PSVersionTable.PSEdition)"
+          "PowerShellVersion=$($PSVersionTable.PSVersion)"
+          "PowerShell64Bit=$([System.Environment]::Is64BitProcess)"
+
+      - name: Native Windows Credential Manager checks
+        run: node apps/vault-dsh/test/native/windows-credential.native.mjs
+
   acp-image-read:
     name: acp-dsh (real Codex image reads) · required integration
     runs-on: ubuntu-24.04
@@ -2073,7 +2110,7 @@ jobs:
     name: CI result
     needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am,
             pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
-            plugin, vault-macos, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, boot]
+            plugin, vault-macos, vault-windows, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, boot]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

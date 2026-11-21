@@ -2203,6 +2203,17 @@ var ZH = {
   "Wi-Fi name": "Wi-Fi 名称",
   "Private key": "私钥",
   "HashiCorp Vault": "HashiCorp Vault",
+  "Windows Credential Manager": "Windows 凭据管理器",
+  "Review this approval on your computer.": "请在电脑上查看此审批。",
+  "Windows Credential Manager needs Windows.": "Windows 凭据管理器需要 Windows。",
+  "Windows Credential Manager is unavailable in Automagik Cloud.": "Automagik Cloud 不支持 Windows 凭据管理器。",
+  "Windows Credential Manager needs 64-bit x64 Windows.": "Windows 凭据管理器需要 64 位 x64 Windows。",
+  "This Windows is installed in a folder the credential reader does not trust.": "此 Windows 安装在凭据读取器不信任的文件夹中。",
+  "The Windows credential reader could not start here (for example Constrained Language Mode, AppLocker or antivirus).": "无法启动 Windows 凭据读取器（可能是受限语言模式、AppLocker 或防病毒软件所致）。",
+  "Find a generic credential by its exact target in the current Windows logon session.": "按确切目标在当前 Windows 登录会话中查找通用凭据。",
+  "Target": "目标",
+  "User name: {name}": "用户名：{name}",
+  "not shown": "未显示",
   "macOS Keychain": "macOS 钥匙串",
   "macOS Keychain needs macOS.": "macOS 钥匙串需要 macOS。",
   "macOS Keychain is unavailable in Automagik Cloud.": "Automagik Cloud 不支持 macOS 钥匙串。",
@@ -6416,6 +6427,9 @@ function GitHubSteps({ bot, work }) {
 var vaultLocked = "The vault is locked. Unlock it in Settings › Vault and ask again; nothing was read.";
 var vaultDetailUnavailable = "The vault item details could not be loaded.";
 var macosKeychain = "macos-keychain";
+var windowsCredential = "windows-credential";
+var windowsLabel = "Windows Credential Manager";
+var windowsHint = "Find a generic credential by its exact target in the current Windows logon session.";
 var keychainHint = "macOS may ask on this Mac. Choose “Allow”, not “Always Allow”.";
 var GNOME_PROVIDER_ID = "secret-service";
 var GNOME_PROVIDER_LABEL = "Secret Service (GNOME Keyring)";
@@ -6470,6 +6484,8 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
         } catch {
           verified = false;
         }
+      } else if (verified && provider === windowsCredential) {
+        verified = field === "password" && item.length >= 4;
       } else if (verified && provider === "hashicorp-vault") {
         try {
           const parts = JSON.parse(item);
@@ -6506,6 +6522,7 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
     const keyring = item?.provider === GNOME_PROVIDER_ID;
     const proton = item?.provider === "proton-pass";
     const keychain = item?.provider === macosKeychain;
+    const windows = item?.provider === windowsCredential;
     const allow2 = () => {
       if (item && !busy) void run3(() => actions.secretAllow(request.id, { commandDigest: item.commandDigest, snapshot: item.snapshot }));
     };
@@ -6523,7 +6540,7 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
       item ? (0, import_react10.createElement)(
         "div",
         { className: "bt-secret-note" },
-        (0, import_react10.createElement)("div", null, t("Provider: {provider}", { provider: keyring ? t(GNOME_PROVIDER_LABEL) : keychain ? t("macOS Keychain") : hashicorp ? t("HashiCorp Vault") : proton ? t("Proton Pass") : item.provider })),
+        (0, import_react10.createElement)("div", null, t("Provider: {provider}", { provider: keyring ? t(GNOME_PROVIDER_LABEL) : keychain ? t("macOS Keychain") : windows ? t(windowsLabel) : hashicorp ? t("HashiCorp Vault") : proton ? t("Proton Pass") : item.provider })),
         keychain ? ["Service", "Account"].map((label) => (0, import_react10.createElement)(
           "div",
           { key: label },
@@ -6533,10 +6550,15 @@ function SecretCard({ sessionId, bot, request, roster, actions, inline = false }
             { className: "bt-aa-pre", "aria-label": t(label) },
             (0, import_react10.createElement)("code", null, item.keychainDetails[label.toLowerCase()])
           )
-        )) : (0, import_react10.createElement)("div", null, t("Item: {item}", { item: item.item })),
+        )) : windows ? (0, import_react10.createElement)(
+          "div",
+          null,
+          t("Target"),
+          (0, import_react10.createElement)("pre", { className: "bt-aa-pre", "aria-label": t("Target") }, (0, import_react10.createElement)("code", null, item.item))
+        ) : (0, import_react10.createElement)("div", null, t("Item: {item}", { item: item.item })),
         keyring ? (0, import_react10.createElement)("div", null, t("Collection: {collection}", { collection: item.collection })) : null,
         keyring ? (0, import_react10.createElement)("div", null, createdLabel(item.created)) : null,
-        (0, import_react10.createElement)("div", null, t("Field: {field}", { field: keyring ? t("Secret") : keychain ? t("Password") : item.field }))
+        (0, import_react10.createElement)("div", null, t("Field: {field}", { field: keyring ? t("Secret") : keychain || windows ? t("Password") : item.field }))
       ) : null,
       error || detail?.error ? (0, import_react10.createElement)("div", { className: "bt-secret-error", role: "alert" }, error || t(detail.error)) : null,
       (0, import_react10.createElement)(
@@ -6934,6 +6956,7 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
   const [project, setProject] = (0, import_react10.useState)("");
   const [service2, setService] = (0, import_react10.useState)("");
   const [account, setAccount] = (0, import_react10.useState)("");
+  const [target, setTarget] = (0, import_react10.useState)("");
   const keyring = provider === GNOME_PROVIDER_ID;
   const item = items?.find((row2) => itemId !== "" && (keyring ? row2.handle : row2.id) === itemId && !row2.folder);
   const onePassword = provider === "onepassword";
@@ -6941,6 +6964,7 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
   const hashicorp = provider === "hashicorp-vault";
   const machineAccount = provider === "bitwarden-secrets";
   const keychain = provider === macosKeychain;
+  const windows = provider === windowsCredential;
   const namedSearch = provider === "onepassword" || provider === GNOME_PROVIDER_ID;
   const optionId = (row2) => hashicorp && row2.folder ? row2.id + "/" : row2.id;
   const itemOption = (row2, index) => {
@@ -6979,15 +7003,15 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
     setFields([]);
   };
   const find = async (next = hashicorp ? folder : project) => {
-    if (busy || keychain && (!service2 || !account)) return;
+    if (busy || keychain && (!service2 || !account) || windows && target.length < 4) return;
     setBusy(true);
     resetItems();
     try {
-      const listed = keychain ? actions.vaultItems({ service: service2, account }, provider) : hashicorp ? actions.vaultItems({ mount, folder: next }, provider) : machineAccount ? actions.vaultItems(search, provider, next || void 0) : namedSearch || proton ? actions.vaultItems(search, provider) : actions.vaultItems(search);
+      const listed = windows ? actions.vaultItems({ target }, provider) : keychain ? actions.vaultItems({ service: service2, account }, provider) : hashicorp ? actions.vaultItems({ mount, folder: next }, provider) : machineAccount ? actions.vaultItems(search, provider, next || void 0) : namedSearch || proton ? actions.vaultItems(search, provider) : actions.vaultItems(search);
       await run3(listed.then((answer) => {
         if (machineAccount && !next) setProjects(answer.projects);
         else setItems(answer.items);
-        if (keychain && answer.items.length === 1) {
+        if ((keychain || windows) && answer.items.length === 1) {
           setItemId(answer.items[0].id);
           setField("password");
         }
@@ -7022,7 +7046,7 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
     try {
       const key = name.trim().replace(/-/g, "_");
       const mapping = keyring ? { name: key, purpose, scope, provider, handle: itemId } : { name: key, purpose, connection, item: hashicorp ? JSON.stringify([mount, itemId]) : itemId, field, scope };
-      if (onePassword || hashicorp || proton || machineAccount || keychain) mapping.provider = provider;
+      if (onePassword || hashicorp || proton || machineAccount || keychain || windows) mapping.provider = provider;
       if (machineAccount) mapping.credentialRevision = credentialRevision;
       if (await run3(actions.secretSourceSet(mapping))) onDone();
     } finally {
@@ -7057,7 +7081,7 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
         event.preventDefault();
         return find();
       } },
-      keychain ? [["Service", service2, setService], ["Account", account, setAccount]].map(([label, value, setValue]) => (0, import_react10.createElement)(
+      keychain || windows ? (windows ? [["Target", target, setTarget, 256]] : [["Service", service2, setService, 128], ["Account", account, setAccount, 128]]).map(([label, value, setValue, maxLength]) => (0, import_react10.createElement)(
         "label",
         { key: label, className: "bt-q-field" },
         t(label),
@@ -7065,7 +7089,7 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
           className: "bt-input",
           "aria-label": t(label),
           value,
-          maxLength: 128,
+          maxLength,
           disabled: busy,
           spellCheck: false,
           autoComplete: "off",
@@ -7107,12 +7131,13 @@ function AddVaultKey({ actions, provider, connection, credentialRevision, roster
       ] : (0, import_react10.createElement)("input", { className: "bt-input", type: "search", "aria-label": t("Search the vault"), placeholder: t("Search the vault"), value: search, autoComplete: "off", onChange: (event) => setSearch(event.target.value) }),
       (0, import_react10.createElement)(
         "button",
-        { type: "submit", className: "bt-soft bt-soft-sm", disabled: busy || hashicorp && !mount || keychain && (!service2 || !account) },
-        t(keychain ? "Find" : hashicorp ? "Browse" : "Search")
+        { type: "submit", className: "bt-soft bt-soft-sm", disabled: busy || hashicorp && !mount || keychain && (!service2 || !account) || windows && target.length < 4 },
+        t(keychain || windows ? "Find" : hashicorp ? "Browse" : "Search")
       )
     ) : null,
     items?.length === 0 ? (0, import_react10.createElement)("span", { className: "bt-set-hint", role: "status" }, t("No matching vault items.")) : null,
-    !keychain && items?.length > 0 ? (0, import_react10.createElement)(
+    windows && item ? (0, import_react10.createElement)("div", { className: "bt-set-hint" }, t("User name: {name}", { name: item.userName ?? t("not shown") })) : null,
+    !keychain && !windows && items?.length > 0 ? (0, import_react10.createElement)(
       "select",
       {
         className: "bt-input",
@@ -7161,7 +7186,8 @@ var vaultProviders = Object.fromEntries([
   [GNOME_PROVIDER_ID, GNOME_PROVIDER_LABEL],
   ["proton-pass", "Proton Pass"],
   ["bitwarden-secrets", "Bitwarden Secrets Manager"],
-  [macosKeychain, "macOS Keychain"]
+  [macosKeychain, "macOS Keychain"],
+  [windowsCredential, windowsLabel]
 ]);
 function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const [status, setStatus] = (0, import_react10.useState)(null);
@@ -7183,6 +7209,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   const proton = provider === "proton-pass";
   const hashicorp = provider === "hashicorp-vault";
   const keychain = provider === macosKeychain;
+  const windows = provider === windowsCredential;
   const machineAccount = provider === "bitwarden-secrets";
   const connectionKnown = status?.connectionKnown === true;
   const target = connectionKnown ? connection : connectionLabel2 ?? connection;
@@ -7236,13 +7263,13 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
   };
   const unlock = async () => {
     const input = password.current;
-    if (busy || !keyring && !keychain && !input?.value || hashicorp && !address.current?.value || machineAccount && !target) return;
+    if (busy || !keyring && !keychain && !windows && !input?.value || hashicorp && !address.current?.value || machineAccount && !target) return;
     setBusy(true);
     const credential = input?.value;
     if (input) input.value = "";
     try {
       if (keyring) await run3(actions.vaultUnlockSecretService());
-      else if (keychain) await run3(actions.vaultUnlock(void 0, void 0, provider));
+      else if (keychain || windows) await run3(actions.vaultUnlock(void 0, void 0, provider));
       else if (hashicorp) {
         const endpoint = { address: address.current.value, namespace: namespace.current.value };
         address.current.value = "";
@@ -7266,13 +7293,13 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
       changed();
     }
   };
-  const credentialControls = !readOnly && (state2 === "locked" || (onePassword || hashicorp || proton || machineAccount) && state2 === "unlocked" || machineAccount && state2 === "unavailable" && status?.reason !== "Bitwarden Secrets Manager is unavailable in Automagik Cloud.");
+  const credentialControls = !readOnly && (state2 === "locked" || (onePassword || hashicorp || proton || machineAccount) && state2 === "unlocked" || windows && state2 === "unavailable" && status?.retry === true || machineAccount && state2 === "unavailable" && status?.reason !== "Bitwarden Secrets Manager is unavailable in Automagik Cloud.");
   const lock = async () => {
     if (busy) return;
     setBusy(true);
     setAdding(false);
     try {
-      await run3(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring || proton || machineAccount || keychain ? actions.vaultLock(provider) : actions.vaultLock());
+      await run3(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring || proton || machineAccount || keychain || windows ? actions.vaultLock(provider) : actions.vaultLock());
     } finally {
       changed();
     }
@@ -7298,8 +7325,8 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
     (0, import_react10.createElement)(
       "div",
       { className: "bt-set-row", role: "status" },
-      (0, import_react10.createElement)("span", { className: "bt-tag" }, t(keychain && status?.reason ? "Unavailable" : status?.reason ?? vaultStates[state2] ?? "Checking vault status…")),
-      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t(keyring ? "Locking here closes Automagik’s access. Manage the keyring lock in GNOME." : keychain ? status?.reason ?? keychainHint : hashicorp ? "The address, namespace and token are cleared when the vault locks or the app quits." : proton ? "The token is used once to sign in and needs read access to a vault; items shared on their own are not listed. The session ends when the vault locks, after at most 110 minutes, or when the app quits." : onePassword ? "The token is cleared when the vault locks or the app quits." : "The vault locks after the idle time set in the plugin’s settings.")),
+      (0, import_react10.createElement)("span", { className: "bt-tag" }, t((keychain || windows) && status?.reason ? "Unavailable" : status?.reason ?? vaultStates[state2] ?? "Checking vault status…")),
+      (0, import_react10.createElement)("span", { className: "bt-set-hint" }, t(keyring ? "Locking here closes Automagik’s access. Manage the keyring lock in GNOME." : keychain ? status?.reason ?? keychainHint : windows ? status?.reason ?? windowsHint : hashicorp ? "The address, namespace and token are cleared when the vault locks or the app quits." : proton ? "The token is used once to sign in and needs read access to a vault; items shared on their own are not listed. The session ends when the vault locks, after at most 110 minutes, or when the app quits." : onePassword ? "The token is cleared when the vault locks or the app quits." : "The vault locks after the idle time set in the plugin’s settings.")),
       state2 === "unlocked" && (!onePassword || local) ? (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: lock }, t(onePassword ? "Clear token" : "Lock")) : null
     ),
     credentialControls && !local ? (0, import_react10.createElement)(
@@ -7366,7 +7393,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
           setServer(event.target.value);
         }
       }) : null,
-      keyring || keychain ? null : (0, import_react10.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react10.createElement)(MaskedInput, {
+      keyring || keychain || windows ? null : (0, import_react10.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react10.createElement)(MaskedInput, {
         key: credentialKey,
         inputRef: password,
         disabled: busy,
@@ -7377,7 +7404,7 @@ function VaultSection({ roster, actions, run: run3, Section: Section3 }) {
       (0, import_react10.createElement)(
         "button",
         { type: "button", className: "bt-soft bt-soft-sm", disabled: busy || machineAccount && !target, onClick: unlock },
-        t(hashicorp ? "Connect" : onePassword || proton || machineAccount ? state2 === "unlocked" ? "Replace token" : "Set token" : "Unlock")
+        t(hashicorp ? "Connect" : onePassword || proton || machineAccount ? state2 === "unlocked" ? "Replace token" : "Set token" : windows && status?.retry ? "Retry" : "Unlock")
       )
     ) : null,
     state2 === "unlocked" && !status?.mismatch && !roster.secretSources?.broken ? adding ? (0, import_react10.createElement)(AddVaultKey, { key: managerStatusKey ?? provider + "/" + connection, actions, provider, connection, credentialRevision, roster, run: run3, onDone: () => setAdding(false) }) : (0, import_react10.createElement)("div", { className: "bt-set-row" }, (0, import_react10.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => setAdding(true) }, t("Add a vault key"))) : null
@@ -22324,7 +22351,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     vaultStatus: (signal, provider) => call2("vault-status", provider === void 0 ? void 0 : { provider }, signal),
     vaultUnlock: (password, connection, provider = "bitwarden") => call2(
       "vault-unlock",
-      provider === "macos-keychain" ? { provider } : { provider, password, connection }
+      provider === "macos-keychain" || provider === "windows-credential" ? { provider } : { provider, password, connection }
     ),
     vaultUnlockSecretService: () => call2("vault-unlock", { provider: "secret-service" }),
     vaultUnlockSaved: (provider, connection, credentialRevision) => call2("vault-unlock", {
@@ -22333,7 +22360,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
       ...credentialRevision === void 0 ? {} : { credentialRevision }
     }),
     vaultLock: (provider) => provider === void 0 ? call2("vault-lock") : call2("vault-lock", { provider }),
-    vaultItems: (search, provider, project) => call2("vault-items", provider === "hashicorp-vault" || provider === "macos-keychain" ? { provider, ...search } : {
+    vaultItems: (search, provider, project) => call2("vault-items", provider === "hashicorp-vault" || provider === "macos-keychain" || provider === "windows-credential" ? { provider, ...search } : {
       search,
       ...provider === void 0 ? {} : { provider },
       ...project === void 0 ? {} : { project }

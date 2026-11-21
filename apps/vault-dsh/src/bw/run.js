@@ -6,12 +6,13 @@ import { debuglog } from 'node:util'
 import { isUnlockVariable } from './unlock-env.js'
 
 const debugChild = debuglog('child_process')
+const debugStream = debuglog('stream')
 const stripped = new Set(['BW_RESPONSE', 'BW_CLEANEXIT', 'BW_NOINTERACTION', 'BW_RAW', 'BW_PRETTY', 'BW_QUIET', 'NODE_DEBUG', 'NODE_OPTIONS'])
 const rustDiagnostics = /^(?:RUST_(?:LOG|(?:LIB_)?BACKTRACE|SPANTRACE)(?:_|$)|COLORBT_)/
 const MAX_OUTPUT = 4 * 1024 * 1024
 const MAX_INPUT = 4096
 const decode = chunks => new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks))
-export const tracing = () => debugChild.enabled || inspectorUrl() !== undefined
+export const tracing = () => debugChild.enabled || debugStream.enabled || inspectorUrl() !== undefined
 
 export function childEnv(parent = process.env) {
   return { ...sensitiveEnv(parent), BW_NOINTERACTION: 'true' }

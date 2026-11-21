@@ -30,6 +30,7 @@ export function install(rt) {
     if (label.startsWith('Spanish')) return 'es'
     if (label.startsWith('French')) return 'fr'
     if (label.startsWith('German')) return 'de'
+    if (label.startsWith('Portuguese') || /^pt(?:-BR)?$/i.test(label)) return 'pt-BR'
     return 'en'
   }
   const text = (key, values = {}) => {
@@ -43,6 +44,7 @@ export function install(rt) {
         stopped: 'Stopped.',
         idle: 'Nothing is running.',
         stale: 'This card was already answered.',
+        localApproval: 'Review this approval on your computer.',
         noFile: 'This file cannot be sent here; send it on the computer.',
         greeting: `Hello, I am ${values.name}.`,
         question: `${values.bot} asks: `,
@@ -64,6 +66,7 @@ export function install(rt) {
         stopped: '已停下。',
         idle: '现在没有在做的活。',
         stale: '这张卡已经答过了。',
+        localApproval: '请在电脑上查看此审批。',
         noFile: '这个文件发不过去，请在电脑上发。',
         greeting: `你好，我是 ${values.name}。`,
         question: `${values.bot} 问你：`,
@@ -85,6 +88,7 @@ export function install(rt) {
         stopped: '已停下。',
         idle: '現在沒有在做的活。',
         stale: '這張卡已經答過了。',
+        localApproval: '請在電腦上查看此審批。',
         noFile: '這個檔案傳不過去，請在電腦上傳。',
         greeting: `你好，我是 ${values.name}。`,
         question: `${values.bot} 問你：`,
@@ -182,6 +186,9 @@ export function install(rt) {
         allow: 'Autoriser une fois',
         reject: 'Refuser',
       },
+      'pt-BR': {
+        localApproval: 'Revise esta aprovação no seu computador.',
+      },
       de: {
         requested: 'Eine Verbindungsanfrage wurde an Omni gesendet; erlaube sie am Computer unter Einstellungen → IM.',
         unbound: 'Dieser IM-Bot ist noch keinem Bot zugewiesen; wähle einen in den Omni-Einstellungen → IM.',
@@ -204,7 +211,7 @@ export function install(rt) {
         reject: 'Ablehnen',
       },
     }
-    return (table[lang] ?? table.en)[key] ?? key
+    return table[lang]?.[key] ?? table.en[key] ?? key
   }
 
   // ---------------------------------------------------------------- runtime file
@@ -458,6 +465,10 @@ export function install(rt) {
       await settleCard(conn.id, held.cardKey, choice === 'allow' ? text('allow') : text('reject'))
       await settledEdits(conn)
     } catch (error) {
+      if (error?.code === 'bot/local-approval') {
+        await sendCardReply(conn, chat, text('localApproval'))
+        return true
+      }
       if (error?.code === 'bot/stale') {
         await sendCardReply(conn, chat, text('stale'))
         return true
@@ -1085,8 +1096,9 @@ export function install(rt) {
           if (runner === undefined) continue
           const bot = rt.botOf(data.botId)
           const targets = data.roomId !== undefined ? listeners(conn, { roomId: data.roomId }) : listeners(conn, { botId: data.botId })
-          const buttons = imPlatform(conn.platform)?.buttons === true ? cardButtons.approval(data.id) : undefined
-          await sendCard(conn, `a:${data.id}`, targets, cardText.approval(bot?.name ?? '?', data), buttons, ask)
+          const buttons = data.localReview !== true && imPlatform(conn.platform)?.buttons === true ? cardButtons.approval(data.id) : undefined
+          const body = cardText.approval(bot?.name ?? '?', data)
+          await sendCard(conn, `a:${data.id}`, targets, data.localReview === true ? `${body}\n${text('localApproval')}` : body, buttons, ask)
         }
       })().catch(error => rt.warn('omni-ui: im approval card failed: %s', error))
       return

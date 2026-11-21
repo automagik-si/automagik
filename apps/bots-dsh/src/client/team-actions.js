@@ -253,12 +253,12 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     secretSourceDetail: requestId => call('secret-source-detail', { requestId }),
     vaultStatus: (signal, provider) => call('vault-status', provider === undefined ? undefined : { provider }, signal),
     vaultUnlock: (password, connection, provider = 'bitwarden') => call('vault-unlock',
-      provider === 'macos-keychain' ? { provider } : { provider, password, connection }),
+      (provider === 'macos-keychain' || provider === 'windows-credential') ? { provider } : { provider, password, connection }),
     vaultUnlockSecretService: () => call('vault-unlock', { provider: 'secret-service' }),
     vaultUnlockSaved: (provider, connection, credentialRevision) => call('vault-unlock', { provider, connection,
       ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
     vaultLock: provider => provider === undefined ? call('vault-lock') : call('vault-lock', { provider }),
-    vaultItems: (search, provider, project) => call('vault-items', provider === 'hashicorp-vault' || provider === 'macos-keychain'
+    vaultItems: (search, provider, project) => call('vault-items', provider === 'hashicorp-vault' || provider === 'macos-keychain' || provider === 'windows-credential'
       ? { provider, ...search } : { search, ...(provider === undefined ? {} : { provider }),
         ...(project === undefined ? {} : { project }) }),
     vaultFields: (provider, mount, path) => call('vault-fields', { provider, mount, path }),
