@@ -3,7 +3,7 @@
 // switch of either vendor, on a reset, and once at start when it is absent or stale.
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { test } from 'node:test'
@@ -144,7 +144,7 @@ test('a DSH symlink change cannot split root selection from the published identi
     symlinkSync(first, link)
     const identity = installationIdentity(link)
     const { root } = installationCliHome(acpHome, link, { identity })
-    rmSync(link)
+    unlinkSync(link)
     symlinkSync(second, link)
     const panel = new CliHomes(root, { acpHome, identity })
     t.after(() => panel.dispose())
@@ -175,7 +175,7 @@ test('a failed vendor startup and a symlinked selection directory publish no aut
     panel.startup('claude')
     assert.deepEqual(errors, ['recorded'])
     assert.deepEqual(readdirSync(other), [])
-    rmSync(selected)
+    unlinkSync(selected)
     panel.publishSelection()
     assert.deepEqual(JSON.parse(readFileSync(panel.selection.path, 'utf8')).vendors, ['claude'])
   })
