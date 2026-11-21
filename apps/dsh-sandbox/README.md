@@ -2,7 +2,7 @@
 
 The DSH lane's part of #624 (tracked by #631), and the owner's answer to #700 and #743: a
 `bwrap` runner wrapper that gives every sandboxed dsh-tui pane its **own network namespace**,
-hides the herdr-core socket, the user's `~/.ssh` and fixed and env-named runtime sockets, and
+hides the herdr-core socket, the user's `~/.ssh` and runtime sockets, and
 binds the pane's filtering proxy at the exact real core socket path inside the sandbox. The
 host's loopback, its LAN and its own addresses are not in the pane's namespace; egress to the
 public internet goes through one explicit CONNECT relay on the namespace's own loopback. The
@@ -56,6 +56,15 @@ different design and out of scope here.
 - `hc-socket-mask: `: the prefix of every wrapper line. It is the profile row's
   `runnerFailureSignatures` entry, so DSH reports a wrapper refusal as a runner failure.
 
+Masked runs read bwrap's reported payload status. A valid status record does not prove that
+the pane command ran. The wrapper forwards bwrap's exit code and leaves bwrap's own stderr
+intact. It can print one of these status lines, each with the `hc-socket-mask: ` prefix.
+
+- `cannot start bwrap: <error>` (exit 127)
+- `bwrap ended by signal <signal>` (the wrapper re-raises the signal)
+- `bwrap's status could not be read (exit <code>)` (exit 1 when bwrap exited 0)
+- `bwrap exited <code> without reporting payload status` (including exit 0)
+
 The runner receives `[...runnerCommand, ...bwrapProfileArgs(policy), '--', ...command]` and
 must leave the profile args, the separator and the command intact.
 
@@ -97,7 +106,7 @@ these mounts after the profile args and before the `--`, in this order:
    file or forge its next approval.
 6. `$HOME/.ssh` when it exists, following symlinks. A directory gets `--tmpfs <canonical path>`;
    any other entry gets `--bind /dev/null <canonical path>`. `HOME` must be an absolute path.
-7. Fixed runtime sockets, then the sockets named by `DOCKER_HOST` and `CONTAINER_HOST` (only
+7. Fixed and discovered runtime sockets, then the sockets named by `DOCKER_HOST` and `CONTAINER_HOST` (only
    `unix://` with an absolute path) and by `SSH_AUTH_SOCK` (absolute paths only). The wrapper
    resolves and deduplicates these paths together. A directory gets `--tmpfs <canonical path>`;
    any other entry gets `--bind /dev/null <canonical path>`. Paths already inside the masked
@@ -112,6 +121,12 @@ these mounts after the profile args and before the `--`, in this order:
    - `/run/k3s/containerd/containerd.sock`
    - `/run/containerd/containerd.sock.ttrpc`
    - `/run/buildkit/buildkitd.sock`
+
+   For rootless containerd and BuildKit the wrapper inventories `/run/user/<uid>` and any
+   absolute `XDG_RUNTIME_DIR` that is a real directory owned by that uid. It lists each
+   canonical root once. In each root it checks `containerd/containerd.sock`,
+   `containerd/containerd.sock.ttrpc`, `buildkit/buildkitd.sock` and `buildkitd.sock` directly
+   under each `buildkit-*` entry.
 
 The socket masks cover readable endpoints that exist when the pane starts. A socket created
 later in a visible host folder remains reachable. The core and shared proxy folders are
@@ -148,9 +163,10 @@ Before running `bwrap`, the wrapper refuses with one `hc-socket-mask: ` line and
   (masking that folder would hide the proxy again), whether or not a bind is added;
 - the resolved core and shared proxy folders contain one another, or the resolved proxy
   folder holds the core socket path;
-- a fixed or env-named socket path resolves to `/` or would cover a protected path: the
+- a runtime socket path resolves to `/` or would cover a protected path: the
   canonical core folder, shared proxy folder, host egress folder, relay source, pack data
   parent or masked `~/.ssh`;
+- an existing rootless runtime folder cannot be listed to inventory its services;
 - the platform is not Linux (there is no network namespace to create);
 - a `bwrap --unshare-net` probe cannot create a network namespace (missing privilege, an old
   kernel or a container that forbids it), or bwrap is missing;
@@ -163,7 +179,7 @@ host route. A refused CONNECT (a host, loopback, link-local or private destinati
 
 When `AM_HC_PROXY_SOCKET` is absolute but missing or not a Unix socket, the wrapper prints one
 `hc-socket-mask: ` line, hides the proxy's host folder along with the real folder, `~/.ssh` (if
-present) and the fixed and env-named runtime sockets, and runs `bwrap` with **no core socket**.
+present) and the fixed, discovered and env-named runtime sockets, and runs `bwrap` with **no core socket**.
 The pane starts and its `hc` calls fail closed. This is the "proxy not up yet" case and a non-socket path; it
 never falls back to the real socket. **The pack must always set an absolute
 `AM_HC_PROXY_SOCKET`**: an unset or relative one refuses the pane instead of starting it without
@@ -171,6 +187,13 @@ the folder mask.
 
 With the switch off, nothing above applies: the wrapper runs `bwrap` with exactly the argv it
 was handed, which is today's behavior.
+
+## Residuals and their conditions (RFC 0044 Q2a)
+
+Before the first opt-in, record the computer's name, its privileged socket folders and its
+container services. Accept `tcp://` or `ssh://` container hosts only if none is reachable
+through the relay. Accept sockets created after launch only if no privileged socket folder
+is visible in the pane. Enable the mask on that computer only when both conditions hold.
 
 ## The network: own namespace, one loopback relay
 

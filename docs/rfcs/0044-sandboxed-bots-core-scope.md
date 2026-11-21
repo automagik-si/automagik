@@ -411,6 +411,9 @@ runbook's answer stays to start that Bot on its own computer (`hcProxy.md`, "Rol
 - **Q6, the upstream request:** post R1-R6 as one comment on herdr-core#171, in English, without
   offering a PR and without Bot names or anyone's data. The text is reviewed before it is posted.
   Maintainer question 5 is not asked.
+- **Q6 amended (owner's delegate, 2026-11-21):** the herdr-core work goes as PRs to herdr-core,
+  each small and opt-in, discussed on #171 before any is marked ready; R3b stays in the request
+  but is not implemented in this work.
 - **Q7, macOS:** (a) a feasibility study on a Mac after the Linux canary.
 - **Q8, RFC 0028's grant:** (a) in the same request, as R3b.
 - **Delivery 1** was approved ahead of these answers, as the fix of today's defect (the proxy refuses

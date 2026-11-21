@@ -1525,6 +1525,31 @@ test(
   assert.match(warnings[0].message, /differs from the approved one/);
 });
 
+test("the proxy detects changed roster bytes even when a lossy UTF-8 read matches", async (t) => {
+  const { s, start } = await sceneWithCore(t, { proxy: false });
+  const roster = team();
+  roster.bots[0].name = "Main \uFFFD";
+  const text = `${JSON.stringify(roster, null, 2)}\n`;
+  const botsPath = join(s.project, ".herdr", "bots.json");
+  writeFileSync(botsPath, text);
+  approveProject({ project: s.project, env: s.env });
+  s.terminals.push({ address: "t200", name: "new-seat", labels: { bot: ID.dev }, cwd: s.project,
+    state: "live" });
+  const events = [];
+  const options = { caller: { bot: ID.dev, project: s.project, worker: false }, bound: true,
+    log: (event) => events.push(event) };
+  const drift = () => events.filter((event) => event.ev === "roster_unapproved");
+  const initial = await start("t200", options);
+  assert.equal(drift().length, 0);
+  await initial.close();
+  const [before, after] = text.split("\uFFFD");
+  const changed = Buffer.concat([Buffer.from(before), Buffer.from([0xff]), Buffer.from(after)]);
+  assert.equal(changed.toString("utf8"), text);
+  writeFileSync(botsPath, changed);
+  await start("t200", options);
+  assert.equal(drift().length, 1);
+});
+
 test("G1 (c): a missing record refuses a proxied pane and names the command", async (t) => {
   const { s, start } = await sceneWithCore(t, { proxy: false });
   s.terminals.push({ address: "t200", name: "new-seat", labels: { bot: ID.dev }, cwd: s.project,

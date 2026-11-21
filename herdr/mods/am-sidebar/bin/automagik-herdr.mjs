@@ -86,8 +86,8 @@ import { isInstalledGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
-import { approveProject, approvedProxyEnabled, approvedProxyState, approvedSettingsDir, approvedWorkerHome, parseApprovedRecord,
-  projectKey, proxyStateFor, recordFileOf } from "../approved.js";
+import { APPROVAL_REVIEW, approvedProxyEnabled, approvedProxyState, approvedSettingsDir, approvedWorkerHome,
+  commitApproval, escapeForTerminal, parseApprovedRecord, previewApproval, proxyStateFor } from "../approved.js";
 import { hooksNotice } from "../migrateHooks.mjs";
 import { SPACE_LABEL, plan as tidyPlan, planText } from "../tidy.js";
 import { fixNonVisual, readState, spacesOf } from "./state.mjs";
@@ -1898,6 +1898,7 @@ const OPTIONS = {
   code: { type: "string" },
   lead: { type: "string" }, "lead-project": { type: "string" }, "no-lead-project": { type: "boolean" },
   "old-lead": { type: "string" },
+  confirm: { type: "string" },
   "cross-member": { type: "string", multiple: true }, "no-cross-members": { type: "boolean" },
   category: { type: "string" }, "no-category": { type: "boolean" },
   character: { type: "string" }, colour: { type: "string" }, color: { type: "string" }, omni: { type: "boolean" },
@@ -1974,7 +1975,8 @@ Usage: am <command> [options]                   (every command takes --json and 
          [--worker-agent A] [--worker-model M] [--worker-effort E]   its workers' defaults
          [--worker-agy-mode accept-edits|auto|plan]                  (Antigravity's --mode)
          [--hc-proxy on|off]            per-bot Linux proxy; default off. Edit, proxy approve
-                                       (review the diff), then restart to apply or roll back
+                                       (review the preview, then --confirm), then restart
+                                       to apply or roll back
          [--worker-template T]          (an hc template: owns the command, so it wins)
          [--worker-agent-home DIR]      the login folder (absolute) its Claude or Codex default
                                        worker agent runs on; an edit that changes that agent
@@ -2239,13 +2241,11 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 answers, and each Antigravity bot's effective permission lists
                                 and whether agy's terminal sandbox is there (read-only); off
                                 with proxy up warns: rollback unfinished
-  proxy approve --project <dir> approve a project's working .herdr/bots.json as the proxy's
-                                roster and hcProxy switch: print the diff against the previous
-                                approval, then
-                                write the record 0600 outside the project. The proxy reads
-                                only this record: a working-tree edit warns until approved,
-                                and a missing record refuses a proxied pane. Approving is the
-                                person's act; the printed diff is the check.
+  proxy approve --project <dir> [--confirm <digest>]
+                                preview the working .herdr/bots.json and review the diff;
+                                confirm its digest to write the approved record 0600 outside
+                                the project. The proxy reads only this record: a working-tree
+                                edit warns until approved, and a missing record refuses a pane.
   doc get <name> [--machine M]  a herdr-core doc's value, as one line of JSON on stdout (hc's
                                 doc.get through hc connect; read-only, 10 s at most); --machine:
                                 that linked machine's doc. Exit 0 with the JSON; 3: no such doc
@@ -2332,11 +2332,12 @@ Install it: npx skills add automagik-si/automagik --skill am
 Report what am cannot do: https://github.com/automagik-si/automagik/issues`;
 
 /** `proxy approve`'s own help: the residual is part of the command's contract. */
-export const PROXY_USAGE = `usage: am proxy approve --project <dir>
+export const PROXY_USAGE = `usage: am proxy approve --project <dir> [--confirm <digest>]
 
-Approve a project's worked roster: reads <dir>'s .herdr/bots.json, prints the diff against the
-previous approval (bots added/removed, rank/lead/kind changes), then writes the record
-0600 outside the project. The proxy reads only this record; a working-tree roster that
+Preview <dir>'s working .herdr/bots.json and review the diff against the previous approval.
+A bare run used to write the record; it now writes nothing. Run the printed command with
+--confirm <digest> to approve those exact bytes and write the record 0600 outside the project.
+The proxy reads only this record; a working-tree roster that
 differs warns once naming this command and still starts on the approved one. A missing
 record refuses a proxied pane.
 
@@ -3314,7 +3315,7 @@ const proxyStateText = (state) => `working ${state.working ? "on" : "off"}; appr
   + `${state.error ? `; ${state.error}` : ""}`;
 
 const proxyWarning = (state) => `WARNING hc proxy: ${state.error}; working switch off; `
-  + "starting plain; run am proxy approve";
+  + `starting plain; run am proxy approve; ${APPROVAL_REVIEW}`;
 const reportProxyWarning = (warning) => report([warning]);
 
 function proxyEnabled(state, platform = process.platform, warn = reportProxyWarning) {
@@ -12668,7 +12669,7 @@ export async function cmdDshTui(opts, [verb, ...rest], io = {}) {
       try {
         const approval = approvedProxyState({ project: projectKey, bot: { id: "" }, env });
         if (approval.error) r.checks.push({ check: "approved-roster", ok: true, warning: true,
-          detail: approval.error, fix: "am proxy approve (review the diff)" });
+          detail: approval.error, fix: "am proxy approve (review the preview, then --confirm)" });
         app = env.HERDR_APP_HOME || join(env.HOME || homedir(), ".config/herdr-app");
         let attachRows = [];
         try { attachRows = readAttachFile(attachPath(app)) ?? []; } catch { attachRows = []; }
@@ -12744,7 +12745,7 @@ export async function cmdDshTui(opts, [verb, ...rest], io = {}) {
         detail: `${bot.name}: ${agy}${perms ? `${perms}; ${guardrail}; ` : ""}hcProxy ${proxyStateText(state)}; ${bot.detail}`,
         ...(seatAgy ? { agyPermissions: { allow: seatAgy.allow, deny: seatAgy.deny, trustedWorkspaces: seatAgy.trustedWorkspaces } } : {}),
         ...(workerAgy ? { workerAgyPermissions: { allow: workerAgy.allow, deny: workerAgy.deny, trustedWorkspaces: workerTrusted } } : {}),
-        fix: needsApproval ? "am proxy approve (review the diff), then restart"
+        fix: needsApproval ? "am proxy approve (review the preview, then --confirm), then restart"
           : !ok || bot.warning ? `am restart ${bot.id}` : null });
       if (!ok) r.code = 1;
       if (agent?.leadProject && projectFile) {
@@ -12811,13 +12812,38 @@ export async function meterAfterUpdate(io) {
   }
 }
 
-/**
- * `proxy approve --project <dir>` (#631 PR C1): the one writer of a project's approved roster
- * record. It reads the project's working .herdr/bots.json, prints the diff from the previous
- * approval, then writes the record 0600 under the data root, outside the project. `--project`
- * is mandatory: the record is keyed by the project's canonical main-checkout realpath.
- */
-export async function cmdProxy(opts, [verb, ...rest], { forbiddenRoots } = {}) {
+const CONFIRM_USAGE = "--confirm goes with am proxy approve only.";
+const CONFIRM_DIGEST = /^[0-9a-f]{64}$/;
+const CONFIRM_FORMAT = "--confirm needs a 64-character lowercase hexadecimal digest from the preview.";
+
+function printApprovalChanges({ note, warnings = [], diff, entries, raw_diff }) {
+  if (note) process.stdout.write(`note: ${escapeForTerminal(note)}\n`);
+  for (const warning of warnings) process.stdout.write(`warning: ${escapeForTerminal(warning)}\n`);
+  for (const line of diff) process.stdout.write(`${escapeForTerminal(line)}\n`);
+  if (!diff.length) process.stdout.write(raw_diff.length
+    ? "no rank/lead/kind/hcProxy changes; other changes below\n"
+    : "no roster changes from the previous approval\n");
+  for (const line of entries) process.stdout.write(`  ${escapeForTerminal(line)}\n`);
+  if (raw_diff.length) {
+    process.stdout.write("raw diff:\n");
+    for (const line of raw_diff) process.stdout.write(`${escapeForTerminal(line)}\n`);
+  }
+}
+
+/** Quote a project path for the confirmation command, including terminal controls in it. */
+function approvalProjectWord(project) {
+  // ANSI-C quoting keeps each control intact in the shell without sending it to the terminal.
+  if (project === escapeForTerminal(project)) return shellWord(project);
+  const escaped = [...project].map((ch) => {
+    if (ch === "'" || ch === "\\") return `\\${ch}`;
+    if (ch === escapeForTerminal(ch)) return ch;
+    return Array.from(Buffer.from(ch), (byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join("");
+  }).join("");
+  return "$'" + escaped + "'";
+}
+
+/** Preview or confirm the exact working roster for the canonical main checkout. */
+export async function cmdProxy(opts, [verb, ...rest], { forbiddenRoots, repairCliLinks, approvedWriteOptions } = {}) {
   if (verb !== "approve") {
     const extra = verb ? `, not "${verb}"` : "";
     throw new CliError(`proxy needs approve${extra}: proxy approve --project <dir>.`, 2);
@@ -12826,37 +12852,45 @@ export async function cmdProxy(opts, [verb, ...rest], { forbiddenRoots } = {}) {
     throw new CliError(`proxy approve takes no argument after --project `
       + `(got ${rest.join(" ")}).`, 2);
   }
+  if (opts.confirm !== undefined && !CONFIRM_DIGEST.test(opts.confirm))
+    throw new CliError(CONFIRM_FORMAT, 2);
   if (opts.project === undefined)
     throw new CliError("proxy approve needs --project <dir>: the project to approve.", 2);
   const project = await namedKeyOf(opts.project);
   const unsafe = approvedDataRootProblem({ env: process.env, project, appHome: appHome(),
     forbiddenRoots });
   if (unsafe) throw new CliError(unsafe);
-  const countOf = (record) => JSON.parse(record.roster).bots.length;
-  let result;
-  try {
-    result = approveProject({
-      project,
-      beforeWrite: ({ diff, record, previous, note }) => {
-        if (opts.json) {
-          process.stdout.write(`${JSON.stringify({
-            project, key: projectKey(project), record: recordFileOf(project),
-            approvedAt: record.approvedAt, approvedBy: record.approvedBy,
-            bots: countOf(record), previous, note, diff,
-          }, null, 2)}\n`);
-          return;
-        }
-        process.stdout.write(`approved ${countOf(record)} bots for ${project}\n`);
-        if (note) process.stdout.write(`note: ${note}\n`);
-        if (diff.length) for (const line of diff) process.stdout.write(`${line}\n`);
-        else process.stdout.write("no roster changes from the previous approval\n");
-      },
-    });
-  } catch (e) {
-    throw new CliError(`proxy approve: ${e?.message ?? e}`);
+  if (opts.confirm === undefined) {
+    let preview;
+    try { preview = previewApproval({ project }); }
+    catch (e) { throw new CliError(`proxy approve: ${e?.message ?? e}`); }
+    if (opts.json) {
+      process.stdout.write(`${JSON.stringify(preview, null, 2)}\n`);
+    } else {
+      process.stdout.write(`preview of ${escapeForTerminal(preview.project)} (nothing was written)\n`);
+      printApprovalChanges(preview);
+      process.stdout.write(`digest: ${preview.digest}\n`);
+      process.stdout.write(`am proxy approve --project ${approvalProjectWord(preview.project)} --confirm ${preview.digest}\n`);
+    }
+    return PRINTED;
   }
-  if (opts.json) return PRINTED;
-  process.stdout.write(`record: ${result.path} (0600)\n`);
+
+  let result;
+  try { result = commitApproval({ project, digest: opts.confirm, writeOptions: approvedWriteOptions }); }
+  catch (e) { throw new CliError(`proxy approve: ${e?.message ?? e}`); }
+  repairCliLinks?.();
+  const { record, path, previous, note, diff, digest } = result;
+  const bots = JSON.parse(record.roster).bots.length;
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify({
+      project: record.project, key: basename(path, ".json"), record: path,
+      approvedAt: record.approvedAt, approvedBy: record.approvedBy, bots, previous, note, diff, digest,
+    }, null, 2)}\n`);
+  } else {
+    process.stdout.write(`approved ${bots} bots for ${escapeForTerminal(record.project)}\n`);
+    printApprovalChanges(result);
+    process.stdout.write(`record: ${escapeForTerminal(path)} (0600)\ndigest: ${digest}\n`);
+  }
   return PRINTED;
 }
 
@@ -14049,17 +14083,31 @@ let lastDispatch = Promise.resolve();
 async function dispatch(argv, io) {
   const at = argv.findIndex((word) => !word.startsWith("-"));
   if (argv[at] === "accounts" && argv.slice(0, at).every((word) => word === "--json")) {
+    for (const word of argv.slice(at + 1)) {
+      if (word === "--") break;
+      if (/^--confirm(?:=|$)/.test(word)) { report([CONFIRM_USAGE]); return 2; }
+    }
     return accountsMain(argv.slice(at + 1));
   }
   let parsed;
   try {
     parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true, tokens: true });
   } catch (e) {
-    process.stderr.write(`am: ${e.message}\n\n${USAGE}\n`);
+    process.stderr.write(`am: ${escapeForTerminal(e.message)}\n\n${USAGE}\n`);
     return 2;
   }
   const { values: opts, positionals, tokens } = parsed;
   const [command, ...rest] = positionals;
+  if (opts.confirm !== undefined) {
+    if (command !== "proxy" || rest[0] !== "approve" || opts.help || opts.version) {
+      report([CONFIRM_USAGE]);
+      return 2;
+    }
+    if (tokens.some((t) => t.kind === "option" && t.name === "confirm" && !CONFIRM_DIGEST.test(t.value))) {
+      report([CONFIRM_FORMAT]);
+      return 2;
+    }
+  }
   if (opts["local-only"]) {
     const refusal = localStartUsage(command, opts, rest[0]);
     if (refusal) {
@@ -14086,7 +14134,8 @@ async function dispatch(argv, io) {
     if (opts["old-lead"] !== undefined) { report(["--old-lead is only for main."]); return 2; }
     // The accounts read is read-only on every machine (RFC 0043), so it repairs nothing either;
     // nor does the reader's read-only login --check (#1509), nor a linked machine's install (#206).
-    if (command !== "accounts" && (command !== "login" || !opts.check)) io.repairCliLinks?.();
+    if (command !== "accounts" && command !== "proxy" && (command !== "login" || !opts.check))
+      io.repairCliLinks?.();
   }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).
   if (opts.version && !command) {
@@ -14144,7 +14193,7 @@ async function dispatch(argv, io) {
     }
     const message = e instanceof CliError ? e.message : botAction
       ? actionError(e, command === "start" ? "Start" : "Restart") : `${e?.stack ?? e}`;
-    process.stderr.write(unprinted(`am: ${message}\n`));
+    process.stderr.write(unprinted(`am: ${command === "proxy" ? escapeForTerminal(message) : message}\n`));
     if (opts.json && e instanceof CliError && (e.detail || command === "main" || (opts.revive && e.loginCode))) {
       process.stdout.write(unprinted(`${JSON.stringify({ error: message, ...e.detail, ...(opts.revive && e.loginCode ? { login: e.loginCode } : {}) }, null, 2)}\n`));
     }
