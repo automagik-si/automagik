@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path'
 import { replaceFile } from './files.js'
 import { looksLikeKey, looksSecret, writtenIn } from './memory.js'
 import { validateCapabilityName } from './capabilities.js'
+import { credentialShapes } from './redact.js'
 import { refusal } from './refusal.js'
 
 export const LEARNING = {
@@ -31,7 +32,8 @@ export const LEARNING = {
   agentsEditMax: 400,
 }
 
-const clip = (text, max) => (text.length > max ? `${text.slice(0, max)} […]` : text)
+const CLIPPED = ' […]'
+const clip = (text, max) => (text.length > max ? text.slice(0, max) + CLIPPED : text)
 export const hashOf = text => createHash('sha256').update(String(text ?? '')).digest('hex').slice(0, 16)
 
 // The answer of the review's model: one JSON object, perhaps in a code fence.
@@ -113,6 +115,7 @@ export function agentsSystem() {
     '3. Not obvious: a capable agent would not do it anyway, and reading the code or the docs does not show it at once.',
     '4. Lasting: still true next month. Never add task progress, plans, dates, versions, pull request or issue numbers, file lists, pasted errors or logs, or keys, passwords, and tokens.',
     '5. Not already said: if the file already says it, change nothing; if the file says it unclearly or partly, replace that line instead of adding one.',
+    'Keep credentials out of every edit field, including quoted old text, add anchors, and reasons.',
     '',
     'Also remove or fix lines the work shows to be wrong or outdated, such as a rule the user reversed, and merge lines that say the same thing. Do not remove a line only because this work did not use it. Keep the user\'s own words and the file\'s language and style; do not rewrite lines that are fine.',
     '',
@@ -145,6 +148,7 @@ export function agentsRequest({ folder, current, lines, declined = [], language 
 // Skills often talk about code such as `password == input`; read keys everywhere, but
 // password wording only outside code.
 const holdsSecret = text => looksLikeKey(text) || looksSecret(text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' '))
+const holdsCredential = text => credentialShapes(text) !== text || holdsSecret(text)
 
 const textOf = value => typeof value === 'string' ? value : ''
 const lineBlock = value => value.split(/\r?\n/)
@@ -246,7 +250,7 @@ export function agentsProblem(proposal, current) {
     if (why.trim() === '') return 'each edit needs a reason'
     if (edit.op !== 'remove' && text === '') return 'an add or replacement needs text'
     if (text.length > LEARNING.agentsEditMax) return `edit text must have at most ${LEARNING.agentsEditMax} characters`
-    if (holdsSecret(text) || holdsSecret(why)) return 'it looks like it holds a secret'
+    if ([text, old, after, why].some(holdsCredential)) return 'it looks like it holds a secret'
     if (/#\d{2,}|\b\d{4}-\d{2}-\d{2}\b|\bv\d+\.\d+/u.test(text)) return 'the edit contains a task number, date, or version'
     const lines = lineBlock(result)
     if (edit.op === 'add') {
@@ -298,26 +302,94 @@ export function install(rt) {
   const { ctx, config, home, state } = rt
   const settings = { ...LEARNING, ...(config.learningTimes ?? {}) }
   const on = config.learning !== false && config.memory !== false
-  const view = () => ({})
-  if (!on) {
-    Object.assign(rt, { learningView: view, learningSettledView: view, learningEndpoint: async () => { throw refusal('Learning is turned off on this host') }, learningRun: async () => 0 })
-    return
-  }
-
   const root = join(home, 'learning')
   const path = join(root, 'state.json')
+  const privateOwner = id => id !== undefined && (rt.isPrivate(id) || (state.privateArchives ?? []).some(bot => bot.id === id))
+  const privateProposal = proposal => privateOwner(proposal.botId) || proposal.contributors?.some(privateOwner)
+  const hasContributors = ({ contributors }) => Array.isArray(contributors)
+    && contributors.length > 0 && contributors.every(id => typeof id === 'string' && id !== '')
+  const checkPublic = proposal => {
+    if (privateProposal(proposal)) throw refusal("A private Bot's learning proposal cannot be applied.")
+  }
+  const savedSecret = text => rt.redactSecretsAnywhere(text) !== text
+  const redactLine = text => {
+    const shaped = credentialShapes(text)
+    // Check the original for saved values, as a shape could mask just part of one.
+    if (!savedSecret(text) && !holdsSecret(shaped)) return shaped
+    return `${/^(?:User|You): /.exec(text)?.[0] ?? ''}[hidden]`
+  }
+  const sensitiveText = value => typeof value === 'string' && (holdsCredential(value) || savedSecret(value))
+  const sensitiveSkill = ({ name, description, content, why, previous } = {}) =>
+    [name, description, content, why, previous?.description, previous?.content].some(sensitiveText)
+  const sensitiveCard = card => card.kind === 'agents'
+    ? [card.folder, card.path, card.content].some(sensitiveText)
+      || card.edits?.some(({ text, old, after, why }) => [text, old, after, why].some(sensitiveText))
+    : sensitiveSkill(card)
+  const safeRecords = (records, discardClipped = false) => records.filter(record => (
+    typeof record.text === 'string' && !(discardClipped && record.text.endsWith(CLIPPED))
+  )).map(record => {
+    const text = redactLine(record.text)
+    return text === record.text ? record : { ...record, text }
+  })
+
+  function scrubContent(store, { loading = false, discardClipped = false } = {}) {
+    let changed = false
+    for (const [folder, group] of Object.entries(store.agentsPending)) {
+      const previous = group.records ?? []
+      const records = safeRecords(previous, discardClipped)
+      if (records.length === 0 && group.recoverAt === undefined) {
+        delete store.agentsPending[folder]
+        changed = true
+      } else if (records.length !== previous.length || records.some((record, index) => record !== previous[index])) {
+        group.records = records
+        changed = true
+      }
+    }
+    for (const [id, proposal] of Object.entries(store.proposals)) {
+      const unknown = loading && proposal.kind === 'agents' && !hasContributors(proposal)
+      const sensitive = sensitiveCard(proposal)
+      if (!unknown && !sensitive) continue
+      // The old writer already consumed the reviewed work. Recover it from public
+      // source Sessions without rewinding skill cursors.
+      if (unknown && !sensitive && Number.isFinite(proposal.at)) {
+        const group = store.agentsPending[proposal.folder] ??= { botId: proposal.botId, records: [] }
+        group.recoverAt = proposal.at
+      }
+      delete store.proposals[id]
+      changed = true
+    }
+    for (const [id, proposal] of Object.entries(store.settled)) {
+      if (!sensitiveCard(proposal)) continue
+      delete store.settled[id]
+      changed = true
+    }
+    const declined = store.declined.filter(entry => !sensitiveCard(entry))
+    if (declined.length === store.declined.length) return changed
+    store.declined = declined
+    return true
+  }
   // `pending`: Bot id → chats with a long turn since the last pass. `agentsPending`:
   // folder → queued work waiting for AGENTS.md review. `cursors`: newest line read.
   // `proposals`: waiting for the user, by id. `settled`: answered ones, by id, with
   // the outcome; their cards stay in the chat part they were answered in.
   // `learned`: skill names learned by Bot.
   let saved
-  const data = () => {
+  let cleanupRevision = 0
+  let writtenCleanup = 0
+  const needsCleanup = () => cleanupRevision !== writtenCleanup
+  const data = ({ secretsLoaded = false } = {}) => {
+    // The secret store installs its redactor synchronously and can call back into data().
+    if (saved === undefined && !secretsLoaded) void rt.loadSecrets()
     if (saved !== undefined) return saved
     try {
-      saved = JSON.parse(readFileSync(path, 'utf8'))
+      const store = JSON.parse(readFileSync(path, 'utf8'))
+      if (store === null || typeof store !== 'object' || Array.isArray(store)) throw new TypeError('Invalid learning state')
+      saved = store
     } catch (error) {
-      if (error?.code !== 'ENOENT') rt.warn('omni-ui: unreadable learning state %s: %s', path, error?.message ?? error)
+      if (error?.code !== 'ENOENT') {
+        const reason = error?.code ?? error?.name ?? 'error'
+        throw refusal(`Could not read the learning state (${reason})`)
+      }
       saved = {}
     }
     saved.pending ??= {}
@@ -327,20 +399,85 @@ export function install(rt) {
     saved.declined ??= []
     saved.learned ??= {}
     saved.agentsPending ??= {}
+    // The old writer clipped before redacting, and the secret store can change
+    // while the host is down. A clipped line may now hold an unrecognizable prefix.
+    if (scrubContent(saved, { loading: true, discardClipped: true })) {
+      cleanupRevision += 1
+      if (!secretsLoaded) void persist(true)
+    }
     return saved
   }
   let stopped = false
   let writing = Promise.resolve()
-  const persist = () => {
-    if (stopped) return writing
-    const text = JSON.stringify(data(), null, 1)
-    writing = writing.then(async () => {
+  const persist = (cleanupOnly = false) => {
+    if (stopped || rt.readOnly() !== undefined) return writing
+    const attempt = writing.then(async () => {
+      if (rt.readOnly() !== undefined || (cleanupOnly && !needsCleanup())) return
       await mkdir(dirname(path), { recursive: true })
       const temp = `${path}.${process.pid}.tmp`
-      await writeFile(temp, text, 'utf8')
-      await replaceFile(temp, path)
-    }).catch(error => rt.warn('omni-ui: saving the learning state failed: %s', error?.message ?? error))
-    return writing
+      const contents = JSON.stringify(data(), null, 1)
+      const revision = cleanupRevision
+      try {
+        await writeFile(temp, contents, 'utf8')
+        await replaceFile(temp, path)
+        writtenCleanup = revision
+      } finally {
+        await unlink(temp).catch(() => {})
+      }
+    })
+    // Keep the write queue usable after a failure and let cleanup callers see it.
+    writing = attempt.catch(error => rt.warn('omni-ui: saving the learning state failed: %s', error?.message ?? error))
+    return cleanupOnly || needsCleanup() ? attempt : writing
+  }
+
+  let secretChange = 0
+  const secretsChanged = rt.secretsChanged
+  rt.secretsChanged = () => {
+    secretChange += 1
+    let failed
+    try {
+      if (saved === undefined) data({ secretsLoaded: true })
+      else if (scrubContent(saved, { discardClipped: true })) cleanupRevision += 1
+    } catch (error) {
+      failed = Promise.reject(error)
+      // A refresh can update the redactor without waiting for learning cleanup.
+      void failed.catch(() => {})
+    }
+    secretsChanged?.()
+    return failed ?? (needsCleanup() ? persist(true) : undefined)
+  }
+
+  function clearFolder(store, folder) {
+    let changed = Object.hasOwn(store.agentsPending, folder)
+    delete store.agentsPending[folder]
+    for (const cards of [store.proposals, store.settled]) {
+      for (const [id, card] of Object.entries(cards)) {
+        if (card.kind !== 'agents' || card.folder !== folder) continue
+        delete cards[id]
+        changed = true
+      }
+    }
+    const declined = store.declined.filter(entry => entry.kind !== 'agents' || entry.folder !== folder)
+    if (declined.length !== store.declined.length) {
+      store.declined = declined
+      changed = true
+    }
+    if (changed) cleanupRevision += 1
+  }
+
+  const privateFolder = async (folder, file = join(folder, 'AGENTS.md')) => (
+    await rt.privatePathOwner(folder) ?? await rt.privatePathOwner(file)
+  )
+  async function prepareLearning() {
+    const store = data()
+    const folders = new Set(Object.keys(store.agentsPending))
+    for (const entry of [...Object.values(store.proposals), ...Object.values(store.settled), ...store.declined]) {
+      if (entry.kind === 'agents') folders.add(entry.folder)
+    }
+    for (const folder of folders) {
+      if (await privateFolder(folder)) clearFolder(store, folder)
+    }
+    await (needsCleanup() ? persist(true) : writing)
   }
 
   // A turn in a Bot's own chat that ran long marks the chat for the next pass.
@@ -359,18 +496,20 @@ export function install(rt) {
     const since = started.get(id)
     started.delete(id)
     const botId = rt.chatOwners.get(id)
-    if (since === undefined || botId === undefined || Date.now() - since < settings.minTurnMs) return
-    const pending = data().pending
-    pending[botId] = [...new Set([...(pending[botId] ?? []), id])]
-    noted.set(id, (noted.get(id) ?? 0) + 1)
-    void persist()
+    if (since === undefined || botId === undefined || privateOwner(botId) || Date.now() - since < settings.minTurnMs) return
+    try {
+      const pending = data().pending
+      pending[botId] = [...new Set([...(pending[botId] ?? []), id])]
+      noted.set(id, (noted.get(id) ?? 0) + 1)
+      void persist().catch(() => {})
+    } catch (error) {
+      rt.warn('omni-ui: marking a chat for learning failed: %s', error?.message ?? error)
+    }
   })
 
   // After the text budget, keep scanning to the cursor for user corrections.
-  async function linesSince(sessionId) {
-    const cursor = data().cursors[sessionId]
-    const kept = []
-    const userLines = []
+  async function linesSince(sessionId, recovery) {
+    const cursor = recovery === undefined ? data().cursors[sessionId] : undefined
     const keptRecords = []
     const userRecords = []
     let used = 0
@@ -378,30 +517,35 @@ export function install(rt) {
     let overBudget = false
     let through
     for await (const line of rt.partLines(sessionId, AbortSignal.timeout(settings.readMs), { pages: Infinity })) {
+      if (recovery !== undefined && (line.seq > recovery.through || !Number.isFinite(line.time) || line.time > recovery.at)) continue
       through ??= line.seq
       if (cursor !== undefined && line.seq <= cursor) break
-      const text = clip(line.text, line.who === 'user' ? settings.userLineMax : settings.botLineMax)
+      const text = clip(redactLine(line.text), line.who === 'user' ? settings.userLineMax : settings.botLineMax)
       if (!overBudget && used + text.length <= settings.textMax) {
-        kept.push(text)
         keptRecords.push({ text, time: line.time })
         used += text.length
         continue
       }
       overBudget = true
       if (text.startsWith('User: ') && userUsed + text.length <= settings.userTextMax) {
-        userLines.push(text)
         userRecords.push({ text, time: line.time })
         userUsed += text.length
       }
     }
-    return { lines: [...kept, ...userLines].reverse(), work: [...keptRecords, ...userRecords].reverse(), through }
+    return { work: [...keptRecords, ...userRecords].reverse(), through }
   }
 
   const skillsOf = () => Object.fromEntries(Object.entries(state.capabilities?.items ?? {}).filter(([, item]) => item.kind === 'skill'))
   const learnedOf = bot => (data().learned[bot.id] ?? []).filter(name => skillsOf()[name] !== undefined && (bot.capabilities ?? []).includes(name))
   const waitingFor = botId => Object.values(data().proposals).filter(entry => entry.botId === botId)
 
+  const staleReview = () => Object.assign(new Error('The learning review inputs changed'), { code: 'bot/stale' })
+  const checkReview = (bot, secrets) => {
+    if (stopped || rt.botOf(bot.id) !== bot || privateOwner(bot.id) || secretChange !== secrets) throw staleReview()
+  }
+
   async function reviewSkill(bot, lines) {
+    const secrets = secretChange
     const skills = skillsOf()
     const learned = learnedOf(bot)
     const library = Object.values(skills).filter(item => !learned.includes(item.name)).map(item => ({ name: item.name, description: item.description }))
@@ -410,17 +554,16 @@ export function install(rt) {
       lines,
       learned: learned.map(name => skills[name]),
       library,
-      declined: data().declined.filter(entry => entry.kind !== 'agents'),
+      declined: data().declined.filter(entry => entry.kind !== 'agents' && entry.botId === bot.id),
       language: writtenIn(lines.filter(line => line.startsWith('User: ')).map(line => line.slice(6)), rt.uiLanguage?.()),
       limit: settings.learnedMax,
     })
-    const reply = await rt.botShot(bot, skillSystem(), text, { sessionId: rt.chatOf(bot.id), kind: 'memory' })
+    const check = () => checkReview(bot, secrets)
+    const reply = await rt.botShot(bot, skillSystem(), text, { sessionId: rt.chatOf(bot.id), kind: 'memory' }, { check })
+    check()
     const proposal = parseJson(reply)
-    if (['description', 'content', 'why'].some(key => {
-      const value = proposal?.[key]
-      return typeof value === 'string' && rt.redactSecrets(value) !== value
-    })) {
-      rt.warn('omni-ui: the skill review of %s proposed content containing a saved secret', bot.name)
+    if (sensitiveSkill(proposal)) {
+      rt.warn('omni-ui: the skill review of %s proposed content containing a secret', bot.name)
       return undefined
     }
     const problem = skillProblem(proposal, { skills, learned, limit: settings.learnedMax })
@@ -448,23 +591,45 @@ export function install(rt) {
     }
   }
 
-  async function reviewAgents(bot, folder, current, lines) {
+  async function reviewAgents(bot, { folder, file, current, lines, group, contributors }) {
+    const secrets = secretChange
     const language = writtenIn(lines.filter(line => line.startsWith('User: ')).map(line => line.slice(6)), rt.uiLanguage?.())
-    const request = agentsRequest({ folder, current, lines, declined: data().declined, language })
-    const reply = await rt.botShot(bot, agentsSystem(), request, { sessionId: rt.chatOf(bot.id), kind: 'memory' })
+    const store = data()
+    const declined = store.declined.filter(entry => entry.kind === 'agents' && entry.folder === folder
+      && hasContributors(entry) && !privateProposal(entry))
+    const request = agentsRequest({ folder, current, lines, declined, language })
+    let privacy
+    const prepare = async () => {
+      // The path lookup yields. Reject its result if the protected regions changed.
+      privacy = rt.privatePathsKey()
+      if (!await privateFolder(folder, file)) return
+      clearFolder(store, folder)
+      throw staleReview()
+    }
+    const check = () => {
+      checkReview(bot, secrets)
+      if (store.agentsPending[folder] !== group || contributors.some(privateOwner)
+        || declined.some(privateProposal) || privacy !== rt.privatePathsKey()) throw staleReview()
+    }
+    const reply = await rt.botShot(bot, agentsSystem(), request, { sessionId: rt.chatOf(bot.id), kind: 'memory' }, { prepare, check })
+    check()
     const answer = agentsAnswer(reply, current)
     if (answer === undefined || answer === null || typeof answer !== 'object') throw new Error('the answer is not a JSON object')
-    if (Array.isArray(answer.edits) && answer.edits.some(edit => [edit?.text, edit?.why].some(value => typeof value === 'string' && rt.redactSecrets(value) !== value))) {
-      rt.warn('omni-ui: the AGENTS.md review of %s proposed content containing a saved secret', bot.name)
-      return undefined
-    }
     const problem = agentsProblem(answer, current)
     if (problem !== undefined) {
       if (answer?.action !== 'none') rt.warn('omni-ui: the AGENTS.md review of %s proposed nothing usable: %s', bot.name, problem)
       return undefined
     }
     if (answer.action === 'none') return undefined
-    const content = applyEdits(current, answer.edits)
+    const edits = answer.edits.map(({ op, text, old, after, why }) => ({
+      op, text: textOf(text), old: textOf(old), why: textOf(why), ...(op === 'add' ? { after } : {}),
+    }))
+    const content = applyEdits(current, edits)
+    if (edits.some(({ text, old, after, why }) => [text, old, textOf(after), why].some(savedSecret))
+      || savedSecret(content) || holdsCredential(content)) {
+      rt.warn('omni-ui: the AGENTS.md review of %s proposed content containing a secret', bot.name)
+      return undefined
+    }
     return {
       id: randomUUID(),
       kind: 'agents',
@@ -474,7 +639,7 @@ export function install(rt) {
       path: join(folder, 'AGENTS.md'),
       base: hashOf(current ?? ''),
       exists: current !== undefined,
-      edits: answer.edits.map(edit => ({ ...edit, text: textOf(edit.text), old: textOf(edit.old), why: textOf(edit.why) })),
+      edits,
       content,
     }
   }
@@ -482,8 +647,7 @@ export function install(rt) {
   const exists = async path => {
     try { await access(path); return true } catch { return false }
   }
-  async function agentsFile(folder) {
-    const path = join(folder, 'AGENTS.md')
+  async function agentsFile(path) {
     try {
       const content = await readFile(path, 'utf8')
       return content.length <= LEARNING.agentsFileMax ? content : undefined
@@ -517,7 +681,39 @@ export function install(rt) {
       size -= item.text.length
     }
     if (removed.size > 0) queue.records = queue.records.filter(item => !removed.has(item))
-    if (queue.records.length === 0) delete data().agentsPending[folder]
+    if (queue.records.length === 0 && queue.recoverAt === undefined) delete data().agentsPending[folder]
+  }
+
+  async function recoverAgentsWork(store, folder, group) {
+    const ownBotOf = sessionId => {
+      const past = rt.pastOwners.get(sessionId)
+      return rt.chatOwners.get(sessionId) ?? (past?.roomId === undefined ? past?.botId : undefined)
+    }
+    const read = []
+    const secrets = secretChange
+    let unavailable
+    for (const [sessionId, through] of Object.entries(store.cursors)) {
+      const botId = ownBotOf(sessionId)
+      if (!Number.isFinite(through) || botId === undefined || privateOwner(botId) || rt.botOf(botId) === undefined) continue
+      try {
+        const { session } = await rt.resolveAgent(sessionId)
+        const reported = rt.reportedFolder(session)
+        if (!reported || await rt.real(reported) !== folder || privateOwner(botId)) continue
+        const { work } = await linesSince(sessionId, { through, at: group.recoverAt })
+        if (work.length > 0) read.push({ sessionId, botId, work })
+      } catch (error) { unavailable = error }
+    }
+    const privacy = rt.privatePathsKey()
+    if (await privateFolder(folder)) clearFolder(store, folder)
+    if (stopped || store.agentsPending[folder] !== group || secrets !== secretChange || privacy !== rt.privatePathsKey()) return
+    if (read.length === 0 && unavailable !== undefined) throw unavailable
+    for (const { sessionId, botId, work } of read) {
+      const bot = rt.botOf(botId)
+      if (bot !== undefined && ownBotOf(sessionId) === botId && !privateOwner(botId)) {
+        queueAgentsWork(folder, bot, safeRecords(work))
+      }
+    }
+    delete group.recoverAt
   }
 
   // One pass over every Bot with a long turn since the last one. A Bot with a
@@ -527,14 +723,18 @@ export function install(rt) {
     if (stopped) return 0
     if (running) return running
     running = (async () => {
+      await prepareLearning()
+      if (stopped) return 0
       const store = data()
       store.lastRun = Date.now()
       let made = 0
       for (const [botId, pendingSessions] of Object.entries(store.pending)) {
         if (stopped) break
         const bot = rt.botOf(botId)
-        if (bot === undefined) {
+        const isPrivate = privateOwner(botId)
+        if (bot === undefined || isPrivate) {
           delete store.pending[botId]
+          if (isPrivate) cleanupRevision += 1
           continue
         }
         if (waitingFor(botId).length > 0) continue
@@ -542,12 +742,13 @@ export function install(rt) {
         const notedAtStart = new Map(sessions.map(sessionId => [sessionId, noted.get(sessionId)]))
         try {
           const read = []
+          const secretsAtRead = secretChange
           for (const sessionId of sessions) read.push({ sessionId, ...await linesSince(sessionId) })
           if (stopped) return made
-          const lines = read.flatMap(entry => entry.lines)
-          const proposal = lines.length === 0 ? undefined : await reviewSkill(bot, lines)
+          const lines = safeRecords(read.flatMap(entry => entry.work), secretsAtRead !== secretChange).map(record => record.text)
+          const proposal = lines.length === 0 || privateOwner(botId) ? undefined : await reviewSkill(bot, lines)
           if (stopped) return made
-          if (proposal !== undefined) {
+          if (proposal !== undefined && !privateOwner(botId) && !sensitiveSkill(proposal)) {
             store.proposals[proposal.id] = proposal
             made += 1
           }
@@ -560,7 +761,11 @@ export function install(rt) {
                 const folder = await rt.real(reported)
                 try { await rt.workFolder(folder) } catch { continue }
                 if (!await exists(join(folder, '.git')) && !await exists(join(folder, 'AGENTS.md'))) continue
-                queueAgentsWork(folder, bot, entry.work ?? [])
+                if (await privateFolder(folder)) {
+                  clearFolder(store, folder)
+                  continue
+                }
+                if (!privateOwner(botId)) queueAgentsWork(folder, bot, safeRecords(entry.work, secretsAtRead !== secretChange))
               } catch (error) {
                 rt.warn('omni-ui: the AGENTS.md folder lookup for %s failed: %s', entry.sessionId, error?.message ?? error)
               }
@@ -572,14 +777,28 @@ export function install(rt) {
           if (remaining.length === 0) delete store.pending[botId]
           else store.pending[botId] = remaining
         } catch (error) {
-          rt.warn('omni-ui: the learning review of %s failed: %s', bot.name, error?.message ?? error)
+          if (error?.code !== 'bot/stale') rt.warn('omni-ui: the learning review of %s failed: %s', bot.name, error?.message ?? error)
           continue
         }
       }
       if (config.agentsMd !== false) {
         for (const [folder, group] of Object.entries(store.agentsPending)) {
           if (stopped) break
-          let bot = rt.botOf(group.botId)
+          if (group.recoverAt !== undefined) {
+            try { await recoverAgentsWork(store, folder, group) } catch (error) {
+              rt.warn('omni-ui: recovering the AGENTS.md review of %s failed: %s', folder, error?.message ?? error)
+              continue
+            }
+            if (stopped || store.agentsPending[folder] !== group || group.recoverAt !== undefined) continue
+          }
+          const records = group.records ?? []
+          group.records = records.filter(item => !privateOwner(item.botId ?? group.botId))
+          if (group.records.length !== records.length) cleanupRevision += 1
+          if (group.records.length === 0) {
+            delete store.agentsPending[folder]
+            continue
+          }
+          let bot = privateOwner(group.botId) ? undefined : rt.botOf(group.botId)
           if (bot === undefined) {
             const contributor = group.records.find(item => rt.botOf(item.botId) !== undefined)
             if (contributor === undefined) {
@@ -591,11 +810,25 @@ export function install(rt) {
           }
           if (Object.values(store.proposals).some(entry => entry.kind === 'agents' && entry.folder === folder)) continue
           try {
-            const reviewRecords = [...group.records]
-            const reviewedOrders = reviewRecords.map(item => item.order)
-            const current = await agentsFile(folder)
+            const file = await rt.realBeyond(join(folder, 'AGENTS.md'))
+            if (await privateFolder(folder, file)) {
+              clearFolder(store, folder)
+              continue
+            }
+            const current = await agentsFile(file)
             if (stopped) return made
-            if (current === undefined && await exists(join(folder, 'AGENTS.md'))) continue
+            if (current === undefined && await exists(file)) continue
+            if (await privateFolder(folder, file)) {
+              clearFolder(store, folder)
+              continue
+            }
+            if (stopped || store.agentsPending[folder] !== group) continue
+            if (current !== undefined && (holdsCredential(current) || savedSecret(current))) continue
+            if (privateOwner(bot.id)) continue
+            group.records = safeRecords(group.records)
+            const reviewRecords = group.records.filter(item => !privateOwner(item.botId ?? group.botId))
+            const reviewedOrders = reviewRecords.map(item => item.order)
+            const contributors = [...new Set(reviewRecords.map(item => item.botId ?? group.botId))]
             const lines = []
             let used = 0
             let userUsed = 0
@@ -613,10 +846,16 @@ export function install(rt) {
               }
             }
             if (lines.length === 0) continue
-            const proposal = await reviewAgents(bot, folder, current, lines)
+            const proposal = await reviewAgents(bot, { folder, file, current, lines, group, contributors })
             if (stopped) return made
+            if (await privateFolder(folder, file)) {
+              clearFolder(store, folder)
+              continue
+            }
+            if (stopped || store.agentsPending[folder] !== group || privateOwner(bot.id) || contributors.some(privateOwner)) continue
+            if (proposal !== undefined && sensitiveCard(proposal)) continue
             if (proposal !== undefined) {
-              store.proposals[proposal.id] = proposal
+              store.proposals[proposal.id] = { ...proposal, contributors }
               made += 1
             }
             const queue = store.agentsPending[folder]
@@ -625,7 +864,7 @@ export function install(rt) {
               if (queue.records.length === 0) delete store.agentsPending[folder]
             }
           } catch (error) {
-            rt.warn('omni-ui: the AGENTS.md review of %s failed: %s', folder, error?.message ?? error)
+            if (error?.code !== 'bot/stale') rt.warn('omni-ui: the AGENTS.md review of %s failed: %s', folder, error?.message ?? error)
           }
         }
       }
@@ -639,16 +878,17 @@ export function install(rt) {
     if (stopped) return false
     const store = data()
     const hasPending = Object.values(store.pending).some(sessions => sessions.length > 0)
-      || (config.agentsMd !== false && Object.values(store.agentsPending).some(queue => queue.records?.length > 0))
+      || (config.agentsMd !== false && Object.values(store.agentsPending).some(queue => queue.recoverAt !== undefined || queue.records?.length > 0))
     if (!hasPending || rt.readOnly() !== undefined) return false
     if (Object.keys(rt.workView()).length > 0 || Date.now() - lastActivity < settings.idleMs) return false
     return store.lastRun === undefined || Date.now() - store.lastRun >= settings.intervalMs
   }
   ctx.effect(() => {
-    const timer = setInterval(() => {
-      if (due()) void run().catch(error => rt.warn('omni-ui: learning pass failed: %s', error?.message ?? error))
-    }, settings.tickMs)
-    timer.unref?.()
+    const timer = on ? setInterval(() => {
+      void Promise.resolve().then(() => { if (due()) return run() })
+        .catch(error => rt.warn('omni-ui: learning pass failed: %s', error?.message ?? error))
+    }, settings.tickMs) : undefined
+    timer?.unref?.()
     return () => {
       stopped = true
       clearInterval(timer)
@@ -657,14 +897,34 @@ export function install(rt) {
     }
   }, 'omni-ui: learning')
 
+  if (!on) {
+    const view = () => ({})
+    Object.assign(rt, { prepareLearning, learningView: view, learningSettledView: view, learningEndpoint: async () => { throw refusal('Learning is turned off on this host') }, learningRun: async () => 0 })
+    return
+  }
+
   // The user's answer to a card.
   async function answer({ id, approve }) {
     const store = data()
     const proposal = Object.hasOwn(store.proposals, id) ? store.proposals[id] : undefined
-    if (proposal === undefined) throw Object.assign(new Error('This proposal is no longer open'), { code: 'bot/stale' })
+    const stale = () => Object.assign(new Error('This proposal is no longer open'), { code: 'bot/stale' })
+    if (proposal === undefined) throw stale()
+    const checkOpen = () => {
+      if (store.proposals[id] !== proposal) throw stale()
+    }
+    const checkAgentsAccess = async () => {
+      if (await privateFolder(proposal.folder, proposal.path)) {
+        clearFolder(store, proposal.folder)
+        await persist()
+        throw refusal("This folder belongs to a private Bot, so its learning proposal was removed.")
+      }
+      checkOpen()
+    }
+    if (proposal.kind === 'agents') await checkAgentsAccess()
     // The answered card stays where it was, read-only, with how it ended. A waiting
     // card shows in the Bot's current chat part, so that is where it stays.
     const settle = (outcome) => {
+      checkOpen()
       delete store.proposals[id]
       const { saved: _saved, ...kept } = proposal
       store.settled[id] = { ...kept, sessionId: rt.chatOf(proposal.botId), outcome, settledAt: Date.now() }
@@ -672,22 +932,32 @@ export function install(rt) {
     if (approve !== true) {
       settle('declined')
       const decline = proposal.kind === 'agents'
-        ? { kind: 'agents', folder: proposal.folder, edits: proposal.edits.map(({ op, text, old }) => ({ op, text, old })), at: Date.now() }
-        : { name: proposal.name, description: proposal.description, at: Date.now() }
-      store.declined = [...store.declined, decline].slice(-settings.declinedMax)
+        ? { kind: 'agents', folder: proposal.folder, contributors: proposal.contributors,
+            edits: proposal.edits.map(({ op, text, old }) => ({ op, text, old })), at: Date.now() }
+        : { botId: proposal.botId, name: proposal.name, description: proposal.description, at: Date.now() }
+      if (proposal.kind !== 'agents' || !privateProposal(proposal)) store.declined = [...store.declined, decline].slice(-settings.declinedMax)
       await persist()
       return { applied: false }
     }
     // A failed approval keeps the card, so the user can still decline it.
-    if (proposal.kind === 'agents') await applyAgents(proposal)
-    else await applySkill(proposal)
+    if (proposal.kind === 'agents') {
+      checkPublic(proposal)
+      await applyAgents(proposal, checkAgentsAccess)
+    } else {
+      const admit = item => {
+        checkOpen()
+        checkPublic(proposal)
+        if (sensitiveSkill(proposal) || sensitiveSkill(item)) throw refusal('This proposal contains a secret.')
+      }
+      await applySkill(proposal, admit)
+    }
     settle('approved')
     await persist()
     return { applied: true }
   }
 
   const agentsApplying = new Map()
-  async function applyAgents(proposal) {
+  async function applyAgents(proposal, checkAgentsAccess) {
     const path = proposal.path
     const previous = agentsApplying.get(path) ?? Promise.resolve()
     let release
@@ -699,6 +969,7 @@ export function install(rt) {
       const folder = await rt.real(proposal.folder)
       await rt.workFolder(folder)
       if (join(folder, 'AGENTS.md') !== path) throw refusal('AGENTS.md changed since this was proposed')
+      await checkAgentsAccess()
       const readCurrent = async () => {
         try { return await readFile(path, 'utf8') } catch (error) {
           if (error?.code !== 'ENOENT') throw error
@@ -712,11 +983,18 @@ export function install(rt) {
         }
       }
       checkCurrent(await readCurrent())
+      await checkAgentsAccess()
+      checkPublic(proposal)
       const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
       try {
         await writeFile(temp, proposal.content, 'utf8')
         checkCurrent(await readCurrent())
-        await replaceFile(temp, path)
+        await checkAgentsAccess()
+        checkPublic(proposal)
+        await replaceFile(temp, path, async () => {
+          await checkAgentsAccess()
+          checkPublic(proposal)
+        })
       } finally {
         await unlink(temp).catch(() => {})
       }
@@ -726,11 +1004,13 @@ export function install(rt) {
     }
   }
 
-  async function applySkill(proposal) {
+  async function applySkill(proposal, admit) {
+    admit()
     const bot = rt.botOf(proposal.botId)
     if (bot === undefined) throw refusal('The Bot that learned this skill is gone')
     const current = skillsOf()[proposal.name]
     const store = data()
+    const options = { botId: bot.id, ui: false, admit }
     if (proposal.action === 'create') {
       if (proposal.saved) {
         if (current === undefined || current.description !== proposal.description || current.content !== proposal.content) {
@@ -740,18 +1020,23 @@ export function install(rt) {
         await persist()
       } else {
         if (current !== undefined) throw refusal(`A skill named ${proposal.name} exists now`)
-        const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, { botId: bot.id, ui: false })
+        const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, options)
+        admit()
         proposal.saved = true
         store.learned[bot.id] = [...new Set([...(store.learned[bot.id] ?? []), item.name])]
         await persist()
       }
     } else if (proposal.action === 'update') {
       if (current === undefined || hashOf(`${current.description}\n${current.content}`) !== proposal.base) throw refusal(`${proposal.name} changed since this was proposed`)
-      const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, { botId: bot.id, ui: false })
+      const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, options)
+      admit()
       store.learned[bot.id] = [...new Set([...(store.learned[bot.id] ?? []), item.name])]
       await persist()
     }
-    if (!(bot.capabilities ?? []).includes(proposal.name)) await rt.capabilityEndpoint('bot-capability', { botId: bot.id, name: proposal.name, attached: true })
+    if (!(bot.capabilities ?? []).includes(proposal.name)) {
+      admit()
+      await rt.capabilityEndpoint('bot-capability', { botId: bot.id, name: proposal.name, attached: true })
+    }
   }
 
   async function learningEndpoint(endpoint, body) {
@@ -796,5 +1081,5 @@ export function install(rt) {
     return result
   }
 
-  Object.assign(rt, { learningView, learningSettledView, learningEndpoint, learningRun: run })
+  Object.assign(rt, { prepareLearning, learningView, learningSettledView, learningEndpoint, learningRun: run })
 }

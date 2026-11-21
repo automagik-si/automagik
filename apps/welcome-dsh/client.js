@@ -12517,6 +12517,14 @@ function SubscriptionSignIn({ tile, onBack, onSaved, glitch }) {
 
 // src/client/redact.js
 var CREDENTIAL_MARK = "[hidden]";
+function basicCredential(match, scheme, token) {
+  try {
+    const decoded = atob(token);
+    if (decoded.includes(":") && !/[^\x20-\x7e\x80-\xff]/.test(decoded)) return `${scheme} ${CREDENTIAL_MARK}`;
+  } catch {
+  }
+  return match;
+}
 var CREDENTIALS = Object.freeze([
   [/\bsk-[A-Za-z0-9_*.-]{6,}/g, "sk-[hidden]"],
   [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
@@ -12525,7 +12533,9 @@ var CREDENTIALS = Object.freeze([
   [/\bxox[baprs]-[A-Za-z0-9-]{8,}/g, CREDENTIAL_MARK],
   [/\bAIza[A-Za-z0-9_-]{20,}/g, CREDENTIAL_MARK],
   [/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, CREDENTIAL_MARK],
-  [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
+  [/\b(Bearer)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
+  [/(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?Basic\s+)[A-Za-z0-9._~+/=*-]+/gi, `$1${CREDENTIAL_MARK}`],
+  [/\b(Basic)\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9_+/=-])/gi, basicCredential],
   // Provider and code-host keys whose own prefix the rules above do not cover. Each needs a
   // long enough body that ordinary words cannot match it.
   [/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}/g, CREDENTIAL_MARK],

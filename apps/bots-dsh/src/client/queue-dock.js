@@ -1,5 +1,7 @@
 import { createElement as h, Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { t } from './i18n.js'
+import { guardSignInCodeTransfer, refuseKnownState } from './cli-login-guard.js'
+import { SIGN_IN_TEXT_MAX } from '../shared/cli-login.js'
 import { ArrowUpIcon, CheckIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, PaperclipIcon, PencilIcon, QueueIcon, TrashIcon } from './icons.js'
 
 // The queue dock above the composer, drawn by Omni in place of the shell's own
@@ -66,7 +68,7 @@ function Preview({ text, renderFactorySlot }) {
   return h('span', { className: 'bt-queue-preview' }, rendered ?? text)
 }
 
-function EditField({ text, onChange, onSave, onCancel }) {
+function EditField({ text, onChange, onSave, onCancel, actions }) {
   const field = useRef(null)
   useEffect(() => {
     const node = field.current
@@ -82,6 +84,8 @@ function EditField({ text, onChange, onSave, onCancel }) {
     rows: 1,
     'aria-label': t('Edit queued message'),
     onChange: event => onChange(event.target.value),
+    onPaste: event => guardSignInCodeTransfer(event, actions),
+    onDrop: event => guardSignInCodeTransfer(event, actions),
     onKeyDown: (event) => {
       if (event.key === 'Escape') { event.stopPropagation(); onCancel() }
       else if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); onSave() }
@@ -145,6 +149,11 @@ export function QueueDock({ useSession, useProjection, updateQueue, loadImage, r
   }
   const saveEdit = async () => {
     if (editing === null || editing.text.trim() === '') return
+    if (editing.text.length > SIGN_IN_TEXT_MAX) {
+      actions.showNotice(t('Keep the queued message at or below {n} characters.', { n: SIGN_IN_TEXT_MAX }))
+      return
+    }
+    if (refuseKnownState(editing.text, actions)) return
     if (await applyAction(editing.id, { kind: 'edit', content: [{ type: 'text', text: editing.text }] }, t('Couldn’t edit the queued message — it may have started already.'))) setEditing(null)
   }
   return h('div', { className: 'bt-queue-dock', 'data-queue-dock': '' },
@@ -161,7 +170,7 @@ export function QueueDock({ useSession, useProjection, updateQueue, loadImage, r
           return h('li', { key: row.id, className: 'bt-queue-row' },
             rowCount === 1 && h('span', { className: 'bt-queue-lead', 'aria-hidden': true }, h(QueueIcon)),
             editing?.id === row.id
-              ? h(EditField, { text: editing.text, onChange: text => setEditing({ id: row.id, text }), onSave: saveEdit, onCancel: () => setEditing(null) })
+              ? h(EditField, { text: editing.text, onChange: text => setEditing({ id: row.id, text }), onSave: saveEdit, onCancel: () => setEditing(null), actions })
               : h(Fragment, null,
                 attachments.length > 0 && h('span', { className: 'bt-queue-attachments' },
                   attachments.map((item, index) => item.type === 'image'

@@ -7,8 +7,11 @@
 // the service is optional and every endpoint reports whether it is there.
 
 import { createHash, randomUUID } from 'node:crypto'
+import { SIGN_IN_TEXT_MAX } from '../shared/cli-login.js'
+import { CODE_REFUSED } from './cli-login.js'
 import { hasWriteApi } from './pocket-chat.js'
 import { MAX_SCHEDULE_LINE, SCHEDULE_ID, ScheduleAdmissionRefusal, refusedWrite, scheduleReplyCheck } from './pocket-socket.js'
+import { refusal } from './refusal.js'
 
 const MAX_TITLE = 120
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/
@@ -173,6 +176,7 @@ function pocketSchedulesOf(rt, ownerOf, attached) {
     if (method === 'rename') {
       if (name === '') return refusedWrite('invalid', { message: 'Give the task a name' })
       if (name.length > MAX_TITLE) return refusedWrite('invalid', { message: `Keep the name under ${MAX_TITLE} characters` })
+      if (rt.loginTextMatches?.(name) === true) return refusedWrite('invalid', { message: CODE_REFUSED })
     }
 
     const target = entry.target.sessionId
@@ -711,6 +715,8 @@ export function install(rt) {
       if (title === '') throw invalid('Give the task a name')
       if (title.length > MAX_TITLE) throw invalid(`Keep the name under ${MAX_TITLE} characters`)
       if (prompt === '') throw invalid('Say what the Bot should do')
+      if (prompt.length > SIGN_IN_TEXT_MAX) throw invalid(`Keep the task prompt at or below ${SIGN_IN_TEXT_MAX} characters`)
+      if ([title, prompt].some(text => rt.loginTextMatches?.(text) === true)) throw refusal(CODE_REFUSED)
       const sessionId = bot ? rt.chatOf(bot.id) : rt.sessionOfRoom(room)
       await service.create({ title, prompt, timing: selectorOf(body.when), target: { kind: 'session', sessionId } })
       return schedulesView()

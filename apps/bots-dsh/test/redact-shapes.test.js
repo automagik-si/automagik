@@ -42,6 +42,15 @@ test('authorization headers and key/value spellings are masked', () => {
   for (const spelling of spellings) assert.ok(!redactText(spelling).includes(spelling.split(/[:=]\s*/)[1]), spelling)
 })
 
+test('Basic authentication is masked in headers and encoded pairs while prose is preserved', () => {
+  const pair = Buffer.from('fixture:fake').toString('base64')
+  assert.equal(redactText(`Use Basic ${pair}`), 'Use Basic [hidden]')
+  assert.equal(redactText(`Use Basic\n  ${pair}`), 'Use Basic [hidden]')
+  assert.equal(redactText('Authorization: Basic truncated'), 'Authorization: Basic [hidden]')
+  assert.equal(redactText(`Authorization: Basic\r\n\t${pair}`), 'Authorization: Basic\r\n\t[hidden]')
+  assert.equal(redactText('## Basic commands'), '## Basic commands')
+})
+
 test('credential names in a URL query are masked whichever spelling they use', () => {
   const urls = [
     'https://example.invalid/x?access-token=a1b2c3d4e5f6',

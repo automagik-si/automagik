@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
-import { reminderText } from '../src/host/schedules.js'
+import { install as installSchedules, reminderText } from '../src/host/schedules.js'
 
 const TEAM = {
   version: 1,
@@ -210,6 +210,99 @@ test('without the schedule service the page says so and creating is refused', as
   const refused = await call('schedule-create', { target: 'm1', title: 'Briefing', prompt: 'Sum up', when: { kind: 'daily', time: '09:00', timeZone: 'Asia/Shanghai' } })
   assert.equal(refused.ok, false)
   assert.match(refused.error.message, /Automation tasks are off/)
+})
+
+test('schedule creation refuses a recognized sign-in code before calling the scheduler', async (t) => {
+  const schedule = scheduleService()
+  const calls = []
+  const create = schedule.create
+  schedule.create = async request => { calls.push(request); return create(request) }
+  const state = 'fixture_schedule_state'
+  const { ctx, home, call } = setup({ schedule, acpAgents: { loginTextMatches: text => text.includes(`#${state}`) } })
+  t.after(async () => {
+    await ctx.dispose()
+    rmSync(home, { recursive: true, force: true, maxRetries: 5 })
+  })
+  const task = { target: 'm1', title: 'Briefing', when: { kind: 'every', minutes: 30 } }
+  const refused = await call('schedule-create', { ...task, prompt: `Check the plan: fake-code#${state}` })
+  assert.equal(refused.error?.code, 'bot/refused')
+  assert.match(refused.error.message, /sign-in code/)
+  assert.deepEqual(calls, [])
+  assert.equal((await call('schedule-create', { ...task, prompt: 'Check the plan.' })).ok, true)
+  assert.equal(calls.length, 1)
+})
+
+test('schedule prompts stay within the sign-in matcher’s accepted length', async t => {
+  const schedule = scheduleService()
+  const max = 1_000_000
+  const code = '#fixture_schedule_state'
+  const { ctx, home, call } = setup({ schedule, acpAgents: { loginTextMatches: text => text.slice(0, max).includes(code) } })
+  t.after(async () => {
+    await ctx.dispose()
+    rmSync(home, { recursive: true, force: true, maxRetries: 5 })
+  })
+  const task = { target: 'm1', title: 'Briefing', when: { kind: 'every', minutes: 30 } }
+  const oversized = await call('schedule-create', { ...task, prompt: 'x'.repeat(max) + code })
+  assert.equal(oversized.error?.code, 'bot/invalid')
+  const boundaryCode = await call('schedule-create', { ...task, prompt: 'x'.repeat(max - code.length) + code })
+  assert.equal(boundaryCode.error?.code, 'bot/refused')
+  assert.equal(schedule.tasks.size, 0)
+  assert.equal((await call('schedule-create', { ...task, prompt: 'x'.repeat(max) })).ok, true)
+  assert.equal(schedule.tasks.values().next().value.prompt.length, max)
+})
+
+test('schedule creation refuses a code in the title without writing a task', async t => {
+  const schedule = scheduleService()
+  const code = '#fixture_schedule_state'
+  const { ctx, home, call } = setup({ schedule, acpAgents: { loginTextMatches: text => text.includes(code) } })
+  t.after(async () => {
+    await ctx.dispose()
+    rmSync(home, { recursive: true, force: true, maxRetries: 5 })
+  })
+  const task = { target: 'm1', prompt: 'Check the plan.', when: { kind: 'every', minutes: 30 } }
+  assert.equal((await call('schedule-create', { ...task, title: `Briefing ${code}` })).error?.code, 'bot/refused')
+  assert.equal(schedule.tasks.size, 0)
+  assert.equal((await call('schedule-create', { ...task, title: 'Briefing' })).ok, true)
+  assert.equal(schedule.tasks.values().next().value.title, 'Briefing')
+})
+
+test('Pocket task rename refuses a code before editing the scheduler', async t => {
+  const code = '#fixture_schedule_state'
+  let entry = { id: 'test-task', title: 'Briefing', kind: 'every', scheduledAt: '2030-01-01T00:00:00Z', status: 'active', target: { kind: 'session', sessionId: 'm1' } }
+  const edits = []
+  const schedule = {
+    runtime: { requestDrive() {} },
+    catalog: async () => [entry],
+    async edit(request, _actor, signal) {
+      signal.throwIfAborted()
+      edits.push(request)
+      entry = { ...entry, ...request.patch }
+      return entry
+    },
+  }
+  const ctx = fakeContext({ services: {
+    schedule,
+    sessionController: { follow() {}, events() {}, state() {}, observeState() {}, prompt() {}, cancel() {} },
+  } })
+  t.after(() => ctx.dispose())
+  const rt = {
+    ctx, home: '/unused', chatOwners: new Map([['m1', 'm1']]),
+    warn() {}, loginTextMatches: text => text.includes(code),
+  }
+  installSchedules(rt)
+  if (process.platform === 'win32') return t.skip('Pocket task writes are unavailable on Windows')
+  const args = {
+    botId: 'm1', controller: new AbortController(), refresh: async () => {},
+    allowed: available => available ? undefined : 'unavailable',
+  }
+  const { schedules: { tasks: [task] } } = await rt.pocketSchedules.list(args)
+  const rename = title => rt.pocketSchedules.rename({ ...args, id: task.id, rev: task.rev, title, controller: new AbortController() })
+  const refused = await rename(`Briefing ${code}`)
+  assert.equal(refused.reason, 'invalid')
+  assert.match(refused.message, /sign-in code/)
+  assert.deepEqual(edits, [])
+  assert.equal((await rename('Planning')).state, 'saved')
+  assert.deepEqual(edits.map(edit => edit.patch), [{ title: 'Planning' }])
 })
 
 test('tasks are created on the Bot’s current part, listed by Bot, and deleted', async (t) => {

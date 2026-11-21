@@ -5,6 +5,7 @@
 import { randomUUID } from 'node:crypto'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { CODE_REFUSED } from './cli-login.js'
 import { GOAL_IDLE_NUDGES, SOURCE_KIND } from './constants.js'
 import { headOf } from './text.js'
 import { output } from './tools.js'
@@ -531,6 +532,7 @@ export function install(rt) {
     if (room === undefined) return { error: 'Unknown group chat' }
     const input = String(text ?? '').trim()
     if (input === '' || input.length > BRIEF_MAX) return { error: 'Write what this group should achieve, in at most 2000 characters.', code: 'bot/invalid' }
+    if (rt.loginTextMatches?.(input) === true) return { error: CODE_REFUSED, code: 'bot/refused' }
     const admin = room.members.map(rt.botOf).filter(Boolean).find(bot => rt.isAdminOf(room, bot.id))
     if (admin === undefined) return { error: 'This group has no admin. Set one in the group settings first.' }
     if (room.goal !== undefined && (room.goal.status === 'active' || room.goal.status === 'paused')) {
