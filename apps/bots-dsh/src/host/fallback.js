@@ -237,8 +237,9 @@ export function install(rt) {
   // Notice id -> the fallback it was sent for. DSH fixes a step's model when the step claims
   // its input, which can be after another waiter changed the selection: a fallback notice that
   // a step would answer on another harness leaves the step, and its fallback is undone.
+  // parts.js's pre-step calls it first, beside dropLoginCodes, before a switch can carry the batch.
   const expected = new Map()
-  ctx.on('agent/pre-step', (payload, next) => {
+  rt.dropCrossingFallback = (payload) => {
     const messages = Array.isArray(payload?.messages) ? payload.messages : []
     for (let index = messages.length - 1; index >= 0; index--) {
       const entry = expected.get(messages[index]?.id)
@@ -249,8 +250,7 @@ export function install(rt) {
       restore.delete(entry.agent.id)
       unarm(entry.agent, 'the step runs on another harness')
     }
-    return next()
-  }, { prepend: true })
+  }
 
   // The turn after the failed one (the fallback turn) ends: the Bot answers on its own
   // model again. The failed turn's own end comes first and is passed over. A turn that starts

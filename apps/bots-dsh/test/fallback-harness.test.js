@@ -41,7 +41,8 @@ function bench({ header, fallback = DEEPSEEK, own = header, wait = false }) {
     failed: () => hooks.get('agent/request-error')({ agent, turn: 3, failure: { code: 'SERVER' } }, async () => undefined),
     armed: () => rt.fallbackArmed(agent.session.id),
     turnEnd: () => hooks.get('session/event')(agent.session, { type: 'turn/end', data: { turn: 4 } }),
-    preStep: (payload, next) => hooks.get('agent/pre-step')(payload, next),
+    // parts.js's pre-step calls this first, before its own work.
+    preStep: (payload, next) => { rt.dropCrossingFallback(payload); return next() },
     setCurrent: route => { own = route },
     idle: idle.resolve,
   }
