@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OPT_IN, assetFor, decodeExec, hcExecArgs, linkedMachines, meterScope, recordAfter, targetFor } from "../mods/am-sidebar/meterFleet.js";
-import { METER_POINTER_URL, METER_TARGETS, meterKeys, meterSequenceOf, meterSource, readMeterLane, verifyMeterPointer } from "../mods/am-sidebar/meterLane.mjs";
+import { METER_POINTER_URL, METER_REPOSITORY, METER_TARGETS, meterKeys, meterSequenceOf, meterSource, readMeterLane, verifyMeterPointer } from "../mods/am-sidebar/meterLane.mjs";
 import { METER_EVERY_MS, METER_EXEC_LIMIT_MS, METER_KEY, SYNC, syncMeter, syncTargets } from "../mods/am-sidebar/meter.js";
 import { USAGEMETER, formatMarker, parseMarker } from "../mods/am-sidebar/release.js";
 import { meterAfterUpdate } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
@@ -101,17 +101,19 @@ test("uname -sm picks the target (Pocket Link's aliases too, the Intel Mac kept)
     assert.equal(assetFor(uname, p).sha256, s.pointer.assets[targetFor(uname)].sha256);
   }
   assert.equal(assetFor("FreeBSD amd64", p), null);
-  assert.deepEqual(USAGEMETER, { repo: "automagik-dev/automagik", lane: "meter-lane" }, "no version or hash is pinned any more");
+  assert.deepEqual(USAGEMETER, { repo: "automagik-si/automagik", lane: "meter-lane" }, "no version or hash is pinned any more");
 });
 
 test("the lane is this repository's meter-lane; a file:// test folder and its keys replace it, never for https", () => {
-  assert.equal(METER_POINTER_URL, "https://github.com/automagik-dev/automagik/releases/download/meter-lane/meter.json");
+  assert.equal(METER_POINTER_URL, "https://github.com/automagik-si/automagik/releases/download/meter-lane/meter.json");
+  // The signed pointer still names the pre-transfer repository (scripts/meter-lane.ts REPOSITORY).
+  assert.equal(METER_REPOSITORY, "https://github.com/automagik-dev/automagik");
   const real = meterSource({});
   assert.equal(real.pointer, METER_POINTER_URL);
-  assert.equal(real.base("v3.108.17"), "https://github.com/automagik-dev/automagik/releases/download/v3.108.17");
+  assert.equal(real.base("v3.108.17"), "https://github.com/automagik-si/automagik/releases/download/v3.108.17");
   const file = meterSource({ AUTOMAGIK_HERDR_RELEASE_URL: "file:///tmp/rel/", AUTOMAGIK_HERDR_METER_KEYS: "{}" });
   assert.deepEqual([file.pointer, file.base("v3.1.2"), file.testKeys], ["file:///tmp/rel/download/meter-lane/meter.json", "file:///tmp/rel/download/v3.1.2", "{}"]);
-  for (const url of ["https://evil.example/x", "https://github.com/automagik-dev/automagik/releases", "file:///tmp/../etc", "file:///tmp/%2e%2e"]) {
+  for (const url of ["https://evil.example/x", "https://github.com/automagik-si/automagik/releases", "https://github.com/automagik-dev/automagik/releases", "file:///tmp/../etc", "file:///tmp/%2e%2e"]) {
     const src = meterSource({ AUTOMAGIK_HERDR_RELEASE_URL: url, AUTOMAGIK_HERDR_METER_KEYS: "{}" });
     assert.equal(src.pointer, METER_POINTER_URL, url);
     assert.equal(src.testKeys, null, `${url}: the test keys are ignored`);
@@ -132,7 +134,7 @@ test("over https: the pointer comes through fetch, and a test's keys never count
   await assert.rejects(readMeterLane({ env, fetch }), /is not signed by a key this pack trusts \(meter-keys\.json\): nothing was installed/);
   const { pointer, base } = await readMeterLane({ env, fetch, keys: JSON.parse(s.key.keys).keys });
   assert.equal(pointer.version, V);
-  assert.equal(base, `https://github.com/automagik-dev/automagik/releases/download/v${V}`);
+  assert.equal(base, `https://github.com/automagik-si/automagik/releases/download/v${V}`);
   assert.deepEqual(asked.slice(0, 2), [METER_POINTER_URL, `${METER_POINTER_URL}.sig`]);
   await assert.rejects(readMeterLane({ env, fetch: async () => ({ ok: false, status: 404 }) }), /could not read the meter-lane pointer .*GitHub answered 404/);
 });

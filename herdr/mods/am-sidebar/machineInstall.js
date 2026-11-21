@@ -123,7 +123,9 @@ if (namesFile) {
 export const BOOTSTRAP_SH = `set -eu
 umask 077
 node=$1
-base=https://github.com/automagik-dev/automagik/releases/download/am-lane
+# Read from the repository's current name; the signed pointer still names the pre-transfer one.
+releases=https://github.com/automagik-si/automagik/releases/download
+base=$releases/am-lane
 fetch() { curl -fsSL --proto =https --proto-redir =https -o "$1" "$2"; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -138,7 +140,7 @@ if [ "$4" != - ] && [ "$sequence" -lt "$4" ]; then
   echo "am-lane sequence $sequence is older than the newest this machine took ($4)" >&2; exit 20
 fi
 archive=$tmp/automagik-am-$version.tgz
-fetch "$archive" "$url" || exit 20
+fetch "$archive" "$releases/v$version/automagik-am-$version.tgz" || exit 20
 "$node" -e '${ARCHIVE_JS}' "$archive" "$sha" "$size" || exit 20
 tar -tzf "$archive" > "$tmp/names" || exit 20
 tar -tvzf "$archive" > "$tmp/entries" || exit 20

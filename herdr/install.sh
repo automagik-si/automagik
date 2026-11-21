@@ -65,7 +65,7 @@ main() {
   # none can read (eat) the rest of the script; questions read the terminal instead.
 
   # The pack ships on the Automagik monorepo's releases (its herdr/), v<version> in its one version.
-  REPO=automagik-dev/automagik
+  REPO=automagik-si/automagik
   RELEASES=https://github.com/$REPO/releases
   # The keys the pack pointer may be signed with: mods/am-sidebar/pack-keys.json, kept equal by a
   # test (bun scripts/herdr-lane.ts keygen writes both).
@@ -769,6 +769,7 @@ read_meter_pointer() {
     const fs = require("fs"), crypto = require("crypto");
     const [file, sigFile, keysJson, haveSeq, target] = process.argv.slice(1);
     const no = (why) => { console.log(`the meter-lane pointer ${why}: nothing was installed`); process.exit(1); };
+    // The repository the signed pointer names: still the pre-transfer one (scripts/meter-lane.ts).
     const REPO = "https://github.com/automagik-dev/automagik", DOWNLOADS = `${REPO}/releases/download`;
     const TARGETS = { "darwin-arm64": "usagemeter-darwin-arm64", "darwin-x86_64": "usagemeter-darwin-x86_64",
       "linux-x86_64": "usagemeter-linux-x86_64", "linux-aarch64": "usagemeter-linux-aarch64" };
@@ -1054,7 +1055,7 @@ sched_pin() {
     const no = (why) => { console.log(why); process.exit(1); };
     let S;
     try { S = (await import(pathToFileURL(file).href)).SCHEDULER; } catch { no("the scheduler pin in the pack cannot be read"); }
-    if (!S || S.repo !== repo || !/^\d+\.\d+\.\d+-am\.\d+$/.test(S.version || "")) no("the scheduler pin in the pack is not one this installer knows");
+    if (!S || (S.repo !== repo && S.repo !== "automagik-dev/automagik") || !/^\d+\.\d+\.\d+-am\.\d+$/.test(S.version || "")) no("the scheduler pin in the pack is not one this installer knows");
     const arch = { arm64: "arm64", aarch64: "arm64", x86_64: "amd64", amd64: "amd64" }[machine];
     const pins = { Darwin: ["darwin", S.sha256], Linux: ["linux", S.linux] }[os];
     const sum = arch && pins && pins[1] ? pins[1][arch] : null;

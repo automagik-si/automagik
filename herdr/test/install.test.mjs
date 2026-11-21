@@ -218,7 +218,7 @@ esac
 `);
       sums[target] = pin[target] ?? sha(file);
     }
-    schedulerPin = `export const SCHEDULER = Object.freeze({\n  repo: "automagik-dev/automagik",\n  version: "${version}",\n`
+    schedulerPin = `export const SCHEDULER = Object.freeze({\n  repo: "automagik-si/automagik",\n  version: "${version}",\n`
       + `  sha256: Object.freeze({ arm64: "${sums.darwin_arm64}", amd64: "${sums.darwin_amd64}" }),\n`
       + `  linux: Object.freeze({ arm64: "${sums.linux_arm64}", amd64: "${sums.linux_amd64}" }),\n});\n`
       + `export function repairCommand() { return ""; }\n`;
@@ -1434,7 +1434,7 @@ test("AUTOMAGIK_HERDR_RELEASE_URL: a file:// folder or this repository on GitHub
   s.extraEnv.AUTOMAGIK_HERDR_RELEASE_URL = "https://evil.example/releases";
   const bad = s.run("--yes");
   assert.equal(bad.code, 1);
-  assert.match(bad.err, /must be a file:\/\/ folder or https:\/\/github\.com\/automagik-dev\/automagik\//);
+  assert.match(bad.err, /must be a file:\/\/ folder or https:\/\/github\.com\/automagik-si\/automagik\//);
 });
 
 test("AUTOMAGIK_HERDR_RELEASE_URL with '..' or '%' is refused before anything is fetched", (t) => {
@@ -1443,8 +1443,8 @@ test("AUTOMAGIK_HERDR_RELEASE_URL with '..' or '%' is refused before anything is
   writeFileSync(curlLog, "");
   exe(join(s.bin, "curl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${curlLog}"\nexit 1\n`);
   for (const url of [
-    "https://github.com/automagik-dev/automagik/../../evil/repo/releases",
-    "https://github.com/automagik-dev/automagik/%2e%2e/%2e%2e/evil/repo/releases",
+    "https://github.com/automagik-si/automagik/../../evil/repo/releases",
+    "https://github.com/automagik-si/automagik/%2e%2e/%2e%2e/evil/repo/releases",
   ]) {
     s.extraEnv.AUTOMAGIK_HERDR_RELEASE_URL = url;
     const r = s.run("--yes");

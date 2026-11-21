@@ -43,8 +43,9 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { basename, join } from 'node:path';
 // @ts-expect-error am's plain JavaScript, no types
-import { LANE_RELEASE, PART, REPO, REPOSITORY, RELEASES, SCHEMA_VERSION, sequenceOf, tarballName, verifyPointer } from '../am/lib/lane.mjs';
+import { LANE_RELEASE, PART, REPO, REPOSITORY, SCHEMA_VERSION, sequenceOf, tarballName, verifyPointer } from '../am/lib/lane.mjs';
 // The pointer's repository and tarball URL come from am/lib/lane.mjs (am's part): they move with it.
+// REPOSITORY is still the pre-transfer name every installed am checks for; REPO is where it lives.
 import { keyIdOf, publicOf } from './herdr-lane';
 import { ROOT, signLane } from './lane';
 
@@ -93,7 +94,7 @@ export function pointer(tgz: string, { version, commit, issuedAt, keyId = KEY_ID
     version,
     tag: `v${version}`,
     commit,
-    tarball: { name, url: `${RELEASES}/download/v${version}/${name}`, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.byteLength },
+    tarball: { name, url: `${REPOSITORY}/releases/download/v${version}/${name}`, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.byteLength },
   };
 }
 

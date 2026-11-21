@@ -15,8 +15,9 @@ encoded as base64. Fetch the public keys in `am/am-keys.json` from the official 
 ships it. Herdr's install line uses the same branch. Never fetch keys from the pointer's commit
 or tag, which is not verified yet. Do not copy a key into notes: keys rotate in two phases
 ([RFC 0011](../docs/rfcs/0011-monorepo-parts-and-releases.md)).
-The repository moved to automagik-si; am still checks the pointer's `repository` and tarball URL
-against https://github.com/automagik-dev/automagik (GitHub redirects), so this block uses that exact URL.
+The repository moved to automagik-si, and the block downloads from there. The signed pointer still
+names https://github.com/automagik-dev/automagik as its `repository` and in its tarball URL (every
+installed am checks that exact name), so the check below compares against it.
 
 Paste the whole block into a shell. It works in a new empty folder and runs in a subshell, so it
 stops at the first check that fails and leaves your shell as it was.
@@ -25,8 +26,8 @@ stops at the first check that fails and leaves your shell as it was.
 (
 set -eu
 work=$(mktemp -d) && cd "$work"
-curl -fsSLO --proto =https --proto-redir =https https://github.com/automagik-dev/automagik/releases/download/am-lane/am.json
-curl -fsSLO --proto =https --proto-redir =https https://github.com/automagik-dev/automagik/releases/download/am-lane/am.json.sig
+curl -fsSLO --proto =https --proto-redir =https https://github.com/automagik-si/automagik/releases/download/am-lane/am.json
+curl -fsSLO --proto =https --proto-redir =https https://github.com/automagik-si/automagik/releases/download/am-lane/am.json.sig
 curl -fsSL --proto =https --proto-redir =https -o am-keys.json https://raw.githubusercontent.com/automagik-si/automagik/main/am/am-keys.json
 node -e '
 const { readFileSync } = require("node:fs");
@@ -59,7 +60,7 @@ if (t.name !== "automagik-am-" + p.version + ".tgz"
 console.log(p.version, t.url, t.sha256, t.size, p.sequence);
 ' am.json am.json.sig am-keys.json > verified.txt
 read -r V URL SHA SIZE SEQ < verified.txt
-curl -fsSLO --proto =https --proto-redir =https "$URL"
+curl -fsSLO --proto =https --proto-redir =https "https://github.com/automagik-si/automagik/releases/download/v$V/automagik-am-$V.tgz"
 archive="automagik-am-$V.tgz"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$archive" > checksum.txt

@@ -11,9 +11,14 @@ import { VERSION, sequenceOf } from "../amInstallState.js";
 
 export { VERSION, sequenceOf };
 
-export const REPO = "automagik-dev/automagik";
-export const REPOSITORY = `https://github.com/${REPO}`;
-export const RELEASES = `${REPOSITORY}/releases`;
+export const REPO = "automagik-si/automagik";
+/** Where am-lane and the releases are read from. */
+export const RELEASES = `https://github.com/${REPO}/releases`;
+/**
+ * The repository a signed pointer names, and its tarball URL's: still the pre-transfer name, which
+ * every installed am compares exactly, so the release keeps writing it (scripts/am-lane.ts).
+ */
+export const REPOSITORY = "https://github.com/automagik-dev/automagik";
 export const LANE_RELEASE = "am-lane";
 export const POINTER = "am.json";
 export const SIGNATURE = "am.json.sig";
@@ -35,7 +40,7 @@ export function checkPointer(p) {
   if (typeof p.commit !== "string" || !/^[0-9a-f]{40}$/.test(p.commit)) fail("the pointer names no commit");
   const t = p.tarball ?? {};
   if (t.name !== tarballName(p.version)) fail(`the pointer's tarball ${t.name} is not ${tarballName(p.version)}`);
-  if (t.url !== `${RELEASES}/download/${p.tag}/${t.name}`) fail(`the pointer's tarball URL ${t.url} is not on ${p.tag}`);
+  if (t.url !== `${REPOSITORY}/releases/download/${p.tag}/${t.name}`) fail(`the pointer's tarball URL ${t.url} is not on ${p.tag}`);
   if (typeof t.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(t.sha256)) fail("the pointer names no sha256");
   if (!Number.isSafeInteger(t.size) || t.size <= 0) fail("the pointer names no size");
   return p;
