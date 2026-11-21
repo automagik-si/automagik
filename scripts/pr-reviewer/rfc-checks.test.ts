@@ -704,3 +704,7 @@ describe('Astra round 3 regressions (Opus)', () => {
     expect(rfcChecks(input).findings.map(finding => finding.rule)).toContain('rfc-companion');
   });
 });
+
+test('keeps an annotated Refs list whole for the needs-rfc check (Astra round 3)', () => {
+  expect(references('Refs #1425 `parser.ts`, #1528', repo).refs).toEqual([1425, 1528]);
+});
