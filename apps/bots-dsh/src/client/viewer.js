@@ -170,9 +170,10 @@ function trackDrafts(active, viewer, written = new Map()) {
         written.delete(key)
       }
     }
-    const clear = () => {
+    const clear = (confirmingHandoff = false) => {
       try {
-        if (current()) {
+        // During a handoff, discard the exact values retained from the disposed mount.
+        if (confirmingHandoff || current()) {
           for (const [key, value] of written) if (storage.getItem(key) === value) remove.call(storage, key)
         }
       } finally { written.clear() }
@@ -207,10 +208,11 @@ export async function startViewer(boot, signal, prepare, clearNativeDrafts) {
   if (guard) throw new Error('Viewer already started')
   if (signal?.aborted) throw unavailable()
   const active = guard = { hooks: new Set(), retired: false, boot, signal }
-  const previousViewer = storedViewer()
+  const initialViewer = storedViewer()
   const hidden = hideDocument()
   const handoff = hidden.handoff
   const retained = handoff?.viewer
+  let confirmingHandoff = Boolean(handoff)
   const current = () => guard === active && !active.retired && !signal?.aborted
   let cancelDelay
   const pause = async delay => {
@@ -237,9 +239,15 @@ export async function startViewer(boot, signal, prepare, clearNativeDrafts) {
     try {
       if (draftRole === 'owner' || draftRole === 'admin') clearNativeDrafts?.()
     } catch { /* The native session service may be disposing too. */ }
-    try { drafts?.clear() } catch { /* Storage may be unavailable. */ }
+    try { drafts?.clear(confirmingHandoff) } catch { /* Storage may be unavailable. */ }
   }
   if (retained) active.hooks.add(clearDrafts)
+  const storage = event => {
+    if (event.key === null || (event.key === VIEWER_KEY && event.newValue !== (active.viewer?.id ?? initialViewer))) retire(active)
+  }
+  const stopStorage = () => window.removeEventListener('storage', storage)
+  window.addEventListener('storage', storage)
+  active.hooks.add(stopStorage)
   const abort = () => {
     cancelDelay?.()
     if (guard === active && !active.retired) {
@@ -247,6 +255,7 @@ export async function startViewer(boot, signal, prepare, clearNativeDrafts) {
       if (active.viewer) {
         hidden.handoff = { viewer: active.viewer, drafts }
       }
+      stopStorage()
       active.stop?.()
       stopTrackingDrafts?.()
       guard = undefined
@@ -268,17 +277,23 @@ export async function startViewer(boot, signal, prepare, clearNativeDrafts) {
   }
   if (!current()) throw new Error('Viewer unavailable')
   const currentViewer = storedViewer()
+  const markerChanged = currentViewer !== initialViewer
   if (!confirmed(answer, boot) ||
-      (retained && (retained.id !== answer.viewer.id || retained.role !== answer.viewer.role)) ||
-      (currentViewer !== null && currentViewer !== previousViewer && currentViewer !== answer.viewer.id)) {
+      (handoff && (retained.id !== answer.viewer.id || retained.role !== answer.viewer.role ||
+        markerChanged || currentViewer !== answer.viewer.id)) ||
+      (currentViewer !== null && markerChanged && currentViewer !== answer.viewer.id)) {
     retire(active)
     throw new Error('Viewer role changed')
   }
   const viewer = active.viewer = answer.viewer
-  try {
-    localStorage.setItem(VIEWER_KEY, viewer.id)
+  if (handoff) {
     active.markerSet = true
-  } catch { /* The server still checks each request's viewer. */ }
+  } else {
+    try {
+      localStorage.setItem(VIEWER_KEY, viewer.id)
+      active.markerSet = true
+    } catch { /* The server still checks each request's viewer. */ }
+  }
   if (!stopTrackingDrafts) startTracking(viewer)
   active.hooks.add(clearDrafts)
 
@@ -321,18 +336,13 @@ export async function startViewer(boot, signal, prepare, clearNativeDrafts) {
     } finally { checking = false }
   }
   const visibility = () => { if (document.visibilityState === 'visible') void check() }
-  const storage = event => {
-    if (event.key === null || (event.key === VIEWER_KEY && event.newValue !== viewer.id)) retire(active)
-  }
   window.addEventListener('focus', check)
-  window.addEventListener('storage', storage)
   document.addEventListener('visibilitychange', visibility)
   const timer = setInterval(check, 15_000)
   active.stop = () => {
     for (const controller of pendingChecks) controller.abort()
     clearInterval(timer)
     window.removeEventListener('focus', check)
-    window.removeEventListener('storage', storage)
     document.removeEventListener('visibilitychange', visibility)
   }
   active.hooks.add(active.stop)
@@ -350,6 +360,7 @@ export async function startViewer(boot, signal, prepare, clearNativeDrafts) {
     if (!current()) throw unavailable()
   }
   checkViewer(active)
+  confirmingHandoff = false
   const body = document.body
   if (body) {
     body.inert = hidden.inert

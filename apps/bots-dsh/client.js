@@ -4133,9 +4133,9 @@ function trackDrafts(active2, viewer, written = /* @__PURE__ */ new Map()) {
         written.delete(key);
       }
     };
-    const clear = () => {
+    const clear = (confirmingHandoff = false) => {
       try {
-        if (current()) {
+        if (confirmingHandoff || current()) {
           for (const [key, value] of written) if (storage.getItem(key) === value) remove.call(storage, key);
         }
       } finally {
@@ -4168,10 +4168,11 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
   if (guard) throw new Error("Viewer already started");
   if (signal?.aborted) throw unavailable();
   const active2 = guard = { hooks: /* @__PURE__ */ new Set(), retired: false, boot, signal };
-  const previousViewer = storedViewer();
+  const initialViewer = storedViewer();
   const hidden = hideDocument();
   const handoff = hidden.handoff;
   const retained = handoff?.viewer;
+  let confirmingHandoff = Boolean(handoff);
   const current = () => guard === active2 && !active2.retired && !signal?.aborted;
   let cancelDelay;
   const pause = async (delay2) => {
@@ -4202,11 +4203,17 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
     } catch {
     }
     try {
-      drafts?.clear();
+      drafts?.clear(confirmingHandoff);
     } catch {
     }
   };
   if (retained) active2.hooks.add(clearDrafts);
+  const storage = (event) => {
+    if (event.key === null || event.key === VIEWER_KEY && event.newValue !== (active2.viewer?.id ?? initialViewer)) retire(active2);
+  };
+  const stopStorage = () => window.removeEventListener("storage", storage);
+  window.addEventListener("storage", storage);
+  active2.hooks.add(stopStorage);
   const abort = () => {
     cancelDelay?.();
     if (guard === active2 && !active2.retired) {
@@ -4214,6 +4221,7 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
       if (active2.viewer) {
         hidden2.handoff = { viewer: active2.viewer, drafts };
       }
+      stopStorage();
       active2.stop?.();
       stopTrackingDrafts?.();
       guard = void 0;
@@ -4235,15 +4243,20 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
   }
   if (!current()) throw new Error("Viewer unavailable");
   const currentViewer = storedViewer();
-  if (!confirmed(answer, boot) || retained && (retained.id !== answer.viewer.id || retained.role !== answer.viewer.role) || currentViewer !== null && currentViewer !== previousViewer && currentViewer !== answer.viewer.id) {
+  const markerChanged = currentViewer !== initialViewer;
+  if (!confirmed(answer, boot) || handoff && (retained.id !== answer.viewer.id || retained.role !== answer.viewer.role || markerChanged || currentViewer !== answer.viewer.id) || currentViewer !== null && markerChanged && currentViewer !== answer.viewer.id) {
     retire(active2);
     throw new Error("Viewer role changed");
   }
   const viewer = active2.viewer = answer.viewer;
-  try {
-    localStorage.setItem(VIEWER_KEY, viewer.id);
+  if (handoff) {
     active2.markerSet = true;
-  } catch {
+  } else {
+    try {
+      localStorage.setItem(VIEWER_KEY, viewer.id);
+      active2.markerSet = true;
+    } catch {
+    }
   }
   if (!stopTrackingDrafts) startTracking(viewer);
   active2.hooks.add(clearDrafts);
@@ -4291,18 +4304,13 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
   const visibility = () => {
     if (document.visibilityState === "visible") void check();
   };
-  const storage = (event) => {
-    if (event.key === null || event.key === VIEWER_KEY && event.newValue !== viewer.id) retire(active2);
-  };
   window.addEventListener("focus", check);
-  window.addEventListener("storage", storage);
   document.addEventListener("visibilitychange", visibility);
   const timer = setInterval(check, 15e3);
   active2.stop = () => {
     for (const controller of pendingChecks) controller.abort();
     clearInterval(timer);
     window.removeEventListener("focus", check);
-    window.removeEventListener("storage", storage);
     document.removeEventListener("visibilitychange", visibility);
   };
   active2.hooks.add(active2.stop);
@@ -4326,6 +4334,7 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
     if (!current()) throw unavailable();
   }
   checkViewer(active2);
+  confirmingHandoff = false;
   const body = document.body;
   if (body) {
     body.inert = hidden.inert;

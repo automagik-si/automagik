@@ -618,3 +618,79 @@ test('R4 eleven re-applies during renewal preserve the draft and keep viewer wat
   assert.deepEqual(f.reloads, [true])
   assert.deepEqual(watchers(), [0, 0, 0, 0])
 })
+
+for (const [name, change] of [
+  ['R10 a storage clear event during replacement whoami', 'event'],
+  ['R11 a storage clear at replacement whoami send before the event arrives', 'early clear'],
+  ['R12 a different viewer marker before replacement whoami answers', 'different marker'],
+]) {
+  test(`${name} retires the hidden composer and discards its retained draft`, async t => {
+    const marker = 'automagik.viewer'
+    const sharedDraft = 'dsh.conversation.shared-chat'
+    const pending = Promise.withResolvers()
+    let listenersAtSend
+    const f = browser({ boot: { version: 1, role: 'owner' }, fetch: () => {
+      if (f.calls.length === 1) return viewerReply('owner', 'owner-a')
+      listenersAtSend = f.window.listeners.get('storage')?.size
+      if (change === 'early clear') f.localStorage.values.clear()
+      return pending.promise
+    } })
+    const composer = nativeComposer(f)
+    const options = { ownerEffects: gatedOwnerEffects, sessions: composer.sessions }
+    const first = slotsOf(t, f, false, options)
+    await tick()
+
+    const body = f.document.body
+    body.replaceChildren({ text: 'A transcript' })
+    composer.setDraft('A unsent draft')
+    f.localStorage.setItem(sharedDraft, 'A earlier draft')
+    first.dispose()
+    assert.equal(composer.draft(), 'A unsent draft')
+    assert.equal(f.localStorage.getItem(composer.key), 'A unsent draft')
+    assert.equal(f.localStorage.getItem(marker), 'owner-a')
+    assert.equal(f.window.listeners.get('storage').size, 0)
+
+    const displays = []
+    const setProperty = body.style.setProperty
+    body.style.setProperty = (name, value, priority) => {
+      if (name === 'display') displays.push(value)
+      setProperty(name, value, priority)
+    }
+    const writesBeforeRemount = f.writes.length
+    const replacement = slotsOf(t, f, false, options)
+    assert.equal(listenersAtSend, 1)
+    assert.equal(body.inert, true)
+    assert.equal(composer.draft(), 'A unsent draft')
+    assert.deepEqual(f.reloads, [])
+
+    if (change === 'event') {
+      f.localStorage.values.clear()
+      f.window.emit('storage', { key: null, newValue: null })
+      assert.equal(composer.draft(), '')
+      assert.deepEqual(f.reloads, [true])
+    }
+    if (change === 'different marker') {
+      f.localStorage.values.set(marker, 'owner-b')
+      f.localStorage.values.set(sharedDraft, 'B newer draft')
+    }
+    pending.resolve(viewerReply('owner', 'owner-a'))
+    await tick()
+
+    assert.deepEqual(f.calls.map(call => call.body), [
+      { endpoint: 'whoami', payload: null }, { endpoint: 'whoami', payload: null },
+    ])
+    assert.deepEqual(f.writes.slice(writesBeforeRemount), [])
+    assert.equal(f.localStorage.getItem(marker), change === 'different marker' ? 'owner-b' : null)
+    assert.equal(f.localStorage.getItem(composer.key), null)
+    assert.equal(f.localStorage.getItem(sharedDraft), change === 'different marker' ? 'B newer draft' : null)
+    assert.equal(composer.draft(), '')
+    assert.deepEqual(composer.clears, [true])
+    assert.equal(body.inert, true)
+    assert.equal(body.style.getPropertyValue('display'), 'none')
+    assert.ok(displays.every(display => display === 'none'))
+    assert.deepEqual(body.children, [])
+    assert.equal(replacement.client.omni.face(), null)
+    assert.deepEqual(f.reloads, [true])
+    assert.equal(f.window.listeners.get('storage').size, 0)
+  })
+}
