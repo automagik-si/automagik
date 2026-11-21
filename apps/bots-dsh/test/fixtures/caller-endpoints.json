@@ -163,6 +163,7 @@
       "usage-stats"
     ],
     "bot-admin": [
+      "accounts-codex",
       "add-agent",
       "agent-adopt",
       "agent-archive",
@@ -171,9 +172,13 @@
       "agent-presets",
       "agent-rename",
       "agent-session",
+      "automations-entry",
+      "automations-history",
       "automations-list",
+      "automations-pause",
       "automations-put",
       "automations-remove",
+      "automations-run",
       "bot-capability",
       "bot-fresh",
       "bot-new-part",
