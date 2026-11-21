@@ -303,7 +303,7 @@ test('the mounted service advertises Vault and preserves the enumerable v1 surfa
   let service
   apply({ provide(_name, value) { service = value }, effect() {} })
   try {
-    assert.deepEqual(service.providers, ['bitwarden', 'onepassword', provider, 'secret-service', 'proton-pass', 'bitwarden-secrets'])
+    assert.deepEqual(service.providers, ['bitwarden', 'onepassword', provider, 'secret-service', 'proton-pass', 'bitwarden-secrets', 'macos-keychain'])
     assert.deepEqual(Object.keys(service).sort(), ['listItems', 'lock', 'prepareQuit', 'read', 'status', 'unlock', 'version'])
     equalPrivate(await service.unlock({ provider, token: '', address: '' }), { ok: false, code: 'refused' })
     equalPrivate(await service.status({ provider }), { state: 'locked' })

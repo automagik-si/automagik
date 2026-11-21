@@ -103,13 +103,35 @@ function managerRead(words) {
   const matches = (first, next) => verbs.includes(first) || verbs.includes(`${first} ${next}`)
   return matches(...operands) || args.some((word, at) => matches(word, args[at + 1]))
 }
+const SECURITY_METADATA = new Set([
+  'list-keychains', 'default-keychain', 'login-keychain', 'show-keychain-info',
+  'find-certificate', 'find-identity', 'verify-cert', 'help',
+])
+const SECURITY_SEARCH_LIST = new Set(['list-keychains', 'default-keychain', 'login-keychain'])
+function securityRead(args) {
+  let at = 0
+  while (args[at]?.startsWith('-')) {
+    const option = args[at++]
+    if (option === '--') break
+    // Only these global flags can be skipped without consuming a command word.
+    if (!/^-[qvlR]+$/.test(option)) return true
+  }
+  const command = args[at]
+  if (!command) return true
+  if (['find-generic-password', 'find-internet-password'].some(name => name.startsWith(command))) {
+    return args.slice(at + 1).some(word => /^-[^-]*[gw]/.test(word))
+  }
+  if (SECURITY_SEARCH_LIST.has(command) && args.slice(at + 1).some(word => /^-[^-]*s/.test(word))) return true
+  return !SECURITY_METADATA.has(command)
+}
+const securityCommand = words => words[0]?.split('/').at(-1) === 'security' && securityRead(words.slice(1))
 function secretCommand(words) {
   if (managerRead(words)) return true
+  if (securityCommand(words)) return true
   const text = words.join(' ')
   if (/^(export|declare -[a-z]*x[a-z]*)( -p)?$/.test(text)) return true
   if (/^git credential fill\b/.test(text) || (/^gh auth status\b/.test(text) && words.some(word => /^(-t|--show-token)$/.test(word)))) return true
   if (/^(gh auth token|gcloud auth print-(access|identity)-token|op read|aws secretsmanager get-secret-value|kubectl get secrets?)\b/.test(text)) return true
-  if (/^security find-(generic|internet)-password\b/.test(text) && words.some(word => /^-[wg]$/.test(word))) return true
   if (/^aws ssm get-parameters?\b/.test(text) || /^aws ssm get-parameters-by-path\b/.test(text)) return words.includes('--with-decryption')
   return /^(env|printenv)$/.test(words[0]) && (words.length === 1 || words.slice(1).some(word => /TOKEN|SECRET|PASSWORD|API_KEY|KEY$/i.test(word)))
 }
@@ -315,7 +337,8 @@ export function hardToUndo(step, context = {}) {
   // Terminal input can run a command whether the tool submits it now or leaves it at the prompt.
   const terminalText = tool === 'terminal_send' && typeof step.args?.text === 'string' ? [step.args.text] : []
   return [...commandTexts(step.args), ...title].some(text => HARD.some(pattern => pattern.test(text)))
-    || commands.some(command => Array.isArray(command) && command.every(word => typeof word === 'string') && managerRead(command))
+    || commands.some(command => Array.isArray(command) && command.every(word => typeof word === 'string')
+      && (managerRead(command) || securityCommand(command)))
     || [...commandTexts(commands, 0, false), ...argvShells(commands), ...title, ...terminalText].some(text => hardCommand(text, context, typeof workdir === 'string' ? workdir : undefined))
 }
 // A missing folder stays conservative; a broken sender hook asks the person.
