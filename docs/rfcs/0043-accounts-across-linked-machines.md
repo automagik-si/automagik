@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; delivery 0a found no qualified transport, so the linked trial and 3a are blocked (Delivery 0a's findings); on 2026-11-20 the owner's side left the trial and 3a to the owner and kept Codex on this computer only, Q4's fallback; deliveries 1 (#1901) and 2 (#1914) merged; amendment proposed 2026-11-21 (RFC 0030 Q19, Q23): Q12-Q17 for the owner) |
+| Status | In delivery (2026-11-20, approved by the owner's delegate: Q1-Q11 answered with this RFC's recommendations, see Decided; delivery 0a found no qualified transport, so the linked trial and 3a are blocked (Delivery 0a's findings); on 2026-11-20 the owner's side left the trial and 3a to the owner and kept Codex on this computer only, Q4's fallback; deliveries 1 (#1901) and 2 (#1914) merged; amendment (RFC 0030 Q19, Q23) approved by the owner's delegate on 2026-11-21: Q12-Q17 answered with its recommendations, see Decided) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | herdr patches (the pack: am-quota and the sidebar's CLI), each carrying am's generated copies of the CLI |
 | Created | 2026-11-20 |
@@ -583,8 +583,9 @@ Deliveries 1 and 2 copy no credential; they start before the trial (Q2).
 
 ## Amendment (2026-11-21): this computer's Codex switch and the plan without the pack
 
-**Status. Proposed, for the owner.** Q12–Q17 are open. Deliveries 4 and 5 describe the
-recommended answers and wait for the owner's decision.
+**Status. Approved by the owner's delegate on 2026-11-21**, with every recommendation: Q12–Q17
+are answered (a) (Decided, 12–17). Deliveries 4 and 5 below follow those answers. The options
+not taken stay listed under Open questions; taking one needs a later amendment.
 
 ### What is already decided
 
@@ -799,7 +800,7 @@ triggers honor the applicable record and stop calling apply for that plan. An ol
 ignore the separate record under Q14 (b). Require compatible plan writers and retry callers
 before handing over. Apply and retry take `accounts.lock` with zero wait. Contention returns `busy`.
 
-### 4. Proposed deliveries
+### 4. Deliveries 4 and 5
 
 **4. This computer's Codex writer.** Herdr lane with `am`'s generated copies. Under Q12 (a) and
 Q16 (a), ship §2 in the sidebar source and delegate the existing panel actions after
@@ -861,7 +862,7 @@ delivery 8. The Accounts page, controls and app-host timer ship after the CLI in
 
 ### What each answer changes above
 
-Under the recommended answers, the following rules replace the affected Contracts introduced rows.
+Under the approved answers, the following rules replace the affected Contracts introduced rows.
 
 | Contract | Rule for existing installs |
 |---|---|
@@ -887,83 +888,17 @@ Under the recommended answers, the following rules replace the affected Contract
   membership and assignments. An approved, independently verified `local` assignment can run.
   Under (b), the discovery guard also stops `local`.
 
-### Questions for the owner
+### The questions
 
-**Q12. Which record binds the Codex home, proxy base, key source and controller?**
-
-- **(a) Recommended.** Keep `codex-binding.json` and the lock in the private per-user state
-  directory, keyed by the verified destination as in §2. Bind one controller and support
-  user-owned homes with safe parents. Set the binding by a press in page setup or through
-  `am accounts codex-bind` in a terminal. Keep the key in `~/.config/cliproxyapi/mgmt.key`.
-  Without a binding, the new writer returns `not-bound`. Page setup offers `~/.codex` and the
-  configured proxy base.
-- **(b)** Keep the destination lock and resolve `CODEX_HOME` from the writer's environment with
-  `~/.codex` as the default and the key from the file. Agreement by convention leaves parity
-  and proxy approval unproved. Q23's single-writer rule blocks every new writer, including the
-  page, terminal and timer, until home and key parity and proxy approval are proved.
-- **(c)** Let the app hold the key in a private store. This needs a design for the same binding
-  and writer checks in the panel, terminal and timer, plus migration for file and environment
-  setups.
-
-**Q13. Who retries, and does retry continue when the app closes?**
-
-- **(a) Recommended.** Use the app host's five-minute timer on a pack-free install. Keep the
-  installed pack's hourly and due triggers until an explicit handover to the app. Under Q14 (a),
-  handover records `retries: "app"` in the v2 plan and migrates v1 after §3's version checks.
-  Under Q14 (b), both pack triggers honor `accounts-retries.json` from delivery 5 as in §3.
-  Pack-free and handed-over plans get no new automatic runs while the app is closed.
-- **(b)** Have `am` install a user timer that runs while the app is closed. Include install,
-  update and removal on a fresh install and handover from any existing pack triggers.
-- **(c)** Use a person-owned scheduler automation. Q19's fresh-install check then needs a
-  provisioning step for that automation.
-
-**Q14. What does stopping the plan do?**
-
-- **(a) Recommended.** Use §3's durable stop through `plan --stop|--resume --expect-rev <n>`.
-  It survives installing, enabling or removing the panel and stops at the next per-machine
-  check. A manual Use press stays available. Ship compatible readers first. Check both installed
-  CLI versions and the lock owner before Stop and before any v2 write, including Q13 (a)'s retry
-  handover, which also migrates v1 to v2. A delivery-2 panel loses plan viewing and editing for
-  version 2, and a linked Claude start on that reader can proceed with no managed login words.
-- **(b)** Keep switching the panel off as the only stop. On a pack-free install, stopping
-  means deleting the plan, including its approvals and pending attempts. Keep the plan at v1.
-  Record Q13 (a)'s handover in `<app home>/automagik-herdr/accounts-retries.json`. Both pack
-  triggers honor it from delivery 5. An older pack can ignore it.
-
-**Q15. May a write replace an existing local credential while Codex is running?**
-
-- **(a) Recommended.** Check just before a managed replacement. If a Codex process of this user
-  is running, defer and retry later. For manual Use while Codex runs, terminal
-  `am accounts codex-use` refuses unless `--confirm-running` is given. The page asks for the same
-  confirmation. The panel keeps its single press under Q16 (a). Create a missing file exclusively.
-  A refresh can still land between the last check and rename if a client starts in that interval
-  or the person confirms a manual replacement while one runs.
-- **(b)** Keep today's replacement policy (§1). A client refresh can overwrite the switch or
-  be lost to it.
-
-**Q16. How do installed panels move to the shared writer?**
-
-- **(a) Recommended.** Qualify the replacement, then delegate the existing Use/Switch and
-  managed `local` actions. Retire the panel's local driver when delivery 5 enables the
-  executor's. This is a breakage fix for the race the panel design accepts today
-  (`herdr/mods/am-quota/DESIGN.md:256-262`).
-- **(b) A migration hold.** The panel keeps its installer. Every new writer, including the page,
-  terminal and timer, stays refused until cutover. The hold ends only when (a)'s conditions
-  hold, including §2's proof of home and key parity and refusal of any older installed panel,
-  enabled or disabled. Q23's single-writer rule holds throughout.
-
-**Q17. May an approved local assignment run when linked discovery fails?**
-
-- **(a) Recommended.** Apply an independently verified `local` assignment first. Keep linked
-  membership, assignments and pending work as they were on failed discovery.
-- **(b)** Require successful linked discovery before running `local` too. A discovery failure
-  then leaves both local and linked assignments pending.
+Q12–Q17, as put to the owner with every option, are under Open questions. The answers
+are under Decided.
 
 ## Decided
 
-Approved by the owner's delegate on 2026-11-20 (the note under the table), with every
-recommendation. The options not taken stay listed with each question below; taking one needs a
-later amendment.
+Q1–Q11 approved by the owner's delegate on 2026-11-20 (the note under the table), with every
+recommendation. Q12–Q17 (the Amendment's) approved by the owner's delegate on 2026-11-21, with
+every recommendation. The options not taken stay listed with each question below; taking one
+needs a later amendment.
 
 1. **Q1.** The RFC's shape stands: one approved plan, read-back before "on", Claude per machine
    without copies, Codex copying only after a qualified route and a pass.
@@ -978,7 +913,8 @@ later amendment.
    copied. No delivery reads or copies a real Codex or Claude home. Since 2026-11-20 (after
    0a's findings) the trial and 3a are left to the owner, and until the owner decides, Codex
    stays on this computer only, as after a fail; the deliveries go on with 1 and 2.
-5. **Q5.** This computer is `local` in the plan, first in order; its switch stays the panel's.
+5. **Q5.** This computer is `local` in the plan, first in order. Its writer clause ("its
+   switch stays the panel's") is superseded by RFC 0030 Q23 (Amendment, Q12 and Q16).
 6. **Q6.** A Codex credential goes only to machines the person adds to the list; none by default.
 7. **Q7.** A pin change in `spread` moves that machine only; the rest waits for **Spread again**.
 8. **Q8.** A host with no login of the account is an accepted exception under `one`; the sign-in
@@ -989,6 +925,29 @@ later amendment.
     or re-applies the plan.
 11. **Q11.** An existing Codex file is replaced only while no Codex process of that user runs
     there; the residual is accepted.
+12. **Q12.** `codex-binding.json` and the destination lock live in the private per-user state
+    directory, keyed by the verified Codex home, with one controller app home. A press in page
+    setup or `am accounts codex-bind` sets the binding; the key stays in
+    `~/.config/cliproxyapi/mgmt.key`. Without a binding the new writer returns `not-bound`
+    (Amendment §2).
+13. **Q13.** The app host's five-minute timer retries on a pack-free install. An installed pack
+    keeps its hourly and due triggers until an explicit handover press, which records `retries:
+    "app"` in the version 2 plan after Amendment §3's version checks. A pack-free or handed-over
+    plan gets no automatic run while the app is closed.
+14. **Q14.** Stopping is durable (`plan --stop|--resume --expect-rev <n>`, Amendment §3): it
+    survives installing, enabling or removing the panel, and manual Use stays available. Version 2
+    readers ship first, and both installed CLI versions and the lock owner are checked before Stop
+    or any version 2 write. The cost is accepted: a delivery-2 panel cannot view or edit a version
+    2 plan, and a linked Claude start on that reader can run with no managed login words.
+15. **Q15.** A managed replacement defers while a Codex process of this user runs. Manual Use asks
+    first (`--confirm-running` in the terminal, a confirmation on the page); the panel keeps its
+    single press. A missing file is created exclusively. A refresh landing between the last check
+    and the rename is accepted.
+16. **Q16.** After qualification, the panel's Use/Switch and managed `local` actions delegate to
+    the shared writer, as a breakage fix for the race the panel design accepts today. The panel's
+    local driver retires when delivery 5 enables the executor's.
+17. **Q17.** An independently verified `local` assignment runs even when linked discovery fails;
+    linked membership, assignments and pending work stay as they were.
 
 ## Open questions
 
@@ -1033,6 +992,60 @@ None open. The questions as put to the owner, with the options not taken:
     started inside that last step can still lose one refresh, and that residual is accepted.
     (b) Never: 3a places a credential only where no `auth.json` exists, and replacing one stays a
     person's job on that machine.
+12. **Q12. Which record binds the Codex home, proxy base, key source and controller?** (a,
+    recommended) Keep `codex-binding.json` and the lock in the private per-user state directory,
+    keyed by the verified destination as in Amendment §2. Bind one controller and support
+    user-owned homes with safe parents. Set the binding by a press in page setup or through `am
+    accounts codex-bind` in a terminal. Keep the key in `~/.config/cliproxyapi/mgmt.key`. Without
+    a binding, the new writer returns `not-bound`. Page setup offers `~/.codex` and the configured
+    proxy base. (b) Keep the destination lock and resolve `CODEX_HOME` from the writer's
+    environment with `~/.codex` as the default and the key from the file. Agreement by convention
+    leaves parity and proxy approval unproved. Q23's single-writer rule blocks every new writer,
+    including the page, terminal and timer, until home and key parity and proxy approval are
+    proved. (c) Let the app hold the key in a private store. This needs a design for the same
+    binding and writer checks in the panel, terminal and timer, plus migration for file and
+    environment setups.
+13. **Q13. Who retries, and does retry continue when the app closes?** (a, recommended) Use the
+    app host's five-minute timer on a pack-free install. Keep the installed pack's hourly and due
+    triggers until an explicit handover to the app. Under Q14 (a), handover records `retries:
+    "app"` in the v2 plan and migrates v1 after Amendment §3's version checks. Under Q14 (b), both
+    pack triggers honor `accounts-retries.json` from delivery 5 as in Amendment §3. Pack-free and
+    handed-over plans get no new automatic runs while the app is closed. (b) Have `am` install a
+    user timer that runs while the app is closed. Include install, update and removal on a fresh
+    install and handover from any existing pack triggers. (c) Use a person-owned scheduler
+    automation. Q19's fresh-install check then needs a provisioning step for that automation.
+14. **Q14. What does stopping the plan do?** (a, recommended) Use Amendment §3's durable stop
+    through `plan --stop|--resume --expect-rev <n>`. It survives installing, enabling or removing
+    the panel and stops at the next per-machine check. A manual Use press stays available. Ship
+    compatible readers first. Check both installed CLI versions and the lock owner before Stop and
+    before any v2 write, including Q13 (a)'s retry handover, which also migrates v1 to v2. A
+    delivery-2 panel loses plan viewing and editing for version 2, and a linked Claude start on
+    that reader can proceed with no managed login words. (b) Keep switching the panel off as the
+    only stop. On a pack-free install, stopping means deleting the plan, including its approvals
+    and pending attempts. Keep the plan at v1. Record Q13 (a)'s handover in `<app
+    home>/automagik-herdr/accounts-retries.json`. Both pack triggers honor it from delivery 5. An
+    older pack can ignore it.
+15. **Q15. May a write replace an existing local credential while Codex is running?** (a,
+    recommended) Check just before a managed replacement. If a Codex process of this user is
+    running, defer and retry later. For manual Use while Codex runs, terminal `am accounts
+    codex-use` refuses unless `--confirm-running` is given. The page asks for the same
+    confirmation. The panel keeps its single press under Q16 (a). Create a missing file
+    exclusively. A refresh can still land between the last check and rename if a client starts in
+    that interval or the person confirms a manual replacement while one runs. (b) Keep today's
+    replacement policy (Amendment §1). A client refresh can overwrite the switch or be lost to it.
+16. **Q16. How do installed panels move to the shared writer?** (a, recommended) Qualify the
+    replacement, then delegate the existing Use/Switch and managed `local` actions. Retire the
+    panel's local driver when delivery 5 enables the executor's. This is a breakage fix for the
+    race the panel design accepts today (`herdr/mods/am-quota/DESIGN.md:256-262`). (b) A migration
+    hold. The panel keeps its installer. Every new writer, including the page, terminal and timer,
+    stays refused until cutover. The hold ends only when (a)'s conditions hold, including
+    Amendment §2's proof of home and key parity and refusal of any older installed panel, enabled
+    or disabled. Q23's single-writer rule holds throughout.
+17. **Q17. May an approved local assignment run when linked discovery fails?** (a, recommended)
+    Apply an independently verified `local` assignment first. Keep linked membership, assignments
+    and pending work as they were on failed discovery. (b) Require successful linked discovery
+    before running `local` too. A discovery failure then leaves both local and linked assignments
+    pending.
 
 ## Links
 
