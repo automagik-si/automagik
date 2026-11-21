@@ -22,6 +22,7 @@ const SENTENCES = [
   'The CLI did not offer a sign-in link in time. Try again.',
   'The CLI could not be started. Run it once in a terminal, then try again.',
   'The CLI returned an old sign-in link. Update it, then try again.',
+  'The CLI returned a short sign-in link Automagik cannot use yet. Update Automagik, then try again.',
   'The CLI did not confirm the sign-in. Try again.',
   'The CLI exited before the sign-in finished. Try again.',
   'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.',

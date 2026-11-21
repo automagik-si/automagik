@@ -617,6 +617,7 @@ const ZH = {
   "The CLI did not offer a sign-in link in time. Try again.": "CLI 没有及时给出登录链接，请重试。",
   "The CLI could not be started. Run it once in a terminal, then try again.": "无法启动 CLI。请先在终端里运行一次，然后重试。",
   "The CLI returned an old sign-in link. Update it, then try again.": "CLI 返回了旧的登录链接。请更新后重试。",
+  "The CLI returned a short sign-in link Automagik cannot use yet. Update Automagik, then try again.": "CLI 返回了 Automagik 暂时无法使用的短登录链接。请更新 Automagik 后重试。",
   "The CLI did not confirm the sign-in. Try again.": "CLI 没有确认登录，请重试。",
   "The CLI exited before the sign-in finished. Try again.": "CLI 在登录完成前退出了，请重试。",
   "Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.": "这台电脑上的另一个 Automagik 会话正在使用 Bot 账号。请关闭它，然后再次点击登录。",

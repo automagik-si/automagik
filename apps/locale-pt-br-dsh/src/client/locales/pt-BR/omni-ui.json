@@ -3344,6 +3344,7 @@
   "The CLI did not offer a sign-in link in time. Try again.": "O CLI não ofereceu um link de login a tempo. Tente de novo.",
   "The CLI could not be started. Run it once in a terminal, then try again.": "Não foi possível iniciar o CLI. Rode-o uma vez no terminal e tente de novo.",
   "The CLI returned an old sign-in link. Update it, then try again.": "O CLI devolveu um link de login antigo. Atualize-o e tente de novo.",
+  "The CLI returned a short sign-in link Automagik cannot use yet. Update Automagik, then try again.": "O CLI devolveu um link de login curto que o Automagik ainda não consegue usar. Atualize o Automagik e tente de novo.",
   "The CLI did not confirm the sign-in. Try again.": "O CLI não confirmou o login. Tente de novo.",
   "The CLI exited before the sign-in finished. Try again.": "O CLI saiu antes de o login terminar. Tente de novo.",
   "Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.": "Outra sessão do Automagik neste computador está usando a conta do Bot. Feche-a e clique em Entrar de novo.",
