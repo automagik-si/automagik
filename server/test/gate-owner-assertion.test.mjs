@@ -25,7 +25,8 @@ function connectHttp(server) {
   const [client, socket] = duplexPair()
   client.setTimeout = socket.setTimeout = () => {}
   // A parser error writes its reply then destroys the server side immediately.
-  socket.once('close', () => { if (!client.readableEnded) client.push(null) })
+  // Node 24.18+ also destroys the client side of the pair (close, no end); older ones leave it.
+  socket.once('close', () => { if (!client.readableEnded && !client.destroyed) client.push(null) })
   server.emit('connection', socket)
   return client
 }
@@ -34,7 +35,7 @@ async function post(server, cookie, extra, body = '') {
   const client = connectHttp(server)
   let reply = ''
   client.on('data', bytes => { reply += bytes })
-  const ended = once(client, 'end')
+  const ended = new Promise(resolve => { client.once('end', resolve); client.once('close', resolve) })
   const headers = [`Host: ${new URL(origin).host}`, `Origin: ${origin}`, `Cookie: ${cookie}`,
     'Connection: close', ...extra]
   client.write(`POST ${path} HTTP/1.1\r\n${headers.join('\r\n')}\r\n\r\n${body}`)
@@ -210,6 +211,7 @@ test('an accepted ambiguous owner POST stays unsigned through the DSH Fetch brid
         'dsh-client-connection/src/http-bridge.ts', import.meta.url,
     )).find(file => existsSync(file))
     if (!source) { t.skip('the pinned DSH test harness is unavailable'); return }
+    if (!process.features.typescript) { t.skip('this Node cannot strip TypeScript'); return }
     // Node cannot load TS directly under node_modules. The bridge has only Node runtime imports.
     const js = stripTypeScriptTypes(readFileSync(source, 'utf8'))
     const moduleUrl = 'data:text/javascript;base64,' + Buffer.from(js).toString('base64')
