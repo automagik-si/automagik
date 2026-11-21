@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (delivery 2 merged: ci.yml's merge_group trigger and the CI result job; delivery 3 in part: the merge rules as code (.github/pr-reviewer.json, scripts/pr-reviewer/rules.ts), the bot itself waits on delivery 1's App; delivery 1 waits on the owner registering the App and the release environment; the rest of 3 and 4-6 open; approved by the owner's delegate on 2026-11-19; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9, 2026-11-19, by the owner's delegate, the RFC's recommended option; no question open) |
+| Status | In delivery (delivery 2 merged: ci.yml's merge_group trigger and the CI result job; delivery 3 in part: the merge rules as code (.github/pr-reviewer.json, scripts/pr-reviewer/rules.ts), the bot itself waits on delivery 1's App; delivery 1 waits on the owner registering the App and the release environment; the rest of 3 and 4-6 open; amendment of 2026-11-20 approved by the owner's delegate on 2026-11-20 (#991): the parts of D3, D4 and D5 that need neither the App nor the ruleset split off as D3a, D3b, D4a and D5a, with points D1 and D5 must also cover; D5a merged: the dev ruleset as a disabled import template and a read-only drift check (.github/rulesets/dev-reviewed-merges.json, scripts/pr-reviewer/ruleset.ts, #1937); approved by the owner's delegate on 2026-11-19; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9, 2026-11-19, by the owner's delegate, the RFC's recommended option; Q10-Q12, 2026-11-20, by the owner's delegate, option (a) each: a separate proof repository, a 30-day public-read token for the dry run, the ruleset as a disabled template; no question open) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none (docs here; every delivery is under `.github/`, `scripts/` or top-level `*.md` such as `AGENTS.md`, which never ship, so none cuts a release) |
 | Created | 2026-11-10 |
@@ -85,7 +85,8 @@ push to `dev`; #962's failed). Nothing in the repository stops that today:
 
 On 2026-11-19 the delegate approved the RFC and took its recommendation for the only open question.
 
-- **Q9. Proof images:** the App uploads each image as an asset of a rolling `review-proof`
+- **Q9. Proof images** (where they live amended on 2026-11-20 by Q10: a separate proof
+  repository, not this one): the App uploads each image as an asset of a rolling `review-proof`
   prerelease (never Latest, holding nothing else, like `pocket-lane`) and links it from its
   review and its check run; the bot deletes a PR's images 30 days after it merges or closes.
   Not committed to a branch, where an image would stay in the history for good. Uploading and
@@ -490,10 +491,209 @@ Dogfooder; the Orchestrator and the Integrator stop merging; the outside merge h
   bypass with its after-the-fact review.
 - *Rollback:* revert the text; the ruleset still holds.
 
+## Amendment: what moves before the App (2026-11-20, proposed, #991)
+
+Status: Accepted, approved by the owner's delegate on 2026-11-20 with option (a) for Q10-Q12
+(below); the RFC stays In delivery. It moves no owner step and adds no merge path. Q1-Q8 stand;
+Q10's answer amends Q9 (where the images live) and (a) (the App installed on one more
+repository). It splits off the parts of D3, D4 and D5 that need
+neither the App nor the ruleset, records what D1 and D5 must also cover, and asks Q10-Q12.
+
+### Where it stands (reviewed on dev 3e58d9d57)
+
+- **Merged.** D2 (#1775): `ci.yml` runs on a `dev` merge group and has the `CI result` job
+  (`.github/workflows/ci.yml:1981`), kept complete by `scripts/ci-result.test.ts`. D3 in part
+  (#1786): `.github/pr-reviewer.json` and `scripts/pr-reviewer/rules.ts` (`classify`,
+  `verdictLine` and `parseVerdictLine`, `fromReviews`, `gate`), with tests; nothing runs them.
+  The five unreviewed merges each carry an after-the-fact verdict as a comment on their PR:
+  [#961](https://github.com/automagik-si/automagik/pull/961#issuecomment-6779340923),
+  [#962](https://github.com/automagik-si/automagik/pull/962#issuecomment-6779341291),
+  [#965](https://github.com/automagik-si/automagik/pull/965#issuecomment-6779341778),
+  [#967](https://github.com/automagik-si/automagik/pull/967#issuecomment-6779342334),
+  [#972](https://github.com/automagik-si/automagik/pull/972#issuecomment-6779342898).
+- **Changed since the Motivation.** `ci.yml` now cancels only pull-request runs
+  (`ci.yml:38-40`), so a running `dev` CI finishes; a pending one can still be replaced by a newer
+  run in the same group. A cut whose `dev` moved re-decides the lane and re-cuts on the new tip a
+  bounded number of times (`scripts/release-cut.sh:426`, `release.yml:93-96`, #668, still open).
+  What the queue still owes is (d)'s serial order: the next merge only after the previous release
+  run, its lane jobs included, ended green. The missing review rule is unchanged.
+- **Waiting on the owner.** D1: register the App as in (a) and create the `release` environment
+  with the App's release key. D5: activate the ruleset and the merge queue. Every acceptance item
+  of #991 sits behind one of the two.
+
+### What D1 and D5 must also cover
+
+- **D1: the App's own pushes still create runs.** GitHub has no actor filter on a `push` trigger,
+  and a completed Release run on `dev` fires Follow Omni's `workflow_run` trigger
+  (`follow-omni.yml:61-64`) even when every job skipped. So a push by the App creates a Release
+  run, a CI run and then a Follow Omni run; D1 makes each of them do no work (the `cut`, CI's jobs
+  and Follow Omni's jobs skip for an App push, or for the Release run one started), puts each in
+  a concurrency group of its own, so it never replaces a pending genuine run in `ci-<ref>` or
+  `follow-omni` (`follow-omni.yml:90`), and keeps the no-op Release run out of (d)'s "newest
+  Release run ended green". Its tests show that a pending genuine CI run and a pending genuine
+  Follow Omni run survive an App push, that Follow Omni's reusable Release call still runs, and
+  that a push by the user account, a pull request and a merge group run as today. D1's check
+  reads "its own pushes start no second cut and no work in `ci.yml` or Follow Omni" instead of
+  "no `ci.yml` run". `main`'s fast-forward (`release.yml:1219`) keeps the workflow token.
+  The skips and the token switch land together in D1, after the App exists, and never dormant
+  behind a variable: running a job that names an environment that does not exist makes GitHub
+  create it with no protection rule and no secret. The owner checks the `release` environment's
+  `dev`-only rule before placing the key.
+- **(k) corrected: the App's pushes are three.** Follow Omni's bump is committed as
+  `chore(desktop): carry Omni <version>` (`follow-omni.yml:329`), not `chore(release): ...`. The
+  watch tells a release push from any other App push by the run that pushed it (the workflow,
+  the run's head and the commit it pushed), never by the commit subject alone.
+- **D5: a cancelled leg on the merge group.** From D2: a matrix leg cancelled without its run being
+  cancelled can leave its parent job's result `success`, so `CI result` passes it. The queue tests
+  the merge group's sha, while the SHIP belongs to the PR head, and `gate` binds both its verdict
+  and its results to one sha and keeps only the newest check per App and name
+  (`scripts/pr-reviewer/rules.ts:255-279`). So the bot's check on a merge group is two checks:
+  the SHIP and the approvals still stand on the PR's current head (`gate` on that head); and the
+  group, read as the queue's entry for that head, has every expected job and matrix leg of its CI
+  run ending in success, each leg's effective result being its newest across all the run's
+  attempts (every page read), so a rerun of the aggregate alone never covers a leg cancelled in
+  an earlier attempt. A skipped leg fails on a group (`ci.yml` lets only a pull request skip an
+  unchanged area). Missing or partial evidence waits. D5's check adds: an ordinary green group
+  merges; a leg cancelled on a scratch merge group stops that merge even when its parent job
+  reports success, and still stops it after a rerun of `CI result` alone; a skipped group leg
+  stops it; a group whose jobs are not all read waits.
+
+### The split
+
+Each part is one PR against `dev` under `scripts/` or `.github/`, so none cuts a release; each
+names its delivery. All of them change the reviewer's own files, which (g) puts under the
+owner's review (`.github/pr-reviewer.json`'s `reviewer` list, which D5a extends to
+`.github/rulesets/**`); until D5 nothing enforces that list, so each PR says so and asks for the
+owner's approval on its head, under today's merge rule.
+
+**D3a. The review engine, offline** (part of D3). `scripts/pr-reviewer/` gains, as pure code over
+a GitHub port with a fake in the tests:
+- the poll as a reducer: the last state and one snapshot (open PRs against `dev`, head shas,
+  drafts, labels, author permission, head repository, comments since the cursor, queue entries)
+  in, (b)'s actions out (start a review, re-review, reply, "draft", carry a verdict); a field the
+  snapshot could not read, and a connection whose pages were not all followed, is unknown and
+  leads to waiting, never to a pass;
+- every mechanical check of (i): a PR fixing a `needs-rfc` issue links an RFC that is Accepted or
+  In delivery, else BLOCKED; a new RFC's number against `dev` and the open PRs (a companion page
+  names its RFC instead), its README row, status word, Template header fields and
+  `docs(rfcs): ...` commits; a delivery PR names its RFC and delivery and moves the RFC's row, or
+  the bot drafts the follow-up; the lane, read from trusted lane code over the PR's own diff,
+  `ships` first and `kind` only for a change that ships (a bare `kind` answers `full` with
+  no tag to compare, `scripts/lane.ts:695`); a closing keyword only for a fully fixed issue;
+- (h)'s verdict composer, the carry-over included: the new head is a merge commit whose first
+  parent is the reviewed head and whose other parent is on `dev`, the PR's own diff from its merge
+  base is identical to the one reviewed, no conflict was resolved, and the new head's CI is green;
+  anything else (pending or failed CI, a rewritten or reset head with the same diff) gets a full
+  review;
+- (j)'s issue drafts: search before opening, the body with PR, head sha and `file:line`;
+- the wiring of a snapshot into `gate` ((f)) on a PR's head, and the merge-group verifier of
+  "What D1 and D5 must also cover" on the queue's sha.
+
+The engine and its rules are loaded from a trusted revision (the deployed one), never from a PR's
+head. The only real adapter it adds reads; it holds no token of its own.
+- *Check:* the tests run every (b) transition, each (i) check on a passing and a failing fixture,
+  the carry-over on an identical diff with green, pending and failed CI, on a conflict-resolving
+  merge and on a rewritten head with the same diff and green CI (full review), and recorded
+  snapshots replayed end to end, including a truncated page and a field denied to the token.
+- *Rollback:* revert; nothing runs it.
+
+**D3b. The dry run** (part of D3; after D3a and Q11). The engine runs on the team's machine
+against the real open PRs and writes each verdict to a local ledger instead of GitHub; nothing is
+posted. The passes follow (e) for each exact head: one Reviewer pass on a docs-only PR; on a code
+PR both passes, independent, with the part's gate from `AGENTS.md` through `scripts/capped-run`
+and cargo only under its build-host rule. A PR's code runs only when its head repository is this
+repository and its author's write access was read and confirmed; a PR from a fork (a writer's
+fork included) or with either value unknown is reviewed by reading only. The read token is held
+by the poller, never by a pass. The ledger is tallied against the human Reviewer and Dogfooder verdicts
+on the same heads, the comparison D3 asks for; a ledger entry is never approval evidence. It does
+not count toward Q7's shadow (one day and five PRs, verdicts posted on GitHub), which still runs
+on the App after D1: a review within 5 minutes and a re-review without being asked show only on
+the PR.
+- *Check:* five PRs in the ledger with the passes (e) gives them beside the human verdicts, each
+  marked complete only when every page of the poll was read; a writer's fork in the ledger read
+  only; the token shown as public read only, expiring.
+- *Rollback:* stop it and revoke its token; it wrote nothing on GitHub.
+
+**D4a. The watch's logic, offline** (part of D4). The watch's decisions as code in
+`scripts/pr-reviewer/` with D4's fixture list: an open, ready PR whose head has no `pr-reviewer`
+check, or one in progress for over 60 minutes outside a release wait; an App push to `dev` that
+the pushing run does not show to be the cut, the index listing or Follow Omni's bump. No workflow
+file: `pr-reviewer-watch.yml`, with its issue-write permission and schedule, lands in D4 after
+the App; before the App every open PR lacks the check and a live run would open the issue at
+once.
+- *Check:* the fixtures, including each of the three release pushes passing and a hand-made App
+  commit with a `chore(release): ...` subject from no release run failing.
+- *Rollback:* revert.
+
+**D5a. The ruleset as a template** (part of D5; Q12). The ruleset of (c) and the queue of (d)
+committed as one file, `.github/rulesets/dev-reviewed-merges.json`, in the shape GitHub's ruleset
+import takes, `enforcement` `disabled`, with the App's id and the owner's bypass entry as named
+placeholders. Its tests check: target `dev` only; one approval, stale approvals dismissed,
+approval of the latest push; `pr-reviewer` pinned to the App's id and `CI result` to GitHub
+Actions; squash only, one PR per group and one group building at a time, a 120-minute check
+timeout; exactly two bypass actors, both `always`. A read-only script compares the live ruleset
+with the file; a field the token cannot read (GitHub shows bypass actors only to an account that
+can edit the ruleset, and a ruleset export leaves them out) is reported as unverified, for the
+owner to check by eye. At D5 the owner fills in the two ids, imports the file, checks it and sets
+it active; the script then compares against `active`.
+- *Check:* the file's tests; after D5, the script reports no difference and lists what it could
+  not verify.
+- *Rollback:* revert; the file changes nothing on GitHub.
+
+**Order.** D3a, D4a and D5a in any order; D3b after D3a, and only if Q11's answer is (a), which
+is the owner's leave to run it. After the owner: D1 (with the points above), D3's shadow on the App, D4's workflow, D5, D6, as above.
+
+### Questions for the owner (recommended first)
+
+- **Q10. Where proof images are uploaded.** Q9 puts them on a rolling `review-proof` prerelease of
+  this repository. An upload needs contents write; a contents-write token on this repository can
+  push to `dev` past the ruleset, since the App is on its bypass list; and section (a) keeps every
+  token the bot service mints at contents read. No option changes what the bot's key itself can
+  mint ((a), "The bypass belongs to the App, not to a key").
+  (a) Amend Q9 and (a): a separate public repository in the organisation holding only proof
+  images, with its own rolling `review-proof` prerelease and Q9's 30-day deletion; the App is
+  also installed there. (a)'s rule that only the release jobs mint a contents-write token gains
+  one exception: the bot's uploader, a step of the service apart from both passes, mints a
+  contents-write token for each upload or deletion, for the proof repository's id only (an
+  installation token can be limited to some of the installation's repositories); every token for
+  this repository stays contents read. The uploader posts only an image the Reviewer pass looked
+  at for that PR head, names the PR and head in the asset, and checks the release it touches; the
+  passes never hold a token. Creating that repository and installing the App on it are the
+  owner's actions.
+  (b) Text proofs only until a later design for images: a drawn change's Dogfooder pass has no
+  image, so the bot withholds SHIP on it (Q6); such a PR lands only through the owner's bypass
+  (Q3), reviewed after the fact like any bypass.
+- **Q11. The dry run's credential.** (a) A fine-grained token of the user account
+  `automagik-genie` with public-repository read-only access and an expiry of 30 days, made for the
+  dry run alone and revoked when it ends; nothing is posted; choosing it is the owner's leave to
+  run D3b. (b) No live dry run: D3b is dropped, recorded snapshots are replayed in D3a's tests
+  only, and the comparison waits for the shadow on the App.
+- **Q12. The ruleset's form.** (a) A disabled template committed now and a read-only drift
+  check (D5a), the owner filling in the ids and importing it at D5. (b) The owner sets it by hand
+  from (c)'s text at D5, as the RFC says today.
+
+None of Q10-Q12 blocks D1 or D5; Q10 blocks only the image half of the Dogfooder's proof in D3.
+
+### Answers, by the owner's delegate, 2026-11-20
+
+On 2026-11-20 the delegate approved the amendment with option (a) for each question.
+
+- **Q10. Proof images:** (a). A separate public repository in the organisation holds only proof
+  images, with its own rolling `review-proof` prerelease and Q9's 30-day deletion; the App is
+  also installed there, and upload tokens are minted for that repository only. Every token for
+  this repository stays contents read. Creating the repository and installing the App on it stay
+  the owner's actions.
+- **Q11. The dry run's credential:** (a). A fine-grained token of the user account
+  `automagik-genie` with public-repository read-only access and a 30-day expiry; nothing is
+  posted. The owner's delegate makes it when D3b starts and revokes it when it ends; no one else
+  makes it, asks for it or reads it.
+- **Q12. The ruleset's form:** (a). A disabled import template and a read-only drift check
+  (D5a); the owner fills in the ids, imports it and sets it active at D5.
+
 ## Open questions
 
-None. Q1-Q8 were answered by the owner on 2026-11-10 and Q9 by the owner's delegate on 2026-11-19,
-above.
+Q1-Q8 were answered by the owner on 2026-11-10 and Q9 by the owner's delegate on 2026-11-19,
+above; Q10-Q12, the amendment's, by the owner's delegate on 2026-11-20. None is open.
 
 ## Links
 
