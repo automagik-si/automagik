@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (delivery 2 merged: ci.yml's merge_group trigger and the CI result job; delivery 3 in part: the merge rules as code (.github/pr-reviewer.json, scripts/pr-reviewer/rules.ts), the bot itself waits on delivery 1's App; delivery 1 waits on the owner registering the App and the release environment; the rest of 3 and 4-6 open; amendment of 2026-11-20 proposed (#991): the parts of D3, D4 and D5 that need neither the App nor the ruleset split off as D3a, D3b, D4a and D5a, with points D1 and D5 must also cover, Q10-Q12 open; approved by the owner's delegate on 2026-11-19; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9, 2026-11-19, by the owner's delegate, the RFC's recommended option; Q10-Q12 open, the amendment's) |
+| Status | In delivery (delivery 2 merged: ci.yml's merge_group trigger and the CI result job; delivery 3 in part: the merge rules as code (.github/pr-reviewer.json, scripts/pr-reviewer/rules.ts), the bot itself waits on delivery 1's App; delivery 1 waits on the owner registering the App and the release environment; the rest of 3 and 4-6 open; amendment of 2026-11-20 approved by the owner's delegate on 2026-11-20 (#991): the parts of D3, D4 and D5 that need neither the App nor the ruleset split off as D3a, D3b, D4a and D5a, with points D1 and D5 must also cover; approved by the owner's delegate on 2026-11-19; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9, 2026-11-19, by the owner's delegate, the RFC's recommended option; Q10-Q12, 2026-11-20, by the owner's delegate, option (a) each: a separate proof repository, a 30-day public-read token for the dry run, the ruleset as a disabled template; no question open) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none (docs here; every delivery is under `.github/`, `scripts/` or top-level `*.md` such as `AGENTS.md`, which never ship, so none cuts a release) |
 | Created | 2026-11-10 |
@@ -85,7 +85,8 @@ push to `dev`; #962's failed). Nothing in the repository stops that today:
 
 On 2026-11-19 the delegate approved the RFC and took its recommendation for the only open question.
 
-- **Q9. Proof images:** the App uploads each image as an asset of a rolling `review-proof`
+- **Q9. Proof images** (where they live amended on 2026-11-20 by Q10: a separate proof
+  repository, not this one): the App uploads each image as an asset of a rolling `review-proof`
   prerelease (never Latest, holding nothing else, like `pocket-lane`) and links it from its
   review and its check run; the bot deletes a PR's images 30 days after it merges or closes.
   Not committed to a branch, where an image would stay in the history for good. Uploading and
@@ -492,9 +493,10 @@ Dogfooder; the Orchestrator and the Integrator stop merging; the outside merge h
 
 ## Amendment: what moves before the App (2026-11-20, proposed, #991)
 
-Status: Proposed; the RFC stays In delivery. It moves no owner step and adds no merge path. Q1-Q9
-stand; only Q10's option (a), if the owner takes it, amends Q9 (where the images live) and (a)
-(the App installed on one more repository). It splits off the parts of D3, D4 and D5 that need
+Status: Accepted, approved by the owner's delegate on 2026-11-20 with option (a) for Q10-Q12
+(below); the RFC stays In delivery. It moves no owner step and adds no merge path. Q1-Q8 stand;
+Q10's answer amends Q9 (where the images live) and (a) (the App installed on one more
+repository). It splits off the parts of D3, D4 and D5 that need
 neither the App nor the ruleset, records what D1 and D5 must also cover, and asks Q10-Q12.
 
 ### Where it stands (reviewed on dev 3e58d9d57)
@@ -672,10 +674,26 @@ is the owner's leave to run it. After the owner: D1 (with the points above), D3'
 
 None of Q10-Q12 blocks D1 or D5; Q10 blocks only the image half of the Dogfooder's proof in D3.
 
+### Answers, by the owner's delegate, 2026-11-20
+
+On 2026-11-20 the delegate approved the amendment with option (a) for each question.
+
+- **Q10. Proof images:** (a). A separate public repository in the organisation holds only proof
+  images, with its own rolling `review-proof` prerelease and Q9's 30-day deletion; the App is
+  also installed there, and upload tokens are minted for that repository only. Every token for
+  this repository stays contents read. Creating the repository and installing the App on it stay
+  the owner's actions.
+- **Q11. The dry run's credential:** (a). A fine-grained token of the user account
+  `automagik-genie` with public-repository read-only access and a 30-day expiry; nothing is
+  posted. The owner's delegate makes it when D3b starts and revokes it when it ends; no one else
+  makes it, asks for it or reads it.
+- **Q12. The ruleset's form:** (a). A disabled import template and a read-only drift check
+  (D5a); the owner fills in the ids, imports it and sets it active at D5.
+
 ## Open questions
 
 Q1-Q8 were answered by the owner on 2026-11-10 and Q9 by the owner's delegate on 2026-11-19,
-above. Q10-Q12 belong to the amendment of 2026-11-20, above.
+above; Q10-Q12, the amendment's, by the owner's delegate on 2026-11-20. None is open.
 
 ## Links
 
