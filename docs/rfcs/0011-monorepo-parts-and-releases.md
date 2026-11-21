@@ -103,6 +103,24 @@ what a release is and whether it attaches the pack:
   and re-sign the lane, and every desktop app would reinstall plugins that did not change.
 - A herdr patch, like a plugin patch, is not marked Latest; `main` still moves to it.
 
+### A cut while dev moves or the previous release still posts (#668)
+
+- A push rejected because `dev` moved during the gates is retried on the new tip: the cut re-decides
+  the lane, re-runs the gates and tries again, up to three whole attempts (`scripts/release-cut.sh`).
+- Before deciding the Pocket and meter builds, the cut re-reads `pocket-lane` and `meter-lane` and
+  waits, within one 300 s budget, for a previous stable release's posts still in flight (meter
+  pointers count only when they verify against `meter-keys.json`).
+- Residual windows, accepted (decided by the owner's delegate on 2026-11-21, the recommended
+  option): a previous run slower than the budget; a stable plugin tag without build evidence hiding
+  an older pending post; more than three intervening drafts or prereleases; a meter post during the
+  Pocket wait when the meter did not trigger; a deleted lane release, which reads as bootstrap.
+  Each one ends the same way: the cut builds that part again although its code did not change (one
+  more version, and for Pocket an update prompt for identical code). None loses a tag, posts a
+  wrong or lower pointer, or ships an unsigned or ungated part. A longer wait would slow every
+  release to avoid a rare, harmless rebuild.
+- The process rule covers them: a merge waits until the previous release run is green, lane jobs
+  included.
+
 ## The pack on a release
 
 `release.yml`'s "Pack the herdr pack" step is the old repository's Pack step, under `herdr/`:
