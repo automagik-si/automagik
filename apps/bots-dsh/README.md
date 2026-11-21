@@ -428,7 +428,7 @@ No credential is read or copied between programs. The background model is not mo
 
 **The model menu** lists only what is set up, as connection, then model, then thinking level: a provider whose key is stored, an agent whose CLI is signed in, and a DSH sign-in other than Claude's or ChatGPT's that is stored. A connection is named by its brand and how it connects: "DeepSeek", "Anthropic · API key", "OpenAI · API key", "Claude Code", "Codex"; two connections that would read the same also show their route id. DSH's own Claude Pro/Max or ChatGPT sign-in route is never offered (the catalog marks it `covered`), nor is a model whose key or sign-in is missing (`needsKey`, `needsSignIn`). The model a Bot is on stays shown even when it cannot run, marked unavailable, and a new Bot never starts on one: the team's default skips them, and DSH's default on a covered plan route is read as the same model on that plan's CLI. The jobs beside the chats keep their own rule (the background model above).
 
-**Images**: `generate_image` draws with an OpenAI API key (the Images API) exactly as before; without one, through the Codex CLI on its own ChatGPT sign-in (acp-dsh's `generateImage`, a one-off Codex session with a per-draw permission profile using Codex's image tool), so a ChatGPT plan draws with no DSH sign-in. A ChatGPT grant an earlier version stored through DSH's `openai-codex` sign-in is read last, only so a person who signed in that way keeps drawing; Automagik no longer offers that sign-in. Nothing reads or copies the CLI's sign-in. A Bot on an agent (Codex) can also make an image with the agent's own tool: acp-dsh hands its PNG, from the call's own update, to the Bot team's keeper (`acpAgents.keepImages`), the chat shows it in the same image card, it is saved in the same images folder, and the agent's link to its own local copy leaves the reply. While any image is made (either path), the card is Omni painting: Omni's clay art with no card behind it, swaying, its face changing every 0.9 s, four dabs of the theme's colours around it, and "Painting your image…" with the seconds so far; a partial image, then the finished one, fades in where Omni was. With reduced motion Omni stands still and the dabs are gone. A call that fails or is stopped says the image was not made, and why.
+**Images**: `generate_image` draws through the Images API with an OpenAI API key the person gave the app: the key saved in the app, or `OPENAI_API_KEY` from DSH's credential file or the app's own `.env` files. A key inherited from the environment Automagik was started in is skipped (#869). An exported variable hides the app's `.env` keys. When no image source is ready, Settings → Bots → Images explains why the inherited key was skipped and points to Settings → Models, where saving that key gives it priority. Without an eligible key, it draws through the Codex CLI on its own ChatGPT sign-in (acp-dsh's `generateImage`, a one-off Codex session with a per-draw permission profile using Codex's image tool), so a ChatGPT plan draws with no DSH sign-in. A ChatGPT grant an earlier version stored through DSH's `openai-codex` sign-in is read last, only so a person who signed in that way keeps drawing; Automagik no longer offers that sign-in. Nothing reads or copies the CLI's sign-in. A Bot on an agent (Codex) can also make an image with the agent's own tool: acp-dsh hands its PNG, from the call's own update, to the Bot team's keeper (`acpAgents.keepImages`), the chat shows it in the same image card, it is saved in the same images folder, and the agent's link to its own local copy leaves the reply. While any image is made (either path), the card is Omni painting: Omni's clay art with no card behind it, swaying, its face changing every 0.9 s, four dabs of the theme's colours around it, and "Painting your image…" with the seconds so far; a partial image, then the finished one, fades in where Omni was. With reduced motion Omni stands still and the dabs are gone. A call that fails or is stopped says the image was not made, and why.
 
 `generate_image` also edits a picture the person uploaded in that Bot's own chat: pass its
 shown name, sha256 (full or a prefix), or upload path as `image`, and the change as `prompt`.
@@ -438,8 +438,9 @@ other chats, group chats and team-generated images are not edit inputs in this p
 verified PNG, JPEG and WebP uploads up to 12 MiB are accepted. The original stays unchanged;
 the result is a new image in the same chat card and team images folder.
 
-Edits use the person's OpenAI key through the Images edits API, or Codex on their ChatGPT
-plan through `acpAgents.editImage`. An older ACP plugin asks for an update;
+Edits use the OpenAI key the person gave the app (an inherited environment key is not used)
+through the Images edits API, or Codex on their ChatGPT plan through `acpAgents.editImage`.
+An older ACP plugin asks for an update;
 a legacy ChatGPT grant cannot edit. Codex edits require acknowledgement of the per-draw
 profile before sending the edit prompt. A Codex Bot's own chat image tool is a separate route.
 
@@ -508,8 +509,8 @@ one-off Codex draw is refused with “Update Automagik and try again.” A Codex
 chat image tool uses its chat permissions, which govern whether an injected request can use
 a readable local image as input and return its contents in chat.
 
-An OpenAI API key routes `generate_image` through the Images API instead of its one-off
-Codex session. Prompt text still reaches the model; keep secrets out of it. A Bot running on
+An OpenAI API key given to the app routes `generate_image` through the Images API instead of
+its one-off Codex session. Prompt text still reaches the model; keep secrets out of it. A Bot running on
 Codex can still use its own image tool despite that key. Use a different Bot model or turn
 Codex off to avoid that route. Avoid sending untrusted outside text to Codex drawing; prompt
 review is not a file access control. See the

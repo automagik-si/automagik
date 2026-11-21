@@ -7,7 +7,10 @@ import { test } from 'node:test'
 import { CODEX_RECORD, createImageGen, install as imagegen } from '../src/host/imagegen.js'
 import { install as uploads } from '../src/host/shared-uploads.js'
 
-async function fixture(t, mode = 'workspace-write', reason = 'edit-not-isolated', { access = { ready: true }, codex = true, canEdit = true, grant = false, authScope } = {}) {
+const ENV_KEY = 'sk-inherited-0123456789abcdef'
+const ENV_SENTINEL = new RegExp(ENV_KEY)
+
+async function fixture(t, mode = 'workspace-write', reason = 'edit-not-isolated', { access = { ready: true }, codex = true, canEdit = true, grant = false, authScope, resolved } = {}) {
   const folder = await mkdtemp(join(tmpdir(), 'edit-guidance-'))
   t.after(() => rm(folder, { recursive: true, force: true }))
   const data = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
@@ -18,7 +21,7 @@ async function fixture(t, mode = 'workspace-write', reason = 'edit-not-isolated'
     botOfSession: () => bot, roomOf: () => undefined, partsOf: () => [], warn() {},
     async *eventsBackwards() { yield { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'image', attachment: ref }] } } },
     ctx: { on() {}, inject() {}, get: name => ({
-      credentials: { readRecord: async name => grant && name === CODEX_RECORD ? { kind: 'grant', payload: { access: 'test-token' } } : undefined, resolve: async () => undefined },
+      credentials: { readRecord: async name => grant && name === CODEX_RECORD ? { kind: 'grant', payload: { access: 'test-token' } } : undefined, resolve: async ref => ref === 'OPENAI_API_KEY' ? resolved : undefined },
       attachments: { readImage: async typed => { reads++; assert.equal(typed.name, undefined); return { ref: typed, data } } },
       sandboxPolicy: { resolve: () => ({ mode }) },
       acpAgents: codex ? {
@@ -80,6 +83,52 @@ test('an edit with no image service at all still gives the Bot its own copy', as
   assert.match(text, /no edited image was made/)
   assert.match(text, /no image service is connected/)
   assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
+})
+
+test('an edit with only an inherited key still gives the Bot its own copy and names why', async t => {
+  const fetch = globalThis.fetch
+  let requests = 0
+  globalThis.fetch = async () => { requests++; assert.fail('no image request') }
+  t.after(() => { globalThis.fetch = fetch })
+  for (const [options, detail] of [
+    [{ access: { ready: false, signedIn: false } }, /not signed in/],
+    [{ access: { ready: false } }, /not ready to edit here/],
+    [{ codex: false }, /no image service is connected/],
+  ]) {
+    const f = await fixture(t, 'workspace-write', 'edit-not-isolated', { ...options, resolved: { value: ENV_KEY, source: 'env' } })
+    const text = await f.run()
+    const path = join(f.folder, '.automagik/bots/test-bot/uploads', f.ref.attachmentId.slice(7), f.ref.name)
+    assert.ok(text.includes(JSON.stringify(path)))
+    assert.match(text, /no edited image was made/)
+    assert.match(text, /OPENAI_API_KEY inherited from the environment.*not used for images.*Settings → Models/)
+    assert.match(text, detail)
+    assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
+    assert.deepEqual(await readFile(path), f.data)
+    assert.equal((await stat(path)).mode & 0o777, 0o444)
+    const progress = f.rt.images.progress('edit')
+    assert.equal(progress, null)
+    assert.doesNotMatch(JSON.stringify([text, progress]), ENV_SENTINEL)
+  }
+  assert.equal(requests, 0)
+})
+
+test('an edit Codex cannot ready for its own cause names that cause first, then the inherited key', async t => {
+  const access = { ready: false, signedIn: true, reason: 'config' }
+  const f = await fixture(t, 'workspace-write', 'edit-not-isolated', { access, resolved: { value: ENV_KEY, source: 'env' } })
+  const text = await f.run()
+  const path = join(f.folder, '.automagik/bots/test-bot/uploads', f.ref.attachmentId.slice(7), f.ref.name)
+  assert.ok(text.includes(JSON.stringify(path)))
+  assert.match(text, /no edited image was made/)
+  assert.match(text, /could not load its own configuration.*OPENAI_API_KEY inherited from the environment.*Settings → Models/)
+  assert.doesNotMatch(text, /OpenAI\s+(?:API\s+)?key/i)
+  assert.deepEqual(await readFile(path), f.data)
+  assert.equal((await stat(path)).mode & 0o777, 0o444)
+  assert.doesNotMatch(JSON.stringify([text, f.rt.images.progress('edit')]), ENV_SENTINEL)
+
+  const noKey = await fixture(t, 'workspace-write', 'edit-not-isolated', { access })
+  const noKeyText = await noKey.run()
+  assert.match(noKeyText, /could not load its own configuration/)
+  assert.doesNotMatch(noKeyText, /OPENAI_API_KEY/)
 })
 
 test('an edit an older Codex service cannot take still gives the Bot its own copy', async t => {

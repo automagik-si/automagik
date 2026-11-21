@@ -288,17 +288,28 @@ body[data-bt-motion=quiet] :is(.bt-img-dab,.bt-img-spark,.bt-img-pic){display:no
 body[data-bt-motion=quiet] .bt-img-glow{opacity:.6}
 ${IMAGE_VIEWER_CSS}`
 
-// Settings → Bots: what draws the Bots' images here, so the person knows before asking.
-export function ImagesSection({ Section, Row }) {
-  const [access, setAccess] = useState(undefined)
-  useEffect(() => { void call('image-access').then(setAccess, () => setAccess(null)) }, [])
+// What the Images row says for an `image-access` reply: undefined (loading), null, an access
+// view (an older host), or { access, environmentKey } (asked with detail).
+export function imagesRowOf(reply) {
+  const detailed = reply !== null && typeof reply === 'object' && Object.hasOwn(reply, 'access')
+  const access = detailed ? reply.access : reply
+  const ignored = detailed && reply.environmentKey === 'ignored'
   const label = access === undefined ? t('Loading…')
     : access === null ? t('Not connected')
       : access.kind === 'codex' ? t('Codex, on your ChatGPT plan')
         : access.kind === 'chatgpt' ? t('Your ChatGPT account') : t('Your OpenAI key')
   const hint = access === null
-    ? t('Sign in to Codex from a Bot\'s chat, and every Bot can draw images in its chats.')
+    ? (ignored ? t('An OPENAI_API_KEY from the environment is not used for images. Sign in to Codex from a Bot\'s chat, or save that key in Settings → Models.')
+      : t('Sign in to Codex from a Bot\'s chat, and every Bot can draw images in its chats.'))
     : t('Every Bot can draw images in its chats. They are saved in the team workspace\'s images folder.')
+  return { label, hint, value: access?.model ? `${label} · ${access.model}` : label }
+}
+
+// Settings → Bots: what draws the Bots' images here, and why an inherited key is not used.
+export function ImagesSection({ Section, Row }) {
+  const [reply, setReply] = useState(undefined)
+  useEffect(() => { void call('image-access', { detail: true }).then(setReply, () => setReply(null)) }, [])
+  const { hint, value } = imagesRowOf(reply)
   return h(Section, { title: t('Images') },
-    h(Row, { label: t('Drawn with'), hint }, h('span', { className: 'bt-set-hint' }, access?.model ? `${label} · ${access.model}` : label)))
+    h(Row, { label: t('Drawn with'), hint }, h('span', { className: 'bt-set-hint' }, value)))
 }
