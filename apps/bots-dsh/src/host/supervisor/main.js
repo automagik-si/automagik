@@ -102,7 +102,9 @@ export async function runSupervisor({
     if (target !== child || !target?.launchUrl || target.result || probeSignal.aborted) return null
     if (checkedListener) return checkedListener
     if (!listenerCheck) {
-      listenerCheck = verifyListener(target, args, { signal: probeSignal, probe: healthProbe }).then(found => {
+      listenerCheck = verifyListener(target, args, {
+        signal: probeSignal, probe: healthProbe, dshHome: bootEnv.DSH_HOME,
+      }).then(found => {
         if (!found || target !== child || target.result || signal.aborted) return null
         announceListener(found.status)
         checkedListener = found
