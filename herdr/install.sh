@@ -211,9 +211,19 @@ EOF
 }
 
 say() { printf '%s\n' "$*"; }
+# With the pack's AUTOMAGIK_HERDR_DIAG=1 (the install e2e rows set it; a person's run never prints
+# these): one `diag:` line where the hooks notice is held and where it is printed, so a notice that
+# went missing between the two is named instead of silent.
+diag() { [ "${AUTOMAGIK_HERDR_DIAG:-}" != 1 ] || say "diag: $*"; }
+notice_state() {
+  if [ ! -d "$TMP" ]; then echo "$TMP is gone"
+  elif [ ! -e "$TMP/notice" ]; then echo "$TMP/notice is missing"
+  else echo "$(grep -c '' "$TMP/notice") line(s) in $TMP/notice"; fi
+}
 # The briefing hooks' notice update.mjs gave (its `notice: ` lines), held in $TMP/notice for the
 # end of the run: printed once, there or before any failure after it, so it is never lost.
 held_notice() {
+  if [ -n "${TMP:-}" ]; then diag "hooks notice at the end of the run: $(notice_state)"; fi
   { [ -n "${TMP:-}" ] && [ -s "$TMP/notice" ]; } || return 0
   say ""
   cat "$TMP/notice"
@@ -323,12 +333,14 @@ shown_layout() {
   herdr-app status </dev/null >"$st" 2>/dev/null &
   asked=$!
   # Nothing of the watchdog's stays on stdout: callers read this function through $(…), which would
-  # wait for its sleep. Stopped, it stops its sleep too, so no run leaves one behind.
+  # wait for its sleep. Its trap is set only once the sleep is started and its pid kept: dash loses
+  # a trapped TERM that lands while it forks, and the caller then waited out the whole bound. From
+  # then on a TERM stops the sleep too, so no run leaves one behind; a TERM before the trap ends the
+  # watchdog at once, and a sleep it had just started runs out alone, its pid unused.
   (
-    nap=
-    trap '[ -z "$nap" ] || { kill "$nap"; wait "$nap"; }; exit 0' TERM
     sleep "$STATUS_SECONDS" &
     nap=$!
+    trap 'kill "$nap" 2>/dev/null; wait "$nap"; exit 0' TERM
     wait "$nap" || true
     kill "$asked" 2>/dev/null
   ) >/dev/null 2>&1 &
@@ -971,16 +983,16 @@ sha_of() {
   printf '%s\n' "${sha_out%% *}"
 }
 # Runs "$@" with no stdin and its stdout in the file $2, killed after $1 seconds (macOS has no
-# `timeout`). The watchdog stops its own sleep when stopped, so no run leaves one behind.
+# `timeout`). The watchdog stops its own sleep when stopped, so no run leaves one behind; its trap
+# is set only once the sleep's pid is kept, as shown_layout's (a TERM during the fork is lost).
 bounded() {
   bsec=$1; bout=$2; shift 2
   "$@" </dev/null >"$bout" 2>/dev/null &
   basked=$!
   (
-    nap=
-    trap '[ -z "$nap" ] || { kill "$nap"; wait "$nap"; }; exit 0' TERM
     sleep "$bsec" &
     nap=$!
+    trap 'kill "$nap" 2>/dev/null; wait "$nap"; exit 0' TERM
     wait "$nap" || true
     kill -9 "$basked" 2>/dev/null
   ) >/dev/null 2>&1 &
@@ -1777,6 +1789,7 @@ install() {
     else
       sed -e '/^notice: /d' -e 's/^/  /' "$TMP/log"
       sed -n 's/^notice: //p' "$TMP/log" >"$TMP/notice"
+      diag "hooks notice held after the repair: $(notice_state)"
       case $out in *'"changed":false'*) changed=no ;; esac
       if [ "$changed" = yes ]; then say "Repaired the pack $VERSION in $MODS: what differed from the release is listed above."; fi
     fi
@@ -1796,6 +1809,7 @@ install() {
     sed -e '/^notice: /d' -e 's/^/  /' "$TMP/log"
     # The briefing hooks' notice (update.mjs): kept for the end of the run, where it is read.
     sed -n 's/^notice: //p' "$TMP/log" >"$TMP/notice"
+    diag "hooks notice held after the install: $(notice_state)"
     say "Installed the pack $VERSION in $MODS: $(mods_said)."
     if [ -f "$STATE/.prev/.pack" ] && [ "$installed" != none ]; then
       kept_pack="The folders it replaced ($installed) are kept in $STATE/.prev"

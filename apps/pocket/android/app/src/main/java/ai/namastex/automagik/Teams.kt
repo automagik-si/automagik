@@ -293,7 +293,7 @@ object Teams {
      */
     fun bubbles(teams: List<Team>, dsh: Map<String, List<Chat.Terminal>>): List<Bubble> = teams.map { t ->
         val main = t.bots.firstOrNull { it.main } ?: return@map Bubble(t, null, null)
-        val chats = dsh[t.hostId].orEmpty().filter { it.dsh }
+        val chats = dsh[t.hostId].orEmpty().filter { it.dsh && !it.group }
         val chat = if (t.stale) null else mainChat(main.id, chats)
         val bot = if (chat != null && main.ref == null) main.copy(pose = poseOfChat(chat.status)) else main
         val opens = when {

@@ -110,6 +110,7 @@ exec "$@"
 `;
 
 const FAKE_SYSTEMD_RUN = `#!/bin/sh
+if [ "$1" = "--help" ]; then exit 0; fi
 printf '%s\\n' "===" "$@" >> "$(dirname "$0")/systemd-run.args"
 if [ -e "$(dirname "$0")/scope-fails" ]; then
   echo "Failed to start transient scope unit: no user manager" >&2
@@ -175,13 +176,22 @@ export function testHost({
   gid = 65534,
   log = () => {},
   memberUids = {},
+  botUids = {},
 }) {
   const runnerPaths = new Set([join(root, "homes"), join(root, "work"), join(root, "state.json")]);
+  runnerPaths.add(join(root, "homes", ".bots"));
+  runnerPaths.add(join(root, "work", ".bots"));
   const memberUidOf = (path) => {
     for (const [member, memberUid] of Object.entries(memberUids)) {
       for (const area of [join(root, "homes"), join(root, "work")]) {
         const under = join(area, member);
         if (path === under || path.startsWith(`${under}/`)) return memberUid;
+      }
+    }
+    for (const [id, botUid] of Object.entries(botUids)) {
+      for (const area of ["homes", "work"]) {
+        const under = join(root, area, ".bots", id);
+        if (path === under || path.startsWith(`${under}/`)) return botUid;
       }
     }
     return null;

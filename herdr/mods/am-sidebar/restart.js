@@ -3,12 +3,13 @@
 // the replacement carries over from the old pane. The CLI's `restart` runs it with hc; the
 // sidebar's Restart runs the CLI. Pure: no `herdr`, so `node --test` runs it. Apache-2.0.
 
-import { agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
+import { AGENTS, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
   modelArgs, ownsSession, resumeArgs, resumesById, seatSettingsArgs, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
 import { SQUAD_LABEL, SQUAD_MARK } from "./launchArgs.js";
 import { ENV, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, codexCommandCheck,
   codexTemplateRefusal, codexTemplateWarning, templateAgent } from "./workers.js";
 import { CONFIG_VAR, envWords } from "./logins.js";
+import { DIRECT_LOGIN_PROBLEM, POINTER_VAR, botLoginCommandIndex, loginLaunchProblem, loginPolicyActive } from "./loginWords.js";
 import { hermesPairRun } from "./hermesPair.js";
 import { actionError } from "./actionError.js";
 import { isPromptLine, pendingDialog, screenLines } from "./dialog.js";
@@ -57,6 +58,9 @@ export function paneCommand(get) {
   let argv = Array.isArray(get?.argv) && get.argv.length && get.argv.every((w) => typeof w === "string") ? [...get.argv] : null;
   if (!argv) return null;
   if (argv[0] === ENV) {
+    // A reader-managed launch (#1509) only under the login policy; otherwise exactly as before.
+    const reader = loginPolicyActive(globalThis.process?.env ?? {}) ? botLoginCommandIndex(argv) : -1;
+    if (reader >= 0) return { argv: argv.slice(reader) };
     const unset = argv[1] === "-u" && argv[2] === CONFIG_VAR;
     let i = unset ? 3 : 1;
     if (unset || argv[i]?.startsWith("PATH=") || argv[i]?.startsWith(`${CONFIG_VAR}=`)) {
@@ -541,7 +545,7 @@ export function restartRefusal({ name, old, helpers = [], force = false, tree = 
  * resume, argv, agySettings (the file to write first, or null), note, warning }, or
  * { name, replaced, error } when there is nothing to run.
  */
-export function helperPlan({ get, worker = null, session = null, agents, fresh = null, agy = null, bot = null, launchAgent = false, grants = [],
+export function helperPlan({ directLogin = false, get, worker = null, session = null, agents, fresh = null, agy = null, bot = null, launchAgent = false, grants = [],
   where = null }) {
   const name = typeof get?.name === "string" && get.name ? get.name : null;
   const replaced = get?.address ?? null;
@@ -569,6 +573,10 @@ export function helperPlan({ get, worker = null, session = null, agents, fresh =
       ...agyModeArgs(agent, agyMode), ...modelArgs(agent, model), ...effortArgs(agent, effort)], grants) };
   } else {
     const launch = paneCommand(get);
+    if (directLogin && launch) {
+      const problem = launch.shell !== undefined ? DIRECT_LOGIN_PROBLEM : loginLaunchProblem(launch.argv, agent, AGENTS[agent]?.run);
+      if (problem) return { loginProblem: problem };
+    }
     const check = launch?.shell !== undefined ? codexCommandCheck(launch.shell, agents, where) : null;
     const who = name ?? replaced;
     if (check && templateWorker) {
@@ -648,13 +656,17 @@ export function helperCwd({ get, worker = null, realpath = null }) {
  * `hc run` arguments for a helper Restart --tree runs again: in the background, its name (null:
  * hc picks), folder and labels, a child of the bot's new pane, its PATH as a seat's (`path`).
  * `login`: a Claude helper's login words (logins.js chooseLogin), before its argv or its `sh -c`.
+ * `env`: home variables the helper's own launch named (#1490: HOME, DSH_HOME, CODEX_HOME or
+ * KIMI_CODE_HOME), after its PATH, so the replacement records where its session belongs.
  */
-export function helperArgs({ name, cwd, labels = {}, parent, argv, path = null, login = [] }) {
+export function helperArgs({ name, cwd, labels = {}, parent, argv, path = null, login = [], env: more = {} }) {
   const args = ["run", "--bg", "--json"];
   if (name) args.push("--name", name);
   args.push("--cwd", cwd);
   for (const [k, v] of Object.entries(labels)) if (typeof v === "string" && v) args.push("--label", `${k}=${v}`);
-  const env = envWords(path ? [`PATH=${path}`] : [], login);
+  // An explicitly empty Bot login pointer stays: it keeps the helper under the login policy (#1509).
+  const home = Object.entries(more ?? {}).filter(([k, v]) => typeof v === "string" && (v || k === POINTER_VAR)).map(([k, v]) => `${k}=${v}`);
+  const env = envWords([...(path ? [`PATH=${path}`] : []), ...home], login);
   return [...args, "--parent", parent, "--", ...(env.length ? [ENV, ...env] : []), ...argv];
 }
 
@@ -760,4 +772,27 @@ export function restartAnswer(r) {
   // The CLI's refusal is its last stderr line (warnings come before it).
   const raw = String(r?.err ?? "");
   return { refused: actionError(raw, "Restart"), forceable: /pass --force/.test(raw), freshable: /--fresh\b/.test(raw) };
+}
+
+export { durationMs, rateLimitDialog, resetTimeFrom } from "./dialog.js";
+
+/** An ISO instant in the person's own clock as "YYYY-MM-DD HH:MM", or an empty string when it is not one. */
+const localMinute = (iso) => {
+  const at = new Date(iso);
+  if (!Number.isFinite(at.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+};
+
+/** `<bot> is rate-limited until <time>; <outcome>`, or without the time when the dialog names none. */
+export function rateLimitLine(botName, { outcome = "parked", resetsAt = null } = {}) {
+  const at = resetsAt ? localMinute(resetsAt) : "";
+  return `${botName} is rate-limited${at ? ` until ${at}` : ""}; ${outcome}`;
+}
+
+/** How long a parked entry still has to wait (ms): 0 when `wakeAt` is due or absent, never negative. */
+export function wakeWait(wakeAt, now = Date.now()) {
+  if (typeof wakeAt !== "string" || !wakeAt) return 0;
+  const at = Date.parse(wakeAt);
+  return Number.isFinite(at) ? Math.max(0, at - now) : 0;
 }

@@ -41,7 +41,7 @@ export const attachPath = (appHome) => `${String(appHome).replace(/\/+$/, "")}/$
 export const ATTACH_EVENTS = ["attach", "detach", "end"];
 export const ATTACH_BY = ["start", "attach", "detach", "sweep", "import"];
 export const ATTACH_REASONS = ["finished", "moved", "replaced"];
-const BOT_SHAPE = /^(b-[a-z2-7]{10}|session-[A-Za-z0-9._-]+)$/;
+export const BOT_SHAPE = /^(b-[a-z2-7]{10}|session-[A-Za-z0-9._-]+)$/;
 // hc's addresses are `t7`, `t1b`; any one word without a slash (another machine's) is read.
 const TERMINAL_SHAPE = /^[A-Za-z0-9._-]+$/;
 
@@ -148,7 +148,10 @@ export function machinesById(json) {
   const out = new Map();
   for (const m of Array.isArray(list) ? list : []) {
     if (m && typeof m.id === "string" && m.id && typeof m.name === "string" && TERMINAL_SHAPE.test(m.name)) {
-      out.set(m.id, { name: m.name, connected: m.state === "connected" });
+      // since_ms (#1432): when the line dropped, for a holder-loss record; absent for a machine
+      // that is connected or that an older hc didn't date.
+      out.set(m.id, { name: m.name, connected: m.state === "connected",
+        ...(Number.isSafeInteger(m.since_ms) ? { since_ms: m.since_ms } : {}) });
     }
   }
   return out;
@@ -182,11 +185,14 @@ export async function confirmBindings(bindings, core, ask, unanswered = undefine
     if (binding.machine) {
       if (!machines.get(binding.core)?.connected) { unknown.push(binding); return; }
     } else if (binding.core !== core) { ended.push({ binding, reason: "replaced" }); return; }
+    // `get` is the terminal as hc gave it (#1432): its `reason` says whether a holder loss ended
+    // it (`holder_lost`), which the holder-loss record needs; a caller that reads only `reason`
+    // is unchanged.
     const get = await ask(["get", addressOf(binding, machines)]);
     if (unanswered !== undefined && get === unanswered) { unknown.push(binding); return; }
     const verdict = verdictOf(binding, get);
     if (verdict === "live") live.push({ binding, get });
-    else ended.push({ binding, reason: verdict });
+    else ended.push({ binding, reason: verdict, get });
   }));
   return { live, ended, unknown };
 }

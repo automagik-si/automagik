@@ -2,12 +2,21 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
-import { bundleClient } from '../scripts/build-client.mjs'
+import * as bundler from '../scripts/build-client.mjs'
 
 const committed = () => readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 
 test('client.js is the build of src/client', async () => {
-  assert.equal(await bundleClient(), committed(), 'client.js is stale: run `npm run build` and commit it')
+  assert.equal(await bundler.bundleClient(), committed(), 'client.js is stale: run `npm run build` and commit it')
+})
+
+test('gated sharing surfaces load from the gated chunk instead of the desktop bundle', async () => {
+  const main = committed()
+  assert.equal(/function (?:MemberRoot|OwnerPeopleCard)\(/.test(main), false, 'the desktop bundle contains a gated surface')
+  const chunk = readFileSync(new URL('../client.gated.js', import.meta.url), 'utf8')
+  assert.match(chunk, /function MemberRoot\(/)
+  assert.match(chunk, /function OwnerPeopleCard\(/)
+  assert.equal(chunk, await bundler.bundleGated())
 })
 
 // dsh runs client.js as a classic script that hands a factory to the module loader; the
@@ -42,7 +51,12 @@ test('client.js registers a factory that exports apply and inject', () => {
   // this one through dsh.client.external).
   assert.deepEqual(Object.keys(exports), ['apply', 'inject', 'omni'])
   assert.equal(typeof exports.apply, 'function')
-  assert.deepEqual(Object.keys(exports.omni).sort(), ['addStrings', 'badges', 'botChannels', 'botChildren', 'botSettings', 'call', 'chatSuggestions', 'dateLocale', 'face', 'genui', 'headerButtons', 'hostText', 'language', 'nav', 'onShell', 'registerComposerPack', 'setCanvasRenderer', 'sidebarTools', 't', 'toolCards', 'ui'])
+  assert.deepEqual(Object.keys(exports.omni).sort(), [
+    'addStrings', 'badges', 'botChannels', 'botChildren', 'botSettings', 'call', 'chatSuggestions',
+    'dateLocale', 'face', 'genui', 'headerButtons', 'hostText', 'language', 'nav',
+    'officialInstall', 'onShell', 'registerComposerPack', 'setCanvasRenderer', 'sidebarTools',
+    't', 'toolCards', 'ui',
+  ])
   assert.deepEqual(Object.keys(exports.omni.ui).sort(), ['BotMark', 'CHARACTERS', 'MAIN_LOOK', 'OmniMark', 'createSource', 'icons', 'relativeShort'])
   // The shared gen-UI kit (#1326) is a plugin's to draw with: the rows, the person card,
   // the slice reader and the endpoint it reads.

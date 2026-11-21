@@ -41,7 +41,7 @@ internal fun deliverAttachPick(session: AttachSession, uris: List<Uri>) {
 
 @Composable
 internal fun AttachButton(s: Chat.State, att: AttachState, picker: (Int) -> Unit, session: AttachSession) {
-    if (!s.dsh || !ChatActions.canSend(s)) return
+    if (!s.dsh || s.group || !ChatActions.canSend(s)) return
     IconButton(onClick = { session.pick()?.let(picker) }, modifier = Modifier.size(48.dp)) {
         Icon(Icons.Outlined.Add, "Add images", tint = if (att.peer is Attach.Peer.Offered) Accent else Muted)
     }

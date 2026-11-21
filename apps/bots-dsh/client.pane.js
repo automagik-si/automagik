@@ -9600,6 +9600,7 @@ var ZH = {
   "The CLI did not offer a sign-in link in time. Try again.": "CLI 没有及时给出登录链接，请重试。",
   "The CLI could not be started. Run it once in a terminal, then try again.": "无法启动 CLI。请先在终端里运行一次，然后重试。",
   "The CLI returned an old sign-in link. Update it, then try again.": "CLI 返回了旧的登录链接。请更新后重试。",
+  "The CLI returned a short sign-in link Automagik cannot use yet. Update Automagik, then try again.": "CLI 返回了 Automagik 暂时无法使用的短登录链接。请更新 Automagik 后重试。",
   "The CLI did not confirm the sign-in. Try again.": "CLI 没有确认登录，请重试。",
   "The CLI exited before the sign-in finished. Try again.": "CLI 在登录完成前退出了，请重试。",
   "Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.": "这台电脑上的另一个 Automagik 会话正在使用 Bot 账号。请关闭它，然后再次点击登录。",
@@ -10889,6 +10890,7 @@ var ZH = {
   "{name} started on it": "{name} 开始做了",
   "You stopped {name}'s work": "你停下了 {name} 的工作",
   "{name} finished its work": "{name} 做完了",
+  "{name} was interrupted by an Automagik update and picked its work back up": "{name} 的工作被 Automagik 更新打断，已经接着做",
   "{name} was cut off by a restart and picked its work back up": "{name} 的工作被重启打断，已经接着做",
   "{name} was cut off by a restart again and stopped": "{name} 的工作又被重启打断，已停下",
   "Picked up its work after a restart": "重启后接着做之前的工作",
@@ -11106,6 +11108,22 @@ var ZH = {
   "Wi-Fi name": "Wi-Fi 名称",
   "Private key": "私钥",
   "HashiCorp Vault": "HashiCorp Vault",
+  "Windows Credential Manager": "Windows 凭据管理器",
+  "Review this approval on your computer.": "请在电脑上查看此审批。",
+  "Windows Credential Manager needs Windows.": "Windows 凭据管理器需要 Windows。",
+  "Windows Credential Manager is unavailable in Automagik Cloud.": "Automagik Cloud 不支持 Windows 凭据管理器。",
+  "Windows Credential Manager needs 64-bit x64 Windows.": "Windows 凭据管理器需要 64 位 x64 Windows。",
+  "This Windows is installed in a folder the credential reader does not trust.": "此 Windows 安装在凭据读取器不信任的文件夹中。",
+  "The Windows credential reader could not start here (for example Constrained Language Mode, AppLocker or antivirus).": "无法启动 Windows 凭据读取器（可能是受限语言模式、AppLocker 或防病毒软件所致）。",
+  "Find a generic credential by its exact target in the current Windows logon session.": "按确切目标在当前 Windows 登录会话中查找通用凭据。",
+  "Target": "目标",
+  "User name: {name}": "用户名：{name}",
+  "not shown": "未显示",
+  "macOS Keychain": "macOS 钥匙串",
+  "macOS Keychain needs macOS.": "macOS 钥匙串需要 macOS。",
+  "macOS Keychain is unavailable in Automagik Cloud.": "Automagik Cloud 不支持 macOS 钥匙串。",
+  "macOS may ask on this Mac. Choose “Allow”, not “Always Allow”.": "macOS 可能会在此 Mac 上请求授权。请选择“允许”，请勿选择“始终允许”。",
+  "Find": "查找",
   "Vault address": "Vault 地址",
   "Vault token": "Vault 令牌",
   "Vault namespace (optional)": "Vault 命名空间（可选）",
@@ -11395,13 +11413,87 @@ var ZH = {
   "About Omni": "关于 Omni",
   "About Automagik": "关于 Automagik",
   "Version {version}": "版本 {version}",
-  "Star Omni on GitHub": "在 GitHub 上给 Omni 点 Star",
+  "Star Automagik on GitHub": "在 GitHub 上给 Automagik 点 Star",
   "{count} stars": "{count} 个 Star",
-  "If Omni helps you, a star on GitHub helps more people find it.": "如果 Omni 对你有用，欢迎在 GitHub 上点个 Star，让更多人看到它。",
+  "If Automagik helps you, a star on GitHub helps more people find it.": "如果 Automagik 对你有用，欢迎在 GitHub 上点个 Star，让更多人看到它。",
   Updates: "更新",
   "Check for updates": "检查更新",
   "Checking…": "正在检查…",
   "Up to date": "已是最新版本",
+  "Up to date.": "已是最新版本。",
+  "Automagik {version} is available, signed and checked.": "Automagik {version} 已发布，签名和安装包均已验证。",
+  "Cannot update: {reason}": "无法更新：{reason}",
+  "updates come with the desktop app.": "更新随桌面应用提供。",
+  "the update store is unavailable.": "更新存储不可用。",
+  "the saved update state is invalid.": "保存的更新状态无效。",
+  "the installed plugin versions could not be read.": "无法读取已安装插件的版本。",
+  "the update files could not be downloaded.": "无法下载更新文件。",
+  "the signed release could not be verified.": "无法验证已签名的发行版本。",
+  "the published release has invalid update information.": "已发布版本的更新信息无效。",
+  "the published release would downgrade an installed plugin.": "已发布版本会降级某个已安装的插件。",
+  "the published release is older than one already accepted.": "已发布版本早于已接受的版本。",
+  "the published release needs a different DeepSeek Harness version.": "已发布版本需要其他版本的 DeepSeek Harness。",
+  "a downloaded plugin package did not match the signed release.": "下载的插件包与已签名的发行版本不符。",
+  "the local DSH listener could not be determined. Use a fixed port with --public-url.": "无法确定 DSH 的本地监听地址。使用 --public-url 时请指定固定端口。",
+  "the package registry could not be reached.": "无法连接软件包仓库。",
+  "the profile .npmrc contains settings besides the registry.": "此配置的 .npmrc 含有软件包仓库以外的设置。",
+  "this window does not hold the team lock.": "此窗口未持有团队锁。",
+  "the update check is taking too long. Try again.": "更新检查耗时过长。请重试。",
+  "The check was interrupted. Check again.": "更新检查已中断。请重新检查。",
+  "A check is already running. Try again shortly.": "正在进行更新检查。请稍后重试。",
+  "the update check could not be completed.": "无法完成更新检查。",
+  "An update is running. Your message waits until it is done.": "正在更新。你的消息会等到更新完成后再处理。",
+  "this instance is not run by the update supervisor.": "此实例不是由更新监督程序运行的。",
+  "there is no writable folder to keep the previous version in.": "没有可写入的文件夹来保留上一个版本。",
+  "in-app updates are turned off for this instance.": "此实例已关闭应用内更新。",
+  "an update is already running.": "已有更新正在进行。",
+  "the last check is too old. Check for updates again.": "上次检查已过时。请重新检查更新。",
+  "the team is kept in a custom folder the update cannot snapshot.": "团队保存在自定义文件夹中，更新无法为其创建快照。",
+  "the update supervisor did not answer.": "更新监督程序没有响应。",
+  "Automagik is still picking up work from startup. Try again shortly.": "Automagik 仍在恢复启动前的工作。请稍后重试。",
+  "the notes needed to recover stopped work could not be saved.": "无法保存恢复已停止工作所需的记录。",
+  "The update status could not be confirmed. Check again shortly.": "无法确认更新状态。请稍后再检查。",
+  "the new version could not be installed beside the current one.": "无法在当前版本旁安装新版本。",
+  "the installed plugins changed while the update was being prepared.": "准备更新期间，已安装的插件发生了变化。",
+  "the update supervisor restarted before the switch.": "更新监督程序在切换前重新启动了。",
+  "the new version did not answer its health check.": "新版本没有通过健康检查。",
+  "going back to the previous version failed.": "回退到上一个版本失败。",
+  "Updating: checking the release…": "正在更新：检查发行版本…",
+  "Updating: downloading…": "正在更新：下载中…",
+  "Updating: verifying the signature and hashes…": "正在更新：验证签名和哈希…",
+  "Updating: installing beside the current version…": "正在更新：在当前版本旁安装…",
+  "Updating: switching versions…": "正在更新：切换版本…",
+  "Updating: restarting…": "正在更新：重新启动…",
+  "Updating: checking that the new version answers…": "正在更新：检查新版本是否响应…",
+  "Updating: going back to the previous version…": "正在更新：回退到上一个版本…",
+  "Updated to Automagik {version}.": "已更新到 Automagik {version}。",
+  "DSH stopped during the health check.": "DSH 在健康检查期间停止。",
+  "The local web listener did not answer.": "本地 Web 监听端口没有响应。",
+  "Local sign-in did not work.": "本地登录失败。",
+  "The expected plugins or the update hold could not be verified.": "无法验证所需插件或更新暂停状态。",
+  "The saved team could not be read.": "无法读取已保存的团队。",
+  "The web page or its scripts did not load.": "网页或其脚本未能加载。",
+  "Failed check: {check}": "未通过的检查：{check}",
+  "The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. Nothing in your sessions, memory, settings or keys was lost.": "Automagik {to} 未通过检查，更新已撤销。Automagik {from} 已恢复，团队回到了更新前的状态。你的会话、记忆、设置和密钥都没有丢失。",
+  "The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back, with the team as it was before the update. If you changed the team between {start} and {end}, that change is in the copy kept with the update. Nothing in your sessions, memory, settings or keys was lost.": "Automagik {to} 未通过检查，更新已撤销。Automagik {from} 已恢复，团队回到了更新前的状态。如果你在 {start} 到 {end} 之间修改了团队，改动保存在此次更新保留的副本中。你的会话、记忆、设置和密钥都没有丢失。",
+  "The update to Automagik {to} did not pass its checks and was undone: Automagik {from} is back. Nothing in your sessions, memory, settings or keys was lost.": "Automagik {to} 未通过检查，更新已撤销。Automagik {from} 已恢复。你的会话、记忆、设置和密钥都没有丢失。",
+  "This version of Automagik cannot roll an update back from the app; update it once by hand (docs/upgrade.md).": "此版本的 Automagik 无法在应用内回退更新。请先手动更新一次（见 docs/upgrade.md）。",
+  'The update to Automagik {to} failed, and so did going back to {from}. See "In-app updates" in docs/upgrade.md; state.json in the update store names the step that failed.': "更新到 Automagik {to} 失败，回退到 {from} 也失败。请参阅 docs/upgrade.md 中的“In-app updates”。更新存储中的 state.json 记录了失败的步骤。",
+  "The update was undone: Automagik {version} is back. Nothing was lost.": "更新已撤销：Automagik {version} 已恢复。没有丢失任何内容。",
+  "Not updated: {reason} The work that was stopped goes on.": "未更新：{reason}被停止的工作会继续。",
+  'The update needs manual recovery. See "In-app updates" in docs/upgrade.md.': "此次更新需要手动恢复。请参阅 docs/upgrade.md 中的“In-app updates”。",
+  "No newer signed release is available. Reinstalling the same version needs a newer update supervisor.": "没有更新的已签名版本。重新安装同一版本需要更新的更新监督程序。",
+  "Automagik {version} is already installed. Stop and update reinstalls the same signed version: work in progress stops and comes back by itself once it is done. Nothing is lost.": "已安装 Automagik {version}。点击“停止并更新”会重新安装同一个已签名版本：正在进行的工作会暂停，完成后会自动恢复。不会丢失任何内容。",
+  "Automagik {version} is already installed.": "已安装 Automagik {version}。",
+  "Reinstalled Automagik {version}.": "已重新安装 Automagik {version}。",
+  "Done: the same version is installed again.": "完成：已重新安装同一版本。",
+  "reinstalling the current version requires Force update.": "重新安装当前版本需要使用“强制更新”。",
+  "reinstalling the same version needs a newer update supervisor.": "重新安装同一版本需要更新的更新监督程序。",
+  "this page is older than the installed update support. Reload the page.": "此页面早于已安装的更新功能。请重新加载此页面。",
+  "the published release changed after the check. Check again.": "发布版本在检查后发生了变化。请重新检查。",
+  "No newer signed release is available.": "没有更新的已签名版本。",
+  "Work in progress stops when you click Stop and update, and it comes back by itself once the update is done. Nothing is lost.": "点击“停止并更新”时，正在进行的工作会停止，更新完成后会自动恢复。不会丢失任何内容。",
+  "this instance's update supervisor cannot roll back automatically yet, which Force update needs.": "此实例的更新监督程序尚不能自动回滚，而强制更新需要它。",
   "Checked {time}": "检查于 {time}",
   "Could not check for updates.": "没能检查更新。",
   "Update checks are off.": "已关闭更新检查。",
@@ -11580,11 +11672,68 @@ var ZH = {
   "Template: {name}": "模板：{name}",
   "Last run: {run}": "上次运行：{run}",
   "No runs yet.": "尚未运行。",
+  "Run now": "立即运行",
+  "Run {name} now": "立即运行 {name}",
+  "Pause {name}": "暂停 {name}",
+  "Resume {name}": "恢复 {name}",
+  "History": "运行历史",
+  "History of {name}": "{name} 的运行历史",
+  "Run requested for {name}.": "已请求运行 {name}。",
+  "On schedule": "按计划",
+  "Catch-up": "补跑",
+  "Manual": "手动",
+  "Exit code {code}": "退出代码 {code}",
+  "Keeps its own agent arguments.": "保留此任务的 Agent 参数。",
+  "The agent can be changed in the Herdr panel.": "可在 Herdr 面板中更改 Agent。",
+  "This automation cannot be edited here. Use the Herdr panel.": "此处无法编辑此自动化任务。请使用 Herdr 面板。",
+  "Editing needs scheduler 0.12 or later. Update the Herdr pack.": "编辑需要 0.12 或更高版本的调度器。请更新 Herdr 套件。",
+  "This computer's Codex account, as its sign-in file shows it. Switching accounts stays in the Herdr Accounts panel.": "此处显示这台电脑的 Codex 登录文件中记录的账户。请在 Herdr 的账户面板中切换账户。",
+  "Account fingerprint: {account}": "账户指纹：{account}",
+  "Account unknown: the sign-in file names no account.": "账户未知：登录文件未指定账户。",
+  "No sign-in file in this folder.": "此文件夹中没有登录文件。",
+  "Codex can also keep its sign-in elsewhere, such as the system keyring.": "Codex 也可将登录信息保存在其他位置，例如系统密钥环。",
+  "Could not read the sign-in file.": "无法读取登录文件。",
+  "Last refreshed: {time}": "上次刷新：{time}",
+  "Account proxy: Unknown": "账户代理：未知",
+  "The proxy's state needs its management key, which only the Herdr panel reads for now.": "查看代理状态需要管理密钥，目前只有 Herdr 面板会读取该密钥。",
+  "Accounts show in the Automagik desktop app.": "账户信息在 Automagik 桌面应用中显示。",
+  "Could not read this computer's accounts.": "无法读取此电脑的账户信息。",
   "Unnamed automation": "未命名的自动化任务",
   "Confirm removing {name}": "确认移除 {name}",
   "This automation changed. Review the list and try again.": "此自动化任务已更改。请查看列表后重试。",
   "This automation is already gone.": "此自动化任务已不存在。",
   "This host can only read automations.": "此主机只能读取自动化任务。",
+  "Choose which Claude Code login new launches use, for bots that run from this Herdr home. Running bots keep their login until they restart.": "为从这个 Herdr 主目录启动的 Bot 选择新启动时使用的 Claude Code 登录账号。运行中的 Bot 会继续使用当前账号，直到重启。",
+  "Default login": "默认登录账号",
+  "Login {id}": "登录账号 {id}",
+  "Use this login": "使用此登录账号",
+  "Use {login}": "使用：{login}",
+  "Used by new launches": "新启动时使用",
+  "An environment variable overrides this login": "此登录账号被环境变量覆盖",
+  "Its folder cannot be used": "无法使用此账号的文件夹",
+  "Two logins share this email": "两个登录账号使用同一个邮箱",
+  "Did not answer in time": "未能及时响应",
+  "Could not be read": "无法读取",
+  "The selected login cannot be used. Fix it in the Herdr Accounts panel.": "无法使用所选的登录账号。请在 Herdr 的账号面板中修复。",
+  "Claude Code starts through your own launcher here, so this page cannot tell which login it uses.": "此处通过自定义启动器启动 Claude Code，因此此页面无法判断它使用哪个登录账号。",
+  "am or the Herdr pack is not installed on this computer.": "此计算机上未安装 am 或 Herdr 软件包。",
+  "Update am or the Herdr pack to switch logins here.": "请更新 am 或 Herdr 软件包，以便在此切换登录账号。",
+  "The Herdr Accounts panel is on and older than this page. Update the Herdr pack, or switch the panel off, to switch here.": "Herdr 的账号面板已开启，但版本早于此页面。更新 Herdr 软件包或关闭账号面板后，即可在此切换。",
+  "Could not tell which version of the Herdr Accounts panel is installed.": "无法确定已安装的 Herdr 账号面板版本。",
+  "This app and the command line use different Herdr homes, so switching is off here.": "此应用与命令行使用不同的 Herdr 主目录，因此无法在此切换。",
+  "Could not read the Claude Code logins.": "无法读取 Claude Code 的登录账号。",
+  "This installation uses a separate agent home. Manage its logins in the Herdr Accounts panel.": "此安装使用独立的助手主目录。请在 Herdr 的账号面板中管理其登录账号。",
+  "Accounts are not available on Windows yet.": "Windows 上暂时无法使用账号功能。",
+  "This host can only read accounts.": "此主机只能读取账号。",
+  "am could not do this.": "am 无法完成此操作。",
+  "am took too long to reply.": "am 未能及时响应。",
+  "am returned an unexpected reply.": "am 返回了意外的响应。",
+  "The logins changed since this page read them. Read again.": "登录账号在此页面读取后已更改。请重新读取。",
+  "Another change to the logins is in progress. Read again.": "另一项登录账号更改正在进行。请重新读取。",
+  "Could not confirm the switch. Read again before trying again.": "无法确认切换结果。请重新读取后再试。",
+  "This login choice has changed or expired. Read again.": "此登录选项已更改或过期。请重新读取。",
+  "Could not switch the Claude Code login.": "无法切换 Claude Code 登录账号。",
+  "Claude Code login switched.": "已切换 Claude Code 登录账号。",
   "The scheduler could not do this.": "调度器无法完成此操作。",
   "The scheduler took too long to reply.": "调度器响应超时。",
   "The scheduler returned too much data.": "调度器返回的数据过多。",
@@ -11835,6 +11984,7 @@ var ZH = {
   "Work, in this window": "工作，就在这个窗口",
   "Code: open this Bot’s folder in Herdr": "代码：在 Herdr 中打开这个 Bot 的文件夹",
   "Open Herdr": "打开 Herdr",
+  "Open in Herdr": "在 Herdr 中打开",
   "Team or Code": "团队或代码",
   "Code: open Herdr": "代码：打开 Herdr",
   "Opening Herdr…": "正在打开 Herdr…",
@@ -11895,6 +12045,7 @@ var ZH = {
   "Nothing running right now.": "现在没有在运行的任务。",
   "Just finished": "刚刚完成",
   "This step was withdrawn: its task ended": "这一步已撤回：它的任务结束了",
+  "This step was withdrawn: its group Session ended": "这一步已撤回：它的群会话结束了",
   "The task ended with an approval unanswered": "任务结束时还有一个审批没有回答",
   "Automations": "自动化",
   "What runs on a schedule or a trigger": "按计划或触发运行的任务",
@@ -12159,6 +12310,7 @@ var HOST_ZH = {
   "The saved permission level is no longer offered, so nothing was started. Pick a permission level again.": "已保存的权限级别已不再提供，因此没有启动任何操作。请重新选择权限级别。",
   "This Bot has Full access on its coding CLI, which is not available now, so nothing was started on another model. Fix the CLI or sign in to it, or pick another model for the Bot yourself.": "这个 Bot 在它的编程 CLI 上使用完全权限，而该 CLI 现在不可用，因此没有在其他模型上启动任何操作。请修复该 CLI 或登录它，或者自己为这个 Bot 选择其他模型。",
   "The model failed and no other model answered in its place: this Bot has Full access on its coding CLI and stays there. Fix the CLI or sign in to it, or pick another model for the Bot yourself.": "模型出错了，也没有其他模型代替它回答：这个 Bot 在它的编程 CLI 上使用完全权限，所以留在那里。请修复该 CLI 或登录它，或者自己为这个 Bot 选择其他模型。",
+  "The model failed and no other model answered in its place: the fallback model runs on another harness, and a conversation never changes harness. Try again, fix or sign in to the model, or start a new conversation on another model.": "模型出错了，也没有其他模型代替它回答：备用模型在另一个运行环境中，而同一对话不能更换运行环境。请重试、修复或登录该模型，或者用另一个模型开始新对话。",
   "Turn Auto review back on in Plugins to open this chat.": "请在插件中重新开启自动审查，才能打开这个对话。",
   "Avatar images must be PNG, JPEG, WebP, or GIF": "头像图片必须是 PNG、JPEG、WebP 或 GIF",
   "Avatar image is too large": "头像图片太大了",
@@ -12412,6 +12564,69 @@ Object.assign(ZH, {
   "OpenAI Codex through the Agent Client Protocol": "通过 Agent Client Protocol 使用 OpenAI Codex"
 });
 Object.assign(ZH, HOST_ZH);
+Object.assign(ZH, {
+  "Checking the signed release": "正在检查已签名的版本",
+  "Verifying the downloaded packages": "正在验证已下载的软件包",
+  "Restarting and checking health": "正在重启并检查是否正常",
+  "Automagik {version} is ready to install.": "Automagik {version} 已可安装。",
+  "{plugin} is already on {version}.": "{plugin} 已是 {version} 版。",
+  "Work in progress stops when you click Update now. Automagik will pick it up again once a healthy version is ready.": "点击立即更新后，正在进行的工作会暂停。版本确认可用后，Automagik 会接着处理这些工作。",
+  "Waiting for the update supervisor to confirm the request.": "正在等待更新监督程序确认请求。",
+  "Switching versions…": "正在切换版本…",
+  "The update status is unconfirmed.": "更新状态尚未确认。",
+  "In-app update recovery guide": "应用内更新恢复指南",
+  "The team data kept the same format.": "团队数据仍采用原来的格式。",
+  "The team data format could not be determined.": "无法确定团队数据的格式。",
+  "The team data was in use.": "团队数据当时正在使用。",
+  "The team data changed after the restore was planned.": "制定恢复计划后，团队数据发生了变化。",
+  "The saved team snapshot had changed.": "已保存的团队快照发生了变化。",
+  "Stop DSH": "停止 DSH",
+  "Restore the plugin entries": "恢复插件条目",
+  "Put back the kept files": "放回保留的文件",
+  "Restore the version record": "恢复版本记录",
+  "Restore team data": "恢复团队数据",
+  "Verify the profile": "验证配置",
+  "Check health": "检查运行状态",
+  "Live profile": "当前配置",
+  "Kept version": "保留的版本",
+  "Staging folder": "暂存文件夹",
+  "The saved team snapshot was restored. Sessions, memory, settings and keys are kept separately.": "已恢复保存的团队快照。会话、记忆、设置和密钥单独保存。",
+  "If you saved a team change between {start} and {end}, it may have been replaced. A copy of the trial team was kept if there was team data to copy.": "如果你在 {start} 至 {end} 之间保存了团队改动，改动可能已被覆盖。若试用期间有可复制的团队数据，已保留副本。",
+  "The team snapshot was skipped. {reason}": "未恢复团队快照。{reason}",
+  "The supervisor recorded no team snapshot outcome.": "监督程序未记录团队快照的恢复结果。",
+  "Work recovery results are not available yet.": "暂时没有工作恢复结果。",
+  "There was no stopped work to recover.": "没有需要恢复的中断工作。",
+  "Pending": "等待处理",
+  "Resumed": "已恢复",
+  "Could not resume": "无法恢复",
+  "Turn": "对话轮次",
+  "Queued input": "队列中的输入",
+  "Queued delivery": "队列中的投递",
+  "{name} ({kind}) · {state}": "{name}（{kind}）· {state}",
+  "Work recovery": "工作恢复",
+  "The previous plugin set passed its checks.": "上一组插件已通过检查。",
+  "Update target {version}.": "更新目标版本为 {version}。",
+  "Oldest plugin version before the update: {version}.": "更新前最旧的插件版本为 {version}。",
+  "Automagik was not updated": "Automagik 未更新",
+  "Manual recovery required": "需要手动恢复",
+  "See the recovery guide and the supervisor’s state.json before moving any files.": "移动文件前，请查看恢复指南和监督程序的 state.json。",
+  "Previous plugin version recorded for the update: {version}.": "更新记录中的旧插件版本为 {version}。",
+  "Previous version check: {reason}": "旧版本检查结果：{reason}",
+  "Last rollback step: {step}.": "最后的回退步骤：{step}。",
+  "Rollback actions tried: {actions}.": "已尝试的回退操作：{actions}。",
+  "{file}: previous — {previous}; candidate — {candidate}.": "{file}：旧版本在 {previous}，候选版本在 {candidate}。",
+  "The supervisor has not confirmed the update request.": "监督程序尚未确认更新请求。",
+  "Your previous version stays kept.": "上一个版本会保留。",
+  "The previous version can read the team data format.": "上一个版本可以读取这种格式的团队数据。",
+  "If you saved a team change between {start} and {end}, it may have been replaced.": "如果你在 {start} 至 {end} 之间保存了团队改动，改动可能已被覆盖。",
+  "A copy of the trial team data was kept.": "已保留试用期间的团队数据副本。",
+  "No copy of the trial team data was kept.": "未保留试用期间的团队数据副本。",
+  "The supervisor did not record whether a copy of the trial team data was kept.": "监督程序未记录是否保留了试用期间的团队数据副本。",
+  "More work items than can be shown here ({pending} pending, {resumed} resumed, {failed} could not resume, {unconfirmed} unconfirmed).": "部分工作未逐项列出（{pending} 项待恢复，{resumed} 项已恢复，{failed} 项无法恢复，{unconfirmed} 项未确认）。",
+  "The signed release did not offer a newer compatible plugin set.": "签名版本没有提供更新且兼容的插件组合。",
+  "Work recovery is unconfirmed because the saved notes could not be read.": "无法读取保存的记录，工作恢复情况尚未确认。",
+  "The supervisor could not confirm a healthy running instance.": "监督程序未能确认实例正常运行。"
+});
 var fill2 = (text, params) => params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text;
 var service = null;
 var bound = null;
@@ -12447,11 +12662,58 @@ function addStrings(zh2) {
     if (added.length > 0) publish();
   };
 }
+Object.assign(ZH, {
+  "No Bots are shared with you yet.": "还没有任何 Bot 与你共享。",
+  "Nothing to read here yet.": "这里还没有可阅读的消息。",
+  "You can read this chat, but not send messages.": "你可以阅读这段对话，但不能发送消息。",
+  "This Bot is no longer shared with you.": "这个 Bot 已停止与你共享。",
+  "Who can talk to this Bot": "谁可以与这个 Bot 对话",
+  "Only you and admins": "仅你和管理员",
+  "People you choose": "你选择的人",
+  "Anyone in the workspace": "工作区中的任何人",
+  "Sharing starts a new part of this chat; earlier parts stay yours.": "共享会开启新的对话段落；较早的段落仍归你所有。",
+  "People you add can read this Bot's chat; they can't send messages yet.": "你添加的人可以阅读这个 Bot 的对话，暂时不能发送消息。",
+  "Guests and named people": "访客和指定人员",
+  "Member": "成员",
+  "Guest": "访客",
+  "Last seen {time}": "上次在线：{time}",
+  "Not signed in since the last restart": "自上次重启后未登录",
+  "Remove": "移除",
+  "Add person": "添加人员",
+  "No one has signed in since the last restart.": "自上次重启后还没有人登录。",
+  "Who may talk to this Bot changed in another window; check it and save again.": "另一个窗口修改了此 Bot 的共享设置；请检查后重新保存。",
+  "Starting a new part of this chat for sharing…": "正在开启新的对话段落以供共享…",
+  "Shared: people you add read this chat from its new part on.": "已共享：你添加的人可以从新的段落开始阅读对话。",
+  "Sharing did not start because something moved into the new part; stop sharing and share again.": "有内容进入了新段落，未能开始共享；请停止共享后再重新共享。",
+  "{name} is already moving to a new conversation.": "{name} 正在切换到新对话。",
+  "{name} is still handing on earlier messages; try again shortly.": "{name} 仍在转交较早的消息；请稍后重试。",
+  "Answer or dismiss {name}'s open card first.": "请先回答或关闭 {name} 打开的卡片。",
+  "Pause {name}'s goal first.": "请先暂停 {name} 的目标。",
+  "Wait for {name} to finish, then share it.": "请等待 {name} 完成后再共享。",
+  "{name} has messages waiting; let them run or remove them, then share it.": "{name} 有待处理的消息；请等它处理完或移除这些消息后再共享。",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}": "{issuer} {subject} 自上次重启后未登录，或未以 {role} 身份登录",
+  "Who may talk to {name} changed in another window; check it and save again.": "另一个窗口修改了 {name} 的共享设置；请检查后重新保存。",
+  "A Main Bot is shared only with people you name": "主 Bot 只能与指定人员共享",
+  "Sharing needs multiuser mode": "共享需要多用户模式",
+  "Save who may talk to a Bot on its own": "请单独保存 Bot 的共享设置",
+  "Name at most 100 people": "最多可指定 100 人",
+  "Each person needs a valid issuer, subject and role": "每个人都需要有效的签发者、主体和角色",
+  "Name each person only once": "每个人只能指定一次",
+  "Your sign-in changed; reload this page.": "你的登录状态已更改；请重新加载此页面。"
+});
 function t(key, params) {
   return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
   "Detach {name} first.",
+  "{name} is already moving to a new conversation.",
+  "{name} is still handing on earlier messages; try again shortly.",
+  "Answer or dismiss {name}'s open card first.",
+  "Pause {name}'s goal first.",
+  "Wait for {name} to finish, then share it.",
+  "{name} has messages waiting; let them run or remove them, then share it.",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}",
+  "Who may talk to {name} changed in another window; check it and save again.",
   "A folder is in the way: {folder}",
   "{name} does not have the {tool} tool: its Genie role is off.",
   "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
@@ -12802,6 +13064,16 @@ function previewText(text) {
 
 // src/client/text.js
 var MENTION_ORIGIN = "https://bots.local/";
+function dateTimeLabel(value) {
+  if (typeof value !== "string") return "";
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return "";
+  try {
+    return new Date(time).toLocaleString(language(), { dateStyle: "medium", timeStyle: "short" });
+  } catch {
+    return "";
+  }
+}
 function linkMentions(text, bots, selfId) {
   if (!text || !text.includes("@")) return text;
   let out = "";
@@ -13324,14 +13596,23 @@ function stepMenuFocus(menu, event, trigger) {
 }
 
 // src/client/styles.js
+var SHELL_LIGHT_RULE = `body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-accent-ink:#ffffff;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}`;
+var SHELL_DARK_RULE = `body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent);--bt-accent-ink:#ffffff}`;
+var SHELL_LIGHT_PALETTE = SHELL_LIGHT_RULE.slice("body{".length, -1);
+var SHELL_DARK_PALETTE = SHELL_DARK_RULE.slice("body[data-ds-dark-theme]{".length, -1);
+var roundButtonCss = (selector) => `
+${selector}{width:36px;height:36px;border-radius:50%;border:1px solid var(--bt-line);background:var(--bt-main);color:var(--bt-ink);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background-color .12s ease,transform .12s ease}
+${selector}:hover{background:var(--bt-hover)}
+${selector}:active{transform:scale(.94)}
+`;
 var SHELL_CSS = `
-body{--bt-im-telegram:#229ed9;--bt-im-weixin:#07c160;--bt-im-feishu:#3370ff;--bt-im-dingtalk:#1e88e5;--bt-im-wecom:#0082ef;--bt-im-qq:#e03e3e;--bt-im-discord:#5865f2;--bt-im-slack:#4a154b;--bt-im-mark-ink:#ffffff;--bt-qr-paper:#ffffff;--bt-qr-ink:#141414;--bt-ink:#141414;--bt-danger:#e02135;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-accent-ink:#ffffff;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56);--bt-knob:#ffffff;--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 14%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 14%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 24%,transparent);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;--bt-font:var(--dsw-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
+body{${SHELL_LIGHT_PALETTE}}
 /* The --bt-glass-* tokens keep upstream's names, which its cards, menus and docks read, and
    hold solid surfaces here: this look is clay depth on a plain ground, not frosted glass. */
 /* iOS waits out a double-tap zoom on buttons; the plugin's own controls never zoom. */
 :is(.bt-tool,.bt-uaction,.bt-menu button,.bt-menu-item,.bt-icon-btn,.bt-round,.bt-pill,.bt-account,.bt-set-row,.bt-settings-item,.bt-react-strip button,.bt-palette-row,.bt-palette-clear,.bt-tab,.bt-ptab,.bt-ptab-x,.bt-bcard-x,.bt-plus,.bt-q-btn,.bt-q-x,.bt-x,.bt-nc-send,.bt-send,.bt-soft,.bt-mini,.bt-side-send,.bt-shape,.bt-swatch,.bt-color,.bt-newchat,.bt-task-day,.bt-task-remove,.bt-fb-btn){touch-action:manipulation}
 :is(.bt-round,.bt-you,.bt-account,.bt-color,.bt-color span,.bt-swatch,.bt-icon-btn,.bt-avatar-trigger,.bt-avatar-pencil,.bt-plus,.bt-mic,.bt-voice){corner-shape:round}
-body[data-ds-dark-theme]{--bt-im-telegram:#2ea8de;--bt-im-weixin:#17c96a;--bt-im-feishu:#4d84ff;--bt-im-dingtalk:#3d99ed;--bt-im-wecom:#2898f2;--bt-im-qq:#e85555;--bt-im-discord:#6e7bf2;--bt-im-slack:#7c4380;--bt-im-mark-ink:#ffffff;--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62);--bt-glass-bg:var(--bt-main);--bt-glass-border:var(--bt-line-2);--bt-glass-rim:var(--bt-line-2);--bt-glass-shadow:0 12px 32px -6px rgba(0,0,0,.42),0 2px 8px -1px rgba(0,0,0,.28);--bt-accent-soft:color-mix(in srgb,var(--bt-accent) 18%,transparent);--bt-danger-soft:color-mix(in srgb,var(--bt-danger) 18%,transparent);--bt-danger-glow:color-mix(in srgb,var(--bt-danger) 28%,transparent);--bt-accent-ink:#ffffff}
+body[data-ds-dark-theme]{${SHELL_DARK_PALETTE}}
 body{--bt-gold:#f2b84b;--bt-gold-edge:#c98a1a;--bt-gold-band:#e9a636;--bt-gold-shine:#fff3d4;--bt-gem:#8fdcec;--bt-gem-2:#f0bddf;--bt-role-bg:#fbe7bf;--bt-role-ink:#8a5a12;--bt-role-edge:#e7c88a;--bt-role-shine:#fff6e2;--bt-magic-cyan:#3ccbf4;--bt-magic-violet:#9a6cf6;--bt-magic-pink:#ff4fa0;--bt-arena:#120f24;--bt-arena-2:#231a44;--bt-arena-ink:#f4f1ff}
 body[data-ds-dark-theme]{--bt-role-bg:#4a3a1c;--bt-role-ink:#f6d48f;--bt-role-edge:#2a1f0c;--bt-role-shine:rgba(255,240,200,.12)}
 ${Object.entries(INKS).map(([name, [light]]) => `body{--bt-ink-${name}:${light}}`).join("")}
@@ -13449,9 +13730,7 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .omni-logo{flex:none;overflow:visible}
 .omni-mark{object-fit:contain;-webkit-user-drag:none;user-select:none}
 .bt-you .omni-logo{color:var(--bt-ink)}
-.bt-round{width:36px;height:36px;border-radius:50%;border:1px solid var(--bt-line);background:var(--bt-main);color:var(--bt-ink);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background-color .12s ease,transform .12s ease}
-.bt-round:hover{background:var(--bt-hover)}
-.bt-round:active{transform:scale(.94)}
+${roundButtonCss(".bt-round")}
 .bt-list{display:flex;flex-direction:column;gap:3px;overflow-y:auto;min-height:0;flex:1 1 auto}
 /* Chromium ignores ::-webkit-scrollbar when scrollbar-width or scrollbar-color (inherited) is non-auto. */
 .bt-side:not(.bt-rail)>.bt-list{margin-right:-12px;scrollbar-gutter:stable;scrollbar-width:auto;scrollbar-color:auto}
@@ -15394,6 +15673,7 @@ var base64Of = (bytes) => {
   return btoa(binary);
 };
 async function post(path, payload) {
+  if (globalThis.__AUTOMAGIK_VIEW__ !== void 0) return { status: 403, body: { error: "desktop-only" } };
   const answer = await fetch(`api/omni-ui/code/${path}`, {
     method: "POST",
     credentials: "same-origin",
@@ -15777,37 +16057,55 @@ function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${botId}:
 }
 var onMac = () => /^mac/i.test(globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || "");
 var besideKey = (event) => event.ctrlKey || event.metaKey;
-function TreeRow({ label, status, depth = 0, current, note, title, onClick }) {
+function TreeRow({ label, status, depth = 0, current, note, title, onClick, action }) {
   const keyboardPick = (0, import_react3.useRef)(false);
   const hint = onMac() ? t("⌘-click to show beside") : t("Ctrl-click to show beside");
   return (0, import_react3.createElement)(
-    "button",
-    {
-      type: "button",
-      className: "cs-row",
-      "data-depth": depth,
-      "aria-current": current ? "true" : void 0,
-      title: title ? `${title}
+    "div",
+    null,
+    (0, import_react3.createElement)(
+      "button",
+      {
+        type: "button",
+        className: "cs-row",
+        "data-depth": depth,
+        "aria-current": current ? "true" : void 0,
+        title: title ? `${title}
 ${hint}` : hint,
-      onClick: (event) => {
-        const duplicate = keyboardPick.current && event.detail === 0;
-        keyboardPick.current = false;
-        if (!duplicate) onClick({ beside: besideKey(event) });
-      },
-      onKeyDown: (event) => {
-        if (event.key !== "Enter" || !besideKey(event)) {
+        onClick: (event) => {
+          const duplicate = keyboardPick.current && event.detail === 0;
           keyboardPick.current = false;
-          return;
+          if (!duplicate) onClick({ beside: besideKey(event) });
+        },
+        onKeyDown: (event) => {
+          if (event.key !== "Enter" || !besideKey(event)) {
+            keyboardPick.current = false;
+            return;
+          }
+          event.preventDefault();
+          keyboardPick.current = true;
+          if (!event.repeat) onClick({ beside: true });
         }
-        event.preventDefault();
-        keyboardPick.current = true;
-        if (!event.repeat) onClick({ beside: true });
-      }
-    },
-    (0, import_react3.createElement)("span", { className: "cs-row-label" }, label),
-    note ? (0, import_react3.createElement)("span", { className: "cs-row-note" }, note) : null,
-    (0, import_react3.createElement)("span", { className: `cs-mark cs-mark-${status}`, title: statusLabel(status) }, (0, import_react3.createElement)("span", { className: "cs-mark-word" }, statusLabel(status)))
+      },
+      (0, import_react3.createElement)("span", { className: "cs-row-label" }, label),
+      note ? (0, import_react3.createElement)("span", { className: "cs-row-note" }, note) : null,
+      (0, import_react3.createElement)("span", { className: `cs-mark cs-mark-${status}`, title: statusLabel(status) }, (0, import_react3.createElement)("span", { className: "cs-mark-word" }, statusLabel(status)))
+    ),
+    action
   );
+}
+function herdrAction(herdr, botId) {
+  return (0, import_react3.createElement)("button", {
+    type: "button",
+    className: "cs-btn cs-row-note",
+    "aria-label": t("Open in Herdr"),
+    title: t("Code: open this Bot’s folder in Herdr"),
+    disabled: herdr.busy,
+    onClick: (event) => {
+      event.stopPropagation();
+      herdr.openRow(botId);
+    }
+  }, t("Herdr"));
 }
 var TreeFold = ({ label, title, open, onClick }) => (0, import_react3.createElement)(
   "button",
@@ -15821,7 +16119,7 @@ var TreeFold = ({ label, title, open, onClick }) => (0, import_react3.createElem
   (0, import_react3.createElement)("span", { className: "lb-name" }, label),
   (0, import_react3.createElement)("span", { className: open ? "lb-chev lb-chev-open" : "lb-chev" }, (0, import_react3.createElement)(ChevronRightIcon))
 );
-function CodeTree({ current, onSelect, sidebar = false }) {
+function CodeTree({ current, onSelect, sidebar = false, herdr }) {
   const { tree, loading, error, selected, beside = [] } = current;
   const shown = [selected, ...beside].filter(Boolean);
   const isCurrent = (botId, worker = null) => shown.some((pane) => pane.botId === botId && (pane.worker ?? null) === worker);
@@ -15834,6 +16132,7 @@ function CodeTree({ current, onSelect, sidebar = false }) {
   });
   const machine = tree?.machine?.name || t("This computer");
   const projects = tree?.projects ?? [];
+  const canOpenRow = herdr?.visible();
   const machineOpen = !folded.has(null);
   const treeRows = machineOpen ? projects.map((project) => {
     const label = project.global === true ? t("Global Bots") : project.name ?? project.folder;
@@ -15852,7 +16151,8 @@ function CodeTree({ current, onSelect, sidebar = false }) {
           status: bot.status,
           current: isCurrent(bot.id),
           note: sidebar ? bot.agent ?? (bot.main ? t("lead") : null) : bot.main ? t("lead") : null,
-          onClick: (options) => onSelect(paneFor(tree, bot.id) ?? { botId: bot.id, worker: null }, options)
+          onClick: (options) => onSelect(paneFor(tree, bot.id) ?? { botId: bot.id, worker: null }, options),
+          action: canOpenRow ? herdrAction(herdr, bot.id) : null
         }),
         bot.workers.map((worker) => (0, import_react3.createElement)(TreeRow, {
           key: worker.terminal,
@@ -15861,7 +16161,8 @@ function CodeTree({ current, onSelect, sidebar = false }) {
           depth: 1,
           current: isCurrent(bot.id, worker.terminal),
           title: [worker.role, worker.branch?.replace(/^refs\/heads\//, "")].filter(Boolean).join(" · "),
-          onClick: (options) => onSelect({ botId: bot.id, worker: worker.terminal }, options)
+          onClick: (options) => onSelect({ botId: bot.id, worker: worker.terminal }, options),
+          action: canOpenRow ? herdrAction(herdr, bot.id) : null
         }))
       )) : null
     );
@@ -15869,6 +16170,7 @@ function CodeTree({ current, onSelect, sidebar = false }) {
   return (0, import_react3.createElement)(
     "nav",
     { className: sidebar ? "lb-rows" : "cs-tree", "aria-label": t("Code team") },
+    herdr?.notices,
     sidebar && tree?.machine ? (0, import_react3.createElement)(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }) : null,
     error || sidebar && tree?.reason === "no-core" ? (0, import_react3.createElement)("p", { className: "cs-empty" }, t("The Code side could not read this computer’s team.")) : null,
     !error && projects.length === 0 && !loading && (!sidebar || tree?.reason !== "no-core") ? (0, import_react3.createElement)("p", { className: "cs-empty" }, t("No project has a Bot on this computer yet.")) : null,
@@ -15898,9 +16200,10 @@ function CodeTerminal({ tree, selected, beside = [], refused, loading }) {
 function CodeBody({ code }) {
   const current = (0, import_react3.useSyncExternalStore)(code.subscribe, code.snapshot, code.snapshot);
   const { tree, loading, error, selected, beside, refused } = current;
+  const { loadTree, selectPane, herdr } = code;
   (0, import_react3.useEffect)(() => {
-    if (!tree && !loading && !error) void code.loadTree();
-  }, [code, tree, loading, error]);
+    if (!tree && !loading && !error) void loadTree();
+  }, [loadTree, tree, loading, error]);
   const realProjects = (tree?.projects ?? []).filter((project) => project.global !== true);
   const projectCount = realProjects.length === 1 ? t("1 project") : t("{n} projects", { n: realProjects.length });
   return (0, import_react3.createElement)(
@@ -15915,7 +16218,7 @@ function CodeBody({ code }) {
     (0, import_react3.createElement)(
       "div",
       { className: "cs-body" },
-      (0, import_react3.createElement)(CodeTree, { current, onSelect: code.selectPane }),
+      (0, import_react3.createElement)(CodeTree, { current, onSelect: selectPane, herdr }),
       (0, import_react3.createElement)("section", { className: "cs-view" }, (0, import_react3.createElement)(CodeTerminal, { tree, selected, beside, refused, loading }))
     )
   );
@@ -15936,6 +16239,13 @@ var CODE_SIDE_CSS = `
 .cs-project{margin:0 0 10px}
 .cs-project-name{padding:6px 10px 5px;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:var(--bt-weight-title,600) 10.5px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:.16em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cs-bot{display:block}
+.cs-bot>div:has(>.cs-btn){display:flex;align-items:center}
+.cs-bot .cs-btn{flex:none}
+.cs-bot .cs-btn:focus-visible{outline:3px solid var(--st-ring,var(--bt-accent));outline-offset:-3px}
+.lb-rows .cs-row:has(+.cs-btn) .cs-mark-word{display:none}
+.cs-row:has(+.cs-btn) .cs-mark{min-width:0}
+.cs-row:has(+.cs-btn) .cs-mark::before{flex:none}
+.cs-tree>.bt-code-notes[data-code-row],.lb-rows>.bt-code-notes[data-code-row]{position:sticky;top:0;width:auto;max-width:none}
 .cs-row{display:flex;align-items:center;gap:var(--lb-art-gap,10px);width:100%;min-width:0;height:var(--lb-row-h,34px);padding:0 10px 0 8px;margin:0;border:0;border-radius:var(--lb-row-r,8px);background:none;color:var(--bt-ink);font:var(--bt-weight-label,500) 15px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:-.005em;text-align:left;cursor:pointer}
 .cs-row[data-depth='1']{height:var(--lb-channel-h,26px);padding-left:calc(8px + var(--lb-art,28px) + var(--lb-art-gap,10px));color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 13.5px/1.3 var(--bt-font);letter-spacing:0}
 .cs-row:hover{background:var(--bt-hover)}

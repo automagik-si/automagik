@@ -47,7 +47,7 @@ test('follow-omni follows only an Omni release tested on the dsh the desktop run
   assert.ok(text.indexOf('not following it until the Bot team moves') < text.indexOf('git commit -qa'), 'a mismatch stops before the commit')
   // The welcome installs the same Omni release in a plain DSH: both pins move in one commit.
   assert.ok(text.indexOf('apps/welcome-dsh/package.json') < text.indexOf('git commit -qa'))
-  assert.match(text, /pkg\.automagik\.omni = \{ \.\.\.pkg\.automagik\.omni, version, commit \}/)
+  assert.match(text, /pkg\.automagik\.omni = \{ \.\.\.pkg\.automagik\.omni, version, commit, tree \}/)
 })
 
 test('follow-omni carries an Omni only after it booted, on the dev commit that booted', () => {
@@ -88,11 +88,14 @@ test('follow-omni runs on Omni\'s dispatch and the outside daily clock, taking t
   assert.match(text, /for try in 1 2 3 4 5 6; do\n\s+unlisted \|\| break\n[\s\S]*?sleep 20\n\s+lookup\n\s+done\n/)
   assert.match(text, /if unlisted; then\n\s+echo "::warning ::Omni dispatched \$\{wanted\}/)
   assert.deepEqual([...text.matchAll(/\bnewest=(.*)/g)].map(match => match[1]), ['"${WANT_VERSION}"', '$(sort -V releases.txt | tail -1)'])
+  // The newest listed release is followed as it is (#1915): npm's server no longer picks it.
+  assert.doesNotMatch(text, /registry\.npmjs\.org|\$\{candidate\}|read -r candidate/)
+  assert.match(text, /# follow: start\n[\s\S]*?! above "\$\{newest\}" "\$\{current\}"[\s\S]*?# follow: end\n/)
 })
 
 test('the boot gate boots the candidate exactly as carry writes it, both pins', () => {
   const read = name => readFileSync(new URL(`../../../.github/workflows/${name}`, import.meta.url), 'utf8')
-  const bump = text => text.match(/\n {10}node -e '\n([\s\S]*?)\n {10}' "\$\{(?:OMNI_)?VERSION\}" "\$\{(?:OMNI_)?COMMIT\}"/)?.[1]
+  const bump = text => text.match(/\n {10}node -e '\n([\s\S]*?)\n {10}' "\$\{(?:OMNI_)?VERSION\}" "\$\{(?:OMNI_)?COMMIT\}" "\$\{(?:TREE|tree)\}"/)?.[1]
   const carried = bump(read('follow-omni.yml'))
   assert.ok(carried?.includes('apps/welcome-dsh/package.json'), 'carry moves the welcome too')
   assert.equal(bump(read('boot-check.yml')), carried)

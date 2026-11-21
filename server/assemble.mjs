@@ -4,11 +4,11 @@
 //   out/runtime/   the pinned DeepSeek Harness and the pnpm it installs plugins with
 //                  (apps/desktop/runtime/package.json + lock, the desktop's own pins)
 //   out/profile/   the automagik-web profile: dsh's base and web app, the Bot team, the
-//                  welcome and ACP, installed by dsh's own plugin command from the release
+//                  welcome, ACP and the multiuser adapter, installed by dsh's own plugin command from the release
 //                  tarballs, with pnpm's store repointed at /data and build-only files gone
 //   out/versions.json
 //
-// The release is pinned by --version (default 3.90.1); every tarball is checked against the
+// The release is pinned by --version (default 3.160.6); every tarball is checked against the
 // release's plugins.json and PLUGINS.SHA256SUMS before it is installed. Run it in the image
 // builder, where npm and the network exist; the runtime stage carries no package manager but
 // the profile's own pnpm.
@@ -23,6 +23,7 @@ import { profileDirOf, PROFILE, pinStore } from './lib.mjs'
 import { pruneNodeModules } from '../apps/desktop/scripts/prune-runtime.mjs'
 import { patchRuntime } from '../apps/desktop/scripts/runtime-patches.mjs'
 import { writeShippedProfilePatch } from '../apps/desktop/src/profile-patch.mjs'
+import { ADAPTER, ADAPTER_SINCE, compareRelease } from './profile-state.mjs'
 import { buildOfflineStore } from './offline-store.mjs'
 import { HERDR_CORE_SHA256, HERDR_CORE_TARBALL, HERDR_CORE_VERSION } from './toolchain.mjs'
 
@@ -178,11 +179,14 @@ export function applyRuntimePatches(runtimeDir, patchesDir = PATCHES_SOURCE) {
   return results
 }
 
-export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', revision = 'unknown', repository = 'https://github.com/automagik-si/automagik', kind = 'release', event = '', manifest = '' }) {
+export async function assemble({ out, version = ADAPTER_SINCE, dsh = '0.2.2-rc.2', revision = 'unknown', repository = 'https://github.com/automagik-si/automagik', kind = 'release', event = '', manifest = '' }) {
   const input = { kind, event, revision, manifest, repository, version }
   const source = validateInput(input)
-  if (kind === 'checkout') verifyCheckoutDirectory(join(HERE, 'checkout-input'), input)
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`not a release version: ${version}`)
+  if (compareRelease(version, ADAPTER_SINCE) < 0) {
+    throw new Error(`the image needs ${ADAPTER} ${ADAPTER_SINCE} or later (RFC 0038 delivery 1); release ${version} is older`)
+  }
+  if (kind === 'checkout') verifyCheckoutDirectory(join(HERE, 'checkout-input'), input)
   const runtimeDir = join(out, 'runtime')
   const dshHome = join(out, 'dsh-home')
   const installDir = profileDirOf(dshHome)
@@ -279,7 +283,7 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = argsOf(process.argv.slice(2))
-    if (!args.out) throw new Error('usage: node assemble.mjs --out <dir> [--version 3.90.1] [--dsh 0.2.2-rc.2] [--repository <url>]')
+    if (!args.out) throw new Error('usage: node assemble.mjs --out <dir> [--version 3.160.6] [--dsh 0.2.2-rc.2] [--repository <url>]')
     const result = await assemble({ out: resolve(args.out), version: args.version, dsh: args.dsh, revision: args.revision, repository: args.repository, kind: args['input-kind'], event: args.event, manifest: args['input-manifest'] })
     console.log(`[assemble] ready: dsh ${result.dsh}, automagik ${result.version}`)
   } catch (error) {

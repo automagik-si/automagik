@@ -26,8 +26,8 @@ const updates = Object.freeze({
 })
 
 // Code mode (RFC 0013): Herdr's state, and bringing its window forward. The page sends a Bot
-// id and, to an offer of a newer Herdr (`reason: 'update'`), `update: true` or `false`; nothing
-// else, and only during a real click; main finds everything else, the update included, itself.
+// id and, to an offer of a newer Herdr (`reason: 'update'`), `update: true` or `false`.
+// During a real click, Code rows use their own method to choose the registry lookup.
 // User activation is the page's, shared by every script in it (the RFC's threat model).
 const herdr = Object.freeze({
   status: () => ipcRenderer.invoke('automagik-herdr-status'),
@@ -37,6 +37,14 @@ const herdr = Object.freeze({
     }
     const botId = options?.botId
     const request = { botId: typeof botId === 'string' ? botId : null }
+    if (typeof options?.update === 'boolean') request.update = options.update
+    return ipcRenderer.invoke('automagik-herdr-open', request)
+  },
+  openCodeRow(botId, options) {
+    if (globalThis.navigator?.userActivation?.isActive !== true) {
+      return Promise.reject(new Error('Herdr opens only on a click'))
+    }
+    const request = { botId: typeof botId === 'string' ? botId : null, source: 'code' }
     if (typeof options?.update === 'boolean') request.update = options.update
     return ipcRenderer.invoke('automagik-herdr-open', request)
   },

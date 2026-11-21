@@ -167,6 +167,22 @@ test('main takes only a Bot id and a yes or no from the page: a folder or machin
   assert.deepEqual(openRequest({ folder: '/w/site' }), { botId: null, update: undefined })
 })
 
+const ROW = 'b-abcdefghij'
+const GLOBAL = 'b-abcdefghik'
+const ROOT = '/home/ana/.automagik'
+
+test('main accepts registry ids only for Code requests and drops unrecognized sources and paths', () => {
+  const registrySession = `session-${'a'.repeat(36)}`
+  for (const botId of [ROW, registrySession]) {
+    assert.deepEqual(openRequest({ botId, source: 'code', update: false, folder: '/etc', machine: 'vps' }),
+      { botId, source: 'code', update: false })
+    assert.deepEqual(openRequest({ botId, source: 'Code' }), { botId: null, update: undefined })
+  }
+  assert.deepEqual(openRequest({ botId: BOT, source: true }), { botId: BOT, update: undefined })
+  assert.deepEqual(openRequest({ botId: BOT.toUpperCase(), source: 'code' }), { botId: null, source: 'code', update: undefined })
+  assert.deepEqual(openRequest({ botId: BOT.toUpperCase() }), { botId: BOT.toUpperCase(), update: undefined })
+})
+
 // A fake herdr-app for pickSpace: records each argv and answers from `answers` by command.
 function fakeHerdr(answers) {
   const calls = []
@@ -193,6 +209,35 @@ test('pickSpace: the folder comes from the state, never from the page', async ()
   assert.deepEqual(herdr.calls, [['ls'], ['do', 'space.select', '--id', 'sp1']])
   assert.deepEqual(marks, ['space'])
   assert.deepEqual(lines, ['space select sp1'])
+})
+
+test('pickSpace: a registry-only Code Bot selects or creates its project space', async () => {
+  const read = reader({
+    [`${ROOT}/bots/bots.json`]: JSON.stringify({ version: 2, bots: [], projects: [{ folder: '/w/site' }], shown: [{ project: '/w/site', bots: [] }] }),
+    '/w/site/.automagik/bots/bots.json': JSON.stringify({ version: 2, bots: [{ id: ROW, name: 'Site', folder: '/etc' }] }),
+  })
+  const opts = { ...openRequest({ botId: ROW, source: 'code', folder: '/etc' }), found: FOUND, platform: 'linux', env: {}, appHome: APP, registryRoot: ROOT, read, isFolder: folders(['/w/site']), resolve: dir => dir }
+  const selected = fakeHerdr({ ls: { stdout: LS }, 'space.select': { stdout: '{}' } })
+  assert.deepEqual(await pickSpace({ ...opts, execFile: selected.execFile }), { action: 'select', id: 'sp1' })
+  assert.deepEqual(selected.calls, [['ls'], ['do', 'space.select', '--id', 'sp1']])
+  const created = fakeHerdr({ ls: { stdout: '{"spaces":[]}' }, 'space.new': { stdout: '{"space":"new"}' } })
+  assert.deepEqual(await pickSpace({ ...opts, execFile: created.execFile }), { action: 'new', id: 'new' })
+  assert.deepEqual(created.calls, [['ls'], made({ name: 'site', folder: '/w/site' })])
+})
+
+test('pickSpace: an unknown Code Bot never falls back to state, and a global Code Bot has no folder', async () => {
+  const read = reader({
+    ...stateOf({ [BOT]: { workDir: '/w/site' } }),
+    [`${APP}/bots/bots.json`]: JSON.stringify({ version: 2, bots: [{ id: BOT, name: 'Desktop-only decoy' }] }),
+    [`${ROOT}/bots/bots.json`]: JSON.stringify({ version: 2, bots: [{ id: GLOBAL, name: 'Global' }] }),
+  })
+  const herdr = fakeHerdr({})
+  for (const [botId, why] of [[BOT, 'unknown Bot'], [GLOBAL, 'no folder']]) {
+    const lines = []
+    assert.deepEqual(await pickSpace({ botId, source: 'code', found: FOUND, platform: 'linux', env: {}, appHome: APP, registryRoot: ROOT, execFile: herdr.execFile, read, log: line => lines.push(line) }), { action: 'none' })
+    assert.deepEqual(lines, [`no-space ${why}`])
+  }
+  assert.deepEqual(herdr.calls, [])
 })
 
 test('pickSpace: no match makes the space and reports its id; two matches log the pick', async () => {

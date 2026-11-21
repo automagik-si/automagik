@@ -10,12 +10,12 @@ name: Server image
 # than the published :latest.
 #
 # workflow_dispatch takes one optional input, `content`: a release tag that carries
-# plugins.json (e.g. v3.93.0). Empty means the newest stable release whose assets include
-# plugins.json, searched among the last 30 releases. A herdr, Pocket or am patch carries no
+# plugins.json (e.g. v3.160.6). Content must be 3.160.6 or later. Empty means the newest stable
+# release whose assets include plugins.json, searched among the last 30 releases. A herdr, Pocket or am patch carries no
 # plugin tarballs, so a dispatch whose content has none fails, naming the tag. A dispatch runs
 # on dev or on a v<version> tag (which must be package.json's version). After merge:
 #
-#   gh workflow run server-image.yml --ref dev -f content=v3.93.0
+#   gh workflow run server-image.yml --ref dev -f content=v3.160.6
 #
 # A release event uses the release's own version as the content when it carries plugins.json,
 # with the same composite tag and labels; a release without it builds and pushes nothing. A
@@ -106,8 +106,8 @@ on:
     inputs:
       content:
         description: >-
-          A release tag whose assets include plugins.json (e.g. v3.93.0). Empty uses the
-          newest stable release that has plugins.json.
+          A release tag at 3.160.6 or later whose assets include plugins.json (e.g. v3.160.6).
+          Empty uses the newest stable release that has plugins.json.
         required: false
         type: string
         default: ''
@@ -123,7 +123,7 @@ jobs:
   image:
     name: Server image (build, smoke, scan)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     outputs:
       version: ${{ steps.gate.outputs.version }}
       content: ${{ steps.gate.outputs.content }}
@@ -217,7 +217,7 @@ jobs:
                 fi
               fi
               if ! has_plugins "v${content}"; then
-                echo "::error::content v${content} carries no plugins.json (a herdr/Pocket/am patch); pass a release tag whose assets include plugins.json, e.g. v3.93.0"
+                echo "::error::content v${content} carries no plugins.json (a herdr/Pocket/am patch). Pass a release tag at 3.160.6 or later whose assets include plugins.json, e.g. v3.160.6"
                 exit 1
               fi
               publish=true
@@ -312,6 +312,9 @@ jobs:
           sh -n server/bin/dsh
           sh -n server/bin/pnpm
 
+      - name: Install pinned DSH composition harness
+        run: bun install --cwd apps/bots-dsh/dev/harness --no-save --no-summary
+
       - name: Unit tests
         run: node --test 'server/test/*.test.mjs'
 
@@ -375,6 +378,7 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         env:
           TAG: ${{ steps.gate.outputs.tag }}
+          SMOKE_INPUT_KIND: ${{ steps.gate.outputs.source }}
         run: node server/smoke.mjs "automagik-server:${TAG}"
 
       - name: Plugins follow a newer image on an older release volume (offline)
@@ -408,6 +412,12 @@ jobs:
           path: secrecy/
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Install and restart the pinned Omni sandbox
+        if: steps.gate.outputs.build == 'true'
+        env:
+          TAG: ${{ steps.gate.outputs.tag }}
+        run: node server/omni-smoke.mjs "automagik-server:${TAG}"
 
       - name: Save the scanned image for the publish job
         if: steps.gate.outputs.publish == 'true' && steps.gate.outputs.source == 'release' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')

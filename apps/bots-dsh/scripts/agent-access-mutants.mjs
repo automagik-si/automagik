@@ -101,6 +101,14 @@ const mutants = [
     test: 'a new private Bot gets no shell on its own chat',
   },
   {
+    name: 'skip the runner guard before tool approval',
+    source: '../src/host/bot-runner.js',
+    from: "ctx.on('tools/pre-execute', admitTool, ahead)",
+    to: "ctx.on('tools/pre-execute', (_exec, next) => next(), ahead)",
+    file: 'test/bot-runner.test.js',
+    test: 'the no-runner tool guard precedes approval and dispatch',
+  },
+  {
     name: 'require a boundary before full credential words',
     source: '../src/host/agent-redaction.js',
     from: 'longSecretEnv.test(name)',

@@ -23,6 +23,10 @@ import { appendLine, readJsonLines } from "./log-lines.mjs";
 
 const args = process.argv.slice(2);
 appendLine(process.env.HC_FAKE_LOG, JSON.stringify(args));
+const { HC_SOCKET, HC_SESSION, HC_TERMINAL_ID, HC_TERMINAL_SOCKET, AUTOMAGIK_HERDR_CORE_SOCKET, HC_FAKE_ORIGIN } = process.env;
+if (process.env.HC_FAKE_ENV_LOG) appendLine(process.env.HC_FAKE_ENV_LOG, JSON.stringify({
+  argv: args, HC_SOCKET, HC_SESSION, HC_TERMINAL_ID, HC_TERMINAL_SOCKET, AUTOMAGIK_HERDR_CORE_SOCKET, origin: HC_FAKE_ORIGIN,
+}));
 const state = JSON.parse(readFileSync(process.env.HC_FAKE_STATE, "utf8"));
 // The CLI runs several hc calls at once: a save writes a file of its own beside the state and
 // renames it over it (atomic in one folder), so another call never reads one half written.
@@ -75,6 +79,13 @@ const callNo = logged.length;
 }
 // state.fail: commands that fail as a server that is down would (exit 1).
 if ((state.fail ?? []).includes(words[0])) fail(`hc: can't reach the server (${words[0]})`);
+// state.lockProbe: record whether the ledger lock is held when this pane is checked or ended.
+const lockProbe = state.lockProbe;
+if (lockProbe && words[1] === lockProbe.terminal && ["get", "kill"].includes(words[0])) {
+  (lockProbe.seen ??= []).push({ call: words[0], held: existsSync(lockProbe.path) });
+  save();
+}
+
 // A linked machine's terminal ("vm/t8") on a machine that isn't connected: unavailable, as hc says.
 if (["get", "label", "kill", "read", "send", "keys", "interrupt"].includes(words[0]) && words[1]?.includes("/")) {
   const m = (state.machines ?? []).find((x) => x.name === words[1].split("/")[0]);
@@ -146,7 +157,9 @@ if (process.env.HC_FAKE_PROXY_RUN === "1" && words[0] === "run") {
     });
   });
   if (reply.error) fail(reply.error.message);
-  const terminal = { ...reply.result.terminal, cwd: params.cwd, labels: params.labels,
+  // herdr-core's RunResult flattens the terminal record into the result (both tagged versions).
+  const { argv: _argv, ...record } = reply.result;
+  const terminal = { ...record, cwd: params.cwd, labels: params.labels,
     parent: params.parent, foreground: { argv: params.argv, pid: 5000 }, pid: 5000 };
   state.terminals.push(terminal); save(); out(terminal); process.exit(0);
 }
@@ -227,11 +240,16 @@ switch (words[0]) {
   case "read": {
     const t = find(words[1]);
     if (!t) fail(`no terminal ${words[1]}`);
-    out({ text: t.screen ?? "" });
+    // Live seats normally have a rendered prompt or progress line. An explicitly blank
+    // screen represents a seat that has painted nothing.
+    const normal = t.state !== "live" ? "" : t.status?.state === "working" ? "Working… (1s)"
+      : ["idle", "done"].includes(t.status?.state) ? "❯" : "";
+    out({ text: t.screen ?? normal });
     // state.onRead: the screen (and status) changes just after this answer, between two checks.
     // The look is counted across processes: `nth` can name a read later than the first (the
     // counter is saved on every look, not only on the one that fires).
-    if (state.onRead && state.onRead.terminal === t.address) {
+    if (state.onRead && state.onRead.terminal === t.address
+      && (!state.onRead.afterSend || state.sent?.some(message => message.to === t.address))) {
       state.onRead.seen = (state.onRead.seen ?? 0) + 1;
       if (state.onRead.seen === state.onRead.nth) {
         if (state.onRead.status) t.status = { ...(t.status ?? {}), state: state.onRead.status };
@@ -298,7 +316,8 @@ switch (words[0]) {
     // state.failRun: names whose hc run fails (a name taken, the server refusing).
     if ((state.failRun ?? []).includes(name)) fail(`hc: can't start ${name}`);
     const n = state.next ?? 100;
-    const address = on ? `${on}/t${n}` : `t${n}`;
+    // Both the run reply and a later get by name return this address.
+    const address = state.runAddress ?? (on ? `${on}/t${n}` : `t${n}`);
     state.next = n + 1;
     // state.runAs: "shell" (the agent never comes in front), "exit" (it ends at once) or
     // "flaky" (its agent is in front for one hc get, then it exits); state.runAsFor[name]: the
@@ -315,7 +334,7 @@ switch (words[0]) {
     if (state.failGetOnRun) { state.failGet = [...(state.failGet ?? []), ...state.failGetOnRun]; delete state.failGetOnRun; }
     // state.noCreated: names whose hc get gives no created_ms.
     state.terminals.push({ address, name, cwd, labels, parent, die_with_parent: Boolean(parent) && !outlive, state: runAs === "exit" ? "finished" : "live",
-      ...((state.noCreated ?? []).includes(name) ? {} : { created_ms: Date.now() }),
+      ...((state.noCreated ?? []).includes(name) ? {} : { created_ms: state.runCreatedMs ?? Date.now() }),
       argv: launch, template: template?.name ?? null,
       pid: 9000 + n, foreground: { argv: shell ? ["zsh"] : argv, cwd, pid: 5000 + n }, // state.noStatus: programs that report no status to hc (hermes): status null.
       status: (state.noStatus ?? []).includes(program) ? null : { app: program === "claude" ? "claude-code" : program, state: "working" },
@@ -363,6 +382,11 @@ switch (words[0]) {
     t.finished_ms = Date.now();
     // state.surviveParent: children that outlive their parent's end anyway (a kill that didn't take).
     for (const c of state.terminals) if (c.parent === t.address && c.state === "live" && c.die_with_parent && !(state.surviveParent ?? []).includes(c.address)) c.state = "finished";
+    // A file changes exactly when the selected pane is ended.
+    if (state.onKillWrite?.terminal === t.address) {
+      writeFileSync(state.onKillWrite.path, state.onKillWrite.text);
+      delete state.onKillWrite;
+    }
     // state.afterKill: { terminal, patch }: another pane ends with this kill (a seat that dies
     // between the cancel of its queued restart and the next look).
     if (state.afterKill) {
@@ -379,6 +403,7 @@ switch (words[0]) {
   }
   case "server": {
     // `hc server status`: the core's permanent id (state.core, else a fixed one).
+    if (words[1] === "stop") { out({ stopped: true }); break; }
     if (words[1] !== "status") fail(`fake hc: no server ${words[1]}`, 2);
     out({ core: state.core ?? { id: "fakecore0000", name: "fake" }, live: state.terminals.filter((t) => t.state === "live").length });
     break;
@@ -389,8 +414,40 @@ switch (words[0]) {
     break;
   }
   case "machine": {
+    // #1432: a local holder is added as a machine (`--via`), and removed when it holds nothing.
+    if (words[1] === "add") {
+      let name = null, target = null, temporary = false;
+      for (let i = 2; i < words.length; i += 1) {
+        if (words[i] === "--name") name = words[++i];
+        else if (words[i] === "--via" || words[i] === "--target") target = words[++i];
+        else if (words[i] === "--session") target = `${target ?? ""} --session ${words[++i]}`;
+        else if (words[i] === "--temp") temporary = true;
+      }
+      if (!name) fail("machine add needs --name", 2);
+      if ((state.machines ?? []).some((m) => m.name === name)) fail(JSON.stringify({ error: { kind: "name_taken", message: `${name} is taken` } }), 2);
+      const m = { name, id: `core-${name}`, state: "connected", host: name, target: target ?? name, temporary,
+        uname: "Linux x86_64", home: process.env.HOME, path: state.machinePath ?? null };
+      state.machines = [...(state.machines ?? []), m];
+      save();
+      out(m);
+      break;
+    }
+    if (words[1] === "rm" || words[1] === "remove") {
+      const name = words[2];
+      if (!(state.machines ?? []).some((m) => m.name === name)) fail(JSON.stringify({ error: { kind: "machine_unknown", message: `no machine "${name}"` } }), 4);
+      state.machines = (state.machines ?? []).filter((m) => m.name !== name);
+      save();
+      out({ removed: name });
+      break;
+    }
     if (words[1] !== "ls") fail(`fake hc: no machine ${words[1]}`, 2);
-    out({ machines: (state.machines ?? []).map(({ name, id, state: s, temporary = false }) => ({ name, id: id ?? `core-${name}`, host: name, state: s, temporary, target: name })) });
+    if (state.machineListUnreadable) { process.stdout.write("not JSON\n"); break; }
+    const nth = logged.filter((a) => a[0] === "machine" && a[1] === "ls").length;
+    if (state.relinkOnList?.nth === nth) {
+      const m = state.machines.find((m) => m.name === state.relinkOnList.name);
+      if (m) { m.id = state.relinkOnList.id; save(); }
+    }
+    out({ machines: (state.machines ?? []).map(({ name, id, state: s, temporary = false, target = null, since_ms = null }) => ({ name, id: id ?? `core-${name}`, host: name, state: s, temporary, target: target ?? name, since_ms })) });
     break;
   }
   case "exec": {
@@ -411,6 +468,15 @@ switch (words[0]) {
     // never answers): its sh -c script, else its command, never its data words (a scratch path can hold "-lc");
     // state.execTimedOutAfterMs: how long that answer takes to come back over the link, really waited.
     const program = argv[0] === "sh" && argv[1] === "-c" ? argv[2] : argv[0];
+    const installReply = state.installExecReply;
+    if (installReply && program?.includes(installReply.contains)) {
+      const nth = logged.filter((a) => a[0] === "exec" && a.some((word) => word.includes(installReply.contains))).length;
+      if (nth === (installReply.nth ?? 1)) {
+        if (installReply.lost) fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } }));
+        out({ code: installReply.code, stdout: b64(JSON.stringify(installReply.reply)), stderr: "", timed_out: false });
+        break;
+      }
+    }
     if ((state.execTimedOut ?? []).some((w) => (program ?? "").includes(w))) { if (state.execTimedOutAfterMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.execTimedOutAfterMs); out({ code: null, stdout: "", stderr: "", timed_out: true }); break; }
     // Its login shell is fake-login-shell, never the host's, and never reads a real profile:
     // m.login { path, noise, exit }, the PATH it has (default: the one hc runs programs with).
@@ -425,6 +491,11 @@ switch (words[0]) {
         FAKE_LOGIN_NOISE: m.login?.noise ?? "", FAKE_LOGIN_EXIT: m.login?.exit ?? "", ...(m.env ?? {}) } });
     // state.loseExecAnswer: a program (by name) ran there, then the link dropped: unavailable, as hc says.
     if (state.loseExecAnswer && state.loseExecAnswer === argv[0]) { delete state.loseExecAnswer; save(); fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } })); }
+    if (state.loseExecAnswerContaining && program?.includes(state.loseExecAnswerContaining)) {
+      delete state.loseExecAnswerContaining;
+      save();
+      fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } }));
+    }
     out({ code: r.status ?? -1, stdout: b64(fromDisk(r.stdout)), stderr: b64(fromDisk(r.stderr)), timed_out: false });
     break;
   }

@@ -19,7 +19,7 @@ export function install(rt) {
     return resolved.agent
   }
 
-  const headerFor = (role, fromName, roomName, audience, note = 'new message', deferred = false, { resumed = false, retried = false, resent = false, abandoned = false, asker, noReply = false, plural = false, hasSender = false } = {}) => {
+  const headerFor = (role, fromName, roomName, audience, note = 'new message', deferred = false, { resumed = false, resumedByUpdate = false, retried = false, resent = false, abandoned = false, asker, noReply = false, plural = false, hasSender = false } = {}) => {
     // What came back for work another Bot gave this one says where its answer goes.
     const goesOn = asker === undefined ? '' : ` · for the work ${asker} asked you for; your answer goes to ${asker} once everything you handed on is back`
     // A wait the user gave up reads as its own thing: the other Bot never answered.
@@ -34,6 +34,8 @@ export function install(rt) {
       ? `[Message from ${fromName} · no reply needed · DeepSeek Harness restarted while you were working on it]`
       : `[Message from ${fromName} · no reply needed]`
     if (retried && role !== 'room') return '[Your last reply wrote a tool call as text, so nothing ran]'
+    if (resumedByUpdate && role === 'resume') return '[An Automagik update stopped your work]'
+    if (resumedByUpdate && role !== 'room') return `[Message from ${fromName} · picking up after an Automagik update]`
     if (resumed && role === 'resume') return '[DeepSeek Harness restarted while you were working]'
     if (resumed && role !== 'room') return plural
       ? `[Messages from ${fromName} · DeepSeek Harness restarted while you were working on them]`
@@ -234,7 +236,7 @@ export function install(rt) {
   // result that came back goes on with. `merged`: a request that takes in an earlier
   // one its recipient had not read, under that one's exchange. `uploads`: the person's
   // uploads of a group turn, for a member over ACP.
-  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }, { enqueue, shouldSend, made } = {}) {
+  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, resumedByUpdate = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }, { enqueue, shouldSend, made } = {}) {
     const from = rt.botOf(fromId)
     const to = rt.botOf(toId)
     if (to === undefined) throw new Error(`Unknown Bot ${toId}`)
@@ -257,6 +259,7 @@ export function install(rt) {
       ...(noReply ? { noReply: true } : {}),
       ...(joined && joined.length > 0 ? { joined } : {}),
       ...(resumed ? { resumed: true } : {}),
+      ...(resumedByUpdate ? { resumedByUpdate: true } : {}),
       ...(retried ? { retried: true } : {}),
       ...(askedBy ? { askedBy } : {}),
       ...(fromRoomId ? { senderRoomId: fromRoomId } : {}),
@@ -275,7 +278,7 @@ export function install(rt) {
     // queues for the next turn (see turns.js for how each is routed).
     const message = createUserMessage({
       content: [
-        { type: 'text', text: `${headerText(role, fromName, audience, note, deferred, { roomId, work, resumed, retried, resent, abandoned, hasSender: fromId !== undefined || senderName !== undefined, noReply, plural: (joined?.length ?? 0) > 0 })}\n${text}` },
+        { type: 'text', text: `${headerText(role, fromName, audience, note, deferred, { roomId, work, resumed, resumedByUpdate, retried, resent, abandoned, hasSender: fromId !== undefined || senderName !== undefined, noReply, plural: (joined?.length ?? 0) > 0 })}\n${text}` },
         ...images.map(attachment => ({ type: 'image', attachment })),
         ...files.map(attachment => ({ type: 'file', attachment })),
       ],

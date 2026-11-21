@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; merged: delivery 4's selector (#1025, issue #1016), delivery 1's desktop half (#1391), delivery 2's typing (#1394); delivery 0 met on 2026-11-19, when the owner's delegate approved RFC 0022's revision; owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; delivery 0 met on 2026-11-19, when the owner's delegate approved RFC 0022's revision; amended 2026-11-20: what moves now and what waits, approved by the owner's delegate on 2026-11-20, Q15-Q23 answered with the amendment's recommendations; Q18 narrowed by the owner's delegate on 2026-11-21 (the Code side in a gated browser needs member admission on and RFC 0038 delivery 3); what has merged is in that amendment's inventory, see Amendment (2026-11-20); owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) only if the preload must change; the server image; herdr (3.N.P) for the pack's fix-only period, the `am mailbox send` verb (the pack's CLI is its source; `am/` gets it as a byte copy) and the retirement notice; am (3.N.P) for those copies |
 | Created | 2026-11-10 |
@@ -150,7 +150,7 @@ plugin's own route.
 | **Input** | Typed keys go to the shown terminal as herdr-core input, only after the person clicks into it (focus is explicit, never on hover or on open). RFC 0014's Q19 holds: nothing wipes a half-typed draft in a terminal. |
 | **What is view-only** | (1) Terminals on linked machines, until delivery H. (2) Every terminal in a browser before the gate. (3) A terminal another client is typing into right now, shown with "Typing elsewhere" and a click to take over. Everything else in the tree is typeable, as in herdr-app today: Decided 4 keeps each seat in its agent's own native terminal, and the person answers approval dialogs there (RFC 0022 Decided 6, RFC 0028 "Approvals"). |
 | **The orchestrator's terminal** | Typeable, with a one-line note above it: "You are typing to the team's orchestrator directly; Genie will not see this." Q4 asks the owner whether it should be view-only instead. |
-| **Resize** | Only the client the person is typing in sets the terminal's size; a view that is only watching fits the terminal into its box and never resizes it, so the app never reflows a terminal someone uses in herdr-app or on the phone. Delivery 1 checks how herdr-core's attach treats a watching client's size; if it cannot avoid a resize, that is filed upstream before delivery 2. |
+| **Resize** | Code mode never resizes a terminal, typing included (Q15, 2026-11-20, as RFC 0022's revision says): a view keeps the terminal's own grid and fits it by font size, so the app never reflows a terminal someone uses in herdr-app or on the phone. |
 | **Scrollback** | On open, the history herdr-core keeps for the terminal (the screen and history RFC 0028's `code_read` returns), then the live stream; xterm.js keeps its own buffer while the terminal stays on screen. No scrollback is written to the Bot team's home. |
 | **Many terminals** | The right pane shows one terminal by default and up to four side by side when the person picks them; there is no layout editor, no saved layout and no tabs (D27's no-rebuild survives in that narrow sense). Four is the cap because the spike measured about 300 MB more memory for two busy panes. |
 | **Electron and browser** | Identical: the page is DSH's page in both. The desktop adds nothing for terminals; the only desktop change would be if the preload must expose a new capability, which delivery 1 aims to avoid. |
@@ -177,7 +177,8 @@ app's pane, not herdr-app's window.
   counts today (RFC 0013's states table).
 - **Read, never run**, as (i) says: no row starts, stops or restarts a bot or a worker in the
   first slices. Starting from the tree is the pack's New menu (`herdr/mods/am-new-menu`) moving in
-  (delivery 6), after #206.
+  as the tree's explicit New action, on this computer only (delivery 6a; Q17, 2026-11-20); a
+  row's click still runs nothing.
 
 ### The human-facing pane
 
@@ -303,14 +304,27 @@ start a fresh Session needs that route restored or an access level that allows a
 route. A managed history-free move onto the selected route belongs to the pending-input
 delivery.
 
+Failover never crosses a harness (2026-11-21). A failed request always holds the person's
+request. So when the fallback model runs on another harness than the request that failed (a
+local CLI the team carries counts as its own harness), the Bot team takes no fallback. The turn
+fails with its own error, as before. The conversation records one notice of why no other model
+answered; like the Full access notice it is a context line, shown in Advanced mode. No fallback
+is taken, and no notice is written, in two more cases: when another selection on another harness
+was made meanwhile, and on a Session that may not run a coding CLI. A fallback turn whose step
+DSH fixes on another harness drops its fallback notice. A fallback on the same harness is
+unchanged, and the Full access rule for a coding CLI still comes first. The rest (Q7b, the other
+writers of Q7c, and the pending-input delivery) waits on DSH. A plugin check cannot be bound to
+the moment DSH records a selection, and input that moves between parts has no durable receipt.
+The ask is section 5 of RFC 0045, a proposal not yet merged.
+
 ### Mod by mod
 
 | Mod (`herdr/mods/`) | What it does today | After the move |
 |---|---|---|
 | `am-sidebar` | Spaces, the bot and worker rows, the briefing hook, the guard, the updater, the CLI (`bin/`) | **Splits.** Rows become the team tree (bots-dsh). The CLI, the briefing (`briefing.mjs`), the guard (`hcGuard.mjs`, `hcProxy.mjs`, `guard/`), the ledgers and the meter install path stay shared and move to `am/` as their source (today `am/` holds byte copies). The updater ends with the pack. |
 | `am-automations` | Scheduled agent prompts through the `herdr-automations` CLI and the vendored scheduler (`herdr/scheduler/`, pinned in `scheduler.js`) | **A page in the app**, still driving the same CLI with `--json`; the scheduler stays a shared install through `am` (#220). The Bot team's own schedules (`client/schedules.js`) stay separate (Q10). |
-| `am-quota` | The Accounts panel: which account the local agent clients use, through the account proxy | **A page in the app's settings**, beside the Models page (`client/providers-page.js`); its write path (`write.js`, `lock.js`) is shared by the CLI and the page through the pack's source and `am`'s byte copy until delivery 8 moves the source to `am/`. |
-| `am-new-menu` | Start a bot or worker from a menu | **The tree's New**, after #206 (the tree runs nothing before then). |
+| `am-quota` | The Accounts panel: which account the local agent clients use, through the account proxy | **A page in the app's settings**, beside the Models page (`client/providers-page.js`). The Claude login switches through RFC 0043's locked `set-login` (delivery 5b); this computer's Codex and proxy switch stays the panel's until an amendment to RFC 0043's Q5 moves it to one locked CLI writer (Q23, 2026-11-20). Shared CLI code lives in the pack's source and `am`'s byte copy until delivery 8 moves the source to `am/`. |
+| `am-new-menu` | Start a bot or worker from a menu | **The tree's New**, on this computer, in delivery 6a (Q17, 2026-11-20); starting on a linked machine is deferred. |
 | `am-status` | Herdr's status bar plus the pack's version and update state | **Ends.** The machine, branch and agent counts show in the tree's header; the update state is the app's own (`client/desktop-update.js`). |
 | `am-footer` | The rail: Work button, Automations, Accounts, the phone dot | **Ends.** The Work button is the flip itself; Automations and Accounts are pages; the phone dot moves to the tree's header, read from Pocket Link's published state as today. |
 | `am-tabs` | Tab names in Herdr | **Ends.** The app has no tabs (D27's no-rebuild, narrow sense). |
@@ -324,20 +338,23 @@ delivery.
 is never renamed even though herdr-app's home stops being the reason for the name), the
 `automagik-herdr` CLI and `am`, the briefing hook, the guard, and herdr-core.
 
-**What ends:** herdr-app as part of Automagik's install, the pack's UI mods, its layout and its
+**What ends:** herdr-app as part of Automagik's install (once Pocket Link runs without it, Q20,
+2026-11-20), the pack's UI mods, its layout and its
 updater (the herdr lane's pack pointer).
 
 ### The pack after the move
 
 **Recommended:**
 
-1. **Fix-only from this RFC's acceptance** until the app's Code mode ships (deliveries 1 and 2 in
-   a stable release): security and breakage fixes on the herdr lane as today; no new features in
+1. **Fix-only from this RFC's acceptance** until the pack's last release (2, as Q19 set it on
+   2026-11-20): security and breakage fixes on the herdr lane as today; no new features in
    the pack's UI.
-2. **One last pack release** after the app's Code mode ships. Its update notice says Code now
-   lives in the Automagik app, with a link. Installed packs keep working; nothing switches them
-   off remotely, and the pack never deletes data. The herdr-lane pointer is signed one last time;
-   no field is added to it (a new field is an RFC 0011 change).
+2. **One last pack release** once deliveries 1 and 2 as shipped (the take-over left out), 5 and 6a
+   are in one stable release, and the Accounts page carries RFC 0043's per-machine view, the plan's
+   preview, approval and apply, and its retries (Q19, 2026-11-20). Its update notice says Code now
+   lives in the Automagik app, with a link. Installed packs keep working; nothing switches them off
+   remotely, and the pack never deletes data. The herdr-lane pointer is signed one last time; no
+   field is added to it (a new field is an RFC 0011 change).
 3. **Then retired.** The pack's UI folders leave the repository; the shared parts already live
    in `am/` (Mod by mod). Pocket Link stays where Pocket puts it.
 4. **The Community entry.** AGENTS.md says no `herdr-mod` or `herdr-layout` topic is added until
@@ -353,7 +370,8 @@ updater (the herdr lane's pack pointer).
 - **Deliveries 1-6 stand** until deliveries 1 and 2 here ship in a stable release: the switch
   keeps raising herdr-app for people who use it, then is replaced by the flip.
 - **Delivery 7 (one install) stands, re-scoped:** the code set installs herdr-core and `am`, not
-  herdr-app and the pack.
+  herdr-app and the pack; herdr-app leaves it only once Pocket Link runs without it (Q20,
+  2026-11-20).
 - **Delivery 8 (shared Bots) stands for its desktop and plugin parts:** one Bot id in both
   places, a Bot with a live pane is shown. Its herdr part (the Work button sends its pane's Bot)
   ends with `am-footer`.
@@ -366,10 +384,12 @@ about where it runs:
 
 - **herdr-core**, pinned by version and sha256 the way `apps/desktop/wslc/Dockerfile` already
   pins its `hc`, never through an installer that resolves "latest".
-- **`am`** from its signed lane, the same tarball every release attaches.
-- **The agent CLIs** the person enables (Claude Code, Codex, ...), each pinned like the desktop's
-  required CLIs (RFC 0003, 2026-11-08), installed into the volume on first enable, not baked in,
-  so the image stays one size for everyone.
+- **`am`** of the image's own release, pinned and checked against that release's `.sha256`
+  (Q22, 2026-11-20; #1869): the rolling am-lane signature names only the newest version.
+- **The agent CLIs** (Claude Code, Codex, ...) come from DSH's CLI store, which installs their
+  current versions into the volume in the background at every boot, with integrity checks;
+  `AUTOMAGIK_CLI_INSTALL=off` skips it. None is baked in, so the image stays one size for
+  everyone (Q21, 2026-11-20; #1869).
 - **Sign-in.** Each agent signs in with its own sign-in flow, started from the Bot's chat (RFC
   0003's sign-in from the Bot's chat) or in a terminal in Code mode; credentials land in the
   instance's data volume, never in the image. The image's secrecy scan (`server/secrecy.mjs`)
@@ -410,7 +430,7 @@ about where it runs:
 | Another local process posts to the mailbox as the orchestrator | `am` stamps the posting terminal; the follower accepts only the Genie's lead terminal; the per-start token if delivery 3 finds it possible, else the residual is recorded |
 | The Genie types into the team behind the orchestrator | The grant reaches only the orchestrator's terminal; its children carry no Genie label |
 | A populated own chat crosses through the model picker | Q7a refuses the pick before selecting a route or starting a switch |
-| A watching view reflows a terminal someone is using | Only the typing client resizes; a watching view letterboxes |
+| A watching view reflows a terminal someone is using | The app never resizes a terminal, watching or typing (Q15, 2026-11-20) |
 | A terminal on a linked machine is reached before its link is scoped | Linked machines are view-only and unlisted until delivery H (RFC 0022 (k)) |
 
 ## Deliveries
@@ -421,7 +441,8 @@ Each is one PR on one lane. Two tracks run in parallel:
   after Q13 and Q14 only. It needs nothing from deliveries 0-3, Q1-Q3, #1009 or RFC 0028: it
   changes the model menu, and Q7a adds the populated own-chat refusal. The track attaches to no
   terminal.
-- **The Code track:** 0, 1, 2, 3a, 3b, then 5, 6, 7 and 8.
+- **The Code track:** 0, 1, 2, 3a, 3b, then 5, 6, 7 and 8; since the 2026-11-20 amendment, 5 and
+  6a may land before 3, in the order of its What moves now.
 
 Every test uses temp homes, fake ledgers and a herdr-core started for the test, never a live
 Herdr install.
@@ -436,7 +457,12 @@ Herdr install.
    first slice. In Code mode the tree lists this computer's projects, bots and workers from the
    registry and the two ledgers; a click renders that terminal live in the right pane, view-only;
    the flip back shows the human-facing bot's DSH chat, which never moved. The desktop app first;
-   the browser half needs RFC 0024 delivery 2's gate and ships only once that is in.
+   the browser half needs RFC 0024 delivery 2's gate and, behind it, a proof bound to each
+   request of the claimed owner's passkey session (Q18, 2026-11-20, an amendment to RFC 0038);
+   in the gate's Access mode the Code side stays off in a browser. The owner's delegate decided on
+   2026-11-21 that the browser half also requires member admission on and RFC 0038 delivery 3's
+   readiness; with member admission off, and in Cloud mode, it stays off (RFC 0038's amendment of
+   2026-11-21).
    *Acceptance:* the flip starts, resumes and sends nothing; no row runs anything; linked
    machines are not listed; the transport question (socket or streamed output) is answered;
    without the gate, a browser shows no terminal.
@@ -449,9 +475,10 @@ Herdr install.
    terminal's size; a fifth pick is refused with the four named. *Rollback:* back to view-only.
 3. **The Genie's two seats and the mailbox** (after RFC 0028 deliveries 0 and 1, and Q1 and Q8),
    two PRs:
-   - 3a (herdr): `am mailbox send` in the pack's CLI, with its terminal stamp. *Acceptance:* the
-     herdr gate, and `node scripts/am-copies.mjs --check` passes with `am/`'s copy regenerated by
-     `--write`, never edited by hand.
+   - 3a (herdr): `am mailbox send` in the pack's CLI (in `am/` if delivery 8 has moved the CLI's
+     source there), with its terminal stamp, released only when 3b is ready (Q16, 2026-11-20).
+     *Acceptance:* the herdr gate, and `node scripts/am-copies.mjs --check` passes with `am/`'s copy
+     regenerated by `--write`, never edited by hand.
    - 3b (plugin): the orchestrator as a lead worker, the mailbox follower, the two row kinds.
    *Check:* an `answer` with a known request id reaches the Genie's Session once across a crash,
    and once after a host restart for a row written while the host was down; an unknown id, an
@@ -474,8 +501,10 @@ Herdr install.
    pack's source and `am-copies`, as in 3a). *Check:* the page lists, adds and
    removes an automation through the `herdr-automations` CLI's `--json`, and a quota switch
    written from the page reads back from the CLI. *Rollback:* the pack's panels stay.
-6. **Start from the tree** (plugin; after #206). The New menu moves in. *Check:* a start from the
-   tree writes the attach ledger the same way the CLI does. *Rollback:* the tree reads only.
+6. **Start from the tree** (amended 2026-11-20, Q17: 6a on this computer, without #206, as the
+   Amendment's What moves now, 6, specifies; starting on a linked machine is deferred). The New menu
+   moves in. *Check:* a start from the tree writes the attach ledger the same way the CLI does.
+   *Rollback:* the tree reads only.
 7. **Code mode in the image** (server image and plugin; after RFC 0024 delivery 2). herdr-core,
    `am`, agent CLIs enabled into the volume, sign-in. *Check:* before the claim no terminal is
    shown; after it a fresh image signs an agent in, starts the Genie and shows its orchestrator's
@@ -483,17 +512,272 @@ Herdr install.
    uses a fake agent CLI; the real sign-in is a manual step, on a test account of the tester's
    own, and no account is named in the repository.
    *Rollback:* an image without herdr-core; Team works as today.
-8. **The pack's last release and retirement** (herdr, then a removal PR; after delivery 2 has
-   shipped in a stable release). The notice, the last pointer, the shared parts' source moved to
-   `am/`, RFC 0013 deliveries 7 and 8 re-scoped. *Check:* the herdr gate on the last release; the
-   notice's text names the Automagik app and its link; the last pointer's sequence is higher than
-   the one before and it adds no field (`scripts/herdr-lane.ts`'s own refusals); a pack installed
-   in a temp home keeps working after the last release; the am gate with `am/` as the source;
-   `scripts/entries.mjs --check` after the folders leave.
-   *Rollback:* revert the removal; the pack keeps its fix-only lane.
+8. **The pack's last release and retirement** (herdr, then a removal PR; amended 2026-11-20, Q19:
+   once The pack after the move, 2, holds). The notice, the last pointer, the shared parts' source
+   moved to `am/`, RFC 0013 deliveries 7 and 8 re-scoped. *Check:* the herdr gate on the last
+   release; the notice's text names the Automagik app and its link; the last pointer's sequence is
+   higher than the one before and it adds no field (`scripts/herdr-lane.ts`'s own refusals); a pack
+   installed in a temp home keeps working after the last release; the am gate with `am/` as the
+   source; `scripts/entries.mjs --check` after the folders leave. *Rollback:* revert the removal;
+   the pack keeps its fix-only lane.
 
 Linked machines come after RFC 0022's delivery H, as a delivery of that RFC widened by its Q16,
 not of this one.
+
+## Amendment (2026-11-20): what moves now, and what waits
+
+Approved by the owner's delegate on 2026-11-20, with every recommendation (Q15-Q23; see Answers
+(2026-11-20) below). It keeps the current inventory of this RFC's deliveries, orders what
+is left, names each piece outside this repository that holds one, and asks Q15-Q23 (below).
+"The marked window" below is the desktop window #1788 marks: Electron keeps a secret and DSH
+gets only its digest, so no other browser or tool reaches what it gates.
+
+**What it changes.** Apart from the answers:
+
+- The Code track's order ("0, 1, 2, 3a, 3b, then 5, 6, 7 and 8", Deliveries): 5 and 6a may
+  land before 3, because 3 waits on herdr-core and they do not.
+- Delivery 5 splits into 5a, 5b and 5c, and 5b switches through RFC 0043's `set-login` instead
+  of the `am-quota` row's `write.js` and `lock.js` path (Mod by mod).
+- Delivery 6 splits into 6a and 6b; 6a adds an explicit New action to the tree and a local-only
+  start path to the CLI (Team tree's "Read, never run" holds for rows).
+- Deliveries that span two lanes ship as one PR per lane, in order, as 3a and 3b do.
+- The Lanes field's desktop line also covers a change in Electron's main process (What moves
+  now, 7), not only the preload.
+- CLI changes that come with a delivery here (6a's local-only start path, 3a's verb) land where
+  the CLI's source is at the time: the pack's CLI on the herdr lane with `am/`'s generated
+  copies, or `am/` once delivery 8 has moved the source there. The pack's UI stays fix-only.
+
+Each answer changed text above it, applied on 2026-11-20 and marked there with its number:
+
+- Q15: the Resize row and the Threat model's resize row.
+- Q16 (a): delivery 3 keeps its prerequisites; 3a is released only with 3b.
+- Q17 (a): the "after #206" left Team tree, the Mod by mod row for `am-new-menu` and delivery 6.
+- Q18: delivery 1's browser half.
+- Q19: The pack after the move, 1 and 2.
+- Q20 (a): "What ends: herdr-app as part of Automagik's install" and the RFC 0013 delivery 7
+  bullet, which wait for Pocket Link to run without herdr-app.
+- Q21: Q5's answer and The image's agent CLI line.
+- Q22: The image's `am` line.
+- Q23: the Mod by mod row for `am-quota`.
+
+Q16 (a), Q17 (a) and Q18 (a) are the answers given, so delivery 3 keeps its order and 6a moves now.
+
+### Where delivery stands
+
+| Delivery | Merged | Left |
+|---|---|---|
+| 0 | met 2026-11-19 | nothing |
+| 1 | the desktop half: #1391, #1779, #1788 (the flip, the window marker, no core spawn) | the browser half (1b) |
+| 2 | typing #1394; the watching-size rule and four panes #1810 | "Typing elsewhere" with a click to take over (no resize while typing, as shipped, is Q15's answer) |
+| 3a, 3b | nothing (RFC 0028's durable wake log, its 0b, is merged: #1827) | all |
+| 4 | the selector #1025; Q13's route policy #1822; Q7a #1863; failover never crosses a harness (Q7c's first writer, Handoff note) | Q7b, the note-only rule for a Bot's turns as a group member; the rest of Q7c, the other route writers (migrations, a pinned route, reopen) with the in-place path's races, effort, rollback, default fallbacks and automatic moves (Handoff note); the pending-input delivery with its managed history-free move. All three wait on DSH (What waits) |
+| 5 | 5a, the Automations page: #1817 | run now, history, edit, pause and resume on that page; 5b (the Claude login); 5c (Codex and the account proxy) |
+| 6 | nothing | all |
+| 7 | the image half of the base: #1869 carries herdr-core 0.1.18 pinned by version and sha256, `am` pinned to the release's content and checked against its `.sha256`, and DSH's CLI store installing Claude Code and Codex in the background (`server/README.md`) | 1b; the end-to-end check, which also needs delivery 3's orchestrator (#1869's provisioning is kept: Q21, Q22) |
+| 8 | nothing | all |
+
+### What moves now
+
+Each needs nothing from another repository. In this order:
+
+1. **The owed wording, docs only.** RFC 0028 gains the `lead` worker kind (Q8's answer), in its
+   own PR. RFC 0028's Words rows for "Code" (still herdr-app) and "Code mode" (still the chat
+   view's switch to xterm), its line that workers get no rows of their own, and RFC 0022's uses of
+   "Code mode" change to Q9's answer and RFC 0022's Q15 answer, with no change to either RFC's
+   design. Delivery 3b is built on the lead kind's text, so it is settled before the grant exists.
+2. **Delivery 4's remainder** (plugin): failover never crossing a harness moved (2026-11-21).
+   Q7b, the rest of Q7c and the pending-input delivery wait on DSH (What waits). Hermes stays
+   out while it is frozen.
+3. **Delivery 5a's remainder** (plugin), through the scheduler CLI's own verbs
+   (`herdr/scheduler/main.go`, its usage text), from the owner's marked window only, as 5a:
+   history with `history --json`; edit with `put --original <name>`; pause and resume with
+   `pause` and `resume`, read back from `list --json`; run now with `run <name> --bg`. That verb
+   prints nothing and its exit status only says the run was started, so the click stays
+   "requested": the CLI gives no run id that ties a history row to it, and a scheduled run of the
+   same automation, or a run recorded as skipped, may be the next row. Beside it the page shows
+   the automation's newest history row with its trigger and status, as history, never as this
+   click's result.
+4. **Delivery 5b, on RFC 0043's writer** (plugin). RFC 0043's deliveries 1 (#1901) and 2 (#1914)
+   are merged: `am accounts here` reads, and one locked `set-login` writer switches. 5b's first plan
+   added a second writer, and its review found that it could erase a panel edit; so 5b adds none.
+   Its page reads through `accounts here` and switches through `set-login`, both with `--json`, and
+   passes the snapshot it showed, so a conflict keeps the other edit and is read again. It switches
+   only where RFC 0043's writer qualification holds for that app home
+   (`herdr/mods/am-sidebar/accountsWrite.js`, `writerQualified`: the CLI writes through
+   `set-login`, and the panel is off or absent, or on and confirmed writing through it too);
+   elsewhere it shows why and changes nothing. *Check:* in a marked desktop window with a fake
+   `claude`, a switch reads back from the CLI; an enabled older panel beside a newer CLI refuses
+   the switch; a standalone CLI with no panel switches; an unmarked browser gets nothing.
+5. **Delivery 5c, the read half** (plugin): the page shows this computer's Codex account read-only,
+   from the default `CODEX_HOME`. The proxy's state needs its management key, which the panel takes
+   from Herdr's environment or the proxy's own key file; the page shows it as "unknown" until the
+   amendment Q23 asks for settles which process supplies that key. Moving the switch itself waits
+   for that amendment (Q23). Copying Codex credentials to linked machines is not part of 5c: it
+   stays RFC 0043's delivery 3, behind its qualified transport and the owner's trial.
+6. **Delivery 6a: start from the tree, on this computer** (plugin; Q17 answered). #206's last open
+   point (`am` on a linked machine) goes to RFC 0012's Fleet delivery and does not change the
+   start path, the attach ledger's rows or `whois --json`. The tree gets an explicit **New**
+   action; a row's click stays read-only. New runs the pack's CLI from the host, from the marked
+   window only, on a start path that is local only: it lands on this computer's own core (the
+   local holder) and consults no linked terminal, while keeping the CLI's duplicate-seat check.
+   Today an explicit local holder still reads every connected ledger binding, linked ones
+   included (`holderForStart` calling `holderView` in the pack's CLI,
+   `herdr/mods/am-sidebar/bin/automagik-herdr.mjs`), so 6a adds that local-only path there
+   first (herdr lane). The attach ledger is
+   written by the CLI itself. *Check:* against a fake `hc` with a two-holder pool and a connected
+   linked binding, a start from the tree writes the same ledger row as the CLI on the local holder
+   and makes zero calls toward the linked machine; an unmarked window starts nothing.
+7. **Fixes left by #1788** that need nothing outside: the pack's `coreSocket.mjs` discovery gaps
+   (`HC_SOCKET` first, a `config.toml` socket, session names with spaces, lock paths without
+   `.sock`), a herdr fix under the pack's fix-only rule; opening a registry Bot's own Herdr space
+   from a Code row while herdr-app is installed (Q2), a desktop change as well as a plugin one,
+   because Electron resolves a Bot only from the Bot team's `state.json`
+   (`apps/desktop/src/herdr-space.js`) and needs a trusted registry lookup. *Check:* a Bot that
+   exists only in the registry opens its own space.
+
+### What waits, and on what
+
+| Item | Waits on | Whose |
+|---|---|---|
+| Delivery 4's remainder: Q7b, Q7c beyond failover, the pending-input delivery | A DSH fence that records a model selection only if no input was admitted and no turn started since the host read the Session (a revision checked inside DSH's admission lock), and input that keeps the part it was meant for and moves with a durable receipt. Three plugin-only review rounds (2026-11-21) found both missing: DSH's `selectModel` awaits before it records the selection, and text prompts are admitted outside that lock. Asked in section 5 of RFC 0045, a proposal not yet merged | DSH (another repository) |
+| 3b, the Genie's two seats and the follower | RFC 0028's delivery 0, the grant, then its delivery 1 (the worker tools); the lead kind (above). The grant is herdr-core's, filed from #628 and #631 (both open) | herdr-core (another repository) |
+| 3a, `am mailbox send` | 3b (Q16) | herdr-core, through 3b |
+| The mailbox for a DSH Bot that runs in a terminal | RFC 0023's session terminal field (The Genie's two seats and the mailbox); until DSH ships it, the mailbox reaches app-hosted Sessions only | DSH (another repository) |
+| 2's take-over from another typer | a signal from herdr-core that says which client is typing into a terminal. Until then a refused take stays "Typing elsewhere · view only" | herdr-core |
+| 1b, the browser half | RFC 0022's delivery B (paused for scheduling, not for its design), with the owner's approval of its drawing; and the owner proof behind the gate that Q18 set (RFC 0038's amendment of 2026-11-21, which, by the owner's delegate's decision of 2026-11-21, also requires member admission on and RFC 0038 delivery 3's readiness). The gate is in the image (`server/gate*.mjs`) and RFC 0038's delivery 1 (#1892) checks its caller assertion, but only for members and guests; the owner reaches DSH through the stock app's fallback (`apps/multiuser-dsh/README.md`), so the core bridge cannot yet tell the claimed owner from any browser | the owner (B's drawing), then this repository (an RFC 0038 amendment, then the plugin) |
+| 7, Code mode in the image | 1b; delivery 3 for its end-to-end check (Q21 and Q22 keep #1869's provisioning) | herdr-core (through delivery 3), then this repository |
+| 5c's switch | an amendment to RFC 0043's Q5 (Q23) | this repository |
+| 6b, starting on a linked machine | deferred (Q17): RFC 0022's delivery H allows a shown terminal's view and input but refuses `run`, `exec` and file writes on a link, and H's own scoping is upstream in herdr-core | herdr-core and a later decision of the owner's |
+| 8, the pack's retirement | Q19's condition: 1, 2 as shipped, 5 and 6a in one stable release, with 5c's switch (Q23) and an amendment to RFC 0043 that moves a plan's apply and its retries off the pack; removing herdr-app from Automagik's install waits for Pocket Link to run without it (Q20) | this repository, then Pocket |
+| A linked Claude bot's per-turn briefing | `am` on the linked machine, RFC 0012's Fleet delivery (its amendment is #1932). Not a gate for any delivery here (Q17) | this repository |
+
+### Questions for the owner (2026-11-20)
+
+The recommended option comes first. All were answered the same day (Answers (2026-11-20)).
+
+15. **Who sets a terminal's size while the person types in the app?**
+    (a, recommended) Nobody in the app: Code mode never resizes, typing included, as RFC 0022's
+    approved revision says ("Size: Code mode never resizes the pane") and #1394 and #1810 ship.
+    The Resize row above and the Threat model's resize row are amended to say so.
+    (b) The typing client sets it, as the Resize row says today: RFC 0022's revision is amended
+    and delivery 2 sends a resize while the person types, which reflows the terminal for
+    herdr-app and the phone.
+16. **When `am mailbox send` (3a) ships.** Either way, a send that succeeds means the row is
+    queued for the follower's checks. The follower admits a row only from the lead's terminal and
+    only of an allowed kind: an `answer` must carry a request id the Genie sent; a `question`
+    needs none. An admitted row is delivered once, within RFC 0028's durable wake log, whose
+    limits still apply (a row older than 7 days, or one whose two resends are spent, is dropped
+    and logged, not sent again).
+    (a, recommended) With its reader: 3a is released only once 3b, RFC 0028's delivery 1 and the
+    lead kind are ready.
+    (b) Now. Until 3b creates a lead, no row can come from a lead's terminal, so every row
+    written before then is refused when the follower starts; nothing posted early reaches the
+    Genie.
+17. **Starting from the tree.**
+    (a, recommended) 6a (this computer) now, without #206, whose last point goes to RFC 0012;
+    starting on a linked machine is deferred, and the tree on a linked machine stays read-only.
+    (b) 6a now, and a separately scoped start capability on a link is designed: an amendment to
+    RFC 0022's delivery H, which today refuses `run`, and a scope herdr-core must grant.
+    (c) Delivery 6 keeps waiting for #206's last point.
+18. **How the core bridge knows the gated owner (1b).**
+    (a, recommended) In the gate's claim and passkey mode, every request to the Code side's routes
+    carries a proof bound to that request and to the owner's own passkey session, whether member
+    admission is on or off. An admin, a request with no verified caller and a direct browser
+    request outside the gate are refused. In the gate's Access mode every allowlisted address gets
+    the same owner principal (`server/README.md`), so one person cannot be told from another, and
+    the Code side stays off in a browser there. Designed as an amendment to RFC 0038, with no DSH
+    change. *Check:* a second allowlisted Access address is refused.
+    (b) As (a), and in Access mode every allowlisted address may use the Code side for the
+    instance's own terminals only, as the instance already treats each of them as the owner. This
+    amends condition 1 of RFC 0022's (l) for instance-local terminals; a linked machine's seats
+    keep all four of (l)'s conditions and delivery H.
+    (c) Wait for DSH's own authentication hook upstream (RFC 0024's Decided 21).
+19. **When the pack's last release goes (delivery 8).** The pack stays fix-only until then.
+    Under every option, packs already installed keep their panels and keep working (The pack after
+    the move, 2); a fresh install after retirement gets no pack, so it has only the app's pages and
+    the CLI (which already starts bots and switches the Claude login); and if the last release
+    goes before 3a, `am mailbox send` lands in `am/`, the CLI's source from delivery 8. Delivery
+    1b is not required by any option: the desktop app is the replacement.
+    (a, recommended) After deliveries 1 and 2 as shipped (the take-over left out), 5 (5c's switch
+    included, under Q23) and 6a are in one stable release, and the Accounts page also carries
+    what the panel gained from RFC 0043 (the per-machine view, the plan's preview and approval,
+    apply, retries). Today a plan's apply refuses without an enabled `am-quota` folder and the
+    sidebar runs its retries, so this option includes moving both off the pack. *Check:* on a
+    fresh install with no pack, a plan applies from the page and a failed machine is retried.
+    (b) The same, without RFC 0043's plan on the page: a fresh install keeps the Claude and Codex
+    switches of this computer, and loses a plan's apply and its retries, which need the pack.
+    (c) After delivery 2's typing and four panes are in a stable release, before 5 and 6: a fresh
+    install starts bots and switches the Claude login only through the CLI, and has no Codex or
+    proxy switch, no plan apply and no retries until those land.
+    (d) Today's rule (The pack after the move, 1 and 2, read strictly): after all of delivery 2,
+    the take-over included, which waits on herdr-core; until then the pack stays fix-only and a
+    fresh install still gets it.
+20. **Removing herdr-app from Automagik's install.** Q11 leaves Pocket Link's host to Pocket.
+    (a, recommended) herdr-app leaves the install only once Pocket Link runs without it; until
+    then the install keeps herdr-app with no pack UI.
+    (b) herdr-app leaves the install at delivery 8; a person who uses Pocket keeps or installs
+    herdr-app on their own until Pocket's answer.
+21. **The image's agent CLIs, after #1869.** Q5 answered "installed into the volume on first
+    enable, none baked into the image"; #1869 ships DSH's CLI store, which installs the current
+    Claude Code and Codex in the background under `$AUTOMAGIK_HOME/acp/clis`, with integrity
+    checks, and `AUTOMAGIK_CLI_INSTALL=off` to skip it.
+    (a, recommended) Keep #1869's store. None is baked into the image, which was Q5's reason. This
+    gives up the pin and the install-on-enable rule: the store installs npm's current versions in
+    the background at every boot. Q5's answer and The image's agent CLI line are amended to say so.
+    (b) Rework delivery 7 to Q5's letter: pinned versions, installed only when the person enables
+    an agent.
+22. **How the image trusts `am`.** The image's line above says `am` comes "from its signed lane";
+    #1869 pins the release's own `am` and checks it against that release's `.sha256`, because the
+    rolling am-lane signature names only the newest version and cannot vouch for an older pin
+    (`server/README.md`).
+    (a, recommended) Keep #1869's check; The image's `am` line is amended to say the image takes
+    the `am` of its own release, checked by sha256.
+    (b) Check the image's `am` against the signed am-lane pointer at build time, which works only
+    while the image's version is the pointer's.
+23. **The local Codex and proxy switch's writer (5c).** RFC 0043's Q5 keeps this computer's
+    switch in the panel, where Herdr supplies `CODEX_HOME` and the proxy's management key.
+    (a, recommended) It stays the panel's until an amendment to RFC 0043's Q5 moves it to one
+    locked CLI writer, says how that writer gets the same home and key as the panel, and keeps one
+    writer during the move (an older panel refused, as for `set-login`); 5c's page reads only
+    until then.
+    (b) 5c moves the switch now, under this RFC instead of RFC 0043, with the same three
+    conditions defined here: the host process that supplies `CODEX_HOME` and the proxy key, one
+    locked CLI writer, and an older panel refused during the move.
+
+### Answers (2026-11-20)
+
+The owner's delegate approved this amendment on 2026-11-20 and answered every question with its
+recommended option:
+
+15. **Q15:** Code mode never resizes a terminal, typing included; the Resize row and the Threat
+    model's row say so.
+16. **Q16:** `am mailbox send` (3a) ships with its reader: 3b, RFC 0028's delivery 1 and the lead
+    kind ready.
+17. **Q17:** 6a (this computer) now, without #206, whose last point goes to RFC 0012 (#1932);
+    starting on a linked machine is deferred, and the tree on a linked machine stays read-only.
+18. **Q18:** in the gate's claim and passkey mode, every request to the Code side's routes carries
+    a proof bound to that request and to the owner's passkey session, whether member admission is
+    on or off; an admin, a request with no verified caller and a direct browser request outside
+    the gate are refused; in Access mode the Code side stays off in a browser. Designed as an
+    amendment to RFC 0038, with no DSH change.
+    *Narrowed by the owner's delegate on 2026-11-21:* this decision replaces "whether member
+    admission is on or off". The Code side in a gated browser requires member admission on and RFC
+    0038 delivery 3's readiness, and it is off otherwise, as in Access and in Cloud mode, until a
+    later amendment (RFC 0038, Amendment (2026-11-21)).
+19. **Q19:** the pack's last release goes once one stable release carries delivery 1 (the desktop
+    half), delivery 2 as shipped (the take-over left out), all of 5 (5c's switch included) and 6a,
+    and the Accounts page carries RFC 0043's per-machine view, the plan's preview, approval and
+    apply, and its retries, with apply and retries moved off the pack. Installed packs keep their
+    panels.
+20. **Q20:** herdr-app leaves Automagik's install only once Pocket Link runs without it; until
+    then a fresh install after the pack's retirement keeps herdr-app with no pack UI.
+21. **Q21:** the image keeps #1869's CLI store, which installs npm's current versions in the
+    background at every boot; no agent CLI is baked into the image. Q5's answer and The image say
+    so.
+22. **Q22:** the image keeps #1869's `am`, its own release's, checked by sha256.
+23. **Q23:** this computer's Codex and proxy switch stays the panel's until an amendment to RFC
+    0043's Q5 moves it to one locked CLI writer that gets the same `CODEX_HOME` and proxy key as
+    the panel, with an older panel refused during the move; 5c's page reads only until then.
 
 ## Answers (2026-11-19)
 
@@ -513,7 +797,8 @@ Q7a amends the crossing rule in Q7 and Q14.
 4. **Q4:** the orchestrator's terminal is typeable, with the one-line note above it (Terminal
    renderer).
 5. **Q5:** the image's agent CLIs install into the volume on first enable; none is baked into the
-   image.
+   image. Amended 2026-11-20 (Q21): DSH's CLI store installs npm's current versions into the
+   volume in the background at every boot; none is baked in.
 6. **Q6:** the Community entry is never opened, and `herdr/` stops being its folder when the pack
    is retired.
 7. **Q7:** Sessions that already crossed harnesses keep their records. Q7a removes
@@ -548,7 +833,8 @@ Q7a amends the crossing rule in Q7 and Q14.
 
 From this acceptance the pack is fix-only (The pack after the move, 1): security and breakage
 fixes on the herdr lane as today, no new features in its UI, until deliveries 1 and 2 are in a
-stable release.
+stable release. Amended 2026-11-20 (Q19): until the pack's last release, as The pack after the
+move, 2, now sets it.
 
 ## Open questions
 

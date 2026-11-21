@@ -1,9 +1,13 @@
-import { betterAuth } from 'better-auth';
+import { betterAuth, type GenericEndpointContext } from 'better-auth';
+import { APIError } from 'better-auth/api';
 import { jwt } from 'better-auth/plugins';
 import { passkey } from '@better-auth/passkey';
 import { oauthProvider } from '@better-auth/oauth-provider';
 import { whatsappEnabled, whatsappPlugin } from './whatsapp';
 import { passkeySiteName } from './site';
+import { passkeyAccountPlugin } from './passkeys';
+import { admitSignup } from './gate';
+import { ADMISSION_HEADER } from './admission';
 
 function strictRedirectUri(uri: string, registered: readonly string[], defaultResult: boolean) {
   const url = new URL(uri);
@@ -32,10 +36,15 @@ export interface Env {
   PASSKEY_RP_ID: string;
   WHATSAPP_RECEIVING_NUMBER?: string;
   OMNI_INBOUND_TOKEN?: string;
+  /** Public keys (a JWKS JSON string) that admission tickets are checked against. */
+  ADMISSION_KEYS?: string;
+  /** The issuer every admission ticket must name. */
+  ADMISSION_ISSUER?: string;
   PAGES?: Fetcher;
 }
 
-export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>) {
+export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>,
+  authorizeRegistration?: (endpoint: GenericEndpointContext, userId: string, credentialId: string) => Promise<void>) {
   if (!env.BETTER_AUTH_SECRET || env.BETTER_AUTH_SECRET.length < 32) {
     throw new Error('BETTER_AUTH_SECRET must be provisioned');
   }
@@ -68,16 +77,32 @@ export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>) {
         authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
         registration: {
           requireSession: false,
+          // Invite only (RFC 0032, Decided 9): the ticket is checked, and reserved, before the
+          // user row is written. Every ceremony on one ticket gets the same row.
           async resolveUser({ ctx: endpoint }) {
-            const user = await endpoint.context.internalAdapter.createUser({
-              name: 'Automagik user',
-              email: `${crypto.randomUUID()}@id.invalid`,
-              emailVerified: false,
-            }, { method: 'passkey' });
+            const id = await admitSignup(env, endpoint.headers?.get(ADMISSION_HEADER));
+            const adapter = endpoint.context.internalAdapter;
+            let user = await adapter.findUserById(id);
+            if (!user) {
+              try {
+                user = await adapter.createUser({
+                  id, name: 'Automagik user', email: `${crypto.randomUUID()}@id.invalid`, emailVerified: false,
+                } as Parameters<typeof adapter.createUser>[0], { method: 'passkey' });
+              } catch {
+                // A concurrent ceremony on the same ticket wrote the row first.
+                user = await adapter.findUserById(id);
+                if (!user) throw new APIError('INTERNAL_SERVER_ERROR', { message: 'Please start again' });
+              }
+            }
             return { id: user.id, name: 'Automagik user', displayName: 'Automagik user' };
+          },
+          async afterVerification({ ctx: endpoint, user, verification }) {
+            if (!authorizeRegistration) throw new APIError('FORBIDDEN');
+            await authorizeRegistration(endpoint, user.id, verification.registrationInfo!.credential.id);
           },
         },
       }),
+      passkeyAccountPlugin(env),
       jwt({ disableSettingJwtHeader: true }),
       oauthProvider({
         loginPage: '/sign-in',

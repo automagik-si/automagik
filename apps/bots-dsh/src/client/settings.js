@@ -2,7 +2,7 @@ import { Component, Fragment, createElement as h, useCallback, useEffect, useRef
 import { ACCENT_INKS, INKS } from './inks.js'
 import { isMainOf } from './sources.js'
 import { MESSAGE_WIDTH, allThemes, flatWidthOf, layoutOf, thinkingShown, widthOf } from './themes.js'
-import { CloseIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, ConnectorIcon, GlobeIcon, InfoIcon, MonitorIcon, PlugIcon, PlusIcon, ShieldIcon, SlidersIcon, SETTINGS_ICONS } from './icons.js'
+import { CloseIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, ConnectorIcon, GlobeIcon, InfoIcon, MonitorIcon, PlugIcon, PlusIcon, ShieldIcon, SignInIcon, SlidersIcon, SETTINGS_ICONS } from './icons.js'
 import { AdminStar, BotAvatar, RoomAvatar } from './mark.js'
 import { useEscape } from './overlay-hooks.js'
 import { BotSettingsForm, Switch } from './bot-settings.js'
@@ -18,6 +18,7 @@ import { BrowserPage } from './browser-settings.js'
 import { ComputerPage } from './computer.js'
 import { SchedulesPage } from './schedules.js'
 import { AutomationsPage } from './automations-page.js'
+import { AccountsPage } from './accounts-page.js'
 import { FeedbackIcon, FeedbackPage } from './feedback.js'
 import { AgentAccessPage } from './agent-access.js'
 import { PrivacyPage } from './privacy.js'
@@ -41,7 +42,7 @@ const capitalize = word => word[0].toUpperCase() + word.slice(1)
 // their members, and one opens on its own settings form. Usage widens the dialog.
 // Models is there only in a window without DSH's own settings, which carry the providers.
 export const PAGE_ICONS = {
-  ...SETTINGS_ICONS, models: SlidersIcon, 'hermes-remote': HermesMark, connectors: ConnectorIcon, capabilities: PlugIcon,
+  ...SETTINGS_ICONS, models: SlidersIcon, accounts: SignInIcon, 'hermes-remote': HermesMark, connectors: ConnectorIcon, capabilities: PlugIcon,
   browser: GlobeIcon, computer: MonitorIcon, schedules: ClockIcon, secrets: KeyIcon, 'agent-access': KeyIcon,
   privacy: ShieldIcon, feedback: FeedbackIcon, about: InfoIcon,
 }
@@ -347,6 +348,7 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
   const extra = actions.pluginSettings?.() ?? []
   // Before About: what the plugins add sits with the team's pages, not after the app's.
   const own = SETTINGS_PAGES.filter(([key]) => key !== 'models' || actions.providers !== undefined)
+  own.splice(own.findIndex(([key]) => key === (actions.providers === undefined ? 'general' : 'models')) + 1, 0, ['accounts', 'Accounts'])
   own.splice(own.findIndex(([key]) => key === 'schedules') + 1, 0, ['automations', 'Automations'])
   const pluginPages = extra.map(section => [`plugin:${section.id}`, section.label])
   // Keep remote agents together, independent of the current display language.
@@ -395,6 +397,7 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
           errorLine,
           // Called, not mounted: it holds no state, and the dialog's tree stays as it was.
           h(PageBoundary, null, shown === 'automations' ? h(AutomationsPage, { Section: SetSection })
+            : shown === 'accounts' ? h(AccountsPage, { Section: SetSection })
             : SettingsPage({ shown, id, bot, room, pluginPage, roster, actions, run, useUpdate, close }))),
         usageOpened ? h('div', { key: 'usage', className: 'bt-settings-scroll bt-settings-usage', 'data-off': shown === 'usage' ? undefined : '', 'aria-hidden': shown === 'usage' ? undefined : true },
           shown === 'usage' ? errorLine : null,

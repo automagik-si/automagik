@@ -10,5 +10,5 @@
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "scripts/client-seed.ts", "scripts/seed-clients.ts", "scripts/configure.ts", "test/**/*.ts", "vitest.config.ts"]
+  "include": ["src/**/*.ts", "scripts/client-seed.ts", "scripts/seed-clients.ts", "scripts/configure.ts", "scripts/admission.ts", "test/**/*.ts", "vitest.config.ts"]
 }

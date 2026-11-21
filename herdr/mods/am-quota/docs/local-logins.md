@@ -67,8 +67,9 @@ is never derived from an email.
 
 ## 2. How a switch chooses the login for new Claude launches
 
-**One record, read at launch.** The record is `<app home>/claude-logins.json`. Only the panel
-writes it, and the bot CLI reads it:
+**One record, read at launch.** The record is `<app home>/claude-logins.json`. The panel writes it
+through `am accounts set-login` where present, else with `writeTextFile`. Plan Apply uses the same
+CLI writer on linked machines. The bot CLI reads the record at launch.
 
 ```json
 { "use": "2", "logins": [ { "id": "2", "dir": "/home/you/.claude-2" } ] }
@@ -77,7 +78,7 @@ writes it, and the bot CLI reads it:
 - `use` is `"default"` (login A) or a listed `id`. The default login is implicit and never listed.
 - The record lives at the app home's top level, not under `data/am-quota/`. The CLI reads it and
   am-quota ships switched off, so the CLI must not depend on another mod's private folder.
-- A switch is one atomic write of `use` (`writeTextFile` with the snapshot it replaces). It
+- A switch is one atomic write of `use` with the snapshot it replaces. It
   touches no credential, so there is nothing to back up or put back.
 
 **Claude launches only.** The CLI reads the record only when the agent it is about to start is
@@ -110,6 +111,7 @@ CLI never repairs or rewrites the record.
 | a worker (`am worker`) | `workerArgs` (`workers.js`) | the same words, after `PATH=` |
 | a **template** worker | `workerArgs` with `template`: today `hc run … <template> <task>`, which takes no environment | see below |
 | the Accounts panel's background Restart | `cliRun` (`am-quota/main.js`) runs `am restart` in an hc terminal | none of its own: the CLI it runs reads the record. `CLI_ENV` never carries `CLAUDE_CONFIG_DIR` |
+| a worker on a chosen login home (`am worker --agent-home DIR`, a bot's `worker.agentHome`; #1208) | `workerArgs` (`workers.js`) with that folder's words | none: it never reads the record. It keeps the folder it was started on, and a switch never moves it |
 
 **Template workers.** `hc run <template>` takes no environment, so a template's pane would get
 herdr-core's environment, whatever login that names. When `templateAgent` says a template runs
@@ -149,8 +151,17 @@ Out of scope, by design:
 - a `claude` typed into an ordinary terminal, an automation (`am-automations`), or a template run
   by hand with `hc run`: these get whatever environment they start in, which is login A unless
   something sets the variable;
-- launches on linked machines (`--machine`) never get the login words: each host has one login;
+- launches on linked machines (`--machine`) get the login words only for a machine in the
+  Accounts plan's claude section, for projects that launch with its managed app home and set
+  neither their own app home nor their own PATH (RFC 0043 delivery 2); every other linked launch
+  keeps each route's behaviour: a start or plain restart gets none, a tree restart reads that
+  machine's own record;
 - per-bot pinning to a login (not asked for).
+
+The Accounts panel shows what each route would start on a linked machine. On a machine in the
+plan's claude section, a start or plain restart from here follows that machine's login record,
+as a tree restart does; elsewhere it uses the target's inherited environment, and the read says
+when the two routes pick different emails.
 
 Not used:
 - `launchctl setenv`: it is machine-wide, reaches every app, and going back to A needs an unset

@@ -10,10 +10,11 @@
 // credential or settings file be read.
 import { accessSync, constants, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { MEASUREMENT_MARKER } from './lib.mjs'
 
 export const VIEW_USAGE = 'node server/measurement-check.mjs <read-only-view>'
-/** Written by the image's first seed; its absence means the documented path is stale. */
-export const MARKER = 'dsh/profiles/automagik-web/automagik-server-profile'
+/** Published at startup in the dedicated measurement directory for an image-seeded profile. */
+export const MARKER = MEASUREMENT_MARKER
 /** The only roots the measurement identity may read. */
 export const EXPOSED = [
   '.claude/projects',

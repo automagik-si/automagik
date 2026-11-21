@@ -6,10 +6,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import * as localLogins from "../mods/am-quota/logins.js";
+import * as sharedProbe from "../mods/am-quota/loginProbe.js";
+import { loginsView } from "../mods/am-quota/view.js";
 import * as cli from "../mods/am-sidebar/logins.js";
 import { AUTH_SCRIPT, CONFIG_VAR, CREDENTIAL_VARS, DEFAULT_LOGIN, DEFAULT_WORDS, FOLDER_SCRIPT, PRESENT_SCRIPT, accountEmail, authCommand, bounded,
   loginWords, matchReal, methodLine, nextSlot, paneLogin, parseLogins, probeLogin, readRecord, readStatus, shapeProblem, signedOut, typed, writeRecord }
@@ -155,6 +158,19 @@ test("the credential variables Herdr has: names only, never a value", () => {
   assert.equal(r.stdout.includes("sk-example"), false);
 });
 
+test("a status of {} with a stale account record is failed in the fleet, never eligible; the panel's probe still shows the record's email", async () => {
+  const slot = { id: DEFAULT_LOGIN, dir: null };
+  const home = "/example-home";
+  for (const [stdout, signedIn, email, state] of [["{}", false, null, "failed"],
+    ['{"loggedIn":true}', true, "ana@example.com", "eligible"]]) {
+    const probe = await probeLogin(slot, { home, exec: async () => ({ code: 0, stdout }),
+      readTextFile: async () => '{"oauthAccount":{"emailAddress":"ana@example.com"}}' });
+    assert.equal(probe.email, "ana@example.com");
+    assert.equal(probe.signedIn, signedIn);
+    assert.deepEqual(sharedProbe.slotStates([probe], { home, vars: [] }), [{ ...slot, email, state }]);
+  }
+});
+
 test("readRecord and writeRecord: no file is login A; the write is { use, logins } with the snapshot it replaces", async () => {
   const files = new Map();
   const readTextFile = async (p) => (files.has(p) ? files.get(p) : null);
@@ -192,6 +208,8 @@ test("authCommand: claude where the CLI says launches find it, with the PATH a p
   const where = { program: "/opt/n/bin/claude", path: "/opt/n/bin:/usr/bin:/bin" };
   assert.deepEqual(authCommand({ id: DEFAULT_LOGIN, dir: null }, where), [ENV, [...DEFAULT_WORDS, `PATH=${where.path}`, where.program, "auth", "status"]]);
   assert.deepEqual(authCommand({ id: "2", dir: "/h/.claude-2" }, where), [ENV, [`PATH=${where.path}`, `${CONFIG_VAR}=/h/.claude-2`, where.program, "auth", "status"]]);
+  assert.deepEqual(authCommand({ id: "default" }, { program: "/p/claude", path: "/p" }),
+    [ENV, [...DEFAULT_WORDS, "PATH=/p", "/p/claude", "auth", "status"]]);
   assert.equal(authCommand({ id: "2", dir: "/h/.claude-2" }, { program: null, path: null }), null, "launches can't find claude: nothing to run");
   assert.deepEqual(authCommand({ id: "2", dir: "/h/.claude-2" }, undefined), ["sh", ["-c", AUTH_SCRIPT, "sh", `${CONFIG_VAR}=/h/.claude-2`]], "no CLI: the app's PATH");
 });
@@ -219,4 +237,58 @@ test("matchReal: a pane's folder reached through a link maps to its login by rea
   assert.deepEqual(await matchReal(paneLogin([ENV, `${CONFIG_VAR}=${join(root, "alias")}/`, "claude"], logins), logins, exec), { id: "2" });
   assert.deepEqual(await matchReal({ unknown: join(root, "gone") }, logins, exec), { unknown: join(root, "gone") });
   assert.deepEqual(await matchReal({ id: DEFAULT_LOGIN }, logins, exec), { id: DEFAULT_LOGIN });
+});
+
+test("loginProbe.js and accountsRows.js are byte copies, and logins.js exports the same probe functions", () => {
+  for (const name of ["loginProbe.js", "accountsRows.js"]) {
+    assert.deepEqual(readFileSync(new URL(`../mods/am-sidebar/${name}`, import.meta.url)),
+      readFileSync(new URL(`../mods/am-quota/${name}`, import.meta.url)));
+  }
+  for (const name of ["askStatus", "readRecord", "probeLogin", "paneLogin", "presentVars", "readStatus"]) {
+    assert.equal(localLogins[name], sharedProbe[name]);
+  }
+});
+
+test("probeLogin's code marks a bad folder or timeout without changing the local view", async () => {
+  for (const [dir, result, code] of [["relative", null, "bad-folder"], ["/h/empty", { code: 0, stdout: "missing" }, "bad-folder"],
+    ["/h/late", { late: true }, "timeout"], ["/h/failed", { code: 1 }, "bad-folder"]]) {
+    const probe = await probeLogin({ id: "2", dir }, { exec: async () => result, home: "/h" });
+    assert.equal(probe.code, code);
+    const { code: _code, ...unchanged } = probe;
+    const base = { id: "default", dir: null, problem: null, unlinked: [], email: "ana@example.com", status: { state: "in" } };
+    const input = { record: { use: "2", logins: [{ id: "2", dir }] }, vars: [], accounts: [], home: "/h" };
+    assert.deepEqual(loginsView({ ...input, probes: [base, probe] }), loginsView({ ...input, probes: [base, unchanged] }));
+  }
+});
+
+test("slotState and slotStates report fixed codes and only signed-in emails", () => {
+  const probe = { id: "default", dir: null, email: "ANA@example.com", signedIn: true, status: { state: "in", authMethod: "claude.ai" } };
+  const io = { vars: [], home: "/h" };
+  const cases = [
+    [probe, io, "eligible"], [{ ...probe, code: "bad-folder" }, io, "bad-folder"], [{ ...probe, code: "timeout" }, io, "timeout"],
+    [{ ...probe, status: { state: "late" } }, io, "timeout"], [{ ...probe, status: { state: "out" } }, io, "not-signed-in"],
+    [{ ...probe, status: { state: "nobin" } }, io, "failed"], [{ ...probe, email: null }, io, "failed"],
+    [probe, { ...io, vars: null }, "failed"], [probe, { ...io, vars: [CREDENTIAL_VARS[0]] }, "override"],
+    [{ ...probe, status: { state: "in", authMethod: "api_key" } }, io, "override"],
+    [{ ...probe, status: { state: "in", configDirectory: "/moved" } }, io, "override"],
+  ];
+  for (const [p, options, want] of cases) assert.equal(sharedProbe.slotState(p, options), want);
+  assert.deepEqual(sharedProbe.slotStates([probe, { ...probe, id: "2", dir: "/h/.claude-2" },
+    { ...probe, id: "3", dir: "/h/.claude-3", status: { state: "out" } }], io), [
+    { id: "default", dir: null, email: "ana@example.com", state: "ambiguous" },
+    { id: "2", dir: "/h/.claude-2", email: "ana@example.com", state: "ambiguous" },
+    { id: "3", dir: "/h/.claude-3", email: null, state: "not-signed-in" },
+  ]);
+});
+
+test("bareCommand passes the pane PATH with no login words, and falls back only when where is absent", () => {
+  assert.deepEqual(sharedProbe.bareCommand({ path: "/bin", program: "claude" }), [ENV, ["PATH=/bin", "claude", "auth", "status"]]);
+  assert.deepEqual(sharedProbe.bareCommand(), ["sh", ["-c", AUTH_SCRIPT, "sh"]]);
+  assert.equal(sharedProbe.bareCommand({ path: null, program: null }), null);
+});
+
+test("the local helpers still name folders, overrides and the next slot", () => {
+  assert.equal(typed("/h/.claude-2", "/h"), '"$HOME/.claude-2"');
+  assert.equal(methodLine("api_key"), "an API key outranks this sign-in");
+  assert.deepEqual(nextSlot([{ id: "2", dir: "/h/.claude-2" }], "/h"), { id: "3", dir: "/h/.claude-3" });
 });

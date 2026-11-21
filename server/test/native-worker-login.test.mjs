@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -14,6 +13,7 @@ import {
 } from '../native-worker-login.mjs'
 import { installationCliHome } from '../../apps/acp-dsh/src/host/installation.js'
 import { CliGenerations } from '../../apps/acp-dsh/src/host/cli-generations.js'
+import { spawnCapture } from './fixtures/spawn-capture.mjs'
 
 function scratch(t) {
   const home = mkdtempSync(join(tmpdir(), 'native-worker-login-'))
@@ -82,9 +82,13 @@ const FOLLOW = new URL('../profile-follow.mjs', import.meta.url).href
 const harness = `
   import { registerHooks, syncBuiltinESMExports } from 'node:module'
   const fs = process.getBuiltinModule('node:fs')
+  globalThis.testSpawn = process.getBuiltinModule('node:child_process').spawn
   const lstat = fs.lstatSync
   fs.lstatSync = (path, options) => path === globalThis.testCoreSocket
     ? { isSocket: () => true } : lstat(path, options)
+  // A host's own /data is never this test's: the view stays in the fixture's home.
+  const exists = fs.existsSync
+  fs.existsSync = (path) => path !== '/data' && exists(path)
   syncBuiltinESMExports()
   const lib = await import(${JSON.stringify(`${LIB}?test-original`)})
   globalThis.serverTestLib = {
@@ -108,6 +112,7 @@ const harness = `
           import { PassThrough } from 'node:stream'
           export function execFileSync() { return '' }
           export function spawn(command, args, options) {
+            if (command === '/usr/bin/flock') return globalThis.testSpawn(command, args, options)
             const env = options.env ?? process.env
             const child = new EventEmitter()
             child.stdout = new PassThrough()
@@ -142,7 +147,7 @@ function entrypointSpawnEnv(s) {
   delete env.AUTOMAGIK_PUBLIC_URL
   delete env[BOT_CLI_POINTER_ENV]
   delete env[NATIVE_WORKER_LOGIN_ENV]
-  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', harness], { env, encoding: 'utf8', timeout: 30_000 })
+  const result = spawnCapture(s.home, process.execPath, ['--input-type=module', '--eval', harness], { env, timeout: 30_000 })
   assert.ifError(result.error)
   assert.equal(result.status, 0, result.stderr)
   const line = result.stdout.split('\n').find(row => row.startsWith('DSH SPAWNENV '))

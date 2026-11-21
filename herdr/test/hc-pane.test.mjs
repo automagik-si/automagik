@@ -3,9 +3,13 @@
 // a fake core, temp app home/project/runtime, and a tiny child that records its environment.
 import test from "node:test";
 import assert from "node:assert/strict";
+import net from "node:net";
+import { once } from "node:events";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createInterface } from "node:readline";
+import { setTimeout as delay } from "node:timers/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -35,13 +39,14 @@ async function scene(t, { version = "0.1.14", labels = { bot: ID.dev }, address 
     { id: ID.dev, name: "Dev", kind: "main", look: { character: "star", colour: "blue" }, role: "r", instructions: "i", agent: "dsh-tui" },
   ] }, null, 2)}\n`);
   const socket = join(root, "core.sock");
-  const fake = await startFakeCore({ socket, version, terminals: [
-    { address, name: "pane", labels, cwd: project, state: "live" },
-  ] });
+  let fake;
   t.after(async () => {
-    try { await fake.close(); } catch { /* gone */ }
+    try { await fake?.close(); } catch { /* gone */ }
     rmSync(root, { recursive: true, force: true });
   });
+  fake = await startFakeCore({ socket, version, terminals: [
+    { address, name: "pane", labels, cwd: project, state: "live" },
+  ] });
   const roots = [["the project", project], ["the app home", app], ["the temp folder", paneTmp], ["the runtime folder", runtime]];
   const harness = join(root, "helper-test.mjs");
   writeFileSync(harness, `import { runPane } from ${JSON.stringify(pathToFileURL(HELPER).href)};\ntry { process.exit(await runPane(process.argv.slice(2), process.env, { forbiddenRoots: ${JSON.stringify(roots)} })); } catch (e) { console.error("hc-pane: " + String(e?.message ?? e).replace(/\\s+/g, " ")); process.exit(1); }\n`);
@@ -51,7 +56,8 @@ async function scene(t, { version = "0.1.14", labels = { bot: ID.dev }, address 
     HC_TERMINAL_ID: address, HC_TERMINAL_SOCKET: socket };
   if (sandboxRow) installSandboxRow({ env, forbiddenRoots: roots });
   approveProject({ project, env, approvedAt: "2026-11-01T00:00:00.000Z", approvedBy: "test" });
-  return { root, app, project, home, runtime, socket, fake, env, harness };
+  const proxySocket = join(runtime, "automagik-hc-proxy", address, "hc.sock");
+  return { root, app, project, home, runtime, socket, fake, env, harness, proxySocket, forbiddenRoots: roots };
 }
 
 /** Run the helper with a child Node script that records the environment it was given. */
@@ -104,9 +110,34 @@ test("the helper refuses to start the pane when the proxy refuses (fail closed, 
   const r = await runHelper(s, { out });
   assert.notEqual(r.code, 0, "the pane command was not started");
   assert.match(r.stderr, /^hc-pane: /m);
-  assert.match(r.stderr, /not the pinned 0\.1\.14/);
+  assert.match(r.stderr, /not a supported version \(0\.1\.14, 0\.1\.21\)/);
   assert.equal(existsSync(out), false, "the sandboxed command never ran");
   assert.equal(existsSync(join(s.runtime, "automagik-hc-proxy", "t300")), false, "no socket folder was made");
+});
+
+test("the helper starts a pane on a 0.1.21 core", async (t) => {
+  const s = await scene(t, { version: "0.1.21" });
+  const out = join(s.root, "child.json");
+  const result = await runHelper(s, { out });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(readFileSync(out, "utf8")).socket, true);
+});
+
+test("a version change between startup connections refuses the pane before spawn", async (t) => {
+  const s = await scene(t);
+  s.fake.state.reply = ({ id, method }, conn) => {
+    if (conn !== 1 || method !== "server.status") return undefined;
+    s.fake.state.version = "0.1.21";
+    return { jsonrpc: "2.0", id, result: { version: "0.1.14", core: { id: "fake-core" } } };
+  };
+  const out = join(s.root, "child.json");
+  const result = await runHelper(s, { out });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /^hc-pane: .*version.*0\.1\.21.*0\.1\.14/m);
+  assert.equal(existsSync(out), false);
+  assert.equal(existsSync(dirname(s.proxySocket)), false);
+  assert.deepEqual(s.fake.log.map(({ conn, method }) => [conn, method]),
+    [[1, "server.status"], [2, "server.status"]]);
 });
 
 test("M2: proxy down never starts a child or falls back to the real socket", async (t) => {
@@ -141,7 +172,9 @@ test("doctor reports each saved switch and probes only its bound proxy, without 
   t.after(() => proxy.close());
   assert.equal((await status())[0].up, true);
   bindings.get(bot.id).created_ms = 2;
-  assert.equal((await status())[0].up, false, "an old pane binding cannot report healthy");
+  const stale = (await status())[0];
+  assert.equal(stale.up, false, "an old pane binding cannot report healthy");
+  assert.equal(stale.coreVersion, null);
   bindings.get(bot.id).created_ms = 1;
   bot.hcProxy = false;
   const rollingBack = (await status())[0];
@@ -149,12 +182,7 @@ test("doctor reports each saved switch and probes only its bound proxy, without 
   assert.equal(rollingBack.up, true, "saved off does not pretend the old proxy has stopped");
   assert.equal(rollingBack.warning, true, "L2: incomplete rollback is a visible warning");
   assert.match(rollingBack.detail, /rollback not finished/);
-  writeFileSync(attachPath(s.app), attachLine(attachRow({ event: "attach", bot: bot.id,
-    project: s.project, terminal: "t300", core: "fixture", created_ms: 1, by: "test" })),
-  { mode: 0o600 });
-  const io = { env: s.env, project: { key: s.project, file: { bots: [bot] } },
-    forbiddenRoots: [["the project", s.project], ["the app home", s.app],
-      ["the temp folder", s.env.TMPDIR], ["the runtime folder", s.runtime]] };
+  const io = doctorIO(s, bot);
   const report = await cmdDshTui({ json: true }, ["doctor"], io);
   assert.equal(report.checks.find((row) => row.check === `hc-proxy:${bot.id}`).warning, true);
   const text = await cmdDshTui({}, ["doctor"], io);
@@ -163,6 +191,157 @@ test("doctor reports each saved switch and probes only its bound proxy, without 
   const before = s.fake.log.length;
   assert.equal((await status())[0].up, false);
   assert.equal(s.fake.log.length, before, "a stopped proxy never queries the real socket");
+});
+
+function doctorIO(s, bot) {
+  s.fake.state.terminals[0].created_ms = 1;
+  writeFileSync(attachPath(s.app), attachLine(attachRow({ event: "attach", bot: bot.id,
+    project: s.project, terminal: "t300", core: "fixture", created_ms: 1, by: "test" })),
+  { mode: 0o600 });
+  return { env: s.env, project: { key: s.project, file: { bots: [bot] } }, forbiddenRoots: s.forbiddenRoots };
+}
+
+test("doctor shows the proxy's core version", async (t) => {
+  const s = await scene(t, { version: "0.1.21" });
+  const bot = { id: ID.dev, name: "Dev", agent: "dsh-tui", hcProxy: true };
+  const io = doctorIO(s, bot);
+  const proxy = await startProxy({ env: s.env, terminal: "t300", upstream: s.socket,
+    caller: { bot: bot.id, project: s.project }, bound: true, forbiddenRoots: s.forbiddenRoots });
+  t.after(() => proxy.close());
+  const { bots: [row] } = await cmdDshTui({ json: true }, ["doctor"], io);
+  assert.equal(row.up, true);
+  assert.equal(row.coreVersion, "0.1.21");
+  assert.match(await cmdDshTui({}, ["doctor"], io), /hc-proxy:.*proxy is up, core 0\.1\.21/);
+  assert.deepEqual(s.fake.calls("proxy.status"), []);
+});
+
+test("an older proxy without proxy.status shows version unavailable", async (t) => {
+  const s = await scene(t);
+  const bot = { id: ID.dev, name: "Dev", agent: "dsh-tui", hcProxy: false };
+  const io = doctorIO(s, bot);
+  mkdirSync(dirname(s.proxySocket), { recursive: true });
+  const connections = [];
+  const old = net.createServer((socket) => {
+    const methods = [];
+    connections.push(methods);
+    const lines = createInterface({ input: socket });
+    lines.on("line", (line) => {
+      const { id, method } = JSON.parse(line);
+      methods.push(method);
+      const answer = method === "terminal.get" ? { result: s.fake.state.terminals[0] }
+        : { error: { code: -32000, message: "hc-proxy: method not allowed" } };
+      socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, ...answer })}\n`);
+    });
+  });
+  old.listen(s.proxySocket);
+  await once(old, "listening");
+  t.after(() => new Promise((done) => old.close(done)));
+  const { bots: [row] } = await cmdDshTui({ json: true }, ["doctor"], io);
+  assert.equal(row.up, true);
+  assert.equal(row.coreVersion, null);
+  assert.equal(row.warning, true);
+  assert.match(await cmdDshTui({}, ["doctor"], io),
+    /WARN hc-proxy:.*proxy is up, core version unavailable; rollback not finished/);
+  assert.deepEqual(connections, [["terminal.get", "proxy.status"], ["terminal.get", "proxy.status"]]);
+  assert.deepEqual(s.fake.log, [], "doctor only spoke to the proxy");
+});
+
+test("doctor rechecks the binding once when the proxy disconnects during status", async (t) => {
+  for (const retryAnswers of [false, true]) {
+    await t.test(retryAnswers ? "the binding still answers" : "the binding is down", async (t) => {
+      const s = await scene(t);
+      const bot = { id: ID.dev, name: "Dev", agent: "dsh-tui", hcProxy: true };
+      const io = doctorIO(s, bot);
+      mkdirSync(dirname(s.proxySocket), { recursive: true });
+      const connections = [];
+      const flaky = net.createServer((socket) => {
+        const retry = connections.length > 0;
+        const methods = [];
+        connections.push(methods);
+        const lines = createInterface({ input: socket });
+        lines.on("line", (line) => {
+          const { id, method } = JSON.parse(line);
+          methods.push(method);
+          if (method === "proxy.status" || (retry && !retryAnswers)) {
+            socket.end();
+            return;
+          }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, result: s.fake.state.terminals[0] })}\n`);
+        });
+      });
+      flaky.listen(s.proxySocket);
+      await once(flaky, "listening");
+      t.after(() => new Promise((done) => flaky.close(done)));
+      const { bots: [row] } = await cmdDshTui({ json: true }, ["doctor"], io);
+      assert.equal(row.up, retryAnswers);
+      assert.equal(row.coreVersion, null);
+      assert.deepEqual(connections, [["terminal.get", "proxy.status"], ["terminal.get"]]);
+      assert.deepEqual(s.fake.log, [], "doctor only spoke to the proxy");
+    });
+  }
+});
+
+test("a version mismatch kills a pane that ignores SIGTERM and disconnects a client in a long wait", { timeout: 10000 }, async (t) => {
+  const s = await scene(t);
+  const bot = { id: ID.dev, name: "Dev", agent: "dsh-tui", hcProxy: true };
+  const io = doctorIO(s, bot);
+  const spawned = Promise.withResolvers();
+  const messages = [];
+  const childScript = `
+    process.on("SIGTERM", () => console.log("SIGTERM"));
+    setInterval(() => {}, 1000);
+    console.log("ready");
+  `;
+  const pane = runPane(["--bot", ID.dev, "--project", s.project, "--",
+    process.execPath, "-e", childScript], s.env, {
+    forbiddenRoots: s.forbiddenRoots,
+    stderr: { write: (line) => messages.push(line) },
+    spawn: (command, args, options) => {
+      const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "inherit"] });
+      t.after(() => child.kill("SIGKILL"));
+      const output = createInterface({ input: child.stdout });
+      spawned.resolve({ exited: once(child, "exit"), output,
+        ready: once(output, "line", { signal: AbortSignal.timeout(3000) }) });
+      return child;
+    },
+  });
+  const { exited, output, ready } = await Promise.race([spawned.promise,
+    pane.then((code) => assert.fail(`the pane exited before starting its child (${code})`))]);
+  assert.deepEqual(await ready, ["ready"], "the child installed its SIGTERM handler");
+  assert.equal((await cmdDshTui({ json: true }, ["doctor"], io)).bots[0].up, true);
+
+  const waiting = net.connect(s.proxySocket);
+  t.after(() => waiting.destroy());
+  await once(waiting, "connect");
+  const waitClosed = once(waiting, "close");
+  s.fake.state.hang = "terminal.wait";
+  waiting.write('{"jsonrpc":"2.0","id":1,"method":"terminal.wait","params":{"children":"all"}}\n');
+  for (let elapsed = 0; !s.fake.calls("terminal.wait").length && elapsed < 3000; elapsed += 10) await delay(10);
+  assert.equal(s.fake.calls("terminal.wait").length, 1, "the other client has an in-flight wait");
+
+  s.fake.state.version = "0.1.21";
+  const trigger = net.connect(s.proxySocket);
+  t.after(() => trigger.destroy());
+  await once(trigger, "connect");
+  const lines = createInterface({ input: trigger });
+  const reply = once(lines, "line", { signal: AbortSignal.timeout(3000) });
+  const terminated = once(output, "line", { signal: AbortSignal.timeout(3000) });
+  trigger.write('{"jsonrpc":"2.0","id":42,"method":"terminal.list"}\n');
+  const [[line], childOutput] = await Promise.all([reply, terminated]);
+  const { id, error } = JSON.parse(line);
+  assert.equal(id, 42);
+  assert.match(error.message, /^hc-proxy: .*version/);
+
+  const [code, [, signal]] = await Promise.all([pane, exited, waitClosed]);
+  assert.equal(code, 1);
+  assert.deepEqual(childOutput, ["SIGTERM"], "the child received and ignored SIGTERM");
+  assert.equal(signal, "SIGKILL", "the helper killed the child after the grace period");
+  assert.equal(existsSync(s.proxySocket), false, "the helper removed its socket");
+  assert.match(messages.join(""), /hc-pane: .*version.*ending the pane/);
+  const { bots: [row] } = await cmdDshTui({ json: true }, ["doctor"], io);
+  assert.equal(row.up, false);
+  assert.equal(row.coreVersion, null);
+  assert.match(await cmdDshTui({}, ["doctor"], io), /hc-proxy:.*proxy is down/);
 });
 
 test("M1: proxy is listening before spawn; unexpected close ends the pane", async (t) => {

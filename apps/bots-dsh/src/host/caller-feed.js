@@ -1,0 +1,186 @@
+import { closesPart } from './caller-view.js'
+import { callerService, hasCallerLock, matchesFeedViewer } from './multiuser.js'
+import { personKey } from './people.js'
+
+const MAX_FEEDS = 4
+const MAX_BYTES = 64 * 1024
+const KEEPALIVE_MS = 15_000
+const HEADERS = { 'cache-control': 'no-store' }
+const encoder = new TextEncoder()
+const frame = (event, data) => encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+const hello = frame('hello', {})
+const revision = frame('revision', {})
+const keepalive = encoder.encode(': keepalive\n\n')
+
+export function install(rt) {
+  const { ctx } = rt
+  const people = new Map()
+  let timer, unsubscribers, disposed
+
+  function* feeds() {
+    for (const person of people.values()) yield* person.feeds
+  }
+
+  function close(feed, cancelled = false) {
+    if (feed.closed) return
+    feed.closed = true
+    const { person, request } = feed
+    person.bytes -= feed.bytes
+    person.feeds.delete(feed)
+    if (person.feeds.size === 0) people.delete(feed.key)
+    if (people.size === 0) {
+      clearInterval(timer)
+      timer = undefined
+      for (const off of unsubscribers ?? []) off?.()
+      unsubscribers = undefined
+    }
+    request.signal.removeEventListener('abort', feed.abort)
+    feed.request = undefined
+    feed.queue.length = 0
+    feed.changed.clear()
+    if (!cancelled) feed.controller.close()
+    feed.pull?.resolve()
+    feed.pull = undefined
+  }
+
+  function live(feed) {
+    if (feed.closed) return false
+    const role = feed.service.roleOf(feed.principal)
+    if (feed.request.signal.aborted || callerService(ctx) !== feed.service ||
+        role !== feed.role || !matchesFeedViewer(feed.request, rt.viewerOf(feed.principal, role)) ||
+        !rt.sameTeam(feed.team) || rt.readOnly() !== undefined) {
+      close(feed)
+      return false
+    }
+    return true
+  }
+
+  function valid(feed, entry) {
+    if (!live(feed)) return false
+    if (entry.botId === undefined) return true
+    try {
+      return feed.service.visibleBotIds(feed.principal).has(entry.botId) &&
+        rt.readableParts(entry.botId).length > 0 && !feed.closed
+    } catch {
+      close(feed)
+      return false
+    }
+  }
+
+  function drain(feed) {
+    if (!feed.pull || feed.draining) return
+    feed.draining = true
+    try {
+      while (!feed.closed && feed.queue.length > 0) {
+        const entry = feed.queue.shift()
+        feed.bytes -= entry.chunk.byteLength
+        feed.person.bytes -= entry.chunk.byteLength
+        feed.changed.delete(entry.botId)
+        if (!valid(feed, entry)) continue
+        feed.controller.enqueue(entry.chunk)
+        feed.pull.resolve()
+        feed.pull = undefined
+        break
+      }
+    } finally {
+      feed.draining = false
+    }
+  }
+
+  function enqueue(feed, chunk, botId) {
+    const entry = { chunk, botId }
+    if (feed.changed.has(botId) || !valid(feed, entry)) return
+    const size = chunk.byteLength
+    if (feed.person.bytes + size > MAX_BYTES) {
+      close(feed)
+      return
+    }
+    if (botId !== undefined) feed.changed.add(botId)
+    feed.queue.push(entry)
+    feed.bytes += size
+    feed.person.bytes += size
+    drain(feed)
+  }
+
+  function allowed(feed) {
+    return new Map(Array.from(feed.service.visibleBotIds(feed.principal), id =>
+      [id, new Set(rt.readableParts(id).map(part => part.sessionId))]))
+  }
+
+  function refreshAccess() {
+    for (const feed of feeds()) {
+      if (!live(feed)) continue
+      let next
+      try { next = allowed(feed) } catch {
+        close(feed)
+        continue
+      }
+      if (feed.closed) continue
+      const lost = [...feed.allowed].some(([id, parts]) => !next.has(id) ||
+        [...parts].some(part => !next.get(id).has(part)))
+      if (lost) close(feed)
+      else {
+        feed.allowed = next
+        enqueue(feed, revision)
+      }
+    }
+  }
+
+  const saved = () => {
+    for (const feed of feeds()) enqueue(feed, revision)
+  }
+  const sessionEvent = (session, event) => {
+    if ((event.type !== 'user/message' && event.type !== 'assistant/message') || closesPart(event)) return
+    const id = rt.chatOwners.get(session?.id)
+    if (id === undefined || !rt.readableParts(id).some(part => part.sessionId === session.id)) return
+    const chunk = frame('changed', { botId: id })
+    for (const feed of feeds()) enqueue(feed, chunk, id)
+  }
+
+  rt.callerFeed = async (request, principal) => {
+    const service = callerService(ctx)
+    const role = service?.roleOf(principal)
+    if (disposed || (role !== 'member' && role !== 'guest')) {
+      return new Response(null, { status: 403, headers: HEADERS })
+    }
+    if (!matchesFeedViewer(request, rt.viewerOf(principal, role))) {
+      return new Response(null, { status: 403, headers: HEADERS })
+    }
+    if (!hasCallerLock(rt)) return new Response(null, { status: 503, headers: HEADERS })
+    const key = personKey(principal.person)
+    const person = people.get(key) ?? { feeds: new Set(), bytes: 0 }
+    if (person.feeds.size >= MAX_FEEDS) return new Response('Too many open feeds', { status: 429, headers: HEADERS })
+
+    // Retain the request so that its signal keeps following the connection.
+    const feed = { key, person, request, service, principal, role, team: rt.teamGeneration(), bytes: 0, queue: [], changed: new Set() }
+    feed.abort = () => close(feed)
+    feed.allowed = allowed(feed)
+    const body = new ReadableStream({
+      start(controller) { feed.controller = controller },
+      pull() {
+        const pull = Promise.withResolvers()
+        feed.pull = pull
+        drain(feed)
+        return pull.promise
+      },
+      cancel() { close(feed, true) },
+    }, { highWaterMark: 0 })
+    people.set(key, person)
+    person.feeds.add(feed)
+    request.signal.addEventListener('abort', feed.abort, { once: true })
+    if (request.signal.aborted) close(feed)
+    else {
+      unsubscribers ??= [rt.onAccessLoss(refreshAccess), rt.onSaved(saved), ctx.on('session/event', sessionEvent)]
+      timer ??= setInterval(() => {
+        for (const client of feeds()) if (live(client) && client.queue.length === 0) enqueue(client, keepalive)
+      }, KEEPALIVE_MS).unref()
+      enqueue(feed, hello)
+    }
+    return new Response(body, { headers: { ...HEADERS, 'content-type': 'text/event-stream; charset=utf-8' } })
+  }
+
+  return () => {
+    disposed = true
+    for (const feed of feeds()) close(feed)
+  }
+}

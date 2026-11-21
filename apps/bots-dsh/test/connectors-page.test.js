@@ -18,7 +18,12 @@ const { JSDOM } = createRequire(join(process.env.DSH_HARNESS ?? join(PLUGIN, '..
 // stable because the tree expands the same way every pass.
 const { outputFiles } = await build({
   stdin: {
-    contents: "export { MailCatalogRow, MailToolCell } from './src/client/connectors.js'\nexport { ConnectorsPage } from './src/client/connectors-page.js'",
+    contents: [
+      "export { MailCatalogRow, MailToolCell } from './src/client/connectors.js'",
+      "export { ConnectorsPage } from './src/client/connectors-page.js'",
+      "export { officialInstall } from './src/client/extend.js'",
+      "export { installLocale } from './src/client/i18n.js'",
+    ].join('\n'),
     resolveDir: PLUGIN,
   },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
@@ -28,6 +33,7 @@ const slots = []
 let idx = 0
 let concrete = null
 let props = {}
+let officialHooks = null
 const expand = (node) => {
   if (node === null || node === undefined || node === false || node === true) return node
   if (Array.isArray(node)) return node.map(expand)
@@ -36,15 +42,35 @@ const expand = (node) => {
   return { ...node, props: { ...(node.props ?? {}), children: expand(node.props?.children) } }
 }
 let active = () => expand(MailCatalogRow(props))
-const rerender = () => { idx = 0; concrete = active() }
+const rerender = () => {
+  idx = 0
+  if (officialHooks) {
+    officialHooks.at = 0
+    officialHooks.subscriptions.length = 0
+  }
+  concrete = active()
+}
 const react = {
   createContext: (initial) => { const ctx = { value: initial }; ctx.Provider = ({ value, children }) => { ctx.value = value; return children }; return ctx },
   useContext: ctx => ctx.value,
   useCallback: fn => fn,
-  useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
+  useSyncExternalStore(subscribe, getSnapshot) {
+    officialHooks?.subscriptions.push(subscribe)
+    return getSnapshot()
+  },
   createElement: (type, p, ...children) => ({ type, props: { ...(p ?? {}), children } }),
   Fragment: 'fragment',
-  useEffect() {}, useLayoutEffect() {},
+  useEffect(run, deps) {
+    if (!officialHooks) return
+    const i = officialHooks.at++
+    const before = officialHooks.deps[i]
+    if (!deps || !before || deps.length !== before.length
+      || deps.some((dep, index) => !Object.is(dep, before[index]))) {
+      officialHooks.deps[i] = deps
+      officialHooks.pendingEffects.push(run)
+    }
+  },
+  useLayoutEffect() {},
   useState: (init) => {
     const i = idx++
     if (!(i in slots)) slots[i] = typeof init === 'function' ? init() : init
@@ -71,7 +97,9 @@ runInNewContext(outputFiles[0].text, {
   window: pageWindow,
   require: name => (name === 'react' ? react : name === 'react-dom' ? { createPortal: node => node } : {}),
 })
-const { MailCatalogRow, MailToolCell, ConnectorsPage } = module.exports
+const {
+  MailCatalogRow, MailToolCell, ConnectorsPage, officialInstall, installLocale,
+} = module.exports
 const render = () => { active = () => expand(MailCatalogRow(props)); rerender() }
 const renderCell = (cellProps) => { slots.length = 0; active = () => expand(MailToolCell(cellProps)); rerender() }
 
@@ -436,6 +464,219 @@ test('an install opens the team setup, and an installed Bot opens its chat', () 
   actionIn(officialTile('Omni'), 'Installed').props.onClick()
   actionIn(officialTile('Genie'), 'Install').props.onClick()
   assert.deepEqual(calls, [['closeSettings'], ['openSession', 'omni-1'], ['closeSettings'], ['openHarnessOnboarding', 'omni-team']])
+})
+
+const noAction = { text: null, label: null, alert: null }
+const installerOf = extra => ({
+  kinds: ['omni', 'genie'],
+  row: () => noAction,
+  subscribe: () => () => {},
+  version: () => 0,
+  ...extra,
+})
+const useOfficialHooks = (t) => {
+  slots.length = 0
+  officialHooks = { at: 0, deps: [], pendingEffects: [], subscriptions: [] }
+  t.after(() => { officialHooks = null })
+}
+const runEffects = () => {
+  for (const effect of officialHooks.pendingEffects.splice(0)) effect()
+}
+
+test('an official install runs in the Apps row without leaving Settings', (t) => {
+  useOfficialHooks(t)
+  const calls = []
+  const actions = {
+    closeSettings: () => calls.push('close'),
+    openHarnessOnboarding: () => calls.push('onboarding'),
+  }
+  const page = officialPage({ connectors: [], actions })
+  const installer = installerOf({
+    row: kind => kind === 'genie'
+      ? { ...noAction, label: 'Install Genie', action: 'install' } : noAction,
+    act: (kind, ctx) => calls.push([kind, ctx.roster, ctx.actions]),
+  })
+  t.after(officialInstall.register(installer))
+  renderPage(page)
+  actionIn(officialTile('Genie'), 'Install').props.onClick()
+  assert.deepEqual(calls, [['genie', page.roster, actions]])
+})
+
+test('a plain official install uses the Apps page status and button translations', (t) => {
+  useOfficialHooks(t)
+  t.after(officialInstall.register(installerOf({
+    row: kind => kind === 'genie'
+      ? { ...noAction, label: 'Install Genie', action: 'install' } : noAction,
+  })))
+  const page = officialPage({ connectors: [] })
+  const check = (label, text) => {
+    renderPage(page)
+    const tile = officialTile('Genie')
+    assert.ok(actionIn(tile, label))
+    const status = within(tile, n => n.props.className === 'bt-app-status')[0]
+    assert.equal(flatten(status).join(''), text)
+  }
+  check('Install', 'Not installed')
+  let zh
+  t.after(installLocale({
+    register(_namespace, _lang, strings) { zh = strings },
+    bind: () => key => zh[key] ?? key,
+  }))
+  check('安装', '未安装')
+})
+
+test('an official row shares its progress and error between the tile and detail', (t) => {
+  useOfficialHooks(t)
+  let row = { ...noAction, text: 'Installing Genie · 2 of 3 · Bot team' }
+  let genieRows = 0
+  const installer = installerOf({
+    row(kind) {
+      if (kind !== 'genie') return noAction
+      genieRows += 1
+      return row
+    },
+  })
+  t.after(officialInstall.register(installer))
+  renderPage(officialPage({ connectors: [] }))
+  assert.equal(genieRows, 1)
+  mainButton('Genie').props.onClick()
+  assert.equal(genieRows, 2)
+  const detail = has('bt-app-expanded')[0]
+  const tile = officialTile('Genie')
+  assert.equal(flatten(within(tile, n => n.props.className === 'bt-app-status')[0])[0], row.text)
+  assert.equal(flatten(within(detail, n => n.props.className === 'bt-set-hint')[0])[0], row.text)
+  assert.equal(within(tile, n => n.props.className === 'bt-app-btn').length, 0)
+  assert.equal(within(detail, n => n.type === 'button').length, 0)
+
+  row = { text: 'Could not install Genie', label: 'Try again', alert: 'git was not found' }
+  rerender()
+  assert.equal(officialTile('Genie').props['data-error'], '')
+  const alert = within(has('bt-app-expanded')[0], n => n.props.role === 'alert')[0]
+  assert.equal(alert.props.className, 'bt-connector-error')
+  assert.equal(flatten(alert)[0], row.alert)
+})
+
+test('a late installer with no action hides Install, and disposal restores the team step', (t) => {
+  useOfficialHooks(t)
+  const calls = []
+  const actions = { openHarnessOnboarding: id => calls.push(id) }
+  const page = officialPage({ connectors: [], actions })
+  renderPage(page)
+  assert.ok(actionIn(officialTile('Genie'), 'Install'))
+  runEffects()
+
+  page.roster.readOnly = true
+  const dispose = officialInstall.register(installerOf({
+    row: (_kind, { roster }) => roster.readOnly ? noAction : { ...noAction, label: 'Install' },
+    refresh: () => calls.push('refresh'),
+  }))
+  t.after(dispose)
+  rerender()
+  runEffects()
+  assert.deepEqual(calls, ['refresh'])
+  const tile = officialTile('Genie')
+  assert.match(flatten(tile).join(' '), /Not installed/)
+  assert.equal(within(tile, n => n.type === 'button').length, 1)
+  mainButton('Genie').props.onClick()
+  assert.equal(within(has('bt-app-expanded')[0], n => n.type === 'button').length, 0)
+  assert.deepEqual(calls, ['refresh'])
+
+  dispose()
+  page.roster.readOnly = false
+  rerender()
+  actionIn(officialTile('Genie'), 'Install').props.onClick()
+  assert.deepEqual(calls, ['refresh', 'omni-team'])
+})
+
+test('the official section refreshes on mount and when its provider changes', (t) => {
+  useOfficialHooks(t)
+  const reads = []
+  const first = installerOf({ refresh: async () => { reads.push('first') } })
+  const second = installerOf({ refresh: async () => { reads.push('second') } })
+  t.after(officialInstall.register(first))
+  const page = officialPage({ connectors: [] })
+  renderPage(page)
+  assert.ok(officialHooks.subscriptions.includes(first.subscribe))
+  runEffects()
+  rerender()
+  runEffects()
+  assert.deepEqual(reads, ['first'])
+
+  t.after(officialInstall.register(second))
+  rerender()
+  assert.ok(officialHooks.subscriptions.includes(second.subscribe))
+  assert.ok(!officialHooks.subscriptions.includes(first.subscribe))
+  runEffects()
+  rerender()
+  runEffects()
+  assert.deepEqual(reads, ['first', 'second'])
+
+  useOfficialHooks(t)
+  renderPage(page)
+  runEffects()
+  assert.deepEqual(reads, ['first', 'second', 'second'])
+})
+
+test('pending Omni takes the Main Bot fallback while an Omni Bot keeps Installed', (t) => {
+  useOfficialHooks(t)
+  let pending = false
+  let row = { ...noAction, label: 'Install Omni', action: 'install' }
+  const installer = installerOf({
+    pending: kind => kind === 'omni' && pending,
+    row: kind => kind === 'omni' ? row : noAction,
+  })
+  t.after(officialInstall.register(installer))
+  const main = { id: 'ada', name: 'Ada' }
+  renderPage(officialPage({ connectors: [], bots: [main] }))
+  assert.ok(actionIn(officialTile('Omni'), 'Installed'))
+
+  pending = true
+  rerender()
+  assert.ok(actionIn(officialTile('Omni'), 'Install'))
+  row = { ...noAction, text: 'Installing Omni · 2 of 3 · Omni channels' }
+  rerender()
+  assert.ok(flatten(officialTile('Omni')).includes(row.text))
+  assert.equal(within(officialTile('Omni'), n => n.type === 'button').length, 1)
+
+  renderPage(officialPage({ connectors: [], bots: [main, { id: 'omni', kind: 'omni' }] }))
+  assert.ok(actionIn(officialTile('Omni'), 'Installed'))
+})
+
+test('pending Omni pairing takes the Main Bot fallback without an action button', (t) => {
+  useOfficialHooks(t)
+  const text = 'Approve this device on your phone'
+  t.after(officialInstall.register(installerOf({
+    pending: kind => kind === 'omni',
+    row: kind => kind === 'omni' ? { ...noAction, text } : noAction,
+  })))
+  renderPage(officialPage({ connectors: [], bots: [{ id: 'ada', name: 'Ada' }] }))
+  const tile = officialTile('Omni')
+  assert.ok(flatten(tile).includes(text))
+  assert.equal(within(tile, n => n.type === 'button').length, 1)
+})
+
+test('installed Bots and ACP actions still use the Apps page actions with an installer', (t) => {
+  useOfficialHooks(t)
+  t.after(officialInstall.register(installerOf({
+    row: () => assert.fail('installed Bots and ACP rows use the built-in actions'),
+  })))
+  const calls = []
+  const actions = {
+    closeSettings: () => calls.push(['close']),
+    openSession: id => calls.push(['openSession', id]),
+    openCliLogin: (bot, provider) => calls.push(['openCliLogin', bot, provider]),
+  }
+  const bots = [{ id: 'omni', kind: 'omni' }, { id: 'genie', kind: 'genie' }]
+  const models = [{ provider: 'acp-claude', needsSignIn: true }, { provider: 'acp-codex' }]
+  renderPage(officialPage({ connectors: [], bots, models, actions }))
+  actionIn(officialTile('Genie'), 'Installed').props.onClick()
+  actionIn(officialTile('Claude'), 'Sign in').props.onClick()
+  actionIn(officialTile('Codex'), 'Installed').props.onClick()
+  assert.deepEqual(calls, [
+    ['close'], ['openSession', 'genie'],
+    ['close'], ['openCliLogin', 'omni', 'acp-claude'],
+    ['close'], ['openCliLogin', 'omni', 'acp-codex'],
+  ])
 })
 
 test('Claude and Codex follow the ACP routes, open the sign-in the app already uses, and offer no install', () => {

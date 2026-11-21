@@ -33,6 +33,24 @@ export function restartAtProblem(value) {
     ? null : `restartAt ${JSON.stringify(value)} isn't a positive whole number of tokens`;
 }
 
+/**
+ * How a project reacts to a Claude Code seat blocked on its rate-limit dialog (#1557):
+ * `park` (the default) records the reset time and restarts the seat a minute after it;
+ * `switch` restarts it on another signed-in login with headroom, falling back to `park`.
+ * The setting is the project file's top-level `onRateLimit`, beside `version` and `categories`.
+ */
+export const RATE_LIMIT_MODES = ["park", "switch"];
+
+/** The project's rate-limit reaction: "switch" only when the file says so, else "park". */
+export const rateLimitModeOf = (file) => (file?.onRateLimit === "switch" ? "switch" : "park");
+
+/** Why a project's `onRateLimit` can't be used, or null: absent, or park/switch. */
+export function onRateLimitProblem(value) {
+  if (value === undefined || value === null) return null;
+  return RATE_LIMIT_MODES.includes(value)
+    ? null : `onRateLimit ${JSON.stringify(value)} isn't one of ${RATE_LIMIT_MODES.join(", ")}`;
+}
+
 /** A daily wake is a two-digit time on the machine that owns the roster. */
 export function wakeProblem(value) {
   return typeof value === "string" && /^daily@(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(value)
@@ -112,6 +130,62 @@ export const TEMPLATE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** The worker fields a bot may set (`worker: { agent?, model?, effort?, template?, agyMode? }`), each optional text. */
 export const WORKER_FIELDS = ["agent", "model", "effort", "template", "agyMode"];
+
+// ---- a chosen login home for a bot's workers (#1208; agentHome.js has the launch side) ----
+
+/** The variable each agent that takes a chosen login home reads it from. */
+export const AGENT_HOME_VARS = Object.freeze({ claude: "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" });
+/** Whether `agent` is one a chosen home can be given to. */
+export const agentHomeAgent = (agent) => typeof agent === "string" && Object.hasOwn(AGENT_HOME_VARS, agent);
+/** Whether a worker defaults object names `agentHome` at all (any value, even an unusable one). */
+export const hasWorkerHome = (worker) => worker !== null && typeof worker === "object" && Object.hasOwn(worker, "agentHome");
+/** Why `path` isn't shaped as a login folder (absolute, printable, not the root), or null. Nothing is read. */
+export function agentHomePathProblem(path) {
+  if (typeof path !== "string" || !path) return "needs a folder";
+  if (!path.startsWith("/")) return "must be an absolute path";
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(path)) return "has a control character";
+  if (/^\/+$/u.test(path)) return "must name a login folder, not /";
+  return null;
+}
+
+/** The agent a bot's workers run by default: its worker agent, else its own (the default table's aliases resolved). */
+const workerAgentOf = (bot) => resolveAgent(bot?.worker?.agent ?? bot?.agent);
+/**
+ * #1208: a worker object parseBots had to drop (a field not text, a bad template) keeps its
+ * `agentHome` and the reason here, beside the bot object, so a launch that would use that home is
+ * refused instead of running without the dropped defaults. Nothing else reads it.
+ */
+const droppedWorkerHome = new WeakMap();
+
+/**
+ * A bot's `worker.agentHome` as its file wrote it (#1208): { present, home, error }. `present`:
+ * the field is there, whatever its value; `error`: why its worker object was dropped when it
+ * was (parseBots), else null. A worker launch refuses a present home it can't use.
+ */
+export function workerHomeOf(bot) {
+  if (hasWorkerHome(bot?.worker)) return { present: true, home: bot.worker.agentHome, error: null };
+  const kept = bot !== null && typeof bot === "object" ? droppedWorkerHome.get(bot) : undefined;
+  return kept ? { present: true, home: kept.home, error: kept.error } : { present: false, home: undefined, error: null };
+}
+
+/**
+ * Why a bot's written `worker.agentHome` can't be saved (#1208), or null when it is absent or
+ * fine: an absolute folder path (its folder is checked at each launch, on its own machine), for a
+ * Claude or Codex default worker agent, and no worker template beside it.
+ */
+function workerHomeProblem(bot) {
+  if (!hasWorkerHome(bot?.worker)) return null;
+  return agentHomePathProblem(bot.worker.agentHome)
+    ?? (!agentHomeAgent(workerAgentOf(bot)) ? "needs a Claude or Codex default worker agent" : null)
+    ?? (bot.worker.template !== undefined ? "can't be used with a worker template" : null);
+}
+
+/** Why a launch that would use the bot's `worker.agentHome` is refused by its file alone, or null. */
+export function workerHomeLaunchProblem(bot) {
+  const written = workerHomeOf(bot);
+  if (!written.present) return null;
+  return written.error ?? workerHomeProblem(bot);
+}
 
 /**
  * Why a bot's `worker` (its workers' defaults) can't be used, or null when it is absent or
@@ -316,10 +390,16 @@ export function parseBots(text) {
       delete bot.worker.agyMode;
     }
     const workerWhy = workerProblem(bot.worker);
-    if (workerWhy) { warnings.push(`${where}: ${workerWhy}; ignored`); delete bot.worker; }
+    if (workerWhy) {
+      if (hasWorkerHome(bot.worker)) droppedWorkerHome.set(bot, { home: bot.worker.agentHome, error: workerWhy });
+      warnings.push(`${where}: ${workerWhy}; ignored`);
+      delete bot.worker;
+    }
     else if (isObject(bot.worker) && typeof bot.worker.agyMode === "string" && !AGY_MODES.includes(bot.worker.agyMode)) {
       warnings.push(`${where}: worker agyMode ${JSON.stringify(bot.worker.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
+    const homeWhy = workerHomeLaunchProblem(bot);
+    if (homeWhy) warnings.push(`${where}: worker.agentHome: ${homeWhy}; launches using it will be refused`);
     const retired = (k) => (typeof k === "string" && Object.hasOwn(LEGACY_AGENTS, k) ? k : null);
     const seatOld = retired(bot.agent);
     const workerOld = isObject(bot.worker) ? retired(bot.worker.agent) ?? (bot.worker.agent ? null : seatOld) : null;
@@ -400,6 +480,8 @@ export function parseBots(text) {
   const mains = bots.filter((b) => b.kind === "main");
   if (mains.length === 0) warnings.push("no main bot");
   if (mains.length > 1) warnings.push(`${mains.length} main bots; ${mains[0].id} counts`);
+  const rateIssue = onRateLimitProblem(raw.onRateLimit);
+  if (rateIssue) warnings.push(`${rateIssue}; the project parks rate-limited seats`);
   const file = { ...raw, version: 1, categories, bots };
   for (const b of bots) {
     if (b.leadProject) {
@@ -677,6 +759,8 @@ export function checkBots(file, before = null, { project = null, projects = null
   const oldIds = new Set((Array.isArray(had?.categories) ? had.categories : []).map((c) => c?.id).filter(isText));
   const errors = [];
   if (!isObject(file) || file.version !== 1 || !Array.isArray(file.bots)) return ["not a version-1 bots file"];
+  const rateIssue = onRateLimitProblem(file.onRateLimit);
+  if (rateIssue) errors.push(rateIssue);
   const cats = Array.isArray(file.categories) ? file.categories : [];
   if (!Array.isArray(file.categories)) errors.push("no categories list");
   const catIds = new Set();
@@ -737,6 +821,12 @@ export function checkBots(file, before = null, { project = null, projects = null
     }
     if (isObject(b.worker) && b.worker.agyMode !== undefined && b.worker.agyMode !== "" && !AGY_MODES.includes(b.worker.agyMode)) {
       errors.push(`${at}: worker agyMode ${JSON.stringify(b.worker.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
+    }
+    if (hasWorkerHome(b.worker)) {
+      // workerPlan resolves an explicit worker agent and uses the seat agent's raw key as its fallback.
+      const why = workerProblem(b.worker) ?? workerHomeProblem(b)
+        ?? (!b.worker.agent && !agentHomeAgent(b.agent) ? "set worker.agent to Claude or Codex, or use its canonical key as the bot agent" : null);
+      if (why) errors.push(`${at}: worker.agentHome: ${why}`);
     }
     if (b.agyPermissions !== undefined) {
       if (!isObject(b.agyPermissions)) errors.push(`${at}: agyPermissions is not an object with allow and deny lists`);
@@ -973,8 +1063,10 @@ export function newCategoryId(title, categories = []) {
  * the stored ones; a `worker` with none of its fields left is removed too.
  * A lead equal to the main bot (with no leadProject) is stored as no lead; a category goes only
  * with the main bot as lead; `newCategory` ({ title, sub }) is added to the categories and used.
+ * `workerHomeGiven`: the entry's `worker.agentHome` is the person's own (create/edit
+ * --worker-agent-home, #1208); without it the stored one is kept or dropped as said below.
  */
-export function applyBotEdit(raw, entry, newCategory = null) {
+export function applyBotEdit(raw, entry, newCategory = null, { workerHomeGiven = false } = {}) {
   const out = JSON.parse(JSON.stringify(raw ?? { version: 1, categories: [], bots: [] }));
   out.version ??= 1;
   if (!Array.isArray(out.categories)) out.categories = [];
@@ -1041,6 +1133,24 @@ export function applyBotEdit(raw, entry, newCategory = null) {
     if (!Object.keys(merged.worker).length) delete merged.worker;
   }
   if ("worker" in bot && (!isObject(bot.worker) || Object.keys(bot.worker).length === 0)) delete merged.worker;
+  // #1208: worker.agentHome belongs to the default worker agent. Only a writer that gives it
+  // (`workerHomeGiven`: create/edit --worker-agent-home; empty clears) sets it. Any other writer
+  // (the Herdr form, restart --save, an edit without the flag) keeps the stored one while the
+  // default worker agent stays the same, drops it when that agent changes, and never brings back
+  // one its own copy of the entry still carries.
+  const previous = i >= 0 ? out.bots[i] : null;
+  if ((hasWorkerHome(previous?.worker) || hasWorkerHome(merged.worker)) && (merged.worker === undefined || isObject(merged.worker))) {
+    const worker = { ...merged.worker };
+    if (workerHomeGiven) {
+      if (worker.agentHome === "") delete worker.agentHome;
+    } else {
+      delete worker.agentHome;
+      if (hasWorkerHome(previous?.worker) && workerAgentOf(previous) === workerAgentOf({ ...merged, worker })) {
+        worker.agentHome = previous.worker.agentHome;
+      }
+    }
+    if (Object.keys(worker).length) merged.worker = worker; else delete merged.worker;
+  }
   if (i >= 0) out.bots[i] = merged; else out.bots.push(merged);
   return out;
 }

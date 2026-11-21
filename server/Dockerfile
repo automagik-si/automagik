@@ -22,7 +22,7 @@ FROM gcr.io/distroless/nodejs24-debian12@sha256:61f4f4341db81820c24ce771b83d202e
 
 FROM node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS builder
 
-ARG AUTOMAGIK_VERSION=3.90.1
+ARG AUTOMAGIK_VERSION=3.160.6
 ARG DSH_VERSION=0.2.2-rc.2
 ARG IMAGE_REVISION=unknown
 ARG AUTOMAGIK_REPOSITORY=https://github.com/automagik-si/automagik
@@ -123,7 +123,8 @@ RUN set -eux; \
     rm -f /tmp/herdr-core.tar.gz /tmp/herdr-core; \
     /out/bin/hc --version | grep -qx "hc ${HERDR_CORE_VERSION}"; \
     install -d -o 1000 -g 1000 -m 0700 /out/rootfs/run/automagik; \
-    chmod 0700 /out/data/secrets; \
+    install -d -m 0755 /out/caller-keys; \
+    chmod 0700 /out/data/dsh /out/data/secrets; \
     chown -R 1000:1000 /out/data
 
 # Exact WebAuthn library and transitive lock, installed with the repository's Bun version.
@@ -141,13 +142,13 @@ FROM scratch AS runtime
 # the repository's) and the commit that built it name the image: the tag is
 # <content>-<short revision>, :latest compares the version label, and the revision is the full
 # workflow commit. `AUTOMAGIK_VERSION` in the builder is that plugin release.
-ARG IMAGE_VERSION=3.90.1
+ARG IMAGE_VERSION=3.160.6
 ARG IMAGE_REVISION=unknown
 ARG INPUT_KIND=release
 ARG INPUT_MANIFEST=
 
 LABEL org.opencontainers.image.title="Automagik server" \
-      org.opencontainers.image.description="The automagik-web DeepSeek Harness profile for a host: the Bot team, the welcome and ACP agents" \
+      org.opencontainers.image.description="The automagik-web DeepSeek Harness profile for a host: the Bot team, the welcome, ACP agents and the multiuser adapter" \
       org.opencontainers.image.source="https://github.com/automagik-si/automagik" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
@@ -177,6 +178,7 @@ COPY --from=tools /out/bin/herdr-core /usr/local/bin/herdr-core
 COPY --from=tools /out/bin/hc /usr/local/bin/hc
 COPY --from=tools /out/licenses /opt/automagik/licenses
 COPY --from=tools --chown=1000:1000 /out/data /data
+COPY --from=tools --chown=1000:1000 /out/caller-keys /caller-keys
 
 COPY --from=gate-deps /gate/node_modules /opt/automagik/node_modules
 COPY --from=builder /build/out/runtime /opt/automagik/runtime
@@ -187,9 +189,10 @@ COPY --from=builder /build/out/offline-store /opt/automagik/offline-store
 COPY --from=builder /build/out/am /opt/automagik/am
 COPY server/entrypoint.mjs server/native-worker-login.mjs server/healthcheck.mjs server/lib.mjs \
      server/gate*.mjs server/profile-*.mjs server/plugin-payload.mjs server/volume-lock.mjs \
-     server/first-boot.mjs server/cli-store.mjs server/in-image-smoke.mjs server/toolchain.mjs \
+     server/first-boot.mjs server/cli-store.mjs server/in-image-smoke.mjs server/toolchain.mjs server/omni-supervisor.mjs \
      /opt/automagik/
 COPY apps/desktop/src/profile-patch.mjs /opt/apps/desktop/src/
+COPY am/runner/locks.mjs am/runner/proto.mjs /opt/am/runner/
 # No /home/<user> in the image's account record: the distroless nonroot home is replaced with
 # the uid the image actually runs as. The scanner's home check then has nothing to excuse.
 COPY server/passwd /etc/passwd

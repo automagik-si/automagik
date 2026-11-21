@@ -51,6 +51,8 @@ const URL_PATHS = {
 const failure = (code, message) => Object.assign(new Error(message), { code: `acp-login/${code}` })
 const failedMessage = 'Sign-in did not finish. Try again.'
 const unavailableMessage = 'Install the CLI before signing in.'
+const unsupportedLinkMessage = 'The CLI returned an unsupported sign-in link. Update it and try again.'
+const shortLinkMessage = 'The CLI returned a short sign-in link this app cannot use yet. Update Automagik and try again.'
 const deviceAccessMessage = 'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.'
 const deviceStartMessage = 'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.'
 const expiredMessage = 'Sign-in expired. Try again.'
@@ -64,7 +66,8 @@ const FAILURE_CAUSES = new Map([
   [unavailableMessage, 'no CLI found'],
   ['The CLI did not start sign-in. Try again.', 'no sign-in link in time'],
   ['The CLI could not start sign-in. Try again.', 'the CLI could not be started'],
-  ['The CLI returned an unsupported sign-in link. Update it and try again.', 'unsupported sign-in link'],
+  [unsupportedLinkMessage, 'unsupported sign-in link'],
+  [shortLinkMessage, 'short sign-in link unsupported'],
   ['The CLI did not confirm sign-in. Try again.', 'the CLI did not confirm the sign-in'],
   [deviceAccessMessage, 'device-code login is not enabled'],
   [deviceStartMessage, 'device sign-in did not start'],
@@ -102,6 +105,17 @@ export function isLoginUrl(id, value) {
     if (URL_PATHS[id]?.has(`${url.hostname}${url.pathname}`) !== true) return false
     if (id === 'acp-codex') return !url.search
     return url.searchParams.get('code') === 'true' && STATE.test(url.searchParams.get('state') ?? '')
+  } catch { return false }
+}
+
+function isShortClaudeLoginUrl(value) {
+  // Match the printed authority and exclude even an empty fragment or an explicit default port.
+  if (!/^https:\/\/claude\.ai\//i.test(value) || value.includes('#')) return false
+  try {
+    const url = new URL(value)
+    if (url.pathname !== '/oauth/authorize' || url.searchParams.has('state')) return false
+    // The first raw query component packs scope bits and a 43-character PKCE challenge.
+    return /^[A-Za-z0-9_-]{44,64}$/.test(url.search.slice(1).split('&', 1)[0])
   } catch { return false }
 }
 
@@ -395,6 +409,9 @@ export class CliLogins {
     if (flow.id === 'acp-claude') {
       flow.browserBlock = blockBrowser()
       env.BROWSER = flow.browserBlock.path
+      // Ask this CLI sign-in to print the full link. Short links omit state and code=true,
+      // which isLoginUrl still requires for the manual code flow.
+      env.CLAUDE_CODE_FULL_SIGN_IN_LINK = '1'
     }
     // Only fixed argument vectors are allowed. Even the manual authorization code goes
     // directly to stdin; it can never become a shell argument or an agent prompt.
@@ -469,7 +486,7 @@ export class CliLogins {
   // The link is shown: the expiry starts now, the provider's own when reported.
   waiting(flow, url, { prompt, expiresAt } = {}) {
     if (!this.active(flow)) return
-    if (!isLoginUrl(flow.id, url)) { this.finish(flow, 'failed', 'The CLI returned an unsupported sign-in link. Update it and try again.'); return }
+    if (!isLoginUrl(flow.id, url)) { this.finish(flow, 'failed', unsupportedLinkMessage); return }
     const now = this.now()
     flow.status = 'waiting'
     flow.url = url
@@ -558,7 +575,10 @@ export class CliLogins {
       if (!/Paste code here if prompted\s*>/.test(text)) return
       const urls = text.match(/https:\/\/[^\s<>\u0000-\u001f]+/g) ?? []
       const url = urls.find(value => isLoginUrl(flow.id, value))
-      if (!url) { this.finish(flow, 'failed', 'The CLI returned an unsupported sign-in link. Update it and try again.'); return }
+      if (!url) {
+        this.finish(flow, 'failed', urls.some(isShortClaudeLoginUrl) ? shortLinkMessage : unsupportedLinkMessage)
+        return
+      }
       const state = new URL(url).searchParams.get('state')
       flow.state = state
       this.rememberState(state)

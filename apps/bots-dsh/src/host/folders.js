@@ -12,8 +12,14 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { unquote } from './text.js'
 
 const PICK_TIMEOUT_MS = 10 * 60_000
+const folderAsks = new WeakSet()
 
 export const within = (inner, outer) => inner === outer || inner.startsWith(outer.endsWith(sep) ? outer : outer + sep)
+
+// DSH receives the folder argument untrimmed.
+export const workingDirectoryCd = exec => exec?.name === 'working_directory' && typeof exec.arguments?.cd === 'string' ? exec.arguments.cd : ''
+export const changesWorkingFolder = exec => workingDirectoryCd(exec) !== ''
+  || ((exec?.name === 'update_bot' || exec?.name === 'update_group') && typeof exec.arguments?.work_dir === 'string')
 
 const expandHome = text => (text === '~' ? homedir() : /^~[\\/]/.test(text) ? join(homedir(), text.slice(2)) : text)
 
@@ -89,6 +95,7 @@ export function install(rt) {
   // a change; undefined when nothing is there.
   const folderAt = (base, input) => realpath(resolve(base, input)).catch(error => osBlocked(error) ? resolve(base, input) : undefined)
   // Where a Session works: the folder DSH has for it, else the one DS Bot made it for.
+  const reportedFolder = session => ctx.get?.('workingDirectory')?.get?.(session) ?? session?.header?.cwd
   const sessionFolder = (session) => {
     const reported = session?.header === undefined ? undefined : ctx.get?.('workingDirectory')?.get?.(session) ?? session.header.cwd
     if (reported !== undefined) return reported
@@ -215,14 +222,16 @@ export function install(rt) {
     const agent = exec.agent
     if (approval === undefined || agent?.session === undefined) throw refusal(`Working in ${path} needs the user's approval, and there is no way to ask for it here, so nothing changed. The user can make this change in the settings.`)
     const approvalPolicy = approvalPolicyOf(approval, agent.session)
-    const outcome = await approval.request({
+    const request = {
       agent,
       toolName: exec.name,
       ...(exec.callId !== undefined ? { callId: exec.callId } : {}),
       reason: `Let ${who.en} work in ${path}? Files there can then be changed.`,
       displayReason: { en: `Let ${who.en} work in ${path}? Files there can then be changed.`, zh: `允许${who.zh}在 ${path} 中工作吗？之后可以修改这个文件夹里的文件。` },
       ...(exec.signal ? { signal: exec.signal } : {}),
-    })
+    }
+    folderAsks.add(request)
+    const outcome = await approval.request(request)
     if (outcome === 'allowed-once') return
     // A never policy refuses without asking anyone; a person's no keeps its own text.
     if (outcome === 'rejected' && approvalPolicy === 'never') throw refusal(`Working in ${path} needs the person's approval, and nobody was asked: approval prompts are off in this conversation (a subagent, or Full access), so nothing changed. The person can make this change in the settings, or give this Bot a level that asks first, such as Workspace.`)
@@ -279,5 +288,5 @@ export function install(rt) {
     }
   }
 
-  Object.assign(rt, { checkFolderAccess, folderWarning, sessionFolderWarnings, teamFolder, defaultTeamFolder, workDirOf, sessionFolder, isFolder, real, realBeyond, folderAt, cleanWorkDir, workFolder, inData, setTeamWorkspace, sessionsOfBot, approveFolder, folderEndpoint })
+  Object.assign(rt, { checkFolderAccess, folderWarning, sessionFolderWarnings, teamFolder, defaultTeamFolder, workDirOf, sessionFolder, reportedFolder, isFolder, real, realBeyond, folderAt, cleanWorkDir, workFolder, inData, setTeamWorkspace, sessionsOfBot, approveFolder, isFolderAsk: request => folderAsks.has(request), folderEndpoint })
 }

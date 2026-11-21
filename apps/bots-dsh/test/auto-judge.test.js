@@ -4,6 +4,7 @@
 // the agent session of a Session the moment it is marked (`acpAgents.endSession`). Both only
 // ever refuse. acp-dsh is a fake here: the gates it was given and the sessions it was told to end.
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -944,4 +945,25 @@ test('RFC 0034 password-manager reads on the mirror reach the person without a j
   assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall }), 'person')
   assert.equal(w.rt.autoAuditRows().at(-1).code, 'hard')
   assert.equal(w.requests.length, 0)
+})
+
+test('credential fields on a matching escalation still require the person', async t => {
+  const w = await world(t)
+  const marker = randomUUID()
+  const windows = 'cmdkey /generic:' + marker
+  const macos = 'security find-internet-password -g -s ' + marker
+  for (const fields of [
+    { permissionTitle: 'Inspect the fixture with ' + windows },
+    { justification: 'Need to run ' + macos },
+    { input: { script: macos } },
+  ]) {
+    await w.run()
+    const before = w.requests.length
+    assert.equal(await w.decide({ ...w.request(), ...fields }), 'person')
+    assert.equal(w.requests.length, before)
+    const audit = w.rt.autoAuditRows().at(-1)
+    assert.equal(audit.code, 'hard')
+    assert.equal(JSON.stringify(audit).includes(marker), false)
+    assert.equal(await w.decide(), 'person', 'the prior grant is gone')
+  }
 })

@@ -4,11 +4,12 @@
 import { createElement as h } from 'react'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
-import { CodeBody, codeStore, loadTree, openTerminal } from '../../src/client/code-side.js'
-import { CodeBody as PaneBody, TerminalPane } from '../../src/client/code-side-pane.js'
+import { CodeBarList, CodeBody, codeStore, loadTree, openTerminal, useCodeSide } from '../../src/client/code-side.js'
+import { CodeBody as PaneBody, CodeTree, TerminalPane } from '../../src/client/code-side-pane.js'
 import { installLocale } from '../../src/client/i18n.js'
 import { SeatChatPanel, seatChatView, SEAT_CHAT_CSS } from '../../src/client/seat-chat.js'
 import { installStyles } from '../../src/client/styles.js'
+import { WorkCodeSwitch } from '../../src/client/work-code-switch.js'
 
 window.__calls = []
 window.__streams = []
@@ -87,17 +88,38 @@ window.inspectTerms = async () => {
 window.__chunkRequests = []
 window.__dshChunk = async (name) => {
   window.__chunkRequests.push(name)
-  return { CodeBody: PaneBody }
+  return { CodeBody: PaneBody, CodeTree }
+}
+
+window.mountCodeBarFixture = async (tree, shownBot) => {
+  window.__codePicks = []
+  window.__codeBubbles = 0
+  window.__readCodeTree = () => Response.json({ ok: true, value: tree })
+  await loadTree({ fresh: true })
+  const root = createRoot(document.getElementById('root'))
+  const roster = { byId: { [shownBot]: { id: shownBot } } }
+  const useSessions = select => select({ byId: { [shownBot]: { id: shownBot, retainedBy: { mainView: 1 } } } })
+  function CodeBar({ footer }) {
+    const current = useCodeSide()
+    return h('div', { onClick: () => { window.__codeBubbles++ } },
+      h(CodeBarList, { current, onSelect: (pane, options) => window.__codePicks.push([pane, options]) }),
+      footer ? h('div', { className: 'lb-foot' }, h(WorkCodeSwitch, { roster, useSessions })) : null)
+  }
+  window.showCodeFooter = footer => flushSync(() => root.render(h(CodeBar, { footer })))
+  window.showCodeFooter(false)
 }
 
 window.pressTerminal = () => openTerminal('b-aaaaaaaaaa')
 window.refreshCodeTree = () => loadTree({ fresh: true })
-window.mountCodeBody = (language, portuguese) => {
+window.setCodeLocale = (language, portuguese) => {
   const dictionaries = { pt: portuguese }
   installLocale({
     register: (_namespace, locale, dictionary) => { dictionaries[locale] = dictionary; return () => { delete dictionaries[locale] } },
     bind: () => key => dictionaries[language]?.[key] ?? key,
   })
+}
+window.mountCodeBody = (language, portuguese) => {
+  window.setCodeLocale(language, portuguese)
   createRoot(document.getElementById('root')).render(h('div', { id: 'code-fixture' }, h(CodeBody)))
 }
 

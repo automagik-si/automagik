@@ -80,14 +80,17 @@ export function manifestOf(app) {
 
 // GET and HEAD, as DSH's static files answer.
 function answer(type, body, headers = {}) {
-  return async (req, res) => {
+  const responseHeaders = { 'content-type': type, ...headers }
+  const handler = async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405, { allow: 'GET, HEAD' })
       return res.end()
     }
-    res.writeHead(200, { 'content-type': type, ...headers })
+    res.writeHead(200, responseHeaders)
     res.end(req.method === 'HEAD' ? undefined : body)
   }
+  const resource = request => new Response(request.method === 'HEAD' ? null : body, { headers: responseHeaders })
+  return { handler, resource }
 }
 
 // The icon is served as the type its extension names, never sniffed; an SVG opened on its own
@@ -99,8 +102,8 @@ function iconHeaders(type) {
 /** Exact webServer routes: the manifest and its icon. */
 export function appRoutes(app) {
   return [
-    { kind: 'exact', path: MANIFEST_PATH, handler: answer(MANIFEST_TYPE, Buffer.from(JSON.stringify(manifestOf(app), null, 2))) },
-    { kind: 'exact', path: app.icon.path, handler: answer(app.icon.type, app.icon.body, iconHeaders(app.icon.type)) },
+    { kind: 'exact', path: MANIFEST_PATH, ...answer(MANIFEST_TYPE, Buffer.from(JSON.stringify(manifestOf(app), null, 2))) },
+    { kind: 'exact', path: app.icon.path, ...answer(app.icon.type, app.icon.body, iconHeaders(app.icon.type)) },
   ]
 }
 
@@ -124,8 +127,13 @@ export function install(rt) {
       const disposers = []
       const release = () => disposers.splice(0).reverse().forEach((dispose) => dispose())
       try {
-        for (const route of appRoutes(app)) disposers.push(web.webServer.register(route))
+        const routes = appRoutes(app)
+        for (const route of routes) disposers.push(web.webServer.register(route))
         disposers.push(web.webServer.tapIndex(titleTap(app.name)))
+        if (typeof web.provide === 'function') {
+          disposers.push(web.provide('automagikAppResource', request =>
+            routes.find(route => route.path === new URL(request.url).pathname)?.resource(request)))
+        }
       } catch (error) {
         release()
         throw error
