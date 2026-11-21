@@ -91,6 +91,16 @@ test('a closed Bot carries a channel that needs the person up to its own row', (
   assert.equal(botRowStatus(bot('x', { status: 'idle', channels: [{ ...closed, status: 'connected' }] })), 'idle')
 })
 
+test('a Bot whose plugin is not installed says so over a channel that needs its person', () => {
+  const closed = { ...HELP, status: 'needs-pairing', chats: undefined }
+  const missing = bot('x', { status: 'not-installed', installed: false, channels: [closed] })
+  assert.equal(botRowStatus(missing), 'not-installed', 'the plugin it lacks comes before a channel asking for the person')
+  // The channel keeps saying Needs you on its own row; only the Bot's own word changes.
+  assert.equal(channelRows(missing, [closed])[0].status, 'needs', 'the channel still asks on its row')
+  // An installed Bot keeps carrying the folded channel's needs up to its row.
+  assert.equal(botRowStatus(bot('x', { status: 'idle', channels: [closed] })), 'needs', 'an installed Bot still carries it')
+})
+
 test('a channel that needs its pairing again or fails says so on its row', () => {
   const pair = { id: 'pair', kind: 'whatsapp', name: 'WhatsApp', status: 'needs-pairing' }
   const failed = { id: 'fail', kind: 'slack', name: 'Slack', status: 'error' }
