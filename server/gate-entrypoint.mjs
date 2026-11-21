@@ -5,12 +5,26 @@ import { cloudConfig, CloudConfigurationError, CloudSignIn } from './gate-cloud.
 import { createGate, pinOrigin } from './gate.mjs'
 import { writeFileSync } from 'node:fs'
 import { callerKeyDirectories, createSigner, instanceOf } from './gate-caller.mjs'
+import { createDecisionServer } from './gate-decisions.mjs'
 import { multiuserMode } from './profile-multiuser.mjs'
 import { controlServer } from './gate-control.mjs'
 import { readOwner, SessionStore } from './gate-store.mjs'
 import { DshCredentials, DSH_HOST } from './gate-upstream.mjs'
 
-let claimErrors, control, server, bootstrap
+let claimErrors, control, server, bootstrap, decisions, stopping
+const shutdown = () => stopping ??= Promise.all([
+  control?.close(), bootstrap?.closeGate(), server?.closeGate(), decisions?.closeDecision(),
+])
+const listenerFailed = () => {
+  if (stopping) return stopping
+  console.error('automagik-gate: listener failed')
+  process.exitCode = 1
+  return shutdown()
+}
+const listen = (server, port, host) => new Promise((resolve, reject) => {
+  server.once('error', reject)
+  server.listen(port, host, () => { server.off('error', reject); resolve() })
+})
 try {
   const config = accessConfig(process.env)
   const cloudSettings = cloudConfig(process.env)
@@ -33,18 +47,22 @@ try {
   const mode = multiuserMode(process.env.AUTOMAGIK_GATE_MULTIUSER)
   if (mode === 'invalid') throw new Error('Invalid gate multiuser value')
   const multiuser = mode === 'on'
+  const successors = new Map()
   let caller
   if (multiuser) {
     const paths = callerKeyDirectories(dir, process.env.AUTOMAGIK_GATE_CALLER_PUBLIC)
     caller = createSigner({ ...paths, instance: () => instanceOf({ env: process.env, dir: paths.dir }) })
     caller.publish()
+    decisions = createDecisionServer({ origin: origin.origin, sessions, cloud, successors,
+      signer: caller })
   }
   const credentials = new DshCredentials()
   const access = config ? new AccessSignIn(config, { ownerDir: dir }) : undefined
   const selfHosted = !claimMode ? undefined : new SelfHostedClaim({ dir, origin: origin.origin, sessions, clearOnSignIn: multiuser, claimMode: process.env.AUTOMAGIK_GATE_CLAIM ?? 'local' })
   const published = process.env.AUTOMAGIK_GATE_HOST || DSH_HOST
   if (claimMode && ![DSH_HOST, '0.0.0.0'].includes(published)) throw new claimErrors('AUTOMAGIK_GATE_HOST must be loopback or the IPv4 wildcard bind address')
-  server = createGate({ origin: origin.origin, sessions, credentials, access, cloud, selfHosted, multiuser, caller })
+  server = createGate({ origin: origin.origin, sessions, credentials, access, cloud, selfHosted,
+    multiuser, caller, successors })
   if (selfHosted) {
     if (selfHosted.claimMode === 'local') {
       const bootstrapPort = Number(process.env.AUTOMAGIK_GATE_BOOTSTRAP_PORT || 3083)
@@ -52,28 +70,34 @@ try {
         throw new claimErrors('AUTOMAGIK_GATE_BOOTSTRAP_PORT must be a separate valid port, never the DSH or main gate port')
       }
       bootstrap = createGate({ origin: origin.origin, sessions, credentials, selfHosted, multiuser, caller, bootstrap: true })
-      await new Promise((resolve, reject) => {
-        bootstrap.once('error', reject)
-        bootstrap.listen(bootstrapPort, DSH_HOST, resolve)
-      })
-      bootstrap.on('error', () => { console.error('automagik-gate: bootstrap listener failed'); process.exit(1) })
+      await listen(bootstrap, bootstrapPort, DSH_HOST)
+      bootstrap.on('error', listenerFailed)
     }
     control = await controlServer(selfHosted)
     selfHosted.bindingChange = async (claimed, drop) => {
+      if (stopping) return
       if (drop) bootstrap?.closeAllConnections()
       try { await server.rebind(port, () => selfHosted.claimed ? published : DSH_HOST, drop) }
-      catch { console.error('automagik-gate: listener failed'); process.exit(1) }
+      catch { await listenerFailed() }
     }
     await selfHosted.start({ interactive: process.env.AUTOMAGIK_GATE_IMAGE !== '1' && Boolean(process.stdin.isTTY && process.stdout.isTTY),
       show: code => writeFileSync('/dev/tty', `Automagik claim code: ${code}\n`) })
   }
-  server.listen(port, selfHosted?.claimed ? published : DSH_HOST, () => console.log('automagik-gate: listening on loopback or claimed address'))
-  server.on('error', () => { console.error('automagik-gate: listener failed'); process.exitCode = 1 })
-  for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { control?.close(); bootstrap?.closeGate(); server.closeGate() })
+  // Claim startup revokes persisted families when the configured origin changes.
+  if (decisions && !stopping) {
+    await decisions.start()
+    decisions.on('error', listenerFailed)
+  }
+  // Handlers go in before the ready line: a signal right after it must not take the default action.
+  for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, shutdown)
+  await listen(server, port, selfHosted?.claimed ? published : DSH_HOST)
+  if (stopping) await server.closeGate()
+  else {
+    console.log('automagik-gate: listening on loopback or claimed address')
+    server.on('error', listenerFailed)
+  }
 } catch (error) {
-  control?.close()
-  bootstrap?.closeGate()
-  server?.closeGate()
+  await shutdown()
   // Never echo config, credentials, a URL, an owner record or a session into container logs.
   console.error(error instanceof AccessConfigurationError || error instanceof CloudConfigurationError || (claimErrors && error instanceof claimErrors)
     ? `automagik-gate: ${error.message}`

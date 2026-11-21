@@ -79,6 +79,43 @@ export function upstreamHeaders(req, credentials, cookie, principal, upgrade = f
   if (upgrade) { headers.connection = 'Upgrade'; headers.upgrade = 'websocket' }
   return headers
 }
+
+const OWNER_ASSERTION = 'x-automagik-owner-assertion'
+const OWNER_HEADER_BUDGET = 16 * 1024 - 1024
+const ASSERTION_SENSITIVE_HEADERS = new Set(['host', 'content-type', 'content-length',
+  'transfer-encoding', 'origin'])
+const assertionSensitive = name =>
+  ASSERTION_SENSITIVE_HEADERS.has(name) || name.startsWith('x-automagik-')
+
+export function ownerAssertionHeaders(req, headers, sign) {
+  const seen = new Set()
+  for (let i = 0; i < req.rawHeaders.length; i += 2) {
+    const name = req.rawHeaders[i].toLowerCase()
+    if (name === OWNER_ASSERTION) return
+    if (name === 'connection' && req.rawHeaders[i + 1].toLowerCase().split(',')
+      .some(value => assertionSensitive(value.trim()))) return
+    if (!assertionSensitive(name)) continue
+    if (seen.has(name)) return
+    seen.add(name)
+  }
+  // Account for Node's implicit connection and, for an empty POST, framing headers.
+  let size = Buffer.byteLength(`Connection: keep-alive\r\n${OWNER_ASSERTION}: \r\n\r\n`)
+  if (headers['content-length'] === undefined && headers['transfer-encoding'] === undefined) {
+    size += Buffer.byteLength('Content-Length: 0\r\n')
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    size += Buffer.byteLength(`${name}: ${value}\r\n`, 'latin1')
+  }
+  const limit = OWNER_HEADER_BUDGET - size
+  if (limit <= 0) return
+  try {
+    const assertion = sign(limit)
+    if (typeof assertion === 'string' && assertion && Buffer.byteLength(assertion) <= limit) {
+      headers[OWNER_ASSERTION] = assertion
+    }
+  } catch {}
+}
+
 export function callerHeaders(req, credentials, principal, assertion) {
   const headers = requestHeaders(req, REQUEST_HEADERS)
   headers.host = credentials.authority

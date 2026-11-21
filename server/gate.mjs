@@ -1,9 +1,10 @@
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { Transform } from 'node:stream'
-import { COOKIE, cookieSecret, IDLE_MS, LOCAL_TRUST_NOTICE, sessionCookie } from './gate-store.mjs'
+import { COOKIE, cookieSecret, IDLE_MS, LOCAL_TRUST_NOTICE, sessionCookie, sessionHash } from './gate-store.mjs'
 import { frontendPath } from './gate-frontend.mjs'
-import { agentMcpHeaders, callerHeaders, callerUpgradeHeaders, DSH_HOST, responseHeaders, upstreamHeaders, validBodyFraming } from './gate-upstream.mjs'
+import { agentMcpHeaders, callerHeaders, callerUpgradeHeaders, DSH_HOST, ownerAssertionHeaders,
+  responseHeaders, upstreamHeaders, validBodyFraming } from './gate-upstream.mjs'
 import { MEMBER_UPGRADE_PATH, memberStatus, probeDsh } from './gate-mux.mjs'
 import { callerTarget, CLEAR_SITE_DATA, effectiveRole, ownerFamily } from './gate-roles.mjs'
 import { samePerson, SIGNATURE_HEADER } from './gate-cloud.mjs'
@@ -16,6 +17,7 @@ const MAX_OPEN_BODY = 4096
 const MAX_PENDING_OPENS = 128
 const OPEN_FINISH_MS = 60_000
 const MAX_RENEW_BODY = 4096
+const MAX_RENEW_HISTORY = 4096
 const MAX_REVOCATION_BODY = 4096
 const MAX_EARLY_UPGRADE_BYTES = 1_048_576 + 1024 * 14 // One max-size mux message, with frame headers.
 // Match the adapter's socket limits while the gate is still holding the handshake.
@@ -135,6 +137,7 @@ function reuseProbe(probe) {
 // `connectDsh({ port, host, signal })` resolves a loopback socket on which the adapter answered
 // its readiness probe; a member's request is sent on that socket and nowhere else.
 export function createGate({ origin: value, sessions, credentials, access, cloud, selfHosted, bootstrap = false, multiuser = false, caller,
+  successors = new Map(),
   connectDsh = options => probeDsh({ ...options, authority: credentials.authority }),
   auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
   if (multiuser && !caller) throw new Error('Multiuser requires a caller signer')
@@ -155,6 +158,8 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const pendingUpgrades = new Map()
   let pendingUpgradeCount = 0
   const pendingOpens = new Map()
+  const renewals = new Map()
+  const consumed = new Set()
   const browserBindings = new WeakMap()
   // Gated HTTP responses are piped apart from the socket table. Family changes cut
   // forwarded requests at both ends, including owner streams.
@@ -319,11 +324,13 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     if (fields !== 'renew,version,workspace' || request.version !== 2 || request.renew !== true ||
       request.workspace !== cloud.config.workspace) { refuse(401, 'Renewal refused'); return }
     const family = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
+    const current = family?.current
     const binding = browserBindings.get(family)
     const renewable = () => family && sessions.active(family) && !cloud.drops(family) &&
       (binding === undefined || binding.familyId === family.id)
     // An expired or already-revoked session, or one Cloud has dropped, never reaches Cloud.
     if (!renewable()) { refuse(401, 'Renewal refused'); return }
+    if (renewals.has(family.id)) { refuse(429, 'Renewal in progress'); return }
     // The proof is the exact workspace token this gate verified for the session. A missing or
     // expired held token is refused with no grace, before Cloud is called. `workspace` is v1's
     // aud, never a host: it must equal both the configured id and the held token's aud.
@@ -332,18 +339,47 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       refuse(401, 'Renewal refused')
       return
     }
-    let renewed
-    try { renewed = await cloud.renew(family.principal, proof) }
-    catch (error) { refuse(error?.status === 429 ? 429 : 401, 'Renewal refused'); return }
     if (res.destroyed) return
-    if (!samePerson(renewed.principal, family.principal) || !renewable()) { refuse(401, 'Renewal refused'); return }
-    // Rotate the session out and issue the rechecked one, holding the token Cloud just issued;
-    // the old secret never outlives it.
-    retireTransports(family.id, true)
-    sessions.revoke(family)
-    const issued = sessions.issue(origin.origin, renewed.principal, { expires: renewed.expires, proof: renewed.proof })
-    res.setHeader('set-cookie', cloudCookies(issued, binding))
-    answer(res, 200, {})
+    const release = () => { if (renewals.get(family.id) === release) renewals.delete(family.id) }
+    renewals.set(family.id, release)
+    res.once('close', release)
+    try {
+      const renewed = await cloud.renew(family.principal, proof)
+      if (res.destroyed || renewals.get(family.id) !== release) return
+      if (!samePerson(renewed.principal, family.principal) || !renewable() ||
+          family.current !== current || consumed.has(family.id)) {
+        refuse(401, 'Renewal refused')
+        return
+      }
+      consumed.add(family.id)
+      let issued
+      try {
+        issued = sessions.issue(origin.origin, renewed.principal, {
+          expires: renewed.expires, proof: renewed.proof,
+        })
+      } catch (error) {
+        consumed.delete(family.id)
+        throw error
+      }
+      if (consumed.size > MAX_RENEW_HISTORY) consumed.delete(consumed.values().next().value)
+      // Retire the old cookie and transports before exposing the renewed session.
+      retireTransports(family.id, true)
+      sessions.revoke(family)
+      const session = sessionHash(issued.family.id)
+      successors.set(sessionHash(family.id), {
+        session, origin: family.origin, roles: family.principal.roles,
+      })
+      if (successors.size > MAX_RENEW_HISTORY) successors.delete(successors.keys().next().value)
+      res.setHeader('set-cookie', cloudCookies(issued, binding))
+      answer(res, 200, {})
+    } catch (error) {
+      if (!res.destroyed && renewals.get(family.id) === release) {
+        refuse(error?.status === 429 ? 429 : 401, 'Renewal refused')
+      }
+    } finally {
+      res.off('close', release)
+      release()
+    }
   }
   // Cloud's signed revocation call (contracts v1, section 6). It needs no browser session and
   // sets none; the detached JWS covers the exact body bytes, and the gate changes nothing
@@ -490,6 +526,12 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
         if (!sessions.active(family)) { sessionRequired(req, res); return }
         if (record && !httpRequests.has(record)) return
         headers = upstreamHeaders(req, credentials, cookie, family.principal)
+        if (multiuser && req.method === 'POST' && req.url === '/api/omni-ui' &&
+            sessions.active(family) && !cloud?.drops(family)) {
+          ownerAssertionHeaders(req, headers, limit => caller.signOwner({
+            principal: family.principal, familyId: family.id,
+          }, limit))
+        }
       } else {
         const decision = callerTarget({ role, method: req.method, raw: req.url, origin })
         if (!decision.allow) { answer(res, decision.status, { error: 'Not available' }); return }
@@ -745,9 +787,9 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     }, cloud.pollInterval)
     pollTimer.unref()
   }
-  let rebinding = false
+  let rebinding = false, closing = false
   server.on('close', () => {
-    if (!rebinding) {
+    if (!rebinding || closing) {
       pendingOpens.clear()
       clearInterval(timer); clearInterval(pollTimer); sessions.off('revoke', revoke)
     }
@@ -760,6 +802,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       server.closeAllConnections()
     }
     const task = binding.then(async () => {
+      if (closing) return
       const host = typeof target === 'function' ? target() : target
       const address = server.address()
       if (address?.address === host && (port === 0 || address.port === port)) return
@@ -773,7 +816,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
           for (const record of httpRequests) if (drop || !record.owner) endRequest(record, true)
           if (drop) server.closeAllConnections()
         })
-        await new Promise((resolve, reject) => {
+        if (!closing) await new Promise((resolve, reject) => {
           const failed = error => reject(error)
           server.once('error', failed)
           server.listen(port, host, () => { server.off('error', failed); resolve() })
@@ -786,6 +829,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     return task
   }
   server.closeGate = () => {
+    closing = true
     for (const record of sockets.values()) record.socket.destroy()
     for (const record of httpRequests) endRequest(record, true)
     server.closeAllConnections()

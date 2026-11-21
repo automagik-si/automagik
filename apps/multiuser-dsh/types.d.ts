@@ -49,6 +49,14 @@ export interface AutomagikCaller {
   readonly version: 2
   readonly multiuser: boolean
   current(): AutomagikPrincipal | undefined
+  verify?(request: Request):
+    { principal: AutomagikPrincipal['person']; session: string } | undefined
+  decide?(session: string, signal?: AbortSignal): Promise<
+    { active: false }
+    | { active: true; person: string; roles: AutomagikPrincipal['person']['roles'];
+        resolved: boolean }
+    | undefined
+  >
   roleOf(principal: unknown): CallerRole | undefined
   visibleBotIds(principal: unknown): ReadonlySet<string>
   provide(provider: { bots(): Iterable<BotFact> }): () => void

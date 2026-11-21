@@ -7,6 +7,7 @@ services:
     environment:
       AUTOMAGIK_GATE_CLOUD_WORKSPACE: ${AUTOMAGIK_GATE_CLOUD_WORKSPACE:-}
       AUTOMAGIK_MULTIUSER: ${AUTOMAGIK_MULTIUSER:-0}
+      AUTOMAGIK_GATE_DECISION_SOCKET:
       AUTOMAGIK_CALLER_KEYS: /caller-keys/caller-keys.json
     volumes:
       - dsh-data:/data
@@ -21,6 +22,7 @@ services:
     network_mode: service:dsh
     environment:
       AUTOMAGIK_GATE_MULTIUSER: ${AUTOMAGIK_MULTIUSER:-0}
+      AUTOMAGIK_GATE_DECISION_SOCKET:
       AUTOMAGIK_GATE_CALLER_PUBLIC: /caller-keys
       AUTOMAGIK_GATE_ENABLED: ${AUTOMAGIK_GATE_ENABLED:-0}
       AUTOMAGIK_GATE_ORIGIN: ${AUTOMAGIK_GATE_ORIGIN:?set the exact public origin}

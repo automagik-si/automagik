@@ -31,6 +31,7 @@ import {
   writeMeasurementMarker,
 } from './lib.mjs'
 import { LAUNCH_FILE, prepareGateView, realLocation, writePrivateFile, writeProfileState } from './gate-view.mjs'
+import { decisionSocketName } from './gate-decision-name.mjs'
 import { multiuserConfigChecks, multiuserMode, multiuserReadiness, startupDecision } from './profile-multiuser.mjs'
 import { followImage } from './profile-follow.mjs'
 import { profileState } from './profile-state.mjs'
@@ -118,6 +119,16 @@ export function refuseStartup({ env, readiness, warn, exit }) {
 
 export async function runStartup({ env, readiness, launchCore, launchDsh, exit, warn }) {
   const mode = multiuserMode(env.AUTOMAGIK_MULTIUSER)
+  if (mode === 'on') {
+    // DSH's workspace and profile .env files can only supply unset variables.
+    try {
+      env.AUTOMAGIK_GATE_DECISION_SOCKET = decisionSocketName(env.AUTOMAGIK_GATE_DECISION_SOCKET)
+    } catch (error) {
+      warn(error.message)
+      exit(1)
+      return
+    }
+  }
   let result
   if (mode === 'on' && readiness !== undefined) {
     try { result = typeof readiness === 'function' ? await readiness() : readiness }

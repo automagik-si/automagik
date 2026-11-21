@@ -2,8 +2,10 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import { roleOf, visibleBotIds } from './src/access.js'
+import { verifyOwner } from './src/assertion.js'
 import { createSeen } from './src/seen.js'
 import { createCarrier, DEFAULT_MAX_REQUEST_BODY_BYTES } from './src/carrier.js'
+import { createDecisionClient } from './src/decisions.js'
 import { createStaticFrontend } from './src/frontend-static.js'
 import { createKeySource } from './src/keys.js'
 import { createMuxCarrier, MUX_PATH } from './src/mux-carrier.js'
@@ -228,10 +230,12 @@ export async function apply(ctx, config) {
     }
     claimPolicy()
     const cleanups = []
+    const disposed = new AbortController()
     let carrier, mux
     // Unload closes admission at once and closes every carried socket; admitted HTTP drains.
     const release = () => {
       owner.release()
+      disposed.abort()
       carrier?.stopPending()
       registry.closeSockets(1011, 'adapter unloaded')
       for (const cleanup of cleanups.reverse()) cleanup()
@@ -280,6 +284,9 @@ export async function apply(ctx, config) {
         startedAtSec, anchorSec: Math.floor(Date.now() / 1000),
         file: multiuser ? join(dshHome, 'multiuser-dsh', 'caller-watermark') : undefined,
       })
+      const decide = multiuser && keysConfigured ? createDecisionClient({
+        keys, instance: configuredInstance, disposed: disposed.signal,
+      }) : undefined
       carrier = createCarrier({
         connection: c.connection,
         active: ready, apiFor: binding => binding.api, registry,
@@ -325,6 +332,14 @@ export async function apply(ctx, config) {
       const provider = c.extend({ fiber: new Context().fiber })
       const removeCaller = provider.provide('automagikCaller', Object.freeze({
         version: 2, multiuser, current: scope.current, roleOf, provide,
+        verify(request) {
+          if (multiuser && keysConfigured && owner.live() && scope.current() === undefined) {
+            return verifyOwner(request, { keys, instance: configuredInstance, nonces })
+          }
+        },
+        async decide(session, signal) {
+          if (owner.live()) return decide?.(session, signal)
+        },
         visibleBotIds: principal => visibleBotIds(principal, multiuser ? callerProvider?.provider : undefined, warnProvider),
         invalidate() {
           try { policyCtx?.remoteAccess?.invalidate?.() } catch {}
