@@ -842,6 +842,8 @@ function methodRefusal(method) {
   return `${method} is not allowed by the proxy allow-list`;
 }
 
+export const isHcTerminalId = (value) => typeof value === "string" && /^t[0-9a-z]+$/.test(value);
+
 /**
  * Start one pane's proxy. Resolves once the socket is listening; every check before that is a
  * refusal to start (the core version, the caller, the approved roster, the socket folder).
@@ -851,7 +853,7 @@ export async function startProxy(options = {}) {
   const terminal = String(options.terminal ?? "");
   const upstream = String(options.upstream ?? "");
   const log = options.log ?? (() => {});
-  if (!/^t[0-9a-z]+$/.test(terminal)) throw new Error("--terminal must be an hc terminal id (t7, t1b)");
+  if (!isHcTerminalId(terminal)) throw new Error("--terminal must be an hc terminal id (t7, t1b)");
   if (!upstream || !isAbsolute(upstream)) throw new Error("--upstream must be an absolute socket path");
   const home = options.appHome ?? appHome(env);
   const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) ? options.idleTimeoutMs : IDLE_TIMEOUT_MS;

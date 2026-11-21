@@ -16,7 +16,8 @@ export function hcName(name, botId, taken = new Set()) {
   if (!taken.has(slug)) return slug;
   const tail = `-${String(botId).slice(-4)}`;
   const named = `${slug.slice(0, 32 - tail.length)}${tail}`;
-  return taken.has(named) ? null : named; // null: let hc pick, rather than fail on a taken name
+  if (!taken.has(named)) return named;
+  return null;
 }
 
 /**

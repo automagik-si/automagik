@@ -18,8 +18,13 @@ const server = createServer((client) => {
     try {
       request = JSON.parse(input.slice(0, newline));
       input = input.slice(newline + 1);
-      if (request.method !== "server.status") throw new Error("unsupported method");
       const env = JSON.parse(readFileSync(control, "utf8"));
+      if (request.method === "proxy.workerTransport" && env.HC_FAKE_PROXY_TERMINAL) {
+        const { core } = JSON.parse(readFileSync(env.HC_FAKE_STATE, "utf8"));
+        client.end(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { v: 1, terminal: env.HC_FAKE_PROXY_TERMINAL, core } })}\n`);
+        return;
+      }
+      if (request.method !== "server.status") throw new Error("unsupported method");
       let hc;
       for (const dir of [...(env.PATH || "").split(":"), join(env.HOME || "", ".local/bin"), dirname(process.execPath)]) {
         if (!dir || isGuardFolder(dir)) continue;
@@ -30,7 +35,9 @@ const server = createServer((client) => {
         break;
       }
       if (!hc) throw new Error("hc (herdr-core) is not on PATH.");
-      const r = spawnSync(hc, ["server", "status", "--json"], { env, encoding: "utf8", timeout: 15000 });
+      const r = spawnSync(hc, ["server", "status", "--json"], {
+        env: { ...env, HC_FAKE_ORIGIN: "core-status-helper" }, encoding: "utf8", timeout: 15000,
+      });
       if (r.status !== 0) throw new Error(r.stderr?.trim() || `exit ${r.status}`);
       client.end(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: JSON.parse(r.stdout) })}\n`);
     } catch (e) {
