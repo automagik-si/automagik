@@ -39,6 +39,22 @@ canonical path rewrite. Direct DSH requests using path aliases fall outside that
 
 Caller assertions allow targets up to 4,096 bytes and assertion headers up to 8,192 bytes because DSH partitions startup combos at 3,072 bytes.
 
+## Owner verification and session decisions
+
+`automagikCaller` v2 exposes two optional methods in multiuser mode. `verify(request)`
+verifies the gate's `x-automagik-owner-assertion` on `POST /api/omni-ui` outside caller scope.
+The owner or admin assertion uses the same key source and replay watermark as the HTTP and
+mux carriers. A successful verification consumes its nonce and returns `{ principal, session }`.
+
+`decide(session, signal?)` asks the gate for a fresh decision on a session-family hash. The
+adapter uses the Linux abstract socket `automagik-gate-decision`. Set
+`AUTOMAGIK_GATE_DECISION_SOCKET` to the same name on both sides when overriding it.
+The adapter verifies the signed reply with the caller keys and the request's random challenge.
+An active reply carries the person hash, roles and whether the answer followed a renewal.
+An inactive reply returns `{ active: false }`. Both methods return `undefined` when the
+adapter is unavailable or multiuser is off. An outstanding decision also returns `undefined`
+on failure, cancellation or disposal. Delivery 5e-1 exposes these methods for later slices.
+
 ## Bot principal record
 
 With multiuser on and a nonblank `AUTOMAGIK_INSTANCE_ID`, the adapter records confirmed

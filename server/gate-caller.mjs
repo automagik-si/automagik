@@ -4,8 +4,10 @@ import { closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, open
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { cloudConfig } from './gate-cloud.mjs'
-import { readOwner } from './gate-store.mjs'
+import { readOwner, sessionHash } from './gate-store.mjs'
 import { GATE_VIEW_MOUNT } from './lib.mjs'
+
+export { sessionHash }
 
 const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url')
 const kidOf = x => createHash('sha256').update(Buffer.from(x, 'base64url')).digest().subarray(0, 16).toString('base64url')
@@ -211,29 +213,51 @@ export function createSigner({ dir, publicDir, instance, now = Date.now, monoton
       checkedAt = monotonicNow()
     })
   }
+  const sign = (aud, typ, claims, limit = MAX_ASSERTION_BYTES) => {
+    const elapsed = monotonicNow()
+    if (state && elapsed - checkedAt >= 1000) {
+      const nextStamp = stampOf(dir)
+      if (stamp !== nextStamp) install(readStore(dir), nextStamp)
+      checkedAt = elapsed
+    }
+    if (!state || state.pending || published !== JSON.stringify(publicKeys(state, aud))) {
+      publish(aud)
+    }
+    const h = encode({ alg: 'EdDSA', kid: state.signer, typ })
+    const input = `${h}.${encode({ version: 1, aud, ...claims })}`
+    if (input.length + 87 > limit) throw new Error('Invalid caller target')
+    return `${input}.${edSign(null, Buffer.from(input), signingKey).toString('base64url')}`
+  }
+  const signCaller = ({ principal, familyId, method, path }, owner, limit) => {
+    const aud = instance()
+    const { issuer, subject, roles, workspace } = principal
+    const elevated = roles.some(role => role === 'owner' || role === 'admin')
+    if (!aud || workspace !== aud || elevated !== owner) {
+      throw new Error('Caller is outside the signing scope')
+    }
+    if (Buffer.byteLength(path) > MAX_TARGET_BYTES || !/^[A-Z]{1,16}$/.test(method)) {
+      throw new Error('Invalid caller target')
+    }
+    const iat = Math.floor(now() / 1000)
+    return sign(aud, owner ? 'automagik-owner-caller' : 'automagik-caller', {
+      principal: { issuer, subject, roles, workspace },
+      session: sessionHash(familyId), method, path,
+      iat, exp: iat + 30, nonce: random(16).toString('base64url'),
+    }, limit)
+  }
   return {
     publish,
-    sign({ principal, familyId, method, path }) {
+    sign: input => signCaller(input, false),
+    signOwner: (input, maxBytes = MAX_ASSERTION_BYTES) =>
+      signCaller({ ...input, method: 'POST', path: '/api/omni-ui' }, true,
+        Math.min(maxBytes, MAX_ASSERTION_BYTES)),
+    signDecision({ session, challenge, active, resolved, person, roles }) {
       const aud = instance()
-      if (!aud || principal.workspace !== aud || principal.roles.some(role => role === 'owner' || role === 'admin')) {
-        throw new Error('Caller is outside the signing scope')
-      }
-      const elapsed = monotonicNow()
-      if (state && elapsed - checkedAt >= 1000) {
-        const nextStamp = stampOf(dir)
-        if (stamp !== nextStamp) install(readStore(dir), nextStamp)
-        checkedAt = elapsed
-      }
-      if (!state || state.pending || published !== JSON.stringify(publicKeys(state, aud))) publish(aud)
-      const { issuer, subject, roles, workspace } = principal
+      if (!aud) return
       const iat = Math.floor(now() / 1000)
-      const session = createHash('sha256').update(familyId).digest('base64url')
-      const nonce = random(16).toString('base64url')
-      const h = encode({ alg: 'EdDSA', kid: state.signer, typ: 'automagik-caller' })
-      const p = encode({ version: 1, aud, principal: { issuer, subject, roles, workspace }, session, method, path, iat, exp: iat + 30, nonce })
-      const input = `${h}.${p}`
-      if (input.length + 87 > MAX_ASSERTION_BYTES || Buffer.byteLength(path) > MAX_TARGET_BYTES || !/^[A-Z]{1,16}$/.test(method)) throw new Error('Invalid caller target')
-      return `${input}.${edSign(null, Buffer.from(input), signingKey).toString('base64url')}`
+      return sign(aud, 'automagik-decision', {
+        session, challenge, active, resolved, person, roles, iat, exp: iat + 5,
+      }, 2048)
     },
   }
 }

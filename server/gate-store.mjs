@@ -8,6 +8,7 @@ export const IDLE_MS = 12 * 60 * 60 * 1000
 export const COOKIE = '__Host-automagik-session'
 export const LOCAL_TRUST_NOTICE = 'On loopback, another local service can receive your cookie. A local process holding it can replay it with any Origin; origin binding does not prevent this. Local processes are inside the host trust boundary.'
 const digest = value => createHash('sha256').update(value).digest('hex')
+export const sessionHash = familyId => createHash('sha256').update(familyId).digest('base64url')
 const secret = () => randomBytes(32).toString('base64url')
 const hashPattern = /^[a-f0-9]{64}$/
 const localPrincipal = p => p && typeof p.subject === 'string' && p.subject.length > 0 &&
@@ -71,6 +72,9 @@ export function cookieSecret(header = '') {
 }
 
 export class SessionStore extends EventEmitter {
+  #bySession = new Map()
+  #sessionHashes = new WeakMap()
+
   // Cloud mode keeps its sessions in memory only (`memory`), each bounded by its token's expiry,
   // and admits only the principals its own check (`accepts`) allows. Self-hosted keeps the file.
   constructor(dir, { now = Date.now, memory = false, accepts = localPrincipal } = {}) {
@@ -83,7 +87,19 @@ export class SessionStore extends EventEmitter {
     const stored = read(this.file)
     if (stored !== undefined && (!stored || stored.version !== 1 || !Array.isArray(stored.families) || !stored.families.every(validFamily))) throw new Error('Unsupported session store')
     this.families = stored?.families ?? []
+    for (const family of this.families) this.#index(family)
   }
+  #index(family) {
+    const session = sessionHash(family.id)
+    this.#sessionHashes.set(family, session)
+    this.#bySession.set(session, family)
+  }
+  #unindex(family) {
+    const session = this.#sessionHashes.get(family)
+    this.#sessionHashes.delete(family)
+    if (this.#bySession.get(session) === family) this.#bySession.delete(session)
+  }
+  familyBySessionHash(session) { return this.#bySession.get(session) }
   save() { if (this.file) write(this.file, { version: 1, families: this.families }) }
   // Sign-in calls this only after authentication. `expires` (ms) is a hard end, never renewed.
   // `proof` is the verified Cloud workspace token the v2 renewal sends; Cloud sessions keep it
@@ -93,16 +109,28 @@ export class SessionStore extends EventEmitter {
     if (expires !== undefined && (!this.memory || !Number.isSafeInteger(expires))) throw new Error('Invalid session expiry')
     if (proof !== undefined && (!this.memory || !validProof(proof))) throw new Error('Invalid session proof')
     // Ended Cloud sessions leave memory here: their browsers drop the cookie, so none returns.
-    if (this.memory) this.families = this.families.filter(f => f.expires === undefined || this.now() < f.expires)
+    if (this.memory) {
+      this.families = this.families.filter(family => {
+        if (family.expires === undefined || this.now() < family.expires) return true
+        this.#unindex(family)
+        return false
+      })
+    }
     const value = secret()
-    const family = { id: randomUUID(), origin, principal: structuredClone(principal), current: digest(value), used: [], created: this.now(), touched: this.now(), ...(expires === undefined ? {} : { expires }), ...(proof === undefined ? {} : { proof: structuredClone(proof) }) }
+    const family = {
+      id: randomUUID(), origin, principal: structuredClone(principal),
+      current: digest(value), used: [], created: this.now(), touched: this.now(),
+      ...(expires === undefined ? {} : { expires }),
+      ...(proof === undefined ? {} : { proof: structuredClone(proof) }),
+    }
     this.families.push(family)
+    this.#index(family)
     this.save()
     return { secret: value, family }
   }
   get memory() { return !this.file }
   active(family) {
-    return this.families.includes(family) && this.now() - family.touched < IDLE_MS &&
+    return this.#sessionHashes.has(family) && this.now() - family.touched < IDLE_MS &&
       (family.expires === undefined || this.now() < family.expires)
   }
   // Cookie lifetime in seconds: the idle limit, or what is left before a hard end.
@@ -148,13 +176,19 @@ export class SessionStore extends EventEmitter {
   }
   revoke(family) {
     this.families = this.families.filter(f => f !== family)
+    this.#unindex(family)
     this.save()
     this.emit('revoke', family.id)
   }
   // `where` narrows to some families (one person's, in Cloud mode); without it, every family.
   revokeAll(where = () => true) {
-    const previous = this.families.filter(f => where(f))
-    this.families = this.families.filter(f => !where(f))
+    const previous = []
+    this.families = this.families.filter(family => {
+      if (!where(family)) return true
+      previous.push(family)
+      return false
+    })
+    for (const family of previous) this.#unindex(family)
     this.save()
     for (const family of previous) this.emit('revoke', family.id)
   }

@@ -47,7 +47,10 @@ function fixture(t, { upstreamStatus = 200, cookie: credential = async () => 'ds
     return proxy
   })
   const gate = createGate({
-    origin, sessions, multiuser: true, caller: { sign: value => { signed.push(value); return 'fixture' } },
+    origin, sessions, multiuser: true,
+    caller: {
+      sign: value => { signed.push(value); return 'fixture' }, signOwner: () => 'owner-fixture',
+    },
     connectDsh: async () => new PassThrough(),
     credentials: { port: 1, authority: '127.0.0.1:1', cookie: credential, invalidate: value => invalidated.push(value) },
     cloud: {
@@ -285,6 +288,7 @@ test('G9 an upstream owner 401 marks credential refresh without clearing the gat
   const f = fixture(t, { upstreamStatus: 401 })
   const owner = f.issue('owner', 'owner')
   const response = await f.request('/api/omni-ui', { cookie: owner.cookie, method: 'POST' })
+  assert.equal(f.upstreams[0].options.headers['x-automagik-owner-assertion'], 'owner-fixture')
   assert.equal(response.status, 401)
   assert.equal(response.headers['x-automagik-dsh-refresh'], '1')
   assert.equal(response.headers['clear-site-data'], undefined)

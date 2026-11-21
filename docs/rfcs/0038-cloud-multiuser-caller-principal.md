@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892, and 5b, #1911; the amendment's 5c-5d open; narrowed the same day by the owner's delegate: member and guest prompting moves to 5e) |
+| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892, 5b, #1911, 5c, #1923, and 5d, #1940; the owner's delegate chose 5e-1 first and 5e-2' for owner authorship after it; member and guest prompting waits on DSH) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P); the gate and the server image |
 | Created | 2026-11-20 |
@@ -988,8 +988,14 @@ All additive; no route, plugin id or storage prefix that exists today is renamed
 - **The `automagik` policy**, registered by multiuser-dsh alone, with the role names above.
 - **`automagikCaller` version 2**: version 1's fields, plus `roleOf(principal)`, `visibleBotIds(principal)`, the
   Bot visibility provider hook, `invalidate(principal?)` and `seen()` (owner only).
-  `verify(request)` (an owner-path author) follows in 5e.
+  Delivery 5e-1 adds optional `verify(request)` for an owner or admin assertion and
+  `decide(session, signal?)` for the gate's current session decision.
   bots-dsh reads `current()` at version 1 or 2; what needs version 2 refuses on version 1.
+- **The gate decision socket** `automagik-gate-decision` (5e-1), a Linux abstract Unix socket
+  in the gate and DSH's shared network namespace. `POST /decision` returns the
+  `automagik-decision` JWS for the requested family hash and challenge.
+- **The owner/admin assertion** (5e-1), an `automagik-owner-caller` JWS in
+  `x-automagik-owner-assertion` on the gate's exact owner `POST /api/omni-ui`.
 - **`automagikCallerRoutes` version 1**, provided by bots-dsh: `match(path, method)`.
 - **The private stream route** `/_automagik/caller/api/remote.mux`, under the carrier's existing
   private namespace, and the gate's one member upgrade path, `/api/remote.mux`.
@@ -1009,8 +1015,8 @@ needs all of delivery 4's runner, this policy, a caller-aware Code route and the
 grant.
 
 *Narrowed by the owner's delegate on 2026-11-20 (option B).* 5c ships the read model and every
-refusal. 5d exposes the reads to members and guests. Their prompting is 5e, which starts from a
-DSH capability asked in RFC 0023's form or one certified route.
+refusal. 5d exposes the reads to members and guests. The later 5e decision below keeps
+their prompting pending on DSH.
 
 - **5a. This amendment** (docs). *Check:* the index row matches; `git diff --check` clean.
   *Rollback:* revert the docs.
@@ -1053,16 +1059,23 @@ DSH capability asked in RFC 0023's form or one certified route.
   owner's composer are unchanged. *Rollback:* stop member and guest admission, revoke their sessions and close their
   streams and feeds first, keeping the gate's deny rules; then remove the service and the row. Delivery 5 is
   complete with 5d, which completes #1373; the positive terminal and Code grant takes effect with delivery 4.
-- **5e. Member and guest prompting** (a later delivery; the owner's delegate, 2026-11-20). *Scope:* a member or
-  guest sends in a visible Bot's chat (`am:bot-session-prompt`, the caller routes' `send` and `stage-image`) and
+- **5e. Member and guest prompting** (the owner's delegate, 2026-11-20). The delegate chose
+  option (a). 5e-1 follows 5d with the gate decision channel, single-use Cloud renewal, the
+  signed owner/admin assertion, and the optional `automagikCaller` v2 methods `verify` and
+  `decide`. 5e-2' (owner authorship) follows 5e-1 with its own Astra review. Member and
+  guest prompting waits for DSH. [RFC 0045](0045-dsh-upstream-authored-input-and-caller-turns.md)
+  is a file-only proposal. Taking it to DSH's tracker or adding runtime patches is the owner's
+  decision. The delegate refused option (b), another plugin-only round with shared conversation
+  mode, because it would make card answers public and cut owner functions on a shared Bot.
+  *Scope:* a member or guest sends in a visible Bot's chat (`am:bot-session-prompt`, the caller routes'
+  `send` and `stage-image`) and
   answers or dismisses the cards of their own turns, and every human input to a shared Bot carries a verified
   author, the owner's included, under the rules marked "from 5e" above: **Authored** and the pre-step check with
   its quarantine, **What the model sees**, **A turn a member or guest started**, the card's recorded person and the
-  drain in "Rollback"; questions 5-8 below take effect with it. *Unlocked by:* 5d and either a DSH capability asked
-  in RFC 0023's form (DSH itself enforces each input's author and a caller-scoped guard over each turn's tools,
-  model route, compaction and recovery) or one certified route whose whole turn a test proves caller-safe, every
-  other route refusing member prompts. *Check:* specified with it; at least a demoted, revoked or withdrawn member's
-  queued or continuing work never reaches a model step or a tool; a member-started turn's model request holds no
+  drain in "Rollback"; questions 5-8 below take effect with it. DSH must enforce each input's
+  author and guard each caller turn's tools, model route, compaction and recovery.
+  *Check:* specified with it; at least a demoted, revoked or withdrawn member's queued or
+  continuing work never reaches a model step or a tool; a member-started turn's model request holds no
   hidden content, MEMORY.md or recall; two admins' posts in a shared chat carry two authors and an owner's post
   without one never reaches a model step; a card answers only to its person; the rollback drains member-started
   work with a turn running and a prompt queued. *Rollback:* stop member and guest admission and drain
@@ -1152,7 +1165,7 @@ Answered by the owner's delegate on 2026-11-20, each with the recommended option
    fallback turns, inbox edits and forwards, continuing turns, renewals and the drain.
    *Answered by the owner's delegate on 2026-11-20: 5c and 5d give read access and every refusal.
    Prompting is 5e, which starts from a DSH capability asked in RFC 0023's form or one certified
-   route.*
+   route.* The later 5e decision above defers member and guest prompting until DSH.
 
 ## Amendment (2026-11-20): a Bot's files and its commands live in two trees
 
