@@ -1158,6 +1158,73 @@ jobs:
           fi
           echo "ran: ${OUTCOMES}"
 
+  am-linked-native:
+    # #206 (RFC 0012 delivery 9a, question 11): am on a linked machine, proved on a real Linux
+    # and a real macOS arm64 runner. herdr's "native (#206)" rows install the signed am with
+    # `am machines install --machine` (the far side reads the signed am-lane pointer itself, then
+    # `self install --signed`), run it from a sparse service PATH (node found the way run.sh finds
+    # Homebrew's), let it update itself, and start a Claude bot there whose per-turn hook prints
+    # the bot's briefing. The release folder is a file:// one signed with a key each run makes
+    # in memory (am/test/signed-release.mjs): never the real key, never printed. hc is the
+    # tests' fake; the machine's uname, shell, tar, checksum tool and Node are the runner's own.
+    name: am on a linked machine (native ${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.outputs.am != 'false' || needs.changes.outputs.herdr != 'false') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    defaults:
+      run:
+        working-directory: herdr
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        working-directory: .
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: This runner's system
+        env:
+          OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          system=$(uname -sm)
+          echo "uname -sm: ${system}"
+          if [[ "${OS}" == macos-* && "${system}" != "Darwin arm64" ]]; then
+            echo "::error::the macOS leg must run on Apple silicon (got ${system})"
+            exit 1
+          fi
+
+      - name: Native rows
+        env:
+          AM_LINKED_NATIVE: '1'
+        run: |
+          set -euo pipefail
+          export TMPDIR="${RUNNER_TEMP}"
+          out="${RUNNER_TEMP}/native.tap"
+          status=0
+          node --test --test-reporter=tap --test-name-pattern='^native \(#206\)' \
+            test/machine-install.test.mjs test/cli-remote-panes.test.mjs > "${out}" 2>&1 || status=$?
+          cat "${out}"
+          # Both rows ran and passed: a skip or a filter that matched nothing is a failure here.
+          passed=$(grep -cE '^ok [0-9]+ - native \(\\#206\)' "${out}" || true)
+          if [[ "${status}" != 0 || "${passed}" != 2 ]] || grep -qE '^ok [0-9]+ - native .*# SKIP' "${out}"; then
+            echo "::error::the #206 native rows did not all pass (exit ${status}, ${passed} of 2 passed)"
+            exit 1
+          fi
+
   pocket:
     # Pocket's GitHub debug APK and both flavors' unit tests and lint.
     # Its version is the root package.json's, so a change there builds it too.
@@ -2282,7 +2349,7 @@ jobs:
     # other job, so add new jobs here too (scripts/ci-result.test.ts fails until they are listed).
     # A pull request can skip an unchanged area. On every other event, a skip fails the check.
     name: CI result
-    needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am,
+    needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am, am-linked-native,
             pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
             plugin, reservations-macos, vault-macos, vault-windows, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, acp-macos, boot]
     if: always()
@@ -2307,6 +2374,7 @@ jobs:
             [herdr]=herdr
             [scheduler]=scheduler
             [am]=am
+            [am-linked-native]=am
             [pocket]=pocket
             [pocket-link]=link
             [meter]=meter
