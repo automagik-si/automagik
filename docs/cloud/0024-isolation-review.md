@@ -726,6 +726,9 @@ evidence: no source exists, so the probe stays unrun and the gate stays open (P9
 | P13 browser origin | a browser at A | B's origin | no B session; A's cookie is refused at B and A's `localStorage` is not visible there; the Cloud edge gives A and B distinct origins, and a 401 is the expected refusal, so B must answer | VM/Cloud | Cloud edge origin allocation and the browser/VM |
 | P14 MCP Bearer | A | B's MCP route with A's Bearer, on B's gate origin and B's direct listener | 401 from both routes; A's Bearer works at A; a missing answer fails | Repository | this repository: two `createAgentAccess` fixtures with separate homes and two gate origins; no VM needed |
 
+*2026-11-21:* P14 has since been run and passes ([delivery 4 evidence](0024-delivery-4-evidence.md#test-receipts)).
+The paragraph below describes this review as it was written.
+
 The 14 probes are still 14: **1 provable from this repository** (P14), **11 provable only on the
 VM/Cloud side** (P1-P8, P11-P13), and **2 not provable at all with today's evidence** (P9, P10).
 None has been run for this record, so the gate stays open. P14 is a missing repository test, not a
