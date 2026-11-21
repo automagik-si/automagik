@@ -154,3 +154,8 @@ visibility from the facts supplied by `provide({ bots })`, which registers one p
 and returns its disposer. Without usable facts, visibility is empty. `invalidate()`
 wakes remote-access followers. `seen()` lists recently admitted identities for the
 owner during this activation and refuses inside a carried caller scope.
+
+Delivery 5d hands exact `POST /api/omni-ui` and `GET /api/omni-ui/feed` targets to bots-dsh's
+`automagikCallerRoutes` v1 when available. The POST accepts up to 16 KiB (or the configured body limit,
+if lower) and four simultaneous requests per person. The feed accepts no body. The native
+`automagik` policy stays empty.

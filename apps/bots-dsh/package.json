@@ -39,6 +39,7 @@
     "src/office/",
     "scripts/seed-registry.mjs",
     "client.js",
+    "client.gated.js",
     "client.pane.js",
     "office.js",
     "locale/",

@@ -22,7 +22,9 @@ import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
 import { CHECK_READ_ONLY, newerCheckedCandidate, savedCheckSummary } from './self-update-check.js'
 import { readUpdateRecovery } from './self-update-recovery.js'
-import { callerService } from './multiuser.js'
+import { callerService, multiuserMode } from './multiuser.js'
+import { callerJson } from './caller-routes.js'
+import { peopleOf } from './people.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -327,7 +329,7 @@ export function install(rt) {
   // Updates change the dsh profile, not the team, so a reading host may run them too.
   const privacy = createPrivacy()
   const pets = createPets({ home: () => rt.home, warn: (...args) => rt.warn?.(...args) })
-  const READS = new Set(['people-seen', 'privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
+  const READS = new Set(['people-seen', 'people-share', 'privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
   READS.add('role-catalog')
   // Sign-in (cli-login.js): its replies are never cached by the browser.
   const CLI_LOGIN = new Set([
@@ -522,7 +524,7 @@ export function install(rt) {
         return fail('Only the user can choose who may talk to a Bot, in its settings', 'bot/refused')
       }
       if (endpoint === 'update-bot' && Object.hasOwn(body, 'people')) {
-        if (Object.keys(body).some(key => key !== 'id' && key !== 'people')) {
+        if (Object.keys(body).some(key => key !== 'id' && key !== 'people' && key !== 'expect')) {
           return fail('Save who may talk to a Bot on its own', 'bot/refused')
         }
         if (!callerService(ctx)) return fail('Sharing needs multiuser mode', 'bot/refused')
@@ -752,10 +754,18 @@ export function install(rt) {
           const service = callerService(ctx)
           return service ? ok(service.seen()) : fail('Sharing needs multiuser mode', 'bot/refused')
         }
+        case 'people-share': {
+          if (!callerService(ctx)) return fail('Sharing needs multiuser mode', 'bot/refused')
+          await rt.load()
+          const id = String(body.id ?? '')
+          const bot = rt.botOf(id)
+          if (!bot) return fail('Unknown Bot', 'bot/not-found')
+          return ok({ state: rt.shareState(id) ?? null, people: peopleOf(bot, { main: rt.isMain(id) }) })
+        }
         case 'update-bot':
           if (Object.hasOwn(body, 'people')) {
             await rt.load()
-            return ok(await rt.setPeople(String(body.id ?? ''), body.people))
+            return ok(await rt.setPeople(String(body.id ?? ''), body.people, { expect: body.expect }))
           }
           if (Object.hasOwn(body, 'roles')) throw invalid("A Bot's role changes with role-attach and role-detach")
           await rt.load()
@@ -1377,6 +1387,7 @@ export function install(rt) {
     rt.noteFailure({ source: 'api', text: `${where}: ${kind}`, code: kind, stack: error?.stack })
     return Response.json({ error: `Something went wrong (${kind}).` }, { status: error?.code === 'bot/invalid' ? 400 : 500 })
   }
+  const gatedOwner = request => multiuserMode() || (callerService(ctx) && request.headers.has('x-automagik-principal'))
   ctx.effect(() => ctx.connection.fetch.register({
     path: PET_ROUTE,
     methods: ['GET'],
@@ -1408,6 +1419,14 @@ export function install(rt) {
     methods: ['PUT'],
     requestBody: 'streaming',
     fetch: async (request) => {
+      if (gatedOwner(request)) {
+        const viewer = rt.ownerViewer(request)
+        if (!viewer || request.headers.get('x-automagik-viewer') !== viewer.id) {
+          return Response.json({ code: 'bot/viewer-changed', error: 'Your sign-in changed; reload this page.' },
+            { status: 403, headers: { 'cache-control': 'no-store' } })
+        }
+        if (!callerService(ctx)) return new Response(null, { status: 503 })
+      }
       const url = new URL(request.url)
       const id = url.searchParams.get('id') ?? ''
       try {
@@ -1481,6 +1500,14 @@ export function install(rt) {
       let body
       try { body = await request.json() } catch { body = {} }
       const endpoint = String(body?.endpoint ?? '')
+      if (gatedOwner(request) || (endpoint === 'whoami' && callerService(ctx))) {
+        const viewer = rt.ownerViewer(request)
+        if (!viewer || (!(endpoint === 'whoami' && body?.viewer === undefined) && body?.viewer !== viewer.id)) {
+          return callerJson(fail('Your sign-in changed; reload this page.', 'bot/viewer-changed'))
+        }
+        if (!callerService(ctx)) return new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } })
+        if (endpoint === 'whoami') return callerJson(ok({ role: 'owner', multiuser: true, viewer }))
+      }
       // The proof goes only to endpoints; this route's own checks read it as a boolean.
       const proof = appBrowserBridge() ? windowProof(request) : false
       const desktopWindow = proof !== false

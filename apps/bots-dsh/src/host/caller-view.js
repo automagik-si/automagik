@@ -1,5 +1,5 @@
 import { HISTORY_TIMEOUT_MS, MAX_AVATAR_IMAGE, SOURCE_KIND } from './constants.js'
-import { callerService } from './multiuser.js'
+import { callerService, hasCallerLock } from './multiuser.js'
 import { refusal } from './refusal.js'
 import { isColor, textOf } from './text.js'
 
@@ -78,7 +78,7 @@ export function install(rt) {
   function visible(principal) {
     const service = callerService(ctx)
     if (!service) throw unknown()
-    if (rt.readOnly() !== undefined || !rt.canWriteTeam()) throw refusal('This host is read-only', { code: 'bot/read-only' })
+    if (!hasCallerLock(rt)) throw refusal('This host is read-only', { code: 'bot/read-only' })
     return service.visibleBotIds(principal)
   }
 

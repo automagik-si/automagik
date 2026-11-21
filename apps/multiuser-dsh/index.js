@@ -284,6 +284,7 @@ export async function apply(ctx, config) {
         connection: c.connection,
         active: ready, apiFor: binding => binding.api, registry,
         clientModules: () => c.get('clientModules'),
+        callerRoutes: () => c.get('automagikCallerRoutes'),
         appResource: request => c.get('automagikAppResource')?.(request),
         staticResource: multiuser ? createStaticFrontend(webServer) : undefined,
         keys, nonces, scope, multiuser, keysConfigured,

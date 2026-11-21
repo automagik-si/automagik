@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { cloudConfig, CloudConfigurationError, CloudSignIn, KEYS_TTL_MS, LIST_MAX_AGE_MS, MAX_EXCHANGES, MAX_OPEN_CODES, REFRESH_INTERVAL_MS } from '../gate-cloud.mjs'
-import { CLOUD_OPEN_PATH, createGate } from '../gate.mjs'
+import { CLOUD_OPEN_PATH, CLOUD_OPEN_FINISH_PATH, createGate } from '../gate.mjs'
 import { COOKIE, SessionStore } from '../gate-store.mjs'
 import { DSH_HOST } from '../gate-upstream.mjs'
 
@@ -76,7 +76,7 @@ const form = value => ({ method: 'POST', path: CLOUD_OPEN_PATH, body: value,
 const cookieOf = response => response.headers['set-cookie']?.[0]?.split(';', 1)[0]
 
 // One workspace gate in front of a fake DSH, and the fake Cloud it talks to.
-async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval } = {}) {
+async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval, multiuser = false } = {}) {
   const state = cloudState ?? {
     now: 1_800_000_000_000,
     keys: [jwk('a')],
@@ -180,7 +180,7 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ principal: JSON.parse(Buffer.from(req.headers['x-automagik-principal'], 'base64url')) }))
   })
   const upstreamPort = await listen(upstream)
-  const gate = createGate({ origin, sessions, cloud, auditAccess: entry => audit.push(entry),
+  const gate = createGate({ origin, sessions, cloud, multiuser, caller: { sign() { assert.fail('owner fixture signed') } }, auditAccess: entry => audit.push(entry),
     credentials: { port: upstreamPort, authority: `${DSH_HOST}:${upstreamPort}`, cookie: async () => 'dsh-credential=server-held' } })
   const gatePort = await listen(gate)
   t.after(async () => {
@@ -195,7 +195,15 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval
     state.codes.set(value, { workspace: 'workspace-a', sub: 'person-1', roles: ['owner'], used: false, ...options })
     return value
   }
-  const open = value => request(gatePort, form(new URLSearchParams({ code: value }).toString()))
+  const open = async (value, cookie) => {
+    const rail = await request(gatePort, form(new URLSearchParams({ code: value }).toString()))
+    if (!multiuser || rail.status !== 200) return rail
+    assert.equal(rail.headers['set-cookie'], undefined)
+    assert.match(rail.body, new RegExp(`action="${CLOUD_OPEN_FINISH_PATH}"`))
+    const open = /name="open" value="([^"]+)"/.exec(rail.body)[1]
+    return request(gatePort, { method: 'POST', path: CLOUD_OPEN_FINISH_PATH, body: `open=${open}`,
+      headers: { origin, 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) } })
+  }
   const renew = (body, cookie, headers = {}) => request(gatePort, {
     method: 'POST', path: RENEW, body: JSON.stringify(body),
     headers: { origin: ORIGIN, 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...headers },
@@ -1101,4 +1109,30 @@ test('v1 opens are unchanged and the v1 and v2 parsers never accept each other',
   const good = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, cookie)
   assert.equal(good.status, 200)
   assert.equal(f.state.renewals.length, 1)
+})
+
+test('G4 a cross-site Cloud open clears storage on both visits, while renewal preserves it', async t => {
+  const f = await fixture(t, { multiuser: true })
+  const first = await f.open(f.issue({ sub: 'first' }))
+  const second = await f.open(f.issue({ sub: 'second' }), cookieOf(first))
+  for (const reply of [first, second]) {
+    assert.equal(reply.status, 303)
+    assert.equal(reply.headers['clear-site-data'], '"cache", "storage"')
+    assert.ok(cookieOf(reply))
+  }
+  const input = { version: 2, renew: true, workspace: 'workspace-a' }
+  const renewed = await f.renew(input, cookieOf(second))
+  assert.equal(renewed.status, 200)
+  assert.equal(renewed.headers['clear-site-data'], undefined)
+  f.state.renewReply = token => ({ version: 2, token: mint({ ...claimsOf(token), sub: 'different' }), expires_in: 300 })
+  const refused = await f.renew(input, cookieOf(renewed))
+  assert.equal(refused.status, 401)
+  assert.equal(refused.headers['clear-site-data'], undefined)
+  assert.equal(refused.headers['set-cookie'], undefined)
+  assert.equal((await request(f.port, { path: '/_gate/sessions', headers: { cookie: cookieOf(renewed) } })).status, 200)
+
+  const off = await fixture(t)
+  const opened = await off.open(off.issue())
+  assert.equal(opened.status, 303)
+  assert.equal(opened.headers['clear-site-data'], undefined)
 })

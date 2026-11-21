@@ -347,3 +347,11 @@ test('A10 the admitted identity list refuses in carried HTTP and stream callback
   assert.equal(httpRead, true)
   assert.deepEqual(f.service.seen().map(row => row.subject).sort(), ['http', 'stream'])
 })
+
+test('A11 the adapter and gate share the whole-array role rule', async () => {
+  const { roles } = (await import('../../../server/test/fixtures/caller-role-paths.json', { with: { type: 'json' } })).default
+  for (const row of roles) {
+    const expected = row.role === 'member' || row.role === 'guest' ? row.role : undefined
+    assert.equal(roleOf({ kind: 'automagik', person: { roles: row.roles } }), expected, JSON.stringify(row))
+  }
+})

@@ -9,6 +9,10 @@ import { callerOf } from '../../bots-dsh/src/host/multiuser.js'
 import { createCarrier } from '../src/carrier.js'
 import { createNonces } from '../src/nonces.js'
 import { carrier, invoke, prefix, rpc, seconds, target, wire } from './runtime.mjs'
+import routeFixture from '../../../server/test/fixtures/caller-role-paths.json' with { type: 'json' }
+
+const feed = routeFixture.targets.find(row => row.query)
+const feedTarget = feed.path + feed.query
 
 test('attribution is deeply immutable, isolated across overlapping calls and peers are always disposed', async t => {
   const f = carrier(t)
@@ -356,4 +360,95 @@ test('500 ms clock observations refuse an unused assertion after 40 seconds with
   }
   f.advance(seconds, 500)
   assert.equal((await f.send(unused)).status, 401)
+})
+
+test('C5D1 only two raw pairs are offered to the v1 route provider', async t => {
+  const calls = []
+  let provider = { version: 1, match: (path, method) => {
+    calls.push([method, path])
+    return () => new Response('caller')
+  } }
+  const f = carrier(t, { callerRoutes: () => provider })
+  const post = '/api/omni-ui'
+  assert.equal((await f.call(post)).bytes.toString(), 'caller')
+  assert.equal((await f.call(feedTarget, { method: 'GET' })).bytes.toString(), 'caller')
+  for (const [method, raw] of [
+    ['POST', post + '?x=1'], ['POST', post + '?'], ['POST', '/api/./omni-ui'], ['POST', '/api/x/../omni-ui'],
+    ['POST', post + '/'], ['POST', '/api//omni-ui'], ['POST', '/api/omni%2Dui'],
+    ['HEAD', feed.path], ['POST', feed.path], ['GET', feed.path], ['GET', post + '/image'],
+  ]) {
+    const path = new URL(raw, 'http://x')
+    const assertion = f.key.assertion({ method, path: path.pathname + path.search })
+    assert.equal((await f.call(raw, { method, assertion })).status, 404, method + ' ' + raw)
+  }
+  assert.deepEqual(calls, [['POST', post], ['GET', feed.path]])
+  for (const missing of [undefined, { version: 2 }, { version: 1, match: () => undefined }]) {
+    provider = missing
+    assert.equal((await f.call(post)).status, 404)
+  }
+  provider = { version: 1, match() { throw new Error('private message') } }
+  const refused = await f.call(post)
+  assert.equal(refused.status, 500)
+  assert.equal(refused.bytes.length, 0)
+})
+
+test('C5D2 pair body limits are shared with the gate and release POST slots after refusals', async t => {
+  const { CALLER_PAIRS } = await import('../src/carrier.js')
+  const { targets } = (await import('../../../server/test/fixtures/caller-role-paths.json', { with: { type: 'json' } })).default
+  assert.deepEqual(CALLER_PAIRS, new Map(targets.filter(row => row.callerRoute).map(row => [row.method + ' ' + row.path, row.maxBody])))
+  let calls = 0
+  const f = carrier(t, { callerSlots: 1, maxRequestBodyBytes: 100, callerRoutes: () => ({
+    version: 1, match: () => () => { calls++; return new Response() },
+  }) })
+  const path = '/api/omni-ui'
+  for (const options of [
+    { headers: { 'content-length': '101' } },
+    { chunks: ['x'.repeat(100), 'y'] },
+  ]) assert.equal((await f.call(path, options)).status, 413)
+  assert.equal((await f.call(feedTarget, { method: 'GET', body: 'x' })).status, 413)
+  assert.equal((await f.call(feedTarget, { method: 'GET', headers: { 'content-length': '1' } })).status, 413)
+  assert.equal(calls, 0)
+  assert.equal((await f.call(path, { body: 'x'.repeat(100) })).status, 200)
+  assert.equal(calls, 1)
+})
+
+test('C5D3 the matched handler runs in the admitted scope with its registered Peer', async t => {
+  const { createPeerRegistry } = await import('../src/peers.js')
+  const registry = createPeerRegistry()
+  let admitted, calls = 0
+  const f = carrier(t, { registry, callerRoutes: () => ({
+    version: 1, match: () => async (_request, principal, peer) => {
+      calls++
+      admitted = peer
+      await setImmediate()
+      assert.equal(registry.live(peer), true)
+      assert.equal(peer.principal, principal)
+      assert.equal(f.scope.current(), principal)
+      return new Response('read')
+    },
+  }) })
+  const response = await f.call('/api/omni-ui')
+  assert.equal(response.status, 200)
+  assert.equal(response.bytes.toString(), 'read')
+  assert.equal(calls, 1)
+  assert.equal(f.scope.current(), undefined)
+  assert.equal(registry.live(admitted), false)
+})
+
+test('C5D4 a viewer-bound feed signs the full target, matches the exact GET route and admits no body', async t => {
+  const received = []
+  const f = carrier(t, { callerRoutes: () => ({
+    version: 1,
+    match(path, method) {
+      assert.equal(path, '/api/omni-ui/feed')
+      assert.equal(method, 'GET')
+      return request => { received.push(new URL(request.url).search); return new Response() }
+    },
+  }) })
+  const path = feedTarget
+  const assertion = f.key.assertion({ method: 'GET', path })
+  assert.equal((await f.call(path.replace('.member', '.guest'), { method: 'GET', assertion })).status, 401)
+  assert.equal((await f.call(path, { method: 'GET', body: 'x' })).status, 413)
+  assert.equal((await f.call(path, { method: 'GET', assertion })).status, 200)
+  assert.deepEqual(received, [feed.query])
 })

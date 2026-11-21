@@ -41,7 +41,7 @@ function seenRole(roles) {
   return roles.includes('member') ? 'member' : roles.includes('guest') ? 'guest' : undefined
 }
 
-export function cleanPeople(input, { main = false, current = ownersOnly(), seen = [] } = {}) {
+export function cleanPeople(input, { main = false, current = ownersOnly(), seen = [], narrow = false } = {}) {
   if (!object(input)) throw invalid('Sharing settings must be an object')
   for (const key of Object.keys(input)) {
     if (key !== 'mode' && key !== 'allow') throw invalid('Unknown sharing field ' + key)
@@ -49,6 +49,10 @@ export function cleanPeople(input, { main = false, current = ownersOnly(), seen 
   if (!Object.hasOwn(input, 'mode') || !MODES.has(input.mode)) throw invalid('Unknown sharing mode')
   if (main && input.mode === 'workspace') throw refusal('A Main Bot is shared only with people you name')
   const allow = checkedList(Object.hasOwn(input, 'allow') ? input.allow : [])
+  if (narrow) {
+    const kept = allow.filter(entry => current.allow.some(person => person.role === entry.role && personKey(person) === personKey(entry)))
+    return { mode: input.mode, allow: kept }
+  }
   const existing = new Set(current.allow.map(personKey))
   const admitted = new Map(seen.map(person => [personKey(person), seenRole(person.roles)]))
   for (const entry of allow) {

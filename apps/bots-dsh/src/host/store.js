@@ -632,7 +632,8 @@ export function install(rt) {
     return writeSnapshot(() => snapshot, { required: true, epoch: lockEpoch })
   }
 
-  const save = ({ required = false } = {}) => {
+  const save = ({ required = false, copy } = {}) => {
+    if (copy !== undefined) return rt.saveCopy(copy.change, copy)
     if (stopped) return required ? Promise.reject(new Error('The Bot team cannot be saved after this host stopped.')) : writing
     refreshShellHolds(state.bots)
     indexSessions()

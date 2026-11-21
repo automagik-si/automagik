@@ -30,6 +30,7 @@ import { MUX_PATH } from '../src/mux-carrier.js'
 import { invoke, localHTTP, prefix, provideConnection, rpc, runtime, send, webRuntime, wire } from './runtime.mjs'
 
 const origin = 'https://workspace.invalid'
+const callerPath = '/api/omni-ui'
 const instance = wire.payload.aud
 const webConfig = { openBrowser: false, printUrl: false, surfaceContext: false }
 
@@ -72,6 +73,17 @@ function fixtureGateway(ctx, { publicMux = false } = {}) {
     assert.equal(decision.kind, 'allow')
     return observe(endpoint, payload, signal, peer)
   }
+  ctx.provide('automagikCallerRoutes', {
+    version: 1,
+    match(path, method) {
+      if (path !== callerPath || method !== 'POST') return
+      return async (request, _principal, peer) => {
+        const { method: endpoint, payload } = await request.json()
+        const result = await gateway.dispatchRpc(endpoint, payload, request.signal, peer)
+        return Response.json({ result })
+      }
+    },
+  })
   return gateway
 }
 
@@ -226,6 +238,18 @@ function businessGateway({ ctx, connection }) {
   }
 }
 
+function directCarrier(f, target, method, principal, body, signedTarget = target) {
+  const path = prefix + target
+  const assertion = f.signer.sign({ principal, familyId: 'fixture', method, path: signedTarget })
+  return invoke(f.webServer.responderFor(new URL(path, 'http://x').pathname).handler, {
+    url: path, method, body, headers: {
+      host: `127.0.0.1:${f.webServer.listenedPort}`,
+      'content-type': 'application/json',
+      'x-automagik-caller': assertion,
+    },
+  })
+}
+
 function result(reply) {
   assert.equal(reply.status, 200, reply.bytes.toString())
   return JSON.parse(reply.bytes).result
@@ -358,7 +382,7 @@ for (const kind of ['exact', 'prefix', 'upgrade', 'mux upgrade']) {
     assert.match(log.mock.calls[0].arguments[0], /startup refused.*\/_automagik/)
     const sign = t.mock.method(f.signer, 'sign')
     const { request, upstream } = inProcessGate(t, f)
-    assert.equal((await request('/api/fixture', 'POST', person('first'), rpc())).status, 503)
+    assert.equal((await request(callerPath, 'POST', person('first'), rpc())).status, 503)
     assert.equal(sign.mock.callCount(), 0)
     assert.equal(upstream.mock.callCount(), 0)
     const target = prefix + '/api/fixture'
@@ -397,7 +421,7 @@ test('the adapter reserves /_automagik for its lifetime and later intruders rece
   removeSibling()
   observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
-  assert.equal(result(await request('/api/fixture', 'POST', person('first'), rpc())).value, 'first')
+  assert.equal(result(await request(callerPath, 'POST', person('first'), rpc())).value, 'first')
   assert.equal(handler.mock.callCount(), 0)
   await dispose()
   assert.equal(webServer.register, register)
@@ -412,14 +436,16 @@ test('the real plugin route composes DSH services behind the gate over an in-pro
   const stopObserving = observe(f)
   const { request, upstream } = inProcessGate(t, f)
   const calls = await Promise.all(['first', 'second'].map(subject =>
-    request('/api/fixture', 'POST', person(subject), rpc())))
+    request(callerPath, 'POST', person(subject), rpc())))
   assert.deepEqual(calls.map(reply => result(reply).value), ['first', 'second'])
   assert.equal(callerOf(f.ctx), undefined)
   await stopObserving()
   const business = businessGateway(f)
   for (const role of ['member', 'guest']) {
     const principal = person(role, role)
-    const denied = result(await request('/api/session/prompt', 'POST', principal, rpc('session/prompt', { args: {} })))
+    const prompt = rpc('session/prompt', { args: {} })
+    assert.equal((await request('/api/session/prompt', 'POST', principal, prompt)).status, 403)
+    const denied = result(await directCarrier(f, '/api/session/prompt', 'POST', principal, prompt))
     assert.equal(denied.ok, false)
     assert.equal(denied.error.code, 'remote-access/denied')
     assert.equal(business.calls(), 0)
@@ -429,11 +455,18 @@ test('the real plugin route composes DSH services behind the gate over an in-pro
   assert.equal(business.calls(), 1)
   for (const [raw, expected] of wire.canonicalTargets) {
     const count = f.dispatched.length
-    assert.equal((await request(raw, 'GET', person('first'))).status, 404, raw)
-    const { path, headers } = upstream.mock.calls.at(-1).arguments[0]
-    assert.equal(path, prefix + expected, raw)
-    const payload = JSON.parse(Buffer.from(headers['x-automagik-caller'].split('.')[1], 'base64url'))
-    assert.equal(payload.path, expected, raw)
+    if (expected.startsWith('/api/')) {
+      const hops = upstream.mock.callCount()
+      assert.equal((await request(raw, 'GET', person('first'))).status, 403, raw)
+      assert.equal(upstream.mock.callCount(), hops, raw)
+      assert.equal((await directCarrier(f, raw, 'GET', person('first'), undefined, expected)).status, 404, raw)
+    } else {
+      assert.equal((await request(raw, 'GET', person('first'))).status, 404, raw)
+      const { path, headers } = upstream.mock.calls.at(-1).arguments[0]
+      assert.equal(path, prefix + expected, raw)
+      const payload = JSON.parse(Buffer.from(headers['x-automagik-caller'].split('.')[1], 'base64url'))
+      assert.equal(payload.path, expected, raw)
+    }
     assert.deepEqual(f.dispatched.slice(count), ['http://dsh.internal' + expected], raw)
   }
   await frontendAssertions(f, (path, method = 'GET') => request(path, method, person('first')))
@@ -592,7 +625,7 @@ test('gate interop through the installed private route preserves attribution, po
   const first = issue('first', 'member')
   const second = issue('second', 'member')
   const guest = issue('guest', 'guest')
-  const call = (endpoint, headers, payload) => send(port, '/api/' + endpoint, {
+  const call = (endpoint, headers, payload) => send(port, callerPath, {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: rpc(endpoint, payload),
   })
   const replies = await Promise.all([call('fixture', first), call('fixture', second)])
@@ -600,7 +633,9 @@ test('gate interop through the installed private route preserves attribution, po
   await stopObserving()
   const business = businessGateway(f)
   for (const [headers, principal] of [[first, person('first')], [guest, person('guest', 'guest')]]) {
-    assert.equal(result(await call('session/prompt', headers, { args: {} })).error.code, 'remote-access/denied')
+    const prompt = rpc('session/prompt', { args: {} })
+    assert.equal((await send(port, '/api/session/prompt', { method: 'POST', headers, body: prompt })).status, 403)
+    assert.equal(result(await directCarrier(f, '/api/session/prompt', 'POST', principal, prompt)).error.code, 'remote-access/denied')
     assert.equal(business.calls(), 0)
     assert.equal((await business.follow(principal)).owner, false)
     // Delivery 5b carries a member's /api/remote.mux to the adapter; this handshake has no
@@ -652,7 +687,7 @@ test('the reserved carrier refuses before the connection arrives and after it le
   await connection
   observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
-  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  const member = () => request(callerPath, 'POST', person('first'), rpc())
   assert.equal(result(await member()).value, 'first')
   await connection.dispose()
   assert.equal((await member()).status, 503)
@@ -672,7 +707,7 @@ test('a replacement connection inherits an unpersisted rollback cutoff', async t
   observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
   const principal = person('first')
-  const member = () => request(fixturePath, 'POST', principal, rpc())
+  const member = () => request(callerPath, 'POST', principal, rpc())
   assert.equal((await member()).status, 200)
 
   wall += 6000
@@ -825,8 +860,8 @@ test('new and retained carrier handlers refuse while a caller dependent holds te
   }))
 
   const { request, upstream } = inProcessGate(t, f)
-  const member = () => request(fixturePath, 'POST', person('first'), rpc())
-  const { handler } = f.webServer.match(prefix + fixturePath)
+  const member = () => request(callerPath, 'POST', person('first'), rpc())
+  const { handler } = f.webServer.match(prefix + callerPath)
   assert.equal(result(await member()).value, 'first')
   const { path, method, headers } = upstream.mock.calls[0].arguments[0]
   const disconnect = connection.dispose()
@@ -834,7 +869,7 @@ test('new and retained carrier handlers refuse while a caller dependent holds te
     await entered.promise
     assert.equal(f.ctx.get('automagikCaller'), undefined)
     const fresh = (await member()).status
-    const assertion = f.signer.sign({ principal: person('first'), familyId: 'fixture', method, path: fixturePath })
+    const assertion = f.signer.sign({ principal: person('first'), familyId: 'fixture', method, path: callerPath })
     const retained = (await invoke(handler, {
       url: path, method, body: rpc(), headers: { ...headers, 'x-automagik-caller': assertion },
     })).status
@@ -852,7 +887,7 @@ test('adapter disposal leaves the permanent guard ahead of the fallback and late
   const { match } = f.webServer
   observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
-  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  const member = () => request(callerPath, 'POST', person('first'), rpc())
   assert.equal(result(await member()).value, 'first')
   await dispose()
   assert.equal(f.webServer.match, match)
@@ -977,7 +1012,7 @@ for (const event of ['adapter disposal', 'connection loss']) {
     }))
 
     const { request } = inProcessGate(t, f)
-    const member = subject => request(fixturePath, 'POST', person(subject), rpc())
+    const member = subject => request(callerPath, 'POST', person(subject), rpc())
     const response = member('first')
     await Promise.race([entered.promise, response.then(() => assert.fail('RPC did not enter the interceptor'))])
     const stopped = event === 'connection loss' ? connection.dispose() : dispose()
@@ -1054,7 +1089,7 @@ test('an overlapping activation leaves the first owner serving through its dispo
   assert.equal(f.ctx.get('automagikCaller'), original)
   observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
-  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  const member = () => request(callerPath, 'POST', person('first'), rpc())
   assert.equal(result(await member()).value, 'first')
   await disposeOverlap()
   assert.equal(result(await member()).value, 'first')
@@ -1079,7 +1114,7 @@ test('a duplicate caller provider fails the injected child and releases its rese
   assert.equal(f.webServer.registerUpgrade, registerUpgrade)
   observeFixture(f.ctx)
   const { request } = inProcessGate(t, f)
-  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  const member = () => request(callerPath, 'POST', person('first'), rpc())
   assert.equal((await member()).status, 503)
   assert.equal(fallback.mock.callCount(), 0)
   await dispose()
@@ -1094,7 +1129,7 @@ test('a waiting owner reloads the watermark and refuses the previous owner’s s
   const f = callerRuntime(t, { now: () => wall })
   const disposeFirst = await f.activate()
   const first = f.ctx.get('automagikCaller')
-  const waiting = f.ctx.isolate('connection').isolate('typertGateway')
+  const waiting = f.ctx.isolate('connection').isolate('typertGateway').isolate('automagikCallerRoutes')
   fixtureGateway(waiting)
   await f.activate(waiting)
   assert.equal(waiting.get('connection'), undefined)
@@ -1103,7 +1138,7 @@ test('a waiting owner reloads the watermark and refuses the previous owner’s s
   t.mock.method(Date, 'now', () => wall)
   observeFixture(f.ctx)
   const { request, upstream } = inProcessGate(t, f)
-  const member = () => request(fixturePath, 'POST', person('first'), rpc())
+  const member = () => request(callerPath, 'POST', person('first'), rpc())
   assert.equal(result(await member()).value, 'first')
   const { path, method, headers } = upstream.mock.calls[0].arguments[0]
   assert.ok(headers['x-automagik-caller'])
@@ -1131,7 +1166,7 @@ test('member indexes use conditional GET and HEAD with a render-specific weak ET
     const first = person('first')
     const get = await request(path, 'GET', first)
     assert.equal(get.status, 200)
-    assert.equal(get.headers['cache-control'], 'no-cache')
+    assert.equal(get.headers['cache-control'], 'no-store')
     assert.match(get.headers.etag, /^W\//)
     assert.equal(get.headers.etag, `W/"${createHash('sha1').update(get.bytes).digest('base64url')}"`)
     const headers = { 'if-none-match': get.headers.etag }
@@ -1358,7 +1393,7 @@ test('a DSH restart interval never hands a signed member request to an early pri
   const g = await loopbackGate(t, f, f.webServer)
   const member = () => g.issue(person('first')).headers
   const attempt = async () => {
-    const http = await g.http('/api/fixture', member(), rpc())
+    const http = await g.http(callerPath, member(), rpc())
     const s = g.socket(member())
     const upgrade = await s.opened.then(() => 101, error => error.status)
     return [http.status, upgrade]
@@ -1383,7 +1418,7 @@ test('a DSH restart interval never hands a signed member request to an early pri
   await f.activate(next.ctx)
   g.credentials.port = next.webServer.port
   g.credentials.authority = `127.0.0.1:${next.webServer.port}`
-  const reply = await g.http('/api/fixture', member(), rpc())
+  const reply = await g.http(callerPath, member(), rpc())
   assert.equal(result(reply).value, 'first')
   const s = g.socket(member())
   await s.opened

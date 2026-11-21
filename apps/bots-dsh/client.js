@@ -3686,11 +3686,58 @@ function addStrings(zh) {
     if (added.length > 0) publish();
   };
 }
+Object.assign(ZH, {
+  "No Bots are shared with you yet.": "还没有任何 Bot 与你共享。",
+  "Nothing to read here yet.": "这里还没有可阅读的消息。",
+  "You can read this chat, but not send messages.": "你可以阅读这段对话，但不能发送消息。",
+  "This Bot is no longer shared with you.": "这个 Bot 已停止与你共享。",
+  "Who can talk to this Bot": "谁可以与这个 Bot 对话",
+  "Only you and admins": "仅你和管理员",
+  "People you choose": "你选择的人",
+  "Anyone in the workspace": "工作区中的任何人",
+  "Sharing starts a new part of this chat; earlier parts stay yours.": "共享会开启新的对话段落；较早的段落仍归你所有。",
+  "People you add can read this Bot's chat; they can't send messages yet.": "你添加的人可以阅读这个 Bot 的对话，暂时不能发送消息。",
+  "Guests and named people": "访客和指定人员",
+  "Member": "成员",
+  "Guest": "访客",
+  "Last seen {time}": "上次在线：{time}",
+  "Not signed in since the last restart": "自上次重启后未登录",
+  "Remove": "移除",
+  "Add person": "添加人员",
+  "No one has signed in since the last restart.": "自上次重启后还没有人登录。",
+  "Who may talk to this Bot changed in another window; check it and save again.": "另一个窗口修改了此 Bot 的共享设置；请检查后重新保存。",
+  "Starting a new part of this chat for sharing…": "正在开启新的对话段落以供共享…",
+  "Shared: people you add read this chat from its new part on.": "已共享：你添加的人可以从新的段落开始阅读对话。",
+  "Sharing did not start because something moved into the new part; stop sharing and share again.": "有内容进入了新段落，未能开始共享；请停止共享后再重新共享。",
+  "{name} is already moving to a new conversation.": "{name} 正在切换到新对话。",
+  "{name} is still handing on earlier messages; try again shortly.": "{name} 仍在转交较早的消息；请稍后重试。",
+  "Answer or dismiss {name}'s open card first.": "请先回答或关闭 {name} 打开的卡片。",
+  "Pause {name}'s goal first.": "请先暂停 {name} 的目标。",
+  "Wait for {name} to finish, then share it.": "请等待 {name} 完成后再共享。",
+  "{name} has messages waiting; let them run or remove them, then share it.": "{name} 有待处理的消息；请等它处理完或移除这些消息后再共享。",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}": "{issuer} {subject} 自上次重启后未登录，或未以 {role} 身份登录",
+  "Who may talk to {name} changed in another window; check it and save again.": "另一个窗口修改了 {name} 的共享设置；请检查后重新保存。",
+  "A Main Bot is shared only with people you name": "主 Bot 只能与指定人员共享",
+  "Sharing needs multiuser mode": "共享需要多用户模式",
+  "Save who may talk to a Bot on its own": "请单独保存 Bot 的共享设置",
+  "Name at most 100 people": "最多可指定 100 人",
+  "Each person needs a valid issuer, subject and role": "每个人都需要有效的签发者、主体和角色",
+  "Name each person only once": "每个人只能指定一次",
+  "Your sign-in changed; reload this page.": "你的登录状态已更改；请重新加载此页面。"
+});
 function t(key, params) {
   return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
   "Detach {name} first.",
+  "{name} is already moving to a new conversation.",
+  "{name} is still handing on earlier messages; try again shortly.",
+  "Answer or dismiss {name}'s open card first.",
+  "Pause {name}'s goal first.",
+  "Wait for {name} to finish, then share it.",
+  "{name} has messages waiting; let them run or remove them, then share it.",
+  "{issuer} {subject} has not signed in since the last restart, or not as a {role}",
+  "Who may talk to {name} changed in another window; check it and save again.",
   "A folder is in the way: {folder}",
   "{name} does not have the {tool} tool: its Genie role is off.",
   "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
@@ -3847,11 +3894,256 @@ ${REST_NOTE}`);
   return { url: facts.length <= URL_LIMIT ? facts : build(PASTE_NOTE), inline: false };
 }
 
+// src/client/viewer.js
+var VIEWER_KEY = "automagik.viewer";
+var RELOAD_KEY = "automagik.retired";
+var ROLES = /* @__PURE__ */ new Set(["owner", "member", "guest", "none"]);
+var guard;
+function bootView() {
+  const boot = globalThis.__AUTOMAGIK_VIEW__;
+  if (boot === void 0) return;
+  return boot?.version === 1 && ROLES.has(boot.role) ? boot : { role: "none" };
+}
+var mountedViewer = () => guard?.retired ? void 0 : guard?.viewer;
+var isRetired = () => guard?.retired === true;
+var canClearDraftInMemory = () => guard?.draftsProtected === true;
+var unavailable = () => Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
+function storedViewer() {
+  try {
+    return localStorage.getItem(VIEWER_KEY);
+  } catch {
+    return null;
+  }
+}
+function requestViewer(endpoint) {
+  checkViewer(guard);
+  if (isRetired() || endpoint !== "whoami" && !guard?.viewer && bootView() !== void 0) {
+    throw unavailable();
+  }
+  return guard;
+}
+function checkViewer(active2) {
+  if (active2 && guard === active2 && active2.viewer) {
+    const current = storedViewer();
+    if (current !== null && current !== active2.viewer.id) retire();
+  }
+  if (active2 && (guard !== active2 || active2.retired)) throw unavailable();
+}
+function viewerRefused(code) {
+  if (guard && ["bot/viewer-changed", "HTTP_401", "HTTP_403"].includes(code)) retire();
+}
+function viewerResponse(response) {
+  if (response.status === 401 && response.headers?.get?.("x-automagik-dsh-refresh") === "1") return;
+  viewerRefused(`HTTP_${response.status}`);
+}
+function onRetire(hook) {
+  if (!guard) return () => {
+  };
+  const hooks = guard.hooks;
+  if (guard.retired) hook();
+  else hooks.add(hook);
+  return () => hooks.delete(hook);
+}
+function retire() {
+  if (!guard || guard.retired) return;
+  guard.retired = true;
+  guard.viewer = void 0;
+  const body = document.body;
+  if (body) {
+    body.inert = true;
+    body.style?.setProperty("display", "none", "important");
+  }
+  for (const hook of guard.hooks) {
+    try {
+      hook();
+    } catch {
+    }
+  }
+  guard.hooks.clear();
+  body?.replaceChildren?.();
+  clearClientErrors();
+  try {
+    if (sessionStorage.getItem(RELOAD_KEY) === "1") return;
+    sessionStorage.setItem(RELOAD_KEY, "1");
+  } catch {
+    return;
+  }
+  try {
+    location.reload();
+  } catch {
+  }
+}
+function trackDrafts(active2, viewer) {
+  try {
+    const storage = localStorage;
+    const prototype = Object.getPrototypeOf(storage);
+    const set2 = prototype.setItem;
+    const remove = prototype.removeItem;
+    if (typeof set2 !== "function" || typeof remove !== "function") return;
+    const written = /* @__PURE__ */ new Map();
+    const current = () => storage.getItem(VIEWER_KEY) === viewer.id;
+    const conversation = (key) => typeof key === "string" && key.startsWith("dsh.conversation.");
+    prototype.setItem = function(key, value) {
+      if (this !== storage || !conversation(key)) return set2.call(this, key, value);
+      if (!active2.retired && current()) {
+        set2.call(this, key, value);
+        written.set(key, storage.getItem(key));
+      }
+    };
+    prototype.removeItem = function(key) {
+      if (this !== storage || !conversation(key)) return remove.call(this, key);
+      if (!active2.retired && current()) {
+        remove.call(this, key);
+        written.delete(key);
+      }
+    };
+    active2.hooks.add(() => {
+      try {
+        if (current()) {
+          for (const [key, value] of written) if (storage.getItem(key) === value) remove.call(storage, key);
+        }
+      } finally {
+        written.clear();
+      }
+    });
+    return () => {
+      prototype.setItem = set2;
+      prototype.removeItem = remove;
+    };
+  } catch {
+  }
+}
+function confirmed(answer, boot) {
+  const viewer = answer?.viewer;
+  return boot.role !== "none" && answer?.multiuser === true && answer.role === boot.role && (viewer?.role === boot.role || boot.role === "owner" && viewer?.role === "admin") && typeof viewer.id === "string" && /^[\w-]{1,64}$/.test(viewer.id);
+}
+async function startViewer(boot, signal, prepare) {
+  if (guard) throw new Error("Viewer already started");
+  if (signal?.aborted) throw unavailable();
+  const active2 = guard = { hooks: /* @__PURE__ */ new Set(), retired: false };
+  const previousViewer = storedViewer();
+  const body = document.body;
+  const display = body?.style?.getPropertyValue("display");
+  const priority = body?.style?.getPropertyPriority("display");
+  const inert = body?.inert;
+  const show2 = () => {
+    if (!body) return;
+    body.inert = inert;
+    body.style?.setProperty("display", display, priority);
+  };
+  if (body) {
+    body.inert = true;
+    body.style?.setProperty("display", "none", "important");
+  }
+  const current = () => guard === active2 && !active2.retired && !signal?.aborted;
+  let cancelDelay;
+  active2.hooks.add(() => cancelDelay?.());
+  let answer;
+  const abort = () => {
+    cancelDelay?.();
+    active2.stop?.();
+    if (guard === active2 && !active2.retired) {
+      if (!active2.viewer) show2();
+      guard = void 0;
+      delete globalThis.__AUTOMAGIK_MOUNTED_VIEWER__;
+    }
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  let delay = 250;
+  while (current()) {
+    try {
+      answer = await call("whoami", void 0, signal);
+      break;
+    } catch {
+      if (!current()) break;
+      await new Promise((resolve2) => {
+        const timer2 = setTimeout(resolve2, delay);
+        cancelDelay = () => {
+          clearTimeout(timer2);
+          resolve2();
+        };
+      });
+      cancelDelay = void 0;
+      delay = Math.min(15e3, delay * 2);
+    }
+  }
+  if (!current()) throw new Error("Viewer unavailable");
+  const currentViewer = storedViewer();
+  if (!confirmed(answer, boot) || currentViewer !== null && currentViewer !== previousViewer && currentViewer !== answer.viewer.id) {
+    retire();
+    throw new Error("Viewer role changed");
+  }
+  const viewer = active2.viewer = answer.viewer;
+  try {
+    localStorage.setItem(VIEWER_KEY, viewer.id);
+  } catch {
+  }
+  const untrackDrafts = trackDrafts(active2, viewer);
+  active2.draftsProtected = untrackDrafts !== void 0;
+  let checking = false;
+  const check = async () => {
+    if (checking || active2.retired || guard !== active2) return;
+    checking = true;
+    try {
+      const next = await call("whoami", void 0, signal);
+      if (guard === active2 && (!confirmed(next, boot) || next.viewer.id !== viewer.id || next.viewer.role !== viewer.role)) retire();
+    } catch {
+    } finally {
+      checking = false;
+    }
+  };
+  const visibility = () => {
+    if (document.visibilityState === "visible") void check();
+  };
+  const storage = (event) => {
+    if ((event.key === VIEWER_KEY || event.key === null) && event.newValue !== viewer.id) retire();
+  };
+  window.addEventListener("focus", check);
+  window.addEventListener("storage", storage);
+  document.addEventListener("visibilitychange", visibility);
+  const timer = setInterval(check, 15e3);
+  active2.stop = () => {
+    if (!active2.retired) untrackDrafts?.();
+    clearInterval(timer);
+    window.removeEventListener("focus", check);
+    window.removeEventListener("storage", storage);
+    document.removeEventListener("visibilitychange", visibility);
+  };
+  active2.hooks.add(active2.stop);
+  const checkMounted = () => checkViewer(active2);
+  globalThis.__AUTOMAGIK_MOUNTED_VIEWER__ = Object.freeze({
+    get id() {
+      checkMounted();
+      return active2.viewer.id;
+    },
+    check: checkMounted,
+    response: viewerResponse,
+    refused: viewerRefused
+  });
+  if (prepare) {
+    try {
+      await prepare();
+    } catch (error) {
+      if (current()) retire();
+      throw error;
+    }
+    if (!current()) throw unavailable();
+  }
+  show2();
+  try {
+    sessionStorage.removeItem(RELOAD_KEY);
+  } catch {
+  }
+  return viewer;
+}
+
 // src/client/api.js
 var ROUTE = "api/omni-ui";
-var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
+var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/viewer-changed", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
 var isRefusal = (code) => REFUSALS.has(code) || code.startsWith("bot/adopt-") || code.startsWith("bot/reservation-");
 var call = async (endpoint, payload, signal) => {
+  const active2 = requestViewer(endpoint);
+  const viewer = active2?.viewer?.id;
   const vault = endpoint.startsWith("vault-");
   let response;
   try {
@@ -3859,10 +4151,11 @@ var call = async (endpoint, payload, signal) => {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ endpoint, payload: payload ?? null }),
+      body: JSON.stringify({ endpoint, payload: payload ?? null, ...viewer === void 0 ? {} : { viewer } }),
       signal
     });
   } catch (error) {
+    checkViewer(active2);
     if (error?.name === "AbortError") throw error;
     if (!vault) noteClientError(endpoint, Object.assign(new Error(`network error: ${error?.message ?? error}`), { code: "NETWORK" }));
     throw markNoted(Object.assign(new Error(t("Could not reach DSH. Check that it is still running.")), {
@@ -3870,18 +4163,23 @@ var call = async (endpoint, payload, signal) => {
       ...!vault ? { cause: error } : {}
     }));
   }
+  checkViewer(active2);
   if (!response.ok) {
+    viewerResponse(response);
     const error = Object.assign(new Error(hostText(`HTTP ${response.status}`)), { code: `HTTP_${response.status}` });
-    if (!vault) noteClientError(endpoint, error);
+    if (!vault && !isRetired()) noteClientError(endpoint, error);
     throw error;
   }
   const result = await response.json();
+  checkViewer(active2);
   if (!result.ok) {
     const code = result.error?.code ?? "bot/error";
+    viewerRefused(code);
     const message = hostText(result.error?.message ?? "Request failed");
     const error = Object.assign(new Error(code === "bot/internal" ? `${message} ${t("Settings → Feedback has the details.")}` : message), { code });
     if (code === "bot/refused" && result.error?.reason === "needs-new-conversation") error.reason = result.error.reason;
-    if (!vault && !isRefusal(code)) {
+    const staleShare = code === "bot/stale" && endpoint === "update-bot" && Object.hasOwn(payload ?? {}, "people");
+    if (!vault && !staleShare && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? "Request failed"), { code }));
       markNoted(error);
     }
@@ -12735,8 +13033,8 @@ function ConfirmInput({ node, onSubmit, busy = false, footStart = null }) {
 }
 function SettledConfirm({ node, answer }) {
   const ui2 = useViewUi();
-  const confirmed = answerValues(answer, node)?.confirmed;
-  if (confirmed !== true && confirmed !== false) {
+  const confirmed2 = answerValues(answer, node)?.confirmed;
+  if (confirmed2 !== true && confirmed2 !== false) {
     return (0, import_react26.createElement)(
       "div",
       { className: "dv-q-foot" },
@@ -12744,7 +13042,7 @@ function SettledConfirm({ node, answer }) {
       (0, import_react26.createElement)("button", { type: "button", className: "dv-q-submit", disabled: true }, node.confirmLabel ?? ui2.t("Confirm"))
     );
   }
-  const label = confirmed ? node.confirmLabel ?? ui2.t("Confirm") : node.cancelLabel ?? ui2.t("Cancel");
+  const label = confirmed2 ? node.confirmLabel ?? ui2.t("Confirm") : node.cancelLabel ?? ui2.t("Cancel");
   return (0, import_react26.createElement)("span", { className: "dv-q-badge" }, label);
 }
 function FormInput({ node, onSubmit, busy = false, footStart = null }) {
@@ -14295,13 +14593,22 @@ function currentKey(bot, look) {
   if (look.shape === "octopus" && look.color === "deepseek") return "omni";
   return `shape:${look.shape}`;
 }
-async function put(url, blob) {
-  const response = await fetch(url, { method: "PUT", body: blob, headers: { "content-type": "image/webp" } });
+async function put(url, blob, active2) {
+  checkViewer(active2);
+  const viewer = requestViewer("pet-codex")?.viewer?.id;
+  const headers = { "content-type": "image/webp", ...viewer ? { "x-automagik-viewer": viewer } : {} };
+  const response = await fetch(url, { method: "PUT", body: blob, headers });
+  checkViewer(active2);
   const answer = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(answer.error ?? t("Codex's pets folder could not be written"));
+  checkViewer(active2);
+  if (!response.ok) {
+    viewerResponse(response);
+    throw new Error(answer.error ?? t("Codex's pets folder could not be written"));
+  }
   return answer;
 }
 async function toCodex(bot, look) {
+  const active2 = requestViewer("pet-codex");
   const id = `automagik-${slug(bot.name)}`;
   const query = (part) => `api/omni-ui/pet-codex?${new URLSearchParams({ id, name: bot.name, description: bot.role ?? "", ...part ? { part } : {} })}`;
   const wants = petOf(bot, look, { live: true, size: 64 });
@@ -14316,8 +14623,8 @@ async function toCodex(bot, look) {
   } else {
     throw new Error(t("A photo is not a pet: pick a character or a pet first."));
   }
-  await put(query(), sheet);
-  if (sleep2) await put(query("sleep"), sleep2);
+  await put(query(), sheet, active2);
+  if (sleep2) await put(query("sleep"), sleep2, active2);
   return id;
 }
 function Portrait({ item, color }) {
@@ -16941,6 +17248,13 @@ function roleOutletVisible(outlet, id, bot, roster) {
 
 // src/client/bot-settings.js
 var import_react41 = require("react");
+var PeopleCard;
+function installPeopleCard(component) {
+  PeopleCard = component;
+  return () => {
+    if (PeopleCard === component) PeopleCard = void 0;
+  };
+}
 var capitalize2 = (word2) => word2[0].toUpperCase() + word2.slice(1);
 function InlineText({ label, value, placeholder: placeholder2, required = false, maxLength, multiline = false, onSave }) {
   const [draft, setDraft] = (0, import_react41.useState)(null);
@@ -17439,6 +17753,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         onChange: (value) => save({ private: value })
       })
     ),
+    PeopleCard ? (0, import_react41.createElement)(PeopleCard, { bot, roster }) : null,
     (0, import_react41.createElement)(
       Card2,
       { title: t("Instructions") },
@@ -23689,21 +24004,21 @@ var Glyph = ({ face }) => (0, import_react51.createElement)(
   { className: "lb-face-glyph", viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true, focusable: "false" },
   ...PATHS[face].map((d) => (0, import_react51.createElement)("path", { key: d, d }))
 );
-function FaceSwitch({ face, onFace, label, unavailable = {} }) {
+function FaceSwitch({ face, onFace, label, unavailable: unavailable2 = {} }) {
   return TwoPartSwitch({
     current: faceOr(face),
     onSelect: onFace,
     label: label ?? word("faces"),
-    unavailable,
+    unavailable: unavailable2,
     parts: FACES2.map((name) => ({ name, content: [(0, import_react51.createElement)(Glyph, { face: name }), faceWord(name)] }))
   });
 }
-function TwoPartSwitch({ current, onSelect, label, parts, unavailable = {} }) {
+function TwoPartSwitch({ current, onSelect, label, parts, unavailable: unavailable2 = {} }) {
   return (0, import_react51.createElement)(
     "div",
     { className: "lb-face", role: "group", "aria-label": label },
     ...parts.map(({ name, content }) => {
-      const why = name === current ? void 0 : unavailable[name];
+      const why = name === current ? void 0 : unavailable2[name];
       return (0, import_react51.createElement)("button", {
         key: name,
         type: "button",
@@ -27526,9 +27841,9 @@ function usePermissionPick({ saved, onPick, askedOf, repick = false, confirmFull
   };
   const current = pending ?? saved;
   const asks = (value) => value === AUTO_ROW || value === AUTO || confirmFull && presetDanger(value);
-  const pick2 = (value, confirmed = false) => {
+  const pick2 = (value, confirmed2 = false) => {
     if (value === current && !repick) return;
-    if (asks(value) && !confirmed) {
+    if (asks(value) && !confirmed2) {
       asked2.current = askedOf?.();
       setConfirming(value);
       return;
@@ -27802,12 +28117,12 @@ var autoQuestion = (name, level, judge) => {
 // src/client/enter-steer.js
 var steerable = (input) => input !== void 0 && input.phase === "plain" && input.draft.trim() === "" && input.attachmentIds.length === 0 && input.queue.some((message) => message.source?.kind === "user");
 var enterSteers = (event, input) => event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && !event.getModifierState?.("AltGraph") && !event.isComposing && event.keyCode !== 229 && !event.repeat && steerable(input);
-var steerQueued = async (session) => {
+var steerQueued = async (session, update = (id, action) => session.updateQueue(id, action)) => {
   try {
     const queued = session.projections.faceOf("inbox").getSnapshot()?.["next-turn"] ?? [];
     for (const item of queued) {
       if (item.source?.kind !== "user") continue;
-      const result = await session.updateQueue(item.id, { kind: "steer" });
+      const result = await update(item.id, { kind: "steer" });
       if (result.ok) continue;
       return result.error.code === "session/steer-unavailable" || result.error.code === "session/queue-item-not-found" ? "done" : "failed";
     }
@@ -39481,7 +39796,7 @@ function readPage(limits) {
   const started = performance.now();
   const SKIP = /* @__PURE__ */ new Set(["script", "style", "noscript", "template", "head", "title", "meta", "link", "svg", "object", "embed", "audio", "video", "source", "track", "map", "datalist", "option", "optgroup"]);
   const ITEM = 'a[href], button, input:not([type=hidden]), textarea, select, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=checkbox], [role=switch], [role=radio], [contenteditable=""], [contenteditable=true]';
-  const ROLES = { a: "link", button: "button", select: "select", textarea: "textbox", summary: "button" };
+  const ROLES2 = { a: "link", button: "button", select: "select", textarea: "textbox", summary: "button" };
   const INPUT_ROLES = { checkbox: "checkbox", radio: "radio", submit: "button", button: "button", reset: "button", image: "button", search: "searchbox", range: "slider", file: "button", color: "button" };
   const NO_VALUE_TYPES = /* @__PURE__ */ new Set(["checkbox", "radio", "submit", "button", "reset", "image", "file", "color"]);
   const SECRET_HINT = /(^|[-_\s])(cvv|cvc|csc|cc-?(num|number|csc|exp)|card-?(num|number)|otp|one-?time-?code|pin)([-_\s]|$)/i;
@@ -39528,7 +39843,7 @@ function readPage(limits) {
     else if (stats.nodes % 512 === 0 && performance.now() - started > limits.ms) stop3 = `reading took longer than ${limits.ms} ms`;
     return stop3 !== "";
   };
-  const roleOf = (el) => el.getAttribute("role") || ROLES[el.localName] || (el.localName === "input" ? INPUT_ROLES[el.type] || "textbox" : el.isContentEditable ? "textbox" : el.localName);
+  const roleOf = (el) => el.getAttribute("role") || ROLES2[el.localName] || (el.localName === "input" ? INPUT_ROLES[el.type] || "textbox" : el.isContentEditable ? "textbox" : el.localName);
   const sized = (el) => {
     const box = el.getBoundingClientRect();
     return box.width > 0 && box.height > 0;
@@ -43547,8 +43862,8 @@ function createSelfUpdateController({
       if (next === "connected") void refresh();
       else unconfirm(true);
     });
-    const unavailable = state2 === "connecting" || state2 === "disconnected";
-    if (detached || unavailable) unconfirm(unavailable);
+    const unavailable2 = state2 === "connecting" || state2 === "disconnected";
+    if (detached || unavailable2) unconfirm(unavailable2);
     else void refresh();
   };
   const open = () => {
@@ -44042,6 +44357,40 @@ function createDocumentUpdate(doc, storage = (() => {
   };
 }
 
+// src/client/gated-shared.js
+var gated_shared_exports = {};
+__export(gated_shared_exports, {
+  BotMark: () => BotMark,
+  BrandMark: () => BrandMark,
+  BrandName: () => BrandName,
+  CONVERSATION_CSS: () => CONVERSATION_CSS,
+  Card: () => Card2,
+  LEFT_BAR_CSS: () => LEFT_BAR_CSS,
+  Nothing: () => Nothing,
+  Row: () => Row,
+  SHELL_CSS: () => SHELL_CSS,
+  SIDEBAR_CSS: () => SIDEBAR_CSS,
+  Segmented: () => Segmented,
+  Shimmer: () => Shimmer,
+  allThemes: () => allThemes,
+  call: () => call,
+  checkViewer: () => checkViewer,
+  createSource: () => createSource,
+  dayLabel: () => dayLabel,
+  freePriority: () => freePriority,
+  installCompiledStyles: () => installCompiledStyles,
+  installStyles: () => installStyles,
+  isMainOf: () => isMainOf,
+  isRetired: () => isRetired,
+  lookOf: () => lookOf,
+  mountedViewer: () => mountedViewer,
+  onRetire: () => onRetire,
+  relativeShort: () => relativeShort,
+  requestViewer: () => requestViewer,
+  t: () => t,
+  themeCss: () => themeCss
+});
+
 // src/client/index.js
 var inject = ["sessions", "uiWorkspace", "uiConversation", "slots", "theme", "layout"];
 var LIVE_OWN = /* @__PURE__ */ new Set(["revision", "unchanged", "activity", "work", "memoryNews", "memoryReviews", "liveKey", "computerLive"]);
@@ -44116,7 +44465,33 @@ var omni = Object.freeze({
 });
 var DSH_SETTINGS = /* @__PURE__ */ new Set(["general", "account", "models", "agent-presets", "plugins"]);
 function apply(ctx) {
-  ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy");
+  const boot = bootView();
+  if (boot === void 0) return applyOwner(ctx);
+  const lifetime = new AbortController();
+  ctx.effect(() => () => lifetime.abort(), "ds-bot: gated viewer");
+  ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy (gated)");
+  let gated;
+  const prepare = async () => {
+    const chunk = await globalThis.__dshChunk("./client.gated.js");
+    gated = chunk.initialize(gated_shared_exports);
+  };
+  startViewer(boot, lifetime.signal, prepare).then((viewer) => {
+    if (lifetime.signal.aborted || ctx.fiber && ctx.fiber.state !== 2 || isRetired()) return;
+    const surface = ctx.inject([], (scope) => {
+      if (viewer.role === "member" || viewer.role === "guest") gated.applyMember(scope);
+      else {
+        scope.effect(() => installPeopleCard(gated.PeopleCard), "ds-bot: gated People card");
+        applyOwner(scope, { gated: true });
+      }
+    });
+    ctx.effect(() => onRetire(() => {
+      void Promise.resolve().then(() => surface.dispose());
+    }), "ds-bot: retire gated surface");
+  }, () => {
+  });
+}
+function applyOwner(ctx, { gated = false } = {}) {
+  if (!gated) ctx.effect(() => installLocale(ctx.get("locale")), "ds-bot: interface copy");
   const hostHolds = createSource({});
   migrateStorage();
   const PREFS_KEY = STORAGE.prefs;
@@ -44131,7 +44506,8 @@ function apply(ctx) {
   const reactionStore = sharedMap(STORAGE.reactions);
   const seenStore = sharedMap(STORAGE.seen);
   let seenAt = seenStore.read();
-  const ui2 = createSource({ details: null, view: "details", renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: unreadStore.read(), reactions: reactionStore.read(), visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null });
+  const emptyUi = { details: null, view: "details", renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: {}, reactions: {}, visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null };
+  const ui2 = createSource({ ...emptyUi, unread: unreadStore.read(), reactions: reactionStore.read() });
   const frame = createSource({ viewport: typeof window === "undefined" ? 0 : window.innerWidth });
   const surface = createSource({ mode: readMode(), plain: false });
   let agentSessionCache = /* @__PURE__ */ new Set();
@@ -44210,7 +44586,7 @@ function apply(ctx) {
     const order = ++pulls;
     const known2 = roster.getSnapshot();
     const value = await call("state", { since: known2.revision, models: known2.modelsKey ?? "", live: liveKey, locale: language(), allowPlace: allowPlace() });
-    if (order < applied) return;
+    if (order < applied || gated && isRetired()) return;
     applied = order;
     if (value.liveKey !== void 0) liveKey = value.liveKey;
     if (value.activity !== void 0) {
@@ -44278,6 +44654,31 @@ function apply(ctx) {
   };
   let selfUpdate;
   const selfUpdateStatusSource = createSource(null);
+  if (gated) ctx.effect(() => onRetire(() => {
+    currentFace = null;
+    for (const [source, empty] of [
+      [roster, EMPTY_ROSTER],
+      [ui2, emptyUi],
+      [work, { bots: {}, approvals: [] }],
+      ...[hostHolds, activity, live, computer, cards2, heldCards, turnClock, memoryNews].map((source2) => [source2, {}])
+    ]) {
+      try {
+        source.set(empty);
+      } catch {
+      }
+    }
+    seenAt = savedPrefs = {};
+    agentSessionCache.clear();
+    for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear();
+    if (canClearDraftInMemory()) {
+      for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
+        try {
+          ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.("");
+        } catch {
+        }
+      }
+    }
+  }), "ds-bot: clear owner state on retirement");
   ctx.effect(() => {
     let stopped = false;
     let running2 = false;
@@ -44904,9 +45305,13 @@ function apply(ctx) {
     });
   }
   const face = () => ({ actions, hooks: { roster, ui: ui2, activity, work, memoryNews, registry: registry2, turnClock, live, computer, cards: cards2, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } });
+  const updateQueue = async (sessionId, itemId, action) => {
+    if (gated) await call("whoami");
+    return await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action) ?? { ok: false };
+  };
   const queueFace = (sessionId) => ({
     ...face(),
-    updateQueue: async (itemId, action) => await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action) ?? { ok: false },
+    updateQueue: (itemId, action) => updateQueue(sessionId, itemId, action),
     loadImage: (attachment) => ctx.uiConversation.imageUrl(sessionId, attachment)
   });
   ctx.effect(() => noticeApprovals({
@@ -44963,7 +45368,7 @@ function apply(ctx) {
   actions.steerQueued = async (sessionId) => {
     const session = ctx.sessions.binding(sessionId)?.session;
     if (session === void 0) return;
-    if (await steerQueued(session) === "failed") {
+    if (await steerQueued(session, gated ? (id, action) => updateQueue(sessionId, id, action) : void 0) === "failed") {
       actions.reportError(new Error(t("Couldn’t steer the queued messages. Try again.")), "steer-queue");
     }
   };

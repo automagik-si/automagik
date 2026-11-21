@@ -1,7 +1,9 @@
+const ROLES = new Set(['owner', 'admin', 'member', 'guest'])
 const MODES = new Set(['owners', 'allowlist', 'workspace'])
 
 export function effectiveRole(roles) {
-  if (!Array.isArray(roles) || !roles.length || !Array.from(roles).every(role => typeof role === 'string') ||
+  if (!Array.isArray(roles) || roles.length < 1 || roles.length > ROLES.size ||
+      new Set(roles).size !== roles.length || !Array.from(roles).every(role => ROLES.has(role)) ||
       roles.includes('owner') || roles.includes('admin')) return undefined
   if (roles.includes('member')) return 'member'
   if (roles.includes('guest')) return 'guest'

@@ -1,5 +1,6 @@
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
+import { bootView, canClearDraftInMemory, isRetired, onRetire, startViewer } from './viewer.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
@@ -105,6 +106,8 @@ import { listedOpener } from './open-listed.js'
 import { agentSessionToReuse, singleFlight } from './agent-new.js'
 import { ReadScopeControl } from './read-scope.js'
 import { installSelfUpdate } from './self-update.js'
+import { installPeopleCard } from './bot-settings.js'
+import * as gatedShared from './gated-shared.js'
 
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
@@ -146,7 +149,31 @@ export const omni = Object.freeze({
 const DSH_SETTINGS = new Set(['general', 'account', 'models', 'agent-presets', 'plugins'])
 
 export function apply(ctx) {
-  ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
+  const boot = bootView()
+  if (boot === undefined) return applyOwner(ctx)
+  const lifetime = new AbortController()
+  ctx.effect(() => () => lifetime.abort(), 'ds-bot: gated viewer')
+  ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy (gated)')
+  let gated
+  const prepare = async () => {
+    const chunk = await globalThis.__dshChunk('./client.gated.js')
+    gated = chunk.initialize(gatedShared)
+  }
+  startViewer(boot, lifetime.signal, prepare).then(viewer => {
+    if (lifetime.signal.aborted || (ctx.fiber && ctx.fiber.state !== 2) || isRetired()) return
+    const surface = ctx.inject([], scope => {
+      if (viewer.role === 'member' || viewer.role === 'guest') gated.applyMember(scope)
+      else {
+        scope.effect(() => installPeopleCard(gated.PeopleCard), 'ds-bot: gated People card')
+        applyOwner(scope, { gated: true })
+      }
+    })
+    ctx.effect(() => onRetire(() => { void Promise.resolve().then(() => surface.dispose()) }), 'ds-bot: retire gated surface')
+  }, () => {})
+}
+
+function applyOwner(ctx, { gated = false } = {}) {
+  if (!gated) ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
   // A Bot's own browser hold, from the team view, where no browser bridge reports holds.
   const hostHolds = createSource({})
   migrateStorage()
@@ -163,7 +190,8 @@ export function apply(ctx) {
   let seenAt = seenStore.read()
   // `details` is the panel's subject (a Session id); `view` picks details or the
   // subject Bot's browser inside it.
-  const ui = createSource({ details: null, view: 'details', renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: unreadStore.read(), reactions: reactionStore.read(), visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null })
+  const emptyUi = { details: null, view: 'details', renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: {}, reactions: {}, visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null }
+  const ui = createSource({ ...emptyUi, unread: unreadStore.read(), reactions: reactionStore.read() })
   // The window's width, which the Bot panel's fit rule reads (frame-layout.js). The team's bar
   // sits in the shell's own sidebar, which keeps its own track: no column of ours takes room.
   const frame = createSource({ viewport: typeof window === 'undefined' ? 0 : window.innerWidth })
@@ -269,7 +297,7 @@ export function apply(ctx) {
     const order = ++pulls
     const known = roster.getSnapshot()
     const value = await call('state', { since: known.revision, models: known.modelsKey ?? '', live: liveKey, locale: language(), allowPlace: allowPlace() })
-    if (order < applied) return
+    if (order < applied || (gated && isRetired())) return
     applied = order
     if (value.liveKey !== undefined) liveKey = value.liveKey
     if (value.activity !== undefined) {
@@ -334,6 +362,22 @@ export function apply(ctx) {
 
   let selfUpdate
   const selfUpdateStatusSource = createSource(null)
+  if (gated) ctx.effect(() => onRetire(() => {
+    currentFace = null
+    for (const [source, empty] of [[roster, EMPTY_ROSTER], [ui, emptyUi], [work, { bots: {}, approvals: [] }],
+      ...[hostHolds, activity, live, computer, cards, heldCards, turnClock, memoryNews].map(source => [source, {}])]) {
+      try { source.set(empty) } catch { /* Continue even if a subscriber is being removed. */ }
+    }
+    seenAt = savedPrefs = {}
+    agentSessionCache.clear()
+    for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear()
+    if (canClearDraftInMemory()) {
+      for (const id of Object.keys(ctx.sessions.list.getSnapshot().byId ?? {})) {
+        try { ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.('') } catch { /* Storage may be unavailable. */ }
+      }
+    }
+  }), 'ds-bot: clear owner state on retirement')
+
   ctx.effect(() => {
     let stopped = false
     let running = false
@@ -963,11 +1007,15 @@ export function apply(ctx) {
     })
   }
   const face = () => ({ actions, hooks: { roster, ui, activity, work, memoryNews, registry, turnClock, live, computer, cards, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } })
+  const updateQueue = async (sessionId, itemId, action) => {
+    if (gated) await call('whoami')
+    return (await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action)) ?? { ok: false }
+  }
   // The queue dock's per-session verbs, supplied the way the shell's own dock
   // injects them (the session facade and the conversation service).
   const queueFace = (sessionId) => ({
     ...face(),
-    updateQueue: async (itemId, action) => (await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action)) ?? { ok: false },
+    updateQueue: (itemId, action) => updateQueue(sessionId, itemId, action),
     loadImage: (attachment) => ctx.uiConversation.imageUrl(sessionId, attachment),
   })
   ctx.effect(() => noticeApprovals({
@@ -1024,7 +1072,7 @@ export function apply(ctx) {
   actions.steerQueued = async (sessionId) => {
     const session = ctx.sessions.binding(sessionId)?.session
     if (session === undefined) return
-    if (await steerQueued(session) === 'failed') {
+    if (await steerQueued(session, gated ? (id, action) => updateQueue(sessionId, id, action) : undefined) === 'failed') {
       actions.reportError(new Error(t('Couldn’t steer the queued messages. Try again.')), 'steer-queue')
     }
   }

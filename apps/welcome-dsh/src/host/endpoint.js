@@ -10,6 +10,7 @@ import { createAcpActions } from './acp.js'
 import { hostOf, machineOf } from './host.js'
 import { preloadOf } from './preload.js'
 import { UNFOLD_BOT } from './companion.js'
+import { needsViewer } from './viewer-policy.js'
 
 // The host endpoint the onboarding steps call: POST /api/omni-ai with
 // { endpoint, payload }, answered { ok: true, value } or { ok: false, error }.
@@ -232,6 +233,11 @@ export function createActions(ctx, { fetch: fetchImpl = globalThis.fetch, anyOn,
 }
 
 export function install(ctx, deps = {}) {
+  const mode = (deps.env ?? process.env).AUTOMAGIK_MULTIUSER
+  const multiuser = mode !== undefined && mode !== '' && mode !== '0'
+  const service = name => {
+    try { return ctx.get?.(name) } catch { return undefined }
+  }
   const ai = createAiActions(ctx, { fetch: deps.fetch, saveRoute: (provider, patch) => saveRoute(ctx, provider, patch), unsetRoute: provider => unsetRoute(ctx, provider) })
   const { anyOn, ...aiEndpoints } = ai
   const { team, omniProjectOf, assignModels, joinOmni, ...companion } = createCompanionActions(ctx, { env: deps.env ?? process.env, ...deps.companion })
@@ -322,6 +328,17 @@ export function install(ctx, deps = {}) {
     fetch: async (request) => {
       let body
       try { body = await request.json() } catch { body = {} }
+      if (needsViewer(body?.endpoint)) {
+        const hasPrincipal = request.headers.has('x-automagik-principal')
+        const caller = hasPrincipal ? service('automagikCaller') : undefined
+        if (multiuser || (caller?.version === 2 && caller.multiuser === true)) {
+          const viewer = hasPrincipal ? service('omniTeam')?.ownerViewer?.(request) : undefined
+          if (!viewer || typeof body?.viewer !== 'string' || body.viewer !== viewer.id) {
+            return Response.json({ ok: false, error: { code: 'bot/viewer-changed', message: 'Your sign-in changed; reload this page.' } },
+              { headers: { 'cache-control': 'no-store' } })
+          }
+        }
+      }
       const asked = parse(RequestBody, body)
       let result
       if (asked !== undefined) {

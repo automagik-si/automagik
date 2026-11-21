@@ -5,10 +5,11 @@
 import { watch, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { bundleClient } from './build-client.mjs'
+import { bundleClient, bundleGated } from './build-client.mjs'
 
 const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
 const OUTPUT = join(PLUGIN, 'client.js')
+const GATED_OUTPUT = join(PLUGIN, 'client.gated.js')
 let timer = null
 let building = false
 
@@ -16,8 +17,9 @@ async function rebuild() {
   if (building) return
   building = true
   try {
-    const next = await bundleClient()
+    const [next, gated] = await Promise.all([bundleClient(), bundleGated()])
     writeFileSync(OUTPUT, next)
+    writeFileSync(GATED_OUTPUT, gated)
     console.log(`[watch-client] ${new Date().toISOString()} client.js rebuilt`)
   } catch (error) {
     console.error(`[watch-client] build failed: ${error.message}`)

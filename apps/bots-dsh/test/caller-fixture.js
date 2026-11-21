@@ -64,6 +64,11 @@ export function fixture(t, { service = serviceStub(), seed, inflight, beforeLoad
   }
   const services = { automagikCaller: service, get goals() { return goals.size ? goalService : undefined } }
   const ctx = fakeContext({ services })
+  const on = ctx.on
+  ctx.on = (name, listener, options) => {
+    on(name, listener, options)
+    return () => ctx.listeners.set(name, ctx.listeners.get(name).filter(fn => fn !== listener))
+  }
   ctx.logger.warn = (...args) => warnings.push(args.join(' '))
   ctx.connection.fetch.register = route => { routes.set(route.path, route); return () => routes.delete(route.path) }
   function event(id, type, data, { notify = true } = {}) {
@@ -139,11 +144,12 @@ export function fixture(t, { service = serviceStub(), seed, inflight, beforeLoad
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   })
-  const call = async (endpoint, payload) => {
+  const postOwner = (endpoint, payload, { headers, viewer } = {}) => {
     const route = routes.get('/api/omni-ui')
-    const request = new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint, payload }) })
-    return (await route.fetch(request)).json()
+    const request = new Request('http://localhost/api/omni-ui', { method: 'POST', headers, body: JSON.stringify({ endpoint, payload, viewer }) })
+    return route.fetch(request)
   }
+  const call = async (...args) => (await postOwner(...args)).json()
   const emitService = async next => {
     services.automagikCaller = next
     ctx.emit('internal/service', 'automagikCaller')
@@ -170,6 +176,6 @@ export function fixture(t, { service = serviceStub(), seed, inflight, beforeLoad
     await rt.refresh()
     await rt.peopleQueue(() => {})
   }
-  return { rt, ctx, service, statePath, saved, team, logs, agents, created, archived, warnings, goals, reads, verificationReads, routes,
+  return { rt, ctx, service, statePath, saved, team, logs, agents, created, archived, warnings, goals, reads, verificationReads, routes, postOwner,
     agentOf, event, start, call, emitService, finishSwitch, open, readable, edit }
 }

@@ -8967,6 +8967,7 @@ var NAMESPACE = "welcome.team";
 var PT_BR = {
   // Installs and their errors
   "The install was cancelled.": "A instalação foi cancelada.",
+  "Viewer unavailable": "Visualização indisponível",
   "Omni's installer stopped (exit code {code}). What it printed is above.": "O instalador do Omni parou (código de saída {code}). A saída está acima.",
   "Omni {version} is not on npm, where Omni's installer gets it. The newest there is {npm}.": "O Omni {version} não está no npm, de onde o instalador do Omni o baixa. A versão mais recente lá é {npm}.",
   "Omni {github} is out on GitHub and not on npm yet.": "O Omni {github} já saiu no GitHub e ainda não chegou ao npm.",
@@ -9531,26 +9532,60 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 
+// src/host/viewer-policy.js
+var READS = /* @__PURE__ */ new Set([
+  "state",
+  "ais",
+  "providers",
+  "signin-status",
+  "companion",
+  "companion-image",
+  "omni-plugins",
+  "genie-plugin",
+  "unfold-plugin",
+  "bot-type",
+  "migrate-status"
+]);
+var needsViewer = (endpoint) => !READS.has(endpoint);
+
 // src/client/api.js
 var ROUTE = "api/omni-ai";
 var OMNI_UI = "api/omni-ui";
-var call = (endpoint, payload) => callRoute(ROUTE, endpoint, payload);
-var callOmniUi = (endpoint, payload) => callRoute(OMNI_UI, endpoint, payload);
-async function callRoute(route, endpoint, payload) {
+var call = (endpoint, payload) => needsViewer(endpoint) ? callWithViewer(ROUTE, endpoint, payload) : callRoute(ROUTE, endpoint, payload);
+var callOmniUi = (endpoint, payload) => callWithViewer(OMNI_UI, endpoint, payload);
+async function callWithViewer(route, endpoint, payload) {
+  if (globalThis.__AUTOMAGIK_VIEW__ === void 0) return callRoute(route, endpoint, payload);
+  const viewer = globalThis.__AUTOMAGIK_MOUNTED_VIEWER__;
+  if (!viewer) throw Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
+  return callRoute(route, endpoint, payload, viewer);
+}
+async function callRoute(route, endpoint, payload, viewer) {
+  const body = { endpoint, payload: payload ?? null };
+  if (viewer) body.viewer = viewer.id;
   let response;
   try {
     response = await fetch(route, {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ endpoint, payload: payload ?? null })
+      body: JSON.stringify(body)
     });
   } catch {
+    viewer?.check();
     throw Object.assign(new Error(t("Could not reach DSH. Check that it is still running.")), { code: "NETWORK" });
   }
-  if (!response.ok) throw Object.assign(new Error(t("DSH answered HTTP {status}", { status: response.status })), { code: `HTTP_${response.status}` });
+  viewer?.check();
+  if (!response.ok) {
+    viewer?.response(response);
+    throw Object.assign(new Error(t("DSH answered HTTP {status}", { status: response.status })), { code: `HTTP_${response.status}` });
+  }
   const result = await response.json();
-  if (!result.ok) throw Object.assign(new Error(result.error?.message ?? t("Request failed")), { code: result.error?.code ?? "omni-ai/error" });
+  viewer?.check();
+  if (!result.ok) {
+    const code = result.error?.code ?? (route === OMNI_UI && viewer ? "bot/error" : "omni-ai/error");
+    viewer?.refused(code);
+    throw Object.assign(new Error(result.error?.message ?? t("Request failed")), { code });
+  }
   return result.value;
 }
 

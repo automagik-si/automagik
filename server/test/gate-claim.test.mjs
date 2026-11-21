@@ -30,12 +30,12 @@ test('every generated sign-in page contains browser-parseable JavaScript', () =>
     assert.doesNotThrow(() => new Script(script))
   }
 })
-async function fixture(t, { origin = ORIGIN, interactive = false, published = DSH_HOST, claimMode = 'local' } = {}) {
+async function fixture(t, { origin = ORIGIN, interactive = false, published = DSH_HOST, claimMode = 'local', clearOnSignIn = false } = {}) {
   let now = Date.now(), closed = false
   const dir = mkdtempSync(join(tmpdir(), 'automagik-claim-'))
   const sessions = new SessionStore(dir, { now: () => now })
   const logs = [], shown = [], seen = []
-  const claim = new SelfHostedClaim({ dir, origin, sessions, claimMode, now: () => now, audit: record => logs.push(record) })
+  const claim = new SelfHostedClaim({ dir, origin, sessions, claimMode, clearOnSignIn, now: () => now, audit: record => logs.push(record) })
   const control = await controlServer(claim)
   await claim.start({ interactive, show: value => shown.push(value) })
   const upstream = http.createServer((req, res) => { seen.push(req.url); res.end('workspace') })
@@ -602,4 +602,22 @@ test('remote penalty disconnect cancels its timer, releases its slot and allows 
   const before = held.total()
   await assert.rejects(f.claim.action('claim/options', { code: 'wrong' }, undefined, undefined, aborted.signal), { status: 401 })
   assert.equal(held.total(), before, 'an already-disconnected request must allocate no timer')
+})
+
+test('G4 self-hosted sign-in clears site data when configured and keeps the new session cookie', async t => {
+  for (const clearOnSignIn of [true, false]) {
+    const f = await fixture(t, { clearOnSignIn })
+    const { device, completed } = await enroll(f)
+    const expected = clearOnSignIn ? '"cache", "storage"' : undefined
+    assert.equal(completed.headers['clear-site-data'], expected)
+    const options = await f.request('/_gate/signin/options', { data: {} })
+    assert.equal(options.status, 200)
+    assert.equal(options.headers['clear-site-data'], undefined)
+    const reply = await f.request('/_gate/signin/verify', {
+      data: { id: options.body.id, credential: device.authenticate(options.body.options, f.origin) },
+    })
+    assert.equal(reply.status, 200)
+    assert.equal(reply.headers['clear-site-data'], expected)
+    assert.ok(cookieOf(reply))
+  }
 })
