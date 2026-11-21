@@ -4,6 +4,7 @@ import { ID, matches, versionOkay } from "./accountsRows.js";
 import { isHash, isHome, isMachine } from "./accountsPlanRecord.js";
 
 export const WRITE_V = 1;
+export const EXPECT_QUALIFIED = 1;
 export const PANEL_MARKER = "mods/am-quota/setLogin.js";
 export const SIDEBAR_MARKERS = Object.freeze([
   "mods/am-sidebar/accountsWrite.js", "mods/am-sidebar/bin/accounts.mjs", "mods/am-sidebar/bin/run.sh",
@@ -88,7 +89,11 @@ export function loginEdit(text, { kind, id, dir }, io) {
 export function setLoginOp(opts) {
   const { dir, snapshot, "expect-home": home, "expect-core": core,
     "expect-slot": slotDigest, "expect-eff": effDigest, "expect-rev": rev,
-    "attempt": number, dispatch, "cancel-attempt": cancel, "launch-login": launch, "project-home": projectHome } = opts;
+    "attempt": number, dispatch, "cancel-attempt": cancel, "launch-login": launch, "project-home": projectHome,
+    "expect-qualified": qualified } = opts;
+  if (qualified !== undefined && (qualified !== true || opts.use === undefined || !isHome(home)
+    || !isHash(slotDigest) || !isHash(effDigest)
+    || [core, rev, number, dispatch, cancel, launch].some((value) => value !== undefined))) return { usage: true };
   if (launch) {
     if (!isHome(home) || !isMachine(core) || Object.keys(opts).some((key) =>
       !["json", "launch-login", "project-home", "expect-home", "expect-core"].includes(key))) return { usage: true };
@@ -116,5 +121,6 @@ export function setLoginOp(opts) {
     || (slotDigest !== undefined && (kind !== "use" || !isHash(slotDigest)))
     || (effDigest !== undefined && (kind !== "use" || !isHash(effDigest)))
     || (core !== undefined && (!attempt || !isHash(slotDigest) || !isHash(effDigest)))) return { usage: true };
-  return { op: { kind, id, dir, snapshot, home, core, slotDigest, effDigest, ...(attempt ? { attempt } : {}) } };
+  return { op: { kind, id, dir, snapshot, home, core, slotDigest, effDigest,
+    ...(attempt ? { attempt } : {}), ...(qualified ? { qualified } : {}) } };
 }
