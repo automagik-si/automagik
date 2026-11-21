@@ -273,8 +273,7 @@ export function parseState(text) {
   let j = null;
   try { j = JSON.parse(text); } catch { /* none yet */ }
   const entry = (e) => (e && typeof e === "object" && typeof e.result === "string" ? e : null);
-  const machines = {};
-  if (j?.machines && typeof j.machines === "object") for (const [name, e] of Object.entries(j.machines)) if (entry(e)) machines[name] = e;
+  const machines = Object.fromEntries(Object.entries(j?.machines ?? {}).filter(([, e]) => entry(e) || typeof e?.install?.state === "string"));
   return { at: typeof j?.at === "string" ? j.at : null, here: entry(j?.here), machines };
 }
 
@@ -284,14 +283,15 @@ export function parseState(text) {
  * machine ls` gives now, null when hc could not say) is dropped.
  */
 export function stateAfter(state, entries, { at, linked = null } = {}) {
-  const machines = {};
-  for (const [name, e] of Object.entries(state.machines)) if (!linked || linked.includes(name)) machines[name] = e;
+  const machines = Object.fromEntries(Object.entries(state.machines).filter(([name]) => !linked || linked.includes(name)));
   let here = state.here;
   for (const e of entries) {
     if (e.machine === null) here = e;
-    else machines[e.machine] = e.result === "disconnected"
-      ? { ...e, versions: state.machines[e.machine]?.versions ?? null, auto: state.machines[e.machine]?.auto ?? null, packAuto: state.machines[e.machine]?.packAuto }
-      : e;
+    else {
+      const before = state.machines[e.machine];
+      machines[e.machine] = { ...e, ...(before?.install ? { install: before.install } : {}) };
+      if (e.result === "disconnected") Object.assign(machines[e.machine], { versions: before?.versions ?? null, auto: before?.auto ?? null, packAuto: before?.packAuto });
+    }
   }
   return { schemaVersion: 1, at: at ?? state.at, here, machines };
 }
@@ -310,7 +310,7 @@ export function resultText(e) {
   if (e.result === "off") return "updates are off there (am machines --auto on turns them on)";
   if (e.result === "failed" && !e.steps?.length) return `not checked (${e.why?.[0] ?? "failed"})`;
   const said = (e.steps ?? []).map(stepText).filter(Boolean);
-  return said.length ? said.join("; ") : "up to date";
+  return said.length ? said.join("; ") : e.result === "current" ? "up to date" : e.result;
 }
 
 /** The machine's own pack switch, as words (`unknown`: an entry from before #1505 recorded it). */
@@ -325,12 +325,24 @@ export function entryLine(e) {
   return `${where}: ${runs}. pack auto: ${packAutoText(e.packAuto)}; linked auto: ${linked}. ${e.at ? `${e.at}: ` : ""}${resultText(e)}.`;
 }
 
+export function installLine(r) {
+  const user = r.user ? `, uid ${r.user.uid}, ${r.user.home}` : "";
+  const line = `${r.machine ?? "linked machine"}${r.core ? ` (${r.core}${user})` : ""}: ${r.state}${r.version ? ` ${r.version}` : ""}`
+    + `${r.why ? ` (${r.why})` : ""}${r.auto === false ? "; linked updates are off there" : ""}.`;
+  return line.replace(/\s*[\r\n]+\s*/g, " ");
+}
+
 /** The lines `automagik-herdr machines` prints. `linked`: names with no entry yet. */
 export function stateLines(state, linked = []) {
   const lines = [];
   if (state.here) lines.push(entryLine(state.here));
   const names = [...new Set([...Object.keys(state.machines), ...linked])].sort();
-  for (const name of names) lines.push(state.machines[name] ? entryLine(state.machines[name]) : `${name}: not checked yet (am machines update).`);
+  for (const name of names) {
+    const e = Object.hasOwn(state.machines, name) ? state.machines[name] : null;
+    if (e?.result) lines.push(entryLine(e));
+    if (e?.install) lines.push(`${e.install.at ? `${e.install.at} ` : ""}${installLine(e.install)}`);
+    if (!e) lines.push(`${name}: not checked yet (am machines update).`);
+  }
   return lines;
 }
 

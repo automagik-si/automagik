@@ -10,14 +10,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { attachPath, closingRow, foldAttach, heldIn, readAttach } from "../mods/am-sidebar/attach.js";
+import { attachLine, attachPath, attachRow, closingRow, foldAttach, heldIn, readAttach } from "../mods/am-sidebar/attach.js";
 import { GUARD_DIR, KILL_GUARD_DIR } from "../mods/am-sidebar/workers.js";
 import { AGY_FIXED_DENY, CLAUDE_PERSON_SETTINGS } from "../mods/am-sidebar/models.js";
-import { WORKER_LINE } from "../mods/am-sidebar/briefingText.mjs";
+import { amPartHookCommand, WORKER_LINE } from "../mods/am-sidebar/briefingText.mjs";
 import { approveProject, recordFileOf } from "../mods/am-sidebar/approved.js";
 import { emptyPlan, PLAN_FILE, planText } from "../mods/am-sidebar/accountsPlanRecord.js";
 import { WRITE_SINCE } from "../mods/am-sidebar/accountsFleet.js";
@@ -27,6 +27,7 @@ import { readJsonLines } from "./log-lines.mjs";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { chosenHomeWords } from "../mods/am-sidebar/agentHome.js";
 import { envWords } from "../mods/am-sidebar/logins.js";
+import { signedRelease } from "../../am/test/signed-release.mjs";
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
 const ACCOUNTS_WRITE = new URL("../mods/am-sidebar/accountsWrite.js", import.meta.url).href;
@@ -41,7 +42,7 @@ const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755);
 /** The warning a start on a machine with no `hc kill` shim prints (#955). */
 const NO_KILL_SHIM = /^\S.* runs on vm without the hc kill shim \(#955\): /;
 
-function scene(t, { terminals = [], tui = true, caller = false, accounts = false } = {}) {
+function scene(t, { terminals = [], tui = true, caller = false, accounts = false, isGit = true } = {}) {
   const root = scratchRoot(t, "hb-panes-");
   const bin = join(root, "bin"), home = join(root, "home"), app = join(root, "app"), vm = join(root, "vm"), vmBin = join(root, "vm-bin");
   for (const d of [bin, home, app, vm, vmBin]) mkdirSync(d, { recursive: true });
@@ -58,6 +59,7 @@ function scene(t, { terminals = [], tui = true, caller = false, accounts = false
   if (tui) writeFileSync(join(app, "programs.json"), JSON.stringify({ programs: { hermes: { run: ["hermes", "--tui"] } } }));
   const look = { character: "star", colour: "blue" };
   const project = scratchProject(vm, "atlas", {
+    isGit,
     bots: { version: 1, categories: [], bots: [
       { id: ATLAS, name: "Atlas", kind: "main", look, role: "incident agent", instructions: "", agent: "hermes" },
       { id: HEDGE, name: "Hedge", kind: "member", look, role: "r", instructions: "", agent: "claude" },
@@ -360,6 +362,10 @@ const packAt = (dir) => {
     mkdirSync(join(dir, f, ".."), { recursive: true });
     writeFileSync(join(dir, f), "// stand-in\n");
   }
+  const runner = join(dir, "mods/am-sidebar/bin/run.sh");
+  mkdirSync(dirname(runner), { recursive: true });
+  // A managed-login scene may already have installed its Accounts launcher.
+  if (!existsSync(runner)) exe(runner, "#!/bin/sh\nexit 0\n");
 };
 const vmApp = (s) => join(s.root, "vm/.config/herdr-app");
 function writeLaunchPlan(s, core = CORE) {
@@ -821,6 +827,7 @@ test("start and restart --machine of an Antigravity bot with no app home there: 
     const said = r.err.split("\n").filter((x) => x.includes("Antigravity permission list"));
     assert.equal(said.length, 1, r.err);
     assert.match(said[0].replace(/^am: /, ""), line);
+    assert.ok(r.err.includes(`am machines install --machine vm --project ${s.project} --app-home`), r.err);
   }
   assert.equal(s.calls().filter((c) => c[0] === "run").length, 0, "nothing started");
   assert.equal(existsSync(join(s.root, "vm/.config")), false, "no app home made there");
@@ -2434,4 +2441,195 @@ test("#1208 linked --force refuses a chosen descendant even if an intermediate g
     assert.match(r.err, /vm\/t9 is a worker on a chosen agent home that would end with its parent \(under vm\/t8\)/);
     assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
   }
+});
+
+// Install the real signed part into the fake target first, with no Herdr app home there.
+function amOnly(s) {
+  const home = join(s.root, "vm"), bin = join(home, ".local/bin");
+  const store = join(home, ".automagik/parts/automagik.am");
+  const lane = signedRelease(s.root);
+  const version = "3.162.4";
+  const { archive, dir } = lane.pack(version);
+  lane.post(version, archive);
+  const signed = join(lane.lane, `automagik-am-${version}.tgz`);
+  writeFileSync(signed, readFileSync(archive));
+  const env = { ...process.env, PATH: `${join(s.root, "vm-bin")}:${dirname(process.execPath)}:/usr/bin:/bin`,
+    HOME: home, HERDR_APP_HOME: vmApp(s), AM_HOME: "", AUTOMAGIK_HERDR_TEST_ROOTS: s.root };
+  const r = spawnSync(process.execPath, [join(dir, "bin/am.mjs"), "self", "install", "--signed", lane.lane, "--json"], {
+    cwd: home, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(r.status, 0, r.stdout || r.stderr);
+  assert.equal(existsSync(vmApp(s)), false);
+  mkdirSync(dirname(vmApp(s)), { recursive: true });
+  const app = s.cli(["machines", "install", ...s.on, "--app-home", "--json"]);
+  assert.equal(app.code, 0, app.err);
+  assert.equal(app.raw().state, "made");
+  return { store, home, bin, env };
+}
+
+function runPrompt(s, far, path, terminal, session, pane) {
+  const state = join(s.root, "target-hc.json"), log = join(s.root, "target-hc.log");
+  const hook = JSON.parse(readFileSync(path, "utf8")).hooks.UserPromptSubmit[0].hooks[0].command;
+  exe(join(far.bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+  writeFileSync(state, JSON.stringify({ core: { id: CORE }, terminals: [{ ...pane, address: terminal }] }));
+  const prompt = join(s.root, "prompt.json");
+  writeFileSync(prompt, JSON.stringify({ session_id: session, prompt: "Continue." }));
+  const fd = openSync(prompt, "r");
+  try {
+    return spawnSync("sh", ["-c", hook], { cwd: dirname(dirname(path)),
+      env: { ...far.env, PATH: `${far.bin}:${far.env.PATH}`, HC_TERMINAL_ID: terminal, CLAUDE_PROJECT_DIR: s.project, HC_FAKE_STATE: state, HC_FAKE_LOG: log },
+      encoding: "utf8", stdio: [fd, "pipe", "pipe"] });
+  } finally { closeSync(fd); }
+}
+
+test("linked Start on am alone writes the am hook and a resumed prompt gets the bot's briefing", (t) => {
+  const s = scene(t);
+  const far = amOnly(s);
+  const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  assert.equal(start.raw().hookWritten, true);
+  assert.equal(hookOf(s), amPartHookCommand(vmApp(s), far.store));
+  assert.doesNotMatch(start.err, /pane PATH.*resolves am/);
+  assert.equal(existsSync(join(vmApp(s), "automagik-herdr/briefing.mjs")), false);
+  const pane = s.hcState().terminals.find((pane) => pane.address === "vm/t100");
+  const argv = agentPart(startedWith(s));
+  const briefing = argv[argv.indexOf("--append-system-prompt-file") + 1];
+  assert.match(readFileSync(briefing, "utf8"), /You are Hedge/);
+  const session = "resumed-hedge";
+  const prompt = runPrompt(s, far, join(s.project, ".claude/settings.local.json"), "t100", session, {
+    ...pane, foreground: { ...pane.foreground, argv: ["claude", "--resume", session, "--append-system-prompt-file", briefing] },
+  });
+  assert.equal(prompt.status, 0, prompt.stderr);
+  assert.match(prompt.stdout, /You are Hedge/);
+});
+
+test("linked Start checks the effective pane PATH and names the installer when am is absent", async (t) => {
+  await t.test("PATH_PREPEND shadows am", (t) => {
+    const s = scene(t);
+    amOnly(s);
+    const prepend = join(s.root, "vm-bin");
+    exe(join(prepend, "am"), "#!/bin/sh\nexit 0\n");
+    writeFileSync(join(s.project, ".herdr/pane-env"), `PATH_PREPEND=${prepend}\n`);
+    const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
+    assert.equal(start.code, 0, start.err);
+    assert.ok(start.raw().warnings.some((w) => w.includes(`resolves am to ${prepend}/am`)));
+  });
+  await t.test("no am or pack", (t) => {
+    const s = scene(t);
+    mkdirSync(vmApp(s), { recursive: true });
+    const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
+    assert.equal(start.code, 0, start.err);
+    assert.equal(start.raw().hookWritten, false);
+    assert.match(start.err, /am machines install --machine vm/);
+  });
+});
+
+test("linked Attach writes in the session subfolder and keeps its binding when the hook cannot be written", async (t) => {
+  for (const blocked of [false, true]) await t.test(blocked ? "hook write fails" : "hook written", (t) => {
+    const s = scene(t);
+    const far = amOnly(s);
+    const folder = join(s.project, "session");
+    mkdirSync(folder);
+    if (blocked) writeFileSync(join(folder, ".claude"), "not a folder\n");
+    s.setState((state) => state.terminals.push(atlasPane({ cwd: s.project, labels: {},
+      foreground: { argv: ["claude", "--resume", "attached-hedge"], cwd: folder }, status: { app: "claude-code" } })));
+    const attach = s.cli(["attach", "Hedge", "vm/t8", ...s.on, "--json"]);
+    assert.equal(attach.code, 0, attach.err);
+    assert.equal(attach.raw().hookWritten, !blocked);
+    assert.equal(s.rows().at(-1).bot, HEDGE);
+    assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").labels.bot, HEDGE);
+    assert.equal(existsSync(join(s.project, ".claude/settings.local.json")), false);
+    if (blocked) assert.match(attach.err, /gets no briefing|couldn't create|can't read/);
+    else {
+      const settings = JSON.parse(readFileSync(join(folder, ".claude/settings.local.json"), "utf8"));
+      assert.equal(settings.hooks.UserPromptSubmit[0].hooks[0].command, amPartHookCommand(vmApp(s), far.store));
+      assert.match(attach.err, /restart the bot/);
+    }
+  });
+});
+
+test("linked Start with the pack but no stable entry warns without seeding one or using am", (t) => {
+  const s = scene(t);
+  amOnly(s);
+  packAt(vmApp(s));
+  const stable = join(vmApp(s), "automagik-herdr/briefing.mjs");
+  rmSync(stable);
+  const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  assert.equal(start.raw().hookWritten, false);
+  assert.match(start.err, /pack is there, but .*briefing\.mjs is missing/);
+  assert.equal(existsSync(stable), false);
+  assert.equal(existsSync(join(s.project, ".claude/settings.local.json")), false);
+});
+
+test("round 1: a read-only pack app-home root keeps linked Start and Attach hooks", async (t) => {
+  for (const verb of ["start", "attach"]) await t.test(verb, (t) => {
+    const s = scene(t, { isGit: false });
+    const app = vmApp(s);
+    packAt(app);
+    chmodSync(app, 0o555);
+    if (verb === "attach") s.setState((state) => state.terminals.push(atlasPane({ cwd: s.project, labels: {},
+      foreground: { argv: ["claude", "--resume", "attached-hedge"], cwd: s.project }, status: { app: "claude-code" } })));
+    let result;
+    try { result = s.cli([verb, "Hedge", ...(verb === "attach" ? ["vm/t8"] : []), ...s.on, "--json"]); }
+    finally { chmodSync(app, 0o755); }
+    assert.equal(result.code, 0, result.err);
+    assert.equal(result.raw().hookWritten, true, result.err);
+    assert.ok(hookOf(s).includes(join(app, "automagik-herdr/briefing.mjs")));
+  });
+});
+
+test("round 1: a pack hook still warns when the pane PATH shadows installed am", (t) => {
+  const s = scene(t, { isGit: false });
+  amOnly(s);
+  packAt(vmApp(s));
+  const prepend = join(s.root, "vm-bin");
+  exe(join(prepend, "am"), "#!/bin/sh\nexit 0\n");
+  writeFileSync(join(s.project, ".herdr/pane-env"), `PATH_PREPEND=${prepend}\n`);
+  const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  assert.equal(start.raw().hookWritten, true);
+  assert.ok(start.raw().warnings.some((w) => w.includes(`resolves am to ${prepend}/am`)));
+});
+
+test("round 1: missing linked app home warnings give the project-scoped installer command", (t) => {
+  const s = scene(t, { isGit: false });
+  const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  assert.equal(start.raw().hookWritten, false);
+  const command = `am machines install --machine vm --project ${s.project} --app-home`;
+  assert.ok(start.raw().warnings.some((w) => w.includes(command)), start.err);
+  assert.equal(existsSync(vmApp(s)), false);
+});
+
+test("linked Start and Attach diagnose the target's own ledger by core, pane birth and mode", async (t) => {
+  for (const mode of ["empty", "conflict", "reused", "unsafe", "attach conflict"]) await t.test(mode, (t) => {
+    const s = scene(t);
+    amOnly(s);
+    const attach = mode === "attach conflict";
+    const path = attachPath(vmApp(s));
+    mkdirSync(dirname(path), { recursive: true });
+    const birth = 1700001000000;
+    s.setState((state) => {
+      state.runCreatedMs = birth;
+      if (attach) state.terminals.push(atlasPane({ cwd: s.project, created_ms: birth,
+        foreground: { argv: ["claude"], cwd: s.project }, status: { app: "claude-code" } }));
+    });
+    const row = attachRow({ event: "attach", core: CORE, terminal: attach ? "t8" : "t100", created_ms: birth - Number(mode === "reused"),
+      project: s.project, bot: ATLAS, by: "start" });
+    writeFileSync(path, mode === "empty" ? "" : attachLine(row), { mode: 0o600 });
+    if (mode === "unsafe") chmodSync(path, 0o662);
+    const outcome = s.cli([...(attach ? ["attach", "Hedge", "vm/t8"] : ["start", "Hedge"]), ...s.on, "--json"]);
+    assert.equal(outcome.code, 0, outcome.err);
+    assert.equal(s.rows().at(-1).bot, HEDGE);
+    const lines = outcome.raw().warnings.join("\n");
+    if (mode === "unsafe") {
+      assert.match(lines, /unsafe ledger/);
+      assert.ok(!lines.includes(ATLAS));
+    } else if (mode === "conflict" || attach) assert.ok(lines.includes(`to ${ATLAS}; the hook will use that bot`), lines);
+    else {
+      assert.match(lines, /has no live row for t100/);
+      assert.ok(!lines.includes(ATLAS));
+    }
+  });
 });

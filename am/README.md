@@ -25,35 +25,41 @@ stops at the first check that fails and leaves your shell as it was.
 (
 set -eu
 work=$(mktemp -d) && cd "$work"
-curl -fsSLO https://github.com/automagik-dev/automagik/releases/download/am-lane/am.json
-curl -fsSLO https://github.com/automagik-dev/automagik/releases/download/am-lane/am.json.sig
-curl -fsSL -o am-keys.json https://raw.githubusercontent.com/automagik-si/automagik/main/am/am-keys.json
+curl -fsSLO --proto =https --proto-redir =https https://github.com/automagik-dev/automagik/releases/download/am-lane/am.json
+curl -fsSLO --proto =https --proto-redir =https https://github.com/automagik-dev/automagik/releases/download/am-lane/am.json.sig
+curl -fsSL --proto =https --proto-redir =https -o am-keys.json https://raw.githubusercontent.com/automagik-si/automagik/main/am/am-keys.json
 node -e '
 const { readFileSync } = require("node:fs");
 const { createPublicKey, verify } = require("node:crypto");
-const fail = (why) => { console.error(why); process.exit(1); };
-const bytes = readFileSync("am.json");
-const p = JSON.parse(bytes);
-const keys = JSON.parse(readFileSync("am-keys.json")).keys;
-const key = keys.find((k) => k.keyId === p.keyId);
+const fail = (why) => { console.error("am lane: " + why); process.exit(1); };
+const [pointer, signature, keyFile] = process.argv.slice(1);
+const bytes = readFileSync(pointer);
+let p;
+try { p = JSON.parse(bytes); } catch { fail("the pointer is not JSON"); }
+const keys = JSON.parse(readFileSync(keyFile, "utf8")).keys;
+const key = keys.find((k) => k.keyId === p?.keyId);
+if (!key) fail("unknown key " + p?.keyId + "; update the pack or am on this computer first");
 let valid = false;
 try {
-  valid = !!key && verify(null, bytes, createPublicKey(key.publicKey),
-    Buffer.from(readFileSync("am.json.sig", "utf8").trim(), "base64"));
+  valid = verify(null, bytes, createPublicKey(key.publicKey),
+    Buffer.from(readFileSync(signature, "utf8").trim(), "base64"));
 } catch {}
-if (!valid) fail("signature does not verify");
+if (!valid) fail("the signature does not match");
 const repository = "https://github.com/automagik-dev/automagik";
+const version = typeof p.version === "string" && /^3\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})$/.exec(p.version);
 const t = p.tarball ?? {};
 if (p.schemaVersion !== 1 || p.publisher !== "automagik" || p.part !== "automagik.am"
-    || p.repository !== repository || typeof p.version !== "string" || !/^3\.\d+\.\d+$/.test(p.version)
-    || p.tag !== "v" + p.version || t.name !== "automagik-am-" + p.version + ".tgz"
+    || p.repository !== repository || !version || p.tag !== "v" + p.version) fail("invalid am pointer");
+if (!Number.isSafeInteger(p.sequence) || p.sequence !== Number(version[1]) * 10000 + Number(version[2])) fail("invalid sequence");
+if (typeof p.commit !== "string" || !/^[0-9a-f]{40}$/.test(p.commit)) fail("invalid commit");
+if (t.name !== "automagik-am-" + p.version + ".tgz"
     || t.url !== repository + "/releases/download/" + p.tag + "/" + t.name
     || typeof t.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(t.sha256)
-    || !Number.isSafeInteger(t.size) || t.size <= 0) fail("invalid am pointer");
-console.log(p.version, t.url, t.sha256, t.size);
-' > verified.txt
-read -r V URL SHA SIZE < verified.txt
-curl -fsSLO "$URL"
+    || !Number.isSafeInteger(t.size) || t.size <= 0) fail("invalid am tarball in the pointer");
+console.log(p.version, t.url, t.sha256, t.size, p.sequence);
+' am.json am.json.sig am-keys.json > verified.txt
+read -r V URL SHA SIZE SEQ < verified.txt
+curl -fsSLO --proto =https --proto-redir =https "$URL"
 archive="automagik-am-$V.tgz"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$archive" > checksum.txt
@@ -99,6 +105,19 @@ nothing there. It installs, starts and restarts nothing else: no Herdr app, no h
 Without Herdr, am's own commands work: `update`, `rollback`, `self`, `help` and `--version`.
 Bot and worker commands need Herdr (its `hc` and herdr-core).
 [Install Herdr and the pack](https://github.com/automagik-si/automagik/blob/dev/herdr/README.md#install).
+
+## Install on one linked machine
+
+Run `am machines install --machine M` to install am and its command links as the user
+`hc exec` runs as on that machine. Use `--check` to read the machine’s install state.
+The bootstrap needs Node 22.7 or later, curl, tar and a SHA-256 tool on M. It uses the
+public keys shipped with the am or pack on this computer.
+
+For a headless machine, `am machines install --machine M --project DIR --app-home`
+creates the project’s app home. The parent must already exist. Start and Attach can then
+write the Claude briefing hook in the project. The install records that it writes no stable
+briefing entry. Updates and rollbacks keep that setting. If you roll back to an am from
+before RFC 0012 delivery 9a, the next update through that older am drops the setting.
 
 ## Update and roll back
 

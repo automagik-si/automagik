@@ -18,7 +18,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PART } from "../lib/lane.mjs";
-import { OWN_DIR, appHomeOf, doctorSelf, installExtract, rollbackSelf, storeOf, uninstallSelf, updateSelf } from "../lib/self.mjs";
+import { OWN_DIR, appHomeOf, doctorSelf, installExtract, installSigned, rollbackSelf, storeOf, uninstallSelf, updateSelf } from "../lib/self.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "automagik-herdr.mjs");
 const PACK = "herdr.pack";
@@ -35,7 +35,7 @@ Usage: am <command> [options]
                                 the herdr pack's own switches (update, below)
   rollback automagik.am | herdr.pack [--json]
                                 back to the version each keeps (am: its previous copy)
-  self install | uninstall [--purge] | doctor [--json]
+  self install [--signed <folder>] | uninstall [--purge] | doctor [--json]
                                 am's own part: install this copy and link am and
                                 automagik-herdr; hand the links back; check them
 
@@ -160,8 +160,11 @@ function rollback(args) {
 }
 
 function self(args) {
-  const { words, flags } = parse(args, ["--json", "--purge"]);
-  const [what, extra] = words;
+  const { words, flags } = parse(args, ["--json", "--purge", "--signed"]);
+  const [what, folder, extra] = words;
+  if (flags.signed ? what !== "install" || !folder || flags.purge : folder !== undefined) {
+    throw new Usage("am self install --signed takes one folder holding the signed pointer and tarball");
+  }
   if (extra || !["install", "uninstall", "doctor"].includes(what)) throw new Usage("am self takes install, uninstall or doctor");
   if (what === "doctor") {
     const { lines, code } = doctorSelf();
@@ -169,6 +172,11 @@ function self(args) {
     return code;
   }
   try {
+    if (flags.signed) {
+      const result = installSigned(folder);
+      say(flags.json ? JSON.stringify(result) : `am: ${result.state} ${result.version}${result.cleanup ? ` (${result.cleanup})` : ""}`);
+      return 0;
+    }
     const detail = what === "install"
       ? installExtract(OWN_DIR, { sequence: null, signed: false, source: realpathSync(OWN_DIR) })
       : uninstallSelf({ purge: Boolean(flags.purge) });
@@ -180,7 +188,7 @@ function self(args) {
     }
     return 0;
   } catch (e) {
-    if (flags.json) say(JSON.stringify({ part: PART, ok: false, changed: false, detail: e.message }));
+    if (flags.json) say(JSON.stringify({ part: PART, ok: false, changed: false, ...(flags.signed ? { state: e.state ?? "failed" } : {}), detail: e.message }));
     else process.stderr.write(`am self ${what}: ${e.message}\n`);
     return 1;
   }
