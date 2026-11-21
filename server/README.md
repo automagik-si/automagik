@@ -1108,6 +1108,9 @@ rechecked roles, and the gate keeps the new token server-side for the next renew
 cookie stops working, and the new session ends at the earlier of the token's expiry and 5
 minutes from the renewal. A refusal by Cloud or a role that grants no access is refused whole and
 issues no session. Nothing in the request can lengthen the session or raise a role.
+In either multiuser mode, a concurrent Cloud renewal of the same session receives the existing
+`429` refusal. If sign-out, revocation or cookie rotation changes the session during the Cloud
+call, the pending renewal returns `401` without issuing a session or cookie.
 `POST /_gate/session/renew` remains the plain cookie rotation and still never extends a Cloud
 session's hard end.
 
@@ -1231,6 +1234,29 @@ non-blank and match the published key set. Supply both settings through the cont
 environment. Startup refuses either setting in the workspace or DSH-home `.env`
 when the corresponding variable is unset. Cloud workspace naming still uses
 `AUTOMAGIK_GATE_CLOUD_WORKSPACE` on the gate and `AUTOMAGIK_INSTANCE_ID` for DSH key validation.
+
+With multiuser on, the gate and DSH share the Linux abstract Unix socket
+`automagik-gate-decision`. Set `AUTOMAGIK_GATE_DECISION_SOCKET` in the Compose environment
+or in both service environments to override the name with 1–64 lowercase ASCII letters,
+digits or hyphens. Leaving it unset selects the default. An empty value is invalid. The
+socket lives in the server image's shared network namespace. TCP clients, the tunnel's
+forwarded TCP and runner commands in their own `--net` namespace cannot connect. A process
+inside the shared namespace can connect and, until delivery 3 isolates Bots, is inside the
+host trust boundary described by `LOCAL_TRUST_NOTICE`. The socket has no filesystem path.
+
+The adapter sends one `POST /decision` with a session-family hash and a fresh challenge. The
+five-second `automagik-decision` JWS echoes those fields and reports a current snapshot. An
+active result carries only a person hash and the current roles. A successful Cloud renewal
+can resolve an old hash through up to eight successors and intersects the roles along the
+chain. The gate checks the pinned origin, activity and Cloud revocations without touching the
+session. Before the first claim or Access sign-in sets the audience, the socket returns `503`
+with an empty body.
+
+The gate adds `x-automagik-owner-assertion` to an unambiguous, exact owner or admin
+`POST /api/omni-ui` forwarded with multiuser on. The 30-second `automagik-owner-caller` JWS
+binds the principal to the session family, method and path and has a single-use nonce.
+The adapter exposes verification through `automagikCaller` v2. Delivery 5e-1 adds the
+assertion and decisions for later authorship work.
 
 Readiness refusals report fixed codes.
 
