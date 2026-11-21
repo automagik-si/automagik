@@ -20,6 +20,9 @@ import { BOTS, digest, eventsOf, fixture, FROM, HOST, lane, putDownloads, read, 
 
 const DRIVER = fileURLToPath(new URL('./fixtures/supervisor-driver.mjs', import.meta.url))
 const stateOf = f => read(join(f.store, 'state.json'))
+const whole = path => {
+  try { return read(path) } catch (error) { if (error instanceof SyntaxError) return undefined; throw error }
+}
 const supervisorOf = f => read(join(f.store, 'supervisor.json'))
 const opts = f => ['--dsh-home', f.home, '--profile', f.profile]
 
@@ -875,8 +878,10 @@ test('recovery refuses to start a trial with an unrelated dependency edit', asyn
   const first = driver(t, f)
   await until(() => announced(first), 'initial child did not start')
   request(f)
+  // The candidate's fake DSH rewrites the manifest in place (truncate, then write), so a poll can
+  // read it half written: that read is not yet the edit. The read after the child exits stays strict.
   await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'health'
-    && read(manifest).dependencies['custom-plugin'] === '^2.0.0', 'trial did not change the manifest during health')
+    && whole(manifest)?.dependencies['custom-plugin'] === '^2.0.0', 'trial did not change the manifest during health')
   first.child.kill('SIGTERM')
   assert.equal((await first.exit).code, 0)
   const cut = stateOf(f)

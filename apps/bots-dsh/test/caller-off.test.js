@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { SOURCE_KIND } from '../src/host/constants.js'
+import { RESUME_DELAY_MS } from '../src/host/resume.js'
 import { allowlist, code, fixture, member, serviceStub, workspace } from './caller-fixture.js'
 
 test('O1 off mode leaves owner operations and stored people alone', async t => {
+  // The restart pass runs RESUME_DELAY_MS after the start and adds its daily resume counts to the
+  // team state (restartResumes). Run it at once and before the key snapshot below, or a run slower
+  // than that delay takes it in the middle and the saved keys change for a reason that is not multiuser.
+  const timer = setTimeout
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => timer(callback, ms === RESUME_DELAY_MS ? 0 : ms, ...args))
   for (const service of [null, serviceStub({ multiuser: false })]) {
     const planted = { mode: 'workspace', allow: [{ role: 'guest', subject: 'old', issuer: 'old-idp' }] }
     let initialSave
@@ -12,11 +18,17 @@ test('O1 off mode leaves owner operations and stored people alone', async t => {
       beforeLoad: rt => { initialSave = t.mock.method(rt, 'save') },
     })
     await f.start()
+    let bound
+    await Promise.race([f.rt.resumesDone, new Promise(resolve => { bound = timer(resolve, 5_000) })])
+    clearTimeout(bound)
+    assert.equal(f.rt.resumeBootPending(), false)
     assert.equal(f.rt.hostAuthority, undefined)
     assert.equal(initialSave.mock.calls.filter(call => call.arguments[0]?.required).length, 0)
     assert.equal(service?.hasProvider() ?? false, false)
     const published = t.mock.method(f.rt, 'publishPart')
     const closed = t.mock.method(f.rt, 'closePart')
+    // The pass keeps its notes in memory until the next save: save once so the snapshot is the team after the start.
+    await f.rt.save()
     const initialKeys = Object.keys(f.saved()).sort()
     const grant = JSON.stringify(f.saved().bots.b.people)
     const created = await f.call('create-bot', { name: 'New Bot', model: 'deepseek/v4' })
