@@ -242,8 +242,16 @@ export async function startViewer(boot, signal, prepare, clearNativeDrafts) {
     try { drafts?.clear(confirmingHandoff) } catch { /* Storage may be unavailable. */ }
   }
   if (retained) active.hooks.add(clearDrafts)
+  let sawMarkerWrite = false
   const storage = event => {
-    if (event.key === null || (event.key === VIEWER_KEY && event.newValue !== (active.viewer?.id ?? initialViewer))) retire(active)
+    if (event.key === null) return retire(active)
+    if (event.key !== VIEWER_KEY) return
+    if (!handoff && !active.viewer) {
+      if (event.newValue === null) retire(active)
+      else sawMarkerWrite = true // Compare the shared marker with the whoami answer.
+      return
+    }
+    if (event.newValue !== (active.viewer?.id ?? initialViewer)) retire(active)
   }
   const stopStorage = () => window.removeEventListener('storage', storage)
   window.addEventListener('storage', storage)
@@ -281,7 +289,7 @@ export async function startViewer(boot, signal, prepare, clearNativeDrafts) {
   if (!confirmed(answer, boot) ||
       (handoff && (retained.id !== answer.viewer.id || retained.role !== answer.viewer.role ||
         markerChanged || currentViewer !== answer.viewer.id)) ||
-      (currentViewer !== null && markerChanged && currentViewer !== answer.viewer.id)) {
+      ((sawMarkerWrite || (currentViewer !== null && markerChanged)) && currentViewer !== answer.viewer.id)) {
     retire(active)
     throw new Error('Viewer role changed')
   }

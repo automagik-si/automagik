@@ -4208,8 +4208,16 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
     }
   };
   if (retained) active2.hooks.add(clearDrafts);
+  let sawMarkerWrite = false;
   const storage = (event) => {
-    if (event.key === null || event.key === VIEWER_KEY && event.newValue !== (active2.viewer?.id ?? initialViewer)) retire(active2);
+    if (event.key === null) return retire(active2);
+    if (event.key !== VIEWER_KEY) return;
+    if (!handoff && !active2.viewer) {
+      if (event.newValue === null) retire(active2);
+      else sawMarkerWrite = true;
+      return;
+    }
+    if (event.newValue !== (active2.viewer?.id ?? initialViewer)) retire(active2);
   };
   const stopStorage = () => window.removeEventListener("storage", storage);
   window.addEventListener("storage", storage);
@@ -4244,7 +4252,7 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
   if (!current()) throw new Error("Viewer unavailable");
   const currentViewer = storedViewer();
   const markerChanged = currentViewer !== initialViewer;
-  if (!confirmed(answer, boot) || handoff && (retained.id !== answer.viewer.id || retained.role !== answer.viewer.role || markerChanged || currentViewer !== answer.viewer.id) || currentViewer !== null && markerChanged && currentViewer !== answer.viewer.id) {
+  if (!confirmed(answer, boot) || handoff && (retained.id !== answer.viewer.id || retained.role !== answer.viewer.role || markerChanged || currentViewer !== answer.viewer.id) || (sawMarkerWrite || currentViewer !== null && markerChanged) && currentViewer !== answer.viewer.id) {
     retire(active2);
     throw new Error("Viewer role changed");
   }

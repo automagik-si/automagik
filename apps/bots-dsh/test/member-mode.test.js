@@ -694,3 +694,21 @@ for (const [name, change] of [
     assert.equal(f.window.listeners.get('storage').size, 0)
   })
 }
+
+// R13: a FRESH gated mount (no handoff) after a person change must not retire because another tab of the SAME new
+// person wrote the marker before this mount's whoami answered; a different person still retires it.
+for (const [label, other, reloads] of [['the same person', 'admin-b', []], ['a different person', 'admin-c', [true]]]) {
+  test(`R13 a fresh mount with a cleared marker and ${label} confirmed in another tab first`, async t => {
+    const pending = Promise.withResolvers()
+    const f = browser({ boot: { version: 1, role: 'owner' }, local: new Map(), fetch: () => pending.promise })
+    const composer = nativeComposer(f)
+    slotsOf(t, f, false, { ownerEffects: gatedOwnerEffects, sessions: composer.sessions })
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls[0].body.endpoint, 'whoami')
+    f.localStorage.values.set('automagik.viewer', other)
+    f.window.emit('storage', { key: 'automagik.viewer', newValue: other })
+    pending.resolve(viewerReply('admin', 'admin-b'))
+    await tick()
+    assert.deepEqual(f.reloads, reloads)
+  })
+}
