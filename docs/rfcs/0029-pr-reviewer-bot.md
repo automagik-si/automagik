@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (delivery 2 merged: ci.yml's merge_group trigger and the CI result job; delivery 3 in part: the merge rules as code (.github/pr-reviewer.json, scripts/pr-reviewer/rules.ts), the bot itself waits on delivery 1's App; delivery 1 waits on the owner registering the App and the release environment; the rest of 3 and 4-6 open; amendment of 2026-11-20 approved by the owner's delegate on 2026-11-20 (#991): the parts of D3, D4 and D5 that need neither the App nor the ruleset split off as D3a, D3b, D4a and D5a, with points D1 and D5 must also cover; D5a merged: the dev ruleset as a disabled import template and a read-only drift check (.github/rulesets/dev-reviewed-merges.json, scripts/pr-reviewer/ruleset.ts, #1937); D4a merged: the watch's decisions offline (scripts/pr-reviewer/watch.ts; its workflow waits for D4); approved by the owner's delegate on 2026-11-19; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9, 2026-11-19, by the owner's delegate, the RFC's recommended option; Q10-Q12, 2026-11-20, by the owner's delegate, option (a) each: a separate proof repository, a 30-day public-read token for the dry run, the ruleset as a disabled template; no question open) |
+| Status | In delivery (delivery 2 merged: ci.yml's merge_group trigger and the CI result job; delivery 3 in part: the merge rules as code (.github/pr-reviewer.json, scripts/pr-reviewer/rules.ts), the bot itself waits on delivery 1's App; delivery 1 waits on the owner registering the App and the release environment; the rest of 3 and 4-6 open; amendment of 2026-11-20 approved by the owner's delegate on 2026-11-20 (#991): the parts of D3, D4 and D5 that need neither the App nor the ruleset split off as D3a, D3b, D4a and D5a, with points D1 and D5 must also cover; D5a merged: the dev ruleset as a disabled import template and a read-only drift check (.github/rulesets/dev-reviewed-merges.json, scripts/pr-reviewer/ruleset.ts, #1937); D4a merged: the watch's decisions offline (scripts/pr-reviewer/watch.ts; its workflow waits for D4); D3a part 1 merged: the poll reducer and the verdict composer (scripts/pr-reviewer/poll.ts, verdict.ts), parts 2 (the (i) checks) and 3 (issue drafts, the merge-group verifier) open; approved by the owner's delegate on 2026-11-19; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9, 2026-11-19, by the owner's delegate, the RFC's recommended option; Q10-Q12, 2026-11-20, by the owner's delegate, option (a) each: a separate proof repository, a 30-day public-read token for the dry run, the ruleset as a disabled template; no question open) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none (docs here; every delivery is under `.github/`, `scripts/` or top-level `*.md` such as `AGENTS.md`, which never ship, so none cuts a release) |
 | Created | 2026-11-10 |
@@ -539,6 +539,11 @@ neither the App nor the ruleset, records what D1 and D5 must also cover, and ask
   behind a variable: running a job that names an environment that does not exist makes GitHub
   create it with no protection rule and no secret. The owner checks the `release` environment's
   `dev`-only rule before placing the key.
+- **D1: each release push records its SHA.** When the cut, the index listing and Follow Omni's
+  bump move to the App's token, each of those steps also records the SHA it pushed to `dev`, in a
+  form the watch reads with a read-only token (a notice annotation on the job, for example: job
+  kind and SHA). The watch (D4a, `scripts/pr-reviewer/watch.ts`) accepts an App push only against
+  that record ((k) below); without it, every App push is reported as unexpected.
 - **(k) corrected: the App's pushes are three.** Follow Omni's bump is committed as
   `chore(desktop): carry Omni <version>` (`follow-omni.yml:329`), not `chore(release): ...`. The
   watch tells a release push from any other App push by the run that pushed it (the workflow,
