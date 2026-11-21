@@ -813,7 +813,8 @@ marked there with this section's number. None touches a private key, Play, real 
    Pocket-owned part, installed and started by `am`, paired with `am pocket pair` (RFC 0012's
    proposal), specified in a Pocket RFC and an RFC 0012 amendment; herdr-app stays in the install
    until it ships; decided by the owner's delegate, 2026-11-21, recommended option. The Pocket RFC
-   and the RFC 0012 amendment follow in their own pull request; Q11's and Q20's answers are
+   ([RFC 0046](0046-pocket-link-without-herdr-app.md)) and the RFC 0012 amendment follow in their
+   own pull request; Q11's and Q20's answers are
    unchanged.
 5. **6a's Bots with no CLI start path.** 6a PR 2 lists global and v2-only Bots with Start
    disabled and their reasons; each is enabled by its own CLI start path later; decided by the

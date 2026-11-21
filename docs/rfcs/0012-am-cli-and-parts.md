@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-2: #254, #258, #263; 3-10 not found; owner's answers in: D35; #206 amendment (delivery 9a, am on a linked machine) approved by the owner's delegate on 2026-11-20, questions 6-11 answered with its recommendations, 9a in delivery) |
+| Status | In delivery (deliveries 1-2: #254, #258, #263; 3-10 not found; owner's answers in: D35; #206 amendment (delivery 9a, am on a linked machine) approved by the owner's delegate on 2026-11-20, questions 6-11 answered with its recommendations, 9a in delivery; #1007 amendment (Pocket Link's part, `am pocket`) on 2026-11-21, after the owner's delegate's decision in RFC 0030, its questions in RFC 0046) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | am (3.N.P, D35), herdr (3.N.P), plugin (3.N.P), pocket (3.N.P), desktop (3.N) |
 | Created | 2026-11-03 |
@@ -275,9 +275,10 @@ need. All are `targets: local`, `set: ["code"]`, artifact `automagik-herdr-pack-
 - None declares `~/.local/bin/usagemeter`: that becomes usagemeter's own part (t22b);
   `install.sh` and `am meter` keep handling it until then.
 - Pocket Link (`herdr/mods/pocket-link`) is on the herdr lane but is not a pack member (it is
-  never in `PACK_MODS`, and the pack never writes it). Proposed: its own part, owned by Pocket.
-  Pocket itself (`android-app`) installs nothing on a computer: proposed, its doctor reports 2
-  there, and `am pocket pair` is how a phone joins.
+  never in `PACK_MODS`, and the pack never writes it). Its own part, owned by Pocket, decided by
+  the owner's delegate on 2026-11-21 (RFC 0030, Decisions (2026-11-21), 4): `pocket.link`, see
+  "Amendment (2026-11-21, #1007)". Pocket itself (`android-app`) installs nothing on a computer:
+  proposed, its doctor reports 2 there, and `am pocket pair` is how a phone joins.
 
 ### herdr-app as a part (D27)
 
@@ -672,6 +673,36 @@ and a test's own keys stay out of the bootstrap: its script takes HTTPS only, an
 the far side through a fake `hc exec` runner. (`am update`'s own test overrides in `sourceOf`,
 `am/lib/self.mjs:62-75`, are unchanged and not used.)
 
+### Amendment (2026-11-21, #1007): Pocket Link, Pocket's own part
+
+Status: Proposed. The owner's delegate decided the direction on 2026-11-21 (RFC 0030, Decisions
+(2026-11-21), 4: Pocket Link runs without herdr-app as its own Pocket-owned part, installed and
+started by `am`, paired with `am pocket pair`). The design and its questions are
+[RFC 0046](0046-pocket-link-without-herdr-app.md), Pocket's; this amendment records what changes
+here.
+
+- **A part `pocket.link`** (proposed id), kind `binary`, `macos` and `linux`, in no set. Its files
+  are byte copies of `herdr/mods/pocket-link/`'s shipped bridge and chat files in `am/pocket-link/`
+  (`scripts/am-copies.mjs`; Pocket Link stays the source), so `automagik-am-<v>.tgz` carries them
+  and they are as signed as am. Its entries ship in the am part, as `herdr.app`'s do. It keeps
+  each version in the parts store (`parts/pocket.link/<version>/`, `current` and `previous`).
+- **The `am pocket` group:** `am pocket pair [--minutes N]` (installs the part when missing,
+  starts the bridge's login service, prints the QR code and the link) and `am pocket link
+  status|on|off|forget|reset`, each a call of the bridge's own verb.
+- **Updates.** When am updates itself and its copy differs from the installed one, am stops the
+  bridge, swaps the version and starts it again; a failed start goes back. The hourly linked
+  updater never installs `pocket.link`, and 9a never places it on a linked machine.
+- **`writes`** gains the bridge's login service file (LaunchAgent or systemd user unit) and its
+  state folder, both today Pocket Link's; the pack's `parts.mjs` rule that no herdr part writes
+  them is unchanged.
+- **Who may pair.** `am pocket pair` refuses inside a Herdr terminal or a DSH tool call, by D35's
+  test for an unsigned-source prompt (Threat model), and never prints the code in `--json`
+  (RFC 0046, question 3).
+- **Unchanged:** the pack, herdr-app as a part, the bridge's service names, state folder and
+  pairing link, and Pocket's `latest.json`, `pocket-lane`, app ID and signing key.
+- **Delivery 8** gains Pocket Link's part as RFC 0046's deliveries 1 and 2 (a herdr patch carrying
+  am, then a herdr patch); Pocket's own part (`android-app`) stays as written.
+
 ### Operating systems
 
 Supported targets are D28's: macOS arm64, Linux x86_64 and aarch64, and Windows x86_64 via WSLC
@@ -738,7 +769,8 @@ feed. For those, `am update` asks the owner (the desktop app) and reports.
   }
   ```
   (`os` as it reads after deliveries 5 and 6; today `["macos"]`.)
-- **Part ids**: `automagik.am` and `herdr.app` (proposed), `herdr.pack` (proposed), the nine
+- **Part ids**: `automagik.am` and `herdr.app` (proposed), `herdr.pack` (proposed),
+  `pocket.link` (proposed, Pocket's; Amendment (2026-11-21, #1007)), the nine
   `herdr.am-*` and `herdr.layout`, and one per `apps/*` part as each owner adds it. `herdr.cli`
   is not released.
 - **Capabilities** in the table above. A major is never reused for an incompatible change.
@@ -853,7 +885,8 @@ check passes on all three OSes.
    *Rollback:* revert; an installed fork stays, listed as unsigned, until it is uninstalled.
 8. **The `apps/*` parts** (one PR per owner and lane): Bot team and plugins (plugin, through
    `dsh plugin`), pets and the desktop app (t259's worker), usagemeter (t22b), Pocket and Pocket
-   Link (t16r).
+   Link (t16r). Pocket Link's part is RFC 0046's deliveries 1 and 2 (Amendment (2026-11-21,
+   #1007)).
    *Check:* each part's doctor in `am doctor`; `am install work` on a fresh machine.
    *Rollback:* revert each; the part's own updater is unchanged.
 9. **Fleet** (am). Split by the 2026-11-20 amendment (#206), approved by the owner's delegate on
@@ -975,7 +1008,8 @@ recommendation; the owner may amend on return):
 
 Ledger pass (2026-11-10): the board links this RFC from its file.
 
-- Open issues: #768, #815, #206 (delivery 9a; amendment approved 2026-11-20, #1932).
+- Open issues: #768, #815, #206 (delivery 9a; amendment approved 2026-11-20, #1932), #1007
+  (Pocket Link's part; amendment of 2026-11-21, RFC 0046).
 - Merged changes that cite this RFC: #203, #205, #252, #254, #258, #263, #265, #288, #292, #300, #302, #330, #427, #751, #783, #806 (last merged 2026-11-09).
 
 ## Links
