@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1092; questions 1-6 answered with this RFC's own recommendations, see Answers; merged: delivery 1 (#1085), delivery 2 (#1106), the 2026-11-13 amendment (#1264), and Auto on every route (#1110), which went past this RFC's "Not scheduled" list; question 5 answered by the owner's delegate on 2026-11-21 (Claude Code stays off Auto until a signed-in capture, see Answers); the amendment's Omni senders registered (automagik-si/omni#1813) and its Codex dependency prepared as an upstream request for the owner (2026-11-21; submission and enforcement outstanding); the 2026-11-19 amendment (#870, Auto on Codex under the Workspace profile) approved by the owner's delegate on 2026-11-20, A1 and A2 answered with its recommendations, owes delivery 3 (the wording) and delivery 4 (waits for codex-acp); amends RFC 0003 with its delivery 2) |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1092; questions 1-6 answered with this RFC's own recommendations, see Answers; merged: delivery 1 (#1085), delivery 2 (#1106), the 2026-11-13 amendment (#1264), and Auto on every route (#1110), which went past this RFC's "Not scheduled" list; question 5 answered by the owner's delegate on 2026-11-21 (Claude Code stays off Auto until a signed-in capture, see Answers); the amendment's Omni senders registered (automagik-si/omni#1813) and its Codex dependency requested upstream (agentclientprotocol/codex-acp#790, 2026-11-21; enforcement outstanding); the 2026-11-19 amendment (#870, Auto on Codex under the Workspace profile) approved by the owner's delegate on 2026-11-20, A1 and A2 answered with its recommendations, owes delivery 3 (the wording) and delivery 4 (waits for codex-acp); amends RFC 0003 with its delivery 2) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-11 |
@@ -257,8 +257,9 @@ blocking pre-execution request carrying tool, arguments and cwd. Until then Auto
 keeps Codex's reviewer as the only check for built-ins. The confirmation text is in the
 client, so this amendment records the gap without changing the client.
 
-Status of the dependency (2026-11-21): the request is written for the owner and not yet
-submitted: in codex-acp's `agent` mode, a per-session list of actions that always reach the
+Status of the dependency (2026-11-21): requested upstream in
+[agentclientprotocol/codex-acp#790](https://github.com/agentclientprotocol/codex-acp/issues/790):
+in codex-acp's `agent` mode, a per-session list of actions that always reach the
 client as `session/request_permission` before Codex's reviewer, or a blocking pre-execution
 request. Its acceptance case is a matching built-in that waits for the client's answer even when
 the reviewer would approve it. Codex's app-server picks the reviewer, so Codex itself may need
