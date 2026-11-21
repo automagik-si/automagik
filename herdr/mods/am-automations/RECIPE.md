@@ -209,7 +209,7 @@ scheduler's side `start` and `worker` for a target), and the agents a run starts
 - **A command automation runs a program as you** (#938): the scheduler starts it on its schedule
   with your network and files, no sandbox, and its result line is pasted into the named bot's
   terminal. Whoever can write `automations.yaml` (this form included) decides what runs.
-- Command automations need the pinned scheduler release (`SCHEDULER`, `0.12.1-am.2`) or later; the
+- Command automations need the pinned scheduler release (`SCHEDULER`, `0.12.1-am.3`; commands since 0.12.1-am.2); the
   form offers the kind once a build that names it is installed (0.12.1-am.1 does not run commands).
 - Without the scheduler binary the panel shows the repair block instead of the list. `install.sh`
   provisions it (#220); shipping it as an RFC 0012 part (installed by `am install` and the pack's
