@@ -200,6 +200,15 @@ test('the old unreferenced poll releases surviving waiters after disposal withou
 
 function profile(t) {
   const root = mkdtempSync(join(tmpdir(), 'bots-update-click-'))
+  // node:test runs after hooks in the order they were registered, so a runtime's own stop hook,
+  // registered after this one, would run once the folder is gone, while its notes writer can
+  // still be writing into the team folder (ENOTEMPTY, or a note failing on a missing folder).
+  // Every runtime built on this profile stops here first, newest first, and only then the folder goes.
+  const stops = []
+  t.after(async () => {
+    for (const stop of stops.reverse()) await stop()
+    rmSync(root, { recursive: true, force: true })
+  })
   const profileDir = join(root, 'profiles', 'web')
   const home = join(root, 'team')
   mkdirSync(profileDir, { recursive: true })
@@ -209,14 +218,13 @@ function profile(t) {
     process.env[key] = value
     t.after(() => { if (old === undefined) delete process.env[key]; else process.env[key] = old })
   }
-  t.after(() => rmSync(root, { recursive: true, force: true }))
   const store = storeDirOf(profileDir)
   const saved = checkedAt => writeJsonAtomic(join(store, 'check.json'), {
     version: 1, runId: 'check-run', checkedAt: new Date(checkedAt).toISOString(), state: 'available', reason: null,
     laneVersion: '1.2.4', sequence: 5, supervisor: true, plugins: [],
   }, { profileDir })
   saved(Date.now())
-  return { home, profileDir, request: join(store, 'request.json'), saved }
+  return { home, profileDir, request: join(store, 'request.json'), saved, onStop: stop => stops.push(stop) }
 }
 
 async function clickBench(t) {
@@ -235,8 +243,13 @@ async function clickBench(t) {
   }
   installResume(rt)
   const stop = install(rt)
-  t.after(async () => { stop(); await ctx.dispose() })
-  await Promise.race([rt.resumesDone, new Promise(resolve => timer(resolve, 15))])
+  files.onStop(async () => { stop(); await ctx.dispose() })
+  // The boot's pass reads and notes on disk: wait for it, bounded only so a pass that never ends
+  // fails on the assertion below instead of the file's timeout. The bound keeps the event loop
+  // alive (the pass's own delay timer is unreferenced) and is cleared once the pass is done.
+  let bound
+  await Promise.race([rt.resumesDone, new Promise(resolve => { bound = timer(resolve, 5_000) })])
+  clearTimeout(bound)
   assert.equal(rt.resumeBootPending(), false)
   return { files, agents, rt, status, loseTeam() { owned = false } }
 }
@@ -409,13 +422,13 @@ test('the status and start share static refusals and leave the setting off by de
 })
 
 test('the start route requires the team lock and is absent from the read and tool lists', async t => {
-  const { home, profileDir } = profile(t)
+  const { home, profileDir, onStop } = profile(t)
   const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
   let route
   const register = ctx.connection.fetch.register
   ctx.connection.fetch.register = value => { route = value; return register(value) }
   const rt = createRuntime(ctx, { home, selfUpdate: true })
-  t.after(async () => { rt.dispose(); await ctx.dispose() })
+  onStop(async () => { rt.dispose(); await ctx.dispose() })
   const post = async endpoint => (await route.fetch(new Request('http://localhost/api/omni-ui', {
     method: 'POST', body: JSON.stringify({ endpoint }),
   }))).json()
@@ -486,13 +499,13 @@ for (const [name, rollback, force, refusal, problem, unbound] of [
 }
 
 test('the start route passes the force option only for a boolean true', async t => {
-  const { home, profileDir } = profile(t)
+  const { home, profileDir, onStop } = profile(t)
   const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
   const register = ctx.connection.fetch.register
   let route
   ctx.connection.fetch.register = value => { route = value; return register(value) }
   const rt = createRuntime(ctx, { home, selfUpdate: true })
-  t.after(async () => { rt.dispose(); await ctx.dispose() })
+  onStop(async () => { rt.dispose(); await ctx.dispose() })
   const start = t.mock.method(rt, 'selfUpdateStart', async () => ({ started: true }))
 
   for (const force of [true, false, 'true', undefined]) {
