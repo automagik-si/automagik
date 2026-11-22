@@ -1,3 +1,4 @@
+import { withGrantHold } from './grants.js'
 // Permissions. A Bot's permission level is its own: kept on the Bot and set on every
 // Session it speaks from, so a fresh part or a new group Session keeps it. A group may
 // set one level for all its members there, in place of each member's own, as it may
@@ -265,7 +266,25 @@ export function install(rt) {
   // without one keeps DSH's default. `room` is for a group Session not indexed yet. The
   // level is read when the apply runs, not when it is queued. `start`: the Session is
   // about to start work, so a level that does not hold refuses it (startPermission).
-  async function applyPermission(bot, sessionId, room = roomOfSession(sessionId), session, { start = false, starts = false } = {}) {
+  function grantPermissionState(sessionId, session = ctx.sessions?.get?.(sessionId)) {
+    if (session === undefined) return
+    const service = presets()
+    const current = service?.current(session)
+    const knobs = current === undefined ? undefined : service.resolve?.(current)
+    return [current, knobs?.sandbox, knobs?.approval,
+      ctx.get?.('approval')?.effectivePolicy?.(session), ctx.get?.('shell')?.sandboxMode]
+  }
+
+  function applyPermission(bot, sessionId, room, session, options) {
+    return withGrantHold(rt, { sessionIds: [sessionId] },
+      () => grantPermissionState(sessionId, session),
+      () => applyPermissionHeld(bot, sessionId, room, session, options))
+  }
+
+  async function applyPermissionHeld(
+    bot, sessionId, room = roomOfSession(sessionId), session,
+    { start = false, starts = false } = {},
+  ) {
     if (start) return startPermission(bot, sessionId, room, session)
     if (presets() === undefined) return
     return serial(sessionId, async () => {
@@ -547,7 +566,15 @@ export function install(rt) {
   // Sets a task Session's level, read when the apply runs, not when it is queued, so a
   // lower level picked meanwhile lands last. The fallback mark stays the Bot's and the
   // group's own: a task does not mark them. Resolves whether the Session is a task.
-  async function applyTaskPermission(sessionId, session, { start = false, starts = false } = {}) {
+  function applyTaskPermission(sessionId, session, options) {
+    return withGrantHold(rt, { sessionIds: [sessionId] },
+      () => grantPermissionState(sessionId, session),
+      () => applyTaskPermissionHeld(sessionId, session, options))
+  }
+
+  async function applyTaskPermissionHeld(
+    sessionId, session, { start = false, starts = false } = {},
+  ) {
     if (start) return startTaskPermission(sessionId, session)
     if (taskOf(sessionId) === undefined) return false
     const service = presets()
@@ -614,8 +641,7 @@ export function install(rt) {
   // goes: a loaded one, and a working one even if DSH has to open it. Any other takes it
   // from the session/created re-apply when DSH opens it next. Resolves the tasks whose
   // level was not set, apart from those that take it on opening, for the change that asked.
-  async function reapplyTasks(match) {
-    const left = []
+  function tasksFollowing(match) {
     // And every task started from one of them, down the chain: it is bound by that one.
     const follows = (task) => {
       for (let depth = 0; task !== undefined && depth <= PARENT_DEPTH; depth += 1) {
@@ -624,10 +650,15 @@ export function install(rt) {
       }
       return false
     }
-    const picked = Object.entries(rt.state?.tasks ?? {}).filter(([, task]) => follows(task))
+    return Object.entries(rt.state?.tasks ?? {}).filter(([, task]) => follows(task))
+  }
+  async function reapplyTasks(match) {
+    const left = []
+    const picked = tasksFollowing(match)
     if (picked.length === 0 || rt.readOnly() !== undefined || presets() === undefined) return left
     const loaded = new Map((ctx.sessions?.list?.() ?? []).map(session => [session.id, session]))
     for (const [sessionId, task] of picked) {
+      rt.dropGrantsForSession?.(sessionId)
       if (!loaded.has(sessionId) && task.status !== 'working') continue
       await applyTaskPermission(sessionId, loaded.get(sessionId))
         .catch((error) => {
@@ -859,7 +890,12 @@ export function install(rt) {
     return levelTo(bot, wanted)
   }
 
-  async function levelTo(bot, wanted, { before = bot.permission } = {}) {
+  function levelTo(bot, wanted, options) {
+    return withGrantHold(rt, { botId: bot.id }, () => bot.permission,
+      () => levelToHeld(bot, wanted, options))
+  }
+
+  async function levelToHeld(bot, wanted, { before = bot.permission } = {}) {
     // Read before the apply: whether the Bot's saved Auto last ran as workspace-write.
     const fell = fellBack.has(`bot:${bot.id}`)
     bot.permission = wanted
@@ -887,6 +923,7 @@ export function install(rt) {
         left.push(rt.chatOf(bot.id))
       }
     }
+    rt.dropGrantsForBot?.(bot.id)
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
       if (roomOfSession(sessionId)?.permission) continue
       await applyPermission(bot, sessionId)
@@ -926,13 +963,24 @@ export function install(rt) {
 
   // Members' Sessions in the group change now; a member that has none there yet gets the
   // group's level when its first turn there makes one. Returns whether it changed.
-  async function setRoomPermission(room, name) {
+  function setRoomPermission(room, name) {
+    return withGrantHold(rt, { roomId: room.id }, () => room.permission,
+      () => setRoomPermissionHeld(room, name))
+  }
+
+  async function setRoomPermissionHeld(room, name) {
     const wanted = cleanRoomPermission(name) ?? undefined
     if (wanted === room.permission) return false
     if (wanted === undefined) delete room.permission
     else {
       room.permission = wanted
       room.scoped = true
+    }
+    for (const sessionId of Object.values(room.sessions ?? {})) {
+      rt.dropGrantsForSession?.(sessionId)
+    }
+    for (const [id] of tasksFollowing(task => taskOfRoom(task, room.id))) {
+      rt.dropGrantsForSession?.(id)
     }
     markFallback(`room:${room.id}`, false)
     const service = presets()
@@ -1032,6 +1080,13 @@ export function install(rt) {
       return false
     }
   }
+  rt.grantTaskRun = sessionId => {
+    const task = taskOf(sessionId)
+    const service = presets()
+    if (task !== undefined && service !== undefined) return taskRun(task, service)
+  }
+
+
   // The Sessions that carry the mark now, as a fresh list.
   const unappliedSessions = () => [...unapplied.keys()]
 

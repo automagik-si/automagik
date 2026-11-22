@@ -1,0 +1,374 @@
+[
+  {
+    "name": "rfc0039 D4 A1 a task replays with one DSH decision per call [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A1f first ask works before the window polls [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A1c an ordinary allow asks again [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 A2 changed side argument has its own offer [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A3 wider command has its own offer [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A4 another task has its own offer [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A5 another Bot has its own offer [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A6 and A6s route changes end grants and demote started calls [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A6e effort-only native selection keeps the grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A7 a level change holds the Bot until the apply settles [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A7p an unowned parent prevents a descendant grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A8 a deny-list save ends the grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A9 terminal task turns and wake-log repair end their grants [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A10 revocation stops replay and obeys the team lock [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A11 runtime restart does not reload grants [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A12 never-auto with a key keeps its ordinary card [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A12c ordinary rejection of a never-auto step stays available [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 A14 extra arguments that change scope prevent a grant key [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A14c an ungrouped ask is still answerable [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 A15 a reused call key cannot match or offer a grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A16 event changes end grants and Auto review takes precedence [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A17 invisible marks keep the task grouping key [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A17b two reasons produce different keys for identical calls [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A18 only the pinned shell executors can acquire grants [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A19 bridge metadata rules out a native-looking shell ask [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A20 DSH folder away and back ends shell grants [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A20w no reported folder means an ordinary shell ask [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A20t team workspace away and back ends shell grants [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A21 persistent Bash registration prevents a shell grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 W1 the browser can create a grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 W1D the desktop marker works without connection admission [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 W1K a browser admitted by pinned connection can create a grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 K1 pinned connection keeps browser and credential peers apart [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 W2 an owner API peer cannot grant the persons pending ask [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 W2t the same id with a stale token is refused [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 W2r a rejected or throwing admission leaves the ask open [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 W3b a lockless host refuses a live offer [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 W4 extra fields in a grant request are invalid [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E8 leaving a group drops just that seat grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E9 group level changes end inherited grants selectively [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E11 only a committed DSH archive ends a Session grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 R1 two windows cannot answer the same offer twice [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 R3 an end before DSH decides returns allowed once only [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 R6 a changed offer is refused without answering its card [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 R6c an ordinary answer survives a folder change [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 P1 an ineligible group ask keeps ordinary event fields [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 P2 Bash side arguments stay out of D4 projections [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A6b another owner changing route leaves this grant active [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A6r a refused model route holds the whole team through the save [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A7x changing a parent level ends another Bot descendant grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A7d failed parent deletion ends a different Bot descendant grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A20b Bot and group folder changes end only reachable grants [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A20c the working directory tool ends the member seat grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 W3a a read-only host refuses a grant request before dispatch [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 E3 reopening away and back keeps another owner grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A6v E2 E4 a revert holds the Bot and leaves another seat grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E6 and E7b rollback and re-adoption end the old grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E10a losing and reclaiming the real lock ends grants [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E5 a saved shell hold ends grants through restoration [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E6c the host adapter restoring the first Session ends grants [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E10b a broken team lock invalidates a live grant offer [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A13 an authenticated agent tool cannot grant a pending id [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 C4 the start task cell can grant its correlated ask [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 C5 member cards grant only asks in the displayed room [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 C6 merged Live asks grant one id at a time [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 C6b a single grantable Live ask can be confirmed [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 C7 Live counts grants alongside active work [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 C8 Details lists and revokes only the selected Bot grants [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 C9 an older host still opens ordinary Live rows [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 C10 Escape closes confirmation without deciding [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 C11 confirmation freezes the token, folder, full command and place [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 C12 an allowed-once receipt shows the ordinary notice [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 C3 ordinary shell asks stay with the native composer [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 C10c Enter and Escape keep deciding ordinary composer cards [C]",
+    "tag": "C"
+  },
+  {
+    "name": "rfc0039 D4 I1 grant events neither edit a held IM card nor send a replay card [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 mock repeats identical arguments in own chat [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 mock repeats identical arguments in delegated task [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A12p a prerelease tag push cannot receive a grant [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 P3 a sandbox object is omitted from the open projection [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A22 dispatch middleware cannot replay a different command [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A23 a scoped replacement cannot replay after unregistering [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A17p blank filename characters keep the ordinary card [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 R2p Pocket and the window decide the same request once [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A20p folder grants stay held until the switch settles [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E10p heartbeat loss ends grants and offers none after the lock returns [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A12n version destinations keep their ordinary card [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A22i dispatch requires the frozen arguments by identity [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 R2o Pocket wins after the public window claim [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A6m real model changes hold grants through saves and restores [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E10o an observed lock loss ends grants before heartbeat [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A12w a git push is never grantable, wrapped or plain [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 A6g a Session model selection holds that Session until it settles [P]",
+    "tag": "P"
+  },
+  {
+    "name": "rfc0039 D4 E9s a group level change holds the room until its save settles [P]",
+    "tag": "P"
+  }
+]

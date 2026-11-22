@@ -7,6 +7,17 @@
 // can say which task waits, and the task's thread waits in amber. A subagent child's
 // ask is held under its Bot, where the person can answer it.
 import { createHash, randomUUID } from 'node:crypto'
+import { bindTicketDesk } from './grant-ticket.js'
+import { bindGrantDecisions, grantInternals } from './grants.js'
+
+const claimers = new WeakMap()
+const grantRefusal = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
+
+export async function claimGrant(rt, ticket) {
+  const claim = claimers.get(rt)
+  if (!claim) throw grantRefusal('Allow this step from the Automagik window.')
+  return claim(ticket)
+}
 
 const OUTCOMES = { allow: 'allowed-once', reject: 'rejected' }
 // The kinds of client that can decide an approval here. A request body's kind is trusted
@@ -35,6 +46,7 @@ export function install(rt) {
   const { ctx } = rt
   /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string, decidedBy?:string, why?:string)=>boolean}>} */
   const pending = new Map()
+  const grantContext = new WeakMap()
   const folderIds = new Set()
   // Approvals whose command is credential-sensitive are answered only on the local card.
   const localOnly = new WeakSet()
@@ -142,7 +154,18 @@ export function install(rt) {
     const target = entry.tool === 'keep_working' || !whole ? undefined : rt.callCapability?.(sessionId, request.callId, entry.tool)
     const folder = target === undefined ? undefined : rt.sessionFolder?.(request.agent?.session ?? request.agent)
     if (typeof folder === 'string' && folder !== '') {
-      entry.capabilityKey = createHash('sha256').update(JSON.stringify(['v1', entry.botId, folder, entry.tool, entry.reason, target])).digest('hex')
+      const keyTarget = entry.tool === 'acp_tool' ? target
+        : createHash('sha256').update(target).digest('hex')
+      entry.capabilityKey = createHash('sha256').update(JSON.stringify(
+        ['v1', entry.botId, folder, entry.tool, entry.reason, keyTarget],
+      )).digest('hex')
+    }
+    if (owner === undefined && chat === undefined && task !== undefined
+      && runOwner === undefined && entry.capabilityKey === undefined
+      && whole && entry.tool !== 'keep_working') {
+      const projection = grantInternals(rt)?.projection(sessionId, request.callId,
+        entry.tool, request)
+      if (projection) Object.assign(entry, projection)
     }
     admit(id, entry)
     // Hook owners also arrive as run: true (stops.js).
@@ -152,9 +175,17 @@ export function install(rt) {
         : task !== undefined ? ownerRecord('task', task.from, { task }) : ownerRecord('run', runOwner?.botId))
     const privateNote = rt.privateApprovalNote?.(request)
     if (privateNote !== undefined) localOnly.add(entry)
+    let offer
+    // A credential step is reviewed on the computer only: it is never offered as a grant.
+    if (privateNote === undefined && runOwner === undefined && bindTicketDesk(rt)?.available() === true) {
+      const kind = owner !== undefined ? 'group' : chat !== undefined ? 'chat' : 'task'
+      const grantEntry = { ...entry, kind }
+      grantContext.set(entry, { grantEntry, request })
+      offer = grantInternals(rt)?.offer(grantEntry, request, { signal: request.signal })
+    }
     rt.noteApproval?.(sessionId, privateNote ?? { tool: entry.tool, reason: entry.reason.slice(0, 200) })
     rt.approvalWaiting?.(entry)
-    emit('open', { ...entry, ...(privateNote && { ...privateNote, detail: {}, localReview: true }), answerable: true })
+    emit('open', { ...entry, ...(privateNote && { ...privateNote, detail: {}, localReview: true }), answerable: true, ...offer })
     const settle = (outcome, decidedBy = 'dsh', why) => {
       if (!take(id)) return false
       folderIds.delete(id)
@@ -255,7 +286,12 @@ export function install(rt) {
     })
   }
 
-  const approvalsView = () => [...pending.values()].map(({ answer, ...entry }) => ({ ...entry, answerable: answer !== undefined }))
+  const approvalsView = () => [...pending.values()].map(pendingEntry => {
+    const context = grantContext.get(pendingEntry)
+    const { answer, ...entry } = pendingEntry
+    const offer = context && grantInternals(rt)?.offerView(context.grantEntry, context.request)
+    return { ...entry, answerable: answer !== undefined, ...offer }
+  })
   function groupAskCurrent(id, room) {
     const entry = pending.get(id)
     if (entry === undefined) return false
@@ -330,6 +366,30 @@ export function install(rt) {
     }
     return count
   }
+  const answerIfPending = (id, outcome, by = 'web') => {
+    const entry = pending.get(String(id ?? ''))
+    if (entry?.answer === undefined || entry.child === true
+      || !Object.values(OUTCOMES).includes(outcome)) return false
+    try { return entry.answer(outcome, CLIENT_KINDS.has(by) ? by : 'web') === true }
+    catch { return false }
+  }
+  if (!claimers.has(rt)) claimers.set(rt, ticket => {
+    if (rt.holdsLock?.() !== true) {
+      throw grantRefusal(rt.readOnly?.() ?? 'This host cannot save the Bot team.', 'bot/read-only')
+    }
+    const result = grantInternals(rt)?.claim(ticket, id => {
+      const entry = pending.get(id)
+      return entry?.answer === undefined ? undefined : grantContext.get(entry) ?? {}
+    }, answerIfPending)
+    if (result === undefined) throw grantRefusal('Allow this step from the Automagik window.')
+    if (result.stale) throw grantRefusal('This approval is no longer open', 'bot/stale')
+    if (result.changed) throw grantRefusal('This step changed. Look again.')
+    return result.receipt
+  })
+  bindGrantDecisions(rt, row => emit('grant', {
+    id: row.approvalId ?? `dsh:${row.requestId}`, ...row, at: Date.now(),
+  }))
+
   const withdrawnView = () => { prune(); return withdrawn.map(({ epoch, ...row }) => row) }
   const unansweredView = () => { const epoch = teamEpoch(); return [...unanswered].filter(([, at]) => at === epoch).map(([id]) => id) }
 

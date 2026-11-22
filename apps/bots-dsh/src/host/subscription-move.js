@@ -1,3 +1,4 @@
+import { grantTeamModels, withGrantHold } from './grants.js'
 // A Claude or ChatGPT subscription signs in once, through its own CLI (Claude Code, Codex),
 // which Automagik installs. Bots that still run on a subscription through DSH (pi-ai's
 // `openai-codex`, the ChatGPT sign-in; pi-ai's `anthropic` on a Claude Pro or Max sign-in) move
@@ -595,7 +596,7 @@ export function install(rt) {
       again = true
       return running
     }
-    running = (async () => {
+    running = withGrantHold(rt, { all: true }, () => grantTeamModels(rt), async () => {
       let options = { timed }
       for (;;) {
         again = false
@@ -605,7 +606,7 @@ export function install(rt) {
         if (!again && !(echoed && !echoPass)) break
         echoPass = !again
       }
-    })()
+    })
       .catch(error => rt.warn('ds-bot: the subscription Bots were not moved to their CLI: %s', error))
       .finally(() => {
         running = undefined

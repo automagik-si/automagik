@@ -565,6 +565,8 @@ export function install(rt) {
       // DSH's persisted request header is also the fresh-part route source (parts.js).
       const route = live.session?.requestHeader?.()?.config
       const now = Date.now()
+      rt.dropGrantsForBot?.(chatId)
+      rt.endGrants?.(sessions, 'part')
       state.bots[chatId] = {
         ...(route?.provider && route?.model ? { model: `${route.provider}/${route.model}` } : {}),
         ...(route?.reasoningEffort ? { effort: route.reasoningEffort } : {}),
@@ -597,6 +599,7 @@ export function install(rt) {
         await rt.save({ required: true })
       } catch (error) {
         delete state.bots[chatId]
+        rt.dropGrantsForBot?.(chatId)
         delete agent.adoptedBotId
         Object.assign(agent, creationFields)
         rt.indexSessions()
@@ -743,6 +746,7 @@ export function install(rt) {
           refuse('bot/adopt-preset-not-persisted', `${botLabel} could not keep the native preset "${preset}" for ${sessionLabel}, so the Session did not join that Bot. Try again, or pick a Session already on that preset.`)
         }
         const previous = { sessionId: bot.sessionId, segments: bot.segments }
+        rt.endGrants?.([previous.sessionId ?? botId, sourceSessionId, sessionId], 'part')
         bot.segments = [...(bot.segments ?? []), { sessionId: sourceSessionId, endedAt: Date.now() }]
         bot.sessionId = sessionId
         try {
@@ -754,6 +758,7 @@ export function install(rt) {
         } catch (error) {
           // Undo only this operation's tentative ownership; do not erase a successor.
           if (state.bots[botId] === bot && bot.sessionId === sessionId) {
+            rt.endGrants?.([previous.sessionId ?? botId, sourceSessionId, sessionId], 'part')
             if (previous.sessionId === undefined) delete bot.sessionId
             else bot.sessionId = previous.sessionId
             if (previous.segments === undefined) delete bot.segments
@@ -802,11 +807,13 @@ export function install(rt) {
         throw refusal('Remove Main Bot/group roles and resolve new team history before rolling back adoption')
       }
       delete state.bots[bot.id]
+      rt.dropGrantsForBot?.(bot.id)
       delete original.adoptedBotId
       try {
         await rt.save({ required: true })
       } catch (error) {
         state.bots[bot.id] = bot
+        rt.dropGrantsForBot?.(bot.id)
         original.adoptedBotId = bot.id
         rt.indexSessions()
         await rt.save({ required: true }).catch(() => {})
@@ -987,6 +994,7 @@ export function install(rt) {
       await rt.assertNotOffCli(state.bots?.[from], sessionId, live.session, { unselected: !selected })
     } catch (error) {
       Object.assign(tasks()[sessionId] ?? {}, { status: 'failed', endedAt: Date.now(), summary: String(error?.message ?? error).slice(0, TASK_SUMMARY_MAX) })
+      rt.endGrants?.(sessionId, 'task')
       await rt.save().catch(failure => rt.warn('ds-bot: saving a task failed: %s', failure))
       await ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true })
         .catch(failure => rt.warn('ds-bot: the task %s that did not start was not archived: %s', sessionId, failure))
@@ -1071,6 +1079,7 @@ export function install(rt) {
         }
       }
       Object.assign(task, { status, endedAt, summary })
+      rt.endGrants?.(id, 'task')
       // RFC 0039 delivery 3: publish after this end's own write commits, while its team and task record still hold.
       void rt.save().then((committed) => {
         const valid = () => rt.sameTeam?.(gen) === true && state.tasks?.[id] === task && task.status === status

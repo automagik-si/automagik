@@ -1028,6 +1028,7 @@ export function install(rt) {
       const last = lastTurnOf(agent)
       if (last?.type !== 'turn/end' || !cutByRestart(last.data?.reason)) continue
       Object.assign(task, { status: 'stopped', endedAt: last.time ?? Date.now(), summary: CUT_SUMMARY })
+      rt.endGrants?.(id, 'task')
       await rt.save()
     }
   }

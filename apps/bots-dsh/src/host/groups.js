@@ -510,6 +510,7 @@ export function install(rt) {
         await rt.assertNotOffCli(member, id)
       } catch (error) {
         if (room.sessions[member.id] === id) delete room.sessions[member.id]
+        rt.endGrants?.(id, 'group')
         rt.groupOwners.delete(id)
         void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
           .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
@@ -534,6 +535,7 @@ export function install(rt) {
             await rt.assertNotOffCli(member, id, undefined, { unselected: true })
           } catch (refused) {
             if (room.sessions[member.id] === id) delete room.sessions[member.id]
+            rt.endGrants?.(id, 'group')
             rt.groupOwners.delete(id)
             void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
               .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))

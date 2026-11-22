@@ -3,6 +3,7 @@ import { BotMark, toolState } from './mark.js'
 import { Elapsed, Shimmer, workPhrase } from './cells.js'
 import { SPRING_SHAPE, SPRING_TAP, spring, useLinger } from './motion.js'
 import { t } from './i18n.js'
+import { GrantAction } from './grants.js'
 
 // -------------------------------------------------------------------------
 // What a group's members are doing: above the group's composer, one capsule for the
@@ -129,7 +130,7 @@ const stateLine = (className, at, ...what) => h('span', { className },
   h('span', { className: 'bt-member-what' }, ...what),
   typeof at === 'number' ? h(Elapsed, { at, className: 'bt-member-time' }) : null)
 
-function ApprovalCard({ approval, bot, actions }) {
+function ApprovalCard({ approval, bot, room, actions, readOnly }) {
   const [busy, setBusy] = useState(false)
   const answer = (choice) => {
     setBusy(true)
@@ -148,7 +149,11 @@ function ApprovalCard({ approval, bot, actions }) {
     approval.answerable && (approval.roomId !== undefined || approval.child === true)
       ? h('div', { className: 'bt-mw-actions' },
         h('button', { type: 'button', className: 'bt-q-btn', disabled: busy, onClick: () => answer('reject') }, t('Reject')),
-        h('button', { type: 'button', className: 'bt-q-submit', disabled: busy, onClick: () => answer('allow') }, t('Allow once')))
+        h('button', { type: 'button', className: 'bt-q-submit', disabled: busy,
+          onClick: () => answer('allow') }, t('Allow once')),
+        room && room.id === approval.roomId ? h(GrantAction, {
+          approval, place: room.name, actions, disabled: busy || readOnly,
+        }) : null)
       : h('div', { className: 'bt-mw-actions' },
         h('button', { type: 'button', className: 'bt-q-btn', onClick: () => actions.openSession(bot.id) }, t("Open {name}'s chat", { name: bot.name }))))
 }
@@ -189,9 +194,10 @@ export function StopRoomWork({ room, entries, actions }) {
   return h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: stopping, 'aria-label': label, title: label, onClick: stop }, t('Stop all'))
 }
 
-export function MemberApprovals({ entry, bot, actions }) {
+export function MemberApprovals({ entry, bot, room, actions, readOnly }) {
   if (entry?.state !== 'ask') return null
-  return h('div', { className: 'bt-member-cards' }, entry.approvals.map(approval => h(ApprovalCard, { key: approval.id, approval, bot, actions })))
+  return h('div', { className: 'bt-member-cards' }, entry.approvals.map(approval =>
+    h(ApprovalCard, { key: approval.id, approval, bot, room, actions, readOnly })))
 }
 
 export function useMemberWork(room, useWork) {

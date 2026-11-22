@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (approved by the owner's delegate on 2026-11-20, #1718; questions 1-5 answered with this RFC's own recommendations, see Answers; merged: delivery 2 (#1815), delivery 3's task end (#1859); the 2026-11-20 amendment narrows delivery 3 for part moves and a Bot's deletion; owed: delivery 3's group Sessions and delivery 4) |
+| Status | In delivery (approved by the owner's delegate on 2026-11-20, #1718; questions 1-5 answered with this RFC's own recommendations, see Answers; merged: delivery 2 (#1815), delivery 3's task end (#1859) and group Sessions (#1894); the 2026-11-20 amendment narrows delivery 3 for part moves and a Bot's deletion; delivery 4 ships with the known limit in the 2026-11-21 amendment, and open question 6 stays open) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-19 |
@@ -190,6 +190,16 @@ button (a change to DSH; until then the button is on the Bot team's cards and th
    the person's allow. Recommended: (a); it is D7's "nothing becomes more permissive by itself"
    and the same rule #1740 applied to the mirror.
 
+6. **A persistent shell (asked 2026-11-21, open).** DSH's persistent shells
+   (`dsh-tool-bash-persistent`, `dsh-tool-pwsh-persistent`) keep the working folder, the
+   environment and the aliases from one call to the next, so the same command text can do
+   something else on its second run, and a grant bound to the text and the session's folder
+   cannot show what it allows. Delivery 4 grants no shell step while such a shell is
+   registered (the 2026-11-21 amendment). How a grant could cover one is not decided: for example
+   binding the shell's own state (its folder, environment and aliases) into the grant, a shell
+   tool that starts clean for a granted step, or DSH reporting that state on each call. Answered
+   by a later delivery or RFC; no issue is open for it.
+
 ## Answers (2026-11-20)
 
 The owner's delegate approved this RFC on 2026-11-20 (issue #1718) and answered every open
@@ -235,6 +245,23 @@ in memory and dropped on any doubt about their owner, which needs no such proof.
 
 A later RFC may bring the line to part moves and Bot deletion once the move, adoption and reopen paths
 record their end durably.
+
+## Amendment (2026-11-21, #1718): the persistent shell in delivery 4
+
+Decided by the owner's delegate on 2026-11-21 for #1718: delivery 4 ships as it is and closes the
+issue. A shell step is grantable only when the live call's shell tool is DSH's plain `bash` or `pwsh`
+(the pinned `dsh-tool-bash` or `dsh-tool-pwsh` plugin owning the registration, checked when the
+grant is offered and again on every match). While a persistent shell (`dsh-tool-bash-persistent`
+or `dsh-tool-pwsh-persistent`) is registered, no shell step is grantable, because its folder,
+environment and aliases carry over between calls and the card cannot show them.
+
+Known limit: the desktop app's DSH profile (`apps/desktop/profile/package.json`, through
+`dsh-web-app`) loads `dsh-tool-bash-persistent`. So on the desktop, while that profile carries the
+persistent shell, no step offers a grant: file tools, team tools, other routes and the never-auto
+list are already excluded, and shell steps are excluded by the rule above. Asks there keep "Reject"
+and "Allow once" as before. Grants work wherever the plain shell is the one registered, as in the
+acceptance tests. How to grant a step in a persistent shell is open question 6, with no issue of
+its own.
 
 ## Links
 

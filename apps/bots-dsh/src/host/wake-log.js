@@ -281,6 +281,7 @@ export function install(rt) {
       const task = state.tasks?.[intent.report.taskSessionId]
       if (task?.status !== 'working') return false
       Object.assign(task, intent.outcome)
+      rt.endGrants?.(intent.report.taskSessionId, 'task')
       return true
     }
     const { sub, report } = intent
