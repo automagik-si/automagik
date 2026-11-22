@@ -9,9 +9,9 @@ import { readFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { CATALOG, entryOf, customId, tokenSecretOf, refreshSecretOf, clientSecretOf, keySecretOf, envSecretOf } from './catalog.js'
+import { CATALOG, CONNECTOR_SECRET_REF, entryOf, customId, tokenSecretOf, refreshSecretOf, clientSecretOf, keySecretOf, envSecretOf } from './catalog.js'
 import * as oauth from './oauth.js'
-import { createGateway } from './gateway.js'
+import { createGateway, parseConnectorUrl } from './gateway.js'
 import { install as installMail } from './mail/index.js'
 import { CONNECTOR_IDS } from '../capabilities.js'
 import { output } from '../tools.js'
@@ -22,7 +22,6 @@ export const GITHUB_SECRET = 'GITHUB_TOKEN'
 const MCP_CLIENT = '@deepseek-ai/dsh-mcp-client'
 const CHECK_TIMEOUT_MS = 15_000
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000
-const SECRET_REF = /\$DSH_SECRET_([A-Z][A-Z0-9_]*)/g
 const MAX_REQUESTS = 20
 
 // Asks GitHub who the token belongs to. Any token GitHub accepts passes.
@@ -152,7 +151,7 @@ export function install(rt) {
     return pluginP.p
   }
 
-  const resolveRefs = (value) => String(value).replace(SECRET_REF, (_match, name) => {
+  const resolveRefs = (value) => String(value).replace(CONNECTOR_SECRET_REF, (_match, name) => {
     const unavailable = rt.secretSourceReason(name)
     if (unavailable !== undefined) throw refusal(unavailable)
     return rt.secretValue(name) ?? ''
@@ -569,6 +568,10 @@ export function install(rt) {
 
   // --- import -------------------------------------------------------------
 
+  const importUrl = spec => typeof spec.url === 'string' ? spec.url : typeof spec.serverUrl === 'string' ? spec.serverUrl : undefined
+  const checkAddress = url => {
+    if (parseConnectorUrl(url) === undefined) throw refusal('Connector addresses must use https:// or loopback http://, without user information')
+  }
   const importFiles = () => {
     const home = homedir()
     const appData = platform() === 'win32' ? (process.env.APPDATA ?? join(home, 'AppData', 'Roaming')) : null
@@ -588,7 +591,7 @@ export function install(rt) {
       if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) continue
       for (const [name, spec] of Object.entries(servers)) {
         if (spec === null || typeof spec !== 'object') continue
-        const url = typeof spec.url === 'string' ? spec.url : typeof spec.serverUrl === 'string' ? spec.serverUrl : undefined
+        const url = importUrl(spec)
         const command = typeof spec.command === 'string' ? spec.command : undefined
         if (url === undefined && command === undefined) continue
         found.push({
@@ -612,7 +615,7 @@ export function install(rt) {
       const servers = parsed?.[file.key] ?? {}
       for (const [name, spec] of Object.entries(servers)) {
         if (!wanted.has(`${file.source}:${name}`) || spec === null || typeof spec !== 'object') continue
-        if (scanned.some(entry => entry.source === file.source && entry.name === name)) picked.push({ name, spec })
+        if (scanned.some(entry => entry.source === file.source && entry.name === name)) picked.push({ name, spec, url: importUrl(spec) })
       }
     }
     return picked
@@ -750,7 +753,7 @@ export function install(rt) {
       if (name === '') throw refusal('Name the connector')
       const url = typeof body.url === 'string' ? body.url.trim() : undefined
       const command = typeof body.command === 'string' ? body.command.trim() : undefined
-      if (url !== undefined && insecure(url) && !/^http:\/\/(localhost|127\.)/i.test(url)) throw refusal('Connector addresses must start with https://')
+      if (url !== undefined) checkAddress(url)
       if (url === undefined && command === undefined) throw refusal('Enter an address or a command')
       const taken = new Set(Object.keys(state.connectors ?? {}))
       const id = customId(name, taken)
@@ -773,13 +776,14 @@ export function install(rt) {
     },
     async 'connector-import'(body) {
       const picked = await importPick(body.items)
+      for (const { url } of picked) if (url !== undefined) checkAddress(url)
       const created = []
-      for (const { name, spec } of picked) {
+      for (const { name, spec, url } of picked) {
         const taken = new Set(Object.keys(state.connectors ?? {}))
         const id = customId(name, taken)
         const custom = { name }
-        if (typeof spec.url === 'string' || typeof spec.serverUrl === 'string') {
-          custom.url = spec.url ?? spec.serverUrl
+        if (url !== undefined) {
+          custom.url = url
           custom.headers = {}
           for (const [header, raw] of Object.entries(spec.headers ?? {})) {
             const secretName = envSecretOf(id, `HEAD_${header}`)
