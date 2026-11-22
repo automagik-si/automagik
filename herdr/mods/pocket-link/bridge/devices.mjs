@@ -133,8 +133,8 @@ export function listen(path, { forget, reset, adopt, log = () => {}, pid = proce
       try {
         const request = JSON.parse(buf.slice(0, nl))
         if (request?.ping === true) answer = { ok: true, pid }
-        else if (request?.reset === true && reset) answer = { ok: true, ...(await reset()) }
-        else if (request?.adopt === true && adopt) answer = { ok: true, ...(await adopt()) }
+        else if (request?.reset === true && reset) answer = { ok: true, ...(await reset(request.owner)) }
+        else if (request?.adopt === true && adopt) answer = { ok: true, ...(await adopt(request.owner)) }
         else if (typeof request?.forget !== 'string' || request.forget === '') throw new Error('unknown request')
         else answer = { ok: true, removed: Boolean(forget(request.forget)) }
       } catch (e) { answer = { ok: false, error: e.message } }

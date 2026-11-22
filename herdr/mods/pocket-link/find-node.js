@@ -6,6 +6,10 @@
 // nvm usually lives in .zshrc or .bashrc, which a non-interactive login shell skips, so (c) finds it. Every candidate must answer `--version` with 20.3 or newer.
 // Pure: main.js passes Herdr's exec and file reads; find-node.test.mjs passes fakes.
 
+import { servicePaths } from "./bridge/service-paths.js";
+
+export { servicePaths };
+
 export const MIN = [20, 3, 0];
 const LABEL = "dev.herdr.pocket-link"; // bridge/bridge.mjs
 const UNIT = "herdr-pocket-link.service";
@@ -21,8 +25,8 @@ export const newEnough = (v) => Boolean(v) && compare(v, MIN) >= 0;
 
 // The Node a LaunchAgent plist or systemd unit runs.
 export function servicePath(text) {
-  const m = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]+)<\/string>/.exec(text ?? "") ?? /^ExecStart=(\S+)/m.exec(text ?? "");
-  return m && m[1].startsWith("/") ? m[1] : null;
+  const { node } = servicePaths(text ?? "");
+  return node?.startsWith("/") ? node : null;
 }
 
 // The login shell, with 3 s to answer: a slow rc file can't hang the dialog. The shell gets its own

@@ -17,6 +17,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { POCKET, pocketMain, updatePocket } from "../pocket/pocket.mjs";
+import { linkedUpdate } from "../machineUpdates.js";
 import { PART } from "../lib/lane.mjs";
 import { OWN_DIR, appHomeOf, doctorSelf, installExtract, installSigned, rollbackSelf, storeOf, uninstallSelf, updateSelf } from "../lib/self.mjs";
 
@@ -30,7 +32,8 @@ Usage: am <command> [options]
   update [automagik.am | herdr.pack] [--check] [--json]
                                 am first, from the signed am-lane (checksum and signature
                                 checked; never an older one), then the herdr pack where
-                                one is installed; an id updates that part alone
+                                one is installed; automagik.am includes an installed Pocket Link;
+                                herdr.pack updates the pack alone
   update --rollback | --retry-skipped | --auto on|off|status
                                 the herdr pack's own switches (update, below)
   rollback automagik.am | herdr.pack [--json]
@@ -38,6 +41,15 @@ Usage: am <command> [options]
   self install [--signed <folder>] | uninstall [--purge] | doctor [--json]
                                 am's own part: install this copy and link am and
                                 automagik-herdr; hand the links back; check them
+
+  pocket pair [--minutes N] [--state DIR]
+                                pair from an interactive terminal
+  pocket link status|on|off|forget|reset|install|uninstall|doctor
+                                manage Pocket Link on this computer
+  install | uninstall | doctor pocket.link
+                                Pocket Link's part entries; --purge erases pairings
+
+Update and rollback exit 1 when any part failed.
 
 Every other command:
 `;
@@ -71,6 +83,7 @@ function cli(args, { json = false } = {}) {
   return { code: r.status ?? 1, value };
 }
 
+const worst = (a, b) => a === 1 || b === 1 ? 1 : b || a;
 const say = (text) => process.stdout.write(`${text}\n`);
 const lineOf = (r) => ({
   none: `am: ${r.detail}; am stays at ${r.from ?? "this copy"}.`,
@@ -132,13 +145,18 @@ async function update(args) {
   } else if (id !== PART) {
     const r = cli(["update", ...(flags.check ? ["--check"] : []), ...(flags.json ? ["--json"] : [])], { json: Boolean(flags.json) });
     out.pack = r.value;
-    if (r.code !== 0) code = r.code;
+    code = worst(code, r.code);
+  }
+  if (id !== PACK && !flags.check && !linkedUpdate(process.env)) {
+    out.pocket = await updatePocket();
+    if (out.pocket.state !== "not-installed" && !flags.json) say(out.pocket.detail);
+    code = worst(code, out.pocket.state === "failed" ? 1 : 0);
   }
   if (flags.json) say(JSON.stringify(out));
   return code;
 }
 
-function rollback(args) {
+async function rollback(args) {
   const { words, flags } = parse(args, ["--json"]);
   if (words.length !== 1) throw new Usage(`am rollback takes one id: ${PART} or ${PACK}`);
   if (words[0] === PACK) return cli(["update", "--rollback", ...(flags.json ? ["--json"] : [])]).code;
@@ -149,9 +167,13 @@ function rollback(args) {
   }
   try {
     const r = rollbackSelf();
-    if (flags.json) say(JSON.stringify({ part: PART, ok: true, changed: true, detail: r }));
-    else say(`Rolled am back ${r.from} → ${r.to}. am update moves it forward again.`);
-    return 0;
+    const pocket = await updatePocket();
+    if (flags.json) say(JSON.stringify({ part: PART, ok: true, changed: true, detail: r, pocket }));
+    else {
+      say(`Rolled am back ${r.from} → ${r.to}. am update moves it forward again.`);
+      if (pocket.state !== "not-installed") say(pocket.detail);
+    }
+    return pocket.state === "failed" ? 1 : 0;
   } catch (e) {
     if (flags.json) say(JSON.stringify({ part: PART, ok: false, changed: false, detail: e.message }));
     else process.stderr.write(`am rollback: ${e.message}\n`);
@@ -203,7 +225,9 @@ async function forward(args) {
 
 async function main(args) {
   const [verb, ...rest] = args;
-  if (["update", "rollback", "self", "help", "--help", "-h"].includes(verb)
+  const partVerb = ["install", "uninstall", "doctor"].includes(verb);
+  const ownVerb = partVerb || ["update", "rollback", "self", "help", "--help", "-h", "pocket"].includes(verb);
+  if (ownVerb
     && rest.some((word) => word === "--local-only" || word.startsWith("--local-only="))) {
     const error = "--local-only goes with am start <bot-id> --project DIR only.";
     process.stderr.write(`am: ${error}\n`);
@@ -211,14 +235,20 @@ async function main(args) {
     return 2;
   }
   try {
-    if (["update", "rollback", "self", "help", "--help", "-h"].includes(verb)) {
+    if (ownVerb) {
       for (const word of rest) {
         if (word === "--") break;
         if (/^--confirm(?:=|$)/.test(word)) throw new Usage("--confirm goes with am proxy approve only.");
       }
     }
     if (verb === "update") return await update(rest);
-    if (verb === "rollback") return rollback(rest);
+    if (verb === "rollback") return await rollback(rest);
+    if (verb === "pocket") return await pocketMain(rest);
+    if (partVerb) {
+      const id = rest.find(arg => !arg.startsWith("--"));
+      if (id !== POCKET) throw new Usage(`${id ?? "This command needs a part id"} is not a part am installs yet (RFC 0012 delivery 3)`);
+      return await pocketMain(["link", verb, ...rest.filter((_, i) => i !== rest.indexOf(id))]);
+    }
     if (verb === "self") return self(rest);
     if (verb === undefined || verb === "help" || verb === "--help" || verb === "-h") {
       // #1208: --agent-home starts one worker (am worker "<task>"); help with it is refused, never ignored.

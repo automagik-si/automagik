@@ -1,7 +1,8 @@
 // find-node.js against a fake machine: no real Node, shell or files are touched.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { findNode, noNodeMessage, servicePath, version, newEnough, SHELL_PROBE } from './find-node.js'
+import { unitArg, xml } from './bridge/service-paths.js'
+import { findNode, noNodeMessage, servicePath, servicePaths, version, newEnough, SHELL_PROBE } from './find-node.js'
 
 const HOME = '/home/u'
 const MOD = `${HOME}/.config/herdr-app/mods/pocket-link`
@@ -184,4 +185,16 @@ test('the login-shell probe answers fast, and kills a slow shell and its childre
   const alive = () => { try { process.kill(child, 0); return true } catch { return false } }
   for (let i = 0; i < 20 && alive(); i++) await new Promise(r => setTimeout(r, 50))
   assert.equal(alive(), false, 'the shell\'s child was killed with it')
+})
+
+test('the service Node, entry and state paths round-trip both managers', () => {
+  const node = String.raw`/home/a & % $$ ' " \ node/bin/node`
+  const entry = String.raw`/home/current & % $ \ entry/bridge.mjs`
+  const state = String.raw`/home/state < > & % $$ " '\ pairings`
+  const darwin = `<plist><key>ProgramArguments</key><array><string>${xml(node)}</string><string>${xml(entry)}</string><string>serve</string></array><key>POCKET_LINK_STATE_DIR</key><string>${xml(state)}</string></plist>`
+  const linux = `ExecStart=${unitArg(node, true)} ${unitArg(entry, true)} serve\nEnvironment=${unitArg('POCKET_LINK_STATE_DIR=' + state)}\n`
+  for (const body of [darwin, linux]) {
+    assert.equal(servicePath(body), node)
+    assert.deepEqual(servicePaths(body), { node, entry, state })
+  }
 })

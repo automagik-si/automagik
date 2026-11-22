@@ -31,8 +31,13 @@ function scratch(t) {
   const app = join(home, ".config", "herdr-app");
   const releases = join(root, "releases");
   mkdirSync(app, { recursive: true });
+  const fakebin = join(root, "fakebin");
+  mkdirSync(fakebin);
+  for (const command of ["hc", "herdr-core", "herdr-app", "launchctl", "systemctl", "npm", "dsh"]) {
+    symlinkSync("/bin/false", join(fakebin, command));
+  }
   const env = {
-    PATH: `${NODE_DIR}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, AUTOMAGIK_HERDR_NO_UPDATE: "1",
+    PATH: `${fakebin}:${NODE_DIR}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HERDR_APP_BIN: "/bin/false", AUTOMAGIK_HERDR_NO_UPDATE: "1",
     AM_RELEASE_URL: `file://${releases}`, AM_TRUSTED_KEYS: KEY.trusted,
   };
   const run = (cmd, args, extra = {}) => spawnSync("sh", [cmd, ...args], { encoding: "utf8", env: { ...env, ...extra }, cwd: root });
@@ -416,7 +421,7 @@ test("a machine with no pack (work only): am update is am's alone, and herdr.pac
   const s = scratch(t);
   const all = s.am("update", "--json");
   assert.equal(all.status, 0, all.stderr);
-  assert.deepEqual(json(all), { am: { state: "none", from: null, to: null, detail: "nothing is posted on am-lane yet" }, pack: { state: "not-installed" } });
+  assert.deepEqual(json(all), { am: { state: "none", from: null, to: null, detail: "nothing is posted on am-lane yet" }, pack: { state: "not-installed" }, pocket: { state: "not-installed", detail: "Pocket Link is not installed." } });
   const pack = s.am("update", "herdr.pack");
   assert.equal(pack.status, 2);
   assert.match(pack.stderr, /the herdr pack is not installed on this machine/);
@@ -632,4 +637,24 @@ test("a reclaimer's reused PID with a different start identity is stale", (t) =>
   try { assert.equal(JSON.parse(readFileSync(lock, "utf8")).pid, process.pid); }
   finally { release(); }
   assert.deepEqual(readdirSync(s.store), []);
+});
+
+test("Pocket Link dispatch stays in am's own entry", (t) => {
+  const s = scratch(t);
+  const status = s.am("pocket", "link", "status", "--json");
+  assert.equal(status.status, 2);
+  assert.deepEqual(json(status), { installed: false, running: false });
+  for (const verb of ["install", "uninstall", "doctor"]) {
+    const r = s.am(verb, "another.part");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a part am installs yet/);
+  }
+  for (const flag of ["--confirm", "--local-only"]) {
+    const r = s.am("pocket", "pair", flag);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, new RegExp(flag));
+  }
+  const pack = s.run(join(AM, "bin", "automagik-herdr"), ["pocket", "link", "status"]);
+  assert.notEqual(pack.status, 0);
+  assert.doesNotMatch(pack.stdout, /"installed"/);
 });

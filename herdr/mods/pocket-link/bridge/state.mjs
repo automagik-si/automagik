@@ -10,12 +10,27 @@
 //
 // Older versions kept it in <mod>/.state; open() moves it from there once (migrate()).
 // No dependencies, so node --test runs it without the bridge's packages.
-import { createHash } from 'node:crypto'
-import { chmodSync, constants, copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 export const NAME = 'automagik-pocket-link'
 export const KEY = 'secret.key'
+
+export function syncStateDir(dir) {
+  const fd = openSync(dir, 'r')
+  try { fsyncSync(fd) } finally { closeSync(fd) }
+}
+
+export function writeStateJson(path, value) {
+  const temp = `${path}.${randomUUID()}.tmp`
+  const fd = openSync(temp, 'wx', 0o600)
+  try {
+    try { writeFileSync(fd, JSON.stringify(value) + '\n'); fsyncSync(fd) } finally { closeSync(fd) }
+    renameSync(temp, path)
+    syncStateDir(dirname(path))
+  } finally { rmSync(temp, { force: true }) }
+}
 
 const absolute = (p) => (typeof p === 'string' && p !== '' && isAbsolute(p) ? p : null)
 

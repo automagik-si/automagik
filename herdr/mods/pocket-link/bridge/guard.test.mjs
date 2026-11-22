@@ -2,7 +2,7 @@
 // and rotation. Fake iroh objects only; no network, no npm.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, statSync, openSync, writeSync, closeSync } from 'node:fs'
+import { mkdtempSync, readFileSync, statSync, openSync, writeSync, closeSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { acceptOne, slots, throttle, rotateLog, readLine, addressOf, MAX_LINE, routesFor, endRemoved, sessionName, ALPN } from './guard.mjs'
@@ -223,6 +223,21 @@ test('rotation copies a full log to .1 and empties it in place; an appending wri
   closeSync(fd)
   assert.equal(readFileSync(path, 'utf8'), 'after\n')
   assert.equal(rotateLog(join(dir, 'missing.log'), 1), false)
+})
+
+test('rotation refuses symlinks introduced into either log after startup', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pocket-guard-test-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const path = join(dir, 'bridge.log'), outside = join(dir, 'unrelated')
+  writeFileSync(outside, 'unrelated bytes')
+  symlinkSync(outside, path)
+  assert.throws(() => rotateLog(path, 1), /unsafe/i)
+  rmSync(path)
+  writeFileSync(path, 'complete log')
+  symlinkSync(outside, `${path}.1`)
+  assert.throws(() => rotateLog(path, 1), /bridge\.log\.1/)
+  assert.equal(readFileSync(path, 'utf8'), 'complete log')
+  assert.equal(readFileSync(outside, 'utf8'), 'unrelated bytes')
 })
 
 test('a header line longer than the limit is refused', async () => {

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { ask, bridgeState, fits, store, withLock, BUSY_RETRIES, BUSY_WAIT, FILE, PING_TIMEOUT, SOCKET, TIMEOUT } from './devices.mjs'
 import { KEY } from './state.mjs'
+import { discardGrant } from './pairing.mjs'
 
 const TURN_OFF = "This bridge can't change its key while it runs. Turn off Pocket Link, then press Reset key again."
 const NO_ANSWER = 'The bridge did not answer, so the key may not have changed. Press Reset key again.'
@@ -21,6 +22,7 @@ export function wipe({ dir, generate }) {
     const fd = openSync(tmp, 'wx', 0o600)
     try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
     // If interrupted here, the old key remains with fewer ways to pair or connect to it.
+    discardGrant(dir)
     rmSync(join(dir, 'pairing.json'), { force: true })
     const unpaired = store(join(dir, FILE)).clear()
     renameSync(tmp, key)
@@ -30,14 +32,14 @@ export function wipe({ dir, generate }) {
   })
 }
 
-export async function resetKey({ dir, generate, alive, started, command, timeout = TIMEOUT, retries = BUSY_RETRIES, wait = BUSY_WAIT, between }) {
+export async function resetKey({ dir, generate, owner, alive, started, command, timeout = TIMEOUT, retries = BUSY_RETRIES, wait = BUSY_WAIT, between, write = fn => fn() }) {
   const socket = join(dir, SOCKET)
   const state = () => bridgeState({ dir, alive, started, command, timeout: Math.min(timeout, PING_TIMEOUT) })
   if ((await state()).running) {
     for (let i = 0; ; i++) {
       if (!fits(socket) || !existsSync(socket)) throw new Error(TURN_OFF)
       let answer
-      try { answer = await ask(socket, { reset: true }, { timeout }) } catch { throw new Error(NO_ANSWER) }
+      try { answer = await ask(socket, { reset: true, owner }, { timeout }) } catch { throw new Error(NO_ANSWER) }
       if (answer?.ok) return { ok: true, via: 'bridge', unpaired: answer.unpaired, id: answer.id }
       if (answer) throw new Error(answer.error === 'unknown request' ? TURN_OFF : answer.error)
       if (i >= retries) throw new Error(NO_ANSWER)
@@ -45,10 +47,10 @@ export async function resetKey({ dir, generate, alive, started, command, timeout
     }
   }
 
-  const { unpaired } = await wipe({ dir, generate })
+  const { unpaired } = await write(() => wipe({ dir, generate }))
   await between?.()
   if ((await state()).running) {
-    const answer = await ask(socket, { adopt: true }, { timeout }).catch(() => null)
+    const answer = await ask(socket, { adopt: true, owner }, { timeout }).catch(() => null)
     if (!answer?.ok) throw new Error(NOT_ADOPTED)
   }
   return { ok: true, via: 'file', unpaired }

@@ -65,6 +65,8 @@ export default class PocketLink extends View {
     this.confirmReset = false;
     this.closed = false;
     this.cancelling = null;
+    this.amStore = null;
+    this.managed = null;
     this.handle = cx.focus_handle();
     cx.spawn(async (cx) => {
       await this.reload();
@@ -94,9 +96,62 @@ export default class PocketLink extends View {
     });
   }
 
+  async ownership() {
+    this.amStore ??= exec("printenv", ["AM_HOME"])
+      .then(r => r.code === 0 ? r.stdout.trim() : "", () => "")
+      .then(dir => `${dir || home() + "/.automagik"}/parts/pocket.link`);
+    const store = await this.amStore;
+    const read = path => readTextFile(path).catch(() => null);
+    const [record, pending] = await Promise.all([read(`${store}/record.json`), read(`${store}/pending.json`)]);
+    const bridge = `${store}/current/link/bridge/bridge.mjs`;
+    let value;
+    try { value = JSON.parse(record); } catch {}
+    const live = value?.current?.dir && value.state?.startsWith("/") && value.node?.startsWith("/") && await read(bridge);
+    if (record !== null || pending !== null) {
+      this.managed = { bridge, store, ready: Boolean(live && pending === null),
+        pending: pending !== null, broken: record !== null && !live, value };
+    } else if (this.managed) {
+      // A dialog already open during uninstall stays read-only until it is reopened.
+      this.managed = { ready: false };
+    }
+    return this.managed;
+  }
+
+  async managedBridge(managed, args) {
+    if (!managed.ready) {
+      if (args[0] === "status") return { running: false, devices: [], pairing: null, state: managed.value?.state };
+      return { ok: false, error: managed.pending ? "am is changing Pocket Link. Try again in a moment."
+        : managed.broken ? "Pocket Link needs repair. Run am pocket link on."
+        : "am removed Pocket Link. Reopen the dialog to use its own bridge." };
+    }
+    const { bridge, store, value } = managed;
+    const power = { install: "on", stop: "off" }[args[0]];
+    if (args[0] === "start") return { ok: false, error: "Managed by am (am pocket)" };
+    const run = async node => {
+      const argv = power
+        ? [`AM_HOME=${store.slice(0, -"/parts/pocket.link".length)}`, node, `${store}/current/pocket.mjs`, "link", power, "--json"]
+        : [`POCKET_LINK_STATE_DIR=${value.state}`, `POCKET_LINK_SERVICE_ENTRY=${bridge}`, node, bridge, ...args];
+      const r = await exec("env", argv).catch(e => ({ stdout: "", stderr: String(e) }));
+      try { return { value: JSON.parse(r.stdout.trim().split("\n").pop()) }; }
+      catch { return { error: (r.stderr || "The bridge didn't answer.").trim().slice(0, 300) }; }
+    };
+    const cached = this.managedNode?.recorded === value.node ? this.managedNode.path : value.node;
+    const first = await run(cached);
+    if (first.value) return first.value;
+    if (await runs(cached)) return { ok: false, error: first.error };
+    this.managedNode = null;
+    const { path } = await findNode(io());
+    if (!path || path === cached) return { ok: false, error: first.error };
+    this.managedNode = { recorded: value.node, path };
+    const next = await run(path);
+    return next.value ?? { ok: false, error: next.error };
+  }
+
   // When the bridge gives no answer and the kept Node no longer runs (gone, or broken by an
   // upgrade), forget it, find another and try once more.
   async bridge(args, again = true) {
+    const managed = await this.ownership();
+    if (managed) return this.managedBridge(managed, args);
     const node = found ?? (await (this.looking ??= findNode(io())));
     if (!node.path) {
       this.checked = node.checked;
@@ -120,8 +175,8 @@ export default class PocketLink extends View {
   async reload() {
     const before = this.status ? newest(this.status.devices) : null;
     const s = await this.bridge(["status"]);
-    if (s.error === "node" || s.error === "setup") {
-      this.problem = s.error;
+    if (s.error === "node" || s.error === "setup" || s.packages === false) {
+      this.problem = s.error ?? "setup";
       this.status = null;
       return;
     }
@@ -148,10 +203,11 @@ export default class PocketLink extends View {
   // Closing the dialog ends the code it shows (bridge `cancel`), once. A phone that paired just
   // before still gets its notice, from what `cancel` says.
   cancelCode() {
-    if (!this.cancelling && (this.pairing || this.status?.pairing || this.busy === "pair")) {
+    if (!this.cancelling && this.pairing?.challengeId) {
+      const { challengeId } = this.pairing;
       const before = newest(this.status?.devices);
       this.pairing = null;
-      this.cancelling = this.bridge(["cancel"]).then((r) => { if (r.ok !== false) this.announce(before, r.devices); });
+      this.cancelling = this.bridge(["cancel", challengeId]).then((r) => { if (r.ok !== false) this.announce(before, r.devices); });
     }
     return this.cancelling ?? Promise.resolve();
   }
@@ -186,12 +242,14 @@ export default class PocketLink extends View {
 
   // On: the login service starts the bridge now and at every login. If the
   // system won't take one, a bridge that lives until logout.
-  turnOn(cx) {
+  async turnOn(cx) {
+    const managed = await this.ownership();
     this.act("on", ["install"], cx);
+    if (managed) return;
     cx.spawn(async (cx) => {
       // launchd/systemd start it a moment later; the watcher sees it arrive.
       await cx.sleep(4000);
-      if (this.status && !this.status.running) {
+      if (!this.closed && this.status && !this.status.running && !(await this.ownership())) {
         await this.bridge(["start"]);
         await this.reload();
         cx.notify();
@@ -199,8 +257,8 @@ export default class PocketLink extends View {
     });
   }
 
-  setup(cx) {
-    if (this.busy) return;
+  async setup(cx) {
+    if (this.busy || await this.ownership() || this.busy) return;
     this.busy = "setup";
     cx.notify();
     // npm may take longer than one exec allows: run it detached, watch for the end. npm sits next
@@ -252,6 +310,7 @@ export default class PocketLink extends View {
 
   // Before it can run: Node, then the bridge's packages.
   blocked(t) {
+    if (this.managed) return this.note(t, "Run am pocket link doctor to check the bridge.");
     if (this.problem === "node")
       return v_flex()
         .gap(8)
@@ -291,13 +350,18 @@ export default class PocketLink extends View {
       .child(
         on
           ? this.button(t, "pl-off", this.busy === "off" ? "Turning off…" : "Turn off", (cx) => this.act("off", ["stop"], cx), { disabled: Boolean(this.busy) })
+          : this.managed && !this.managed.ready ? null
           : this.button(t, "pl-on", this.busy === "on" ? "Turning on…" : "Turn on", (cx) => this.turnOn(cx), { primary: true, disabled: Boolean(this.busy), spinning: this.busy === "on" }),
       );
   }
 
   // A code made while the dialog was closing must not outlive it.
   async showCode(r) {
-    if (this.closed) return this.bridge(["cancel"]);
+    if (!/^[0-9a-f]{64}$/.test(r.challengeId ?? "")) {
+      this.error = "Update Pocket Link to display a pairing code.";
+      return;
+    }
+    if (this.closed) return this.bridge(["cancel", r.challengeId]);
     this.pairing = { ...r, copied: false };
   }
 
@@ -311,7 +375,7 @@ export default class PocketLink extends View {
     this.error = null;
     cx.notify();
     cx.spawn(async (cx) => {
-      const r = await this.bridge(["copied"]);
+      const r = await this.bridge(["copied", p.challengeId]);
       if (r.ok === false) this.error = r.error === "node" ? "Pocket Link needs Node.js 20.3 or newer." : r.error;
       else if (this.pairing === p && !this.closed) {
         p.expires = Math.min(p.expires, r.expires);
@@ -426,7 +490,7 @@ export default class PocketLink extends View {
             ...(s.running ? [this.section(t, "Pair a phone"), this.pairCard(t)] : []),
             this.section(t, s.devices.length ? "Paired phones" : "No phones paired yet"),
             v_flex().children(s.devices.map((d) => this.phone(t, d))),
-            this.resetRow(t, s.devices.length),
+            ...(this.managed && !this.managed.ready ? [] : [this.resetRow(t, s.devices.length)]),
           ];
     return v_flex()
       .id("pocket-link")
@@ -446,6 +510,7 @@ export default class PocketLink extends View {
           .child(div().text_size(11).text_color(t.dim).child("Esc")),
       )
       .child(div().pt(6).child(this.note(t, "Your agents on your phone, from anywhere. A phone pairs once with a code from this screen: no SSH, no password, no port to open.")))
+      .when(Boolean(this.managed), (el) => el.child(this.note(t, "Managed by am (am pocket)")))
       .children(body)
       .when(Boolean(this.error), (el) => el.child(div().pt(10).text_size(12).text_color(t.blocked).child(String(this.error))))
       .child(
