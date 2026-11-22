@@ -714,17 +714,13 @@ export function install(rt) {
       const pending = pendings.get(entry.id)
       if (pending === undefined || pending.kind !== 'browser') throw refusal('No sign-in is waiting')
       const input = String(body.input ?? body.code ?? '').trim()
-      if (input === '') throw refusal('Paste the address or the code')
-      let code = input, stateParam, iss
-      if (/^https?:\/\//i.test(input)) {
-        const url = new URL(input)
-        code = url.searchParams.get('code') ?? ''
-        stateParam = url.searchParams.get('state')
-        iss = url.searchParams.get('iss') ?? undefined
-        if (stateParam !== pending.expectedState) throw refusal('This address is not from this sign-in attempt (state mismatch). Copy the whole address again.')
-      }
-      if (code === '') throw refusal('The address has no code')
-      await completeBrowser(entry.id, { code, state: pending.expectedState, iss })
+      const url = /^https?:\/\//i.test(input) ? URL.parse(input) : null
+      if (url === null) throw refusal('Paste the whole callback address')
+      const stateParam = url.searchParams.get('state')
+      if (!stateParam || stateParam !== pending.expectedState) throw refusal('This address is not from this sign-in attempt (state mismatch). Copy the whole address again.')
+      const code = url.searchParams.get('code')
+      if (!code) throw refusal('The address has no code')
+      await completeBrowser(entry.id, { code, state: stateParam, iss: url.searchParams.get('iss') ?? undefined })
       return connectorsView()
     },
     async 'connector-client'(body) {

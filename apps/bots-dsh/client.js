@@ -19019,7 +19019,7 @@ var RULE_LABELS = {
   "require-approval": "Needs approval",
   "no-draft": "Allow this Bot to send directly"
 };
-function MailApprovalMenu({ bot, request, rule, onPick, actions, disabled = false }) {
+function MailApprovalMenu({ rule, onPick, actions, disabled = false }) {
   const [open, setOpen] = (0, import_react43.useState)(false);
   const root = (0, import_react43.useRef)(null);
   (0, import_react43.useEffect)(() => {
@@ -19040,12 +19040,6 @@ function MailApprovalMenu({ bot, request, rule, onPick, actions, disabled = fals
   const choose = (mode) => {
     setOpen(false);
     onPick(mode);
-    void Promise.resolve(actions.mailRuleSet?.({
-      mode,
-      botId: bot.id,
-      recipients: [request.to, request.cc, request.bcc].filter(Boolean).join(", ")
-    })).catch(() => {
-    });
   };
   return (0, import_react43.createElement)(
     "div",
@@ -19110,16 +19104,17 @@ function mailView(request, roster, settled = false) {
     ].filter(Boolean)
   };
 }
-function MailSendCard({ sessionId, bot, request, roster, actions, inline = false }) {
+function MailSendCard({ sessionId, request, roster, actions, inline = false }) {
   const [busy, setBusy] = (0, import_react43.useState)(false);
-  const [rule, setRule] = (0, import_react43.useState)("require-approval");
+  const [rule, setRule] = (0, import_react43.useState)(void 0);
   const busyRef = (0, import_react43.useRef)(false);
   const answer = (values) => {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
     const send = values?.canceled !== true && values?.fields !== void 0;
-    void Promise.resolve(actions.mailSendAnswer(request.id, send ? "send" : "cancel", send ? { fields: values.fields, rule } : { rule })).catch(() => {
+    const extra = send ? { fields: values.fields, ...rule === void 0 ? {} : { rule } } : {};
+    void Promise.resolve(actions.mailSendAnswer(request.id, send ? "send" : "cancel", extra)).catch(() => {
     }).finally(() => {
       busyRef.current = false;
       setBusy(false);
@@ -19134,7 +19129,7 @@ function MailSendCard({ sessionId, bot, request, roster, actions, inline = false
     busy,
     title: t("Mail"),
     icon: (0, import_react43.createElement)(MailIcon),
-    footStart: (0, import_react43.createElement)(MailApprovalMenu, { bot, request, rule, onPick: setRule, actions, disabled: busy }),
+    footStart: (0, import_react43.createElement)(MailApprovalMenu, { rule: rule ?? "require-approval", onPick: setRule, actions, disabled: busy }),
     view: mailView(request, roster),
     onAnswer: answer
   });
@@ -19159,7 +19154,7 @@ function MailToolCell({ sessionId, callId, roster, actions, heldCards = NONE2 })
   const request = (roster.mailRequests?.[bot.id] ?? []).find((entry) => entry.callId === callId && (entry.sessionId ?? sessionId) === sessionId);
   if (request?.status === "pending" && heldCards[heldCardKey("mail", request.id)] > 0) return (0, import_react43.createElement)(CellEmpty);
   if (request) {
-    return request.status === "pending" ? (0, import_react43.createElement)("div", { className: "bt-q-inline" }, (0, import_react43.createElement)(MailSendCard, { sessionId, bot, request, roster, actions, inline: true })) : (0, import_react43.createElement)("div", { className: "bt-q-inline" }, (0, import_react43.createElement)(SettledMail, { bot, request, roster }));
+    return request.status === "pending" ? (0, import_react43.createElement)("div", { className: "bt-q-inline" }, (0, import_react43.createElement)(MailSendCard, { key: request.id, sessionId, request, roster, actions, inline: true })) : (0, import_react43.createElement)("div", { className: "bt-q-inline" }, (0, import_react43.createElement)(SettledMail, { bot, request, roster }));
   }
   return (0, import_react43.createElement)(CellEmpty);
 }
@@ -19172,7 +19167,7 @@ function MailDock({ sessionId, useRoster, useCards, useHeldCards, actions }) {
   const drawn2 = (entry) => entry.callId && entry.sessionId === sessionId && shown2[entry.callId] > 0 && !(held[heldCardKey("mail", entry.id)] > 0);
   const waiting = (roster.mailRequests?.[bot.id] ?? []).filter((entry) => entry.status === "pending" && !drawn2(entry));
   if (waiting.length === 0) return null;
-  return (0, import_react43.createElement)("div", { className: "bt-q-dock bt-secret-dock" }, waiting.map((request) => (0, import_react43.createElement)(MailSendCard, { key: request.id, sessionId, bot, request, roster, actions })));
+  return (0, import_react43.createElement)("div", { className: "bt-q-dock bt-secret-dock" }, waiting.map((request) => (0, import_react43.createElement)(MailSendCard, { key: request.id, sessionId, request, roster, actions })));
 }
 var CONNECTOR_CSS = `
 .bt-connector-mono{display:inline-flex;width:20px;height:20px;border-radius:6px;align-items:center;justify-content:center;background:var(--bt-accent);color:var(--bt-card);font-size:12px;font-weight:600;filter:hue-rotate(calc(var(--bt-hue,0)*1deg))}
