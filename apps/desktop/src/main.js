@@ -25,7 +25,7 @@ import { PUBLISHERS, TRIAL_MS, beforeStart, checkLane, confirm as confirmLane, i
 import {
   ANONYMOUS_ID, appHome, automagikHome, backupSettingsOrLog, busyFileOf, dshEnv, dshRun, dshWindowMarker,
   forgetDshLogins, launchUrlFileOf, privacyFileOf, privacyPatchOf, guardContents, installProfile,
-  launchPort, pageUrlOf, pinProfileStore, portFileOf, preloadOf, resourcesOf, serveDsh,
+  launchPort, pageUrlOf, pinProfileStore, portFileOf, preloadOf, reconcileSandboxRow, resourcesOf, serveDsh,
   storeLayoutOf, writeTools,
 } from './dsh.js'
 import { launchInstance } from './owner-record.js'
@@ -369,6 +369,11 @@ const portWaited = steps => (ms, freed) => steps.mark(`waited ${ms} ms for dsh's
 // Start dsh on `port` and resolve with it once it is ready. `steps` notes the moments (start.log).
 function spawnDsh(port, steps) {
   const { resources, binDir } = dshTools
+  reconcileSandboxRow({
+    profile: laneProfile,
+    runtime: join(dirname(resources.profile), 'runtime'),
+    log: reason => startLog(`${new Date().toISOString()} start: ${reason}\n`),
+  })
   dshOrigin = `http://127.0.0.1:${port}`
   dshLog?.end()
   const log = dshLog = createWriteStream(join(home, 'logs', 'dsh.log'), { flags: 'a' })

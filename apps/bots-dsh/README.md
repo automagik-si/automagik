@@ -323,6 +323,8 @@ The [project page](../../README.md#install) has the full steps for dsh Desktop a
 - Command line: `dsh plugin --profile web add /path/to/automagik-bots-dsh-<version>.tgz`.
 - Or skip dsh setup entirely: the Automagik desktop app ([`apps/desktop`](../desktop/README.md), `omni desktop` from Omni's CLI) ships dsh with this plugin on a home of its own.
 
+The desktop app selects `@automagik/bots-dsh/sandbox-local` when its DSH runtime supplies both sandbox peers. On Linux, the provider gives bwrap a read-only copy of trusted system SSH drop-ins that OpenSSH can read in its user namespace. To opt in on your own DSH profile, add an `insert` row containing `id: automagik-sandbox` and `name: '@automagik/bots-dsh/sandbox-local'`, followed by an override with `id: sandbox`, `name: '@deepseek-ai/dsh-sandbox-local'` and `disabled: true`.
+
 To work on the plugins from a checkout, add them to a dsh profile as linked dependencies and bundles (the channels and canvas plugins are optional):
 
 ```json

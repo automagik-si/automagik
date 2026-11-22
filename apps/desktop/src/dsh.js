@@ -21,7 +21,7 @@ import { homedir } from 'node:os'
 import { delimiter, join, resolve, win32 } from 'node:path'
 import { DEFAULTS as PRIVACY_DEFAULTS, privacyEnv } from './privacy.js'
 import { CLOSE_INHERITED } from './child-paths.js'
-import { mergePatch, replaceProfilePatch } from './profile-patch.mjs'
+import { hasSandboxAdapter, mergePatch, reconcileSandboxPatch, replaceProfilePatch } from './profile-patch.mjs'
 
 export const PROFILE = 'omni'
 const READY_TIMEOUT_MS = 120_000
@@ -108,6 +108,22 @@ const sameTool = (file, text, windows) => {
 /** The user's profile patch with missing shipped operations merged, or null if unchanged. */
 export function mergeProfilePatch(user, shipped) {
   return mergePatch(createRequire(import.meta.url)('yaml'), user, shipped)
+}
+
+export function reconcileSandboxRow({ profile, runtime, log = () => {} }) {
+  try {
+    const file = join(profile, 'cordis.patch.yml')
+    const text = readFileSync(file, 'utf8')
+    const yaml = createRequire(import.meta.url)('yaml')
+    const updated = reconcileSandboxPatch(yaml, text, hasSandboxAdapter(profile, runtime), log)
+    if (updated === null) return null
+    replaceProfilePatch(file, updated, statSync(file).mode & 0o777)
+    log('sandbox: reconciled the DSH sandbox provider in the profile patch')
+    return updated
+  } catch (error) {
+    log(`sandbox: could not reconcile the profile patch (${error.message})`)
+    return null
+  }
 }
 
 /**
