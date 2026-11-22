@@ -150,11 +150,19 @@ test("missing, symlinked and file slots, the default folder, a bad record and un
 });
 
 test("no plan, corrupt or newer plan, or another core makes zero linked calls", async () => {
-  for (const [plan, core] of [[null, CORE], ["{", CORE], ['{"v":2}', CORE], [approved(), "core-two"]]) {
+  for (const [plan, core] of [[null, CORE], ["{", CORE], ['{"v":2}', CORE], ['{"v":3}', CORE], [approved(), "core-two"]]) {
     const s = scene({ plan });
     assert.equal(await s.run(ENV, core), null);
     assert.deepEqual(s.calls, []);
   }
+});
+
+test("a readable stopped v2 plan still supplies managed linked login words", async () => {
+  const v1 = scene({ now: () => 0 });
+  const v2 = scene({ now: () => 0, plan: JSON.stringify({ ...JSON.parse(approved()), v: 2, stopped: true, retries: "pack" }) });
+  assert.deepEqual(await v2.run(), await v1.run());
+  assert.deepEqual(v2.calls, v1.calls);
+  assert.ok(v2.calls.some(([step]) => step === "resolve"));
 });
 
 test("project and transport exceptions leave the old argv and give only a fixed warning", async () => {

@@ -2275,6 +2275,77 @@ const reloadAll = async (p) => {
   await p.cx.settle();
 };
 
+test("a readable v2 shows both local assignments and a linked retry without offering plan controls or calling the driver", async (t) => {
+  const plan = { ...localClaudePlan(), codex: localCodexPlan().codex, v: 2, stopped: true, retries: "app" };
+  addPlanMember(plan, "claude", FLEET_CORE, BO, TARGET_HOME, { snapshot: "none", email: ANA }, "pending");
+  plan.exposures = { [FLEET_CORE]: plan.at };
+  const p = await planPanel(t, { plan });
+  state.files.set(CODEX_FILE, auth("account-a"));
+  await reloadAll(p);
+  await p.view.maybeLocal(p.cx, { force: true });
+  p.view.tick(p.cx);
+  await p.cx.settle();
+  assert.deepEqual(planOps(p), []);
+  assert.ok(!p.history.some((item) => item[0] === "apply"));
+  assert.equal(p.view.plan.state, "newer");
+
+  p.view.preview = { request: { kind: "dismiss-exposure", machine: FLEET_CORE }, changes: [], flags: [], moves: [] };
+  let root = p.draw();
+  assert.match(text(root), /This plan was written by a newer version/);
+  assert.match(text(root), /Plan: each machine pinned/);
+  assert.match(text(root), /a login switch sent there may still land/);
+  assert.match(text(root), /This Mac still on ana@example\.test/);
+  assert.match(text(root), /Dismiss the warning for/);
+  assert.ok(buttons(root).includes("login-use-2"));
+  assert.deepEqual(buttons(root).filter((id) => id?.startsWith("plan-")), ["plan-cancel"]);
+  p.view.preview = null;
+  root = p.draw();
+  assert.ok(!buttons(root).some((id) => id?.startsWith("plan-")));
+  p.view.tool = "codex";
+  root = p.draw();
+  assert.match(text(root), /Plan: each machine pinned/);
+  assert.match(text(root), /This Mac still on/);
+  assert.ok(!buttons(root).some((id) => id?.startsWith("plan-")));
+});
+
+test("unreadable v2 and later plans show only the existing newer-plan line", async (t) => {
+  const p = await planPanel(t);
+  for (const v of [2, 3]) {
+    p.save({ v });
+    await reloadAll(p);
+    const block = p.view.planView({}, "claude", null);
+    assert.equal(text(block), "This plan was written by a newer version: update this Mac's sidebar.");
+    assert.deepEqual(buttons(block), []);
+  }
+  assert.deepEqual(planOps(p), []);
+});
+
+test("a stopped linked apply shows the existing plan refusal template", async (t) => {
+  const p = await planPanel(t, { plan: localClaudePlan() });
+  await p.view.readPlan();
+  const exec = state.exec;
+  state.exec = (program, args, options) => program === "env" && args.at(-1) === "apply"
+    ? fixed({ error: "stopped" }, 1) : exec(program, args, options);
+  await p.view.startApply(p.cx);
+  await p.cx.settle();
+  assert.match(text(p.draw()), /The plan wasn't changed \(stopped\)\./);
+});
+
+test("a stopped Claude write returns quietly with the plan and login unchanged", async (t) => {
+  const p = await planPanel(t, { linked: false, plan: localClaudePlan() });
+  localCli(p);
+  let before;
+  p.handlers["write-local"] = ({ refuse }) => {
+    before = state.files.get(PLAN);
+    return refuse("stopped");
+  };
+  await reloadAll(p);
+  assert.deepEqual(planOps(p), ["--start-local", "--write-local"]);
+  assert.equal(state.files.get(PLAN), before);
+  assert.equal(state.files.get(LOGINS), JSON.stringify(PLAN_LOGIN));
+  assert.equal(p.committed.claude.progress.local.attempt.outcome, null);
+});
+
 test("local Claude writes nothing for a slot no longer eligible, another snapshot, another effective account or an incomplete round", async (t) => {
   // No login of the assigned account here: recorded as a pending refusal, with no attempt and no write.
   let p = await planPanel(t, { linked: false, plan: localClaudePlan(CY) });
@@ -2478,6 +2549,21 @@ async function codexPanel(t, { plan = localCodexPlan(), file = auth("account-a")
 }
 
 const codexEntry = (p) => p.committed.codex;
+
+test("a stopped Codex install returns quietly with the fenced plan and credential unchanged", async (t) => {
+  const p = await codexPanel(t);
+  let before;
+  p.handlers["install-local"] = ({ refuse }) => {
+    before = state.files.get(PLAN);
+    return refuse("stopped");
+  };
+  await reloadAll(p);
+  assert.deepEqual(planOps(p), ["--start-local", "--fence-local", "--install-local"]);
+  assert.deepEqual(p.steps, ["payload", "fence"]);
+  assert.equal(state.files.get(PLAN), before);
+  assert.equal(state.files.get(CODEX_FILE), auth("account-a"));
+  assert.equal(codexEntry(p).progress.local.attempt.outcome, null);
+});
 
 function listCodexBots(...starts) {
   const bots = starts.map(([id, since], i) => ({ id, name: id, status: "idle", agent: "codex",

@@ -456,7 +456,7 @@ export default class AmQuota extends View {
       const out = JSON.parse(result?.stdout ?? "null");
       if (result?.code === 0 && (mayHaveWritten ? out?.ok === true : out)) return out;
       if (op === "install-local" && (result?.code !== 1
-        || !["stale", "changed", "busy", "no-plan", "newer-plan", "no-home", "failed", "off"].includes(out?.error))) {
+        || !["stale", "changed", "busy", "no-plan", "newer-plan", "no-home", "failed", "off", "stopped"].includes(out?.error))) {
         return { error: "lost" };
       }
       if (mayHaveWritten && !out?.error) return { error: "lost" };
@@ -686,7 +686,7 @@ export default class AmQuota extends View {
         effDigest: claude ? idDigest(read.effective, read.email ?? "", sha256Hex) : null };
       if (claude) {
         const write = await this.planCommand("write-local", { tool, n: attempt.n, owner: this.owner, snapshot: before });
-        if (["stale", "lost", "failed", "off"].includes(write.error)) return;
+        if (["stale", "lost", "failed", "off", "stopped"].includes(write.error)) return;
         if (!write.ok) {
           const changed = ["conflict", "slot-changed"].includes(write.error);
           await this.recordLocal(tool, attempt, changed ? { state: "changed", why: "changed", read: null }
@@ -763,7 +763,7 @@ export default class AmQuota extends View {
       await this.switchCodex(account, { env: before.env, fence, installFenced });
     } catch {
       if (refused === "changed") return changed();
-      if (refused === "stale" || refused === "off") return;
+      if (refused === "stale" || refused === "off" || refused === "stopped") return;
       if (refused !== "lost") return fail(PENDING_WHY.includes(refused) ? refused : "failed");
     }
     const after = (await this.readPlanCodex())?.read;
@@ -811,7 +811,7 @@ export default class AmQuota extends View {
   }
 
   planView(t, tool, cxView) {
-    const value = this.plan.plan;
+    const value = this.plan.plan ?? this.plan.view ?? null;
     const observed = this.fleet.record?.machines ?? {};
     const machines = Object.fromEntries((this.fleet.members ?? []).map(({ id, name, connected }) => [
       id, own(observed, id) ?? { name, ...(connected ? {} : { state: "away" }) },
@@ -873,10 +873,11 @@ export default class AmQuota extends View {
     if (model.preview) {
       const box = v_flex().gap(4).px(8).py(6).rounded(7).bg(t.raised);
       for (const line of model.preview.lines) say(box, line);
-      controls(box, model.preview.buttons, "");
-      if (model.preview.readAgain) readAgain(box, "plan-read-preview");
+      // A plan from a newer version is read-only: its preview keeps only Cancel, so it can be put away.
+      if (!this.plan.view) controls(box, model.preview.buttons, "");
+      if (!this.plan.view && model.preview.readAgain) readAgain(box, "plan-read-preview");
       const decisions = h_flex().gap(4).flex_wrap();
-      if (!model.preview.blocked) {
+      if (!this.plan.view && !model.preview.blocked) {
         const { confirmForget } = model.preview;
         const preview = this.preview;
         decisions.child(this.button(t, "plan-commit", confirmForget ? "Forget? Press again to confirm" : "Apply this plan",

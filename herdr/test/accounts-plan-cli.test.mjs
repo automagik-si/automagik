@@ -14,7 +14,7 @@ import { planPreview, readPlanFile } from "../mods/am-sidebar/bin/automagik-herd
 import { markTried, settle, startAttempt, suspend } from "../mods/am-sidebar/accountsPlan.js";
 import { FLEET_FILE, noExceptions, parseFleet } from "../mods/am-sidebar/accountsRows.js";
 import { emptyPlan, LOCAL_CLAIM_MS, LOCAL_FENCE_MS, LOCAL_START_MS, LOCK_FILE, PLAN_FILE, PREVIEWS_DIR, PREVIEW_TTL_MS,
-  REQUESTS_DIR, planText } from "../mods/am-sidebar/accountsPlanRecord.js";
+  REQUESTS_DIR, STOP_FILE, planText } from "../mods/am-sidebar/accountsPlanRecord.js";
 import { AM, PACK, READER, auth, exe, json } from "./accounts-fixture.mjs";
 import { scratchRoot } from "./scratch-project.mjs";
 
@@ -154,6 +154,12 @@ const commit = ({ id, rev }) => planArgs("commit", { id, rev });
 const write = ({ snapshot, n = 1, owner = OWNER }) => planArgs("write-local", { tool: "claude", n, owner, snapshot });
 const fence = (extra = {}) => planArgs("fence-local", { tool: "codex", n: 1, owner: OWNER, generation: GEN,
   intended: INTENDED, proxy: PROXY, ...extra });
+const install = (extra = {}) => planArgs("install-local", { tool: "codex", n: 1, rev: 1, owner: OWNER,
+  intended: INTENDED, stamp: "2026-11-20T13-00-00-000Z", ...extra });
+const localOps = (s, id) => [s.start(), s.start("codex"), write({ snapshot: s.snapshot }), fence(), install(),
+  s.outcome("claude", "lost"), s.outcome("codex", "lost"), ...["claude", "codex"].flatMap((tool) => [
+    planArgs("suspend-local", { tool, rev: 1 }), planArgs("fail-local", { tool, rev: 1, id }),
+  ])];
 
 test("plan commit requires explicit confirmation to keep a retired Claude dispatch warning", (t) => {
   const s = scene(t);
@@ -240,11 +246,92 @@ test("Manage keeps the exact corrupt bytes private and cannot replace a newer pl
   assert.equal(saved.length, 1);
   assert.equal(mode(join(s.app, saved[0])), 0o600);
   assert.equal(readFileSync(join(s.app, saved[0]), "utf8"), corrupt);
-  const edit = s.preview({ kind: "second-login", machine: "local", allow: true });
-  writeFileSync(s.file, '{"v":2}\n');
-  s.refuses(commit(edit), "newer-plan");
-  s.refuses(planArgs("request", { id: s.request({ kind: "manage" }) }), "newer-plan");
-  assert.equal(readFileSync(s.file, "utf8"), '{"v":2}\n');
+  const plan = s.read();
+  const v2 = { ...plan, v: 2, stopped: false, retries: "pack" };
+  for (const bytes of ['{"v":2}\n', '{"v":3}\n', JSON.stringify({ ...plan, v: 2 }),
+    JSON.stringify({ ...v2, retries: "bogus" }), JSON.stringify(v2)]) {
+    s.save(plan);
+    const edit = s.preview({ kind: "second-login", machine: "local", allow: true });
+    writeFileSync(s.file, bytes);
+    s.refuses(commit(edit), "newer-plan");
+    s.refuses(planArgs("request", { id: s.request({ kind: "manage" }) }), "newer-plan");
+    assert.equal(readFileSync(s.file, "utf8"), bytes);
+    assert.deepEqual(readdirSync(s.app).filter((name) => name.startsWith(`${PLAN_FILE}.corrupt-`)), saved);
+  }
+});
+
+test("a readable v2 plan refuses all local mutations and keeps both credentials unchanged", (t) => {
+  const s = scene(t);
+  const plan = s.fixture();
+  const bytes = JSON.stringify({ ...plan, v: 2, stopped: false, retries: "pack" });
+  const codexAuth = join(s.codex, "auth.json"), initial = auth("account-a");
+  writeFileSync(codexAuth, initial, { mode: 0o600 });
+  writeFileSync(s.file, bytes);
+  for (const args of localOps(s, "9".repeat(32))) s.refuses(args, "newer-plan");
+  assert.equal(readFileSync(s.file, "utf8"), bytes);
+  assert.equal(readFileSync(s.loginFile, "utf8"), s.loginText);
+  assert.equal(readFileSync(codexAuth, "utf8"), initial);
+});
+
+test("the stop marker blocks local claims and writes while allowing settling and editing", (t) => {
+  const s = scene(t);
+  s.fixture();
+  const marker = join(s.app, STOP_FILE), canary = "CANARY-STOP\n";
+  mkdirSync(dirname(marker), { recursive: true });
+  writeFileSync(marker, canary);
+  const mtime = statSync(marker).mtimeMs, before = readFileSync(s.file, "utf8");
+  for (const tool of ["claude", "codex"]) s.refuses(s.start(tool), "stopped");
+  assert.equal(readFileSync(s.file, "utf8"), before);
+  const request = planArgs("request", { id: s.request({ kind: "second-login", machine: "local", allow: true }) });
+  s.ok(commit(s.ok(request)));
+  assert.equal(s.ok(planArgs("show")).rev, 2);
+
+  const plan = s.fixture({ local: A });
+  s.ok(planArgs("suspend-local", { tool: "claude", rev: 1 }));
+  const outcome = s.request({ kind: "outcome", assign: "codex-two", why: "proxy-url",
+    read: { at: at(), home: s.codex, account: "ab123456", generation: GEN, proxy: null } });
+  s.ok(planArgs("fail-local", { tool: "codex", rev: 1, id: outcome }));
+  writeFileSync(s.file, JSON.stringify({ ...plan, v: 2, stopped: false, retries: "pack" }));
+  s.refuses(s.start(), "newer-plan");
+  assert.equal(readFileSync(marker, "utf8"), canary);
+  assert.equal(statSync(marker).mtimeMs, mtime);
+});
+
+test("a directory stop marker blocks writers after a claim or fence", (t) => {
+  const s = scene(t);
+  const plan = s.fixture();
+  const initial = auth("account-a"), payload = auth("account-b"), stamp = "2026-11-20T13-00-00-000Z";
+  const codexAuth = join(s.codex, "auth.json"), staged = join(s.app, "data/am-quota", `codex-${stamp}.json`);
+  const generation = sha256(initial), intended = sha256(payload);
+  plan.codex.seen.local.generation = generation;
+  s.save(plan);
+  writeFileSync(codexAuth, initial, { mode: 0o600 });
+  mkdirSync(dirname(staged), { recursive: true, mode: 0o700 });
+  writeFileSync(staged, payload, { mode: 0o600 });
+  s.ok(s.start());
+  s.ok(s.start("codex", { extra: { before: generation } }));
+  s.ok(fence({ generation, intended }));
+  const marker = join(s.app, STOP_FILE);
+  mkdirSync(marker);
+  const mtime = statSync(marker).mtimeMs, before = readFileSync(s.file, "utf8");
+  s.refuses(write({ snapshot: s.snapshot }), "stopped");
+  s.refuses(install({ intended, stamp }), "stopped");
+  assert.equal(readFileSync(s.file, "utf8"), before);
+  assert.equal(s.read().codex.progress.local.attempt.installStarted, undefined);
+  assert.equal(readFileSync(s.loginFile, "utf8"), s.loginText);
+  assert.deepEqual(readdirSync(s.codex), ["auth.json"]);
+  assert.equal(readFileSync(codexAuth, "utf8"), initial);
+  assert.equal(readFileSync(staged, "utf8"), payload);
+  s.ok(s.outcome("claude", "lost"));
+  s.ok(s.outcome("codex", "lost"));
+  assert.equal(statSync(marker).mtimeMs, mtime);
+  rmSync(marker, { recursive: true });
+  s.ok(s.start("codex", { extra: { before: generation } }));
+  mkdirSync(marker);
+  const fencedMtime = statSync(marker).mtimeMs;
+  s.ok(fence({ n: 2, generation, intended }));
+  assert.equal(statSync(marker).mtimeMs, fencedMtime);
+  assert.deepEqual(readdirSync(marker), []);
 });
 
 test("local Claude persists the attempt before the slot write and records a bound read without changing rev", (t) => {
@@ -480,6 +567,8 @@ test("show reports state and member progress with identical output through the p
   const args = planArgs("show");
   assert.equal(s.ok(args).state, "absent");
   const plan = s.fixture({ linked: true });
+  plan.exposures = { "core-one": at() };
+  s.save(plan);
   const answer = s.ok(args);
   assert.equal(answer.state, "ok");
   assert.equal(answer.rev, plan.rev);
@@ -489,7 +578,64 @@ test("show reports state and member progress with identical output through the p
   writeFileSync(s.file, "broken\n");
   assert.equal(s.ok(args).state, "corrupt");
   writeFileSync(s.file, '{"v":2}\n');
-  assert.equal(s.ok(args).state, "newer");
+  const malformed = s.ok(args);
+  assert.equal(malformed.state, "newer");
+  assert.equal(malformed.rev, null);
+  assert.equal(malformed.tools.claude.mode, null);
+  assert.equal(malformed.stopped, undefined);
+  writeFileSync(s.file, JSON.stringify({ ...plan, v: 2, stopped: true, retries: "app" }));
+  const v2 = s.run(args);
+  assert.deepEqual(JSON.parse(v2.stdout), { ...answer, state: "newer", stopped: true, retries: "app" });
+  for (const entry of [AM, READER]) assert.deepEqual(s.run(args, entry), v2);
+});
+
+test("chosen-home workers cannot mutate accounts and show never sweeps expired files", (t) => {
+  const s = scene(t);
+  s.fixture();
+  const before = readFileSync(s.file, "utf8"), show = planArgs("show");
+  const stale = Date.now() - PREVIEW_TTL_MS - 1000;
+  const change = { kind: "second-login", machine: "local", allow: true };
+  const preview = s.preview(change);
+  const id = s.request(change);
+  const oldFiles = [s.privateFile(preview.id), join(s.app, REQUESTS_DIR, `${id}.json`)];
+  for (const path of oldFiles) utimesSync(path, stale / 1000, stale / 1000);
+  const assertExpiredKept = () => { for (const path of oldFiles) assert.ok(existsSync(path), path); };
+  const launch = ["set-login", "--launch-login", "--expect-home", s.app, "--expect-core", "core-one"];
+  const unguarded = s.run(launch, READER);
+  const normal = s.run(show);
+  assertExpiredKept();
+
+  s.env.AUTOMAGIK_AGENT_HOME_LAUNCH = randomUUID();
+  const operations = [planArgs("request", { id }), commit(preview), ...localOps(s, id)];
+  for (const entry of [PACK, READER]) {
+    for (const args of operations) s.refuses(args, "chosen-home", entry);
+    assert.deepEqual(s.run(show, entry), normal);
+    s.usage(["plan", "--commit", id], entry);
+    for (const verb of ["here", "fleet"]) {
+      assert.deepEqual(s.run([verb, "--json"], entry), { code: 1, stdout: "",
+        stderr: "am: Run am accounts from a Bot's pane, not a chosen-home worker.\n" });
+    }
+  }
+  s.refuses(commit(preview), "chosen-home", AM);
+  const binding = ["--expect-home", s.app, "--expect-core", "core-one", "--expect-rev", "1", "--attempt", "1", "--dispatch", OTHER];
+  for (const words of [["--use", "slot-two", "--snapshot", s.snapshot], ["--remove", "slot-two", "--snapshot", s.snapshot],
+    ["--add", "slot-four", "--dir", join(s.home, "claude-four"), "--snapshot", s.snapshot], ["--cancel-attempt", ...binding]]) {
+    assert.deepEqual(s.run(["set-login", ...words], READER),
+      { code: 1, stdout: '{"error":"chosen-home"}\n', stderr: "am: accounts set-login: chosen-home\n" });
+  }
+  assert.deepEqual(s.run(launch, READER), unguarded);
+  assert.deepEqual(s.run(["set-login", "--use", "slot-two"], READER),
+    { code: 2, stdout: "", stderr: "am: accounts set-login: usage\n" });
+  assert.equal(existsSync(join(s.app, LOCK_FILE)), false);
+  assert.equal(readFileSync(s.file, "utf8"), before);
+  assert.equal(readFileSync(s.loginFile, "utf8"), s.loginText);
+  assertExpiredKept();
+
+  delete s.env.AUTOMAGIK_AGENT_HOME_LAUNCH;
+  assert.deepEqual(s.run(show), normal);
+  assertExpiredKept();
+  s.ok(planArgs("request", { id: s.request(change) }));
+  for (const path of oldFiles) assert.equal(existsSync(path), false);
 });
 
 test("accounts routing preserves the reader's here and fleet usage and never repairs a stale link", (t) => {

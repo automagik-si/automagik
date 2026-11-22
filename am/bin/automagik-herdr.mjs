@@ -76,7 +76,7 @@ import { buildPreview, close as closeAttempt, commitPreview, fence, settle, star
 import { planRows } from "../accountsPlanRows.js";
 import { claudeMember, confirmedClaude, idDigest, isClaudeKey, isCodexKey, isFingerprint, isHash, isHome, isIso, isMachine, isProxyId, LOCAL,
   LOCAL_FENCE_MS, LOCAL_START_MS, LOCK_FILE as ACCOUNTS_LOCK, own, parsePlan, parseRead, PLAN_FILE, planText as accountsPlanText,
-  PENDING_WHY, PREVIEWS_DIR, PREVIEW_TTL_MS, recoverable, REQUESTS_DIR, snapshotOf, TOOLS } from "../accountsPlanRecord.js";
+  PENDING_WHY, PREVIEWS_DIR, PREVIEW_TTL_MS, recoverable, REQUESTS_DIR, snapshotOf, STOP_FILE, TOOLS } from "../accountsPlanRecord.js";
 import { loginEdit, setLoginOp, writerCapability, writerQualified, WRITER_MAX_BYTES } from "../accountsWrite.js";
 import { exceptionWarning, routeManaged } from "../accountsLaunch.js";
 import { paneLogin } from "../loginProbe.js";
@@ -92,6 +92,11 @@ import { APPROVAL_REVIEW, approvedProxyEnabled, approvedProxyState, approvedSett
 import { hooksNotice } from "../migrateHooks.mjs";
 import { SPACE_LABEL, plan as tidyPlan, planText } from "../tidy.js";
 import { fixNonVisual, readState, spacesOf } from "./state.mjs";
+
+const RELEASE = (() => {
+  try { return readFileSync(new URL("../VERSION", import.meta.url), "utf8").trim() || "0.0.0"; }
+  catch { return "0.0.0"; }
+})();
 
 /**
  * A refusal or a usage mistake: printed on stderr, exit `code`. `detail`: fields a --json run
@@ -4919,8 +4924,8 @@ const managedLaunchIo = {
 
 /** Login words for one linked Claude seat. An exception leaves the seat's old route in place. */
 export async function managedLoginOn(machine, core, paneEnv, bot, io = managedLaunchIo, launcher = "shipped") {
-  const { state, plan } = io.readPlanFile();
-  const member = state === "ok" ? claudeMember(plan, core) : null;
+  const { state, plan, view } = io.readPlanFile();
+  const member = claudeMember(state === "ok" ? plan : state === "newer" ? view : null, core);
   if (!member) return null;
   const exception = (why) => ({ words: null, warning: exceptionWarning(bot.name, machine, why) });
   if (launcher !== "shipped") return exception(launcher);
@@ -13549,13 +13554,18 @@ const accountSnapshot = (value) => value === "none" || isHash(value);
 const refusal = (error) => ({ error });
 const planPath = () => join(appHome(), PLAN_FILE);
 
+function accountsStopped() {
+  try { lstatSync(join(appHome(), STOP_FILE)); return true; }
+  catch (error) { return error?.code !== "ENOENT" && error?.code !== "ENOTDIR"; }
+}
+
 export function readPlanFile() {
   let bytes;
   try { bytes = accountsBytes(planPath(), undefined, { noFollow: true }); } catch (error) {
     return { state: error?.code === "ENOENT" ? "absent" : "corrupt", plan: null, rev: 0, digest: null };
   }
-  const { state, plan } = parsePlan(bytes.toString("utf8"));
-  return { state, plan, rev: plan?.rev ?? 0, digest: accountsHash(bytes) };
+  const parsed = parsePlan(bytes.toString("utf8"));
+  return { ...parsed, rev: parsed.plan?.rev ?? 0, digest: accountsHash(bytes) };
 }
 
 function writeAccountsTemp(tmp, text) {
@@ -13702,7 +13712,7 @@ function clearAbandonedAccountsLock(path) {
 
 function accountsLockWaiter(path, wait) {
   const token = randomUUID().replaceAll("-", "");
-  const holder = { pid: process.pid, host: hostname(), start: processStart(process.pid) };
+  const holder = { pid: process.pid, host: hostname(), start: processStart(process.pid), version: RELEASE };
   const stage = mkdtempSync(`${path}.owner-`);
   const staged = join(stage, token);
   const end = Date.now() + wait;
@@ -13767,6 +13777,7 @@ async function withLinkedAccountsIo(run) {
   const io = {
     readPlan: readPlanFile,
     quotaOn,
+    stopped: accountsStopped,
     async machines(until) {
       const timeout = Math.min(20_000, until - Date.now());
       if (timeout <= 0) return null;
@@ -13838,18 +13849,20 @@ function commitAccountsPlan(id, expectRev, now, confirmForget) {
   return { ok: true, rev: result.plan.rev };
 }
 
-function showAccountsPlan({ state, plan }) {
+function showAccountsPlan({ state, plan, view }) {
+  const shown = plan ?? view ?? null;
   const fleet = readAccountsFleet();
   const local = fleet.machines.local;
   const ref = { codex: { fingerprint: local?.codex?.account },
     claude: { email: local?.claude?.state === "eligible" ? local.claude.email : null } };
-  const rows = planRows({ plan, fleet, ref, now: Date.now() });
+  const rows = planRows({ plan: shown, fleet, ref, now: Date.now() });
   const tools = Object.fromEntries(TOOLS.map((tool) => {
-    const section = plan?.[tool];
+    const section = shown?.[tool];
     return [tool, { mode: section?.mode ?? null, account: section?.account ?? null, rows: rows[tool] }];
   }));
-  return { v: 1, kind: "accounts.plan", state, rev: plan?.rev ?? null, at: plan?.at ?? null, tools,
-    ...(plan?.exposures ? { exposures: plan.exposures } : {}) };
+  return { v: 1, kind: "accounts.plan", state, rev: shown?.rev ?? null, at: shown?.at ?? null, tools,
+    ...(shown?.exposures ? { exposures: shown.exposures } : {}),
+    ...(!plan && view ? { stopped: view.stopped, retries: view.retries } : {}) };
 }
 
 const exactKeys = (value, keys) => object(value) && Object.keys(value).length === keys.length
@@ -14248,8 +14261,8 @@ function parsePlanOptions(args) {
 }
 
 async function cmdAccountsPlan({ op, values }) {
-  sweepPlanFiles(Date.now(), values.commit);
   if (op === "show") return showAccountsPlan(readPlanFile());
+  sweepPlanFiles(Date.now(), values.commit);
   if (op === "request") {
     const request = readRequest(values.request);
     const base = readPlanFile();
@@ -14263,6 +14276,7 @@ async function cmdAccountsPlan({ op, values }) {
   return withAccountsLock(() => {
     const { state, plan } = readPlanFile();
     if (state !== "ok") return refusal(state === "newer" ? "newer-plan" : "no-plan");
+    if (["start-local", "write-local", "install-local"].includes(op) && accountsStopped()) return refusal("stopped");
     const now = Date.now();
     if (op === "start-local") return startLocalPlan(plan, tool, { owner, rev, evidence: readRequest(values.evidence) }, now);
     if (op === "write-local") return writeLocalPlan(plan, { n, owner, snapshot }, now);
@@ -14322,7 +14336,8 @@ export async function accountsMain(argv) {
     if (!parsed) { process.stderr.write(`am: accounts ${verb}: usage\n`); return 2; }
     let answer;
     const run = { plan: cmdAccountsPlan, "set-login": setLoginRun, apply: cmdAccountsApply }[verb];
-    try { answer = await run(parsed); }
+    const mutating = verb === "apply" || (verb === "plan" ? parsed.op !== "show" : parsed.kind !== "launch");
+    try { answer = process.env[LAUNCH_VAR] !== undefined && mutating ? refusal("chosen-home") : await run(parsed); }
     catch (error) { answer = refusal(error instanceof CliError && error.message === "no-home" ? "no-home" : "failed"); }
     process.stdout.write(`${JSON.stringify(answer)}\n`);
     if (answer.error) process.stderr.write(`am: accounts ${verb}: ${answer.error}\n`);
@@ -14466,9 +14481,7 @@ async function dispatch(argv, io) {
   }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).
   if (opts.version && !command) {
-    let version = "0.0.0";
-    try { version = readFileSync(new URL("../VERSION", import.meta.url), "utf8").trim() || version; } catch { /* no VERSION file */ }
-    process.stdout.write(opts.json ? `${JSON.stringify({ version })}\n` : `am ${version}\n`);
+    process.stdout.write(opts.json ? `${JSON.stringify({ version: RELEASE })}\n` : `am ${RELEASE}\n`);
     return 0;
   }
   if (opts.help && command === "proxy") { process.stdout.write(`${PROXY_USAGE}\n`); return 0; }
