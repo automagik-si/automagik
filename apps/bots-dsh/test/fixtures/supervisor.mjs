@@ -67,7 +67,7 @@ export function fixture(t, { plugins = [BOTS], mode } = {}) {
     write(join(dir, 'package.json'), { name, version: FROM })
     if (name === BOTS) {
       fs.mkdirSync(join(dir, 'src/host'), { recursive: true })
-      fs.copyFileSync(join(HOST, 'update-contract.json'), join(dir, 'src/host/update-contract.json'))
+      write(join(dir, 'src/host/update-contract.json'), { ...read(join(HOST, 'update-contract.json')), stateFormats: [0, 1, 2] })
     }
   }
   const tarballs = new Map()

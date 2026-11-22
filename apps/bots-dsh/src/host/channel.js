@@ -593,7 +593,8 @@ export function install(rt) {
         && tool.endpoint === endpoint) && added?.read !== true) {
         // A window endpoint's refusal never carries the reason itself: it names the team's files and host.
         const fixed = { 'accounts-claude-use': 'This host can only read accounts.', 'accounts-claude-add': 'This host can only read accounts.',
-          'accounts-claude-remove': 'This host can only read accounts.', 'code-start': 'This host can only read the team.' }
+          'accounts-claude-remove': 'This host can only read accounts.', 'code-start': 'This host can only read the team.',
+          'connector-retry': 'Try again in the window that can edit the Bot team.' }
         return fail(Object.hasOwn(fixed, endpoint) ? fixed[endpoint] : readOnly, 'bot/read-only')
       }
       if (CODE_GUARDED.has(endpoint) && textsOf(body).some(text => rt.loginTextMatches?.(text) === true)) return fail(CODE_REFUSED, 'bot/refused')

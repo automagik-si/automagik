@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
-import { syncBuiltinESMExports } from 'node:module'
+import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { KEY_ERROR } from '../src/host/connectors/credential-key.js'
 import { install } from '../src/host/store.js'
 
 function patch(method, replace) {
@@ -28,7 +29,7 @@ function patchSync(method, replace) {
   }
 }
 
-function host(home, saved) {
+function host(home, saved, store = install) {
   const statePath = join(home, 'state.json')
   if (saved !== undefined) fs.writeFileSync(statePath, typeof saved === 'string' ? saved : JSON.stringify(saved))
   const warnings = []
@@ -49,7 +50,7 @@ function host(home, saved) {
     retitleRoom: async () => {},
     warn: (...args) => warnings.push(args),
   }
-  install(rt)
+  store(rt)
   const dispose = () => {
     disposed ??= Promise.all(disposers.splice(0).map(cleanup => cleanup()))
     return disposed
@@ -76,6 +77,215 @@ const hashName = text => {
 // chmod 000 hides a file from its owner, which Windows and root do not honour.
 const unreadableBackupUnsupported = (process.platform === 'win32' || process.getuid?.() === 0)
   && 'needs POSIX file permissions and a non-root user'
+
+const protectedTeam = {
+  version: 2, connectors: { service: { custom: { command: 'mcp', env: { TOKEN: 'fixture-store-token9' } } } },
+}
+const savedToken = bytes => JSON.parse(bytes).connectors.service.custom.env.TOKEN
+
+test('encrypted teams are admitted only by readers that support their format', async (t) => {
+  const { rt, home, statePath, dispose } = runtime(t, protectedTeam)
+  await rt.load()
+  await rt.save()
+  await dispose()
+  const bytes = fs.readFileSync(statePath)
+  assert.equal(JSON.parse(bytes).version, 3)
+  assert.equal(savedToken(bytes).enc, 'v1')
+
+  const hook = registerHooks({ resolve(specifier, context, next) {
+    if (specifier === './update-contract.json' && context.parentURL?.endsWith('store.js?older-reader')) {
+      return { url: 'data:application/json,{"stateFormats":[0,1,2]}', format: 'json', shortCircuit: true }
+    }
+    return next(specifier, context)
+  } })
+  let older
+  try { older = await import('../src/host/store.js?older-reader') } finally { hook.deregister() }
+  const peer = host(home, undefined, older.install)
+  try {
+    await peer.rt.load()
+    assert.match(peer.rt.readOnly(), /saved by a newer Omni/)
+    assert.equal(peer.rt.state.connectors, undefined)
+    await peer.rt.save()
+    assert.deepEqual(fs.readFileSync(statePath), bytes)
+  } finally { await peer.dispose() }
+})
+
+test('key publication uses the verified writer and a complete exclusive file', async (t) => {
+  const { rt, home, statePath, warnings } = runtime(t, protectedTeam)
+  const key = join(home, 'connector-key')
+  fs.writeFileSync(join(home, 'state.lock'), JSON.stringify({ token: 'writer', host: hostname(), pid: process.ppid }))
+  await rt.load()
+  assert.equal(fs.existsSync(key), false)
+  fs.unlinkSync(join(home, 'state.lock'))
+  await rt.refresh()
+  let attempt = 0
+  const winner = Buffer.alloc(32, 9)
+  const restore = patchSync('linkSync', original => (temp, path) => {
+    if (path !== key) return original(temp, path)
+    attempt += 1
+    assert.equal(fs.readFileSync(temp).length, 32)
+    if (attempt <= 2) throw Object.assign(new Error('synthetic publication interruption'), { code: 'EIO' })
+    fs.writeFileSync(key, winner, { flag: 'wx', mode: 0o600 })
+    return original(temp, path)
+  })
+  try {
+    await rt.save()
+    assert.equal(JSON.parse(fs.readFileSync(statePath)).version, 2)
+    assert.equal(fs.existsSync(key), false)
+    assert.deepEqual(fs.readdirSync(home).filter(name => name.startsWith('connector-key')), [])
+    await rt.save()
+    assert.equal(warnings.filter(args => args.some(arg => String(arg).includes('Could not encrypt the connector credentials'))).length, 1)
+    await rt.save()
+    assert.deepEqual(fs.readFileSync(key), winner)
+    assert.equal(savedToken(fs.readFileSync(statePath)).kid, createHash('sha256').update(winner).digest('hex').slice(0, 16))
+    assert.deepEqual(fs.readdirSync(home).filter(name => name.startsWith('connector-key')), ['connector-key'])
+  } finally { restore() }
+})
+
+test('connector keys are admitted only as private regular files with complete key bytes', async (t) => {
+  const { rt, home, statePath, warnings } = runtime(t, protectedTeam)
+  const key = join(home, 'connector-key')
+  fs.mkdirSync(key)
+  await rt.load()
+  assert.equal(JSON.parse(fs.readFileSync(statePath)).version, 2)
+  assert.equal(fs.statSync(key).isDirectory(), true)
+  fs.rmdirSync(key)
+  fs.writeFileSync(key, 'incomplete', { mode: 0o600 })
+  await rt.save()
+  assert.equal(JSON.parse(fs.readFileSync(statePath)).version, 2)
+  assert.equal(fs.readFileSync(key, 'utf8'), 'incomplete')
+  fs.unlinkSync(key)
+  if (process.platform !== 'win32') {
+    const other = join(home, 'other')
+    fs.writeFileSync(other, Buffer.alloc(32), { mode: 0o600 })
+    fs.symlinkSync(other, key)
+    await rt.save()
+    assert.equal(JSON.parse(fs.readFileSync(statePath)).version, 2)
+    assert.equal(fs.lstatSync(key).isSymbolicLink(), true)
+    fs.unlinkSync(key)
+    fs.writeFileSync(key, Buffer.alloc(32), { mode: 0o644 })
+    fs.chmodSync(key, 0o644)
+    await rt.save()
+    assert.equal(JSON.parse(fs.readFileSync(statePath)).version, 2)
+    fs.chmodSync(key, 0o600)
+  }
+  await rt.save()
+  assert.equal(savedToken(fs.readFileSync(statePath)).enc, 'v1')
+  assert.equal(warnings.filter(args => args.some(arg => String(arg).includes('Could not encrypt the connector credentials'))).length, 1)
+})
+
+test('an encrypted snapshot commits with the same key it used', async (t) => {
+  const { rt, home, statePath } = runtime(t, protectedTeam)
+  await rt.load()
+  const key = join(home, 'connector-key')
+  const originalKey = fs.readFileSync(key)
+  const bytes = fs.readFileSync(statePath)
+  const restore = patch('writeFile', original => async (path, ...args) => {
+    await original(path, ...args)
+    if (path === `${statePath}.${process.pid}.tmp`) {
+      fs.unlinkSync(key)
+      fs.writeFileSync(key, Buffer.alloc(32, 5), { mode: 0o600 })
+    }
+  })
+  try {
+    await assert.rejects(rt.save(), /Could not encrypt the connector credentials/)
+    assert.deepEqual(fs.readFileSync(statePath), bytes)
+  } finally { restore() }
+  await rt.save()
+  assert.deepEqual(savedToken(fs.readFileSync(statePath)), savedToken(bytes))
+  fs.writeFileSync(key, originalKey)
+  await rt.save()
+  assert.notEqual(savedToken(fs.readFileSync(statePath)).iv, savedToken(bytes).iv)
+})
+
+test('queued permission copies preserve the newer encrypted connector snapshot', async (t) => {
+  const { rt, home, statePath } = runtime(t)
+  await rt.load()
+  const add = (state) => { state.connectors = structuredClone(protectedTeam.connectors) }
+  let envelope
+  let addedRevision
+  const connectorWrite = rt.saveCopy(add, { afterWrite: () => {
+    add(rt.state)
+    const saved = fs.readFileSync(statePath)
+    envelope = savedToken(saved)
+    addedRevision = JSON.parse(saved).revision
+    fs.unlinkSync(join(home, 'connector-key'))
+  } })
+  const permissionWrite = rt.saveCopy(copy => { copy.prefs.permission = 'new permission' })
+  await connectorWrite
+  await permissionWrite
+  const saved = fs.readFileSync(statePath)
+  assert.equal(envelope.enc, 'v1')
+  assert.deepEqual(savedToken(saved), envelope)
+  assert.equal(JSON.parse(saved).prefs.permission, 'new permission')
+  assert.ok(JSON.parse(saved).revision > addedRevision)
+})
+
+test('reclaim backups protect connector credentials and keep the pending team until saved', async (t) => {
+  const { rt, home, statePath } = runtime(t, protectedTeam)
+  await rt.load()
+  rt.state.prefs.marker = 'our team'
+  fs.writeFileSync(statePath, JSON.stringify({ version: 2, revision: 900, prefs: { marker: 'outside edit' } }))
+  fs.unlinkSync(join(home, 'state.lock'))
+  const restore = patch('writeFile', original => async (path, ...args) => {
+    if (String(path).startsWith(`${statePath}.replaced-`)) throw Object.assign(new Error('synthetic write failure'), { code: 'EACCES' })
+    return original(path, ...args)
+  })
+  try {
+    await assert.rejects(rt.refresh(), { code: 'EACCES' })
+    assert.equal(rt.state.prefs.marker, 'our team')
+  } finally { restore() }
+  await rt.refresh()
+  assert.equal(rt.state.prefs.marker, 'outside edit')
+  const backup = fs.readdirSync(home).find(name => name.startsWith('state.json.replaced-'))
+  const bytes = fs.readFileSync(join(home, backup), 'utf8')
+  assert.equal(JSON.parse(bytes).prefs.marker, 'our team')
+  assert.equal(savedToken(bytes).enc, 'v1')
+  assert.equal(bytes.includes(protectedTeam.connectors.service.custom.env.TOKEN), false)
+})
+
+test('reclaim waits for a key before copying pending legacy credentials', async (t) => {
+  const { rt, home, statePath } = runtime(t, protectedTeam)
+  const key = join(home, 'connector-key')
+  fs.writeFileSync(key, 'unusable key', { mode: 0o600 })
+  await rt.load()
+  const clear = protectedTeam.connectors.service.custom.env.TOKEN
+  assert.equal(savedToken(fs.readFileSync(statePath)), clear)
+  rt.state.prefs.marker = 'our edits'
+  const outside = JSON.stringify({ version: 2, revision: 900, prefs: { marker: 'outside edit' } })
+  fs.writeFileSync(statePath, outside)
+  fs.unlinkSync(join(home, 'state.lock'))
+  const adopted = []
+  rt.onLockGained(() => adopted.push(rt.state.prefs.marker))
+  const backups = () => fs.readdirSync(home).filter(name => name.startsWith('state.json.replaced-'))
+  await assert.rejects(rt.refresh(), { message: KEY_ERROR })
+  assert.deepEqual(backups(), [])
+  assert.equal(fs.readFileSync(statePath, 'utf8'), outside)
+  assert.equal(rt.state.prefs.marker, 'our edits')
+  assert.equal(rt.state.connectors.service.custom.env.TOKEN, clear)
+  assert.deepEqual(adopted, [])
+
+  fs.unlinkSync(key)
+  await rt.refresh()
+  assert.equal(rt.state.prefs.marker, 'outside edit')
+  assert.equal(fs.readFileSync(statePath, 'utf8'), outside)
+  assert.deepEqual(adopted, ['outside edit'])
+  assert.equal(backups().length, 1)
+  const bytes = fs.readFileSync(join(home, backups()[0]), 'utf8')
+  assert.equal(bytes.includes(clear), false)
+  assert.equal(savedToken(bytes).enc, 'v1')
+  assert.equal(JSON.parse(bytes).prefs.marker, 'our edits')
+})
+
+test('the original recovery bytes are retained when a connector state document cannot be read', async (t) => {
+  const bytes = JSON.stringify(protectedTeam).slice(0, -1)
+  const { rt, home, statePath } = runtime(t, bytes)
+  await rt.load()
+  assert.equal(fs.existsSync(join(home, 'connector-key')), false)
+  assert.deepEqual(backupsIn(home), [hashName(bytes)])
+  assert.equal(fs.readFileSync(join(home, hashName(bytes)), 'utf8'), bytes)
+  assert.equal(fs.readFileSync(statePath, 'utf8'), bytes)
+})
 
 test('a failed state write rejects and leaves the saved file unchanged', async (t) => {
   const { rt, statePath } = runtime(t)

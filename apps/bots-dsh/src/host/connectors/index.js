@@ -10,6 +10,7 @@ import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { CATALOG, CONNECTOR_SECRET_REF, entryOf, customId, tokenSecretOf, refreshSecretOf, clientSecretOf, keySecretOf, envSecretOf } from './catalog.js'
+import { CREDENTIAL_UNAVAILABLE } from './credential-key.js'
 import * as oauth from './oauth.js'
 import { createGateway, parseConnectorUrl } from './gateway.js'
 import { install as installMail } from './mail/index.js'
@@ -79,7 +80,13 @@ export function install(rt) {
     if (entry === undefined || entry.id === 'github' && options === null) throw refusal('No such connector')
     return entry
   }
-  const reason = (error) => rt.redactSecrets([error, error?.cause].filter(Boolean).map(part => String(part?.message ?? part)).join(': ') || 'error').slice(0, 300)
+  const reason = (error, mask = rt.connectorDiagnosticRedactor()) => {
+    const text = [error, error?.cause].filter(Boolean).map(part => String(part?.message ?? part)).join(': ') || 'error'
+    return (mask?.(text) ?? text).slice(0, 300)
+  }
+  const checkCredentials = (entry) => {
+    if (rt.connectorCredentialsUnavailable(entry?.custom)) throw refusal(CREDENTIAL_UNAVAILABLE)
+  }
 
   // --- credentials ------------------------------------------------------
 
@@ -109,6 +116,7 @@ export function install(rt) {
   const upstreamOf = (id) => {
     const entry = entryFor(id)
     if (entry === undefined || !hasCredential(id)) return undefined
+    checkCredentials(entry)
     let url = entry.custom?.url ?? entry.remote?.url
     if (url === undefined) return undefined
     const headers = { ...(entry.headers ?? {}) }
@@ -136,6 +144,7 @@ export function install(rt) {
       readOnly: id => state.connectors?.[id]?.readOnly === true,
       onUnauthorized: id => refreshConnector(id),
       log: (...args) => rt.warn(...args),
+      redactor: rt.connectorDiagnosticRedactor,
     })
     await gateways.gw.listen()
     return gateways.gw
@@ -159,6 +168,7 @@ export function install(rt) {
 
   async function configFor(id) {
     const entry = entryFor(id)
+    checkCredentials(entry)
     if (entry?.custom !== undefined && entry.custom.command !== undefined) {
       const env = {}
       for (const [key, raw] of Object.entries(entry.custom.env ?? {})) env[key] = resolveRefs(raw)
@@ -182,13 +192,16 @@ export function install(rt) {
   }
 
   async function mountOne(id) {
-    const fp = await fingerprint(id)
-    if (mounts.get(id)?.fp === fp) return
-    await unmount(id)
-    statuses.set(id, { state: 'connecting' })
+    let fp
+    let mask = rt.connectorDiagnosticRedactor()
     try {
+      fp = await fingerprint(id)
+      if (mounts.get(id)?.fp === fp) return
+      await unmount(id)
+      statuses.set(id, { state: 'connecting' })
       const plugin = await loadMcpPlugin()
       if (stopped) return
+      mask = rt.connectorDiagnosticRedactor()
       const config = { ...(await configFor(id)), failOnStartupError: true }
       const fiber = ctx.plugin(plugin, config)
       const mount = { fp, fiber }
@@ -199,8 +212,8 @@ export function install(rt) {
       settleRequests(id)
     } catch (error) {
       await unmount(id)
-      mounts.set(id, { fp })
-      statuses.set(id, { state: 'error', error: reason(error) })
+      if (fp !== undefined) mounts.set(id, { fp })
+      statuses.set(id, { state: 'error', error: reason(error, mask) })
       rt.warn('omni-ui: connector %s failed: %s', id, statuses.get(id).error)
     }
   }
@@ -625,7 +638,8 @@ export function install(rt) {
 
   const rowFor = (entry) => {
     const saved = state.connectors?.[entry.id]
-    const status = statuses.get(entry.id) ?? (entry.auth.client?.deviceFlow && !entry.auth.client.id && !hasCredential(entry.id) ? { state: 'needs-client', error: 'NOT SET UP: configure an Automagik sign-in app' } : undefined)
+    const status = rt.connectorCredentialsUnavailable(entry.custom) ? { state: 'error', error: CREDENTIAL_UNAVAILABLE }
+      : statuses.get(entry.id) ?? (entry.auth.client?.deviceFlow && !entry.auth.client.id && !hasCredential(entry.id) ? { state: 'needs-client', error: 'NOT SET UP: configure an Automagik sign-in app' } : undefined)
     const connected = hasCredential(entry.id)
     const remote = entry.custom === undefined || entry.custom.url !== undefined
     const state_ = status?.state ?? (connected && mounts.has(entry.id) ? 'ready' : connected ? 'connecting' : 'off')
@@ -692,7 +706,10 @@ export function install(rt) {
       const entry = known(body.id)
       await endPending(entry.id)
       await dropSecrets(entry.id)
-      if (state.connectors?.[entry.id] !== undefined) {
+      if (entry.custom !== undefined) {
+        const remove = team => { delete team.connectors?.[entry.id] }
+        await rt.saveCopy(remove, { afterWrite: () => remove(state) })
+      } else if (state.connectors?.[entry.id] !== undefined) {
         delete state.connectors[entry.id]
         await rt.save()
       }
@@ -704,6 +721,7 @@ export function install(rt) {
       const entry = known(body.id)
       statuses.delete(entry.id)
       await rt.loadSecrets()
+      rt.retryConnectorCredentials()
       await sync(true)
       return connectorsView()
     },
@@ -755,13 +773,18 @@ export function install(rt) {
       const command = typeof body.command === 'string' ? body.command.trim() : undefined
       if (url !== undefined) checkAddress(url)
       if (url === undefined && command === undefined) throw refusal('Enter an address or a command')
-      const taken = new Set(Object.keys(state.connectors ?? {}))
-      const id = customId(name, taken)
-      CONNECTOR_IDS.add(id)
       const custom = url !== undefined
         ? { name, url, headers: body.headers && typeof body.headers === 'object' ? body.headers : {} }
         : { name, command, args: Array.isArray(body.args) ? body.args.map(String) : [], env: body.env && typeof body.env === 'object' ? body.env : {} }
-      await saveState(id, { custom, connectedAt: Date.now() })
+      let id
+      const row = { custom, connectedAt: Date.now() }
+      await rt.saveCopy(team => {
+        id = customId(name, new Set(Object.keys(team.connectors ?? {})))
+        team.connectors = { ...team.connectors, [id]: row }
+      }, { afterWrite: () => {
+        CONNECTOR_IDS.add(id)
+        state.connectors = { ...state.connectors, [id]: row }
+      } })
       await sync(true)
       return connectorsView()
     },
@@ -865,6 +888,7 @@ export function install(rt) {
       return prefixes
     },
     connectorSettleRequests: settleRequests,
+    connectorStateChanged: sync,
     secretsChanged: () => { void sync() },
     connectorsInternals: { mounts, statuses, pendings, gateways, refreshConnector, upstreamOf },
   })

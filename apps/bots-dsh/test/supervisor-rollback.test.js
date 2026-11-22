@@ -6,6 +6,7 @@ import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
+import { connectorState } from '../src/host/connectors/credential-state.js'
 import { runSupervisor } from '../src/host/supervisor/main.js'
 import { finishRolledBack, restoreData, runRollback, teamSnapshot } from '../src/host/supervisor/rollback.js'
 import { PROFILE_INPUTS, VENDOR } from '../src/host/supervisor/stage.js'
@@ -288,6 +289,30 @@ test('restore takes the writer lock and preserves a live peer\'s team', t => {
   restoreData(f.config, run, changes => Object.assign(run, changes))
   assert.deepEqual(run.rollback.data, { restored: false, why: 'team-in-use', trialKept: false })
   assert.deepEqual(read(f.path), trialTeam)
+})
+
+test('rollback restores a supported roster and retains the encrypted trial', t => {
+  const f = prepare(t)
+  const credentials = connectorState(f.botsHome, () => true)
+  const clear = 'fixture-rollback-token9'
+  const trial = credentials.encode({ ...trialTeam, connectors: {
+    service: { custom: { command: 'mcp', env: { TOKEN: clear } } },
+  } }).bytes
+  const key = join(f.botsHome, 'connector-key')
+  const bytes = fs.readFileSync(key)
+  fs.writeFileSync(f.path, trial)
+  const run = read(f.state)
+  restoreData(f.config, run, changes => Object.assign(run, changes))
+  assert.deepEqual(run.rollback.data, { restored: true, trialKept: true })
+  assert.deepEqual(read(f.path), originalTeam)
+  const retained = join(f.backup, 'trial-bots-state.json')
+  assert.equal(fs.readFileSync(retained, 'utf8'), trial)
+  assert.equal(trial.includes(clear), false)
+  assert.deepEqual(fs.readFileSync(key), bytes)
+  const restoredTrial = read(retained)
+  credentials.decode(restoredTrial)
+  assert.equal(restoredTrial.connectors.service.custom.env.TOKEN, clear)
+  assert.equal(fs.existsSync(join(f.backup, 'connector-key')), false)
 })
 
 for (const modified of ['none', 'trial', 'snapshot', 'previous-after-completion']) {

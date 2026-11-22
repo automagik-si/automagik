@@ -13,7 +13,8 @@ import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { GITHUB_TOKEN_DAYS, GITHUB_WORK, cleanGitHubWork, githubPermissions, isGitHubTokenName } from '../shared/github-token.js'
 import { replaceFile } from './files.js'
 import { output } from './tools.js'
-import { CONNECTOR_SECRET_REF, envSecretOf } from './connectors/catalog.js'
+import { envSecretOf } from './connectors/catalog.js'
+import { credentialParts } from './connectors/credential-fields.js'
 import {
   hashicorp, hashicorpCloud, hashicorpItem, hashicorpItems, hashicorpMismatch,
   validHashicorpConnection, validHashicorpField, validHashicorpMount, validHashicorpPath,
@@ -34,9 +35,6 @@ export const ENV_PREFIX = 'DSH_SECRET_'
 // stands alone: no letter or digit right before or after it.
 export const MIN_VALUE = 4
 export const WHOLE_VALUE = 8
-const looksLikeConnectorCredential = value => !/\s/.test(value) && (
-  value.length >= 16 || (value.length >= WHOLE_VALUE && /\p{L}/u.test(value) && /[\p{N}\p{P}\p{S}]/u.test(value))
-)
 // A piece of a secret left at a cut edge: shorter pieces (a path segment, a host
 // name) are too short to tell from ordinary text.
 export const EDGE_MIN = 12
@@ -825,20 +823,11 @@ export function install(rt) {
     // Credential-like connector fields are only used to mask tool and model output.
     const entries = []
     for (const [id, headers, env] of connectorFields) {
-      for (const [fields, prefix] of [[headers, 'HEAD_'], [env, '']]) {
+      for (const [kind, fields, prefix] of [['headers', headers, 'HEAD_'], ['env', env, '']]) {
         for (const [key, value] of Object.entries(fields ?? {})) {
-          if (typeof value !== 'string' || value.length < WHOLE_VALUE || !/key|token|secret|password|auth|bearer|cookie/i.test(key)) continue
           const name = envSecretOf(id, `${prefix}${key}`)
-          const parts = value.split(CONNECTOR_SECRET_REF)
-          // The captured secret names alternate with literal text.
-          for (let i = 0; i < parts.length; i += 2) {
-            const literal = parts.length === 1 ? parts[i] : parts[i].trim()
-            const normalized = prefix === 'HEAD_' ? literal.trim() : literal
-            const token = /^(?:Bearer|Basic)\s+(\S+)$/i.exec(normalized)?.[1]
-            if (!looksLikeConnectorCredential(token ?? normalized)) continue
-            entries.push({ name, value: literal })
-            if (normalized !== literal) entries.push({ name, value: normalized })
-            if (token !== undefined) entries.push({ name, value: token })
+          for (const { forms } of credentialParts(kind, key, value)) {
+            for (const form of forms ?? []) entries.push({ name, value: form })
           }
         }
       }
@@ -2680,6 +2669,7 @@ export function install(rt) {
     forgetBotSecrets,
     loadSecrets,
     redactSecrets: text => redact(text),
+    connectorDiagnosticRedactor: redactorForOutput,
     redactSecretsAnywhere: text => redactAnywhere(text),
   })
 }
