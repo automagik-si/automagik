@@ -1,6 +1,8 @@
 // The one door, checked statically (refs #431, #448, #450): a folder leaves mods/ and a file leaves
 // layouts/ only through mods/am-sidebar/layoutSafe.mjs change(). Every .js and .mjs under herdr/mods
-// (Pocket Link left out: it owns its folder) and am/ (its tests left out) is scanned for rmSync,
+// (Pocket Link left out: it owns its folder) and am/ (its tests left out, and am/pocket/: Pocket's
+// part, its manager and its byte copies of Pocket Link, which write only that part's store and
+// Pocket Link's own state and service, never mods/ or layouts/) is scanned for rmSync,
 // renameSync, unlinkSync, cpSync, rmdirSync, layoutSafe.mjs removePath (#550: rmSync that never
 // follows a link), fs.promises' rm, rename, unlink and cp, a bare
 // rm/rename/unlink call (an injected one), and a program run through Herdr's io or an exec (`rm`,
@@ -55,7 +57,7 @@ export function scan(repo = REPO) {
   const rel = (p) => relative(repo, p).split("\\").join("/");
   const inScope = [
     ...files(join(repo, "herdr", "mods"), (p) => /[/\\](pocket-link|node_modules|test)$/.test(p)),
-    ...files(join(repo, "am"), (p) => /[/\\](node_modules|test)$/.test(p)),
+    ...files(join(repo, "am"), (p) => /[/\\](node_modules|test)$/.test(p) || rel(p) === "am/pocket"),
   ];
   return inScope.flatMap((path) => {
     const file = rel(path);
