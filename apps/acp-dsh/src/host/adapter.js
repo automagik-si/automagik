@@ -1231,7 +1231,7 @@ export class AcpAdapter extends LlmAdapter {
       const live = this.live.get(session?.id)
       if (live?.provider === 'acp-claude' && live.nativeManaged === true && live.native === true
         && ((event.type === 'sandbox/mode' && event.data?.mode === 'read-only') || !permitsNative(this.readLevel(session, true)))) {
-        this.endClaudeSession(session.id, NATIVE_TOOLS_CHANGED_TEXT)
+        this.endClaudeSession(session.id, 'This conversation is now Read only. Send a new message to continue.', NATIVE_TOOLS_CHANGED_TEXT)
       }
     }
     if (event?.type !== 'model/selection') return

@@ -159,7 +159,8 @@ for (const [type, value] of [
     const chat = w.chat('direct')
     await chat.turn('first owner turn')
     w.assertToolset(0, true)
-    const on = w.adapter.live.get('direct').run
+    const live = w.adapter.live.get('direct')
+    const on = live.run
     mode = 'read-only'
     w.adapter.noteEvent(chat.session, chat.session.append(type, value))
     assert.equal(w.adapter.live.has('direct'), false)
@@ -170,5 +171,6 @@ for (const [type, value] of [
     const [first, next] = w.events('new-session')
     assert.notEqual(first.pid, next.pid)
     assert.deepEqual(w.events('prompt').map(row => row.pid), [first.pid, next.pid])
+    assert.equal(live.held, 'This conversation is now Read only. Send a new message to continue.')
   })
 }
