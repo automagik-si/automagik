@@ -188,9 +188,9 @@ test('the login-shell probe answers fast, and kills a slow shell and its childre
 })
 
 test('the service Node, entry and state paths round-trip both managers', () => {
-  const node = String.raw`/home/a & % $$ ' " \ node/bin/node`
-  const entry = String.raw`/home/current & % $ \ entry/bridge.mjs`
-  const state = String.raw`/home/state < > & % $$ " '\ pairings`
+  const node = String.raw`/opt/a & % $$ ' " \ node/bin/node`
+  const entry = String.raw`/opt/current & % $ \ entry/bridge.mjs`
+  const state = String.raw`/srv/state < > & % $$ " '\ pairings`
   const darwin = `<plist><key>ProgramArguments</key><array><string>${xml(node)}</string><string>${xml(entry)}</string><string>serve</string></array><key>POCKET_LINK_STATE_DIR</key><string>${xml(state)}</string></plist>`
   const linux = `ExecStart=${unitArg(node, true)} ${unitArg(entry, true)} serve\nEnvironment=${unitArg('POCKET_LINK_STATE_DIR=' + state)}\n`
   for (const body of [darwin, linux]) {
