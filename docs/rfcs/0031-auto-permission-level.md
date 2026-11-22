@@ -423,9 +423,10 @@ answer, the answer says so.
    fallback notices, tool and permission ids, offered and chosen options, final status and effect.
    Leave out headers and raw transcripts.
 
-   **Note (2026-11-22, #1564).** A Claude Code Bot can use its own tools when its native-tools
-   switch is on, which changes the premise of question 5. Auto stays withheld on Claude Code
-   until the signed-in capture, whatever the switch. [RFC 0003, Amendment: native tools per Bot](0003-model-routes-and-acp.md#amendment-native-tools-per-bot-2026-11-22-1564)
+   **Note (2026-11-22, #1564).** PR A can start Claude Code with its own tools on the owner's
+   first turn in an eligible fresh direct chat. At either switch setting, Claude Code Auto stays
+   withheld until the signed-in capture and bridge design above are complete.
+   [RFC 0003, Amendment on native tools per Bot](0003-model-routes-and-acp.md#amendment-native-tools-per-bot-2026-11-22-1564)
 
 6. **Question 6:** keep both names, "Auto" and DSH's "Auto review"; they are different levels and
    the second is marked Experimental.
