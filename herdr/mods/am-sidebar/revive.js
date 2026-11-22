@@ -1,12 +1,12 @@
-// Revive over plain data (#939): which bots a reboot left without their agent, the order they
-// come back in, the session an agent that takes no id at launch (dsh-TUI, Antigravity, Codex, Kimi) left on
-// disk for a pane, the one report the project's main bot gets, and the login service's files
-// with the caller's PATH kept: a systemd user unit, a launchd agent on macOS (#1418).
+// Revive and holder-loss reporting over plain data (#939, #1432): which seats can come back,
+// their order, session discovery (dsh-TUI, Antigravity, Codex, Kimi), and what to report.
+// Login service files keep the caller's PATH (systemd on Linux, launchd on macOS, #1418).
 // The CLI's `revive` runs it with hc and the files. Pure: no `herdr`, no `node:` import, so
 // `node --test` runs it. Apache-2.0.
 
 import { unwrapKeep } from "./launchArgs.js";
 import { POINTER_VAR } from "./loginWords.js";
+import { attachKey, foldAttach, heldIn, placeOf } from "./attach.js";
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "fish", "ksh"]);
 const base = (p) => String(p ?? "").split("/").pop();
@@ -301,11 +301,12 @@ export function reviveTargets({ bindings = [], states = new Map(), swept = [] })
   const targets = [];
   const skipped = [];
   const seen = new Set();
-  const take = (b, pane) => {
+  const take = (b, pane, wasSwept = false) => {
     const k = `${b.project ?? ""}\n${b.bot}`;
     if (seen.has(k)) return;
     seen.add(k);
-    targets.push({ bot: b.bot, project: b.project ?? null, terminal: b.terminal, created_ms: b.created_ms, pane });
+    targets.push({ bot: b.bot, project: b.project ?? null, terminal: b.terminal, created_ms: b.created_ms, pane,
+      ...(wasSwept ? { swept: true } : {}) });
   };
   for (const b of bindings) {
     const s = states.get(b.terminal) ?? { state: "unknown", why: `hc gave no answer for ${b.terminal}` };
@@ -314,8 +315,32 @@ export function reviveTargets({ bindings = [], states = new Map(), swept = [] })
     if (isBareShell(s.get)) take(b, "shell");
     else seen.add(`${b.project ?? ""}\n${b.bot}`); // it runs: an older swept row of it never counts
   }
-  for (const b of swept) take(b, "gone");
+  for (const b of swept) take(b, "gone", true);
   return { targets, skipped };
+}
+
+/** The seat must predate the estimated boot by more than this margin for a reboot to prove its program ended. */
+export const PRE_BOOT_MARGIN_MS = 10 * 60_000;
+const knownBoot = (bootMs) => Number.isFinite(bootMs) && bootMs > 0;
+export const preBootSeat = (created_ms, bootMs) => Number.isSafeInteger(created_ms) && knownBoot(bootMs)
+  && created_ms < bootMs - PRE_BOOT_MARGIN_MS;
+
+/** Refuse holder loss without evidence the program ended. The boot rule uses the ledger's stamp. */
+export function lostSeatRefusal({ target, get, boot, bootMs }) {
+  if (boot && preBootSeat(target.created_ms, bootMs)) return null;
+  const lost = !target.swept && get?.reason === "holder_lost";
+  if (!lost && !(boot && target.swept)) return null;
+  if (lost && (!Number.isSafeInteger(get.created_ms) || get.created_ms !== target.created_ms)) {
+    return { code: "uncertain_identity", why: "hc says its holder was lost but its creation stamp doesn't confirm this seat" };
+  }
+  if (!boot) {
+    return { code: "ordinary_pass", why: "its holder was lost and nothing shows its program ended, so it may still be running cut off from the core" };
+  }
+  const ended = lost ? "its holder was lost" : "a sweep ended it after this boot began";
+  if (!knownBoot(bootMs)) return { code: "no_boot_time", why: `${ended} and the computer's boot time is unknown` };
+  const thisBoot = target.created_ms >= bootMs;
+  const age = thisBoot ? "within this boot" : "within 10 minutes before this boot";
+  return { code: thisBoot ? "this_boot" : "inside_margin", why: `${ended} and it started ${age}, so the boot doesn't prove its program ended` };
 }
 
 /**
@@ -351,8 +376,54 @@ export function reviveOrder(targets, { leadOf = () => null, isMain = () => false
 
 // ---- the report ----
 
+/** A word as a POSIX shell or zsh reads it, including a leading "=". */
+export function q(value) {
+  const word = String(value ?? "");
+  return /^[A-Za-z0-9._/:@%+,-][A-Za-z0-9._/:@%+=,-]*$/.test(word) ? word : "'" + word.replace(/'/g, "'\\''") + "'";
+}
+
+/** What the ledger says about this lost seat now, with the row that supplies its folder or new address. */
+export function seatNow(rows, seat, fold = foldAttach(rows)) {
+  const key = attachKey(seat);
+  const place = placeOf(seat);
+  const sameBotHere = (row) => row.bot === seat.bot && row.core === seat.core && placeOf(row) === place;
+  const lost = rows.findLastIndex((row) => sameBotHere(row) && attachKey(row) === key);
+  if (lost === -1) return { now: "unknown" };
+  const last = rows.findLast((row) => sameBotHere(row));
+  const held = heldIn(fold, seat.bot, place);
+  if (held?.core === seat.core && rows.lastIndexOf(held) > lost) return { now: "attached_again", binding: held };
+  if (last.event === "detach" && !held) return { now: "detached" };
+  if (last === rows[lost] && last.event === "end" && !held) {
+    const original = rows.findLast((row) => sameBotHere(row) && row.event === "attach" && attachKey(row) === key);
+    return { now: "not_attached", folder: original?.project ?? null };
+  }
+  return { now: "unknown" };
+}
+
+/** A manual restart hint for the recorded destination. Only a local seat uses a loaded definition. */
+export function seatHint({ seat, def, folder, core, machines = new Map() }) {
+  const check = `no command is shown. Check it with am show ${seat.bot}.`;
+  const restart = `am restart ${seat.bot}`;
+  if (seat.machine) {
+    const machine = machines.get(seat.core);
+    if (!machine) return `state unknown (machine ${seat.machine} isn't linked now); no command is shown.`;
+    const { name, connected } = machine;
+    const command = `${restart} --machine ${q(name)} --project`;
+    const away = connected ? "" : ` ${name} isn't connected now; the command refuses until it is.`;
+    if (!folder) return `Its folder on ${name} isn't on record; the restart is: ${command} <its folder on ${name}> (not runnable as printed).${away}`;
+    return `By hand: ${command} ${q(folder)}; it runs on ${name} with that machine's roster: make sure the old program stopped first.${away}`;
+  }
+  if (!core || seat.core !== core) return `state unknown (its core can't be confirmed); ${check}`;
+  if (def?.agent === "hermes" && def.hermes !== undefined) {
+    return `This hint doesn't cover a paired Hermes Bot; check it with am show ${seat.bot}.`;
+  }
+  if (!folder) return `By hand, from its project's folder: ${restart} (a new conversation).`;
+  if (!def) return `state unknown (${def === null ? "bots.json no longer defines it" : "bots.json can't be read"}); ${check}`;
+  return `By hand: ${restart} --project ${q(folder)} (a new conversation).`;
+}
+
 /** The command that brings `botId` back by hand. No session id: restart finds it itself. */
-export const byHandCommand = (botId, project) => `am restart ${botId} --project ${project} --tree`;
+export const byHandCommand = (botId, project) => `am restart ${botId} --project ${q(project)} --tree`;
 /** How a bot is kept down across restarts of the computer: said in every report. */
 export const KEEP_DOWN = "To keep a bot down across restarts of this computer: am detach <bot>.";
 
