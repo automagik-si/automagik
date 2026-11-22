@@ -22,7 +22,7 @@ import { chatProfileModes } from './codex-chat-profiles.js'
 import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './identity.js'
 import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
-import { agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
+import { agentRoute, answered, boundaryNotice, CONTEXT_KINDS, freshOpening, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
 import { callArguments, entered, levelOf, mirrorTool, reviewed, TOOL_NAME } from './tool.js'
 import { guardSession } from './write-guard.js'
@@ -60,7 +60,7 @@ const bridgeRow = message => (
   || (message?.role === 'developer' && message?.source?.kind === SYNTHETIC_KIND)
 )
 
-const ownerInput = message => message.source?.kind === 'user' && message.source.principal === undefined
+const ownerInput = message => message.source?.kind === 'user' && message.source.principal === undefined && !isHandoff(message)
   && (message.source.rpcId === undefined || (typeof message.source.rpcId === 'string' && !message.source.rpcId.startsWith('im:')))
 
 const permitsNative = level => level?.sandbox === 'workspace-write' || level?.sandbox === 'danger-full-access'
@@ -1433,7 +1433,7 @@ export class AcpAdapter extends LlmAdapter {
       const managed = options.provider === 'acp-claude' && this.teamManaged()
       const inputStart = turnStart(options.messages)
       const history = options.messages.slice(0, inputStart)
-      const inputs = managed ? options.messages.slice(inputStart).filter(message => message.source?.kind !== 'runtime-context') : []
+      const inputs = managed ? options.messages.slice(inputStart).filter(message => !CONTEXT_KINDS.has(message.source?.kind)) : []
       const requestedByOwner = dshAgent.session?.header?.origin !== 'subagent' && inputs.length > 0 && inputs.every(ownerInput)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
       const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
@@ -1443,6 +1443,10 @@ export class AcpAdapter extends LlmAdapter {
         ? live?.native === true && live.nativeManaged === true && requestedByOwner && permitsNative(turnLevel)
           && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.bridgeOn(agent, sessionId)
         : this.nativeOn(agent, sessionId)
+      // The first eligible owner turn replaces a managed OFF process that answered the fresh relay.
+      const upgrade = managed && live !== undefined && live.native !== true && live.nativeManaged === true
+        && requestedByOwner && (!answered(history) || freshOpening(history)) && permitsNative(turnLevel)
+        && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.nativeOn(agent, sessionId)
       const hardAsks = (enabled, bridged, currentLevel) => typeof agent.hardAsk === 'function'
         && !(bridged && agent.disableBuiltInTools === true && !enabled) && currentLevel?.full !== true
       const asks = hardAsks(native, this.bridgeOn(agent, sessionId), turnLevel)
@@ -1454,7 +1458,7 @@ export class AcpAdapter extends LlmAdapter {
       const roleChanged = live !== undefined && !sameTurn && (live.roleDigest ?? '') !== role.digest
       // A new tool set or role needs a new agent session.
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
-        || bridgeGone || live.asks !== asks || (live.native === true) !== native || roleChanged)
+        || bridgeGone || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
       if (remade) {
         if (roleChanged) {
           try {
@@ -1559,7 +1563,7 @@ export class AcpAdapter extends LlmAdapter {
             // choosing the bridge tools and starting the process that will use them.
             const spawnLevel = spawnManaged ? levelAtStart() : turnLevel
             const spawnNative = spawnManaged
-              ? requestedByOwner && !answered(history) && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId)
+              ? requestedByOwner && (!answered(history) || freshOpening(history)) && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId)
               : native
             const spawnAsks = spawnManaged ? hardAsks(spawnNative, bridged, spawnLevel) : asks
             state.native = spawnNative

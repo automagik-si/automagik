@@ -70,8 +70,8 @@ export function nativeWorld(t, { identity, hidden, managed = true, env } = {}) {
     const agent = { session, ctx: { tools: { register: () => () => {} } } }
     agents.set(id, agent)
     const history = []
-    async function turn(message, provider = CLAUDE) {
-      history.push(typeof message === 'string' ? person(`plain: ${message}`) : message)
+    async function turn(message, provider = CLAUDE, generated = []) {
+      history.push(typeof message === 'string' ? person(`plain: ${message}`) : message, ...generated)
       for (let step = 0; step < 4; step++) {
         const chunks = []
         for await (const chunk of adapter.stream(markAgentLoopRequest({ provider, model: 'default', sessionId: id, messages: [...history] }))) chunks.push(chunk)

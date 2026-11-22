@@ -7,10 +7,12 @@ import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import ScheduleService from '@deepseek-ai/dsh-schedule'
+import * as switching from '../../acp-dsh/src/host/switch.js'
 import { createRuntime } from '../index.js'
+import { HANDOFF_ACK } from '../src/host/constants.js'
 import { install as installIm } from '../src/host/im/index.js'
 import { adapters } from '../src/host/im/platforms/index.js'
-import { CODEX, nativeWorld, person } from '../../acp-dsh/test/fixtures/managed-native-world.js'
+import { CLAUDE, CODEX, nativeWorld, person } from '../../acp-dsh/test/fixtures/managed-native-world.js'
 import { fakeContext } from './fake-ctx.js'
 import { until } from './until.js'
 
@@ -198,6 +200,157 @@ test('first owner turn in a fresh direct chat gets native tools from saved ON', 
   assert.equal(h.w.events('new-session').length, 1)
   assert.equal(reads, 1)
 })
+
+async function botFresh(t, h) {
+  const prior = h.chat('ben')
+  const workspace = { id: 'test-workspace', path: prior.session.header.cwd }
+  let startup
+  let fresh
+  const agent = chat => ({
+    id: chat.session.id, session: chat.session, status: 'idle',
+    ctx: { tools: { register: () => () => {} } },
+    whenIdle: async () => {},
+    runMaintenance: job => job(new AbortController().signal),
+    inbox: { nextStep: [], nextTurn: [] },
+    followup: message => { startup = message },
+  })
+  const agents = new Map([['ben', agent(prior)]])
+  Object.assign(h.ctx.sessionController, {
+    resolveAgent: async id => ({ agent: agents.get(id) }),
+    create: async () => {
+      fresh = h.chat('fresh-ben')
+      agents.set(fresh.session.id, agent(fresh))
+      return { sessionId: fresh.session.id }
+    },
+    selectModel: async ({ sessionId, provider, model }) => {
+      h.active.get(sessionId).append('model/selection', { provider, model })
+      return { ok: true }
+    },
+  })
+  h.ctx.workspaceRegistry = { get: () => workspace, resolveByPath: async () => workspace, archiveSession: async () => {} }
+  h.ctx.sessions.flush = async () => {}
+  h.ctx.sessionTitle = { rename: async () => {} }
+  t.mock.method(h.rt, 'warn', (...args) => t.diagnostic(args.join(' ')))
+
+  const moved = await h.call('bot-fresh', { id: 'b' })
+  assert.equal(moved.ok, true, JSON.stringify(moved))
+  await until(() => ![...h.rt.switchJobs()].some(job => job.botId === 'b'))
+  assert.ok(startup, 'the Bot route delivered the startup relay')
+  return { prior, fresh, startup }
+}
+
+const startupContext = () => [
+  ['runtime-context', 'snapshot', 'Runtime context for a plain ACP reply.'],
+  ['skill-catalog', 'catalog', 'Available skills.'],
+  ['time-context', 'snapshot', 'Current time.'],
+].map(([kind, form, text]) => createUserMessage({ content: [{ type: 'text', text }], source: { kind, form } }))
+
+test('New conversation replaces the startup Claude on the first owner turn with saved ON', async t => {
+  const h = await host(t)
+  const saved = await h.call('update-bot', { id: 'b', nativeTools: true })
+  assert.equal(saved.ok, true, JSON.stringify(saved))
+  assert.equal(h.stored().bots.b.nativeTools, true)
+
+  const { prior, fresh, startup } = await botFresh(t, h)
+  const sessionId = fresh.session.id
+  assert.equal(h.rt.chatOf('b'), sessionId)
+  assert.notEqual(sessionId, prior.session.id)
+  const { exchangeId, ...source } = startup.source
+  assert.equal(typeof exchangeId, 'string')
+  assert.deepEqual(source, { kind: 'bot', form: 'relay', role: 'handoff', senderName: 'Omni', handoff: true })
+  assert.match(startup.content[0].text, /^\[Handoff · part 2\]\nThe user started a fresh conversation.*This message is not from the user/m)
+
+  // The app trace records these generated rows on the startup step only (seq 11–13).
+  // The recording agent uses the plain marker to finish this setup turn without a tool.
+  const generated = startupContext()
+  const startupAnswer = await fresh.turn(startup, CLAUDE, generated)
+  assert.deepEqual(startupAnswer.at(-1).reason, { kind: 'stop' })
+  h.w.assertToolset(0, false)
+  const off = h.w.adapter.live.get(sessionId).run
+  assert.equal(off.alive, true)
+
+  const owner = 'Teste automático (1564-A): plain owner direct Electron'
+  const ownerAnswer = await fresh.turn(person(owner))
+  assert.deepEqual(ownerAnswer.at(-1).reason, { kind: 'stop' })
+  const launches = h.w.events('new-session')
+  const prompts = h.w.events('prompt')
+  assert.equal(h.rt.chatOf('b'), sessionId)
+  assert.equal(prompts.length, 2)
+  assert.match(prompts[0].text, /\[Handoff · part 2\]/)
+  assert.ok(prompts[1].text.includes(owner))
+  t.diagnostic(JSON.stringify({
+    sessionId,
+    newSessions: launches.map(({ pid, meta }) => ({ pid, disableBuiltInTools: meta.disableBuiltInTools })),
+    prompts: prompts.map(({ pid }, index) => ({ pid, input: index === 0 ? 'handoff' : 'owner' })),
+  }))
+  assert.deepEqual(launches.map(row => row.meta.disableBuiltInTools), [true, false],
+    'the handoff opens OFF and the first owner turn opens ON')
+  const [offPid, onPid] = launches.map(row => row.pid)
+  assert.notEqual(offPid, onPid)
+  assert.deepEqual(prompts.map(row => row.pid), [offPid, onPid])
+  await off.gone.catch(() => {})
+  assert.equal(off.alive, false)
+  assert.match(prompts[1].text, /The chat so far, before this new/)
+  assert.match(prompts[1].text, /Handoff \(not from the user\)/)
+  h.w.assertToolset(1, true)
+  const on = h.w.adapter.live.get(sessionId).run
+  const persisted = h.rt.botOf('b').nativeTools
+  let reads = 0
+  Object.defineProperty(h.rt.botOf('b'), 'nativeTools', { get() { reads++; return persisted } })
+  await fresh.turn('another owner message')
+  assert.equal(h.w.adapter.live.get(sessionId).run, on)
+  assert.equal(h.w.events('new-session').length, 2)
+  assert.equal(h.w.events('prompt').at(-1).pid, onPid)
+  assert.equal(reads, 0)
+})
+
+test('the production handoff ACK leaves the first ACP process for the owner to open ON', async t => {
+  const h = await host(t, { saved: true })
+  const { fresh, startup } = await botFresh(t, h)
+  const sessionId = fresh.session.id
+  const messages = [startup, ...startupContext()]
+  const acknowledge = h.ctx.listeners.get('llm/stream').find(listener => /function\* acknowledge/.test(String(listener)))
+  assert.ok(acknowledge, 'the Bot team registered its handoff ACK middleware')
+  const chunks = []
+  for await (const chunk of acknowledge({ sessionId, messages }, () => assert.fail('the handoff ACK called the adapter'))) {
+    chunks.push(chunk)
+  }
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
+  const content = chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block)
+  assert.deepEqual(content, [{ type: 'text', text: HANDOFF_ACK }])
+  assert.deepEqual(h.w.events('new-session'), [])
+  assert.deepEqual(h.w.events('prompt'), [])
+  fresh.history.push(...messages, { role: 'assistant', source: { kind: 'model', provider: CLAUDE, model: 'default' }, content })
+
+  const owner = 'Teste automático (1564-A): plain owner direct Electron'
+  const answer = await fresh.turn(person(owner))
+  assert.deepEqual(answer.at(-1).reason, { kind: 'stop' })
+  const launches = h.w.events('new-session')
+  const prompts = h.w.events('prompt')
+  assert.equal(prompts.length, 1)
+  assert.ok(prompts[0].text.includes(owner))
+  assert.ok(prompts[0].text.includes(HANDOFF_ACK))
+  assert.deepEqual(prompts.map(row => row.pid), launches.map(row => row.pid))
+  t.diagnostic(JSON.stringify({
+    sessionId,
+    newSessions: launches.map(({ pid, meta }) => ({ pid, disableBuiltInTools: meta.disableBuiltInTools })),
+    prompts: prompts.map(({ pid }) => ({ pid, input: 'owner' })),
+  }))
+  assert.deepEqual(launches.map(row => row.meta.disableBuiltInTools), [false])
+  h.w.assertToolset(0, true)
+})
+
+for (const part of [2, 10]) {
+  test(`ACP recognizes the real bot-fresh own-chat package for part ${part}`, async t => {
+    const h = await host(t)
+    if (part > 2) h.rt.botOf('b').segments = Array.from({ length: part - 2 }, (_, index) => ({ sessionId: `old-ben-${index + 1}` }))
+    const { startup } = await botFresh(t, h)
+    assert.ok(startup.content[0].text.startsWith(`[Handoff · part ${part}]\n`))
+    const answer = { role: 'assistant', content: [{ type: 'text', text: HANDOFF_ACK }] }
+    assert.equal(typeof switching.freshOpening, 'function', 'ACP exports the fresh-opening predicate')
+    assert.equal(switching.freshOpening([startup, ...startupContext(), answer]), true)
+  })
+}
 
 test('a real DSH scheduled delivery to the indexed current chat gets OFF', async t => {
   const h = await host(t, { saved: true, hidden: true })
