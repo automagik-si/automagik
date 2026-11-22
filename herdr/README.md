@@ -1310,8 +1310,11 @@ refused with one stderr line naming #624, #628 and #631, and the real `hc` is ne
 `machine`, `server`, `update`, `connect`, `put`, `keys`, `attach`, a `machine/t7` target on
 every verb but `send` (whether typed or returned by `hc get`), and any `--on` outside an allowed
 `send`. Herdr-core types keys after about 3 seconds of quiet with no condition, so a guard
-check can go stale before delivery. Attach opens a persistent keyboard. Both wait on
-herdr-core for delivery checks or caller binding.
+check can go stale before delivery. `keys` stays refused until RFC 0044 delivery 6:
+herdr-core binds, marks and grants the caller (R1-R3) and checks that grant with every
+write (R4, advertised as `checked_input`); then the guard and the proxy allow it together,
+to the same set as `send`. `attach` opens a persistent keyboard and stays refused for
+sandboxed panes for good (RFC 0044 Q5).
 
 `send` is scoped to the caller's team: its lead chain (`effectiveLead` up), its declared lead
 chain (`bot.lead`, then that bot's lead, while each id is listed in the project's bots.json,

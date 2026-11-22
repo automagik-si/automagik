@@ -126,7 +126,7 @@ ids are never reused, so a rename between the check and the call cannot redirect
 
 | Method | Rule |
 |---|---|
-| `terminal.list` | the caller's own pane and every terminal it may type into (the `terminal.send` rule): its team graph, its own workers and the shared review roles. Other teams' panes and every linked-machine row are left out, and the `machines` inventory is empty: a sandboxed bot can reach no machine target, so no machine is named |
+| `terminal.list` | the caller's own pane plus the local send set (the `terminal.send` rule below): its team graph, its own workers and every recipient the shared-role widening allows, by the recipient's role or the caller's, which may belong to another team. Every linked-machine row and every row without a local address is left out, and the `machines` inventory is empty: a sandboxed bot can reach no machine target, so no machine is named |
 | `terminal.get`, `terminal.read`, `terminal.wait` | the caller itself, hcGuard's `teamOf` graph, and its own workers |
 | `terminal.send` | the same, plus hcGuard's shared send rules: pm/integrator/fixer callers may send to any listed bot; captain callers may send to other captains; tester/reviewer/fixer targets serve every squad. Ranks come from the approved roster. Workers inherit no caller-rank widening |
 | `terminal.kill`, `terminal.rm` | a bot caller's **own workers only**: the target's `parent` is the caller's pane, or its `worker.of` is the caller's bot |
@@ -142,9 +142,13 @@ Both ranks for captain-to-captain sends come from the roster, never `role=captai
 These rules widen only sends; get/read/wait keep the same team graph.
 
 `terminal.list` is filtered rather than refused (#628): the request reaches the core unchanged, and
-the reply keeps only the rows the caller may type into, plus its own pane. It is the list a
-sandboxed bot's `hc ls` sees, so another team's panes are never named there and `hc send <name>`
-can only resolve a name it may type into. A linked machine's pane is never kept, whatever its
+the reply keeps the caller's own pane plus the rows the send check above passes: its own
+workers, its team graph and the recipients the shared-role widening allows (by the
+recipient's role or the caller's), which may belong to another team. It is the list a
+sandboxed bot's `hc ls` sees, so `hc send <name>` can only resolve a name it may type into.
+Each kept row passes as the core answered it, nested fields included: only the reply's
+envelope below is reviewed, and a rule for the fields inside a row is a separate decision.
+A row without a local address is dropped. A linked machine's pane is never kept, whatever its
 labels say: this proxy refuses every machine address on every forwarded verb, so a sandboxed bot
 can neither read nor type into one, and naming it would only leak another team's pane or the
 machine. For the same reason the reply's `machines` inventory is emptied: a machine's name and
