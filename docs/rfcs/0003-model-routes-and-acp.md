@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat) |
+| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22)) |
 | Milestone | 2. One message box (route descriptor); 3. Other agents in the same chat (ACP) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-10-30 |
@@ -145,6 +145,9 @@ and D17). Claude runs on pi-ai's `anthropic` route until `acp-claude` ships.
   replay and a visible provider-boundary notice (owner, 2026-11-06, #516). RFC 0030 Q7a
   supersedes the explicit history-carrying route change for a Bot's own chat. The
   council behind this: [dsh-022-council.md](../research/dsh-022-council.md).
+- A Bot's native tools are the person's per-Bot, per-agent choice, default off (decided by the
+  owner's delegate, 2026-11-22, #1564). For Claude Code this narrows the 2026-11-06 "built-in tools
+  off" rule to Bots whose switch is off. See [Amendment: native tools per Bot](#amendment-native-tools-per-bot-2026-11-22-1564).
 
 ### Per-teammate models (status note)
 
@@ -905,6 +908,7 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
 
 - Open issues: #855, #868, #869, #870.
 - Merged changes that cite this RFC: #186, #187, #189, #349, #520, #522, #537, #557, #559, #569 (last merged 2026-11-06).
+- #1564 (reopened 2026-11-22): native tools per Bot.
 
 ## Links
 
@@ -991,3 +995,33 @@ itself; the original stays unchanged. Scratch cleanup, including its input copy,
 selects its image-tool paths without an adapter pre-read hook; acknowledgement is not proof
 of scratch-only reads, and #870 remains open. Real-app acceptance must demonstrate that
 Codex preserves the reference picture's distinctive shapes and text before this ships.
+
+## Amendment: native tools per Bot (2026-11-22, #1564)
+
+- **Decision.** Decided by the owner's delegate, 2026-11-22. The owner asked to use Claude Code's
+  own tools with Automagik's extras (#1564). The Bot's `nativeTools` record maps an agent route to
+  on or off and records an explicit off choice. Only the person sets it, from Details. It applies
+  to the Sessions the person starts with the Bot (its chat and its group Sessions), from the next
+  turn, in a new agent session. Tasks, scheduled deliveries and any Session whose owner is not
+  confirmed stay off until a later delivery.
+- **Per agent.** With the switch on, Claude Code uses its own tools in native mode. With it off,
+  Claude Code uses DSH's tools over the bridge with its built-in tools off. Codex keeps its own
+  tools as before. Its switch arrives with a later delivery that turns them off by checked
+  config. omp and Antigravity keep their current behavior and get switches in later deliveries.
+  Hermes is out of scope. Details shows the section only where a switch works.
+- **Precedence.** Routes without a switch keep their current behavior. A confirmed plain Session
+  follows the hidden `nativeTools` config as before. An unreadable permission level refuses the
+  turn. An uncertain owner keeps the switch off. Read only forces the switch off. The level is
+  checked again before the first prompt, and Details shows the switch off with the reason.
+  Otherwise the Bot's record decides. On takes effect only after the choice is saved and read
+  back. Off requires a bridge for the turn to proceed. A bridge that fails after it starts ends
+  the turn with an error and no model fallback. The admin's `dshTools: false` is never overridden.
+- **Restricted Bots.** On is refused and the Bot runs off while its `denyTools` names a tool with
+  a native twin. Delivery 4 of #1564 lifts this restriction per twin.
+- **Who can change it.** Bot tools and the agent MCP route cannot set it. Members and guests
+  cannot reach `update-bot`. The switch is unavailable with `AUTOMAGIK_MULTIUSER` until RFC 0038
+  delivery 3. [RFC 0038](0038-cloud-multiuser-caller-principal.md)
+- **Threat model.** With the switch on, Claude Code's own commands and edits run outside DSH's
+  file sandbox, read-before-write policy and write guard. What still asks depends on the level.
+  The agent runs in the Bot's isolated CLI home. [ACP README permission matrix](../../apps/acp-dsh/README.md#native-tools-mode-nativetools-1564)
+- **Rollback.** Revert the PR. Older builds keep and ignore `nativeTools`.
