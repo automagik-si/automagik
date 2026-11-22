@@ -22,7 +22,7 @@ import { chatProfileModes } from './codex-chat-profiles.js'
 import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './identity.js'
 import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
-import { agentRoute, answered, boundaryNotice, CONTEXT_KINDS, freshOpening, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
+import { agentRoute, answered, boundaryNotice, CONTEXT_KINDS, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
 import { callArguments, entered, levelOf, mirrorTool, reviewed, TOOL_NAME } from './tool.js'
 import { guardSession } from './write-guard.js'
@@ -48,6 +48,7 @@ export const OWN_MODE_WAIT_MS = 2_000
 export const HOLD_WAIT_MS = 10_000
 /** What a held Session's step answers when no gate gave a sentence of its own (it threw, never answered, or answered nothing readable). */
 export const HELD_TEXT = 'This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.'
+const NATIVE_TOOLS_CHANGED_TEXT = 'The tools setting changed; send again.'
 
 // The exact disposer of the mirror-tool registration a Session agent carries. It lives on the
 // agent, never in this module: a plugin reload replaces the module and the adapter while the
@@ -860,7 +861,10 @@ export class AcpAdapter extends LlmAdapter {
     if (agent?.disableBuiltInTools !== true || !this.bridgeOn(agent, sessionId)) return false
     if (this.teamManaged()) {
       if (agent !== this.agents.get('acp-claude')) return false
-      try { return this.botIdentity(sessionId)?.nativeTools === true } catch { return false }
+      try {
+        const identity = this.botIdentity(sessionId)
+        return identity?.nativeToolsBlocked !== true && identity?.nativeTools === true
+      } catch { return false }
     }
     let setting
     try { setting = this.nativeTools() } catch { return false }
@@ -873,6 +877,12 @@ export class AcpAdapter extends LlmAdapter {
     } catch {}
     const said = keys.filter(key => typeof key === 'string' && Object.hasOwn(setting, key)).map(key => setting[key])
     return said.length > 0 && said.every(value => value === true)
+  }
+
+  readLevel(session, failClosed) {
+    try {
+      return levelOf(this.ctx.get?.('approval'), session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'), { failClosed })
+    } catch { return undefined }
   }
 
   /**
@@ -1053,10 +1063,15 @@ export class AcpAdapter extends LlmAdapter {
    * end closes its open call and its late result is not written outside the step.
    * @param {string} sessionId
    * @param {string} [why] the sentence a step under way answers
+   * @param {string} [startupWhy] the sentence before a managed ON process receives its first prompt
    * @returns {boolean} whether an agent session was live or starting there
    */
-  endClaudeSession(sessionId, why) {
-    return this.endSession(sessionId, why, 'acp-claude')
+  endClaudeSession(sessionId, why, startupWhy) {
+    const live = this.live.get(sessionId)
+    const startingNative = startupWhy !== undefined && this.starting.get(sessionId)?.provider === 'acp-claude'
+      && live?.provider === 'acp-claude' && live.nativeManaged === true && live.native === true
+      && live.run?.promptEnded === undefined
+    return this.endSession(sessionId, startingNative ? startupWhy : why, 'acp-claude')
   }
 
   endSession(sessionId, why, provider) {
@@ -1212,9 +1227,12 @@ export class AcpAdapter extends LlmAdapter {
     if (owner?.session === session && ['permission/preset', 'sandbox/mode', 'approval/policy', 'model/selection'].includes(event?.type)) {
       this.endSession(session.id, 'Image session permission changed. Send a new message to continue.')
     }
-    if (this.teamManaged() && this.live.get(session?.id)?.native === true
-      && event?.type === 'sandbox/mode' && event.data?.mode === 'read-only') {
-      this.endClaudeSession(session.id, 'This conversation is now Read only. Send a new message to continue.')
+    if (this.teamManaged() && ['sandbox/mode', 'permission/preset', 'approval/policy'].includes(event?.type)) {
+      const live = this.live.get(session?.id)
+      if (live?.provider === 'acp-claude' && live.nativeManaged === true && live.native === true
+        && ((event.type === 'sandbox/mode' && event.data?.mode === 'read-only') || !permitsNative(this.readLevel(session, true)))) {
+        this.endClaudeSession(session.id, NATIVE_TOOLS_CHANGED_TEXT)
+      }
     }
     if (event?.type !== 'model/selection') return
     const live = this.live.get(session?.id)
@@ -1331,6 +1349,7 @@ export class AcpAdapter extends LlmAdapter {
     }
     // A held Session's step: the sentence as the answer, and nothing else happens there.
     const stopped = function* (why) {
+      if (why === NATIVE_TOOLS_CHANGED_TEXT && options.signal?.aborted) return yield STOPPED()
       // In a block of its own, after whatever the agent had already said this step.
       yield* blocks.close()
       yield* blocks.add('text', why)
@@ -1426,15 +1445,13 @@ export class AcpAdapter extends LlmAdapter {
       }
       // If the bridge process exited and the adapter has yet to re-attach by the next turn,
       // start a new agent session with DSH's tools and replay the chat to it (#969).
-      const levelAtStart = () => {
-        try { return levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets')) } catch { return undefined }
-      }
-      const turnLevel = levelAtStart()
       const managed = options.provider === 'acp-claude' && this.teamManaged()
+      const levelAtStart = () => this.readLevel(dshAgent?.session, managed)
+      const turnLevel = levelAtStart()
       const inputStart = turnStart(options.messages)
       const history = options.messages.slice(0, inputStart)
       const inputs = managed ? options.messages.slice(inputStart).filter(message => !CONTEXT_KINDS.has(message.source?.kind)) : []
-      const requestedByOwner = dshAgent.session?.header?.origin !== 'subagent' && inputs.length > 0 && inputs.every(ownerInput)
+      const requestedByOwner = dshAgent.session?.header?.origin !== 'subagent' && inputs.some(ownerInput)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
       const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
       // Native-tools mode keeps the agent's own tools, so it keeps the hard ask rules too: the
@@ -1443,9 +1460,9 @@ export class AcpAdapter extends LlmAdapter {
         ? live?.native === true && live.nativeManaged === true && requestedByOwner && permitsNative(turnLevel)
           && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.bridgeOn(agent, sessionId)
         : this.nativeOn(agent, sessionId)
-      // The first eligible owner turn replaces a managed OFF process that answered the fresh relay.
+      // An eligible owner turn replaces a managed OFF process when the saved switch is ON.
       const upgrade = managed && live !== undefined && live.native !== true && live.nativeManaged === true
-        && requestedByOwner && (!answered(history) || freshOpening(history)) && permitsNative(turnLevel)
+        && requestedByOwner && permitsNative(turnLevel)
         && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.nativeOn(agent, sessionId)
       const hardAsks = (enabled, bridged, currentLevel) => typeof agent.hardAsk === 'function'
         && !(bridged && agent.disableBuiltInTools === true && !enabled) && currentLevel?.full !== true
@@ -1563,7 +1580,7 @@ export class AcpAdapter extends LlmAdapter {
             // choosing the bridge tools and starting the process that will use them.
             const spawnLevel = spawnManaged ? levelAtStart() : turnLevel
             const spawnNative = spawnManaged
-              ? requestedByOwner && (!answered(history) || freshOpening(history)) && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId)
+              ? requestedByOwner && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId)
               : native
             const spawnAsks = spawnManaged ? hardAsks(spawnNative, bridged, spawnLevel) : asks
             state.native = spawnNative
@@ -1712,6 +1729,13 @@ export class AcpAdapter extends LlmAdapter {
           }
         }
       }
+      // A refused model can leave the run alive with no prompt yet. Revalidate when its
+      // eventual first prompt is ready, too. AgentRun sets promptEnded during its first prompt.
+      const startingNative = live.nativeManaged === true && live.native === true && live.run.promptEnded === undefined
+      const stopForNativeChange = () => {
+        this.endClaudeSession(sessionId, NATIVE_TOOLS_CHANGED_TEXT)
+        return stopped(NATIVE_TOOLS_CHANGED_TEXT)
+      }
       // The Session's model and effort, then its level as the agent's own permission mode, before every prompt.
       let substitution
       const standIns = (agent.catalog?.spec?.fallback ?? []).map(entry => entry.id).filter(id => id !== DEFAULT_MODEL)
@@ -1730,7 +1754,9 @@ export class AcpAdapter extends LlmAdapter {
         const why = `${agent.name} would not take ${options.model}${at}: ${reason}`
         return yield finish('error', why)
       }
-      const level = levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
+      const level = startingNative ? levelAtStart()
+        : levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
+      if (level === undefined) return yield* stopForNativeChange()
       const originalModes = agent.modeFor?.(level)
       const profiles = live.profileModes
       const modes = live.sessionFileMode ? [live.sessionFileMode] : profiles ? chatProfileModes(originalModes, profiles) : originalModes
@@ -1809,7 +1835,7 @@ export class AcpAdapter extends LlmAdapter {
       // level that has changed, and a gate that lets go here must not let this turn through.
       const late = entry.held ?? live.held ?? await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
       if (!uploadValid()) return yield uploadStopped()
-      if (uploads === undefined) started()
+      if (uploads === undefined && !startingNative) started()
       if (late !== undefined) {
         this.endSession(sessionId, late)
         return yield* stopped(late)
@@ -1876,6 +1902,17 @@ export class AcpAdapter extends LlmAdapter {
         try { checkUploadSize(uploadRun.sessionId, prompt) } catch (error) {
           return yield finish('error', error.message, 'acp_upload_content')
         }
+      }
+      // The first prompt is the last point where startup can lose its tool authority. The
+      // permission mode, bridge and gates above can all wait after the ON process exists.
+      if (startingNative) {
+        const held = entry.held ?? live.held
+        if (held !== undefined) return yield* stopped(held)
+        if (options.signal?.aborted) {
+          this.end(sessionId, live)
+          return yield STOPPED()
+        }
+        if (!permitsNative(levelAtStart()) || !this.teamManaged() || !this.nativeOn(agent, sessionId)) return yield* stopForNativeChange()
       }
       started()
       live.replay = undefined

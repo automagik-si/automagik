@@ -234,37 +234,6 @@ export function isHandoff(message) {
 
 export const CONTEXT_KINDS = new Set(['runtime-context', 'skill-catalog', 'time-context'])
 
-// Match the whole own-chat freshPackage from bots-dsh/src/host/parts.js, including the repeated part number.
-const FRESH_RELAY = new RegExp([
-  String.raw`^\[Handoff · part (\d+)\]`,
-  String.raw`The user started a fresh conversation \(part \1\) in your own chat\. This message is not from the user\.`,
-  String.raw`Nothing from earlier parts is carried over, on purpose: start from your instructions and your tools as they are now, not from what an earlier conversation concluded about them\.`,
-  String.raw`Earlier parts stay saved; read_own_chat finds them if the user refers to something said there\.`,
-  String.raw`Nothing needs an answer now; wait for the next message\.$`,
-].join('\n'))
-
-function isFreshRelay(message) {
-  if (!isHandoff(message)) return false
-  const { source, content } = message
-  return source.kind === 'bot' && source.form === 'relay' && source.role === 'handoff'
-    && source.resume === undefined && source.joined === undefined && source.principal === undefined
-    && Array.isArray(content) && content.length === 1 && content[0]?.type === 'text'
-    && typeof content[0].text === 'string' && FRESH_RELAY.test(content[0].text)
-}
-
-/** Whether history consists of a fresh own-chat relay and its answer, apart from generated context. */
-export function freshOpening(messages) {
-  let opened = false
-  let replied = false
-  for (const message of messages ?? []) {
-    if (message?.role === 'user' && CONTEXT_KINDS.has(message.source?.kind)) continue
-    if (!opened && isFreshRelay(message)) opened = true
-    else if (opened && (message?.role === 'assistant' || message?.role === 'tool')) replied = true
-    else return false
-  }
-  return replied
-}
-
 /** Whether `messages` hold an answer: an assistant turn that is not a bridge's synthetic block. */
 export function answered(messages) {
   return (messages ?? []).some(message =>

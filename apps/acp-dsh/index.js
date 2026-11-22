@@ -1594,7 +1594,7 @@ export function apply(ctx, config = {}, {
      * one was live or starting.
      */
     endSession: (sessionId, why) => adapter.endSession(sessionId, why),
-    endClaudeSession: (sessionId, why) => adapter.endClaudeSession(sessionId, why),
+    endClaudeSession: (sessionId, why, startupWhy) => adapter.endClaudeSession(sessionId, why, startupWhy),
     /**
      * What acted on one Session's permissions, for a diagnostics view (read-only, a fresh plain
      * copy, undefined for a Session that ran no agent here): { version, agent, startedAt, active,

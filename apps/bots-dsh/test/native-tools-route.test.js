@@ -5,14 +5,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createSystemMessage, createUserMessage, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import ScheduleService from '@deepseek-ai/dsh-schedule'
-import * as switching from '../../acp-dsh/src/host/switch.js'
 import { createRuntime } from '../index.js'
 import { HANDOFF_ACK } from '../src/host/constants.js'
 import { install as installIm } from '../src/host/im/index.js'
 import { adapters } from '../src/host/im/platforms/index.js'
-import { CLAUDE, CODEX, nativeWorld, person } from '../../acp-dsh/test/fixtures/managed-native-world.js'
+import { CLAUDE, CODEX, holdNativeStartup, nativeWorld, person } from '../../acp-dsh/test/fixtures/managed-native-world.js'
 import { fakeContext } from './fake-ctx.js'
 import { until } from './until.js'
 
@@ -42,7 +41,7 @@ async function host(t, { saved = false, hidden, services = {}, im = false } = {}
   const acpAgents = {
     botIdentity(reader) { readIdentity = reader; return () => { readIdentity = undefined } },
     endSession: (...args) => w.adapter.endSession(...args),
-    endClaudeSession: (id, why) => w.adapter.endClaudeSession(id, why),
+    endClaudeSession: (...args) => w.adapter.endClaudeSession(...args),
   }
   const sessionPersistence = {
     open: async () => { throw Object.assign(new Error('No stored Session'), { name: 'SessionPersistenceNotFoundError' }) },
@@ -198,11 +197,12 @@ test('first owner turn in a fresh direct chat gets native tools from saved ON', 
   assert.deepEqual(h.w.executed, [])
   await chat.turn('second owner turn')
   assert.equal(h.w.events('new-session').length, 1)
-  assert.equal(reads, 1)
+  assert.equal(reads, 2)
 })
 
 async function botFresh(t, h) {
   const prior = h.chat('ben')
+  prior.session.append('request/header', { header: { config: { provider: CLAUDE, model: 'default' } }, reason: 'initial' })
   const workspace = { id: 'test-workspace', path: prior.session.header.cwd }
   let startup
   let fresh
@@ -304,15 +304,23 @@ test('New conversation replaces the startup Claude on the first owner turn with 
   assert.equal(reads, 0)
 })
 
-test('the production handoff ACK leaves the first ACP process for the owner to open ON', async t => {
+test('the production handoff ACK with a derived system row leaves the first ACP process for the owner to open ON', async t => {
   const h = await host(t, { saved: true })
+  h.rt.botOf('b').segments = [{ sessionId: 'previous-ben' }]
   const { fresh, startup } = await botFresh(t, h)
-  const sessionId = fresh.session.id
-  const messages = [startup, ...startupContext()]
-  const acknowledge = h.ctx.listeners.get('llm/stream').find(listener => /function\* acknowledge/.test(String(listener)))
-  assert.ok(acknowledge, 'the Bot team registered its handoff ACK middleware')
+  const { session } = fresh
+  const sessionId = session.id
+  const selected = session.snapshotEvents().findLast(event => event.type === 'model/selection')?.data
+  assert.deepEqual(selected, { provider: CLAUDE, model: 'default' })
+  const append = { surfaceOp: 'append' }
+  // APP-TEST-A-HANDOFF-FIX recorded these message rows at seq 9–13, 16 and 23.
+  const system = createSystemMessage('Synthetic Bot instructions for this test.')
+  session.append('system/message', { turn: 1, step: 1, message: system }, append)
+  for (const message of [startup, ...startupContext()]) session.append('user/message', message, append)
+  const middleware = h.ctx.listeners.get('llm/stream').find(listener => /function\* acknowledge/.test(String(listener)))
+  assert.ok(middleware, 'the Bot team registered its handoff ACK middleware')
   const chunks = []
-  for await (const chunk of acknowledge({ sessionId, messages }, () => assert.fail('the handoff ACK called the adapter'))) {
+  for await (const chunk of middleware({ sessionId, messages: session.deriveMessages() }, () => assert.fail('the handoff ACK called the adapter'))) {
     chunks.push(chunk)
   }
   assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' })
@@ -320,19 +328,40 @@ test('the production handoff ACK leaves the first ACP process for the owner to o
   assert.deepEqual(content, [{ type: 'text', text: HANDOFF_ACK }])
   assert.deepEqual(h.w.events('new-session'), [])
   assert.deepEqual(h.w.events('prompt'), [])
-  fresh.history.push(...messages, { role: 'assistant', source: { kind: 'model', provider: CLAUDE, model: 'default' }, content })
+  assert.equal(h.w.adapter.live.has(sessionId), false)
+  const ack = createAssistantMessage({ content, source: { provider: CLAUDE, model: 'default' } })
+  session.append('assistant/message', { turn: 1, step: 1, message: ack }, append)
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1 })
+  session.append('turn/start', { turn: 2 })
+  session.append('step/start', { turn: 2, step: 1 })
 
-  const owner = 'Teste automático (1564-A): plain owner direct Electron'
-  const answer = await fresh.turn(person(owner))
+  const owner = 'Teste automático (1564-A): plain owner direct Electron HOFF-01'
+  const input = person(owner)
+  session.append('user/message', input, append)
+  const messages = session.deriveMessages()
+  assert.deepEqual(messages[0], system)
+  assert.equal(messages[0].role, 'system')
+  assert.equal(messages[0].source.kind, 'system-prompt')
+  assert.ok(messages[0].content[0].text.length > 0)
+  assert.deepEqual(messages[1], startup)
+  assert.match(messages[1].content[0].text, /^\[Handoff · part 3\]/)
+  assert.deepEqual(messages.slice(-2), [ack, input])
+  const request = markAgentLoopRequest({ ...selected, sessionId, messages })
+  const answer = []
+  for await (const chunk of middleware(request, () => h.w.adapter.stream(request))) answer.push(chunk)
   assert.deepEqual(answer.at(-1).reason, { kind: 'stop' })
   const launches = h.w.events('new-session')
   const prompts = h.w.events('prompt')
+  assert.equal(h.w.adapter.live.get(sessionId).provider, CLAUDE)
   assert.equal(prompts.length, 1)
   assert.ok(prompts[0].text.includes(owner))
   assert.ok(prompts[0].text.includes(HANDOFF_ACK))
   assert.deepEqual(prompts.map(row => row.pid), launches.map(row => row.pid))
   t.diagnostic(JSON.stringify({
     sessionId,
+    provider: request.provider,
+    derived: messages.map(message => [message.role, message.source.kind]),
     newSessions: launches.map(({ pid, meta }) => ({ pid, disableBuiltInTools: meta.disableBuiltInTools })),
     prompts: prompts.map(({ pid }) => ({ pid, input: 'owner' })),
   }))
@@ -341,14 +370,11 @@ test('the production handoff ACK leaves the first ACP process for the owner to o
 })
 
 for (const part of [2, 10]) {
-  test(`ACP recognizes the real bot-fresh own-chat package for part ${part}`, async t => {
+  test(`New conversation delivers the own-chat handoff package for part ${part}`, async t => {
     const h = await host(t)
     if (part > 2) h.rt.botOf('b').segments = Array.from({ length: part - 2 }, (_, index) => ({ sessionId: `old-ben-${index + 1}` }))
     const { startup } = await botFresh(t, h)
     assert.ok(startup.content[0].text.startsWith(`[Handoff · part ${part}]\n`))
-    const answer = { role: 'assistant', content: [{ type: 'text', text: HANDOFF_ACK }] }
-    assert.equal(typeof switching.freshOpening, 'function', 'ACP exports the fresh-opening predicate')
-    assert.equal(switching.freshOpening([startup, ...startupContext(), answer]), true)
   })
 }
 
@@ -464,6 +490,37 @@ test('OFF stops A’s live, starting and group Claude only, leaving other live p
   assert.equal(h.w.adapter.live.get('old-a').run, codexRun)
   assert.equal(h.w.adapter.live.get('ben').run, benRun)
   assert.equal(h.w.events('new-session').length, launches)
+})
+
+test('saving OFF while an ON Claude starts holds the turn and sends the next prompt to a new OFF PID', async t => {
+  const h = await host(t, { saved: true })
+  const chat = h.chat()
+  const startup = holdNativeStartup(t, h.w)
+  const pending = chat.turn('owner during startup')
+  let on
+  try {
+    on = await Promise.race([startup.entered, pending.then(() => assert.fail('ON startup did not reach the hold'))])
+    h.w.assertToolset(0, true)
+    assert.deepEqual(h.w.events('prompt'), [])
+    assert.equal((await h.call('update-bot', { id: 'a', nativeTools: false })).ok, true)
+    assert.equal(h.stored().bots.a.nativeTools, undefined)
+  } finally {
+    startup.release()
+  }
+  const stopped = await pending
+  assert.deepEqual(stopped.at(-1).reason, { kind: 'stop' })
+  assert.deepEqual(h.w.events('prompt'), [])
+  assert.equal(h.w.events('new-session').length, 1)
+  await on.gone.catch(() => {})
+  assert.ok(on.exited)
+  await chat.turn('owner after saving OFF')
+  h.w.assertToolset(1, false)
+  const [first, next] = h.w.events('new-session')
+  assert.notEqual(first.pid, next.pid)
+  assert.deepEqual(h.w.events('prompt').map(row => row.pid), [next.pid])
+  const text = stopped.findLast(chunk => chunk.type === 'block-end' && chunk.block.type === 'text')?.block.text
+  t.diagnostic(JSON.stringify({ offSave: true, onPid: first.pid, offPid: next.pid, stopped: text }))
+  assert.equal(text, 'The tools setting changed; send again.')
 })
 
 test('saved Read only override refuses ON while the chat is unloaded, and shows why when reopened', async t => {

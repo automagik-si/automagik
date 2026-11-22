@@ -1,5 +1,6 @@
 import { callerService, multiuserMode } from './multiuser.js'
 import { refusal } from './refusal.js'
+import { NATIVE_TOOLS_CHANGED_TEXT } from '../shared/held.js'
 
 export const NATIVE_OFF_TEXT = 'Native tools were turned off for this Bot, so this answer stopped. Send your message again.'
 export const NATIVE_TOOLS_BLOCK_TEXT = Object.freeze({
@@ -90,7 +91,7 @@ export function install(rt) {
       for (const [id, owner] of owners) if (owner.botId === bot.id) sessions.push(id)
     }
     for (const id of sessions) {
-      try { acp.endClaudeSession(id, NATIVE_OFF_TEXT) }
+      try { acp.endClaudeSession(id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
       catch (error) { rt.warn('omni-ui: Claude Session %s could not be ended: %s', id, error) }
     }
   }

@@ -12,6 +12,20 @@ export const CLAUDE = 'acp-claude'
 export const CODEX = 'acp-codex'
 export const person = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
 
+export function holdNativeStartup(t, w) {
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const ready = w.adapter.ready
+  t.mock.method(w.adapter, 'ready', async function (agent, state) {
+    await ready.call(this, agent, state)
+    if (state.native === true) {
+      entered.resolve(state.run)
+      await release.promise
+    }
+  })
+  return { entered: entered.promise, release: release.resolve }
+}
+
 export function nativeWorld(t, { identity, hidden, managed = true, env } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-managed-native-'))
   const path = join(dir, 'trace.ndjson')

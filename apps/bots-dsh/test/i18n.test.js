@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { heldText } from '../src/client/stops.js'
-import { HELD_LINES } from '../src/shared/held.js'
+import { HELD_LINES, NATIVE_TOOLS_CHANGED_TEXT } from '../src/shared/held.js'
 import { DICTIONARY, hostText, hostTemplateOf, installLocale, language, t } from '../src/client/i18n.js'
 import { ACCESS_MESSAGES } from '../src/host/models.js'
 
@@ -107,6 +107,8 @@ test('only whole held replies translate, with Chinese and Portuguese entries for
       assert.equal(heldText(key), DICTIONARY.zh[key])
       assert.equal(heldText(key + ' x'), key + ' x')
     }
+    assert.equal(heldText(NATIVE_TOOLS_CHANGED_TEXT), '工具设置已更改，请重新发送。')
+    assert.equal(pt[NATIVE_TOOLS_CHANGED_TEXT], 'A configuração de ferramentas mudou; envie de novo.')
     assert.equal(heldText('Model'), 'Model')
     assert.equal(heldText('x'), 'x')
   } finally { off() }

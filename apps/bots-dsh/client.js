@@ -2018,6 +2018,7 @@ var ZH = {
   "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.": "无法为这个对话设置权限级别，所以代理没有在这里运行。重启 DeepSeek Harness 或更改权限级别会再试一次。",
   "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.": "DeepSeek Harness 无法确认这个对话来自哪里，所以代理没有在这里运行。请再发一次消息；如果一直这样，请重启 DeepSeek Harness。",
   "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.": "正在检查这个对话的权限级别，所以代理暂时没有在这里运行。请稍后再发一次消息。",
+  "The tools setting changed; send again.": "工具设置已更改，请重新发送。",
   "A task needs your approval": "有任务等你批准",
   "Task {title} is waiting for approval: {tool}": "任务 {title} 等你批准：{tool}",
   "a tool": "一个工具",
@@ -10219,7 +10220,8 @@ var approvalDetail = (entry) => entry.detail?.code || entry.shownTarget || (entr
 var HELD_NOT_SET = "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.";
 var HELD_UNREAD = "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.";
 var ACP_HELD_TEXT = "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.";
-var HELD_LINES = /* @__PURE__ */ new Set([HELD_NOT_SET, HELD_UNREAD, ACP_HELD_TEXT]);
+var NATIVE_TOOLS_CHANGED_TEXT = "The tools setting changed; send again.";
+var HELD_LINES = /* @__PURE__ */ new Set([HELD_NOT_SET, HELD_UNREAD, ACP_HELD_TEXT, NATIVE_TOOLS_CHANGED_TEXT]);
 
 // src/client/stops.js
 var heldText = (text2) => HELD_LINES.has(text2) ? t(text2) : text2;
@@ -39075,12 +39077,12 @@ function PermissionChoiceDock({ sessionId, useRoster, actions }) {
 var nativeToolsCopy = {
   label: "Claude Code native tools",
   on: "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.",
-  off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Turning this on applies from the next conversation."
+  off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session."
 };
 var nativeToolsZh = {
   [nativeToolsCopy.label]: "Claude Code 原生工具",
   [nativeToolsCopy.on]: "在它与你的单独对话中，Claude Code 使用它自己的工具（Bash、Read、Edit…）。这些工具在 Automagik 的文件沙盒之外运行；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。",
-  [nativeToolsCopy.off]: "Claude Code 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。开启后从下一次对话开始生效。",
+  [nativeToolsCopy.off]: "Claude Code 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
   "Not available at the Read only level.": "在“仅可查看”级别下不可用。",
   "Not available: the permission level of this Bot's chat could not be read.": "不可用：无法读取此 Bot 对话的权限级别。",
   "Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.": "此 Bot 已与他人共享，或已安装共享插件（LiveShare），因此不可用。",

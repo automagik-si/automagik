@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { createAssistantMessage, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { createIdentityReaders } from '../src/host/identity.js'
+import { turnStart } from '../src/host/switch.js'
 import { CLAUDE, nativeWorld, person } from './fixtures/managed-native-world.js'
 
 test('a team registration keeps the hidden setting out even after the reader is removed', () => {
@@ -26,33 +28,37 @@ test('the managed hidden setting stays ignored when the identity reader throws',
   w.assertToolset(0, false)
 })
 
-test('ordinary turns share the same native process and read the switch once', async t => {
+test('ordinary turns share the same native process without rereading the switch', async t => {
   let reads = 0
   const w = nativeWorld(t, { identity: () => ({ name: 'Ada', get nativeTools() { reads++; return true } }) })
   const chat = w.chat('ada')
   await chat.turn('hello')
   w.assertToolset(0, true)
-  assert.equal(reads, 1)
+  assert.equal(reads, 2)
   const run = w.adapter.live.get('ada').run
   await chat.turn('next question')
   assert.equal(w.events('new-session').length, 1)
   assert.equal(w.adapter.live.get('ada').run, run)
-  assert.equal(reads, 1)
+  assert.equal(reads, 2)
 })
 
-test('switching ON does not change an already running DSH toolset', async t => {
+test('switching ON replaces a running DSH toolset on the next owner turn and replays its answer', async t => {
   let on = false
-  let reads = 0
-  const w = nativeWorld(t, { identity: () => ({ name: 'Ada', get nativeTools() { reads++; return on } }) })
+  const w = nativeWorld(t, { identity: () => ({ name: 'Ada', nativeTools: on }) })
   const chat = w.chat('ada')
-  await chat.turn('first answer')
+  await chat.turn('first question')
   w.assertToolset(0, false)
-  const process = w.adapter.live.get('ada').run
+  const off = w.adapter.live.get('ada').run
   on = true
-  await chat.turn('second answer')
-  assert.equal(w.adapter.live.get('ada').run, process)
-  assert.equal(w.events('new-session').length, 1)
-  assert.equal(reads, 1)
+  await chat.turn('second question')
+  assert.deepEqual(flags(w), [true, false])
+  assert.deepEqual(promptPids(w), launchPids(w))
+  assert.notEqual(launchPids(w)[0], launchPids(w)[1])
+  await off.gone.catch(() => {})
+  assert.equal(off.alive, false)
+  assert.match(w.events('prompt')[1].text, /The chat so far, before this new/)
+  assert.match(w.events('prompt')[1].text, /first question/)
+  w.assertToolset(1, true)
 })
 
 test('a running native process retires when eligibility is lost', async t => {
@@ -70,7 +76,7 @@ test('a running native process retires when eligibility is lost', async t => {
   w.assertToolset(1, false)
   await current.gone.catch(() => {})
   assert.equal(current.alive, false)
-  assert.equal(reads, 1)
+  assert.equal(reads, 2)
 })
 
 test('an unreadable sandbox level gives the DSH toolset', async t => {
@@ -78,18 +84,6 @@ test('an unreadable sandbox level gives the DSH toolset', async t => {
   delete w.services.sandboxPolicy
   await w.chat('ada').turn('hello')
   w.assertToolset(0, false)
-})
-
-test('a fresh Claude process replaying answered history in the same current chat starts OFF', async t => {
-  const w = nativeWorld(t, { identity: () => ({ name: 'Ada', nativeTools: true }) })
-  const chat = w.chat('ada')
-  await chat.turn(person('first question'))
-  w.adapter.endSession('ada')
-  await chat.turn(person('bridge read'))
-  assert.match(w.events('prompt').at(-1).text, /chat so far/)
-  assert.deepEqual(w.events('new-session').map(row => row.meta.disableBuiltInTools), [false, true])
-  w.assertToolset(1, false)
-  assert.deepEqual(w.executed, ['read'])
 })
 
 test('Read only entered during process preparation reaches the first session/new', async t => {
@@ -140,6 +134,54 @@ const flags = w => w.events('new-session').map(row => row.meta.disableBuiltInToo
 const promptPids = w => w.events('prompt').map(row => row.pid)
 const launchPids = w => w.events('new-session').map(row => row.pid)
 
+test('an owner batched with a fresh relay rejected before its prompt replaces the OFF child', async t => {
+  const w = nativeWorld(t, { identity: enabledIdentity, env: { FAKE_ACP_NO_OPTIONS: '1' } })
+  const { session } = w.chat('fresh')
+  const relay = freshRelay()
+  session.append('user/message', relay, { surfaceOp: 'append' })
+  const stream = async model => {
+    const chunks = []
+    const messages = session.deriveMessages()
+    for await (const chunk of w.adapter.stream(markAgentLoopRequest({ provider: CLAUDE, model, sessionId: session.id, messages }))) chunks.push(chunk)
+    return chunks
+  }
+  const failed = await stream('unsupported-model')
+  assert.equal(failed.at(-1).reason.kind, 'error')
+  const live = w.adapter.live.get(session.id)
+  assert.ok(live?.run.alive)
+  assert.equal(live.native, false)
+  assert.equal(live.nativeManaged, true)
+  assert.deepEqual(flags(w), [true])
+  assert.deepEqual(promptPids(w), [])
+
+  const owner = person('plain owner direct')
+  session.append('user/message', owner, { surfaceOp: 'append' })
+  const messages = session.deriveMessages()
+  assert.deepEqual(messages.slice(turnStart(messages)), [relay, owner])
+  const answer = await stream('default')
+  assert.equal(answer.at(-1).reason.kind, 'stop')
+  const [offPid, onPid] = launchPids(w)
+  t.diagnostic(JSON.stringify({ flags: flags(w), launchPids: launchPids(w), promptPids: promptPids(w) }))
+  assert.deepEqual(flags(w), [true, false])
+  assert.notEqual(offPid, onPid)
+  assert.deepEqual(promptPids(w), [onPid])
+  assert.match(w.events('prompt')[0].text, /plain owner direct/)
+  w.assertToolset(1, true)
+  await live.run.gone.catch(() => {})
+  assert.equal(live.run.alive, false)
+
+  const content = answer.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block)
+  session.append('assistant/message', {
+    turn: 1, step: 1, message: createAssistantMessage({ content, source: { provider: CLAUDE, model: 'default' } }),
+  }, { surfaceOp: 'append' })
+  session.append('user/message', person('plain: follow-up owner message'), { surfaceOp: 'append' })
+  assert.equal((await stream('default')).at(-1).reason.kind, 'stop')
+  assert.deepEqual(flags(w), [true, false])
+  assert.deepEqual(promptPids(w), [onPid, onPid])
+  assert.match(w.events('prompt')[1].text, /follow-up owner message/)
+  t.diagnostic(JSON.stringify({ offExited: !live.run.alive, followUpPid: w.events('prompt')[1].pid }))
+})
+
 test('R1 an owner prompt after the fixed handoff ACK starts the first Claude process ON', async t => {
   const w = nativeWorld(t, { identity: enabledIdentity })
   const chat = w.chat('direct')
@@ -181,18 +223,23 @@ test('B2 a scheduled turn retires a live ON process and prompts an OFF process',
   const w = nativeWorld(t, { identity: enabledIdentity })
   const chat = w.chat('direct')
   await chat.turn('owner')
+  const on = w.adapter.live.get('direct').run
   await chat.turn(sourced('plain: reminder', { kind: 'schedule' }))
   assert.deepEqual(flags(w), [false, true])
   assert.deepEqual(promptPids(w), launchPids(w))
+  assert.notEqual(launchPids(w)[0], launchPids(w)[1])
+  await on.gone.catch(() => {})
+  assert.equal(on.alive, false)
 })
 
-test('C1 a carried newPart package and answer leave the owner process OFF', async t => {
+test('C1 an owner turn after a carried newPart package and answer opens ON and replays the package', async t => {
   const w = nativeWorld(t, { identity: enabledIdentity })
   const chat = w.chat('direct')
   const carried = freshRelay('[Handoff · part 2]\nOmni moved your own chat with the user on to a fresh conversation, part 2, because a fresh conversation was started. This message is not from the user.\n\n## Latest messages (oldest first)\n[part 1 #3] scheduled: check the calendar')
   chat.history.push(carried, ...openingHistory().slice(1))
   await chat.turn('owner')
-  assert.deepEqual(flags(w), [true])
+  assert.deepEqual(flags(w), [false])
+  assert.match(w.events('prompt')[0].text, /check the calendar/)
 })
 
 for (const [name, source] of [
@@ -208,15 +255,29 @@ for (const [name, source] of [
   })
 }
 
-test('C4 a restart after an answered owner turn replays history with Claude OFF', async t => {
+test('C4 a restart with an owner input replays the handoff and answered owner turn with Claude ON', async t => {
   const w = nativeWorld(t, { identity: enabledIdentity })
   const chat = w.chat('direct')
   chat.history.push(...openingHistory())
   await chat.turn('first owner turn')
   w.adapter.endSession('direct')
   await chat.turn('second owner turn')
-  assert.deepEqual(flags(w).slice(1), [true])
+  assert.deepEqual(flags(w), [false, false])
   assert.match(w.events('prompt')[1].text, /chat so far/)
+  assert.match(w.events('prompt')[1].text, /first owner turn/)
+  assert.match(w.events('prompt')[1].text, /Handoff \(not from the user\)/)
+})
+
+test('a restart for a nonowner input replays the answered chat with DSH tools', async t => {
+  const w = nativeWorld(t, { identity: enabledIdentity })
+  const chat = w.chat('ada')
+  await chat.turn(person('first question'))
+  w.adapter.endSession('ada')
+  await chat.turn(sourced('bridge read', { kind: 'schedule' }))
+  assert.match(w.events('prompt').at(-1).text, /chat so far/)
+  assert.deepEqual(flags(w), [false, true])
+  w.assertToolset(1, false)
+  assert.deepEqual(w.executed, ['read'])
 })
 
 test('C5 an explicit OFF switch stays OFF after the opening', async t => {
@@ -236,35 +297,37 @@ test('C6 Read only stays OFF after the opening', async t => {
   assert.deepEqual(flags(w), [true])
 })
 
-for (const [name, change] of [
-  ['extra text', opening => { opening[0].content[0].text += '\nOne more line.' }],
-  ['a trailing newline', opening => { opening[0].content[0].text += '\n' }],
-  ['an extra text block', opening => { opening[0].content.push({ type: 'text', text: 'Another block.' }) }],
-  ['an extra user row', opening => { opening.splice(1, 0, person('an earlier user input')) }],
-  ['another relay', opening => { opening.splice(1, 0, freshRelay()) }],
-  ['a mismatched part number', opening => { opening[0].content[0].text = freshRelayText.replace('(part 2)', '(part 3)') }],
-  ['group wording', opening => { opening[0].content[0].text = freshRelayText.replace('your own chat', 'the group chat "Group"') }],
-  ...Object.entries({ resume: true, joined: ['another input'], principal: 'visitor' }).map(([key, value]) => [
-    `a relay with ${key}`, opening => { opening[0].source[key] = value },
-  ]),
-]) {
-  test(`C7 a handoff with ${name} does not exempt answered history`, async t => {
-    const w = nativeWorld(t, { identity: enabledIdentity })
-    const chat = w.chat('direct')
-    const opening = structuredClone(openingHistory())
-    change(opening)
-    chat.history.push(...opening)
-    await chat.turn('owner')
-    assert.deepEqual(flags(w), [true])
-  })
-}
-
 test('C8 a resumed relay with the owner source opens OFF', async t => {
   const w = nativeWorld(t, { identity: enabledIdentity })
   const chat = w.chat('direct')
   await chat.turn(sourced('plain: resumed handoff carrying earlier messages', { kind: 'user', handoff: true, resume: true }))
   assert.deepEqual(flags(w), [true])
 })
+
+test('owner input in a mixed batch with generated context starts ON', async t => {
+  const w = nativeWorld(t, { identity: enabledIdentity })
+  const chat = w.chat('direct')
+  chat.history.push(sourced('plain: reminder', { kind: 'schedule' }), ...openingContext())
+  await chat.turn('owner in the same batch')
+  assert.deepEqual(flags(w), [false])
+  assert.deepEqual(promptPids(w), launchPids(w))
+  assert.match(w.events('prompt')[0].text, /owner in the same batch/)
+})
+
+for (const principal of [{ kind: 'person', id: 'visitor' }, 'visitor', null]) {
+  test(`a user source with principal ${JSON.stringify(principal)} cannot open ON`, async t => {
+    const w = nativeWorld(t, { identity: enabledIdentity })
+    const input = sourced('plain: a principal', { kind: 'user', principal })
+    await w.chat('direct').turn(input, CLAUDE, [timeContext()])
+    assert.deepEqual(flags(w), [true])
+    const chat = w.chat('live')
+    await chat.turn('actual owner')
+    assert.deepEqual(flags(w), [true, false])
+    await chat.turn(input, CLAUDE, [timeContext()])
+    assert.deepEqual(flags(w), [true, false, true])
+    assert.deepEqual(promptPids(w), launchPids(w))
+  })
+}
 
 for (const [name, history] of [
   ['C9 in a fresh chat', () => []],
@@ -292,5 +355,5 @@ test('a time-context refresh on an owner turn keeps the live ON process', async 
   const [pid] = launchPids(w)
   assert.deepEqual(promptPids(w), [pid, pid])
   assert.equal(w.adapter.live.get('direct').run, run)
-  assert.equal(reads, 1)
+  assert.equal(reads, 2)
 })

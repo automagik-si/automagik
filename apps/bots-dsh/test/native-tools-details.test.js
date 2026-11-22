@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
-import { nativeToolsZh } from '../src/client/native-tools-copy.js'
+import { nativeToolsCopy, nativeToolsZh } from '../src/client/native-tools-copy.js'
 
 const { outputFiles } = await build({
   stdin: { contents: [
@@ -30,6 +30,7 @@ test('Details registers its translated copy through the normal locale service', 
       assert.equal(zh[key], nativeToolsZh[key])
       assert.ok(pt[key] && pt[key] !== key, key)
     }
+    assert.equal(pt[nativeToolsCopy.off], 'O Claude Code usa as ferramentas do Automagik, aprovadas no Automagik. Grupos, tarefas e execuções agendadas sempre usam. Vale a partir da sua próxima mensagem no chat direto deste Bot. Desligar encerra a sessão em andamento.')
   } finally { off() }
 })
 const module = { exports: {} }
@@ -49,7 +50,7 @@ test('Details uses a Claude-only switch with the Read only reason and the normal
   assert.equal(render({ model: 'acp-codex/default' }), null)
   assert.equal(render({ nativeToolsBlock: 'multiuser' }), null)
   assert.equal(render().props.on, false)
-  assert.match(render().props.hint, /applies from the next conversation/)
+  assert.equal(render().props.hint, "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.")
   assert.equal(render({ nativeTools: true }).props.on, true)
   assert.match(render({ nativeTools: true }).props.hint, /outside Automagik/)
   const blocked = render({ nativeTools: true, nativeToolsBlock: 'read-only' })

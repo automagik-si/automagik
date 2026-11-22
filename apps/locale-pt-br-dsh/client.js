@@ -72,7 +72,7 @@ const pack = createPack({
   "omni-ui": {
     "Claude Code native tools": "Ferramentas nativas do Claude Code",
     "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.": "Na conversa direta com você, o Claude Code usa as próprias ferramentas (Bash, Read, Edit…). Essas ferramentas rodam fora da área restrita de arquivos do Automagik. O nível de permissão determina o que pede sua aprovação antes. Desligar encerra na hora a sessão em andamento.",
-    "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Turning this on applies from the next conversation.": "O Claude Code usa as ferramentas do Automagik, aprovadas no Automagik. Grupos, tarefas e execuções agendadas sempre usam. Ligar vale a partir da próxima conversa.",
+    "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.": "O Claude Code usa as ferramentas do Automagik, aprovadas no Automagik. Grupos, tarefas e execuções agendadas sempre usam. Vale a partir da sua próxima mensagem no chat direto deste Bot. Desligar encerra a sessão em andamento.",
     "Not available at the Read only level.": "Indisponível no nível Somente leitura.",
     "Not available: the permission level of this Bot's chat could not be read.": "Indisponível: não foi possível ler o nível de permissão da conversa deste Bot.",
     "Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.": "Indisponível enquanto este Bot estiver compartilhado com outras pessoas ou houver um plugin de compartilhamento (LiveShare) instalado.",
@@ -632,6 +632,7 @@ const pack = createPack({
     "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.": "Não foi possível definir o nível de permissão desta conversa, então o agente não está rodando aqui. Reiniciar o DeepSeek Harness, ou mudar o nível de permissão, tenta de novo.",
     "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.": "O DeepSeek Harness não conseguiu verificar de onde vem esta conversa, então o agente não está rodando aqui. Envie a mensagem de novo; se continuar assim, reinicie o DeepSeek Harness.",
     "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.": "Esta conversa está em espera enquanto o nível de permissão é verificado, então o agente não está rodando aqui. Envie a mensagem de novo daqui a pouco.",
+    "The tools setting changed; send again.": "A configuração de ferramentas mudou; envie de novo.",
     "{name} is waiting for your approval": "{name} aguarda sua aprovação",
     "{first} and {second} are waiting for your approval": "{first} e {second} aguardam sua aprovação",
     "{first}, {second} and {count} more are waiting for your approval": "{first}, {second} e mais {count} aguardam sua aprovação",
