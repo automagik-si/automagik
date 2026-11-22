@@ -44,11 +44,14 @@
 // `read`/`get`/`wait`, `label`, `kill`, `rm` and both `hc events` target options. A send with
 // `--on` forwards the bare id after checking that address is on the named machine.
 // `keys`, `attach` and `exec` are refused outright. The core types keys after about 3 seconds
-// of quiet with no condition, so a guard check can go stale before delivery. Attach opens
-// a persistent keyboard. Both wait on herdr-core for delivery checks or caller binding.
-// `ls` and the event stream stay cross-pane: a wrapper cannot filter a
-// table's text or a stream without changing what the real hc printed; the per-pane proxy is
-// where a sandboxed pane's list and events are filtered.
+// of quiet with no condition, so a guard check can go stale before delivery. `keys` stays
+// refused until RFC 0044 delivery 6: herdr-core binds, marks and grants the caller (R1-R3)
+// and checks that grant with every write (R4, advertised as `checked_input`); then the
+// guard and the proxy allow it together, to the same set as `send`. `attach` opens a
+// persistent keyboard and stays refused for sandboxed panes for good (RFC 0044 Q5).
+// `ls` and plain `events` stay cross-pane: a wrapper cannot filter a table's text or a
+// stream without changing what the real hc printed. The per-pane proxy filters a sandboxed
+// pane's list and refuses its event subscription.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
