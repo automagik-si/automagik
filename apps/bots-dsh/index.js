@@ -247,6 +247,7 @@ export function createRuntime(ctx, config = {}) {
   rt.syncScopedTools?.()
   // Reloading the plugin while DSH is live must retain turns and child agents already running.
   void rt.adoptLiveWork?.().catch(error => rt.warn?.('omni-ui: adopting the work still running failed: %s', error))
+  void rt.resumeFallbackWayBacks?.().catch(error => rt.warn?.('ds-bot: resuming model fallback failed: %s', error))
   if (imported) rt.warn?.('omni-ui: copied the team from %s into %s', config.importHome, home)
   return rt
 }

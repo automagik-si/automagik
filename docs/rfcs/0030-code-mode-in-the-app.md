@@ -317,6 +317,10 @@ writers of Q7c, and the pending-input delivery) waits on DSH. A plugin check can
 the moment DSH records a selection, and input that moves between parts has no durable receipt.
 The ask is section 5 of RFC 0045, a proposal not yet merged.
 
+The turn after a fallback turn is back on the Bot's own route, also after a restart. A Session
+that a fallback moved to another harness before 2026-11-21 keeps its route until the person
+picks a model or starts a New conversation.
+
 ### Mod by mod
 
 | Mod (`herdr/mods/`) | What it does today | After the move |
