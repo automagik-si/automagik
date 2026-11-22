@@ -18,6 +18,9 @@
 // would never answer, and the person's next message would carry it along. Sent once the failed
 // turn ended, it opens the fallback turn. A turn that started meanwhile (the person wrote
 // again) already ran on the fallback, so the notice is not sent then.
+// The way back retries after DSH's event publication if it refused a reentrant selection.
+// On Agent creation or plugin reload it can be rebuilt from the Session log and the Bot's
+// current choice. A return never takes a Session across harnesses.
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { commandCapableAgent, crossesHarness, leavesCli } from '../shared/routes.js'
 import { splitRef } from './text.js'
@@ -41,6 +44,37 @@ const localCli = provider => typeof provider === 'string' && provider.startsWith
 export const failoverCrosses = (from, to) => crossesHarness(ref(from), ref(to))
   || ((localCli(from?.provider) || localCli(to?.provider)) && from?.provider !== to?.provider)
 const known = route => route?.provider !== undefined && route.model !== undefined
+const newestSelection = events => events?.findLastIndex(event => event.type === 'model/selection') ?? -1
+
+/** The newest selection points to a fallback only if it was made inside a failed turn. */
+export function fallbackLeftOn(events) {
+  const index = newestSelection(events)
+  if (index < 0) return undefined
+  const selection = events[index]
+  if (!known(selection.data)) return undefined
+  const { provider, model } = selection.data
+  const B = { provider, model }
+  let otherRoute = false
+  let failedTurn
+  for (let i = index - 1; i >= 0; i--) {
+    const { type, data } = events[i]
+    if (type === 'turn/end') return undefined
+    if (type === 'turn/start') {
+      failedTurn = data?.turn
+      break
+    }
+    if (type === 'request/header' && known(data?.header?.config) && !sameRoute(data.header.config, B)) otherRoute = true
+  }
+  if (!otherRoute || typeof failedTurn !== 'number') return undefined
+  for (let i = index + 1; i < events.length; i++) {
+    const { type, data } = events[i]
+    if (type === 'turn/start') return undefined
+    if (type === 'turn/end') {
+      if (data?.turn !== failedTurn || data.reason?.kind !== 'error') return undefined
+      return { B, selectionSeq: selection.seq, failedTurn }
+    }
+  }
+}
 
 /**
  * The route a failed request moves to, or undefined when it stays failed: a failure kept
@@ -97,6 +131,47 @@ export function install(rt) {
   const armed = new Map()
   // Agent id -> the expected fallback and turn whose end the notice waits for.
   const waking = new Map()
+  const selectionSeqOf = (session) => {
+    const events = session?.snapshotEvents?.()
+    return events?.[newestSelection(events)]?.seq
+  }
+  const savedModel = sessionId => rt.botOf?.(rt.selfOf?.(sessionId))?.model
+  const hasLiveReturn = sessionId => armed.has(sessionId)
+    || Array.from(restore.values()).some(entry => entry.agent.session?.id === sessionId)
+    || Array.from(waking.values()).some(entry => entry.agent.session?.id === sessionId)
+
+  async function resumeFallbackWayBack(agent) {
+    const session = agent.session
+    const sessionId = session?.id
+    for (let round = 0; round < 3; round++) {
+      if (!rt.isBotSession(sessionId) || hasLiveReturn(sessionId)) return
+      if (agent.status === 'running') {
+        if (typeof agent.whenIdle !== 'function') return
+        await agent.whenIdle()
+        if (agent.status === 'running') continue
+      }
+      const left = fallbackLeftOn(session.snapshotEvents?.())
+      if (left === undefined) return
+      const { B, selectionSeq } = left
+      const selected = await rt.reselectOwnRoute(agent, route => !sameRoute(route, B)
+        && !failoverCrosses(B, route)
+        && !(commandCapableAgent(route.provider) && rt.botRunnerRequired?.(sessionId, agent) === true)
+        && savedModel(sessionId) !== label(B)
+        && fallbackLeftOn(session.snapshotEvents())?.selectionSeq === selectionSeq
+        && sameRoute(agent.model.current(), B)
+        && !hasLiveReturn(sessionId)
+        && agent.status !== 'running')
+      if (selected || agent.status !== 'running') return
+    }
+  }
+
+  rt.resumeFallbackWayBack = resumeFallbackWayBack
+  rt.resumeFallbackWayBacks = async () => {
+    await rt.load()
+    const agents = ctx.get?.('agents')?.list?.() ?? []
+    await Promise.all(agents.filter(agent => rt.isBotSession(agent.session?.id)).map(resumeFallbackWayBack))
+  }
+
   const fallbackRoute = async noCommands => splitRef(config.fallbackModel ?? await rt.defaultModel({ noCommands }))
   // A switch that cannot run (switchFailure) goes back instead: the Bot's own chat with a switch
   // not yet confirmed (model-state.js) or a fresh part still waiting for its first answer
@@ -173,7 +248,9 @@ export function install(rt) {
         : failed?.provider !== undefined && failed.model !== undefined
           ? { provider: failed.provider, model: failed.model }
           : undefined
-      if (route !== undefined) restore.set(agent.id, { agent, route, fallback, failedTurn: turn })
+      if (route !== undefined) {
+        restore.set(agent.id, { agent, route, fallback, failedTurn: turn, selectionSeq: selectionSeqOf(agent.session) })
+      }
     }
     const sessionId = agent.session?.id
     if (sessionId !== undefined && typeof turn === 'number') armed.set(sessionId, turn)
@@ -271,12 +348,28 @@ export function install(rt) {
       if (!sameSession || event.data.turn <= pending.failedTurn) continue
       restore.delete(id)
       if (failoverCrosses(pending.route, pending.fallback)) continue
-      const current = pending.agent.model.current?.()
-      if (current?.provider !== undefined && pending.fallback !== undefined && !sameRoute(current, pending.fallback)) continue
+      const stillOnFallback = () => {
+        const current = pending.agent.model.current?.()
+        if (current?.provider !== undefined && !sameRoute(current, pending.fallback)) return false
+        if (pending.selectionSeq !== undefined && selectionSeqOf(pending.agent.session) !== pending.selectionSeq) return false
+        return savedModel(session.id) !== label(pending.fallback)
+      }
+      if (!stillOnFallback()) continue
       try {
         pending.agent.model.select(pending.route)
       } catch (error) {
-        rt.warn('ds-bot: the Bot\'s own model was not restored: %s', error)
+        if (!String(error?.message).includes('cannot reenter')) {
+          rt.warn('ds-bot: the Bot\'s own model was not restored: %s', error)
+          continue
+        }
+        queueMicrotask(() => {
+          if (!stillOnFallback()) return
+          try {
+            pending.agent.model.select(pending.route)
+          } catch (error) {
+            rt.warn('ds-bot: the Bot\'s own model was not restored: %s', error)
+          }
+        })
       }
     }
   })

@@ -424,7 +424,15 @@ export function install(rt) {
     }
     adoptedEngines.clear()
   }, 'ds-bot: Bot compaction')
-  ctx.on('agent/created', ({ agent }) => { agents.set(agent.id, agent); adoptCompaction(agent) })
+  ctx.on('agent/created', async ({ agent }) => {
+    agents.set(agent.id, agent)
+    adoptCompaction(agent)
+    try {
+      await rt.resumeFallbackWayBack?.(agent)
+    } catch (error) {
+      rt.warn('ds-bot: the Bot\'s own model was not restored: %s', error)
+    }
+  })
   ctx.on('agent/disposed', ({ agent }) => {
     agents.delete(agent.id)
     checkpoints.get(agent.id)?.controller.abort(refused('cancelled', 'The checkpoint was cancelled because its conversation closed.'))

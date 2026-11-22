@@ -692,6 +692,36 @@ export function install(rt) {
     return run
   }
 
+  async function reselectOwnRoute(agent, check) {
+    await rt.load()
+    const sessionId = agent.session.id
+    if (!rt.isBotSession(sessionId)) return false
+    const bot = rt.botOf(rt.selfOf(sessionId))
+    if (!bot?.model) return false
+    const canSelect = () => modelTargetLive(bot) && !rt.hostOwned?.(bot)
+      && !rt.pickingModel?.(bot.id) && !rt.switchingChat?.(bot.id)
+    if (!canSelect()) return false
+    const { model, effort: savedEffort } = bot
+    const noCommands = rt.botRunnerRequired?.(sessionId, agent) === true
+    const ref = await desiredModel(bot, { sessionId, session: agent.session, noCommands })
+    if (ref === undefined || await keepsCarriedRoute(sessionId, ref)) return false
+    const effort = await desiredEffort(bot, ref)
+    const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
+
+    // The selection queue can already be waiting for this Agent's creation to finish.
+    // Select on the Agent in hand without changing the profile's default model.
+    if (!canSelect() || !rt.isBotSession(sessionId) || rt.selfOf(sessionId) !== bot.id
+      || bot.model !== model || bot.effort !== savedEffort || !check(route)) return false
+    try {
+      rt.assertShellChoice?.(sessionId)
+    } catch {
+      return false
+    }
+    agent.model.select(route)
+    sessionSelections.set(sessionId, route)
+    return true
+  }
+
   const sameSelection = (a, b) => a.provider === b.provider && a.model === b.model && a.reasoningEffort === b.reasoningEffort
 
   // Read a stored route once, not on every forced apply; the live feed keeps it current.
@@ -910,7 +940,7 @@ export function install(rt) {
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
     defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
-    selectSessionModel, keepsCarriedRoute, applyModel, waitForModel, syncModels, routeRefused,
+    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, applyModel, waitForModel, syncModels, routeRefused,
     dropCatalog: () => { catalogCache = { at: 0, value: [] } },
   })
 }
