@@ -252,8 +252,7 @@ test('the mail send card is an editable show_view form card with the approval ru
   ruleBtn.props.onClick()
   click('Allow recipient')
   await flush()
-  assert.equal(ruleSets.length, 1)
-  assert.equal(ruleSets[0].mode, 'allow-recipient')
+  assert.equal(ruleSets.length, 0)
   assert.equal(flatten(collect(n => n.type === 'button' && n.props?.className === 'bt-mail-rule-btn')[0]).join(''), 'Allow recipient')
   // Manage rules opens Connectors settings.
   collect(n => n.type === 'button' && n.props?.className === 'bt-mail-rule-btn')[0].props.onClick()
@@ -274,6 +273,17 @@ test('the mail send card is an editable show_view form card with the approval ru
   assert.equal(answers[0][2].rule, 'allow-recipient')
   assert.equal(answers[0][2].fields.to, 'edited@corp.dev')
   assert.equal(answers[0][2].fields.body, 'Edited body')
+
+  click('Discard')
+  await flush()
+  assert.equal(answers[1][1], 'cancel')
+  assert.equal(Object.hasOwn(answers[1][2], 'rule'), false)
+
+  renderCell({ sessionId: 's1', callId: 'c1', roster, actions: { mailSendAnswer: (...args) => { answers.push(args) } } })
+  collect(n => n.type === 'form' && n.props?.className === 'dv-widget-form')[0].props.onSubmit({ preventDefault() {} })
+  await flush()
+  assert.equal(answers[2][1], 'send')
+  assert.equal(Object.hasOwn(answers[2][2], 'rule'), false)
 })
 
 test('a failed mail add shows the host message inside the form', async () => {
