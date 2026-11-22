@@ -29,7 +29,7 @@ import { UNANSWERED, agentInForeground, attachRefusal, attachWords, detachWords,
   paneLabels, paneOf, parentArgs, placementFrom, relabel, relabelPlan, relabelWarning, relabelWords, rowsOf, spaceOnly, spacePlace,
   freshSpare, roleOf, shellIdle, spareTab, startArgs, startRefusal, unwrapKeep } from "../launchArgs.js";
 import { tabSteps, workerSpace, workerTabName } from "../workerTab.js";
-import { addressOf, attachKey, attachLine, attachPath, attachRow, BOT_SHAPE, closingRow, confirmBindings, foldAttach, heldIn, machinesById, modeProblem, placeOf as placeOfRow, readAttach, verdictOf } from "../attach.js";
+import { addressOf, attachKey, attachLine, attachPath, attachRow, BOT_SHAPE, closingRow, confirmBindings, foldAttach, heldIn, machinesById, modeProblem, placeOf as placeOfRow, readAttach, validRow, verdictOf } from "../attach.js";
 import { isHcTerminalId } from "../hcProxy.mjs";
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { amPartEntryPath, amPartRunnerPath, briefingFilePath, briefingPath, installHook, launchBriefingText, runnerPath, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
@@ -52,7 +52,8 @@ import { automaticDelivery, hasRateLimitHold } from "../delivery.mjs";
 export { hasRateLimitHold } from "../delivery.mjs";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchEnvOf, launchHomeEnv, launchdNotLoaded, ledgerRivals,
-  lastText, latestResumeIn, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
+  lastText, latestResumeIn, lostSeatRefusal, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets,
+  sameBoot, seatHint, seatHomeOf, seatHomesRecorded, seatNow, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { firstLineWithIdentity, passReads, wholeTextWithIdentity } from "../sessionFiles.mjs";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, OLD_PACK_NAME, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
@@ -1301,7 +1302,7 @@ async function settleAttachView({ path, core, machines, ended, unknown }) {
   let holders = new Set();
   try { holders = holderMachineNames(); } catch { /* an unreadable pool is the caller's own error */ }
   const losses = [...holderLossEvents({ ended, core }), ...holderUnreachableEvents({ unknown, machines, core, holders })];
-  if (losses.length) recordHolderLosses(losses);
+  recordHolderLosses(losses, { core, machines, ended });
   if (ended.length) await sweep(path, ended);
 }
 
@@ -1441,6 +1442,9 @@ async function underLedger(fn, { local = false, importOnWrite = false } = {}) {
         const { live, ended, unknown } = await confirmBindings([binding], core, local ? localLookup : lookup, UNANSWERED, machines);
         if (live.length) return live[0];
         if (unknown.length) return { binding, get: null };
+        if (ended[0].get?.reason === "holder_lost") {
+          recordHolderLosses(holderLossEvents({ ended, core }), { core, machines, ended });
+        }
         ends.push(closingRow(binding, "end", "sweep", ended[0].reason));
         return null;
       };
@@ -4409,28 +4413,67 @@ function readLosses(limit = HOLDER_LOSSES_KEPT) {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line);
-      if (e && typeof e.holder === "string" && Array.isArray(e.agents)) out.push(e);
+      if (!e || typeof e.holder !== "string" || !Array.isArray(e.agents)) continue;
+      if (Array.isArray(e.seats)) e.seats = e.seats.filter((seat) => validRow({ ...seat, v: 1, event: "end" }));
+      else delete e.seats;
+      out.push(e);
     } catch { /* a torn line is left out, the rest is kept */ }
   }
   return out.slice(-limit);
 }
 
 /**
- * Appends the holder losses this run saw, once each, and says each one line. Bots and holder
- * names only: no path, socket, environment value or machine address.
+ * The local definition for a hint: undefined means unreadable, null means the bot is absent.
+ * A machine's folder is resolved on that machine by restart, so never read a local roster for it.
  */
-function recordHolderLosses(events) {
-  if (!events.length) return;
-  const known = readLosses(200);
-  const fresh = events.filter((e) => !known.some((k) => sameLoss(k, e)));
-  if (!fresh.length) return;
-  const path = holderLossPath();
+function lossSeatDef(seat, folder, core) {
+  if (seat.machine || !folder || !core || seat.core !== core) return undefined;
   try {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    for (const e of fresh) appendFileSync(path, `${JSON.stringify(e)}\n`, { mode: 0o600 });
-    chmodSync(path, 0o600);
-  } catch { /* a log that can't be written must not break the command; the line below still says it */ }
-  for (const e of fresh) report([lossLine(e)]);
+    const project = loadProject(folder);
+    if (project.text !== null) return project.file.bots.find((bot) => bot.id === seat.bot) ?? null;
+  } catch { /* the local definition can't be read */ }
+  return undefined;
+}
+
+function holderSeatLine(seat, folder, { core, machines }) {
+  const def = lossSeatDef(seat, folder, core);
+  const name = def?.name ?? seat.bot;
+  const who = def ? `${name} (${seat.bot})` : name;
+  const where = seat.machine ? addressOf(seat, machines) : `local/${seat.terminal}`;
+  const uncertain = seat.identity === "uncertain" ? " hc gave no creation stamp, so this may not be that seat." : "";
+  return `${who} was in ${where}. Its program may still be running in a holder cut off from the core: make sure it stopped before you start it again, or two agents run as ${name}.${uncertain} `
+    + seatHint({ seat, core, machines, folder, def });
+}
+
+const holderLossKeys = (losses) => new Set(losses.filter((e) => e.reason === "holder_lost").flatMap((e) => (e.seats ?? []).map(attachKey)));
+
+/**
+ * Append the losses this run saw. The log keeps seat identities; folders and advice are printed
+ * to stderr only. This can also run under the attach ledger's lock.
+ */
+function recordHolderLosses(events, { core, machines, ended }) {
+  if (!events.length) return;
+  const known = readLosses(Infinity);
+  const knownSeats = holderLossKeys(known);
+  const bindings = new Map(ended.map(({ binding }) => [attachKey(binding), binding]));
+  const path = holderLossPath();
+  for (const e of events) {
+    if (e.seats?.length ? e.seats.every((seat) => knownSeats.has(attachKey(seat))) : known.some((k) => sameLoss(k, e))) continue;
+    const lines = [lossLine(e)];
+    try {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      if (statSync(path, { throwIfNoEntry: false })?.isFile()) chmodSync(path, 0o600);
+      appendFileSync(path, `${JSON.stringify(e)}\n`, { mode: 0o600 });
+      known.push(e);
+      for (const seat of e.seats ?? []) knownSeats.add(attachKey(seat));
+    } catch (error) {
+      lines.push(`couldn't record this loss in holder-loss.log (${error?.message ?? error}); am holders losses won't list it`);
+    }
+    for (const seat of e.seats ?? []) {
+      lines.push(holderSeatLine(seat, bindings.get(attachKey(seat))?.project, { core, machines }));
+    }
+    report(lines);
+  }
 }
 
 /**
@@ -4445,10 +4488,19 @@ function holderLossEvents({ ended = [], core, at = new Date().toISOString() }) {
     const b = e.binding;
     const holder = b?.machine ? b.machine : (b?.core === core ? LOCAL_HOLDER : null);
     if (!holder) continue;
-    if (!groups.has(holder)) groups.set(holder, []);
-    groups.get(holder).push(b.bot);
+    const { created_ms, finished_ms } = e.get;
+    const uncertain = !Number.isInteger(created_ms);
+    if (!uncertain && created_ms !== b.created_ms) continue;
+    if (!groups.has(holder)) groups.set(holder, { seats: [], finished: Infinity });
+    const group = groups.get(holder);
+    group.seats.push({ ...b, ...(uncertain ? { identity: "uncertain" } : {}) });
+    if (Number.isSafeInteger(finished_ms) && Number.isFinite(new Date(finished_ms).getTime())) {
+      group.finished = Math.min(group.finished, finished_ms);
+    }
   }
-  return [...groups.entries()].map(([holder, agents]) => lossEvent({ at, holder, agents, reason: "holder_lost" }));
+  return [...groups.entries()].map(([holder, { seats, finished }]) => lossEvent({
+    at: finished === Infinity ? at : new Date(finished).toISOString(), holder, agents: seats, seats, reason: "holder_lost",
+  }));
 }
 
 /**
@@ -4516,6 +4568,34 @@ function restartOnHolder(opts, project, bot, held) {
   return PRINTED;
 }
 
+/** Read the ledger once for all the saved losses. An unreadable ledger gives no restart hints. */
+function holderLossReadback(losses) {
+  let rows = [];
+  if (losses.some((event) => event.seats?.length)) {
+    try { rows = readAttachFile() ?? []; } catch { /* the seat's state is unknown */ }
+  }
+  const fold = foldAttach(rows);
+  return losses.map((event) => ({ event, seats: event.seats?.map((seat) => ({ seat, ...seatNow(rows, seat, fold) })) }));
+}
+
+function holderLossJson({ event, seats }) {
+  return seats ? { ...event, seats: seats.map(({ seat, now }) => ({ ...seat, now })) } : event;
+}
+
+function holderLossText({ event, seats }, context) {
+  const lines = [`${event.at}  ${lossLine(event)}`];
+  if (!seats && event.reason !== "holder_unreachable") {
+    lines.push("  which panes is not on record (recorded before this version); check each bot with am show <bot>.");
+  }
+  for (const { seat, now, binding, folder } of seats ?? []) {
+    if (now === "attached_again") lines.push(`  ${seat.bot}: attached again since (in ${addressOf(binding, context.machines)})`);
+    else if (now === "detached") lines.push(`  ${seat.bot}: detached since`);
+    else if (now === "not_attached") lines.push(`  not attached again. ${holderSeatLine(seat, folder, context)}`);
+    else lines.push(`  ${seat.bot}: state unknown; check it with am show ${seat.bot}.`);
+  }
+  return lines;
+}
+
 /** `am holders`: the pool, the live count, the limit, and the losses it recorded. */
 export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
   if (rest.length) throw new CliError("holders takes one name at a time.", 2);
@@ -4523,10 +4603,11 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
     + " | holders losses [--all] | holders up";
   if (verb === undefined) {
     if (arg !== undefined) throw new CliError(usage, 2);
-    const { config, counts, connected } = await holderView();
+    const { config, counts, connected, view } = await holderView();
     const rows = holderRows({ config, counts, connected });
-    const losses = readLosses(opts.all ? 1000 : 5);
-    if (opts.json) return { limit: config.limit, holders: rows, losses };
+    const all = holderLossReadback(readLosses(opts.all || !opts.json ? Infinity : 5));
+    const losses = opts.all ? all : all.slice(-5);
+    if (opts.json) return { limit: config.limit, holders: rows, losses: losses.map(holderLossJson) };
     const lines = [`holders: limit ${config.limit} agents each${rows.length === 1 ? " (one holder: a holder loss ends every agent in it)" : ""}`];
     for (const h of rows) {
       const where = h.local ? "this computer" : `machine ${h.machine}${h.connected ? "" : " (away)"}`;
@@ -4538,14 +4619,22 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
     }
     if (losses.length) {
       lines.push("recent losses:");
-      for (const e of losses) lines.push(`  ${e.at}  ${lossLine(e)}`);
+      for (const loss of losses) lines.push(...holderLossText(loss, view).map((line) => `  ${line}`));
     }
+    const notAttached = new Set(all.flatMap(({ seats }) => (seats ?? [])
+      .filter(({ now }) => now === "not_attached").map(({ seat }) => attachKey(seat))));
+    if (notAttached.size) lines.push(`${notAttached.size} lost ${notAttached.size === 1 ? "seat" : "seats"} not attached again (am holders losses --all)`);
     return lines.join("\n");
   }
   if (verb === "losses") {
     if (arg !== undefined) throw new CliError("holders losses takes no name.", 2);
-    const losses = readLosses(opts.all ? 1000 : HOLDER_LOSSES_KEPT);
-    return opts.json ? { losses } : (losses.length ? losses.map((e) => `${e.at}  ${lossLine(e)}`).join("\n") : "no holder loss recorded");
+    const losses = holderLossReadback(readLosses(opts.all ? Infinity : HOLDER_LOSSES_KEPT));
+    if (opts.json) return { losses: losses.map(holderLossJson) };
+    if (!losses.length) return "no holder loss recorded";
+    const needsLocal = losses.some(({ seats }) => seats?.some(({ seat, now }) => !seat.machine && now === "not_attached"));
+    const needsMachines = losses.some(({ seats }) => seats?.some(({ seat, now }) => seat.machine && ["not_attached", "attached_again"].includes(now)));
+    const [core, machines] = await Promise.all([needsLocal ? coreId().catch(() => null) : null, needsMachines ? machinesNow() : new Map()]);
+    return losses.flatMap((loss) => holderLossText(loss, { core, machines })).join("\n");
   }
   if (verb === "limit") {
     if (arg === undefined) throw new CliError("holders limit needs a number.", 2);
@@ -4713,7 +4802,7 @@ async function cmdStart(opts, [ref], warnedRelabels, repairCliLinks) {
     const out = await running(localView);
     const { path, core, ended } = localView;
     const losses = holderLossEvents({ ended, core });
-    if (losses.length) recordHolderLosses(losses);
+    recordHolderLosses(losses, { core, ended });
     if (ended.length) await sweep(path, ended);
     if (out) return out;
   }
@@ -12800,12 +12889,19 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
   // A bot whose pane ends with another target's pane comes back with it (--tree), never twice.
   const byTerminal = new Map(ordered.filter((t) => t.pane === "shell").map((t) => [t.terminal, t]));
   const parentTarget = (t) => { const g = states.get(t.terminal)?.get; return t.pane === "shell" && g?.parent && g.die_with_parent !== false ? byTerminal.get(g.parent) ?? null : null; };
+  let recordedLosses;
   const plan = ordered.map((t) => {
     const bot = botOf(t);
     const why = !t.project ? "its attach row names no project" : !projectOfKey(t.project).file ? `${t.project} has no ${BOTS_PATH} that can be read`
       : !bot ? `${BOTS_PATH} no longer defines it` : bot.planned ? "it is planned, not started"
         : me && [t.terminal, states.get(t.terminal)?.get?.name].includes(me) ? "revive runs inside its pane; run it from another terminal" : null;
-    return { ...t, name: nameOf(t), bot: t.bot, def: bot, refuse: why, via: parentTarget(t) };
+    const seat = { ...t, core };
+    const get = states.get(t.terminal)?.get;
+    const loss = why ? null : lostSeatRefusal({ target: t, get, boot: Boolean(opts.boot), bootMs });
+    const recordedLoss = loss && t.swept && (recordedLosses ??= holderLossKeys(readLosses(Infinity))).has(attachKey(seat));
+    const refuse = loss ? `${recordedLoss ? "its holder loss is on record and " : ""}${loss.why}; make sure it stopped first. `
+      + seatHint({ seat, folder: t.project, def: bot, core }) : why;
+    return { ...t, name: nameOf(t), def: bot, refuse, refused: loss?.code ?? null, via: parentTarget(t) };
   });
   // #1413 F3: a record warning about a bot being brought back is said once, as start and restart do.
   for (const p of plan) if (p.def) warnProject(projectOfKey(p.project), p.bot);
@@ -12828,28 +12924,28 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
       p.refuse = `its live panes couldn't be checked (${stoppedReason(e)}), so nothing was started`;
     }
   }
-  for (const s of skipped) projectOfKey(s.project).results.push({ name: nameOf(s), bot: s.bot, outcome: "skipped", why: s.why, terminal: s.terminal, helpers: [] });
+  for (const s of skipped) projectOfKey(s.project).results.push({ name: nameOf(s), bot: s.bot, outcome: "skipped", why: s.why, refused: null, terminal: s.terminal, helpers: [] });
   if (dry) {
     const lines = plan.map((p) => `${p.name} (${p.bot}) in ${p.project ?? "no project"}: ${p.refuse ? `left alone, ${p.refuse}`
       : p.via ? `comes back with ${p.via.bot}, under its pane` : `would restart; its pane ${p.terminal} ${p.pane === "shell" ? "is a bare shell" : "is gone"}`}`);
     for (const s of skipped) lines.push(`${nameOf(s)} (${s.bot}) in ${s.project ?? "no project"}: left alone, ${s.why}`);
     return opts.json ? { dry: true, boot_ms: bootMs, targets: plan.map((p) => ({ bot: p.bot, name: p.name, project: p.project, terminal: p.terminal, pane: p.pane,
-      action: p.refuse ? "skip" : p.via ? "with-parent" : "restart", why: p.refuse ?? null })), skipped }
-      : lines.length ? lines.join("\n") : "Every bot the ledger names runs its agent: nothing to bring back.";
+      action: p.refuse ? "skip" : p.via ? "with-parent" : "restart", why: p.refuse ?? null, refused: p.refused })), skipped }
+      : lines.length ? lines.join("\n") : "There is nothing to bring back.";
   }
   const helped = new Map();
   for (const p of plan) {
     const results = projectOfKey(p.project).results;
-    if (p.refuse) { results.push({ name: p.name, bot: p.bot, outcome: p.def ? "skipped" : "failed", why: p.refuse, terminal: null, helpers: [] }); continue; }
+    if (p.refuse) { results.push({ name: p.name, bot: p.bot, outcome: p.def ? "skipped" : "failed", why: p.refuse, refused: p.refused, terminal: null, helpers: [] }); continue; }
     if (p.via) continue; // its parent's --tree brings it back; said there
     const r = await reviveOne(p, p.def);
     for (const h of r.helpers) if (h.bot) helped.set(`${p.project}\n${h.bot}`, h);
-    if (r.outcome !== "running") results.push({ name: p.name, bot: p.bot, ...r });
+    if (r.outcome !== "running") results.push({ name: p.name, bot: p.bot, ...r, refused: null });
   }
   // A bot that was to come back under its parent, and didn't (the parent failed, or --tree left it out): said as not back.
   for (const p of plan.filter((x) => x.via && !x.refuse)) {
     if (!helped.has(`${p.project}\n${p.bot}`)) {
-      projectOfKey(p.project).results.push({ name: p.name, bot: p.bot, outcome: "failed", terminal: null, helpers: [],
+      projectOfKey(p.project).results.push({ name: p.name, bot: p.bot, outcome: "failed", refused: null, terminal: null, helpers: [],
         why: `it was to come back under ${nameOf(p.via)}, which didn't bring it` });
     }
   }
@@ -12887,7 +12983,7 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
   } catch (e) { report([`revive: its record wasn't written (${opts.boot ? e?.code ?? "an error" : e?.message ?? e}).`]); }
   if (failed) exitAfter.code = 1;
   if (opts.json) return { ran: true, boot_ms: bootMs, projects: out };
-  if (!out.length) return "Every bot the ledger names runs its agent: nothing to bring back.";
+  if (!out.length) return "There is nothing to bring back.";
   // The login service's output goes to the user journal: counts only, no folder, no name.
   if (opts.boot) return countsLine(out);
   return out.map((p) => `${p.report}\n  ${p.sent ? `Sent to the main bot (${p.sent}).` : `Not sent: ${p.unsent}. It is kept in ${reviveReportPath()}.`}`).join("\n");

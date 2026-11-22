@@ -809,11 +809,17 @@ A restart of the computer ends every agent. herdr-core keeps each pane it was to
 puts a bare shell in it; a pane it did not keep is gone. `am revive` brings the bots
 back:
 
-- Every bot the attach ledger binds on this computer whose pane is gone, or is a bare shell, is
+- An eligible bot the attach ledger binds on this computer whose pane is gone, or is a bare shell, is
   restarted by `am restart --tree`: in its pane's space, tab and folder, resumed by
   its session id where its agent allows it, its helpers (workers included) under the new pane.
   The main bot comes first, each bot after its lead. A pane with a program in front is never
   touched.
+- Revive brings back a local seat ended by holder loss, or ended by a sweep since boot, only
+  in the login service's pass (`--boot`) and only if its attach row says it started more than
+  10 minutes before the estimated boot (wall clock minus uptime). The margin allows for small
+  clock adjustments. Revive reports why it leaves a seat alone and gives manual recovery advice
+  when the destination can be confirmed. After a sweep, `am holders losses` reports seats lost
+  to the holder.
 - Each project's main bot gets one message: who resumed, who is on a new conversation and why,
   who is not back, and the command that brings it back by hand. The same report is kept in
   `<app home>/automagik-herdr/revive-last.json` (it holds no session id).
@@ -927,18 +933,22 @@ host, and a bot started there runs the pack's normal linked-machine launch.
   `unknown in NAME/tN`, never stopped. `am restart` finds the bot's holder and runs the restart
   there. A worker started from a holder's pane runs in that holder (its `am` talks to that
   core). `am holders losses` reads back what each loss took; a lost holder and a dropped
-  machine line are recorded in `<app home>/automagik-herdr/holder-loss.log` as the holder's name
-  and the bot ids, never a path, socket or command line. Only a pool holder's dropped line is a
-  `holder_unreachable` record: a linked machine that isn't a holder has no seat in the spread.
+  machine line are recorded in `<app home>/automagik-herdr/holder-loss.log` with the holder's name
+  and bot IDs. A holder loss also records the seats' terminal IDs, creation stamps, core IDs and
+  machine names. The log and JSON output omit paths, sockets and commands. The loss report reads
+  the attach ledger to say whether each seat was attached again. Only a pool holder's dropped line
+  produces a `holder_unreachable` record.
 - A `holders.json` that isn't JSON, or whose limit or holder entries are bad, is said on stderr
   (so `--json` still parses) and the run keeps the one-holder default instead of silently
   turning spreading off; fix it with `am holders limit N` / `am holders add` / `remove`.
-- After a reboot, `am holders up` starts the extra holders, then `am restart <bot> --machine
-  NAME --project <folder> --tree` brings a holder's bot back (restart resumes its session as any
-  other restart does); `am revive` still brings back this computer's own bindings.
+- After a reboot, `am holders up` starts the extra holders. To bring a bot back on one, use
+  `am restart <bot> --machine NAME --project <folder>`. Restart uses the roster on that machine
+  and starts a new conversation for an unpaired bot with no old pane. On a machine, `--tree`
+  requires `--force`, which can replace a pane started in the meantime. After a holder loss while
+  the computer stayed up, check that the old program stopped before using the manual command from
+  `am holders losses`. The local hint excludes paired Hermes Bots.
 - The upstream half of #1432 - the core logging why it closes a holder's link, and a holder
-  whose link is gone not sweeping its programs - belongs to `herdrdev/herdr-core` (#303), not to
-  this pack.
+  whose link is gone not sweeping its programs - belongs to `herdrdev/herdr-core` (#372 and #303).
 
 ## The attach ledger
 
