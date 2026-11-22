@@ -2612,3 +2612,39 @@ test("#1557 the kill shim refuses a plain send when ls and get disagree", (t) =>
   assert.match(result.stderr, /different panes \(t101 and m\/t105\)/);
   assert.equal(calls(s).some(args => args.includes("send")), false);
 });
+
+test("the guard and proxy docs say what RFC 0044 decided for keys, attach, events and the list (#628)", () => {
+  // Whitespace is normalized: the README and the comment wrap sentences across lines.
+  const flat = (text) => text.replace(/\s+/g, " ");
+  const guard = readFileSync(join(MOD, "hcGuard.mjs"), "utf8");
+  const header = flat(guard.slice(0, guard.indexOf("\nimport ")).replace(/^\/\/ ?/gm, ""));
+  const readme = readFileSync(join(MOD, "..", "..", "README.md"), "utf8");
+  const at = readme.indexOf("## The hc guard (a guardrail, not a boundary)");
+  const end = readme.indexOf("\n\n`send` is scoped", at);
+  assert.ok(at >= 0 && end > at, "the README's guard section is found");
+  const section = flat(readme.slice(at, end));
+  const doc = readFileSync(join(MOD, "hcProxy.md"), "utf8");
+  // Two separate passages of hcProxy.md: the policy table's terminal.list row and the list paragraph.
+  const rowAt = doc.indexOf("| `terminal.list` |");
+  assert.ok(rowAt >= 0, "hcProxy.md's terminal.list policy row is found");
+  const row = flat(doc.slice(rowAt, doc.indexOf("\n", rowAt)));
+  const listAt = doc.indexOf("`terminal.list` is filtered");
+  assert.ok(listAt >= 0, "hcProxy.md's list paragraph is found");
+  const list = flat(doc.slice(listAt, doc.indexOf("\n\n", listAt)));
+  for (const [where, text] of [["hcGuard.mjs's header", header], ["the README's guard section", section]]) {
+    assert.doesNotMatch(text, /Both wait on herdr-core/, `${where} promises no joint upstream unlock for keys and attach`);
+    assert.match(text, /attach[^.]*refused for sandboxed panes for good \(RFC 0044 Q5\)/i, `${where}: attach is refused for good`);
+    assert.match(text, /keys[^.]*RFC 0044 delivery 6[^.]*\(R1-R3\)[^.]*\(R4, advertised as `checked_input`\)/i,
+      `${where}: keys waits on delivery 6, and checked_input is R4's per-write check`);
+  }
+  assert.doesNotMatch(header, /list and events are filtered/, "the proxy refuses the event subscription; it filters none");
+  assert.match(header, /refuses its event subscription/, "hcGuard.mjs's header: the proxy refuses the subscription");
+  const crossTeam = /by the recipient's role or the caller's\)?, which may belong to another team/;
+  for (const [where, text] of [["hcProxy.md's terminal.list row", row], ["hcProxy.md's list paragraph", list]]) {
+    assert.doesNotMatch(text, /(other teams'|another team's) panes (are|and)[^.|]*(left out|never named)/i,
+      `${where} does not claim other teams' panes are always left out`);
+    assert.match(text, crossTeam, `${where} names the authorized cross-team recipients, by either role`);
+  }
+  assert.match(row, /linked-machine row[^|]*left out, and the `machines` inventory is empty/, "the row keeps machines out");
+  assert.match(list, /as the core answered it, nested fields included/, "hcProxy.md: only the envelope is reviewed");
+});
