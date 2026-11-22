@@ -13,6 +13,7 @@ import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { GITHUB_TOKEN_DAYS, GITHUB_WORK, cleanGitHubWork, githubPermissions, isGitHubTokenName } from '../shared/github-token.js'
 import { replaceFile } from './files.js'
 import { output } from './tools.js'
+import { CONNECTOR_SECRET_REF, envSecretOf } from './connectors/catalog.js'
 import {
   hashicorp, hashicorpCloud, hashicorpItem, hashicorpItems, hashicorpMismatch,
   validHashicorpConnection, validHashicorpField, validHashicorpMount, validHashicorpPath,
@@ -33,6 +34,9 @@ export const ENV_PREFIX = 'DSH_SECRET_'
 // stands alone: no letter or digit right before or after it.
 export const MIN_VALUE = 4
 export const WHOLE_VALUE = 8
+const looksLikeConnectorCredential = value => !/\s/.test(value) && (
+  value.length >= 16 || (value.length >= WHOLE_VALUE && /\p{L}/u.test(value) && /[\p{N}\p{P}\p{S}]/u.test(value))
+)
 // A piece of a secret left at a cut edge: shorter pieces (a path segment, a host
 // name) are too short to tell from ordinary text.
 export const EDGE_MIN = 12
@@ -809,8 +813,40 @@ export function install(rt) {
   let mutations
   let redact = text => text
   let redactAnywhere = text => text
+  let savedRedactionEntries = []
+  let outputRedaction
   let refreshEnv = () => {}
   let stopped = false
+
+  const redactorForOutput = () => {
+    const connectorFields = Object.entries(state.connectors ?? {}).map(([id, saved]) => [id, saved?.custom?.headers, saved?.custom?.env])
+    const connectorKey = JSON.stringify(connectorFields)
+    if (outputRedaction !== undefined && outputRedaction.connectorKey === connectorKey) return outputRedaction.redact
+    // Credential-like connector fields are only used to mask tool and model output.
+    const entries = []
+    for (const [id, headers, env] of connectorFields) {
+      for (const [fields, prefix] of [[headers, 'HEAD_'], [env, '']]) {
+        for (const [key, value] of Object.entries(fields ?? {})) {
+          if (typeof value !== 'string' || value.length < WHOLE_VALUE || !/key|token|secret|password|auth|bearer|cookie/i.test(key)) continue
+          const name = envSecretOf(id, `${prefix}${key}`)
+          const parts = value.split(CONNECTOR_SECRET_REF)
+          // The captured secret names alternate with literal text.
+          for (let i = 0; i < parts.length; i += 2) {
+            const literal = parts.length === 1 ? parts[i] : parts[i].trim()
+            const normalized = prefix === 'HEAD_' ? literal.trim() : literal
+            const token = /^(?:Bearer|Basic)\s+(\S+)$/i.exec(normalized)?.[1]
+            if (!looksLikeConnectorCredential(token ?? normalized)) continue
+            entries.push({ name, value: literal })
+            if (normalized !== literal) entries.push({ name, value: normalized })
+            if (token !== undefined) entries.push({ name, value: token })
+          }
+        }
+      }
+    }
+    const mask = entries.length > 0 ? redactor([...savedRedactionEntries, ...entries]) : savedRedactionEntries.length > 0 ? redact : undefined
+    outputRedaction = { connectorKey, redact: mask }
+    return mask
+  }
 
   const changed = () => {
     for (const name of sources.keys()) {
@@ -823,6 +859,8 @@ export function install(rt) {
     }
     redact = redactor(entries)
     redactAnywhere = redactor(entries, { wholeWords: false })
+    savedRedactionEntries = entries
+    outputRedaction = undefined
     refreshEnv()
     return rt.secretsChanged?.()
   }
@@ -2523,8 +2561,9 @@ export function install(rt) {
   // re-renders a changed success result from its redacted value.
   ctx.on('tools/execute', async function redactToolResult(exec, next) {
     const result = await next()
-    if ((secrets.size === 0 && dualValues.size === 0) || result === null || typeof result !== 'object') return result
-    return redactDeep(result, redact)
+    if (result === null || typeof result !== 'object') return result
+    const mask = redactorForOutput()
+    return mask === undefined ? result : redactDeep(result, mask)
   })
 
   // Anything that still carries a value (the user pasted it, an earlier part kept it)
@@ -2535,10 +2574,12 @@ export function install(rt) {
   // The agent loop mark belongs to the request object, so carry it to the copy
   // to keep agent routes accepting the redacted request.
   const rewritten = new WeakSet()
-  ctx.on('llm/stream', (options, next) => {
-    if ((secrets.size === 0 && dualValues.size === 0) || rewritten.has(options.messages)) return next()
-    const messages = redactDeep(options.messages, redact)
-    const system = redactDeep(options.system, redact)
+  ctx.on('llm/stream', function redactModelRequest(options, next) {
+    if (rewritten.has(options.messages)) return next()
+    const mask = redactorForOutput()
+    if (mask === undefined) return next()
+    const messages = redactDeep(options.messages, mask)
+    const system = redactDeep(options.system, mask)
     if (messages === options.messages && system === options.system) return next()
     const fresh = [...(messages ?? [])]
     rewritten.add(fresh)

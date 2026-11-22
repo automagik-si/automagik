@@ -84,6 +84,7 @@ export const refreshSecretOf = id => `${secretPrefix(id)}_REFRESH`
 export const clientSecretOf = id => `${secretPrefix(id)}_CLIENT_SECRET`
 export const keySecretOf = id => `${secretPrefix(id)}_KEY`
 export const envSecretOf = (id, name) => `${secretPrefix(id)}_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`.slice(0, 64)
+export const CONNECTOR_SECRET_REF = /\$DSH_SECRET_([A-Z][A-Z0-9_]*)/g
 
 // Custom connector ids come from the name the user typed; never a catalog id.
 export function customId(name, taken) {

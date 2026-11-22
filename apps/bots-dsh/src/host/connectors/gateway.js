@@ -8,6 +8,7 @@ import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
+import { isIPv4 } from 'node:net'
 
 const FORWARD_HEADERS = ['mcp-session-id', 'mcp-protocol-version', 'last-event-id', 'accept', 'content-type']
 const RETURN_HEADERS = ['content-type', 'mcp-session-id', 'mcp-protocol-version']
@@ -30,10 +31,19 @@ const sseMessage = (body) => {
   return frames.length === 1 ? frames[0] : null
 }
 
-// Upstreams are https; loopback HTTP is allowed for local custom servers.
-const loopbackHttp = url => /^http:\/\/(127\.|localhost|::1)/i.test(String(url))
-const upstreamRequest = (target, init, onResponse) =>
-  (target.protocol === 'http:' && loopbackHttp(target) ? httpRequest : httpsRequest)(target, init, onResponse)
+// Upstreams use HTTPS or local HTTP. URL canonicalizes IP literals before the check.
+export function parseConnectorUrl(address) {
+  if (typeof address !== 'string' || !/^https?:\/\//i.test(address)) return undefined
+  let url
+  try { url = new URL(address) } catch { return undefined }
+  // URL drops empty userinfo, so check its delimiter too.
+  if (url.username !== '' || url.password !== '' || /^https?:[/\\]*:?@/i.test(address.replace(/[\t\r\n]/g, ''))) return undefined
+  const { protocol, hostname } = url
+  if (protocol === 'https:' || (protocol === 'http:' && (
+    hostname === 'localhost' || hostname === 'localhost.' || hostname === '[::1]' || (isIPv4(hostname) && hostname.startsWith('127.'))
+  ))) return url
+  return undefined
+}
 
 const readAll = stream => new Promise((resolve, reject) => {
   if (stream.errored) { reject(stream.errored); return }
@@ -89,7 +99,8 @@ export function createGateway({ credential, readOnly, onUnauthorized, log = () =
 
   async function sendUpstream(id, entry, method, path, headers, body) {
     return new Promise((resolve, reject) => {
-      const target = new URL(entry.url)
+      const target = parseConnectorUrl(entry.url)
+      if (target === undefined) throw new Error('connector address must be https')
       const suffix = new URL(path, 'http://x')
       if (suffix.pathname !== '/') {
         target.pathname = `${target.pathname.replace(/\/$/, '')}/${suffix.pathname.replace(/^\//, '')}`
@@ -98,7 +109,8 @@ export function createGateway({ credential, readOnly, onUnauthorized, log = () =
       const outgoing = { ...entry.headers }
       for (const name of FORWARD_HEADERS) if (headers[name] !== undefined) outgoing[name] = headers[name]
       if (body !== undefined) outgoing['content-length'] = body.length
-      const req = upstreamRequest(target, { method, headers: outgoing }, upstream => {
+      const request = target.protocol === 'http:' ? httpRequest : httpsRequest
+      const req = request(target, { method, headers: outgoing }, upstream => {
         // This listener must exist before refresh awaits: the response can fail
         // before the handler starts consuming it.
         upstream.on('error', reject)
@@ -119,7 +131,7 @@ export function createGateway({ credential, readOnly, onUnauthorized, log = () =
       res.end(JSON.stringify({ error: 'connector not connected' }))
       return
     }
-    if (!/^https:\/\//i.test(entry.url) && !loopbackHttp(entry.url)) {
+    if (parseConnectorUrl(entry.url) === undefined) {
       res.writeHead(502, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ error: 'connector address must be https' }))
       return
