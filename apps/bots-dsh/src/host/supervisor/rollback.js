@@ -139,7 +139,7 @@ export function restoreData(config, run, save, team = teamSnapshot(config, run))
       if (!lost) {
         const version = live && (live.version === undefined ? 0 : live.version)
         if (!format(version) || !team.reads) return skip('unknown')
-        if (version <= Math.max(...team.reads)) return skip('same-format')
+        if (team.reads.includes(version)) return skip('same-format')
       }
       intent = { path: team.path, snapshot: team.snapshot, trialHash: trial === undefined ? null : digest(trial),
         snapshotHash: team.snapshotHash, ...(lost ? { why: 'team-lost' } : {}) }

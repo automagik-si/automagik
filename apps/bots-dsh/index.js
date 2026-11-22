@@ -6,12 +6,15 @@
 // DSH's and from other plugins'.
 import { randomBytes } from 'node:crypto'
 import fs, { cpSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { selectorRoutePolicy } from './src/shared/routes.js'
 import { DEFAULT_ROUTE_POLICY } from './src/shared/route-policy.js'
 import * as diagnostics from './src/host/diagnostics.js'
 import * as extend from './src/host/extend.js'
 import * as store from './src/host/store.js'
+import { CONNECTOR_KEY, CONNECTOR_KEY_ORIGINS, connectorKeyOriginName, keyFileName, publishConnectorKey, readConnectorKey, readConnectorKeyOrigins } from './src/host/connectors/credential-key.js'
+import { checkImportedCredentials } from './src/host/connectors/credential-state.js'
+import { writeBytesAtomic } from './src/host/supervisor/store.js'
 import * as addressPolicy from './src/host/address-policy.js'
 import * as models from './src/host/models.js'
 import * as modelState from './src/host/model-state.js'
@@ -154,8 +157,51 @@ export function apply(ctx, config = {}) {
 // A team kept elsewhere before (config.importHome, e.g. ~/.dsh/bot) is copied in once,
 // when the home has no team yet. Only on request: the source is left as it was.
 function importTeam(home, from) {
-  if (!from || existsSync(join(home, 'state.json')) || !existsSync(join(from, 'state.json'))) return false
-  cpSync(from, home, { recursive: true, force: false, filter: source => !source.endsWith('state.lock') && !/[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source) })
+  if (!from) return false
+  const sourceState = join(from, 'state.json')
+  const destinationState = join(home, 'state.json')
+  if (existsSync(destinationState) || !existsSync(sourceState)) return false
+  const copyHome = keyed => cpSync(from, home, { recursive: true, force: false, filter: source => {
+    if (source.endsWith('state.lock') || /[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source)) return false
+    if (dirname(source) !== from) return true
+    const name = basename(source)
+    return !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && (!keyed || source !== sourceState)
+  } })
+  const stateBytes = fs.readFileSync(sourceState)
+  const sourceKey = readConnectorKey(join(from, CONNECTOR_KEY))
+  checkImportedCredentials(stateBytes, sourceKey)
+  if (sourceKey.missing) {
+    copyHome(false)
+    return true
+  }
+  if (sourceKey.bytes === undefined) throw new Error('The imported Bot team needs a readable connector key.')
+
+  const destinationPath = join(home, CONNECTOR_KEY)
+  const checkDestination = () => {
+    const destination = readConnectorKey(destinationPath)
+    if (!destination.missing && !destination.bytes?.equals(sourceKey.bytes)) throw new Error('The imported Bot team needs a matching connector key.')
+    return destination
+  }
+  const destination = checkDestination()
+  // Remember the other homes that hold this key before publishing the copy.
+  const origins = new Set([from, fs.realpathSync(from), ...readConnectorKeyOrigins(from)])
+  const originDir = join(home, CONNECTOR_KEY_ORIGINS)
+  fs.mkdirSync(originDir, { recursive: true, mode: 0o700 })
+  for (const origin of origins) {
+    writeBytesAtomic(join(originDir, connectorKeyOriginName(origin)), origin, { durable: process.platform !== 'win32' })
+  }
+  if (destination.missing) {
+    try { publishConnectorKey(destinationPath, sourceKey.bytes) } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      checkDestination()
+    }
+  }
+  copyHome(true)
+  if (checkDestination().missing) throw new Error('The imported Bot team needs a matching connector key.')
+  try { writeBytesAtomic(destinationState, stateBytes, { exclusive: true }) } catch (error) {
+    if (error?.code !== 'EEXIST') throw error
+    return false
+  }
   return true
 }
 

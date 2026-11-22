@@ -13,6 +13,7 @@ import { isIPv4 } from 'node:net'
 const FORWARD_HEADERS = ['mcp-session-id', 'mcp-protocol-version', 'last-event-id', 'accept', 'content-type']
 const RETURN_HEADERS = ['content-type', 'mcp-session-id', 'mcp-protocol-version']
 const RETRYABLE = new Set(['GET', 'POST', 'DELETE'])
+const unmasked = text => text
 
 const nonceMatches = (header, nonce) => {
   const given = /^Bearer\s+(.+)$/i.exec(String(header ?? ''))?.[1] ?? ''
@@ -53,7 +54,7 @@ const readAll = stream => new Promise((resolve, reject) => {
   stream.on('error', reject)
 })
 
-export function createGateway({ credential, readOnly, onUnauthorized, log = () => {} }) {
+export function createGateway({ credential, readOnly, onUnauthorized, log = () => {}, redactor = () => undefined }) {
   const nonce = randomBytes(24).toString('base64url')
   let server = null
   let port = 0
@@ -124,7 +125,7 @@ export function createGateway({ credential, readOnly, onUnauthorized, log = () =
     })
   }
 
-  async function handle(id, req, res) {
+  async function handle(id, req, res, redact) {
     const entry = credential(id)
     if (entry === undefined) {
       res.writeHead(404, { 'content-type': 'application/json' })
@@ -203,7 +204,7 @@ export function createGateway({ credential, readOnly, onUnauthorized, log = () =
       }
       if (upstream.errored) throw upstream.errored
     } catch (error) {
-      log('omni-ui: connector gateway %s: %s', id, error?.message ?? error)
+      log('omni-ui: connector gateway %s: %s', id, redact(String(error?.message ?? error)))
       res.writeHead(502, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ error: 'connector upstream failed' }))
       return
@@ -253,13 +254,14 @@ export function createGateway({ credential, readOnly, onUnauthorized, log = () =
           res.end()
           return
         }
-        handle(found[1], req, res).catch((error) => {
-          log('omni-ui: connector gateway: %s', error?.message ?? error)
+        const redact = redactor() ?? unmasked
+        handle(found[1], req, res, redact).catch((error) => {
+          log('omni-ui: connector gateway: %s', redact(String(error?.message ?? error)))
           if (res.headersSent) res.destroy()
           else { res.writeHead(502); res.end() }
         })
       })
-      server.on('error', error => log('omni-ui: connector gateway server failed: %s', error?.code ?? 'error'))
+      server.on('error', error => log('omni-ui: connector gateway server failed: %s', (redactor() ?? unmasked)(String(error?.code ?? 'error'))))
       await new Promise((resolve, reject) => {
         server.once('error', reject)
         server.listen(0, '127.0.0.1', resolve)

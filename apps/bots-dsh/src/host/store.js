@@ -7,10 +7,13 @@ import { mkdir, unlink, writeFile } from 'node:fs/promises'
 
 import { join } from 'node:path'
 import { piAiClaudeOf } from './claude-models.js'
+import { KEY_ERROR } from './connectors/credential-key.js'
+import { connectorState, ENCRYPTED_STATE_VERSION } from './connectors/credential-state.js'
 import { LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
 import { replaceFile } from './files.js'
 import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
+import { refusal } from './refusal.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import updateContract from './update-contract.json' with { type: 'json' }
@@ -30,6 +33,7 @@ export const own = (table, key) => (table != null && Object.hasOwn(table, key) ?
 
 export function install(rt) {
   const { ctx, home, statePath } = rt
+  const credentials = connectorState(home, () => rt.ownsLockForPendingWrite())
 
   /** @type {{version:2, workspaceId?:string, mainBotIds:string[], bots:Record<string,any>, privateArchives:any[], rooms:Record<string,any>, agents:Record<string,any>, sections:any[], capabilities:{items:Record<string,any>}, exchanges:any[], exchangeTurns:Record<string,number[]>, revision:number}} */
   const state = { version: STATE_VERSION, mainBotIds: [], bots: {}, privateArchives: [], rooms: {}, agents: {}, sections: [], capabilities: { items: {} }, exchanges: [], exchangeTurns: {}, works: {}, requests: {}, questions: {}, views: {}, closedCards: {}, prefs: {}, switching: {}, revision: 0 }
@@ -230,7 +234,7 @@ export function install(rt) {
       stuck = undefined
       return parsed
     }
-    stuck = version !== undefined && version > STATE_VERSION
+    stuck = version !== undefined && version > Math.max(...COMPATIBLE_VERSIONS)
       ? 'saved by a newer Omni; update Omni'
       : `saved by an Omni this version cannot read (format ${JSON.stringify(raw)?.slice(0, 24)})`
     return undefined
@@ -246,16 +250,17 @@ export function install(rt) {
     teamRead = false
     const valid = parsed !== null && parsed !== undefined ? true : stuck === undefined && !aside
     const hadCapabilities = parsed !== null && parsed !== undefined && Object.hasOwn(parsed, 'capabilities')
+    credentials.decode(parsed)
     for (const key of Object.keys(state)) delete state[key]
     Object.assign(state, JSON.parse(EMPTY), parsed ?? {})
-    // Every read ends in the current format; the next save writes this stamp.
+    // The serializer stamps the format of the saved fields.
     state.version = STATE_VERSION
     state.prefs ??= {}
     // Teams saved before the DSH Agent existed carry no `agents`; corrupt values reset.
     if (state.agents === null || typeof state.agents !== 'object' || Array.isArray(state.agents)) state.agents = {}
     // `computer` is the computer-use switch; absent or corrupt means off.
     if (state.computer === null || typeof state.computer !== 'object' || Array.isArray(state.computer)) state.computer = {}
-    let migrated = !hadCapabilities || parsed?.version !== STATE_VERSION
+    let migrated = !hadCapabilities || (parsed?.version !== STATE_VERSION && parsed?.version !== ENCRYPTED_STATE_VERSION)
     if (state.autoStamp !== state.revision && rt.dropAutoMarks()) migrated = true
     if (holder !== undefined) rt.dropAutoMarks()
     // The single DSH Agent of older teams splits into a DSH bot and the tasks record (agents.js).
@@ -467,6 +472,7 @@ export function install(rt) {
     indexSessions()
     rt.hostAuthority?.restore()
     teamRead = valid
+    if (lockEpoch > 1) rt.connectorStateChanged?.()
     return { migrated: migrated || stale.length > 0, stale }
   }
 
@@ -498,18 +504,30 @@ export function install(rt) {
   // `writing` — and behind any adopt already queued — so no save or second
   // refresh slips between finding the change and the adopt.
   let adopting
+  let recoveryPending = false
+  const mayInitializeRecoveryKey = () => {
+    try { return JSON.parse(readFileSync(statePath))?.version !== ENCRYPTED_STATE_VERSION } catch { return false }
+  }
   const adoptAfterReclaim = () => {
     const run = (adopting ?? writing).then(async () => {
       if (stamp() !== seen) {
         const aside = `${statePath}.replaced-${Date.now()}`
+        const snapshot = credentials.encode(state, { initializeKey: mayInitializeRecoveryKey() })
         try {
-          await writeFile(aside, JSON.stringify(state))
+          if (snapshot.pending || snapshot.refused || !snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
+          await writeFile(aside, snapshot.bytes, { mode: 0o600, flag: 'wx' })
           warn('ds-bot: %s changed while no host held the team; it is adopted and this host\'s state is kept as %s', statePath, aside)
         } catch (error) {
+          if (snapshot.encrypted || snapshot.pending || snapshot.refused) {
+            recoveryPending = true
+            warn('ds-bot: keeping the current Bot team open until its recovery copy can be saved: %s', error)
+            throw error
+          }
           warn('ds-bot: %s changed while no host held the team; it is adopted, and this host\'s state is lost because it could not be kept aside: %s', statePath, error)
         }
       }
       adopt(readFileState())
+      recoveryPending = false
     })
     writing = run.catch(() => {})
     const tracked = run.finally(() => { if (adopting === tracked) adopting = undefined })
@@ -555,6 +573,11 @@ export function install(rt) {
       warn('omni-ui: %s', readOnly())
     }
     if (adopting !== undefined) return adopting
+    if (recoveryPending && rt.holdsLock()) {
+      await adoptAfterReclaim()
+      lockGained()
+      return
+    }
     if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) adopt(readFileState())
   }
 
@@ -584,7 +607,7 @@ export function install(rt) {
       if (holder === undefined) {
         // A changed file is adopted first; the save queues behind that adopt.
         const pending = reclaimHeld()
-        if (pending !== undefined) void pending.then(lockGained, lockGained)
+        if (pending !== undefined) void pending.then(lockGained, () => {})
         else queueMicrotask(lockGained)
         return true
       }
@@ -631,14 +654,14 @@ export function install(rt) {
     if (afterWrite !== undefined) {
       let revision
       return writeSnapshot(() => {
-        const copy = JSON.parse(JSON.stringify(state))
+        const copy = credentials.clone(state)
         change(copy)
         refreshShellHolds(copy.bots, { log: false })
         revision = state.revision + 1
         copy.revision = copy.autoStamp = revision
         copy.version = STATE_VERSION
         copy.exchanges = copy.exchanges.slice(-MAX_EXCHANGES)
-        return JSON.stringify(copy)
+        return copy
       }, {
         required: true,
         epoch: lockEpoch,
@@ -656,13 +679,21 @@ export function install(rt) {
     state.autoStamp = state.revision
     state.version = STATE_VERSION
     state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
-    const copy = JSON.parse(JSON.stringify(state))
+    const copy = credentials.clone(state)
     change(copy)
     refreshShellHolds(copy.bots, { log: false })
     // Permission copies belong to the state the caller inspected. Never apply one
     // to a replacement team adopted while this write waited.
-    const snapshot = JSON.stringify(copy)
-    return writeSnapshot(() => snapshot, { required: true, epoch: lockEpoch })
+    const useLiveConnectors = JSON.stringify(copy.connectors) === JSON.stringify(state.connectors)
+    return writeSnapshot(() => {
+      // Permission copies take the current connector rows when their changes only touch other settings.
+      if (useLiveConnectors && state.connectors !== undefined) copy.connectors = state.connectors
+      else if (useLiveConnectors) delete copy.connectors
+      if (copy.revision < state.revision) copy.revision = copy.autoStamp = state.revision + 1
+      return copy
+    }, { required: true, epoch: lockEpoch, afterWrite: () => {
+      if (copy.revision > state.revision) state.revision = state.autoStamp = copy.revision
+    } })
   }
 
   const save = ({ required = false, copy } = {}) => {
@@ -679,10 +710,11 @@ export function install(rt) {
       state.autoStamp = state.revision
       state.version = STATE_VERSION
       state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
-      return JSON.stringify(state)
+      return state
     }, { required })
   }
 
+  let warnedCredentialSave = false
   const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch, beforeCommit, afterWrite } = {}) => {
     const run = writing.then(async () => {
       // An adopt ahead of this save may have made the team read-only.
@@ -697,7 +729,6 @@ export function install(rt) {
       }
       const epoch = copyEpoch ?? lockEpoch
       // Ordinary saves use the adopted state, not a snapshot of the replaced team.
-      const snapshot = snapshotOf()
       const temp = `${statePath}.${process.pid}.tmp`
       try {
         await mkdir(home, { recursive: true })
@@ -716,14 +747,22 @@ export function install(rt) {
           }
         }
         ensureLock()
-        await writeFile(temp, snapshot, 'utf8')
+        const snapshot = credentials.encode(snapshotOf())
+        if (snapshot.refused) throw refusal(KEY_ERROR)
+        if (snapshot.pending && !warnedCredentialSave) {
+          warnedCredentialSave = true
+          warn('ds-bot: %s', KEY_ERROR)
+        }
+        await writeFile(temp, snapshot.bytes, 'utf8')
         const ensureCommit = () => {
           ensureLock()
           beforeCommit?.()
+          if (!snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
         }
         ensureCommit()
         await replaceFile(temp, statePath, ensureCommit)
         seen = stamp()
+        snapshot.commit()
         afterWrite?.()
         // The file now holds this team, a fresh one after a corrupt file included.
         if (stuck === undefined) teamRead = true
@@ -976,6 +1015,8 @@ export function install(rt) {
 
   Object.assign(rt, {
     state, load, save, refresh, readOnly, teamLoaded,
+    connectorCredentialsUnavailable: credentials.hasUnavailable,
+    retryConnectorCredentials: () => credentials.retry(state.connectors),
     // The first read distinguishes an absent roster from a saved empty team.
     teamHealth: () => teamPresentAtLoad !== null && teamRead && stuck === undefined && !aside
       ? { present: teamPresentAtLoad, revision: state.revision, bots: Object.keys(state.bots).length } : null,

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'
 import { syncBuiltinESMExports } from 'node:module'
@@ -8,14 +9,17 @@ import os, { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Readable } from 'node:stream'
 import { test } from 'node:test'
+import { setImmediate as immediate } from 'node:timers/promises'
 import { createRuntime } from '../index.js'
 import { createGateway } from '../src/host/connectors/gateway.js'
+import { CONNECTOR_KEY, CREDENTIAL_UNAVAILABLE, KEY_ERROR } from '../src/host/connectors/credential-key.js'
 import { fakeContext } from './fake-ctx.js'
 
 // Exercise the real gateway routing without opening sockets or resolving names.
 function transport(t) {
   const requests = []
   const listeners = []
+  const io = { listeners, requests, error: undefined }
   t.mock.method(http, 'createServer', listener => {
     listeners.push(listener)
     return Object.assign(new EventEmitter(), {
@@ -27,6 +31,7 @@ function transport(t) {
   for (const protocol of [http, https]) {
     t.mock.method(protocol, 'request', (url, options, response) => {
       requests.push({ protocol, url: String(url), headers: options.headers })
+      if (io.error !== undefined) throw io.error(options.headers)
       return Object.assign(new EventEmitter(), { end: () => {
         response(Object.assign(Readable.from(['ok']), { statusCode: 200, headers: {} }))
       } })
@@ -34,11 +39,16 @@ function transport(t) {
   }
   syncBuiltinESMExports()
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
-  return { listeners, requests }
+  return io
 }
 
 async function team(t, extra = {}, learning) {
   const home = mkdtempSync(join(tmpdir(), 'dsb-connector-security-'))
+  const contexts = []
+  t.after(async () => {
+    for (const ctx of contexts.reverse()) await ctx.dispose()
+    rmSync(home, { recursive: true, force: true })
+  })
   const path = join(home, 'state.json')
   const bot = id => ({ id, sessionId: id, name: id, role: 'Reader', instructions: '', createdAt: 1 })
   writeFileSync(path, JSON.stringify({
@@ -49,16 +59,31 @@ async function team(t, extra = {}, learning) {
     mkdirSync(join(home, 'learning'))
     writeFileSync(join(home, 'learning', 'state.json'), JSON.stringify(learning))
   }
-  const ctx = fakeContext({ services: { loader: { import: async () => ({ name: 'mcp', apply() {} }) } } })
-  const mounts = []
-  ctx.plugin = (_plugin, config) => {
-    mounts.push(config)
-    return { await: async () => {}, dispose() {} }
+  const open = async (options = {}) => {
+    const ctx = fakeContext({ services: { loader: { import: async () => ({ name: 'mcp', apply() {} }) } } })
+    const register = ctx.connection.fetch.register
+    let route
+    ctx.connection.fetch.register = options => {
+      if (options.path === '/api/omni-ui') route = options
+      return register(options)
+    }
+    const post = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/omni-ui', {
+      method: 'POST', body: JSON.stringify({ endpoint, payload }),
+    }))).json()
+    const mounts = []
+    const warnings = []
+    ctx.plugin = (_plugin, config) => {
+      mounts.push(config)
+      return { await: async () => options.start?.(config), dispose: () => options.dispose?.(config) }
+    }
+    const rt = createRuntime(ctx, { home, github: false, ...options.config })
+    rt.warn = (...args) => warnings.push(args)
+    contexts.push(ctx)
+    await rt.load()
+    return { ctx, rt, mounts, warnings, post, call: (name, body) => rt.connectorEndpoint(`connector-${name}`, body) }
   }
-  const rt = createRuntime(ctx, { home, github: false })
-  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
-  await rt.load()
-  return { ctx, rt, home, path, mounts, call: (name, body) => rt.connectorEndpoint(`connector-${name}`, body) }
+  const first = await open()
+  return { ...first, home, path, open }
 }
 
 function importFrom(t, home, servers) {
@@ -74,17 +99,25 @@ async function dispatch(io, url) {
   const gw = createGateway({ credential: () => ({ url, headers: {} }), readOnly: () => false })
   await gw.listen()
   try {
-    const req = Object.assign(new EventEmitter(), {
-      method: 'GET', url: new URL(gw.urlFor('svc')).pathname, headers: { authorization: gw.headers().Authorization },
-    })
-    const res = new PassThrough()
-    res.writeHead = status => { res.statusCode = status }
-    io.listeners.at(-1)(req, res)
-    let body = ''
-    for await (const chunk of res) body += chunk
-    return { status: res.statusCode, body }
+    return await dispatchTo(io, gw, 'svc')
   } finally { await gw.close() }
 }
+
+async function dispatchTo(io, gw, id) {
+  const req = Object.assign(new EventEmitter(), {
+    method: 'GET', url: new URL(gw.urlFor(id)).pathname, headers: { authorization: gw.headers().Authorization },
+  })
+  const res = new PassThrough()
+  res.writeHead = status => { res.statusCode = status }
+  io.listeners.at(-1)(req, res)
+  let body = ''
+  for await (const chunk of res) body += chunk
+  return { status: res.statusCode, body }
+}
+
+const onDisk = path => JSON.parse(readFileSync(path, 'utf8'))
+const envValue = (saved, id, name = 'TOKEN') => saved.connectors[id].custom.env[name]
+const fakeValue = ['fixture', 'credential9'].join('-')
 
 test('both output hooks mask connector credential literals with an empty Secrets store', async (t) => {
   transport(t)
@@ -234,4 +267,302 @@ test('add, import and dispatch accept HTTPS, localhost and IPv4 loopback', async
     assert.deepEqual(await dispatch(io, url), { status: 200, body: 'ok' })
     assert.equal(io.requests.at(-1).protocol, new URL(url).protocol === 'http:' ? http : https)
   }
+})
+
+test('connector snapshots keep credentials encrypted at rest and preserve settings through restart', async (t) => {
+  const io = transport(t)
+  const { ctx, home, path, open } = await team(t)
+  const legacyObject = { enc: 'v1', kid: '1'.repeat(16), iv: 'AAAAAAAAAAAAAAAA', data: 'YQ==', tag: 'AAAAAAAAAAAAAAAAAAAAAA==', parts: [null] }
+  const mixed = `  Bearer ${fakeValue}  $DSH_SECRET_REF  extra text repeats ${fakeValue}  `
+  const headers = { Authorization: mixed, 'X-Mode': ' one ', 'X-Token': legacyObject, 'X-Secret': 'Bearer $DSH_SECRET_REF' }
+  const env = { TOKEN: `${fakeValue}-env`, AUTH_MODE: 'production', OBJECT_TOKEN: { literal: 'a setting' } }
+  const baseline = { version: 2, connectors: {
+    remote: { custom: { name: 'Remote', url: 'https://mcp.example.test', headers } },
+    local: { custom: { name: 'Local', command: 'mcp', env } },
+  } }
+  assert.equal(onDisk(path).version, 2)
+  writeFileSync(path, JSON.stringify({ ...onDisk(path), ...baseline }))
+  await ctx.dispose()
+  const writer = await open()
+  assert.equal(onDisk(path).version, 2)
+  assert.deepEqual(writer.rt.state.connectors, baseline.connectors)
+  await writer.call('set', { id: 'remote', readOnly: true })
+  await writer.rt.secretEndpoint('secret-set', { name: 'REF', value: 'before-rotation', scope: [] })
+  const saved = onDisk(path)
+  assert.equal(saved.version, 3)
+  const key = join(home, CONNECTOR_KEY)
+  if (process.platform !== 'win32') assert.equal(statSync(key).mode & 0o777, 0o600)
+  const keyBytes = readFileSync(key)
+  assert.equal(keyBytes.length, 32)
+  const kid = createHash('sha256').update(keyBytes).digest('hex').slice(0, 16)
+  const envelope = saved.connectors.remote.custom.headers.Authorization
+  assert.equal(readFileSync(path, 'utf8').includes(fakeValue), false)
+  assert.deepEqual(envelope.parts, [null, '$DSH_SECRET_REF', null])
+  for (const field of [envelope, envValue(saved, 'local')]) {
+    assert.equal(field.enc, 'v1')
+    assert.equal(field.kid, kid)
+    assert.equal(Buffer.from(field.iv, 'base64').length, 12)
+    assert.equal(Buffer.from(field.tag, 'base64').length, 16)
+  }
+  assert.equal(saved.connectors.remote.custom.headers['X-Secret'], headers['X-Secret'])
+  assert.equal(saved.connectors.remote.custom.headers['X-Mode'], headers['X-Mode'])
+  assert.equal(saved.connectors.local.custom.env.AUTH_MODE, env.AUTH_MODE)
+  await writer.rt.save()
+  assert.notEqual(envValue(onDisk(path), 'local').iv, envValue(saved, 'local').iv)
+  assert.deepEqual(readFileSync(key), keyBytes)
+  await writer.ctx.dispose()
+  const reader = await open()
+  await reader.rt.secretEndpoint('secret-set', { name: 'REF', value: 'after-rotation', scope: [] })
+  await reader.call('retry', { id: 'remote' })
+  assert.deepEqual(reader.rt.state.connectors.remote.custom.headers, headers)
+  assert.deepEqual(reader.mounts.find(mount => mount.serverName === 'local').env, { ...env, OBJECT_TOKEN: '[object Object]' })
+  assert.deepEqual(await dispatchTo(io, reader.rt.connectorsInternals.gateways.gw, 'remote'), { status: 200, body: 'ok' })
+  assert.equal(io.requests.at(-1).headers.Authorization, mixed.replace('$DSH_SECRET_REF', 'after-rotation'))
+  const execute = reader.ctx.listeners.get('tools/execute').find(listener => listener.name === 'redactToolResult')
+  assert.deepEqual(await execute({}, async () => ({ value: env.TOKEN })), { value: '[secret:CONNECTOR_LOCAL_TOKEN]' })
+})
+
+test('state saves retain the committed envelope and connector writes require encryption', async (t) => {
+  transport(t)
+  const { home, path, rt, call, mounts } = await team(t)
+  await call('add', { name: 'Local', command: 'mcp', env: { TOKEN: fakeValue } })
+  const key = join(home, CONNECTOR_KEY)
+  const envelope = envValue(onDisk(path), 'local')
+  rmSync(key)
+  rt.state.prefs.marker = 'ordinary save'
+  await rt.save()
+  assert.deepEqual(envValue(onDisk(path), 'local'), envelope)
+  await rt.saveCopy(copy => { copy.prefs.marker = 'eager copy' })
+  assert.equal(onDisk(path).prefs.marker, 'eager copy')
+  assert.deepEqual(envValue(onDisk(path), 'local'), envelope)
+  await rt.saveCopy(copy => { copy.prefs.marker = 'deferred copy' }, { afterWrite: () => {} })
+  assert.equal(onDisk(path).prefs.marker, 'deferred copy')
+  assert.deepEqual(envValue(onDisk(path), 'local'), envelope)
+  const saved = readFileSync(path)
+  await assert.rejects(call('add', { name: 'New', command: 'mcp', env: { TOKEN: `${fakeValue}-new` } }), { message: KEY_ERROR })
+  await assert.rejects(rt.saveCopy(copy => { copy.connectors.local.custom.env.TOKEN = `${fakeValue}-edit` }, {
+    afterWrite: () => assert.fail('unexpected connector edit'),
+  }), { message: KEY_ERROR })
+  assert.deepEqual(readFileSync(path), saved)
+  assert.equal(rt.state.connectors.new, undefined)
+  assert.equal(rt.state.connectors.local.custom.env.TOKEN, fakeValue)
+  assert.equal(mounts.some(mount => mount.serverName === 'new'), false)
+  assert.equal(existsSync(key), false)
+})
+
+test('credentials authenticate their field and key, with independent connector recovery', async (t) => {
+  const io = transport(t)
+  const { ctx, home, path, call, open } = await team(t)
+  await call('add', { name: 'Moved header', url: 'https://mcp.example.test', headers: { TOKEN: fakeValue } })
+  await call('add', { name: 'Moved env', command: 'mcp', env: { TOKEN: fakeValue } })
+  await call('add', { name: 'Wrong key', command: 'mcp', env: { TOKEN: fakeValue } })
+  await call('add', { name: 'Malformed', command: 'mcp', env: { TOKEN: fakeValue } })
+  await call('add', { name: 'Recovery', command: 'mcp', env: { TOKEN: fakeValue } })
+  await call('add', { name: 'Sibling', command: 'mcp', env: { TOKEN: 'unavailable' } })
+  await ctx.dispose()
+  const saved = onDisk(path)
+  const rows = saved.connectors
+  const headers = rows['moved-header'].custom.headers
+  headers.OTHER_TOKEN = headers.TOKEN
+  delete headers.TOKEN
+  const moved = rows['moved-env'].custom
+  moved.headers = { TOKEN: moved.env.TOKEN }
+  delete moved.env.TOKEN
+  rows['wrong-key'].custom.env.TOKEN.kid = '0'.repeat(16)
+  rows.malformed.custom.env.TOKEN.iv = 'invalid'
+  writeFileSync(path, JSON.stringify(saved))
+  const key = join(home, CONNECTOR_KEY)
+  renameSync(key, `${key}.saved`)
+  const writer = await open()
+  const view = await writer.call('retry', { id: 'sibling' })
+  for (const id of ['moved-header', 'moved-env', 'wrong-key', 'malformed', 'recovery']) {
+    assert.equal(view.connectors.find(row => row.id === id).error, CREDENTIAL_UNAVAILABLE)
+    assert.equal(writer.mounts.some(mount => mount.serverName === id), false)
+  }
+  assert.equal(writer.mounts.find(mount => mount.serverName === 'sibling').env.TOKEN, 'unavailable')
+  assert.throws(() => writer.rt.connectorsInternals.upstreamOf('moved-header'), { message: CREDENTIAL_UNAVAILABLE })
+  assert.deepEqual(io.requests, [])
+  await writer.rt.save()
+  assert.deepEqual(onDisk(path).connectors, rows)
+  renameSync(`${key}.saved`, key)
+  const recovered = await writer.call('retry', { id: 'recovery' })
+  assert.equal(recovered.connectors.find(row => row.id === 'recovery').state, 'ready')
+  for (const id of ['moved-header', 'moved-env', 'wrong-key', 'malformed']) {
+    assert.equal(recovered.connectors.find(row => row.id === id).error, CREDENTIAL_UNAVAILABLE)
+  }
+  const removed = await writer.call('remove', { id: 'wrong-key' })
+  assert.equal(removed.connectors.some(row => row.id === 'wrong-key'), false)
+  const replaced = await writer.call('add', { name: 'Wrong key', command: 'mcp', env: { TOKEN: `${fakeValue}-replacement` } })
+  assert.equal(replaced.connectors.find(row => row.id === 'wrong-key').state, 'ready')
+  assert.equal(JSON.stringify(replaced).includes(fakeValue), false)
+  assert.equal(envValue(onDisk(path), 'wrong-key').enc, 'v1')
+})
+
+test('Settings directs users to restore the key and retry without recreating the connector', async (t) => {
+  transport(t)
+  const { ctx, home, path, call, open } = await team(t)
+  const spec = { name: 'Local', command: 'mcp', args: ['--custom'], env: { TOKEN: fakeValue } }
+  await call('add', spec)
+  await ctx.dispose()
+  const key = join(home, CONNECTOR_KEY)
+  renameSync(key, `${key}.saved`)
+  const writer = await open()
+  const saved = readFileSync(path)
+  const before = await writer.post('connector-retry', { id: 'local' })
+  assert.equal(before.ok, true)
+  assert.match(before.value.connectors.find(row => row.id === 'local').error, /Restore the matching connector key and try again/)
+  renameSync(`${key}.saved`, key)
+  const after = await writer.post('connector-retry', { id: 'local' })
+  assert.equal(after.ok, true)
+  assert.equal(after.value.connectors.find(row => row.id === 'local').state, 'ready')
+  assert.equal(JSON.stringify(after).includes(fakeValue), false)
+  const mount = writer.mounts.find(mount => mount.serverName === 'local')
+  assert.equal(mount.env.TOKEN, fakeValue)
+  assert.deepEqual(mount.args, spec.args)
+  assert.deepEqual(readFileSync(path), saved)
+})
+
+test('a replaced key cannot add slots to an encrypted team before or after restart', async (t) => {
+  transport(t)
+  const { ctx, home, path, rt, call, open } = await team(t)
+  await call('add', { name: 'Original', command: 'mcp', env: { TOKEN: fakeValue } })
+  const key = join(home, CONNECTOR_KEY)
+  renameSync(key, `${key}.saved`)
+  writeFileSync(key, Buffer.alloc(32, 3), { mode: 0o600 })
+  const saved = readFileSync(path)
+  const add = { name: 'New', command: 'mcp', env: { TOKEN: `${fakeValue}-new` } }
+  await assert.rejects(call('add', add), { message: KEY_ERROR })
+  assert.deepEqual(readFileSync(path), saved)
+  rt.state.connectors.new = { custom: add }
+  await assert.rejects(rt.save(), { message: KEY_ERROR })
+  assert.deepEqual(readFileSync(path), saved)
+  delete rt.state.connectors.new
+  await ctx.dispose()
+  const restarted = await open()
+  assert.equal(restarted.rt.connectorsView().connectors.find(row => row.id === 'original').error, CREDENTIAL_UNAVAILABLE)
+  await assert.rejects(restarted.call('add', add), { message: KEY_ERROR })
+  assert.deepEqual(readFileSync(path), saved)
+
+  const dest = mkdtempSync(join(tmpdir(), 'dsb-connector-import-'))
+  const importCtx = fakeContext()
+  t.after(async () => { await importCtx.dispose(); rmSync(dest, { recursive: true, force: true }) })
+  assert.throws(() => createRuntime(importCtx, { home: dest, importHome: home }), /matching connector key/)
+  assert.equal(existsSync(join(dest, 'state.json')), false)
+  renameSync(`${key}.saved`, key)
+  const imported = createRuntime(importCtx, { home: dest, importHome: home })
+  await imported.load()
+  assert.equal(envValue(imported.state, 'original'), fakeValue)
+  assert.equal(imported.state.connectors.new, undefined)
+})
+
+test('a reader stops using an unavailable credential and keeps its healthy sibling mounted', async (t) => {
+  const io = transport(t)
+  const { ctx, home, path, call, open } = await team(t)
+  await call('add', { name: 'Remote', url: 'https://mcp.example.test', headers: { TOKEN: fakeValue } })
+  await call('add', { name: 'Sibling', command: 'mcp' })
+  await ctx.dispose()
+  writeFileSync(join(home, 'state.lock'), JSON.stringify({ token: 'writer', host: os.hostname(), pid: process.ppid }))
+  const disposed = []
+  const reader = await open({ dispose: config => disposed.push(config.serverName) })
+  assert.match(reader.rt.readOnly(), /open in another dsh/)
+  await reader.rt.connectorStateChanged()
+  disposed.length = 0
+  const gateway = reader.rt.connectorsInternals.gateways.gw
+  assert.equal((await dispatchTo(io, gateway, 'remote')).status, 200)
+  const key = join(home, CONNECTOR_KEY)
+  renameSync(key, `${key}.saved`)
+  writeFileSync(path, JSON.stringify({ ...onDisk(path), check: 'reader refresh' }))
+  await reader.rt.refresh()
+  assert.equal(reader.rt.connectorsView().connectors.find(row => row.id === 'remote').error, CREDENTIAL_UNAVAILABLE)
+  assert.equal((await dispatchTo(io, gateway, 'remote')).status, 502)
+  assert.equal(io.requests.length, 1)
+  await immediate()
+  assert.deepEqual(disposed, ['remote'])
+  assert.equal(reader.rt.connectorsView().connectors.find(row => row.id === 'sibling').state, 'ready')
+  renameSync(`${key}.saved`, key)
+  const beforeRetry = readFileSync(path)
+  const refusal = await reader.post('connector-retry', { id: 'remote' })
+  assert.equal(refusal.ok, false)
+  assert.equal(refusal.error.code, 'bot/read-only')
+  assert.match(refusal.error.message, /Try again in the window that can edit the Bot team/)
+  assert.deepEqual(readFileSync(path), beforeRetry)
+})
+
+test('mount status and gateway warnings mask restored connector credentials', async (t) => {
+  const io = transport(t)
+  const { ctx, call, open } = await team(t)
+  await call('add', { name: 'Local', command: 'mcp', env: { TOKEN: fakeValue } })
+  await call('add', { name: 'Remote', url: 'https://mcp.example.test', headers: { Authorization: `Bearer ${fakeValue}-remote` } })
+  await ctx.dispose()
+  const { call: retry, rt, warnings } = await open({ start: config => {
+    if (config.serverName === 'local') throw new Error(`Transport said ${config.env.TOKEN}`)
+  } })
+  const view = await retry('retry', { id: 'local' })
+  assert.match(view.connectors.find(row => row.id === 'local').error, /Transport said \[secret:CONNECTOR_LOCAL_TOKEN\]/)
+  io.error = headers => new Error(`Transport said ${headers.Authorization}`)
+  assert.equal((await dispatchTo(io, rt.connectorsInternals.gateways.gw, 'remote')).status, 502)
+  const logs = JSON.stringify(warnings)
+  assert.match(logs, /\[secret:CONNECTOR_LOCAL_TOKEN\]/)
+  assert.match(logs, /\[secret:CONNECTOR_REMOTE_HEAD_AUTHORIZATION\]/)
+  assert.equal(logs.includes(fakeValue), false)
+})
+
+test('team imports retain the matching host key and keep key temporaries local', async (t) => {
+  transport(t)
+  const { home, call } = await team(t)
+  await call('add', { name: 'Local', command: 'mcp', env: { TOKEN: fakeValue } })
+  writeFileSync(join(home, `${CONNECTOR_KEY}.sample.tmp`), 'host only', { mode: 0o600 })
+  mkdirSync(join(home, 'notes'))
+  for (const name of [CONNECTOR_KEY, `${CONNECTOR_KEY}.sample.tmp`]) writeFileSync(join(home, 'notes', name), 'user file')
+  const dest = mkdtempSync(join(tmpdir(), 'dsb-connector-import-'))
+  const key = join(dest, CONNECTOR_KEY)
+  const ctx = fakeContext()
+  t.after(async () => { await ctx.dispose(); rmSync(dest, { recursive: true, force: true }) })
+  writeFileSync(key, Buffer.alloc(32, 1), { mode: 0o600 })
+  assert.throws(() => createRuntime(ctx, { home: dest, importHome: home }), /matching connector key/)
+  assert.equal(existsSync(join(dest, 'state.json')), false)
+  rmSync(key)
+  const imported = createRuntime(ctx, { home: dest, importHome: home })
+  await imported.load()
+  assert.deepEqual(readFileSync(key), readFileSync(join(home, CONNECTOR_KEY)))
+  if (process.platform !== 'win32') assert.equal(statSync(key).mode & 0o777, 0o600)
+  assert.equal(existsSync(join(dest, `${CONNECTOR_KEY}.sample.tmp`)), false)
+  for (const name of [CONNECTOR_KEY, `${CONNECTOR_KEY}.sample.tmp`]) {
+    assert.equal(readFileSync(join(dest, 'notes', name), 'utf8'), 'user file')
+  }
+  assert.equal(envValue(imported.state, 'local'), fakeValue)
+})
+
+test('file tools guard both copies of an imported connector key after restart', async (t) => {
+  transport(t)
+  const { home, call } = await team(t)
+  await call('add', { name: 'Local', command: 'mcp', env: { TOKEN: fakeValue } })
+  const dest = mkdtempSync(join(tmpdir(), 'dsb-connector-import-'))
+  const importCtx = fakeContext()
+  const restartCtx = fakeContext()
+  restartCtx.workspaceRegistry = new Map()
+  t.after(async () => { await restartCtx.dispose(); await importCtx.dispose(); rmSync(dest, { recursive: true, force: true }) })
+  await createRuntime(importCtx, { home: dest, importHome: home }).load()
+  await importCtx.dispose()
+  await createRuntime(restartCtx, { home: dest }).load()
+  const agent = { id: 'm1', session: { id: 'm1', header: { cwd: dest } } }
+  const execute = (name, args) => restartCtx.listeners.get('tools/execute').reduceRight((next, listener) =>
+    () => listener({ name, arguments: args, agent }, next), () => 'ran')()
+  for (const root of [dest, home]) {
+    await assert.rejects(execute('read', { file_path: join(root, CONNECTOR_KEY) }), /belongs to the Bot team's host/)
+    await assert.rejects(execute('grep', { path: root }), /belongs to the Bot team's host/)
+  }
+})
+
+test('importing an ordinary team works without hard-link support', async (t) => {
+  const { home, path } = await team(t)
+  const dest = mkdtempSync(join(tmpdir(), 'dsb-connector-import-'))
+  const ctx = fakeContext()
+  t.after(async () => { await ctx.dispose(); rmSync(dest, { recursive: true, force: true }) })
+  const link = t.mock.method(fs, 'linkSync', () => { throw Object.assign(new Error('hard links unavailable'), { code: 'ENOTSUP' }) })
+  const imported = createRuntime(ctx, { home: dest, importHome: home })
+  assert.deepEqual(readFileSync(imported.statePath), readFileSync(path))
+  assert.equal(link.mock.callCount(), 0)
+  await imported.load()
+  assert.equal(onDisk(imported.statePath).version, 2)
 })
