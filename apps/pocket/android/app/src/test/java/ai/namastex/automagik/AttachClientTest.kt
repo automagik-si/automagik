@@ -10,6 +10,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -21,6 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 class AttachClientTest {
@@ -31,6 +33,7 @@ class AttachClientTest {
         private val toPhone = Channel<ByteArray>(Channel.UNLIMITED)
         private val fromPhone = Channel<ByteArray>(Channel.UNLIMITED)
         private val replies = ScheduledThreadPoolExecutor(2)
+        private val channels = AtomicInteger(0)
         val greeting = CompletableDeferred<JSONObject>()
         val requests = LinkedBlockingQueue<JSONObject>()
         val incomingFinish = CompletableDeferred<Unit>()
@@ -64,7 +67,7 @@ class AttachClientTest {
                         if (method == Attach.METHOD_FINISH) incomingFinish.complete(Unit)
                         replies.schedule({
                             val response = when (method) {
-                                "chat.subscribe" -> JSONObject().put("channel", 1)
+                                "chat.subscribe" -> JSONObject().put("channel", channels.incrementAndGet())
                                 else -> JSONObject().put("ok", true)
                             }
                             frame(0, Wire.DATA, reply(rpc, response))
@@ -219,4 +222,35 @@ class AttachClientTest {
             finish.await()
             assertEquals(listOf("list", "finish"), finished.toList())
         }
+    @Test fun aGroupWatchIsTextOnlyBesideABotWithEverythingNegotiated() {
+        val manage = ChatClient.MEMORY + ChatClient.SCHEDULES + ChatClient.SETTINGS
+        val hello = offeredHello().put("chat", 1).put("dshWrite", true).put("groups", true).put("manage", JSONArray(manage))
+        withBridge(hello) { bridge, core ->
+            val chat = ChatClient.start(core, manage, attachments = true, groups = true)
+            val bot = "dsh:bot"
+            val room = "dsh:room:r1"
+            for (terminal in listOf(bot, room)) {
+                chat.subscribe(terminal, null, {}, {})
+                assertEquals(terminal, bridge.next().getJSONObject("params").getString("terminal"))
+            }
+            suspend fun check(method: String, call: suspend (String) -> JSONObject) {
+                assertTrue(call(bot).getBoolean("ok"))
+                val request = bridge.next()
+                assertEquals(method, request.getString("method"))
+                assertEquals(bot, request.getJSONObject("params").getString("terminal"))
+                assertEquals(method, "read-only", call(room).getString("reason"))
+                assertNull(method, bridge.requests.poll(200, TimeUnit.MILLISECONDS))
+            }
+            check(Attach.METHOD_BEGIN) { chat.attachBegin(it, "u", Attach.PNG, 1) }
+            check(Attach.METHOD_CHUNK) { chat.attachChunk(it, "u", 0, byteArrayOf(1)) }
+            check(Attach.METHOD_FINISH) { chat.attachFinish(it, "u") }
+            check(Attach.METHOD_CANCEL) { chat.attachCancel(it, "u") }
+            check(Attach.METHOD_READ) { chat.attachmentRead(it, "dsh:row#0", 0) }
+            check(Attach.METHOD_SEND) { chat.sendUploads(it, "m", "hi", listOf("u")) }
+            check("memory.read") { chat.memoryRead(it) }
+            check("memory.add") { chat.memoryAdd(it, "remember") }
+            check("schedule.list") { chat.scheduleList(it) }
+            check("settings.read") { chat.settingsRead(it) }
+        }
+    }
 }

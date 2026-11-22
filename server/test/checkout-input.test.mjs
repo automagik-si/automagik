@@ -33,9 +33,9 @@ function fixture() {
   return { parent, dir, options, manifest, assets, save }
 }
 
-test('verifies all four identities and returns only the normal three profile packages', () => {
+test('verifies all four identities and returns exactly the four profile packages', () => {
   const f = fixture(), got = verifyCheckoutDirectory(f.dir, f.options)
-  assert.equal(Object.keys(got.plugins).length, 3)
+  assert.deepEqual(Object.keys(got.plugins).sort(), ['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/multiuser-dsh', '@automagik/welcome-dsh'])
   assert.equal(got.plugins['@automagik/bots-dsh'].sha256, sha256(f.assets.get(checkoutFile('@automagik/bots-dsh', '1.2.3'))))
 })
 
@@ -123,7 +123,7 @@ test('build rejects contradictory inputs before Docker; default release forwards
 test('checkout build carries all independently supplied bindings; release ignores present malformed local assets', async () => {
   const f = fixture(), root = temp(), server = join(root, 'server'), bin = join(root, 'bin'), log = join(root, 'docker.log')
   mkdirSync(server); mkdirSync(bin)
-  for (const file of ['build.mjs', 'fetch-plugins.mjs', 'checkout-input.mjs']) cpSync(join(ROOT, 'server', file), join(server, file))
+  for (const file of ['build.mjs', 'fetch-plugins.mjs', 'checkout-input.mjs', 'toolchain.mjs']) cpSync(join(ROOT, 'server', file), join(server, file))
   cpSync(f.dir, join(server, 'checkout-input'), { recursive: true })
   writeFileSync(join(bin, 'git'), `#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] || exit 2\necho ${f.options.revision}\n`)
   writeFileSync(join(bin, 'docker'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\nif [ "$1 $2" = "image inspect" ]; then echo 123; fi\n')
@@ -140,7 +140,7 @@ test('checkout build carries all independently supplied bindings; release ignore
   const reader = await import(pathToFileURL(join(server, 'checkout-input.mjs')))
   const out = join(root, 'vendor')
   const loaded = reader.readCheckoutPlugins({ ...f.options, out })
-  assert.equal(Object.keys(loaded.plugins).length, 3)
+  assert.deepEqual(Object.keys(loaded.plugins).sort(), ['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/multiuser-dsh', '@automagik/welcome-dsh'])
   assert.equal(existsSync(join(out, checkoutFile('@automagik/locale-pt-br-dsh', f.options.version))), false)
   rmSync(log)
   assert.notEqual(run([...args, '--image-version', f.options.version]).status, 0)
@@ -150,4 +150,16 @@ test('checkout build carries all independently supplied bindings; release ignore
   writeFileSync(join(server, 'checkout-input/plugins.json'), 'malformed local inputs')
   assert.equal(run(['--event', 'push']).status, 0)
   assert.match(readFileSync(log, 'utf8'), /INPUT_KIND=release/)
+})
+
+test('assembly refuses all content below the adapter floor before touching output or verifying assets', async () => {
+  const dir = temp(), file = join(dir, 'keep')
+  writeFileSync(file, 'unchanged')
+  for (const input of [{}, { kind: 'checkout', event: 'pull_request', revision: 'a'.repeat(40),
+    manifest: 'a'.repeat(64), repository: CHECKOUT_REPOSITORY }]) {
+    await assert.rejects(assemble({ ...input, out: dir, version: '3.160.5' }), {
+      message: 'the image needs @automagik/multiuser-dsh 3.160.6 or later (RFC 0038 delivery 1); release 3.160.5 is older',
+    })
+    assert.equal(readFileSync(file, 'utf8'), 'unchanged')
+  }
 })

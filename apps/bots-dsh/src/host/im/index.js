@@ -30,6 +30,7 @@ export function install(rt) {
     if (label.startsWith('Spanish')) return 'es'
     if (label.startsWith('French')) return 'fr'
     if (label.startsWith('German')) return 'de'
+    if (label.startsWith('Portuguese') || /^pt(?:-BR)?$/i.test(label)) return 'pt-BR'
     return 'en'
   }
   const text = (key, values = {}) => {
@@ -43,6 +44,7 @@ export function install(rt) {
         stopped: 'Stopped.',
         idle: 'Nothing is running.',
         stale: 'This card was already answered.',
+        localApproval: 'Review this approval on your computer.',
         noFile: 'This file cannot be sent here; send it on the computer.',
         greeting: `Hello, I am ${values.name}.`,
         question: `${values.bot} asks: `,
@@ -50,6 +52,7 @@ export function install(rt) {
         secretAsk: `${values.bot} needs the key ${values.name} — fill it on the computer or the phone app.`,
         viewShow: `${values.bot} shared a card — answer it on the computer or the phone app.`,
         answered: 'answered',
+        withdrawn: 'withdrawn',
         numbers: 'reply with the number',
         numbersMulti: 'reply with the numbers, separated by spaces',
         allow: 'Allow once',
@@ -63,6 +66,7 @@ export function install(rt) {
         stopped: '已停下。',
         idle: '现在没有在做的活。',
         stale: '这张卡已经答过了。',
+        localApproval: '请在电脑上查看此审批。',
         noFile: '这个文件发不过去，请在电脑上发。',
         greeting: `你好，我是 ${values.name}。`,
         question: `${values.bot} 问你：`,
@@ -70,6 +74,7 @@ export function install(rt) {
         secretAsk: `${values.bot} 要密钥 ${values.name}，请在电脑或手机 App 上填。`,
         viewShow: `${values.bot} 发了一个卡片，请在电脑或手机 App 上回复。`,
         answered: '已答',
+        withdrawn: '已撤回',
         numbers: '回复编号',
         numbersMulti: '回复编号，多选用空格隔开',
         allow: '允许一次',
@@ -83,6 +88,7 @@ export function install(rt) {
         stopped: '已停下。',
         idle: '現在沒有在做的活。',
         stale: '這張卡已經答過了。',
+        localApproval: '請在電腦上查看此審批。',
         noFile: '這個檔案傳不過去，請在電腦上傳。',
         greeting: `你好，我是 ${values.name}。`,
         question: `${values.bot} 問你：`,
@@ -90,6 +96,7 @@ export function install(rt) {
         secretAsk: `${values.bot} 要金鑰 ${values.name}，請在電腦或手機 App 上填。`,
         viewShow: `${values.bot} 發了一個卡片，請在電腦或手機 App 上回覆。`,
         answered: '已答',
+        withdrawn: '已撤回',
         numbers: '回覆編號',
         numbersMulti: '回覆編號，多選用空格隔開',
         allow: '允許一次',
@@ -110,6 +117,7 @@ export function install(rt) {
         secretAsk: `${values.bot} がシークレット ${values.name} を必要としています。PC またはスマホアプリで入力してください。`,
         viewShow: `${values.bot} がカードを共有しました。PC またはスマホアプリで回答してください。`,
         answered: '回答済み',
+        withdrawn: '取り下げ済み',
         numbers: '番号を返信',
         numbersMulti: '番号をスペース区切りで返信',
         allow: '1回許可',
@@ -130,6 +138,7 @@ export function install(rt) {
         secretAsk: `${values.bot}에서 시크릿 ${values.name}이(가) 필요합니다. 컴퓨터나 휴대폰 앱에서 입력해 주세요.`,
         viewShow: `${values.bot}에서 카드를 보냈습니다. 컴퓨터나 휴대폰 앱에서 응답해 주세요.`,
         answered: '응답함',
+        withdrawn: '철회됨',
         numbers: '번호로 답장',
         numbersMulti: '공백으로 구분하여 번호로 답장',
         allow: '한 번 허용',
@@ -150,6 +159,7 @@ export function install(rt) {
         secretAsk: `${values.bot} necesita la clave ${values.name} — rellénala en el ordenador o en la app móvil.`,
         viewShow: `${values.bot} compartió una tarjeta — respóndela en el ordenador o en la app móvil.`,
         answered: 'respondido',
+        withdrawn: 'retirado',
         numbers: 'responde con el número',
         numbersMulti: 'responde con los números separados por espacios',
         allow: 'Permitir una vez',
@@ -170,10 +180,14 @@ export function install(rt) {
         secretAsk: `${values.bot} a besoin de la clé ${values.name} — renseignez-la sur l’ordinateur ou l’application mobile.`,
         viewShow: `${values.bot} a partagé une carte — répondez-y sur l’ordinateur ou l’application mobile.`,
         answered: 'répondu',
+        withdrawn: 'retiré',
         numbers: 'répondez avec le numéro',
         numbersMulti: 'répondez avec les numéros séparés par des espaces',
         allow: 'Autoriser une fois',
         reject: 'Refuser',
+      },
+      'pt-BR': {
+        localApproval: 'Revise esta aprovação no seu computador.',
       },
       de: {
         requested: 'Eine Verbindungsanfrage wurde an Omni gesendet; erlaube sie am Computer unter Einstellungen → IM.',
@@ -190,13 +204,14 @@ export function install(rt) {
         secretAsk: `${values.bot} benötigt den Schlüssel ${values.name} — gib ihn am Computer oder in der Smartphone-App ein.`,
         viewShow: `${values.bot} hat eine Karte geteilt — beantworte sie am Computer oder in der Smartphone-App.`,
         answered: 'beantwortet',
+        withdrawn: 'zurückgezogen',
         numbers: 'mit der Nummer antworten',
         numbersMulti: 'mit durch Leerzeichen getrennten Nummern antworten',
         allow: 'Einmal erlauben',
         reject: 'Ablehnen',
       },
     }
-    return (table[lang] ?? table.en)[key] ?? key
+    return table[lang]?.[key] ?? table.en[key] ?? key
   }
 
   // ---------------------------------------------------------------- runtime file
@@ -254,24 +269,43 @@ export function install(rt) {
   // Sent cards: cardKey → [{ chatKey, messageId, answer? }]. Persisted so a restart
   // does not send a card twice; an `answer` marks it settled from this side.
   const cardsOf = async (id) => (await runtimeOf(id)).data
-  const markCard = async (id, cardKey, chatKey, messageId, body) => {
+  const markCard = async (id, cardKey, chatKey, messageId, body, ask, sender) => {
     const data = await cardsOf(id)
+    // A group card's message ID belongs to its sender, even if the connection has since restarted.
+    if (ask !== undefined && sender !== undefined && runners.get(id) !== sender) return
     const entries = data.cards[cardKey] ?? []
-    const held = entries.find(entry => entry.chatKey === chatKey)
-    if (held !== undefined) {
-      held.messageId = messageId ?? held.messageId
-      held.text = body ?? held.text
+    let copy = entries.find(entry => entry.chatKey === chatKey)
+    if (copy !== undefined) {
+      copy.messageId = messageId ?? copy.messageId
+      copy.text = body ?? copy.text
     } else {
-      entries.push({ chatKey, messageId, text: body })
+      copy = { chatKey, messageId, text: body }
+      entries.push(copy)
     }
     data.cards[cardKey] = entries
+    if (ask?.withdrawn === true) {
+      if (copy.answer === undefined || copy.answer === null) {
+        copy.answer = text('withdrawn')
+        copy.withdrawn = true
+      }
+      const chat = connections()[id]?.chats?.[chatKey]
+      if (copy.withdrawn === true && copy.messageId !== undefined && copy.edited !== true && sender?.handle?.edit !== undefined && chat !== undefined) {
+        copy.edited = true
+        const body = copy.text !== undefined ? `${copy.text}\n— ${copy.answer}` : `(${text('withdrawn')})`
+        sender.handle.edit({ key: chatKey, kind: chat.kind, title: chat.title }, copy.messageId, { text: body }).catch(() => {})
+      }
+    }
     scheduleWrite(id)
   }
-  const settleCard = async (id, cardKey, answer) => {
+  const settleCard = async (id, cardKey, answer, withdrawn = false) => {
     const data = await cardsOf(id)
     const entries = data.cards[cardKey]
     if (entries === undefined) return
-    for (const entry of entries) entry.answer ??= answer
+    for (const entry of entries) {
+      if (entry.answer !== undefined && entry.answer !== null) continue
+      entry.answer = answer
+      if (withdrawn) entry.withdrawn = true
+    }
     scheduleWrite(id)
   }
 
@@ -347,7 +381,7 @@ export function install(rt) {
       const job = queue.jobs[0]
       try {
         const sent = await runner.handle.send(job.chat, job)
-        job.after?.(sent)
+        job.after?.(sent, runner)
         queue.jobs.shift()
       } catch (error) {
         const how = failClass(error)
@@ -431,6 +465,10 @@ export function install(rt) {
       await settleCard(conn.id, held.cardKey, choice === 'allow' ? text('allow') : text('reject'))
       await settledEdits(conn)
     } catch (error) {
+      if (error?.code === 'bot/local-approval') {
+        await sendCardReply(conn, chat, text('localApproval'))
+        return true
+      }
       if (error?.code === 'bot/stale') {
         await sendCardReply(conn, chat, text('stale'))
         return true
@@ -566,14 +604,14 @@ export function install(rt) {
     approval: (id) => [{ data: `a:${id}:allow`, label: text('allow') }, { data: `a:${id}:reject`, label: text('reject') }],
   }
 
-  const sendCard = async (conn, cardKey, targets, body, buttons) => {
+  const sendCard = async (conn, cardKey, targets, body, buttons, ask) => {
     for (const { chatKey, chat } of targets) {
-      sendTo(conn, chatKey, { key: chatKey, kind: chat.kind, title: chat.title }, body, buttons, (sent) => {
-        void markCard(conn.id, cardKey, chatKey, sent?.messageId, body)
+      sendTo(conn, chatKey, { key: chatKey, kind: chat.kind, title: chat.title }, body, buttons, (sent, sender) => {
+        void markCard(conn.id, cardKey, chatKey, sent?.messageId, body, ask, sender)
       })
     }
     // A card a chat never got (queued behind a failure) is still recorded below.
-    for (const { chatKey } of targets) await markCard(conn.id, cardKey, chatKey, undefined, body)
+    for (const { chatKey } of targets) await markCard(conn.id, cardKey, chatKey, undefined, body, ask)
   }
 
   const diffCards = async () => {
@@ -626,7 +664,7 @@ export function install(rt) {
         const chat = conn.chats?.[entry.chatKey]
         if (chat === undefined) continue
         entry.edited = true
-        const body = entry.text !== undefined ? `${entry.text}\n— ${entry.answer}` : `(${text('answered')})`
+        const body = entry.text !== undefined ? `${entry.text}\n— ${entry.answer}` : `(${text(entry.withdrawn === true ? 'withdrawn' : 'answered')})`
         runner.handle.edit({ key: entry.chatKey, kind: chat.kind, title: chat.title }, entry.messageId, { text: body }).catch(() => {})
         scheduleWrite(conn.id)
       }
@@ -647,9 +685,11 @@ export function install(rt) {
             : cardKey.startsWith('v:') ? openViews.has(cardKey) : false
       for (const [cardKey, entries] of Object.entries(data.cards)) {
         if (openCard(cardKey)) continue
+        const withdrawn = cardKey.startsWith('a:') && groupAsks.get(cardKey.slice(2))?.withdrawn === true
         for (const entry of entries) {
           if (entry.answer === undefined) {
-            entry.answer = text('answered')
+            entry.answer = text(withdrawn ? 'withdrawn' : 'answered')
+            if (withdrawn) entry.withdrawn = true
             touched = true
           }
         }
@@ -1045,26 +1085,37 @@ export function install(rt) {
     }
   })
 
+  const groupAsks = new Map()
   rt.onApproval((kind, data) => {
+    if (kind === 'grant') return
     if (kind === 'open') {
+      const ask = data.roomId !== undefined ? { withdrawn: false } : undefined
+      if (ask !== undefined) groupAsks.set(data.id, ask)
       void (async () => {
         for (const conn of Object.values(connections())) {
           const runner = runners.get(conn.id)
           if (runner === undefined) continue
           const bot = rt.botOf(data.botId)
           const targets = data.roomId !== undefined ? listeners(conn, { roomId: data.roomId }) : listeners(conn, { botId: data.botId })
-          const buttons = imPlatform(conn.platform)?.buttons === true ? cardButtons.approval(data.id) : undefined
-          await sendCard(conn, `a:${data.id}`, targets, cardText.approval(bot?.name ?? '?', data), buttons)
+          const buttons = data.localReview !== true && imPlatform(conn.platform)?.buttons === true ? cardButtons.approval(data.id) : undefined
+          const body = cardText.approval(bot?.name ?? '?', data)
+          await sendCard(conn, `a:${data.id}`, targets, data.localReview === true ? `${body}\n${text('localApproval')}` : body, buttons, ask)
         }
       })().catch(error => rt.warn('omni-ui: im approval card failed: %s', error))
       return
     }
+    const ask = groupAsks.get(data.id)
+    if (ask !== undefined && data.outcome === 'cancelled' && data.why === 'group') ask.withdrawn = true
+    const withdrawn = ask?.withdrawn === true
     void (async () => {
       for (const conn of Object.values(connections())) {
-        await settleCard(conn.id, `a:${data.id}`, data.outcome === 'allowed-once' ? text('allow') : data.outcome === 'rejected' ? text('reject') : text('answered'))
+        const word = withdrawn ? 'withdrawn' : data.outcome === 'allowed-once' ? 'allow' : data.outcome === 'rejected' ? 'reject' : 'answered'
+        await settleCard(conn.id, `a:${data.id}`, text(word), withdrawn)
         await settledEdits(conn)
       }
-    })().catch(() => {})
+    })().catch(() => {}).finally(() => {
+      if (groupAsks.get(data.id) === ask) groupAsks.delete(data.id)
+    })
   })
 
   rt.onSaved(() => {
@@ -1082,6 +1133,7 @@ export function install(rt) {
     return () => {
       stopped = true
       clearInterval(interval)
+      groupAsks.clear()
       return Promise.all([...runners.keys()].map(stop)).then(async () => {
         for (const held of runtimes.values()) if (held.timer !== undefined) clearTimeout(held.timer)
         await Promise.all([...runtimes.keys()].map(writeRuntime)).catch(() => {})

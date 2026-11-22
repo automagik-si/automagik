@@ -54,7 +54,8 @@ export function coreSockets(env = process.env, { platform = process.platform, ui
   return [...new Set(paths.filter(path => absolute(path) && inTestRoots(path, env)))]
 }
 
-function answersStatus(path, timeoutMs) {
+/** Whether one socket answers `server.status` within `timeoutMs`; never another candidate. */
+export function answersStatus(path, timeoutMs) {
   return new Promise((done) => {
     let socket
     let buffer = Buffer.alloc(0)

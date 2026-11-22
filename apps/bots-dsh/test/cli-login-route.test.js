@@ -27,7 +27,7 @@ async function fixture(t, { home = mkdtempSync(join(tmpdir(), 'automagik-cli-log
   const status = { id: 'acp-codex', attemptId, status: 'waiting', expiresAt: Date.now() + 60000, expiresBy: 'app', url: 'https://auth.openai.com/codex/device', userCode: 'ABCD-1234' }
   const acp = {
     ...Object.fromEntries(['loginStart', 'loginCurrent', 'loginStatus', 'loginAnswer', 'loginCancel'].map(method => [method, async (...args) => { calls.push([method, ...args]); return status }])),
-    loginTextMatches: text => text.includes(`#${STATE}`),
+    loginTextMatches: text => text.slice(0, 1_000_000).includes(`#${STATE}`),
     inspect: async id => ({ id, signedIn: true, on: false, cli: { found: true }, connector: { state: 'off' } }),
   }
   const ctx = fakeContext({ services: { acpAgents: acp } })
@@ -264,6 +264,38 @@ for (const evidence of ['pending', 'damaged', 'legacy']) {
   })
 }
 
+test('the isolated account card asks both vendors’ recovery at once', async t => {
+  const h = await fixture(t)
+  const claude = Promise.withResolvers()
+  const calls = []
+  let recoveriesAtCodexRead
+  h.acp.authScope = 'isolated'
+  h.acp.accountRecovery = id => {
+    calls.push(id)
+    if (id === CLAUDE) return claude.promise
+    return { required: false }
+  }
+  h.acp.account = async id => {
+    if (id !== CODEX) return { signedIn: false }
+    recoveriesAtCodexRead = [...calls]
+    return { signedIn: true, account: { email: 'healthy@example.test' } }
+  }
+  h.acp.accountReset = t.mock.fn()
+  const pending = h.call('cli-login-accounts', {})
+  try {
+    // A turn is enough for the in-process route to call both recovery readers.
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual([...calls].sort(), [CLAUDE, CODEX])
+  } finally { claude.resolve({ required: false }) }
+  const { result } = await pending
+  assert.equal(result.ok, true)
+  assert.deepEqual(recoveriesAtCodexRead?.sort(), [CLAUDE, CODEX])
+  assert.equal(Object.hasOwn(result.value.accounts[CLAUDE], 'recoveryRequired'), false)
+  assert.equal(result.value.accounts[CODEX].signedIn, true)
+  assert.equal(result.value.accounts[CODEX].account.email, 'healthy@example.test')
+  assert.equal(h.acp.accountReset.mock.callCount(), 0)
+})
+
 test('reset stays owner-only, uses only the isolated ACP action and preserves Bot history',
   async t => {
     const h = await fixture(t)
@@ -284,6 +316,14 @@ test('reset stays owner-only, uses only the isolated ACP action and preserves Bo
 test('every send endpoint refuses a text carrying a shown sign-in state before anything is queued', async (t) => {
   const h = await fixture(t)
   const notes = []
+  const relays = []
+  const room = { id: 'room', name: 'Project', members: ['first'], admin: 'first', mode: 'admin', createdAt: 2 }
+  h.rt.state.rooms[room.id] = room
+  await h.rt.save()
+  const path = join(h.home, 'state.json')
+  const before = fs.readFileSync(path, 'utf8')
+  h.rt.resolveAgent = async () => ({ session: {}, followup: message => relays.push(message) })
+  h.ctx.sessions = { ...h.ctx.sessions, flush: async () => {} }
   h.rt.noteFailure = entry => notes.push(entry)
   for (const [endpoint, payload] of [
     ['send', { sessionId: 'first', text: `here: abc#${STATE}` }],
@@ -291,6 +331,8 @@ test('every send endpoint refuses a text carrying a shown sign-in state before a
     ['answer-question', { sessionId: 'first', questionId: 'q', answer: { text: `abc#${STATE}` } }],
     ['view-reply', { sessionId: 'first', viewId: 'v', values: { field: `abc#${STATE}` } }],
     ['memory-ask', { botId: 'first', question: `abc#${STATE}` }],
+    ['goal-draft', { roomId: room.id, text: `Review this plan: abc#${STATE}` }],
+    ['goal-draft', { roomId: room.id, text: `${' '.repeat(1_000_000)}Review this plan: abc#${STATE}` }],
   ]) {
     const { result } = await h.call(endpoint, payload)
     assert.equal(result.ok, false, endpoint)
@@ -299,8 +341,15 @@ test('every send endpoint refuses a text carrying a shown sign-in state before a
     assert.doesNotMatch(JSON.stringify(result), /expected_state/)
   }
   assert.deepEqual(h.prompts, [])
+  assert.equal(room.goal, undefined)
+  assert.equal(fs.readFileSync(path, 'utf8'), before)
+  assert.deepEqual(relays, [])
   assert.deepEqual(notes, [])
   assert.doesNotMatch(JSON.stringify(h.logged), /expected_state/)
+  assert.equal((await h.call('goal-draft', { roomId: room.id, text: '  Review the project plan.  ' })).result.ok, true)
+  assert.equal(room.goal.brief, 'Review the project plan.')
+  assert.equal(JSON.parse(fs.readFileSync(path, 'utf8')).rooms[room.id].goal.brief, room.goal.brief)
+  assert.equal(relays.length, 1)
 })
 
 test('owner only: DSH answers 403 to a share viewer on every sign-in endpoint, and the owner reaches them', async (t) => {

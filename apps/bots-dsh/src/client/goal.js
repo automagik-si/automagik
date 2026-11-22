@@ -5,6 +5,7 @@ import { CheckIcon, ChevronDownIcon } from './icons.js'
 import { useEscape } from './overlay-hooks.js'
 import { SPRING_SHAPE, spring, useMorph } from './motion.js'
 import { t } from './i18n.js'
+import { guardSignInCodeTransfer, refuseKnownState } from './cli-login-guard.js'
 
 // -------------------------------------------------------------------------
 // Group goal: the header island is the goal's status screen. One surface wraps
@@ -240,7 +241,7 @@ function GoalCompose({ room, roster, actions }) {
   const close = () => { actions.closeGoalCompose(); actions.closeGoal() }
   const submit = () => {
     const brief = text.trim()
-    if (brief === '' || sending) return
+    if (brief === '' || sending || refuseKnownState(brief, actions)) return
     setSending(true)
     void Promise.resolve(actions.goalDraft(room.id, brief)).then(
       () => { actions.closeGoalCompose(); actions.closeGoal() },
@@ -257,6 +258,8 @@ function GoalCompose({ room, roster, actions }) {
         box.style.height = 'auto'
         box.style.height = `${box.scrollHeight}px`
       },
+      onPaste: event => guardSignInCodeTransfer(event, actions),
+      onDrop: event => guardSignInCodeTransfer(event, actions),
       onKeyDown: (event) => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() }
         if (event.key === 'Escape') { event.stopPropagation(); close() }

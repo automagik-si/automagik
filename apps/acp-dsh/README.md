@@ -35,6 +35,12 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   the agent changes after review, and level changes can still raise a dialog. When the mirror
   body gets a question offering `allow_always` without `allow_once`, it replies with `reject_once`
   if offered or cancels the question, skips its dialog, and explains why in the result text.
+  Under an Automagik Codex permission profile, the mirror skips the dialog and refuses when Codex
+  asks to run a new command outside the sandbox because Codex keeps the profile's deny rule even
+  after approval, with the refusal reason shown as the turn's last line if Codex cancels the prompt.
+  Network, MCP and additional-permission questions still ask. An input question
+  for a running command has the same wire format as a new command escalation and is refused
+  the same way.
 - **DSH's own tools over the bridge (`dshTools`).** On, the agent gets the Session's preset tool
   set (standard, or cordis in creator mode) over one stdio MCP server per ACP session, named
   `dsh` and spawned by the adapter with that session's arguments. The bridge has no port; it
@@ -449,20 +455,53 @@ root to the next installation that starts.
 `authScope: 'isolated'` identifies the service and Claude/Codex status rows. `accountSignOut(id)`
 and `accountSwitch(id, { label? })` use the Bot environment. They block admission, stop
 starting/live chat, model-probe, image and login processes, wait for termination, then ask the
-CLI to log out and verify it is signed out. Credential-store separation relies on the vendor
-assumptions below. Switch starts a new isolated login afterward.
+CLI to log out and verify it is signed out. What the native macOS job checks about credential
+stores is in *Credential stores on macOS (#869)* below. Switch starts a new isolated login afterward.
 Generation checks prevent work delayed across a switch from starting on the next account.
 `imageAccess()` includes `accountGeneration` when ready; callers pass that ticket to
 `generateImage({ accountGeneration, ... })` so even a switch between those two calls refuses
 the old drawing request. A missing/reloading ACP service never authorizes legacy image billing.
 A failed logout stays paused until the owner retries. Authentication changes hold an installation
 lock; close other app instances registered on that vendor home before changing accounts.
-Automatic app-crash recovery is Unix-only and requires proof that the recorded login group
-ended. On Windows, a dead app's login record stays blocked, even if an old Job nonce exists;
-Windows crash recovery is the owner's Reset Bot sign-in action, followed by fresh sign-in.
-Automatic Windows recovery is deferred to
-[follow-up #1076](https://github.com/automagik-si/automagik/issues/1076).
-The normal Windows sign-in and stop path still waits for its live supervisor's empty-Job proof.
+Unix app-crash recovery requires proof that the recorded login group ended. On Windows the
+app records a unique `Global\` Job name before spawning the supervisor. The supervisor creates
+the kill-on-close Job and uses `PROC_THREAD_ATTRIBUTE_JOB_LIST` with `CREATE_SUSPENDED` to
+start the vendor inside the Job. It records the initial member before resuming the vendor
+and refreshes the member list about every 20 ms. Normal Windows sign-in and stop still wait
+for the supervisor's empty-Job acknowledgement. [Job objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+and [process creation attributes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+describe these APIs.
+
+The supervisor watches the app because libuv's Job permits silent breakaway and assigns
+non-detached children after creation. The app can exit before that assignment, which also
+tolerates access denied. [Node 24.9.0's libuv source](https://github.com/nodejs/node/blob/v24.9.0/deps/uv/src/win/process.c#L1052-L1101)
+shows the assignment, and [the Job flags](https://github.com/nodejs/node/blob/v24.9.0/deps/uv/src/win/process.c#L70-L102)
+govern breakaway.
+
+At startup and before sign-in, sign-out or the account recovery read, a foreign Windows
+record can trigger one PowerShell probe per launch. A cold compile takes about 10–20 seconds
+and each vendor's recovery probes share a 60-second budget. The app, supervisor and recorded
+members must have exited, and opening the Job must return error 2 (file not found). PID birth
+times distinguish reused PIDs. The record and its evidence must still match under the installation mutex before
+removal. Missing proof keeps sign-in blocked and leaves Reset available. Pre-change Windows
+records need one Reset.
+
+The Job object's name disappears on last handle close, which starts termination of its members.
+Recovery checks full exit for each recorded member. A process created since the last sample
+may still have pending I/O from before termination. It can no longer run user code, issue new
+I/O or create processes, but already submitted I/O can complete after the name disappears.
+The proof runs in a later app start after the PowerShell compile. Vendor work delegated to
+other services, such as COM, WMI, Task Scheduler or credential-manager RPC, is outside the Job
+on recovery and on normal stop. See [object name lifetime](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/life-cycle-of-an-object),
+[Job destruction](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-createjobobjectw)
+and [process termination](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess).
+
+This path requires Windows 10 or Windows Server 2016 or later, the Node 24 runtime floor, and
+a token that can create a `Global\` Job. If creation is refused, sign-in fails at `create-job`.
+The global namespace supports lookup across logon sessions. The native CI gate exercises a
+single session. [Windows kernel object namespaces](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces)
+document global lookup.
+
 A dead app PID alone never clears ownership. Dead recovery claimants can be reclaimed under
 installation-level serialization after the lock owner and applicable proof are revalidated.
 `accountRecovery(id)` reports `{ required }` per vendor without running its CLI. Cold Bot settings
@@ -481,8 +520,7 @@ proved to be the retired generation's own is refused and left untouched; a missi
 or unparseable `RETIRED.json` is refused too, because the record of what was decided is then
 ambiguous. An absent note is reported as absent and a corrupt one as corrupt. A startup line
 counts kept, missing and refused homes separately: it claims retention at a bound path only for
-a home that is still there. Unproved folders,
-including Windows crash records, remain retained. Within the installation's CLI root, each
+a home that is still there. Unproved folders remain retained. Within the installation's CLI root, each
 0-byte marker under `retired/<vendor>/` names a retired generation; its home is
 `homes/<vendor>/<generation>` (the legacy home is `<vendor>`), and
 `RETIRED.json` inside it says what is kept, for how long, and how to keep it.
@@ -492,20 +530,51 @@ version or pause marker cannot revive a captured launch. Bot models and DSH hist
 Bot CLI user settings start empty; project settings still load from the working folder.
 Account details stay on owner-only routes, never in state, transcripts, model calls or logs.
 
-**Credential-store assumptions and missing live checks.** Claude's documented macOS Keychain
-entry is namespaced by `CLAUDE_CONFIG_DIR`; Codex's current OS-keyring implementation derives
-its key from `CODEX_HOME`. Separate directories rely on those namespaces remaining distinct in
-the installed vendor versions. Fake-store/process tests do not prove the live credential paths.
-Two checks remain open on #869:
+**Credential stores on macOS (#869).** CI job `acp-dsh (native macOS credential stores)` on
+`macos-15` uses the real Claude Code 2.1.330 and Codex 0.171.0 darwin-arm64 builds, pinned with
+registry integrity in `test/native/clis.json`. The job uses invented credentials, creates and
+deletes a disposable keychain, and denies outbound network access through a seatbelt profile.
+acp-dsh runs its own sign-in, switch and sign-out with the Bot's isolated environment. The
+real CLIs answer every status and logout check. Codex sign-in in acp-dsh requests a ChatGPT
+device code. A stand-in answers that exchange and runs the real `codex login --with-api-key`
+writer offline with acp-dsh's environment and working directory. For Claude Code, the
+stand-in places the credential where the CLI reads it.
 
-- Real macOS, two accounts: sign in, switch and sign out inside the app for both vendors, and
-  verify the terminal login remains intact throughout.
-- Codex's OS-keyring-backed auth path, with separate Bot and terminal homes, through the same
-  sign-in/switch/sign-out sequence (not only the `auth.json` file path).
+- **Round P.** With pristine Bot homes, the job checks that macOS exposes no default keychain
+  or search list to either Bot. It checks that Codex uses `<Bot home>/.codex/auth.json` in
+  default file mode, fails to write in explicit `keyring` mode, and falls back to the file
+  on save in `auto` mode. Phase P5 records `auto-logout-ok` when sign-out removes the file,
+  or `auto-logout-keyring-error` when Codex keeps the file and acp-dsh reports that sign-out
+  did not finish. Claude Code reads the planted `<Bot home>/.claude/.credentials.json` and
+  reports signed out when that credential is removed. Its own logout clears the Bot sign-in.
+  The terminal's Claude keychain record and Codex file must stay byte-identical, and both
+  terminal logins must stay signed in throughout.
+- **Round K.** With both homes pointed to the disposable keychain, the job checks that each
+  vendor gives the terminal and Bot distinct items. Codex's default `Direct` backend on macOS
+  uses service `Codex Auth` and an account of `cli|` plus the first 16 hex characters of the
+  SHA-256 digest of canonical `CODEX_HOME`. Claude Code uses the current user and service
+  `Claude Code-credentials`, suffixed for the Bot with `-` and the first eight hex characters
+  of the SHA-256 digest of the NFC-normalized `CLAUDE_SECURESTORAGE_CONFIG_DIR` value.
+  Each vendor's logout must delete only the Bot's item. The job verifies that A's item is
+  gone before B is written, the Bot record changes between A and B, and the terminal's
+  records stay byte-identical. The same vendor binary can read both names in the keychain.
 
-See [Claude authentication](https://code.claude.com/docs/en/authentication) and
-[Codex auth storage](https://github.com/openai/codex/blob/main/codex-rs/login/src/auth/storage.rs)
-for those upstream namespace contracts.
+First native run (2026-11-21, `ImageOS` macos15, `ImageVersion` 20261118.0550.1, macOS 15.8.2,
+Apple silicon): every phase passed. P5 recorded `auto-logout-keyring-error`: with no keychain
+reachable from the Bot's home, Codex 0.171.0 in `auto` mode saves to the file but its logout
+stops on the keyring error and keeps the file, so acp-dsh reports that sign-out did not finish.
+Bots use Codex's default file mode, which signs out cleanly (P3).
+Real OAuth with real accounts and the vendor exchanges for Claude sign-in and Codex
+device-code sign-in remain untested. Claude Code has no offline sign-in writer for these
+fixtures, so the job exercises its reads and logout against planted credentials. Codex's
+account view reports the same API-key kind for both keys. The job distinguishes A and B
+using masked CLI status, stored record digests and the absence of A at the switch.
+Other macOS images, Keychain prompts on a person's Mac, Intel Macs, newer vendor versions
+(acp-dsh installs the newest stable releases), and Windows (#1076) remain untested here.
+
+See [Claude authentication](https://code.claude.com/docs/en/authentication),
+[Codex 0.171.0 auth storage](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/login/src/auth/storage.rs)
+and [Codex 0.171.0 login and logout](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/cli/src/login.rs).
 
 **Settings migration:** terminal user settings, hooks, MCP servers, skills and CLI sessions are
 not automatically imported. Project settings still load in chat work; account/status/login
@@ -535,10 +604,10 @@ before sending the prompt. Scratch cleanup is best effort. `CODEX_HOME` comes fr
 `cli-homes.js`; the terminal's config is never written. The same checked overrides go through
 codex-acp's `CODEX_CONFIG`.
 
-2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
-the per-draw profile cannot be used); owner decision pending.
+The one-off draw fails closed (#870; decided by the owner's delegate on 2026-11-21, the
+recommended option): the draw or edit is refused when the per-draw profile cannot be used.
 
-Under the proposed default, if the per-draw profile checks fail, the draw or edit is refused
+Under this default, if the per-draw profile checks fail, the draw or edit is refused
 before any prompt and legacy `read-only` is never selected as a fallback. One warning in the
 logger and stderr names the reason without private details. With no profile, the checks and
 the session may start before the refusal. Windows has no profile modes, so `imageAccess()` can
@@ -682,8 +751,9 @@ an injected request could put a local file's contents into a picture shown in ch
 Tool checks and permission refusals alone do not prevent these reads. Prompt text itself is
 outside the file boundary and still reaches the model.
 
-To avoid `generate_image`'s one-off Codex session, configure an OpenAI API key for the Images
-API, or turn Codex off in the agent settings. Keep secrets out of the prompt. A Bot running
+To avoid `generate_image`'s one-off Codex session, give the app an OpenAI API key for the Images
+API (one only inherited from the environment is not used, #869), or turn Codex off in the agent
+settings. Keep secrets out of the prompt. A Bot running
 on Codex can still invoke its own image tool even with an API key configured. Use a different
 Bot model or turn Codex off to avoid that route. Avoid forwarding untrusted channel messages
 or other outside text into Codex drawing requests. Prompt review cannot enforce a file boundary.
@@ -753,8 +823,8 @@ of time leaves Codex ready. A draw always makes its own check.
   on every turn. Codex's image accessor uses a sandboxed helper, whose runtime grants widen
   the profile's requested read boundary. Images in permitted runtime directories remain
   readable. The 2026-11-11 owner decision accepted the risk of continuing in legacy
-  `read-only` for draws when the profile mode was unavailable or rejected. The draft
-  proposes refusing those draws before any prompt.
+  `read-only` for draws when the profile mode was unavailable or rejected. Since #870's
+  decision (2026-11-21) those draws are refused before any prompt.
   Ordinary chat images (`agent-image.js`) use the chat profiles above at Read only and
   Workspace when offered. Signed-in enforcement on the actual per-turn path still needs
   verification in the app.

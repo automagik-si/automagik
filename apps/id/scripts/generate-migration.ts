@@ -1,4 +1,5 @@
 // Run only when deliberately updating the pinned auth schema; review the resulting SQL.
+// Its output also holds columns a later migration adds (0004: session.signInMethod); keep those out of 0001.
 import { Database } from 'bun:sqlite';
 import { getMigrations } from 'better-auth/db/migration';
 import { mkdir, writeFile } from 'node:fs/promises';

@@ -1,6 +1,6 @@
 // npm reads config in a fresh package folder; the registry answers through fetch.
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -19,7 +19,7 @@ const posix = { skip: process.platform === 'win32' }
 const published = (version = '1.2.3') => Response.json({ version })
 
 function fixture(t, { output = scoped(CUSTOM), exit = 0, wait = false, fetch = () => published() } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'acp-npm-lookup-'))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'acp-npm-lookup-')))
   const args = join(root, 'args')
   const cwd = join(root, 'cwd')
   const ready = join(root, 'ready')

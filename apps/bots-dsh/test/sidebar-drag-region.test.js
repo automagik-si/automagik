@@ -26,7 +26,7 @@ const SHELL_NO_DRAG = [
   '[role=radio]', '[role=slider]', '[role=switch]', '[role=tab]',
   '[aria-haspopup]', '[tabindex]', '[data-menu]',
 ]
-const TOP_CONTAINERS = ['.bt-brand', '.bt-code-switch']
+const TOP_CONTAINERS = ['.bt-brand']
 
 // The stylesheet is hand-written and compact; these checks only need selectors and the
 // app-region declaration, so this reader stays small.
@@ -314,9 +314,6 @@ function sidebarTree(platform) {
   const side = append(body, 'div', { class: 'bt-side' })
   const top = append(side, 'div', { class: 'bt-side-top' })
   append(top, 'span', { class: 'bt-brand' })
-  const code = append(append(top, 'div', { class: 'bt-code-switch-wrap' }), 'div', { class: 'bt-code-switch' })
-  append(code, 'span', { class: 'bt-code-seg' })
-  append(code, 'button', { type: 'button', class: 'bt-code-seg' })
   append(top, 'button', { type: 'button', class: 'bt-round bt-update', 'aria-haspopup': 'dialog' })
   append(top, 'button', { type: 'button', class: 'bt-round', 'aria-label': 'Search' })
   append(top, 'button', { type: 'button', class: 'bt-round', 'aria-label': 'New' })
@@ -334,7 +331,7 @@ function sidebarTree(platform) {
 
 function interactive(node) {
   return ['a', 'button', 'input', 'label', 'select', 'summary', 'textarea'].includes(node.tag) ||
-    node.classes.has('bt-brand') || node.classes.has('bt-code-switch') || 'contenteditable' in node.attrs ||
+    node.classes.has('bt-brand') || 'contenteditable' in node.attrs ||
     ['button', 'checkbox', 'link', 'menu', 'menubar', 'menuitem', 'menuitemcheckbox',
       'menuitemradio', 'option', 'radio', 'slider', 'switch', 'tab'].includes(node.attrs.role) ||
     'aria-haspopup' in node.attrs || 'tabindex' in node.attrs || 'data-menu' in node.attrs
@@ -364,9 +361,8 @@ test('every interactive sidebar top-bar item is no-drag on darwin', () => {
   const items = []
   walk(top, node => { if (node !== top && interactive(node)) items.push(node) })
   walk(header, node => { if (node !== header && interactive(node)) items.push(node) })
-  assert.ok(items.length >= 10, `the fixture covers the built controls: ${items.length}`)
+  assert.ok(items.length >= 8, `the fixture covers the built controls: ${items.length}`)
   assert.ok(items.some(node => node.classes.has('bt-brand')), 'the brand is covered even though the app hides it')
-  assert.ok(items.some(node => node.classes.has('bt-code-switch')), 'the work/code switch is covered')
   assert.ok(items.some(node => node.attrs['aria-haspopup'] === 'dialog'), 'the update menu trigger is covered')
   assert.ok(items.some(node => node.attrs['data-sidebar-toggle'] !== undefined), 'the header sidebar toggle is covered')
   for (const item of items) {
@@ -423,7 +419,7 @@ test('the no-drag lists match the shell top bar list', () => {
   const topArgs = noDragArguments(splitTop(topRule.prelude).find(selector => selector.includes('.bt-side-top')))
   const headerArgs = noDragArguments(splitTop(headerRule.prelude).find(selector => selector.includes('header[class*="_header"]')))
   assert.deepEqual([...topArgs].sort(), [...SHELL_NO_DRAG, ...TOP_CONTAINERS].sort(),
-    'the top row opts out every shell item and its brand/work-switch surfaces')
+    'the top row opts out every shell item and its brand surface')
   assert.deepEqual([...headerArgs].sort(), [...SHELL_NO_DRAG].sort(),
     'the header opts out the same controls as the shell top bar')
 })
@@ -449,7 +445,8 @@ test('the drag rules stay darwin-scoped and leave Linux alone', () => {
 
 test('the tests exercise the builders this rule depends on', () => {
   assert.match(source, /className: 'bt-side-top'/)
-  assert.match(source, /h\(WorkCodeSwitch/)
+  // RFC 0022 B (Q9): Open Herdr moved onto each Code row; the sidebar builds no WorkCodeSwitch.
+  assert.doesNotMatch(source, /h\(WorkCodeSwitch/)
   assert.match(source, /h\(UpdateButton/)
   assert.match(headerSource, /'bt-head'/)
 })

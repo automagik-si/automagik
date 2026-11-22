@@ -8,7 +8,11 @@ the code that answers those questions is checked against the real shapes and not
 |---|---|---|
 | `codex-acp-2.6.0.json` | Codex 0.167.0 through `@agentclientprotocol/codex-acp` 2.6.0 | One real turn per case through `AgentRun`, each question answered `reject_once`, so nothing asked for ran. The working folder is replaced by `/workspace`. |
 
-Claude Code is not captured yet: it needs a signed-in Claude Code.
+Claude Code is not captured yet: it needs a signed-in Claude Code, and until then Claude Code stays
+off Auto (RFC 0031, question 5, decided by the owner's delegate on 2026-11-21). A scripted local
+model is not a substitute: it cannot show whether the CLI really entered `auto`. A capture pins the
+CLI, adapter, model and tool surface, runs isolated with synthetic files, and records the requested
+and effective mode and any fallback notice beside the fields below.
 
 ## What the Codex capture shows
 

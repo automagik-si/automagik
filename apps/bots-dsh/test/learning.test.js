@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
-import { agentsAnswer, agentsProblem, agentsRequest, applyEdits, LEARNING, parseJson, skillProblem, withoutReviewedAgentsRecords } from '../src/host/learning.js'
+import { agentsAnswer, agentsProblem, agentsRequest, agentsSystem, applyEdits, hashOf, LEARNING, parseJson, skillProblem, withoutReviewedAgentsRecords } from '../src/host/learning.js'
 import { fakeContext } from './fake-ctx.js'
 
 const TEAM = {
@@ -37,9 +37,8 @@ const createReply = JSON.stringify({
 })
 const noneReply = JSON.stringify({ action: 'none', reason: 'This work taught nothing reusable.' })
 
-function start({ replies = [], config = {}, history = {}, seed = TEAM, learningSeed = {} } = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'ds-bot-learning-'))
-  writeFileSync(join(home, 'state.json'), JSON.stringify(JSON.parse(JSON.stringify(seed))))
+function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-learning-')), replies = [], config = {}, history = {}, seed = TEAM, learningSeed = {} } = {}) {
+  if (!existsSync(join(home, 'state.json'))) writeFileSync(join(home, 'state.json'), JSON.stringify(seed))
   if (Object.keys(learningSeed).length > 0) {
     mkdirSync(join(home, 'learning'), { recursive: true })
     writeFileSync(join(home, 'learning', 'state.json'), JSON.stringify(learningSeed))
@@ -153,6 +152,226 @@ const agentsEdit = JSON.stringify({
   edits: [{ op: 'add', after: '- Existing rule', text: '- Keep the report concise.', why: 'The user corrected the report format more than once.' }],
 })
 
+for (const [name, during, made] of [
+  ['a team reload during a review keeps its proposal', rt => { rt.state.bots = Object.fromEntries(Object.entries(rt.state.bots).map(([id, bot]) => [id, { ...bot }])) }, 2],
+  ['a Bot deleted during its review drops the proposal', rt => { delete rt.state.bots.m1 }, 0],
+]) {
+  test(name, async t => {
+    const publicFolder = realpathSync(projectFolder(t))
+    const seed = structuredClone(TEAM)
+    seed.bots.m1.workDir = publicFolder
+    let reviewing
+    const first = new Promise(resolve => { reviewing = rt => { during(rt); resolve(createReply) } })
+    const runtime = await startRuntime({ seed, replies: [first, agentsEdit], config: { learningTimes: { tickMs: 100_000 } } })
+    t.after(() => runtime.stop())
+    runtime.rt.partLines = async function* () { yield { seq: 11, time: 2, who: 'user', text: 'User: Check the public release.' } }
+    await finishTurn(runtime.ctx, { id: 'm1' })
+    await until(() => runtime.learningState().pending?.m1?.includes('m1'))
+    const pass = runtime.rt.learningRun()
+    await until(() => runtime.requests.length > 0)
+    reviewing(runtime.rt)
+    const proposals = await pass
+    assert.equal(proposals, made)
+  })
+}
+
+test('private work is skipped at collection and purged from queued reviews while public work still learns', async t => {
+  const privateFolder = realpathSync(projectFolder(t))
+  const publicFolder = realpathSync(projectFolder(t))
+  const seed = structuredClone(TEAM)
+  Object.assign(seed.bots.b2, { workDir: privateFolder, private: true })
+  seed.bots.m1.workDir = publicFolder
+  const convention = 'Use the fictional Quartz report convention.'
+  const runtime = await startRuntime({
+    seed,
+    learningSeed: {
+      agentsPending: {
+        [privateFolder]: { botId: 'b2', records: [{ botId: 'b2', text: convention, time: 1, order: 0 }] },
+        [publicFolder]: { botId: 'm1', records: [{ botId: 'b2', text: convention, time: 1, order: 0 }] },
+      },
+    },
+    replies: [createReply, agentsEdit],
+    config: { learningTimes: { tickMs: 100_000 } },
+  })
+  let reloaded
+  t.after(() => (reloaded ?? runtime).stop())
+  const reads = []
+  runtime.rt.partLines = async function* (id) {
+    reads.push(id)
+    yield { seq: 11, time: 2, who: 'user', text: id === 'b2' ? `User: ${convention}` : 'User: Check the public release.' }
+  }
+  await finishTurn(runtime.ctx, { id: 'b2' })
+  await finishTurn(runtime.ctx, { id: 'm1' })
+  await until(() => runtime.learningState().pending?.m1?.includes('m1'))
+  assert.equal(runtime.learningState().pending.b2, undefined)
+  assert.equal(await runtime.rt.learningRun(), 2)
+  assert.deepEqual(runtime.learningState().agentsPending, {})
+  assert.deepEqual(runtime.learningState().pending, {})
+  assert.deepEqual(reads, ['m1'])
+  assert.equal(JSON.stringify(runtime.requests).includes(convention), false)
+  assert.equal(readFileSync(runtime.learningPath, 'utf8').includes(convention), false)
+  const view = (await runtime.call('state')).value.learning
+  assert.equal(view.b2, undefined)
+  assert.deepEqual(view.m1.map(proposal => proposal.kind), ['skill', 'agents'])
+  assert.equal((await runtime.call('learning-answer', { id: view.m1[0].id, approve: true })).value.applied, true)
+  assert.deepEqual(Object.keys(runtime.teamState().capabilities.items), ['release-checks'])
+  // Simulate work already queued by an older host (or before a Bot became private).
+  const legacy = { pending: { b2: ['b2'] } }
+  await runtime.ctx.dispose()
+  writeFileSync(runtime.learningPath, JSON.stringify(legacy))
+  reloaded = await startRuntime({ home: runtime.home, config: { learningTimes: { tickMs: 100_000 } } })
+  reloaded.rt.partLines = runtime.rt.partLines
+  assert.equal(await reloaded.rt.learningRun(), 0)
+  assert.deepEqual(reloaded.learningState().pending, {})
+  assert.deepEqual(reads, ['m1'])
+  assert.deepEqual(reloaded.requests, [])
+})
+
+test('an open learning proposal cannot be approved after its Bot becomes private', async t => {
+  const folder = projectFolder(t)
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  const runtime = await startRuntime({ seed, replies: [createReply, agentsEdit], config: { learningTimes: { tickMs: 100_000 } } })
+  t.after(() => runtime.stop())
+  await finishTurn(runtime.ctx)
+  assert.equal(await runtime.rt.learningRun(), 2)
+  const proposals = (await runtime.call('state')).value.learning.b2
+  // Let approval enter capabilitySave, which waits for its own inputs before publishing.
+  const save = runtime.rt.capabilitySave
+  runtime.rt.capabilitySave = async (...args) => {
+    await runtime.rt.updateBot('b2', { private: true })
+    return save(...args)
+  }
+  for (const { id, kind } of proposals) {
+    const answer = await runtime.call('learning-answer', { id, approve: true })
+    assert.equal(answer.error?.code, 'bot/refused')
+    assert.match(answer.error.message, /private Bot/)
+    assert.equal(Boolean(runtime.learningState().proposals[id]), kind === 'skill')
+  }
+  assert.equal(runtime.teamState().bots.b2.private, true)
+  assert.deepEqual(runtime.teamState().capabilities.items, {})
+  assert.equal(readFileSync(join(folder, 'AGENTS.md'), 'utf8'), '# Project\n- Existing rule\n')
+})
+
+test('saving a secret during skill approval cannot publish or settle a scrubbed card', async t => {
+  for (const afterSave of [false, true]) await t.test(afterSave ? 'before settling' : 'before library insertion', async t => {
+    const value = 'new-skill-fixture-phrase'
+    const reply = { ...JSON.parse(createReply), [afterSave ? 'why' : 'content']: `Review the ${value}.` }
+    const runtime = await startRuntime({
+      replies: [JSON.stringify(reply)],
+      config: { learningTimes: { tickMs: 100_000 } },
+    })
+    t.after(() => runtime.stop())
+    await finishTurn(runtime.ctx)
+    assert.equal(await runtime.rt.learningRun(), 1)
+    const [card] = (await runtime.call('state')).value.learning.b2
+    const save = runtime.rt.capabilitySave
+    runtime.rt.capabilitySave = async (...args) => {
+      const item = afterSave ? await save(...args) : undefined
+      assert.equal((await runtime.call('secret-set', { name: 'LEARNING_TEST', value })).ok, true)
+      assert.equal(runtime.learningState().proposals[card.id], undefined)
+      return afterSave ? item : save(...args)
+    }
+    const answer = await runtime.call('learning-answer', { id: card.id, approve: true })
+    const items = runtime.teamState().capabilities.items
+    assert.deepEqual(Object.keys(items), afterSave ? [card.name] : [])
+    assert.equal(JSON.stringify(items).includes(value), false)
+    assert.deepEqual(runtime.learningState().settled, {})
+    assert.equal(readFileSync(runtime.learningPath, 'utf8').includes(value), false)
+    assert.equal(answer.error?.code, 'bot/stale')
+  })
+})
+
+test('queued folder work is invalidated when a different Bot takes the folder private', async t => {
+  for (const archived of [false, true]) await t.test(archived ? 'archived owner' : 'live owner', async t => {
+    const folder = realpathSync(projectFolder(t))
+    const seed = structuredClone(TEAM)
+    seed.bots.b2.workDir = folder
+    seed.bots.b3 = { ...seed.bots.b2, id: 'b3', sessionId: 'b3', name: 'Coder', workDir: undefined }
+    const runtime = await startRuntime({
+      seed, replies: [noneReply, new Error('review later'), agentsEdit],
+      config: { learningTimes: { tickMs: 100_000 } },
+    })
+    t.after(() => runtime.stop())
+    await finishTurn(runtime.ctx)
+    await runtime.rt.learningRun()
+    assert.ok(runtime.learningState().agentsPending[folder])
+    await runtime.rt.updateBot('b2', { workDir: projectFolder(t) })
+    await runtime.rt.updateBot('b3', { workDir: folder, private: true })
+    if (archived) assert.equal((await runtime.call('delete-bot', { id: 'b3' })).ok, true)
+    assert.notEqual(runtime.rt.botOf('b2').private, true)
+    writeFileSync(join(folder, 'AGENTS.md'), '# Private fixture\n- Existing rule\n')
+    assert.equal(await runtime.rt.learningRun(), 0)
+    assert.equal(runtime.requests.length, 2)
+    assert.equal(runtime.learningState().agentsPending[folder], undefined)
+  })
+})
+
+test('approval invalidates a folder card after another Bot takes ownership of its resolved file', async t => {
+  const folder = realpathSync(projectFolder(t))
+  const target = realpathSync(projectFolder(t))
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  seed.bots.b3 = { ...seed.bots.b2, id: 'b3', sessionId: 'b3', name: 'Coder', workDir: target }
+  const path = join(folder, 'AGENTS.md')
+  const targetFile = join(target, 'AGENTS.md')
+  const baseline = readFileSync(targetFile, 'utf8')
+  unlinkSync(path)
+  symlinkSync(targetFile, path, 'file')
+  const runtime = await startRuntime({ seed, replies: [noneReply, agentsEdit], config: { learningTimes: { tickMs: 100_000 } } })
+  t.after(() => runtime.stop())
+  await finishTurn(runtime.ctx)
+  assert.equal(await runtime.rt.learningRun(), 1)
+  const [card] = (await runtime.call('state')).value.learning.b2
+  const workFolder = runtime.rt.workFolder
+  runtime.rt.workFolder = async (...args) => {
+    const result = await workFolder(...args)
+    await runtime.rt.updateBot('b3', { private: true })
+    return result
+  }
+  const answer = await runtime.call('learning-answer', { id: card.id, approve: true })
+  assert.equal(runtime.rt.botOf('b3').private, true)
+  assert.notEqual(runtime.rt.botOf('b2').private, true)
+  assert.equal(answer.ok, false)
+  assert.equal(readFileSync(path, 'utf8'), baseline)
+  assert.equal(readFileSync(targetFile, 'utf8'), baseline)
+  assert.equal(realpathSync(path), targetFile)
+  assert.equal((await runtime.call('state')).value.learning.b2, undefined)
+  assert.equal(runtime.learningState().proposals[card.id], undefined)
+})
+
+test('declined folder edits stay out of reviews after a contributor becomes private', async t => {
+  const folder = realpathSync(projectFolder(t))
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  seed.bots.b3 = { ...seed.bots.b2, id: 'b3', sessionId: 'b3', name: 'Coder' }
+  const history = { b2: [...ownChat], b3: [...ownChat] }
+  const runtime = await startRuntime({
+    seed, history, replies: [noneReply, noneReply, agentsEdit, noneReply, noneReply],
+    learningSeed: { declined: [
+      { kind: 'agents', folder, edits: [{ op: 'add', text: '- Omit this legacy decline' }] },
+      { kind: 'agents', folder, contributors: ['b2'], edits: [{ op: 'add', text: '- Keep this public decline' }] },
+    ] },
+    config: { learningTimes: { tickMs: 100_000 } },
+  })
+  t.after(() => runtime.stop())
+  await finishTurn(runtime.ctx)
+  await finishTurn(runtime.ctx, { id: 'b3' })
+  assert.equal(await runtime.rt.learningRun(), 1)
+  const [card] = Object.values(runtime.learningState().proposals)
+  assert.deepEqual(card.contributors, ['b2', 'b3'])
+  assert.equal((await runtime.call('learning-answer', { id: card.id })).ok, true)
+
+  await runtime.rt.updateBot('b3', { workDir: projectFolder(t), private: true })
+  addNextTurn(history)
+  await finishTurn(runtime.ctx)
+  assert.equal(await runtime.rt.learningRun(), 0)
+  const request = runtime.requests.at(-1).messages[0].content[0].text
+  assert.match(request, /Keep this public decline/)
+  assert.doesNotMatch(request, /Keep the report concise|Omit this legacy decline/)
+  assert.deepEqual(runtime.learningState().declined.at(-1).contributors, ['b2', 'b3'])
+})
+
 test('agentsProblem validates edit safety and whole-line matches', () => {
   const current = '# Project\n- Existing rule\n'
   assert.equal(agentsProblem({ action: 'none' }, current), undefined)
@@ -163,12 +382,19 @@ test('agentsProblem validates edit safety and whole-line matches', () => {
   assert.match(agentsProblem({ action: 'edit', edits: [{ op: 'add', after: '', text: '- Task #123 happened 2026-10-28 v2.1', why: 'Repeated correction.' }] }, current), /number, date, or version/)
   assert.match(agentsProblem({ action: 'edit', edits: [{ op: 'add', after: '', text: '- Password is hunter2', why: 'Repeated correction.' }] }, current), /secret/)
   assert.match(agentsProblem({ action: 'edit', edits: [{ op: 'add', after: '', text: '- Keep this rule.', why: 'The password is hunter2.' }] }, current), /secret/)
+  const anchor = '- Key sk-examplefixture1234567890'
+  assert.match(agentsProblem({ action: 'edit', edits: [{ op: 'add', after: anchor, text: '- Keep this rule.', why: 'Repeated correction.' }] }, `${current}${anchor}\n`), /secret/)
+  assert.match(agentsProblem(replace(anchor), `${current}${anchor}\n`), /secret/)
   assert.match(agentsProblem(replace('- Existing rule'), undefined), /only add lines/)
   assert.match(agentsProblem({ action: 'edit', edits: [{ op: 'add', after: '', text: 'x'.repeat(LEARNING.agentsEditMax + 1), why: 'Repeated correction.' }] }, current), /at most/)
   assert.match(agentsProblem({ action: 'edit', edits: [{ op: 'replace', old: '- Existing rule', text: '- Existing rule', why: 'Repeated correction.' }] }, current), /change nothing/)
   const long = `# ${'x'.repeat(3997)}`
   const large = { action: 'edit', edits: [1, 2, 3].map(index => ({ op: 'add', after: '', text: `- ${index}${'y'.repeat(397)}`, why: 'Repeated correction.' })) }
   assert.match(agentsProblem(large, long), /too large/)
+})
+
+test('AGENTS review guidance keeps credentials out of every retained edit field', () => {
+  assert.match(agentsSystem(), /Keep credentials out of every edit field, including quoted old text, add anchors, and reasons/)
 })
 
 test('agentsAnswer reads an edit written as the answer, an empty replacement, and lines apart as edits', () => {
@@ -324,17 +550,26 @@ test('work for a folder with an open proposal stays queued until the card is dec
   assert.equal(runtime.learningState().agentsPending[await runtime.rt.real(folder)], undefined)
 })
 
-test('a failed AGENTS model call keeps its folder work for the next pass', async t => {
+test('a failed AGENTS model call keeps its folder work for the next pass with credentials redacted', async t => {
   const folder = projectFolder(t)
   const seed = JSON.parse(JSON.stringify(TEAM))
   seed.bots.b2.workDir = folder
+  const config = { learningTimes: { tickMs: 100_000, userLineMax: 42 } }
+  const key = 'sk-examplefixture1234567890'
+  const secret = 'stored-test-value-37'
+  const keyLine = `User: Key ${'x'.repeat(20)} ${key}`
+  const secretLine = `User: Another saved value: ${secret}`
   const runtime = await startRuntime({
     seed,
-    replies: [createReply, new Error('AGENTS model failed'), agentsEdit],
-    config: { learningTimes: { tickMs: 100_000 } },
+    replies: [createReply, new Error('AGENTS model failed')],
+    config,
   })
-  t.after(() => runtime.stop())
+  let reloaded
+  t.after(() => (reloaded ?? runtime).stop())
+  assert.equal((await runtime.call('secret-set', { name: 'LEARNING_TEST', value: secret })).ok, true)
   runtime.rt.partLines = async function* () {
+    yield { seq: 13, time: 3, who: 'user', text: secretLine }
+    yield { seq: 12, time: 2, who: 'user', text: keyLine }
     yield { seq: 11, time: 1, who: 'user', text: 'User: Keep the same folder work' }
   }
   await finishTurn(runtime.ctx)
@@ -343,12 +578,249 @@ test('a failed AGENTS model call keeps its folder work for the next pass', async
   assert.match(runtime.learningState().agentsPending[folderKey].records[0].text, /same folder work/)
   assert.equal((await runtime.call('state')).value.learning.b2[0].kind, 'skill')
   const firstRequest = runtime.requests.at(-1).messages[0].content[0].text
+  const assertSafe = (runtime, requests) => {
+    const persisted = readFileSync(runtime.learningPath, 'utf8')
+    for (const text of [persisted, JSON.stringify(requests)]) {
+      assert.equal(text.includes(key.slice(0, 10)), false)
+      assert.equal(text.includes(secret), false)
+    }
+  }
+  assertSafe(runtime, runtime.requests)
+  assert.match(firstRequest, /\[hidden\]/)
 
+  await runtime.ctx.dispose()
+  // The old writer clipped raw lines before persisting them, including partial credentials.
+  const legacy = runtime.learningState()
+  const [, keyRecord, secretRecord] = legacy.agentsPending[folderKey].records
+  keyRecord.text = `${keyLine.slice(0, config.learningTimes.userLineMax)} […]`
+  secretRecord.text = `${secretLine.slice(0, config.learningTimes.userLineMax)} […]`
+  assert.ok(secretRecord.text.includes(secret.slice(0, 12)))
+  assert.ok(!secretRecord.text.includes(secret))
+  legacy.agentsPending[folderKey].records.push({ ...secretRecord, order: 3, text: `User: Save ${secret}` })
+  writeFileSync(runtime.learningPath, JSON.stringify(legacy))
+  reloaded = await startRuntime({ home: runtime.home, replies: [agentsEdit], config })
+  assert.deepEqual(reloaded.learningState().agentsPending[folderKey].records.map(item => item.text), ['User: Keep the same folder work', 'User: [hidden]'])
+  assertSafe(reloaded, [])
+  await reloaded.rt.learningRun()
+  assertSafe(reloaded, reloaded.requests)
+  const reloadedRequest = reloaded.requests.at(-1).messages[0].content[0].text
+  assert.match(reloadedRequest, /same folder work/)
+  assert.equal(reloadedRequest.includes(secret.slice(0, 12)), false)
+  assert.equal(reloaded.learningState().agentsPending[folderKey], undefined)
+  assert.ok((await reloaded.call('state')).value.learning.b2.some(proposal => proposal.kind === 'agents'))
+})
+
+test('saving a secret scrubs queued folder work before the next review in the same process', async t => {
+  const folder = realpathSync(projectFolder(t))
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  const secret = 'newly-saved-fixture-37'
+  const runtime = await startRuntime({
+    seed, replies: [noneReply, new Error('review later'), agentsEdit],
+    config: { learningTimes: { tickMs: 100_000, userLineMax: 55 } },
+  })
+  t.after(() => runtime.stop())
+  const clippedValue = 'another-stored-fixture-42'
+  runtime.rt.partLines = async function* () {
+    yield { seq: 12, time: 3, who: 'user', text: `User: Someone else has to check the value: ${clippedValue}` }
+    yield { seq: 11, time: 2, who: 'user', text: `User: Keep this value ${secret}` }
+    yield { seq: 10, time: 1, who: 'user', text: 'User: Keep the same folder work' }
+  }
+  await finishTurn(runtime.ctx)
   await runtime.rt.learningRun()
-  assert.match(runtime.requests.at(-1).messages[0].content[0].text, /same folder work/)
-  assert.equal(runtime.requests.at(-1).messages[0].content[0].text, firstRequest)
-  assert.equal(runtime.learningState().agentsPending[folderKey], undefined)
-  assert.ok((await runtime.call('state')).value.learning.b2.some(proposal => proposal.kind === 'agents'))
+  assert.equal(readFileSync(runtime.learningPath, 'utf8').includes(secret), true)
+  assert.ok(readFileSync(runtime.learningPath, 'utf8').includes(clippedValue.slice(0, 10)))
+  assert.equal((await runtime.call('secret-set', { name: 'LEARNING_TEST', value: secret })).ok, true)
+  assert.equal((await runtime.call('secret-set', { name: 'CLIPPED_TEST', value: clippedValue })).ok, true)
+  const savedText = readFileSync(runtime.learningPath, 'utf8')
+  assert.equal(savedText.includes(secret), false)
+  assert.equal(savedText.includes(clippedValue.slice(0, 10)), false)
+  assert.equal(await runtime.rt.learningRun(), 1)
+  const request = runtime.requests.at(-1).messages[0].content[0].text
+  assert.equal(request.includes(secret), false)
+  assert.match(request, /same folder work/)
+  assert.match(request, /\[hidden\]/)
+})
+
+test('saving a secret scrubs an unopened learning file and retries a failed cleanup write', async t => {
+  for (const failWrite of [false, true]) await t.test(failWrite ? 'failed write and retry' : 'before state is opened', async t => {
+    const folder = realpathSync(projectFolder(t))
+    const value = 'new-learning-fixture-phrase'
+    const runtime = start({
+      learningSeed: {
+        agentsPending: {
+          [folder]: { botId: 'b2', records: [
+            { text: `User: Use this value ${value}`, order: 0 },
+            { text: 'User: Keep the public work.', order: 1 },
+          ] },
+        },
+      },
+      config: { learningTimes: { tickMs: 100_000 } },
+    })
+    t.after(() => runtime.stop())
+    const before = readFileSync(runtime.learningPath, 'utf8')
+    const temp = `${runtime.learningPath}.${process.pid}.tmp`
+    if (failWrite) mkdirSync(temp)
+    const result = await runtime.call('secret-set', { name: 'LEARNING_TEST', value })
+    assert.ok(readFileSync(join(runtime.home, 'secrets.json'), 'utf8').includes(value))
+    if (failWrite) {
+      assert.equal(result.ok, false)
+      assert.match(result.error.message, /EISDIR|EPERM|EACCES/)
+      assert.equal(readFileSync(runtime.learningPath, 'utf8'), before)
+      rmSync(temp, { recursive: true })
+      assert.equal((await runtime.call('state')).ok, true)
+    } else {
+      assert.equal(result.ok, true)
+    }
+    assert.deepEqual(runtime.learningState().agentsPending[folder].records.map(record => record.text), [
+      'User: [hidden]', 'User: Keep the public work.',
+    ])
+    assert.equal(readFileSync(runtime.learningPath, 'utf8').includes(value), false)
+  })
+})
+
+test('a learning file read failure is reported on secret save and retried on the next state poll', async t => {
+  const folder = realpathSync(projectFolder(t))
+  const value = 'new-learning-fixture-phrase'
+  const runtime = start({
+    learningSeed: { agentsPending: { [folder]: { botId: 'b2', records: [
+      { text: `User: Use ${value}`, order: 0 },
+      { text: 'User: Keep the public work.', order: 1 },
+    ] } } },
+    config: { learningTimes: { tickMs: 100_000 } },
+  })
+  t.after(() => runtime.stop())
+  const backup = `${runtime.learningPath}.backup`
+  renameSync(runtime.learningPath, backup)
+  mkdirSync(runtime.learningPath)
+  const result = await runtime.call('secret-set', { name: 'LEARNING_TEST', value })
+  assert.equal(result.ok, false)
+  assert.match(result.error.message, /learning state.*EISDIR/i)
+  assert.ok(readFileSync(join(runtime.home, 'secrets.json'), 'utf8').includes(value))
+  rmSync(runtime.learningPath, { recursive: true })
+  renameSync(backup, runtime.learningPath)
+  assert.equal((await runtime.call('state')).ok, true)
+  assert.deepEqual(runtime.learningState().agentsPending[folder].records.map(record => record.text), [
+    'User: [hidden]', 'User: Keep the public work.',
+  ])
+})
+
+test('a failed private folder purge is retried on the next state poll', async t => {
+  const folder = realpathSync(projectFolder(t))
+  const other = realpathSync(projectFolder(t))
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  const card = { id: 'open', kind: 'agents', botId: 'b2', folder, path: join(folder, 'AGENTS.md'),
+    contributors: ['b2'], content: '- Keep the report concise.' }
+  const publicQueue = { botId: 'm1', records: [{ botId: 'm1', text: 'User: Keep the public work.', order: 0 }] }
+  const runtime = await startRuntime({
+    seed, learningSeed: { proposals: { open: card }, agentsPending: { [other]: publicQueue } },
+    config: { learningTimes: { tickMs: 100_000 } },
+  })
+  t.after(() => runtime.stop())
+  await runtime.rt.updateBot('b2', { private: true })
+  const temp = `${runtime.learningPath}.${process.pid}.tmp`
+  mkdirSync(temp)
+  assert.equal((await runtime.call('state')).ok, false)
+  assert.ok(runtime.learningState().proposals[card.id])
+  rmSync(temp, { recursive: true })
+  assert.equal((await runtime.call('state')).ok, true)
+  assert.equal(runtime.learningState().proposals[card.id], undefined)
+  assert.deepEqual(runtime.learningState().agentsPending[other], publicQueue)
+})
+
+test('restart removes sensitive learning cards and decline edits and regenerates an ownerless folder card', async t => {
+  const folder = realpathSync(projectFolder(t))
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  const secret = 'stored-restart-fixture-37'
+  const key = 'sk-examplefixture1234567890'
+  const config = { learningTimes: { tickMs: 100_000 } }
+  const runtime = await startRuntime({ seed, config })
+  let reloaded
+  t.after(() => (reloaded ?? runtime).stop())
+  assert.equal((await runtime.call('secret-set', { name: 'LEARNING_TEST', value: secret })).ok, true)
+  await runtime.ctx.dispose()
+  const card = { kind: 'agents', botId: 'b2', folder, path: join(folder, 'AGENTS.md'), edits: JSON.parse(agentsEdit).edits, content: '- Public rule\n' }
+  const settled = { ...card, contributors: ['b2'], outcome: 'declined', sessionId: 'b2' }
+  const learningSeed = {
+    proposals: {
+      open: { ...card, id: 'open', contributors: ['b2'], content: `- Local setup: ${key}\n` },
+      legacy: { ...card, id: 'legacy' },
+    },
+    settled: {
+      unsafe: { ...settled, id: 'unsafe', content: `- Local setup: ${secret}\n` },
+      clean: { ...settled, id: 'clean' },
+    },
+    declined: [
+      { kind: 'agents', folder, edits: [{ op: 'remove', old: secret }] },
+      { kind: 'agents', folder, contributors: ['b2'], edits: [{ op: 'add', text: '- Keep the public wording' }] },
+    ],
+    agentsPending: { [folder]: { botId: 'b2', records: [{ botId: 'b2', text: 'User: Current public work', order: 0 }] } },
+  }
+  reloaded = start({ home: runtime.home, learningSeed, replies: [agentsEdit], config })
+  const { value } = await reloaded.call('state')
+  for (const text of [JSON.stringify(value), readFileSync(reloaded.learningPath, 'utf8')]) {
+    assert.equal(text.includes(secret), false)
+    assert.equal(text.includes(key), false)
+  }
+  assert.deepEqual(value.learning, {})
+  assert.deepEqual(value.learningSettled.b2.map(entry => entry.id), ['clean'])
+  assert.deepEqual(reloaded.learningState().proposals, {})
+  assert.deepEqual(Object.keys(reloaded.learningState().settled), ['clean'])
+  assert.equal(reloaded.learningState().declined.length, 1)
+  assert.equal(await reloaded.rt.learningRun(), 1)
+  assert.match(JSON.stringify(reloaded.requests), /Current public work/)
+  assert.match(JSON.stringify(reloaded.requests), /Keep the public wording/)
+  assert.equal(JSON.stringify(reloaded.requests).includes(secret), false)
+  const [regenerated] = (await reloaded.call('state')).value.learning.b2
+  assert.deepEqual(regenerated.contributors, ['b2'])
+  assert.equal((await reloaded.call('learning-answer', { id: regenerated.id, approve: true })).value.applied, true)
+})
+
+test('upgrade recovers a clean folder card from reviewed public work with an empty queue', async t => {
+  const folder = realpathSync(projectFolder(t))
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  seed.bots.b3 = { ...seed.bots.b2, id: 'b3', sessionId: 'b3', name: 'Coder', workDir: projectFolder(t), private: true }
+  const config = { learningTimes: { tickMs: 100_000 } }
+  const first = await startRuntime({
+    seed, config,
+    learningSeed: {
+      proposals: { legacy: { id: 'legacy', kind: 'agents', botId: 'b2', folder, path: join(folder, 'AGENTS.md'),
+        at: 100, content: '- Keep the report concise.', edits: JSON.parse(agentsEdit).edits } },
+      cursors: { b2: 11, b3: 11 },
+      pending: {}, agentsPending: {},
+    },
+  })
+  let runtime
+  t.after(() => (runtime ?? first).stop())
+  await first.ctx.dispose()
+  runtime = await startRuntime({ home: first.home, replies: [agentsEdit], config })
+  const resolve = runtime.ctx.sessionController.resolveAgent
+  runtime.ctx.sessionController.resolveAgent = async id => {
+    const result = await resolve(id)
+    result.agent.session.header = { cwd: folder }
+    return result
+  }
+  const reads = []
+  runtime.rt.partLines = async function* (sessionId) {
+    reads.push(sessionId)
+    yield { seq: 12, time: 101, who: 'user', text: 'User: New unreviewed work.' }
+    yield { seq: 11, time: 99, who: 'user', text: 'User: Review the public report format.' }
+  }
+  assert.deepEqual((await runtime.call('state')).value.learning, {})
+  assert.equal(await runtime.rt.learningRun(), 1)
+  assert.deepEqual(reads, ['b2'])
+  assert.equal(runtime.requests.length, 1)
+  const request = JSON.stringify(runtime.requests)
+  assert.match(request, /Review the public report format/)
+  assert.doesNotMatch(request, /New unreviewed work/)
+  assert.deepEqual(runtime.learningState().cursors, { b2: 11, b3: 11 })
+  assert.deepEqual(runtime.learningState().agentsPending, {})
+  const [card] = (await runtime.call('state')).value.learning.b2
+  assert.deepEqual(card.contributors, ['b2'])
+  assert.equal((await runtime.call('learning-answer', { id: card.id, approve: true })).value.applied, true)
 })
 
 test('AGENTS review falls back to another contributor when its Bot is deleted', async t => {
@@ -853,6 +1325,29 @@ test('declined proposals are recorded and included in the next skill request', a
   assert.equal((await runtime.call('learning-answer', { id: proposal.id, approve: true })).ok, false)
 })
 
+test('declined skill descriptions reach only the originating Bot and ownerless entries are skipped', async t => {
+  const history = { b2: [...ownChat] }
+  const runtime = await startRuntime({
+    history,
+    learningSeed: { declined: [{ name: 'old-skill', description: 'Legacy description with unknown ownership.' }] },
+    replies: [createReply, noneReply, noneReply],
+    config: { learningTimes: { tickMs: 100_000 } },
+  })
+  t.after(() => runtime.stop())
+  await finishTurn(runtime.ctx)
+  await runtime.rt.learningRun()
+  const proposal = (await runtime.call('state')).value.learning.b2[0]
+  assert.equal((await runtime.call('learning-answer', { id: proposal.id, approve: false })).value.applied, false)
+  await finishTurn(runtime.ctx, { id: 'm1' })
+  addNextTurn(history)
+  await finishTurn(runtime.ctx)
+  await runtime.rt.learningRun()
+  assert.equal(runtime.learningState().declined.at(-1).botId, 'b2')
+  assert.doesNotMatch(JSON.stringify(runtime.requests), /Legacy description/)
+  assert.doesNotMatch(runtime.requests[1].messages[0].content[0].text, /Use when checking a release/)
+  assert.match(runtime.requests[2].messages[0].content[0].text, /Use when checking a release/)
+})
+
 test('an update approval fails if the learned skill description alone changed', async t => {
   const seed = JSON.parse(JSON.stringify(TEAM))
   seed.bots.b2.capabilities = ['release-checks']
@@ -913,6 +1408,34 @@ test('a saved secret in a proposed skill is not shown as a proposal', async t =>
   assert.deepEqual(runtime.learningState().proposals, {})
 })
 
+test('fresh skill cards reject credentials in all retained skill text', async t => {
+  const skill = JSON.parse(createReply)
+  const cases = [
+    { field: 'name', reply: skill, value: skill.name },
+    { field: 'description', reply: { ...skill, description: 'Use the fixtureabcdevalue when checking releases.' }, value: 'abcde' },
+    { field: 'content', reply: { ...skill, content: `Use Basic ${Buffer.from('fixture:fake').toString('base64')}.` } },
+    { field: 'why', reply: { ...skill, why: 'See https://example.test/?signature=fixture-proof.' } },
+    { field: 'previous', reply: { ...skill, action: 'update' }, previous: 'See https://example.test/?signature=fixture-proof.' },
+  ]
+  for (const { field, reply, value, previous } of cases) await t.test(field, async t => {
+    const seed = structuredClone(TEAM)
+    if (previous) {
+      seed.bots.b2.capabilities.push(skill.name)
+      seed.capabilities.items[skill.name] = { ...skill, kind: 'skill', content: previous, createdBy: 'b2' }
+    }
+    const runtime = await startRuntime({
+      seed, replies: [JSON.stringify(reply)], learningSeed: { learned: previous ? { b2: [skill.name] } : {} },
+      config: { learningTimes: { tickMs: 100_000 } },
+    })
+    t.after(() => runtime.stop())
+    if (value) assert.equal((await runtime.call('secret-set', { name: 'LEARNING_TEST', value })).ok, true)
+    await finishTurn(runtime.ctx)
+    assert.equal(await runtime.rt.learningRun(), 0)
+    assert.deepEqual((await runtime.call('state')).value.learning, {})
+    assert.deepEqual(runtime.learningState().proposals, {})
+  })
+})
+
 test('an AGENTS edit containing a saved secret is not shown as a proposal', async t => {
   const folder = projectFolder(t)
   const seed = JSON.parse(JSON.stringify(TEAM))
@@ -929,6 +1452,84 @@ test('an AGENTS edit containing a saved secret is not shown as a proposal', asyn
   await runtime.rt.learningRun()
   assert.equal(Object.values(runtime.learningState().proposals ?? {}).length, 0)
   assert.equal(Object.keys(runtime.learningState().agentsPending ?? {}).length, 0)
+})
+
+test('a credential-bearing AGENTS baseline never reaches a review or learning state', async t => {
+  const key = 'sk-examplefixture1234567890'
+  const secret = 'agents-stored-fixture-37'
+  const basic = `Basic ${Buffer.from('fixture:fake').toString('base64')}`
+  for (const value of [key, secret, basic]) {
+    const baseline = `# Project\n- Existing rule\n- Local setup: ${value}\n`
+    const folder = projectFolder(t, { agents: baseline })
+    const seed = structuredClone(TEAM)
+    seed.bots.b2.workDir = folder
+    const runtime = await startRuntime({ seed, replies: [noneReply, agentsEdit], config: { learningTimes: { tickMs: 100_000 } } })
+    t.after(() => runtime.stop())
+    assert.equal((await runtime.call('secret-set', { name: 'AGENTS_TEST', value: secret })).ok, true)
+    await finishTurn(runtime.ctx)
+    assert.equal(await runtime.rt.learningRun(), 0)
+    assert.equal(runtime.requests.length, 1)
+    assert.equal(JSON.stringify(runtime.requests).includes(value), false)
+    assert.equal(readFileSync(runtime.learningPath, 'utf8').includes(value), false)
+    assert.deepEqual(runtime.learningState().proposals, {})
+    assert.equal(readFileSync(join(folder, 'AGENTS.md'), 'utf8'), baseline)
+  }
+})
+
+test('a Basic commands heading allows review and approval of an unrelated AGENTS edit', async t => {
+  const baseline = '## Basic commands\n- Existing rule\n'
+  const folder = projectFolder(t, { agents: baseline })
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  const runtime = await startRuntime({ seed, replies: [noneReply, agentsEdit], config: { learningTimes: { tickMs: 100_000 } } })
+  t.after(() => runtime.stop())
+  await finishTurn(runtime.ctx)
+  assert.equal(await runtime.rt.learningRun(), 1)
+  assert.match(JSON.stringify(runtime.requests.at(-1)), /## Basic commands/)
+  const [card] = (await runtime.call('state')).value.learning.b2
+  assert.equal((await runtime.call('learning-answer', { id: card.id, approve: true })).value.applied, true)
+  assert.equal(readFileSync(join(folder, 'AGENTS.md'), 'utf8'), `${baseline}- Keep the report concise.\n`)
+})
+
+test('a clean AGENTS edit survives review, restart, and approval when its baseline hash resembles an ID', async t => {
+  const baseline = 'Run the 485 project checks.\n'
+  assert.equal(hashOf(baseline), '416768226897123c')
+  const folder = projectFolder(t, { agents: baseline })
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  const edit = { op: 'add', after: '', text: '- Keep the report concise.', why: 'The user corrected the report format more than once.' }
+  const config = { learningTimes: { tickMs: 100_000 } }
+  let runtime = await startRuntime({ seed, config, replies: [noneReply, JSON.stringify({ action: 'edit', edits: [edit] })] })
+  t.after(() => runtime.stop())
+  await finishTurn(runtime.ctx)
+  assert.equal(await runtime.rt.learningRun(), 1)
+  assert.deepEqual(runtime.learningState().agentsPending, {})
+  assert.match(JSON.stringify(runtime.requests.at(-1)), /Run the 485 project checks/)
+  const [card] = (await runtime.call('state')).value.learning.b2
+  await runtime.ctx.dispose()
+  runtime = await startRuntime({ home: runtime.home, config })
+  assert.ok(runtime.learningState().proposals[card.id])
+  assert.equal((await runtime.call('learning-answer', { id: card.id, approve: true })).value.applied, true)
+  assert.equal(readFileSync(join(folder, 'AGENTS.md'), 'utf8'), `${baseline}${edit.text}\n`)
+  await runtime.ctx.dispose()
+  runtime = await startRuntime({ home: runtime.home, config })
+  assert.equal(runtime.learningState().settled[card.id].outcome, 'approved')
+})
+
+test('AGENTS review rejects a saved secret in an edit field that does not affect the diff', async t => {
+  const secret = 'agents-unused-fixture-37'
+  const folder = projectFolder(t)
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.workDir = folder
+  const reply = JSON.parse(agentsEdit)
+  reply.edits[0].old = secret
+  const runtime = await startRuntime({ seed, replies: [noneReply, JSON.stringify(reply)], config: { learningTimes: { tickMs: 100_000 } } })
+  t.after(() => runtime.stop())
+  assert.equal((await runtime.call('secret-set', { name: 'AGENTS_TEST', value: secret })).ok, true)
+  await finishTurn(runtime.ctx)
+  assert.equal(await runtime.rt.learningRun(), 0)
+  assert.equal(runtime.requests.length, 2)
+  assert.equal(readFileSync(runtime.learningPath, 'utf8').includes(secret), false)
 })
 
 test('user corrections remain in long chat reviews after the text budget', async t => {
@@ -987,5 +1588,76 @@ test('a learning review retries TRANSPORT and TIMEOUT failures on the same route
   assert.equal(proposals.length, 1)
   assert.equal(proposals[0].name, 'release-checks')
   assert.equal(runtime.learningState().pending?.b2, undefined)
+})
+
+test('learning rebuilds its skill request when a secret is saved before retry or fallback', async t => {
+  for (const code of ['TRANSPORT', 'AUTH']) await t.test(code, async t => {
+    const value = 'newly-saved-retry-fixture'
+    const first = Promise.withResolvers()
+    const runtime = await startRuntime({
+      replies: [first.promise, createReply],
+      config: { learningTimes: { tickMs: 100_000 }, llmRetryBackoff: { initialDelayMs: 1, maxDelayMs: 5 } },
+    })
+    t.after(() => runtime.stop())
+    runtime.rt.desiredModel = async () => 'fallback/v4'
+    runtime.rt.answersAside = () => true
+    runtime.rt.partLines = async function* () {
+      yield { seq: 11, who: 'user', text: `User: Use ${value}.` }
+      yield { seq: 10, who: 'user', text: 'User: Keep public release work.' }
+    }
+    await finishTurn(runtime.ctx)
+    const waiting = runtime.rt.learningRun()
+    await until(() => runtime.requests.length === 1)
+    assert.match(JSON.stringify(runtime.requests[0]), /newly-saved-retry-fixture/)
+    try {
+      assert.equal((await runtime.call('secret-set', { name: 'LEARNING_TEST', value })).ok, true)
+    } finally {
+      first.resolve({ text: '', finish: 'error', failure: { code, message: 'fixture error' } })
+    }
+    assert.equal(await waiting, 0)
+    assert.equal(runtime.requests.length, 1)
+    assert.deepEqual(runtime.learningState().pending.b2, ['b2'])
+    assert.equal(await runtime.rt.learningRun(), 1)
+    assert.equal(runtime.requests.length, 2)
+    const request = JSON.stringify(runtime.requests[1])
+    assert.match(request, /Keep public release work/)
+    assert.doesNotMatch(request, /newly-saved-retry-fixture/)
+  })
+})
+
+test('folder learning rechecks path privacy after model selection and before retry', async t => {
+  for (const retry of [false, true]) await t.test(retry ? 'transport retry' : 'model selection', async t => {
+    const folder = realpathSync(projectFolder(t))
+    const seed = structuredClone(TEAM)
+    seed.bots.b2.workDir = folder
+    seed.bots.b3 = { ...seed.bots.b2, id: 'b3', sessionId: 'b3', name: 'Coder', workDir: undefined }
+    const runtime = await startRuntime({
+      seed, replies: [noneReply, { text: '', finish: 'error', failure: { code: 'TRANSPORT', message: 'fixture error' } }, agentsEdit],
+      config: { learningTimes: { tickMs: 100_000 }, llmRetryBackoff: { initialDelayMs: 1, maxDelayMs: 5 } },
+    })
+    t.after(() => runtime.stop())
+    const makePrivate = async () => {
+      await runtime.rt.updateBot('b2', { workDir: projectFolder(t) })
+      await runtime.rt.updateBot('b3', { workDir: folder, private: true })
+    }
+    if (retry) {
+      const stream = runtime.ctx.llm.stream
+      runtime.ctx.llm.stream = async function* (request) {
+        yield* stream(request)
+        if (runtime.requests.length === 2) await makePrivate()
+      }
+    } else {
+      const model = runtime.rt.backgroundModel
+      runtime.rt.backgroundModel = async (...args) => {
+        if (runtime.requests.length === 1) await makePrivate()
+        return model(...args)
+      }
+    }
+    await finishTurn(runtime.ctx)
+    assert.equal(await runtime.rt.learningRun(), 0)
+    assert.equal(runtime.requests.length, retry ? 2 : 1)
+    assert.deepEqual((await runtime.call('state')).value.learning, {})
+    assert.deepEqual(runtime.learningState().agentsPending, {})
+  })
 })
 

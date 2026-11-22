@@ -7,6 +7,17 @@
 // can say which task waits, and the task's thread waits in amber. A subagent child's
 // ask is held under its Bot, where the person can answer it.
 import { createHash, randomUUID } from 'node:crypto'
+import { bindTicketDesk } from './grant-ticket.js'
+import { bindGrantDecisions, grantInternals } from './grants.js'
+
+const claimers = new WeakMap()
+const grantRefusal = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
+
+export async function claimGrant(rt, ticket) {
+  const claim = claimers.get(rt)
+  if (!claim) throw grantRefusal('Allow this step from the Automagik window.')
+  return claim(ticket)
+}
 
 const OUTCOMES = { allow: 'allowed-once', reject: 'rejected' }
 // The kinds of client that can decide an approval here. A request body's kind is trusted
@@ -35,6 +46,20 @@ export function install(rt) {
   const { ctx } = rt
   /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string, decidedBy?:string, why?:string)=>boolean}>} */
   const pending = new Map()
+  const grantContext = new WeakMap()
+  const folderIds = new Set()
+  // Approvals whose command is credential-sensitive are answered only on the local card.
+  const localOnly = new WeakSet()
+  let pendingRevision = 0
+  const admit = (id, entry) => {
+    pending.set(id, entry)
+    pendingRevision += 1
+  }
+  const take = id => {
+    if (!pending.delete(id)) return false
+    pendingRevision += 1
+    return true
+  }
   // RFC 0039 delivery 3: withdrawals live in memory for the team they happened in. Owners bind each ask
   // to its admission epoch and owner records by identity. A child inherits its parent's owner.
   const withdrawn = []
@@ -108,6 +133,7 @@ export function install(rt) {
     const botId = owner?.botId ?? chat ?? task?.from ?? runOwner?.botId
     if (botId === undefined) return next()
     const id = randomUUID()
+    if (rt.isFolderAsk?.(request) === true) folderIds.add(id)
     const entry = {
       id,
       sessionId,
@@ -128,20 +154,41 @@ export function install(rt) {
     const target = entry.tool === 'keep_working' || !whole ? undefined : rt.callCapability?.(sessionId, request.callId, entry.tool)
     const folder = target === undefined ? undefined : rt.sessionFolder?.(request.agent?.session ?? request.agent)
     if (typeof folder === 'string' && folder !== '') {
-      entry.capabilityKey = createHash('sha256').update(JSON.stringify(['v1', entry.botId, folder, entry.tool, entry.reason, target])).digest('hex')
+      const keyTarget = entry.tool === 'acp_tool' ? target
+        : createHash('sha256').update(target).digest('hex')
+      entry.capabilityKey = createHash('sha256').update(JSON.stringify(
+        ['v1', entry.botId, folder, entry.tool, entry.reason, keyTarget],
+      )).digest('hex')
     }
-    pending.set(id, entry)
+    if (owner === undefined && chat === undefined && task !== undefined
+      && runOwner === undefined && entry.capabilityKey === undefined
+      && whole && entry.tool !== 'keep_working') {
+      const projection = grantInternals(rt)?.projection(sessionId, request.callId,
+        entry.tool, request)
+      if (projection) Object.assign(entry, projection)
+    }
+    admit(id, entry)
     // Hook owners also arrive as run: true (stops.js).
     if (runOwner !== undefined) runs.add(entry)
     owners.set(entry, owner !== undefined ? ownerRecord('group', owner.botId, { roomId: owner.roomId })
       : chat !== undefined ? ownerRecord('chat', chat)
         : task !== undefined ? ownerRecord('task', task.from, { task }) : ownerRecord('run', runOwner?.botId))
-    rt.noteApproval?.(sessionId, { tool: entry.tool, reason: entry.reason.slice(0, 200) })
+    const privateNote = rt.privateApprovalNote?.(request)
+    if (privateNote !== undefined) localOnly.add(entry)
+    let offer
+    // A credential step is reviewed on the computer only: it is never offered as a grant.
+    if (privateNote === undefined && runOwner === undefined && bindTicketDesk(rt)?.available() === true) {
+      const kind = owner !== undefined ? 'group' : chat !== undefined ? 'chat' : 'task'
+      const grantEntry = { ...entry, kind }
+      grantContext.set(entry, { grantEntry, request })
+      offer = grantInternals(rt)?.offer(grantEntry, request, { signal: request.signal })
+    }
+    rt.noteApproval?.(sessionId, privateNote ?? { tool: entry.tool, reason: entry.reason.slice(0, 200) })
     rt.approvalWaiting?.(entry)
-    emit('open', { ...entry, answerable: true })
+    emit('open', { ...entry, ...(privateNote && { ...privateNote, detail: {}, localReview: true }), answerable: true, ...offer })
     const settle = (outcome, decidedBy = 'dsh', why) => {
-      if (!pending.has(id)) return false
-      pending.delete(id)
+      if (!take(id)) return false
+      folderIds.delete(id)
       rt.noteApproval?.(sessionId, undefined)
       emit('settled', { id, outcome, decidedBy, at: Date.now(), ...(why !== undefined ? { why } : {}) })
       return true
@@ -208,6 +255,7 @@ export function install(rt) {
       return 'cancelled'
     }
     const id = randomUUID()
+    if (rt.isFolderAsk?.(request) === true) folderIds.add(id)
     const entry = {
       id, sessionId, botId: owner.botId, child: true, ownerSessionId: owner.sessionId,
       ...(owner.kind === 'group' ? { roomId: owner.roomId } : {}),
@@ -218,7 +266,7 @@ export function install(rt) {
       detail: rt.callDetail?.(sessionId, request.callId) ?? {},
       at: Date.now(),
     }
-    pending.set(id, entry)
+    admit(id, entry)
     owners.set(entry, ownerRecord(owner.kind, owner.botId, {
       ...(owner.kind === 'group' ? { roomId: owner.roomId } : {}),
       ...(owner.kind === 'task' ? { task: rt.state?.tasks?.[owner.taskId] } : {}),
@@ -227,22 +275,37 @@ export function install(rt) {
     return new Promise(resolve => {
       const aborted = () => entry.answer('cancelled')
       entry.answer = outcome => {
-        if (!pending.delete(id)) return false
+        if (!take(id)) return false
+        folderIds.delete(id)
         request.signal?.removeEventListener('abort', aborted)
         resolve(outcome)
         return true
       }
-      if (request.signal?.aborted) entry.answer('cancelled')
+      if (request.signal?.aborted) aborted()
       else request.signal?.addEventListener('abort', aborted, { once: true })
     })
   }
 
-  const approvalsView = () => [...pending.values()].map(({ answer, ...entry }) => ({ ...entry, answerable: answer !== undefined }))
+  const approvalsView = () => [...pending.values()].map(pendingEntry => {
+    const context = grantContext.get(pendingEntry)
+    const { answer, ...entry } = pendingEntry
+    const offer = context && grantInternals(rt)?.offerView(context.grantEntry, context.request)
+    return { ...entry, answerable: answer !== undefined, ...offer }
+  })
+  function groupAskCurrent(id, room) {
+    const entry = pending.get(id)
+    if (entry === undefined) return false
+    const owner = owners.get(entry)
+    return owner?.kind === 'group' && owner.epoch === teamEpoch() && owner.room === room && owner.bot === rt.botOf(entry.botId)
+  }
   const waitsForApproval = sessionId => [...pending.values()].some(entry => entry.sessionId === sessionId || entry.ownerSessionId === sessionId)
 
   function answerApproval(id, choice, client = 'web') {
     const entry = pending.get(String(id ?? ''))
     if (entry?.answer === undefined) throw Object.assign(new Error('This approval is no longer open'), { code: 'bot/stale' })
+    if (client === 'im' && localOnly.has(entry)) {
+      throw Object.assign(new Error('Review this approval on your computer.'), { code: 'bot/local-approval' })
+    }
     const outcome = OUTCOMES[choice]
     if (outcome === undefined) throw Object.assign(new Error('Choose allow or reject'), { code: 'bot/invalid' })
     // The record of the decision names the kind of client that made it, and `settle` adds
@@ -250,10 +313,38 @@ export function install(rt) {
     entry.answer(outcome, CLIENT_KINDS.has(client) ? client : 'web')
   }
 
-  // A group Session that leaves its group has no card left to answer from.
-  const cancelApprovals = (sessionId) => {
+  const matches = (entry, sessionId) => entry.sessionId === sessionId || entry.ownerSessionId === sessionId
+  const readGroupEvidence = read => {
+    try { return read() } catch (error) { rt.warn('ds-bot: labelling a withdrawn ask failed: %s', error) }
+    return undefined
+  }
+  // Take the ask snapshot before scanning the pre-drop parts and markers. Finish the
+  // read after clearing the group owner index. A hook can settle or admit asks; any
+  // change to the pending list during the read withholds labels for this drop.
+  const prepareGroupApprovalCancel = (sessionId, readSeat) => {
+    const revision = pendingRevision
+    const snapshot = [...pending.values()].filter(entry => matches(entry, sessionId) && current(entry))
+    if (snapshot.length === 0) return undefined
+    const readLabel = readGroupEvidence(readSeat)
+    if (readLabel === undefined) return undefined
+    return () => readGroupEvidence(() => {
+      if (revision !== pendingRevision) return undefined
+      const labelOf = readLabel()
+      if (labelOf === undefined || revision !== pendingRevision) return undefined
+      return new Set(snapshot.filter(entry => current(entry) && labelOf(owners.get(entry), entry) === 'group'))
+    })
+  }
+  // Walk the live list as before, including asks admitted during the drop or by a settlement listener.
+  const cancelApprovals = (sessionId, readLabels) => {
+    const labels = readLabels?.()
     for (const entry of pending.values()) {
-      if (entry.sessionId === sessionId || entry.ownerSessionId === sessionId) entry.answer?.('cancelled', 'system')
+      if (!matches(entry, sessionId)) continue
+      if (!labels?.has(entry)) {
+        entry.answer?.('cancelled', 'system')
+        continue
+      }
+      if (entry.answer?.('cancelled', 'system', 'group') !== true) continue
+      try { record(entry, 'group') } catch (error) { rt.warn('ds-bot: recording a withdrawn ask failed: %s', error) }
     }
   }
 
@@ -275,8 +366,32 @@ export function install(rt) {
     }
     return count
   }
+  const answerIfPending = (id, outcome, by = 'web') => {
+    const entry = pending.get(String(id ?? ''))
+    if (entry?.answer === undefined || entry.child === true
+      || !Object.values(OUTCOMES).includes(outcome)) return false
+    try { return entry.answer(outcome, CLIENT_KINDS.has(by) ? by : 'web') === true }
+    catch { return false }
+  }
+  if (!claimers.has(rt)) claimers.set(rt, ticket => {
+    if (rt.holdsLock?.() !== true) {
+      throw grantRefusal(rt.readOnly?.() ?? 'This host cannot save the Bot team.', 'bot/read-only')
+    }
+    const result = grantInternals(rt)?.claim(ticket, id => {
+      const entry = pending.get(id)
+      return entry?.answer === undefined ? undefined : grantContext.get(entry) ?? {}
+    }, answerIfPending)
+    if (result === undefined) throw grantRefusal('Allow this step from the Automagik window.')
+    if (result.stale) throw grantRefusal('This approval is no longer open', 'bot/stale')
+    if (result.changed) throw grantRefusal('This step changed. Look again.')
+    return result.receipt
+  })
+  bindGrantDecisions(rt, row => emit('grant', {
+    id: row.approvalId ?? `dsh:${row.requestId}`, ...row, at: Date.now(),
+  }))
+
   const withdrawnView = () => { prune(); return withdrawn.map(({ epoch, ...row }) => row) }
   const unansweredView = () => { const epoch = teamEpoch(); return [...unanswered].filter(([, at]) => at === epoch).map(([id]) => id) }
 
-  Object.assign(rt, { approvalsView, waitsForApproval, answerApproval, cancelApprovals, onApproval, endApprovals, withdrawnView, unansweredView })
+  Object.assign(rt, { approvalsView, groupAskCurrent, isFolderApproval: id => folderIds.has(id), waitsForApproval, answerApproval, cancelApprovals, prepareGroupApprovalCancel, onApproval, endApprovals, withdrawnView, unansweredView })
 }

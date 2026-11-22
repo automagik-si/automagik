@@ -11,7 +11,7 @@
 // to / is owned by this user or root and not world-writable (a root sticky /tmp passes). Not loaded by Herdr (node: imports); the CLI and the tests share it. Apache-2.0.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, lstatSync, openSync, readdirSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 const executable = (p) => { try { accessSync(p, constants.X_OK); return true; } catch { return false; } };
@@ -71,7 +71,8 @@ export function envInterpreter(firstLine) {
 function firstLine(file) {
   let fd;
   try {
-    fd = openSync(file, "r");
+    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return null;
     const buf = Buffer.alloc(256);
     const n = readSync(fd, buf, 0, buf.length, 0);
     return buf.subarray(0, n).toString("utf8").split("\n")[0];

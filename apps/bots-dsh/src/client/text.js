@@ -1,10 +1,17 @@
 // -------------------------------------------------------------------------
 // Text helpers
-import { dateLocale, t } from './i18n.js'
+import { dateLocale, language, t } from './i18n.js'
 import { mentionSpans } from '../shared/mentions.js'
 import { previewText } from '../shared/plain-text.js'
 
 export const MENTION_ORIGIN = 'https://bots.local/'
+
+export function dateTimeLabel(value) {
+  if (typeof value !== 'string') return ''
+  const time = Date.parse(value)
+  if (!Number.isFinite(time)) return ''
+  try { return new Date(time).toLocaleString(language(), { dateStyle: 'medium', timeStyle: 'short' }) } catch { return '' }
+}
 
 // The Bots a text calls, by the rule the group host reads (shared/mentions.js). The
 // speaker's own name takes part so that it is never read as a shorter name inside it

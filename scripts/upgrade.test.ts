@@ -133,6 +133,16 @@ describe("a release's tarballs", () => {
     expect(pluginsLeftAlone(release, dependencies)).toEqual(['@automagik/acp-dsh']);
   });
 
+  test('re-adds the installed desktop plugin and leaves server adapter upgrades to the image', () => {
+    const adapter = '@automagik/multiuser-dsh';
+    const incoming = { ...release, packages: {
+      ...release.packages,
+      [adapter]: { version: release.version, file: 'automagik-multiuser-dsh.tgz', integrity: 'sha512-d', size: 1 },
+    } };
+    expect(pluginsToInstall(incoming, { [adapter]: 'file:adapter.tgz', '@automagik/bots-dsh': 'file:bots.tgz' })
+      .map(plugin => plugin.name)).toEqual(['@automagik/bots-dsh']);
+  });
+
   test('finds a runtime asset only when a release really carries one', () => {
     expect(runtimeAssetName([{ name: 'automagik-runtime-3.50.0.tgz', size: 1 }])).toBe('automagik-runtime-3.50.0.tgz');
     expect(runtimeAssetName([{ name: 'Automagik-3.49.0-linux-x86_64.AppImage', size: 1 }])).toBeUndefined();

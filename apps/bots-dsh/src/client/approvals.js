@@ -3,6 +3,7 @@ import { t } from './i18n.js'
 export function withdrawnText(why) {
   switch (why) {
     case 'task': return t('This step was withdrawn: its task ended')
+    case 'group': return t('This step was withdrawn: its group Session ended')
     default: return ''
   }
 }
@@ -64,4 +65,5 @@ export const approvalPlace = (entry, roster) => roster?.roomsById?.[entry.roomId
 export const approvalWhere = (entry, roster) => approvalPlace(entry, roster) || (entry.roomId === undefined && entry.taskId === undefined ? t('in its own chat') : '')
 // What the ask would do: its command, path or url; for an agent's own call through ACP, which
 // has none of those, the reason that names it (acp-dsh), as DSH's own card shows it.
-export const approvalDetail = entry => entry.detail?.code || (entry.tool === 'acp_tool' ? String(entry.reason ?? '') : '')
+export const approvalDetail = entry => entry.detail?.code || entry.shownTarget
+  || (entry.tool === 'acp_tool' ? String(entry.reason ?? '') : '')

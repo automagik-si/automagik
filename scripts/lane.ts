@@ -72,6 +72,7 @@ import { closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { createRequire } from 'node:module';
 import type { ReleasePlugins } from './release-plugins';
 import { CRATES, FIELDS, MAX_PART, VERSION, cargoVersionLine } from './version';
 
@@ -88,6 +89,8 @@ const MAX_ROLE_COUNT = 200;
 // The plugins this release lane ships and updates. None of Unfold's is one: they left this
 // repository for Unfold's own, whose release ships them (RFC 0020); this repository's releases
 // attach no tarball of any and its lane names none. Whoever installed one keeps it.
+/** Released tarballs listed in plugins.json and omitted from desktop builds, profiles and lane readers. */
+export const SERVER_PLUGINS = ['multiuser-dsh'];
 const PLUGINS = ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'];
 const PROFILE = 'apps/desktop/profile/package.json';
 // The add-ons the desktop profile pins that the lane carries too, so a pin move is a patch: each
@@ -320,18 +323,18 @@ const neverShipped = (path: string) => !HERDR_SHIPPING_SCRIPTS.test(path) && (pa
 
 /**
  * A file inside a plugin that its package does not carry (not in its package.json `files`), such
- * as its dev tools and lint script: no install sees it. A plugin's dev/harness and lockfile still
+ * as its dev tools and lint script: no install sees it. A desktop plugin's dev/harness and lockfile still
  * count (the app's build reads them), and so does any file of a plugin whose `files` has a glob.
  */
 export function unpackedIn(files: Record<string, string[]>) {
   return (path: string) => {
     // The release packs these as separate role tarballs.
     if (ROLE_SOURCE.test(path)) return false;
-    const plugin = PLUGINS.find(name => path.startsWith(`apps/${name}/`));
+    const plugin = [...PLUGINS, ...SERVER_PLUGINS].find(name => path.startsWith(`apps/${name}/`));
     const carried = plugin ? files[plugin] : undefined;
     if (!plugin || !carried || carried.some(entry => /[*?![{]/.test(entry))) return false;
     const inside = path.slice(`apps/${plugin}/`.length);
-    if (inside === 'package.json' || inside.startsWith('dev/harness/') || LOCKFILE.test(inside)) return false;
+    if (inside === 'package.json' || (PLUGINS.includes(plugin) && (inside.startsWith('dev/harness/') || LOCKFILE.test(inside)))) return false;
     return !carried.some(entry => (entry.endsWith('/') ? inside.startsWith(entry) : inside === entry || inside.startsWith(`${entry}/`)));
   };
 }
@@ -381,8 +384,8 @@ export function pocketSince(last: string, laneVersion: string | undefined, tags:
 }
 
 /**
- * `am` when everything shipping in `sinceLast` (the changes since the last release, any tag) is am's,
- * `meter` when it is the meter's (with or without am's): that part alone. `herdr` when it is
+ * `am` when everything shipping in `sinceLast` (the changes since the last release, any tag, less the
+ * `inertSince` ones, read against that release) is am's, `meter` when it is the meter's (with or without am's): that part alone. `herdr` when it is
  * under herdr/ (with or without the meter's and am's): the pack alone, no app and no plugin. `pocket` when it is all under apps/pocket/,
  * or under apps/pocket/ and the herdr part (herdr/, herdr-layout/): Pocket's app (the pack along when herdr/ shipped). Otherwise whether the changes since the last
  * full release are the plugins' alone: every changed path inside a plugin, or under herdr/ or apps/pocket/ (no app
@@ -390,8 +393,14 @@ export function pocketSince(last: string, laneVersion: string | undefined, tags:
  * themselves write, the release tooling, tests, `inert` ones), none in a plugin's dev/harness (that
  * moves DSH), no lockfile, and no field a plugin is installed or admitted by.
  */
-export function kindOf(changed: string[], installChanged: (plugin: string) => boolean, inert: (path: string) => boolean = () => false, sinceLast?: string[]): 'am' | 'meter' | 'herdr' | 'pocket' | 'plugins' | 'full' {
-  const shipping = (sinceLast ?? []).filter(path => !neverShipped(path) && !inert(path));
+export function kindOf(
+  changed: string[],
+  installChanged: (plugin: string) => boolean,
+  inert: (path: string) => boolean = () => false,
+  sinceLast?: string[],
+  inertSince = inert,
+): 'am' | 'meter' | 'herdr' | 'pocket' | 'plugins' | 'full' {
+  const shipping = (sinceLast ?? []).filter(path => !neverShipped(path) && !inertSince(path));
   if (shipping.length > 0 && shipping.every(path => AM.test(path))) return 'am';
   if (shipping.length > 0 && shipping.every(path => METER.test(path) || AM.test(path))) return 'meter';
   if (shipping.length > 0 && shipping.every(path => HERDR.test(path) || METER.test(path) || AM.test(path))) return 'herdr';
@@ -399,6 +408,7 @@ export function kindOf(changed: string[], installChanged: (plugin: string) => bo
   if (changed.length === 0) return 'full';
   for (const path of changed) {
     if (neverShipped(path) || inert(path) || HERDR.test(path) || POCKET.test(path) || METER.test(path) || AM.test(path)) continue;
+    if (SERVER_PLUGINS.some(name => path.startsWith(`apps/${name}/`))) continue;
     const plugin = PLUGINS.find(name => path.startsWith(`apps/${name}/`));
     if (!plugin) return 'full';
     const inside = path.slice(`apps/${plugin}/`.length);
@@ -527,15 +537,17 @@ export function manifest(plugins: ReleasePlugins, { base, issuedAt, dir, engines
     version: plugins.version,
     commit: plugins.commit,
     base,
-    plugins: Object.entries(plugins.packages).map(([name, entry]) => ({
-      name,
-      version: entry.version,
-      url: `${DOWNLOADS}v${plugins.version}/${entry.file}`,
-      integrity: entry.integrity,
-      sha256: sha256(entry.file),
-      size: entry.size,
-      engines: { dsh: engines(name) },
-    })),
+    plugins: Object.entries(plugins.packages)
+      .filter(([name]) => !SERVER_PLUGINS.some(plugin => name === `@automagik/${plugin}`))
+      .map(([name, entry]) => ({
+        name,
+        version: entry.version,
+        url: `${DOWNLOADS}v${plugins.version}/${entry.file}`,
+        integrity: entry.integrity,
+        sha256: sha256(entry.file),
+        size: entry.size,
+        engines: { dsh: engines(name) },
+      })),
     addons: Object.entries(addons).map(([name, entry]) => ({
       name,
       version: entry.version,
@@ -657,12 +669,12 @@ function verifyRoleFiles(file: string, signature: string, version: string) {
 
 /** The keys a consumer trusts: plugin-lane/keys.json, { keys: [{ keyId, publicKey (PEM) }] }. */
 export function verifyLane(bytes: Buffer, signature: string, keys: { keyId: string; publicKey: string }[]): Lane {
-  const lane = JSON.parse(bytes.toString('utf8')) as Lane;
-  const key = keys.find(entry => entry.keyId === lane.keyId);
-  if (!key) throw new Error(`lane: no key ${lane.keyId}`);
-  if (!verifyBytes(null, bytes, createPublicKey(key.publicKey), Buffer.from(signature.trim(), 'base64'))) throw new Error('lane: the signature does not match');
-  if (lane.schemaVersion !== SCHEMA_VERSION) throw new Error(`lane: schema ${lane.schemaVersion}`);
-  return lane;
+  // The one verifier (RFC 0041), loaded on first use: tools and tests that copy this file alone
+  // to compute a release kind never need it.
+  const { verifyLane: verifyPluginLane } = createRequire(import.meta.url)('../plugin-lane/verify.mjs') as {
+    verifyLane: (bytes: Buffer, signature: string, keys: { keyId: string; publicKey: string }[]) => Lane;
+  };
+  return verifyPluginLane(bytes, signature, keys);
 }
 
 const git = (...args: string[]) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -681,23 +693,15 @@ if (import.meta.main) {
       process.exit(0);
     }
     if (!last) { console.log(command === 'kind' ? 'full' : 'yes'); process.exit(0); }
-    const diff = (from: string) => {
-      const paths = git('diff', '--name-only', `${from}..HEAD`).split('\n').filter(Boolean);
-      if (command === 'ships' || command === 'kind') {
-        // A detected rename out of roles/ would otherwise report only its destination.
-        const rolePaths = git('diff', '--name-only', '--no-renames', '-z', `${from}..HEAD`, '--', `${ROLE_ROOT}/`)
-          .split('\0').filter(path => ROLE_SOURCE.test(path));
-        return [...new Set([...paths, ...rolePaths])];
-      }
-      return paths;
-    };
+    // A rename can remove a shipped file, so count both paths.
+    const diff = (from: string) => git('diff', '--name-only', '--no-renames', '-z', `${from}..HEAD`).split('\0').filter(Boolean);
     const changed = diff(last);
-    const before = (path: string) => git('show', `${last}:${path}`);
+    const before = (path: string, base = last) => git('show', `${base}:${path}`);
     const read = (get: () => string) => { try { return get(); } catch { return undefined; } };
-    const unpacked = unpackedIn(Object.fromEntries(PLUGINS.map(plugin => [plugin, JSON.parse(readFileSync(join(ROOT, 'apps', plugin, 'package.json'), 'utf8')).files ?? []])));
+    const unpacked = unpackedIn(Object.fromEntries([...PLUGINS, ...SERVER_PLUGINS].map(plugin => [plugin, JSON.parse(readFileSync(join(ROOT, 'apps', plugin, 'package.json'), 'utf8')).files ?? []])));
     // A file only the version fields of changed in (a release's own bump), or the held meter's.
-    const bumped = (path: string) => versionOnly(path, read(() => before(path)), read(() => readFileSync(join(ROOT, path), 'utf8')));
-    const inert = (path: string) => bumped(path) || (held && METER.test(path));
+    const bumped = (path: string, base: string) => versionOnly(path, read(() => before(path, base)), read(() => readFileSync(join(ROOT, path), 'utf8')));
+    const inert = (path: string, base = last) => bumped(path, base) || (held && METER.test(path));
     if (command === 'ships') {
       console.log(ships(changed, path => inert(path) || unpacked(path)) ? 'yes' : 'no');
     } else if (command === 'herdr') {
@@ -714,13 +718,15 @@ if (import.meta.main) {
         return pick(was) !== pick(JSON.parse(readFileSync(join(ROOT, path), 'utf8')));
       };
       // The profile with only the lane's add-on pins moved needs no app: the lane carries them.
-      const addonPins = (path: string) => {
-        try { return path === PROFILE && addonPinsOnly(before(path), readFileSync(join(ROOT, path), 'utf8')); } catch { return false; }
+      const addonPins = (path: string, base: string) => {
+        try { return path === PROFILE && addonPinsOnly(before(path, base), readFileSync(join(ROOT, path), 'utf8')); } catch { return false; }
       };
+      const kindInert = (base: string) => (path: string) => inert(path, base) || addonPins(path, base) || unpacked(path);
       // The changes since the last release of any kind: a herdr-only run of them is a herdr patch, and
       // a run under apps/pocket/ (with herdr/ or alone) a pocket patch.
-      const sinceLast = args[1] ? diff(args[1]) : undefined;
-      console.log(kindOf(changed, installChanged, path => inert(path) || addonPins(path) || unpacked(path), sinceLast));
+      const lastRelease = args[1];
+      const sinceLast = lastRelease ? diff(lastRelease) : undefined;
+      console.log(kindOf(changed, installChanged, kindInert(last), sinceLast, lastRelease ? kindInert(lastRelease) : undefined));
     }
   } else if (command === 'pocket-since' && (args.length === 1 || args.length === 2)) {
     console.log(pocketSince(args[0], args[1], git('tag', '--list', 'v3.*').split('\n').filter(Boolean)));

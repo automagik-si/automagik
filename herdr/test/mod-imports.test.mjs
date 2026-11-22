@@ -355,12 +355,14 @@ function walkMods(modsDir, names) {
   return { problems, seen, mods: walked };
 }
 
-/** The gpui-kit.d.ts a Herdr app installed, when one is readable from this checkout. */
+/** The gpui-kit.d.ts a Herdr app installed, when one is readable from this checkout: a pack
+ * mod's own copy, the app home HERDR_APP_HOME names, and the person's real ~/.config/herdr-app
+ * only with AUTOMAGIK_HERDR_APP_CHECK=1 (a test never reads a live app home by default). */
 function installedDeclaration() {
   const candidates = [
     ...PACK_MODS.map((mod) => join(MODS, mod, "gpui-kit.d.ts")),
     process.env.HERDR_APP_HOME && join(process.env.HERDR_APP_HOME, "mods/am-sidebar/gpui-kit.d.ts"),
-    join(homedir(), ".config/herdr-app/mods/am-sidebar/gpui-kit.d.ts"),
+    process.env.AUTOMAGIK_HERDR_APP_CHECK === "1" && join(homedir(), ".config/herdr-app/mods/am-sidebar/gpui-kit.d.ts"),
   ].filter(Boolean);
   return candidates.find((path) => existsSync(path)) ?? null;
 }
@@ -387,12 +389,17 @@ test("every shipped mod's import graph fits gpui-shell 0.7.1", () => {
   assert.ok(seen.size >= 40, `walked only ${seen.size} modules: the import scanner missed the graph`);
   assert.ok(seen.has(join(MODS, "am-sidebar/workers.js")), "the graph must reach workers.js, where GUARD_DIR lives");
   assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("an installed gpui-kit.d.ts declares exactly the runtime modules the walk allows", (t) => {
   const dts = installedDeclaration();
-  if (dts) {
-    const declared = [...readFileSync(dts, "utf8").matchAll(/^declare module "([^"]+)"/gm)]
-      .map((m) => m[1]).sort();
-    assert.deepEqual(declared, [...RUNTIME_MODULES].sort(), `${dts} declares a different module set`);
+  if (!dts) {
+    t.skip("no gpui-kit.d.ts: set HERDR_APP_HOME to a Herdr app home, or AUTOMAGIK_HERDR_APP_CHECK=1 to read ~/.config/herdr-app");
+    return;
   }
+  const declared = [...readFileSync(dts, "utf8").matchAll(/^declare module "([^"]+)"/gm)]
+    .map((m) => m[1]).sort();
+  assert.deepEqual(declared, [...RUNTIME_MODULES].sort(), `${dts} declares a different module set`);
 });
 
 test("a fixture mod importing node:url fails", () => {

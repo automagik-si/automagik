@@ -11,6 +11,7 @@
 
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { relaunchArgs } from './relaunch-args.js'
 
 export const RELEASES_URL = 'https://api.github.com/repos/automagik-si/automagik/releases?per_page=100'
 // The updater reads the release list newest first. A plugin, herdr or Pocket patch is a release
@@ -376,7 +377,11 @@ export async function fetchReleases(fetchImpl = fetch, enough = () => false) {
  * `check()` also serves the menu's Check for Updates, and answers what it found:
  * `{ result: 'latest' | 'found' | 'ready' | 'error' | 'busy', version?, retrying? }`.
  */
-export function startUpdates({ updater, current, platform, env, log, onState, mode = 'auto', releases = fetchReleases, timers = globalThis }) {
+export function startUpdates({
+  updater, current, platform, env, log, onState, mode = 'auto', releases = fetchReleases,
+  timers = globalThis, argv = process.argv, relaunch = () => { throw new Error('no relaunch') },
+  processEnv = process.env,
+}) {
   const readyWaiters = new Set()
   let lastCheck = null
   let latestVersion = null
@@ -601,7 +606,38 @@ export function startUpdates({ updater, current, platform, env, log, onState, mo
         readyWaiters.add(done)
       })
     },
-    install: () => { if (ready !== null && newer(ready)) updater.quitAndInstall(false, true) },
+    install: () => {
+      if (ready === null || !newer(ready)) return
+      if (platform !== 'linux') return updater.quitAndInstall(false, true)
+      // electron-updater 6.8.10's AppImageUpdater.doInstall calls spawnLog with an empty
+      // argument list inside quitAndInstall. Electron's relaunch preserves the launch arguments
+      // without logging their values, closes inherited sockets that Node's spawn would pass on
+      // (including the old DevTools socket that would block the debug port), and starts the new
+      // copy after this one exits. Re-check the hook on an electron-updater bump.
+      const previous = updater.spawnLog
+      if (typeof previous !== 'function') {
+        log.warn('update: cannot keep the launch arguments on this relaunch')
+        return updater.quitAndInstall(false, true)
+      }
+      const own = Object.hasOwn(updater, 'spawnLog')
+      updater.spawnLog = function (cmd, args = [], env, stdio = 'ignore') {
+        if (args.length > 0) return previous.call(this, cmd, args, env, stdio)
+        const kept = relaunchArgs(argv)
+        try {
+          relaunch({ execPath: cmd, args: kept })
+        } catch {
+          log.warn('update: the updated app reopens without its launch arguments')
+          return previous.call(this, cmd, args, env, stdio)
+        }
+        delete processEnv.AUTOMAGIK_PRELOAD
+        log.info(`update: reopening the app with ${kept.length} launch argument(s)`)
+        return Promise.resolve(true)
+      }
+      try { updater.quitAndInstall(false, true) } finally {
+        if (own) updater.spawnLog = previous
+        else delete updater.spawnLog
+      }
+    },
     stop: () => {
       for (const done of readyWaiters) done(false)
       timers.clearTimeout(first)

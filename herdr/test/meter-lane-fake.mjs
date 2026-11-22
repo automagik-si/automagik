@@ -5,7 +5,7 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { METER_DOWNLOADS, METER_TARGETS, meterSequenceOf } from "../mods/am-sidebar/meterLane.mjs";
+import { METER_REPOSITORY, METER_TARGETS, meterSequenceOf } from "../mods/am-sidebar/meterLane.mjs";
 
 /** A throwaway ed25519 pair: `keys` is a meter-keys.json listing its public half as `keyId`. */
 export function meterKey(keyId = "meter-test") {
@@ -31,7 +31,7 @@ export function publishMeter(root, key, { version, reports = version, edit = nul
     const body = script ? script(name) : `#!/bin/sh\n[ "$1" = --version ] && echo "usagemeter ${reports}"\n# ${name} ${version}\nexit 0\n`;
     writeFileSync(join(dir, name), body);
     chmodSync(join(dir, name), 0o755);
-    assets[target] = { name, url: `${METER_DOWNLOADS}/v${version}/${name}`, sha256: sha(body), size: Buffer.byteLength(body) };
+    assets[target] = { name, url: `${METER_REPOSITORY}/releases/download/v${version}/${name}`, sha256: sha(body), size: Buffer.byteLength(body) };
   }
   if (sums) writeFileSync(join(dir, "usagemeter.SHA256SUMS"), Object.values(assets).map((a) => `${sums(a.name, a.sha256)}\n`).join(""));
   const pointer = {

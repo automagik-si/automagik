@@ -15,9 +15,12 @@
 // Every other agent's pane gets the kill shim instead (`hc-kill/hc`, runKillGuard below): that
 // shim also refuses a prefixed send to an agent or an unknown target (#1421). Both wrappers
 // refuse a send to a pane held by a dialog (#1414): they look at the target's status and, when
-// it is neither working nor blocked, its screen, and never type into or answer the dialog. A pane
-// can still start an agent between the check and delivery: a guardrail, not a guarantee. The real
-// fix for every sender is in herdr-core.
+// it is neither working nor blocked, its screen, and never type into or answer the dialog.
+// An Antigravity pane is read even while it reports working (RFC 0042): agy fires no hook while
+// it waits at its folder-trust or file-access question, so its status can say working, idle, done
+// or nothing, and a known prompt shape on its screen is refused the same way. A pane can still
+// start an agent between the check and delivery: a guardrail, not a guarantee. The real fix
+// for every sender is in herdr-core.
 //
 // The caller comes from the attach ledger (attach.js) in the app home recorded in the
 // caller pane's launch argv (#628). A worker pane has no ledger row, so its `worker.of`
@@ -41,11 +44,14 @@
 // `read`/`get`/`wait`, `label`, `kill`, `rm` and both `hc events` target options. A send with
 // `--on` forwards the bare id after checking that address is on the named machine.
 // `keys`, `attach` and `exec` are refused outright. The core types keys after about 3 seconds
-// of quiet with no condition, so a guard check can go stale before delivery. Attach opens
-// a persistent keyboard. Both wait on herdr-core for delivery checks or caller binding.
-// `ls` and the event stream stay cross-pane: a wrapper cannot filter a
-// table's text or a stream without changing what the real hc printed; the per-pane proxy is
-// where a sandboxed pane's list and events are filtered.
+// of quiet with no condition, so a guard check can go stale before delivery. `keys` stays
+// refused until RFC 0044 delivery 6: herdr-core binds, marks and grants the caller (R1-R3)
+// and checks that grant with every write (R4, advertised as `checked_input`); then the
+// guard and the proxy allow it together, to the same set as `send`. `attach` opens a
+// persistent keyboard and stays refused for sandboxed panes for good (RFC 0044 Q5).
+// `ls` and plain `events` stay cross-pane: a wrapper cannot filter a table's text or a
+// stream without changing what the real hc printed. The per-pane proxy filters a sandboxed
+// pane's list and refuses its event subscription.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -58,7 +64,8 @@ import { readApprovedRecord } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
 import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferProjectOf, mainBotOf, parseBots, projectEntriesOf, projectFileOf, RANKS } from "./model.js";
 import { agentKeyOfArgv, resolveAgent } from "./models.js";
-import { pendingDialog } from "./dialog.js";
+import { pendingDialog, rateLimitDialog } from "./dialog.js";
+import { agyCandidate, agyPromptOf } from "./agyPrompt.js";
 import { ENV, KILL_GUARD_NAME, SESSION_LABEL, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL,
   WORKER_OF_LABEL, isKillGuardWord, stableRootOf } from "./workers.js";
 
@@ -261,15 +268,23 @@ export async function runKillGuard(argv, env = process.env) {
     if (send.target && send.texts.length) {
       let hit;
       try {
-        hit = resolvedTargetOf(real, send.target, send.on, env);
+        hit = checkedTargetOf(real, send.target, send.on, env);
       } catch {
         if (prefix) return sendRefused(prefix, send.target, "the target could not be checked");
         return passthrough(real, args, env, { plain: true });
       }
+      if (hit.why) {
+        say(`hc send: refused ${oneLine(hit.why)}.`);
+        return 2;
+      }
+      if (send.on && hit.address && !hit.address.startsWith(`${send.on}/`)) {
+        say("hc send: refused because hc resolved the target off the --on machine (#628).");
+        return 2;
+      }
       if (prefix && sendTextProblem(send.texts, hit.get)) return sendRefused(prefix, send.target);
       const held = heldTarget(real, hit, env);
       if (held) return heldRefusal(held);
-      if (prefix && hit.address) args[send.targetIndex] = hit.address;
+      if (hit.address) args[send.targetIndex] = send.on ? hit.address.split("/").at(-1) : hit.address;
     }
     return passthrough(real, args, env, { plain: true });
   }
@@ -437,23 +452,36 @@ function hcJson(real, args, env) {
 
 const rowsOf = (ls) => (Array.isArray(ls?.terminals) ? ls.terminals : Array.isArray(ls) ? ls : []);
 
+/** The statuses an Antigravity pane is read in: agyScan.js readable, the sidebar's twin. */
+const agyReadable = (state) => state == null || state === "working" || state === "idle" || state === "done";
+
 /**
  * The target a send must not be typed into (#1414), or null: a pane herdr-core reports blocked
  * is waiting for a person, and a pane whose status says idle, done or nothing at all can still
  * show a visible dialog (a linked machine, a revived pane). A working pane is mid-turn, not
  * asking, so it is left alone. The screen look is the pack's own pendingDialog; a screen that
- * cannot be read is left to hc's own send, never guessed at. Returns the resolved address.
+ * cannot be read is left to hc's own send, never guessed at. An Antigravity pane that reports
+ * working, idle, done or nothing gets one read matched against its captured prompt shapes too
+ * (RFC 0042). The screen's text never leaves the guard. Returns the resolved address.
  */
 export function heldTarget(real, hit, env) {
   if (!hit?.get) return null;
   // A finished pane has no live dialog: its last screen may still show one, and hc's own
   // `finished` refusal is the answer the sender needs (#1414).
   if (hit.get.state && hit.get.state !== "live") return null;
-  if (hit.get.status?.state === "blocked") return hit.address;
-  if (hit.get.status?.state === "working") return null;
-  const read = hcJson(real, ["read", hit.address, "--lines", "40"], env);
+  const state = hit.get.status?.state;
+  if (state === "blocked") return hit.address;
+  // RFC 0042: a pane its live hc get record calls Antigravity (agyCandidate) is read in these
+  // states too, once, at the address hc get answered, and refused under that address when one
+  // of its prompt shapes is on screen. agy fires no hook while it waits there.
+  const agy = agyReadable(state) && agyCandidate(hit.get) === true;
+  if (state === "working" && !agy) return null;
+  const at = agy ? hit.get.address : hit.address;
+  const read = hcJson(real, ["read", at, "--lines", "40"], env);
   if (typeof read?.text !== "string") return null;
-  return pendingDialog(read.text) ? hit.address : null;
+  if (agy && agyPromptOf(read.text)) return at;
+  if (state === "working") return null;
+  return pendingDialog(read.text) || rateLimitDialog(read.text) ? hit.address : null;
 }
 
 /**
@@ -841,19 +869,6 @@ function sendArgs(args) {
   return { target: args[targetIndex], targetIndex, texts: texts.map((i) => args[i]), on };
 }
 
-/** The target's address and hc get answer; a failed get is unknown, labels are optional. */
-function resolvedTargetOf(real, word, on, env) {
-  let address = word;
-  if (on && !address.includes("/")) address = `${on}/${address}`;
-  if (!address.includes("/")) {
-    const rows = rowsOf(hcJson(real, ["ls"], env));
-    const hit = rows.find((r) => r?.address === address) ?? rows.find((r) => r?.name === address);
-    if (hit?.address) address = hit.address;
-  }
-  const get = hcJson(real, ["get", address], env);
-  return { address, get: get && typeof get === "object" && !get.error ? get : null };
-}
-
 const TERMINAL_ADDRESS = /^(?:[^\s/]+\/)?t[0-9a-z]+$/;
 
 /** The canonical address from hc get, with agreement required when hc ls supplied an address. */
@@ -876,7 +891,7 @@ function checkedTargetOf(real, word, on, env) {
     return { why: "the target's address from hc is not a terminal id" };
   }
   if (provenance === "ls" && address !== get.address) {
-    return { why: "hc resolved the target to two different panes" };
+    return { why: `because hc resolved the target to two different panes (${address} and ${get.address})` };
   }
   return { address: get.address, get };
 }

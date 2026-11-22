@@ -23,6 +23,7 @@ import { BotConnectors } from './connectors.js'
 import { ComputerView } from './computer.js'
 import { hostText, t } from './i18n.js'
 import { BotPills } from './capability-pills.js'
+import { GrantList } from './grants.js'
 
 function transcriptOf(list, id, name, hiddenTurns = []) {
   const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline
@@ -161,7 +162,7 @@ function MemberRow({ member, entry, room, roster, actions }) {
             room.admin === member.id ? h('span', { className: 'bt-tag' }, t('Admin')) : null),
           h(MemberState, { entry, bot: member, room, roster }))),
       h(StopMemberWork, { entry, bot: member, room, actions })),
-    h(MemberApprovals, { entry, bot: member, actions }))
+    h(MemberApprovals, { entry, bot: member, room, actions, readOnly: roster.readOnly }))
 }
 
 // A group's overview: what members read, who is in it, who answers, and what it
@@ -361,6 +362,7 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
           needsModelPick(bot, roster) ? h('div', { className: 'bt-note' }, t('Pick a model and {name} can start.', { name: bot.name })) : null),
         bot.engine ? h(AgentSessions, { key: 'sessions', bot, part, run, useSessions }) : null,
         h(PermissionRow, { key: 'permission', bot, roster, actions, run }),
+        h(GrantList, { key: 'grants', bot, roster, actions, useWork }),
         h(BotConnectors, { key: 'connectors', bot, roster, actions, run }),
         h('div', { key: 'folder', className: 'bt-drawer-model' },
           h('div', { className: 'bt-section-title' }, t('Working folder')),

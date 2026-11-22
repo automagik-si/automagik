@@ -894,7 +894,8 @@ const requestError = (agent, failure) => agent.dispatch.waterfall('agent/request
 const notices = calls => calls.followups.filter(entry => entry.message?.source?.kind === 'model-selection')
 
 test('case 4d: a pending switch that is not configured goes back without waking a fallback turn', async (t) => {
-  const b = await switchBench({ perNode: 20_000, model: 'openai-codex/gpt-5.6-sol', fallback: true })
+  // Both sides on the same native header, so only the pending switch tells them apart.
+  const b = await switchBench({ perNode: 20_000, routed: ['openai-codex', 'gpt-5.6-sol'], model: 'openai-codex/gpt-5.6-sol', fallback: true })
   t.after(b.stop)
   b.bot.previousModel = 'deepseek/flash'
   assert.equal(await requestError(b.agent, notConfigured('openai-codex')), undefined)
@@ -905,14 +906,26 @@ test('case 4d: a pending switch that is not configured goes back without waking 
   assert.deepEqual(b.calls.agentSelected, [], 'no fallback route recorded')
   assert.deepEqual(notices(b.calls), [], 'no fallback notice, so no turn runs on its own')
   assert.equal(b.rt.fallbackArmed('s1'), false)
+  assert.deepEqual(b.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source?.kind === 'model-selection'), [], 'no notice appended either')
   // Control: the same failure on a confirmed model falls back as before, with its notice.
-  const kept = await switchBench({ perNode: 20_000, model: 'openai-codex/gpt-5.6-sol', fallback: true })
+  const kept = await switchBench({ perNode: 20_000, routed: ['openai-codex', 'gpt-5.6-sol'], model: 'openai-codex/gpt-5.6-sol', fallback: true })
   t.after(kept.stop)
   kept.bot.previousModel = 'openai-codex/gpt-5.6-sol'
   await requestError(kept.agent, notConfigured('openai-codex'))
   await until(() => notices(kept.calls).length > 0, 500)
   assert.deepEqual(kept.calls.agentSelected, [['s1', 'deepseek/flash']])
   assert.equal(notices(kept.calls).length, 1)
+})
+
+test('case 4d: a confirmed model cannot wake a fallback on another harness', async t => {
+  const b = await switchBench({ perNode: 20_000, model: 'openai-codex/gpt-5.6-sol', fallback: true })
+  t.after(b.stop)
+  b.bot.previousModel = 'openai-codex/gpt-5.6-sol'
+  await requestError(b.agent, notConfigured('openai-codex'))
+  await new Promise(resolve => setImmediate(resolve))
+  const appended = b.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source?.kind === 'model-selection')
+  assert.deepEqual([b.calls.agentSelected, notices(b.calls), b.rt.fallbackArmed('s1'), appended.map(event => event.data.source.summary)],
+    [[], [], false, ['acp-codex/default failed; the fallback runs on another harness']])
 })
 
 test('case 8e: a fresh part whose provider is not configured goes back without waking a fallback turn', async (t) => {

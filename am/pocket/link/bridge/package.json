@@ -1,0 +1,9 @@
+{
+  "name": "herdr-pocket-link-bridge",
+  "private": true,
+  "type": "module",
+  "description": "Lets paired Herdr Pocket phones reach this machine's herdr-core over iroh.",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=20.3.0" },
+  "dependencies": { "@number0/iroh": "1.2.0", "qrcode": "1.5.4" }
+}

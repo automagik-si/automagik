@@ -176,6 +176,7 @@ export function snapshotOf(session, projections) {
 // messages array is tagged for usage. `extra` messages sit between the snapshot
 // and the prompt; a side chat's earlier finished pairs go there.
 export async function callAside(ctx, rt, snapshot, { extra = [], question, promptFor, kind, retry = false, signal }) {
+  rt.assertBotRunnerProvider?.(snapshot.header?.config?.provider, snapshot.sessionId)
   const messages = rt.tagUsage([
     ...snapshot.messages,
     ...extra,

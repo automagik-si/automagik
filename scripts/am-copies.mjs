@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * am's copies of the pack's CLI and briefing (RFC 0012, "The am part"). The pack stays the source:
+ * am's copies of the pack's CLI, briefing and Pocket Link (RFC 0012, "The am part"). The pack stays the source:
  * am/ carries byte-equal copies of herdr/mods/am-sidebar's CLI (bin/automagik-herdr.mjs and its
  * wrapper), the briefing (briefing.mjs, briefingEntry.mjs), run.sh and every module they import,
  * at the same relative paths so each import resolves unchanged, plus the trust anchors am carries
@@ -22,10 +22,14 @@ import { fileURLToPath } from "node:url";
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const SOURCE = "herdr/mods/am-sidebar";
 export const TARGET = "am";
+export const POCKET_SOURCE = "herdr/mods/pocket-link";
+export const POCKET_TARGET = "am/pocket/link";
+const POCKET_EXTRAS = ["bridge/package.json", "bridge/package-lock.json", "chat/package.json",
+  "LICENSE", "chat/LICENSE-upstream", "chat/UPSTREAM.md"];
 export const RECORD = "am/copies.json";
 export const WRITE = "node scripts/am-copies.mjs --write";
 /** The entry points whose import closure am copies, inside SOURCE. */
-export const ROOTS = ["bin/automagik-herdr.mjs", "briefing.mjs", "briefingEntry.mjs"];
+export const ROOTS = ["bin/automagik-herdr.mjs", "bin/accounts.mjs", "briefing.mjs", "briefingEntry.mjs"];
 /** Copied too, though nothing imports them: [from (repository path), to (repository path)]. */
 export const EXTRA = [
   [`${SOURCE}/bin/automagik-herdr`, `${TARGET}/bin/automagik-herdr`],
@@ -63,6 +67,8 @@ export function closure(dir, roots = ROOTS) {
 /** Every copy as [from, to], repository paths: once each, when an EXTRA is also imported (hcGuard.mjs). */
 export function copies(root = ROOT) {
   const inside = closure(join(root, SOURCE)).map((p) => [`${SOURCE}/${p}`, `${TARGET}/${p}`]);
+  inside.push(...[...closure(join(root, POCKET_SOURCE), ["bridge/bridge.mjs"]), ...POCKET_EXTRAS]
+    .map(p => [`${POCKET_SOURCE}/${p}`, `${POCKET_TARGET}/${p}`]));
   const imported = new Set(inside.map(([, to]) => to));
   return [...inside, ...EXTRA.filter(([, to]) => !imported.has(to))].sort((a, b) => a[1].localeCompare(b[1]));
 }
@@ -118,10 +124,10 @@ if (invoked) {
     const found = problems();
     if (found.length) {
       for (const line of found) console.error(`am copies: ${line}`);
-      console.error(`am copies: am/ carries byte-equal copies of the pack's CLI and briefing (RFC 0012). Run \`${WRITE}\` and commit am/.`);
+      console.error(`am copies: am/ carries byte-equal copies of the pack's CLI and briefing and Pocket Link (RFCs 0012 and 0046). Run \`${WRITE}\` and commit am/.`);
       process.exit(1);
     }
-    console.log(`am copies: ${copies().length} files match ${SOURCE}`);
+    console.log(`am copies: ${copies().length} files match ${SOURCE} and ${POCKET_SOURCE}`);
   } else if (flag === "--write") {
     const changed = write();
     console.log(changed.length ? `am copies: wrote ${changed.join(", ")}` : "am copies: nothing to write");

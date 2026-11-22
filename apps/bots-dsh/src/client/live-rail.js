@@ -5,6 +5,7 @@ import { BotMark } from './mark.js'
 import { workPhrase } from './cells.js'
 import { ENDED_FOR_MS, ENDED_SHOWN, endLabel, endOf, railEnded } from './task-card.js'
 import { hostText, t } from './i18n.js'
+import { GrantAction } from './grants.js'
 
 // -------------------------------------------------------------------------
 // Live content belongs to the native tab: the sidebar owns all geometry and focus.
@@ -65,15 +66,17 @@ export function liveOf(work, roster, now = Date.now()) {
   const ended = railEnded(roster, now).map(([sessionId, task]) => ({
     key: `end:${sessionId}`, bot: byId[task.from], title: task.title ?? t('Task'), status: task.status, label: endLabel(task), at: endOf(task), open: sessionId,
   }))
-  return { needs, working, ended }
+  const grants = (work?.grants ?? []).length
+  return { needs, working, ended, ...(grants > 0 ? { grants } : {}) }
 }
 
 /** The line under the rail's title: "1 needs you · 2 working", "nothing working". */
-export function liveSummary({ needs, working }) {
+export function liveSummary({ needs, working, grants = 0 }) {
   const parts = []
   const count = needs.reduce((sum, item) => sum + (item.count ?? 1), 0)
   if (count > 0) parts.push(t('{count} needs you', { count }))
   parts.push(working.length > 0 ? t('{count} working', { count: working.length }) : t('nothing working'))
+  if (grants > 0) parts.push(grants === 1 ? t('1 grant') : t('{count} grants', { count: grants }))
   return parts.join(' · ')
 }
 
@@ -106,7 +109,7 @@ function Entry({ item, tone, line, actions }) {
     h('span', { className: 'bt-live-go' }, t('Open')))
 }
 
-function GroupEntry({ item, actions, statusMap }) {
+function GroupEntry({ item, actions, statusMap, roster }) {
   const [answering, setAnswering] = useState(false)
   // All or nothing: a decision on the card is a decision on every ask it counts. When one of
   // them cannot be answered from this window, the card only opens.
@@ -128,7 +131,12 @@ function GroupEntry({ item, actions, statusMap }) {
     h('div', { className: 'bt-q-foot' },
       canAnswer ? h('button', { type: 'button', className: 'bt-q-btn', disabled: answering, 'aria-label': `${t('Reject')} · ${what}`, onClick: () => answer('reject') }, t('Reject')) : null,
       canAnswer ? h('button', { type: 'button', className: 'bt-q-submit', disabled: answering, 'aria-label': `${t('Allow once')} · ${what}`, onClick: () => answer('allow') }, t('Allow once')) : null,
-      h('button', { type: 'button', className: 'bt-live-go', onClick: () => actions.openSession(item.open) }, t('Open'))))
+      item.entries.filter(approval => approval.grantable).map(approval => h(GrantAction, {
+        key: approval.id, approval, place: approvalWhere(approval, roster), actions,
+        disabled: answering || roster?.readOnly,
+      })),
+      h('button', { type: 'button', className: 'bt-live-go',
+        onClick: () => actions.openSession(item.open) }, t('Open'))))
 }
 
 function Section({ label, dot, children, empty }) {
@@ -156,7 +164,11 @@ export function LiveRail({ roster, actions, useWork, useSessionStatus }) {
       h('h2', { className: 'bt-live-title' }, t('Live')),
       h('span', { className: 'bt-live-sum' }, liveSummary(live))),
     h(Section, { label: t('Needs you'), dot: 'need', empty: t('Nothing waiting for you.') },
-      live.needs.map(item => item.count > 1 ? h(GroupEntry, { key: item.key, item, actions, statusMap }) : h(Entry, { key: item.key, item, tone: 'need', actions, line: item.line ?? (item.tool ? t('Wants to use {tool}', { tool: item.tool }) : t('Waiting for your answer')) }))),
+      live.needs.map(item => item.count > 1 || item.entries?.[0]?.grantable
+        ? h(GroupEntry, { key: item.key, item, actions, statusMap, roster })
+        : h(Entry, { key: item.key, item, tone: 'need', actions,
+          line: item.line ?? (item.tool ? t('Wants to use {tool}', { tool: item.tool })
+            : t('Waiting for your answer')) }))),
     h(Section, { label: t('Working'), dot: 'work', empty: t('Nothing running right now.') },
       live.working.map(item => h(Entry, { key: item.key, item, tone: 'work', actions, line: item.task && item.at ? `${item.phrase} · ${since(item.at, now)}` : item.phrase }))),
     finished.length > 0 ? h(Section, { label: t('Just finished'), dot: 'done', empty: '' }, finished) : null,

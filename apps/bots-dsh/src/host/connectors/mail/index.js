@@ -67,6 +67,7 @@ export function install(rt, host) {
   const sessions = new Map()
   const connecting = new Map()
   const adding = new Map()
+  const sending = new WeakSet()
 
   const accounts = () => state.connectors?.mail?.accounts ?? {}
   const accountList = () => Object.values(accounts())
@@ -478,17 +479,14 @@ export function install(rt, host) {
         }
         return undefined
       })()
-      if (found === undefined || found.request.status !== 'pending') throw refusal('This card was already answered')
+      if (found === undefined || found.request.status !== 'pending' || sending.has(found.request)) throw refusal('This card was already answered')
       const { botId, request } = found
       if (body.fields && typeof body.fields === 'object' && !Array.isArray(body.fields)) {
-        if (typeof body.fields.to === 'string' && body.fields.to.trim() !== '') request.to = body.fields.to.trim()
+        if (typeof body.fields.to === 'string') request.to = body.fields.to.trim()
         if (typeof body.fields.cc === 'string') request.cc = body.fields.cc.trim()
         if (typeof body.fields.bcc === 'string') request.bcc = body.fields.bcc.trim()
         if (typeof body.fields.subject === 'string') request.subject = body.fields.subject.trim()
         if (typeof body.fields.body === 'string') request.body = body.fields.body
-      }
-      if (typeof body.rule === 'string') {
-        applyRules({ mode: body.rule, botId, recipients: [request.to, request.cc, request.bcc].filter(Boolean).join(', ') })
       }
       if (body.choice !== 'send') {
         request.status = 'canceled'; request.settledAt = Date.now()
@@ -503,6 +501,8 @@ export function install(rt, host) {
         await tell(botId, `The account for "${request.subject}" is gone, so nothing was sent.`)
         return true
       }
+      const recipients = { to: request.to, cc: request.cc || undefined, bcc: request.bcc || undefined }
+      sending.add(request)
       try {
         const session = await connect(account)
         const attachments = (request.attachments ?? []).map((name) => {
@@ -510,15 +510,21 @@ export function install(rt, host) {
           if (request.dir === undefined || inside !== realpathSync(request.dir) && !inside.startsWith(realpathSync(request.dir) + sep)) throw new Error(`Attachment ${name} is outside the working folder`)
           return { filename: name, path: inside }
         })
-        await session.send({ to: request.to, cc: request.cc || undefined, bcc: request.bcc || undefined, subject: request.subject, text: request.body, attachments, ...(request.replyTo ? { inReplyTo: request.replyTo } : {}) })
+        await session.send({ ...recipients, subject: request.subject, text: request.body, attachments, ...(request.replyTo ? { inReplyTo: request.replyTo } : {}) })
+        if (typeof body.rule === 'string') {
+          applyRules({ mode: body.rule, botId, recipients: Object.values(recipients).filter(Boolean).join(', ') })
+        }
         request.status = 'sent'; request.settledAt = Date.now()
         await rt.save()
-        await tell(botId, `The user sent "${request.subject}" to ${request.to} from ${account.address}.`)
+        // An empty To (Cc or Bcc only) names no recipient, which keeps a Bcc list private.
+        await tell(botId, `The user sent "${request.subject}"${request.to ? ` to ${request.to}` : ''} from ${account.address}.`)
       } catch (error) {
         request.status = 'failed'; request.settledAt = Date.now()
         request.error = host.reason(error)
         await rt.save()
         await tell(botId, `Sending "${request.subject}" failed: ${request.error}. You can try mail_send again.`)
+      } finally {
+        sending.delete(request)
       }
       return true
     },
@@ -576,15 +582,16 @@ export function install(rt, host) {
     const pending = googlePendings.get(address) ?? [...googlePendings.values()][0]
     if (pending === undefined) throw refusal('No Google sign-in is waiting')
     const input = String(body.input ?? '').trim()
-    const url = /^https?:/i.test(input) ? new URL(input) : undefined
-    const code = url ? url.searchParams.get('code') : input
+    const url = /^https?:\/\//i.test(input) ? URL.parse(input) : null
+    if (url === null) throw refusal('Paste the whole callback address')
+    const code = url.searchParams.get('code')
     if (!code) throw refusal('The address has no code')
-    const given = url?.searchParams.get('state')
-    if (given !== null && pending.state !== undefined && given !== pending.state) throw refusal('The sign-in answer is not for this attempt')
+    const given = url.searchParams.get('state')
+    if (!given || given !== pending.state) throw refusal('The sign-in answer is not for this attempt')
     googlePendings.delete(pending.key ?? pending.address)
     pending.listener?.close()
     const client = googleClient()
-    const tokens = await exchange(pending.discovery, { client_id: client.id, client_secret: client.secret }, { code, codeVerifier: pending.codeVerifier, redirectUri: pending.redirectUri, iss: url?.searchParams.get('iss') ?? undefined }, { fetch: rt.config.mail?.fetch })
+    const tokens = await exchange(pending.discovery, { client_id: client.id, client_secret: client.secret }, { code, codeVerifier: pending.codeVerifier, redirectUri: pending.redirectUri, iss: url.searchParams.get('iss') ?? undefined }, { fetch: rt.config.mail?.fetch })
     const email = pending.address || await googleEmail(tokens.access_token)
     const id = `g${randomUUID().slice(0, 8)}`
     const account = { id, address: email, provider: 'gmail', auth: 'google', createdAt: Date.now() }

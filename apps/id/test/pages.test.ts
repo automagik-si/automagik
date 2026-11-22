@@ -23,7 +23,9 @@ import { createServer } from 'node:net';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { migrate } from './migrations';
 import { clientSeedSQL } from '../scripts/client-seed';
+import { admissions, TEST_ISSUER } from './admission';
 
 const CONTRACT = [
   '/api/id/config', '/api/auth/get-session', '/api/auth/sign-out',
@@ -207,6 +209,8 @@ async function world(options: { whatsapp?: boolean } = {}) {
   }
   const port = await freePort();
   const origin = `http://localhost:${port}`;
+  // Sign-up is by invitation: tickets for this world, signed with a key made for it.
+  const tickets = await admissions(origin);
   const mf = new Miniflare({
     modules: [{ type: 'ESModule', path: bundle }],
     compatibilityDate: '2025-11-18', compatibilityFlags: ['nodejs_compat'],
@@ -223,6 +227,8 @@ async function world(options: { whatsapp?: boolean } = {}) {
       // Local runs only: a passkey for localhost works on localhost and nowhere else.
       PASSKEY_RP_ID: 'localhost',
       BETTER_AUTH_SECRET: 'test-only-auth-secret-placeholder-never-deployed',
+      ADMISSION_KEYS: tickets.keys,
+      ADMISSION_ISSUER: TEST_ISSUER,
       // The service's own test values: with both set, it offers WhatsApp.
       ...(options.whatsapp ? { WHATSAPP_RECEIVING_NUMBER: RECEIVING, OMNI_INBOUND_TOKEN: INBOUND_TOKEN } : {}),
     },
@@ -230,10 +236,7 @@ async function world(options: { whatsapp?: boolean } = {}) {
   worlds.push(mf);
   await mf.ready;
   const db = await mf.getD1Database('DB');
-  for (const file of ['migrations/0001_auth.sql', 'migrations/0002_whatsapp.sql']) {
-    const migration = await readFile(file, 'utf8');
-    for (const sql of migration.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(sql).run();
-  }
+  await migrate(db);
   for (const sql of clientSeedSQL(digest('test-only-cloud-client-secret-never-deployed')).split(';').filter(Boolean)) {
     await db.prepare(sql).run();
   }
@@ -256,7 +259,9 @@ async function world(options: { whatsapp?: boolean } = {}) {
     });
     return response.status === 200 ? ((await response.json()) as { reply: string }).reply : null;
   };
-  return { origin, send };
+  // An invitation link: the address with a fresh admission ticket in its fragment.
+  const invite = async (address: string) => `${address}#ticket=${await tickets.mint()}`;
+  return { origin, send, invite };
 }
 const RECEIVING = '15555550100';
 const INBOUND_TOKEN = 'test-only-inbound-token-placeholder-not-deployed';
@@ -606,10 +611,10 @@ describe('pages: a real browser on the real Worker', () => {
 
   test('signed-in Create a passkey creates a fresh account and revokes the original session', async ({ skip }) => {
     if (!(await chromium())) return skip();
-    const { origin } = await world();
+    const { origin, invite } = await world();
     const { context, page, check, landed } = await visitor(origin, '192.0.2.25');
     try {
-      await page.goto(`${origin}/sign-in`);
+      await page.goto(await invite(`${origin}/sign-in`));
       await page.locator('#create-passkey').click();
       await page.locator('#sign-out').waitFor();
       const original = await (await context.request.get(`${origin}/api/auth/get-session`)).json();
@@ -620,7 +625,7 @@ describe('pages: a real browser on the real Worker', () => {
       expect((await (await readOriginal()).json() as any).user.id).toBe(original.user.id);
       check();
 
-      await page.goto(authorize(origin, { prompt: 'login' }));
+      await page.goto(await invite(authorize(origin, { prompt: 'login' })));
       await page.locator('#create-passkey').click();
       expect((await landed(exits[0])).get('code')).toBeTruthy();
       const current = await (await context.request.get(`${origin}/api/auth/get-session`)).json();
@@ -635,11 +640,12 @@ describe('pages: a real browser on the real Worker', () => {
 
   test('passkey account, sign-in, allow, cancel and the ways back in', async ({ skip }) => {
     if (!(await chromium())) return skip();
-    const { origin } = await world();
+    const { origin, invite } = await world();
     const { context, page, check, landed } = await visitor(origin, '192.0.2.21');
 
-    // New here: the product's name is the verified one, and one tap makes the account.
-    await page.goto(authorize(origin));
+    // New here: the product's name is the verified one, and one tap makes the account. The
+    // invitation's ticket rides the fragment through the provider's redirect.
+    await page.goto(await invite(authorize(origin)));
     await page.locator('#create-passkey').waitFor();
     expect(new URL(page.url()).pathname).toBe('/sign-in');
     expect(await heading(page)).toBe('Sign in to Automagik desktop');
@@ -700,7 +706,7 @@ describe('pages: a real browser on the real Worker', () => {
     check();
 
     // Asked to create: the new account comes first and resumes with `created`.
-    await page.goto(authorize(origin, { prompt: 'create' }));
+    await page.goto(await invite(authorize(origin, { prompt: 'create' })));
     await page.locator('#create-passkey').waitFor();
     expect(await heading(page)).toBe('Create your account for Automagik desktop');
     expect(await page.locator('#card .button.primary:visible').innerText()).toBe('Create a passkey');
@@ -762,11 +768,11 @@ describe('pages: a real browser on the real Worker', () => {
 
   test('WhatsApp: the person sends the message, the page waits and signs in', async ({ skip }) => {
     if (!(await chromium())) return skip();
-    const { origin, send } = await world({ whatsapp: true });
+    const { origin, send, invite } = await world({ whatsapp: true });
     const { context, page, check, landed } = await visitor(origin, '192.0.2.31');
 
-    // Offered under the passkey, which stays the main action.
-    await page.goto(authorize(origin));
+    // Offered under the passkey, which stays the main action. A new number needs an invitation.
+    await page.goto(await invite(authorize(origin)));
     await page.locator('#use-whatsapp').waitFor();
     expect(await page.locator('#card .button.primary:visible').innerText()).toBe('Continue with a passkey');
     let { code, link, message } = await begin(page);
@@ -801,8 +807,8 @@ describe('pages: a real browser on the real Worker', () => {
     expect(await send('15555550127', message)).toBe(null);
     check();
 
-    // Asked to create: a new sender gets a new account and resumes with `created`.
-    await page.goto(authorize(origin, { prompt: 'create' }));
+    // Asked to create: a new sender with an invitation gets a new account and resumes with `created`.
+    await page.goto(await invite(authorize(origin, { prompt: 'create' })));
     await page.locator('#use-whatsapp').waitFor();
     expect(await heading(page)).toBe('Create your account for Automagik desktop');
     ({ message } = await begin(page));
@@ -814,9 +820,9 @@ describe('pages: a real browser on the real Worker', () => {
 
   test('WhatsApp on a phone: a button opens it, and there is no code to scan', async ({ skip }) => {
     if (!(await chromium())) return skip();
-    const { origin, send } = await world({ whatsapp: true });
+    const { origin, send, invite } = await world({ whatsapp: true });
     const { context, page, check, landed } = await visitor(origin, '192.0.2.32', { hasTouch: true, isMobile: true });
-    await page.goto(authorize(origin));
+    await page.goto(await invite(authorize(origin)));
     await page.locator('#use-whatsapp').waitFor();
     const { message } = await begin(page);
     expect(await onPhone(page)).toBe(true);
@@ -830,13 +836,13 @@ describe('pages: a real browser on the real Worker', () => {
 
   test.runIf(shots)('a recording of the WhatsApp flow at phone width', async ({ skip }) => {
     if (!(await chromium())) return skip();
-    const { origin, send } = await world({ whatsapp: true });
+    const { origin, send, invite } = await world({ whatsapp: true });
     await mkdir(shots, { recursive: true });
     const { context, page, landed } = await visitor(origin, '192.0.2.33', {
       hasTouch: true, isMobile: true, deviceScaleFactor: 2,
       recordVideo: { dir: await mkdtemp(`${root}/video-`), size: { width: 390, height: 844 } },
     }, 2200);
-    await page.goto(authorize(origin));
+    await page.goto(await invite(authorize(origin)));
     await page.locator('#use-whatsapp').waitFor();
     await page.waitForTimeout(2200);
     const { message } = await begin(page);
@@ -858,6 +864,8 @@ interface Scene {
   name: string;
   page: typeof PAGES[number];
   query?: string;
+  /** The address's fragment, such as an invitation's `ticket=…`. */
+  hash?: string;
   api?: Record<string, Reply | Reply[]>;
   passkey?: 'pending' | 'cancel' | 'ok' | 'none';
   act?: (page: any) => Promise<void>;
@@ -869,7 +877,7 @@ interface Scene {
   refused?: number;
   more?: (page: any, calls: Call[]) => Promise<void>;
 }
-interface Call { path: string; method: string; search: string; body: string }
+interface Call { path: string; method: string; search: string; body: string; ticket?: string }
 const request = (scope: string, extra = '') => `client_id=automagik-cloud&redirect_uri=https%3A%2F%2Fcloud.example.com` +
   `%2Fauth%2Fcallback&response_type=code&scope=${scope}&state=opaque&code_challenge=stub&code_challenge_method=S256` +
   `${extra}&exp=1893456000&ba_iat=1&ba_param=client_id&ba_param=scope&sig=stub`;
@@ -898,6 +906,7 @@ const scanLine = 'Scan the code with your phone, then press send in WhatsApp. I�
 const openLine = 'Open WhatsApp and press send. I’ll wait right here.';
 const ranOut = 'That code ran out. Start again for a new one.';
 const passkeyLine = 'A passkey is your fingerprint, face or screen lock. No password.';
+const invited = 'ticket=stub.ticket.value';
 
 const scenes: Scene[] = [
   { name: 'sign-in-01-loading', page: 'sign-in', query: cloud,
@@ -933,7 +942,7 @@ const scenes: Scene[] = [
     },
     act: page => page.locator('#use-passkey').click(),
     title: 'Sign in to Automagik Cloud', say: 'That passkey didn’t work here. Try again, or create a new one.', view: 'passkey' },
-  { name: 'sign-in-07-passkey-not-saved', page: 'sign-in', query: cloud, passkey: 'ok', refused: 1,
+  { name: 'sign-in-07-passkey-not-saved', page: 'sign-in', query: cloud, hash: invited, passkey: 'ok', refused: 1,
     api: {
       '/api/auth/passkey/generate-register-options': { json: makeOptions },
       '/api/auth/passkey/verify-registration': { status: 400, json: { code: 'FAILED_TO_VERIFY_REGISTRATION' } },
@@ -943,7 +952,7 @@ const scenes: Scene[] = [
   { name: 'sign-in-08-no-passkeys-in-this-browser', page: 'sign-in', query: cloud, passkey: 'none',
     title: 'Sign in to Automagik Cloud', say: 'This browser can’t use passkeys.', view: 'stop',
     more: async (page) => { expect(await page.locator('#card button:visible').count()).toBe(0); } },
-  { name: 'sign-in-09-account-created', page: 'sign-in', query: cloud, passkey: 'ok',
+  { name: 'sign-in-09-account-created', page: 'sign-in', query: cloud, hash: invited, passkey: 'ok',
     api: {
       '/api/auth/passkey/generate-register-options': { json: makeOptions },
       '/api/auth/passkey/verify-registration': { json: { id: 'passkey', ...account } },
@@ -1164,6 +1173,52 @@ const scenes: Scene[] = [
     act: page => toWaiting(page, '#start-whatsapp'),
     title: 'Sign in to Automagik Cloud', say: scanLine, sayOnPhone: openLine, view: 'whatsapp',
     more: async (page) => { expect(await page.locator('#leave-whatsapp').isHidden()).toBe(true); } },
+  { name: 'sign-in-35-create-needs-an-invitation', page: 'sign-in', query: cloud, passkey: 'ok',
+    act: page => page.locator('#create-passkey').click(),
+    title: 'Sign in to Automagik Cloud', say: 'New accounts need an invitation. Open the link from yours.', view: 'passkey',
+    more: async (page, calls) => {
+      // Nothing is asked of the service or the device without one.
+      expect(made(calls, '/api/auth/passkey/generate-register-options')).toHaveLength(0);
+      expect(await page.locator('#create-passkey').isEnabled()).toBe(true);
+    } },
+  { name: 'sign-in-36-invitation-ticket-in-its-header', page: 'sign-in', query: cloud, hash: invited, passkey: 'ok',
+    api: {
+      '/api/auth/passkey/generate-register-options': { json: makeOptions },
+      '/api/auth/passkey/verify-registration': { json: { id: 'passkey', ...account } },
+      '/api/auth/oauth2/continue': { hang: true },
+    },
+    act: page => page.locator('#create-passkey').click(),
+    title: 'You’re signed in', say: 'Passkey saved. You’re in!', view: 'going',
+    more: async (page, calls) => {
+      // The ticket left the address bar at once and went only in its header, never a query.
+      expect(new URL(page.url()).hash).toBe('');
+      expect(new URL(page.url()).search).toBe(`?${cloud}`);
+      const [options] = made(calls, '/api/auth/passkey/generate-register-options');
+      expect(options.ticket).toBe('stub.ticket.value');
+      expect(options.search).toBe('');
+      for (const call of calls) expect(call.search + call.body, call.path).not.toContain('stub.ticket');
+    } },
+  { name: 'sign-in-37-invitation-already-used', page: 'sign-in', query: cloud, hash: invited, passkey: 'ok', refused: 1,
+    api: { '/api/auth/passkey/generate-register-options': { status: 403, json: { code: 'INVITATION_USED', message: '<b>raw</b>' } } },
+    act: page => page.locator('#create-passkey').click(),
+    title: 'Sign in to Automagik Cloud', say: 'That invitation was already used. Sign in instead.', view: 'passkey' },
+  { name: 'sign-in-38-invitation-not-valid', page: 'sign-in', query: cloud, hash: invited, passkey: 'ok', refused: 1,
+    api: { '/api/auth/passkey/generate-register-options': { status: 403, json: { code: 'INVITATION_INVALID' } } },
+    act: page => page.locator('#create-passkey').click(),
+    title: 'Sign in to Automagik Cloud', say: 'That invitation isn’t valid or has run out. Ask for a new one.', view: 'passkey' },
+  { name: 'sign-in-39-whatsapp-new-number-needs-an-invitation', page: 'sign-in', query: cloud,
+    api: { ...waiting, [STATUS]: { json: { status: 'invitation_required' } } },
+    act: page => page.locator('#use-whatsapp').click(),
+    title: 'Sign in to Automagik Cloud', say: 'This number has no account yet. New accounts need an invitation.', view: 'offer',
+    more: async (page, calls) => {
+      expect(await page.locator('#start-whatsapp').innerText()).toBe('Start again');
+      expect(made(calls, START)[0].ticket).toBeUndefined();
+    } },
+  { name: 'sign-in-40-whatsapp-invitation-sent-with-the-start', page: 'sign-in', query: cloud, hash: invited,
+    api: { ...waiting, [START]: { status: 403, json: { code: 'INVITATION_USED' } } }, refused: 1,
+    act: page => page.locator('#use-whatsapp').click(),
+    title: 'Sign in to Automagik Cloud', say: 'That invitation was already used. Sign in instead.', view: 'passkey',
+    more: async (page, calls) => { expect(made(calls, START)[0].ticket).toBe('stub.ticket.value'); } },
 
   { name: 'consent-01-checking', page: 'consent', query: request('openid+profile+offline_access'),
     api: { '/api/auth/oauth2/public-client-prelogin': { hang: true }, '/api/auth/get-session': { json: account } },
@@ -1253,7 +1308,8 @@ async function stage(context: any, origin: string, scene: Scene, phone = false) 
   };
   await page.route(`${origin}/api/**`, (route: any) => {
     const { pathname: path, search } = new URL(route.request().url());
-    calls.push({ path, method: route.request().method(), search, body: route.request().postData() ?? '' });
+    calls.push({ path, method: route.request().method(), search, body: route.request().postData() ?? '',
+      ticket: route.request().headers()['x-automagik-admission'] });
     const scripted = scene.api?.[path] ?? healthy[path] ?? { status: 500, body: 'not scripted' };
     const turn = turns[path] = (turns[path] ?? 0) + 1;
     const reply = Array.isArray(scripted) ? scripted[Math.min(turn, scripted.length) - 1] : scripted;
@@ -1270,7 +1326,7 @@ async function stage(context: any, origin: string, scene: Scene, phone = false) 
   // stays on the page and its last state can be seen.
   await page.route('https://cloud.example.com/**', (route: any) => route.fulfill({ status: 204 }));
   const seen = watch(page);
-  await page.goto(`${origin}/${scene.page}${scene.query ? `?${scene.query}` : ''}`);
+  await page.goto(`${origin}/${scene.page}${scene.query ? `?${scene.query}` : ''}${scene.hash ? `#${scene.hash}` : ''}`);
   if (scene.view !== 'loading') await page.locator('#card[aria-busy="false"]').waitFor();
   await scene.act?.(page);
   // The pointer leaves the card, so no button is pictured or measured under it.

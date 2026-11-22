@@ -660,12 +660,13 @@ test('with no private Bot the tools run as they did', async (t) => {
   assert.deepEqual(await run('glob', { pattern: '*', path: join(diary, '..') }, 'b'), { ran: true })
 })
 
-test('wake log and rewrite files are refused by file tools even with no private Bot', async (t) => {
+test('host files and their temporary files are protected even with no private Bot', async (t) => {
   const { home, team, run, stop } = await start({ privateBot: false })
   t.after(stop)
   const current = { id: 'a', session: { id: 'a', header: { cwd: home } } }
   const refused = { ran: false, error: "That path belongs to the Bot team's host; no Bot reads it." }
-  for (const file of ['wake.jsonl', 'wake.jsonl.123.tmp']) {
+  assert.deepEqual(await run('grep', { path: home, pattern: join(home, 'wake.jsonl') }, 'a'), { ran: true })
+  for (const file of ['wake.jsonl', 'wake.jsonl.123.tmp', 'connector-key', 'connector-key.sample.tmp']) {
     const absolute = join(home, file)
     writeFileSync(absolute, 'host only')
     for (const path of [absolute, file]) {
@@ -679,7 +680,9 @@ test('wake log and rewrite files are refused by file tools even with no private 
     assert.deepEqual(await run('grep', { path: absolute }, 'a'), refused)
     assert.deepEqual(await run('glob', { pattern: absolute }, 'a'), refused)
   }
-  assert.deepEqual(await run('grep', { path: home, pattern: join(home, 'wake.jsonl') }, 'a'), { ran: true })
+  assert.deepEqual(await run('grep', { path: home, include: 'connector-key' }, 'a'), refused)
+  assert.deepEqual(await run('grep', { pattern: 'sample' }, 'a', current), refused)
+  assert.deepEqual(await run('glob', { path: home, pattern: 'connector-key' }, 'a'), refused)
   for (const name of ['grep', 'glob']) assert.deepEqual(await run(name, { path: team }, 'a'), { ran: true })
   const sibling = join(home, 'wake.jsonl-notes')
   writeFileSync(sibling, 'ordinary notes')

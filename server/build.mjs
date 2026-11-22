@@ -2,7 +2,7 @@
 // Build the server image. No push here: CI scans and then tags and pushes; an operator's
 // machine builds the same way.
 //
-//   node server/build.mjs [--tag automagik-server:local] [--version 3.90.1] [--image-version 3.93.0]
+//   node server/build.mjs [--tag automagik-server:local] [--version 3.160.6] [--image-version 3.160.6]
 //                         [--revision 91cf4862…] [--dsh 0.2.2-rc.2]
 //                         [--repository https://github.com/automagik-si/automagik] [--no-cache]
 //
@@ -13,6 +13,7 @@ import { execFileSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CHECKOUT_REPOSITORY, validateInput, verifyCheckoutDirectory } from './checkout-input.mjs'
+import { HERDR_CORE_SHA256, HERDR_CORE_VERSION } from './toolchain.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -35,7 +36,7 @@ function argsOf(argv) {
 
 const args = argsOf(process.argv.slice(2))
 const tag = args.tag || 'automagik-server:local'
-const version = args.version || '3.90.1'
+const version = args.version || '3.160.6'
 const kind = args['input-kind'] || 'release'
 const event = args.event || ''
 const manifest = args['input-manifest'] || ''
@@ -57,6 +58,8 @@ const command = ['build', '--file', 'server/Dockerfile', '--tag', tag,
   '--build-arg', `IMAGE_VERSION=${imageVersion}`,
   '--build-arg', `IMAGE_REVISION=${revision}`,
   '--build-arg', `DSH_VERSION=${dsh}`,
+  '--build-arg', `HERDR_CORE_VERSION=${HERDR_CORE_VERSION}`,
+  '--build-arg', `HERDR_CORE_SHA256=${HERDR_CORE_SHA256}`,
   '--build-arg', `AUTOMAGIK_REPOSITORY=${repository}`,
   '--build-arg', `INPUT_KIND=${kind}`,
   '--build-arg', `INPUT_EVENT=${event}`,

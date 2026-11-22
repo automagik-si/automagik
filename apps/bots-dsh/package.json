@@ -1,6 +1,6 @@
 {
   "name": "@automagik/bots-dsh",
-  "version": "3.160.2",
+  "version": "3.170.1",
   "description": "Omni for DeepSeek Harness: a team of long-lived Bots with Omni as the Main Bot; its channels and canvases come with @automagik/omni-channels-dsh and @automagik/omni-canvas-dsh",
   "keywords": [
     "dsh-plugin",
@@ -27,6 +27,7 @@
     "./client": "./client.js",
     "./read-scope-files": "./src/host/read-scope-files.js",
     "./read-scope-search": "./src/host/read-scope-search.js",
+    "./sandbox-local": "./src/host/sandbox-local.js",
     "./web-search": "./web-search.js",
     "./member-wall/fs": "./src/host/member-wall/fs.js",
     "./locale/*.json": "./locale/*.json",
@@ -39,6 +40,7 @@
     "src/office/",
     "scripts/seed-registry.mjs",
     "client.js",
+    "client.gated.js",
     "client.pane.js",
     "office.js",
     "locale/",
@@ -74,6 +76,8 @@
     "@deepseek-ai/dsh-fs-patch": "*",
     "@deepseek-ai/dsh-fs-sandbox": "*",
     "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-sandbox": "*",
+    "@deepseek-ai/dsh-sandbox-local": "*",
     "@deepseek-ai/dsh-scope": "*",
     "@deepseek-ai/dsh-subprocess-local": "*",
     "@deepseek-ai/dsh-tool-fs": "*",
@@ -90,6 +94,12 @@
       "optional": true
     },
     "@deepseek-ai/dsh-fs-sandbox": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-sandbox": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-sandbox-local": {
       "optional": true
     },
     "@deepseek-ai/dsh-subprocess-local": {

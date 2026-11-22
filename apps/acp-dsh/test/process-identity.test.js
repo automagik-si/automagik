@@ -3,7 +3,7 @@ import childProcess from 'node:child_process'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { test } from 'node:test'
 import { CliHomes } from '../src/host/cli-homes.js'
 import { processBirth, processState, validBirth } from '../src/host/process-identity.js'
@@ -139,6 +139,19 @@ test('available platform smoke reads this test process birth natively once acros
     childProcess.execFileSync = nativeExec
     syncBuiltinESMExports()
   })
+  // Give cold PowerShell its own startup time before checking native birth reads and caching.
+  // The unit tests above cover the 10 s product bound and its timeout path.
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT
+  if (process.platform === 'win32' && typeof systemRoot === 'string' && win32.isAbsolute(systemRoot)) {
+    const started = performance.now()
+    let result = 'ok'
+    try {
+      nativeExec(win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'],
+        { stdio: 'ignore', windowsHide: true, timeout: 60_000 })
+    } catch { result = 'failed' }
+    t.diagnostic(`PowerShell warm-up ${result} in ms: ${Math.round(performance.now() - started)}`)
+  }
   // The default provider must see the wrappers: only uninjected own-PID calls use the cache.
   if (process.platform === 'linux') fs.readFileSync = read
   else childProcess.execFileSync = exec

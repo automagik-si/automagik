@@ -3,7 +3,7 @@
 // test's own fake (fixtures/fake-hc-core.mjs), never a live Herdr and never a real pane.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -14,6 +14,8 @@ import { verifiedWindow } from '../src/host/desktop-window.js'
 import { connectCore } from '../src/host/code-core.js'
 import { coreProbeFixture } from './fixtures/fake-core-probe.mjs'
 import { connectFakeCore } from './fixtures/fake-core-connection.mjs'
+import { attachPath } from '../src/shared/attach-record.js'
+import { workersPath } from '../src/shared/workers-journal.js'
 
 const WINDOW = 'ab'.repeat(32)
 const DIGEST = createHash('sha256').update(WINDOW, 'ascii').digest('hex')
@@ -87,6 +89,105 @@ const wait = async (check, ms = 5000) => {
 }
 const service = (f, { admit = () => ({}), ...more } = {}) => createTypingService({ env: f.env, admit, recordPath: f.recordPath, warn: () => {}, ...more })
 const request = () => ({ headers: new Headers({ 'content-type': 'application/json', host: '127.0.0.1' }) })
+
+test('typing confirms its own connection before attaching and checks the reply before watching', async (t) => {
+  const f = fixture(t, { probe: false })
+  const [pane] = TERMINALS
+  for (const [core, reply] of [['other-core', pane], [CORE, null], [CORE, { ...pane, created_ms: 701 }]]) {
+    const call = t.mock.fn(async () => pane)
+    const attach = t.mock.fn(async () => ({ channel: 7, terminal: reply }))
+    const watch = t.mock.fn((_channel, handlers) => handlers.onData(Buffer.from('foreign paint')))
+    const detach = t.mock.fn()
+    const close = t.mock.fn()
+    let connections = 0
+    const connect = async () => ++connections === 1
+      ? { info: { core: { id: CORE } }, call: async () => pane, close() {} }
+      : { info: { core: { id: core } }, call, attach, watch, detach, close }
+    const typing = service(f, { connect })
+    const taken = await typing.take({ request: request(), bot: LEAD, viewer: 'viewer-1' })
+    assert.deepEqual(taken, { status: 404, body: { error: 'no-pane' } })
+    assert.deepEqual(typing.sessions(), [])
+    assert.equal(attach.mock.callCount(), core === CORE ? 1 : 0)
+    assert.equal(call.mock.callCount(), core === CORE ? 1 : 0, 'only the pre-attach resolution may call terminal.get')
+    assert.equal(watch.mock.callCount(), 0)
+    assert.equal(detach.mock.callCount(), core === CORE ? 1 : 0)
+    assert.equal(close.mock.callCount(), 1)
+  }
+})
+
+for (const phase of ['attach', 'first paint']) {
+  test(`typing refuses a worker reassigned to another Bot during ${phase}`, async (t) => {
+    const f = fixture(t, { probe: false })
+    const pane = { ...TERMINALS[0], address: 't9', created_ms: 900 }
+    addTypingWorkers(f, [pane])
+    const reassign = () => appendFileSync(attachPath(f.env.HERDR_APP_HOME), JSON.stringify({
+      v: 1, event: 'attach', bot: LEAD, project: f.project, terminal: pane.address, created_ms: pane.created_ms, core: CORE,
+    }) + '\n')
+    const detach = t.mock.fn()
+    const close = t.mock.fn()
+    const typing = service(f, {
+      connect: async () => ({
+        info: { core: { id: CORE } }, call: async () => pane, detach, close, credit() {},
+        async attach() {
+          await Promise.resolve()
+          if (phase === 'attach') reassign()
+          return { channel: 9, terminal: pane }
+        },
+        watch(_channel, { onData }) {
+          queueMicrotask(() => {
+            if (phase === 'first paint') reassign()
+            onData(Buffer.from('paint'))
+          })
+        },
+      }),
+    })
+    t.after(() => typing.dispose())
+    const taken = await typing.take({ request: request(), bot: DEV, worker: pane.address, viewer: 'viewer-1' })
+    assert.deepEqual(taken, { status: 404, body: { error: 'no-pane' } })
+    assert.deepEqual(typing.sessions(), [])
+    assert.deepEqual(readLog(f.recordPath), [])
+    assert.deepEqual(detach.mock.calls.map(call => call.arguments), [[9]])
+    assert.equal(close.mock.callCount(), 2, 'the resolver and typing connections both close')
+  })
+}
+
+for (const withdrawal of ['project grant', 'worker binding']) {
+  test(`typing refuses a withdrawn ${withdrawal} during first paint`, async (t) => {
+    const f = fixture(t, { probe: false })
+    const isWorker = withdrawal === 'worker binding'
+    const pane = isWorker ? { ...TERMINALS[1], address: 't9', created_ms: 900 } : TERMINALS[1]
+    if (isWorker) addTypingWorkers(f, [pane])
+    const detach = t.mock.fn()
+    const close = t.mock.fn()
+    const typing = service(f, {
+      connect: async () => ({
+        info: { core: { id: CORE } }, call: async () => pane, detach, close, credit() {},
+        attach: async () => ({ channel: 9, terminal: pane }),
+        watch(_channel, { onData }) {
+          queueMicrotask(() => {
+            if (isWorker) {
+              appendFileSync(workersPath(f.env.HERDR_APP_HOME), JSON.stringify({
+                event: 'end', terminal: pane.address, created_ms: pane.created_ms, core: CORE,
+              }) + '\n')
+            } else {
+              const path = join(f.env.AUTOMAGIK_HOME, 'bots', 'bots.json')
+              const registry = JSON.parse(readFileSync(path, 'utf8'))
+              writeFileSync(path, JSON.stringify({ ...registry, shown: [] }))
+            }
+            onData(Buffer.from('paint'))
+          })
+        },
+      }),
+    })
+    t.after(() => typing.dispose())
+    const taken = await typing.take({ request: request(), bot: DEV, worker: isWorker ? pane.address : null, viewer: 'viewer-1' })
+    assert.deepEqual(taken, { status: 404, body: { error: 'no-pane' } })
+    assert.deepEqual(typing.sessions(), [])
+    assert.deepEqual(readLog(f.recordPath), [])
+    assert.deepEqual(detach.mock.calls.map(call => call.arguments), [[9]])
+    assert.equal(close.mock.callCount(), 2)
+  })
+}
 
 test('take, type one batch, release: the keys reach the core and appear in no record', async (t) => {
   const f = fixture(t)

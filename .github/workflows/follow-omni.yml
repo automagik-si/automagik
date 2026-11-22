@@ -5,10 +5,12 @@ name: Follow Omni
 # Release workflow (release.yml) completing on dev also checks after every Automagik merge.
 # Any release conclusion qualifies: this reads Omni's releases itself, independently of whether
 # Automagik's release succeeded. The every-30-minute schedule is the last fallback; a dispatch
-# by hand also checks. This looks for the newest Omni release (`v<version>`, prereleases
-# included) above the one omni.json pins (and the welcome's package.json, which installs the
-# same release in a plain DSH). Each of Omni's
-# plugins carries the Omni release of its own last change (omni#1356), so a plugin may be
+# by hand also checks. This follows the newest Omni release (`v<version>`, prereleases
+# included) above the one omni.json pins. npm does not hold it back: when npm lacks that
+# release's Omni server, the welcome builds it from GitHub at the pinned tag, commit and tree
+# (#1915). The desktop and the welcome pin the same release. Each of Omni's plugins carries the
+# Omni release of its own last change
+# (omni#1356), so a plugin may be
 # behind the release but never ahead of it. When the channels and canvas plugins are at or
 # below its version and admit the desktop runtime in the same DSH patch series as their
 # harness, it boots that Omni with dev's plugins (boot-check.yml, the check CI runs), and only
@@ -99,6 +101,7 @@ jobs:
     outputs:
       version: ${{ steps.newest.outputs.version }}
       commit: ${{ steps.newest.outputs.commit }}
+      tree: ${{ steps.newest.outputs.tree }}
       dev: ${{ steps.newest.outputs.dev }}
       held: ${{ steps.hold.outputs.held }}
     env:
@@ -154,7 +157,7 @@ jobs:
             newest="${WANT_VERSION}"
           else
             lookup() {
-              gh api "repos/${OMNI}/releases?per_page=30" \
+              gh api --paginate "repos/${OMNI}/releases?per_page=100" \
                 --jq '.[] | select(.draft | not) | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | .tag_name | ltrimstr("v")' \
                 > releases.txt
               newest=$(sort -V releases.txt | tail -1)
@@ -184,10 +187,14 @@ jobs:
                 echo "::warning ::Omni dispatched ${wanted}, but its releases still list ${newest:-none} after 2 minutes"
               fi
             fi
-            if [[ -z "${newest}" || "${newest}" == "${current}" || "$(printf '%s\n%s\n' "${current}" "${newest}" | sort -V | tail -1)" != "${newest}" ]]; then
+            # follow: start
+            # The newest listed release above omni.json's. npm no longer holds it back: the welcome
+            # builds that release's Omni server from GitHub when npm does not have it (#1915).
+            if [[ -z "${newest}" ]] || ! above "${newest}" "${current}"; then
               echo "Omni ${newest:-none}: omni.json is at ${current}, nothing to follow"
               exit 0
             fi
+            # follow: end
           fi
           read_json() { gh api "repos/${OMNI}/contents/$1?ref=v${newest}" --jq .content 2>/dev/null | base64 -d 2>/dev/null || true; }
           for app in omni-channels-dsh omni-canvas-dsh; do
@@ -207,9 +214,13 @@ jobs:
             fi
           done
           commit="${WANT_COMMIT:-$(gh api "repos/${OMNI}/commits/v${newest}" --jq .sha)}"
+          [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error ::Omni's candidate commit is not a full sha"; exit 1; }
+          tree=$(gh api "repos/${OMNI}/git/commits/${commit}" --jq .tree.sha)
+          [[ "${tree}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error ::Omni's candidate tree is not a full sha"; exit 1; }
           {
             echo "version=${newest}"
             echo "commit=${commit}"
+            echo "tree=${tree}"
             echo "dev=${WANT_DEV:-$(git rev-parse HEAD)}"
           } >> "$GITHUB_OUTPUT"
           echo "### Candidate: Omni ${newest} (${commit:0:9}), omni.json is at ${current}$([[ "${DRY_RUN}" == true ]] && echo ', dry run: boot check only')" >> "$GITHUB_STEP_SUMMARY"
@@ -290,22 +301,23 @@ jobs:
         env:
           VERSION: ${{ needs.follow.outputs.version }}
           COMMIT: ${{ needs.follow.outputs.commit }}
+          TREE: ${{ needs.follow.outputs.tree }}
           BOOTED: ${{ needs.follow.outputs.dev }}
           DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
         run: |
           set -euo pipefail
           node -e '
             const fs = require("node:fs")
-            const [version, commit] = process.argv.slice(1)
+            const [version, commit, tree] = process.argv.slice(1)
             const file = "apps/desktop/omni.json"
             const json = JSON.parse(fs.readFileSync(file, "utf8"))
             fs.writeFileSync(file, JSON.stringify({ ...json, version, commit }, null, 2) + "\n")
             // The welcome installs the same release of the Omni plugins in a plain DSH.
             const welcome = "apps/welcome-dsh/package.json"
             const pkg = JSON.parse(fs.readFileSync(welcome, "utf8"))
-            pkg.automagik.omni = { ...pkg.automagik.omni, version, commit }
+            pkg.automagik.omni = { ...pkg.automagik.omni, version, commit, tree }
             fs.writeFileSync(welcome, JSON.stringify(pkg, null, 2) + "\n")
-          ' "${VERSION}" "${COMMIT}"
+          ' "${VERSION}" "${COMMIT}" "${TREE}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           empty=()

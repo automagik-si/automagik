@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -12,18 +12,22 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { apply, SERVICE } from '../index.js'
 import { accountEvidenceOf } from '../src/host/account.js'
-import { GENERATION_ENV, POINTER_ENV } from '../src/host/cli-generations.js'
+import { CliGenerations, GENERATION_ENV, POINTER_ENV } from '../src/host/cli-generations.js'
 import { CliHomes, HOME_ENV, trackRun } from '../src/host/cli-homes.js'
 import { CONSENT_FILE, ConsentStore } from '../src/host/consent.js'
 import { recordLogin } from '../src/host/login-ownership.js'
+import { CliLogins } from '../src/host/login.js'
 import { reservationDigests } from '../src/host/reservation-evidence.js'
 import { MODEL_ACCESS_REQUIRED } from '../src/host/names.js'
+import { plantWindowsRecord, proved } from './support/windows-record.js'
+import { loginReadIo, resolveLogin } from '../../../herdr/mods/am-sidebar/loginRecord.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const who = email => ({ kind: 'account', id: email, facets: { kind: 'account', email }, email })
 
-function fixture(t, { cold, root: sharedRoot, installation, deps } = {}) {
+function fixture(t, { cold, root: sharedRoot, installation, deps, onEffect } = {}) {
   const root = sharedRoot ?? mkdtempSync(join(tmpdir(), 'isolated-accounts-'))
+  chmodSync(root, 0o700)
   const terminalHomes = { claude: join(root, 'terminal', '.claude'),
     codex: join(root, 'terminal', '.codex') }
   const auth = {
@@ -61,7 +65,7 @@ function fixture(t, { cold, root: sharedRoot, installation, deps } = {}) {
     llm: { registerAdapter(ids, value) { adapter = value; return () => {} },
       listProviders: () => [], listModels: () => new Promise(() => {}) },
     on() {}, get() {}, provide(name, value) { if (name === SERVICE) service = value },
-    effect(setup) { cleanups.push(setup()) }, emit(name) { events.push(name) },
+    effect(setup) { onEffect?.(root); cleanups.push(setup()) }, emit(name) { events.push(name) },
   }
   const signedIn = async (spec, cli, { env }) => {
     calls.push({ kind: 'status', vendor: spec.key, env })
@@ -110,11 +114,14 @@ function fixture(t, { cold, root: sharedRoot, installation, deps } = {}) {
     }
     return child
   }
+  let windowsRecord
   if (cold) {
     const privateRoot = join(root, 'cli-homes')
     const home = join(privateRoot, 'codex')
     mkdirSync(home, { recursive: true })
-    if (cold === 'pending' || cold === 'damaged') {
+    if (cold === 'windows') {
+      windowsRecord = plantWindowsRecord(privateRoot, home, { changing: true })
+    } else if (cold === 'pending' || cold === 'damaged') {
       mkdirSync(join(home, 'login-trees'))
       writeFileSync(join(home, 'login-trees', 'interrupted'), cold === 'damaged' ? '{'
         : JSON.stringify({ kind: 'starting', app: 2, owner: 'previous-app' }))
@@ -153,9 +160,10 @@ function fixture(t, { cold, root: sharedRoot, installation, deps } = {}) {
     ...deps,
   })
   let stopped
+  const dispose = () => { for (const cleanup of cleanups.splice(0)) cleanup() }
   const stopService = async () => {
     for (const child of loginChildren) { child.stuck = false; child.kill() }
-    for (const cleanup of cleanups) cleanup()
+    dispose()
     await tick()
     if (!sharedRoot) rmSync(root, { recursive: true, force: true })
   }
@@ -170,6 +178,7 @@ function fixture(t, { cold, root: sharedRoot, installation, deps } = {}) {
   }
   const login = async id => waitForLogin(id, await service.loginStart(id))
   return { service, adapter, auth, calls, events, root, terminal, login, logs, stop, waitForLogin,
+    dispose, windowsRecord,
     next: email => { nextAccount = email }, fail: value => { failLogout = value },
     stallLogin: value => { stuckLogin = value },
     imageCheck: check => { imageCheck = check } }
@@ -218,11 +227,11 @@ for (const cold of ['pending', 'damaged', 'legacy', 'missing-pointer']) {
   test(`cold ACP keeps owner recovery available for ${cold} while the other vendor works`,
     async t => {
       const h = fixture(t, { cold })
-      assert.equal(h.service.accountRecovery('acp-codex').required, true)
-      assert.equal(h.service.accountRecovery('acp-claude').required, false)
+      assert.equal((await h.service.accountRecovery('acp-codex')).required, true)
+      assert.equal((await h.service.accountRecovery('acp-claude')).required, false)
       assert.equal((await h.service.inspect('acp-claude')).signedIn, false)
       await h.service.accountReset('acp-codex')
-      assert.equal(h.service.accountRecovery('acp-codex').required, false)
+      assert.equal((await h.service.accountRecovery('acp-codex')).required, false)
       await h.login('acp-codex')
       assert.equal((await h.service.account('acp-codex', { fresh: true })).account.email,
         'personal@example.test')
@@ -246,6 +255,121 @@ test('sign-out blocks new work and waits for running work before invoking logout
   await changing
   assert.equal(h.calls.filter(call => call.kind === 'logout').length, before + 1)
 })
+
+function pendingWindowsRecovery(t) {
+  const started = Promise.withResolvers()
+  const response = Promise.withResolvers()
+  const h = fixture(t, { cold: 'windows', deps: { loginProbe(request) {
+    started.resolve(request)
+    return response.promise
+  } } })
+  return { ...h, started: started.promise, response, cliRoot: join(h.root, 'cli-homes') }
+}
+
+test('a cold account read waits for Windows sign-in recovery, then signs in on the same home with zero Resets', async t => {
+  const h = pendingWindowsRecovery(t)
+  const id = 'acp-codex'
+  const home = join(h.cliRoot, 'codex')
+  const reset = t.mock.method(h.service, 'accountReset')
+  let settled = false
+  const reading = h.service.accountRecovery(id).then(result => { settled = true; return result })
+  const request = await h.started
+  assert.equal((await h.service.accountRecovery('acp-claude')).required, false)
+  assert.equal((await h.service.inspect('acp-claude')).signedIn, false)
+  assert.equal(settled, false)
+  h.response.resolve(proved(request))
+  assert.deepEqual(await reading, { required: false })
+  await h.login(id)
+  assert.equal(h.calls.find(call => call.kind === 'login').env.HOME, home)
+  assert.equal(reset.mock.callCount(), 0)
+})
+
+for (const action of ['loginStart', 'accountSignOut']) {
+  for (const byPeer of [false, true]) {
+    test(`a ${byPeer ? 'peer' : 'local'} Reset during recovery stops ${action} before it touches the new home`, async t => {
+      const h = pendingWindowsRecovery(t)
+      const id = 'acp-codex'
+      const pending = assert.rejects(h.service[action](id), { code: 'acp-account/changed' })
+      const request = await h.started
+      const peer = new CliHomes(h.cliRoot)
+      if (byPeer) {
+        // Exercise a pointer change outside this service's auth version. The live peer check
+        // normally prevents a second current app from resetting a registered vendor.
+        t.mock.method(peer.generations, 'otherApps', () => {})
+        peer.reset('codex')
+        peer.dispose()
+      } else await h.service.accountReset(id)
+      const home = peer.home('codex')
+      assert.notEqual(home, join(h.cliRoot, 'codex'))
+      h.response.resolve(proved(request))
+      await pending
+      assert.equal(h.calls.some(call => ['login', 'logout'].includes(call.kind)), false)
+      assert.equal(existsSync(join(home, 'login-trees')), false)
+    })
+  }
+}
+
+for (const rejects of [false, true]) {
+  test(`plugin teardown discards a pending recovery when the drain ${rejects ? 'rejects' : 'is pending'}`, async t => {
+    const drain = Promise.withResolvers()
+    t.mock.method(CliLogins.prototype, 'stop', id => id === 'acp-codex' ? drain.promise : Promise.resolve())
+    const h = pendingWindowsRecovery(t)
+    const request = await h.started
+    const home = join(h.cliRoot, 'codex')
+    const file = h.windowsRecord.file
+    const before = readFileSync(file)
+    const ensureRecord = t.mock.method(CliGenerations.prototype, 'ensureRecord')
+    const recoverChanging = t.mock.method(CliHomes.prototype, 'recoverChanging')
+    const recovery = h.service.accountRecovery('acp-codex')
+    h.dispose()
+    if (rejects) { drain.reject(new Error('drain failed')); await tick() }
+    h.response.resolve(proved(request))
+    assert.deepEqual(await recovery, { required: true })
+    assert.deepEqual(readFileSync(file), before)
+    assert.equal(existsSync(join(home, 'changing')), true)
+    assert.equal(ensureRecord.mock.callCount(), 0)
+    assert.equal(recoverChanging.mock.callCount(), 0)
+    if (!rejects) { drain.resolve(); await tick() }
+  })
+}
+
+test('reset and login restore reader access for a vendor that failed startup',
+  { skip: process.platform !== 'linux' }, async t => {
+    const data = mkdtempSync(join(tmpdir(), 'isolated-selection-recovery-'))
+    t.after(() => rmSync(data, { recursive: true, force: true }))
+    const root = join(data, 'acp')
+    mkdirSync(root, { mode: 0o700 })
+    const h = fixture(t, { root, cold: 'damaged' })
+    const id = 'acp-codex'
+    await h.service.accountReset(id)
+    const { env } = h.adapter.agents.get(id).spawn()
+    const resolve = () => resolveLogin({ vendor: 'codex', env, io: loginReadIo })
+    assert.equal(resolve().code, 'login-paused')
+    await h.login(id)
+    assert.equal(resolve().state, 'ready')
+  })
+
+test('the service registers disposal before publishing and withdraws from a live host',
+  { skip: !['linux', 'darwin'].includes(process.platform) }, async t => {
+    let effects = 0
+    const h = fixture(t, { onEffect(root) {
+      effects++
+      assert.equal(existsSync(join(root, 'selected')), false)
+    } })
+    assert.ok(effects > 0)
+    const selected = join(h.root, 'selected')
+    const [digest] = readdirSync(selected)
+    const [entry] = readdirSync(join(selected, digest))
+    const path = join(selected, digest, entry)
+    const panel = JSON.parse(readFileSync(path, 'utf8'))
+    const registration = join(panel.root, 'instances', 'claude', panel.instance)
+    assert.equal(panel.pid, process.pid)
+    assert.equal(existsSync(registration), true)
+    const stopping = h.stop()
+    assert.equal(existsSync(path), false)
+    assert.equal(existsSync(registration), false)
+    await stopping
+  })
 
 test('logout errors pause work, hide CLI output, and allow explicit retry', async t => {
   const h = fixture(t)
@@ -302,12 +426,12 @@ test('owner reset clears a blocked account with fresh home and account consent',
   const env = crashed.environment('codex')
   recordLogin(env)
   crashed.dispose()
-  assert.equal(h.service.accountRecovery('acp-codex').required, true)
+  assert.equal((await h.service.accountRecovery('acp-codex')).required, true)
   const before = h.calls.filter(call => call.kind === 'logout').length
   await h.service.accountReset('acp-codex')
   assert.equal(h.calls.filter(call => call.kind === 'logout').length, before,
     'reset never logs out or changes the old credential store')
-  assert.equal(h.service.accountRecovery('acp-codex').required, false)
+  assert.equal((await h.service.accountRecovery('acp-codex')).required, false)
   assert.equal((await h.service.inspect('acp-codex')).signedIn, false)
   assert.equal((await h.service.imageAccess()).ready, false)
   const fresh = h.adapter.agents.get('acp-codex').spawn().env

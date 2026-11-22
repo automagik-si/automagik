@@ -8,13 +8,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, stableRootOf, workerArgs } from "../mods/am-sidebar/workers.js";
 import { startArgs } from "../mods/am-sidebar/launchArgs.js";
 import { hcVerbOf, launchHomeOf } from "../mods/am-sidebar/hcGuard.mjs";
+import { STABLE_FILES, STABLE_FOLDERS, stableFilesCurrent, stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
+import { observe } from "../mods/am-sidebar/agyScan.js";
+import { SYNTHETIC, trustScreen, fileScreen } from "./agy-prompt-fixture.mjs";
+import { GUARD_APP, quietScreen, agyHookSource } from "./agy-guard-shapes.mjs";
 
 const ID = {
   main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc",
@@ -1300,7 +1305,7 @@ test("a guard copy that calls its caller stops at once instead of looping", (t) 
   const s = scene(t);
   const mod = join(s.root, "other-guard"), copyGuard = join(mod, "guard");
   mkdirSync(copyGuard, { recursive: true });
-  for (const file of ["hcGuard.mjs", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
+  for (const file of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "loginWords.js", "retired.js", "hermesPair.js"]) {
     copyFileSync(join(GUARD_DIR, "..", file), join(mod, file));
   }
   appendFileSync(join(mod, "hcGuard.mjs"), "\n// not this guard\n");
@@ -1321,7 +1326,7 @@ test("an older guard copy after this one cannot turn a refusal into an allow", (
   const mod = join(s.root, "older-guard"), olderGuard = join(mod, "guard");
   const log = join(mod, "older.log");
   mkdirSync(olderGuard, { recursive: true });
-  for (const file of ["hcGuard.mjs", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
+  for (const file of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "loginWords.js", "retired.js", "hermesPair.js"]) {
     copyFileSync(join(GUARD_DIR, "..", file), join(mod, file));
   }
   // An older copy: it predates the re-entry marker, so it ignores the marker on its env.
@@ -1747,13 +1752,14 @@ test("#1421 shim plain texts pass unchanged after the target check", (t) => {
         const r = shimRun(s, args);
         assert.ifError(r.error);
         assert.equal(r.status, 0, r.stderr);
-        assert.equal(r.stdout, `stub-out ${JSON.stringify(args)}\n`);
+        const forwarded = args.map((word, i) => i === args.indexOf("send") + 1 && word === "cap" ? "t101" : word);
+        assert.equal(r.stdout, `stub-out ${JSON.stringify(forwarded)}\n`);
         assert.equal(r.stderr, `stub-err ${args[0]}\n`);
-        // #1414: every send checks the target first; the text and its address then go on unchanged.
+        // The checked target is canonical. The message text and flag order are preserved.
         const expected = target === "t999"
-          ? [["ls", "--json"], ["get", "t999", "--json"], args]
-          : [["ls", "--json"], ["get", "t101", "--json"], ["read", "t101", "--lines", "40", "--json"], args];
-        assert.deepEqual(calls(s), expected, "the target check, then the send unchanged");
+          ? [["ls", "--json"], ["get", "t999", "--json"], forwarded]
+          : [["ls", "--json"], ["get", "t101", "--json"], ["read", "t101", "--lines", "40", "--json"], forwarded];
+        assert.deepEqual(calls(s), expected);
       }
     }
   }
@@ -1851,6 +1857,15 @@ test("#1414 a visible dialog whose status says idle is refused, not answered", (
   assertHeld(r, "t101");
   assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
   assert.ok(calls(s).some((argv) => same(argv, ["read", "t101", "--lines", "40", "--json"])), "the screen was looked at");
+});
+
+test("#1557 a footerless rate-limit dialog holds a message to an idle seat", (t) => {
+  const s = scene(t);
+  const screen = "You've hit your usage limit.\nYour limit resets in 2 hours.\n❯ 1. Wait for reset\n  2. Dismiss";
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, screen });
+  writeFileSync(s.logPath, "");
+  assertHeld(guardRun(s, ["send", "t101", "the report"]), "t101");
+  assert.equal(calls(s).some(args => hcVerbOf(args) === "send"), false);
 });
 
 test("#1414 a linked-machine pane with no status is checked by its screen", (t) => {
@@ -2246,4 +2261,390 @@ test("#540 the guard uses the label key the sidebar and tidy read", async () => 
   const { OWNER_QUESTION_LABEL } = await import("../mods/am-sidebar/hcGuard.mjs");
   const { NEEDS_OWNER_LABEL } = await import("../mods/am-sidebar/tidy.js");
   assert.equal(OWNER_QUESTION_LABEL, NEEDS_OWNER_LABEL);
+});
+
+// ---- an Antigravity pane at its prompt (RFC 0042 delivery 2) ----
+// agy fires no hook while it waits, so the guard reads a candidate's screen on each send.
+// These shapes are synthetic and are armed only in the wrapper's child process by a load hook.
+// The stable copy keeps the installed bytes, so the test still exercises its real imports.
+const MOD = join(GUARD_DIR, "..");
+const AGY_FG = { argv: ["agy", "--mode", "auto"] };
+const KEEP = ["sh", "-c", '"$@"; exec "${SHELL:-sh}" -i', "sh"];
+const heldLine = (address) => `${JSON.stringify({ error: { kind: "blocked",
+  message: `${address} is held by a dialog: a person must answer a question, permission or sign-in in it, so nothing was sent.`,
+  hint: "Answer the dialog in that pane, or route this message to another pane; it was not typed and was not dropped." } })}\n`;
+const readsOf = (s) => calls(s).filter((argv) => argv[0] === "read");
+const sendsOf = (s) => calls(s).filter((argv) => hcVerbOf(argv) === "send");
+const readOf = (address) => ["read", address, "--lines", "40", "--json"];
+
+function agyStable(s, { drop = null, name = "stable" } = {}) {
+  const dir = join(s.root, name);
+  const copy = (file) => {
+    const from = join(MOD, file), to = join(dir, file);
+    copyFileSync(from, to);
+    chmodSync(to, statSync(from).mode & 0o777);
+  };
+  for (const file of STABLE_FILES) {
+    const to = join(dir, file);
+    mkdirSync(dirname(to), { recursive: true });
+    if (file === "bin/run.sh") writeFileSync(to, stableRunnerText(process.execPath), { mode: 0o755 });
+    else copy(file);
+  }
+  for (const folder of STABLE_FOLDERS) {
+    mkdirSync(join(dir, folder), { recursive: true });
+    for (const file of readdirSync(join(MOD, folder))) copy(join(folder, file));
+  }
+  const hook = join(s.root, `${name}-hook.mjs`);
+  if (drop) unlinkSync(join(dir, drop));
+  else {
+    assert.equal(stableFilesCurrent(MOD, dir), true);
+    const target = pathToFileURL(realpathSync(join(dir, "agyPrompt.js"))).href;
+    writeFileSync(hook, agyHookSource(target));
+  }
+  return { dir, guard: join(dir, "guard", "hc"), shim: join(dir, "hc-kill", "hc"), hook };
+}
+
+function agyRun(s, st, entry, args, { armed = true, ...extra } = {}) {
+  const hookArgs = armed ? ["--import", pathToFileURL(st.hook).href] : [];
+  return spawnSync(process.execPath, [...hookArgs, entry, ...args], {
+    env: envFor(s, { PATH: `${dirname(entry)}:${s.bin}:${dirname(process.execPath)}`, ...extra }),
+    encoding: "utf8",
+  });
+}
+
+const agyWrappers = [
+  { entry: "guard", at: "t101", packRun: guardRun, env: {} },
+  { entry: "shim", at: "t105", packRun: shimRun, env: { HC_TERMINAL_ID: "t103" } },
+];
+const agySend = (s, st, wrapper, args = ["send", wrapper.at, "x"], { armed = true, pack = false } = {}) => {
+  writeFileSync(s.logPath, "");
+  return pack ? wrapper.packRun(s, args, wrapper.env)
+    : agyRun(s, st, st[wrapper.entry], args, { armed, ...wrapper.env });
+};
+
+function assertAgyHeld(s, result, address, reads = [readOf(address)]) {
+  assert.ifError(result.error);
+  assertHeld(result, address);
+  assert.equal(result.stderr, heldLine(address));
+  assert.deepEqual(sendsOf(s), []);
+  assert.deepEqual(readsOf(s), reads);
+}
+
+function assertAgyForwarded(s, result, args, reads) {
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `stub-out ${JSON.stringify(args)}\n`);
+  assert.equal(result.stderr, "stub-err send\n");
+  assert.deepEqual(sendsOf(s), [args]);
+  assert.deepEqual(readsOf(s), reads);
+  const log = calls(s);
+  const sendIndex = log.findIndex((argv) => same(argv, args));
+  for (const read of reads) {
+    assert.ok(log.findIndex((argv) => same(argv, read)) < sendIndex, "the guard reads before forwarding");
+  }
+}
+
+test("RFC 0042 with the shipped empty table both wrappers read a working Antigravity pane once and forward it", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "working" }, screen: trustScreen, foreground: AGY_FG });
+    const args = ["send", at, "x"];
+    for (const pack of [true, false]) {
+      const result = agySend(s, st, wrapper, args, { armed: false, pack });
+      assertAgyForwarded(s, result, args, [readOf(at)]);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 both wrappers refuse a working Antigravity pane at either prompt with #1414's line", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    for (const screen of [trustScreen, fileScreen("x/y")]) {
+      editPane(s, wrapper.at, { status: { state: "working" }, screen, foreground: AGY_FG });
+      assertAgyHeld(s, agySend(s, st, wrapper), wrapper.at);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the refusal names the pane, never the prompt's folder or words", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const folder = "/srv/agy-distinct-folder-q93z";
+  for (const wrapper of agyWrappers) {
+    for (const screen of [fileScreen(folder), quietScreen(folder)]) {
+      editPane(s, wrapper.at, { status: { state: "idle", app: GUARD_APP }, screen, foreground: AGY_FG });
+      const result = agySend(s, st, wrapper);
+      assertAgyHeld(s, result, wrapper.at);
+      for (const output of [result.stdout, result.stderr]) {
+        assert.doesNotMatch(output, /agy-distinct-folder-q93z|\/srv\/|SYNTHETIC|outside the workspace/);
+      }
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 a linked target and --force are refused the same way", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    const linked = `m/${at}`;
+    for (const address of [at, linked]) {
+      editPane(s, address, { status: { state: "working" }, screen: trustScreen, foreground: AGY_FG });
+    }
+    for (const [args, address] of [
+      [["send", linked, "x"], linked],
+      [["send", "--on", "m", at, "x"], linked],
+      [["send", "--force", at, "x"], at],
+    ]) {
+      assertAgyHeld(s, agySend(s, st, wrapper, args), address);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the kill shim reads and names the address hc get answered, never a typed name", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const shim = agyWrappers[1];
+  const address = "m/t105", name = "agy-solo";
+  const args = ["send", name, "x"];
+  // hc ls still calls it worker-m. Only hc get knows agy-solo.
+  editPane(s, address, { name, status: { state: "working" }, screen: trustScreen, foreground: AGY_FG });
+  const result = agySend(s, st, shim, args);
+  assertAgyHeld(s, result, address);
+  assert.doesNotMatch(result.stderr, /agy-solo/);
+
+  editPane(s, address, { status: { state: "idle" }, screen: DIALOG_SCREEN });
+  const generic = agySend(s, st, shim, args);
+  assertAgyHeld(s, generic, address, [readOf(address)]);
+  assert.doesNotMatch(generic.stderr, /agy-solo/);
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 idle, done and no status are refused on a shape pendingDialog does not know", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    for (const status of [{ state: "idle", app: GUARD_APP }, { state: "done" }, undefined]) {
+      editPane(s, at, { status, screen: quietScreen(), foreground: AGY_FG });
+      assertAgyHeld(s, agySend(s, st, wrapper), at);
+      const args = ["send", at, "x"];
+      assertAgyForwarded(s, agySend(s, st, wrapper, args, { pack: true }), args, [readOf(at)]);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 an Antigravity miss still falls to #1414 only where it applied", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "working" }, screen: DIALOG_SCREEN, foreground: AGY_FG });
+    const args = ["send", at, "x"];
+    assertAgyForwarded(s, agySend(s, st, wrapper, args), args, [readOf(at)]);
+    editPane(s, at, { status: { state: "idle", app: GUARD_APP } });
+    assertAgyHeld(s, agySend(s, st, wrapper), at);
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 a second send against the same block is refused again, each after its own read", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "working" }, screen: trustScreen, foreground: AGY_FG });
+    for (const text of ["first", "second"]) {
+      assertAgyHeld(s, agySend(s, st, wrapper, ["send", at, text]), at);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 output changing above a quoted block: every send is refused, the sidebar holds nothing", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const a = "SYNTHETIC output 1\n" + trustScreen, b = "SYNTHETIC output 2\n" + trustScreen;
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "working" }, screen: a, foreground: AGY_FG });
+    assertAgyHeld(s, agySend(s, st, wrapper), at);
+    editPane(s, at, { screen: b });
+    assertAgyHeld(s, agySend(s, st, wrapper), at);
+  }
+  const first = observe(null, { ok: true, text: a }, 100, SYNTHETIC);
+  assert.equal(observe(first, { ok: true, text: b }, 100, SYNTHETIC).held, null);
+  assert.notEqual(observe(first, { ok: true, text: a }, 100, SYNTHETIC).held, null);
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 a mid-turn Antigravity pane is forwarded word for word", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    const screen = "SYNTHETIC building step 3 of 9\nSYNTHETIC thinking";
+    editPane(s, at, { status: { state: "working" }, screen, foreground: AGY_FG });
+    const args = ["send", at, "a message unchanged", "a second line"];
+    assertAgyForwarded(s, agySend(s, st, wrapper, args), args, [readOf(at)]);
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 a working Claude or Codex pane is still not read", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    const args = ["send", at, "x"];
+    for (const [argv0, app] of [["claude", "claude-code"], ["codex", "codex"]]) {
+      editPane(s, at, { status: { state: "working", app }, screen: trustScreen, foreground: { argv: [argv0] } });
+      assertAgyForwarded(s, agySend(s, st, wrapper, args), args, []);
+    }
+    editPane(s, at, {
+      status: { state: "idle", app: "claude-code" }, screen: quietScreen(), foreground: { argv: ["claude"] },
+    });
+    assertAgyForwarded(s, agySend(s, st, wrapper, args), args, [readOf(at)]);
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the hc get record decides who is Antigravity", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const working = { state: "working" };
+  const reported = { state: "working", app: GUARD_APP };
+  const evidence = [
+    { pane: { foreground: { argv: [...KEEP, "agy"] } }, held: true, both: true },
+    { pane: { status: reported, foreground: { argv: ["zsh", "-i"] } }, held: false, both: true },
+    { pane: { status: reported }, held: true },
+    { pane: { status: { state: "working", app: "gemini" } }, held: false },
+    { pane: { foreground: AGY_FG, created_ms: null }, held: false },
+    { pane: { argv: ["agy"] }, held: false },
+  ];
+  for (const { pane, held, both } of evidence) {
+    for (const wrapper of both ? agyWrappers : agyWrappers.slice(0, 1)) {
+      const { at } = wrapper;
+      editPane(s, at, {
+        status: working, screen: trustScreen, created_ms: 100, foreground: undefined, ...pane,
+      });
+      const args = ["send", at, "x"];
+      const result = agySend(s, st, wrapper, args);
+      if (held) assertAgyHeld(s, result, at);
+      else assertAgyForwarded(s, result, args, []);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 an unreadable screen, a finished pane, blocked and error keep #1414's answers", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const states = [
+    { pane: { readFail: true }, read: true, held: false },
+    { pane: { state: "finished" }, read: false, held: false },
+    { pane: { status: { state: "blocked" } }, read: false, held: true },
+    { pane: { status: { state: "error" }, screen: quietScreen() }, read: true, held: false },
+  ];
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    const args = ["send", at, "x"];
+    for (const { pane, read, held } of states) {
+      editPane(s, at, {
+        state: "live", status: { state: "working" }, screen: trustScreen, foreground: AGY_FG,
+        readFail: false, ...pane,
+      });
+      const result = agySend(s, st, wrapper, args);
+      const reads = read ? [readOf(at)] : [];
+      if (held) assertAgyHeld(s, result, at, reads);
+      else assertAgyForwarded(s, result, args, reads);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the stable folder from STABLE_FILES runs the guard; a missing file fails closed", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const short = agyStable(s, { drop: "agyPrompt.js", name: "stable-short" });
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "idle" }, screen: FREE_SCREEN });
+    const args = ["send", at, "x"];
+    assertAgyForwarded(s, agySend(s, st, wrapper, args, { armed: false }), args, [readOf(at)]);
+
+    const result = agySend(s, short, wrapper, args, { armed: false });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    const failure = wrapper.entry === "guard" ? /the guard's logic did not load/
+      : /its logic did not load, so this hc call was not run/;
+    assert.match(result.stderr, failure);
+    assert.deepEqual(calls(s), []);
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+  assert.equal(stableFilesCurrent(MOD, short.dir), false);
+});
+
+test("#1557 the kill shim sends to the canonical address it inspected, including with --on", (t) => {
+  const s = killScene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get["only-in-get"] = { ...state.get.t105, address: "t105", screen: FREE_SCREEN };
+  state.get["m/only-in-get"] = { ...state.get.t105, address: "m/t105", screen: FREE_SCREEN };
+  state.get["m/off-machine"] = { ...state.get.t105, address: "other/t105", screen: FREE_SCREEN };
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const [input, expected, inspected] of [
+    [["send", "only-in-get", "ping"], ["send", "t105", "ping"], "t105"],
+    [["send", "--on=m", "only-in-get", "ping"], ["send", "--on=m", "t105", "ping"], "m/t105"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const result = shimRun(s, input, { HC_TERMINAL_ID: "t103" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(calls(s).some(args => args[0] === "read" && args[1] === inspected));
+    assert.deepEqual(calls(s).at(-1), expected);
+  }
+  writeFileSync(s.logPath, "");
+  const offMachine = shimRun(s, ["send", "--on=m", "off-machine", "ping"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(offMachine.status, 2, offMachine.stderr);
+  assert.match(offMachine.stderr, /off the --on machine/);
+  assert.equal(calls(s).some(args => args[0] === "send"), false);
+});
+
+test("#1557 the kill shim refuses a plain send when ls and get disagree", (t) => {
+  const s = killScene(t);
+  editPane(s, "t101", { address: "m/t105", screen: DIALOG_SCREEN });
+  const result = shimRun(s, ["send", "cap", "plain text"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /different panes \(t101 and m\/t105\)/);
+  assert.equal(calls(s).some(args => args.includes("send")), false);
+});
+
+test("the guard and proxy docs say what RFC 0044 decided for keys, attach, events and the list (#628)", () => {
+  // Whitespace is normalized: the README and the comment wrap sentences across lines.
+  const flat = (text) => text.replace(/\s+/g, " ");
+  const guard = readFileSync(join(MOD, "hcGuard.mjs"), "utf8");
+  const header = flat(guard.slice(0, guard.indexOf("\nimport ")).replace(/^\/\/ ?/gm, ""));
+  const readme = readFileSync(join(MOD, "..", "..", "README.md"), "utf8");
+  const at = readme.indexOf("## The hc guard (a guardrail, not a boundary)");
+  const end = readme.indexOf("\n\n`send` is scoped", at);
+  assert.ok(at >= 0 && end > at, "the README's guard section is found");
+  const section = flat(readme.slice(at, end));
+  const doc = readFileSync(join(MOD, "hcProxy.md"), "utf8");
+  // Two separate passages of hcProxy.md: the policy table's terminal.list row and the list paragraph.
+  const rowAt = doc.indexOf("| `terminal.list` |");
+  assert.ok(rowAt >= 0, "hcProxy.md's terminal.list policy row is found");
+  const row = flat(doc.slice(rowAt, doc.indexOf("\n", rowAt)));
+  const listAt = doc.indexOf("`terminal.list` is filtered");
+  assert.ok(listAt >= 0, "hcProxy.md's list paragraph is found");
+  const list = flat(doc.slice(listAt, doc.indexOf("\n\n", listAt)));
+  for (const [where, text] of [["hcGuard.mjs's header", header], ["the README's guard section", section]]) {
+    assert.doesNotMatch(text, /Both wait on herdr-core/, `${where} promises no joint upstream unlock for keys and attach`);
+    assert.match(text, /attach[^.]*refused for sandboxed panes for good \(RFC 0044 Q5\)/i, `${where}: attach is refused for good`);
+    assert.match(text, /keys[^.]*RFC 0044 delivery 6[^.]*\(R1-R3\)[^.]*\(R4, advertised as `checked_input`\)/i,
+      `${where}: keys waits on delivery 6, and checked_input is R4's per-write check`);
+  }
+  assert.doesNotMatch(header, /list and events are filtered/, "the proxy refuses the event subscription; it filters none");
+  assert.match(header, /refuses its event subscription/, "hcGuard.mjs's header: the proxy refuses the subscription");
+  const crossTeam = /by the recipient's role or the caller's\)?, which may belong to another team/;
+  for (const [where, text] of [["hcProxy.md's terminal.list row", row], ["hcProxy.md's list paragraph", list]]) {
+    assert.doesNotMatch(text, /(other teams'|another team's) panes (are|and)[^.|]*(left out|never named)/i,
+      `${where} does not claim other teams' panes are always left out`);
+    assert.match(text, crossTeam, `${where} names the authorized cross-team recipients, by either role`);
+  }
+  assert.match(row, /linked-machine row[^|]*left out, and the `machines` inventory is empty/, "the row keeps machines out");
+  assert.match(list, /as the core answered it, nested fields included/, "hcProxy.md: only the envelope is reviewed");
 });

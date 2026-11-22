@@ -1,3 +1,4 @@
+import { withGrantHold } from './grants.js'
 import { MARK_LEVEL, markOf, judgeOf, OWN_MODE_MARKS } from '../shared/permission-levels.js'
 
 const refused = message => Object.assign(new Error(message), { code: 'bot/refused' })
@@ -18,7 +19,10 @@ export function install(rt) {
     const task = state.tasks?.[id]
     return task?.from === bot.id && task.status === 'working' && task.auto === bot.permissionAuto && task.autoRev === (bot.permissionRev ?? 0) && !task.roomId && !task.levelRoomId && !task.levelTaskId && !task.permissionCap
   }
-  const movePermissionRev = bot => { bot.permissionRev = (Number.isInteger(bot.permissionRev) ? bot.permissionRev : 0) + 1 }
+  const movePermissionRev = bot => {
+    bot.permissionRev = (Number.isInteger(bot.permissionRev) ? bot.permissionRev : 0) + 1
+    rt.dropGrantsForBot?.(bot.id)
+  }
   function autoWhy(bot, { sessionId, session, route, provider, view } = {}) {
     if (!rt.holdsLock() || !rt.teamLoaded()) return 'lock'
     if (judgeOf(bot.permissionAuto) === undefined || bot.permission !== MARK_LEVEL) return 'level'
@@ -75,7 +79,12 @@ export function install(rt) {
     rt.dropAutoGrants?.(ids)
     for (const id of ids) { try { acp()?.endSession?.(id) } catch {} }
   }
-  async function clearAuto(bot, admit, advanceEmpty = true) {
+  function clearAuto(bot, admit, advanceEmpty) {
+    return withGrantHold(rt, { botId: bot.id }, () => [bot.permissionAuto, bot.permissionRev],
+      () => clearAutoHeld(bot, admit, advanceEmpty))
+  }
+
+  async function clearAutoHeld(bot, admit, advanceEmpty = true) {
     await inflight.get(bot.id)?.catch(() => {})
     admit?.()
     if (advanceEmpty || bot.permissionAuto) movePermissionRev(bot)
@@ -94,7 +103,14 @@ export function install(rt) {
       endAuto(bot)
     }
   }
-  async function setBotAuto(id, rev) {
+  function setBotAuto(id, rev) {
+    return withGrantHold(rt, { botId: id }, () => {
+      const bot = rt.botOf(id)
+      return [bot?.permissionAuto, bot?.permissionRev]
+    }, () => setBotAutoHeld(id, rev))
+  }
+
+  async function setBotAutoHeld(id, rev) {
     const bot = rt.botOf(id)
     if (!bot) throw refused('Unknown Bot')
     const stale = () => refused(`${bot.name}'s permissions changed meanwhile, so nothing was saved. Look again and choose.`)
@@ -110,6 +126,7 @@ export function install(rt) {
       await writing
       if (rt.botOf(id) !== bot || (bot.permissionRev ?? 0) !== rev) { void rt.save(); throw stale() }
       Object.assign(bot, next)
+      rt.dropGrantsForBot?.(bot.id)
       try {
         if (state.revision > revision) await rt.save({ required: true })
       } catch (error) {
@@ -153,6 +170,7 @@ export function install(rt) {
       await writing
       if (rt.botOf(bot.id) !== bot) return
       Object.assign(bot, { permissionAuto: route, permissionRev: 1 })
+      rt.dropGrantsForBot?.(bot.id)
       if (state.revision > revision) await rt.save({ required: true })
     } catch (error) {
       delete bot.permissionAuto

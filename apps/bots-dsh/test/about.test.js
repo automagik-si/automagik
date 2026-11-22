@@ -3,6 +3,9 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { install as installDshUpdate } from '../src/host/dsh-update.js'
+import { install as installUpdate } from '../src/host/update.js'
+import { triskleThreeColours64 } from '../src/client/art/inline.js'
 
 // Settings → About (#90), as the browser gets it, with stand-ins for the platform. The page's
 // state hooks are answered in the order it asks: the app's update presentation, the app's
@@ -184,13 +187,41 @@ test('in a plain DSH the page is Automagik\'s and the Bot team\'s own update sta
   assert.equal(page.name, 'Automagik')
   assert.equal(page.version, 'Version 3.117.2')
   assert.deepEqual(page.sections, ['Updates', 'Links'])
-  assert.equal(page.rows.Omni, 'Omni 3.118.0 is available')
-  assert.equal(textOf(page.buttons.Omni[0]), 'Update')
+  // The row is the Bot team plugin's own update, under its own name: never Omni's, which may
+  // not be installed at all.
+  assert.equal(page.rows['Bot team'], 'Omni 3.118.0 is available')
+  assert.equal(textOf(page.buttons['Bot team'][0]), 'Update')
+  assert.equal('Omni' in page.rows, false)
   assert.equal(page.rows['DeepSeek Harness'], 'Version 0.2.3')
   // A check switched off there is still said, with its button disabled.
   const off = draw({ update: { ...update, available: false, latest: null, enabled: false, source: 'unknown' } })
-  assert.equal(off.rows.Omni, 'Update checks are off.')
-  assert.equal(off.buttons.Omni[0].props.disabled, true)
+  assert.equal(off.rows['Bot team'], 'Update checks are off.')
+  assert.equal(off.buttons['Bot team'][0].props.disabled, true)
+  assert.equal('Omni' in off.rows, false)
+})
+
+test('the hero carries Automagik\'s triskle and asks for a star for Automagik, never Omni\'s pet', () => {
+  const update = { name: '@automagik/bots-dsh', current: '3.117.2', repoUrl: 'https://github.com/automagik-si/automagik', source: 'registry', enabled: true, phase: 'idle', dsh: { current: null, phase: 'idle' } }
+  asked = 0
+  states = []
+  const tree = AboutPage({ useUpdate: () => update, actions: { repoStars: () => Promise.resolve(null), openSettings: () => {} }, run: () => Promise.resolve(true), Section, Row })
+  let mark = null, star = null, ask = null
+  walk(tree, (node) => {
+    if (node.props.className === 'bt-about-mark') mark = node
+    if (node.props.className === 'bt-star') star = node
+    if (node.props.className === 'bt-about-ask') ask = textOf(node)
+  })
+  // The stand-in createElement does not render components: draw the mark's own element.
+  const [child] = mark.children
+  const img = typeof child.type === 'function' ? child.type(child.props) : child
+  assert.equal(img.type, 'img')
+  assert.match(img.props.className, /omni-mark/)
+  // The drawing made for the size it is shown at: the triskle's 64px file, in its three colours.
+  assert.equal(img.props.width, 52)
+  assert.equal(img.props.src, triskleThreeColours64)
+  assert.equal(star.props.href, 'https://github.com/automagik-si/automagik')
+  assert.equal(star.props.title, 'Star Automagik on GitHub')
+  assert.equal(ask, 'If Automagik helps you, a star on GitHub helps more people find it.')
 })
 
 test('in the desktop environment without the app\'s bridge, updates still come with the app', () => {
@@ -366,4 +397,241 @@ test('#1029: the hold reads the app\'s own `check` and the plugins\' own part, e
   assert.equal(held.buttons.Automagik[0].props.disabled, true)
   held.buttons.Automagik[0].props.onClick()
   assert.deepEqual(bridge.asked, [])
+})
+
+// The shipped Cordis patch disables the legacy plugin and DSH update checks.
+function defaultWebReply() {
+  const keys = ['OMNI_CLIENT_ID', 'DS_BOT_APP']
+  const before = keys.map(key => process.env[key])
+  for (const key of keys) delete process.env[key]
+  try {
+    const rt = { config: { updateCheck: false }, ctx: { effect() {} } }
+    installUpdate(rt)
+    installDshUpdate(rt)
+    return { ...rt.updateView(), dsh: rt.dshUpdateView() }
+  } finally {
+    for (const [index, key] of keys.entries()) {
+      if (before[index] === undefined) delete process.env[key]
+      else process.env[key] = before[index]
+    }
+  }
+}
+
+function findWebUpdate(about, update, actions, bridge) {
+  if (bridge) sandbox.omniDesktop = { updates: bridge }
+  else delete sandbox.omniDesktop
+  states = []
+  asked = 0
+  let checkRow
+  walk(about({ useUpdate: () => update, actions, run: () => Promise.resolve(true), Section, Row }), node => {
+    if (typeof node.type === 'function' && node.props.check === actions.checkSelfUpdate) checkRow = node
+  })
+  return checkRow
+}
+
+test('the desktop loading without its bridge and the identified desktop have no web check row', () => {
+  const actions = { checkSelfUpdate: async () => assert.fail('unexpected web check') }
+  const reply = defaultWebReply()
+  for (const update of [{}, reply, { ...HOST_IN_APP, hostAnswered: true }]) {
+    assert.equal(findWebUpdate(AboutPage, update, actions), undefined)
+  }
+  assert.equal(findWebUpdate(AboutPage, { ...reply, hostAnswered: true }, actions, bridgeOf()), undefined)
+  delete sandbox.omniDesktop
+})
+
+test('the default web check polls by run ID and retries transient failures within the poll cap', async () => {
+  let stateIndex = 0
+  let drawingRow = false
+  let startEffect
+  const rowState = []
+  const timers = new Map()
+  let nextTimer = 0
+  const web = {
+    ...sandbox,
+    module: { exports: {} },
+    require(name) {
+      const platform = sandbox.require(name)
+      if (name !== 'react') return platform
+      return {
+        ...platform,
+        useState(initial) {
+          if (!drawingRow) return platform.useState(initial)
+          const index = stateIndex++
+          if (!(index in rowState)) rowState[index] = initial
+          return [rowState[index], value => { rowState[index] = value }]
+        },
+        useEffect(effect) { if (drawingRow) startEffect = effect },
+      }
+    },
+    setTimeout(callback, ms) {
+      timers.set(++nextTimer, { callback, ms })
+      return nextTimer
+    },
+    clearTimeout(id) { timers.delete(id) },
+  }
+  web.exports = web.module.exports
+  web.globalThis = web
+  runInNewContext(bundle.outputFiles[0].text, web)
+  const calls = []
+  const failure = code => Object.assign(new Error(code), { code })
+  const starts = [
+    { state: 'checking', runId: 'fixture-run' },
+    { state: 'checking', runId: 'later-run' },
+    { state: 'checking' },
+    { state: 'checking', runId: 'timed-run' },
+  ]
+  const results = [
+    { state: 'checking', runId: 'fixture-run' },
+    failure('HTTP_502'),
+    failure('NETWORK'),
+    { state: 'available', runId: 'fixture-run', laneVersion: '3.160.3' },
+    { state: 'interrupted', runId: 'later-run' },
+  ]
+  const actions = {
+    checkSelfUpdate: async () => {
+      calls.push('check')
+      return starts.shift()
+    },
+    selfUpdateResult: async runId => {
+      calls.push(runId)
+      if (runId === 'timed-run') throw failure('HTTP_502')
+      const result = results.shift()
+      if (result instanceof Error) throw result
+      return result
+    },
+  }
+  const reply = defaultWebReply()
+  assert.equal(reply.source, 'unknown')
+  assert.equal(reply.enabled, false)
+  const component = findWebUpdate(web.module.exports.AboutPage, { ...reply, hostAnswered: true }, actions)
+  assert.ok(component)
+  const render = () => {
+    stateIndex = 0
+    drawingRow = true
+    try { return component.type(component.props) } finally { drawingRow = false }
+  }
+  const tick = async () => {
+    assert.equal(timers.size, 1)
+    const [[id, { callback, ms }]] = timers
+    assert.equal(ms, 2000)
+    timers.delete(id)
+    await callback()
+  }
+
+  const row = render()
+  assert.equal(row.props.label, 'Automagik')
+  assert.equal(textOf(row.children[0]), 'Check for updates')
+  await row.children[0].props.onClick()
+  assert.deepEqual(calls, ['check'])
+  const busy = render()
+  assert.equal(busy.children[0].props.disabled, true)
+  assert.equal(textOf(busy.children[0]), 'Checking…')
+  assert.equal(textOf(busy.props.hint), '')
+  const cleanup = startEffect()
+  for (let poll = 0; poll < 3; poll++) {
+    await tick()
+    const pending = render()
+    assert.equal(pending.children[0].props.disabled, true)
+    assert.equal(textOf(pending.props.hint), '')
+  }
+  await tick()
+  cleanup()
+  const finished = render()
+  assert.equal(finished.children[0].props.disabled, false)
+  assert.equal(textOf(finished.props.hint), 'Automagik 3.160.3 is available, signed and checked.')
+  assert.deepEqual(calls, ['check', ...Array(4).fill('fixture-run')])
+  assert.equal(timers.size, 0)
+
+  await finished.children[0].props.onClick()
+  assert.equal(render().children[0].props.disabled, true)
+  const stop = startEffect()
+  await tick()
+  stop()
+  const interrupted = render()
+  assert.equal(interrupted.children[0].props.disabled, false)
+  assert.equal(textOf(interrupted.props.hint), 'The check was interrupted. Check again.')
+  assert.deepEqual(calls, ['check', ...Array(4).fill('fixture-run'), 'check', 'later-run'])
+  assert.equal(timers.size, 0)
+
+  await interrupted.children[0].props.onClick()
+  const busyElsewhere = render()
+  assert.equal(startEffect(), undefined)
+  assert.equal(busyElsewhere.children[0].props.disabled, false)
+  assert.equal(textOf(busyElsewhere.props.hint), 'A check is already running. Try again shortly.')
+  assert.equal(timers.size, 0)
+
+  await busyElsewhere.children[0].props.onClick()
+  const firstTimedPoll = calls.length
+  render()
+  const stopTimed = startEffect()
+  for (let poll = 0; poll < 179; poll++) await tick()
+  assert.equal(render().children[0].props.disabled, true)
+  await tick()
+  assert.equal(timers.size, 0)
+  const timedOut = render()
+  assert.equal(timedOut.children[0].props.disabled, false)
+  assert.match(textOf(timedOut.props.hint), /the update check is taking too long/)
+  assert.deepEqual(calls.slice(firstTimedPoll), Array(180).fill('timed-run'))
+  stopTimed()
+})
+
+test('host identification retries early misses and resumes hourly checks after a reply', async () => {
+  const client = await build({
+    entryPoints: [fileURLToPath(new URL('../src/client/index.js', import.meta.url))],
+    bundle: true, format: 'cjs', platform: 'browser', write: false,
+    external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
+  })
+  const effects = new Map()
+  const timers = new Map()
+  let nextTimer = 0
+  const reply = defaultWebReply()
+  const replies = [null, null, null, null, reply, null, { ...reply, dsh: { phase: 'installing' } }]
+  const module = { exports: {} }
+  runInNewContext(client.outputFiles[0].text, {
+    module, exports: module.exports,
+    require: name => name.startsWith('react')
+      ? new Proxy({ Component: class {} }, { get: (target, key) => key in target ? target[key] : () => null })
+      : {},
+    window: {}, URL,
+    async fetch(url, { body }) {
+      assert.equal(url, 'api/omni-ui')
+      assert.deepEqual(JSON.parse(body), { endpoint: 'update-check', payload: { fresh: false } })
+      const value = replies.shift()
+      if (value === null) return { ok: false, status: 502 }
+      return { ok: true, json: async () => ({ ok: true, value }) }
+    },
+    setTimeout(callback, ms) {
+      timers.set(++nextTimer, { callback, ms })
+      return nextTimer
+    },
+    clearTimeout(id) { timers.delete(id) },
+  })
+  const { apply, omni } = module.exports
+  apply({
+    effect: (fn, label) => effects.set(label, fn),
+    get: () => undefined, inject: () => {},
+    sessions: { list: {} }, layout: {}, slots: { inject: () => {} },
+  })
+  const stop = effects.get('ds-bot: update check')()
+  const { update } = omni.face().hooks
+  const advance = async delay => {
+    assert.equal(timers.size, 1)
+    const [[id, { callback, ms }]] = timers
+    assert.equal(ms, delay)
+    timers.delete(id)
+    await callback()
+  }
+
+  await new Promise(resolve => setImmediate(resolve))
+  for (const delay of [5000, 15_000, 30_000, 60 * 60_000]) {
+    assert.equal(update.getSnapshot().hostAnswered, undefined)
+    await advance(delay)
+  }
+  assert.equal(update.getSnapshot().hostAnswered, true)
+  await advance(60 * 60_000)
+  await advance(60 * 60_000)
+  assert.deepEqual([...timers.values()].map(timer => timer.ms), [2000])
+  assert.equal(replies.length, 0)
+  stop()
+  assert.equal(timers.size, 0)
 })

@@ -28,6 +28,10 @@
 // terminal, and need no subscription. Reads have their own limit and writes share the chat
 // limit. Settings management adds a read and name or model changes for shown project Bots.
 // A revoked grant stays revoked for queued requests, even if its id is opened again.
+//
+// RFC 0040 negotiates `groups: 1` on a writable hello. The `dsh:room:` prefix is
+// reserved for text-only group watches. Each call holds the team generation from
+// that hello, and checks it again in the turn that releases its reply.
 import { lstatSync, unlinkSync } from 'node:fs'
 import { chmod, lstat, mkdir } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
@@ -230,6 +234,10 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
   let attachments = false
   let documents = false
   let generation = 0
+  let groupOffer
+  const groupSource = () => source.groupsOffer === true ? source.groups : undefined
+  const groupLost = offer => offer !== undefined && groupSource()?.current(offer.gen) !== true
+  const groupLive = offer => offer !== undefined && offer === groupOffer && !ending && !groupLost(offer)
   const grants = new Map()
   const closeGrant = (id) => {
     const grant = grants.get(id)
@@ -249,8 +257,25 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
     sub?.handle?.close()
   }
   const clearSubs = () => { for (const channel of subs.keys()) unsubscribe(channel) }
+  const loseGroups = (reason, { close }) => {
+    groupOffer = undefined
+    for (const [channel, sub] of subs) {
+      if (!sub.group) continue
+      write({ channel, event: { type: 'gone', reason } })
+      unsubscribe(channel)
+    }
+    if (close) end()
+  }
+  const retireGroups = () => loseGroups('unavailable', { close: false })
+  const closeIfGroupLost = (offer) => {
+    if (!groupLost(offer)) return false
+    loseGroups('unavailable', { close: true })
+    return true
+  }
   const finish = () => {
     ending = true
+    groupOffer = undefined
+    for (const [channel, sub] of subs) if (sub.group) unsubscribe(channel)
     manageMethods = []
     revoke()
     if (attachments) clearSubs()
@@ -275,7 +300,7 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
     const { terminal, text, id: entryId, rev } = params
     const reading = method === 'memory-read'
     const editing = method === 'memory-edit'
-    if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4
+    if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4 || terminal.startsWith('dsh:room:')
       || (!reading && (typeof text !== 'string' || Buffer.byteLength(text) > MAX_MANAGE_TEXT))
       || (editing && (typeof entryId !== 'string' || !MEMORY_ID.test(entryId) || typeof rev !== 'string' || !MANAGE_REV.test(rev)))) {
       return reply(refusedWrite('invalid'))
@@ -315,7 +340,7 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
       if (!grant?.open) return reply(refusedWrite('revoked'))
       const { terminal, id: taskId, rev, title } = params
       const reading = method === 'schedule-list'
-      if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4
+      if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4 || terminal.startsWith('dsh:room:')
         || ((!reading || taskId !== undefined) && (typeof taskId !== 'string' || (!SCHEDULE_ID.test(taskId) && !SCHEDULE_ALIAS.test(taskId))))
         || (!reading && (typeof rev !== 'string' || !MANAGE_REV.test(rev)))
         || (method === 'schedule-rename' && (typeof title !== 'string' || Buffer.byteLength(title) > MAX_MANAGE_TEXT))) {
@@ -360,7 +385,7 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
       if (!grant?.open) return reply(refusedWrite('revoked'))
       const { terminal, rev, name, model } = params
       const reading = method === 'settings-read'
-      if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4
+      if (typeof terminal !== 'string' || !terminal.startsWith('dsh:') || terminal.length === 4 || terminal.startsWith('dsh:room:')
         || (!reading && (typeof rev !== 'string' || !MANAGE_REV.test(rev)))
         || (method === 'settings-name' && (typeof name !== 'string' || Buffer.byteLength(name) > MAX_MANAGE_TEXT))
         || (method === 'settings-model' && !MODEL_REF_OK(model))) return reply(refusedWrite('invalid'))
@@ -428,6 +453,70 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
     }
   }
 
+  async function subscribeGroup(id, { terminal, channel, after, attachments, documents }) {
+    const offer = groupOffer
+    if (closeIfGroupLost(offer)) return
+    if (!groupLive(offer)) return { id, error: { kind: 'not-found', message: 'not-found' } }
+    if (attachments === 1 || documents === 1) return { id, error: { kind: 'unsupported', message: 'unsupported' } }
+    const sub = { terminal, attachments: false, group: true, offer }
+    subs.set(channel, sub)
+    const current = () => !ending && subs.get(channel) === sub
+    let handle
+    try {
+      handle = await groupSource().watch(terminal, (event) => {
+        if (current() && !closeIfGroupLost(offer) && groupLive(offer)) write({ channel, event })
+      }, { after: typeof after === 'string' ? after : undefined, gen: offer.gen })
+    } catch (error) {
+      if (closeIfGroupLost(offer)) return
+      if (!current() || !groupLive(offer)) return { id, error: { kind: 'closed', message: 'closed' } }
+      unsubscribe(channel)
+      throw error
+    }
+    if (closeIfGroupLost(offer)) { handle.close?.(); return }
+    if (!current() || !groupLive(offer)) {
+      handle.close?.()
+      return { id, error: { kind: 'closed', message: 'closed' } }
+    }
+    sub.handle = handle
+    if (!handle.ok || !handle.stillEligible()) {
+      unsubscribe(channel)
+      const reason = handle.reason ?? 'closed'
+      write({ id, error: { kind: reason, message: reason } })
+      return
+    }
+    write({ id, result: { channel } })
+    handle.started()
+  }
+
+  async function groupWrite(id, method, params, sub, phone, by, ref, key) {
+    try {
+      const offer = sub.offer
+      if (closeIfGroupLost(offer)) return
+      const mine = () => subs.get(params.channel) === sub && groupLive(offer)
+      if (!mine()) return { id, result: refusedWrite('not-watching', ref) }
+      const caller = { phone, mine, ...(by ? { by } : {}) }
+      const args = method === 'send'
+        ? { text: params.text, id: params.id, retry: params.retry === true, ...caller }
+        : method === 'answer' ? { row: params.row, choice: params.choice, ...(params.text === undefined ? {} : { text: params.text }), ...caller } : caller
+      const handle = sub.handle
+      let result
+      try {
+        result = await handle[method](args)
+      } catch (error) {
+        if (mine() && handle.stillEligible()) throw error
+      }
+      if (closeIfGroupLost(offer)) return
+      if (!mine()) result = refusedWrite('not-watching', ref)
+      else if (!handle.stillEligible()) {
+        const reason = handle.reason
+        result = refusedWrite(reason === 'deleted' || reason === undefined ? 'not-watching' : reason, ref)
+      }
+      write({ id, result })
+    } finally {
+      limits.end(key)
+    }
+  }
+
   async function request(message) {
     const id = message?.id ?? null
     const params = message?.params && typeof message.params === 'object' ? message.params : {}
@@ -436,6 +525,8 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
         // Writes only for a bridge that asks, and only when the source takes them: an older
         // bridge, which drops any socket that is not `readOnly: true`, gets today's answer.
         writes = params.write === 1 && source.writable === true
+        if (closeIfGroupLost(groupOffer)) return
+        if (groupOffer !== undefined && (!writes || params.groups !== 1)) retireGroups()
         const offer = !ending && writes && params.attachments === 1 && source.attachments === true ? source.attachmentOffer?.() : undefined
         const { documents: documentOffer, ...imageOffer } = offer ?? {}
         const nextDocuments = Boolean(documentOffer) && params.documents === 1 && !uploads?.filesUnsupported
@@ -455,9 +546,22 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
           if (source.managesSettings === true) manageMethods.push(...SETTINGS_METHODS)
           if (manageMethods.length > 0) manageMethods.unshift('manage-open', 'manage-close')
         }
-        return writes
+        const reply = writes
           ? { id, result: { protocol: PROTOCOL, readOnly: false, write: 1, methods: [...METHODS, ...WRITE_METHODS, ...(offer ? ATTACH_METHODS : [])], dedupe: 'log', ...(manageMethods.length > 0 ? { manage: 1, manageMethods } : {}), ...(offer ? { attachments: documents ? offer : imageOffer } : {}) } }
           : { id, result: { protocol: PROTOCOL, readOnly: true, methods: METHODS } }
+        if (ending || !writes || params.groups !== 1 || groupSource() === undefined) return reply
+        const hello = generation
+        const gen = await groupSource().prepare()
+        if (hello === generation && !ending) {
+          if (closeIfGroupLost(groupOffer)) return
+          const groups = groupSource()
+          if (gen !== undefined && groups?.current(gen) === true && groups.rt.teamCurrent() === true) {
+            if (groupOffer === undefined || groupOffer.gen.epoch !== gen.epoch || groupOffer.gen.term !== gen.term) groupOffer = { gen }
+            reply.result.groups = 1
+          } else if (groupOffer !== undefined) retireGroups()
+        }
+        write(reply)
+        return
       }
       case 'upload-begin':
       case 'upload-chunk':
@@ -495,14 +599,24 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
       case 'settings-model':
         if (!manageMethods.includes(message.method)) return readOnly(id)
         return settingsRequest(id, message.method, params)
-      case 'list':
-        return { id, result: { terminals: await source.list() } }
+      case 'list': {
+        const offer = groupOffer
+        if (offer === undefined) return { id, result: { terminals: await source.list() } }
+        if (closeIfGroupLost(offer)) return
+        const terminals = await source.list()
+        const ids = await groupSource()?.eligibleRoomIds(offer.gen)
+        if (closeIfGroupLost(offer)) return
+        const rows = groupLive(offer) ? groupSource().rowsNow(ids) : []
+        write({ id, result: { terminals: [...terminals, ...rows] } })
+        return
+      }
       case 'subscribe': {
         if (ending) return { id, error: { kind: 'closed', message: 'closed' } }
         const { terminal, channel, after } = params
         if (typeof terminal !== 'string' || !Number.isSafeInteger(channel) || channel <= 0) return { id, error: { kind: 'invalid_params', message: 'terminal, channel' } }
         if (subs.has(channel)) return { id, error: { kind: 'invalid_params', message: 'channel in use' } }
         if (subs.size >= MAX_SUBSCRIPTIONS) return { id, error: { kind: 'too_many', message: `at most ${MAX_SUBSCRIPTIONS} subscriptions` } }
+        if (terminal.startsWith('dsh:room:')) return subscribeGroup(id, params)
         const sub = { terminal, attachments: params.attachments === 1 && attachments }
         const documentGrant = sub.attachments && documents && params.documents === 1
         subs.set(channel, sub)
@@ -532,6 +646,7 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
         const withUploads = method === 'send' && Object.hasOwn(params, 'uploads')
         const ref = method === 'send' && typeof params.id === 'string' ? { id: params.id } : {}
         const sub = subs.get(params.channel)
+        if (withUploads && sub?.group) return { id, result: refusedWrite('unsupported', ref) }
         if (withUploads && (!attachments || (sub && !sub.attachments) || Object.hasOwn(params, 'name'))) {
           return { id, result: refusedWrite('invalid', ref) }
         }
@@ -547,6 +662,7 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
         if (limits.busy(key)) return { id, result: refusedWrite('busy', ref) }
         if (!limits.take(phone, chat, method === 'interrupt')) return { id, result: refusedWrite('rate', ref) }
         limits.begin(key)
+        if (sub.group) return groupWrite(id, method, params, sub, phone, by, ref, key)
         try {
           const args = method === 'send'
             ? { text: params.text, id: params.id, ...(withUploads ? { uploads: params.uploads } : {}), ...(by ? { by } : {}) }
@@ -568,12 +684,22 @@ export function servePocketConnection(socket, source, log, limits, uploads) {
         const handle = sub?.handle
         if (!handle) return { id, error: { kind: 'not_watching', message: 'not_watching' } }
         if (typeof params.before !== 'string') return { id, error: { kind: 'invalid_params', message: 'before' } }
-        const stale = () => negotiated && (ending || subs.get(params.channel) !== sub)
+        if (sub.group && closeIfGroupLost(sub.offer)) return
+        const stale = () => sub.group
+          ? subs.get(params.channel) !== sub || !groupLive(sub.offer) || !handle.stillEligible()
+          : negotiated && (ending || subs.get(params.channel) !== sub)
         let rows
         try { rows = await handle.backfill(params.before, params.limit) } catch (error) {
+          if (sub.group && closeIfGroupLost(sub.offer)) return
           if (!stale()) throw error
         }
-        if (stale()) return { id, error: { kind: 'closed', message: 'closed' } }
+        if (sub.group && closeIfGroupLost(sub.offer)) return
+        if (stale()) {
+          const error = { id, error: { kind: 'closed', message: 'closed' } }
+          if (!sub.group) return error
+          write(error)
+          return
+        }
         write({ id, result: { rows } })
         return
       }

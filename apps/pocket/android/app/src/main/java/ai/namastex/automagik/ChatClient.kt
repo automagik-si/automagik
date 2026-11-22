@@ -8,18 +8,24 @@ import java.util.concurrent.ConcurrentHashMap
 /** The desktop's Pocket Link has no chat route yet (an older bridge): the terminal view is all there is. */
 class ChatUnsupported : IllegalStateException(Chat.UPDATE_LINK)
 
+/** This connection was not granted group chats. */
+class GroupsUnsupported : IllegalStateException(Chat.GROUPS_UNAVAILABLE)
+
 /**
  * The chat connection the view model drives. [ChatClient] is the production one, over Pocket Link's chat route; this
  * interface is the internal seam that lets the JVM unit tests put a fake bridge behind the same code path (#754).
  */
 internal interface ChatLink : Closeable {
     val dshWrite: Boolean
+    val groups: Boolean get() = false
     val isClosed: Boolean get() = false
     val manage: Set<String> get() = emptySet()
     suspend fun list(): List<Chat.Terminal>
     suspend fun subscribe(terminal: String, after: String?, event: (JSONObject) -> Unit, closed: (String) -> Unit): Int
     suspend fun backfill(terminal: String, before: String, limit: Int = 50): JSONArray
     suspend fun send(terminal: String, text: String, id: String): JSONObject
+    suspend fun send(terminal: String, text: String, id: String, retry: Boolean): JSONObject =
+        if (retry) ChatClient.refusedRetry(id) else send(terminal, text, id)
     suspend fun sendHeld(terminal: String, id: String): JSONObject
     suspend fun cancelHeld(terminal: String, id: String): JSONObject
     suspend fun answer(terminal: String, row: String, choice: String, text: String? = null): JSONObject
@@ -46,6 +52,7 @@ internal interface ChatLink : Closeable {
 /** The production [ChatLink]: [ChatClient] over Pocket Link's chat route, straight through. */
 internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
     override val dshWrite get() = client.dshWrite
+    override val groups get() = client.groups
     override val isClosed get() = client.isClosed
     override val manage get() = client.manage
     override suspend fun list() = client.list()
@@ -53,6 +60,7 @@ internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
         client.subscribe(terminal, after, event, closed)
     override suspend fun backfill(terminal: String, before: String, limit: Int) = client.backfill(terminal, before, limit)
     override suspend fun send(terminal: String, text: String, id: String) = client.send(terminal, text, id)
+    override suspend fun send(terminal: String, text: String, id: String, retry: Boolean) = client.send(terminal, text, id, retry)
     override suspend fun sendHeld(terminal: String, id: String) = client.sendHeld(terminal, id)
     override suspend fun cancelHeld(terminal: String, id: String) = client.cancelHeld(terminal, id)
     override suspend fun answer(terminal: String, row: String, choice: String, text: String?) = client.answer(terminal, row, choice, text)
@@ -90,7 +98,7 @@ internal class PocketLinkChat(private val client: ChatClient) : ChatLink {
  */
 class ChatClient(
     private val core: CoreClient, val dshWrite: Boolean = false, val manage: Set<String> = emptySet(),
-    val attach: Attach.Peer = Attach.Peer.NotAsked
+    val attach: Attach.Peer = Attach.Peer.NotAsked, val groups: Boolean = false
 ) : Closeable {
     internal val isClosed get() = core.isClosed
     private val watched = ConcurrentHashMap<Int, String>()
@@ -105,14 +113,17 @@ class ChatClient(
         fun refusedReadOnly(id: String? = null): JSONObject = JSONObject().put("state", "refused").put("ok", false)
             .put("reason", "read-only").put("message", Chat.ANSWER_ON_COMPUTER).apply { if (id != null) put("id", id) }
 
+        internal fun refusedRetry(id: String) = JSONObject().put("ok", false).put("state", "refused")
+            .put("reason", "unsupported").put("id", id)
+
         internal fun refusedMemory() = JSONObject().put("ok", false).put("state", "refused").put("reason", "read-only")
         internal fun refusedSchedules() = refusedMemory()
         internal fun refusedSettings() = refusedMemory()
 
         /** Pocket requires each opted-in family to grant its read method so it can check an unconfirmed write. */
-        suspend fun start(core: CoreClient, manage: List<String> = emptyList(), attachments: Boolean = false): ChatClient {
+        suspend fun start(core: CoreClient, manage: List<String> = emptyList(), attachments: Boolean = false, groups: Boolean = false): ChatClient {
             val requested = (MEMORY + SCHEDULES + SETTINGS).filter { it in manage }
-            val hello = core.start(requested.takeIf { it.isNotEmpty() }?.let { JSONArray(it) }, attachments)
+            val hello = core.start(requested.takeIf { it.isNotEmpty() }?.let { JSONArray(it) }, attachments, groups)
             if (hello.optInt("chat") != 1) { core.close(); throw ChatUnsupported() }
             val answered = hello.optJSONArray("manage")?.let { a -> (0 until a.length()).map { a.opt(it) } }.orEmpty()
             val granted = if (answered.all { it is String }) requested.filter { it in answered }.toSet() else emptySet()
@@ -124,7 +135,7 @@ class ChatClient(
                 }
             }.toSet()
             return ChatClient(core, dshWrite = hello.opt("dshWrite") == true, manage = usable,
-                attach = if (attachments) Attach.peer(hello) else Attach.Peer.NotAsked)
+                attach = if (attachments) Attach.peer(hello) else Attach.Peer.NotAsked, groups = groups && hello.opt("groups") == true)
         }
 
         /** A connect that failed because the bridge does not offer the chat route (an older Pocket Link). */
@@ -137,11 +148,12 @@ class ChatClient(
     private fun params(terminal: String) = JSONObject().put("terminal", terminal)
 
     /** Whether this phone refuses a write on [terminal] itself: a DSH chat on a bridge without `dshWrite`. */
-    fun readOnly(terminal: String) = Chat.readOnly(terminal, dshWrite)
+    fun readOnly(terminal: String) = Chat.readOnly(terminal, dshWrite, groups)
 
     suspend fun list(): List<Chat.Terminal> {
         val terminals = core.call("chat.list").optJSONArray("terminals") ?: JSONArray()
-        return (0 until terminals.length()).mapNotNull { terminals.optJSONObject(it) }.map(Chat.Terminal::parse).filter { it.terminal.isNotEmpty() }
+        return (0 until terminals.length()).mapNotNull { terminals.optJSONObject(it) }.map(Chat.Terminal::parse)
+            .filter { it.terminal.isNotEmpty() && (!it.group || groups) }
     }
 
     /**
@@ -149,6 +161,7 @@ class ChatClient(
      * [event]; [closed] gets the reason the bridge closed it ("slow": resubscribe with the cursor).
      */
     suspend fun subscribe(terminal: String, after: String?, event: (JSONObject) -> Unit, closed: (String) -> Unit): Int {
+        if (Chat.isGroup(terminal) && !groups) throw GroupsUnsupported()
         val p = params(terminal).apply { if (after != null) put("after", after) }
         val channel = core.call("chat.subscribe", p).getInt("channel")
         watched[channel] = terminal
@@ -171,8 +184,11 @@ class ChatClient(
     suspend fun backfill(terminal: String, before: String, limit: Int = 50): JSONArray =
         core.call("chat.backfill", params(terminal).put("before", before).put("limit", limit)).optJSONArray("rows") ?: JSONArray()
 
-    suspend fun send(terminal: String, text: String, id: String): JSONObject =
-        if (readOnly(terminal)) refusedReadOnly(id) else core.call("chat.send", params(terminal).put("text", text).put("id", id))
+    suspend fun send(terminal: String, text: String, id: String, retry: Boolean = false): JSONObject =
+        if (readOnly(terminal)) refusedReadOnly(id)
+        else core.call("chat.send", params(terminal).put("text", text).put("id", id).apply {
+            if (retry) put("retry", true)
+        })
 
     suspend fun sendHeld(terminal: String, id: String): JSONObject =
         if (Chat.isDsh(terminal)) refusedReadOnly(id) else core.call("chat.sendHeld", params(terminal).put("id", id))
@@ -183,13 +199,15 @@ class ChatClient(
     /** [text]: a question's typed answer, with choice [ChatActions.OTHER] only. */
     suspend fun answer(terminal: String, row: String, choice: String, text: String? = null): JSONObject =
         if (readOnly(terminal)) refusedReadOnly()
+        else if (Chat.isGroup(terminal) && (choice !in setOf("allow", "deny") || text != null))
+            JSONObject().put("ok", false).put("state", "refused").put("reason", "invalid")
         else core.call("chat.answer", params(terminal).put("row", row).put("choice", choice).apply { if (text != null) put("text", text) })
 
     suspend fun interrupt(terminal: String): JSONObject =
         if (readOnly(terminal)) refusedReadOnly() else core.call("chat.interrupt", params(terminal))
 
     private suspend fun memory(method: String, terminal: String, fields: JSONObject.() -> Unit): JSONObject =
-        if (method !in manage || !Chat.isDsh(terminal)) refusedMemory() else core.call(method, params(terminal).apply(fields))
+        if (method !in manage || !Chat.isDsh(terminal) || Chat.isGroup(terminal)) refusedMemory() else core.call(method, params(terminal).apply(fields))
 
     suspend fun memoryRead(terminal: String) = memory("memory.read", terminal) { }
     suspend fun memoryEdit(terminal: String, id: String, rev: String, text: String) =
@@ -197,7 +215,7 @@ class ChatClient(
     suspend fun memoryAdd(terminal: String, text: String) = memory("memory.add", terminal) { put("text", text) }
 
     private suspend fun schedule(method: String, terminal: String, fields: JSONObject.() -> Unit): JSONObject =
-        if (method !in manage || !Chat.isDsh(terminal)) refusedSchedules() else core.call(method, params(terminal).apply(fields))
+        if (method !in manage || !Chat.isDsh(terminal) || Chat.isGroup(terminal)) refusedSchedules() else core.call(method, params(terminal).apply(fields))
 
     suspend fun scheduleList(terminal: String, id: String? = null) =
         schedule("schedule.list", terminal) { if (id != null) put("id", id) }

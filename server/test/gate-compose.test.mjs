@@ -20,6 +20,7 @@ function parseCompose(source, flags = []) {
       ...process.env,
       AUTOMAGIK_SERVER_IMAGE: 'automagik-server:contract-test',
       AUTOMAGIK_GATE_ENABLED: '1',
+      AUTOMAGIK_MULTIUSER: '1',
       AUTOMAGIK_GATE_ORIGIN: 'https://workspace.invalid',
       AUTOMAGIK_GATE_ACCESS_TEAM_DOMAIN: '',
       AUTOMAGIK_GATE_ACCESS_AUD: '',
@@ -56,4 +57,33 @@ test('the gated Compose DSH service has no public URL, trusted host or published
       'dsh must not receive a trusted-host argument')
     assert.equal(dsh.ports?.length ?? 0, 0, 'dsh must not publish a port')
   }
+})
+
+// The gate runs as the same uid as DSH. Its only mount of that volume is the published view.
+test('the gate mounts only the read-only view of the DSH volume', () => {
+  const config = parseCompose(readFileSync(FILE, 'utf8'))
+  const mounts = (config.services?.gate?.volumes ?? []).filter((mount) => mount.source === 'dsh-data')
+  assert.equal(mounts.length, 1, JSON.stringify(config.services?.gate?.volumes))
+  const [mount] = mounts
+  assert.equal(mount.type, 'volume')
+  assert.equal(mount.target, '/dsh-view')
+  assert.equal(mount.read_only, true)
+  assert.equal(mount.volume?.subpath, 'gate-view')
+  assert.equal(config.services.gate.depends_on?.dsh?.condition, 'service_healthy')
+})
+
+test('the caller key volume is writable only by the gate and both services share the switch', () => {
+  const { services: { dsh, gate } } = parseCompose(readFileSync(FILE, 'utf8'))
+  const keys = service => service.volumes.filter(mount => mount.source === 'caller-keys')
+  assert.equal(keys(dsh).length, 1)
+  assert.equal(keys(gate).length, 1)
+  assert.equal(keys(dsh)[0].target, '/caller-keys')
+  assert.equal(keys(gate)[0].target, '/caller-keys')
+  assert.equal(keys(dsh)[0].read_only, true)
+  assert.equal(keys(gate)[0].read_only ?? false, false)
+  assert.ok(!dsh.volumes.some(mount => mount.source === 'gate-data'))
+  assert.equal(dsh.environment.AUTOMAGIK_MULTIUSER, '1')
+  assert.equal(gate.environment.AUTOMAGIK_GATE_MULTIUSER, '1')
+  assert.equal(dsh.environment.AUTOMAGIK_CALLER_KEYS, '/caller-keys/caller-keys.json')
+  assert.equal(gate.environment.AUTOMAGIK_GATE_CALLER_PUBLIC, '/caller-keys')
 })

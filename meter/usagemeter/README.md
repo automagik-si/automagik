@@ -764,6 +764,14 @@ usagemeter repair --store STORE_DIR --against ORACLE_DIR --apply --copy FILE --c
   alone and listed with their reason); `kept` (cells where the store holds more than
   the oracle: never subtracted); and `conservation: PASS` or `FAIL` with its reasons. `--json`
   prints the same as one record.
+- The dry run also lists “rows with actor state above their evidence, no excess events” for
+  the selected range. A row counts when its event count agrees with its retained evidence,
+  every token column is at least as large, and one or more columns are higher. The report
+  gives row and token counts by harness and UTC day. Reasoning is reported separately and can
+  qualify on its own. Rows below their evidence in any column or in events count as
+  discrepancies. In JSON these counts appear in `residue`. Repair leaves these rows in place.
+  Reclassification requires per-row provenance that the store does not retain.
+  [Repair design (#1126)](../../docs/meter/0021-d7-d8-evidence.md#repair-design-1126)
 - `--coarse` matches on (harness, hour, model, precision) only, the store's rows summed across
   machine, repo and branch: an oracle built from frozen logs in a scratch home carries another
   machine id and fills repo and branch differently, so the exact key matches nothing. Without

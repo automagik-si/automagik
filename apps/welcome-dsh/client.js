@@ -8967,7 +8967,13 @@ var NAMESPACE = "welcome.team";
 var PT_BR = {
   // Installs and their errors
   "The install was cancelled.": "A instalação foi cancelada.",
+  "Viewer unavailable": "Visualização indisponível",
   "Omni's installer stopped (exit code {code}). What it printed is above.": "O instalador do Omni parou (código de saída {code}). A saída está acima.",
+  "Omni {version} is not on npm, where Omni's installer gets it. The newest there is {npm}.": "O Omni {version} não está no npm, de onde o instalador do Omni o baixa. A versão mais recente lá é {npm}.",
+  "Omni {github} is out on GitHub and not on npm yet.": "O Omni {github} já saiu no GitHub e ainda não chegou ao npm.",
+  "Power Omni off and on again to take the Omni plugins that work with it, or use an Omni on another computer.": "Desligue e ligue o Omni novamente para usar os plugins compatíveis com essa versão ou use um Omni em outro computador.",
+  "Omni's installer needs systemd on this computer, and it has none (a container, for example). Use an Omni on another computer.": "O instalador do Omni precisa do systemd, que não está disponível neste computador (como acontece em um contêiner, por exemplo). Use um Omni em outro computador.",
+  "unknown": "desconhecida",
   // A found Omni, and where Omni comes from
   "Your Omni on this Mac": "Seu Omni neste Mac",
   "Your Omni on this computer": "Seu Omni neste computador",
@@ -9105,6 +9111,37 @@ var PT_BR = {
   "Approve this device on your phone": "Aprove este dispositivo no seu celular",
   "Downloading Bun for Omni…": "Baixando o Bun para o Omni…",
   "Setting up your Omni…": "Configurando seu Omni…",
+  "Checking Omni {version}…": "Verificando o Omni {version}…",
+  "Downloading Omni {version} from GitHub…": "Baixando o Omni {version} do GitHub…",
+  "Building Omni {version}…": "Compilando o Omni {version}…",
+  "Installing Omni {version} from npm…": "Instalando o Omni {version} pelo npm…",
+  "Installing Omni {version}…": "Instalando o Omni {version}…",
+  "Connecting to your Omni…": "Conectando ao seu Omni…",
+  "Stopping after this step…": "Parando após esta etapa…",
+  "npm's newest Omni is {npm}, older than Omni {version}, which this Automagik installs.": "A versão mais recente do Omni no npm é {npm}, anterior à versão {version} que este Automagik instala.",
+  "Omni {version} is not on npm (the newest there is {npm}).": "O Omni {version} não está no npm (a versão mais recente lá é {npm}).",
+  "Installing Omni from npm failed (exit code {code}).": "A instalação do Omni pelo npm falhou (código de saída {code}).",
+  "Installing Omni from npm failed.": "A instalação do Omni pelo npm falhou.",
+  "Omni's npm installer needs systemd, and this computer has none.": "O instalador do Omni pelo npm precisa do systemd, que não está disponível neste computador.",
+  "Installing Omni {version} from GitHub instead.": "Instalando o Omni {version} pelo GitHub.",
+  "Installing Omni from GitHub instead.": "Instalando o Omni pelo GitHub.",
+  "Installing Omni {version} from npm.": "Instalando o Omni {version} pelo npm.",
+  "npm could not install it either. Installing Omni {version} from GitHub instead.": "A instalação pelo npm também falhou. Instalando o Omni {version} pelo GitHub.",
+  "The install steps": "As etapas da instalação",
+  "Check": "Verificar",
+  "Download": "Baixar",
+  "Build": "Compilar",
+  "Install": "Instalar",
+  "What the GitHub install printed": "A saída da instalação pelo GitHub",
+  "It stopped at the {step} step.": "Parou na etapa {step}.",
+  "Power Omni on to try again.": "Ligue o Omni para tentar novamente.",
+  "Update Automagik, then power Omni on again.": "Atualize o Automagik e ligue o Omni novamente.",
+  "Use an Omni on another computer.": "Use um Omni em outro computador.",
+  "The install's progress was lost (Automagik may have restarted). Power Omni on to try again.": "O progresso da instalação foi perdido (o Automagik pode ter reiniciado). Ligue o Omni para tentar novamente.",
+  "Omni could not be installed from GitHub.": "Não foi possível instalar o Omni pelo GitHub.",
+  "Omni is installed, but its address is unknown. Power Omni on to try again.": "O Omni está instalado, mas não foi possível identificar o endereço. Ligue o Omni para tentar novamente.",
+  "Omni is installed but did not answer at {url}. Power Omni on to try again.": "O Omni está instalado, mas não respondeu em {url}. Ligue o Omni para tentar novamente.",
+  "Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.": "Há outro login do Omni aguardando ({origin}). Conclua ou cancele esse login e depois conecte-se ao novo Omni em {url} pela lista de Omnis.",
   "Installed · restart DSH to start it": "Instalação concluída · reinicie o DSH para começar",
   "Could not install Omni": "Não foi possível instalar o Omni",
   "Installing Genie…": "Instalando o Genie…",
@@ -9496,26 +9533,62 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 
+// src/host/viewer-policy.js
+var READS = /* @__PURE__ */ new Set([
+  "state",
+  "ais",
+  "providers",
+  "companion",
+  "companion-image",
+  "omni-plugins",
+  "genie-plugin",
+  "unfold-plugin",
+  "bot-type",
+  "migrate-status"
+]);
+var needsViewer = (endpoint) => !READS.has(endpoint);
+
 // src/client/api.js
 var ROUTE = "api/omni-ai";
 var OMNI_UI = "api/omni-ui";
-var call = (endpoint, payload) => callRoute(ROUTE, endpoint, payload);
-var callOmniUi = (endpoint, payload) => callRoute(OMNI_UI, endpoint, payload);
-async function callRoute(route, endpoint, payload) {
+var call = (endpoint, payload) => needsViewer(endpoint) ? callWithViewer(ROUTE, endpoint, payload) : callRoute(ROUTE, endpoint, payload);
+var callOmniUi = (endpoint, payload) => callWithViewer(OMNI_UI, endpoint, payload);
+async function callWithViewer(route, endpoint, payload) {
+  if (globalThis.__AUTOMAGIK_VIEW__ === void 0) return callRoute(route, endpoint, payload);
+  const viewer = globalThis.__AUTOMAGIK_MOUNTED_VIEWER__;
+  if (!viewer) throw Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
+  return callRoute(route, endpoint, payload, viewer);
+}
+async function callRoute(route, endpoint, payload, viewer) {
+  const body = { endpoint, payload: payload ?? null };
+  if (viewer) body.viewer = viewer.id;
   let response;
   try {
     response = await fetch(route, {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ endpoint, payload: payload ?? null })
+      body: JSON.stringify(body)
     });
   } catch {
+    viewer?.check();
     throw Object.assign(new Error(t("Could not reach DSH. Check that it is still running.")), { code: "NETWORK" });
   }
-  if (!response.ok) throw Object.assign(new Error(t("DSH answered HTTP {status}", { status: response.status })), { code: `HTTP_${response.status}` });
+  viewer?.check();
+  if (!response.ok) {
+    const refusal = viewer && await viewer.response(response);
+    throw Object.assign(new Error(t("DSH answered HTTP {status}", { status: response.status })), {
+      code: refusal?.changed ? "bot/viewer-changed" : `HTTP_${response.status}`
+    });
+  }
   const result = await response.json();
-  if (!result.ok) throw Object.assign(new Error(result.error?.message ?? t("Request failed")), { code: result.error?.code ?? "omni-ai/error" });
+  viewer?.check();
+  const changed = viewer && (result.code === "bot/viewer-changed" || result.error?.code === "bot/viewer-changed");
+  if (!result.ok || changed) {
+    const code = changed ? "bot/viewer-changed" : result.error?.code ?? (route === OMNI_UI && viewer ? "bot/error" : "omni-ai/error");
+    viewer?.refused(code);
+    throw Object.assign(new Error(result.error?.message ?? t("Request failed")), { code });
+  }
   return result.value;
 }
 
@@ -10739,18 +10812,34 @@ var import_react7 = require("react");
 var WAKE_MS = 1100;
 var LOOK_MS = 1800;
 var POLL_MS = 900;
+var GITHUB_POLL_MS = 1e3;
+var CONNECT_POLL_MS = 2e3;
+var CONNECT_MS = 18e4;
+var STATUS_RETRIES = 5;
 var READY_POLLS = 20;
 var abortError = () => Object.assign(new Error("Omni was switched off"), { name: "AbortError" });
 var sleep = (ms2, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) return reject(abortError());
   if (ms2 <= 0) return resolve();
-  const timer = setTimeout(resolve, ms2);
-  signal?.addEventListener("abort", () => {
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", abort);
+    resolve();
+  }, ms2);
+  const abort = () => {
     clearTimeout(timer);
     reject(abortError());
-  }, { once: true });
+  };
+  signal?.addEventListener("abort", abort, { once: true });
 });
-async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, quick = reducedMotion(), resume = null }) {
+var serverDone = (job) => job?.phase === "done" && job.acknowledged !== true;
+function resumeServer(status, start = startPower, { passive = false } = {}) {
+  const job = status?.server;
+  if (!job?.id || job.phase !== "running" && (passive || !serverDone(job)) || status.install?.phase === "installing") return null;
+  const { phase, detail } = powerOf("omni");
+  if (detail?.removed === true || WORKING.has(phase) || phase === "pairing" || phase === "linked") return null;
+  return start("omni", (options) => githubInstall({ ...options, resume: job, passive }));
+}
+async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, quick = reducedMotion(), resume = null, passive = false }) {
   const check = () => {
     if (signal?.aborted) throw abortError();
   };
@@ -10788,7 +10877,11 @@ async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait 
     if (plugins.install?.phase === "failed") return end("failed", { message: plugins.install.error });
     if (!plugins.ready) return end("restart", { plugins });
   }
-  show("looking");
+  const server = plugins.server;
+  if (server?.phase === "running") return githubInstall({ show, signal, omniAi, omniUi, wait, resume: server, passive });
+  if (passive && serverDone(server)) return end("asleep", null);
+  if (serverDone(server)) show("looking", detailOf(server));
+  else show("looking");
   const started = Date.now();
   let link = null;
   try {
@@ -10799,8 +10892,12 @@ async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait 
   check();
   if (link?.linked === true || link?.configured === true) {
     await pause(LOOK_MS / 2);
+    check();
+    if (serverDone(server)) void claimJob(omniAi, server.id, signal).catch(() => {
+    });
     return end("linked", { origin: link.origin ?? null });
   }
+  if (link && serverDone(server)) return githubInstall({ show, signal, omniAi, omniUi, wait, resume: server, linkChecked: true });
   const found = await omniUi("omni-discover").catch(() => null);
   check();
   await pause(Math.max(0, LOOK_MS - (Date.now() - started)));
@@ -10849,31 +10946,88 @@ async function botPowerOn(kind, { show, signal, ai: ai2, wait = sleep, quick = r
 }
 var SANDBOX_LOG_MAX = 48e3;
 var TERMINAL_ENDED = /* @__PURE__ */ new Set(["done", "exited", "failed", "cancelled", "closed"]);
-async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep, poll = 400 }) {
+var OMNI_COMMAND_VERSION = /(?:^|\s)@automagik\/omni@(\d+\.\d{6}\.\d+(?:-[0-9A-Za-z.]+)?)(?=\s|$)/;
+var OMNI_RELEASE_TAG = /^v?(\d+)\.(\d{6})\.(\d+)$/;
+function newerOmniTag(github, npm) {
+  const left = OMNI_RELEASE_TAG.exec(github)?.slice(1).map(BigInt);
+  const right = OMNI_RELEASE_TAG.exec(npm)?.slice(1).map(BigInt);
+  if (!left || !right) return false;
+  const at2 = left.findIndex((part, i) => part !== right[i]);
+  return at2 !== -1 && left[at2] > right[at2];
+}
+function serverRefusal({ reason, version, npm, github }) {
+  if (reason === "no-systemd") return t("Omni's installer needs systemd on this computer, and it has none (a container, for example). Use an Omni on another computer.");
+  const message = t("Omni {version} is not on npm, where Omni's installer gets it. The newest there is {npm}.", { version, npm: npm ?? t("unknown") });
+  const newer = newerOmniTag(github, npm) ? ` ${t("Omni {github} is out on GitHub and not on npm yet.", { github })}` : "";
+  return `${message}${newer} ${t("Power Omni off and on again to take the Omni plugins that work with it, or use an Omni on another computer.")}`;
+}
+async function sandboxInstall({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, poll = 400, check: checkVersion }) {
   const check = () => {
     if (signal?.aborted) throw abortError();
   };
-  const opened = await omniUi("omni-terminal-open", { kind: "install", cols: 72, rows: 8 });
-  check();
+  show("sandbox", { terminal: null, log: "", step: null });
+  const payload = { kind: "install", cols: 72, rows: 8 };
+  let opened;
+  try {
+    opened = await omniUi("omni-terminal-open", { ...payload, via: "welcome" });
+  } catch (error) {
+    if (error?.code !== "bot/invalid") throw error;
+    check();
+    opened = await omniUi("omni-terminal-open", payload);
+  }
   const { terminal } = opened;
+  const close = () => omniUi("omni-terminal-close", { terminal }).catch(() => {
+  });
+  if (signal?.aborted) {
+    await close();
+    throw abortError();
+  }
   let log = "";
   let from = 0;
   show("sandbox", { terminal, log, step: null });
-  let started = false;
-  const start = async (state) => {
-    if (started || state !== "ready") return;
-    check();
-    const written = await omniUi("omni-terminal-write", { terminal, data: "\r" });
-    started = written?.ok === true;
-  };
-  await start(opened.state);
   const end = (phase, detail) => {
-    void omniUi("omni-terminal-close", { terminal }).catch(() => {
-    });
+    void close();
     check();
     show(phase, detail);
     return phase;
   };
+  const switchToGithub = async ({ npm, ...start2 }) => {
+    show("sandbox", { terminal: null, log: "", step: null });
+    await close();
+    check();
+    return githubInstall({ show, signal, omniAi, omniUi, wait, start: start2, npm });
+  };
+  let started = false;
+  let checked = false;
+  let checkedRun = null;
+  const start = async ({ state, command }) => {
+    if (started || state !== "ready") return;
+    check();
+    const version = checkVersion && OMNI_COMMAND_VERSION.exec(command)?.[1];
+    if (version && !checked) {
+      checked = true;
+      let answer;
+      try {
+        answer = await checkVersion(version);
+      } catch {
+      }
+      check();
+      checkedRun = { version, answer };
+      if (answer?.ok === false) {
+        if (answer.fallback || answer.reason === "no-systemd" && Object.hasOwn(answer, "fallback") && answer.npmHas === true) {
+          return { github: { version, reason: answer.reason, npm: { version, latest: answer.npm ?? null, exitCode: null } } };
+        }
+        return { refusal: serverRefusal({ ...answer, version }) };
+      }
+    }
+    const written = await omniUi("omni-terminal-write", { terminal, data: "\r" });
+    check();
+    started = written?.ok === true;
+  };
+  const opening = await start(opened);
+  check();
+  if (opening?.github) return switchToGithub(opening.github);
+  if (opening?.refusal) return end("failed", { message: opening.refusal });
   for (; ; ) {
     check();
     const read = await omniUi("omni-terminal-read", { terminal, from });
@@ -10882,13 +11036,228 @@ async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep,
     from = read.next ?? from;
     if (read.result?.status === "paired") return end("linked", { origin: read.result.origin ?? null });
     if (read.result?.status === "pairing") return end("pairing", { pairing: read.result.pairing });
-    const exited = typeof read.exitCode === "number" || TERMINAL_ENDED.has(read.state);
-    if (exited && read.exitCode === 0) return end("linked", { origin: null });
+    const linking = read.exitCode === 0 && read.state === "linking" && !read.error;
+    const exited = !linking && (typeof read.exitCode === "number" || TERMINAL_ENDED.has(read.state));
+    if (exited && read.exitCode === 0 && !read.error) return end("linked", { origin: null });
+    if (exited && typeof read.exitCode === "number" && read.exitCode !== 0 && read.exitCode !== 130 && checkedRun?.answer?.ok === true && checkedRun.answer.fallback) {
+      const { version } = checkedRun;
+      const { exitCode } = read;
+      return switchToGithub({ version, reason: "npm-failed", exitCode, npm: { version, latest: null, exitCode } });
+    }
     if (exited) return end("failed", { message: read.error ?? (read.exitCode === 130 ? t("The install was cancelled.") : t("Omni's installer stopped (exit code {code}). What it printed is above.", { code: read.exitCode ?? "?" })), log });
     show("sandbox", { terminal, log, step: read.step ?? null });
-    await start(read.state);
+    const next = await start(read);
+    check();
+    if (next?.github) return switchToGithub(next.github);
+    if (next?.refusal) return end("failed", { message: next.refusal });
     await wait(poll, signal);
   }
+}
+var claimAttempts = /* @__PURE__ */ new WeakSet();
+async function claimJob(omniAi, id, signal) {
+  if (signal && claimAttempts.has(signal)) return;
+  if (signal) claimAttempts.add(signal);
+  return omniAi("omni-github-ack", { id });
+}
+async function cancelJob(omniAi, id, signal) {
+  const reply = await omniAi("omni-github-cancel", { id });
+  if (reply?.job?.id === id && reply.job.phase !== "running") await claimJob(omniAi, id, signal);
+}
+function showStoppedJobError(error, signal) {
+  if (powerSignal("omni") === signal && powerOf("omni").detail?.removed === true) {
+    showPower("omni", "failed", { message: error.message, removed: true });
+  }
+}
+var detailOf = ({ id, source, reason, npm, release, step, steps, log, error, fellBack, phase, cancelRequested }) => ({ job: id, source, reason, npm, release, step, steps, log, error: error ?? null, fellBack, phase, cancelRequested });
+function cleanUrl(text) {
+  const value = String(text ?? "").trim();
+  if (value === "") return null;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) && !/^https?:\/\//i.test(value)) return null;
+  let url;
+  try {
+    url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (url.username || url.password || url.search || url.hash) return null;
+  return `${url.origin}${url.pathname.replace(/\/api\/v2\/?$/, "").replace(/\/+$/, "")}`;
+}
+var loopback = (host) => ["localhost", "127.0.0.1", "[::1]"].includes(host) ? "localhost" : host;
+var effectivePort = (url) => url.port || (url.protocol === "https:" ? "443" : "80");
+function sameUrl(a, b2) {
+  const left = cleanUrl(a);
+  const right = cleanUrl(b2);
+  if (!left || !right) return false;
+  const leftUrl = new URL(left);
+  const rightUrl = new URL(right);
+  return leftUrl.protocol === rightUrl.protocol && loopback(leftUrl.hostname) === loopback(rightUrl.hostname) && effectivePort(leftUrl) === effectivePort(rightUrl) && leftUrl.pathname === rightUrl.pathname;
+}
+function sameOrigin(origin, target) {
+  if (typeof origin !== "string" || /[/\\?#@\s]/.test(origin)) return false;
+  const url = new URL(target);
+  try {
+    const candidate = new URL(`${url.protocol}//${origin}`);
+    return loopback(candidate.hostname) === loopback(url.hostname) && candidate.port === url.port;
+  } catch {
+    return false;
+  }
+}
+var CONNECT_DEADLINE = /* @__PURE__ */ Symbol();
+async function readBefore(omniUi, endpoint, remaining, signal) {
+  let timer;
+  let abort;
+  const deadline = new Promise((resolve, reject) => {
+    timer = setTimeout(resolve, remaining, CONNECT_DEADLINE);
+    abort = () => reject(abortError());
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    const request2 = Promise.resolve().then(() => omniUi(endpoint)).catch(() => null);
+    return await Promise.race([deadline, request2]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+async function githubInstall({
+  show,
+  signal,
+  omniAi = call,
+  omniUi = callOmniUi,
+  wait = sleep,
+  now = Date.now,
+  poll = GITHUB_POLL_MS,
+  connectPoll = CONNECT_POLL_MS,
+  connectMs = CONNECT_MS,
+  start = null,
+  npm = null,
+  resume = null,
+  linkChecked = false,
+  passive = false
+}) {
+  const check = () => {
+    if (signal?.aborted) throw abortError();
+  };
+  const end = (phase, detail) => {
+    check();
+    show(phase, detail);
+    return phase;
+  };
+  const connectSandbox = async (job2) => {
+    const github = detailOf(job2);
+    const fail = (message) => end("failed", { message, github });
+    const target = cleanUrl(job2.report?.apiUrl);
+    if (!target) return fail(t("Omni is installed, but its address is unknown. Power Omni on to try again."));
+    show("sandbox", { ...github, step: "connect" });
+    const deadline = now() + connectMs;
+    const read = (endpoint) => readBefore(omniUi, endpoint, deadline - now(), signal);
+    let claimLost = false;
+    while (now() < deadline) {
+      check();
+      const found = claimLost ? null : await read("omni-discover");
+      check();
+      if (found === CONNECT_DEADLINE || now() >= deadline) break;
+      const omnis = Array.isArray(found?.omnis) ? found.omnis : [];
+      const entry = omnis.find((entry2) => entry2.source === "sandbox" && entry2.reachable === true && entry2.version === job2.report.version && sameUrl(entry2.url, job2.report.apiUrl));
+      const link = entry || claimLost ? await read("omni-link") : null;
+      check();
+      if (link === CONNECT_DEADLINE || now() >= deadline) break;
+      if (link?.linked === true || link?.configured === true) return end("linked", { origin: link.origin ?? null });
+      if (link?.pairing && !sameOrigin(link.pairing.origin, target)) {
+        return fail(t("Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.", {
+          origin: link.pairing.origin ?? t("unknown"),
+          url: target
+        }));
+      }
+      if (link && entry) {
+        let claim;
+        try {
+          claim = await claimJob(omniAi, job2.id, signal);
+        } catch (error) {
+          return end("failed", { message: error.message });
+        }
+        check();
+        if (claim?.claimed === true) {
+          let reply;
+          try {
+            reply = await omniUi("omni-discover-use", { id: entry.id });
+          } catch (error) {
+            return fail(error.message);
+          }
+          check();
+          if (reply.status === "paired") return end("linked", { origin: reply.origin ?? null });
+          if (reply.pairing) return end("pairing", { pairing: reply.pairing });
+          return fail(reply.message);
+        }
+        claimLost = true;
+      }
+      await wait(Math.min(connectPoll, deadline - now()), signal);
+      check();
+    }
+    return fail(t("Omni is installed but did not answer at {url}. Power Omni on to try again.", { url: target }));
+  };
+  check();
+  let job = resume;
+  if (resume === null) {
+    show("sandbox", { job: null, source: "github", reason: start.reason, npm, release: null, step: "check", steps: [], log: "", fellBack: false });
+    const { version, reason, exitCode } = start;
+    const payload = { version, reason };
+    if (reason === "npm-failed" && Number.isInteger(exitCode)) payload.exitCode = exitCode;
+    try {
+      const reply = await omniAi("omni-github-install", payload);
+      job = reply.job;
+    } catch (error) {
+      return end("failed", { message: error.message });
+    }
+    if (signal?.aborted) void cancelJob(omniAi, job.id, signal).catch((error) => showStoppedJobError(error, signal));
+    check();
+  } else if (job.phase === "done" && !linkChecked && !passive) {
+    show("sandbox", detailOf(job));
+    let link;
+    try {
+      link = await omniUi("omni-link");
+    } catch {
+      return end("asleep", null);
+    }
+    check();
+    if (link?.linked === true || link?.configured === true) {
+      void claimJob(omniAi, job.id, signal).catch(() => {
+      });
+      return end("linked", { origin: link.origin ?? null });
+    }
+  }
+  let retries = 0;
+  let last;
+  while (job.phase === "running") {
+    last = detailOf(job);
+    show("sandbox", last);
+    await wait(poll, signal);
+    check();
+    let reply;
+    try {
+      reply = await omniAi("omni-github-status", { id: job.id });
+    } catch (error) {
+      check();
+      retries += 1;
+      if (retries === STATUS_RETRIES) return end("failed", { message: error.message, github: last, log: last.log });
+      continue;
+    }
+    check();
+    retries = 0;
+    if (reply.job === null) {
+      return end("failed", { message: t("The install's progress was lost (Automagik may have restarted). Power Omni on to try again."), github: last, log: last.log });
+    }
+    job = reply.job;
+  }
+  if (job.phase === "done") return passive ? end("asleep", null) : connectSandbox(job);
+  if (job.phase === "cancelled") return end("failed", { message: t("The install was cancelled.") });
+  return end("failed", {
+    message: job.error ?? t("Omni could not be installed from GitHub."),
+    next: job.next ?? null,
+    log: job.log,
+    github: detailOf(job)
+  });
 }
 var around = (text, name, node) => {
   const [before, after = ""] = text.split(`{${name}}`);
@@ -11097,6 +11466,15 @@ function statusOf(phase, detail) {
     return count === 1 ? t("Found an Omni") : count > 1 ? t("Found {count} Omnis", { count }) : t("Found Omnis, none ready to connect");
   }
   if (phase === "linked") return detail?.origin ? t("Connected to {origin}", { origin: detail.origin }) : t("Connected");
+  if (phase === "sandbox" && detail && "job" in detail) {
+    const version = detail.release?.version ?? detail.npm?.version;
+    if (detail.step === "check") return t("Checking Omni {version}…", { version });
+    if (detail.step === "download") return t("Downloading Omni {version} from GitHub…", { version });
+    if (detail.step === "build") return t("Building Omni {version}…", { version });
+    if (detail.step === "install") return detail.source === "npm" ? t("Installing Omni {version} from npm…", { version }) : t("Installing Omni {version}…", { version });
+    if (detail.step === "connect") return t("Connecting to your Omni…");
+    return t("Setting up your Omni…");
+  }
   return {
     waking: t("Waking up…"),
     starting: t("Starting Omni in this DSH…"),
@@ -11217,7 +11595,7 @@ function destinyOf(omnis = [], { where = WORKSPACE, newOmni = true } = {}) {
     title: choice.action === "use" ? t("Use {omni}", { omni: titleIn(omni, choice) }) : t("Connect {omni}", { omni: titleIn(omni, choice) }),
     sub: choice.sub || (omni.local ? place.already : t("Saved in your Omni CLI"))
   }));
-  if (newOmni && !rows.some((row) => row.omni.source === "sandbox")) {
+  if (newOmni && !rows.some((row) => row.omni.source === "sandbox" && row.omni.reachable !== false)) {
     tiles.push({ id: "local", icon: "sandbox", title: place.run, sub: place.on });
   }
   tiles.push({ id: "remote", icon: "remote", title: t("An Omni somewhere else"), sub: t("On a server, or the link Omni sent you") });
@@ -11268,11 +11646,78 @@ function Remote({ busy, onRemote, onBack, label = t("Where is your Omni?") }) {
     (0, import_react7.createElement)("button", { type: "button", className: "oai-textlink", onClick: onBack }, t("Back to the choices"))
   );
 }
+var installStepLabel = (step) => ({
+  check: t("Check"),
+  download: t("Download"),
+  build: t("Build"),
+  install: t("Install"),
+  connect: t("Connect")
+})[step];
+function installReason({ reason, release, npm }) {
+  if (reason === "behind" && release?.version) return t("npm's newest Omni is {npm}, older than Omni {version}, which this Automagik installs.", { npm: npm.latest ?? npm.version, version: release.version });
+  if (reason === "unpublished") return t("Omni {version} is not on npm (the newest there is {npm}).", { version: npm.version, npm: npm.latest ?? t("unknown") });
+  if (reason === "no-systemd") return t("Omni's npm installer needs systemd, and this computer has none.");
+  if (reason === "npm-failed") return Number.isInteger(npm.exitCode) ? t("Installing Omni from npm failed (exit code {code}).", { code: npm.exitCode }) : t("Installing Omni from npm failed.");
+  return null;
+}
+function installSource({ source, fellBack, release }) {
+  if (!release) return t("Installing Omni from GitHub instead.");
+  const { version } = release;
+  if (fellBack) return t("npm could not install it either. Installing Omni {version} from GitHub instead.", { version });
+  return source === "npm" ? t("Installing Omni {version} from npm.", { version }) : t("Installing Omni {version} from GitHub instead.", { version });
+}
+var installLogLabel = (source) => source === "npm" ? t("What Omni's installer printed") : t("What the GitHub install printed");
 function Inside({ phase, detail, power, live }) {
   const channels = live?.configured ? live.channels ?? [] : [];
   if (phase === "installing") return (0, import_react7.createElement)(InstallProgress, { plugins: detail?.plugins });
   if (phase === "pairing") return (0, import_react7.createElement)(Pairing, { pairing: detail.pairing, onCancel: power.cancelPairing });
+  if (phase === "sandbox" && detail && "job" in detail) {
+    const reason = installReason(detail);
+    const steps = [...detail.steps, { id: "connect", state: detail.step === "connect" ? "now" : "next" }];
+    return (0, import_react7.createElement)(
+      "div",
+      null,
+      reason ? (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad" }, reason) : null,
+      (0, import_react7.createElement)("p", { className: "oai-inside-note" }, detail.phase === "running" && detail.cancelRequested ? t("Stopping after this step…") : installSource(detail)),
+      (0, import_react7.createElement)("ol", { className: "oai-install", "aria-label": t("The install steps") }, steps.filter(({ state }) => state !== "skipped").map(({ id, state }) => {
+        const style = state === "done" || state === "now" ? state : "next";
+        return (0, import_react7.createElement)(
+          "li",
+          { key: id, className: `oai-install-${style}` },
+          (0, import_react7.createElement)("span", { className: "oai-install-dot", "aria-hidden": true }, style === "done" ? (0, import_react7.createElement)(Check) : null),
+          installStepLabel(id)
+        );
+      }))
+    );
+  }
   if (phase === "sandbox") return (0, import_react7.createElement)(InstallLog, { text: detail?.log ?? "", label: t("What Omni's installer printed") });
+  if (phase === "failed" && detail?.github) {
+    const { github, message, next, log } = detail;
+    const reason = installReason(github);
+    const stopped = github.steps.find(({ state }) => state === "failed");
+    const advice = {
+      retry: t("Power Omni on to try again."),
+      update: t("Update Automagik, then power Omni on again."),
+      "other-omni": t("Use an Omni on another computer.")
+    }[next];
+    const stoppedAt = stopped ? t("It stopped at the {step} step.", { step: installStepLabel(stopped.id) }) : null;
+    if (!github.error && log) {
+      const words = [stoppedAt, message, advice].filter(Boolean).join(" ");
+      return (0, import_react7.createElement)(
+        "div",
+        null,
+        (0, import_react7.createElement)(InstallLog, { text: log, label: installLogLabel(github.source) }),
+        (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad", title: [reason, words].filter(Boolean).join(" ") }, words)
+      );
+    }
+    return (0, import_react7.createElement)(
+      "div",
+      null,
+      reason ? (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad" }, reason) : null,
+      (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad", title: message }, [stoppedAt, message].filter(Boolean).join(" ")),
+      advice ? (0, import_react7.createElement)("p", { className: "oai-inside-note" }, advice) : null
+    );
+  }
   if (phase === "failed" && detail?.log) return (0, import_react7.createElement)("div", null, (0, import_react7.createElement)(InstallLog, { text: detail.log, label: t("What Omni's installer printed") }), (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad", title: detail.message }, t("What went wrong is above. Power Omni on to try again.")));
   if ((phase === "none" || phase === "found") && power.unowned) return (0, import_react7.createElement)(Unowned, { ...power.unowned, busy: power.busy, onRemote: power.remote, onBack: power.forgetUnowned });
   if (phase === "none" || phase === "found") return (0, import_react7.createElement)(Destiny, { omnis: detail?.omnis ?? [], machine: power.machine, busy: power.busy, onUse: power.use, onLocal: power.local, onRemote: power.remote });
@@ -11289,12 +11734,21 @@ function Inside({ phase, detail, power, live }) {
   return null;
 }
 var powerLocked = (kind, phase) => phase === "installing" || phase === "starting" || kind !== "omni" && phase === "ready";
-function powerOff(kind, { phase, detail } = powerOf(kind), omniUi = callOmniUi) {
+function powerOff(kind, { phase, detail } = powerOf(kind), omniUi = callOmniUi, omniAi = call) {
+  const signal = powerSignal(kind);
   stopPower(kind);
   if (kind === "omni" && phase === "pairing") void omniUi("omni-pair-cancel").catch(() => {
   });
   if (kind === "omni" && phase === "sandbox" && detail?.terminal) void omniUi("omni-terminal-write", { terminal: detail.terminal, data: "" }).catch(() => {
   });
+  if (kind === "omni") {
+    const job = phase === "failed" ? detail?.github : detail;
+    if (job?.job && (job.step === "connect" || job.phase === "done" || job.phase === "failed")) {
+      void claimJob(omniAi, job.job, signal).catch((error) => showStoppedJobError(error, signal));
+    } else if (phase === "sandbox" && job?.job) {
+      void cancelJob(omniAi, job.job, signal).catch((error) => showStoppedJobError(error, signal));
+    }
+  }
   showPower(kind, "asleep", { removed: true });
 }
 function Machine({ kind = "omni", phase, detail, power, live, onPower, children }) {
@@ -11463,7 +11917,7 @@ function usePower() {
   const off = () => {
     setProblem(null);
     setBusy(null);
-    powerOff("omni", { phase, detail });
+    powerOff("omni");
   };
   const connect = async (row, endpoint, payload) => {
     setBusy(row);
@@ -11520,7 +11974,17 @@ function usePower() {
     sandbox: () => {
       setProblem(null);
       back.current = { phase, detail };
-      runPower("omni", sandboxInstall);
+      runPower("omni", (args) => sandboxInstall({
+        ...args,
+        check: async (version) => {
+          try {
+            return await call("omni-server-check", { version, fallback: true });
+          } catch (error) {
+            if (error.code !== "omni-ai/invalid" || args.signal.aborted) throw error;
+            return call("omni-server-check", { version });
+          }
+        }
+      }));
     },
     remote: (wanted) => wanted.kind === "bad-link" ? setProblem(t("That is not a link your Omni sends. It looks like https://your-omni/api/login/app?grant=…")) : wanted.kind === "claim" ? (setProblem(null), setUnowned({ url: wanted.url, claimUrl: wanted.claimUrl }), window.open(wanted.claimUrl, "_blank", "noreferrer")) : wanted.kind === "grant" ? connect("remote", "omni-connect-grant", { url: wanted.url, grant: wanted.grant }) : connect("remote", "omni-pair-start", { url: wanted.url }),
     cancelPairing: () => {
@@ -11614,22 +12078,41 @@ function TeamStep(props) {
     if (state) glitch();
   }, [state, glitch]);
   (0, import_react7.useEffect)(() => {
-    if (!state || !powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) return;
-    autoPowered.current = true;
-    power.toggle();
-  }, [state]);
+    if (!state) return;
+    if (!explicit && powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) {
+      autoPowered.current = true;
+      power.toggle();
+    } else if (!autoPowered.current) {
+      void call("omni-plugins").then((status) => resumeServer(status)).catch(() => {
+      });
+    }
+  }, [state, explicit]);
   (0, import_react7.useEffect)(() => {
-    if (!state || !powersOnByItself(state.preload, geniePower.phase, geniePower.detail, genieAutoPowered.current, "genie")) return;
+    if (explicit || !state) return;
+    if (!powersOnByItself(
+      state.preload,
+      geniePower.phase,
+      geniePower.detail,
+      genieAutoPowered.current,
+      "genie"
+    )) return;
     genieAutoPowered.current = true;
     setLastPressed("genie");
     geniePower.toggle();
-  }, [state]);
+  }, [state, explicit]);
   (0, import_react7.useEffect)(() => {
-    if (!state || !powersOnByItself(state.preload, unfoldPower.phase, unfoldPower.detail, unfoldAutoPowered.current, "unfold")) return;
+    if (explicit || !state) return;
+    if (!powersOnByItself(
+      state.preload,
+      unfoldPower.phase,
+      unfoldPower.detail,
+      unfoldAutoPowered.current,
+      "unfold"
+    )) return;
     unfoldAutoPowered.current = true;
     setLastPressed("unfold");
     unfoldPower.toggle();
-  }, [state]);
+  }, [state, explicit]);
   if (!state) return null;
   const name = state.companionName ?? t("Your companion");
   const omni = phase !== "asleep" && phase !== "failed";
@@ -12034,6 +12517,14 @@ function SubscriptionSignIn({ tile, onBack, onSaved, glitch }) {
 
 // src/client/redact.js
 var CREDENTIAL_MARK = "[hidden]";
+function basicCredential(match, scheme, token) {
+  try {
+    const decoded = atob(token);
+    if (decoded.includes(":") && !/[^\x20-\x7e\x80-\xff]/.test(decoded)) return `${scheme} ${CREDENTIAL_MARK}`;
+  } catch {
+  }
+  return match;
+}
 var CREDENTIALS = Object.freeze([
   [/\bsk-[A-Za-z0-9_*.-]{6,}/g, "sk-[hidden]"],
   [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
@@ -12042,7 +12533,9 @@ var CREDENTIALS = Object.freeze([
   [/\bxox[baprs]-[A-Za-z0-9-]{8,}/g, CREDENTIAL_MARK],
   [/\bAIza[A-Za-z0-9_-]{20,}/g, CREDENTIAL_MARK],
   [/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, CREDENTIAL_MARK],
-  [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
+  [/\b(Bearer)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
+  [/(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?Basic\s+)[A-Za-z0-9._~+/=*-]+/gi, `$1${CREDENTIAL_MARK}`],
+  [/\b(Basic)\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9_+/=-])/gi, basicCredential],
   // Provider and code-host keys whose own prefix the rules above do not cover. Each needs a
   // long enough body that ordinary words cannot match it.
   [/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}/g, CREDENTIAL_MARK],
@@ -13805,6 +14298,54 @@ var actionLabel = (row) => row.action ? ACTION_LABEL[row.action](row.name) : nul
 var secondaryLabel = (row) => row.secondary ? ACTION_LABEL[row.secondary](row.name) : null;
 var POWER_KINDS = /* @__PURE__ */ new Set(["omni", "genie", "unfold"]);
 var POWER_ON = { omni: powerOn, genie: geniePowerOn, unfold: unfoldPowerOn };
+var installRunning = (status) => status?.install?.phase === "installing";
+function resumeInstall(kind, status, start = startPower) {
+  if (!installRunning(status) || kind !== "omni" && kind !== "genie") return null;
+  const on2 = kind === "omni" ? powerOn : geniePowerOn;
+  return start(kind, (options) => on2({ ...options, resume: status, passive: true }));
+}
+var readPlugins = (ask = call) => Promise.all(
+  [ask("omni-plugins"), ask("genie-plugin")].map((request2) => Promise.resolve(request2).catch(() => null))
+);
+function officialRow(kind, power, { roster, read, actions }) {
+  const asleep = (power?.phase ?? "asleep") === "asleep";
+  if (!read.checked && asleep) {
+    return { text: null, label: null, alert: null, action: null };
+  }
+  const status = asleep ? read.status : null;
+  const row = powerRow(kind, power, { roster, status });
+  if (row.state === "on" && row.action === "off" && notInstalled(kind, status)) {
+    const action2 = "install";
+    const label = actionLabel({ ...row, action: action2 });
+    return { text: null, label, alert: null, action: action2 };
+  }
+  let action = null;
+  if (row.action === "install" || row.action === "power" || row.action === "retry") {
+    action = row.action;
+  } else if (row.action === "off" && kind === "omni" && power?.phase === "sandbox" && power.detail?.job) {
+    action = "off";
+  } else if (row.action === "choose" && typeof actions?.openHarnessOnboarding === "function") {
+    action = row.action;
+  } else if (row.action === "plugins" && actions?.hasPlugins?.() === true) {
+    action = row.action;
+  }
+  const text = row.state === "off" && action === "install" ? null : row.text;
+  return { text, label: actionLabel({ ...row, action }), alert: row.alert, action };
+}
+function actOfficial(kind, row, { actions, start = startPower, stop = powerOff }) {
+  if (row.action === "install" || row.action === "power" || row.action === "retry") {
+    return start(kind, POWER_ON[kind]);
+  }
+  if (row.action === "off") {
+    stop(kind);
+  } else if (row.action === "choose") {
+    actions.closeSettings?.();
+    actions.openHarnessOnboarding("omni-team");
+  } else if (row.action === "plugins") {
+    actions.closeSettings?.();
+    actions.openPlugins?.();
+  }
+}
 function togglePowerSettings(kind, next, { start = startPower, stop = powerOff } = {}) {
   if (next) start(kind, POWER_ON[kind]);
   else stop(kind);
@@ -13844,6 +14385,67 @@ function installPowerSettings(load = () => require("@automagik/bots-dsh/client")
   };
   return settings.register({ id: "welcome-power", order: 0, Component: PowerSettingsCard });
 }
+function installOfficialInstall(load = () => require("@automagik/bots-dsh/client"), { ask = call, start = startPower, stop = powerOff } = {}) {
+  let bots = null;
+  try {
+    bots = load();
+  } catch {
+    bots = null;
+  }
+  const registry = bots?.omni?.officialInstall;
+  if (typeof registry?.register !== "function") return () => {
+  };
+  const empty = { checked: false, status: null };
+  const reads = { omni: empty, genie: empty };
+  const listeners2 = /* @__PURE__ */ new Set();
+  let version = 0;
+  let inFlight = null;
+  let disposed = false;
+  const changed = () => {
+    version += 1;
+    for (const listener of Array.from(listeners2)) listener();
+  };
+  const unsubscribePower = subscribePower(changed);
+  const row = (kind, { roster, actions }) => officialRow(kind, powerOf(kind), { roster, read: reads[kind], actions });
+  const unregister = registry.register({
+    id: "welcome-install",
+    order: 0,
+    kinds: ["omni", "genie"],
+    subscribe(listener) {
+      listeners2.add(listener);
+      return () => listeners2.delete(listener);
+    },
+    version: () => version,
+    pending(kind) {
+      const { phase } = powerOf(kind);
+      const missing = phase === "asleep" && notInstalled(kind, reads[kind].status);
+      const needsAttention = phase === "failed" || phase === "restart" || phase === "pairing";
+      return missing || WORKING.has(phase) || needsAttention || CHOOSE.has(phase);
+    },
+    row,
+    act: (kind, ctx) => actOfficial(kind, row(kind, ctx), { actions: ctx.actions, start, stop }),
+    refresh() {
+      if (inFlight !== null) return inFlight;
+      inFlight = readPlugins(ask).then(([omni, genie]) => {
+        if (disposed) return;
+        reads.omni = { checked: true, status: omni };
+        reads.genie = { checked: true, status: genie };
+        changed();
+        resumeInstall("omni", omni, start);
+        resumeServer(omni, start, { passive: true });
+        resumeInstall("genie", genie, start);
+      }).finally(() => {
+        inFlight = null;
+      });
+      return inFlight;
+    }
+  });
+  return () => {
+    disposed = true;
+    unsubscribePower();
+    unregister();
+  };
+}
 
 // src/client/index.js
 var STEPS = [
@@ -13870,6 +14472,7 @@ function apply(ctx) {
   }
   ctx.effect(() => installAcpSection(ctx), "omni-ai: Claude Code and Codex in Settings");
   ctx.effect(() => installPowerSettings(), "omni-ai: power in each Bot's settings");
+  ctx.effect(() => installOfficialInstall(), "omni-ai: Omni and Genie install on the Apps page");
 }
 /*! Bundled license information:
 

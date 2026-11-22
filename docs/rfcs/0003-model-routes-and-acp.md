@@ -628,10 +628,11 @@ a missing sign-in (`needsSignIn`) is never offered; a Bot's current model stays 
 unavailable, and a new Bot's default skips all three. The jobs beside the chats keep their own
 model rule (D-g).
 
-**Images through Codex.** `generate_image` and the companion's drawing use an OpenAI API key as
-before; without one, the Codex CLI on its own ChatGPT sign-in (acp-dsh `generateImage`, a one-off
-session with a per-draw permission profile using Codex's image tool). A ChatGPT grant stored by an earlier version's DSH
-sign-in is read last. CLI auto-updates stay on (D-h).
+**Images through Codex.** `generate_image` and the companion's drawing use an OpenAI API key
+the person gave the app as before (one only inherited from the environment Automagik was started
+in is not used, #869). Without one, they use the Codex CLI on its own ChatGPT sign-in (acp-dsh
+`generateImage`, a one-off session with a per-draw permission profile using Codex's image tool).
+A ChatGPT grant stored by an earlier version's DSH sign-in is read last. CLI auto-updates stay on (D-h).
 
 **Image read boundary (#870).** Each draw uses a fresh scratch folder and selects the image
 permission profile from the Bot's isolated Codex home through its session overrides. The
@@ -668,10 +669,11 @@ With no profile, the preliminary checks and session may start. Windows has no pr
 Readiness can report ready there even though the one-off Codex draw is refused with
 “Update Automagik and try again.”
 
-An OpenAI API key avoids `generate_image`'s one-off Codex session by using the Images API;
-the API still receives the prompt. Prompt text is outside the file boundary. A Bot running
-on Codex can still invoke its own image tool despite that key. Use a different Bot model or
-turn Codex off to avoid that route. Avoid routing untrusted outside text into Codex drawings;
+An OpenAI API key given to the app (one only inherited from the environment is not used, #869)
+avoids `generate_image`'s one-off Codex session by using the Images API. The API still receives
+the prompt. Prompt text is outside the file boundary. A Bot running on Codex can still invoke
+its own image tool despite that key. Use a different Bot model or turn Codex off to avoid that
+route. Avoid routing untrusted outside text into Codex drawings;
 post-call refusals cannot undo a read, and prompt review is not a file access control.
 See the [user warning and security notes][codex-image-security].
 

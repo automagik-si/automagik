@@ -10,13 +10,14 @@ import { startFakeCore } from "./fake-core.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { attachPath, readAttach as readRows } from "../mods/am-sidebar/attach.js";
 import { GUARD_DIR, KILL_GUARD_DIR } from "../mods/am-sidebar/workers.js";
 import { readJsonLines } from "./log-lines.mjs";
+import { privateFixtureHome, selectedRootFixture } from "./login-fixture.mjs";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
@@ -779,4 +780,57 @@ test("#1195 adoption refuses a login it cannot keep across the next restart, and
   assert.deepEqual(fileOrNull(attachPath(fallback)), beforeDefault, "neither refusal wrote the fallback ledger");
   assert.equal(attachRowsIn(fallback).filter((row) => row.event === "attach" && row.terminal === terminal).length, 0,
     "the fallback home binds no row for the refused pane");
+});
+
+// #1509 with #1195: when the entrypoint exports the Bot login pointer, the record decides the
+// restart's login, so the adopted home's Claude record (and its refusal above) does not apply:
+// the restart launches on the record's generation, and a refused record stops it before any
+// launch or kill.
+function pointerWorld(t, s) {
+  const root = join(s.root, "acp", "cli-homes"), current = join(root, "current"), dsh = join(s.root, "dsh");
+  mkdirSync(dsh, { recursive: true });
+  const generation = "33333333-3333-4333-8333-333333333333";
+  const configDir = join(root, "homes", "claude", generation, ".claude");
+  mkdirSync(current, { recursive: true });
+  mkdirSync(configDir, { recursive: true });
+  privateFixtureHome(configDir);
+  writeFileSync(join(current, "claude"), generation);
+  selectedRootFixture(t, join(s.root, "acp"), root, dsh);
+  writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 2,
+    claude: { generation, configDir }, codex: null, updatedAt: "2026-11-20T00:00:00.000Z" }));
+  return { configDir, env: { AUTOMAGIK_BOT_CLI_POINTER: join(current, "claude"), AUTOMAGIK_NATIVE_WORKER_LOGIN: "required", DSH_HOME: dsh, AUTOMAGIK_HOME: s.root } };
+}
+
+test("#1509 an adopted restart launches on the login record's generation, not the adopted home's selection", (t) => {
+  const { s, terminal } = twoHomes(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  const pane = state.terminals.find((x) => x.address === terminal);
+  pane.argv = pane.argv.filter((word) => !word.startsWith("HERDR_APP_HOME="));
+  writeFileSync(s.statePath, JSON.stringify(state));
+  rmSync(attachPath(s.app), { force: true });
+  const login = pointerWorld(t, s);
+  writeFileSync(s.logPath, "");
+  const r = cliWith(s, { HC_TERMINAL_ID: terminal, ...login.env }, ["HERDR_APP_HOME"], ["restart", "Genie", "--json"]);
+  // The fake hc ends the CLI as the real kill of its own pane would: what it printed first stands.
+  assert.ok(r.stdout.trim(), r.stderr);
+  assert.equal(JSON.parse(r.stdout).replaced, terminal, r.stderr);
+  assert.equal(runs(s).length, 1);
+  assert.equal(envWord(runs(s)[0], "CLAUDE_CONFIG_DIR"), `CLAUDE_CONFIG_DIR=${login.configDir}`, "the record's login");
+});
+
+test("#1509 a refused login record stops an adopted restart before any launch or kill", (t) => {
+  const { s, terminal } = twoHomes(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  const pane = state.terminals.find((x) => x.address === terminal);
+  pane.argv = pane.argv.filter((word) => !word.startsWith("HERDR_APP_HOME="));
+  writeFileSync(s.statePath, JSON.stringify(state));
+  rmSync(attachPath(s.app), { force: true });
+  const login = pointerWorld(t, s);
+  chmodSync(login.configDir, 0o755);
+  writeFileSync(s.logPath, "");
+  const r = cliWith(s, { HC_TERMINAL_ID: terminal, ...login.env }, ["HERDR_APP_HOME"], ["restart", "Genie", "--json"]);
+  assert.notEqual(r.status, 0, r.stdout);
+  assert.match(r.stderr + r.stdout, /folder-mode/);
+  assert.deepEqual(calls(s).filter((call) => ["run", "kill"].includes(call[0])), [], "nothing launched or ended");
+  assert.equal(liveFor(s, ID.main).length, 1, "the live pane is untouched");
 });

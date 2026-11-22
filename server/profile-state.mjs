@@ -2,8 +2,14 @@ import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import { readStoreJson, signedUpdate, updateRecovery, updateStoreOf } from './profile-update.mjs'
 
-export const PLUGINS = ['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/welcome-dsh']
+export const ADAPTER = '@automagik/multiuser-dsh'
+export const ADAPTER_SINCE = '3.160.6'
+export const BOTS_GUARD_SINCE = '3.161.3'
+export const LEGACY_PLUGINS = ['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/welcome-dsh']
+
+export const PLUGINS = [...LEGACY_PLUGINS, ADAPTER].sort()
 
 export const SEED_MARKER = 'automagik-server-profile'
 export const FOLLOW_STATUS = 'automagik-server-status.json'
@@ -64,12 +70,49 @@ export function extendsImage(pkg, baseline) {
   return isDeepStrictEqual(copy, baseline)
 }
 
+export function legacyManifest(manifest) {
+  if (!manifest) return undefined
+  const legacy = structuredClone(manifest)
+  if (legacy.dependencies) delete legacy.dependencies[ADAPTER]
+  return legacy
+}
+
+export function basePlugins(marker) {
+  if (marker?.imagePackage === undefined) return LEGACY_PLUGINS
+  const dependencies = marker.imagePackage?.dependencies
+  if (!dependencies || typeof dependencies !== 'object') return PLUGINS
+  const base = PLUGINS.filter(name => Object.hasOwn(dependencies, name))
+  return base.length ? base : PLUGINS
+}
+
+function vendorPrefix(name) {
+  return `file:vendor/automagik-${name.split('/')[1]}-`
+}
+
+export function vendorRelease(name, spec) {
+  const prefix = vendorPrefix(name)
+  if (typeof spec !== 'string' || !spec.startsWith(prefix) || !spec.endsWith('.tgz')) return undefined
+  const version = spec.slice(prefix.length, -4)
+  return releaseVersion(version) ? version : undefined
+}
+
+function manifestAt(manifest, names, release) {
+  if (!manifest?.dependencies) return undefined
+  const baseline = structuredClone(manifest)
+  for (const name of names) baseline.dependencies[name] = `${vendorPrefix(name)}${release}.tgz`
+  return baseline
+}
+
+const ownerManaged = () => ({ managed: false, ownerManaged: true, reason: 'owner-managed' })
+
 /** Legacy adoption is deliberately stricter than a subset or dependency-name check. */
-export function ownership(profile, source) {
+export function ownership(profile, source, { updateStore = updateStoreOf(profile) } = {}) {
   const path = join(profile, 'package.json')
-  if (!existsSync(path) || !lstatSync(path).isFile()) return { managed: false, ownerManaged: false, reason: 'invalid-profile' }
+  if (!lstatSync(profile, { throwIfNoEntry: false })?.isDirectory() ||
+      !lstatSync(path, { throwIfNoEntry: false })?.isFile()) return { managed: false, ownerManaged: false, reason: 'invalid-profile' }
   const raw = readFileSync(path, 'utf8'), pkg = readJson(path)
   if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return { managed: false, ownerManaged: false, reason: 'invalid-profile' }
+  const expected = readJson(join(source, 'package.json'))
   const markerPath = join(profile, SEED_MARKER)
   const text = existsSync(markerPath) ? readFileSync(markerPath, 'utf8') : undefined
   if (text !== undefined && text !== 'unknown\n') {
@@ -78,40 +121,74 @@ export function ownership(profile, source) {
       return { managed: false, ownerManaged: false, reason: 'unsupported-seed-marker' }
     }
     const observedHash = packageHash(profile)
-    // Old markers held only the hash. Their base has the canonical image shape with
-    // its three dependency filenames at the recorded release.
-    const baseline = marker.imagePackage ?? readJson(join(source, 'package.json'))
-    if (!marker.imagePackage && baseline?.dependencies) {
-      for (const name of PLUGINS) baseline.dependencies[name] = `file:vendor/automagik-${name.split('/')[1]}-${marker.release}.tgz`
+    const candidates = marker.imagePackage == null ? [
+      manifestAt(expected, PLUGINS, marker.release),
+      manifestAt(legacyManifest(expected), LEGACY_PLUGINS, marker.release),
+    ] : [marker.imagePackage]
+    const compatible = candidate => candidate && (basePlugins({ imagePackage: candidate }).includes(ADAPTER) ||
+      !Object.hasOwn(pkg.dependencies ?? {}, ADAPTER))
+    const markerOwnership = imagePackage => ({ managed: true, ownerManaged: false, reason: 'image-seed',
+      release: marker.release, packageSha256: observedHash, imagePackage })
+    const baseline = candidates.find(candidate => compatible(candidate) &&
+      ((marker.imagePackage != null && observedHash === marker.packageSha256) || extendsImage(pkg, candidate)))
+    if (baseline) return markerOwnership(baseline)
+
+    const current = readStoreJson(updateStore, 'current.json')
+    for (const candidate of candidates.filter(compatible)) {
+      const signed = signedUpdate(profile, candidate, updateStore, current)
+      if (signed) return { ...markerOwnership(candidate), signed, signedNames: Object.keys(current.value.entries),
+        signedEntries: current.value.entries }
     }
-    if (observedHash !== marker.packageSha256 && !extendsImage(pkg, baseline)) return { managed: false, ownerManaged: true, reason: 'owner-managed' }
-    return { managed: true, ownerManaged: false, reason: 'image-seed', release: marker.release, packageSha256: observedHash }
+    return ownerManaged()
   }
-  const expected = readJson(join(source, 'package.json'))
-  const versions = PLUGINS.map(name => {
-    const prefix = `file:vendor/automagik-${name.split('/')[1]}-`, spec = pkg.dependencies?.[name]
-    return typeof spec === 'string' && spec.startsWith(prefix) && spec.endsWith('.tgz') ? spec.slice(prefix.length, -4) : undefined
-  })
-  if (expected && versions.every(v => releaseVersion(v) && v === versions[0])) {
-    expected.dependencies = { ...expected.dependencies }
-    for (const name of PLUGINS) expected.dependencies[name] = `file:vendor/automagik-${name.split('/')[1]}-${versions[0]}.tgz`
-    if (`${JSON.stringify(expected, null, 2)}\n` === raw) return { managed: true, ownerManaged: false, reason: 'legacy-image-seed', release: versions[0], packageSha256: createHash('sha256').update(raw).digest('hex') }
+  for (const [manifest, names] of [[expected, PLUGINS], [legacyManifest(expected), LEGACY_PLUGINS]]) {
+    const versions = names.map(name => vendorRelease(name, pkg.dependencies?.[name]))
+    if (!versions[0] || !versions.every(version => version === versions[0])) continue
+    const baseline = manifestAt(manifest, names, versions[0])
+    if (baseline && `${JSON.stringify(baseline, null, 2)}\n` === raw) {
+      return { managed: true, ownerManaged: false, reason: 'legacy-image-seed', release: versions[0],
+        packageSha256: createHash('sha256').update(raw).digest('hex'), imagePackage: baseline }
+    }
   }
-  return { managed: false, ownerManaged: true, reason: 'owner-managed' }
+  return ownerManaged()
 }
 
-export function profileState({ profile, source, build, dshHome }) {
-  const own = ownership(profile, source), plugins = installedPlugins(profile)
-  const matchesImage = validBuild(build) && PLUGINS.every(name => plugins[name] === build.plugins[name])
+export function signedProfileReason(own, image, plugins) {
+  if (!own.signed) return null
+  if (compareRelease(image, own.release) < 0 ||
+      (plugins[ADAPTER] !== null && compareRelease(plugins[ADAPTER], image) > 0)) return 'newer-than-image'
+  if (compareRelease(image, own.signed) >= 0) return null
+  const untouched = basePlugins(own).filter(name => !own.signedNames.includes(name))
+  if (untouched.some(name => plugins[name] === null)) return 'missing-plugins'
+  return untouched.every(name => plugins[name] === own.release) ? 'signed-update-ahead' : 'update-required'
+}
+
+export function profileState({ profile, source, build, dshHome, rolledBack = false, updateStore }) {
+  const plugins = installedPlugins(profile)
+  if (!validBuild(build)) return { plugins, followsImage: false, ownerManaged: false, matchesImage: false,
+    reason: 'invalid-image-metadata' }
+  if (updateRecovery(profile, updateStore) === 'recover') {
+    return { plugins, followsImage: false, ownerManaged: false, matchesImage: false, reason: 'self-update-unfinished' }
+  }
+  const own = ownership(profile, source, { updateStore })
+  const base = basePlugins(own)
+  const newerMarker = own.managed && compareRelease(own.release, build.automagik) > 0
+  const matchesImage = !own.signed && !newerMarker && base.length === PLUGINS.length &&
+    PLUGINS.every(name => plugins[name] === build.plugins[name])
   let reason = own.reason
-  if (!validBuild(build)) reason = 'invalid-image-metadata'
+  if (own.managed && rolledBack) reason = 'update-rolled-back'
   else if (own.managed) {
-    const status = readJson(join(dshHome, FOLLOW_STATUS))
-    if (matchesImage) reason = 'matching-image'
-    else if (status?.version === 1 && status.imageVersion === build.automagik && status.packageSha256 === packageHash(profile) && status.result === 'update-rolled-back') reason = 'update-rolled-back'
-    else if (Object.values(plugins).some(v => v === null)) reason = 'missing-plugins'
-    else if (Object.values(plugins).some(v => compareRelease(v, build.automagik) > 0)) reason = 'newer-than-image'
+    const signedReason = signedProfileReason(own, build.automagik, plugins)
+    const path = join(dshHome, FOLLOW_STATUS)
+    const stat = lstatSync(path, { throwIfNoEntry: false })
+    const status = stat?.isFile() ? readJson(path) : undefined
+    if (status?.version === 1 && status.imageVersion === build.automagik &&
+        status.packageSha256 === packageHash(profile) && status.result === 'update-rolled-back') reason = 'update-rolled-back'
+    else if (signedReason) reason = signedReason
+    else if (base.some(name => plugins[name] === null)) reason = 'missing-plugins'
+    else if (newerMarker || Object.values(plugins).some(v => v !== null && compareRelease(v, build.automagik) > 0)) reason = 'newer-than-image'
+    else if (matchesImage) reason = stat && status === undefined ? 'update-rolled-back' : 'matching-image'
     else reason = 'update-required'
   }
-  return { plugins, followsImage: own.managed && matchesImage, ownerManaged: own.ownerManaged, matchesImage, reason }
+  return { plugins, followsImage: reason === 'matching-image', ownerManaged: own.ownerManaged, matchesImage, reason }
 }

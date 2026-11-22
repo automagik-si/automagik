@@ -1,9 +1,10 @@
+import { grantModelFields, grantTeamModels, withGrantHold } from './grants.js'
 // Models. Every Bot runs on one model of its own, fixed when it is created and changed
 // only in its settings or by a Main Bot. The team's first Main Bot has none until the
 // user picks one in its chat. The Session keeps the selection durably.
 import { BlockAssembler, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { cliRoute, leavesCli, piAiRoutes, routeOf } from '../shared/routes.js'
+import { cliRoute, commandCapableAgent, leavesCli, piAiRoutes, routeOf } from '../shared/routes.js'
 import { refusal } from './refusal.js'
 import { normalize, splitRef } from './text.js'
 import { install as installHostModels } from './host-models.js'
@@ -132,10 +133,12 @@ function canRetryPolicy(policy, code, retry) {
 // bypass the agent loop's `agent/request-error` hook, so `dsh-llm-retry` never sees
 // their transport or stream-idle failures. Retry those transient codes on the same
 // route with the provider's own retry policy, discarding partial chunks from failed attempts.
-export async function assembleLlmStream(ctx, options, { signal, backoff, random = Math.random, check } = {}) {
+export async function assembleLlmStream(ctx, options, { signal, backoff, random = Math.random, check, dispatch } = {}) {
   const fused = options.signal && signal ? AbortSignal.any([options.signal, signal]) : (options.signal ?? signal)
   const request = fused === options.signal ? options : { ...options, signal: fused }
   for (let retry = 1; ; retry += 1) {
+    if (dispatch?.prepare !== undefined) await dispatch.prepare()
+    dispatch?.check()
     const assembler = new BlockAssembler()
     let thrown
     try {
@@ -315,17 +318,21 @@ export function install(rt) {
   // A provider's model list can change in DSH settings without any event, so a picker
   // that is about to be used asks for a `fresh` one. Entries for models a Bot uses
   // also carry their `reasoning`, so the picker can offer thinking levels.
-  async function catalog({ fresh = false, remember = true } = {}) {
+  // Auxiliary Bot work without a runner can list API providers without probing
+  // command-capable adapters or changing the owner's catalog cache.
+  async function catalog({ fresh = false, remember = true, noCommands = false } = {}) {
+    const visible = entries => noCommands ? entries.filter(entry => !commandCapableAgent(entry.provider)) : entries
     // Pocket's work can use the existing snapshot. Even a module-local catalog call
     // must leave desktop enumeration, cache population and unblocking to the desktop.
-    if (quiet.getStore() === rt) return cachedCatalog({ held: true }) ?? []
-    if (!fresh && Date.now() - catalogCache.at < CATALOG_TTL_MS && catalogCache.value.length > 0) return answerable(catalogCache.value)
+    if (quiet.getStore() === rt) return visible(cachedCatalog({ held: true }) ?? [])
+    if (!fresh && Date.now() - catalogCache.at < CATALOG_TTL_MS && catalogCache.value.length > 0) return answerable(visible(catalogCache.value))
     const epoch = catalogEpoch
     const listed = []
     let directory = []
     try { directory = ctx.llm.listConfigurableProviders?.() ?? [] } catch {}
     const piAi = piAiRoutes(directory)
     for (const provider of ctx.llm.listProviders()) {
+      if (noCommands && commandCapableAgent(provider.id)) continue
       let models = []
       try { models = await ctx.llm.listModels(provider.id) } catch { continue }
       for (const model of models) {
@@ -369,7 +376,7 @@ export function install(rt) {
     }
     // DSH's own ChatGPT or Claude sign-in: its CLI serves that plan, signed in or not.
     for (const entry of entries) if (coveredBy(entry) !== undefined) entry.covered = true
-    if (remember) {
+    if (remember && !noCommands) {
       noteConnected(entries)
       // A key can arrive without an event, so a provider listed with its key again lifts
       // what its missing key blocked. Catalog reads used to validate a pick stay read-only.
@@ -379,7 +386,7 @@ export function install(rt) {
       const reasoning = await reasoningOf(entry.ref, epoch)
       if (reasoning !== undefined) entry.reasoning = reasoning
     }))
-    if (epoch === catalogEpoch) catalogCache = { at: Date.now(), value: entries }
+    if (epoch === catalogEpoch && !noCommands) catalogCache = { at: Date.now(), value: entries }
     return answerable(entries)
   }
 
@@ -427,7 +434,7 @@ export function install(rt) {
     const own = ordered.filter(entry => entry.provider === first)
     return (own.find(entry => entry.id !== 'default' && entry.superseded !== true) ?? own.find(entry => entry.id !== 'default') ?? own[0])?.ref
   }
-  const defaultModel = async () => pickDefault(await catalog())
+  const defaultModel = async ({ noCommands = false } = {}) => pickDefault(await catalog({ noCommands }))
 
   // The model a create that names none starts on: the team's pick while the catalog
   // still serves it, else the DSH default. A create fixes the ref then, so a later
@@ -451,7 +458,10 @@ export function install(rt) {
     if (typeof chosen === 'string' && aside.some(entry => entry.ref === chosen && !entry.needsKey)) return chosen
     return pickDefault(aside, entry => !entry.needsKey)
   }
-  const backgroundModel = async () => pickBackground(await catalog())
+  const backgroundModel = async (sessionId) => {
+    rt.assertBotRunnerProvider?.(state.prefs?.backgroundModel, sessionId)
+    return pickBackground(await catalog({ noCommands: rt.botRunnerRequired?.(sessionId) }))
+  }
   /** Whether a `provider/model` ref can answer a job beside the chats (not an ACP agent). */
   const answersAsideRef = ref => typeof ref === 'string' && ref.includes('/') && !['acp', 'hermes-remote'].includes(routeOf(ref.split('/')[0]).connectedBy)
 
@@ -545,8 +555,8 @@ export function install(rt) {
   // for a Bot that waits; another model of the same CLI is still taken. `aside`: a call
   // beside the chat that runs no tool (memory.js) keeps the plain rule.
   const stayed = new Set()
-  const plainModel = async (bot) => {
-    const entries = await catalog()
+  const plainModel = async (bot, noCommands) => {
+    const entries = await catalog({ noCommands })
     if (entries.some(entry => entry.ref === bot.model)) return bot.model
     // A fallback is never one that needs a key.
     return entries.some(entry => entry.ref === bot.appliedModel && entry.needsKey !== true) ? bot.appliedModel : pickDefault(entries)
@@ -568,13 +578,13 @@ export function install(rt) {
     return new Set(ids.filter(id => typeof id === 'string' && rt.sessionWide(id, open.get(id)) === true))
   }
   const ownSessions = bot => [rt.chatOf?.(bot.id), ...(rt.groupSessionsOf?.(bot.id) ?? [])]
-  async function desiredModel(bot, { aside = false, sessionId, session } = {}) {
+  async function desiredModel(bot, { aside = false, sessionId, session, noCommands = false } = {}) {
     if (!bot.model || !onDsh(bot)) return undefined
     // A Bot's own chat is moving to a new route: its old part must not be selected, but the
     // fresh part asks with its own Session (freshRoute) and may. A plain fresh-part switch
     // has no target and keeps the old behavior.
     if (sessionId === undefined && rt.switchingChat?.(bot.id)) return undefined
-    const ref = await plainModel(bot)
+    const ref = await plainModel(bot, noCommands)
     if (aside || !offCli(bot, ref)) return ref
     const wide = sessionId !== undefined ? rt.sessionWide?.(sessionId, session) === true : wideAmong(ownSessions(bot)).size > 0
     if (!wide) return ref
@@ -644,6 +654,11 @@ export function install(rt) {
   // prove that an older group Session received the member's thinking level.
   const sessionSelections = new Map()
   function selectSessionModel(sessionId, { provider, model, reasoningEffort }, pocket) {
+    const release = rt.holdGrants?.({ sessionIds: [sessionId] }, () => {
+      const selected = sessionSelections.get(sessionId)
+        ?? ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config
+      return [selected?.provider, selected?.model]
+    })
     const run = selecting.then(async () => {
       pocket?.check()
       rt.assertShellChoice?.(sessionId)
@@ -673,7 +688,38 @@ export function install(rt) {
       return result
     })
     selecting = run.catch(() => {})
+    if (release) void run.then(() => release(false), () => release(true))
     return run
+  }
+
+  async function reselectOwnRoute(agent, check) {
+    await rt.load()
+    const sessionId = agent.session.id
+    if (!rt.isBotSession(sessionId)) return false
+    const bot = rt.botOf(rt.selfOf(sessionId))
+    if (!bot?.model) return false
+    const canSelect = () => modelTargetLive(bot) && !rt.hostOwned?.(bot)
+      && !rt.pickingModel?.(bot.id) && !rt.switchingChat?.(bot.id)
+    if (!canSelect()) return false
+    const { model, effort: savedEffort } = bot
+    const noCommands = rt.botRunnerRequired?.(sessionId, agent) === true
+    const ref = await desiredModel(bot, { sessionId, session: agent.session, noCommands })
+    if (ref === undefined || await keepsCarriedRoute(sessionId, ref)) return false
+    const effort = await desiredEffort(bot, ref)
+    const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
+
+    // The selection queue can already be waiting for this Agent's creation to finish.
+    // Select on the Agent in hand without changing the profile's default model.
+    if (!canSelect() || !rt.isBotSession(sessionId) || rt.selfOf(sessionId) !== bot.id
+      || bot.model !== model || bot.effort !== savedEffort || !check(route)) return false
+    try {
+      rt.assertShellChoice?.(sessionId)
+    } catch {
+      return false
+    }
+    agent.model.select(route)
+    sessionSelections.set(sessionId, route)
+    return true
   }
 
   const sameSelection = (a, b) => a.provider === b.provider && a.model === b.model && a.reasoningEffort === b.reasoningEffort
@@ -746,7 +792,12 @@ export function install(rt) {
 
   // `force` re-selects even when the record says it is applied: the composer's own
   // model picker can move the Session without telling this plugin.
-  async function applyModel(bot, { force = false, modelEntry, checkChoice, selected } = {}) {
+  function applyModel(bot, options) {
+    return withGrantHold(rt, { botId: bot.id }, () => grantModelFields(bot),
+      () => applyModelHeld(bot, options))
+  }
+
+  async function applyModelHeld(bot, { force = false, modelEntry, checkChoice, selected } = {}) {
     const pinned = modelEntry !== undefined
     const expectedChat = pinned ? rt.chatOf(bot.id) : undefined
     const live = () => modelTargetLive(bot) && !rt.switchingChat?.(bot.id)
@@ -852,7 +903,12 @@ export function install(rt) {
   // the catalog from now on, the Bots pinned to it move to what they would be given
   // today, and each of them re-selects even when its record looks applied (`force`):
   // its Session may still be on the route, or on another Bot's route in a group.
-  async function routeRefused(ref, bot) {
+  function routeRefused(ref, bot) {
+    return withGrantHold(rt, { all: true }, () => grantTeamModels(rt),
+      () => routeRefusedHeld(ref, bot))
+  }
+
+  async function routeRefusedHeld(ref, bot) {
     const served = await servedModels(ref)
     if (!refused.has(ref)) {
       refused.set(ref, served)
@@ -873,7 +929,10 @@ export function install(rt) {
 
   const lifetime = new AbortController()
   ctx.effect?.(() => () => { lifetime.abort() }, 'ds-bot: auxiliary llm retry')
-  const assembleLlm = (options, { check } = {}) => assembleLlmStream(ctx, options, { signal: lifetime.signal, backoff: rt.config?.llmRetryBackoff, check })
+  const assembleLlm = async (options, { check, dispatch } = {}) => {
+    rt.assertBotRunnerProvider?.(options.provider, options.sessionId)
+    return assembleLlmStream(ctx, options, { signal: lifetime.signal, backoff: rt.config?.llmRetryBackoff, check, dispatch })
+  }
 
   Object.assign(rt, {
     assembleLlm,
@@ -881,7 +940,7 @@ export function install(rt) {
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
     defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
-    selectSessionModel, keepsCarriedRoute, applyModel, waitForModel, syncModels, routeRefused,
+    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, applyModel, waitForModel, syncModels, routeRefused,
     dropCatalog: () => { catalogCache = { at: 0, value: [] } },
   })
 }

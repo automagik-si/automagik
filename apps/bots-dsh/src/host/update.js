@@ -6,6 +6,9 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { refusal } from './refusal.js'
 import { join } from 'node:path'
 import { inDesktopApp, inUnfoldInstance } from './constants.js'
+import { cleanVersion } from './supervisor/records.js'
+
+export { cleanVersion } from './supervisor/records.js'
 
 const PKG = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 export const OFFICIAL_REGISTRY = 'https://registry.npmjs.org/'
@@ -15,11 +18,6 @@ export const CHECK_TTL_MS = 10 * 60_000
 export const FETCH_TIMEOUT_MS = 8000
 // The first check waits until the host has settled its own start.
 const STARTUP_DELAY_MS = 15_000
-const VERSION = /^v?(\d+\.\d+\.\d+(?:-[\w.]+)?)(?:\+[\w.]+)?$/
-
-/** A release version without its `v` and build metadata, or null. */
-export const cleanVersion = value => VERSION.exec(String(value ?? '').trim())?.[1] ?? null
-
 /** Whether version `a` is newer than `b` (semver order, prereleases before their release). */
 export function newer(a, b) {
   const parse = (value) => {
@@ -72,13 +70,14 @@ export const fetchJson = async (url, headers = {}) => {
 
 // The registries the plugin manager installs from, in its order: its configured
 // first one (else pnpm's own), then the fallbacks, unless that first one is private.
-export async function registryPlan(config, manager) {
+export async function registryPlan(config, manager, fallback = () => OFFICIAL_REGISTRY) {
   if (typeof config.updateRegistry === 'string' && config.updateRegistry !== '') return [normalizeRegistry(config.updateRegistry)]
-  const configured = await Promise.resolve(manager?.registries?.()).catch(() => null)
-  if (!configured) return [OFFICIAL_REGISTRY, MIRROR_REGISTRY]
+  let configured
+  try { configured = await manager?.registries?.() } catch { /* Older managers may not report a registry. */ }
+  if (!configured) return [fallback(), MIRROR_REGISTRY]
   const fallbacks = (configured.fallbackRegistries ?? []).map(normalizeRegistry)
   const own = configured.resolved ? normalizeRegistry(configured.resolved) : null
-  const first = configured.registry ? normalizeRegistry(configured.registry) : own ?? OFFICIAL_REGISTRY
+  const first = configured.registry ? normalizeRegistry(configured.registry) : own ?? fallback()
   const isPublic = first === OFFICIAL_REGISTRY || fallbacks.includes(first)
   return isPublic ? [...new Set([first, ...fallbacks])] : [first]
 }

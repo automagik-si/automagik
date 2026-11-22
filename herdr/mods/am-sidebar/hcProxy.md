@@ -38,6 +38,10 @@ remain outside this work.
 After the remaining slices land, the captain can roll out one bot at a time from an ordinary
 terminal on the computer running that bot:
 
+0. Before the first opt-in, record the computer's name, its privileged socket folders and its
+   container services (RFC 0044 Q2a). Accept `tcp://` or `ssh://` container hosts only if none is
+   reachable through the relay. Accept sockets created after launch only if no privileged
+   socket folder is visible in the pane. Record both decisions and proceed only if both conditions hold.
 1. Run `am dsh-tui update`, then `am dsh-tui doctor`.
    Install and update refresh the stable helper, proxy, guard and wrapper together. Doctor
    checks the stable execution copy and managed profile row without changing either.
@@ -47,17 +51,21 @@ terminal on the computer running that bot:
    while install checks still print. A missing proxy is reported down; doctor never starts a core,
    proxy or pane. Install and update preserve every saved switch, including an absent value.
 2. Run `am edit <bot> --hc-proxy on`, then
-   `am proxy approve --project <project>`. Review the printed roster diff,
-   including the switch change. A **roster change needs a pane restart** after approval.
+   `am proxy approve --project <project>`. Review the preview, including the switch change,
+   then run the printed command with `--confirm <digest>`. A **roster change needs a pane restart** after approval.
    After a re-approval, every worker start from an approved pane is refused until that pane
    restarts, including dsh-tui helper workers. Restart before asking the pane to start workers.
 3. Run `am restart <bot>`. Check that bot before opting in the next.
 4. To roll back, run `am edit <bot> --hc-proxy off`, then
-   `am proxy approve --project <project>` (review the diff), then
-   `am restart <bot>`. With a valid approved-on record, off without approval
+   `am proxy approve --project <project>`. Review the preview and run the printed command
+   with `--confirm <digest>`, then run `am restart <bot>`. With a valid approved-on record, off without approval
    keeps the pane proxied; the invalid-record exception above starts plain with a warning.
    Existing workers keep their launch until restarted;
    end and relaunch any workers that also need rollback.
+
+A local start on macOS ignores the switch and starts plain, with no pack mask yet (RFC 0044 §F).
+While that bot's approved record is valid and on, `am dsh-tui doctor --project <project>` warns for
+it. Step 4's edit, preview and confirmation, each with `--project <project>`, clear the warning.
 
 Linked starts and restarts check the target platform first. Non-Linux ignores the switch.
 On Linux they read the target's approved record and refuse an unapproved opt-in; approved on
@@ -103,9 +111,9 @@ is refused with the named error before the folder or socket exists.
 
 ## What it speaks
 
-Plain-mode JSON-RPC 2.0, one message per line, exactly hc 0.1.14. It opens **one upstream
-connection per downstream client connection**, so one client's long `terminal.wait` cannot block
-another's read. `hello` is refused, so the connection never switches to framed mode and
+Plain-mode JSON-RPC 2.0, one message per line, for hc 0.1.14 and 0.1.21. It opens **one
+upstream connection per downstream client connection** for forwarding, so one client's long
+`terminal.wait` cannot block another's read. `hello` is refused, so the connection never switches to framed mode and
 `terminal.attach` is unreachable. Every reply line is capped at 2 MiB and `terminal.read` is
 capped at 5,000 lines: a 6 MiB read is a clear `hc-proxy:` error, never a buffered line. A
 request line is capped at 256 KiB. A pane socket accepts at most 16 client connections at once;
@@ -114,7 +122,7 @@ or a `send` with `wait`, keeps it alive); a forwarded call other than those is a
 error after 30 seconds.
 
 `params.caller` is always overwritten with the pane's terminal id, fixed at start. A caller the
-client supplies is never forwarded. Every allowed call is resolved first with one short
+client supplies is never forwarded. A targeted call is resolved first with one short
 `terminal.get`, checked against the policy, then forwarded by the **resolved address**; terminal
 ids are never reused, so a rename between the check and the call cannot redirect it.
 
@@ -122,13 +130,14 @@ ids are never reused, so a rename between the check and the call cannot redirect
 
 | Method | Rule |
 |---|---|
-| `terminal.list` | the caller's own pane and every terminal it may type into (the `terminal.send` rule): its team graph, its own workers and the shared review roles. Other teams' panes and every linked-machine row are left out, and the `machines` inventory is empty: a sandboxed bot can reach no machine target, so no machine is named |
+| `terminal.list` | the caller's own pane plus the local send set (the `terminal.send` rule below): its team graph, its own workers and every recipient the shared-role widening allows, by the recipient's role or the caller's, which may belong to another team. Every linked-machine row and every row without a local address is left out, and the `machines` inventory is empty: a sandboxed bot can reach no machine target, so no machine is named |
 | `terminal.get`, `terminal.read`, `terminal.wait` | the caller itself, hcGuard's `teamOf` graph, and its own workers |
 | `terminal.send` | the same, plus hcGuard's shared send rules: pm/integrator/fixer callers may send to any listed bot; captain callers may send to other captains; tester/reviewer/fixer targets serve every squad. Ranks come from the approved roster. Workers inherit no caller-rank widening |
 | `terminal.kill`, `terminal.rm` | a bot caller's **own workers only**: the target's `parent` is the caller's pane, or its `worker.of` is the caller's bot |
 | `terminal.label` | the same own-worker rule, plus a caller (bot or worker) may set or clear `automagik-herdr.needs-owner` on its own pane |
 | `terminal.run` | the helper shape, or the exact approved template/agent shape below; bound bot panes only |
 | `templates.list` | only the approved worker template, with its metadata unchanged |
+| `proxy.status` | local status for any pane: protocol `v: 1`, its `terminal`, and the verified core `version`; no params or upstream call |
 | `proxy.workerTransport` | local transport identification for the wrapper's verified bot pane; never forwarded |
 
 The guard and proxy use the same shared send check. Tester targets require a roster rank;
@@ -137,15 +146,20 @@ Both ranks for captain-to-captain sends come from the roster, never `role=captai
 These rules widen only sends; get/read/wait keep the same team graph.
 
 `terminal.list` is filtered rather than refused (#628): the request reaches the core unchanged, and
-the reply keeps only the rows the caller may type into, plus its own pane. It is the list a
-sandboxed bot's `hc ls` sees, so another team's panes are never named there and `hc send <name>`
-can only resolve a name it may type into. A linked machine's pane is never kept, whatever its
+the reply keeps the caller's own pane plus the rows the send check above passes: its own
+workers, its team graph and the recipients the shared-role widening allows (by the
+recipient's role or the caller's), which may belong to another team. It is the list a
+sandboxed bot's `hc ls` sees, so `hc send <name>` can only resolve a name it may type into.
+Each kept row passes as the core answered it, nested fields included: only the reply's
+envelope below is reviewed, and a rule for the fields inside a row is a separate decision.
+A row without a local address is dropped. A linked machine's pane is never kept, whatever its
 labels say: this proxy refuses every machine address on every forwarded verb, so a sandboxed bot
 can neither read nor type into one, and naming it would only leak another team's pane or the
 machine. For the same reason the reply's `machines` inventory is emptied: a machine's name and
-target are not information this pane can use. The remaining fields (`hidden_finished`) are kept
-as the core answered them; an error reply never carries rows, and a reply that cannot be read is
-a `hc-proxy:` error, never the unfiltered rows.
+target are not information this pane can use. The success result contains only `terminals`,
+the numeric `hidden_finished` count as answered, and `machines: []` when the core included
+`machines`. The reply keeps `jsonrpc`, `id`, and either the filtered `result` or the core's
+`error`. A malformed or uncorrelated reply returns a correlated `hc-proxy:` error.
 
 A worker start needs `--bg`, `parent` = the caller, `cwd` under the caller's project
 `.claude/worktrees/`, `worker.of` = the caller's bot, only the worker labels, and this argv:
@@ -163,8 +177,13 @@ read-only (covering the stable folder and `approved/`), so its guard, helper and
 be rewritten. Any other guard is refused inside the writable project and app home. Only a
 bound bot pane (the helper's seat, or a by-hand ledger row) starts a worker.
 
-`terminal.send` keeps hc's `force`, `if` and `timeout`; `force` only skips the busy wait, and the
-target is still team-scoped.
+`terminal.send` forwards an absent `force` or the CLI's explicit `force: false` as sent.
+It refuses `force: true`, which types past a blocked dialog, and rejects other values as
+malformed. The `if` and `timeout` parameters retain their usual meaning.
+
+`terminal.wait --children any|all` always waits on the caller's own children. The proxy
+discards any supplied target in those modes. An absent or null `children` uses normal
+target resolution, and any other value is refused.
 
 Everything else is refused with a JSON-RPC error whose message starts `hc-proxy: `, including
 `terminal.put`, `terminal.keys`, `terminal.attach`, `terminal.interrupt`, `terminal.keep`,
@@ -280,16 +299,16 @@ writable tree**:
 
 The record lives outside the project and the app home; the sandbox row binds the whole data root
 read-only once, so every stable file and every approved record is reachable but not writable
-inside a sandbox. `am proxy approve --project <dir>` is the only writer: it reads
-the working roster, prints the diff against the previous record (bots added/removed,
-rank/lead/kind changes), then writes the new record. `dsh-tui install` never approves.
+inside a sandbox. `am proxy approve --project <dir>` previews the working roster and prints
+the diff against the previous record. After reviewing it, run the printed command with
+`--confirm <digest>` to write the record for those exact bytes. `dsh-tui install` never approves.
 Only `proxy approve` and a proxied start check the approved data root. Plain `dsh-tui`
 install/check keeps its stable execution root checks without validating approval storage.
 
 A working-tree roster that differs from the record **warns once and still starts**, naming
 `am proxy approve`; the approved roster stays in force. A missing record **refuses**
 a proxied pane. **A roster change therefore needs a pane restart**, after
-`am proxy approve`: the helper starts the proxy before DSH, so the new pane's proxy
+`am proxy approve --project <dir> --confirm <digest>`. The helper starts the proxy before DSH, so the new pane's proxy
 reads the newly approved record, and
 nothing in the old sandbox can write it first. The proxy's own socket folder is outside both
 trees: `$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock`, not under the app home.
@@ -299,11 +318,13 @@ the enablement: it still reads the attach ledger, `<app home>/automagik-herdr/at
 (`modeProblem` still refuses a group- or world-writable ledger), and the working
 `.herdr/bots.json` (the team graph via `teamOf`). An explicit caller never opens the ledger.
 
-## Version pin and fail-closed behaviour
+## Supported versions and fail-closed behaviour
 
-At start the proxy calls `server.status`; the core must answer `version: "0.1.14"` (the box's
-core, hc 0.1.14), or the proxy refuses to start. One constant names it: `HC_PIN` in
-`hcProxy.mjs`. The wslc image's separate 0.1.18 pin is a separate note, not this pin.
+At start the proxy checks `server.status` against `HC_SUPPORTED` in `hcProxy.mjs`: the exact
+strings `0.1.14` and `0.1.21`. Each new upstream connection checks `server.status` again before
+sending a lookup or forwarded call. The check has a deadline even for a long wait. A missing,
+malformed, stalled, or different version reply stops the proxy and its pane. The wslc image
+has its own 0.1.18 pin.
 
 A dead or vanished upstream is a JSON-RPC error on every call; it never falls back to another
 socket or to a locally started core. `hc` auto-starts a core when it cannot connect, so a pane
@@ -319,13 +340,13 @@ made the approved snapshot authoritative for the per-bot switch. C2b-2 adds the 
 allowance above. Every switch stays off in this preparation.
 
 Residual, recorded for the person who approves: a sandboxed bot can ask an in-team unsandboxed
-pane to run `am proxy approve`. The printed diff is the check, and approving is the
-person's act. The record is outside the sandbox; the command that writes it is not automatically
+pane to run `am proxy approve`. The preview is the check, and running `--confirm <digest>`
+is the person's act. The record is outside the sandbox; the command that writes it is not automatically
 trusted because it ran in an unsandboxed pane.
 
 C2c coordinates the later sandbox profile change and mask review. This slice changes neither.
 
-## Limits and the real hc 0.1.14 params
+## Limits and the hc wire parameters
 
 The proxy trusts any same-uid client (Node cannot check peer credentials); the 0700 folder and
 0600 socket are the only access control, and every pane has its own folder.
@@ -335,7 +356,9 @@ The proxy trusts any same-uid client (Node cannot check peer credentials); the 0
 `die_with_parent`, `env`, `keep`, `labels`, `name`, `no_notify`, `no_parent`, `outlive_parent`,
 `parent`, `rm`, `timeout` and `wait`. `--json` is CLI output only and is not an RPC member, so
 there is no `json` gap; `line` and `on` are listed by the schema but the proxy refuses them by
-design, as the worker shape. The `terminal.list` caller refusal stays as it is.
+design, as the worker shape. The 0.1.21 API also has `size` and `display`. They are marked
+`#[arg(skip)]` and omitted by the CLI, and the proxy refuses them. The `terminal.list`
+caller refusal stays as it is.
 
 ## What a filesystem mask cannot do
 

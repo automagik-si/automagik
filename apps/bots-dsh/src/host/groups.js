@@ -16,6 +16,7 @@
 // it started, or that is called while still at earlier work, lets the round go on. Its
 // turn keeps running in its group Session, and what it ends with is posted to the group,
 // where the member that asked for it answers.
+import { isBotGroupPost, NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
@@ -98,7 +99,7 @@ const goalNotice = (line) => {
     default: return line.text ?? ''
   }
 }
-const noticeText = (line) => {
+export const noticeText = (line) => {
   if (line.reason === 'missed') return `${(line.names ?? []).join(' and ')} did not answer within ${line.minutes} minutes, so this round moved on without it. If it is still working, it posts its result later as a late reply; if it is urgent, the user can write here or the admin can follow up.`
   if (line.reason === 'paused' && line.idle && (line.names ?? []).length === 0) return `Paused: Bots here posted ${line.limit} status updates with no new work (no tool used, nobody called), the last from ${line.from ?? 'a member'}. The group answers no more of them until the user writes here; do not post again to start a round.`
   if (line.reason === 'paused' && line.idle) return `Paused: ${[line.from, ...(line.names ?? [])].filter(Boolean).join(' and ')} went back and forth ${line.limit} times without progress (no tool used, only thanks or repeats). The calls to @${(line.names ?? []).join(' and @')} wait until the user writes here; do not call them again.`
@@ -112,6 +113,7 @@ const noticeText = (line) => {
 // `text` is what to show of a message line, by default what the log keeps of it.
 export const lineText = (line, text = line.text) => {
   if (line.kind === 'lookup') return `[${speakerOf(line)} looked up its own chat${line.text ? ` for "${line.text}"` : ''}]`
+  if (line.kind === 'resumed' && line.resumedByUpdate) return `[An Automagik update stopped ${speakerOf(line)}'s work here. It is picking it back up and posts when done]`
   if (line.kind === 'resumed') return `[${speakerOf(line)}'s work here was cut off when DeepSeek Harness restarted; it is picking it back up and posts when done]`
   if (line.kind === 'cut') return `[${speakerOf(line)}'s work here was cut off by a restart again, so it stopped; ask it to go on if it still matters]`
   if (line.kind === 'stopped') return `[The user stopped ${speakerOf(line)}'s work here]`
@@ -193,6 +195,16 @@ const ROOM_READ_MAX = 30
 // reports a corrupt log only in the message of a generic failure.
 const lostSession = error => error?.code === 'session/not-found' || /\bis corrupt\b|\bcorrupt session log\b/i.test(String(error?.message ?? ''))
 const fileLine = file => `[File "${file.name}" (${file.bytes} bytes) attached]`
+const captionOf = ({ text, excerpt }) => ({ caption: excerpt ?? text ?? '', ...(excerpt !== undefined ? { captionCut: true } : {}) })
+const isPhoneRequest = id => typeof id === 'string' && id.startsWith('pocket-')
+const unknownSpeaker = line => line.kind === undefined && line.botId === undefined && line.who !== undefined && line.who !== 'User'
+const sameSpeaker = (a, b) => ['botId', 'about', 'kind', 'reason'].every(key => a[key] === b[key])
+const sameGeneration = (a, b) => a.epoch === b.epoch && a.term === b.term
+const withoutPocketFields = (line) => {
+  if (!Object.hasOwn(line, 'caption') && !Object.hasOwn(line, 'captionCut') && !Object.hasOwn(line, 'requestId')) return line
+  const { caption, captionCut, requestId, ...kept } = line
+  return kept
+}
 
 export function install(rt) {
   const { ctx, state } = rt
@@ -207,6 +219,7 @@ export function install(rt) {
   // A group's book starts from what groups kept before the ledger: the room's log, the
   // whole text of its long lines (group-lines), and its own log of whole lines (group-logs).
   const oldLogName = id => (/^[\w-]{1,128}$/.test(id) ? id : createHash('sha256').update(String(id)).digest('hex').slice(0, 32))
+  const oldLog = id => parseBook(readFileSync(join(rt.home, 'group-logs', `${oldLogName(id)}.jsonl`), 'utf8'))
   rt.ledger.importer('group-', (book) => {
     const roomId = book.slice('group-'.length)
     const lines = new Map()
@@ -220,7 +233,7 @@ export function install(rt) {
       lines.set(line.seq, { ...rest, ...(text === undefined ? {} : { text }) })
     }
     try {
-      for (const line of parseBook(readFileSync(join(rt.home, 'group-logs', `${oldLogName(roomId)}.jsonl`), 'utf8'))) {
+      for (const line of oldLog(roomId)) {
         if (Number.isInteger(line.seq)) lines.set(line.seq, line)
       }
     } catch { /* no log of its own yet */ }
@@ -232,20 +245,86 @@ export function install(rt) {
   // the room's count on, so no number is used twice. What was said before a room had a
   // place for the chat to start from was shown already.
   const reconciled = new WeakSet()
-  const ensureRoomLog = (room) => {
+  const ensureRoomLog = (room, { force = false } = {}) => {
     if (typeof room.seq !== 'number') {
       room.log = (room.log ?? []).map((line, index) => ({ ...line, seq: index + 1 }))
       room.seq = room.log.length
     }
     room.seen ??= {}
-    if (!reconciled.has(room)) {
+    if (force || !reconciled.has(room)) {
       reconciled.add(room)
-      const ahead = rt.ledger.after(bookOf(room.id), room.seq)
+      const book = bookOf(room.id)
+      const ahead = rt.ledger.after(book, room.seq)
+      reconcileLegacy(room, book)
       if (ahead.length > 0) {
         room.seq = Math.max(room.seq, ...ahead.map(record => record.seq))
         room.log = [...room.log, ...ahead.filter(memberLine).map(record => cutLine(record))].slice(-ROOM_LOG_MAX)
       }
     }
+  }
+
+  // Keep the evidence even after the room's short log has turned over.
+  function reconcileLegacy(room, book) {
+    let older = []
+    try { older = oldLog(room.id) } catch (error) {
+      if (error?.code !== 'ENOENT') room.legacyUnproven = true
+    }
+    const speakers = new Set(room.legacySpeakers)
+    const bySeq = new Map()
+    for (const line of [...room.log ?? [], ...older]) {
+      if (!Number.isInteger(line?.seq)) continue
+      const prior = bySeq.get(line.seq)
+      const kept = rt.ledger.record(book, line.seq)
+      if (unknownSpeaker(line) || (prior !== undefined && !sameSpeaker(prior, line))
+        || (kept !== undefined && !sameSpeaker(kept, line))) room.legacyUnproven = true
+      if (kept === undefined) {
+        if (typeof line.botId === 'string') speakers.add(line.botId)
+        if (typeof line.about === 'string') speakers.add(line.about)
+      }
+      bySeq.set(line.seq, line)
+    }
+    if (speakers.size > 0) room.legacySpeakers = [...speakers]
+  }
+
+  const histories = new Map()
+  function note(history, line) {
+    if (typeof line.botId === 'string') history.speakers.add(line.botId)
+    if (typeof line.about === 'string') history.speakers.add(line.about)
+    if (isPhoneRequest(line.requestId)) history.requests.add(line.requestId)
+    if (line.kind === 'notice' && line.reason === 'folder') history.folderNotice = true
+    if (unknownSpeaker(line)) history.ok = false
+  }
+
+  async function roomHistory(room) {
+    const gen = rt.teamGeneration()
+    const cached = histories.get(room.id)
+    if (cached?.room === room && sameGeneration(cached.gen, gen)) return cached.ready
+    const history = { room, gen, ok: true, speakers: new Set(), requests: new Set(), folderNotice: false }
+    histories.set(room.id, history)
+    history.ready = (async () => {
+      const book = bookOf(room.id)
+      const fresh = await rt.ledger.refresh(book)
+      if (rt.roomOf(room.id) !== room) return { ok: false, gone: true }
+      if (!fresh || !sameGeneration(gen, rt.teamGeneration())) return { ok: false }
+      ensureRoomLog(room, { force: true })
+      for (const line of rt.ledger.records(book)) {
+        if (Number.isInteger(line.seq)) note(history, line)
+      }
+      for (const id of room.legacySpeakers ?? []) history.speakers.add(id)
+      if (room.legacyUnproven === true) history.ok = false
+      return Object.freeze({
+        get ok() { return history.ok },
+        get speakers() { return new Set(history.speakers) },
+        get requests() { return new Set(history.requests) },
+        get folderNotice() { return history.folderNotice },
+      })
+    })()
+    return history.ready
+  }
+
+  function noteLine(room, record) {
+    const history = histories.get(room.id)
+    if (history?.room === room && sameGeneration(history.gen, rt.teamGeneration())) note(history, record)
   }
 
   // What a member reads of a line: all of it, up to GROUP_LINE_READ.
@@ -258,8 +337,9 @@ export function install(rt) {
 
   // The start of a line for the room's log; the book has it whole.
   const cutLine = (line, text = line.text ?? '') => {
+    const fields = withoutPocketFields(line)
     const kept = headOf(text, TEXT_KEPT)
-    return kept.length === text.length ? line : { ...line, text: kept, length: text.length }
+    return kept.length === text.length ? fields : { ...fields, text: kept, length: text.length }
   }
   // A team from before the ledger cuts its long lines once its book has them whole.
   function keepGroupLine(roomId, line, text) {
@@ -268,6 +348,7 @@ export function install(rt) {
   }
 
   function dropGroupLines(roomId) {
+    histories.delete(roomId)
     rt.ledger.drop(bookOf(roomId))
     if (!writes()) return
     void rm(join(rt.home, 'group-lines', roomId), { recursive: true, force: true }).catch(() => {})
@@ -282,7 +363,8 @@ export function install(rt) {
     room.seq += 1
     const record = { ...line, seq: room.seq, time: line.time ?? Date.now() }
     rt.ledger.append(bookOf(room.id), record)
-    // The phone link hears every line the chat will draw (mobile.js).
+    noteLine(room, record)
+    // Pocket hears every line the group chat will draw.
     rt.roomLineAdded?.(room, record)
     if (!memberLine(record)) return record
     room.log = [...room.log, cutLine(record)].slice(-ROOM_LOG_MAX)
@@ -305,7 +387,8 @@ export function install(rt) {
     }
     if (record.kind === 'lookup') return { kind: 'lookup', ...who, text: record.text, time }
     if (record.kind === 'permission-stop') return { kind: 'permission-stop', ...who, why: record.why, count: record.count, time }
-    if (record.kind !== 'notice') return { kind: record.kind, ...who, time }
+    if (record.kind !== 'notice') return { kind: record.kind, ...who, time,
+      ...(record.resumedByUpdate ? { resumedByUpdate: true } : {}) }
     switch (record.reason) {
       case 'failed': return { kind: 'failed', ...who, code: record.code, ...(record.status ? { status: record.status } : {}), text: record.message ?? record.detail, time }
       case 'missed': return { kind: 'missed', ...who, time }
@@ -313,7 +396,7 @@ export function install(rt) {
       case 'paused': return { kind: 'paused', idle: record.idle, ...who, name: bot?.name ?? record.from, count: record.count ?? record.limit, limit: record.limit, names: record.names, time }
       case 'folder': return { kind: 'folder', text: noticeText(record), time }
       case 'goal': {
-        const { who: _who, kind: _kind, reason: _reason, seq: _seq, time: _time, about: _about, ...fields } = record
+        const { who: _who, kind: _kind, reason: _reason, seq: _seq, time: _time, about: _about, ...fields } = withoutPocketFields(record)
         return { kind: 'goal', ...fields, time }
       }
       default: return undefined
@@ -343,19 +426,19 @@ export function install(rt) {
   const groupRows = (roomId, from, to, anchor) => rowsView(roomId, from, to, anchor).rows
 
   Object.assign(rt, {
-    keepGroupLine, dropGroupLines, groupRows, groupRowsView: rowsView,
+    keepGroupLine, dropGroupLines, groupRows, groupRowsView: rowsView, roomHistory,
     logRoom: (room, line) => say(room, line),
     onRoomLine: (listener) => {
       roomLineListeners.add(listener)
       return () => roomLineListeners.delete(listener)
     },
     // The group's own log, for the memory review and read_group_chat: every line, whole.
-    groupLinesAfter: async (roomId, since) => rt.ledger.after(bookOf(roomId), since).filter(memberLine),
+    groupLinesAfter: async (roomId, since) => rt.ledger.after(bookOf(roomId), since).filter(memberLine).map(withoutPocketFields),
     groupLine: async (roomId, seq) => {
       const record = rt.ledger.record(bookOf(roomId), seq)
-      return memberLine(record) ? record : undefined
+      return memberLine(record) ? withoutPocketFields(record) : undefined
     },
-    searchGroupLog: async (roomId, query) => rt.ledger.search(bookOf(roomId), query).filter(memberLine),
+    searchGroupLog: async (roomId, query) => rt.ledger.search(bookOf(roomId), query).filter(memberLine).map(withoutPocketFields),
   })
 
   // The folder a group was set to work in is gone: its members' Sessions move on in
@@ -382,84 +465,91 @@ export function install(rt) {
   // a fresh look at the log and a brief of the member's own chat; the brief is the
   // first message, so it stays fixed and the prefix stays cacheable.
   async function groupSessionFor(room, member) {
-    rt.assertShellChoice?.(undefined, member.id)
-    room.sessions ??= {}
-    const known = room.sessions[member.id]
-    if (known !== undefined) {
-      await rt.ensureCapabilities(known)
-      return { id: known, brief: undefined }
-    }
-    // A saved level DSH no longer offers refuses the member's first turn here before a
-    // Session is made for it.
-    rt.assertLevelOffered?.(room.permission ?? member.permission)
-    const id = await rt.createSession(`${member.name} · ${room.name}`, {
-      dir: rt.workDirOf({ botId: member.id, roomId: room.id }), group: true, botId: member.id,
-      readScopeSource: rt.sessionOfRoom(room), ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}),
-    })
-    // Its level first, before the Session is the member's: one whose level did not hold is
-    // not kept, so the member takes no turn on it and its next turn here makes another.
+    const leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      await rt.applyPermission(member, id, room, undefined, { start: true })
-    } catch (error) {
-      void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
-        .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
-      throw error
-    }
-    // While the Session was made the member may have left or been deleted, the group been
-    // deleted, or another turn made the member's Session first: the new one is not kept.
-    // Undefined means the member is gone from the group.
-    const gone = rt.roomOf(room.id) !== room || !room.members.includes(member.id) || rt.botOf(member.id) === undefined
-    if (gone || room.sessions?.[member.id] !== undefined) {
-      void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
-        .catch(error => rt.warn('omni-ui: unused group Session of %s in %s not archived: %s', member.name, room.name, error))
-      return gone ? undefined : groupSessionFor(room, member)
-    }
-    room.sessions[member.id] = id
-    rt.groupOwners.set(id, { botId: member.id, roomId: room.id })
-    // Once more now that a change of level reaches it: one picked while the first apply
-    // ran went only to the Sessions the group had then.
-    try {
-      await rt.applyPermission(member, id, room, undefined, { start: true })
-      // At Full access with the member's coding CLI not served: not started on another model.
-      await rt.assertNotOffCli(member, id)
-    } catch (error) {
-      if (room.sessions[member.id] === id) delete room.sessions[member.id]
-      rt.groupOwners.delete(id)
-      void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
-        .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
-      throw error
-    }
-    // The Session is mapped to its member now, so its Bot is known: the deny list lands
-    // before the first turn here, not on the next resolve.
-    await rt.applyToolDeny(member, [id])
-      .catch(error => rt.warn('ds-bot: tool deny for %s in %s not applied: %s', member.name, room.name, error?.message ?? error))
-    delete room.seen[member.id]
-    const ref = await rt.desiredModel(member, { sessionId: id })
-    if (ref !== undefined) {
-      const effort = await rt.desiredEffort(member, ref)
+      rt.assertShellChoice?.(undefined, member.id)
+      room.sessions ??= {}
+      const known = room.sessions[member.id]
+      if (known !== undefined) {
+        await rt.ensureCapabilities(known)
+        return { id: known, brief: undefined }
+      }
+      rt.assertBotRunnerProvider?.(member.model, rt.chatOf(member.id))
+      // A saved level DSH no longer offers refuses the member's first turn here before a
+      // Session is made for it.
+      rt.assertLevelOffered?.(room.permission ?? member.permission)
+      const id = await rt.createSession(`${member.name} · ${room.name}`, {
+        dir: rt.workDirOf({ botId: member.id, roomId: room.id }), group: true, botId: member.id,
+        readScopeSource: rt.sessionOfRoom(room), ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}),
+      })
+      // Its level first, before the Session is the member's: one whose level did not hold is
+      // not kept, so the member takes no turn on it and its next turn here makes another.
       try {
-        await rt.selectSessionModel(id, { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) })
+        await rt.applyPermission(member, id, room, undefined, { start: true })
       } catch (error) {
-        rt.warn('ds-bot: model for %s in %s not applied: %s', member.name, room.name, error)
-        // The Session is still on the model DSH made it with. At Full access with the member
-        // on a coding CLI it is not kept, as one whose level did not hold is not (above).
+        void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+          .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
+        throw error
+      }
+      // While the Session was made the member may have left or been deleted, the group been
+      // deleted, or another turn made the member's Session first: the new one is not kept.
+      // Undefined means the member is gone from the group.
+      const gone = rt.roomOf(room.id) !== room || !room.members.includes(member.id) || rt.botOf(member.id) === undefined
+      if (gone || room.sessions?.[member.id] !== undefined) {
+        void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+          .catch(error => rt.warn('omni-ui: unused group Session of %s in %s not archived: %s', member.name, room.name, error))
+        return gone ? undefined : await groupSessionFor(room, member)
+      }
+      room.sessions[member.id] = id
+      rt.groupOwners.set(id, { botId: member.id, roomId: room.id })
+      // Once more now that a change of level reaches it: one picked while the first apply
+      // ran went only to the Sessions the group had then.
+      try {
+        await rt.applyPermission(member, id, room, undefined, { start: true })
+        // At Full access with the member's coding CLI not served: not started on another model.
+        await rt.assertNotOffCli(member, id)
+      } catch (error) {
+        if (room.sessions[member.id] === id) delete room.sessions[member.id]
+        rt.endGrants?.(id, 'group')
+        rt.groupOwners.delete(id)
+        void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+          .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
+        throw error
+      }
+      // The Session is mapped to its member now, so its Bot is known: the deny list lands
+      // before the first turn here, not on the next resolve.
+      await rt.applyToolDeny(member, [id])
+        .catch(error => rt.warn('ds-bot: tool deny for %s in %s not applied: %s', member.name, room.name, error?.message ?? error))
+      delete room.seen[member.id]
+      const ref = await rt.desiredModel(member, { sessionId: id, noCommands: rt.botRunnerRequired?.(id) })
+      if (ref !== undefined) {
+        rt.assertBotRunnerProvider?.(ref, id)
+        const effort = await rt.desiredEffort(member, ref)
         try {
-          await rt.assertNotOffCli(member, id, undefined, { unselected: true })
-        } catch (refused) {
-          if (room.sessions[member.id] === id) delete room.sessions[member.id]
-          rt.groupOwners.delete(id)
-          void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
-            .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
-          throw refused
+          await rt.selectSessionModel(id, { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) })
+        } catch (error) {
+          rt.warn('ds-bot: model for %s in %s not applied: %s', member.name, room.name, error)
+          // The Session is still on the model DSH made it with. At Full access with the member
+          // on a coding CLI it is not kept, as one whose level did not hold is not (above).
+          try {
+            await rt.assertNotOffCli(member, id, undefined, { unselected: true })
+          } catch (refused) {
+            if (room.sessions[member.id] === id) delete room.sessions[member.id]
+            rt.endGrants?.(id, 'group')
+            rt.groupOwners.delete(id)
+            void ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+              .catch(failure => rt.warn('ds-bot: unused group Session of %s in %s not archived: %s', member.name, room.name, failure))
+            throw refused
+          }
         }
       }
-    }
-    await rt.save()
-    // The Session was resolved before the group owned it, so its scoped tools land now.
-    await rt.resolveAgent(id)
-      .catch(error => rt.warn('omni-ui: scoped tools for %s in %s not applied: %s', member.name, room.name, error))
-    await rt.ensureCapabilities(id)
-    return { id, brief: await rt.ownChatBrief(member) }
+      await rt.save()
+      // The Session was resolved before the group owned it, so its scoped tools land now.
+      await rt.resolveAgent(id)
+        .catch(error => rt.warn('omni-ui: scoped tools for %s in %s not applied: %s', member.name, room.name, error))
+      await rt.ensureCapabilities(id)
+      return { id, brief: await rt.ownChatBrief(member) }
+    } finally { leave() }
   }
 
   // Lines from before the round's opening message are kept apart from this round, so
@@ -802,7 +892,7 @@ export function install(rt) {
       // repair a lost Session, so the member's next turn in the group starts a new one.
       const lost = lostSession(error)
       if (lost && room.sessions?.[member.id] === sessionId) {
-        rt.retireGroupSession(room, member.id)
+        rt.retireGroupSession(room, member.id, { bot: member })
         void rt.save().catch(() => {})
       }
       rt.roomWaiters.get(exchangeId)?.fail({ code: lost ? 'SESSION_RESET' : 'SESSION', message: String(error?.message ?? error).slice(0, 300) })
@@ -929,7 +1019,7 @@ export function install(rt) {
       const content = Array.isArray(message.content) ? message.content : []
       const text = textOf(content)
       if (text === '' || content.some(block => block?.type !== 'text') || text.includes('dsh-session:')) break
-      lines.push({ id: message.id, text, exchangeId: message.source?.exchangeId, ...(viaOf(message.source) ? { via: viaOf(message.source) } : {}) })
+      lines.push({ id: message.id, text, exchangeId: message.source?.exchangeId, ...(viaOf(message.source) ? { via: viaOf(message.source) } : {}), ...(isPhoneRequest(message.source?.rpcId) ? { requestId: message.source.rpcId } : {}) })
     }
     return lines
   })
@@ -959,7 +1049,7 @@ export function install(rt) {
     rt.goalUserMessage?.(room.id)
     const members = room.members.map(rt.botOf).filter(Boolean)
     for (const line of lines) {
-      say(room, { who: 'User', text: line.text, ...(line.via ? { via: line.via } : {}) })
+      say(room, { who: 'User', text: line.text, ...(line.via ? { via: line.via } : {}), ...(line.requestId ? { requestId: line.requestId } : {}) })
       const { all, found } = mentionsIn(line.text, members)
       const note = all || found.length > 0 ? 'the user mentioned you' : 'new message from the user'
       const { speakers, ordered } = openingCall(room, { text: line.text })
@@ -1115,7 +1205,8 @@ export function install(rt) {
       const own = batchOfSlot(room.id, slot)
       if (own !== undefined) leaveBatch(room, own, member.id)
       round.failed.push(member.name)
-      noteFailure(room, member, { code: error?.levelNotSet === true ? 'PERMISSION' : 'SESSION', message: String(error?.message ?? error).slice(0, 300) })
+      const code = error?.code === NO_BOT_RUNNER ? NO_BOT_RUNNER : error?.levelNotSet === true ? 'PERMISSION' : 'SESSION'
+      noteFailure(room, member, { code, message: String(error?.message ?? error).slice(0, 300) })
       return
     }
     if (session === undefined) {
@@ -1277,9 +1368,11 @@ export function install(rt) {
       if (sender !== undefined) {
         const text = [post.text, ...(post.files ?? []).map(fileLine)].filter(Boolean).join('\n')
         if (post.failed !== undefined) round.failed.push(sender.name)
-        else if (post.resumed || post.stopped || post.done) say(room, { who: sender.name, botId: sender.id, kind: post.done ? 'done' : post.stopped ? 'stopped' : post.again ? 'cut' : 'resumed', text: '' })
+        else if (post.resumed || post.stopped || post.done) say(room, { who: sender.name, botId: sender.id,
+          kind: post.done ? 'done' : post.stopped ? 'stopped' : post.again ? 'cut' : 'resumed', text: '',
+          ...(post.resumedByUpdate ? { resumedByUpdate: true } : {}) })
         else {
-          say(room, { who: sender.name, botId: sender.id, text, ...(post.files === undefined ? {} : { files: post.files }), session: true })
+          say(room, { who: sender.name, botId: sender.id, text, ...(post.files === undefined ? {} : { files: post.files }), ...(post.files?.length ? captionOf(post) : {}), session: true })
           if (post.batch !== undefined && text !== '') recordResult(post.batch, sender.name, room.seq)
         }
         callPost(room, round, sender, post.text ?? '', post)
@@ -1289,7 +1382,7 @@ export function install(rt) {
       if (post.botId !== undefined) continue
       // The user's message, as one the round takes in from the Session's inbox.
       const text = [post.text, ...(post.files ?? []).map(fileLine)].filter(Boolean).join('\n')
-      say(room, { who: 'User', text, ...(post.files === undefined ? {} : { files: post.files }), ...(post.uploads === undefined ? {} : { uploads: post.uploads }), ...(post.via === undefined ? {} : { via: post.via }), session: true })
+      say(room, { who: 'User', text, ...(post.files === undefined ? {} : { files: post.files }), ...(post.files?.length ? { caption: post.text ?? '' } : {}), ...(post.uploads === undefined ? {} : { uploads: post.uploads }), ...(post.via === undefined ? {} : { via: post.via }), ...(isPhoneRequest(post.requestId) ? { requestId: post.requestId } : {}), session: true })
       unpauseRoomIdle(room)
       round.userMessage = true
       rt.goalUserMessage?.(room.id)
@@ -1364,6 +1457,8 @@ export function install(rt) {
         text,
         ...(post.images === undefined ? {} : { images: post.images }),
         ...(post.files === undefined ? {} : { files: post.files }),
+        ...(post.images?.length || post.files?.length ? captionOf(post) : {}),
+        ...(isPhoneRequest(post.requestId) ? { requestId: post.requestId } : {}),
         ...(post.uploads === undefined ? {} : { uploads: post.uploads }),
         ...(post.via === undefined ? {} : { via: post.via }),
         // The group's own Session shows the message; a goal draft's trigger it hides.
@@ -1456,7 +1551,7 @@ export function install(rt) {
     for (const post of posts.filter(item => (item.resumed || item.stopped || item.done) && item.logged === undefined)) {
       const name = rt.botOf(post.botId)?.name ?? post.name
       const kind = post.done ? 'done' : post.stopped ? 'stopped' : post.again ? 'cut' : 'resumed'
-      say(room, { who: name, botId: post.botId, kind, text: '' })
+      say(room, { who: name, botId: post.botId, kind, text: '', ...(post.resumedByUpdate ? { resumedByUpdate: true } : {}) })
     }
     if (posts.some(post => post.resumed || post.stopped || post.done)) await rt.save()
     for (const post of posts) if (post.batchEnd) closeBatch(post.batch)
@@ -1714,7 +1809,8 @@ export function install(rt) {
   // While a round runs, the post goes into the group's log and that round's replies at
   // once, and the members it calls start in that round, so it is not held back until
   // the round ends and never sits in the group Session's QueueDock (#663).
-  async function postToRoom(room, sender, text, extra = {}, files = []) {
+  async function postToRoom(room, sender, text, extra = {}, files = [], ownsTeam = () => true) {
+    if (!ownsTeam()) return
     const running = [...rt.roomProgress.values()].find(round => round.roomId === room.id && round.nudge !== undefined)
     if (running !== undefined) {
       if (extra.failed !== undefined) {
@@ -1722,10 +1818,10 @@ export function install(rt) {
         running.failed.push(sender.name)
       } else if (extra.resumed === true || extra.stopped === true || extra.done === true) {
         const kind = extra.done === true ? 'done' : extra.stopped === true ? 'stopped' : extra.again === true ? 'cut' : 'resumed'
-        say(room, { who: sender.name, botId: sender.id, kind, text: '' })
+        say(room, { who: sender.name, botId: sender.id, kind, text: '', ...(extra.resumedByUpdate ? { resumedByUpdate: true } : {}) })
       } else {
         const line = [text, ...files.map(fileLine)].filter(Boolean).join('\n')
-        say(room, { who: sender.name, botId: sender.id, text: line, ...(files.length > 0 ? { files } : {}) })
+        say(room, { who: sender.name, botId: sender.id, text: line, ...(files.length > 0 ? { files, ...captionOf({ text, excerpt: extra.excerpt }) } : {}) })
         if (extra.batch !== undefined && line !== '') recordResult(extra.batch, sender.name, room.seq)
       }
       const postId = extra.postId ?? randomUUID()
@@ -1735,6 +1831,7 @@ export function install(rt) {
       return
     }
     const agent = await rt.resolveAgent(rt.sessionOfRoom(room))
+    if (!ownsTeam()) return
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: `[Group post from ${sender.name}]\n${text}` }, ...files.map(attachment => ({ type: 'file', attachment }))],
       source: { kind: SOURCE_KIND, form: 'relay', role: 'post', exchangeId: randomUUID(), senderName: sender.name, senderSessionId: sender.id, roomId: room.id, ...extra },
@@ -2066,7 +2163,12 @@ export function install(rt) {
       const roundId = `${Date.now()}-${randomUUID()}`
       // Only for a group made under the PTC preset, which can call nothing but run_code;
       // new group Sessions get the standard preset.
-      const [name, args] = declared.has('run_code') && !declared.has('group_relay')
+      const usePtc = declared.has('run_code') && !declared.has('group_relay')
+      if (usePtc && rt.botRunnerRequired !== undefined) {
+        const previousStep = options.messages.findLastIndex(message => message.role === 'assistant' || message.role === 'tool')
+        if (options.messages.slice(previousStep + 1).some(message => isBotGroupPost(rt, message))) throw noBotRunner()
+      }
+      const [name, args] = usePtc
         ? ['run_code', JSON.stringify({ description: `Relay the group chat to its Bots (${roundId})`, code: `return await tools.group_relay({ roundId: ${JSON.stringify(roundId)} })`, timeoutMs: 600_000 })]
         : ['group_relay', JSON.stringify({ roundId })]
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }

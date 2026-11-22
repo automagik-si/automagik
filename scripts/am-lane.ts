@@ -32,7 +32,7 @@
  *   bun scripts/am-lane.ts keygen [--repo <owner/repo>] [--key-id <id>]
  *       make a key: an ed25519 pair generated in memory; the private key goes straight to `gh secret
  *       set` on its stdin (never printed, never written to disk), and only then is the public key
- *       added to am/am-keys.json (commit it). The first key goes to AM_LANE_KEY. A rotation is two
+ *       added to am/am-keys.json and the pack copy. The first key goes to AM_LANE_KEY. A rotation is two
  *       phases (RFC 0011): keygen puts the new key in the slot that is NOT signing (the
  *       AM_LANE_SIGNER variable names the one that is; AM_LANE_KEY when unset), so releases keep
  *       signing with the old key while an am carrying the new public key ships; later
@@ -43,8 +43,9 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { basename, join } from 'node:path';
 // @ts-expect-error am's plain JavaScript, no types
-import { LANE_RELEASE, PART, REPO, REPOSITORY, RELEASES, SCHEMA_VERSION, sequenceOf, tarballName, verifyPointer } from '../am/lib/lane.mjs';
+import { LANE_RELEASE, PART, REPO, REPOSITORY, SCHEMA_VERSION, sequenceOf, tarballName, verifyPointer } from '../am/lib/lane.mjs';
 // The pointer's repository and tarball URL come from am/lib/lane.mjs (am's part): they move with it.
+// REPOSITORY is still the pre-transfer name every installed am checks for; REPO is where it lives.
 import { keyIdOf, publicOf } from './herdr-lane';
 import { ROOT, signLane } from './lane';
 
@@ -53,6 +54,12 @@ export const KEY_ID = 'am-2026-11';
 /** The two secret slots a rotation alternates between; release.yml signs with the one AM_LANE_SIGNER names. */
 export const SLOTS = ['AM_LANE_KEY', 'AM_LANE_KEY_NEXT'] as const;
 export const KEYS_FILE = join(ROOT, 'am', 'am-keys.json');
+const PACK_KEYS_FILE = join(ROOT, 'herdr', 'mods', 'am-sidebar', 'am-keys.json');
+
+export function writeKeyFiles(keys: AmKey[], paths: string[]) {
+  const text = `${JSON.stringify({ keys }, null, 2)}\n`;
+  for (const path of paths) writeFileSync(path, text);
+}
 
 export interface AmKey { keyId: string; publicKey: string }
 export interface AmPointer {
@@ -87,7 +94,7 @@ export function pointer(tgz: string, { version, commit, issuedAt, keyId = KEY_ID
     version,
     tag: `v${version}`,
     commit,
-    tarball: { name, url: `${RELEASES}/download/v${version}/${name}`, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.byteLength },
+    tarball: { name, url: `${REPOSITORY}/releases/download/v${version}/${name}`, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.byteLength },
   };
 }
 
@@ -217,8 +224,8 @@ if (import.meta.main) {
     const secret = spawnSync('gh', ['secret', 'set', slot, '--repo', repo], { input: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), stdio: ['pipe', 'inherit', 'inherit'] });
     if (secret.status !== 0) { console.error('am lane: gh secret set failed; nothing was written'); process.exit(1); }
     const next = [...keys, { keyId, publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
-    writeFileSync(KEYS_FILE, `${JSON.stringify({ keys: next }, null, 2)}\n`);
-    console.log(`am lane: ${slot} set on ${repo}; ${keyId} added to am/am-keys.json. Commit it.`);
+    writeKeyFiles(next, [KEYS_FILE, PACK_KEYS_FILE]);
+    console.log(`am lane: ${slot} set on ${repo}; ${keyId} added to both am-keys.json files. Commit them.`);
     if (keys.length > 0) console.log(`Phase 2, only after a release has shipped this am-keys.json and installs have taken it: gh variable set AM_LANE_SIGNER --body ${slot} --repo ${repo}`);
   } else {
     console.error('usage: bun scripts/am-lane.ts manifest <tgz> <version> <commit> <issuedAt> | sign <am.json> | verify <am.json> <sig> | posted <am.json> <dir> | check-key | keygen [--repo <owner/repo>] [--key-id <id>]');

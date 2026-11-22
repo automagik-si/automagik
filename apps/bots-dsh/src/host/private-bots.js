@@ -4,8 +4,10 @@
 // tools Omni owns and checks the paths that the file tools and the shell are given;
 // a shell can still reach any file the account can (see docs/plans).
 import { homedir } from 'node:os'
+import { readdir } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { install as installPrivateForward } from './private-forward.js'
+import { CONNECTOR_KEY, CONNECTOR_KEY_ORIGINS, keyFileName, readConnectorKeyOrigins } from './connectors/credential-key.js'
 import { within } from './folders.js'
 import { refusal } from './refusal.js'
 import { unquote } from './text.js'
@@ -87,6 +89,7 @@ export function install(rt) {
   // Deleting a private Bot does not make the files and memory it leaves behind public.
   const protectedBots = () => [...new Map([...(state.privateArchives ?? []), ...privateBots()].map(bot => [bot.id, bot])).values()]
   const sessionsOf = bot => [...new Set([bot.id, ...(bot.sessionIds ?? [rt.chatOf(bot.id), ...(bot.segments ?? []).map(segment => segment.sessionId), ...rt.groupSessionsOf(bot.id)])])]
+  const privatePathsKey = () => JSON.stringify(protectedBots().map(bot => [sessionsOf(bot), bot.workDir, bot.archivePath]))
   const dataRoots = () => [rt.dshHome, rt.home, process.env.DS_BOT_USER_DSH_HOME?.trim()].filter(Boolean)
 
   // A path as it is and as the file system resolves it, folded for comparing. realBeyond
@@ -134,6 +137,7 @@ export function install(rt) {
     join(rt.home, 'learning', 'state.json'),
     join(rt.home, 'ocr.json'),
     join(rt.home, 'secrets.json'),
+    join(rt.home, CONNECTOR_KEY),
     join(rt.home, 'vault-sources.json'),
     join(rt.home, 'vault-audit.jsonl'),
     join(rt.home, 'vault-audit.jsonl.1'),
@@ -373,23 +377,38 @@ export function install(rt) {
           if (!(error instanceof parser.PatchParseError)) throw error
         }
       }
-      if (paths === undefined && fold(args.input).includes('wake.jsonl')) throw refusal(HOST_PATH_REFUSAL)
+      if (paths === undefined && ['wake.jsonl', CONNECTOR_KEY].some(file => fold(args.input).includes(file))) throw refusal(HOST_PATH_REFUSAL)
     } else if (SEARCH_TOOLS.includes(name)) {
-      paths = [args.path]
-      if (name === 'glob' && typeof args.pattern === 'string' && /^(?:[a-z]:|[\\/]|~)/i.test(args.pattern)) {
-        paths.push(args.pattern.split(/[*?[{]/, 1)[0])
+      paths = [name === 'grep' && !args.path ? '.' : args.path]
+      if (name === 'glob' && typeof args.pattern === 'string') {
+        const target = args.pattern.split(/[*?[{]/, 1)[0]
+        if (/^(?:[a-z]:|[\\/]|~)/i.test(target)) paths.push(target)
+        else if (keyFileName(basename(fold(target)))) paths.push(args.path ? join(args.path, target) : target)
       }
     }
     if (!paths?.some(path => typeof path === 'string' && path !== '')) return
     const session = exec.agent?.session ?? exec.agent
     const bases = [rt.sessionFolder(session), session?.header?.cwd]
-    const homes = await spellings(rt.home)
+    let keyHomes
+    try { keyHomes = [rt.home, ...readConnectorKeyOrigins(rt.home)] } catch { throw refusal(HOST_PATH_REFUSAL) }
+    const guardHomes = await Promise.all(keyHomes.map(async home => ({ home, paths: await spellings(home) })))
+    const homes = guardHomes[0].paths
     for (const path of paths) {
       const targets = await hostOnlyTargets(path, { bases, homedir, realBeyond: rt.realBeyond })
       if (targets.some((key) => {
         const base = basename(key)
         return homes.includes(dirname(key)) && (base === 'wake.jsonl' || /^wake\.jsonl\.[^\\/]+\.tmp$/.test(base))
       })) throw refusal(HOST_PATH_REFUSAL)
+      for (const { home, paths: roots } of guardHomes) {
+        if (targets.some(key => roots.some(root => (dirname(key) === root && keyFileName(basename(key)))
+          || within(key, join(root, CONNECTOR_KEY_ORIGINS))))) throw refusal(HOST_PATH_REFUSAL)
+        if (name !== 'grep' || !targets.some(key => roots.some(root => within(root, key)))) continue
+        const files = await readdir(home).catch(error => {
+          if (error?.code === 'ENOENT') return []
+          throw refusal(HOST_PATH_REFUSAL)
+        })
+        if (files.some(file => keyFileName(fold(file)))) throw refusal(HOST_PATH_REFUSAL)
+      }
     }
   }
 
@@ -463,5 +482,5 @@ export function install(rt) {
   // What the settings list shows. Session ids stay on the host.
   const archivesView = () => (state.privateArchives ?? []).map(({ id, name, workDir }) => ({ id, name, ...(workDir === undefined ? {} : { workDir }) }))
 
-  Object.assign(rt, { isPrivate, privateClash, checkPrivacyChange: checkChange, checkNoPrivate, releaseArchive, archivesView })
+  Object.assign(rt, { isPrivate, privateClash, privatePathOwner: ownerOfPath, privatePathsKey, checkPrivacyChange: checkChange, checkNoPrivate, releaseArchive, archivesView })
 }

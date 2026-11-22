@@ -10,7 +10,7 @@ import { createElement as h, useEffect, useRef, useState, useSyncExternalStore }
 import { t } from './i18n.js'
 import { installStyles } from './styles.js'
 import { ChevronRightIcon } from './icons.js'
-import { MAX_PANES, paneDetails, paneFor, statusKey, validGrid } from './code-side-model.js'
+import { MAX_PANES, paneDetails, statusKey, validGrid } from './code-side-model.js'
 import { pasteBytes } from './code-side-paste.js'
 import XTERM_CSS from '@xterm/xterm/css/xterm.css'
 
@@ -55,6 +55,7 @@ const base64Of = (bytes) => {
 
 /** JSON over the plugin's own exact routes; resolves { status, body }, never the request. */
 async function post(path, payload) {
+  if (globalThis.__AUTOMAGIK_VIEW__ !== undefined) return { status: 403, body: { error: 'desktop-only' } }
   const answer = await fetch(`api/omni-ui/code/${path}`, {
     method: 'POST',
     credentials: 'same-origin',
@@ -152,7 +153,7 @@ function createPaneHub() {
  * takes the pane, and its keys go to the host in small batches until typing ends.
  * No key, batch or paste is ever written to a log or a record here.
  */
-export function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${botId}:${worker ?? 'seat'}` }) {
+export function TerminalPane({ botId, worker, title, refusal, hub, faces, paneKey = `${botId}:${worker ?? 'seat'}` }) {
   const host = useRef(null)
   const [standaloneHub] = useState(() => hub ? null : createPaneHub())
   const stream = hub ?? standaloneHub
@@ -417,6 +418,7 @@ export function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${
   return h('div', { className: 'cs-pane' },
     h('div', { className: 'cs-pane-head' },
       h('span', { className: 'cs-pane-title', title }, title),
+      faces,
       h('span', { className: 'cs-pane-note', role: 'status', 'data-mode': mode }, stateWord),
       refusal ? h('span', { className: 'cs-paste-note', role: 'status', 'data-wrap': '' }, refusal)
         : resumeNote === 'paused' ? h('span', { className: 'cs-paste-note', role: 'status' }, t('Typing paused after 60 s idle. Press any key to resume'))
@@ -429,10 +431,10 @@ export function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${
 const onMac = () => /^mac/i.test(globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || '')
 const besideKey = event => event.ctrlKey || event.metaKey
 
-export function TreeRow({ label, status, depth = 0, current, note, title, onClick }) {
+export function TreeRow({ label, status, depth = 0, current, note, title, onClick, action }) {
   const keyboardPick = useRef(false)
   const hint = onMac() ? t('⌘-click to show beside') : t('Ctrl-click to show beside')
-  return h('button', {
+  return h('div', null, h('button', {
     type: 'button', className: 'cs-row', 'data-depth': depth, 'aria-current': current ? 'true' : undefined,
     title: title ? `${title}\n${hint}` : hint,
     onClick: (event) => {
@@ -449,7 +451,23 @@ export function TreeRow({ label, status, depth = 0, current, note, title, onClic
   },
   h('span', { className: 'cs-row-label' }, label),
   note ? h('span', { className: 'cs-row-note' }, note) : null,
-  h('span', { className: `cs-mark cs-mark-${status}`, title: statusLabel(status) }, h('span', { className: 'cs-mark-word' }, statusLabel(status))))
+  h('span', { className: `cs-mark cs-mark-${status}`, title: statusLabel(status) }, h('span', { className: 'cs-mark-word' }, statusLabel(status)))),
+  action)
+}
+
+function herdrAction(herdr, botId) {
+  return h('button', {
+    type: 'button',
+    className: 'cs-btn cs-row-note',
+    'aria-label': t('Open in Herdr'),
+    title: t('Code: open this Bot’s folder in Herdr'),
+    disabled: herdr.busy,
+    onPointerEnter: herdr.refresh,
+    onClick: (event) => {
+      event.stopPropagation()
+      herdr.openRow(botId)
+    },
+  }, t('Herdr'))
 }
 
 const TreeFold = ({ label, title, open, onClick }) => h('button', {
@@ -458,7 +476,7 @@ const TreeFold = ({ label, title, open, onClick }) => h('button', {
   h('span', { className: 'lb-name' }, label),
   h('span', { className: open ? 'lb-chev lb-chev-open' : 'lb-chev' }, h(ChevronRightIcon)))
 
-export function CodeTree({ current, onSelect, sidebar = false }) {
+export function CodeTree({ current, onSelect, sidebar = false, herdr, newControl = null, newStatus = null }) {
   const { tree, loading, error, selected, beside = [] } = current
   const shown = [selected, ...beside].filter(Boolean)
   const isCurrent = (botId, worker = null) => shown.some(pane => pane.botId === botId && (pane.worker ?? null) === worker)
@@ -471,6 +489,7 @@ export function CodeTree({ current, onSelect, sidebar = false }) {
   })
   const machine = tree?.machine?.name || t('This computer')
   const projects = tree?.projects ?? []
+  const canOpenRow = herdr?.visible()
   const machineOpen = !folded.has(null)
   const treeRows = machineOpen ? projects.map((project) => {
     const label = project.global === true ? t('Global Bots') : project.name ?? project.folder
@@ -486,7 +505,8 @@ export function CodeTree({ current, onSelect, sidebar = false }) {
           status: bot.status,
           current: isCurrent(bot.id),
           note: sidebar ? bot.agent ?? (bot.main ? t('lead') : null) : bot.main ? t('lead') : null,
-          onClick: options => onSelect(paneFor(tree, bot.id) ?? { botId: bot.id, worker: null }, options),
+          onClick: options => onSelect({ botId: bot.id, worker: null }, options),
+          action: canOpenRow ? herdrAction(herdr, bot.id) : null,
         }),
         bot.workers.map(worker => h(TreeRow, {
           key: worker.terminal,
@@ -496,10 +516,13 @@ export function CodeTree({ current, onSelect, sidebar = false }) {
           current: isCurrent(bot.id, worker.terminal),
           title: [worker.role, worker.branch?.replace(/^refs\/heads\//, '')].filter(Boolean).join(' · '),
           onClick: options => onSelect({ botId: bot.id, worker: worker.terminal }, options),
+          action: canOpenRow ? herdrAction(herdr, bot.id) : null,
         })))) : null)
   }) : null
   return h('nav', { className: sidebar ? 'lb-rows' : 'cs-tree', 'aria-label': t('Code team') },
-    sidebar && tree?.machine ? h(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }) : null,
+    herdr?.notices,
+    sidebar && tree?.machine ? h('div', { className: 'cs-machine-line' }, h(TreeFold, { label: machine, open: machineOpen, onClick: () => toggle(null) }), newControl) : null,
+    sidebar ? newStatus : null,
     error || (sidebar && tree?.reason === 'no-core') ? h('p', { className: 'cs-empty' }, t('The Code side could not read this computer’s team.')) : null,
     !error && projects.length === 0 && !loading && (!sidebar || tree?.reason !== 'no-core') ? h('p', { className: 'cs-empty' }, t('No project has a Bot on this computer yet.')) : null,
     loading && !tree ? h('p', { className: 'cs-empty' }, t('Reading this computer’s team…')) : null,
@@ -507,7 +530,7 @@ export function CodeTree({ current, onSelect, sidebar = false }) {
 }
 
 /** The chosen terminals, shared by the seat face and the bar's main Code panel. */
-export function CodeTerminal({ tree, selected, beside = [], refused, loading }) {
+export function CodeTerminal({ tree, selected, beside = [], refused, loading, code }) {
   const [hub] = useState(createPaneHub)
   const panes = []
   for (const pane of [selected, ...beside].slice(0, MAX_PANES)) {
@@ -522,25 +545,31 @@ export function CodeTerminal({ tree, selected, beside = [], refused, loading }) 
   const refusal = refused && (onMac()
     ? t('Four terminals are shown: {names}. ⌘-click one of them to close it, then add another.', { names: refused.join(', ') })
     : t('Four terminals are shown: {names}. Ctrl-click one of them to close it, then add another.', { names: refused.join(', ') }))
-  return h('div', { className: 'cs-panes', 'data-count': panes.length }, panes.map(({ botId, worker, key, title }, index) =>
-    h(TerminalPane, { key, paneKey: key, hub, botId, worker, title, refusal: index === 0 ? refusal : null })))
+  return h('div', { className: 'cs-panes', 'data-count': panes.length }, panes.map(({ botId, worker, key, title, terminal }, index) => {
+    const faces = worker == null && code?.seatForPane?.(botId, terminal)
+      ? h(code.FaceSwitch, { face: 'terminal', onFace: () => code.openSeatFace(botId, terminal) }) : null
+    return h(TerminalPane, { key, paneKey: key, hub, botId, worker, title, faces, refusal: index === 0 ? refusal : null })
+  }))
 }
 
 /** The seat's Terminal face: keep its own tree next to its terminal. */
 export function CodeBody({ code }) {
   const current = useSyncExternalStore(code.subscribe, code.snapshot, code.snapshot)
   const { tree, loading, error, selected, beside, refused } = current
+  const { loadTree, selectPane, herdr, newControl = null, newStatus = null } = code
   useEffect(() => {
-    if (!tree && !loading && !error) void code.loadTree()
-  }, [code, tree, loading, error])
+    if (!tree && !loading && !error) void loadTree()
+  }, [loadTree, tree, loading, error])
   const realProjects = (tree?.projects ?? []).filter(project => project.global !== true)
   const projectCount = realProjects.length === 1 ? t('1 project') : t('{n} projects', { n: realProjects.length })
   return h('div', { className: 'cs-host' },
     h('div', { className: 'cs-top' },
       h('span', { className: 'cs-machine' }, tree?.machine?.name ?? t('This computer')),
-      h('span', { className: 'cs-count' }, projectCount)),
+      h('span', { className: 'cs-count' }, projectCount),
+      newStatus,
+      tree?.machine ? newControl : null),
     h('div', { className: 'cs-body' },
-      h(CodeTree, { current, onSelect: code.selectPane }),
+      h(CodeTree, { current, onSelect: selectPane, herdr }),
       h('section', { className: 'cs-view' }, h(CodeTerminal, { tree, selected, beside, refused, loading }))))
 }
 
@@ -558,11 +587,22 @@ export const CODE_SIDE_CSS = `
 .cs-count{color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 12.5px/1.3 var(--bt-font)}
 .cs-btn{margin-left:auto;height:26px;padding:0 12px;border:1px solid var(--lb-line,var(--bt-line));border-radius:999px;background:none;color:var(--bt-ink);font:var(--bt-weight-label,500) 13px/1 var(--bt-head-font,var(--bt-font));cursor:pointer}
 .cs-btn:disabled{opacity:.55;cursor:default}
+.cs-machine-line{display:flex;align-items:center;gap:6px}
+.cs-machine-line>.lb-row{flex:1;min-width:0}
+.cs-start-menu button:disabled{color:var(--bt-ink-3);cursor:default;background:none}
+.cs-start-menu .bt-folder-path[data-wrap]{white-space:normal}
 .cs-body{display:flex;flex:1;min-height:0}
 .cs-tree{width:var(--lb-list-w,264px);min-width:184px;max-width:42%;overflow:auto;padding:8px;border-right:1px solid var(--lb-line,var(--bt-line));background:var(--bt-card);flex:none}
 .cs-project{margin:0 0 10px}
 .cs-project-name{padding:6px 10px 5px;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:var(--bt-weight-title,600) 10.5px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:.16em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cs-bot{display:block}
+.cs-bot>div:has(>.cs-btn){display:flex;align-items:center}
+.cs-bot .cs-btn{flex:none}
+.cs-bot .cs-btn:focus-visible{outline:3px solid var(--st-ring,var(--bt-accent));outline-offset:-3px}
+.lb-rows .cs-row:has(+.cs-btn) .cs-mark-word{display:none}
+.cs-row:has(+.cs-btn) .cs-mark{min-width:0}
+.cs-row:has(+.cs-btn) .cs-mark::before{flex:none}
+.cs-tree>.bt-code-notes[data-code-row],.lb-rows>.bt-code-notes[data-code-row]{position:sticky;top:0;width:auto;max-width:none}
 .cs-row{display:flex;align-items:center;gap:var(--lb-art-gap,10px);width:100%;min-width:0;height:var(--lb-row-h,34px);padding:0 10px 0 8px;margin:0;border:0;border-radius:var(--lb-row-r,8px);background:none;color:var(--bt-ink);font:var(--bt-weight-label,500) 15px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:-.005em;text-align:left;cursor:pointer}
 .cs-row[data-depth='1']{height:var(--lb-channel-h,26px);padding-left:calc(8px + var(--lb-art,28px) + var(--lb-art-gap,10px));color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 13.5px/1.3 var(--bt-font);letter-spacing:0}
 .cs-row:hover{background:var(--bt-hover)}

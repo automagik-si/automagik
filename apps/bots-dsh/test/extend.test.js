@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
-import { install } from '../src/host/extend.js'
+import { fromWindow } from '../src/host/desktop-window.js'
+import { install, windowEndpoint } from '../src/host/extend.js'
 import { fakeContext } from './fake-ctx.js'
 
 function start() {
@@ -19,7 +21,7 @@ function start() {
     return register(options)
   }
   apply(ctx, { home })
-  const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))).json()
+  const call = async (endpoint, payload, headers) => (await route.fetch(new Request('http://localhost/api/omni-ui', { method: 'POST', headers, body: JSON.stringify({ endpoint, payload }) }))).json()
   const stop = async () => {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
@@ -30,7 +32,7 @@ function start() {
 test('apply provides the runtime as omniTeam, with the hooks other Omni plugins add through', async (t) => {
   const { rt, stop } = start()
   t.after(stop)
-  assert.deepEqual(Object.keys(rt.hooks).sort(), ['botModels', 'endpoint', 'genui', 'live', 'mainRules', 'media', 'sessionOwner', 'view'])
+  assert.deepEqual(Object.keys(rt.hooks).sort(), ['around', 'botModels', 'endpoint', 'genui', 'live', 'mainRules', 'media', 'sessionOwner', 'view'])
   for (const name of ['load', 'save', 'botOf', 'isMain', 'selfOf', 'createBot', 'createTaskSession', 'startTask', 'deliver', 'resolveAgent', 'readOnly', 'home']) assert.ok(name in rt, name)
 })
 
@@ -120,6 +122,88 @@ test('an added endpoint says whether a host that only reads the team may answer 
   assert.equal(rt.extended.endpointOf('toString'), undefined)
 })
 
+test('an endpoint wrapper runs in order and next serves once with the same signal and an optional body', async (t) => {
+  const { rt, call, stop } = start()
+  t.after(stop)
+  const trace = []
+  let signal
+  let keptNext
+  const wrap = async (body, requestSignal, next) => {
+    signal = requestSignal
+    trace.push(['before', body])
+    keptNext = next
+    const result = await next({ name: 'Bea' })
+    assert.throws(() => next(), /once during its wrapper/)
+    trace.push(['after', result])
+    return result.toUpperCase()
+  }
+  const off = rt.hooks.around('wrapped', wrap)
+  assert.throws(() => rt.hooks.around('wrapped', wrap), /endpoint wrapped is already wrapped/)
+  assert.equal((await call('wrapped', {})).error.code, 'bot/not-found')
+  rt.hooks.endpoint('wrapped', ({ name }, passedSignal, proof) => {
+    if (trace.length === 1) assert.equal(passedSignal, signal)
+    assert.equal(proof, false)
+    trace.push(['endpoint', name])
+    return name
+  })
+  assert.deepEqual(await call('wrapped', { name: 'Ana' }), { ok: true, value: 'BEA' })
+  assert.deepEqual(trace, [['before', { name: 'Ana' }], ['endpoint', 'Bea'], ['after', 'Bea']])
+  assert.throws(() => keptNext(), /once during its wrapper/)
+  off()
+  assert.deepEqual(await call('wrapped', { name: 'Ana' }), { ok: true, value: 'Ana' })
+  const newOff = rt.hooks.around('wrapped', (_body, _signal, next) => next())
+  off()
+  assert.ok(rt.extended.aroundOf('wrapped'))
+  assert.deepEqual(await call('wrapped', { name: 'Ana' }), { ok: true, value: 'Ana' })
+  newOff()
+  rt.hooks.around('wrapped', (_body, _signal, next) => { keptNext = next; return 'short circuit' })
+  assert.deepEqual(await call('wrapped', {}), { ok: true, value: 'short circuit' })
+  assert.throws(() => keptNext(), /once during its wrapper/)
+})
+
+test('a wrapper registered before its endpoint never handles an unknown name', async t => {
+  const { rt, call, stop } = start()
+  t.after(stop)
+  let wraps = 0
+  rt.hooks.around('later', (_body, _signal, next) => { wraps += 1; return next() })
+  assert.equal((await call('later', { name: 'Ana' })).error.code, 'bot/not-found')
+  assert.equal(wraps, 0)
+  rt.hooks.endpoint('later', body => body.name)
+  assert.deepEqual(await call('later', { name: 'Ana' }), { ok: true, value: 'Ana' })
+  assert.equal(wraps, 1)
+})
+
+test('wrappers keep the read-only gate and leave real window endpoints their proof', async (t) => {
+  const { rt, call, stop } = start()
+  t.after(stop)
+  rt.readOnly = () => 'This team is read-only.'
+  rt.hooks.endpoint('writes', () => assert.fail('write endpoint ran'))
+  rt.hooks.around('writes', () => assert.fail('write wrapper ran'))
+  rt.hooks.endpoint('reads', () => 2, { read: true })
+  rt.hooks.around('reads', async (_body, _signal, next) => 1 + await next())
+  assert.equal((await call('writes', {})).error.code, 'bot/read-only')
+  assert.deepEqual(await call('reads', {}), { ok: true, value: 3 })
+
+  const secret = 'ab'.repeat(32)
+  const { AUTOMAGIK_WINDOW_DIGEST: digest, AUTOMAGIK_APP_BROWSER: browser } = process.env
+  const send = process.send
+  t.after(() => {
+    if (digest === undefined) delete process.env.AUTOMAGIK_WINDOW_DIGEST
+    else process.env.AUTOMAGIK_WINDOW_DIGEST = digest
+    if (browser === undefined) delete process.env.AUTOMAGIK_APP_BROWSER
+    else process.env.AUTOMAGIK_APP_BROWSER = browser
+    if (send === undefined) delete process.send
+    else process.send = send
+  })
+  process.send = () => true
+  process.env.AUTOMAGIK_APP_BROWSER = '1'
+  process.env.AUTOMAGIK_WINDOW_DIGEST = createHash('sha256').update(secret).digest('hex')
+  windowEndpoint(rt, 'window', (_body, _signal, proof) => fromWindow(proof), { read: true })
+  rt.hooks.around('window', () => assert.fail('window wrapper ran'))
+  assert.deepEqual(await call('window', {}, { 'x-automagik-window': secret }), { ok: true, value: true })
+  assert.deepEqual(await call('window', {}), { ok: true, value: false })
+})
+
 test('Main Bot rules come in their order, and a hook with nothing to add is left out', () => {
   const rt = {}
   install(rt)
@@ -162,8 +246,15 @@ test('#1092 sendsOutside hooks register, ask on failure and dispose', () => {
   const rt = {}; install(rt)
   const step = { tool: 'team_send', args: { recipient: 'outside' } }
   assert.equal(rt.sendsOutside(step), false)
-  const dispose = rt.stepHooks.sendsOutside(input => { assert.deepEqual(input, step); return true })
+  let classified
+  const dispose = rt.stepHooks.sendsOutside(input => {
+    classified = input
+    return true
+  })
+  assert.equal(rt.sendsOutside(step, 's1'), true)
+  assert.deepEqual(classified, { ...step, sessionId: 's1' })
   assert.equal(rt.sendsOutside(step), true)
+  assert.deepEqual(classified, { ...step, sessionId: undefined })
   dispose(); dispose()
   assert.equal(rt.sendsOutside(step), false)
   const throwing = rt.stepHooks.sendsOutside(() => { throw new Error('unknown recipient') })

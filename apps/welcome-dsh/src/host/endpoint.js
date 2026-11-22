@@ -1,13 +1,17 @@
-import { CliproxyPayload, DonePayload, MigrateOmniPayload, MigrateStartPayload, MigrateStatusPayload, RequestBody, Secret, parse } from './payloads.js'
+import { CliproxyPayload, DonePayload, MigrateOmniPayload, MigrateStartPayload, MigrateStatusPayload, OmniGithubAckPayload, OmniGithubCancelPayload, OmniGithubInstallPayload, OmniGithubStatusPayload, OmniServerPayload, RequestBody, Secret, parse } from './payloads.js'
 import { createMigrateActions } from './hermes-migrate.js'
 import { createAiActions } from './ais.js'
 import { createProviderActions, saveRoute, unsetRoute } from './providers.js'
 import { createCompanionActions } from './companion.js'
 import { createBotTypeActions } from './bot-types.js'
+import { createOmniServerCheck } from './release-resolve.js'
+import { createOmniInstaller, omniInstallAvailable } from './omni-github.js'
+import { createOmniTerminalGuard } from './omni-terminal-guard.js'
 import { createAcpActions } from './acp.js'
 import { hostOf, machineOf } from './host.js'
 import { preloadOf } from './preload.js'
 import { UNFOLD_BOT } from './companion.js'
+import { needsViewer } from './viewer-policy.js'
 
 // The host endpoint the onboarding steps call: POST /api/omni-ai with
 // { endpoint, payload }, answered { ok: true, value } or { ok: false, error }.
@@ -34,6 +38,9 @@ import { UNFOLD_BOT } from './companion.js'
 //   unfold-plugin, unfold-plugin-install, bot-type
 //                      the Omni plugins, Genie's and Unfold's, installed through DSH's plugin
 //                      manager, and what a Bot type starts with (src/host/bot-types.js)
+//   omni-server-check { version, fallback? }, omni-github-install, omni-github-status,
+//   omni-github-cancel, omni-github-ack
+//                      the route to install Omni and the welcome's installer job
 //   acp, acp-switch, acp-retry
 //                      Claude Code and Codex through @automagik/acp-dsh: its acpAgents
 //                      service's status, and its claude/codex settings (src/host/acp.js)
@@ -227,6 +234,11 @@ export function createActions(ctx, { fetch: fetchImpl = globalThis.fetch, anyOn,
 }
 
 export function install(ctx, deps = {}) {
+  const mode = (deps.env ?? process.env).AUTOMAGIK_MULTIUSER
+  const multiuser = mode !== undefined && mode !== '' && mode !== '0'
+  const service = name => {
+    try { return ctx.get?.(name) } catch { return undefined }
+  }
   const ai = createAiActions(ctx, { fetch: deps.fetch, saveRoute: (provider, patch) => saveRoute(ctx, provider, patch), unsetRoute: provider => unsetRoute(ctx, provider) })
   const { anyOn, ...aiEndpoints } = ai
   const { team, omniProjectOf, assignModels, joinOmni, ...companion } = createCompanionActions(ctx, { env: deps.env ?? process.env, ...deps.companion })
@@ -245,7 +257,78 @@ export function install(ctx, deps = {}) {
       }), 'omni-ai: Add Omni')
     })
   }
-  const actions = { ...createActions(ctx, { ...deps, anyOn }), ...createProviderActions(ctx), ...aiEndpoints, ...createAcpActions(ctx), ...companion, ...createBotTypeActions(ctx, { team, omniProjectOf, env: deps.env ?? process.env, ...(deps.checkGit ? { checkGit: deps.checkGit } : {}), ...(deps.genieSkills ? { genieSkills: deps.genieSkills } : {}), ...(deps.genieCli ? { genieCli: deps.genieCli } : {}), ...(deps.release ? { release: deps.release } : {}), ...(deps.offersUnfold !== undefined ? { offersUnfold: deps.offersUnfold } : {}) }) }
+  const readOnly = () => team()?.readOnly?.()
+  const omniOptions = { fetch: deps.fetch, env: deps.env ?? process.env, ...deps.omniServer, ...deps.omniInstaller }
+  const omniInstaller = createOmniInstaller({ ...omniOptions, readOnly })
+  const botTypes = createBotTypeActions(ctx, {
+    team, omniProjectOf, env: deps.env, checkGit: deps.checkGit, genieSkills: deps.genieSkills, genieCli: deps.genieCli,
+    release: deps.release, releases: deps.releases, offersUnfold: deps.offersUnfold, omniInstaller,
+  })
+  const actions = { ...createActions(ctx, { ...deps, anyOn }), ...createProviderActions(ctx), ...aiEndpoints, ...createAcpActions(ctx), ...companion, ...botTypes }
+  const checkOmniServer = deps.releases?.checkOmniServer ?? createOmniServerCheck(omniOptions)
+  const available = (login, version) => readOnly() === undefined
+    && omniInstallAvailable({ env: omniOptions.env, kill: omniOptions.kill, login, version })
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['omniTeam', 'omniChannels'], (sub) => {
+      const rt = sub.omniTeam
+      if (typeof rt?.hooks?.around !== 'function') return
+      sub.effect(() => {
+        const guard = createOmniTerminalGuard({
+          check: (version, available) => checkOmniServer(version, true, available),
+          available,
+          installer: omniInstaller,
+          endpointOf(name) {
+            const run = rt.extended.endpointOf(name)?.fn
+            if (name !== 'omni-link' || !run) return run
+            return async (body, signal) => {
+              const link = await run(body, signal)
+              // The public reply carries only a host and port. Compare the saved URL, too.
+              if (typeof rt.omniLink !== 'function') return link
+              const url = rt.omniLink()?.url
+              if (!url) return link?.linked ? null : link
+              return { ...link, linked: true, origin: new URL(url).host, url }
+            }
+          },
+          readOnly: () => team() === rt ? rt.readOnly() : 'The Bot team changed.',
+          generation: () => rt.teamGeneration?.(),
+          sameTeam: g => g === undefined || rt.sameTeam?.(g) !== false,
+          language: () => rt.uiLanguage?.(),
+        })
+        const off = []
+        const dispose = () => {
+          guard.dispose()
+          for (const remove of off) remove()
+        }
+        try {
+          for (const name of ['open', 'read', 'write', 'resize', 'close']) {
+            off.push(rt.hooks.around('omni-terminal-' + name, guard[name]))
+          }
+        } catch (error) {
+          dispose()
+          throw error
+        }
+        return dispose
+      }, 'omni-ai: Connect card install')
+    })
+  }
+  actions['omni-server-check'] = (payload) => {
+    const fields = parse(OmniServerPayload, payload)
+    if (fields === undefined) throw invalid('Name an Omni server version.')
+    if (fields.fallback !== true) return checkOmniServer(fields.version)
+    return checkOmniServer(fields.version, true, available)
+  }
+  for (const [action, schema, run] of [
+    ['omni-github-install', OmniGithubInstallPayload, omniInstaller.start],
+    ['omni-github-status', OmniGithubStatusPayload, omniInstaller.status],
+    ['omni-github-cancel', OmniGithubCancelPayload, omniInstaller.cancel],
+    ['omni-github-ack', OmniGithubAckPayload, omniInstaller.ack],
+  ]) {
+    actions[action] = (payload) => {
+      const fields = parse(schema, payload === undefined ? {} : payload)
+      if (fields === undefined) throw invalid('Check the Omni install request.')
+      return run(fields)
+    }
+  }
   const migrate = createMigrateActions(ctx, deps.migrate ?? {})
   // The move's own payloads are parsed here, as every other endpoint's are.
   actions['migrate-start'] = (payload, signal) => migrate['migrate-start'](parse(MigrateStartPayload, payload) ?? {}, signal)
@@ -290,6 +373,17 @@ export function install(ctx, deps = {}) {
     fetch: async (request) => {
       let body
       try { body = await request.json() } catch { body = {} }
+      if (needsViewer(body?.endpoint)) {
+        const hasPrincipal = request.headers.has('x-automagik-principal')
+        const caller = hasPrincipal ? service('automagikCaller') : undefined
+        if (multiuser || (caller?.version === 2 && caller.multiuser === true)) {
+          const viewer = hasPrincipal ? service('omniTeam')?.ownerViewer?.(request) : undefined
+          if (!viewer || typeof body?.viewer !== 'string' || body.viewer !== viewer.id) {
+            return Response.json({ ok: false, error: { code: 'bot/viewer-changed', message: 'Your sign-in changed; reload this page.' } },
+              { headers: { 'cache-control': 'no-store' } })
+          }
+        }
+      }
       const asked = parse(RequestBody, body)
       let result
       if (asked !== undefined) {

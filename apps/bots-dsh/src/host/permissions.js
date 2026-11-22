@@ -1,3 +1,4 @@
+import { withGrantHold } from './grants.js'
 // Permissions. A Bot's permission level is its own: kept on the Bot and set on every
 // Session it speaks from, so a fresh part or a new group Session keeps it. A group may
 // set one level for all its members there, in place of each member's own, as it may
@@ -7,6 +8,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
 import { HELD_NOT_SET, HELD_UNREAD } from '../shared/held.js'
 import { AUTO, AUTO_FALLBACK } from '../shared/permission-levels.js'
+import { MAX_SESSION_LINEAGE_DEPTH } from './bot-sessions.js'
 import { refusal } from './refusal.js'
 import { narrowerLevel, narrowestOffered, rankOf } from './permission-rank.js'
 import { shellHoldText } from '../shared/routes.js'
@@ -66,6 +68,25 @@ export function install(rt) {
       return typeof level === 'string' && level !== '' ? level : undefined
     } catch {
       return undefined
+    }
+  }
+
+  // A group member's live level must stay within the Bot's own level.
+  function groupMemberHolds(sessionId, bot) {
+    try {
+      const service = presets()
+      if (service === undefined) return false
+      const session = (ctx.sessions?.list?.() ?? []).find(loaded => loaded?.id === sessionId)
+      if (session === undefined) return true
+      if (chains.has(sessionId) || unapplied.has(sessionId)) return false
+      const current = service.current(session)
+      if (typeof current !== 'string' || current === '') return false
+      const own = bot.permission ?? service.catalog().defaultPreset
+      const a = runRank(service, current)
+      const b = runRank(service, own)
+      return a !== undefined && b !== undefined ? a <= b : current === own
+    } catch {
+      return false
     }
   }
   // `{ permissionFallback }` for a Bot's or group's view when its Auto runs as workspace-write.
@@ -245,7 +266,25 @@ export function install(rt) {
   // without one keeps DSH's default. `room` is for a group Session not indexed yet. The
   // level is read when the apply runs, not when it is queued. `start`: the Session is
   // about to start work, so a level that does not hold refuses it (startPermission).
-  async function applyPermission(bot, sessionId, room = roomOfSession(sessionId), session, { start = false, starts = false } = {}) {
+  function grantPermissionState(sessionId, session = ctx.sessions?.get?.(sessionId)) {
+    if (session === undefined) return
+    const service = presets()
+    const current = service?.current(session)
+    const knobs = current === undefined ? undefined : service.resolve?.(current)
+    return [current, knobs?.sandbox, knobs?.approval,
+      ctx.get?.('approval')?.effectivePolicy?.(session), ctx.get?.('shell')?.sandboxMode]
+  }
+
+  function applyPermission(bot, sessionId, room, session, options) {
+    return withGrantHold(rt, { sessionIds: [sessionId] },
+      () => grantPermissionState(sessionId, session),
+      () => applyPermissionHeld(bot, sessionId, room, session, options))
+  }
+
+  async function applyPermissionHeld(
+    bot, sessionId, room = roomOfSession(sessionId), session,
+    { start = false, starts = false } = {},
+  ) {
     if (start) return startPermission(bot, sessionId, room, session)
     if (presets() === undefined) return
     return serial(sessionId, async () => {
@@ -527,7 +566,15 @@ export function install(rt) {
   // Sets a task Session's level, read when the apply runs, not when it is queued, so a
   // lower level picked meanwhile lands last. The fallback mark stays the Bot's and the
   // group's own: a task does not mark them. Resolves whether the Session is a task.
-  async function applyTaskPermission(sessionId, session, { start = false, starts = false } = {}) {
+  function applyTaskPermission(sessionId, session, options) {
+    return withGrantHold(rt, { sessionIds: [sessionId] },
+      () => grantPermissionState(sessionId, session),
+      () => applyTaskPermissionHeld(sessionId, session, options))
+  }
+
+  async function applyTaskPermissionHeld(
+    sessionId, session, { start = false, starts = false } = {},
+  ) {
     if (start) return startTaskPermission(sessionId, session)
     if (taskOf(sessionId) === undefined) return false
     const service = presets()
@@ -594,8 +641,7 @@ export function install(rt) {
   // goes: a loaded one, and a working one even if DSH has to open it. Any other takes it
   // from the session/created re-apply when DSH opens it next. Resolves the tasks whose
   // level was not set, apart from those that take it on opening, for the change that asked.
-  async function reapplyTasks(match) {
-    const left = []
+  function tasksFollowing(match) {
     // And every task started from one of them, down the chain: it is bound by that one.
     const follows = (task) => {
       for (let depth = 0; task !== undefined && depth <= PARENT_DEPTH; depth += 1) {
@@ -604,10 +650,15 @@ export function install(rt) {
       }
       return false
     }
-    const picked = Object.entries(rt.state?.tasks ?? {}).filter(([, task]) => follows(task))
+    return Object.entries(rt.state?.tasks ?? {}).filter(([, task]) => follows(task))
+  }
+  async function reapplyTasks(match) {
+    const left = []
+    const picked = tasksFollowing(match)
     if (picked.length === 0 || rt.readOnly() !== undefined || presets() === undefined) return left
     const loaded = new Map((ctx.sessions?.list?.() ?? []).map(session => [session.id, session]))
     for (const [sessionId, task] of picked) {
+      rt.dropGrantsForSession?.(sessionId)
       if (!loaded.has(sessionId) && task.status !== 'working') continue
       await applyTaskPermission(sessionId, loaded.get(sessionId))
         .catch((error) => {
@@ -665,10 +716,10 @@ export function install(rt) {
   // while a Session is marked (levelHolds): a Session DSH cannot read then may be a marked
   // one's child, so its call is refused, never let through.
   const UNREAD = 'DeepSeek Harness could not read where this conversation comes from while a permission level is not set, so no tool runs here until it can. Try again; if this goes on, tell the user to restart DeepSeek Harness.'
-  function markedFor(agent) {
+  function markedFor(agent, requireLineage = false) {
     let current = agent?.id ?? agent?.session?.id
     let header = agent?.session?.header
-    for (let depth = 0; typeof current === 'string' && depth < 32; depth += 1) {
+    for (let depth = 0; typeof current === 'string' && depth <= MAX_SESSION_LINEAGE_DEPTH; depth += 1) {
       if (unapplied.has(current)) return current
       try {
         header ??= ctx.sessions?.get?.(current)?.header
@@ -676,12 +727,16 @@ export function install(rt) {
         rt.warn('ds-bot: the Session %s could not be read while a permission level is not set: %s', current, error)
         throw Object.assign(refusal(UNREAD, { cause: error }), { held: HELD_UNREAD })
       }
+      if (requireLineage && (header === null || typeof header !== 'object')) break
       if (header?.origin !== 'subagent') return undefined
       current = header.parentSession
       header = undefined
     }
-    return undefined
+    if (requireLineage) throw Object.assign(refusal(UNREAD), { held: HELD_UNREAD })
   }
+  // The runner needs a synchronous hold check at dispatch, without retrying or lifting a mark.
+  rt.levelHeldFor = sessionId => unapplied.size > 0 && markedFor({ id: sessionId }, true) !== undefined
+
   // Whether the Session reads the level it should run at: a saved Auto DSH does not offer
   // runs as workspace-write. False when DSH cannot tell.
   function reads(session, level) {
@@ -835,7 +890,12 @@ export function install(rt) {
     return levelTo(bot, wanted)
   }
 
-  async function levelTo(bot, wanted, { before = bot.permission } = {}) {
+  function levelTo(bot, wanted, options) {
+    return withGrantHold(rt, { botId: bot.id }, () => bot.permission,
+      () => levelToHeld(bot, wanted, options))
+  }
+
+  async function levelToHeld(bot, wanted, { before = bot.permission } = {}) {
     // Read before the apply: whether the Bot's saved Auto last ran as workspace-write.
     const fell = fellBack.has(`bot:${bot.id}`)
     bot.permission = wanted
@@ -863,6 +923,7 @@ export function install(rt) {
         left.push(rt.chatOf(bot.id))
       }
     }
+    rt.dropGrantsForBot?.(bot.id)
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
       if (roomOfSession(sessionId)?.permission) continue
       await applyPermission(bot, sessionId)
@@ -902,11 +963,25 @@ export function install(rt) {
 
   // Members' Sessions in the group change now; a member that has none there yet gets the
   // group's level when its first turn there makes one. Returns whether it changed.
-  async function setRoomPermission(room, name) {
+  function setRoomPermission(room, name) {
+    return withGrantHold(rt, { roomId: room.id }, () => room.permission,
+      () => setRoomPermissionHeld(room, name))
+  }
+
+  async function setRoomPermissionHeld(room, name) {
     const wanted = cleanRoomPermission(name) ?? undefined
     if (wanted === room.permission) return false
     if (wanted === undefined) delete room.permission
-    else room.permission = wanted
+    else {
+      room.permission = wanted
+      room.scoped = true
+    }
+    for (const sessionId of Object.values(room.sessions ?? {})) {
+      rt.dropGrantsForSession?.(sessionId)
+    }
+    for (const [id] of tasksFollowing(task => taskOfRoom(task, room.id))) {
+      rt.dropGrantsForSession?.(id)
+    }
     markFallback(`room:${room.id}`, false)
     const service = presets()
     if (service === undefined) return true
@@ -1005,8 +1080,15 @@ export function install(rt) {
       return false
     }
   }
+  rt.grantTaskRun = sessionId => {
+    const task = taskOf(sessionId)
+    const service = presets()
+    if (task !== undefined && service !== undefined) return taskRun(task, service)
+  }
+
+
   // The Sessions that carry the mark now, as a fresh list.
   const unappliedSessions = () => [...unapplied.keys()]
 
-  Object.assign(rt, { newBotPermission, sessionWide, permissionFactsOf, unappliedSessions, permissionCatalog, permissionFallbackOf, permissionKey, autoClosed, applyPermission, applyTaskPermission, levelHolds, reapplyTasks, capTasks, taskOfRoom, inToolCall, callerGroup, callerTask, callerLevel, capTaskByOpener, armedLevels, lowerScheduledSession, assertTaskDepth, taskForebears, taskLevelOf, forgetTaskPermission, checkPreset, startingSession, assertLevelOffered, setPermission, levelTo, inheritedPermission, cleanRoomPermission, setRoomPermission })
+  Object.assign(rt, { newBotPermission, sessionWide, groupMemberHolds, permissionFactsOf, unappliedSessions, permissionCatalog, permissionFallbackOf, permissionKey, autoClosed, applyPermission, applyTaskPermission, levelHolds, reapplyTasks, capTasks, taskOfRoom, inToolCall, callerGroup, callerTask, callerLevel, capTaskByOpener, armedLevels, lowerScheduledSession, assertTaskDepth, taskForebears, taskLevelOf, forgetTaskPermission, checkPreset, startingSession, assertLevelOffered, setPermission, levelTo, inheritedPermission, cleanRoomPermission, setRoomPermission })
 }

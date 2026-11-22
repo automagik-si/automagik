@@ -22,6 +22,7 @@
 //   进目录 路径 (working_directory with cd) · 开任务 标题: 指令 (start_task, from a Main Bot)
 //   插话 名: 消息 (message_bot when "now") · 排队 名: 消息 (message_bot when "queue") · 叫停 名: 原因 (stop_bot)
 //   In a message from a Bot: 转告 名: 消息 (hands it on with message_bot) · 慢慢做 N (answers after N seconds)
+//   重复调用 N S: 工具 JSON (repeat one call N times, S seconds apart)
 //   长文 N / long N (N×1000 characters) · 长任务 N [K] (N steps of K×1000, default 4)
 //   查记录 词 [词…] · 查锚点 part N #序号 · 查第 N 段 (read_own_chat)
 //   上下文里有 词 (searches the context except the last message) · 撑爆 (fake overflow, 400)
@@ -101,6 +102,33 @@ const WRITTEN_CALL = '我先看一下目录。\n<tool_call>\n<function=pwsh>\n<p
 // Deterministic filler that grows a conversation by about `chars` characters.
 const filler = (chars, tag) => Array.from({ length: Math.ceil(chars / 20) }, (_, index) => `${tag}第${index + 1}段：这是一段用来撑长上下文的测试文字。`).join('').slice(0, chars)
 const isResults = message => Array.isArray(message?.content) && message.content.some(block => block.type === 'tool_result')
+
+// Rebuild progress from this turn's tool results so each repeat has a fresh call id.
+function repeatedCall(messages, tools) {
+  const at = messages.findLastIndex(message => message.role === 'user' && !isResults(message))
+  if (at === -1) return
+  const line = textBlocks(messages[at].content).flatMap(block => block.split('\n'))
+    .map(line => line.trim()).find(line => line.startsWith('重复调用 '))
+  const parsed = /^重复调用\s+(\d+)\s+(\d+)\s*[:：]\s*(\S+)\s+(.+)$/.exec(line ?? '')
+  if (!parsed) return
+  const [, count, seconds, name, input] = parsed
+  const total = Number(count)
+  const pause = Number(seconds)
+  if (total < 1 || total > 20 || pause > 60 || !tools.has(name)) return
+  let args
+  try { args = JSON.parse(input) } catch { return }
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return
+  const later = messages.slice(at + 1)
+  const calls = new Set(later.filter(message => message.role === 'assistant')
+    .flatMap(message => Array.isArray(message.content) ? message.content : [])
+    .filter(block => block.type === 'tool_use' && block.name === name).map(block => block.id))
+  const results = new Set(later.filter(isResults).flatMap(message => message.content)
+    .filter(block => block.type === 'tool_result' && calls.has(block.tool_use_id))
+    .map(block => block.tool_use_id))
+  if (results.size >= total) return [text('重复调用完成。')]
+  const out = [tool(name, args)]
+  return results.size > 0 ? Object.assign(out, { delay: pause * 1000 }) : out
+}
 // 'handoff' or 'backend' for a summary request, by its final prompt. The adapter merges
 // that prompt into the user message before it, so it is the last text block, not the
 // whole message.
@@ -193,6 +221,8 @@ function decide(body) {
 
   // A stopped call's result can share a message with the next group turn, which wins.
   const fresh = textBlocks(last?.content).some(value => value.trimStart().startsWith('[Group chat'))
+  const repeat = repeatedCall(messages, tools)
+  if (repeat !== undefined) return repeat
   const result = fresh ? undefined : blocks.find(block => block.type === 'tool_result')
   if (result) {
     const resultText = typeof result.content === 'string' ? result.content : textOf(result.content)

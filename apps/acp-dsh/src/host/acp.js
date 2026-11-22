@@ -932,6 +932,8 @@ export class AgentRun {
         signal: lifetime.signal,
         invalidate: () => lifetime.abort(),
         options: params.options ?? [],
+        // codex-acp renders execute/pending on the question only before the command starts (dist/index.js:35333).
+        startsCommand: params.toolCall?.kind === 'execute' && params.toolCall?.status === 'pending',
         answer: (response) => {
           if (done) return
           done = true

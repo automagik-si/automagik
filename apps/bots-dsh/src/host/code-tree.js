@@ -17,18 +17,58 @@
 // until that confirmation holds, so the view can never attach a terminal it was merely told
 // about. Reading and building are separate: `buildCodeTree` is pure and the host's reader
 // only supplies the files and the core's answer.
-import { readFileSync, statSync } from 'node:fs'
-import { basename, isAbsolute, join, resolve } from 'node:path'
+import { execFile } from 'node:child_process'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { HOME_PATH, REPO_PATH, parseRegistry } from '../shared/registry.js'
-import { attachPath, foldAttach, heldIn, readAttach } from '../shared/attach-record.js'
+import { attachKey, attachPath, foldAttach, heldIn, readAttach } from '../shared/attach-record.js'
 import { foldWorkers, readWorkers, workersOf, workersPath } from '../shared/workers-journal.js'
 import { connectCore } from './code-core.js'
+import { GIT_DIRS, startEnv, trustedHc, trustedProgram } from './code-env.js'
 
 export const TREE_VERSION = 1
 /** No ledger is read past this: a runaway file is refused, never parsed into memory. */
 export const MAX_LEDGER_BYTES = 64 * 1024 * 1024
 /** How many projects one answer carries: a bound on a runaway registry. */
 export const MAX_PROJECTS = 200
+/** A registry file past this is not read. */
+export const MAX_REGISTRY_BYTES = 8 * 1024 * 1024
+/** A project's Herdr team file past this is not read for the Start menu. */
+export const MAX_ROSTER_BYTES = 1024 * 1024
+/** The project file the pack's CLI starts a Bot from (`am start`, RFC 0014's version 1). */
+export const ROSTER_PATH = join('.herdr', 'bots.json')
+
+/**
+ * Why New › Start an existing Bot cannot start a row, or null. Advisory for the menu: the CLI
+ * decides again when a start runs.
+ *   global-bot       RFC 0014's global Bot has no folder, and the CLI has no start path for it yet;
+ *   ambiguous-clone  the id is listed in more than one folder (clones of one repository);
+ *   folder-missing   the project folder is gone;
+ *   not-in-roster    the project's `.herdr/bots.json` (version 1) does not list it: a Bot only in
+ *                    the v2 registry, which the CLI does not read yet (RFC 0014 delivery 2);
+ *   unverified       the project the CLI would start in, or its file, could not be checked here.
+ * A row is startable only when its membership was verified.
+ */
+export const START_BLOCKS = Object.freeze(['global-bot', 'ambiguous-clone', 'folder-missing', 'not-in-roster', 'unverified'])
+/** How long one git question about a project's main checkout may take. */
+export const GIT_TIMEOUT_MS = 3_000
+/** How many folders' git questions run at once. */
+export const GIT_AT_ONCE = 4
+
+/**
+ * Why one Bot cannot start (or null), from what `startFacts` found. `facts` absent: a pure
+ * caller with nothing read, so only a global Bot gets a reason.
+ */
+export function startBlock(botId, folder, facts) {
+  if (folder === null) return 'global-bot'
+  if (!facts) return null
+  const roster = facts.rosters.get(folder)
+  if (roster === 'missing') return 'folder-missing'
+  if ((facts.clones.get(botId) ?? 1) > 1) return 'ambiguous-clone'
+  // A project's registry that could not be read may list the same id: uniqueness is unknown.
+  if (facts.incomplete || !(roster instanceof Set)) return 'unverified'
+  return roster.has(botId) ? null : 'not-in-roster'
+}
 
 /** herdr-app's home: `$HERDR_APP_HOME`, else `~/.config/herdr-app` (the pack's own rule). */
 export const appHomeOf = (env = process.env) => (env.HERDR_APP_HOME || join(env.HOME || '', '.config', 'herdr-app')).replace(/\/+$/, '')
@@ -38,10 +78,17 @@ export const STATUS_WORDS = Object.freeze(['working', 'needs-you', 'idle', 'not-
 
 /** One terminal's status as the bar's words: a person is needed first, then what runs. */
 export function statusWord(terminal) {
-  if (!terminal) return 'not-running'
-  if (terminal.status === 'blocked' || terminal.status === 'error') return 'needs-you'
-  if (terminal.status === 'working') return 'working'
+  if (!terminal || terminal.state === 'finished') return 'not-running'
+  const status = terminal.status?.state ?? terminal.status
+  if (status === 'blocked' || status === 'error') return 'needs-you'
+  if (status === 'working') return 'working'
   return 'idle'
+}
+
+/** The core's current pane is the exact live pane the ledger names. */
+export function confirmedPane(binding, core, terminal) {
+  return core && binding?.core === core && terminal?.state === 'live' && terminal.created_ms === binding.created_ms
+    ? terminal : null
 }
 
 /** The terminal's own size, for an observer that must not reflow it. */
@@ -68,10 +115,11 @@ const STATUS_RANK = { 'needs-you': 0, working: 1, idle: 2, 'not-running': 3 }
  *   workers: Map<string, any>,
  *   terminals: Map<string, any>,
  *   core: { id: string, name: string },
+ *   facts?: { rosters: Map<string, 'missing' | Set<string> | null>, clones: Map<string, number>, keys: Map<string, string | null> },
  * }} input
  * @returns {{ v: number, machine: { name: string, core: string }, projects: any[] }}
  */
-export function buildCodeTree({ bots = [], projects = [], attach, workers, terminals, core }) {
+export function buildCodeTree({ bots = [], projects = [], attach, workers, terminals, core, facts }) {
   const local = bots.filter(bot => typeof bot.id === 'string' && typeof bot.name === 'string')
   const inProject = local.filter(bot => typeof bot.folder === 'string' && bot.folder !== '')
   // RFC 0014's global Bots have no folder; RFC 0022 lists them as seats. They are this
@@ -83,18 +131,16 @@ export function buildCodeTree({ bots = [], projects = [], attach, workers, termi
     folders.set(resolve(project.folder), { folder: resolve(project.folder) })
   }
   for (const bot of inProject) folders.set(resolve(bot.folder), { folder: resolve(bot.folder) })
-  const rowsOf = projectBots => projectBots.map((bot) => {
+  const rowsOf = (projectBots, folder = null) => projectBots.map((bot) => {
     const binding = heldIn(attach.fold, bot.id, null)
-    const terminal = binding ? terminals.get(String(binding.terminal)) : undefined
-    // The row must name this computer's core as well: a terminal id reused after a core
-    // wipe is not the binding the ledger wrote.
-    const live = Boolean(binding) && binding.core === core.id && terminal?.created_ms === binding.created_ms
-    const size = live ? sizeOf(terminal) : null
+    const terminal = binding ? confirmedPane(binding, core.id, terminals.get(binding.terminal)) : null
+    const live = terminal !== null
+    const size = sizeOf(terminal)
     const seen = workersOf(workers, bot.id)
-      .filter(worker => worker.core === core.id)
       .map((worker) => {
-        const running = terminals.get(worker.terminal)
-        if (!running || running.created_ms !== worker.created_ms) return null
+        const running = confirmedPane(worker, core.id, terminals.get(worker.terminal))
+        // The fold contains seats of Bots outside this tree as well.
+        if (!running || attach.fold.byKey.has(attachKey(worker))) return null
         return {
           terminal: worker.terminal,
           role: worker.role,
@@ -116,7 +162,10 @@ export function buildCodeTree({ bots = [], projects = [], attach, workers, termi
       main: bot.main === true,
       status: live ? statusWord(terminal) : 'not-running',
       terminal: live && size ? { id: binding.terminal, cols: size.cols, rows: size.rows } : null,
+      // The project the live seat was started for, as its attach row says.
+      ...(live && typeof binding.project === 'string' ? { seatProject: binding.project } : {}),
       workers: seen,
+      blocked: startBlock(bot.id, folder, facts),
     }
   })
   // The main Bot of a group comes first; a global group has no main Bot unless one is marked.
@@ -129,7 +178,9 @@ export function buildCodeTree({ bots = [], projects = [], attach, workers, termi
   for (const { folder } of [...folders.values()].slice(0, MAX_PROJECTS)) {
     const projectBots = inProject.filter(bot => resolve(bot.folder) === folder)
     if (projectBots.length === 0) continue
-    built.push({ folder, name: projectName(folder), bots: ordered(rowsOf(projectBots)) })
+    // The folder a start runs in, when the CLI's project is another one (a worktree's main checkout).
+    const key = facts?.keys.get(folder)
+    built.push({ folder, name: projectName(folder), ...(typeof key === 'string' && key !== folder ? { launch: key } : {}), bots: ordered(rowsOf(projectBots, folder)) })
   }
   built.sort((a, b) => String(a.name ?? a.folder).localeCompare(String(b.name ?? b.folder)))
   if (globalBots.length > 0) built.unshift({ folder: null, name: null, global: true, bots: ordered(rowsOf(globalBots)) })
@@ -138,11 +189,19 @@ export function buildCodeTree({ bots = [], projects = [], attach, workers, termi
 
 /** One registry read: { file, warnings } or { error }; a missing file is an empty registry. */
 function readRegistry(path, kind, readFile = readFileSync) {
+  const missing = { file: { bots: [], projects: [] }, warnings: [] }
   let text
-  try {
-    text = readFile(path, 'utf8')
-  } catch (error) {
-    return error?.code === 'ENOENT' ? { file: { bots: [], projects: [] }, warnings: [] } : { error: 'unreadable' }
+  if (readFile === readFileSync) {
+    // Never a blocking read on the host's loop: a regular file, opened without waiting, bounded.
+    text = boundedText(path, MAX_REGISTRY_BYTES)
+    if (text === undefined) return missing
+    if (text === null) return { error: 'unreadable' }
+  } else {
+    try {
+      text = readFile(path, 'utf8')
+    } catch (error) {
+      return error?.code === 'ENOENT' ? missing : { error: 'unreadable' }
+    }
   }
   try {
     return parseRegistry(text, { kind })
@@ -160,18 +219,25 @@ export function readRegistryTree({ env = process.env, readFile = readFileSync, w
   const automagikHome = env.AUTOMAGIK_HOME && String(env.AUTOMAGIK_HOME).trim() ? env.AUTOMAGIK_HOME : join(env.HOME || '', '.automagik')
   const home = join(automagikHome.replace(/\/+$/, ''), HOME_PATH)
   const readHome = readRegistry(home, 'home', readFile)
-  if (readHome.error) { warn(`the Bot registry ${home} could not be read`); return { bots: [], projects: [] } }
+  if (readHome.error) { warn(`the Bot registry ${home} could not be read`); return { bots: [], projects: [], listed: new Map() } }
   // A local shown[] entry grants the project on this computer. Global Bots need no project.
   const shown = new Set((readHome.file.shown ?? [])
     .filter(entry => entry.machine === undefined && entry.project !== null && isAbsolute(entry.project))
     .map(entry => resolve(entry.project)))
   const bots = []
   const seen = new Set()
+  // Every distinct local folder that lists an id: two clones of one repository list the same ids.
+  const listed = new Map()
+  const list = (id, folder) => {
+    if (!listed.has(id)) listed.set(id, new Set())
+    listed.get(id).add(folder)
+  }
   for (const bot of readHome.file.bots ?? []) {
     if (bot.machine !== undefined) continue
     if (seen.has(bot.id)) continue
     seen.add(bot.id)
     if (bot.folder && (!isAbsolute(bot.folder) || !shown.has(resolve(bot.folder)))) continue
+    if (typeof bot.folder === 'string' && bot.folder !== '') list(bot.id, resolve(bot.folder))
     // A home-file Bot with no folder is a global Bot (RFC 0014), and a seat (RFC 0022).
     bots.push({ id: bot.id, name: bot.name, role: bot.role, agent: bot.agent, main: bot.main === true, folder: typeof bot.folder === 'string' && bot.folder !== '' ? bot.folder : undefined })
   }
@@ -182,23 +248,263 @@ export function readRegistryTree({ env = process.env, readFile = readFileSync, w
   }
   for (const bot of bots) if (typeof bot.folder === 'string') folders.add(resolve(bot.folder))
   const projects = [...folders].map(folder => ({ folder }))
+  let incomplete = false
   for (const folder of folders) {
     const readRepo = readRegistry(join(folder, REPO_PATH), 'repo', readFile)
+    if (readRepo.error) incomplete = true
     if (readRepo.error || !readRepo.file?.bots) continue
     for (const bot of readRepo.file.bots) {
-      if (bot.machine !== undefined || seen.has(bot.id)) continue
+      if (bot.machine !== undefined) continue
+      if (typeof bot.id === 'string') list(bot.id, folder)
+      if (seen.has(bot.id)) continue
       seen.add(bot.id)
       bots.push({ id: bot.id, name: bot.name, role: bot.role, agent: bot.agent, main: bot.main === true, folder })
     }
   }
-  return { bots, projects }
+  return { bots, projects, listed, incomplete }
 }
 
-const readLedger = (path, readFile) => {
-  let stat
-  try { stat = statSync(path) } catch (error) { return error?.code === 'ENOENT' ? '' : null }
-  if (!stat.isFile() || stat.size > MAX_LEDGER_BYTES) return null
+/**
+ * Whether the pack CLI's `--project <folder>` (its `namedKeyOf`: git's main checkout, else the
+ * folder) is provably this folder: 'own' for a main checkout's root (a `.git` folder here) or a
+ * folder in no repository at all (no `.git` here or above, no GIT_DIR), 'missing' when the folder
+ * is gone, else 'unknown' (a linked worktree or submodule, a folder inside a repository): the CLI
+ * answers for those itself.
+ */
+export function folderKind(folder, env = process.env) {
+  try {
+    if (!statSync(folder).isDirectory()) return 'missing'
+  } catch { return 'missing' }
+  if (env.GIT_DIR || env.GIT_WORK_TREE || env.GIT_COMMON_DIR) return 'unknown'
+  // A path through a link: git walks the physical folders, so it is git's to answer.
+  try { if (realpathSync(folder) !== resolve(folder)) return 'unknown' } catch { return 'unknown' }
+  const entry = (dir, name = '.git') => { try { return lstatSync(join(dir, name)) } catch { return null } }
+  const here = entry(folder)
+  // A git dir with its own commondir shares another repository's: git decides where that is.
+  // Only a .git folder git itself would take (HEAD, objects, refs) is this folder's own repository;
+  // an empty or partial one makes git look further up, so git answers for it.
+  const gitDir = join(folder, '.git')
+  if (here) {
+    return here.isDirectory() && !entry(gitDir, 'commondir') && entry(gitDir, 'HEAD')?.isFile() && headLooksValid(join(gitDir, 'HEAD'))
+      && entry(gitDir, 'objects')?.isDirectory() && entry(gitDir, 'refs')?.isDirectory() ? 'own' : 'unknown'
+  }
+  for (let dir = dirname(folder); ; dir = dirname(dir)) {
+    if (entry(dir)) return 'unknown'
+    if (dir === dirname(dir)) return 'own'
+  }
+}
+
+// git's own test of a HEAD: a symbolic ref under refs/, or an object id.
+const headLooksValid = (path) => {
+  const text = boundedText(path, 512)
+  return typeof text === 'string' && (/^ref: refs\/\S+\s*$/.test(text) || /^[0-9a-f]{40}(?:[0-9a-f]{24})?\s*$/.test(text))
+}
+
+const isText = value => typeof value === 'string' && value.trim() !== ''
+const ROSTER_KINDS = new Set(['main', 'member'])
+
+/** A file's text, read through one descriptor and at most `limit` bytes; undefined when it is not there, null when it can't be read. */
+export function boundedText(path, limit) {
+  let fd
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK)
+    const stat = fstatSync(fd)
+    if (!stat.isFile() || stat.size > limit) return null
+    return boundedDescriptorText(fd, stat.size)
+  } catch (error) {
+    return error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ? undefined : null
+  } finally { if (fd !== undefined) closeSync(fd) }
+}
+
+/** Read at most the size verified by the caller, refusing a file that has grown. */
+export function boundedDescriptorText(fd, fileSize) {
+  // Room for the file as it is now, and one byte more to see it grow past the limit.
+  const bytes = Buffer.alloc(fileSize + 1)
+  let size = 0
+  while (size < bytes.length) {
+    const count = readSync(fd, bytes, size, bytes.length - size, null)
+    if (count === 0) break
+    size += count
+  }
+  return size > fileSize ? null : bytes.toString('utf8', 0, size)
+}
+
+/** One git question in `folder`, as the CLI asks it: its trimmed answer, '' when git says no, null when it can't tell. */
+function askGit(args, folder, env, avoid = []) {
+  // The repository this folder may belong to: the nearest folder up its physical path with a .git.
+  let top = null
+  try {
+    for (let dir = realpathSync(folder); ; dir = dirname(dir)) {
+      try { lstatSync(join(dir, '.git')); top = dir; break } catch { /* not here */ }
+      if (dir === dirname(dir)) break
+    }
+  } catch { /* the folder went away: git answers that itself */ }
+  const checkouts = [folder, top, ...avoid].filter(Boolean)
+  const childEnv = startEnv(env, undefined, checkouts)
+  // A system git, found without the projects' PATH, and not a link into a checkout.
+  const git = trustedProgram('git', { PATH: GIT_DIRS.join(':') }, checkouts)
+  return new Promise((done) => {
+    if (!git) { done(null); return }
+    try {
+      execFile(git, args, { cwd: folder, env: childEnv, timeout: GIT_TIMEOUT_MS, maxBuffer: 64 * 1024, killSignal: 'SIGKILL', windowsHide: true },
+        (error, stdout) => {
+          if (!error) return done(String(stdout).trim())
+          // Not a repository, or no git: the CLI's own git() reads both as no answer.
+          if (typeof error.code === 'number' || error.code === 'ENOENT') return done('')
+          done(null)
+        })
+    } catch { done(null) }
+  })
+}
+
+/**
+ * The project the pack CLI's `--project <folder>` starts in (its `namedKeyOf`, model.js
+ * projectOf's `own`): 'missing' when the folder is gone; the folder itself when that is provable
+ * from files; else what git says (a common dir named `.git` -> its parent, else the top level, no
+ * answer -> the folder); null when git could not be asked.
+ */
+export async function effectiveKey(folder, env = process.env, avoid = [], { askAlways = false } = {}) {
+  const kind = folderKind(folder, env)
+  if (kind === 'missing' || (kind === 'own' && !askAlways)) return kind === 'missing' ? 'missing' : folder
+  const common = await askGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], folder, env, avoid)
+  if (common === null) return null
+  if (common) {
+    const dir = common.replace(/\/+$/, '')
+    if (basename(dir) === '.git') return dirname(dir)
+    const top = await askGit(['rev-parse', '--show-toplevel'], folder, env, avoid)
+    if (top === null) return null
+    if (top) return top.replace(/\/+$/, '') || '/'
+  }
+  return folder
+}
+
+const keyOfFolder = (folder, env, avoid) => effectiveKey(folder, env, avoid)
+
+/** The checkouts a set of facts names: each project folder and the project its starts run in. */
+export function checkoutRoots(folders, keys = new Map()) {
+  const roots = new Set(folders.filter(folder => typeof folder === 'string'))
+  for (const key of keys.values()) if (typeof key === 'string' && key !== 'missing') roots.add(key)
+  return [...roots]
+}
+
+/**
+ * What a project's `.herdr/bots.json` says, by the CLI's own rules: the ids of its usable entries
+ * (an absent file lists none: the CLI's `no-roster`); null when it can't be checked (unreadable,
+ * not a regular file, too big, not JSON, not version 1).
+ */
+export function readRosterAt(key) {
+  const text = boundedText(join(key, ROSTER_PATH), MAX_ROSTER_BYTES)
+  if (text === undefined) return new Set()
+  if (text === null) return null
+  let file
+  try { file = JSON.parse(text) } catch { return null }
+  if (file === null || typeof file !== 'object' || file.version !== 1 || !Array.isArray(file.bots)) return null
+  return new Set(file.bots
+    .filter(bot => bot !== null && typeof bot === 'object' && isText(bot.id) && isText(bot.name) && ROSTER_KINDS.has(bot.kind))
+    .map(bot => bot.id))
+}
+
+/**
+ * For the registry's project folders (or `only` of them): the folder each start runs in, its
+ * roster, and per Bot id how many distinct such projects list it (clones of one repository).
+ */
+export async function startFacts(registry, env = process.env, only = null) {
+  const folders = (only ?? registry.projects.map(project => project.folder)).slice(0, MAX_PROJECTS)
+  // No git may come from any project this computer shows, or from the repository it is in.
+  const avoid = checkoutRoots(registry.projects.map(project => project.folder))
+  const effectiveKey = (folder, env) => keyOfFolder(folder, env, avoid)
+  const keys = new Map()
+  // A few folders at a time: only a folder git must answer for runs git at all.
+  for (let at = 0; at < folders.length; at += GIT_AT_ONCE) {
+    const batch = folders.slice(at, at + GIT_AT_ONCE)
+    for (const [folder, key] of await Promise.all(batch.map(async folder => [folder, await effectiveKey(folder, env)]))) keys.set(folder, key)
+  }
+  const keyOf = async (folder) => {
+    if (!keys.has(folder)) keys.set(folder, await effectiveKey(folder, env))
+    return keys.get(folder)
+  }
+  const rosters = new Map()
+  for (const [folder, key] of keys) rosters.set(folder, key === 'missing' ? 'missing' : key === null ? null : readRosterAt(key))
+  const clones = new Map()
+  const shownIds = new Set(registry.bots.map(bot => bot.id))
+  for (const [id, listedIn] of registry.listed ?? []) {
+    if (!shownIds.has(id)) continue
+    if (only && !only.some(folder => listedIn.has(folder))) continue
+    const projects = new Set()
+    for (const folder of listedIn) {
+      const key = await keyOf(folder)
+      if (key !== 'missing') projects.add(typeof key === 'string' ? key : folder)
+    }
+    clones.set(id, projects.size)
+  }
+  return { keys, rosters, clones, incomplete: registry.incomplete === true }
+}
+
+/**
+ * One Bot's start, decided afresh from the registry and the project files (no core): its folder
+ * and why it cannot start, or null when it is not this computer's Bot.
+ */
+export async function startTarget(botId, { env = process.env, readFile = readFileSync } = {}) {
+  const registry = readRegistryTree({ env, readFile })
+  const bot = registry.bots.find(candidate => candidate.id === botId)
+  if (!bot) return null
+  const folder = typeof bot.folder === 'string' && bot.folder !== '' ? resolve(bot.folder) : null
+  if (folder === null) return { folder, blocked: 'global-bot' }
+  const facts = await startFacts(registry, env, [folder])
+  // The grant again, after git answered: a withdrawal meanwhile starts nothing.
+  const final = readRegistryTree({ env, readFile })
+  const again = final.bots.find(candidate => candidate.id === botId)
+  if (!again || typeof again.folder !== 'string' || resolve(again.folder) !== folder) return null
+  // A project that now lists the id too, or a registry that can no longer be read: not the facts git answered for.
+  const listedIn = registry => [...(registry.listed.get(botId) ?? [])].sort().join('\0')
+  if (final.incomplete !== registry.incomplete || listedIn(final) !== listedIn(registry)) {
+    return { folder, key: facts.keys.get(folder), blocked: 'unverified' }
+  }
+  return { folder, key: facts.keys.get(folder), blocked: startBlock(botId, folder, facts) }
+}
+
+const ledgerStat = path => {
+  try { return statSync(path) } catch (error) { return error?.code === 'ENOENT' ? false : null }
+}
+
+const readLedger = (path, readFile, stat = ledgerStat(path)) => {
+  if (stat === false) return ''
+  if (!stat?.isFile() || stat.size > MAX_LEDGER_BYTES) return null
   try { return readFile(path, 'utf8') } catch { return null }
+}
+
+const workerHasNoOtherSeatOwner = (fold, botId, pane) => {
+  const seat = fold.byKey.get(attachKey(pane))
+  return !seat || seat.bot === botId
+}
+
+/** Observers reuse the ownership verdict only while the ledger's metadata stays the same. */
+export function paneStillOwned(pane, worker, { env = process.env, readFile = readFileSync, cache } = {}) {
+  const path = attachPath(appHomeOf(env))
+  const stat = ledgerStat(path)
+  const key = stat ? `${stat.mtimeMs}:${stat.size}:${stat.ino}` : stat
+  if (cache && cache.key === key) return cache.owned
+  const text = readLedger(path, readFile, stat)
+  if (text === null) return false
+  const fold = foldAttach(readAttach(text).rows)
+  const seat = worker == null ? heldIn(fold, pane.botId, null) : null
+  const owned = worker == null ? Boolean(seat && attachKey(seat) === attachKey(pane))
+    : workerHasNoOtherSeatOwner(fold, pane.botId, pane)
+  if (cache) Object.assign(cache, { key, owned })
+  return owned
+}
+
+const workerBinding = (appHome, botId, worker, readFile) =>
+  workersOf(foldWorkers(readWorkers(readLedger(workersPath(appHome), readFile) ?? '').rows), botId)
+    .find(candidate => candidate.terminal === worker)
+
+/** Confirm the registry grant and worker launch before issuing a typing session. */
+export function paneStillGranted(pane, worker, { env = process.env, readFile = readFileSync, warn } = {}) {
+  const bot = readRegistryTree({ env, readFile, warn }).bots.find(candidate => candidate.id === pane.botId)
+  if (!bot || bot.folder !== pane.folder) return false
+  if (worker == null) return true
+  const row = workerBinding(appHomeOf(env), pane.botId, worker, readFile)
+  return Boolean(row && attachKey(row) === attachKey(pane))
 }
 
 /**
@@ -217,9 +523,14 @@ export async function readCodeTree({ env = process.env, warn = () => {}, connect
   const attachRows = readAttach(attachText ?? '').rows
   const attach = { rows: attachRows, fold: foldAttach(attachRows) }
   const workers = foldWorkers(readWorkers(workersText ?? '').rows)
+  const facts = await startFacts(registry, env)
+  // The hc that serves the read: HERDR_HC or the CLI's own search, never one inside a project
+  // this computer shows or the repository it is in.
+  const bin = trustedHc(env, checkoutRoots(registry.projects.map(project => project.folder), facts.keys))
+  if (!bin) { warn('the Code side found no hc outside the projects'); return { reason: 'no-core' } }
   let core
   try {
-    core = await connect({ env })
+    core = await connect({ env, bin })
   } catch (error) {
     warn(`the Code side could not reach herdr-core: ${error?.kind ?? error?.message ?? error}`)
     return { reason: 'no-core' }
@@ -230,7 +541,10 @@ export async function readCodeTree({ env = process.env, warn = () => {}, connect
     for (const terminal of answer?.terminals ?? []) {
       if (typeof terminal?.address === 'string') terminals.set(terminal.address, terminal)
     }
-    return { tree: buildCodeTree({ bots: registry.bots, projects: registry.projects, attach, workers, terminals, core: { id: core.info?.core?.id ?? '', name: core.info?.core?.name ?? '' } }) }
+    return { tree: buildCodeTree({
+      bots: registry.bots, projects: registry.projects, attach, workers, terminals, facts,
+      core: { id: core.info?.core?.id ?? '', name: core.info?.core?.name ?? '' },
+    }) }
   } catch (error) {
     warn(`the Code side could not list terminals: ${error?.kind ?? error?.message ?? error}`)
     return { reason: 'no-core' }
@@ -253,23 +567,11 @@ export async function resolvePane({ botId, worker = null, env = process.env, con
   const appHome = appHomeOf(env)
   const attachRows = readAttach(readLedger(attachPath(appHome), readFile) ?? '').rows
   const fold = foldAttach(attachRows)
-  let terminalId = null
-  let createdMs = null
-  let rowCore = null
-  if (worker === null || worker === undefined) {
-    const binding = heldIn(fold, botId, null)
-    if (!binding) return null
-    terminalId = binding.terminal
-    createdMs = binding.created_ms
-    rowCore = binding.core
-  } else {
-    const workers = foldWorkers(readWorkers(readLedger(workersPath(appHome), readFile) ?? '').rows)
-    const found = workersOf(workers, botId).find(candidate => candidate.terminal === worker)
-    if (!found) return null
-    terminalId = found.terminal
-    createdMs = found.created_ms
-    rowCore = found.core
-  }
+  const row = worker == null
+    ? heldIn(fold, botId, null)
+    : workerBinding(appHome, botId, worker, readFile)
+  if (!row) return null
+  const terminalId = row.terminal
   let core
   try {
     core = await connect({ env })
@@ -278,14 +580,13 @@ export async function resolvePane({ botId, worker = null, env = process.env, con
   }
   try {
     const coreId = core.info?.core?.id ?? ''
-    // The row must name this computer's core: a row written on another machine's core with
-    // a colliding terminal id is not this computer's pane.
-    if (!coreId || rowCore !== coreId) return null
-    const terminal = await core.call('terminal.get', { terminal: terminalId })
-    if (!terminal || terminal.created_ms !== createdMs || terminal.state !== 'live') return null
+    if (!coreId || row.core !== coreId) return null
+    const terminal = confirmedPane(row, coreId, await core.call('terminal.get', { terminal: terminalId }))
+    if (!terminal) return null
+    if (worker != null && !workerHasNoOtherSeatOwner(fold, botId, row)) return null
     const size = sizeOf(terminal)
     if (!size) return null
-    return { botId, terminal: terminalId, cols: size.cols, rows: size.rows, core: coreId, name: bot.name, folder: bot.folder }
+    return { botId, terminal: terminalId, created_ms: row.created_ms, cols: size.cols, rows: size.rows, core: coreId, name: bot.name, folder: bot.folder }
   } catch {
     return null
   } finally {

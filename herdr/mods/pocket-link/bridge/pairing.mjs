@@ -2,7 +2,9 @@
 // copied, and the short key fingerprint the dialog shows next to each phone. No iroh here, so
 // `node --test` runs it without npm.
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { unlinkSync, readFileSync, openSync, readSync, writeSync, ftruncateSync, fstatSync, statSync, closeSync } from 'node:fs'
+import { unlinkSync, readFileSync, lstatSync, openSync, readSync, writeSync, ftruncateSync, fstatSync, statSync, closeSync } from 'node:fs'
+import { join } from 'node:path'
+import { syncStateDir, writeStateJson } from './state.mjs'
 
 /** Wrong tries one phone key gets at a code; after that its tries are refused and not counted. */
 export const TRIES_PER_PHONE = 3
@@ -77,15 +79,15 @@ export function shorten(pending, life = COPIED_LIFE, now = Date.now()) {
  * writer of pairing.json, the dialog also ends a copied code itself at 0:00 (a new code replaces
  * it).
  */
-export function shortenCode(path, life = COPIED_LIFE, now = Date.now(), { attempts = 5, settle = 50, written, settled } = {}) {
-  let code = null
+export function shortenCode(path, life = COPIED_LIFE, now = Date.now(), { attempts = 5, settle = 50, written, settled, only = null } = {}) {
+  let id = only
   for (let i = 0; i < attempts; i++) {
     let fd
     try { fd = openSync(path, 'r+') } catch { return { error: 'gone' } }
     try {
-      const next = shortenOpen(fd, life, now, code)
+      const next = shortenOpen(fd, life, now, id)
       if (!next) return { error: 'gone' }
-      code = next.code
+      id = challengeId(next.code)
       written?.(i)
       if (!holds(fd, path, next)) continue
       if (settle > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, settle)
@@ -106,7 +108,7 @@ function holds(fd, path, next) {
 
 /**
  * shortenCode's read and write, on pairing.json already open for both: the record written, or
- * null with nothing written when no code is live or, given `only`, the live one is another code.
+ * null with nothing written when no code is live or its challenge ID differs from `only`.
  */
 export function shortenOpen(fd, life = COPIED_LIFE, now = Date.now(), only = null) {
   const buf = Buffer.alloc(fstatSync(fd).size)
@@ -114,17 +116,86 @@ export function shortenOpen(fd, life = COPIED_LIFE, now = Date.now(), only = nul
   let pending = null
   try { pending = JSON.parse(buf.toString('utf8')) } catch {}
   const next = shorten(pending, life, now)
-  if (!next || (only !== null && !sameCode(next.code, only))) return null
+  if (!next || (only !== null && !matchesChallenge(next, only))) return null
   const out = Buffer.from(JSON.stringify(next, null, 2) + '\n')
   writeSync(fd, out, 0, out.length, 0)
   ftruncateSync(fd, out.length)
   return next
 }
 
+export const COMPLETED = 'pairing-completed.json'
+export const GRANT = 'pairing-grant.json'
+export const challengeId = code => createHash('sha256').update(code).digest('hex')
+const matchesChallenge = (pending, id) => typeof pending?.code === 'string' && challengeId(pending.code) === id
+
+/** Receipts outlive the single pending file, so overlapping waiters can identify their own phone. */
+export function completionReceipts(previous, pending, phone, now = Date.now()) {
+  const next = Object.fromEntries(Object.entries(previous ?? {}).filter(([, value]) => value.expires >= now))
+  const id = challengeId(pending.code)
+  next[id] = { name: phone.name, fingerprint: fingerprint(phone.id), expires: pending.expires }
+  return next
+}
+
+function readRecord(path) {
+  try {
+    if (!lstatSync(path).isFile()) throw new Error(`Invalid Pocket Link pairing record: ${path}`)
+    return JSON.parse(readFileSync(path, 'utf8'))
+  }
+  catch (e) { if (e.code !== 'ENOENT') throw e; return null }
+}
+
+export function discardGrant(dir) {
+  const path = join(dir, GRANT)
+  try {
+    if (!lstatSync(path).isFile()) throw new Error('Invalid Pocket Link pairing grant.')
+    unlinkSync(path)
+  } catch (e) { if (e.code === 'ENOENT') return; throw e }
+  syncStateDir(dir)
+}
+
+/** Finish the reserved grant under service.lock. The receipt is published only after access exists. */
+export function resumePairing(dir, phones, now = Date.now(), desktopId) {
+  const grant = readRecord(join(dir, GRANT))
+  if (!grant) return
+  const { pending, phone } = grant
+  if (!desktopId || !pending.id || desktopId === pending.id) {
+    const path = join(dir, COMPLETED)
+    const receipts = readRecord(path) ?? {}
+    if (!Object.hasOwn(receipts, challengeId(pending.code))) {
+      phones.add(phone)
+      writeStateJson(path, completionReceipts(receipts, pending, phone, now))
+    }
+  }
+  cancelCode(join(dir, 'pairing.json'), now, challengeId(pending.code))
+  discardGrant(dir)
+}
+
+/** Judge the incoming phone under service.lock and reserve its key before granting access. */
+export function acceptPairing(dir, phones, { pending, peer, code, device, now = Date.now() }) {
+  resumePairing(dir, phones, now, pending?.id)
+  const completed = readRecord(join(dir, COMPLETED)) ?? {}
+  const used = pending?.code && Object.hasOwn(completed, challengeId(pending.code))
+  const { verdict, next } = judgeCode(used ? null : pending, peer, code, now)
+  const path = join(dir, 'pairing.json')
+  if (verdict === 'ok') {
+    const name = String(device ?? 'Phone').replace(/[\u0000-\u001f]/g, '').slice(0, 60) || 'Phone'
+    const { id, code, expires } = pending
+    writeStateJson(join(dir, GRANT), { pending: { id, code, expires }, phone: { id: peer, name, paired: now, seen: now } })
+    resumePairing(dir, phones, now)
+    return { verdict, name }
+  } else if (next === null) cancelCode(path, now)
+  else if (next) writeStateJson(path, next)
+  return { verdict }
+}
+
 /** Ends the live code, if any. True when there was one that still worked. */
-export function cancelCode(path, now = Date.now()) {
+export function cancelCode(path, now = Date.now(), only = undefined) {
   let pending = null
-  try { pending = JSON.parse(readFileSync(path, 'utf8')) } catch {}
+  try {
+    if (!lstatSync(path).isFile()) return false
+    pending = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {}
+  if (only !== undefined && !matchesChallenge(pending, only)) return false
   try { unlinkSync(path) } catch { return false }
   return Boolean(pending && now <= pending.expires)
 }

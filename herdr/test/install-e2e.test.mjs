@@ -314,8 +314,18 @@ function assertFullPack(m, r) {
   const entry = existsSync(join(x, "am-sidebar", "bin", "automagik-herdr")) ? "automagik-herdr" : "automagik-herdr.mjs";
   assert.equal(readlinkSync(m.link), join(m.mods, "am-sidebar", "bin", entry));
   // usagemeter, the token meter the sidebar runs, in place beside it.
-  const meter = spawnSync(join(m.home, ".local", "bin", "usagemeter"), ["--version"], { encoding: "utf8" });
-  assert.equal(meter.stdout, `usagemeter ${METER_VERSION}\n`, "usagemeter is installed");
+  const binDir = join(m.home, ".local", "bin");
+  const meter = spawnSync(join(binDir, "usagemeter"), ["--version"], { encoding: "utf8" });
+  // A rare CI failure (the spawn failed: no stdout) left no trace of why. On a mismatch the message
+  // names the spawn's error, what ~/.local/bin holds and the installer's own output (it prints
+  // paths and versions, never the environment or a key).
+  const meterWhy = () => {
+    let listing;
+    try { listing = readdirSync(binDir).sort().join(", "); } catch (e) { listing = `unreadable (${e.code})`; }
+    return [`usagemeter is installed: spawn error ${meter.error?.code ?? "none"}, status ${meter.status}, stderr ${JSON.stringify(meter.stderr ?? "")}`,
+      `~/.local/bin: ${listing}`, "install.sh stdout:", r.out, "install.sh stderr:", r.err].join("\n");
+  };
+  assert.equal(meter.stdout, `usagemeter ${METER_VERSION}\n`, meter.stdout === `usagemeter ${METER_VERSION}\n` ? "usagemeter is installed" : meterWhy());
   const v = m.cli("--version");
   assert.equal(v.code, 0, `am --version: ${v.out}${v.err}`);
   assert.equal(v.out, `am ${RELEASE}\n`);

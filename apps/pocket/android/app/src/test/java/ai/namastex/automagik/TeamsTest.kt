@@ -790,4 +790,15 @@ class TeamsTest {
         assertEquals(Teams.Swipe.NONE, Teams.swipe(dx = 150f, dy = 0f, t, canYes = false, canNo = true))   // no Yes to send
         assertEquals(Teams.Swipe.NONE, Teams.swipe(dx = 60f, dy = -80f, t, canYes = true, canNo = true))    // too short
     }
+
+    @Test fun aGroupIsNeverABubblesChat() {
+        val teams = Teams.build(mapOf("h1" to machine()), 10_000L)
+        val noRooms = Teams.bubbles(teams, emptyMap())
+        val main = "b-aaaaaaaaaa"
+        val groups = listOf(dshRow("room:$main"), dshRow("room:r1", registryId = main))
+        assertEquals(noRooms.map { it.opens }, Teams.bubbles(teams, mapOf("h1" to groups)).map { it.opens })
+        val roomNamedBot = Teams.Bot("room:$main", "Lead", true, null, Teams.IDLE, "", 0L, null, "")
+        val team = Teams.Team("h1|x", "h1", "", "/w", "W", Teams.Icon.Letter, null, listOf(roomNamedBot))
+        assertNull(Teams.bubbles(listOf(team), mapOf("h1" to groups)).single().opens)
+    }
 }

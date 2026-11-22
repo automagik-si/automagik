@@ -14,6 +14,7 @@ import { SESSION_MASK, ledgerSession, maskedArgv, planText, restartPlan } from "
 const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", solo: "b-dddddddddd", deep: "b-ffffffffff", plan: "b-eeeeeeeeee" };
 const SID = "00000000-0000-4000-8000-000000000001";
 const SID2 = "00000000-0000-4000-8000-000000000002";
+const GEN1 = "11111111-1111-4111-8111-111111111111";
 const bot = (id, kind, extra = {}) => ({ id, kind, name: id, agent: "claude", ...extra });
 const file = (bots) => ({ version: 1, categories: [], bots });
 
@@ -60,12 +61,14 @@ test("squadOf is frozen in the row: a start row keeps the squad it was written w
 
 // ---- the rows ----
 
-test("startRow: core, created_ms, squad and session, null when not given; an old row still reads", () => {
+test("startRow: core, created_ms, squad, session, generation and sequence, null when not given; an old row still reads", () => {
   const row = startRow({ kind: "seat", terminal: "t5", botId: ID.cap, role: "captain", lead: ID.main, squad: ID.cap, core: "core-1",
-    createdMs: 1234, session: SID, at: 0 });
-  assert.deepEqual([row.core, row.created_ms, row.role, row.lead, row.squad, row.session], ["core-1", 1234, "captain", ID.main, ID.cap, SID]);
+    createdMs: 1234, session: SID, generation: GEN1, sequence: 5, at: 0 });
+  assert.deepEqual([row.core, row.created_ms, row.role, row.lead, row.squad, row.session, row.generation, row.sequence],
+    ["core-1", 1234, "captain", ID.main, ID.cap, SID, GEN1, 5]);
   const bare = startRow({ kind: "seat", terminal: "t5", botId: ID.cap, createdMs: "1234" });
-  assert.deepEqual([bare.core, bare.created_ms, bare.squad, bare.session, bare.role, bare.lead], [null, null, null, null, null, null]);
+  assert.deepEqual([bare.core, bare.created_ms, bare.squad, bare.session, bare.role, bare.lead, bare.generation, bare.sequence],
+    [null, null, null, null, null, null, null, null]);
   // An old row written before RFC 0021 has none of the new fields: it reads as it was.
   const old = readLedger('{"event":"start","kind":"worker","terminal":"t3","botId":"b-cccccccccc"}\n')[0];
   assert.equal(launchKey(old), null);

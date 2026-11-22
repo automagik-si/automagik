@@ -68,7 +68,8 @@ How they fit:
   outside the Bot’s folder ask the person when the existing tool gate allows them. Children follow the same check.
   Read-only team lookups such as `recall` do not ask just because their arguments mention a hard step.
   Auto also asks about these steps inside its Workspace boundary; its judge keeps its own counts.
-  Plugins classify external senders through `rt.stepHooks.sendsOutside(fn)`; a failed hook asks.
+  Plugins classify external senders through `rt.stepHooks.sendsOutside(fn)`, with the classifier
+  receiving `{ tool, args, sessionId }`. A failed hook asks.
   Ordinary example env files, public SSH keys, feature-branch pushes with an explicit
   destination and local file deletes stay out of the added list; a bare `git push` or a
   destination of `HEAD` asks. Exact boundaries are in RFC 0031’s #1092 amendment.
@@ -237,15 +238,22 @@ the endpoint for a plugin with a read of its own.
 
 ### The backfill card (K2)
 
-`omni.genui.BackfillCard({ roster, start?, cancel? })` draws the interactive per-chat history
+`omni.genui.BackfillCard({ roster, proposalId?, runId?, start?, cancel? })` draws the interactive per-chat history
 backfill: a Bot proposes reading a chat's history over a date range, the person ticks the
 chats and sets the dates, and presses **Start** once. Nothing starts on its own, and the card
-never sends a message. A plugin mounts it from its own tool card, with the same roster every
-tool card gets:
+never sends a message. A tool card passes its `roster` and the ID from that call's successful
+result. With React's `createElement` as `h`, a proposal renderer can return:
 
 ```js
-omni.toolCards.register('propose_backfill', p => omni.genui.BackfillCard({ roster: p.roster }))
+return h(omni.genui.BackfillCard, { roster: p.roster, proposalId })
 ```
+
+`proposalId` shows that proposal while it is open and follows the run that shares its ID.
+When both disappear, the card says the request is no longer open. `runId` selects a single
+run and takes precedence for the rows when both IDs are passed. If the requested run is
+absent, the card says so. With neither ID, the card shows all open proposals and the first
+three runs. When `roster.readOnly` is set, the foot explains where to act and **Start** and
+**Stop** are disabled.
 
 It reads the two fields Omni's channels plugin publishes (`omni-channels-dsh`, #1772):
 
@@ -278,10 +286,16 @@ run appears in `omniBackfills`. A row offers **Stop** only while it has a `jobId
 `outcome` is `null`; `cancel_backfill` stops that one job. A refusal is shown in the card, as
 the host worded it, and the proposal stays for another try.
 
+An ended backfill row with coverage says when Omni holds no messages in the selected
+window. Otherwise, if the oldest message Omni holds falls after the start day, the row
+names that oldest day. Both comparisons and dates use UTC. The line describes the history
+Omni holds.
+
 `start` and `cancel` replace the two actions for a plugin or a test (`(payload) => Promise`).
 The words and formats live in `genui-model.js`: `proposalView`, `runView`, `backfillView`,
 `backfillRange`, `backfillDay`, `backfillSummaryText`, `canCancel`. `BACKFILL_RUNS_SHOWN` (3)
-and `BACKFILL_ROWS_SHOWN` (20) cap what the card draws; a run says how many chats it leaves out.
+and `BACKFILL_ROWS_SHOWN` (20) cap the displayed runs and rows. A run says how many chats it
+leaves out.
 
 ### What the rest of the kit gives a card
 
@@ -308,6 +322,8 @@ The [project page](../../README.md#install) has the full steps for dsh Desktop a
 - dsh Desktop: Settings → Plugins → add a `.tgz` of this package (`npm pack` in this folder).
 - Command line: `dsh plugin --profile web add /path/to/automagik-bots-dsh-<version>.tgz`.
 - Or skip dsh setup entirely: the Automagik desktop app ([`apps/desktop`](../desktop/README.md), `omni desktop` from Omni's CLI) ships dsh with this plugin on a home of its own.
+
+The desktop app selects `@automagik/bots-dsh/sandbox-local` when its DSH runtime supplies both sandbox peers. On Linux, the provider gives bwrap a read-only copy of trusted system SSH drop-ins that OpenSSH can read in its user namespace. To opt in on your own DSH profile, add an `insert` row containing `id: automagik-sandbox` and `name: '@automagik/bots-dsh/sandbox-local'`, followed by an override with `id: sandbox`, `name: '@deepseek-ai/dsh-sandbox-local'` and `disabled: true`.
 
 To work on the plugins from a checkout, add them to a dsh profile as linked dependencies and bundles (the channels and canvas plugins are optional):
 
@@ -428,7 +444,7 @@ No credential is read or copied between programs. The background model is not mo
 
 **The model menu** lists only what is set up, as connection, then model, then thinking level: a provider whose key is stored, an agent whose CLI is signed in, and a DSH sign-in other than Claude's or ChatGPT's that is stored. A connection is named by its brand and how it connects: "DeepSeek", "Anthropic · API key", "OpenAI · API key", "Claude Code", "Codex"; two connections that would read the same also show their route id. DSH's own Claude Pro/Max or ChatGPT sign-in route is never offered (the catalog marks it `covered`), nor is a model whose key or sign-in is missing (`needsKey`, `needsSignIn`). The model a Bot is on stays shown even when it cannot run, marked unavailable, and a new Bot never starts on one: the team's default skips them, and DSH's default on a covered plan route is read as the same model on that plan's CLI. The jobs beside the chats keep their own rule (the background model above).
 
-**Images**: `generate_image` draws with an OpenAI API key (the Images API) exactly as before; without one, through the Codex CLI on its own ChatGPT sign-in (acp-dsh's `generateImage`, a one-off Codex session with a per-draw permission profile using Codex's image tool), so a ChatGPT plan draws with no DSH sign-in. A ChatGPT grant an earlier version stored through DSH's `openai-codex` sign-in is read last, only so a person who signed in that way keeps drawing; Automagik no longer offers that sign-in. Nothing reads or copies the CLI's sign-in. A Bot on an agent (Codex) can also make an image with the agent's own tool: acp-dsh hands its PNG, from the call's own update, to the Bot team's keeper (`acpAgents.keepImages`), the chat shows it in the same image card, it is saved in the same images folder, and the agent's link to its own local copy leaves the reply. While any image is made (either path), the card is Omni painting: Omni's clay art with no card behind it, swaying, its face changing every 0.9 s, four dabs of the theme's colours around it, and "Painting your image…" with the seconds so far; a partial image, then the finished one, fades in where Omni was. With reduced motion Omni stands still and the dabs are gone. A call that fails or is stopped says the image was not made, and why.
+**Images**: `generate_image` draws through the Images API with an OpenAI API key the person gave the app: the key saved in the app, or `OPENAI_API_KEY` from DSH's credential file or the app's own `.env` files. A key inherited from the environment Automagik was started in is skipped (#869). An exported variable hides the app's `.env` keys. When no image source is ready, Settings → Bots → Images explains why the inherited key was skipped and points to Settings → Models, where saving that key gives it priority. Without an eligible key, it draws through the Codex CLI on its own ChatGPT sign-in (acp-dsh's `generateImage`, a one-off Codex session with a per-draw permission profile using Codex's image tool), so a ChatGPT plan draws with no DSH sign-in. A ChatGPT grant an earlier version stored through DSH's `openai-codex` sign-in is read last, only so a person who signed in that way keeps drawing; Automagik no longer offers that sign-in. Nothing reads or copies the CLI's sign-in. A Bot on an agent (Codex) can also make an image with the agent's own tool: acp-dsh hands its PNG, from the call's own update, to the Bot team's keeper (`acpAgents.keepImages`), the chat shows it in the same image card, it is saved in the same images folder, and the agent's link to its own local copy leaves the reply. While any image is made (either path), the card is Omni painting: Omni's clay art with no card behind it, swaying, its face changing every 0.9 s, four dabs of the theme's colours around it, and "Painting your image…" with the seconds so far; a partial image, then the finished one, fades in where Omni was. With reduced motion Omni stands still and the dabs are gone. A call that fails or is stopped says the image was not made, and why.
 
 `generate_image` also edits a picture the person uploaded in that Bot's own chat: pass its
 shown name, sha256 (full or a prefix), or upload path as `image`, and the change as `prompt`.
@@ -438,8 +454,9 @@ other chats, group chats and team-generated images are not edit inputs in this p
 verified PNG, JPEG and WebP uploads up to 12 MiB are accepted. The original stays unchanged;
 the result is a new image in the same chat card and team images folder.
 
-Edits use the person's OpenAI key through the Images edits API, or Codex on their ChatGPT
-plan through `acpAgents.editImage`. An older ACP plugin asks for an update;
+Edits use the OpenAI key the person gave the app (an inherited environment key is not used)
+through the Images edits API, or Codex on their ChatGPT plan through `acpAgents.editImage`.
+An older ACP plugin asks for an update;
 a legacy ChatGPT grant cannot edit. Codex edits require acknowledgement of the per-draw
 profile before sending the edit prompt. A Codex Bot's own chat image tool is a separate route.
 
@@ -508,8 +525,8 @@ one-off Codex draw is refused with “Update Automagik and try again.” A Codex
 chat image tool uses its chat permissions, which govern whether an injected request can use
 a readable local image as input and return its contents in chat.
 
-An OpenAI API key routes `generate_image` through the Images API instead of its one-off
-Codex session. Prompt text still reaches the model; keep secrets out of it. A Bot running on
+An OpenAI API key given to the app routes `generate_image` through the Images API instead of
+its one-off Codex session. Prompt text still reaches the model; keep secrets out of it. A Bot running on
 Codex can still use its own image tool despite that key. Use a different Bot model or turn
 Codex off to avoid that route. Avoid sending untrusted outside text to Codex drawing; prompt
 review is not a file access control. See the
@@ -717,6 +734,10 @@ Secret Service mappings before rolling back to a Bot team version that predates 
 Auto asks before recognized Secret Service reads, monitors and captures.
 
 Remove Proton Pass mappings before rolling back to a Bot team version that predates this provider.
+
+macOS Keychain uses `/usr/bin/security` for generic passwords in the login keychain. Unlock the plugin gate in local Settings › Secrets › Vault and find a single item by its exact service and account. macOS may ask on this Mac. Choose **Allow**, not **Always Allow**. The provider is unavailable on Linux, Windows and Automagik Cloud. Locking the gate invalidates its pending approvals and grants.
+
+Windows Credential Manager opens a local Settings gate and finds one generic credential by its exact target. The user's private card shows the saved target. Settings can show its user name during Find. A lock invalidates pending approvals and grants for this provider. Auto asks before recognized credential commands, including Windows PowerShell credential API calls or opaque invocations, vaultcmd and cmdkey listings or writes. Auto omits recognized credential command details from its diagnostics, audit and subsequent judge requests. A tool-call event emitted by an agent can still contain text the agent supplied. Same-user shell code can access the Windows credential store outside Automagik's gate, and Windows credential-access auditing can record the target name.
 
 Vault mappings live in a separate `vault-sources.json` in the team home, written atomically with file mode 600. Mapped names stay reserved even when the vault plugin is off. When the vault is unlocked, a Bot in scope can ask for approval in its own chat. Each approval covers one attempt at the exact command, in the shell and folder shown on the card. Vault values cannot reach a shell in this version. If a name appears in both files, remove one definition in Settings → Secrets to resolve the conflict. You can remove a mapping there with the vault plugin off. If the mapping file cannot be read, secret use stops until the file is fixed.
 

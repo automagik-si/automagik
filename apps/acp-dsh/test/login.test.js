@@ -12,6 +12,9 @@ const CLAUDE = 'acp-claude'
 const CODEX = 'acp-codex'
 const STATE = 'expected_state_0123456789'
 const CLAUDE_URL = `https://claude.com/cai/oauth/authorize?code=true&client_id=public&state=${STATE}&code_challenge=public-challenge`
+const SHORT_CLAUDE_QUERY = `A${'b'.repeat(43)}`
+const SHORT_CLAUDE_ENDPOINT = 'https://claude.ai/oauth/authorize'
+const SHORT_CLAUDE_URL = `${SHORT_CLAUDE_ENDPOINT}?${SHORT_CLAUDE_QUERY}`
 const CODEX_URL = 'https://auth.openai.com/codex/device'
 const settle = () => new Promise(resolve => setImmediate(resolve))
 const deferred = () => {
@@ -119,7 +122,7 @@ test('sign-in URLs reject lookalikes, userinfo, controls, ports, schemes and a C
     'https://auth.openai.com/codex/device?code=private',
     'https://auth.openai.com/codex/device\n',
     'https://auth.openai.com/another-path',
-  ]) assert.equal(isLoginUrl(CODEX, bad), false, bad)
+  ]) assert.equal(isLoginUrl(CODEX, bad), false, 'invalid Codex sign-in link')
   // H5: without code=true the page sends the code to a local callback no other device reaches.
   for (const bad of [
     `https://claude.com/cai/oauth/authorize?state=${STATE}`,
@@ -127,7 +130,8 @@ test('sign-in URLs reject lookalikes, userinfo, controls, ports, schemes and a C
     'https://claude.com/cai/oauth/authorize?code=true',
     'https://claude.com/cai/oauth/authorize?code=true&state=short',
     `https://claude.com/cai/oauth/authorize?code=true&state=${STATE}#x`,
-  ]) assert.equal(isLoginUrl(CLAUDE, bad), false, bad)
+  ]) assert.equal(isLoginUrl(CLAUDE, bad), false, 'invalid Claude sign-in link')
+  assert.equal(isLoginUrl(CLAUDE, SHORT_CLAUDE_URL), false, 'compact Claude sign-in link')
   assert.equal(isLoginUrl(CLAUDE, CODEX_URL), false)
   assert.equal(isLoginUrl(CODEX, CLAUDE_URL), false)
 })
@@ -407,10 +411,11 @@ test('an ended attempt carries its fixed cause; a live one carries none', async 
   assert.doesNotMatch(JSON.stringify(view), /private-account-name/)
 })
 
-test('Claude and Codex run at the same time, independently; the browser block is scoped and cleaned up', async t => {
+test('Claude and Codex run independently with Claude-only sign-in options', async t => {
   const h = harness()
   t.after(() => h.logins.dispose())
   const browserBefore = process.env.BROWSER
+  const fullLinkBefore = process.env.CLAUDE_CODE_FULL_SIGN_IN_LINK
   h.selected.env.BROWSER = '/user/normal-browser'
   const original = { ...h.selected.env }
   const claude = h.logins.start(CLAUDE, { label: 'first-bot' })
@@ -422,7 +427,10 @@ test('Claude and Codex run at the same time, independently; the browser block is
   const nativeCodex = h.children.find(row => row.args[0] === 'app-server')
   const directory = dirname(nativeClaude.opts.env.BROWSER)
   assert.equal(nativeCodex.opts.env.BROWSER, original.BROWSER)
+  assert.equal(nativeClaude.opts.env.CLAUDE_CODE_FULL_SIGN_IN_LINK, '1')
+  assert.equal(Object.hasOwn(nativeCodex.opts.env, 'CLAUDE_CODE_FULL_SIGN_IN_LINK'), false)
   assert.deepEqual(h.selected.env, original)
+  assert.deepEqual(h.checks.map(({ env }) => env), [original, original])
   assert.notEqual(claude.attemptId, codex.attemptId)
   showClaudeLink(nativeClaude.child)
   h.logins.cancel(CLAUDE, claude.attemptId)
@@ -432,6 +440,7 @@ test('Claude and Codex run at the same time, independently; the browser block is
   assert.equal(h.logins.activeAttempts(), 1)
   h.logins.dispose()
   assert.equal(process.env.BROWSER, browserBefore)
+  assert.equal(process.env.CLAUDE_CODE_FULL_SIGN_IN_LINK, fullLinkBefore)
   assert.equal(h.logins.activeAttempts(), 0)
   assert.deepEqual(h.counts, [1, 2, 1, 0])
 })
@@ -555,6 +564,58 @@ test('unsupported OAuth links and oversized process output never echo account di
     assert.equal(JSON.stringify(result).includes('sensitive-account-data'), false)
     assert.equal(h.logins.textMatches(`x#${STATE}`), false, 'a refused link records no state')
   }
+})
+
+test('only compact Claude links get the short-link failure and no link is retained', async t => {
+  const shortCause = 'short sign-in link unsupported'
+  const unsupportedCause = 'unsupported sign-in link'
+  const cases = [
+    ['compact query', SHORT_CLAUDE_URL, shortCause],
+    ['compact query with a suffix', `${SHORT_CLAUDE_URL}&x=1`, shortCause],
+    ['bare endpoint', SHORT_CLAUDE_ENDPOINT, unsupportedCause],
+    ['manual code without state', `${SHORT_CLAUDE_ENDPOINT}?code=true`, unsupportedCause],
+    ['ordinary query parameter', `${SHORT_CLAUDE_ENDPOINT}?x=1`, unsupportedCause],
+    ['compact query with a state parameter', `${SHORT_CLAUDE_URL}&state=`, unsupportedCause],
+    ['compact query after another component', `${SHORT_CLAUDE_ENDPOINT}?x=1&${SHORT_CLAUDE_QUERY}`, unsupportedCause],
+    ['different host', `https://evil.test/oauth/authorize?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
+    ['different path', `https://claude.ai/other?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
+    ['explicit default port', `https://claude.ai:443/oauth/authorize?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
+    // Built through URL so the source holds no address-shaped text (the privacy scan).
+    ['userinfo', Object.assign(new URL(SHORT_CLAUDE_URL), { username: 'user' }).href, unsupportedCause],
+    ['fragment', `${SHORT_CLAUDE_URL}#x`, unsupportedCause],
+  ]
+  for (const [label, url, cause] of cases) {
+    const h = harness()
+    t.after(() => h.logins.dispose())
+    const started = h.logins.start(CLAUDE)
+    await settle()
+    showClaudeLink(h.children[0].child, url)
+    const result = h.logins.status(CLAUDE, started.attemptId)
+    assert.equal(result.status, 'failed', label)
+    assert.equal(result.cause, cause, label)
+    assert.equal(result.message, cause === shortCause
+      ? 'The CLI returned a short sign-in link this app cannot use yet. Update Automagik and try again.'
+      : 'The CLI returned an unsupported sign-in link. Update it and try again.', label)
+    assert.equal(Object.hasOwn(result, 'url'), false, label)
+    assert.equal(Object.hasOwn(result, 'state'), false, label)
+    assert.equal(Object.hasOwn(result, 'prompt'), false, label)
+    assert.equal(h.logins.states.size, 0, label)
+  }
+})
+
+test('a full Claude sign-in link takes precedence over a short link in the same output', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  const started = h.logins.start(CLAUDE)
+  await settle()
+  const { child } = h.children[0]
+  child.stdout.write(`visit: ${SHORT_CLAUDE_URL}\n`)
+  showClaudeLink(child)
+  const result = h.logins.status(CLAUDE, started.attemptId)
+  assert.equal(result.status, 'waiting')
+  assert.equal(result.url === CLAUDE_URL, true, 'the full Claude sign-in link is shown')
+  assert.equal(result.prompt?.id, 'claude-code')
+  assert.equal(h.logins.textMatches(`x#${STATE}`), true)
 })
 
 // F5: a sign-in never updates the CLI on its own, whoever installed it (clis.js asks --version

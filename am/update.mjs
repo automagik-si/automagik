@@ -73,6 +73,7 @@ import {
 } from "./migrateHome.mjs";
 import { change, removePath } from "./layoutSafe.mjs";
 import { foldAttach, readAttach } from "./attach.js";
+import { automaticDelivery } from "./delivery.mjs";
 import { AM_LINK, CLI_LINK, botPaneFolders, hooksNotice, hooksNoticeSuppressed, openSpaces, relink, syncHooks, tightenLedgers } from "./migrateHooks.mjs";
 
 export { CHECK_EVERY_MS, FIRST_CHECK_MS, LANE_RELEASE, NO_UPDATE_ENV, PACK_MODS, PACK_NAME, POINTER_SIG_URL, POINTER_URL, RETRY_MS, compareVersions,
@@ -235,8 +236,12 @@ const tokenOf = (lock) => { try { return readFileSync(join(lock, LOCK_TOKEN), "u
  * never frees the newer holder's. A stale lock is renamed aside (one taker wins the rename).
  */
 export function takeLock(modsDir, now = Date.now(), hooks = {}) {
-  const lock = lockOf(modsDir);
-  mkdirSync(stateDirOf(modsDir), { recursive: true });
+  return takeStateLock(lockOf(modsDir), now, hooks);
+}
+
+function takeStateLock(lock, now = Date.now(), hooks = {}) {
+  const state = dirname(lock);
+  mkdirSync(state, { recursive: true });
   try { mkdirSync(lock); } catch (error) {
     if (error?.code !== "EEXIST") throw error;
     let age = Infinity;
@@ -247,7 +252,7 @@ export function takeLock(modsDir, now = Date.now(), hooks = {}) {
     // one goes back where it was, and this run is refused. (`hooks`: tests' interleavings.)
     const seen = tokenOf(lock);
     hooks.beforeTakeover?.();
-    const aside = freshPath(stateDirOf(modsDir), ".update.lock-stale-");
+    const aside = freshPath(state, `.${basename(lock)}-stale-`);
     try { renameSync(lock, aside); } catch { throw lockedError(); }
     if (tokenOf(aside) !== seen) {
       try { renameSync(aside, lock); } catch {}
@@ -261,7 +266,7 @@ export function takeLock(modsDir, now = Date.now(), hooks = {}) {
   writeFileSync(join(lock, LOCK_TOKEN), token);
   return () => {
     if (tokenOf(lock) !== token) return;
-    const gone = freshPath(stateDirOf(modsDir), ".update.lock-free-");
+    const gone = freshPath(state, `.${basename(lock)}-free-`);
     try { renameSync(lock, gone); } catch { return; }
     if (tokenOf(gone) === token) removePath(gone, { recursive: true, force: true });
     else { try { renameSync(gone, lock); } catch {} }
@@ -1479,7 +1484,8 @@ export async function checkForUpdate({ fetch = globalThis.fetch, env = process.e
     const restore = JSON.parse(readFileSync(join(state, RESTORE_FILE), "utf8"));
     const note = JSON.parse(readFileSync(join(state, "restore-notified.json"), "utf8"));
     if (typeof restore?.failedVersion === "string" && typeof restore?.version === "string"
-      && note?.failedVersion === restore.failedVersion && Array.isArray(note.pendingBots) && note.pendingBots.length > 0) {
+      && note?.failedVersion === restore.failedVersion
+      && (note.pendingBots?.length > 0 || note.unreadableProjects?.length > 0)) {
       notifyMainBotOfRestore({ modsDir, version: restore.failedVersion, restored: restore.version,
         failed: Array.isArray(restore.failed) ? restore.failed : [restore.mod].filter(Boolean), projectDir, hcRun });
     }
@@ -1550,22 +1556,21 @@ export async function installUpdate({ fetch = globalThis.fetch, env = process.en
 }
 
 /**
- * Best-effort notice to every project's running main bot, once per failed version. A bot whose
- * pane is blocked when the send is attempted is kept in `pendingBots`, so a later call (or the
- * next check tick) retries it; a notified bot is never told twice for the same version.
+ * Best-effort notice to each project's main bot. Serialize retries across processes and
+ * record an acknowledged send before releasing the lock. Unverified recipients stay pending.
  */
 export function notifyMainBotOfRestore({ modsDir, version, restored, failed = [], projectDir,
   hcRun = (args) => execFileSync("hc", args, { encoding: "utf8", timeout: 15000 }) }) {
+  let free;
   try {
     const state = stateDirOf(modsDir), file = join(state, "restore-notified.json");
-    let notified = null;
-    try { notified = JSON.parse(readFileSync(file, "utf8")); } catch {}
-    const same = notified?.failedVersion === version;
-    let notifiedBots = same && Array.isArray(notified.notifiedBots) ? [...notified.notifiedBots] : [];
-    let pendingBots = same && Array.isArray(notified.pendingBots) ? [...notified.pendingBots] : [];
-    // Done for this version, and none left to retry.
-    if (same && (!Array.isArray(notified.pendingBots) || notified.pendingBots.length === 0)) return { sent: false };
-    if (!same) { notifiedBots = []; pendingBots = []; }
+    free = takeStateLock(join(state, "restore-notified.lock"));
+    let note = null;
+    try { note = JSON.parse(readFileSync(file, "utf8")); } catch {}
+    const same = note?.failedVersion === version;
+    const recipients = same && Array.isArray(note.recipients) ? [...note.recipients] : [];
+    const legacySent = same && !note.recipients && Array.isArray(note.notifiedBots) ? note.notifiedBots : [];
+    if (same && !note.pendingBots?.length && !note.unreadableProjects?.length) return { sent: false };
     let rows = [];
     try { rows = readAttach(readFileSync(join(state, "attach.jsonl"), "utf8")).rows; } catch {}
     const bindings = foldAttach(rows);
@@ -1594,61 +1599,94 @@ export function notifyMainBotOfRestore({ modsDir, version, restored, failed = []
     for (const binding of bindings.byBot.values()) add(binding?.project);
     for (const row of rows) add(row?.project);
     const text = `Automagik Herdr update ${version} failed to load (${failed.join(", ")}) and rolled back to ${restored}; no restart is needed for ${version}.`;
-    for (const dir of dirs) {
-      let bots;
-      try { bots = JSON.parse(readFileSync(join(dir, ".herdr/bots.json"), "utf8")); } catch { continue; }
-      const main = bots.bots?.find((b) => b.kind === "main");
-      if (!main || notifiedBots.includes(main.id)) continue;
-      // The project's own live binding first; ids are shared across a project's worktrees, so
-      // hc ls alone can name another checkout's pane.
-      let terminal = null;
-      let blocked = false;
-      const isBlocked = (state) => state?.status?.state === "blocked" || state?.status === "blocked";
-      const binding = bindings.byBot.get(main.id);
-      if (binding?.project === dir) {
-        try {
-          const get = JSON.parse(hcRun(["get", binding.terminal, "--json"]));
-          if (get.state === "live" && get.created_ms === binding.created_ms) {
-            terminal = binding.terminal;
-            blocked = isBlocked(get);
-          }
-        } catch {}
-      }
-      if (!terminal) {
-        try {
-          const listed = JSON.parse(hcRun(["ls", "--label", `bot=${main.id}`, "--json"]));
-          const terminals = Array.isArray(listed) ? listed : listed.terminals ?? listed.items ?? [];
-          const live = terminals.filter((t) => t?.state === "live" && t.address);
-          const under = (cwd) => typeof cwd === "string"
-            && (resolve(cwd) === dir || resolve(cwd).startsWith(dir === "/" ? "/" : `${dir}/`));
-          const chosen = live.find((t) => under(t.cwd)) ?? live[0] ?? null;
-          terminal = chosen?.address ?? null;
-          blocked = isBlocked(chosen);
-        } catch {}
-      }
-      if (!terminal) continue;
-      // Never type into a blocked main pane: keep it pending for the next check tick.
-      if (blocked) {
-        if (!pendingBots.includes(main.id)) pendingBots.push(main.id);
-        continue;
-      }
+    for (const recipient of recipients) add(recipient.project);
+    if (same) for (const dir of note.unreadableProjects ?? []) add(dir);
+    const unreadableProjects = [];
+    const mains = dirs.flatMap((dir) => {
       try {
-        hcRun(["send", terminal, text]);
-        if (!notifiedBots.includes(main.id)) notifiedBots.push(main.id);
-        pendingBots = pendingBots.filter((id) => id !== main.id);
+        const bots = JSON.parse(readFileSync(join(dir, ".herdr/bots.json"), "utf8"));
+        const main = bots.bots.find((bot) => bot.kind === "main");
+        return main ? [{ dir, id: main.id }] : [];
       } catch {
-        if (!pendingBots.includes(main.id)) pendingBots.push(main.id);
+        unreadableProjects.push(dir);
+        return [];
+      }
+    });
+    for (let i = recipients.length - 1; i >= 0; i -= 1) {
+      const { project, botId } = recipients[i];
+      if (!unreadableProjects.includes(project) && !mains.some(main => main.dir === project && main.id === botId)) {
+        recipients.splice(i, 1);
       }
     }
-    pendingBots = pendingBots.filter((id) => !notifiedBots.includes(id));
-    if (notifiedBots.length === 0 && pendingBots.length === 0) return { sent: false };
-    mkdirSync(state, { recursive: true });
-    const tmp = `${file}.${process.pid}`;
-    writeFileSync(tmp, JSON.stringify({ failedVersion: version, restoredVersion: restored, notifiedBots, pendingBots,
-      botId: notifiedBots[0] ?? null, at: Date.now() }), { mode: 0o600 });
-    chmodSync(tmp, 0o600); renameSync(tmp, file);
-    return { sent: notifiedBots.length > 0 };
+    const write = () => {
+      const notifiedBots = recipients.filter(row => row.sent).map(row => row.botId);
+      const pendingBots = recipients.filter(row => !row.sent).map(row => row.botId);
+      const tmp = `${file}.${process.pid}`;
+      writeFileSync(tmp, JSON.stringify({ failedVersion: version, restoredVersion: restored, notifiedBots, pendingBots,
+        recipients, unreadableProjects, botId: notifiedBots[0] ?? null, at: Date.now() }), { mode: 0o600 });
+      chmodSync(tmp, 0o600);
+      renameSync(tmp, file);
+    };
+    for (const { dir, id } of mains) {
+      if (recipients.some(row => row.project === dir && row.botId === id)) continue;
+      recipients.push({ project: dir, botId: id, sent: legacySent.includes(id)
+        && mains.filter(main => main.id === id).length === 1 });
+    }
+    if (same || recipients.length || unreadableProjects.length) write();
+    let sent = false;
+    for (const { dir, id } of mains) {
+      const recipient = recipients.find(row => row.project === dir && row.botId === id);
+      if (recipient.sent) continue;
+      try {
+        const binding = bindings.byBot.get(id);
+        const readPane = (terminal) => JSON.parse(hcRun(["get", terminal, "--json"]));
+        const under = (cwd) => {
+          if (typeof cwd !== "string") return false;
+          for (let folder = resolve(cwd); folder === dir || folder.startsWith(dir === "/" ? "/" : `${dir}/`); folder = dirname(folder)) {
+            if (folder === dir) return true;
+            if (existsSync(join(folder, ".herdr/bots.json"))) return false;
+          }
+          return false;
+        };
+        let pane, expected, fromLabel = false;
+        if (binding?.project === dir) {
+          const get = readPane(binding.terminal);
+          if (get?.state === "live" && get.created_ms === binding.created_ms) {
+            pane = get;
+            expected = { terminal: binding.terminal, created_ms: binding.created_ms };
+          }
+        }
+        if (!pane) {
+          const listed = JSON.parse(hcRun(["ls", "--label", `bot=${id}`, "--json"]));
+          const terminals = Array.isArray(listed) ? listed : listed.terminals ?? listed.items ?? [];
+          const matches = terminals.flatMap(t => {
+            if (t?.state !== "live" || typeof t.address !== "string" || !t.address || t.address.includes("/")) return [];
+            const get = readPane(t.address);
+            return get?.address === t.address && get.state === "live" && Number.isSafeInteger(get.created_ms)
+              && get.labels?.bot === id && under(get.cwd) ? [get] : [];
+          });
+          if (matches.length !== 1) continue;
+          [pane] = matches;
+          expected = { terminal: pane.address, created_ms: pane.created_ms };
+          fromLabel = true;
+        }
+        const homes = [dirname(resolve(modsDir)), join(dir, ".herdr/app-home")];
+        let capture;
+        const status = automaticDelivery(pane, homes, () =>
+          (capture = JSON.parse(hcRun(["read", pane.address, "--lines", "40", "--json"]))?.text), expected);
+        if (status.held) continue;
+        const current = readPane(status.terminal);
+        if (fromLabel && (current?.labels?.bot !== id || !under(current.cwd))) continue;
+        if (automaticDelivery(current, homes, capture, expected).held) continue;
+        hcRun(["send", status.terminal, text]);
+        recipient.sent = true;
+        write();
+        sent = true;
+      } catch { /* keep this recipient pending */ }
+    }
+    return { sent };
   } catch { return { sent: false }; }
+  finally { try { free?.(); } catch { /* a notice must not interrupt the update */ } }
 }
 
 /**

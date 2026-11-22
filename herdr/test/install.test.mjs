@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readJsonLines } from "./log-lines.mjs";
+import { pathWithout } from "./system-path.mjs";
 import { UNIT_MARK as UNIT_MARK_LINE } from "../mods/am-sidebar/revive.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -105,7 +106,7 @@ fi
   exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "test", "fake-hc.mjs")}" "$@"\n`);
   const extraEnv = { HC_FAKE_STATE: hcState, HC_FAKE_LOG: hcLog };
   const env = {
-    HOME: home, TMPDIR: tmp, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+    HOME: home, TMPDIR: tmp, PATH: `${bin}:${pathWithout([dirname(process.execPath), "/usr/bin", "/bin", "/usr/sbin", "/sbin"])}`,
     AUTOMAGIK_HERDR_RELEASE_URL: `file://${rel}`, AUTOMAGIK_HERDR_TTY: join(root, "no-tty"), AUTOMAGIK_HERDR_APPS: apps,
     AUTOMAGIK_HERDR_PACK_KEYS: JSON.stringify({ keys: TEST_KEYS }),
   };
@@ -217,7 +218,7 @@ esac
 `);
       sums[target] = pin[target] ?? sha(file);
     }
-    schedulerPin = `export const SCHEDULER = Object.freeze({\n  repo: "automagik-dev/automagik",\n  version: "${version}",\n`
+    schedulerPin = `export const SCHEDULER = Object.freeze({\n  repo: "automagik-si/automagik",\n  version: "${version}",\n`
       + `  sha256: Object.freeze({ arm64: "${sums.darwin_arm64}", amd64: "${sums.darwin_amd64}" }),\n`
       + `  linux: Object.freeze({ arm64: "${sums.linux_arm64}", amd64: "${sums.linux_amd64}" }),\n});\n`
       + `export function repairCommand() { return ""; }\n`;
@@ -980,9 +981,25 @@ test("install, update, rollback, uninstall: a planted pocket-link stays byte-ide
   s.publish("9.10.0");
   assert.equal(s.run("--yes").code, 0);
   assert.equal(treeSum(pocket), sum, "after update");
-  const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: s.home, HERDR_APP_HOME: s.appHome };
+  // The rollback moves the briefing hooks with the window's folders (herdr-app ls, hc ls --json): stand-ins
+  // of its own, first on a PATH that otherwise keeps only node and system folders.
+  const noWindow = join(s.root, "rollback-bin");
+  const appLog = join(s.root, "rollback-herdr-app.log"), hcLog = join(s.root, "rollback-hc.log");
+  mkdirSync(noWindow);
+  exe(join(noWindow, "herdr-app"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${appLog}"\necho "herdr-app: no window is open" >&2\nexit 1\n`);
+  exe(join(noWindow, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, "test", "fake-hc.mjs")}" "$@"\n`);
+  writeFileSync(appLog, "");
+  writeFileSync(hcLog, "");
+  const env = {
+    PATH: `${noWindow}:${pathWithout([dirname(process.execPath), "/usr/bin", "/bin"])}`,
+    HOME: s.home, HERDR_APP_HOME: s.appHome, HC_FAKE_STATE: s.extraEnv.HC_FAKE_STATE, HC_FAKE_LOG: hcLog,
+  };
   const back = spawnSync(s.link, ["update", "--rollback"], { encoding: "utf8", env });
   assert.equal(back.status, 0, back.stderr);
+  const lines = readFileSync(appLog, "utf8").split("\n").filter(Boolean);
+  assert.ok(lines.length > 0 && lines.every((l) => l === "ls"), `the rollback asked the test's herdr-app only for ls: ${lines}`);
+  const calls = readJsonLines(hcLog);
+  assert.ok(calls.length > 0 && calls.every((c) => c[0] === "ls" && c.includes("--json")), `the rollback asked the test's hc only for ls --json: ${JSON.stringify(calls)}`);
   assert.deepEqual(s.versions(), s.all("9.9.0"));
   assert.match(s.mark(), /^version=9\.9\.0$/m);
   // The record's usagemeter line survives update.mjs's update and rollback (Group 6c).
@@ -1025,6 +1042,30 @@ test("a failing herdr-app check exits 1 after installing, naming the mod; a firs
   assert.doesNotMatch(r.out + r.err, /update --rollback|swaps? (them|the kept set) back/);
   assert.doesNotMatch(r.out, /Done/);
   assert.deepEqual(s.versions(), s.all("9.9.0"));
+});
+
+test("#1557 the staged updater imports from the installer bootstrap for install and repair", (t) => {
+  const s = scratch(t);
+  s.addHerdrApp();
+  const loads = join(s.root, "bootstrap-loads");
+  exe(join(s.bin, "node"), `#!/bin/sh
+case "$1" in
+  */x/am-sidebar/update.mjs)
+    "${process.execPath}" --input-type=module -e 'await import(process.argv.pop())' "$1" || exit 1
+    printf '%s\\n' "$2" >> "${loads}" ;;
+esac
+exec "${process.execPath}" "$@"
+`);
+  s.publish("9.9.0");
+  const installed = s.run("--yes");
+  assert.equal(installed.code, 0, installed.out + installed.err);
+  const broken = join(s.pack, "delivery.mjs");
+  writeFileSync(broken, "broken");
+  const repaired = s.run("--yes");
+  assert.equal(repaired.code, 0, repaired.out + repaired.err);
+  assert.match(repaired.out, /Repaired the pack/);
+  assert.deepEqual(readFileSync(broken), readFileSync(join(PACK_SRC, "delivery.mjs")));
+  assert.equal(readFileSync(loads, "utf8"), "install\nrepair\n");
 });
 
 // #44: a rerun of the installed release checks every file against it before saying "up to date".
@@ -1417,7 +1458,7 @@ test("AUTOMAGIK_HERDR_RELEASE_URL: a file:// folder or this repository on GitHub
   s.extraEnv.AUTOMAGIK_HERDR_RELEASE_URL = "https://evil.example/releases";
   const bad = s.run("--yes");
   assert.equal(bad.code, 1);
-  assert.match(bad.err, /must be a file:\/\/ folder or https:\/\/github\.com\/automagik-dev\/automagik\//);
+  assert.match(bad.err, /must be a file:\/\/ folder or https:\/\/github\.com\/automagik-si\/automagik\//);
 });
 
 test("AUTOMAGIK_HERDR_RELEASE_URL with '..' or '%' is refused before anything is fetched", (t) => {
@@ -1426,8 +1467,8 @@ test("AUTOMAGIK_HERDR_RELEASE_URL with '..' or '%' is refused before anything is
   writeFileSync(curlLog, "");
   exe(join(s.bin, "curl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${curlLog}"\nexit 1\n`);
   for (const url of [
-    "https://github.com/automagik-dev/automagik/../../evil/repo/releases",
-    "https://github.com/automagik-dev/automagik/%2e%2e/%2e%2e/evil/repo/releases",
+    "https://github.com/automagik-si/automagik/../../evil/repo/releases",
+    "https://github.com/automagik-si/automagik/%2e%2e/%2e%2e/evil/repo/releases",
   ]) {
     s.extraEnv.AUTOMAGIK_HERDR_RELEASE_URL = url;
     const r = s.run("--yes");
@@ -2544,6 +2585,26 @@ test("#805 installer refuses an updater missing its attach-ledger dependency", (
   assert.equal(r.code, 1, r.out);
   assert.match(r.err, /am-sidebar\/attach\.js is not a plain file: nothing was installed\./);
   assert.equal(existsSync(s.pack), false);
+});
+
+test("#1557 bootstrap refuses a missing delivery dependency while --version can load an older updater", (t) => {
+  const s = scratch(t);
+  s.addHerdrApp();
+  s.publish("9.9.0", { edit: src => rmSync(join(src, "am-sidebar/loginWords.js")) });
+  const missing = s.run("--yes");
+  assert.equal(missing.code, 1, missing.out);
+  assert.match(missing.err, /am-sidebar\/loginWords\.js is not a plain file: nothing was installed/);
+  assert.equal(existsSync(s.pack), false);
+
+  s.publish("9.8.0", { latest: false, edit: src => {
+    const side = join(src, "am-sidebar");
+    const updater = join(side, "update.mjs");
+    writeFileSync(updater, readFileSync(updater, "utf8").replace(/^import .* from "\.\/delivery\.mjs";\n/m, ""));
+    rmSync(join(side, "delivery.mjs"));
+  } });
+  const older = s.run("--yes", "--version", "9.8.0");
+  assert.equal(older.code, 0, older.out + older.err);
+  assert.match(older.out, /Installed the pack 9\.8\.0/);
 });
 
 /**

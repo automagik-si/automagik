@@ -2,11 +2,13 @@ import { beforeAll, afterAll, beforeEach, afterEach, describe, expect, test } fr
 import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 import { createHash } from 'node:crypto';
-import { readFile, readdir, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createLocalJWKSet, decodeJwt, jwtVerify } from 'jose';
+import { migrate } from './migrations';
 import { clientSeedSQL } from '../scripts/client-seed';
 import { SoftwareAuthenticator } from './authenticator';
+import { ADMISSION_HEADER, admissions, TEST_ISSUER, type Admissions } from './admission';
 
 // Refresh tokens through the real Worker: passkey sign-in, authorize, S256 PKCE, token endpoint.
 // The lifetimes asserted here are the contract in README.md, "Token lifetimes".
@@ -20,6 +22,7 @@ const cloudBasic = `Basic ${Buffer.from(`automagik-cloud:${cloudSecret}`).toStri
 const ACCESS_TTL = 15 * 60;
 const ID_TTL = 15 * 60;
 const REFRESH_TTL = 30 * 24 * 60 * 60;
+let tickets: Admissions;
 let bundle: string;
 let root: string;
 let runtime: Miniflare;
@@ -27,6 +30,7 @@ let cookie: string;
 let ip: number;
 
 beforeAll(async () => {
+  tickets = await admissions(origin);
   await mkdir('.wrangler', { recursive: true });
   root = await mkdtemp('.wrangler/test-refresh-');
   bundle = resolve(root, 'worker.mjs');
@@ -52,15 +56,14 @@ beforeEach(async () => {
     },
     bindings: {
       BETTER_AUTH_URL: origin,
+      ADMISSION_KEYS: tickets.keys,
+      ADMISSION_ISSUER: TEST_ISSUER,
       PASSKEY_RP_ID: 'automagik.si',
       BETTER_AUTH_SECRET: 'test-only-auth-secret-placeholder-never-deployed',
     },
   });
   const db = await runtime.getD1Database('DB');
-  for (const file of (await readdir('migrations')).filter(name => name.endsWith('.sql')).sort()) {
-    const migration = await readFile(`migrations/${file}`, 'utf8');
-    for (const sql of migration.split(';').map(s => s.trim()).filter(Boolean)) await db.prepare(sql).run();
-  }
+  await migrate(db);
   for (const sql of clientSeedSQL(digest(cloudSecret)).split(';').filter(Boolean)) {
     await db.prepare(sql).run();
   }
@@ -123,7 +126,9 @@ async function jsonOK(response: WorkerResponse) {
 
 async function signup() {
   const authenticator = new SoftwareAuthenticator();
-  const options = await jsonOK(await request('/api/auth/passkey/generate-register-options'));
+  const options = await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined, {
+    headers: { [ADMISSION_HEADER]: await tickets.mint() },
+  }));
   const result = await jsonOK(await request('/api/auth/passkey/verify-registration', {
     response: authenticator.register(options, origin), createSession: true,
   }));

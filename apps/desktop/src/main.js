@@ -25,16 +25,15 @@ import { PUBLISHERS, TRIAL_MS, beforeStart, checkLane, confirm as confirmLane, i
 import {
   ANONYMOUS_ID, appHome, automagikHome, backupSettingsOrLog, busyFileOf, dshEnv, dshRun, dshWindowMarker,
   forgetDshLogins, launchUrlFileOf, privacyFileOf, privacyPatchOf, guardContents, installProfile,
-  launchPort, pageUrlOf, pinProfileStore, portFileOf, preloadOf, resourcesOf, serveDsh,
+  launchPort, pageUrlOf, pinProfileStore, portFileOf, preloadOf, reconcileSandboxRow, resourcesOf, serveDsh,
   storeLayoutOf, writeTools,
 } from './dsh.js'
 import { launchInstance } from './owner-record.js'
 import { BotCursor } from './bot-cursor.js'
 import { BotRelay } from './bot-relay.js'
 import { BotViews, isBotId, isTabId } from './bot-views.js'
-import { findHerdr, herdrStatus } from './herdr.js'
-import { openRequest, pickSpace } from './herdr-space.js'
-import { openLatest } from './herdr-update.js'
+import { herdrStatus } from './herdr.js'
+import { openHerdr, openRequest } from './herdr-space.js'
 import { laneMissedOf, tableColor, updatePresentation, versionsAnswer, WINDOW_ACTIONS, windowChrome, windowPageLayout } from './frame.js'
 import { PRODUCT, setDataPaths } from './identity.js'
 import { LOOK_EVERY_MS, readBusy } from './idle.js'
@@ -370,6 +369,11 @@ const portWaited = steps => (ms, freed) => steps.mark(`waited ${ms} ms for dsh's
 // Start dsh on `port` and resolve with it once it is ready. `steps` notes the moments (start.log).
 function spawnDsh(port, steps) {
   const { resources, binDir } = dshTools
+  reconcileSandboxRow({
+    profile: laneProfile,
+    runtime: join(dirname(resources.profile), 'runtime'),
+    log: reason => startLog(`${new Date().toISOString()} start: ${reason}\n`),
+  })
   dshOrigin = `http://127.0.0.1:${port}`
   dshLog?.end()
   const log = dshLog = createWriteStream(join(home, 'logs', 'dsh.log'), { flags: 'a' })
@@ -392,7 +396,7 @@ function spawnDsh(port, steps) {
   // Called for each child, including a retry if the first port was taken.
   const env = () => {
     marker = windowMarker.start()
-    return dshEnv({ home, electronAsNode: true, binDir, preload, privacy, windowDigest: marker.digest, instanceId: instance?.instanceId })
+    return dshEnv({ home, root, electronAsNode: true, binDir, preload, privacy, windowDigest: marker.digest, instanceId: instance?.instanceId })
   }
   // dsh's web app records its launch URL here (runtime patch web-launch-token-persistence); the
   // launcher reads it when dsh's output is unavailable.
@@ -720,6 +724,7 @@ function watchUpdates() {
   log.info(`update: ${app.getVersion()} checks for updates (${mode})`)
   updates = startUpdates({
     updater: updaterModule.autoUpdater,
+    relaunch: options => app.relaunch(options),
     current: app.getVersion(),
     platform: process.platform,
     env: process.env,
@@ -882,43 +887,18 @@ ipcMain.handle('automagik-account-signin', async event => (fromPage(event) && ac
 ipcMain.handle('automagik-account-signout', async event => (fromPage(event) && account ? await account.signOut() : null))
 
 // Code mode (RFC 0013, deliveries 1, 2 and 4): Herdr's state, and its window brought forward on
-// a click in the page (preload.cjs `omniDesktop.herdr`). The page sends a Bot id and, to an
-// offer of a newer Herdr, the person's yes or no; nothing else (openRequest drops the rest).
-// Once the window is open, main looks up the Bot's folder itself and shows its space
-// (herdr-space.js); an unknown Bot, or one with no folder, gets no space picked. One open at a
-// time. herdrdev's feed is read on an open only, never here at boot. A yes is honoured only for
-// a pending offer. A version declined is not offered again until the app restarts (kept in
-// memory only). logs/switch.log has the steps.
+// a click in the page (preload.cjs `omniDesktop.herdr`). One open at a time. The handler in
+// herdr-space.js keeps update offers for this app session and looks up the Bot's space itself.
 const herdrHost = () => ({ platform: process.platform, arch: process.arch, env: process.env, home: homedir() })
 const switchLog = (line) => { try { appendFileSync(join(home, 'logs', 'switch.log'), line) } catch {} }
 let herdrOpening = null
-let herdrOffered = null
-let herdrDeclined = null
+const herdrOffer = { offered: null, declined: null }
 ipcMain.handle('automagik-herdr-status', event => (fromPage(event) ? herdrStatus(herdrHost()) : null))
 ipcMain.handle('automagik-herdr-open', (event, request) => {
   if (!fromPage(event)) return null
-  const { botId, update } = openRequest(request)
-  herdrOpening ??= (async () => {
-    const timed = steps(`switch${botId ? ` ${botId}` : ''}`, { write: switchLog, since: Date.now() })
-    const log = what => switchLog(`${new Date().toISOString()} switch: ${what}\n`)
-    try {
-      if (update === false && herdrOffered) herdrDeclined = herdrOffered
-      // A yes counts only for the version this session offered (openLatest checks the feed
-      // still names it); any other open clears the offer.
-      const result = await openLatest({ ...herdrHost(), update, offered: herdrOffered, skip: herdrDeclined, mark: timed.mark, log })
-      herdrOffered = result.reason === 'update' ? result.latest : null
-      if (!result.ok) return result
-      log(`opened${result.raised === true ? '' : ' (no focus)'}`)
-      const found = findHerdr(herdrHost())
-      const space = found ? await pickSpace({ ...herdrHost(), botId, found, appHome: home, mark: timed.mark, log }) : { action: 'none' }
-      return { ...result, space }
-    } catch (error) {
-      log(`failed ${error?.message ?? error}`)
-      return { ok: false, reason: 'error', message: "Herdr didn't open" }
-    } finally {
-      herdrOpening = null
-    }
-  })()
+  herdrOpening ??= openHerdr(openRequest(request), {
+    host: herdrHost(), appHome: home, registryRoot: root, offer: herdrOffer, write: switchLog,
+  }).finally(() => { herdrOpening = null })
   return herdrOpening
 })
 

@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { RELEASES, checkPointer, sequenceOf, verifyPointer } from "../lib/lane.mjs";
+import { RELEASES, REPOSITORY, checkPointer, sequenceOf, verifyPointer } from "../lib/lane.mjs";
 import { sourceOf } from "../lib/self.mjs";
 
 const pair = () => {
@@ -13,7 +13,7 @@ const pointer = (version = "3.64.2", extra = {}) => ({
   schemaVersion: 1, publisher: "automagik", part: "automagik.am", keyId: "am-test", sequence: sequenceOf(version),
   issuedAt: "2026-11-03T00:00:00Z", repository: "https://github.com/automagik-dev/automagik", version, tag: `v${version}`,
   commit: "a".repeat(40),
-  tarball: { name: `automagik-am-${version}.tgz`, url: `${RELEASES}/download/v${version}/automagik-am-${version}.tgz`, sha256: "b".repeat(64), size: 10 },
+  tarball: { name: `automagik-am-${version}.tgz`, url: `${REPOSITORY}/releases/download/v${version}/automagik-am-${version}.tgz`, sha256: "b".repeat(64), size: 10 },
   ...extra,
 });
 const signed = (value, key) => {
@@ -56,7 +56,7 @@ test("a test's own keys are honoured for a file:// folder only, never a GitHub U
   const test = JSON.stringify({ keys: [{ keyId: "test", publicKey: "y" }] });
   assert.deepEqual(sourceOf({}, own), { releases: RELEASES, keys: own, file: false });
   assert.equal(sourceOf({ AM_RELEASE_URL: "file:///tmp/rel", AM_TRUSTED_KEYS: test }, own).keys[0].keyId, "test");
-  const github = sourceOf({ AM_RELEASE_URL: "https://github.com/automagik-dev/automagik/releases", AM_TRUSTED_KEYS: test }, own);
+  const github = sourceOf({ AM_RELEASE_URL: "https://github.com/automagik-si/automagik/releases", AM_TRUSTED_KEYS: test }, own);
   assert.deepEqual(github.keys, own);
   assert.throws(() => sourceOf({ AM_RELEASE_URL: "https://example.com/releases" }, own), /must be a file:\/\/ folder/);
 });

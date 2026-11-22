@@ -1462,11 +1462,14 @@ test('two messages to a busy Bot cost one answer turn and one reply turn', async
   emit('b', 'user/message', { content: second.content, source: second.source })
   emit('b', 'assistant/message', assistantText('both tables check out'))
   emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  // The answers reach 'a' through saves on disk, so wait for them rather than for a fixed time,
+  // then keep the same quiet window, so a third call to either Bot still fails the test.
+  await settled(() => callsOf(agents, 'a').length >= 2)
   await delay(80)
   assert.equal(agents.get('b').calls.length, 2)
-  assert.deepEqual(agents.get('a').calls.map(([kind]) => kind).sort(), ['followup', 'inject'])
-  assert.deepEqual(agents.get('a').calls.map(([, message]) => message.source.replyTo).sort(), [first.source.exchangeId, second.source.exchangeId].sort())
-  assert.equal(new Set(agents.get('a').calls.map(([, message]) => textOf(message.content))).size, 1)
+  assert.deepEqual(callsOf(agents, 'a').map(([kind]) => kind).sort(), ['followup', 'inject'])
+  assert.deepEqual(callsOf(agents, 'a').map(([, message]) => message.source.replyTo).sort(), [first.source.exchangeId, second.source.exchangeId].sort())
+  assert.equal(new Set(callsOf(agents, 'a').map(([, message]) => textOf(message.content))).size, 1)
 })
 
 // A reply that waits for a busy Bot belongs to the Bot, not to the part it was sent to:

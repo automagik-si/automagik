@@ -222,6 +222,8 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     answerView: (sessionId, viewId, action, values) => after(call('view-reply', { sessionId: partFor(sessionId), viewId, action, values })),
     dismissView: sessionId => after(call('dismiss-view', { sessionId: partFor(sessionId) })),
     deleteBtw: (sessionId, cardId) => after(call('btw-delete', { sessionId, cardId })),
+    grantApproval: (id, offer) => after(call('grant-approval', { id, offer })),
+    revokeGrant: id => after(call('grant-revoke', { id })),
     answerApproval: (id, choice) => after(call('approval-answer', { id, choice, client: 'web' })),
     computerSetEnabled: enabled => after(call('computer-set-enabled', { enabled })),
     computerSetLevel: (botId, level) => after(call('computer-set-level', { botId, level })),
@@ -252,12 +254,13 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     secretAllow: (requestId, approval) => after(call('secret-allow', { ...approval, requestId })),
     secretSourceDetail: requestId => call('secret-source-detail', { requestId }),
     vaultStatus: (signal, provider) => call('vault-status', provider === undefined ? undefined : { provider }, signal),
-    vaultUnlock: (password, connection) => call('vault-unlock', { provider: 'bitwarden', password, connection }),
+    vaultUnlock: (password, connection, provider = 'bitwarden') => call('vault-unlock',
+      (provider === 'macos-keychain' || provider === 'windows-credential') ? { provider } : { provider, password, connection }),
     vaultUnlockSecretService: () => call('vault-unlock', { provider: 'secret-service' }),
     vaultUnlockSaved: (provider, connection, credentialRevision) => call('vault-unlock', { provider, connection,
       ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
     vaultLock: provider => provider === undefined ? call('vault-lock') : call('vault-lock', { provider }),
-    vaultItems: (search, provider, project) => call('vault-items', provider === 'hashicorp-vault'
+    vaultItems: (search, provider, project) => call('vault-items', provider === 'hashicorp-vault' || provider === 'macos-keychain' || provider === 'windows-credential'
       ? { provider, ...search } : { search, ...(provider === undefined ? {} : { provider }),
         ...(project === undefined ? {} : { project }) }),
     vaultFields: (provider, mount, path) => call('vault-fields', { provider, mount, path }),
@@ -336,6 +339,10 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     diagnosticsClear: () => call('diagnostics-clear'),
     diagnosticsPermissions: () => call('diagnostics-permissions'),
     repoStars: () => call('repo-stars'),
+    checkSelfUpdate: body => call('self-update-check', body),
+    selfUpdateResult: runId => call('self-update-check-result', { runId }),
+    selfUpdateStatus: signal => call('self-update-status', undefined, signal),
+    startSelfUpdate: body => call('self-update-start', body),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = 'action') => {
       noteClientError(where, error)

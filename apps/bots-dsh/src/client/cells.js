@@ -1005,7 +1005,9 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
       : t('Paused after {count} Bot relays. Waiting: {names}', { count: reply.count, names: (reply.names ?? []).join(t(' and ')) }))
   }
   if (reply.kind === 'resumed') {
-    return h('div', { className: 'bt-event' }, t('{name} was cut off by a restart and picked its work back up', { name: bot.name }))
+    return h('div', { className: 'bt-event' }, reply.resumedByUpdate
+      ? t('{name} was interrupted by an Automagik update and picked its work back up', { name: bot.name })
+      : t('{name} was cut off by a restart and picked its work back up', { name: bot.name }))
   }
   if (reply.kind === 'cut') {
     return h('div', { className: 'bt-event' }, t('{name} was cut off by a restart again and stopped', { name: bot.name }))
@@ -1189,7 +1191,12 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
       // The task's own card: it works where the user can watch, then says what it found.
       const started = done ? /\((session-[^)]+)\) under (?:Tasks|your row)/.exec(contentText(call.content))?.[1] : undefined
       if (done && !started) return h('div', { className: 'bt-event' }, contentText(call.content).slice(0, 160))
-      return h(TaskCard, { sessionId: started, title: arg('title') ?? t('a task'), task: started ? roster.tasks?.[started] : undefined, onOpen: () => started && actions.openSession(started), useSessionStatus, useWork })
+      return h(TaskCard, {
+        sessionId: started, title: arg('title') ?? t('a task'),
+        task: started ? roster.tasks?.[started] : undefined,
+        onOpen: () => started && actions.openSession(started), useSessionStatus, useWork,
+        actions, readOnly: roster.readOnly,
+      })
     }
     case 'message_bot': {
       const target = findBot(arg('to')) ?? { name: arg('to') ?? '…', color: 'gray' }

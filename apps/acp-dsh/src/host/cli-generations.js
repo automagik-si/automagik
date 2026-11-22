@@ -104,12 +104,13 @@ export function assertGeneration(env) {
 }
 
 export class CliGenerations {
-  constructor(root, instance) {
+  constructor(root, instance, { reader = false } = {}) {
     this.root = root
     this.instance = instance
     this.held = new Map()
     this.registered = new Set()
     this.birth = processBirth(process.pid)
+    this.reader = reader
     this.owned = new Map()
     // Test seams: a failed rename or fsync can be injected for the record alone. Production
     // always uses the imported calls.
@@ -214,7 +215,7 @@ export class CliGenerations {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
     const temporary = join(staging, randomUUID())
     const bytes = JSON.stringify({ format: 'app-birth-v1', pid: process.pid,
-      nonce: basename(path), birth: this.birth, marker })
+      nonce: basename(path), birth: this.birth, marker, ...(marker === 'root' && this.reader ? { reader: true } : {}) })
     const fd = openSync(temporary, 'wx', 0o600)
     try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
     try {
@@ -227,10 +228,11 @@ export class CliGenerations {
     } finally { rmSync(temporary, { force: true }) }
   }
 
-  release(path) {
+  release(path, { strict = false } = {}) {
     const snapshot = this.owned.get(path)
-    this.owned.delete(path)
     if (sameOwnership(snapshot)) rmSync(path, { force: true })
+    else if (strict && snapshot && lstatSync(path, { throwIfNoEntry: false })) throw busy()
+    this.owned.delete(path)
   }
 
   peers(directory, legacy, own, { sweep = false } = {}) {
@@ -252,8 +254,8 @@ export class CliGenerations {
     this.registered.add(vendor)
   }
 
-  unregister(vendor) {
-    this.release(join(this.instances(vendor), this.instance))
+  unregister(vendor, options) {
+    this.release(join(this.instances(vendor), this.instance), options)
     this.registered.delete(vendor)
   }
 

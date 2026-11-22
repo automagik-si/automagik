@@ -24,6 +24,7 @@
 // memory section the first time it renders, so its prompt stays byte-stable and the
 // provider's prefix cache holds; a fresh part, or a checkpoint (which breaks the cache
 // anyway), freezes it anew.
+import { NO_BOT_RUNNER } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -823,10 +824,13 @@ export function install(rt) {
     if (route === undefined) throw new Error('no chat model')
     return route
   }
-  async function noteWindow(bot) {
+  async function noteWindow(bot, { agent, modelSelection }) {
     if (Date.now() - (windowAsked.get(bot.id) ?? 0) < WINDOW_ASK_MS) return
     windowAsked.set(bot.id, Date.now())
-    const info = await chatRoute(bot).then(route => ctx.llm.resolveModelInfo(route.provider, route.model)).catch(() => undefined)
+    const route = rt.botRunnerRequired?.(agent.id, agent) ? modelSelection : await chatRoute(bot).catch(() => undefined)
+    if (!route?.provider || !route?.model) return
+    rt.assertBotRunnerProvider?.(route.provider, agent.id, agent)
+    const info = await ctx.llm.resolveModelInfo(route.provider, route.model).catch(() => undefined)
     const size = info?.context?.contextWindow
     if (typeof size === 'number' && size > 0) windows.set(bot.id, size - (info.defaultMaxTokens ?? 0))
   }
@@ -1012,14 +1016,14 @@ export function install(rt) {
   // stays frozen with the conversation and the prompt stays the Bot's own. A Session
   // frozen with the group's memory in its prompt keeps it there.
   const isGroupMemory = message => message?.source?.kind === GROUP_MEMORY_SOURCE
-  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+  ctx.on('agent/pre-step', async ({ agent, signal, modelSelection }, next) => {
     const decision = await next()
     if (decision.kind === 'reject' || signal?.aborted || !Array.isArray(decision.messages)) return decision
     await rt.load()
     const roomId = roomIdOf(agent.id)
     const bot = rt.botOf(rt.selfOf(agent.id))
     if (bot === undefined) return decision
-    await noteWindow(bot)
+    await noteWindow(bot, { agent, modelSelection })
     const member = roomId !== undefined && rt.roomOf(roomId)?.members.includes(bot.id) === true
     const front = []
     const snapshot = member ? groupSnapshot(agent, roomId, bot, decision) : undefined
@@ -1457,14 +1461,15 @@ export function install(rt) {
 
   // Memory runs beside the chats, on the team's background model (models.js), never on an
   // agent over ACP, which answers only in its own chat.
-  async function modelFor() {
-    const route = splitRef(await rt.backgroundModel())
+  async function modelFor(sessionId) {
+    const route = splitRef(await rt.backgroundModel(sessionId))
     if (route === undefined) throw Object.assign(new Error('No model can run memory review. Pick a background model in Settings, or add a model in Harness settings.'), { code: 'memory/no-model' })
     return route
   }
   // The panel's model calls belong to the Bot or group whose memory they serve;
   // without the tag the meter would file them under "other".
-  async function oneShot(route, system, text, tag) {
+  async function oneShot(route, system, text, tag, sessionId, dispatch) {
+    rt.assertBotRunnerProvider?.(route.provider, sessionId)
     const info = await ctx.llm.resolveModelInfo(route.provider, route.model).catch(() => undefined)
     const efforts = info?.reasoning?.efforts ?? []
     // Thinking counts against the same output budget as the answer, so ask for
@@ -1483,7 +1488,7 @@ export function install(rt) {
       const callOptions = {
         provider: route.provider,
         model: route.model,
-        ...(tag?.sessionId === undefined ? {} : { sessionId: tag.sessionId }),
+        ...(sessionId === undefined ? {} : { sessionId }),
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         purpose: 'compaction',
         tools: [],
@@ -1492,7 +1497,9 @@ export function install(rt) {
         maxTokens,
         signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
       }
-      const assembler = await (rt.assembleLlm ? rt.assembleLlm(callOptions) : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff }))
+      const assembler = await (rt.assembleLlm
+        ? rt.assembleLlm(callOptions, { dispatch })
+        : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff, dispatch }))
       const finish = assembler.finish
       // A cancelled call is the caller's decision, not a route that may answer again.
       if (finish.kind === 'aborted') throw modelFailure('The model call was aborted.')
@@ -1520,17 +1527,22 @@ export function install(rt) {
   // is tried once more on the Bot's own model, when that one answers beside its chat.
   // The provider's own error is not passed on: its message may quote the request.
   const answerFailure = error => (ownFailure(error) ? error : modelFailure(`The model could not answer (${failureCode(error, 'provider error')}).`))
-  async function botShot(bot, system, text, tag) {
-    const first = await modelFor()
+  const shotSession = (bot, tag) => rt.botRunnerRequired === undefined ? tag?.sessionId : rt.chatOf(bot.id)
+  async function botShot(bot, system, text, tag, dispatch) {
+    const sessionId = shotSession(bot, tag)
+    const cancelled = error => error?.code === NO_BOT_RUNNER || error?.code === 'bot/stale'
+    const first = await modelFor(sessionId)
     try {
-      return await oneShot(first, system, text, tag)
+      return await oneShot(first, system, text, tag, sessionId, dispatch)
     } catch (error) {
-      const mine = await rt.desiredModel(bot, { aside: true })
+      if (cancelled(error)) throw error
+      const mine = await rt.desiredModel(bot, { aside: true, noCommands: rt.botRunnerRequired?.(sessionId) })
       const fallback = rt.answersAside(mine) ? splitRef(mine) : undefined
       if (fallback === undefined || (fallback.provider === first.provider && fallback.model === first.model)) throw answerFailure(error)
       try {
-        return await oneShot(fallback, system, text, tag)
+        return await oneShot(fallback, system, text, tag, sessionId, dispatch)
       } catch (again) {
+        if (cancelled(again)) throw again
         const said = failure => failureText(failure, 'provider error')
         throw modelFailure(`${first.provider}/${first.model}: ${said(error)}; ${fallback.provider}/${fallback.model}: ${said(again)}`)
       }
@@ -1573,7 +1585,7 @@ export function install(rt) {
 
   // The models a summary runs on, the background model first and the keeper's after it: a
   // failure stands until one of them changes.
-  const summaryModels = async keeper => `${await rt.backgroundModel() ?? ''}|${keeper?.model ?? ''}`
+  const summaryModels = async (keeper, sessionId) => `${await rt.backgroundModel(sessionId) ?? ''}|${keeper?.model ?? ''}`
 
   function startSummary(panel, loaded, language, hash, models) {
     const { keeper } = panel
@@ -1604,7 +1616,11 @@ export function install(rt) {
     const hash = createHash('sha256').update(JSON.stringify([language, ...Object.values(loaded).map(linesFor)])).digest('hex')
     const saved = savedSummary(panel.id)
     const prior = summaryFailures.get(panel.id)
-    const models = await summaryModels(panel.keeper)
+    const models = await summaryModels(panel.keeper, panel.keeper === undefined ? panel.tag.sessionId : shotSession(panel.keeper, panel.tag))
+      .catch(error => {
+        if (error?.code === NO_BOT_RUNNER) return NO_BOT_RUNNER
+        throw error
+      })
     const failed = prior?.hash === hash && prior.models === models ? prior : undefined
     const wanted = body.regenerate === true || (body.summarize === true && saved?.hash !== hash && failed === undefined)
     if (wanted && entries.length > 0 && panel.keeper !== undefined && !summarizing.has(panel.id)) startSummary(panel, loaded, language, hash, models)

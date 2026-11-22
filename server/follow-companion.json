@@ -1,0 +1,6 @@
+{
+  "version": "3.160.4",
+  "revision": "bc719b13c320bf419ab776e8f19f875063beb74e",
+  "record": "ghcr.io/automagik-si/automagik-server@sha256:34b9a2a077961f23af2e2dd2e3111d071d1df8756433bba35f4f47b9bb443476",
+  "plugins": ["@automagik/acp-dsh", "@automagik/bots-dsh", "@automagik/welcome-dsh"]
+}

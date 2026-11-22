@@ -45,6 +45,16 @@ export const TeamPayload = z.object({
 })
 // A Bot type the team step describes.
 export const BotTypePayload = z.object({ type: z.enum(['omni']) })
+const OmniVersion = z.string().regex(/^\d+\.\d{6}\.\d+(-[0-9A-Za-z.]+)?$/)
+const OmniJobId = z.string()
+export const OmniServerPayload = z.strictObject({ version: OmniVersion, fallback: z.literal(true).optional() })
+export const OmniGithubInstallPayload = z.discriminatedUnion('reason', [
+  z.strictObject({ version: OmniVersion, reason: z.enum(['behind', 'unpublished', 'no-systemd']) }),
+  z.strictObject({ version: OmniVersion, reason: z.literal('npm-failed'), exitCode: z.int().optional() }),
+])
+export const OmniGithubStatusPayload = z.strictObject({ id: OmniJobId.optional() })
+export const OmniGithubCancelPayload = z.strictObject({ id: OmniJobId.optional() })
+export const OmniGithubAckPayload = z.strictObject({ id: OmniJobId })
 
 /** The parsed value, or undefined when it does not match. */
 export function parse(schema, value) {

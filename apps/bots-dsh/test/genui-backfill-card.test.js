@@ -303,3 +303,75 @@ test('a cancel that fails says why, and an empty roster draws nothing', async ()
   card.unmount()
   cardWithRun.unmount()
 })
+
+test('binding selects only the named proposal and run, including a run beyond the unbound cap', () => {
+  const other = { ...PROPOSAL, id: 'p2', chats: [{ id: 'c3', name: 'Other picker', ticked: true }] }
+  const listed = RUN([ROW('c4', 'Bound run', 'j4', 'queued', null)])
+  const newer = ['r1', 'r2', 'r3'].map(id => ({ ...RUN([ROW('c5', 'Other run', 'j5', 'queued', null)]), id }))
+  const roster = { omniBackfillProposals: [other, PROPOSAL], omniBackfills: [...newer, listed] }
+  const card = mount(BackfillCard, { roster, proposalId: 'p1' })
+  let text = textOf(card.render())
+  assert.match(text, /Ana/)
+  assert.match(text, /Bound run/)
+  assert.doesNotMatch(text, /Other picker|Other run|Showing only/)
+  text = textOf(card.render({ roster, runId: 'p1' }))
+  assert.match(text, /Bound run/)
+  assert.doesNotMatch(text, /Ana|Other picker|Other run/)
+  text = textOf(card.render({ roster, proposalId: 'p1', runId: 'r1' }))
+  assert.match(text, /Ana/)
+  assert.match(text, /Other run/)
+  assert.doesNotMatch(text, /Other picker|Bound run/)
+  card.unmount()
+})
+
+test('a bound proposal follows its approval into the live run and settles when the run leaves', async () => {
+  const props = { proposalId: 'p1', start: async () => ({ runId: 'p1' }) }
+  const card = mount(BackfillCard, { ...props, roster: { omniBackfillProposals: [PROPOSAL] } })
+  await buttonOf(card.render(), 'bt-genui-start').props.onClick()
+  const empty = { ...props, roster: { omniBackfillProposals: [{ ...PROPOSAL, id: 'replacement' }] } }
+  assert.match(textOf(card.render(empty)), /Your approval was sent/)
+  assert.match(textOf(card.render({ ...empty, proposalId: 'replacement' })), /Read chat history/)
+  assert.doesNotMatch(textOf(card.render({ ...empty, proposalId: 'replacement' })), /Your approval was sent/)
+  const row = { ...ROW('c1', 'Ana', 'j1', 'done', 'done'), coverage: { countInWindow: 0 } }
+  const run = { ...empty, roster: { ...empty.roster, omniBackfills: [RUN([row])] } }
+  const text = textOf(card.render(run))
+  assert.match(text, /Omni holds nothing in this window/)
+  assert.doesNotMatch(text, /Your approval was sent|Read chat history|This request is no longer open/)
+  assert.equal(textOf(card.render(empty)), 'This request is no longer open.')
+  card.unmount()
+})
+
+test('missing bindings report their own settled status without showing other requests', () => {
+  const roster = { omniBackfillProposals: [PROPOSAL], omniBackfills: [RUN([])] }
+  const card = mount(BackfillCard, { roster, proposalId: 'missing' })
+  assert.equal(textOf(card.render()), 'This request is no longer open.')
+  assert.equal(textOf(card.render({ roster, runId: 'missing' })), 'This run is no longer listed.')
+  const listedRun = { omniBackfills: roster.omniBackfills }
+  assert.equal(textOf(card.render({ roster: listedRun, proposalId: 'p1', runId: 'missing' })), 'This run is no longer listed.')
+  card.unmount()
+})
+
+test('a read-only roster shows the picker and live rows with Start and Stop disabled', async () => {
+  const roster = {
+    readOnly: 'The team is already open.',
+    omniBackfillProposals: [PROPOSAL],
+    omniBackfills: [RUN([ROW('c3', 'Carla', 'j3', 'fetching', null)])],
+  }
+  const card = mount(BackfillCard, {
+    roster,
+    start: () => assert.fail('read-only Start'),
+    cancel: () => assert.fail('read-only Stop'),
+  })
+  const tree = card.render()
+  assert.match(textOf(tree), /Carla/)
+  for (const kind of ['bt-genui-start', 'bt-genui-cancel']) {
+    const button = buttonOf(tree, kind)
+    assert.equal(button.props.disabled, true)
+    await button.props.onClick()
+  }
+  // The component reports action errors in the foot, so check that neither callback ran.
+  const notes = byClass(card.render(), 'bt-genui-foot').map(textOf)
+  const note = 'This window only reads the team; open the team where it runs to act.'
+  assert.deepEqual(notes, [`1 chats selected\n${note}`, note])
+  card.unmount()
+})

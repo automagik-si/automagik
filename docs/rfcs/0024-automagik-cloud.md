@@ -1118,6 +1118,7 @@ host name, issuer or client id in a test or a default config.
    same Bots and chats; the private network, the build host and other workspaces are unreachable
    from inside. *Rollback:* stop the workspace; the image without Cloud mode is a self-hosted
    instance.
+   *Record:* [the public delivery 4 evidence](../cloud/0024-delivery-4-evidence.md).
    *Acceptance (from review):*
    - the gate's session lasts no longer than a workspace token, or rechecks the role; a lowered
      role drops sessions as a removal does;
@@ -1390,7 +1391,8 @@ Each is one PR per lane, in this order.
   and is ignored.
 - **R5. The Cloud registry** (later, after delivery 6). The same record version 1 served by the
   Cloud service per organisation, with a key per organisation, so a reservation holds across the
-  owner's machines. Its own amendment when delivery 6 is planned.
+  owner's machines. Its own amendment when delivery 6 is planned. R0-R4 closed #1426 (decided by the
+  owner's delegate, 2026-11-21): R5 is tracked here, with delivery 6, not in that issue.
 
 ### Questions for the owner
 
@@ -1447,6 +1449,14 @@ keep their meaning.
     off on an OS until it exists there. The alternative is the owner's written acceptance of the
     risk for that OS ((d)).
 18. **Until the three safeguards hold.** Answered in Decided 26.
+19. **The Cloud rail on another site than its workspaces.** Browser acceptance on
+    `a8d663c1e` (#1373, 2026-11-20) saw the rail's direct 303 land on a cross-site 401. In
+    multiuser mode, RFC 0038 delivery 5d now returns a 200 workspace document from
+    `POST /_gate/cloud/open`. Its same-origin POST to `/_gate/cloud/open/finish` can carry the
+    previous Lax cookie, retire that family, and issue the new cookie with a 303 to `/`.
+    Verify the final cross-site landing in a browser before Cloud ships. The two options
+    remain to serve the rail on the same site as the workspaces or add a signed exception
+    in `trustedRequest` for the Cloud landing, like the Access exception (#1082).
 
 ## Tracking
 

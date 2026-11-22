@@ -248,7 +248,7 @@ html[data-automagik-desktop=darwin]:not([data-automagik-fullscreen]) .lb-bar[dat
 html[data-automagik-desktop=darwin] .lb-head{-webkit-app-region:drag}
 html[data-automagik-desktop=darwin] .lb-head :is(a,button,input,[role=button],[aria-haspopup],[tabindex]){-webkit-app-region:no-drag}
 .lb-host .bt-hint{margin:2px 10px 8px}
-.lb-foot{flex:none;padding:6px 8px 2px}
+.lb-foot{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:6px 8px 2px}
 .lb-foot:empty{display:none}
 .lb-agent .bt-agent-sub-in{margin-left:calc(8px + var(--lb-art) + var(--lb-art-gap) - 8px)}
 .lb-host .bt-threads{margin-left:calc(8px + var(--lb-art) / 2)}

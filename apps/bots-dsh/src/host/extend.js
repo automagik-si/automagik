@@ -5,6 +5,8 @@
 //
 //   endpoint(name, fn, { read })   one POST /api/omni-ui endpoint; `read` lets a host that
 //                                  only reads the team (store.js) answer it too
+//   around(name, fn)               wrap a plugin endpoint with fn(body, signal, next)
+//                                  next(nextBody = body) serves it once during that call
 //   view(fn)                       fields merged into the team view (revisioned)
 //   sessionOwner(fn)               the team Bot and label of an external run Session
 //   live(fn)                       fields merged into every state answer (no revision)
@@ -22,6 +24,8 @@
 // The team's own window-only endpoints (the seat chat's reads, the Code tree, automations)
 // register through `windowEndpoint`, which is not on `rt`: only those get the route's proof of
 // the desktop window (desktop-window.js). An endpoint added through `rt.hooks` never does.
+import { isPromise } from 'node:util/types'
+
 const registrars = new WeakMap()
 const windowEntries = new WeakSet()
 export const isWindowEndpoint = entry => typeof entry === 'object' && entry !== null && windowEntries.has(entry)
@@ -33,9 +37,11 @@ export function windowEndpoint(rt, name, fn, { read = false } = {}) {
 
 export function install(rt) {
   const endpoints = new Map()
+  const around = new Map()
   const views = []
   const lives = []
   const sessionOwners = []
+  let sessionOwnersRevision = 0
   const senders = []
   const rules = []
   const botModels = new Map()
@@ -56,6 +62,25 @@ export function install(rt) {
       return {}
     }
   }))
+  const readSessionOwners = sessionId => {
+    const revision = sessionOwnersRevision
+    const owners = []
+    for (const fn of sessionOwners.slice()) {
+      try {
+        const owner = fn(sessionId)
+        if (owner === undefined) continue
+        if (isPromise(owner)) {
+          void owner.catch(() => {})
+          return undefined
+        }
+        if (owner === null || typeof owner !== 'object' || Array.isArray(owner)) return undefined
+        const { botId, label } = owner
+        if (typeof botId !== 'string' || (label !== undefined && typeof label !== 'string')) return undefined
+        owners.push({ botId, label })
+      } catch { return undefined }
+    }
+    return sessionOwnersRevision === revision ? owners : undefined
+  }
 
   // Frozen, so the entry another plugin gets from `endpointOf` cannot be given a new function.
   const register = (name, fn, read, window) => {
@@ -68,8 +93,18 @@ export function install(rt) {
   registrars.set(rt, register)
   rt.hooks = {
     endpoint: (name, fn, { read = false } = {}) => register(name, fn, read, false),
+    around(name, fn) {
+      if (around.has(name)) throw new Error(`ds-bot: endpoint ${name} is already wrapped`)
+      const entry = { fn }
+      around.set(name, entry)
+      return () => { if (around.get(name) === entry) around.delete(name) }
+    },
     view: fn => add(views, fn),
-    sessionOwner: fn => add(sessionOwners, fn),
+    sessionOwner: fn => {
+      const dispose = add(sessionOwners, fn)
+      sessionOwnersRevision += 1
+      return () => { dispose(); sessionOwnersRevision += 1 }
+    },
     live: fn => add(lives, fn),
     mainRules(fn, { order = 0 } = {}) {
       const dispose = add(rules, { fn, order })
@@ -85,18 +120,21 @@ export function install(rt) {
     },
   }
 
-  // Apart from rt.hooks, on its own surface: rt.stepHooks.sendsOutside(fn), where fn({ tool, args })
-  // is true for a step that sends to people outside the team (an Omni channel send). Such a step is
-  // hard to undo: Auto never allows it by itself and every asking level asks the person (RFC 0031,
+  // rt.stepHooks.sendsOutside(fn) classifies steps that send to people outside the team (an Omni
+  // channel send). The classifier receives { tool, args, sessionId }. The Session id is a string,
+  // or undefined when the caller has no Session, so a plugin can keep its rules for its own Sessions.
+  // Auto never allows such a step by itself and every asking level asks the person (RFC 0031,
   // #1092). A hook that throws counts as true. The Bot team names no sender of its own.
   rt.stepHooks = { sendsOutside: fn => add(senders, fn) }
-  rt.sendsOutside = step => senders.some(fn => {
-    try { return fn({ tool: step.tool, args: step.args }) === true } catch { return true }
+  rt.sendsOutside = (step, sessionId) => senders.some(fn => {
+    try { return fn({ tool: step.tool, args: step.args, sessionId }) === true } catch { return true }
   })
 
   // What channel.js and prompt.js read.
   rt.extended = {
     endpointOf: name => (endpoints.has(name) ? endpoints.get(name) : undefined),
+    aroundOf: name => around.get(name)?.fn,
+    endpointNames: () => [...endpoints.keys()],
     sessionOwner(sessionId) {
       for (const fn of sessionOwners) {
         try {
@@ -107,6 +145,25 @@ export function install(rt) {
         }
       }
       return undefined
+    },
+    // A drop can certify exclusivity only when the registered hooks read cleanly.
+    sessionOwnerRead(sessionId) {
+      const owners = readSessionOwners(sessionId)
+      return owners === undefined ? 'unreadable' : owners.length === 0 ? 'free' : 'owned'
+    },
+    // The execution boundary needs a stable identity or a verified absence.
+    sessionBotOwner(sessionId) {
+      if (sessionOwners.length === 0) return null
+      const owners = readSessionOwners(sessionId)
+      if (owners === undefined) return undefined
+      const again = readSessionOwners(sessionId)
+      if (again?.length !== owners.length
+        || owners.some(({ botId, label }, i) => again[i].botId !== botId || again[i].label !== label)
+        || rt.teamCurrent?.() !== true) return undefined
+      if (owners.length === 0) return null
+      const { botId } = owners[0]
+      if (owners.some(owner => owner.botId !== botId)) return undefined
+      return rt.botOf?.(botId) === undefined ? undefined : botId
     },
     view: () => merged(views),
     live: () => merged(lives),

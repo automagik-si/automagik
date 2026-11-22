@@ -1,0 +1,93 @@
+{
+  "pulls": [],
+  "runs": [
+    {
+      "id": 3,
+      "path": ".github/workflows/follow-omni.yml",
+      "headBranch": "dev",
+      "headSha": "0000000000000000000000000000000000000001",
+      "status": "completed",
+      "createdAt": "2026-11-20T09:10:00Z",
+      "updatedAt": "2026-11-20T10:00:00Z",
+      "pushed": [
+        {
+          "job": "carry",
+          "sha": "0000000000000000000000000000000000000004",
+          "attempt": 1
+        },
+        {
+          "job": "cut",
+          "sha": "0000000000000000000000000000000000000005",
+          "attempt": 1
+        },
+        {
+          "job": "list",
+          "sha": "0000000000000000000000000000000000000006",
+          "attempt": 1
+        }
+      ],
+      "evidenceComplete": true
+    }
+  ],
+  "pushes": [
+    {
+      "actor": "automagik-genie[bot]",
+      "ref": "refs/heads/dev",
+      "before": "0000000000000000000000000000000000000003",
+      "after": "0000000000000000000000000000000000000004",
+      "activityType": "push",
+      "timestamp": "2026-11-20T09:20:00Z",
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000004",
+          "parents": [
+            "0000000000000000000000000000000000000003"
+          ],
+          "subject": "chore(desktop): carry Omni 2.261120.2"
+        }
+      ],
+      "commitsComplete": true
+    },
+    {
+      "actor": "automagik-genie[bot]",
+      "ref": "refs/heads/dev",
+      "before": "0000000000000000000000000000000000000004",
+      "after": "0000000000000000000000000000000000000005",
+      "activityType": "push",
+      "timestamp": "2026-11-20T09:35:00Z",
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000005",
+          "parents": [
+            "0000000000000000000000000000000000000004"
+          ],
+          "subject": "chore(release): v3.162.4"
+        }
+      ],
+      "commitsComplete": true
+    },
+    {
+      "actor": "automagik-genie[bot]",
+      "ref": "refs/heads/dev",
+      "before": "0000000000000000000000000000000000000005",
+      "after": "0000000000000000000000000000000000000006",
+      "activityType": "push",
+      "timestamp": "2026-11-20T09:50:00Z",
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000006",
+          "parents": [
+            "0000000000000000000000000000000000000005"
+          ],
+          "subject": "chore(release): list v3.162.4 in the market index"
+        }
+      ],
+      "commitsComplete": true
+    }
+  ],
+  "complete": {
+    "pulls": true,
+    "runs": true,
+    "pushes": true
+  }
+}

@@ -500,7 +500,7 @@ const RULE_LABELS = {
   'no-draft': 'Allow this Bot to send directly',
 }
 
-function MailApprovalMenu({ bot, request, rule, onPick, actions, disabled = false }) {
+function MailApprovalMenu({ rule, onPick, actions, disabled = false }) {
   const [open, setOpen] = useState(false)
   const root = useRef(null)
   useEffect(() => {
@@ -514,11 +514,6 @@ function MailApprovalMenu({ bot, request, rule, onPick, actions, disabled = fals
   const choose = (mode) => {
     setOpen(false)
     onPick(mode)
-    void Promise.resolve(actions.mailRuleSet?.({
-      mode,
-      botId: bot.id,
-      recipients: [request.to, request.cc, request.bcc].filter(Boolean).join(', '),
-    })).catch(() => {})
   }
   return h('div', { ref: root, className: 'bt-mail-rule-wrap' },
     h('button', {
@@ -574,22 +569,23 @@ function mailView(request, roster, settled = false) {
   }
 }
 
-export function MailSendCard({ sessionId, bot, request, roster, actions, inline = false }) {
+export function MailSendCard({ sessionId, request, roster, actions, inline = false }) {
   const [busy, setBusy] = useState(false)
-  const [rule, setRule] = useState('require-approval')
+  const [rule, setRule] = useState(undefined)
   const busyRef = useRef(false)
   const answer = (values) => {
     if (busyRef.current) return
     busyRef.current = true
     setBusy(true)
     const send = values?.canceled !== true && values?.fields !== undefined
-    void Promise.resolve(actions.mailSendAnswer(request.id, send ? 'send' : 'cancel', send ? { fields: values.fields, rule } : { rule })).catch(() => {}).finally(() => { busyRef.current = false; setBusy(false) })
+    const extra = send ? { fields: values.fields, ...(rule === undefined ? {} : { rule }) } : {}
+    void Promise.resolve(actions.mailSendAnswer(request.id, send ? 'send' : 'cancel', extra)).catch(() => {}).finally(() => { busyRef.current = false; setBusy(false) })
   }
   return h(RequestView, {
     sessionId, kind: 'mail', request, actions, inline, busy,
     title: t('Mail'),
     icon: h(MailIcon),
-    footStart: h(MailApprovalMenu, { bot, request, rule, onPick: setRule, actions, disabled: busy }),
+    footStart: h(MailApprovalMenu, { rule: rule ?? 'require-approval', onPick: setRule, actions, disabled: busy }),
     view: mailView(request, roster),
     onAnswer: answer,
   })
@@ -619,7 +615,7 @@ export function MailToolCell({ sessionId, callId, roster, actions, heldCards = N
   if (request?.status === 'pending' && heldCards[heldCardKey('mail', request.id)] > 0) return h(CellEmpty)
   if (request) {
     return request.status === 'pending'
-      ? h('div', { className: 'bt-q-inline' }, h(MailSendCard, { sessionId, bot, request, roster, actions, inline: true }))
+      ? h('div', { className: 'bt-q-inline' }, h(MailSendCard, { key: request.id, sessionId, request, roster, actions, inline: true }))
       : h('div', { className: 'bt-q-inline' }, h(SettledMail, { bot, request, roster }))
   }
   return h(CellEmpty)
@@ -634,7 +630,7 @@ export function MailDock({ sessionId, useRoster, useCards, useHeldCards, actions
   const drawn = entry => entry.callId && entry.sessionId === sessionId && shown[entry.callId] > 0 && !(held[heldCardKey('mail', entry.id)] > 0)
   const waiting = (roster.mailRequests?.[bot.id] ?? []).filter(entry => entry.status === 'pending' && !drawn(entry))
   if (waiting.length === 0) return null
-  return h('div', { className: 'bt-q-dock bt-secret-dock' }, waiting.map(request => h(MailSendCard, { key: request.id, sessionId, bot, request, roster, actions })))
+  return h('div', { className: 'bt-q-dock bt-secret-dock' }, waiting.map(request => h(MailSendCard, { key: request.id, sessionId, request, roster, actions })))
 }
 
 export const CONNECTOR_CSS = `

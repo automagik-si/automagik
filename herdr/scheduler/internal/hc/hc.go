@@ -202,14 +202,37 @@ func sendErrorMessage(raw string) string {
 	return strings.Join(strings.Fields(message), " ")
 }
 
+// deliveryTarget asks the pack that owns the seat and its parked-restart records.
+func deliveryTarget(ctx context.Context, address string) (string, error) {
+	out, err := exec.CommandContext(ctx, hostpath.AmBin(), "delivery-status", address, "--json").Output()
+	if err != nil {
+		return "", fmt.Errorf("automatic delivery to %s held: the pack could not check the terminal: %w", address, err)
+	}
+	var status struct {
+		Terminal string `json:"terminal"`
+		Held     *bool  `json:"held"`
+	}
+	if err := json.Unmarshal(out, &status); err != nil || status.Held == nil || status.Terminal == "" || strings.HasPrefix(status.Terminal, "-") {
+		return "", fmt.Errorf("automatic delivery to %s held: the pack returned no terminal status", address)
+	}
+	if *status.Held {
+		return "", fmt.Errorf("automatic delivery to %s held: the terminal is waiting for a person", status.Terminal)
+	}
+	return status.Terminal, nil
+}
+
 // Send pastes text into a terminal and submits it: how one bot messages
 // another. hc refuses a terminal whose program is blocked on a dialog, and
 // that refusal is the answer: a report never answers somebody's dialog.
 func (Client) Send(address, text string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
+	terminal, err := deliveryTarget(ctx, address)
+	if err != nil {
+		return err
+	}
 	// "--" keeps a text that starts with a dash from being read as a flag.
-	cmd := exec.CommandContext(ctx, hostpath.HCBin(), "send", "--json", "--", address, text)
+	cmd := exec.CommandContext(ctx, hostpath.HCBin(), "send", "--json", "--", terminal, text)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

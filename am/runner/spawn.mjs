@@ -4,18 +4,17 @@
 // (2.39 or later), then setpriv --no-new-privs. No docker and no fallback: when this cannot run,
 // the shell is refused.
 //
-// Every member gets a stable uid from the runner's subordinate range, kept in a runner-owned state
-// file, mode 0600. The member's HOME and its XDG folders and TMPDIR are its own folders, owned by
-// its uid, mode 0700; a file planted in one member's area is not in another member's environment.
-// The child enters cwd after the uid switch (env -C runs as the member), inside the member's own
-// area under the same-path work root. Each shell runs in its own systemd scope, with MemoryMax and
-// TasksMax, and in its own pid and network namespaces. A refusal exits 125.
+// Each member and Bot gets a stable uid from the runner's subordinate range. The runner keeps
+// the mapping in a mode 0600 state file. HOME, XDG folders and TMPDIR belong to that uid and are
+// mode 0700. The child enters its own area under the same-path work root after the uid switch.
+// Each shell runs in its own systemd scope, with MemoryMax and TasksMax, and in its own pid and
+// network namespaces. A refusal exits 125.
 
 import * as nodeFs from "node:fs";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { dirname, join, resolve as resolvePath, sep } from "node:path";
-import { Refusal, oneLine, plain } from "./proto.mjs";
+import { basename, dirname, join, resolve as resolvePath, sep } from "node:path";
+import { BOT_ID_RE, MEMBER_RE, Refusal, identityLabel, oneLine, plain } from "./proto.mjs";
 import { checkFolderChain, lstatOr } from "./locks.mjs";
 
 export const DEFAULT_CHILD_PATH = "/usr/local/bin:/usr/bin:/bin";
@@ -25,6 +24,7 @@ export const ROOT_MODE = 0o711;
 export const PROVISION_TIMEOUT_MS = 20000;
 export const PROVISION_RELS = [".config", ".cache", ".local", ".local/share", ".local/state", ".local/run", "tmp"];
 export const TMP_REL = "tmp";
+export const BOTS_DIR = ".bots";
 
 /**
  * The fixed script the provisioning user namespace runs as its own root: it makes the member's
@@ -187,12 +187,18 @@ export function provisionCli(argv) {
   }
 }
 
-/** A user namespace for the member's own uid, unshare's newuidmap/newgidmap path. */
+/**
+ * A user namespace for the member's own uid, unshare's newuidmap/newgidmap path: the runner's own
+ * uid and gid become 0 inside (--map-user=0, --map-group=0) and the member's map to themselves (one
+ * --map-users and one --map-groups range). util-linux 2.39 keeps only the last of several
+ * --map-users, so two ranges there would leave the helper as nobody and every home the runner's;
+ * one --map-user plus one range is the same newuidmap call on 2.39 and on later versions.
+ */
 export function provisionArgs(host, ids, home, area, cwd) {
   return [
-    `--map-users=0:${host.uid}:1`,
+    "--map-user=0",
     `--map-users=${ids.uid}:${ids.uid}:1`,
-    `--map-groups=0:${host.gid}:1`,
+    "--map-group=0",
     `--map-groups=${ids.gid}:${ids.gid}:1`,
     "--",
     process.execPath,
@@ -208,13 +214,19 @@ export function provisionArgs(host, ids, home, area, cwd) {
   ];
 }
 
-/** The path the member's shell gets: HOME, the five XDG homes and TMPDIR, all under HOME. */
-export function layoutOf(config, member) {
-  const home = join(config.homesRoot, member);
-  const area = join(config.workRoot, member);
+const asIdentity = (who) => typeof who === "string" ? { kind: "member", name: who } : who;
+
+/** The identity's HOME, XDG homes, TMPDIR and work area. */
+export function layoutOf(config, who) {
+  const identity = asIdentity(who);
+  const user = identity.kind === "bot" ? identity.id : identity.name;
+  const parts = identity.kind === "bot" ? [BOTS_DIR, user] : [user];
+  const home = join(config.homesRoot, ...parts);
+  const area = join(config.workRoot, ...parts);
   return {
     home,
     area,
+    user,
     xdg: {
       config: join(home, ".config"),
       cache: join(home, ".cache"),
@@ -241,11 +253,6 @@ export function childEnvironment(layout, requestEnv) {
   return env;
 }
 
-/** Which environment name holds the member, for the layout above. */
-function withUser(layout, member) {
-  return { ...layout, user: member };
-}
-
 /**
  * The child enters cwd after the uid switch, in the member's own identity, and checks the resolved
  * directory against the member's work area before it runs anything. A symlink out is refused with
@@ -255,6 +262,16 @@ export const CWD_GUARD = [
   'area=$1; target=$2; shift 2',
   'cd -P -- "$target" || exit 125',
   'case "$(pwd -P)" in "$area"|"$area"/*) ;; *) exit 125 ;; esac',
+  'exec "$@"',
+].join("\n");
+
+const SWITCH_MARKER = Buffer.from("switched\n");
+export const SWITCH_GUARD = [
+  'area=$1; target=$2; shift 2',
+  'cd -P -- "$target" || exit 125',
+  'case "$(pwd -P)" in "$area"|"$area"/*) ;; *) exit 125 ;; esac',
+  "printf 'switched\\n' >&3 || exit 125",
+  "exec 3>&-",
   'exec "$@"',
 ].join("\n");
 
@@ -291,31 +308,47 @@ export function resolveTools(host) {
   if (version === null || Number(version[1]) < 2 || (Number(version[1]) === 2 && Number(version[2]) < 39)) {
     throw new Refusal("TOOL_MISSING", `util-linux unshare 2.39 or later is required, got ${version?.[0] ?? "unknown"}`);
   }
+  let help;
+  try {
+    help = run(tools.systemdRun, ["--help"], { encoding: "utf8", env: host.env, timeout: 10000 });
+  } catch {
+    throw new Refusal("TOOL_MISSING", "systemd-run --help failed");
+  }
+  if (help?.error || help?.status !== 0) throw new Refusal("TOOL_MISSING", "systemd-run --help failed");
+  tools.disableExpand = /\s--expand-environment(?:[=\s]|$)/.test(` ${help.stdout ?? ""} ${help.stderr ?? ""}`);
   return tools;
 }
 
-/** Reads or makes the runner's member-to-slot state, mode 0600, and checks its range. */
-export function openState(config, host) {
+const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const poisonedStates = new WeakSet();
+
+function emptyState(config) {
+  return { v: 1, uidStart: config.uidStart, uidCount: config.uidCount, gidStart: config.gidStart, members: {}, bots: {} };
+}
+
+function syncPath(fs, path) {
+  const fd = fs.openSync(path, "r");
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readState(config, host) {
   const fs = host.fs;
   const statePath = config.state;
   checkFolderChain(fs, dirname(statePath), "the state folder");
   let state;
   const existing = lstatOr(fs, statePath);
-  if (existing === null) {
-    state = {
-      v: 1,
-      uidStart: config.uidStart,
-      uidCount: config.uidCount,
-      gidStart: config.gidStart,
-      members: {},
-    };
-    writeState(config, host, state);
-    return state;
-  }
+  if (existing === null) return null;
   if (existing.isSymbolicLink() || !existing.isFile()) {
     throw new Refusal("STATE_INVALID", `the state file ${statePath} is not a regular file`);
   }
   if (existing.uid !== host.uid) throw new Refusal("STATE_INVALID", `the state file ${statePath} is not the runner's`);
+  if ((existing.mode & 0o022) !== 0) {
+    throw new Refusal("STATE_INVALID", `the state file ${statePath} is writable by group or others`);
+  }
   let text;
   try {
     text = fs.readFileSync(statePath, "utf8");
@@ -323,83 +356,182 @@ export function openState(config, host) {
   } catch (error) {
     throw new Refusal("STATE_INVALID", `the state file ${statePath} is unreadable: ${plain(error)}`);
   }
+  if (state?.v !== 1 && state?.v !== 2) {
+    throw new Refusal("STATE_INVALID", `the state file ${statePath} has an unknown version`);
+  }
   if (
-    state?.v !== 1 ||
     state.uidStart !== config.uidStart ||
     state.gidStart !== config.gidStart ||
     !Number.isInteger(state.uidCount) ||
+    state.uidCount < 1 ||
     state.uidCount > config.uidCount ||
-    state.members === null ||
-    typeof state.members !== "object" ||
-    Array.isArray(state.members)
+    !isRecord(state.members) ||
+    (state.v === 1 ? Object.hasOwn(state, "bots") : !isRecord(state.bots))
   ) {
     throw new Refusal("STATE_INVALID", `the state file ${statePath} was made for another range`);
   }
-  const slots = Object.values(state.members);
+  if (state.v === 1) state.bots = {};
+  const slots = [...Object.values(state.members), ...Object.values(state.bots)];
   if (
     new Set(slots).size !== slots.length ||
-    slots.some((slot) => !Number.isInteger(slot) || slot < 0 || slot >= config.uidCount)
+    slots.some((slot) => !Number.isInteger(slot) || slot < 0 || slot >= state.uidCount)
   ) {
     throw new Refusal("STATE_INVALID", `the state file ${statePath} has a bad slot`);
   }
   for (const member of Object.keys(state.members)) {
-    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(member)) {
+    if (!MEMBER_RE.test(member)) {
       throw new Refusal("STATE_INVALID", `the state file ${statePath} names a bad member`);
+    }
+  }
+  for (const bot of Object.keys(state.bots)) {
+    if (!BOT_ID_RE.test(bot)) {
+      throw new Refusal("STATE_INVALID", `the state file ${statePath} names a bad Bot id`);
     }
   }
   state.uidCount = config.uidCount;
   try {
     fs.chmodSync(statePath, 0o600);
+    syncPath(fs, statePath);
+    syncPath(fs, dirname(statePath));
   } catch (error) {
     throw new Refusal("STATE_INVALID", `the state file ${statePath}: ${plain(error)}`);
   }
   return state;
 }
 
-/** Writes the state file atomically, mode 0600, synced before the member runs anything. */
+/** Loads a synced slot map, or returns an empty map without writing a missing file. */
+export function openState(config, host) {
+  return readState(config, host) ?? emptyState(config);
+}
+
+/** Writes the state file atomically, mode 0600, synced before its slots can be used. */
 export function writeState(config, host, state) {
   const fs = host.fs;
   const tmp = `${config.state}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  const { uidStart, uidCount, gidStart, members, bots } = state;
+  const v = Object.keys(bots).length > 0 ? 2 : 1;
+  const record = { v, uidStart, uidCount, gidStart, members };
+  if (v === 2) record.bots = bots;
+  let visible = false;
   try {
     const fd = fs.openSync(tmp, "wx", 0o600);
     try {
-      fs.writeSync(fd, `${JSON.stringify(state, null, 2)}\n`);
+      const buf = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+      let offset = 0;
+      while (offset < buf.length) {
+        const written = fs.writeSync(fd, buf, offset, buf.length - offset);
+        if (written === 0) throw new Error("short state write");
+        offset += written;
+      }
       fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);
     }
     fs.renameSync(tmp, config.state);
-    const folder = fs.openSync(dirname(config.state), "r");
-    try {
-      fs.fsyncSync(folder);
-    } finally {
-      fs.closeSync(folder);
-    }
+    visible = true;
+    syncPath(fs, dirname(config.state));
   } catch (error) {
     try {
       fs.unlinkSync(tmp);
     } catch {
       /* not there */
     }
-    throw new Refusal("STATE_INVALID", `the state file ${config.state}: ${plain(error)}`);
+    const refusal = new Refusal("STATE_INVALID", `the state file ${config.state}: ${plain(error)}`);
+    if (visible) refusal.visible = true;
+    throw refusal;
   }
+  return v;
 }
 
-/** The next uid for a member: a new member gets the next slot, and slots are never reused. */
-export function idsFor(config, host, state, member) {
-  const slot = state.members[member];
-  if (slot !== undefined) return { uid: config.uidStart + slot, gid: config.gidStart + slot };
-  const used = Object.values(state.members);
+/** A new member or Bot gets the next slot in the shared range. Slots are never reused. */
+export function idsFor(config, host, state, who) {
+  const identity = asIdentity(who);
+  const bot = identity.kind === "bot";
+  const key = bot ? "bots" : "members";
+  const name = bot ? identity.id : identity.name;
+  const slots = state[key];
+  if (Object.hasOwn(slots, name)) {
+    const slot = slots[name];
+    return { uid: config.uidStart + slot, gid: config.gidStart + slot };
+  }
+  if (poisonedStates.has(state)) {
+    throw new Refusal("STATE_INVALID", "the state file changed on disk without its sync; restart the runner");
+  }
+  const used = [...Object.values(state.members), ...Object.values(state.bots)];
   const next = used.length === 0 ? 0 : Math.max(...used) + 1;
   if (next >= config.uidCount) {
-    throw new Refusal("RANGE_FULL", `no free uid left in the range for member ${member}`);
+    throw new Refusal("RANGE_FULL", `no free uid left in the range for ${identityLabel(identity)}`);
   }
   // The uid is used only after its assignment is durable. A failed write leaves the state in
   // memory untouched and refuses the request; it never hands out a uid that was not recorded.
-  const candidate = { ...state, members: { ...state.members, [member]: next } };
-  writeState(config, host, candidate);
-  state.members = candidate.members;
+  const candidate = { ...state, [key]: { ...slots, [name]: next } };
+  try {
+    state.v = writeState(config, host, candidate);
+  } catch (error) {
+    if (error.visible) poisonedStates.add(state);
+    throw error;
+  }
+  state[key] = candidate[key];
   return { uid: config.uidStart + next, gid: config.gidStart + next };
+}
+
+/** Resolves a config path through the real path of its nearest existing ancestor. */
+export function resolveConfigPath(fs, path) {
+  const tail = [];
+  let at = path;
+  for (;;) {
+    try {
+      return join(fs.realpathSync(at), ...tail.reverse());
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw new Refusal("CONFIG_INVALID", `the folder of ${path}: ${plain(error)}`);
+      }
+    }
+    tail.push(basename(at));
+    const parent = dirname(at);
+    if (parent === at) throw new Refusal("CONFIG_INVALID", `the path ${path} cannot be resolved`);
+    at = parent;
+  }
+}
+
+const inside = (path, root) => path === root || path.startsWith(root + sep);
+
+export function checkRootOverlap(config) {
+  const homes = resolvePath(config.homesRoot);
+  const work = resolvePath(config.workRoot);
+  if (homes === work || homes === sep || work === sep || homes.startsWith(work + sep) || work.startsWith(homes + sep)) {
+    throw new Refusal("ROOT_INVALID", "homesRoot and workRoot must be disjoint");
+  }
+  // The socket folder keeps its own mode (0750); a Bot root is made 0711.
+  if (typeof config.socket === "string") {
+    const folder = dirname(resolvePath(config.socket));
+    if ([join(homes, BOTS_DIR), join(work, BOTS_DIR)].some((root) => inside(folder, root))) {
+      throw new Refusal("ROOT_INVALID", "the socket folder must not be in a Bot root");
+    }
+  }
+}
+
+/**
+ * The four allocation roots are four folders: a bind mount can show one folder at two disjoint
+ * paths, so they are compared by device and inode too.
+ */
+function checkRootIdentities(fs, roots, { strict }) {
+  const seen = new Map();
+  for (const [label, path] of roots) {
+    let info;
+    try {
+      info = fs.lstatSync(path, { bigint: true });
+    } catch (error) {
+      // Before the roots are made, a root the runner cannot read yet is checked after its chmod.
+      if (!strict || error?.code === "ENOENT") continue;
+      throw new Refusal("ROOT_INVALID", `${label} ${path}: ${plain(error)}`);
+    }
+    const key = `${info.dev}:${info.ino}`;
+    if (seen.has(key)) {
+      throw new Refusal("ROOT_INVALID", `${label} ${path} is the same folder as the ${seen.get(key)}`);
+    }
+    seen.set(key, label);
+  }
 }
 
 /** The homes and work roots: the runner's, traversable by members, never writable by them. */
@@ -407,8 +539,11 @@ export function ensureRoots(config, host) {
   const roots = [
     ["homes root", config.homesRoot],
     ["work root", config.workRoot],
+    ["Bot homes root", join(config.homesRoot, BOTS_DIR), true],
+    ["Bot work root", join(config.workRoot, BOTS_DIR), true],
   ];
-  for (const [label, path] of roots) {
+  checkRootIdentities(host.fs, roots, { strict: false });
+  for (const [label, path, botRoot] of roots) {
     checkFolderChain(host.fs, dirname(path), `the ${label} chain`);
     let info = lstatOr(host.fs, path);
     if (info === null) {
@@ -423,6 +558,9 @@ export function ensureRoots(config, host) {
       throw new Refusal("ROOT_INVALID", `${label} ${path} is not a real folder`);
     }
     if (info.uid !== host.uid) throw new Refusal("ROOT_INVALID", `${label} ${path} is not the runner's`);
+    if (botRoot && (info.mode & 0o022) !== 0) {
+      throw new Refusal("ROOT_INVALID", `${label} ${path} is writable by group or others`);
+    }
     checkFolderChain(host.fs, path, `the ${label}`);
     try {
       host.fs.chmodSync(path, ROOT_MODE);
@@ -430,18 +568,19 @@ export function ensureRoots(config, host) {
       throw new Refusal("ROOT_INVALID", `${label} ${path}: ${plain(error)}`);
     }
   }
+  checkRootIdentities(host.fs, roots, { strict: true });
 }
 
 /**
- * On start, the homes and work areas on disk must agree with the recorded state: a member folder
- * with no recorded uid means a uid was used unrecorded, and a folder of another uid means the
- * recorded member and the files disagree. Either refuses the start.
+ * On start, each member and Bot folder must have a recorded slot and belong to its recorded uid.
  */
 export function checkHomes(config, host, state) {
   const fs = host.fs;
-  for (const [label, root] of [
-    ["home", config.homesRoot],
-    ["work area", config.workRoot],
+  for (const [label, root, kind, pattern, slots] of [
+    ["home", config.homesRoot, "member", MEMBER_RE, state.members],
+    ["work area", config.workRoot, "member", MEMBER_RE, state.members],
+    ["home", join(config.homesRoot, BOTS_DIR), "bot", BOT_ID_RE, state.bots],
+    ["work area", join(config.workRoot, BOTS_DIR), "bot", BOT_ID_RE, state.bots],
   ]) {
     let entries;
     try {
@@ -450,21 +589,21 @@ export function checkHomes(config, host, state) {
       throw new Refusal("STATE_INVALID", `the ${label} root ${root}: ${plain(error)}`);
     }
     for (const entry of entries) {
-      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(entry)) continue;
+      if (!pattern.test(entry)) continue;
       const path = join(root, entry);
       const info = lstatOr(fs, path);
       if (info === null || info.isSymbolicLink() || !info.isDirectory()) {
         throw new Refusal("STATE_INVALID", `the ${label} ${path} is not a real folder`);
       }
-      const slot = state.members[entry];
-      if (slot === undefined) {
-        throw new Refusal("STATE_INVALID", `member ${entry} has a ${label} but no recorded uid`);
+      if (!Object.hasOwn(slots, entry)) {
+        throw new Refusal("STATE_INVALID", `${kind} ${entry} has a ${label} but no recorded uid`);
       }
-      const expected = config.uidStart + slot;
+      const expected = config.uidStart + slots[entry];
       if (info.uid !== expected) {
+        const owner = kind === "bot" ? `bot ${entry}'s ${label}` : `the ${label} ${path}`;
         throw new Refusal(
           "STATE_INVALID",
-          `the ${label} ${path} is owned by uid ${info.uid}, not its recorded uid ${expected}`,
+          `${owner} is owned by uid ${info.uid}, not its recorded uid ${expected}`,
         );
       }
     }
@@ -484,12 +623,13 @@ export function checkHome(fs, path, uid, label = "home") {
   }
 }
 
-/** cwd must be the member's own area or below it: the work root is the members' area only. */
-export function checkCwd(config, member, cwd) {
-  const area = join(config.workRoot, member);
+/** cwd must be the identity's own area or below it. */
+export function checkCwd(config, who, cwd) {
+  const identity = asIdentity(who);
+  const { area } = layoutOf(config, identity);
   const resolved = resolvePath(cwd);
   if (resolved !== area && !resolved.startsWith(area + sep)) {
-    throw new Refusal("BAD_CWD", `cwd is outside member ${member}'s area`);
+    throw new Refusal("BAD_CWD", `cwd is outside ${identityLabel(identity)}'s area`);
   }
   return resolved;
 }
@@ -514,23 +654,28 @@ function provisionFailure(result) {
  * its own; main calls idsFor then start for each connection.
  */
 export function createRunner(config, host) {
+  checkRootOverlap(config);
+  checkRootOverlap({
+    homesRoot: resolveConfigPath(host.fs, config.homesRoot),
+    workRoot: resolveConfigPath(host.fs, config.workRoot),
+  });
   const inRange = (id) => id >= config.uidStart && id < config.uidStart + config.uidCount;
   const inGidRange = (gid) => gid >= config.gidStart && gid < config.gidStart + config.gidCount;
   if (inRange(host.uid)) throw new Refusal("RANGE_INVALID", "the runner's own uid is inside the member range");
   if (inRange(config.dshUid)) throw new Refusal("RANGE_INVALID", "DSH's uid is inside the member range");
   if (inGidRange(host.gid)) throw new Refusal("RANGE_INVALID", "the runner's own gid is inside the member range");
   const tools = resolveTools(host);
-  const state = openState(config, host);
+  const existing = readState(config, host);
+  const state = existing ?? emptyState(config);
   ensureRoots(config, host);
   checkHomes(config, host, state);
+  if (existing === null) writeState(config, host, state);
   const run = host.spawnSync ?? nodeSpawnSync;
   const startSpawn = host.spawn ?? nodeSpawn;
 
-  const idsForMember = (member) => idsFor(config, host, state, member);
-
-  /** Makes and checks the member's home, XDG folders, TMPDIR and work area. */
-  const provision = (member, ids, cwd) => {
-    const layout = withUser(layoutOf(config, member), member);
+  /** Makes and checks the identity's home, XDG folders, TMPDIR and work area. */
+  const provision = (who, ids, cwd) => {
+    const layout = layoutOf(config, who);
     const result = run(tools.unshare, provisionArgs(host, ids, layout.home, layout.area, cwd), {
       encoding: "utf8",
       env: { PATH: DEFAULT_SAFE_PATH, LC_ALL: "C" },
@@ -551,6 +696,7 @@ export function createRunner(config, host) {
    * a closed connection ends the run. The child's exit code passes through in the exit frame.
    */
   const start = (request, ids, layout, runId, io) => {
+    const { identity } = request;
     const cwd = resolvePath(request.cwd);
     const env = childEnvironment(layout, request.env);
     const assignments = Object.keys(env)
@@ -565,7 +711,7 @@ export function createRunner(config, host) {
       ...assignments,
       "/bin/sh",
       "-c",
-      CWD_GUARD,
+      SWITCH_GUARD,
       "am-enter",
       layout.area,
       cwd,
@@ -586,11 +732,12 @@ export function createRunner(config, host) {
       "--",
       ...inner,
     ];
-    const unit = `am-member-${runId}`;
+    const unit = `am-${identity.kind}-${runId}`;
     const scoped = [
       tools.systemdRun,
       "--user",
       "--scope",
+      ...(tools.disableExpand ? ["--expand-environment=no"] : []),
       "--quiet",
       `--unit=${unit}`,
       "-p",
@@ -605,19 +752,22 @@ export function createRunner(config, host) {
     try {
       child = startSpawn(scoped[0], scoped.slice(1), {
         env: host.env,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "pipe", "pipe"],
         detached: true,
       });
     } catch (error) {
-      io.fail("SPAWN_FAILED", plain(error));
+      io.fail("SPAWN_FAILED", plain(error).slice(0, 200));
       return { stop: () => {} };
     }
     const startedAt = (host.now ?? Date.now)();
     let done = false;
     let timedOut = false;
     let truncated = false;
-    let scopeFailed = false;
-    let firstStderr = true;
+    let switched = false;
+    let invalidMarker = false;
+    let markerBytes = 0;
+    let firstStderr;
+    const queued = [];
     let outBytes = 0;
     let timer;
     const stop = () => {
@@ -627,56 +777,82 @@ export function createRunner(config, host) {
         /* already gone */
       }
     };
-    const finish = (fail, result) => {
+    const finish = (send) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      if (fail !== null) io.fail("SCOPE_FAILED", fail);
-      else io.exit({ ...result, ms: (host.now ?? Date.now)() - startedAt });
+      send();
     };
     child.once("spawn", () => {
-      io.start({ member: request.member, uid: ids.uid, gid: ids.gid, mode: "subuid", run: runId, unit });
       timer = setTimeout(() => {
         timedOut = true;
         stop();
       }, request.timeoutMs);
     });
     child.once("error", (error) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      io.fail("SPAWN_FAILED", plain(error));
+      finish(() => io.fail("SPAWN_FAILED", plain(error).slice(0, 200)));
     });
-    child.stdout?.on("data", (chunk) => {
-      if (truncated) return;
-      firstStderr = false;
+    const output = (send, chunk) => {
+      if (done || truncated || invalidMarker) return;
       if (outBytes + chunk.length > config.maxOutputBytes) {
         truncated = true;
         stop();
         return;
       }
       outBytes += chunk.length;
-      io.out(chunk);
-    });
+      if (switched) send(chunk);
+      else queued.push([send, chunk]);
+    };
+    child.stdout?.on("data", (chunk) => output(io.out, chunk));
     child.stderr?.on("data", (chunk) => {
-      if (scopeFailed) return;
-      if (firstStderr) {
-        firstStderr = false;
-        if (/^(Failed to|System has not been booted with systemd)/.test(chunk.toString("utf8"))) {
-          scopeFailed = true;
-          stop();
-          return;
-        }
+      if (!switched && firstStderr === undefined) {
+        firstStderr = chunk.subarray(0, 200).toString("utf8").split(/\r?\n/, 1)[0];
       }
-      io.err(chunk);
+      output(io.err, chunk);
+    });
+    const sendStart = () => {
+      switched = true;
+      io.start({ [identity.kind]: layout.user, uid: ids.uid, gid: ids.gid, mode: "subuid", run: runId, unit });
+      for (const [send, data] of queued) send(data);
+      queued.length = 0;
+    };
+    child.stdio?.[3]?.on("data", (chunk) => {
+      if (done || invalidMarker) return;
+      const length = Math.min(chunk.length, SWITCH_MARKER.length - markerBytes);
+      if (!chunk.subarray(0, length).equals(SWITCH_MARKER.subarray(markerBytes, markerBytes + length))) {
+        invalidMarker = true;
+        stop();
+        return;
+      }
+      markerBytes += length;
+      if (!switched && !timedOut && markerBytes === SWITCH_MARKER.length) sendStart();
+      if (chunk.length > length) {
+        invalidMarker = true;
+        stop();
+      }
     });
     child.on("close", (code, signal) => {
-      if (done) return;
-      if (scopeFailed) return finish("the systemd scope could not be made");
-      finish(null, { code, signal, timedOut, truncated });
+      finish(() => {
+        // All fd 3 data has arrived by close, including any marker pending at the deadline.
+        if (markerBytes === SWITCH_MARKER.length) {
+          if (!switched) sendStart();
+          if (invalidMarker) {
+            io.fail("SPAWN_FAILED", "the command wrote after the switch marker");
+            return;
+          }
+          io.exit({ code, signal, timedOut, truncated, ms: (host.now ?? Date.now)() - startedAt });
+          return;
+        }
+        if (!timedOut && !invalidMarker && /^(Failed to|System has not been booted with systemd)/.test(firstStderr ?? "")) {
+          io.fail("SCOPE_FAILED", "the systemd scope could not be made");
+          return;
+        }
+        const detail = firstStderr ? `: ${oneLine(firstStderr)}` : "";
+        io.fail("SPAWN_FAILED", `the command did not start under its own uid${detail}`.slice(0, 200));
+      });
     });
     return { stop, get killed() { return done; } };
   };
 
-  return { tools, state, idsFor: idsForMember, provision, start };
+  return { tools, state, idsFor: (who) => idsFor(config, host, state, who), provision, start };
 }

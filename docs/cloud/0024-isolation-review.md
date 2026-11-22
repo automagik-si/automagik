@@ -591,12 +591,18 @@ rotation. Across workspaces, the VM boundary must stop the copied secret; that i
 
 ### U12. File modes and the shared uid (medium)
 
-The gate store is private; the workspace's Bots are the same uid as the workspace and read the
-launch URL and model key (section 2.8). `ensureDataDirs` does not set modes
-(`server/lib.mjs:53-75`), and the image's `0700` on `/data/secrets` is not tested on an Incus
-volume. **What would prove it:** a file-mode test on a fresh Incus volume, a secrets directory that
-is `0700` after first start, and a statement of which secrets are expected to be readable by the
-workspace's own Bots. Cross-workspace still needs the volume boundary.
+The gate store is private. In a workspace where Bots share DSH's uid, they can read the launch
+URL and model key (section 2.8). The image now creates DSH's home with mode `0700` and tightens
+an existing DSH-owned home before its first write. A foreign owner or a symbolic link in the
+path causes startup to refuse. Measurement reads its freshness marker from
+`.automagik-measurement/` on the volume. A default ACL on that directory carries the
+measurement account's read grant to replacement markers.
+These checks are image prerequisites for RFC 0038's distinct-uid Bot boundary.
+
+The `/data/secrets` finding is open. **What would prove it:** a file-mode test on a fresh Incus
+volume, a secrets directory that is `0700` after first start, and a statement of which secrets
+are expected to be readable by the workspace's own Bots. Cross-workspace still needs the
+volume boundary.
 
 ### U13. Distinct origins and browser storage (medium)
 
@@ -719,6 +725,9 @@ evidence: no source exists, so the probe stays unrun and the gate stays open (P9
 | P12 own secrets | A | A's model key and Omni credential at B | A's credential works at A, B answers 401 for it at B, and B's own credential works; a 401 is the expected scope evidence, so B must answer | VM/Cloud | VM A/B and the Cloud/secret record |
 | P13 browser origin | a browser at A | B's origin | no B session; A's cookie is refused at B and A's `localStorage` is not visible there; the Cloud edge gives A and B distinct origins, and a 401 is the expected refusal, so B must answer | VM/Cloud | Cloud edge origin allocation and the browser/VM |
 | P14 MCP Bearer | A | B's MCP route with A's Bearer, on B's gate origin and B's direct listener | 401 from both routes; A's Bearer works at A; a missing answer fails | Repository | this repository: two `createAgentAccess` fixtures with separate homes and two gate origins; no VM needed |
+
+*2026-11-21:* P14 has since been run and passes ([delivery 4 evidence](0024-delivery-4-evidence.md#test-receipts)).
+The paragraph below describes this review as it was written.
 
 The 14 probes are still 14: **1 provable from this repository** (P14), **11 provable only on the
 VM/Cloud side** (P1-P8, P11-P13), and **2 not provable at all with today's evidence** (P9, P10).

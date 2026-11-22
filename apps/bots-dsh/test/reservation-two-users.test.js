@@ -26,8 +26,12 @@ test('two distinct group members respect sticky reservations and the Bot check',
   assert.equal(made.created, true)
   const path = join(dir, made.name)
   t.after(() => op(a, 'make-shared'))
+  // Mode, owner, group, uid and modification time: GNU stat on Linux, BSD stat on macOS.
+  const statArgs = process.platform === 'darwin'
+    ? ['-f', '%Lp %Su %Sg %u %m']
+    : ['-c', '%a %U %G %u %y']
   const snapshot = user => [
-    run(user, 'cat', [path]), run(user, 'stat', ['-c', '%a %U %G %u %y', path]),
+    run(user, 'cat', [path]), run(user, 'stat', [...statArgs, path]),
   ]
   const before = snapshot(a)
   assert.match(before[1], new RegExp(`^640 ${a} automagik-ci `))
@@ -37,10 +41,15 @@ test('two distinct group members respect sticky reservations and the Bot check',
   })
   assert.equal(op(b, 'reserve', { label: 'B project', other: true }).created, true)
   assert.deepEqual(op(b, 'make-shared', { other: true }), { ok: true })
-  for (const [operation, code] of [
-    ['unlink', 'EPERM'], ['rename-over', 'EPERM'],
-    ['link-over', 'EEXIST'], ['open-write', 'EACCES'],
-  ]) assert.deepEqual(op(b, operation), { code })
+  // Each write to another member's file is refused. XNU's sticky check answers EACCES where
+  // Linux answers EPERM; every operation is run before comparing, so one run shows them all.
+  const sticky = process.platform === 'darwin' ? 'EACCES' : 'EPERM'
+  const refusals = {
+    unlink: sticky, 'rename-over': sticky, 'link-over': 'EEXIST', 'open-write': 'EACCES',
+  }
+  assert.deepEqual(Object.fromEntries(Object.keys(refusals).map(operation => [
+    operation, op(b, operation),
+  ])), Object.fromEntries(Object.entries(refusals).map(([operation, code]) => [operation, { code }])))
   assert.deepEqual(op(b, 'make-shared', { instance: a }), { refused: 'not-own-file' })
   assert.deepEqual(op(b, 'reserve', { label: 'B project' }).conflict, { label, owner: a })
   assert.deepEqual(snapshot(a), before)

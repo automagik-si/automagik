@@ -47,7 +47,7 @@ and updaters that find their asset among releases that are mostly someone else's
 | Plugins | `apps/<plugin>/` | `automagik-<plugin>-<v>.tgz`, `plugins.json`, `PLUGINS.SHA256SUMS`, `lane.json`. Every versioned release that packs `bots-dsh`, including prereleases, also carries `roles.json` and `roles.json.sig`. It attaches `automagik-role-<id>-<v>.tgz` and its `.sha256` for each official role. A role's version is the release in which its package bytes last changed. Each later plugin cut attaches the same bytes under its own tag. | the rolling `plugin-lane` release (`scripts/lane.ts`) |
 | Server image | `server/` | GHCR image by digest, keyless GitHub build provenance, `server-image.json` on the content release | [server-lane/server-image.json](https://github.com/automagik-si/automagik/releases/download/server-lane/server-image.json); a rolling prerelease, never Latest, advanced only by stable content without downgrades; consumers verify the image attestation (`server/README.md`, Follow) |
 | Herdr pack | `herdr/`, `herdr-layout/` | `automagik-herdr-pack-<v>.tgz` and `automagik-herdr-pack-<v>.tgz.sha256`; the `herdr-lane` pointer is re-signed | the rolling `herdr-lane` release (`scripts/herdr-lane.ts`), checked against the pack's `pack-keys.json` |
-| Pocket | `apps/pocket/` (Pocket Link, `herdr/mods/pocket-link`, is on the herdr lane) | `automagik-pocket-<v>.apk` and `latest.json`; `latest.json` on the rolling `pocket-lane` release is replaced | `latest.json` on `pocket-lane` (`apps/pocket/android/app/build.gradle.kts`, `UPDATE_URL`) |
+| Pocket | `apps/pocket/` (Pocket Link, `herdr/mods/pocket-link`, is on the herdr lane) | `automagik-pocket-<v>.apk` and `latest.json`; `latest.json` on the rolling `pocket-lane` release is replaced. Pocket Link ships as `pocket.link` inside `automagik-am-<v>.tgz` (RFC 0046) | `latest.json` on `pocket-lane` (`apps/pocket/android/app/build.gradle.kts`, `UPDATE_URL`) |
 
 `herdr/` is a top-level folder because Herdr's crawler (herdr.dev) indexes top-level folders. The
 herdr.dev listing waits on the owner's gate: no `herdr-mod` or `herdr-layout` topic is set on this
@@ -102,6 +102,24 @@ what a release is and whether it attaches the pack:
   measured since the full one, a herdr-only merge after a plugin patch would pack the plugins again
   and re-sign the lane, and every desktop app would reinstall plugins that did not change.
 - A herdr patch, like a plugin patch, is not marked Latest; `main` still moves to it.
+
+### A cut while dev moves or the previous release still posts (#668)
+
+- A push rejected because `dev` moved during the gates is retried on the new tip: the cut re-decides
+  the lane, re-runs the gates and tries again, up to three whole attempts (`scripts/release-cut.sh`).
+- Before deciding the Pocket and meter builds, the cut re-reads `pocket-lane` and `meter-lane` and
+  waits, within one 300 s budget, for a previous stable release's posts still in flight (meter
+  pointers count only when they verify against `meter-keys.json`).
+- Residual windows, accepted (decided by the owner's delegate on 2026-11-21, the recommended
+  option): a previous run slower than the budget; a stable plugin tag without build evidence hiding
+  an older pending post; more than three intervening drafts or prereleases; a meter post during the
+  Pocket wait when the meter did not trigger; a deleted lane release, which reads as bootstrap.
+  Each one ends the same way: the cut builds that part again although its code did not change (one
+  more version, and for Pocket an update prompt for identical code). None loses a tag, posts a
+  wrong or lower pointer, or ships an unsigned or ungated part. A longer wait would slow every
+  release to avoid a rare, harmless rebuild.
+- The process rule covers them: a merge waits until the previous release run is green, lane jobs
+  included.
 
 ## The pack on a release
 

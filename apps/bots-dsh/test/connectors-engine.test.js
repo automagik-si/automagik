@@ -2,7 +2,8 @@
 // real node:http upstream, and mail on fake transports. No network leaves the
 // test process (fakes listen on 127.0.0.1 or answer in memory).
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
+import { createServer, Server } from 'node:http'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -36,6 +37,19 @@ const teamHome = (extra = {}) => {
 }
 const mounts = ctx => { const list = []; ctx.plugin = (given, config) => { const m = { config, disposed: false }; list.push(m); return { await: async () => {}, dispose: () => { m.disposed = true } } }; return list }
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
+
+const fakeLoopback = (t) => {
+  const listeners = []
+  t.mock.method(Server.prototype, 'listen', function (_port, host, callback) {
+    assert.equal(host, '127.0.0.1')
+    listeners.push(this)
+    queueMicrotask(() => { this.emit('listening'); callback?.() })
+    return this
+  })
+  t.mock.method(Server.prototype, 'address', function () { return { port: 38517 + listeners.indexOf(this) } })
+  t.mock.method(Server.prototype, 'close', function (callback) { callback?.(); return this })
+  return listeners
+}
 
 // --- oauth.js --------------------------------------------------------------
 
@@ -600,6 +614,130 @@ test('concurrent adds for one address share verification and its result', async 
   assert.equal(rt.mailView().accounts.length, 1)
 })
 
+test('discarded and failed mail sends leave approval rules unchanged', async (t) => {
+  const delivery = Promise.withResolvers()
+  const sending = Promise.withResolvers()
+  const session = { ...fakeSession(), send: () => { sending.resolve(); return delivery.promise } }
+  const home = teamHome()
+  const ctx = fakeContext()
+  const rt = createRuntime(ctx, { home, github: false, mail: { connect: async () => session } })
+  t.mock.method(rt, 'deliver', async () => {})
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+  await rt.load()
+  await rt.connectorEndpoint('mail-account-add', { address: addressAt('163.com'), password: 'RIGHT' })
+  const send = rt.teamTools.find(d => d.name === 'mail_send')
+  const draft = async () => {
+    await send.execute({ to: 'draft@test.dev', subject: 'Draft', body: 'Body' }, { agent: { id: 'm1' } })
+    return rt.state.mailRequests.m1.at(-1)
+  }
+  await rt.connectorEndpoint('mail-rule-set', { addRecipient: 'saved@test.dev' })
+  for (const extra of [{}, { rule: 'allow-recipient' }]) {
+    const request = await draft()
+    await rt.connectorEndpoint('mail-send-answer', { requestId: request.id, choice: 'cancel', ...extra })
+    assert.equal(request.status, 'canceled')
+  }
+  assert.deepEqual(rt.mailView().allowedRecipients, ['saved@test.dev'])
+
+  const request = await draft()
+  const answer = rt.connectorEndpoint('mail-send-answer', { requestId: request.id, choice: 'send', rule: 'no-draft' })
+  await sending.promise
+  const beforeSend = rt.mailView().noDraftFor
+  delivery.reject(new Error('Delivery failed'))
+  await answer
+  assert.equal(request.status, 'failed')
+  assert.deepEqual(beforeSend, [])
+  assert.deepEqual(rt.mailView().noDraftFor, [])
+})
+
+for (const { name, fields, recipients, allowed, told } of [
+  {
+    name: 'mail card preserves cleared and edited recipients in delivery and the allow rule',
+    fields: { to: '', cc: 'edited@test.dev', bcc: '' },
+    recipients: { to: '', cc: 'edited@test.dev', bcc: undefined },
+    allowed: ['edited@test.dev'],
+    told: /The user sent "Draft" from /,
+  },
+  {
+    name: 'mail card preserves unedited recipients in delivery and the allow rule',
+    fields: {},
+    recipients: { to: 'original@test.dev', cc: 'cc@test.dev', bcc: 'bcc@test.dev' },
+    allowed: ['original@test.dev', 'cc@test.dev', 'bcc@test.dev'],
+    told: /The user sent "Draft" to original@test\.dev from /,
+  },
+]) {
+  test(name, async (t) => {
+    const session = fakeSession()
+    const home = teamHome()
+    const ctx = fakeContext()
+    const rt = createRuntime(ctx, { home, github: false, mail: { connect: async () => session } })
+    const delivered = []
+    t.mock.method(rt, 'deliver', async (...args) => { delivered.push(args.map(a => a?.text ?? String(a)).join(' ')) })
+    t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+    await rt.load()
+    await rt.connectorEndpoint('mail-account-add', { address: addressAt('163.com'), password: 'RIGHT' })
+    const send = rt.teamTools.find(d => d.name === 'mail_send')
+    await send.execute({ to: 'original@test.dev', cc: 'cc@test.dev', bcc: 'bcc@test.dev', subject: 'Draft', body: 'Body' }, { agent: { id: 'm1' } })
+    const request = rt.state.mailRequests.m1.at(-1)
+    await rt.connectorEndpoint('mail-send-answer', { requestId: request.id, choice: 'send', fields, rule: 'allow-recipient' })
+    assert.equal(request.status, 'sent')
+    assert.deepEqual({ calls: session.calls, allowed: rt.mailView().allowedRecipients }, {
+      calls: [['send', { ...recipients, subject: 'Draft', text: 'Body', attachments: [] }]],
+      allowed,
+    })
+    // An empty To names no recipient in the Bot's confirmation (a Bcc list stays private).
+    assert.match(delivered.join('\n'), told)
+  })
+}
+
+for (const [name, concurrent] of [
+  ['mail card refuses a second answer while the first reconnects', true],
+  ['mail card accepts a single answer while reconnecting', false],
+]) {
+  test(name, async (t) => {
+    const reconnecting = Promise.withResolvers()
+    const reconnected = Promise.withResolvers()
+    const session = fakeSession()
+    let disconnect
+    const home = teamHome()
+    const ctx = fakeContext()
+    const rt = createRuntime(ctx, { home, github: false, mail: { connect: async (_account, { onGone }) => {
+      if (disconnect !== undefined) {
+        reconnecting.resolve()
+        await reconnected.promise
+      }
+      disconnect = onGone
+      return session
+    } } })
+    t.mock.method(rt, 'deliver', async () => {})
+    t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+    await rt.load()
+    await rt.connectorEndpoint('mail-account-add', { address: addressAt('163.com'), password: 'RIGHT' })
+    const send = rt.teamTools.find(d => d.name === 'mail_send')
+    await send.execute({ to: 'original@test.dev', subject: 'Draft', body: 'Body' }, { agent: { id: 'm1' } })
+    const request = rt.state.mailRequests.m1.at(-1)
+    const answer = to => rt.connectorEndpoint('mail-send-answer', { requestId: request.id, choice: 'send', fields: { to }, rule: 'allow-recipient' })
+    disconnect()
+    const first = answer('first@test.dev')
+    await reconnecting.promise
+    const answers = [first]
+    if (concurrent) answers.push(answer('second@test.dev'))
+    const settled = Promise.allSettled(answers)
+    await new Promise(resolve => setImmediate(resolve))
+    reconnected.resolve()
+    const [accepted, refused] = await settled
+    assert.deepEqual(accepted, { status: 'fulfilled', value: true })
+    if (concurrent) {
+      assert.equal(refused.status, 'rejected')
+      assert.equal(refused.reason.code, 'bot/refused')
+      assert.equal(refused.reason.message, 'This card was already answered')
+    }
+    assert.equal(request.status, 'sent')
+    assert.equal(request.to, 'first@test.dev')
+    assert.deepEqual(session.calls.map(([kind, args]) => [kind, args.to]), [['send', 'first@test.dev']])
+    assert.deepEqual(rt.mailView().allowedRecipients, ['first@test.dev'])
+  })
+}
+
 test('mail account add verifies before saving; a bad code fails cleanly; send needs the card', async (t) => {
   const sessions = new Map()
   const factory = async (account, deps) => {
@@ -611,6 +749,7 @@ test('mail account add verifies before saving; a bad code fails cleanly; send ne
   const home = teamHome()
   const ctx = fakeContext()
   const rt = createRuntime(ctx, { home, github: false, mail: { connect: factory } })
+  t.mock.method(rt, 'deliver', async () => {})
   t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
   await rt.load()
   // 163 preset picked from the address; wrong code → clean error, nothing saved.
@@ -640,16 +779,17 @@ test('mail account add verifies before saving; a bad code fails cleanly; send ne
   const request2 = rt.state.mailRequests.m1.at(-1)
   await rt.connectorEndpoint('mail-send-answer', {
     requestId: request2.id, choice: 'send',
-    fields: { to: 'edited@test.dev', cc: 'cc@test.dev', subject: 'Hi2 edited', body: 'Edited B' },
+    fields: { to: 'edited@test.dev', cc: 'cc@test.dev', bcc: 'bcc@test.dev', subject: 'Hi2 edited', body: 'Edited B' },
     rule: 'allow-recipient',
   })
   const sent = sessions.get(addressAt('163.com')).calls.filter(c => c[0] === 'send')
   assert.equal(sent.length, 1)
   assert.equal(sent[0][1].to, 'edited@test.dev')
   assert.equal(sent[0][1].cc, 'cc@test.dev')
+  assert.equal(sent[0][1].bcc, 'bcc@test.dev')
   assert.equal(sent[0][1].subject, 'Hi2 edited')
   assert.equal(sent[0][1].text, 'Edited B')
-  assert.deepEqual(rt.mailView().allowedRecipients, ['edited@test.dev', 'cc@test.dev'])
+  assert.deepEqual(rt.mailView().allowedRecipients, ['edited@test.dev', 'cc@test.dev', 'bcc@test.dev'])
   // Allowed recipients skip the draft card and send right away; an unknown recipient still requires confirmation.
   let concludedAllowed = false
   const autoReply = await send.execute({ to: 'edited@test.dev', subject: 'Auto', body: 'Quick' }, { agent: { id: 'm1' }, callId: 'call-3', concludeTurn: () => { concludedAllowed = true } })
@@ -665,7 +805,7 @@ test('mail account add verifies before saving; a bad code fails cleanly; send ne
   let concludedNoDraft = false
   await send.execute({ to: 'anyone@test.dev', subject: 'NoDraft', body: 'Go' }, { agent: { id: 'm1' }, callId: 'call-5', concludeTurn: () => { concludedNoDraft = true } })
   assert.equal(concludedNoDraft, false)
-  await rt.connectorEndpoint('mail-rule-set', { botId: 'm1', noDraft: false, removeRecipient: 'edited@test.dev, cc@test.dev' })
+  await rt.connectorEndpoint('mail-rule-set', { botId: 'm1', noDraft: false, removeRecipient: 'edited@test.dev, cc@test.dev, bcc@test.dev' })
   assert.deepEqual(rt.mailView().noDraftFor, [])
   assert.deepEqual(rt.mailView().allowedRecipients, [])
   // A draft never draws a card.
@@ -873,7 +1013,8 @@ test('a stored CIMD client is reused only with the fixed port', async () => {
   assert.equal(random.via, 'dcr')
 })
 
-test('connector-sign-in-code refuses a wrong state and accepts the pasted URL or bare code', async (t) => {
+test('connector-sign-in-code exchanges a matching callback URL with the pending verifier', async (t) => {
+  fakeLoopback(t)
   const home = teamHome()
   const ctx = fakeContext()
   const rt = createRuntime(ctx, { home, github: false })
@@ -885,17 +1026,21 @@ test('connector-sign-in-code refuses a wrong state and accepts the pasted URL or
     discovery: { authorizationServerUrl: 'https://as.test', metadata: AS, resource: 'https://mcp.test/mcp' },
     clientInformation: { client_id: 'c1' }, timer: setTimeout(() => {}, 60_000), listener: { close: cb => cb?.() },
   })
-  await assert.rejects(rt.connectorEndpoint('connector-sign-in-code', { id: 'notion', input: 'http://x/?code=C&state=WRONG' }), /state/i)
-  const real = globalThis.fetch
-  globalThis.fetch = async (u) => String(u?.url ?? u) === 'https://as.test/token' ? json({ access_token: 'AT-9', token_type: 'Bearer' }) : notFound()
-  t.after(() => { globalThis.fetch = real })
-  await rt.connectorEndpoint('connector-sign-in-code', { id: 'notion', input: 'http://x/?code=C&state=STATE1' })
+  const exchanges = []
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (String(url?.url ?? url) !== 'https://as.test/token') return notFound()
+    exchanges.push(new URLSearchParams(init.body).get('code_verifier'))
+    return json({ access_token: 'AT-9', token_type: 'Bearer' })
+  })
+  await rt.connectorEndpoint('connector-sign-in-code', { id: 'notion', input: 'http://127.0.0.1:9/callback?code=C&state=STATE1' })
+  assert.deepEqual(exchanges, ['v'])
   assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), 'AT-9')
 })
 
 // A pasted answer the panel cannot use is a refusal (code bot/refused), so the card shows its
 // sentence instead of "Something went wrong" (#1322).
 test('connector-sign-in-code answers an unusable paste with a coded refusal', async (t) => {
+  const request = t.mock.method(globalThis, 'fetch', async () => notFound())
   const home = teamHome()
   const ctx = fakeContext()
   const rt = createRuntime(ctx, { home, github: false })
@@ -907,16 +1052,20 @@ test('connector-sign-in-code answers an unusable paste with a coded refusal', as
     clientInformation: { client_id: 'c1' }, timer: setTimeout(() => {}, 60_000), listener: { close: cb => cb?.() },
   })
   for (const [input, message] of [
-    ['  ', 'Paste the address or the code'],
+    ['C', 'Paste the whole callback address'],
+    ['  ', 'Paste the whole callback address'],
+    ['http://x/?code=C', 'This address is not from this sign-in attempt (state mismatch). Copy the whole address again.'],
     ['http://x/?code=C&state=WRONG', 'This address is not from this sign-in attempt (state mismatch). Copy the whole address again.'],
     ['http://x/?state=STATE1', 'The address has no code'],
   ]) {
     await assert.rejects(rt.connectorEndpoint('connector-sign-in-code', { id: 'notion', input }), { code: 'bot/refused', message })
   }
+  assert.equal(request.mock.callCount(), 0)
   assert.ok(rt.connectorsInternals.pendings.has('notion'), 'a refused paste keeps the sign-in waiting')
 })
 
 test('mail-sign-in-code answers an unusable Google answer with a coded refusal', async (t) => {
+  fakeLoopback(t)
   const oldId = process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID
   const oldSecret = process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET
   process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID = 'google-test'
@@ -929,25 +1078,37 @@ test('mail-sign-in-code answers an unusable Google answer with a coded refusal',
   })
   const home = teamHome()
   const ctx = fakeContext()
-  const rt = createRuntime(ctx, { home, github: false, mail: { fetch: async url => {
+  const exchanges = []
+  const rt = createRuntime(ctx, { home, github: false, mail: { fetch: async (url, init) => {
     const u = String(url)
     if (u.includes('oauth-authorization-server')) return json(AS)
-    if (u === 'https://as.test/token') return json({ access_token: 'tok-cccc', expires_in: 3600, token_type: 'Bearer' })
-    if (u.includes('userinfo')) return json({})
+    if (u === 'https://as.test/token') {
+      exchanges.push(new URLSearchParams(init.body).get('code_verifier'))
+      return json({ access_token: 'tok-cccc', expires_in: 3600, token_type: 'Bearer' })
+    }
+    if (u.includes('userinfo')) return json({ email: addressAt('gmail.com') })
     return notFound()
   } } })
   t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
   await rt.load()
   await assert.rejects(rt.connectorEndpoint('mail-sign-in-code', { input: 'C' }), { code: 'bot/refused', message: 'No Google sign-in is waiting' })
   const view = await rt.connectorEndpoint('mail-account-add', { google: true })
-  const state = new URL(view.pending[0].url).searchParams.get('state')
+  const params = new URL(view.pending[0].url).searchParams
+  const callback = new URL(params.get('redirect_uri'))
   for (const [input, message] of [
+    ['http://x/?code=C', 'The sign-in answer is not for this attempt'],
+    ['C', 'Paste the whole callback address'],
     ['http://x/?code=C&state=WRONG', 'The sign-in answer is not for this attempt'],
-    [`http://x/?state=${state}`, 'The address has no code'],
-    [`http://x/?code=C&state=${state}`, 'Google did not say which account this is'],
+    [`http://x/?state=${params.get('state')}`, 'The address has no code'],
   ]) {
     await assert.rejects(rt.connectorEndpoint('mail-sign-in-code', { input }), { code: 'bot/refused', message })
   }
+  assert.deepEqual(exchanges, [])
+  callback.search = `?code=C&state=${params.get('state')}`
+  const connected = await rt.connectorEndpoint('mail-sign-in-code', { input: callback.href })
+  assert.deepEqual(connected.accounts.map(account => account.address), [addressAt('gmail.com')])
+  assert.equal(exchanges.length, 1)
+  assert.equal(createHash('sha256').update(exchanges[0]).digest('base64url'), params.get('code_challenge'))
 })
 
 test('OAuth loopback keeps an error listener after binding, including repeated errors', async (t) => {
@@ -1023,6 +1184,7 @@ test('Google loopback catches a rejected sign-in callback instead of an unhandle
 })
 
 test('Google sign-in retries get a fresh URL and a success clears the pending row', async (t) => {
+  const listeners = fakeLoopback(t)
   const oldId = process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID
   const oldSecret = process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET
   process.env.AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID = 'google-test'
@@ -1048,15 +1210,20 @@ test('Google sign-in retries get a fresh URL and a success clears the pending ro
   const second = await rt.connectorEndpoint('mail-account-add', { google: true })
   assert.notEqual(first.pending[0].url, second.pending[0].url, 'retry should start a new attempt')
   const url = new URL(second.pending[0].url)
-  const callback = new URL(url.searchParams.get('redirect_uri'))
-  callback.search = `?code=C&state=WRONG`
-  const bad = await fetch(callback)
-  assert.equal(bad.status, 200)
+  const request = (state) => {
+    const req = Object.assign(new EventEmitter(), { url: `/callback?code=C&state=${state}` })
+    let html
+    const res = Object.assign(new EventEmitter(), {
+      writeHead: status => assert.equal(status, 200),
+      end: body => { html = body },
+    })
+    listeners.at(-1).emit('request', req, res)
+    return html
+  }
+  request('WRONG')
   await new Promise(resolve => setImmediate(resolve))
   assert.ok((await rt.diagnostics.entries()).some(row => /not for this attempt/.test(row.text)))
-  callback.search = `?code=C&state=${url.searchParams.get('state')}`
-  const ok = await fetch(callback)
-  assert.match(await ok.text(), /Signed in/)
+  assert.match(request(url.searchParams.get('state')), /Signed in/)
   for (let i = 0; i < 20; i++) {
     await new Promise(resolve => setImmediate(resolve))
     const view = await rt.connectorEndpoint('mail-rule-set', {})

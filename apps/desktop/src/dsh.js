@@ -21,7 +21,7 @@ import { homedir } from 'node:os'
 import { delimiter, join, resolve, win32 } from 'node:path'
 import { DEFAULTS as PRIVACY_DEFAULTS, privacyEnv } from './privacy.js'
 import { CLOSE_INHERITED } from './child-paths.js'
-import { mergePatch, replaceProfilePatch } from './profile-patch.mjs'
+import { hasSandboxAdapter, mergePatch, reconcileSandboxPatch, replaceProfilePatch } from './profile-patch.mjs'
 
 export const PROFILE = 'omni'
 const READY_TIMEOUT_MS = 120_000
@@ -108,6 +108,22 @@ const sameTool = (file, text, windows) => {
 /** The user's profile patch with missing shipped operations merged, or null if unchanged. */
 export function mergeProfilePatch(user, shipped) {
   return mergePatch(createRequire(import.meta.url)('yaml'), user, shipped)
+}
+
+export function reconcileSandboxRow({ profile, runtime, log = () => {} }) {
+  try {
+    const file = join(profile, 'cordis.patch.yml')
+    const text = readFileSync(file, 'utf8')
+    const yaml = createRequire(import.meta.url)('yaml')
+    const updated = reconcileSandboxPatch(yaml, text, hasSandboxAdapter(profile, runtime), log)
+    if (updated === null) return null
+    replaceProfilePatch(file, updated, statSync(file).mode & 0o777)
+    log('sandbox: reconciled the DSH sandbox provider in the profile patch')
+    return updated
+  } catch (error) {
+    log(`sandbox: could not reconcile the profile patch (${error.message})`)
+    return null
+  }
 }
 
 /**
@@ -829,7 +845,7 @@ export async function forgetDshLogins(cookies, origin) {
  */
 export const toolDirs = (userHome = homedir()) => [join(userHome, '.local', 'bin'), join(userHome, '.claude', 'local'), '/opt/homebrew/bin', '/usr/local/bin']
 
-export function dshEnv({ base = process.env, home, electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform, windowDigest, instanceId }) {
+export function dshEnv({ base = process.env, home, root = automagikHome(base), electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform, windowDigest, instanceId }) {
   // After the machine's own: a project's commands keep the user's node and pnpm, and then the
   // usual tool folders, then the app's own node and pnpm. dsh's plugin manager does not resolve
   // pnpm here: startDsh binds it to the bundled pnpm by absolute path (src/dsh-launch.cjs).
@@ -838,9 +854,11 @@ export function dshEnv({ base = process.env, home, electronAsNode = false, binDi
     .join(delimiter)
   const env = { ...base }
   delete env.AUTOMAGIK_WINDOW_DIGEST
-  // Only the launcher sets this id. It is non-secret and grants nothing (RFC 0024 amendment (l)).
+  // The launcher owns the instance id (RFC 0024 amendment (l)) and registry root. Drop
+  // inherited aliases too on Windows, where the child sees case-insensitive names.
   for (const key of Object.keys(env)) {
-    if ((platform === 'win32' ? key.toUpperCase() : key) === 'AUTOMAGIK_INSTANCE_ID') delete env[key]
+    const name = platform === 'win32' ? key.toUpperCase() : key
+    if (name === 'AUTOMAGIK_INSTANCE_ID' || name === 'AUTOMAGIK_HOME') delete env[key]
   }
   return {
     ...env,
@@ -848,6 +866,8 @@ export function dshEnv({ base = process.env, home, electronAsNode = false, binDi
     ...(typeof instanceId === 'string' ? { AUTOMAGIK_INSTANCE_ID: instanceId } : {}),
     PATH,
     DSH_HOME: join(home, 'dsh'),
+    // Code rows and the DSH Code tree read the same shared registry even after DSH changes cwd.
+    AUTOMAGIK_HOME: root,
     // The app's own team, apart from one in a dsh the person runs (bots-dsh folders.js).
     AUTOMAGIK_BOTS_HOME: join(home, 'bots'),
     // Signs in to an Omni as the desktop app (the Better Auth device-flow client id).

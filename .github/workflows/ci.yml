@@ -31,6 +31,16 @@ env:
   METER_CHANGED_PATHS: '^(meter/statusline/|\.github/workflows/ci\.yml$)'
   USAGEMETER_CHANGED_PATHS: '^(meter/(usagemeter|schema)/|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
   SANDBOX_CHANGED_PATHS: '^(apps/dsh-sandbox/|\.github/workflows/ci\.yml$)'
+  # The member runner's VM proof (runner-vm): the runner itself, its VM script, the Bot team's client
+  # of it (and the registry it imports), the probe that drives that client with its harness, the
+  # apt helper the job runs and the Node file.
+  RUNNER_VM_CHANGED_PATHS: '^(am/runner/|am/test/vm-run\.sh$|apps/bots-dsh/src/host/(runner-client|bot-shell)\.js$|apps/bots-dsh/src/shared/registry\.js$|apps/bots-dsh/test/(member-wall-probe\.test\.js|harness-resolve\.mjs)$|apps/bots-dsh/dev/harness/package\.json$|\.github/scripts/apt-canonical-sources\.sh$|\.github/workflows/ci\.yml$|\.github/node-versions\.json$)'
+  # Automagik ID installs from its own lockfile inside apps/id. Its tests and mutations also read
+  # this workflow's ID_PAGES_BROWSER line, and the job runs the apt mirror script.
+  ID_CHANGED_PATHS: '^(apps/id/|\.github/workflows/ci\.yml$|\.github/scripts/apt-canonical-sources\.sh$)'
+  # The brand font rebuild reads only its tool (scripts/brand-font, its own lockfile) and the
+  # committed font with its README in docs/brand/fonts.
+  BRAND_FONT_CHANGED_PATHS: '^(scripts/brand-font/|docs/brand/fonts/|\.github/workflows/ci\.yml$)'
 
 # Cancel only pull_request runs: a push to dev or main finishes, and
 # a manual run is never cancelled by a push. A pull request push
@@ -62,6 +72,9 @@ jobs:
       meter: ${{ steps.paths.outputs.meter }}
       usagemeter: ${{ steps.paths.outputs.usagemeter }}
       sandbox: ${{ steps.paths.outputs.sandbox }}
+      runnervm: ${{ steps.paths.outputs.runnervm }}
+      id: ${{ steps.paths.outputs.id }}
+      font: ${{ steps.paths.outputs.font }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -77,7 +90,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          areas=(herdr scheduler am pocket meter usagemeter sandbox link)
+          areas=(herdr scheduler am pocket meter usagemeter sandbox runnervm link id font)
           report="${RUNNER_TEMP}/areas.md"
           printf '| area | changed |\n| --- | --- |\n' > "${report}"
           # Every area is written, changed or not: each job-level `if` reads one output.
@@ -101,9 +114,14 @@ jobs:
           else
             # The diff goes to a file: piped into `grep -q`, git diff dies of SIGPIPE at the
             # first match, and pipefail reads that as "did not change" (#895).
+            # The pull request's own commits, from where it left the base to its head: the
+            # checked-out HEAD is GitHub's merge with today's base, and BASE (the event's
+            # base.sha) can be an older base commit, so BASE...HEAD also listed every base
+            # commit since then: a release bump marked herdr, am, Pocket and usagemeter as
+            # changed on a docs-only pull request. The base itself is checked by its own runs.
             names="${RUNNER_TEMP}/changed-names.txt"
-            if ! git diff --name-only "${BASE}...HEAD" > "${names}"; then
-              echo "::error::git diff ${BASE}...HEAD failed"
+            if ! git diff --name-only "${BASE}...${HEAD_SHA}" > "${names}"; then
+              echo "::error::git diff ${BASE}...${HEAD_SHA} failed"
               exit 1
             fi
             # Pocket Link's own rule: complete before/after trees, never a rename followed.
@@ -132,7 +150,12 @@ jobs:
             grep_area meter "${METER_CHANGED_PATHS}" "${names}"
             grep_area usagemeter "${USAGEMETER_CHANGED_PATHS}" "${names}"
             grep_area sandbox "${SANDBOX_CHANGED_PATHS}" "${names}"
+            grep_area id "${ID_CHANGED_PATHS}" "${names}"
+            grep_area font "${BRAND_FONT_CHANGED_PATHS}" "${names}"
             grep_area link "${POCKET_LINK_CHANGED_PATHS}" "${link_names}"
+            # The runner VM's rule reads both sides of a rename too: moving the VM script away
+            # must still run the job that checks it.
+            grep_area runnervm "${RUNNER_VM_CHANGED_PATHS}" "${link_names}"
           fi
           cat "${report}"
           if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
@@ -327,12 +350,17 @@ jobs:
     # subset again from that file, at its pinned commit, and fails unless the result is the
     # committed font, byte for byte (docs/brand/fonts/README.md has the call). The tooling is in
     # scripts/brand-font, outside docs/brand, because that folder is copied into other repositories.
+    # Only when the tool, docs/brand/fonts or this workflow changed: the `changes` job's font
+    # output decides it before this job takes a runner.
     name: Brand font rebuild
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.font != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -344,6 +372,7 @@ jobs:
           bun-version: 1.4.4
 
       - name: Rebuild fredoka-latin.woff2 from its pinned source and compare
+        id: rebuild
         shell: bash
         working-directory: scripts/brand-font
         env:
@@ -363,8 +392,52 @@ jobs:
           path: ${{ runner.temp }}/font-rebuild/fredoka-latin.woff2
           if-no-files-found: warn
 
+      # The change check and this assertion read the same diff in two independent steps: a skip
+      # in the first one cannot hide a change from the second (#895, as usagemeter's).
+      - name: Assert the steps ran
+        if: always()
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          OUTCOMES: rebuild=${{ steps.rebuild.outcome }}
+        run: |
+          set -euo pipefail
+          changed=false
+          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            changed=true
+          else
+            diff_file="${RUNNER_TEMP}/font-assert.txt"
+            if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
+              echo "::error::git diff ${BASE}...HEAD failed"
+              exit 1
+            fi
+            grep_status=0
+            grep -E "${BRAND_FONT_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
+            case "${grep_status}" in
+              0) changed=true ;;
+              1) ;;
+              *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
+            esac
+          fi
+          if [[ "${changed}" != true ]]; then
+            echo "the brand font and its tool unchanged: no steps expected"
+            exit 0
+          fi
+          missing=''
+          for outcome in ${OUTCOMES}; do
+            [[ "${outcome#*=}" == success ]] || missing="${missing} ${outcome%%=*}"
+          done
+          if [[ -n "${missing}" ]]; then
+            echo "::error::the brand font or its tool changed but these steps did not succeed:${missing}"
+            exit 1
+          fi
+          echo "ran: ${OUTCOMES}"
+
   id:
+    # Only when apps/id/ changed, or this workflow or the apt mirror script it runs: the
+    # `changes` job's id output decides it before this job takes a runner.
     name: Automagik ID (local Workers runtime)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.id != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -377,6 +450,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
@@ -385,7 +459,8 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile --ignore-scripts
-      - run: bun run check
+      - id: check
+        run: bun run check
 
       # A browser hit skips both the Chromium download and Playwright's apt step; a browser
       # miss still installs under a hard bound. The archive cache keeps a miss's deb downloads
@@ -568,8 +643,51 @@ jobs:
           else
             fail_phase "browser download" "${status}"
           fi
-      - run: bun run test
-      - run: node scripts/mutations.mjs
+      - id: test
+        run: bun run test
+      - id: mutations
+        run: node scripts/mutations.mjs
+
+      # The change check and this assertion read the same diff in two independent steps: a skip
+      # in the first one cannot hide a change from the second (#895, as usagemeter's).
+      - name: Assert the steps ran
+        if: always()
+        working-directory: .
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          OUTCOMES: check=${{ steps.check.outcome }} test=${{ steps.test.outcome }} mutations=${{ steps.mutations.outcome }}
+        run: |
+          set -euo pipefail
+          changed=false
+          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            changed=true
+          else
+            diff_file="${RUNNER_TEMP}/id-assert.txt"
+            if ! git diff --name-only "${BASE}...HEAD" > "${diff_file}"; then
+              echo "::error::git diff ${BASE}...HEAD failed"
+              exit 1
+            fi
+            grep_status=0
+            grep -E "${ID_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
+            case "${grep_status}" in
+              0) changed=true ;;
+              1) ;;
+              *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
+            esac
+          fi
+          if [[ "${changed}" != true ]]; then
+            echo "apps/id/ unchanged: no steps expected"
+            exit 0
+          fi
+          missing=''
+          for outcome in ${OUTCOMES}; do
+            [[ "${outcome#*=}" == success ]] || missing="${missing} ${outcome%%=*}"
+          done
+          if [[ -n "${missing}" ]]; then
+            echo "::error::apps/id/ changed but these steps did not succeed:${missing}"
+            exit 1
+          fi
+          echo "ran: ${OUTCOMES}"
 
   privacy:
     # The whole repository, on every pull request and push, whatever changed: a docs-only or
@@ -609,9 +727,11 @@ jobs:
     runs-on: ubuntu-24.04
     # Measured: 10m58 on Node 22, 12m32 on Node 24, whose leg also runs the herdr-app
     # system-libraries apt-get (2m33 in the slow run). At 15 that leg was cancelled at its cap
-    # twice in one day on unrelated changes (#1603, #1681), recording no result; 20 keeps the
-    # suite, the install and a slow runner's variance under the cap. Do not trim it back.
-    timeout-minutes: 20
+    # twice in one day on unrelated changes (#1603, #1681), recording no result; 20 kept the
+    # suite, the install and a slow runner's variance under the cap until the Node 24 leg grew
+    # to 15-19 min on dev (2026-11-20) and was cancelled at 20 with 3683 of ~3774 tests done.
+    # 30 keeps that headroom. Do not trim it back.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       # One list for CI and the release (#1645): .github/node-versions.json.
@@ -767,15 +887,25 @@ jobs:
           # Hand the downloaded debs back to the runner user so actions/cache can save them.
           sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
+      # Keep the verified pinned build for the Tests step's
+      # standalone check.
       - name: Every pack mod loads in herdr-app
+        id: app
         if: matrix.node == '24'
         working-directory: .
-        run: node .github/scripts/herdr-app-check.mjs
+        run: node .github/scripts/herdr-app-check.mjs --keep-app
 
       # am-quota's Keychain tests run against the stand-in in test/am-quota-keychain.mjs, first on
       # PATH; am-quota-keychain-guard.test.mjs fails any that could reach the real `security`.
       - name: Tests
         id: tests
+        env:
+          # test/standalone-check.test.mjs runs `herdr-app check` on every am-* mod for real only with
+          # AUTOMAGIK_HERDR_APP_CHECK=1 and HERDR_APP_BIN naming the app: the Node 24 leg, from the pinned
+          # build the step above verified and kept. A feed that could not be reached (outcome
+          # unverified, already a ::warning::) skips it; a missing handoff fails it. Other legs skip.
+          AUTOMAGIK_HERDR_APP_CHECK: ${{ matrix.node == '24' && steps.app.outputs.outcome != 'unverified' && '1' || '' }}
+          HERDR_APP_BIN: ${{ steps.app.outputs.bin }}
         run: node --test 'test/*.test.mjs'
 
       - name: Syntax
@@ -1032,6 +1162,265 @@ jobs:
           done
           if [[ -n "${missing}" ]]; then
             echo "::error::am/ changed but these steps did not succeed:${missing}"
+            exit 1
+          fi
+          echo "ran: ${OUTCOMES}"
+
+  am-linked-native:
+    # #206 (RFC 0012 delivery 9a, question 11): am on a linked machine, proved on a real Linux
+    # and a real macOS arm64 runner. herdr's "native (#206)" rows install the signed am with
+    # `am machines install --machine` (the far side reads the signed am-lane pointer itself, then
+    # `self install --signed`), run it from a sparse service PATH (node found the way run.sh finds
+    # Homebrew's), let it update itself, and start a Claude bot there whose per-turn hook prints
+    # the bot's briefing. The release folder is a file:// one signed with a key each run makes
+    # in memory (am/test/signed-release.mjs): never the real key, never printed. hc is the
+    # tests' fake; the machine's uname, shell, tar, checksum tool and Node are the runner's own.
+    name: am on a linked machine (native ${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.outputs.am != 'false' || needs.changes.outputs.herdr != 'false') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    defaults:
+      run:
+        working-directory: herdr
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        working-directory: .
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: This runner's system
+        env:
+          OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          system=$(uname -sm)
+          echo "uname -sm: ${system}"
+          if [[ "${OS}" == macos-* && "${system}" != "Darwin arm64" ]]; then
+            echo "::error::the macOS leg must run on Apple silicon (got ${system})"
+            exit 1
+          fi
+
+      - name: Native rows
+        env:
+          AM_LINKED_NATIVE: '1'
+        run: |
+          set -euo pipefail
+          export TMPDIR="${RUNNER_TEMP}"
+          out="${RUNNER_TEMP}/native.tap"
+          status=0
+          node --test --test-reporter=tap --test-name-pattern='^native \(#206\)' \
+            test/machine-install.test.mjs test/cli-remote-panes.test.mjs > "${out}" 2>&1 || status=$?
+          cat "${out}"
+          # Both rows ran and passed: a skip or a filter that matched nothing is a failure here.
+          passed=$(grep -cE '^ok [0-9]+ - native \(\\#206\)' "${out}" || true)
+          if [[ "${status}" != 0 || "${passed}" != 2 ]] || grep -qE '^ok [0-9]+ - native .*# SKIP' "${out}"; then
+            echo "::error::the #206 native rows did not all pass (exit ${status}, ${passed} of 2 passed)"
+            exit 1
+          fi
+
+  runner-vm:
+    # RFC 0038 delivery 3 (#1374): the member runner's real-uid proof on a throwaway VM. A
+    # GitHub-hosted ubuntu-24.04 runner is one (ephemeral, root through sudo, systemd, linger), so
+    # am/test/vm-run.sh runs am/runner/VM-RUN.md's setup and rows 1-32 on it as root, asserting each
+    # expected line, then the bots-dsh probe's three OS rows drive the shipped bot_shell client
+    # (apps/bots-dsh/src/host/runner-client.js) against the same runner. Nothing here may run on a
+    # contributor's machine: the script refuses without AM_RUNNER_VM_DISPOSABLE=yes and the probe
+    # rows skip without AUTOMAGIK_RUNNER_VM_PROBE. Node is the release's, read from
+    # .github/node-versions.json. Only when the runner, the client, the probe or this workflow
+    # changed: the `changes` job's runnervm output decides it before this job takes a runner.
+    name: Member runner on a throwaway VM
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.runnervm != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      DO_NOT_TRACK: '1'
+    steps:
+      # First, before anything changes the machine: only a GitHub-hosted (throwaway) runner.
+      - name: A GitHub-hosted runner
+        run: |
+          [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || { echo "::error::only on a GitHub-hosted runner"; exit 1; }
+          echo "image: ${ImageOS:-?} ${ImageVersion:-?}"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The release's exact Node (#1645): the version every am user's newest release ran on.
+      - name: Read the release Node version
+        id: node
+        run: |
+          set -euo pipefail
+          version=$(jq -r '.release' .github/node-versions.json)
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release Node version '${version}' in .github/node-versions.json is not exact x.y.z"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Cache the pinned DSH harness
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: apps/bots-dsh/dev/harness/node_modules
+          key: dsh-harness-bun-bots-dsh-${{ runner.os }}-${{ hashFiles('apps/bots-dsh/dev/harness/package.json') }}
+
+      - name: Install the Bot team for its probe
+        working-directory: apps/bots-dsh
+        run: |
+          bun install --frozen-lockfile
+          [ -d dev/harness/node_modules ] || bun run harness
+
+      - name: Syntax
+        id: syntax
+        run: |
+          set -euo pipefail
+          bash -n am/test/vm-run.sh
+          shellcheck -s bash am/test/vm-run.sh
+          node --check apps/bots-dsh/test/member-wall-probe.test.js
+
+      # The runner's uid switch is a rootless user namespace through newuidmap/newgidmap, and each
+      # shell's scope goes through the runner's systemd user manager, which needs its user bus.
+      - name: Point apt at the canonical Ubuntu archive
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/apt-canonical-sources.sh"
+
+      - name: The runner's system tools
+        run: |
+          set -euo pipefail
+          missing=()
+          command -v newuidmap > /dev/null || missing+=(uidmap)
+          dpkg -s dbus-user-session > /dev/null 2>&1 || missing+=(dbus-user-session)
+          if (( ${#missing[@]} > 0 )); then
+            sudo timeout 120 apt-get update -qq
+            sudo timeout 240 apt-get install -y -qq --no-install-recommends "${missing[@]}"
+          fi
+          unshare --version
+          command -v setpriv newuidmap newgidmap systemd-run
+
+      # The image's AppArmor blocks unprivileged user namespaces, which the runner's rootless switch
+      # needs (spawn.mjs). Debian 13, the server image's base, has no such restriction. Recorded
+      # before and after, and in the run's report.
+      - name: Allow unprivileged user namespaces on this throwaway runner
+        run: |
+          set -euo pipefail
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [[ -e "${knob}" ]]; then
+            echo "before: $(cat "${knob}")"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            echo "after: $(cat "${knob}")"
+          else
+            echo "no ${knob} on this kernel"
+          fi
+
+      - name: VM-RUN rows 1-32
+        id: rows
+        run: |
+          set -euo pipefail
+          tgz="${RUNNER_TEMP}/automagik-am.tgz"
+          # am exactly as a release packs it (release.yml "Pack am"): am/ without its tests.
+          git archive --format=tar.gz -o "${tgz}" HEAD:am -- . ':(exclude)test'
+          # The artifact folder is this user's, so the probe step can write its TAP there too.
+          mkdir -p "${RUNNER_TEMP}/runner-vm"
+          # The script's two keys: the disposable flag and the hosted runner, passed through sudo.
+          sudo env AM_RUNNER_VM_DISPOSABLE=yes RUNNER_ENVIRONMENT="${RUNNER_ENVIRONMENT}" \
+            NODE_BIN="$(command -v node)" bash am/test/vm-run.sh "${tgz}" "${RUNNER_TEMP}/runner-vm"
+
+      - name: The probe's OS rows against the real runner
+        id: probe
+        working-directory: apps/bots-dsh
+        run: |
+          set -euo pipefail
+          tap="${RUNNER_TEMP}/runner-vm/probe.tap"
+          status=0
+          sudo env PATH="${PATH}" AUTOMAGIK_RUNNER_VM_PROBE="${RUNNER_TEMP}/runner-vm/probe.json" \
+            "$(command -v node)" --import ./test/harness-resolve.mjs --test --test-reporter=tap \
+            --test-name-pattern='^delivery 3: ' test/member-wall-probe.test.js > "${tap}" || status=$?
+          sudo chmod a+r "${tap}"
+          cat "${tap}"
+          # A skip here is a failure: the VM is exactly where these rows must run. Each row passes
+          # once with no SKIP or TODO, and the run holds those three and nothing else.
+          for name in bot-shell gate-credential bot-owner-rights; do
+            if [[ "$(grep -Ec "^ok [0-9]+ - delivery 3: ${name}\$" "${tap}")" != 1 ]]; then
+              echo "::error::the probe row 'delivery 3: ${name}' did not pass exactly once here (failed or skipped)"
+              status=1
+            fi
+          done
+          for count in 'tests 3' 'pass 3' 'fail 0' 'cancelled 0' 'skipped 0' 'todo 0'; do
+            if ! grep -qx "# ${count}" "${tap}"; then
+              echo "::error::the probe's summary lacks '# ${count}'"
+              status=1
+            fi
+          done
+          exit "${status}"
+
+      - name: Upload what to send back
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runner-vm-${{ github.event.pull_request.number || github.run_number }}
+          path: ${{ runner.temp }}/runner-vm/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # The change check and this assertion read the same diff in two independent steps: a skip
+      # in the first one cannot hide a change from the second (#895, as usagemeter's).
+      - name: Assert the steps ran
+        if: always()
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          OUTCOMES: syntax=${{ steps.syntax.outcome }} rows=${{ steps.rows.outcome }} probe=${{ steps.probe.outcome }}
+        run: |
+          set -euo pipefail
+          changed=false
+          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            changed=true
+          else
+            diff_file="${RUNNER_TEMP}/runner-vm-assert.txt"
+            if ! git diff --no-renames --name-only "${BASE}...HEAD" > "${diff_file}"; then
+              echo "::error::git diff ${BASE}...HEAD failed"
+              exit 1
+            fi
+            grep_status=0
+            grep -E "${RUNNER_VM_CHANGED_PATHS}" "${diff_file}" > /dev/null || grep_status=$?
+            case "${grep_status}" in
+              0) changed=true ;;
+              1) ;;
+              *) echo "::error::grep over the changed paths failed (${grep_status})"; exit 1 ;;
+            esac
+          fi
+          if [[ "${changed}" != true ]]; then
+            echo "the member runner unchanged: no steps expected"
+            exit 0
+          fi
+          missing=''
+          for outcome in ${OUTCOMES}; do
+            [[ "${outcome#*=}" == success ]] || missing="${missing} ${outcome%%=*}"
+          done
+          if [[ -n "${missing}" ]]; then
+            echo "::error::the member runner changed but these steps did not succeed:${missing}"
             exit 1
           fi
           echo "ran: ${OUTCOMES}"
@@ -1587,7 +1976,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, vault-dsh, welcome-dsh]
+        app: [acp-dsh, bots-dsh, locale-pt-br-dsh, multiuser-dsh, vault-dsh, welcome-dsh]
     defaults:
       run:
         working-directory: apps/${{ matrix.app }}
@@ -1729,6 +2118,137 @@ jobs:
       - name: Integration groups (optional here, not claimed as coverage)
         if: ${{ matrix.app == 'acp-dsh' && !cancelled() }}
         run: node ../../scripts/integration-gate.mjs summary --job "acp-dsh (plugin tests)"
+
+  reservations-macos:
+    # RFC 0024 R4 on a native Mac: the documented macOS setup (dseditgroup, the default
+    # /Users/Shared/Automagik/reservations) and the same two-user test as the Linux plugin step.
+    name: Machine reservations (native macOS, two OS users)
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Record macOS image
+        run: |
+          sw_vers
+          printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+
+      - name: Two OS users and the documented setup
+        working-directory: apps/bots-dsh
+        run: |
+          set -euo pipefail
+          root=/opt/automagik-ci
+          dir=/Users/Shared/Automagik/reservations
+          sudo dseditgroup -o create -r 'Automagik CI' automagik-ci
+          gid=$(dscl . -read /Groups/automagik-ci PrimaryGroupID | awk '{print $2}')
+          uid=5101
+          for u in amres-a amres-b; do
+            sudo dscl . -create "/Users/${u}"
+            sudo dscl . -create "/Users/${u}" UniqueID "${uid}"
+            sudo dscl . -create "/Users/${u}" PrimaryGroupID "${gid}"
+            sudo dscl . -create "/Users/${u}" UserShell /usr/bin/false
+            sudo dscl . -create "/Users/${u}" NFSHomeDirectory /var/empty
+            sudo dseditgroup -o edit -a "${u}" -t user automagik-ci
+            uid=$((uid + 1))
+          done
+          sudo dscacheutil -flushcache
+          sudo sh scripts/reservations-setup.sh --group automagik-ci
+          sudo ls -ld "${dir}" "${dir}/key"
+          sudo install -d -m 0755 "${root}/bin" "${root}/plugin" \
+            "${root}/acp/src/host" "${root}/run"
+          sudo install -m 0755 "$(command -v node)" "${root}/bin/node"
+          sudo cp -R src "${root}/plugin/src"
+          sudo install -m 0644 test/fixtures/reservation-driver.mjs "${root}/plugin/"
+          sudo install -m 0644 ../acp-dsh/src/host/reservation-evidence.js "${root}/acp/src/host/"
+          sudo chmod -R a+rX "${root}"
+          for u in amres-a amres-b; do
+            (cd "${root}/run" && sudo -n -u "$u" -- "${root}/bin/node" \
+              "${root}/plugin/reservation-driver.mjs" probe "{\"dir\":\"${dir}\"}")
+          done
+          printf 'RESERVATION_TWO_USERS={"root":"%s","dir":"%s","a":"%s","b":"%s"}\n' \
+            "$root" "$dir" amres-a amres-b >> "$GITHUB_ENV"
+
+      - name: Two-user reservation test
+        working-directory: apps/bots-dsh
+        run: node --test test/reservation-two-users.test.js
+
+  vault-macos:
+    name: vault-dsh (native macOS Keychain)
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      VAULT_MACOS_NATIVE: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Record macOS image
+        run: |
+          sw_vers
+          printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+
+      - name: Native Keychain checks
+        run: node apps/vault-dsh/test/native/macos-keychain.native.mjs
+
+  vault-windows:
+    name: vault-dsh (native Windows Credential Manager)
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      VAULT_WINDOWS_NATIVE: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        shell: pwsh
+        run: |
+          $version = (Get-Content .github/node-versions.json -Raw | ConvertFrom-Json).release
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Record Windows image
+        shell: powershell
+        run: |
+          "ImageOS=$env:ImageOS"
+          "ImageVersion=$env:ImageVersion"
+          "WindowsBuild=$([System.Environment]::OSVersion.Version.Build)"
+          "PowerShellEdition=$($PSVersionTable.PSEdition)"
+          "PowerShellVersion=$($PSVersionTable.PSVersion)"
+          "PowerShell64Bit=$([System.Environment]::Is64BitProcess)"
+
+      - name: Native Windows Credential Manager checks
+        run: node apps/vault-dsh/test/native/windows-credential.native.mjs
 
   acp-image-read:
     name: acp-dsh (real Codex image reads) · required integration
@@ -1925,13 +2445,21 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert the tested commit
+        env:
+          EXPECTED: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          git rev-parse HEAD
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24.9.0
 
       - name: Test
-        run: node --test test/batch-spawn.test.js test/process-identity.test.js
+        run: node --test test/batch-spawn.test.js test/process-identity.test.js test/windows-job-probe.test.js test/windows-login-recovery.test.js test/windows-login-recovery.check.js
 
       - name: Test native Windows vault keychain
         working-directory: apps/vault-dsh
@@ -1958,6 +2486,56 @@ jobs:
         working-directory: apps/vault-dsh
         run: node --test test/keychain-macos-native.test.js
 
+  acp-macos:
+    # #869: the Bot's isolated CLI homes against the real Claude Code and Codex on macOS, with a
+    # disposable keychain. Invented credentials only. A seatbelt profile denies outbound network.
+    # apps/acp-dsh/README.md, "Credential stores on macOS (#869)".
+    name: acp-dsh (native macOS credential stores)
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/acp-dsh
+    env:
+      ACP_MACOS_NATIVE: '1'
+      DO_NOT_TRACK: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        working-directory: .
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Record macOS image
+        run: |
+          sw_vers
+          uname -m
+          printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+
+      - name: Plugin dependencies and the pinned DSH harness
+        run: |
+          bun install --frozen-lockfile
+          bun run harness
+
+      - name: Pinned Claude Code and Codex (registry integrity checked)
+        run: node test/native/install-clis.mjs "${RUNNER_TEMP}/acp-clis" >> "$GITHUB_ENV"
+
+      - name: Native credential-store checks
+        run: /usr/bin/sandbox-exec -f test/native/offline.sb node --import ./test/harness-resolve.mjs test/native/macos-accounts.native.mjs
+
   boot:
     # The plugins booted for real with Omni's channels and canvases (the release omni.json
     # pins): boot-check.yml, which Follow Omni also runs on a candidate Omni before carrying it.
@@ -1971,9 +2549,9 @@ jobs:
     # other job, so add new jobs here too (scripts/ci-result.test.ts fails until they are listed).
     # A pull request can skip an unchanged area. On every other event, a skip fails the check.
     name: CI result
-    needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am,
+    needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am, am-linked-native, runner-vm,
             pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
-            plugin, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, boot]
+            plugin, reservations-macos, vault-macos, vault-windows, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, acp-macos, boot]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1996,11 +2574,15 @@ jobs:
             [herdr]=herdr
             [scheduler]=scheduler
             [am]=am
+            [am-linked-native]=am
+            [runner-vm]=runnervm
             [pocket]=pocket
             [pocket-link]=link
             [meter]=meter
             [usagemeter]=usagemeter
             [dsh-sandbox]=sandbox
+            [id]=id
+            [brand-font]=font
           )
           report="${RUNNER_TEMP}/ci-result.md"
           printf '| job | result |\n| --- | --- |\n' > "${report}"

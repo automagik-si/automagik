@@ -1,0 +1,150 @@
+{
+  "pulls": [
+    {
+      "number": 202,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "0000000000000000000000000000000000000067",
+      "checkRuns": [
+        {
+          "id": 1012,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "queued",
+          "startedAt": null
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 203,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "0000000000000000000000000000000000000067",
+      "checkRuns": [
+        {
+          "id": 1013,
+          "name": "pr-reviewer",
+          "appId": 42,
+          "status": "unrecognized",
+          "startedAt": "2026-11-20T10:58:00Z"
+        }
+      ],
+      "complete": true
+    },
+    {
+      "number": 101,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "0000000000000000000000000000000000000065",
+      "checkRuns": [],
+      "complete": true
+    }
+  ],
+  "runs": [
+    {
+      "id": 1,
+      "path": ".github/workflows/release.yml",
+      "headBranch": "dev",
+      "headSha": "0000000000000000000000000000000000000001",
+      "status": "completed",
+      "createdAt": "2026-11-20T08:00:00Z",
+      "updatedAt": "2026-11-20T09:00:00Z",
+      "pushed": [
+        {
+          "job": "cut",
+          "sha": "0000000000000000000000000000000000000002",
+          "attempt": 2
+        },
+        {
+          "job": "list",
+          "sha": "0000000000000000000000000000000000000003",
+          "attempt": 2
+        }
+      ],
+      "evidenceComplete": true
+    },
+    {
+      "id": 2,
+      "path": ".github/workflows/follow-omni.yml",
+      "headBranch": "dev",
+      "headSha": "0000000000000000000000000000000000000003",
+      "status": "completed",
+      "createdAt": "2026-11-20T09:10:00Z",
+      "updatedAt": "2026-11-20T09:30:00Z",
+      "pushed": [],
+      "evidenceComplete": false
+    }
+  ],
+  "pushes": [
+    {
+      "actor": null,
+      "ref": "refs/heads/dev",
+      "before": "0000000000000000000000000000000000000001",
+      "after": "0000000000000000000000000000000000000002",
+      "activityType": "push",
+      "timestamp": "2026-11-20T08:20:00Z",
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000002",
+          "parents": [
+            "0000000000000000000000000000000000000001"
+          ],
+          "subject": "chore(release): v3.162.4"
+        }
+      ],
+      "commitsComplete": true
+    },
+    {
+      "actor": "automagik-genie[bot]",
+      "ref": "refs/heads/dev",
+      "before": "0000000000000000000000000000000000000002",
+      "after": "0000000000000000000000000000000000000003",
+      "activityType": "push",
+      "timestamp": "2026-11-20T08:40:00Z",
+      "commits": [],
+      "commitsComplete": false
+    },
+    {
+      "actor": "automagik-genie[bot]",
+      "ref": "refs/heads/dev",
+      "before": "0000000000000000000000000000000000000003",
+      "after": "0000000000000000000000000000000000000004",
+      "activityType": "push",
+      "timestamp": "2026-11-20T09:20:00Z",
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000004",
+          "parents": [
+            "0000000000000000000000000000000000000003"
+          ],
+          "subject": "chore(desktop): carry Omni 2.261120.2"
+        }
+      ],
+      "commitsComplete": true
+    },
+    {
+      "actor": "automagik-genie[bot]",
+      "ref": "refs/heads/dev",
+      "before": "0000000000000000000000000000000000000001",
+      "after": "000000000000000000000000000000000000000f",
+      "activityType": "push",
+      "timestamp": "2026-11-20T08:20:00Z",
+      "commits": [
+        {
+          "sha": "000000000000000000000000000000000000000f",
+          "parents": [
+            "0000000000000000000000000000000000000001"
+          ],
+          "subject": "chore(release): v3.162.4"
+        }
+      ],
+      "commitsComplete": true
+    }
+  ],
+  "complete": {
+    "pulls": true,
+    "runs": true,
+    "pushes": true
+  }
+}

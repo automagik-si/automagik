@@ -166,6 +166,7 @@ A renewal is refused with no new session and no cookie:
 | Case | Status |
 |---|---|
 | no session, an expired session, a revoked session, or a session Cloud already dropped | `401` |
+| the session was revoked or its cookie was rotated during the Cloud recheck | `401` |
 | a version 1 body, another version, `renew` not `true`, another workspace, an unknown field | `401` |
 | a missing held token, a held token past its `exp`, or a request `workspace` that differs from the token's `aud` | `401` |
 | the Cloud recheck refuses the token, or the rechecked role grants no access | `401` |
@@ -175,7 +176,7 @@ A renewal is refused with no new session and no cookie:
 | another media type | `415` |
 | another method | `405` |
 | a body over the gate's bound | `413` |
-| too many rechecks in flight | `429` |
+| too many rechecks in flight, including a concurrent renewal of the same session | `429` |
 
 A refusal changes nothing: no session, no token and no role. A refused request is logged only
 with a status and a generated request id, never with a token, a code or a subject.

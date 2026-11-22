@@ -21,6 +21,31 @@ const PKG = JSON.parse(readFileSync(new URL('../../package.json', import.meta.ur
 const APP_BOOT = '@deepseek-ai/dsh-app-boot'
 const DSH_PACKAGE = '@deepseek-ai/dsh'
 
+// Use the app-boot export, or the nearest @deepseek-ai package.json above the entry script.
+export async function currentDsh(ctx) {
+  try {
+    const loader = ctx?.get?.('loader')
+    const loaded = await loader?.import?.(APP_BOOT)
+    const appBoot = loader?.unwrapExports?.(loaded) ?? loaded?.default ?? loaded
+    const version = cleanVersion(appBoot?.getDshRuntimeVersion?.())
+    if (version) return version
+  } catch { /* the export is not visible here: read the install instead */ }
+  let dir = dirname(String(process.argv[1] ?? ''))
+  for (let depth = 0; depth < 12; depth += 1) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+      if (manifest?.name?.startsWith?.('@deepseek-ai/')) {
+        const version = cleanVersion(manifest.version)
+        if (version) return version
+      }
+    } catch { /* not a package directory */ }
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return null
+}
+
 export function install(rt) {
   const { ctx, config } = rt
   // Unfold's own instance pins its DSH and updates it with Unfold.
@@ -44,33 +69,6 @@ export function install(rt) {
     available: status.phase !== 'installed' && target !== null && status.current !== null
       && status.verified !== null && status.verified !== status.current && !blocked(),
   })
-
-  // The version of the DSH that is running us: the app-boot export, or — where
-  // that import cannot see it — the nearest @deepseek-ai package.json above the
-  // entry script.
-  async function currentDsh() {
-    try {
-      const loader = ctx.get?.('loader')
-      const loaded = await loader?.import?.(APP_BOOT)
-      const appBoot = loader?.unwrapExports?.(loaded) ?? loaded?.default ?? loaded
-      const version = cleanVersion(appBoot?.getDshRuntimeVersion?.())
-      if (version) return version
-    } catch { /* the export is not visible here: read the install instead */ }
-    let dir = dirname(String(process.argv[1] ?? ''))
-    for (let depth = 0; depth < 12; depth += 1) {
-      try {
-        const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
-        if (manifest?.name?.startsWith?.('@deepseek-ai/')) {
-          const version = cleanVersion(manifest.version)
-          if (version) return version
-        }
-      } catch { /* not a package directory */ }
-      const parent = dirname(dir)
-      if (parent === dir) break
-      dir = parent
-    }
-    return null
-  }
 
   // A bundled package manager means the runtime came with the app and only the
   // app's own updater can move it.
@@ -102,7 +100,7 @@ export function install(rt) {
 
   async function runCheck() {
     try {
-      status.current = await currentDsh()
+      status.current = await currentDsh(ctx)
       status.kind = installKind()
       // The desktop app pins its DSH and updates it as a whole, so it has nothing to offer.
       const inApp = inDesktopApp()

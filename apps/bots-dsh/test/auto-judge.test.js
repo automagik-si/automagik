@@ -4,6 +4,7 @@
 // the agent session of a Session the moment it is marked (`acpAgents.endSession`). Both only
 // ever refuse. acp-dsh is a fake here: the gates it was given and the sessions it was told to end.
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -618,8 +619,14 @@ test('#1092 every new hard category reaches the person without a judge call', as
     assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall: { title: 'bash', input: { command }, allowOnce: true } }), 'person')
     assert.equal(w.rt.autoAuditRows().at(-1).code, 'hard')
   }
-  w.rt.stepHooks.sendsOutside(() => true)
-  assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall: { title: 'team_send', input: {}, allowOnce: true } }), 'person')
+  let classified
+  w.rt.stepHooks.sendsOutside(input => {
+    classified = input
+    return input.tool === 'team_send'
+  })
+  const mirrorCall = { title: 'team_send', input: {}, allowOnce: true }
+  assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall }), 'person')
+  assert.deepEqual(classified, { tool: mirrorCall.title, args: mirrorCall.input, sessionId: w.session.id })
   assert.equal(w.requests.length, 0)
 })
 for (const stuck of ['background', 'info', 'stream']) test(`#1092 total judge deadline bounds ${stuck}`, async t => {
@@ -944,4 +951,25 @@ test('RFC 0034 password-manager reads on the mirror reach the person without a j
   assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall }), 'person')
   assert.equal(w.rt.autoAuditRows().at(-1).code, 'hard')
   assert.equal(w.requests.length, 0)
+})
+
+test('credential fields on a matching escalation still require the person', async t => {
+  const w = await world(t)
+  const marker = randomUUID()
+  const windows = 'cmdkey /generic:' + marker
+  const macos = 'security find-internet-password -g -s ' + marker
+  for (const fields of [
+    { permissionTitle: 'Inspect the fixture with ' + windows },
+    { justification: 'Need to run ' + macos },
+    { input: { script: macos } },
+  ]) {
+    await w.run()
+    const before = w.requests.length
+    assert.equal(await w.decide({ ...w.request(), ...fields }), 'person')
+    assert.equal(w.requests.length, before)
+    const audit = w.rt.autoAuditRows().at(-1)
+    assert.equal(audit.code, 'hard')
+    assert.equal(JSON.stringify(audit).includes(marker), false)
+    assert.equal(await w.decide(), 'person', 'the prior grant is gone')
+  }
 })

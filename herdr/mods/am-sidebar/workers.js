@@ -7,8 +7,9 @@
 
 import { AGENTS, AGY_MODE_DEFAULT, CODEX_LOGIN_SHELL, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
   hasEffortFlag, launchRun, modelArgs, modelRefusal, promptArgs, resolveAgent } from "./models.js";
-import { TEMPLATE_SHAPE } from "./model.js";
+import { TEMPLATE_SHAPE, agentHomeAgent, agentHomePathProblem } from "./model.js";
 import { envWords } from "./logins.js";
+import { loginPolicyWords } from "./loginWords.js";
 
 export { TEMPLATE_SHAPE };
 
@@ -382,8 +383,8 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
  * not herdr-core's (a bun script like omp needs ~/.bun/bin). A
  * `template` runs in hc's documented template form, `<template> <task>` after the options,
  * with no `--` (neither starts with a dash: both are refused before): it sets its own command.
- * `login`: a Claude worker's login words (logins.js chooseLogin), after PATH. A Claude template
- * can't take them through hc's template form, so it runs its own command instead
+ * `login`: a worker's login options and assignments (logins.js). A template that needs
+ * login words runs its own command instead
  * (`templateArgv`, `sh -c '<command> "$@"' sh <task>`, as Restart re-runs a template) under
  * `/usr/bin/env <login words>`, its template label kept. `agyMode`: an Antigravity worker's
  * execution mode (auto by default), written in the `worker.agyMode` label only when it isn't
@@ -397,10 +398,12 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
  * argv starts it on (`--session-id`), set as its agent.session label too. Any other agent gets
  * the `hc kill` shim's folder first instead (KILL_GUARD_DIR, #955); `killGuard` names another
  * copy of it (the stable folder's, for a worker the hc proxy approves), null for none.
+ * `outliveParent`: a worker on a chosen agent home (#1208) runs with `--outlive-parent`, so it
+ * never ends with its lead, and no restart of the lead runs it again.
  */
 export function workerArgs({ botId, branch, role, name, cwd, parent, agent, model, effort, agyMode, argv, task, template, path,
   taskId, project, lead, space, login = [], templateArgv = null, sandbox = false, stableRoot = null, session = null,
-  agySettingsPath = null, killGuard = undefined }) {
+  agySettingsPath = null, killGuard = undefined, outliveParent = false, loginEnv = {} }) {
   const args = ["run", "--bg", "--json"];
   if (name) args.push("--name", name);
   args.push("--cwd", cwd, "--label", `${WORKER_OF_LABEL}=${botId}`);
@@ -424,12 +427,15 @@ export function workerArgs({ botId, branch, role, name, cwd, parent, agent, mode
   const sandboxRoot = sandbox === true && agent === "dsh-tui" ? (stableRoot ?? stableRootOf()) : null;
   const guard = sandboxRoot ? stableGuardDir(sandboxRoot)
     : agent === "dsh-tui" ? GUARD_DIR : agent ? (killGuard === undefined ? KILL_GUARD_DIR : killGuard) : null;
-  const vars = envWords(path ? [`PATH=${guardPathWith(path, guard)}`] : [], login);
+  const vars = envWords([
+    ...(path ? [`PATH=${guardPathWith(path, guard)}`] : []),
+    ...(agent === "dsh-tui" ? loginPolicyWords(loginEnv) : []),
+  ], login);
   const env = vars.length ? [ENV, ...vars] : [];
   // #955: an Antigravity worker with no permission file never runs on skip-permissions.
   const taskArgv = [...agyGuarded(agent, [...argv, ...agySettingsArgs(agent, agySettingsPath)]), ...promptArgs(agent, task)];
   const launchArgv = sandboxRoot ? paneArgs(taskArgv, { botId, project: project ?? null, worker: true, stableRoot: sandboxRoot }) : taskArgv;
-  return [...args, "--parent", parent, "--", ...env, ...launchArgv];
+  return [...args, "--parent", parent, ...(outliveParent ? ["--outlive-parent"] : []), "--", ...env, ...launchArgv];
 }
 
 /** A program path's own name (`/bin/sh` is `sh`). */
@@ -815,6 +821,9 @@ const stamp = (at) => new Date(at ?? Date.now()).toISOString();
 const orNull = (x) => (x === undefined || x === "" ? null : x);
 const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
 
+/** A launch id: a v4 UUID. */
+const GENERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 /**
  * A start row: a worker (`kind: "worker"`, `worktree` its cwd as a real path) or a bot seat
  * (`kind: "seat"`, from start, restart, attach and --tree; `worktree` its folder). `task`:
@@ -831,16 +840,28 @@ const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
  * RFC 0021: `core` (this computer's hc core id) and `created_ms` (the terminal's, from hc get)
  * key the launch with `terminal`, since hc reuses terminal ids; `squad` (model.js squadOf, frozen
  * here at launch); `session`: the Claude session the launch runs (the id Herdr chose with
- * --session-id, or the one it resumed), else null. A seat's worker-only fields are null or false.
+ * --session-id, or the one it resumed), else null. `env`: #1490's launch home, the absolute
+ * HOME/DSH_HOME/CODEX_HOME/KIMI_CODE_HOME the seat was started with, so a search for the
+ * conversation it left on disk uses its own root and never the reviving process's; null when the
+ * launch named none (the search then fails closed). `generation` and `sequence`: the Bot login
+ * generation and record sequence the reader resolved for this launch's spawn (#1532), both null
+ * when the launch had no Bot login resolution (policy off, a legacy login, an unusable sequence,
+ * or `am attach`). A seat's
+ * worker-only fields are null or false. `agentHome` and `launch`: a worker on a chosen agent home
+ * (#1208), its real home and launch id; a row with none has neither key.
  */
 export function startRow({ kind, terminal, pid, botId, task, branch, project, lead, worktree, base, created, agent, model, effort,
-  template, role, swap, override, overrideRequested, core, createdMs, squad, session, at }) {
+  template, role, swap, override, overrideRequested, core, createdMs, squad, session, env, generation, sequence, agentHome, launch, at }) {
   const requested = overrideRequested && Object.keys(overrideRequested).length ? { ...overrideRequested } : null;
+  const home = env && typeof env === "object" && !Array.isArray(env)
+    ? Object.fromEntries(Object.entries(env).filter(([, v]) => typeof v === "string" && v)) : null;
   return { event: "start", kind, terminal, pid: Number.isInteger(pid) ? pid : null, botId, task: orNull(task),
     worktree: orNull(worktree), agent: orNull(agent), model: orNull(model), effort: orNull(effort), template: orNull(template),
     role: orNull(role), branch: orNull(branch), project: orNull(project), lead: orNull(lead), base: orNull(base),
     created: created === true, swap: swap === true, override: override === true, override_requested: requested,
-    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session), at: stamp(at) };
+    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session),
+    ...(home && Object.keys(home).length ? { env: home } : {}),
+    generation: orNull(generation), sequence: msOrNull(sequence), ...(agentHome ? { agentHome, launch: orNull(launch) } : {}), at: stamp(at) };
 }
 
 /**
@@ -1101,12 +1122,45 @@ export function prChecksText(checked, watched) {
 /** One ledger line. */
 export const ledgerLine = (row) => `${JSON.stringify(row)}\n`;
 
-/** A ledger's rows; a line that isn't a JSON object (a torn write) is skipped. */
+/**
+ * The reservation a chosen-home worker (#1208) writes before it is sent to hc: its launch id
+ * (the AUTOMAGIK_AGENT_HOME_LAUNCH its argv carries), the hc name it asks for, its project,
+ * worktree, agent and real home, and when (`at`, ms). Its start row later carries the same
+ * `launch`. Until then a pane under that name with no argv to read is unresolved, never ordinary
+ * (the CLI's chosenProof). Every other reader skips the event, as it skips any it doesn't know.
+ */
+export function workerIntent({ launch, name, project, worktree, agent, agentHome, at = Date.now() }) {
+  return { event: "intent", kind: "worker", launch, name, project, worktree, agent, agentHome, at };
+}
+
+/** The pane seen on a failed chosen-home verification, keyed to its instance. */
+export function unresolvedWorker({ terminal, core, created_ms, launch }) {
+  return { event: "unresolved", terminal, core, created_ms: Number.isSafeInteger(created_ms) ? created_ms : null, launch };
+}
+
+/** An intent row as workerIntent writes one; any other is skipped by readLedger, as a torn line is. */
+function validWorkerIntent(row) {
+  return row.kind === "worker" && typeof row.launch === "string" && GENERATION_ID.test(row.launch)
+    && typeof row.name === "string" && row.name.length > 0 && row.name.length <= 64 && !/[\u0000-\u001f\u007f]/.test(row.name)
+    && [row.project, row.worktree].every((path) => typeof path === "string" && path.startsWith("/"))
+    && agentHomeAgent(row.agent) && !agentHomePathProblem(row.agentHome)
+    && Number.isSafeInteger(row.at) && row.at >= 0;
+}
+
+/** A ledger's rows, skipping torn lines and malformed chosen launch reservations or observations. */
 export function readLedger(text) {
   const rows = [];
   for (const line of String(text ?? "").split("\n")) {
     if (!line.trim()) continue;
-    try { const row = JSON.parse(line); if (row && typeof row === "object" && !Array.isArray(row)) rows.push(row); } catch { /* skipped */ }
+    try {
+      const row = JSON.parse(line);
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      if (row.event === "intent" && !validWorkerIntent(row)) continue;
+      if (row.event === "unresolved" && !(typeof row.terminal === "string" && row.terminal
+        && typeof row.core === "string" && row.core && (row.created_ms === null || Number.isSafeInteger(row.created_ms))
+        && typeof row.launch === "string" && GENERATION_ID.test(row.launch))) continue;
+      rows.push(row);
+    } catch { /* skipped */ }
   }
   return rows;
 }

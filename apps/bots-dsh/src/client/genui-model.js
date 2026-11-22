@@ -53,7 +53,7 @@ export function shortDate(value) {
 
 const genuiMonth = (date, withYear) => new Intl.DateTimeFormat(dateLocale(), { month: 'short', ...(withYear ? { year: 'numeric' } : {}) }).format(date)
 
-/** The months a coverage spans, "Mar–Nov", or the years too when they differ. */
+/** The months a coverage spans, such as "Aug 2026", "Mar–Nov" or "Mar 2025 – Nov 2026". */
 export function spanOf(value) {
   const coverage = coverageOf(value)
   if (coverage === undefined) return ''
@@ -62,7 +62,10 @@ export function spanOf(value) {
   if (oldest === undefined && newest === undefined) return ''
   if (oldest === undefined) return shortDate(coverage.newest)
   if (newest === undefined) return shortDate(coverage.oldest)
-  if (oldest.getFullYear() === newest.getFullYear()) return `${genuiMonth(oldest, false)}–${genuiMonth(newest, false)}`
+  if (oldest.getFullYear() === newest.getFullYear()) {
+    if (oldest.getMonth() === newest.getMonth()) return genuiMonth(oldest, true)
+    return `${genuiMonth(oldest, false)}–${genuiMonth(newest, false)}`
+  }
   return `${genuiMonth(oldest, true)} – ${genuiMonth(newest, true)}`
 }
 
@@ -313,6 +316,7 @@ export const BACKFILL_RUNS_SHOWN = 3
 export const BACKFILL_ROWS_SHOWN = 20
 const BACKFILL_CHATS_MAX = 200
 const BACKFILL_ID_MAX = 200
+const BACKFILL_OUTCOMES = new Set(['done', 'phone-did-not-answer', 'stopped', 'failed', 'not-started'])
 
 const backfillId = value => genuiLabel(value, BACKFILL_ID_MAX)
 
@@ -412,11 +416,28 @@ export function backfillSummaryText(summary, rows) {
   return parts.join(' · ')
 }
 
-function backfillRowView(row) {
+function backfillWindowLine(row, fromDay) {
+  if (!BACKFILL_OUTCOMES.has(row.outcome)) return ''
+  const coverage = coverageOf(row.coverage)
+  if (coverage === undefined) return ''
+  if (coverage.countInWindow === 0) return t('Omni holds nothing in this window')
+  const oldestDay = backfillDay(coverage.oldest)
+  return fromDay !== '' && oldestDay > fromDay
+    ? t('Omni holds nothing before {date}', { date: backfillDayText(coverage.oldest) })
+    : ''
+}
+
+function backfillRowView(row, fromDay) {
   if (row === null || typeof row !== 'object' || Array.isArray(row)) return undefined
   const chatId = backfillId(row.chatId)
   if (chatId === undefined) return undefined
-  return { ...rowView(row), chatId, jobId: backfillId(row.jobId) ?? null, cancelable: canCancel(row) }
+  return {
+    ...rowView(row),
+    chatId,
+    jobId: backfillId(row.jobId) ?? null,
+    cancelable: canCancel(row),
+    windowLine: backfillWindowLine(row, fromDay),
+  }
 }
 
 function backfillRunId(value) {
@@ -429,7 +450,8 @@ export function runView(value) {
   const id = backfillRunId(value)
   if (id === undefined) return undefined
   const rows = Array.isArray(value.rows) ? value.rows : []
-  const shown = rows.slice(0, BACKFILL_ROWS_SHOWN).map(backfillRowView).filter(Boolean)
+  const fromDay = backfillDay(value.from)
+  const shown = rows.slice(0, BACKFILL_ROWS_SHOWN).map(row => backfillRowView(row, fromDay)).filter(Boolean)
   return {
     id,
     botId: backfillId(value.botId),
@@ -442,15 +464,21 @@ export function runView(value) {
   }
 }
 
-/** The open proposals and the first runs in roster order. */
-export function backfillView(roster) {
+/** The open proposals and the first runs in roster order, scoped to a request when bound. */
+export function backfillView(roster, { proposalId, runId = proposalId } = {}) {
   const proposals = Array.isArray(roster?.omniBackfillProposals) ? roster.omniBackfillProposals : []
   const runs = Array.isArray(roster?.omniBackfills) ? roster.omniBackfills : []
   const validRuns = runs.filter(run => backfillRunId(run) !== undefined)
-  const shown = validRuns.slice(0, BACKFILL_RUNS_SHOWN).map(runView)
+  const scopedRuns = runId === undefined ? validRuns : validRuns.filter(run => backfillRunId(run) === runId)
+  const shown = scopedRuns.slice(0, BACKFILL_RUNS_SHOWN).map(runView)
+  const open = proposals.map(proposalView).filter(Boolean)
+    .filter(proposal => (proposalId === undefined && runId === undefined) || proposal.id === proposalId)
   return {
-    proposals: proposals.map(proposalView).filter(Boolean),
+    proposals: open,
     runs: shown,
-    moreRuns: validRuns.length - shown.length,
+    moreRuns: scopedRuns.length - shown.length,
+    ...(proposalId !== undefined && {
+      proposalSettled: open.length === 0 && !validRuns.some(run => backfillRunId(run) === proposalId),
+    }),
   }
 }

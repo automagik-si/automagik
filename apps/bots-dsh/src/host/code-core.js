@@ -12,7 +12,7 @@
 // This module probes for a running core and manages its protocol connection. The
 // tree and the route (code-side.js) decide which terminal may be attached.
 import { spawn } from 'node:child_process'
-import { probeCore } from './core-probe.js'
+import { answersStatus, probeCore } from './core-probe.js'
 
 export const KINDS = Object.freeze({ data: 0, credit: 1, close: 2, resize: 3, focus: 4 })
 /** The core's cap on one frame's payload; a header above it is a broken stream. */
@@ -62,12 +62,13 @@ export class CoreError extends Error {
 }
 
 /**
- * Open one `hc connect` and read its hello.
- * @param {{ bin?: string, env?: NodeJS.ProcessEnv, cwd?: string, onStderr?: (text: string) => void, spawn?: typeof spawn }} [options]
+ * Open one `hc connect` and read its hello. `socket` pins the connection to that one path: it is
+ * checked alone and nothing else is tried when it does not answer.
+ * @param {{ bin?: string, env?: NodeJS.ProcessEnv, cwd?: string, socket?: string, onStderr?: (text: string) => void, spawn?: typeof spawn }} [options]
  * @returns {Promise<CoreConnection>}
  */
-export async function connectCore({ bin, env = process.env, cwd, onStderr = () => {}, spawn: spawnProcess = spawn } = {}) {
-  const socket = await probeCore(env)
+export async function connectCore({ bin, env = process.env, cwd, socket: pinned, onStderr = () => {}, spawn: spawnProcess = spawn } = {}) {
+  const socket = pinned === undefined ? await probeCore(env) : (await answersStatus(pinned, 3000) ? pinned : null)
   if (socket === null) throw new CoreError('no-core')
   // Use the socket that answered, even when hc's first choice was stale.
   const command = bin ?? (env.HERDR_HC && String(env.HERDR_HC).trim() ? env.HERDR_HC : 'hc')

@@ -20,6 +20,13 @@ import { isWindowEndpoint } from './extend.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
+import { CHECK_READ_ONLY, newerCheckedCandidate, savedCheckSummary } from './self-update-check.js'
+import { readUpdateRecovery } from './self-update-recovery.js'
+import { callerService, multiuserMode } from './multiuser.js'
+import { callerJson } from './caller-routes.js'
+import { peopleOf } from './people.js'
+import { claimGrant } from './approvals.js'
+import { bindTicketDesk, createTicketDesk } from './grant-ticket.js'
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -64,6 +71,8 @@ const exposition = error => (typeof error?.code === 'string' && /^(?:bot|memory)
 const errorKind = error => [error?.code, error?.name].find(value => typeof value === 'string' && /^[\w./-]{1,40}$/.test(value)) ?? 'error'
 
 export function install(rt) {
+  const { mint, desk } = createTicketDesk(rt.ctx.connection)
+  bindTicketDesk(rt, desk)
   installBtw(rt)
   installSide(rt)
   const { ctx, state } = rt
@@ -198,7 +207,7 @@ export function install(rt) {
     // `sessionId` is the group's own Session's current part, `ownParts` its earlier
     // ones; `parts` the members' hidden group Sessions and their earlier segments,
     // for usage. `lateRounds` and `relays` are what an older team's rooms may still hold.
-    rooms: Object.values(state.rooms).map(({ log, seen, paused, sessions, segments, parts: ownParts, ...room }) => {
+    rooms: Object.values(state.rooms).map(({ log, seen, paused, sessions, segments, parts: ownParts, scoped: _scoped, legacySpeakers: _legacySpeakers, legacyUnproven: _legacyUnproven, ...room }) => {
       const parts = [...Object.values(sessions ?? {}), ...Object.values(segments ?? {}).flat().map(segment => segment.sessionId), ...(ownParts ?? []).map(segment => segment.sessionId)]
       const last = (log ?? []).filter(line => line.kind === undefined).at(-1)
       // The row's one line: the start of the last message, without its markdown marks (#1155).
@@ -272,7 +281,9 @@ export function install(rt) {
   }
   const live = (roles) => ({
     activity: rt.activityView(),
-    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), withdrawn: rt.withdrawnView?.() ?? [], unanswered: rt.unansweredView?.() ?? [], stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
+    // The web self-update holds new work (update-hold.js): the composer says so.
+    updateHold: rt.updateHoldView?.() === true,
+    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), grants: rt.grantsView?.() ?? [], withdrawn: rt.withdrawnView?.() ?? [], unanswered: rt.unansweredView?.() ?? [], stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
     memoryNews: rt.memoryNews(),
     memoryReviews: rt.memoryReviews(),
     learning: rt.learningView(),
@@ -334,7 +345,7 @@ export function install(rt) {
   // Updates change the dsh profile, not the team, so a reading host may run them too.
   const privacy = createPrivacy()
   const pets = createPets({ home: () => rt.home, warn: (...args) => rt.warn?.(...args) })
-  const READS = new Set(['privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
+  const READS = new Set(['people-seen', 'people-share', 'privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
   READS.add('role-catalog')
   // Sign-in (cli-login.js): its replies are never cached by the browser.
   const CLI_LOGIN = new Set([
@@ -496,24 +507,44 @@ export function install(rt) {
   }
   // Internal Bot tools call these same runtime mutators directly. They participate as
   // owners; nested calls from an already admitted handler reuse its admission.
+  const ownershipMutators = new Set(['createBot', 'updateBot', 'switchRoute', 'addAgent', 'removeAgent',
+    'adoptAgentSession', 'adoptBotSession', 'adoptAsBot', 'rollbackAdoption'])
   for (const name of ['createBot', 'duplicateBot', 'updateBot', 'deleteBot', 'setMain',
     'createRoom', 'updateRoom', 'deleteRoom', 'setFlags', 'bootstrap', 'switchRoute',
     'addAgent', 'removeAgent', 'adoptAgentSession', 'adoptBotSession', 'adoptAsBot',
     'rollbackAdoption']) {
     const original = rt[name]
     if (typeof original === 'function') {
-      rt[name] = (...args) => ownerTransaction(() => name === 'switchRoute'
+      const execute = (...args) => ownerTransaction(() => name === 'switchRoute'
         ? rt.withModelChange(args[0], () => original(...args)) : original(...args))
+      rt[name] = ownershipMutators.has(name) || name === 'updateRoom' ? async (...args) => {
+        const leave = name !== 'updateRoom' || args[1]?.workDir !== undefined ? rt.enterOwnership() : undefined
+        try { return await execute(...args) } finally { leave?.() }
+      } : execute
     }
   }
+  const ownershipEndpoints = new Set(['create-bot', 'update-bot', 'switch-route', 'add-agent', 'agent-session',
+    'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'agent-archive', 'remove-agent',
+    'bot-fresh', 'bot-new-part', 'bot-open-part'])
+  const enterRequestOwnership = (endpoint, payload) => ownershipEndpoints.has(endpoint)
+    || (endpoint === 'update-room' && payload?.workDir !== undefined) ? rt.enterOwnership() : undefined
   const adminActions = new Set([...AGENT_TOOLS.map(tool => tool.endpoint),
     'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags', 'set-main',
     'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'role-attach', 'role-detach',
     'role-install', 'role-uninstall', 'role-grant', 'role-settings', 'role-settings-set'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
-  const handle = async (endpoint, payload, signal, windowSeen = false) => {
+  const handle = async (endpoint, payload, signal, windowSeen = false, ticket) => {
     try {
       const body = payload ?? {}
+      if ((endpoint === 'create-bot' || endpoint === 'duplicate-bot') && Object.hasOwn(body, 'people')) {
+        return fail('Only the user can choose who may talk to a Bot, in its settings', 'bot/refused')
+      }
+      if (endpoint === 'update-bot' && Object.hasOwn(body, 'people')) {
+        if (Object.keys(body).some(key => key !== 'id' && key !== 'people' && key !== 'expect')) {
+          return fail('Save who may talk to a Bot on its own', 'bot/refused')
+        }
+        if (!callerService(ctx)) return fail('Sharing needs multiuser mode', 'bot/refused')
+      }
       // The permission section of the diagnostics page (permission-diagnostics.js): answered
       // from memory before the refresh below, which may load the team or take its lock. It
       // takes no input.
@@ -522,13 +553,61 @@ export function install(rt) {
         || (endpoint === 'vault-token-clear' && body.provider === 'bitwarden-secrets')) {
         return ok(await rt.vaultEndpoint(endpoint, body, true))
       }
+      const healthForm = body.health === true && Object.keys(body).length === 1
+      if (endpoint === 'state' && healthForm) {
+        await rt.load()
+        const health = rt.teamHealth()
+        return health ? ok(health) : fail('The saved team could not be read.', 'bot/team-unread')
+      }
       await rt.refresh()
+      // The web self-update (RFC 0041): owner routes of the window that holds the team, never READS, never a Bot tool.
+      if (endpoint === 'self-update-status' || endpoint === 'self-update-check' || endpoint === 'self-update-check-result'
+        || endpoint === 'self-update-start') {
+        if (rt.holdsLock() !== true) return fail(CHECK_READ_ONLY, 'bot/read-only')
+        if (endpoint === 'self-update-check-result' && (typeof body.runId !== 'string' || body.runId === '')) {
+          return fail('An update check run ID is required.', 'bot/invalid')
+        }
+        const generation = rt.teamGeneration()
+        const status = endpoint === 'self-update-status' ? rt.selfUpdateStatus() : undefined
+        const ownerStatus = () => {
+          const profileDir = rt.ctx.get?.('profileContext')?.dir
+          const check = healthForm ? null : savedCheckSummary(profileDir)
+          const recovery = healthForm ? null : readUpdateRecovery(profileDir, status.run)
+          const reply = { ...status, ...(healthForm ? rt.selfUpdateHealth() : {}) }
+          if (check !== null) reply.check = { ...check, newer: newerCheckedCandidate(check, status.current) }
+          if (recovery !== null) reply.recovery = recovery
+          if (rt.config.selfUpdate === true) {
+            reply.startEnabled = true
+            reply.startRefusal = rt.selfUpdateStartRefusal(status)
+            reply.forceRefusal = rt.selfUpdateStartRefusal(status, true)
+          }
+          return reply
+        }
+        const result = endpoint === 'self-update-status'
+          ? ownerStatus()
+          : endpoint === 'self-update-check-result' ? rt.selfUpdateCheckResult(body.runId)
+            : endpoint === 'self-update-start' ? await rt.selfUpdateStart(() => rt.sameTeam(generation), {
+              force: body.force === true,
+              ...(Object.hasOwn(body, 'runId') ? { runId: body.runId } : {}),
+              ...(Object.hasOwn(body, 'reinstall') ? { reinstall: body.reinstall } : {}),
+            })
+              : body.reinstall === true ? await rt.selfUpdateCheck(true) : await rt.selfUpdateCheck()
+        return rt.sameTeam(generation) ? ok(result) : fail(CHECK_READ_ONLY, 'bot/read-only')
+      }
+      // A plugin install while the web self-update holds the team would race the supervisor's switch.
+      if ((endpoint === 'update-install' || endpoint === 'dsh-update-install') && rt.updateHoldView?.() === true) {
+        return fail('An update is running. Try again when it is done.', 'bot/update-running')
+      }
       const readOnly = rt.readOnly()
       // An endpoint another Omni plugin serves (extend.js) says itself whether it only reads.
       const added = rt.extended.endpointOf(endpoint)
       if (readOnly !== undefined && !READS.has(endpoint) && !AGENT_TOOLS.some(tool => tool.read
         && tool.endpoint === endpoint) && added?.read !== true) {
-        return fail(readOnly, 'bot/read-only')
+        // A window endpoint's refusal never carries the reason itself: it names the team's files and host.
+        const fixed = { 'accounts-claude-use': 'This host can only read accounts.', 'accounts-claude-add': 'This host can only read accounts.',
+          'accounts-claude-remove': 'This host can only read accounts.', 'code-start': 'This host can only read the team.',
+          'connector-retry': 'Try again in the window that can edit the Bot team.' }
+        return fail(Object.hasOwn(fixed, endpoint) ? fixed[endpoint] : readOnly, 'bot/read-only')
       }
       if (CODE_GUARDED.has(endpoint) && textsOf(body).some(text => rt.loginTextMatches?.(text) === true)) return fail(CODE_REFUSED, 'bot/refused')
       if (CLI_LOGIN.has(endpoint)) return ok(await rt.cliLoginActions[endpoint](body))
@@ -565,6 +644,7 @@ export function install(rt) {
           // a host restarted under an open window, compares the same key).
           await rt.refreshInstallation?.()
           const roles = await rt.roleRecordsView()
+          await rt.prepareLearning()
           const answer = liveAnswer(roles)
           if (body.since === state.revision && (body.models === undefined || body.models === modelsKey())) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })
@@ -697,7 +777,23 @@ export function install(rt) {
         case 'set-bot-auto':
           await rt.load()
           return ok(await rt.setBotAuto(String(body.id ?? ''), body.rev))
+        case 'people-seen': {
+          const service = callerService(ctx)
+          return service ? ok(service.seen()) : fail('Sharing needs multiuser mode', 'bot/refused')
+        }
+        case 'people-share': {
+          if (!callerService(ctx)) return fail('Sharing needs multiuser mode', 'bot/refused')
+          await rt.load()
+          const id = String(body.id ?? '')
+          const bot = rt.botOf(id)
+          if (!bot) return fail('Unknown Bot', 'bot/not-found')
+          return ok({ state: rt.shareState(id) ?? null, people: peopleOf(bot, { main: rt.isMain(id) }) })
+        }
         case 'update-bot':
+          if (Object.hasOwn(body, 'people')) {
+            await rt.load()
+            return ok(await rt.setPeople(String(body.id ?? ''), body.people, { expect: body.expect }))
+          }
           if (Object.hasOwn(body, 'roles')) throw invalid("A Bot's role changes with role-attach and role-detach")
           await rt.load()
           return ok(await rt.updateBot(body.id, body))
@@ -853,6 +949,29 @@ export function install(rt) {
         case 'approval-answer':
           rt.answerApproval(body.id, body.choice, body.client)
           return ok(true)
+        case 'grant-approval': {
+          if (typeof body.id !== 'string' || typeof body.offer !== 'string'
+            || Object.keys(body).some(key => key !== 'id' && key !== 'offer')) {
+            return fail('Choose one approval', 'bot/invalid')
+          }
+          const result = await claimGrant(rt, ticket)
+          if (result.allowed === 'unknown') {
+            return fail('The answer was not confirmed. Look again.', 'bot/unconfirmed')
+          }
+          if (result.allowed !== true) {
+            return fail('This approval is no longer open', 'bot/stale')
+          }
+          return ok(result.live ? { grantId: result.grantId } : { allowedOnce: true })
+        }
+        case 'grant-revoke':
+          if (typeof body.id !== 'string' || Object.keys(body).length !== 1) {
+            return fail('Choose one grant', 'bot/invalid')
+          }
+          if (rt.holdsLock?.() !== true) {
+            return fail(rt.readOnly?.() ?? 'This host cannot save the Bot team.', 'bot/read-only')
+          }
+          return rt.revokeGrant?.(body.id) === true
+            ? ok(true) : fail('This grant has ended', 'bot/stale')
         // A stop that fails partway still parks the goal, or it wakes the admin again.
         case 'stop-member-work':
           try {
@@ -1078,8 +1197,9 @@ export function install(rt) {
           return ok(rt.roleRuntime.voice.acknowledge(body))
         // The Privacy page (privacy.js): what the desktop app may share, all off until switched on.
         // Images (imagegen.js): how they are made here, and a generation's progress for its card.
+        // `detail: true` also asks why an inherited key was skipped when nothing can draw.
         case 'image-access':
-          return ok(await rt.images.access())
+          return ok(body.detail === true ? await rt.images.accessDetail() : await rt.images.access())
         case 'image-progress':
           return ok(rt.images.progress(String(body.callId ?? ''), body.seen))
         // Pets (pets.js): the Codex-format avatars on this computer, and codex-pets.net's.
@@ -1280,7 +1400,23 @@ export function install(rt) {
           await rt.diagnostics.clear()
           return ok(true)
         default:
-          if (added !== undefined) return ok(await added.fn(body, signal, isWindowEndpoint(added) ? windowSeen : false))
+          if (added !== undefined) {
+            if (isWindowEndpoint(added)) return ok(await added.fn(body, signal, windowSeen))
+            const around = rt.extended.aroundOf(endpoint)
+            if (around === undefined) return ok(await added.fn(body, signal, false))
+            let canCall = true
+            const next = (nextBody = body) => {
+              if (!canCall) throw new Error('ds-bot: next can serve an endpoint once during its wrapper')
+              canCall = false
+              return added.fn(nextBody, signal, false)
+            }
+            try {
+              const value = around(body, signal, next)
+              return ok(typeof value?.then === 'function' ? await value : value)
+            } finally {
+              canCall = false
+            }
+          }
           if (endpoint.startsWith('computer-')) {
             await rt.load()
             return ok(await rt.computerEndpoint(endpoint.slice('computer-'.length), body))
@@ -1301,7 +1437,7 @@ export function install(rt) {
     }
   }
 
-  const agentAccess = createAgentAccess(rt, handle, { transaction: adminTransaction })
+  const agentAccess = createAgentAccess(rt, handle, { transaction: adminTransaction, enterRequestOwnership })
   rt.agentAccess = agentAccess
   ctx.effect(() => {
     void agentAccess.resume().catch(() => rt.warn('Agent access could not start'))
@@ -1318,6 +1454,7 @@ export function install(rt) {
     rt.noteFailure({ source: 'api', text: `${where}: ${kind}`, code: kind, stack: error?.stack })
     return Response.json({ error: `Something went wrong (${kind}).` }, { status: error?.code === 'bot/invalid' ? 400 : 500 })
   }
+  const gatedOwner = request => multiuserMode() || (callerService(ctx) && request.headers.has('x-automagik-principal'))
   ctx.effect(() => ctx.connection.fetch.register({
     path: PET_ROUTE,
     methods: ['GET'],
@@ -1349,6 +1486,14 @@ export function install(rt) {
     methods: ['PUT'],
     requestBody: 'streaming',
     fetch: async (request) => {
+      if (gatedOwner(request)) {
+        const viewer = rt.ownerViewer(request)
+        if (!viewer || request.headers.get('x-automagik-viewer') !== viewer.id) {
+          return Response.json({ code: 'bot/viewer-changed', error: 'Your sign-in changed; reload this page.' },
+            { status: 403, headers: { 'cache-control': 'no-store' } })
+        }
+        if (!callerService(ctx)) return new Response(null, { status: 503 })
+      }
       const url = new URL(request.url)
       const id = url.searchParams.get('id') ?? ''
       try {
@@ -1422,9 +1567,18 @@ export function install(rt) {
       let body
       try { body = await request.json() } catch { body = {} }
       const endpoint = String(body?.endpoint ?? '')
+      if (gatedOwner(request) || (endpoint === 'whoami' && callerService(ctx))) {
+        const viewer = rt.ownerViewer(request)
+        if (!viewer || (!(endpoint === 'whoami' && body?.viewer === undefined) && body?.viewer !== viewer.id)) {
+          return callerJson(fail('Your sign-in changed; reload this page.', 'bot/viewer-changed'))
+        }
+        if (!callerService(ctx)) return new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } })
+        if (endpoint === 'whoami') return callerJson(ok({ role: 'owner', multiuser: true, viewer }))
+      }
       // The proof goes only to endpoints; this route's own checks read it as a boolean.
       const proof = appBrowserBridge() ? windowProof(request) : false
       const desktopWindow = proof !== false
+      const ticket = endpoint === 'grant-approval' ? mint(request, body?.payload) : undefined
       const dispatch = () => {
         if (VAULT_LOCAL.has(endpoint)) {
           // DSH rebuilds the request on an internal URL (http://dsh.internal), so the page's own
@@ -1448,17 +1602,23 @@ export function install(rt) {
             return fail('Bitwarden Secrets Manager is unavailable in Automagik Cloud.', 'bot/refused')
           }
         }
-        return handle(endpoint, body?.payload, request.signal, proof)
+        return handle(endpoint, body?.payload, request.signal, proof, ticket)
       }
       // Read before the dispatch, as #1845 does: the dispatch can settle the request it names.
       const keyringDetail = endpoint === 'secret-source-detail' && rt.secretServiceDetail?.(body?.payload?.requestId)
+      const leave = enterRequestOwnership(endpoint, body?.payload)
       let result
       try {
         result = await (adminActions.has(endpoint) ? ownerTransaction(dispatch) : dispatch())
       } finally {
+        leave?.()
+        desk.voidTicket(ticket)
         revokeWindowProof(proof)
       }
       const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint) || keyringDetail
+        || ['automations-entry', 'accounts-codex'].includes(endpoint)
+        || endpoint === 'secret-source-detail'
+        || ['accounts-claude', 'accounts-claude-use', 'accounts-claude-add', 'accounts-claude-remove'].includes(endpoint)
         || ['role-settings', 'role-settings-set'].includes(endpoint)
         || ['agent-access', 'agent-token-create', 'agent-token-revoke'].includes(body?.endpoint)
       return new Response(JSON.stringify(result), { status: 200, headers: {

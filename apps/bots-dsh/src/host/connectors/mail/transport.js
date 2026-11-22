@@ -9,6 +9,7 @@ import { IMAP_ID } from './presets.js'
 // caller reconnects once.
 export const imapOptions = (account, deps = {}) => ({
   host: account.imap.host, port: account.imap.port, secure: account.imap.secure !== false,
+  ...(account.imap.secure === false ? { doSTARTTLS: true } : {}),
   auth: { user: account.address, pass: deps.password },
   // RFC 2971: 163/126 refuse logins without the client identity.
   id: IMAP_ID,
@@ -35,7 +36,7 @@ export async function connectImap(account, deps = {}) {
   imap.on('close', retire)
   smtp = nodemailer.createTransport({
     host: account.smtp.host, port: account.smtp.port, secure: account.smtp.secure === true,
-    requireTLS: account.smtp.starttls === true,
+    requireTLS: account.smtp.secure !== true,
     auth: { user: account.address, pass: deps.password },
     // Nodemailer's close() does not cancel a non-pooled verify(). Own its sockets
     // through the transport hook so an IMAP failure also cancels that login.

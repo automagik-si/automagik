@@ -1840,6 +1840,7 @@ export class AcpAdapter extends LlmAdapter {
       if (live.bridge !== undefined) live.bridge.agentAsked = false
       // The previous turn's mirrors are finished for DSH; continuation steps keep these above.
       live.calls.clear()
+      live.confinedReason = undefined
       live.toolIds?.clear()
       live.run.prompt(prompt).catch(() => {})
       // The notice belongs to this prompt, including any step after a mirror result.
@@ -1940,6 +1941,14 @@ export class AcpAdapter extends LlmAdapter {
         if (event.stopReason === 'cancelled' && options.signal?.aborted !== true
             && live.run.cancelled !== true && this.hostStopping()) {
           return yield finish('error', `${agent.name} was interrupted before it finished.`, AGENT_INTERRUPTED)
+        }
+        if (event.stopReason === 'cancelled' && typeof live.confinedReason === 'string'
+            && options.signal?.aborted !== true && live.run.cancelled !== true) {
+          const reason = live.confinedReason
+          live.confinedReason = undefined
+          yield* blocks.add('text', shownText(`[${reason}]`))
+          yield* blocks.close()
+          return yield finish('stop')
         }
         if (event.stopReason === 'cancelled') return yield finish('aborted', 'Stopped', 'ABORTED')
         return yield finish(FINISH[event.stopReason] ?? 'stop')

@@ -1,5 +1,6 @@
 // Pure pieces of the sign-in row (plan v3, 2.3): which agents sign in, which chats may show the
 // row, and the Claude states this page has shown. No React, no requests, no storage.
+import { SIGN_IN_TEXT_MAX } from '../shared/cli-login.js'
 
 // The agents a Bot's chat signs in to, by their DSH provider id.
 export const CLI_NAMES = Object.freeze({ 'acp-codex': 'Codex', 'acp-claude': 'Claude Code' })
@@ -29,7 +30,7 @@ export function rememberLinkState(url) {
 export const knowsStates = () => KNOWN.size > 0
 
 // Spaces, line breaks and invisible characters do not hide a pasted code.
-const squeeze = text => text.slice(0, 1_000_000).replace(/[\s\p{Cf}]+/gu, '')
+const squeeze = text => text.slice(0, SIGN_IN_TEXT_MAX).replace(/[\s\p{Cf}]+/gu, '')
 
 /** Whether a text carries `#<state>` of a state this page showed. Exact values only, never a pattern. */
 export function carriesKnownState(text) {

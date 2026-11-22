@@ -8,6 +8,7 @@ import { bakeBlobs, canBake } from './pet-bake.js'
 import { CloseIcon } from './icons.js'
 import { t } from './i18n.js'
 import { importPhotos, loadLibrary } from './avatar-library.js'
+import { checkViewer, requestViewer, viewerChanged, viewerRefused, viewerResponse } from './viewer.js'
 
 // -------------------------------------------------------------------------
 // The character select: where a Bot's look is chosen, as a fighting game's select screen. The
@@ -48,14 +49,30 @@ export function currentKey(bot, look) {
   return `shape:${look.shape}`
 }
 
-async function put(url, blob) {
-  const response = await fetch(url, { method: 'PUT', body: blob, headers: { 'content-type': 'image/webp' } })
-  const answer = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(answer.error ?? t('Codex\'s pets folder could not be written'))
+async function put(url, blob, active) {
+  checkViewer(active)
+  const viewer = active?.viewer?.id
+  const headers = { 'content-type': 'image/webp', ...(viewer ? { 'x-automagik-viewer': viewer } : {}) }
+  const response = await fetch(url, { method: 'PUT', body: blob, headers })
+  checkViewer(active)
+  const refusal = active && !response.ok ? await viewerResponse(active, response) : undefined
+  const answer = refusal ? refusal.answer : await response.json().catch(() => ({}))
+  const changed = refusal?.changed ?? (active && viewerChanged(answer))
+  if (!refusal) {
+    checkViewer(active)
+    if (changed) viewerRefused(active, 'bot/viewer-changed')
+  }
+  if (!response.ok || changed) {
+    const message = changed ? answer.error?.message ?? answer.error : answer?.error
+    const error = new Error(message ?? t('Codex\'s pets folder could not be written'))
+    if (changed) error.code = 'bot/viewer-changed'
+    throw error
+  }
   return answer
 }
 /** Writes the Bot's look to ~/.codex/pets as a Codex pet: its own pet's sheet, else its character baked. */
 export async function toCodex(bot, look) {
+  const active = requestViewer('pet-codex')
   const id = `automagik-${slug(bot.name)}`
   const query = part => `api/omni-ui/pet-codex?${new URLSearchParams({ id, name: bot.name, description: bot.role ?? '', ...(part ? { part } : {}) })}`
   const wants = petOf(bot, look, { live: true, size: 64 })
@@ -70,8 +87,8 @@ export async function toCodex(bot, look) {
   } else {
     throw new Error(t('A photo is not a pet: pick a character or a pet first.'))
   }
-  await put(query(), sheet)
-  if (sleep) await put(query('sleep'), sleep)
+  await put(query(), sheet, active)
+  if (sleep) await put(query('sleep'), sleep, active)
   return id
 }
 

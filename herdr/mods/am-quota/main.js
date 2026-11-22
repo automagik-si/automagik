@@ -4,12 +4,13 @@
 // file or $CLIPROXY_MGMT_KEY, the base URL and optional display name from <app home>/cliproxy.json,
 // and what this panel installed from <app home>/data/am-quota/active.json. ./view.js turns that
 // into what each tool's card says; this file draws it.
-// Writes: only when the person presses Switch or Use: Codex's credential file, through ./switch.js,
+// Writes after a person presses Switch, Use or approves a plan: Codex's local credential file, through ./switch.js,
 // with a backup, 0600, temp + atomic rename, and never a token in a log, a notify, shared state or
 // an error message. Claude is never installed from the proxy, and nothing here reads or writes a
 // Claude Keychain item or credential (#453, docs/local-logins.md): the Claude card lists the logins
 // signed in on this Mac (./logins.js), and its Use, Add login and Remove login write only
-// <app home>/claude-logins.json, which new Claude launches read. After a switch, Restart runs
+// <app home>/claude-logins.json through am accounts set-login where present. Apply uses the same
+// command on linked machines. New Claude launches read that record. After a switch, Restart runs
 // `automagik-herdr restart <bot>` for the bots still on the old account or login, once the person
 // confirms.
 import { View, div } from "gpui-kit";
@@ -21,7 +22,18 @@ import { install } from "./switch.js";
 import { claim, release } from "./lock.js";
 import { payloadDir, sweepScript } from "./write.js";
 import { TOOLS, instanceName, loginsView, offLogin, openUrl, runningBots, staleBots, toolView, who } from "./view.js";
-import { DEFAULT_LOGIN, PROBE_MS, bounded, loginName, matchReal, paneLogin, presentVars, probeLogin, readRecord, signedOut, typed, writeRecord } from "./logins.js";
+import { DEFAULT_LOGIN, PROBE_MS, bounded, loginName, matchReal, nextSlot, paneLogin, presentVars, probeLogin, readRecord, signedOut, typed, writeRecord } from "./logins.js";
+
+import { FLEET_FILE, parseFleet, accountFingerprint, bytesOf, versionOkay } from "./accountsRows.js";
+import { fleetRows, members, restartArgs, frozen, sameList, readFleetAnswer, restartWords } from "./fleet.js";
+import { setLoginArgs, setLoginResult, SIDEBAR_MARKERS, SIDEBAR_VERSION, snapshotOf, WRITER_FILE, WRITER_MAX_BYTES } from "./setLogin.js";
+import { idDigest, isClaudeKey, isCodexKey, isFingerprint, isHome, linkedDue, LOCAL, localDue, LOCAL_START_MS, newest, own,
+  parsePlan, PENDING_WHY, PLAN_FILE, proxyId, REQUESTS_DIR, RETRY_EVERY_MS, snapshotOf as planSnapshot } from "./accountsPlanRecord.js";
+import { planRows } from "./accountsPlanRows.js";
+import { slotStates } from "./loginProbe.js";
+import { sha256Hex } from "./sha256.js";
+import { usable } from "./policy.js";
+import { localResult, planArgs, planBlock, planError, refusalWords } from "./plan.js";
 
 const POLL = 60000;
 /** How often the installed credential's identity is re-read. It is a token-bearing item; the
@@ -54,8 +66,16 @@ const RUN_HELPER_MS = 40_000;
 const RUN_PAUSE_MS = 5_000;
 /** The label of a restart's terminal: the bot's id, so a second press finds a run still going. */
 const RUN_LABEL = "am-quota.restart";
+const FLEET_LABEL = "am-quota.accounts";
+const FLEET_FOLLOW_MS = 120_000;
+const APPLY_FOLLOW_MS = 660_000;
+const MACHINES_MS = 10_000;
 /** Where a restart's terminal leaves the CLI's stdout, stderr and exit code, under the app's data. */
 const RUNS = "data/am-quota/runs";
+const accountsRuns = new Set();
+const opaqueId = () => globalThis.crypto?.randomUUID?.().replaceAll("-", "")
+  ?? Array.from({ length: 4 }, () => Math.floor(Math.random() * 2 ** 32).toString(16).padStart(8, "0")).join("");
+const appDir = () => appHome().replace(/\/+$/, "");
 // The restart terminal's program: `sh -c RUN_SCRIPT sh <out> <err> <code> <the CLI's argv…>`. The
 // paths and the argv are its arguments, never part of the script. Files older than a day go first.
 // The exit code is written last, through a rename, so a code read means the other two are whole.
@@ -68,6 +88,15 @@ const RUN_SCRIPT = [
   '"$@" >"$out" 2>"$err"; c=$?',
   'cat "$err" >&2',
   'printf "%s\\n" "$c" >"$code.tmp" && mv -f "$code.tmp" "$code"',
+].join("\n");
+// Keep the reply private, discard stderr and remove only files abandoned by older runs.
+const PRIVATE_RUN_SCRIPT = [
+  'umask 077',
+  'out=$1 code=$2 slug=$3; shift 3',
+  'find "${out%/*}" -maxdepth 1 -type f -name "$slug-*" -mmin +1440 -exec rm -f -- {} + 2>/dev/null',
+  'unset HC_TERMINAL_ID',
+  '"$@" >"$out" 2>/dev/null; c=$?',
+  '[ -f "$out" ] && printf "%s\\n" "$c" >"$code.tmp" && mv -f "$code.tmp" "$code"',
 ].join("\n");
 // Run through exec before each restart, in Herdr's environment: `sh -c PREPARE_SCRIPT sh <runs
 // folder> <names…>` makes the folder (exit 3 when it can't) and prints NAME=value for each name set.
@@ -125,6 +154,29 @@ async function cliArgv(args, env = [], unset = []) {
   if (!there) return null;
   return ["env", ...unset.flatMap((n) => ["-u", n]), `HERDR_APP_HOME=${dir}`, ...env, "sh", runner, `${dir}/mods/${SIDEBAR}/bin/automagik-herdr.mjs`, ...args, "--json"];
 }
+async function writerStatus(dir) {
+  const markers = await Promise.all(SIDEBAR_MARKERS.map(async (file) => {
+    try {
+      const text = await readTextFile(`${dir}/${file}`);
+      if (text == null) return "absent";
+      if (typeof text === "string" && bytesOf(text) <= WRITER_MAX_BYTES) return "present";
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return "absent";
+    }
+    return "unknown";
+  }));
+  return markers.includes("unknown") ? "unknown" : markers.includes("absent") ? "absent" : "present";
+}
+
+async function accountsArgv(args, { write = false, status } = {}) {
+  const dir = appHome().replace(/\/+$/, "");
+  const bin = `${dir}/mods/${SIDEBAR}/bin`;
+  const runner = `${bin}/run.sh`, program = `${bin}/accounts.mjs`;
+  const found = write ? (status ?? await writerStatus(dir)) === "present" :
+    (await Promise.all([runner, program].map((path) => readTextFile(path).catch(() => null)))).every((text) => text != null);
+  return found ? ["env", `HERDR_APP_HOME=${dir}`, "sh", runner, program, ...args] : null;
+}
+
 /** What hc said when it failed, in plain words: its JSON error's message, else its last line, never a flag. */
 function hcSaid(r) {
   const text = String(r?.stderr || r?.stdout || "").trim();
@@ -149,8 +201,8 @@ function cliAnswer(code, stdout, stderr) {
   return { code, out, err: String(stderr ?? "").replace(/^(?:am|automagik-herdr): /gm, "").trim() };
 }
 /** Why a restart's terminal gave no answer; `partway`: it may have stopped part-way. */
-function runError(why, { partway = false } = {}) {
-  return Object.assign(new Error(why), { partway });
+function runError(why, { partway = false, code } = {}) {
+  return Object.assign(new Error(why), { partway, ...(code ? { code } : {}) });
 }
 /** The live rows of `hc ls --json`'s stdout (a list, or { terminals }), each with an address. */
 function liveRows(stdout) {
@@ -235,10 +287,21 @@ export default class AmQuota extends View {
     this.armed = null;      // "restart:<provider>" waiting for its second click
     this.restarting = {};   // provider → true while its bots restart (lock.claim reads it)
     this.logins = null;     // Claude's logins on this Mac: { record, probes, vars, at } (#453)
+    this.fleet = { record: null, bots: {}, members: null, at: 0, running: false, error: null, needsSidebar: false };
+    this.linked = {};
+    this.plan = { state: "absent", plan: null };
+    this.preview = null;
+    this.owner = opaqueId();
+    this.applying = false;
+    this.applyAt = null;
+    this.applyingLocal = {};
+    this.localAt = {};      // tool → when this panel last read this Mac for the plan
     this.loginNote = null;  // the last Add or Remove that worked
     this.seen = 0;          // last render; a hidden copy stops polling
     this.hidden = false;
     this.sampler = new QuotaSampler();
+    this.writerVersion = readTextFile(`${appHome().replace(/\/+$/, "")}/${SIDEBAR_VERSION}`)
+      .then((text) => text?.split(/\r?\n/, 1)[0], () => null);
     cx.timer.every(POLL, (cx) => this.tick(cx));
     cx.spawn(async (cx) => {
       // Which account this panel installed, read once — before the first proxy read, so the
@@ -289,12 +352,16 @@ export default class AmQuota extends View {
     const seq = (this.seq ?? 0) + 1;
     this.seq = seq;
     this.readLogins(cx, { force: !this.logins || this.forceLogins });
+    this.readFleet(cx, { force: !this.fleet.at || this.forceLogins });
+    cx.spawn(() => this.confirmWriter());
     this.forceLogins = false;
     cx.spawn(async (cx) => {   // one read of the proxy; the newest wins
-      const { config, key, env } = await this.settings();
+      const { config, key, env, envKnown } = await this.settings();
       if (seq !== this.seq) return;
       this.env = env;
       this.config = config;
+      this.fleetEnvReady = envKnown;
+      if (envKnown && this.hasLinkedRows()) void this.codexRef(env).then(() => wake(cx));
       try {
         this.setup = !config ? "proxy" : !key ? "key" : null;
         if (this.setup) {
@@ -313,6 +380,7 @@ export default class AmQuota extends View {
         }
         if (seq !== this.seq) return;
         this.api = api;
+        this.apiProxy = proxyId(config.url);
         this.accounts = sampled;
         this.badges = badges;
         this.quotaError = quotaError;
@@ -322,9 +390,672 @@ export default class AmQuota extends View {
         this.error = message(err);
         this.accounts = null;
       } finally {
-        if (seq === this.seq) wake(cx);
+        if (seq === this.seq) {
+          wake(cx);
+          await this.reloadPlan(cx, seq);
+        }
       }
     });
+  }
+
+  // A running panel confirms the version it loaded with, even if newer files are on disk.
+  async confirmWriter() {
+    const dir = appHome().replace(/\/+$/, "");
+    const path = `${dir}/${WRITER_FILE}`;
+    try {
+      const version = await this.writerVersion;
+      if (!versionOkay(version) || await writerStatus(dir) !== "present") return;
+      const before = await readTextFile(path);
+      let record;
+      try { record = JSON.parse(before); } catch { /* Replace a record this panel can't read. */ }
+      if (record?.v === 1 && record.setLogin === true && record.version === version && Object.keys(record).length === 3) return;
+      const made = await exec("sh", ["-c", 'umask 077; mkdir -p -- "$1"', "sh", path.slice(0, path.lastIndexOf("/"))]);
+      if (made?.code !== 0) return;
+      const text = `${JSON.stringify({ v: 1, setLogin: true, version })}\n`;
+      await writeTextFile(path, text, before ?? null);
+      const mode = await exec("chmod", ["600", path]).catch(() => null);
+      if (mode?.code !== 0 && await readTextFile(path) === text) await exec("rm", ["-f", "--", path]);
+    } catch { /* Local edits still take the login lock when the writer is present. */ }
+  }
+
+  hasLinkedRows() {
+    return Boolean(this.fleet.members?.length || Object.keys(this.fleet.record?.machines ?? {}).some((core) => core !== "local"));
+  }
+
+  async readPlan() {
+    const id = (this.planRead ?? 0) + 1;
+    this.planRead = id;
+    const text = await readTextFile(`${appDir()}/${PLAN_FILE}`).catch(() => "");
+    if (id === this.planRead) this.plan = parsePlan(text ?? null);
+    return this.plan;
+  }
+
+  async planRequest(body) {
+    const id = opaqueId();
+    const folder = `${appDir()}/${REQUESTS_DIR}`;
+    const path = `${folder}/${id}.json`;
+    let created = false;
+    try {
+      const dir = await exec("sh", ["-c", 'umask 077; mkdir -p -- "$1" && chmod 700 -- "$1"', "sh", folder]);
+      if (dir?.code !== 0) return null;
+      await writeTextFile(path, `${JSON.stringify({ v: 1, ...body })}\n`, null);
+      created = true;
+      if ((await exec("chmod", ["600", path]))?.code === 0) return id;
+    } catch { /* The panel shows a fixed refusal. */ }
+    if (created) await exec("rm", ["-f", "--", path]).catch(() => {});
+    return null;
+  }
+
+  async planCommand(op, fields, body) {
+    const id = body ? await this.planRequest(body) : fields?.id;
+    if (body && !id) return { error: "failed" };
+    const mayHaveWritten = op === "write-local" || op === "install-local";
+    try {
+      const argv = await accountsArgv(planArgs(op, { ...fields, id }), { write: true });
+      const result = argv && await exec(argv[0], argv.slice(1));
+      const out = JSON.parse(result?.stdout ?? "null");
+      if (result?.code === 0 && (mayHaveWritten ? out?.ok === true : out)) return out;
+      if (op === "install-local" && (result?.code !== 1
+        || !["stale", "changed", "busy", "no-plan", "newer-plan", "no-home", "failed", "off", "stopped"].includes(out?.error))) {
+        return { error: "lost" };
+      }
+      if (mayHaveWritten && !out?.error) return { error: "lost" };
+      return { error: planError(out?.error) };
+    } catch { return { error: mayHaveWritten ? "lost" : "failed" }; }
+    finally {
+      if (body) await exec("rm", ["-f", "--", `${appDir()}/${REQUESTS_DIR}/${id}.json`]).catch(() => {});
+    }
+  }
+
+  codexAccounts() {
+    return (this.accounts ?? []).filter((account) => account.provider === "codex" && isCodexKey(account.name));
+  }
+
+  async readPlanCodex() {
+    try {
+      const env = await readEnv(["CODEX_HOME"]);
+      const file = credentialTarget("codex", { home: home(), env }).file;
+      const dir = file.slice(0, file.lastIndexOf("/"));
+      if (!isHome(dir)) return null;
+      const [text, config] = await Promise.all([
+        readTextFile(file),
+        readTextFile(`${appDir()}/cliproxy.json`).then((text) => JSON.parse(text ?? "null"), () => null).catch(() => null),
+      ]);
+      return { env, read: { at: new Date().toISOString(), home: dir, account: accountFingerprint(text),
+        generation: text == null ? null : sha256Hex(text), proxy: proxyId(config?.url) } };
+    } catch { return null; }
+  }
+
+  async readPlanActive() {
+    try {
+      const active = records(JSON.parse(await readTextFile(`${appDir()}/data/${STATE}`))).codex;
+      return isCodexKey(active?.name) && isFingerprint(active?.fingerprint)
+        ? { name: active.name, fingerprint: active.fingerprint } : null;
+    } catch { return null; }
+  }
+
+  previewPlan(request, cx) {
+    if (this.planEditing) return;
+    this.planEditing = true;
+    this.planError = null;
+    cx.spawn(async (cx) => {
+      try {
+        const { kind, tool } = request;
+        const body = { ...request };
+        if (kind === "manage" || tool === "codex") {
+          const current = await this.readPlanCodex();
+          const { at, ...observation } = current?.read ?? {};
+          body.codexLocal = current ? observation : null;
+          const accounts = this.codexAccounts();
+          body.codexUsable = accounts.filter(usable).map(({ name }) => name);
+          if (kind === "manage") body.codexAccounts = accounts.map(({ name }) => name);
+          body.active = await this.readPlanActive();
+        }
+        if ((kind === "manage" || tool === "claude") && kind !== "second-login") {
+          const local = await this.probeRound();
+          if (local) body.claudeLocal = local;
+        }
+        const reply = await this.planCommand("request", {}, body);
+        if (reply.kind !== "accounts.preview" || !/^[0-9a-f]{32}$/.test(reply.id) || !Number.isSafeInteger(reply.rev)
+          || ![reply.moves, reply.flags, reply.changes].every(Array.isArray)) {
+          this.planError = reply.error ?? "failed";
+          return;
+        }
+        this.preview = { ...reply, request };
+      } finally {
+        this.planEditing = false;
+        wake(cx);
+      }
+    });
+  }
+
+  commitPlan(cx, { preview = this.preview, confirmForget = false } = {}) {
+    if (!preview || this.preview !== preview || this.planEditing) return;
+    const linked = preview.moves.some(({ machine }) => machine !== LOCAL);
+    if (linked && (this.fleet.running || accountsRuns.has(appDir()))) {
+      this.planError = "busy";
+      return wake(cx);
+    }
+    this.planEditing = true;
+    this.planError = null;
+    cx.spawn(async (cx) => {
+      try {
+        const reply = await this.planCommand("commit", { id: preview.id, rev: preview.rev, confirmForget });
+        if (!reply.ok) {
+          this.planError = reply.error ?? "failed";
+          if (["expired", "stale", "missing", "newer-plan"].includes(this.planError)) this.preview = null;
+          await this.readPlan();
+          return;
+        }
+        this.preview = null;
+        await this.readPlan();
+        await this.maybeLocal(cx, { force: true });
+        if (linked) await this.startApply(cx);
+      } finally {
+        this.planEditing = false;
+        wake(cx);
+      }
+    });
+  }
+
+  async reloadPlan(cx, seq) {
+    await this.readPlan();
+    if (seq !== this.seq || this.plan.state !== "ok") return;
+    await this.maybeLocal(cx);
+    if (seq === this.seq) this.maybeRetry(cx);
+    wake(cx);
+  }
+
+  maybeRetry(cx) {
+    const now = Date.now();
+    if (this.planEditing || this.applying || this.fleet.running || accountsRuns.has(appDir())
+      || this.applyAt !== null && now - this.applyAt < RETRY_EVERY_MS) return;
+    if (linkedDue(this.plan.plan, { now, retry: true, fleet: this.fleet.record, members: this.fleet.members }).length) {
+      cx.spawn((cx) => this.startApply(cx, { retry: true }));
+    }
+  }
+
+  async startApply(cx, { retry = false } = {}) {
+    if (this.applying) return;
+    if (this.fleet.running || accountsRuns.has(appDir())) {
+      if (!retry) this.planError = "busy";
+      return;
+    }
+    this.applying = true;
+    this.applyAt = Date.now();
+    try {
+      const reply = await this.cliRun(retry ? ["apply", "--retry"] : ["apply"], {
+        label: "apply", runLabel: FLEET_LABEL, followMs: APPLY_FOLLOW_MS, privateRun: true,
+      });
+      this.planError = reply?.code === 0 && reply.out?.kind === "accounts.apply" ? null : planError(reply?.out?.error);
+    } catch (err) {
+      this.planError = ["apply-running", "fleet-running"].includes(err?.code) ? "busy" : "failed";
+    } finally {
+      this.applying = false;
+      await this.readPlan();
+      this.readFleet(cx, { force: true });
+      wake(cx);
+    }
+  }
+
+  // This Mac's part of the plan. A fresh assignment or an open attempt is acted on at once. A
+  // recorded refusal is tried again at most every five minutes, and a done member is checked for
+  // a change at most as often as the installed identity is read, or after a login round or a
+  // switch here. A plan with no local member reads nothing.
+  async maybeLocal(cx, { force = false, tools = ["claude", "codex"], round } = {}) {
+    for (const tool of tools) {
+      const plan = this.plan.plan;
+      if (!plan || this.plan.state !== "ok") return;
+      if (this.busy || this.applyingLocal[tool]) continue;
+      const progress = own(plan[tool]?.progress, LOCAL);
+      if (!progress) continue;
+      const now = Date.now();
+      const due = localDue(plan, tool, now, this.owner);
+      if (due === "wait" || !due && progress.state !== "done") continue;
+      const urgent = due === "read-back" || due === "apply" && (progress.why === null || progress.why === "lost");
+      const fresh = force || round !== undefined || now - (this.localAt[tool] ?? 0) >= (due ? RETRY_EVERY_MS : IDENTITY_EVERY);
+      if (!urgent && !fresh) continue;
+      this.localAt[tool] = now;
+      this.applyingLocal[tool] = true;
+      try {
+        await this.applyLocal(plan, tool, due, cx, round);
+      } finally {
+        this.applyingLocal[tool] = false;
+      }
+    }
+  }
+
+  async applyLocal(plan, tool, due, cx, round) {
+    const section = plan[tool];
+    const progress = own(section.progress, LOCAL);
+    const assign = own(section.assign, LOCAL);
+    const claude = tool === "claude";
+    const current = claude ? null : await this.readPlanCodex();
+    const read = claude ? round !== undefined ? round : await this.probeRound() : current?.read;
+    if (!claude) {
+      this.planCodex = read;
+      this.planActive = await this.readPlanActive();
+    }
+    if (!read) return;
+    if (progress?.state === "done") {
+      const before = own(section.seen, LOCAL);
+      const drift = claude ? read.state === "eligible" && read.email !== assign
+        : read.account !== null && own(section.seen, LOCAL)?.account !== read.account;
+      if (drift || before?.home !== read.home) {
+        await this.planCommand("suspend-local", { tool, rev: plan.rev });
+        await this.readPlan();
+      }
+      return;
+    }
+    if (!due || this.busy || this.restarting[tool]) return;
+    if (due === "read-back") {
+      const attempt = progress.attempt;
+      const outcome = localResult(tool, attempt, read, { recovering: true });
+      if (outcome.state === "failed" && attempt.owner !== this.owner) {
+        outcome.state = "changed";
+        outcome.why = "changed";
+      }
+      const previous = !claude && this.view("codex").current;
+      const result = await this.recordLocal(tool, attempt, outcome);
+      if (!claude) await this.finishLocalCodex(attempt, outcome, result, previous, cx);
+      return;
+    }
+    const slot = claude && read.slots.find((item) => item.email === assign && item.state === "eligible");
+    const before = claude ? planSnapshot(read) : read.generation;
+    const why = claude ? slot ? null : read.slots.some((item) => item.email === assign) ? "not-eligible" : "no-login"
+      : !read.proxy ? "proxy-url" : null;
+    if (why) {
+      const seen = own(section.seen, LOCAL);
+      if (progress.why !== why || seen.home !== read.home || (claude
+        ? seen.snapshot !== before || Boolean(seen.email && read.email && seen.email !== read.email)
+        : seen.generation !== before)) {
+        await this.planCommand("fail-local", { tool, rev: plan.rev }, { kind: "outcome", assign, why, read });
+        await this.readPlan();
+      }
+      return;
+    }
+    if (claim(this, tool, null, `Switching ${TOOLS[tool]} on this Mac…`)) return;
+    wake(cx);
+    try {
+      const start = await this.planCommand("start-local", { tool, owner: this.owner, rev: plan.rev },
+        { kind: "evidence", assign, before, home: read.home, eff: claude ? read.email : null,
+          effSlot: claude ? read.effective : null, slot: slot?.id ?? null, proxy: claude ? null : read.proxy });
+      if (!start.ok) return;
+      const attempt = { ...start.attempt, home: start.seen.home,
+        before: claude ? start.seen.snapshot : start.seen.generation,
+        effDigest: claude ? idDigest(read.effective, read.email ?? "", sha256Hex) : null };
+      if (claude) {
+        const write = await this.planCommand("write-local", { tool, n: attempt.n, owner: this.owner, snapshot: before });
+        if (["stale", "lost", "failed", "off", "stopped"].includes(write.error)) return;
+        if (!write.ok) {
+          const changed = ["conflict", "slot-changed"].includes(write.error);
+          await this.recordLocal(tool, attempt, changed ? { state: "changed", why: "changed", read: null }
+            : { state: "failed", why: PENDING_WHY.includes(write.error) ? write.error : "failed", read: null });
+          return;
+        }
+        const back = await this.probeRound();
+        if (back) {
+          const outcome = localResult(tool, attempt, back, { snapshot: write.snapshot });
+          const recorded = await this.recordLocal(tool, attempt, outcome);
+          if (recorded.ok && outcome.state === "done" && read.email !== back.email) {
+            this.armed = null;
+            this.switched.claude = { at: Date.now(), from: read.email, to: back.email, login: back.effective, look: "loading" };
+            this.findBots("claude", cx);
+          }
+        }
+      } else {
+        await this.applyLocalCodex(attempt, cx);
+      }
+    } finally {
+      release(this);
+      await this.readPlan();
+      wake(cx);
+    }
+  }
+
+  async recordLocal(tool, attempt, outcome) {
+    const reply = await this.planCommand("record-local", { tool, n: attempt.n, owner: this.owner },
+      { kind: "outcome", ...outcome });
+    await this.readPlan();
+    return reply;
+  }
+
+  async applyLocalCodex(attempt, cx) {
+    const { home } = attempt;
+    const fail = (why) => this.recordLocal("codex", attempt, { state: "failed", why, read: null });
+    const changed = () => this.recordLocal("codex", attempt, { state: "changed", why: "changed", read: null });
+    const eligible = () => this.codexAccounts().find((account) => account.name === attempt.assign && usable(account));
+    const started = () => Date.now() - Date.parse(attempt.at) < LOCAL_START_MS;
+    const before = await this.readPlanCodex();
+    if (!before) return fail("failed");
+    if (before.read.home !== home || before.read.generation !== attempt.before) return changed();
+    if (before.read.proxy !== attempt.proxy || this.apiProxy !== attempt.proxy) return fail("proxy-url");
+    const account = eligible();
+    if (!account || !this.api) return fail("not-eligible");
+    if (!started()) return;
+    let refused = null, intended;
+    const previous = this.view("codex").current;
+    const fence = async (body) => {
+      const latest = await this.readPlanCodex();
+      if (!latest) refused = "failed";
+      else if (latest.read.home !== home || latest.read.generation !== attempt.before) refused = "changed";
+      else if (latest.read.proxy !== attempt.proxy || this.apiProxy !== attempt.proxy) refused = "proxy-url";
+      else if (!eligible()) refused = "not-eligible";
+      else if (!accountFingerprint(body)) refused = "no-account-id";
+      else if (!started()) refused = "stale";
+      if (!refused) {
+        intended = sha256Hex(body);
+        const reply = await this.planCommand("fence-local", { tool: "codex", n: attempt.n, owner: this.owner,
+          generation: latest.read.generation, proxy: attempt.proxy, intended });
+        if (!reply.ok) refused = reply.error ?? "failed";
+      }
+      if (refused) throw new Error("fenced");
+    };
+    try {
+      const installFenced = async (stamp) => {
+        const reply = await this.planCommand("install-local", { tool: "codex", n: attempt.n, rev: attempt.rev,
+          owner: this.owner, intended, stamp });
+        if (!reply.ok) {
+          refused = reply.error ?? "failed";
+          throw new Error("fenced");
+        }
+      };
+      await this.switchCodex(account, { env: before.env, fence, installFenced });
+    } catch {
+      if (refused === "changed") return changed();
+      if (refused === "stale" || refused === "off" || refused === "stopped") return;
+      if (refused !== "lost") return fail(PENDING_WHY.includes(refused) ? refused : "failed");
+    }
+    const after = (await this.readPlanCodex())?.read;
+    this.planCodex = after;
+    if (!after) return;
+    const outcome = localResult("codex", { ...attempt, home, intended, fencedAt: attempt.at }, after);
+    const result = await this.recordLocal("codex", attempt, outcome);
+    await this.finishLocalCodex(attempt, outcome, result, previous, cx, { switchConfirmed: refused !== "lost" });
+  }
+
+  async readCodexPlacement({ rev, n, generation, name }) {
+    const current = (await this.readPlanCodex())?.read;
+    const text = await readTextFile(`${appDir()}/${PLAN_FILE}`).catch(() => "");
+    const { plan } = parsePlan(text ?? null);
+    const section = plan?.codex, seen = own(section?.seen, LOCAL), placed = seen?.placed;
+    const progress = own(section?.progress, LOCAL);
+    if (plan?.rev === rev && progress?.state === "done" && progress.attempt?.n === n
+      && placed?.name === name && placed.generation === generation
+      && current?.generation === generation && current.home === seen.home && current.proxy === placed.proxy) return placed;
+    return null;
+  }
+
+  async finishLocalCodex(attempt, outcome, result, previous, cx, { switchConfirmed = false } = {}) {
+    if (!result.ok || !outcome.placed || !Number.isSafeInteger(result.rev)) return;
+    const { generation, name } = outcome.placed;
+    const placement = { rev: result.rev, n: attempt.n, generation, name };
+    try {
+      const recorded = await this.record("codex", async () => {
+        const placed = await this.readCodexPlacement(placement);
+        if (placed) return { name, fingerprint: placed.account };
+      });
+      const placed = recorded && await this.readCodexPlacement(placement);
+      if (!placed) return;
+      const account = this.codexAccounts().find((account) => account.name === name);
+      // Recovery proves what was installed. Its record time cannot tell which bots started on it.
+      const at = switchConfirmed ? Date.parse(placed.at) : null;
+      this.armed = null;
+      this.switched.codex = { at, from: previous ? who(previous) : null,
+        to: account ? who(account) : "the planned account", look: "loading", placement };
+      this.findBots("codex", cx);
+      this.reload(cx);
+    } catch (err) {
+      this.switchError = message(err);
+    }
+  }
+
+  planView(t, tool, cxView) {
+    const value = this.plan.plan ?? this.plan.view ?? null;
+    const observed = this.fleet.record?.machines ?? {};
+    const machines = Object.fromEntries((this.fleet.members ?? []).map(({ id, name, connected }) => [
+      id, own(observed, id) ?? { name, ...(connected ? {} : { state: "away" }) },
+    ]));
+    Object.assign(machines, observed);
+    const local = this.planClaude;
+    if (local) machines.local = { ...machines.local, core: LOCAL, appHome: local.home,
+      state: "read", at: local.at, claude: { ...local, readAt: local.at } };
+    else machines.local = { ...machines.local, name: "This Mac" };
+    const codex = this.codexAccounts();
+    const labels = new Map(codex.map((account) => [account.name, who(account)]));
+    const codexUsable = this.accounts ? codex.filter(usable).map(({ name }) => name) : null;
+    const ref = { codex: { codexLocal: this.planCodex, active: this.planActive, codexUsable },
+      claude: { email: local?.email ?? observed.local?.claude?.email ?? null } };
+    const rows = planRows({ plan: value, fleet: { machines }, ref, now: Date.now() })[tool].map((row) => {
+      const entry = own(machines, row.machine);
+      const { read, failure } = newest(entry, row.progress, row.machine, tool);
+      const known = this.fleet.members?.find(({ id }) => id === row.machine);
+      const eligible = tool === "codex" ? codexUsable ?? []
+        : !failure && read?.slotsComplete ? read.slots.filter((item) => item.state === "eligible").map((item) => item.email) : [];
+      return { ...row, name: row.machine === LOCAL ? "This Mac" : row.name, read, eligible,
+        connected: known?.connected ?? entry?.state === "read", writer: entry?.writer };
+    });
+    const verdict = cxView?.primary && cxView?.current
+      ? tool === "codex" ? { from: cxView.current.name, to: cxView.primary.account.name }
+        : { from: cxView.current.email?.toLowerCase(), to: cxView.primary.row.email?.toLowerCase() } : null;
+    const model = planBlock({ plan: this.plan, preview: this.preview, rows, tool, accounts: { labels }, verdict,
+      linked: this.hasLinkedRows(), error: this.planError });
+    if (!model) return null;
+    const block = v_flex().mx(14).gap(6);
+    const say = (row, text) => row.child(this.said(t, { text, tone: "none" }));
+    const controls = (parent, list, prefix) => {
+      if (!list.length) return;
+      const group = h_flex().gap(4).flex_wrap();
+      for (const { id, label, request } of list) {
+        const key = `plan-${prefix}${id}`;
+        if (!request) group.child(this.pill(t, { text: label, tone: "none" }).id(key));
+        else group.child(this.button(t, key, label, (_e, cx) => {
+          const previous = this.preview?.request;
+          const next = request.include && typeof request.include === "string" && previous?.kind === "move-off"
+            ? { ...previous, include: [...new Set([...(previous.include ?? []), request.include])] } : request;
+          this.previewPlan(next, cx);
+        }));
+      }
+      parent.child(group);
+    };
+    const readAgain = (row, id) => row.child(this.button(t, id, "Read linked machines", (_e, cx) => this.readFleet(cx, { force: true })));
+    for (const line of model.head) say(block, line);
+    controls(block, model.buttons, "");
+    for (const entry of model.rows) {
+      const row = v_flex().gap(4).child(h_flex().gap(6).items_center()
+        .child(div().font_semibold().child(entry.name)).child(this.pill(t, { text: entry.words, tone: "none" })));
+      if (entry.command) row.child(this.shownCommand(t, entry.command));
+      for (const line of entry.lines) say(row, line);
+      controls(row, entry.controls, `${slug(entry.machine)}-`);
+      if (entry.readAgain) readAgain(row, `plan-read-${slug(entry.machine)}`);
+      block.child(row);
+    }
+    if (model.preview) {
+      const box = v_flex().gap(4).px(8).py(6).rounded(7).bg(t.raised);
+      for (const line of model.preview.lines) say(box, line);
+      // A plan from a newer version is read-only: its preview keeps only Cancel, so it can be put away.
+      if (!this.plan.view) controls(box, model.preview.buttons, "");
+      if (!this.plan.view && model.preview.readAgain) readAgain(box, "plan-read-preview");
+      const decisions = h_flex().gap(4).flex_wrap();
+      if (!this.plan.view && !model.preview.blocked) {
+        const { confirmForget } = model.preview;
+        const preview = this.preview;
+        decisions.child(this.button(t, "plan-commit", confirmForget ? "Forget? Press again to confirm" : "Apply this plan",
+          (_e, cx) => this.commitPlan(cx, { preview, confirmForget }), { primary: true }));
+      }
+      box.child(decisions.child(this.button(t, "plan-cancel", "Cancel", (_e, cx) => {
+        if (this.planEditing) return;
+        this.preview = null;
+        this.planError = null;
+        wake(cx);
+      })));
+      block.child(box);
+    }
+    return block;
+  }
+
+  readFleet(cx, { force = false } = {}) {
+    cx.spawn(async (cx) => {
+      const fleet = this.fleet;
+      const read = async () => parseFleet(await readTextFile(`${appHome()}/${FLEET_FILE}`).catch(() => null));
+      fleet.record = await read();
+      wake(cx);
+      const checkedCodex = this.fleetEnvReady && this.hasLinkedRows();
+      if (checkedCodex) void this.codexRef(this.env, { force }).then(() => wake(cx));
+      if (fleet.running || !force && Date.now() - fleet.at < IDENTITY_EVERY) return;
+
+      fleet.running = true;
+      try {
+        const listed = await bounded((_command, args) => hc(args), "hc", ["machine", "ls", "--json"], MACHINES_MS);
+        fleet.members = members(listed);
+        fleet.at = Date.now();
+        wake(cx);
+        if (!this.hasLinkedRows()) {
+          fleet.needsSidebar = false;
+          fleet.error = null;
+          fleet.answer = null;
+          return;
+        }
+        if (this.fleetEnvReady) void this.codexRef(this.env, { force: force && !checkedCodex }).then(() => wake(cx));
+        if (!await accountsArgv(["fleet"])) {
+          fleet.needsSidebar = true;
+          return;
+        }
+        fleet.needsSidebar = false;
+        const reply = await this.cliRun(["fleet"], { label: "fleet", runLabel: FLEET_LABEL,
+          followMs: FLEET_FOLLOW_MS, privateRun: true });
+        if (!reply) {
+          fleet.needsSidebar = true;
+          return;
+        }
+        const answer = reply.code === 0 ? readFleetAnswer(JSON.stringify(reply.out)) : null;
+        if (!answer) {
+          fleet.error = reply.out?.error === "busy" ? "busy" : "failed";
+          return;
+        }
+        fleet.record = await read();
+        fleet.answer = answer;
+        fleet.error = null;
+      } catch (error) {
+        if (error?.code === "apply-running") this.planError = "busy";
+        else fleet.error = error?.partway ? "timeout" : "failed";
+      } finally {
+        fleet.running = false;
+        this.maybeRetry(cx);
+        wake(cx);
+      }
+    });
+  }
+
+  async codexRef(env, { force = false } = {}) {
+    const file = credentialTarget("codex", { home: home(), env }).file;
+    if (!force && this.fleetCodex?.file === file && Date.now() - this.fleetCodex.at < IDENTITY_EVERY) return this.fleetCodex.value;
+    const value = readTextFile(file).then(accountFingerprint, () => null);
+    const check = { file, value, fingerprint: null, at: Date.now() };
+    this.fleetCodex = check;
+    check.fingerprint = await value;
+    return check.fingerprint;
+  }
+
+  linkedRows(tool) {
+    const fleet = this.fleet;
+    const stored = fleet.record?.machines ?? {};
+    const known = new Map(Object.entries(stored));
+    for (const { id, name, connected } of fleet.members ?? []) {
+      if (!known.has(id)) known.set(id, { name, ...(connected ? {} : { state: "away", reason: null }) });
+    }
+    const fingerprint = this.fleetEnvReady ? this.fleetCodex?.fingerprint ?? null : null;
+    const active = this.active.codex;
+    const account = fingerprint && active?.fingerprint === fingerprint &&
+      this.accounts?.find((a) => a.provider === "codex" && a.name === active.name);
+    const local = stored.local?.claude;
+    const ref = tool === "codex" ? { fingerprint } : { email: local?.state === "eligible" ? local.email : null };
+    return fleetRows({ record: { at: fleet.record?.at, machines: Object.fromEntries(known) }, answer: fleet.error || fleet.needsSidebar ? null : fleet.answer,
+      tool, ref, refName: account ? who(account) : null, now: Date.now(), plan: this.plan.plan });
+  }
+
+  restartLinked(tool, core, cx) {
+    const key = `restart:${tool}:${core}`;
+    const row = this.linkedRows(tool).find((r) => r.core === core);
+    const entry = this.linked[`${tool}:${core}`] ??= { restarting: false, result: null };
+    if (entry.restarting) return;
+    if (this.busy) {
+      this.armed = null;
+      this.switchError = "a switch is running: restart the bots once it is done";
+      wake(cx);
+      return;
+    }
+    if (this.armed !== key) {
+      if (!row?.bots.length) return;
+      this.armed = key;
+      entry.result = null;
+      const list = frozen(row.bots);
+      entry.list = list;
+      entry.names = row.bots.map((bot) => bot.name);
+      entry.name = row.name;
+      cx.timer.after(ARMED, (cx) => {
+        if (this.armed === key && this.linked[`${tool}:${core}`]?.list === list) {
+          this.armed = null;
+          wake(cx);
+        }
+      });
+      wake(cx);
+      return;
+    }
+    this.armed = null;
+    if (row?.name !== entry.name || !sameList(entry.list, row.bots)) {
+      entry.result = ["The list changed: press Restart again."];
+      wake(cx);
+      return;
+    }
+    entry.restarting = true;
+    cx.spawn(async (cx) => {
+      wake(cx);
+      const result = [];
+      for (const [i, bot] of entry.list.entries()) {
+        result.push(await this.restartOne({ ...bot, name: entry.names[i] }, { on: { name: entry.name } }));
+      }
+      entry.restarting = false;
+      entry.result = result;
+      wake(cx);
+      this.readFleet(cx, { force: true });
+    });
+  }
+
+  fleetBlock(t, tool) {
+    const rows = this.linkedRows(tool);
+    const fleet = this.fleet;
+    if (!rows.length && !fleet.needsSidebar && !fleet.error) return null;
+    const block = v_flex().mx(14).gap(6).child(div().font_semibold().child("On linked machines"));
+    const say = (parent, text) => parent.child(this.said(t, { text, tone: "none" }));
+    if (fleet.needsSidebar) say(block, "Reading linked machines needs the sidebar mod switched on and up to date.");
+    if (fleet.error) {
+      say(block, `The linked machines weren't read (${fleet.error}).`);
+      if (fleet.record?.at) say(block, `Last fleet read ${new Date(fleet.record.at).toLocaleString()}.`);
+    }
+    if (fleet.answer?.linked || fleet.record?.linked || fleet.members === null && fleet.at) {
+      const time = fleet.record?.linked?.at ?? (fleet.at ? new Date(fleet.at).toISOString() : fleet.record?.at);
+      say(block, `The list of linked machines couldn't be read${time ? ` ${new Date(time).toLocaleString()}` : ""}: rows show the last read.`);
+    }
+    for (const { core, name, words, tone, lines, bots, restart } of rows) {
+      const row = v_flex().gap(4);
+      row.child(h_flex().gap(6).items_center().child(div().font_semibold().child(name)).child(this.pill(t, { text: words, tone })));
+      for (const line of lines) say(row, line);
+      const state = this.linked[`${tool}:${core}`];
+      if (bots.length) {
+        const chips = h_flex().gap(4).flex_wrap();
+        for (const bot of bots) chips.child(div().px(6).h(18).flex().items_center().rounded(5).bg(t.raised)
+          .text_size(10.5).child(`${bot.name} · ${bot.on}${bot.restart ? ` · ${bot.restart}` : ""}`));
+        row.child(chips);
+        const prompt = `Restart ${bots.length} bot${bots.length === 1 ? "" : "s"} on ${name}`;
+        const armed = this.armed === `restart:${tool}:${core}`;
+        row.child(this.button(t, `restart-${tool}-${core}`, state?.restarting ? "Restarting…" : armed ? `${prompt}? Press again to confirm` : prompt,
+          (_e, cx) => this.restartLinked(tool, core, cx), { small: restart }));
+      }
+      for (const line of state?.result ?? []) say(row, line);
+      block.child(row);
+    }
+    return block;
   }
 
   /**
@@ -334,7 +1065,9 @@ export default class AmQuota extends View {
    * record keeps its badge rather than flipping on a guess. Never logged.
    */
   async installedIdentity(provider, env) {
-    if (!this.active[provider]?.fingerprint) return null;
+    const codex = this.plan.plan?.codex;
+    if (!this.active[provider]?.fingerprint
+      && !(provider === "codex" && own(codex?.progress, LOCAL) && own(codex.seen, LOCAL)?.placed)) return null;
     const now = Date.now();
     const cached = this.identities[provider];
     if (cached && now - cached.at < IDENTITY_EVERY) return cached.value;
@@ -345,10 +1078,12 @@ export default class AmQuota extends View {
 
   /** Codex's installed identity, from its file; null for a provider with no writer (Claude). */
   async readIdentity(provider, env) {
-    const plan = credentialTarget(provider, { home: home(), env });
-    if (!plan) return null;
+    const target = credentialTarget(provider, { home: home(), env });
+    if (!target) return null;
     try {
-      return { known: true, fingerprint: tokenIdentity(provider, await readTextFile(plan.file)) };
+      const text = await readTextFile(target.file);
+      return { known: true, fingerprint: tokenIdentity(provider, text), account: accountFingerprint(text),
+        generation: text == null ? null : sha256Hex(text), home: target.file.slice(0, target.file.lastIndexOf("/")) };
     } catch {
       return null;
     }
@@ -375,26 +1110,58 @@ export default class AmQuota extends View {
         this.probeAgain = true;
         return wake(cx);
       }
-      this.probing = true;
+      let round = null;
       try {
-        const ms = this.probeMs ?? PROBE_MS;
-        const where = await this.whereClaude(ms);
-        const io = { exec, home: home(), readTextFile, where, ms };
-        const [probes, vars] = await Promise.all([Promise.all(want.map((l) => probeLogin(l, io))), presentVars(exec, ms)]);
-        // The record read again: the probes are for `want`, so another set of logins goes round again.
-        const now = await readRecord(appHome(), readTextFile);
-        const sameNow = now.logins.length === record.logins.length && now.logins.every((l, i) => l.id === record.logins[i].id && l.dir === record.logins[i].dir);
-        this.logins = { record: sameNow ? now : record, probes, vars, at: Date.now() };
-        if (!sameNow) this.probeAgain = true;
+        round = await this.probeRound(record);
       } finally {
-        this.probing = false;
         wake(cx);
+        // A finished round is the fresh read the plan's local Claude part checks against.
+        if (this.plan.state === "ok" && own(this.plan.plan.claude.progress, LOCAL)) {
+          await this.maybeLocal(cx, { tools: ["claude"], round });
+          wake(cx);
+        }
         if (this.probeAgain) {
           this.probeAgain = false;
           this.readLogins(cx, { force: true });
         }
       }
     });
+  }
+
+  async probeRound(initial) {
+    while (this.probePending) await this.probePending;
+    const run = async () => {
+      const record = initial ?? await readRecord(appHome(), readTextFile);
+      const want = [{ id: DEFAULT_LOGIN, dir: null }, ...record.logins];
+      const ms = this.probeMs ?? PROBE_MS;
+      const io = { exec, home: home(), readTextFile, where: await this.whereClaude(ms), ms };
+      const [probes, vars] = await Promise.all([Promise.all(want.map((login) => probeLogin(login, io))), presentVars(exec, ms)]);
+      const now = await readRecord(appHome(), readTextFile);
+      const sameSlots = now.logins.length === record.logins.length
+        && now.logins.every((login, i) => login.id === record.logins[i].id && login.dir === record.logins[i].dir);
+      const sameRecord = sameSlots && now.text === record.text && !now.problem;
+      const slots = slotStates(probes, { vars, home: home() }).map(({ id, email, state }) => ({
+        id, email: isClaudeKey(email) ? email : null, state: email && !isClaudeKey(email) ? "failed" : state,
+      }));
+      if (!sameSlots) this.probeAgain = true;
+      this.logins = { record: sameSlots ? now : record, probes, vars, at: Date.now() };
+      const selected = now.use;
+      const effective = probes.find((probe) => probe.id === selected)?.problem ? DEFAULT_LOGIN : selected;
+      const chosen = slots.find((slot) => slot.id === effective);
+      if (!sameRecord || vars === null || !chosen || slots.some((slot) => ["timeout", "failed"].includes(slot.state))) return null;
+      // Only a complete round is this Mac's observation for the plan; an incomplete one keeps the last.
+      this.planClaude = { at: new Date().toISOString(), core: null, home: appDir(), selected, effective,
+        record: record.text === null ? "absent" : "ok", snapshot: record.text === null ? null : snapshotOf(record.text),
+        email: chosen.state === "eligible" ? chosen.email : null, state: chosen.state,
+        slots, slotsComplete: true, nextSlot: nextSlot(now.logins, home()).dir };
+      return this.planClaude;
+    };
+    this.probing = true;
+    try { return await (this.probePending = run()); }
+    finally {
+      this.probing = false;
+      this.probePending = null;
+    }
   }
 
   /**
@@ -419,10 +1186,15 @@ export default class AmQuota extends View {
       return loginsView({ record: this.logins?.record ?? null, probes: this.logins?.probes ?? null, accounts: this.accounts ?? [],
         now: Date.now(), source: instanceName(this.config), home: home(), vars: this.logins?.vars ?? null });
     }
-    return toolView({
-      provider, accounts: this.accounts ?? [], record: this.active[provider] ?? null,
-      badge: this.badges[provider] ?? null, now: Date.now(), source: instanceName(this.config),
-    });
+    const codex = this.plan.plan?.codex;
+    const seen = own(codex?.seen, LOCAL), placed = seen?.placed;
+    const installed = this.identities[provider]?.value;
+    // A Codex refresh changes the bytes without changing the account named by this proxy.
+    const refreshed = own(codex?.progress, LOCAL) && placed && installed?.account === placed.account && installed.home === seen.home
+      && installed.generation !== placed.generation && placed.proxy === proxyId(this.config?.url);
+    const record = refreshed ? { name: placed.name, fingerprint: placed.account } : this.active[provider] ?? null;
+    const badge = refreshed ? { text: "in use" } : this.badges[provider] ?? null;
+    return toolView({ provider, accounts: this.accounts ?? [], record, badge, now: Date.now(), source: instanceName(this.config) });
   }
 
   // Installs one credential into the client that owns that provider (Codex only: Claude has no
@@ -447,12 +1219,14 @@ export default class AmQuota extends View {
     cx.spawn(async (cx) => {   // one switch at a time
       wake(cx);
       try {
-        const result = await install({ api: this.api, provider, account, ...this.io() });
+        const result = await this.switchCodex(account);
+        this.planCodex = null;
         this.active[provider] = { name: account.name, fingerprint: result.fingerprint };
         await this.record(provider);
         this.armed = null;
         this.switched[provider] = { at: Date.now(), from: before ? who(before) : null, to: who(account), look: "loading" };
         this.findBots(provider, cx);
+        this.localAt[provider] = 0;   // with a plan, the next read checks this Mac against it
         this.reload(cx);   // the card and the verdict follow the credential that is now installed
       } catch (err) {
         this.switchError = message(err);
@@ -461,6 +1235,30 @@ export default class AmQuota extends View {
         wake(cx);
       }
     });
+  }
+
+  switchCodex(account, options = {}) {
+    return install({ api: this.api, provider: "codex", account, ...this.io(), ...options });
+  }
+
+  /**
+   * A current sidebar shares its login lock with the panel. Older installs keep the same
+   * writeTextFile call and the same snapshot.
+   */
+  async writeLogins(record, op) {
+    const status = await writerStatus(appDir());
+    if (status === "unknown") throw new Error("writer-unreadable: try again");
+    const argv = await accountsArgv(setLoginArgs(op, snapshotOf(record.text)), { write: true, status });
+    if (argv) {
+      const result = setLoginResult(await exec(argv[0], argv.slice(1)).catch(() => null));
+      if (!result.ok) throw new Error(result.code);
+      return;
+    }
+    const { kind, id, dir } = op;
+    const next = { use: kind === "use" ? id : record.use, logins: record.logins };
+    if (kind === "add") next.logins = [...next.logins, { id, dir }];
+    if (kind === "remove") next.logins = next.logins.filter((login) => login.id !== id);
+    await writeRecord(appHome(), next, record.text, writeTextFile);
   }
 
   /**
@@ -483,7 +1281,7 @@ export default class AmQuota extends View {
     cx.spawn(async (cx) => {
       wake(cx);
       try {
-        await writeRecord(appHome(), { use: id, logins: record.logins }, record.text, writeTextFile);
+        await this.writeLogins(record, { kind: "use", id });
         this.armed = null;
         this.switched.claude = { at: Date.now(), from: v.current?.who ?? null, to: target.who, login: id, look: "loading" };
         this.findBots("claude", cx);
@@ -523,7 +1321,7 @@ export default class AmQuota extends View {
         if (p.problem) throw new Error(`its ${p.problem}: make it first, as the steps say`);
         if (p.status.state !== "in") throw new Error("claude auth status there doesn't say signed in: sign in first, as the steps say");
         if (p.status.configDirectory && p.status.configDirectory.replace(/\/+$/, "") !== slot.dir) throw new Error(`settings move ${name} to another folder`);
-        await writeRecord(appHome(), { use: record.use, logins: [...record.logins, { id: slot.id, dir: slot.dir }] }, record.text, writeTextFile);
+        await this.writeLogins(record, { kind: "add", id: slot.id, dir: slot.dir });
         this.loginNote = `${name} added${p.email ? `: ${p.email}` : ""}. Press Use on it to start new Claude launches there.`;
       } catch (err) {
         this.switchError = `${name} wasn't added: ${message(err)}`;
@@ -584,7 +1382,7 @@ export default class AmQuota extends View {
         // A folder under home that no login lists may be this one by another spelling: refused too.
         const odd = named((o) => typeof o?.unknown === "string" && o.unknown.startsWith(`${home().replace(/\/+$/, "")}/`));
         if (odd.length) throw new Error(`${odd.join(", ")} ${odd.length === 1 ? "runs" : "run"} on a login folder the panel can't match to a login: restart or stop ${odd.length === 1 ? "it" : "them"} first`);
-        await writeRecord(appHome(), { use: record.use, logins: record.logins.filter((l) => l.id !== id) }, record.text, writeTextFile);
+        await this.writeLogins(record, { kind: "remove", id });
         this.loginNote = `${row.name} removed from the panel. Its folder stays; delete it by hand if you want.`;
       } catch (err) {
         this.switchError = `${row.name} wasn't removed: ${message(err)}`;
@@ -605,11 +1403,18 @@ export default class AmQuota extends View {
    * Writes `active.json` and drops the cached identity, so the card follows what was written. A
    * failed write is shown, not swallowed: a stale record would name the wrong account in use.
    */
-  async record(provider) {
+  async record(provider, validate) {
     delete this.identities[provider];
+    if (provider === "codex") this.fleetCodex = null;
     // writeTextFile wants the snapshot it replaces: null only creates.
     const statePath = `${appHome()}/data/${STATE}`;
     const before = await readTextFile(statePath).catch(() => null);
+    if (validate) {
+      // Check the managed placement after reading the snapshot. Switch may have updated it.
+      const record = await validate();
+      if (!record) return false;
+      this.active[provider] = record;
+    }
     try {
       await writeTextFile(statePath, JSON.stringify(this.active, null, 2) + "\n", before ?? null);
     } catch (err) {
@@ -619,6 +1424,7 @@ export default class AmQuota extends View {
       } catch {}
       throw new Error(`the login was written, but active.json could not record it (${message(err).slice(0, 80)}) — the panel may name the wrong account in use`);
     }
+    return true;
   }
 
   /**
@@ -636,46 +1442,80 @@ export default class AmQuota extends View {
   /**
    * The bot CLI with --json in an hc terminal of its own (#433), followed to its end: what cli()
    * resolves, so outside exec's limit, or null when the sidebar mod is not installed. `label`: the
-   * bot's id, on the terminal; one still running for it refuses a second. `followMs`: how long the
+   * bot's id, on the terminal; one still running for it refuses a second. For private accounts
+   * runs, either live label refuses a second run. `followMs`: how long the
    * panel follows it. Throws a RunError when there is no answer: not started (nothing ran), its
    * terminal gone or ended with none (`partway`: it may have stopped part-way), or still running.
    */
-  async cliRun(args, { env = [], label, followMs }) {
-    if (!(await cliArgv(args))) return null;
-    const dir = appHome().replace(/\/+$/, "");
-    const mine = ["ls", "--label", `${RUN_LABEL}=${label}`, "--json"];
-    const before = await hc(mine);
-    if (before?.code !== 0) throw runError("hc can't list the restarts still running, so none was started");
-    const going = liveRows(before.stdout)[0];
-    if (going) throw runError(`its restart started earlier still runs in ${going.address}, so no second one was started`);
+  async cliRun(args, { env = [], label, followMs, runLabel = RUN_LABEL, privateRun = false }) {
+    const dir = appDir();
+    if (privateRun && accountsRuns.has(dir)) {
+      throw runError("an accounts run is still running", { code: "apply-running", partway: true });
+    }
+    if (privateRun) accountsRuns.add(dir);
+    try {
+      return await this.runCliTerminal(args, { dir, env, label, followMs, runLabel, privateRun });
+    } finally {
+      if (privateRun) accountsRuns.delete(dir);
+    }
+  }
+
+  async runCliTerminal(args, { dir, env, label, followMs, runLabel, privateRun }) {
+    const privateArgv = privateRun ? await accountsArgv(args) : null;
+    if (privateRun ? !privateArgv : !(await cliArgv(args))) return null;
+    const listRun = (value) => ["ls", "--label", `${runLabel}=${value}`, "--json"];
+    const mine = listRun(label);
+    if (privateRun) {
+      const [fleet, apply] = await Promise.all([hc(listRun("fleet")), hc(listRun("apply"))]);
+      if (fleet?.code !== 0 || apply?.code !== 0) throw runError("hc can't list the restarts still running, so none was started");
+      if (liveRows(fleet.stdout)[0]) throw runError("the fleet read is still running", { code: "fleet-running", partway: true });
+      if (liveRows(apply.stdout)[0]) throw runError("machines are being switched now", { code: "apply-running", partway: true });
+    } else {
+      const before = await hc(mine);
+      if (before?.code !== 0) throw runError("hc can't list the restarts still running, so none was started");
+      const going = liveRows(before.stdout)[0];
+      if (going) throw runError(`its restart started earlier still runs in ${going.address}, so no second one was started`);
+    }
     // Its own names: never a file an earlier run left, even one started in the same millisecond.
     const base = `${dir}/${RUNS}/${slug(label)}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const files = { out: `${base}.out`, err: `${base}.err`, code: `${base}.code` };
-    const herdr = await this.prepare(`${dir}/${RUNS}`);
-    const argv = await cliArgv(args, [...CLI_ENV.filter((n) => n in herdr).map((n) => `${n}=${herdr[n]}`), ...env],
-      CLI_ENV.filter((n) => !(n in herdr)));
-    // --rm: hc removes it once it ends; its answer is in the files.
-    const r = await hc(["run", "--bg", "--json", "--rm", "--no-parent", "--cwd", dir, "--label", `${RUN_LABEL}=${label}`,
-      "--", "sh", "-c", RUN_SCRIPT, "sh", files.out, files.err, files.code, ...argv]);
-    if (r?.code !== 0) {
-      const said = hcSaid(r);
-      throw runError(`hc couldn't start its restart in a terminal of its own${said ? ` (${said})` : ""}; nothing was restarted`);
-    }
-    let terminal = null;
+    const files = { out: `${base}.out`, err: privateRun ? null : `${base}.err`, code: `${base}.code` };
     try {
-      terminal = JSON.parse(r.stdout).address ?? null;
-    } catch {}
-    // It may run anyway: found by its label.
-    if (typeof terminal !== "string" || !terminal) {
-      const after = await hc(mine).catch(() => null);
-      terminal = after?.code === 0 ? liveRows(after.stdout)[0]?.address ?? null : null;
+      let argv = privateArgv;
+      if (privateRun) {
+        const made = await exec("sh", ["-c", 'umask 077; mkdir -p -- "$1"', "sh", `${dir}/${RUNS}`]);
+        if (made?.code !== 0) throw runError("the fleet read could not start");
+      } else {
+        const herdr = await this.prepare(`${dir}/${RUNS}`);
+        argv = await cliArgv(args, [...CLI_ENV.filter((n) => n in herdr).map((n) => `${n}=${herdr[n]}`), ...env],
+          CLI_ENV.filter((n) => !(n in herdr)));
+      }
+      // --rm: hc removes it once it ends; its answer is in the files.
+      const r = await hc(["run", "--bg", "--json", "--rm", "--no-parent", "--cwd", dir, "--label", `${runLabel}=${label}`,
+        "--", "sh", "-c", ...(privateRun ? [PRIVATE_RUN_SCRIPT, "sh", files.out, files.code, slug(label)] :
+          [RUN_SCRIPT, "sh", files.out, files.err, files.code]), ...argv]);
+      if (r?.code !== 0) {
+        if (privateRun) throw runError("the fleet read could not start");
+        const said = hcSaid(r);
+        throw runError(`hc couldn't start its restart in a terminal of its own${said ? ` (${said})` : ""}; nothing was restarted`);
+      }
+      let terminal = null;
+      try {
+        terminal = JSON.parse(r.stdout).address ?? null;
+      } catch {}
+      // It may run anyway: found by its label.
+      if (typeof terminal !== "string" || !terminal) {
+        const after = await hc(mine).catch(() => null);
+        terminal = after?.code === 0 ? liveRows(after.stdout)[0]?.address ?? null : null;
+      }
+      if (!terminal) {
+        const got = await this.runAnswer(files);
+        if (got) return got;
+        throw runError("hc started its restart without saying in which terminal, and none was found", { partway: true });
+      }
+      return await this.follow(terminal, files, followMs);
+    } finally {
+      if (privateRun) await exec("rm", ["-f", "--", files.out, files.code, `${files.code}.tmp`]).catch(() => {});
     }
-    if (!terminal) {
-      const got = await this.runAnswer(files);
-      if (got) return got;
-      throw runError("hc started its restart without saying in which terminal, and none was found", { partway: true });
-    }
-    return this.follow(terminal, files, followMs);
   }
 
   /**
@@ -706,7 +1546,7 @@ export default class AmQuota extends View {
     const code = await read(files.code);
     if (code === null || code === undefined) return null;
     const n = Number.parseInt(String(code).trim(), 10);
-    return cliAnswer(Number.isSafeInteger(n) ? n : 1, await read(files.out), await read(files.err));
+    return cliAnswer(Number.isSafeInteger(n) ? n : 1, await read(files.out), files.err ? await read(files.err) : null);
   }
 
   /**
@@ -737,7 +1577,7 @@ export default class AmQuota extends View {
       // Wall time, not waits: a wait that answers at once is followed by a pause, never counted.
       if (Date.now() - started >= followMs) {
         throw runError(`its restart ${unread ? `may still run in ${terminal} (hc can't say how it is)` : `still runs in ${terminal}`} after `
-          + `${waited(Date.now() - started)}; the panel stopped following it, so how it ends isn't shown here. Check whether the bot is back once ${terminal} is gone`);
+          + `${waited(Date.now() - started)}; the panel stopped following it, so how it ends isn't shown here. Check whether the bot is back once ${terminal} is gone`, files.err ? {} : { partway: true });
       }
       const asked = Date.now();
       try {
@@ -754,7 +1594,8 @@ export default class AmQuota extends View {
 
   /**
    * After a switch: the bots still on the old one, by `automagik-herdr ls`. Codex: those started
-   * before it. Claude (#453 section 3): those whose pane's launch argv names another login, by value.
+   * before it, or all of them when the switch time is unknown. Claude (#453 section 3): those
+   * whose pane's launch argv names another login, by value.
    */
   findBots(provider, cx) {
     const s = this.switched[provider];
@@ -777,6 +1618,24 @@ export default class AmQuota extends View {
         if (this.switched[provider] === s) s.look = { error: message(err) };
       }
       wake(cx);
+    });
+  }
+
+  async checkCodexRestart(s, cx) {
+    if (this.switched.codex === s && await this.readCodexPlacement(s.placement) && this.switched.codex === s) return true;
+    if (this.switched.codex === s) {
+      delete this.switched.codex;
+      this.armed = null;
+    }
+    this.switchError = "This Codex placement was superseded.";
+    wake(cx);
+    return false;
+  }
+
+  withRestartOffer(s, cx, run) {
+    if (!s.placement) return run();
+    cx.spawn(async (cx) => {
+      if (await this.checkCodexRestart(s, cx)) run();
     });
   }
 
@@ -825,6 +1684,7 @@ export default class AmQuota extends View {
       let done = (s.done ?? 0);
       // One at a time: each restart waits for the new pane's agent to stay up.
       for (const bot of bots) {
+        if (s.placement && !await this.checkCodexRestart(s, cx)) break;
         const one = await this.restartOne(bot);
         if (one.note) fresh.push(`${bot.name}: ${noteText(one.note)}`);
         if (one.busy) busy.push(one.busy);
@@ -855,13 +1715,14 @@ export default class AmQuota extends View {
    * when a helper wasn't run again, though the bot did restart: its new `terminal` with no `error`
    * says so. A refusal can carry a `terminal` too (a new pane that exited, a turn started again).
    */
-  async restartOne(bot, { tree = false, helpers: count = 0 } = {}) {
+  async restartOne(bot, { tree = false, helpers: count = 0, on = null } = {}) {
     try {
-      const args = ["restart", bot.id, "--project", bot.project, ...(tree ? ["--tree"] : [])];
+      const args = on ? restartArgs(bot, on.name) : ["restart", bot.id, "--project", bot.project, ...(tree ? ["--tree"] : [])];
       // In a terminal of its own (#433): a restart waits up to 30 s for its new pane, twice when
       // codex can't resume (#413), and a --tree one 40 s more per helper, past exec's limit.
       const r = await this.cliRun(args, { label: bot.id, followMs: RUN_FOLLOW_MS + (tree ? count * RUN_HELPER_MS : 0),
         env: tree ? [`AUTOMAGIK_HERDR_TREE_TURN_WAIT_MS=${TREE_TURN_WAIT_MS}`] : [] });
+      if (on) return restartWords({ name: bot.name, code: r?.code, refused: r?.out?.refused, retired: r?.out?.retired });
       const helpers = (Array.isArray(r?.out?.helpers) ? r.out.helpers : []).filter((h) => h?.error)
         .map((h) => `${bot.name}'s helper ${h.name ?? h.replaced}: ${plain(h.error)}`);
       if (r?.code === 0 || (tree && typeof r?.out?.terminal === "string" && r.out.error === undefined)) {
@@ -873,6 +1734,7 @@ export default class AmQuota extends View {
         ? { bot, why, refused, terminal: r.out.terminal } : null;
       return { why, note: null, busy, helpers };
     } catch (err) {
+      if (on) return restartWords({ name: bot.name });
       // Its terminal ended with no answer: the restart may have stopped part-way.
       const back = tree ? `${bot.name} and its helpers are back` : `${bot.name} is back`;
       const why = err?.partway ? `${message(err)}. It may have stopped part-way: check whether ${back}, then restart what is missing from a terminal, not from here` : message(err);
@@ -943,6 +1805,7 @@ export default class AmQuota extends View {
       } catch {}
       if (!live()) return;
     }
+    if (s.placement && (!await this.checkCodexRestart(s, cx) || !live())) return;
     // A switch or another restart running now: this one does not wait for it.
     if (this.busy || s.restarting) {
       delete s.waiting[id];
@@ -1120,7 +1983,8 @@ export default class AmQuota extends View {
       const armed = this.armed === `restart:${provider}`;
       const what = `Restart ${n} bot${n === 1 ? "" : "s"}`;
       box.child(this.button(t, `restart-${provider}`, s.restarting ? "Restarting…" : armed ? `${what}? Press again to confirm` : what,
-        (_e, cx) => this.restartBots(provider, cx), { primary: true, small: `Each one resumes its conversation on the new ${old} where it can` }));
+        (_e, cx) => this.withRestartOffer(s, cx, () => this.restartBots(provider, cx)),
+        { primary: true, small: `Each one resumes its conversation on the new ${old} where it can` }));
       const busy = s.result?.busy ?? [];
       if (s.result?.failed.length || busy.length) {
         hint(`Restarted ${s.result.done} of ${s.result.done + s.result.failed.length + busy.length}. Not restarted:`);
@@ -1131,7 +1995,7 @@ export default class AmQuota extends View {
           box.child(div().text_size(10.5).text_color(t.working).child(`${b.bot.name} is busy: ${b.why}`));
           box.child(this.button(t, `idle-${provider}-${b.bot.id}`,
             waiting ? `Waiting for ${b.bot.name} · Cancel` : `Restart ${b.bot.name} when idle`,
-            (_e, cx) => this.restartWhenIdle(provider, b.bot.id, cx)));
+            (_e, cx) => this.withRestartOffer(s, cx, () => this.restartWhenIdle(provider, b.bot.id, cx))));
         }
       }
     }
@@ -1289,6 +2153,10 @@ export default class AmQuota extends View {
       for (const r of v.others) list.child(this.row(t, v, r));
       body.child(list);
     }
+    const fleet = this.fleetBlock(t, this.tool);
+    if (fleet) body.child(fleet);
+    const plan = this.planView(t, this.tool, claude ?? (this.accounts ? this.view(this.tool) : null));
+    if (plan) body.child(plan);
     // Keep the scroll area in flow so its rows give the footer popup its body height.
     root.child(v_flex().relative().flex_1().min_h(0)
       .child(div().id("am-quota-body").flex_1().min_h(0).overflow_y_scroll().child(body))

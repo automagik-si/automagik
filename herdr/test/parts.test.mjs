@@ -17,6 +17,7 @@ import { ownHook, withoutHooks } from "../mods/am-sidebar/migrateHooks.mjs";
 import { directHookCommand, hookCommand, amPartHookCommand } from "../mods/am-sidebar/briefingText.mjs";
 import { OFF_BY_DEFAULT, PACK_MODS } from "../mods/am-sidebar/release.js";
 import { placeLayout, readMarker, readVersion, writeMarker } from "../mods/am-sidebar/update.mjs";
+import { pathWithout } from "./system-path.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const VERSION = readVersion(join(ROOT, "mods", "am-sidebar"));
@@ -30,7 +31,7 @@ function machine(t) {
   mkdirSync(home);
   mkdirSync(app);
   const binDir = join(home, ".local", "bin");
-  const env = { HOME: home, HERDR_APP_HOME: app, PATH: `${binDir}:${dirname(process.execPath)}:/usr/bin:/bin`, AM_PART_DIR: join(ROOT, "mods", "am-footer") };
+  const env = { HOME: home, HERDR_APP_HOME: app, PATH: `${binDir}:${pathWithout([dirname(process.execPath), "/usr/bin", "/bin"])}`, AM_PART_DIR: join(ROOT, "mods", "am-footer") };
   const logs = [];
   const calls = [];
   const exec = (cmd, args, opts) => { calls.push([cmd, ...args]); return runCommand(cmd, args, opts); };

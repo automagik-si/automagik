@@ -24,7 +24,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, write
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scrubBuildPaths } from '../src/dsh.js'
-import { writeShippedProfilePatch } from '../src/profile-patch.mjs'
+import { hasSandboxAdapter, writeShippedProfilePatch } from '../src/profile-patch.mjs'
 import { prepareSharpWasm, pruneNodeModules } from './prune-runtime.mjs'
 import { acceptsHarness } from './follow-dsh.mjs'
 import { patchRuntime } from './runtime-patches.mjs'
@@ -200,6 +200,7 @@ execFileSync(process.execPath, [join(runtimeDir, 'node_modules', '@deepseek-ai',
   stdio: ['ignore', 'inherit', 'inherit'],
 })
 writeShippedProfilePatch(join(APP, 'profile'), installDir, runtimeDir, { requireAdapters: true })
+if (!hasSandboxAdapter(installDir, runtimeDir)) throw new Error('The desktop build is missing the Bot sandbox adapter or its DSH peers')
 for (const [name, version] of Object.entries(ADDONS)) {
   const installed = readJson(join(installDir, 'node_modules', ...name.split('/'), 'package.json')).version
   if (installed !== version) throw new Error(`${name} installed at ${installed}, not the vetted ${version}`)
