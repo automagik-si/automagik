@@ -183,6 +183,14 @@ test("reportLine: one line: who resumed, who is on a new conversation and why, w
   for (const word of ["/home/u", "Genie", "Dev", "Cap", "/q"]) assert.ok(!counts.includes(word), counts);
 });
 
+test("reportLine: a holder-loss restart hint shares its final period with the report (#1432)", async () => {
+  const { seatHint } = await import("../mods/am-sidebar/revive.js");
+  const bot = "b-aaaaaaaaaa", folder = "/a b", core = "c1";
+  const hint = seatHint({ seat: { bot, core }, folder, core, def: { agent: "claude" } });
+  const line = reportLine(folder, [{ name: "Main", bot, outcome: "skipped", why: `make sure it stopped first. ${hint}` }]);
+  assert.match(line, /Left alone: Main, .* \(a new conversation\)\. To keep a bot down/);
+});
+
 test("unitText: a oneshot user unit that runs revive --boot and waits for herdr-core itself; only a unit with the pack's mark is ours", () => {
   const text = unitText({ runner: "/home/u/.local/bin/automagik-herdr", env: { HERDR_APP_HOME: "/home/u/my app/100%" }, wait: 600 });
   assert.ok(text.startsWith(`${UNIT_MARK}\n[Unit]\n`), text);

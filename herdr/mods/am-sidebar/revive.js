@@ -459,7 +459,10 @@ export function reportLine(project, results) {
   if (failed.length) {
     parts.push(`Not back: ${list(failed.map((r) => `${r.name}, ${r.why ?? "no reason given"}; by hand: ${byHandCommand(r.bot, project)}`))}.`);
   }
-  if (skipped.length) parts.push(`Left alone: ${list(skipped.map((r) => `${r.name}, ${r.why}`))}.`);
+  if (skipped.length) {
+    const reasons = list(skipped.map((r) => `${r.name}, ${r.why}`));
+    parts.push(`Left alone: ${reasons}${reasons.endsWith(".") ? "" : "."}`);
+  }
   parts.push(KEEP_DOWN);
   return parts.join(" ").replace(/\s*\n\s*/g, " ");
 }
