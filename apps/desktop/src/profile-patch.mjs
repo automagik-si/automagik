@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 
 const BOT_PACKAGE = '@automagik/bots-dsh'
 const ADAPTERS = new Map([
@@ -18,6 +18,10 @@ const PRESET_IDS = new Set([...PRESETS.keys()].map(id => `preset-${id}`))
 const PRESET_NAME = '@deepseek-ai/dsh-agent-preset'
 const JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: text => text }
 const PATCH_FILE = 'cordis.patch.yml'
+const SANDBOX_ID = 'automagik-sandbox'
+const SANDBOX_ADAPTER = `${BOT_PACKAGE}/sandbox-local`
+const STOCK_SANDBOX = '@deepseek-ai/dsh-sandbox-local'
+const SANDBOX_COMMENT = '# Automagik (#2024): DSH\'s sandbox with the system ssh drop-ins readable under bwrap.'
 
 function parsePatch(yaml, text, { allowOpaque = false, keepSourceTokens = false } = {}) {
   const document = yaml.parseDocument(text, { customTags: [JS_TAG], keepSourceTokens })
@@ -68,6 +72,29 @@ export function hasReadScopeAdapters(profile) {
   })
   if (available.some(Boolean) && !available.every(Boolean)) throw new Error('The Bot release exports only one file-scope adapter')
   return available.every(Boolean)
+}
+
+export function hasSandboxAdapter(profile, runtime) {
+  const requireProfile = createRequire(join(profile, 'package.json'))
+  const requireRuntime = createRequire(join(runtime, 'package.json'))
+  try {
+    // A lane swap keeps the same package path. Node caches package.json and resolution
+    // results, so read the installed manifest again and resolve its file target by path.
+    const folder = join(profile, 'node_modules', BOT_PACKAGE)
+    const { exports } = JSON.parse(readFileSync(join(folder, 'package.json'), 'utf8'))
+    const target = exports?.['./sandbox-local']
+    if (typeof target !== 'string' || !target.startsWith('./')) return false
+    const file = resolve(folder, target)
+    if (!file.startsWith(folder + sep) || !statSync(file).isFile()) return false
+    requireProfile.resolve(file)
+    return [STOCK_SANDBOX, '@deepseek-ai/dsh-sandbox'].every(peer => {
+      if (!existsSync(join(runtime, 'node_modules', peer, 'package.json'))) return false
+      return existsSync(requireRuntime.resolve(peer))
+    })
+  } catch (error) {
+    if (['ENOENT', 'MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED'].includes(error.code)) return false
+    throw error
+  }
 }
 
 function adaptPresetTools(yaml, nodes, config, available, replaceName) {
@@ -193,11 +220,12 @@ export function writeShippedProfilePatch(source, profile, runtime, { requireAdap
   writeFileSync(join(profile, PATCH_FILE), configureReadScopePatch(yaml, text, available, presets))
 }
 
-export function replaceProfilePatch(file, text, mode = 0o644) {
+export function replaceProfilePatch(file, text, mode) {
   const scratch = mkdtempSync(join(dirname(file), '.profile-patch-'))
   try {
     const replacement = join(scratch, PATCH_FILE)
-    writeFileSync(replacement, text, { mode })
+    writeFileSync(replacement, text, { mode: mode ?? 0o644 })
+    if (mode !== undefined) chmodSync(replacement, mode)
     renameSync(replacement, file)
   } finally {
     rmSync(scratch, { recursive: true, force: true })
@@ -242,6 +270,40 @@ function patchSource(yaml, patch, text) {
   }
 
   return {
+    removeItems(sequence, removed, managedComment) {
+      const token = sequence.srcToken
+      const commaAt = index => token.items[index]?.start.find(part => part.type === 'comma')
+      const flow = token.type === 'flow-collection'
+      let kept = 0
+      for (const [index, item] of sequence.items.entries()) {
+        if (!removed.has(item)) {
+          if (flow && kept === 0 && index > 0) {
+            const comma = commaAt(index)
+            if (comma) replace(comma.offset, comma.offset + 1, '')
+          }
+          kept += 1
+          continue
+        }
+        let start = token.items[index].start.find(part => part.type === 'seq-item-ind')?.offset ?? item.range[0]
+        if (flow) {
+          const comma = commaAt(index)
+          if (comma) {
+            if (/^[ \t]*$/.test(text.slice(comma.offset + 1, start))) start = comma.offset
+            else replace(comma.offset, comma.offset + 1, '')
+          }
+        } else {
+          const line = startLine(start)
+          if (/^[ \t]*$/.test(text.slice(line, start))) start = line
+          if (managedComment?.(item) && start > 0) {
+            const previous = startLine(start - 1)
+            if (text.slice(previous, start).trim() === SANDBOX_COMMENT) start = previous
+          }
+        }
+        replace(start, item.range[flow ? 1 : 2], '')
+      }
+      const trailingComma = commaAt(sequence.items.length)
+      if (flow && kept === 0 && trailingComma) replace(trailingComma.offset, trailingComma.offset + 1, '')
+    },
     replaceName(row, name) {
       const source = row.get('name', true)?.srcToken
       if (!source) return
@@ -315,6 +377,65 @@ function patchSource(yaml, patch, text) {
       return result + text.slice(offset)
     },
   }
+}
+
+/** Reconcile the managed sandbox rows after the plugin lane has picked the Bot release. */
+export function reconcileSandboxPatch(yaml, text, available, log = () => {}) {
+  const patch = parsePatch(yaml, text, { allowOpaque: true, keepSourceTokens: true })
+  if (!patch) return null
+  const nodes = patchNodes(yaml, patch)
+  const { get } = nodes
+  const rows = patch.contents.items
+  const inserts = new Map()
+  const overrides = []
+  let oursOff = false
+  for (const row of rows) {
+    const insert = get(row, 'insert')
+    if (yaml.isSeq(insert)) {
+      const ours = insert.items.filter(plugin => get(plugin, 'id') === SANDBOX_ID && get(plugin, 'name') === SANDBOX_ADAPTER)
+      if (ours.length === 0) continue
+      inserts.set(row, { insert, ours })
+      oursOff ||= ours.some(plugin => get(plugin, 'disabled') === true)
+    } else {
+      const id = get(row, 'id')
+      const name = get(row, 'name')
+      if (id === 'sandbox' && (name === undefined || name === STOCK_SANDBOX)) overrides.push(row)
+      if (id === SANDBOX_ID && get(row, 'disabled') === true) oursOff = true
+    }
+  }
+
+  const ours = inserts.size > 0
+  const managed = new Set(overrides.filter(row => ours && yaml.isMap(row)
+    && row.items.length === 3 && row.get('name') === STOCK_SANDBOX && row.get('disabled') === true))
+  const own = overrides.length > managed.size
+  if (own) log("sandbox: the profile configures DSH's sandbox row; Automagik's ssh drop-in fix stays off")
+
+  const edit = patchSource(yaml, patch, text)
+  const removed = new Set()
+  if (own || (ours && !available && !oursOff)) {
+    for (const [row, { insert, ours }] of inserts) {
+      if (ours.length === insert.items.length && yaml.isMap(row) && row.items.length === 1) removed.add(row)
+      else edit.removeItems(insert, new Set(ours))
+    }
+  }
+  if (own || !available || oursOff) {
+    for (const row of managed) removed.add(row)
+    if (removed.size > 0) edit.removeItems(patch.contents, removed, row => inserts.has(row))
+    const updated = edit.finish()
+    if (updated === text) return null
+    if (!own && !available) log('sandbox: the Automagik adapter is unavailable; DSH uses its stock sandbox')
+    return updated
+  }
+
+  if (managed.size > 0) return null
+  const disable = { id: 'sandbox', name: STOCK_SANDBOX, disabled: true }
+  if (!ours) {
+    const adapter = patch.createNode({ insert: [{ id: SANDBOX_ID, name: SANDBOX_ADAPTER }] })
+    if (!patch.contents.flow) adapter.commentBefore = SANDBOX_COMMENT.slice(1)
+    rows.push(adapter)
+  }
+  rows.push(patch.createNode(disable))
+  return edit.finish()
 }
 
 /** Merge registrations by insert target and plugin id, and settings by override operation. */
