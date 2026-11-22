@@ -22,7 +22,7 @@ import { reopenPermissionChoice } from './permission-card.js'
 import { BotConnectors } from './connectors.js'
 import { ComputerView } from './computer.js'
 import { addStrings, t } from './i18n.js'
-import { nativeToolsZh } from './native-tools-copy.js'
+import { nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
 import { markOf as permissionMarkOf } from '../shared/permission-levels.js'
@@ -41,11 +41,9 @@ export function NativeToolsRow({ bot, roster, run, actions }) {
   if (permissionMarkOf(bot.model) !== 'acp-claude' || bot.nativeToolsBlock === 'multiuser') return null
   const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock]
   const on = blocked === undefined && bot.nativeTools === true
-  const hint = blocked !== undefined ? t(blocked) : on
-    ? t("In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.")
-    : t("Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Turning this on applies from the next conversation.")
+  const hint = t(blocked ?? (on ? nativeToolsCopy.on : nativeToolsCopy.off))
   return h(SwitchRow, {
-    label: t('Claude Code native tools'), hint, on, disabled: blocked !== undefined || Boolean(roster.readOnly),
+    label: t(nativeToolsCopy.label), hint, on, disabled: blocked !== undefined || Boolean(roster.readOnly),
     onChange: value => void run(actions.updateBot(bot.id, { nativeTools: value })),
   })
 }
