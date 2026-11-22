@@ -22,7 +22,7 @@ import { reopenPermissionChoice } from './permission-card.js'
 import { BotConnectors } from './connectors.js'
 import { ComputerView } from './computer.js'
 import { addStrings, t } from './i18n.js'
-import { nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
+import { nativeToolsCopy, nativeToolsZh, ompNativeToolsCopy } from './native-tools-copy.js'
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
 import { markOf as permissionMarkOf } from '../shared/permission-levels.js'
@@ -38,10 +38,13 @@ const NATIVE_TOOLS_HINTS = {
 }
 
 export function NativeToolsRow({ bot, roster, run, actions }) {
-  if (permissionMarkOf(bot.model) !== 'acp-claude' || bot.nativeToolsBlock === 'multiuser') return null
+  const mark = permissionMarkOf(bot.model ?? bot.appliedModel)
+  if ((mark !== 'acp-claude' && mark !== 'acp-omp') || bot.nativeToolsBlock === 'multiuser') return null
+  const copy = mark === 'acp-omp' ? ompNativeToolsCopy : nativeToolsCopy
   const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock]
-  const on = blocked === undefined && bot.nativeTools === true
-  const hint = t(blocked ?? (on ? nativeToolsCopy.on : nativeToolsCopy.off))
+  const on = blocked === undefined && bot.nativeTools === true && (bot.nativeToolsKept === undefined || bot.nativeToolsKept === mark)
+  const hint = blocked === undefined ? t(on ? copy.on : copy.off)
+    : mark === 'acp-omp' ? `${t(blocked)} ${t(ompNativeToolsCopy.blocked)}` : t(blocked)
   return h(SwitchRow, {
     details: true, label: t(nativeToolsCopy.label), hint, on, disabled: blocked !== undefined || Boolean(roster.readOnly),
     onChange: value => void run(actions.updateBot(bot.id, { nativeTools: value })),

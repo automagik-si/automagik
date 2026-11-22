@@ -65,6 +65,7 @@ const ownerInput = message => message.source?.kind === 'user' && message.source.
   && (message.source.rpcId === undefined || (typeof message.source.rpcId === 'string' && !message.source.rpcId.startsWith('im:')))
 
 const permitsNative = level => level?.sandbox === 'workspace-write' || level?.sandbox === 'danger-full-access'
+const OMP_TOOLS_OFF_TEXT = 'omp tried to use a tool while native tools are off, so this answer stopped.'
 
 const detailed = tool => (tool.rawInput !== undefined && tool.rawInput !== null && Object.keys(tool.rawInput).length > 0) || tool.permission !== undefined || tool.status !== 'pending'
 function settle(tool, ms) {
@@ -856,15 +857,12 @@ export class AcpAdapter extends LlmAdapter {
    * on when at least one key names it and none that names it says false. A throwing reader is off.
    * @param {any} agent this plugin's agent row
    * @param {string} sessionId the DSH Session
+   * @param {string} provider the route being started
    */
-  nativeOn(agent, sessionId) {
+  nativeOn(agent, sessionId, provider) {
     if (agent?.disableBuiltInTools !== true || !this.bridgeOn(agent, sessionId)) return false
     if (this.teamManaged()) {
-      if (agent !== this.agents.get('acp-claude')) return false
-      try {
-        const identity = this.botIdentity(sessionId)
-        return identity?.nativeToolsBlocked !== true && identity?.nativeTools === true
-      } catch { return false }
+      return agent === this.agents.get('acp-claude') && this.savedNativeOn(sessionId, provider)
     }
     let setting
     try { setting = this.nativeTools() } catch { return false }
@@ -883,6 +881,19 @@ export class AcpAdapter extends LlmAdapter {
     try {
       return levelOf(this.ctx.get?.('approval'), session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'), { failClosed })
     } catch { return undefined }
+  }
+
+  savedNativeOn(sessionId, provider, reuse = false) {
+    try {
+      const who = this.botIdentity(sessionId)
+      // The team stops an ON child when the person turns OFF. On reuse it
+      // supplies current eligibility without reading the saved switch again.
+      // Readers that only supply the switch still have to confirm ON.
+      const blocked = who?.nativeToolsBlocked
+      if (blocked === true || (!(reuse && blocked === false) && who?.nativeTools !== true)) return false
+      const kept = who.nativeToolsAgent
+      return kept === undefined || kept === provider
+    } catch { return false }
   }
 
   /**
@@ -1074,17 +1085,25 @@ export class AcpAdapter extends LlmAdapter {
     return this.endSession(sessionId, startingNative ? startupWhy : why, 'acp-claude')
   }
 
-  endSession(sessionId, why, provider) {
+  endOmpSession(sessionId, why, startupWhy) {
+    const live = this.live.get(sessionId)
+    if (!this.teamManaged() || live?.provider !== 'acp-omp' || live.nativeOff === true) return false
+    const startingNative = startupWhy !== undefined && this.starting.get(sessionId)?.provider === 'acp-omp'
+      && live.run?.promptEnded === undefined
+    return this.endSession(sessionId, startingNative ? startupWhy : why, 'acp-omp', state => state.nativeOff !== true)
+  }
+
+  endSession(sessionId, why, provider, matches = () => true) {
     if (provider === undefined) this.sessionFiles.clear(sessionId, { retire: false })
     const text = typeof why === 'string' && why.trim() !== '' ? why : HELD_TEXT
     const starting = this.starting.get(sessionId)
-    const stopStarting = starting !== undefined && (provider === undefined || starting.provider === provider)
+    const stopStarting = starting !== undefined && (provider === undefined || starting.provider === provider) && matches(starting)
     if (stopStarting) {
       starting.held ??= text
       starting.upload?.controller.abort()
     }
     const live = this.live.get(sessionId)
-    if (live === undefined || (provider !== undefined && live.provider !== provider)) return stopStarting
+    if (live === undefined || (provider !== undefined && live.provider !== provider) || !matches(live)) return stopStarting
     live.held = text
     live.open = false
     live.substitution = undefined
@@ -1229,9 +1248,13 @@ export class AcpAdapter extends LlmAdapter {
     }
     if (this.teamManaged() && ['sandbox/mode', 'permission/preset', 'approval/policy'].includes(event?.type)) {
       const live = this.live.get(session?.id)
-      if (live?.provider === 'acp-claude' && live.nativeManaged === true && live.native === true
+      const claudeOn = live?.provider === 'acp-claude' && live.nativeManaged === true && live.native === true
+      const ompOn = live?.provider === 'acp-omp' && live.nativeOff !== true
+      if ((claudeOn || ompOn)
         && ((event.type === 'sandbox/mode' && event.data?.mode === 'read-only') || !permitsNative(this.readLevel(session, true)))) {
-        this.endClaudeSession(session.id, 'This conversation is now Read only. Send a new message to continue.', NATIVE_TOOLS_CHANGED_TEXT)
+        const readOnly = 'This conversation is now Read only. Send a new message to continue.'
+        if (ompOn) this.endOmpSession(session.id, readOnly, NATIVE_TOOLS_CHANGED_TEXT)
+        else this.endClaudeSession(session.id, readOnly, NATIVE_TOOLS_CHANGED_TEXT)
       }
     }
     if (event?.type !== 'model/selection') return
@@ -1446,12 +1469,15 @@ export class AcpAdapter extends LlmAdapter {
       // If the bridge process exited and the adapter has yet to re-attach by the next turn,
       // start a new agent session with DSH's tools and replay the chat to it (#969).
       const managed = options.provider === 'acp-claude' && this.teamManaged()
-      const levelAtStart = () => this.readLevel(dshAgent?.session, managed)
+      const omp = agent.nativeSwitch === 'args'
+      const levelAtStart = () => this.readLevel(dshAgent?.session, managed || (omp && this.teamManaged()))
       const turnLevel = levelAtStart()
       const inputStart = turnStart(options.messages)
       const history = options.messages.slice(0, inputStart)
-      const inputs = managed ? options.messages.slice(inputStart).filter(message => !CONTEXT_KINDS.has(message.source?.kind)) : []
+      const inputs = managed || omp ? options.messages.slice(inputStart).filter(message => !CONTEXT_KINDS.has(message.source?.kind)) : []
       const requestedByOwner = dshAgent.session?.header?.origin !== 'subagent' && inputs.some(ownerInput)
+      const ompNativeAllowed = (reuse = false) => requestedByOwner && permitsNative(levelAtStart())
+        && this.savedNativeOn(sessionId, options.provider, reuse)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
       const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
       // Native-tools mode keeps the agent's own tools, so it keeps the hard ask rules too: the
@@ -1459,11 +1485,11 @@ export class AcpAdapter extends LlmAdapter {
       const native = managed
         ? live?.native === true && live.nativeManaged === true && requestedByOwner && permitsNative(turnLevel)
           && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.bridgeOn(agent, sessionId)
-        : this.nativeOn(agent, sessionId)
+        : this.nativeOn(agent, sessionId, options.provider)
       // An eligible owner turn replaces a managed OFF process when the saved switch is ON.
       const upgrade = managed && live !== undefined && live.native !== true && live.nativeManaged === true
         && requestedByOwner && permitsNative(turnLevel)
-        && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.nativeOn(agent, sessionId)
+        && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.nativeOn(agent, sessionId, options.provider)
       const hardAsks = (enabled, currentLevel, bridged) => typeof agent.hardAsk === 'function'
         && !((bridged ?? this.bridgeOn(agent, sessionId)) && agent.disableBuiltInTools === true && !enabled)
         && currentLevel?.full !== true
@@ -1530,6 +1556,14 @@ export class AcpAdapter extends LlmAdapter {
         this.end(sessionId, live, { preserveFiles: keepsFiles() })
         live = undefined
       }
+      // omp takes its tools from argv. Replace a child whose launch no longer fits this turn.
+      if (omp && live !== undefined && this.teamManaged()) {
+        const keep = live.nativeOff !== undefined && live.nativeOff === !ompNativeAllowed(live.nativeOff === false)
+        if (!keep) {
+          this.end(sessionId, live, { preserveFiles: keepsFiles() })
+          live = undefined
+        }
+      }
       if (live !== undefined) live.roleTurn = turn
       let fresh = false
       let crossing = false
@@ -1560,7 +1594,20 @@ export class AcpAdapter extends LlmAdapter {
           try {
             // The chat profile modes belong to this process's home, read once at its start: a
             // later spawn or a replaced agent object never changes what a running session asks.
-            const { profileModes, sessionFileMode, sessionFileEnabled, ...spec } = await agent.spawn(fileContext === undefined ? undefined : { sessionFiles: fileContext })
+            // omp's tool set is launch argv. Decide it after the startup awaits,
+            // so a permission change during startup applies to the first process.
+            const spawnOmpManaged = omp && this.teamManaged()
+            const nativeOff = spawnOmpManaged ? !ompNativeAllowed() : undefined
+            entry.nativeOff = state.nativeOff = nativeOff
+            const spawnContext = {
+              ...(fileContext === undefined ? {} : { sessionFiles: fileContext }),
+              ...(nativeOff === true ? { nativeOff: true } : {}),
+            }
+            const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
+            // omp's launch spec is synchronous and it has no bridge to prepare.
+            // Keep its policy decision and actual spawn in the same event-loop turn.
+            const { profileModes, sessionFileMode, sessionFileEnabled, ...spec } = omp ? launch : await launch
+            if (spawnOmpManaged && entry.held !== undefined) return yield* stopped(entry.held)
             state.profileModes = profileModes
             state.sessionFileMode = sessionFileMode
             state.sessionFileEnabled = sessionFileEnabled === true
@@ -1581,7 +1628,7 @@ export class AcpAdapter extends LlmAdapter {
             // choosing the bridge tools and starting the process that will use them.
             const spawnLevel = spawnManaged ? levelAtStart() : turnLevel
             const spawnNative = spawnManaged
-              ? requestedByOwner && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId)
+              ? requestedByOwner && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId, options.provider)
               : native
             const spawnAsks = spawnManaged ? hardAsks(spawnNative, spawnLevel, bridged) : asks
             state.native = spawnNative
@@ -1616,6 +1663,15 @@ export class AcpAdapter extends LlmAdapter {
                   ? { sessionMeta: { disableBuiltInTools: true } }
                   : spawnAsks ? { sessionMeta: agent.hardAsk() } : {}),
               dshTools: bridged,
+              ...(nativeOff === true ? {
+                refuseTools: true,
+                onForbiddenTool: () => {
+                  if (this.live.get(sessionId) === state && state.run === run) {
+                    this.endSession(sessionId, OMP_TOOLS_OFF_TEXT, options.provider,
+                      candidate => candidate === state || candidate === entry)
+                  }
+                },
+              } : {}),
               refresh: agent.refresh,
               onReady: state.bridge === undefined ? undefined : () => this.ready(agent, state),
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
@@ -1732,10 +1788,14 @@ export class AcpAdapter extends LlmAdapter {
       }
       // A refused model can leave the run alive with no prompt yet. Revalidate when its
       // eventual first prompt is ready, too. AgentRun sets promptEnded during its first prompt.
-      const firstNativePrompt = options.provider === 'acp-claude' && live.native === true && live.run.promptEnded === undefined
-      const startingNative = firstNativePrompt && live.nativeManaged === true
+      const firstClaudePrompt = options.provider === 'acp-claude' && live.native === true && live.run.promptEnded === undefined
+      const startingClaude = firstClaudePrompt && live.nativeManaged === true
+      const startingOmp = omp && live.nativeOff === false && live.run.promptEnded === undefined
       const stopForNativeChange = () => {
-        this.endClaudeSession(sessionId, NATIVE_TOOLS_CHANGED_TEXT)
+        if (startingOmp) {
+          this.endSession(sessionId, NATIVE_TOOLS_CHANGED_TEXT, options.provider,
+            candidate => candidate === entry || candidate === live)
+        } else this.endClaudeSession(sessionId, NATIVE_TOOLS_CHANGED_TEXT)
         return stopped(NATIVE_TOOLS_CHANGED_TEXT)
       }
       // The Session's model and effort, then its level as the agent's own permission mode, before every prompt.
@@ -1756,7 +1816,7 @@ export class AcpAdapter extends LlmAdapter {
         const why = `${agent.name} would not take ${options.model}${at}: ${reason}`
         return yield finish('error', why)
       }
-      const level = firstNativePrompt && (startingNative || this.teamManaged()) ? this.readLevel(dshAgent?.session, true)
+      const level = startingOmp || (firstClaudePrompt && (startingClaude || this.teamManaged())) ? this.readLevel(dshAgent?.session, true)
         : levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
       if (level === undefined) return yield* stopForNativeChange()
       const originalModes = agent.modeFor?.(level)
@@ -1837,7 +1897,7 @@ export class AcpAdapter extends LlmAdapter {
       // level that has changed, and a gate that lets go here must not let this turn through.
       const late = entry.held ?? live.held ?? await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
       if (!uploadValid()) return yield uploadStopped()
-      if (uploads === undefined && !startingNative) started()
+      if (uploads === undefined && !startingClaude && !startingOmp) started()
       if (late !== undefined) {
         this.endSession(sessionId, late)
         return yield* stopped(late)
@@ -1907,8 +1967,8 @@ export class AcpAdapter extends LlmAdapter {
       }
       // The first prompt is the last point where startup can lose its tool authority. The
       // permission mode, bridge and gates above can all wait after the ON process exists.
-      const managedNow = firstNativePrompt && this.teamManaged()
-      if (startingNative || managedNow) {
+      const managedClaudeNow = firstClaudePrompt && this.teamManaged()
+      if (startingOmp || startingClaude || managedClaudeNow) {
         const held = entry.held ?? live.held
         if (held !== undefined) return yield* stopped(held)
         if (options.signal?.aborted) {
@@ -1916,8 +1976,10 @@ export class AcpAdapter extends LlmAdapter {
           return yield STOPPED()
         }
         // Team registration during startup invalidates the standalone hidden ON grant.
-        if (!startingNative || !managedNow || !permitsNative(this.readLevel(dshAgent?.session, true))
-          || !this.nativeOn(agent, sessionId)) return yield* stopForNativeChange()
+        const allowed = startingOmp ? this.teamManaged() && ompNativeAllowed()
+          : startingClaude && managedClaudeNow && permitsNative(this.readLevel(dshAgent?.session, true))
+            && this.nativeOn(agent, sessionId, options.provider)
+        if (!allowed) return yield* stopForNativeChange()
       }
       started()
       live.replay = undefined

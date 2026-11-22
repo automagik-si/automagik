@@ -12,8 +12,11 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { FOLDER, loadDictionaries } from './dictionaries.mjs'
+import { ompNativeToolsCopy } from '../../bots-dsh/src/client/native-tools-copy.js'
 
 const OMNI_UI = 'omni-ui'
+// #1564 approved this exact wording for the Bot and its file sandbox.
+const APPROVED_OMP_HINT = 'Na conversa dele com você, o omp usa as próprias ferramentas. Elas rodam fora do sandbox de arquivos do Automagik. Desligar encerra na hora a sessão em andamento.'
 const PLACEHOLDER = /\{(\w+)\}/g
 const ARTICLE = '(?:o|a|os|as|do|da|dos|das|no|na|nos|nas|ao|à|aos|às|pelo|pela|num|numa|dum|duma|um|uma)'
 
@@ -85,6 +88,8 @@ export async function checkCopy({ folder = FOLDER, reference, omni } = {}) {
       }
       if (en !== undefined && placeholders(en) !== placeholders(text)) findings.push(`${ns}:${key}: drops or adds a placeholder ("${text}")`)
       for (const [rule, pattern] of RULES) {
+        if (ns === OMNI_UI && key === ompNativeToolsCopy.on && text === APPROVED_OMP_HINT
+            && (rule === 'uses a gendered pronoun' || rule === 'says sandbox')) continue
         const hit = text.match(pattern)
         if (hit) findings.push(`${ns}:${key}: ${rule} ("${hit[0]}" in "${text}")`)
       }

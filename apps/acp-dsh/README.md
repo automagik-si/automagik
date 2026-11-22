@@ -201,6 +201,12 @@ that makes your harness lose all your power."
   use the DSH tool path. Read only blocks the switch and the launch. Turning it off ends
   the Bot's Claude Code processes. The Bot team's switch supersedes hidden config for
   the entire host once the team has registered.
+- **omp Bot teams.** The **omp native tools** switch applies on the next owner message in the
+  Bot's direct chat, subject to the permission checks. ON keeps `omp acp`. OFF is chat only,
+  with no DSH bridge. Turning it off stops that Bot's starting and live ON omp processes.
+  If native tools become unavailable before an ON process receives its first prompt, the turn
+  stops and the owner can send again. Existing eligible omp Bots keep their ON choice
+  for omp in a one-time migration.
 - **Standalone ACP.** `nativeTools` in this plugin's config (the `acpAgents` service's plugin,
   `acp-dsh`), hidden from settings forms like `dshTools`. Absent (the default) or `false` is
   today's behaviour for everyone. `true` turns it on for every Claude Code Session; an object
@@ -326,8 +332,15 @@ differs from Claude Code and Codex:
   fails the turn. A table agent with no mode for DSH's level would say so once in the chat.
 - **No DSH tool bridge.** DSH's tools do not reach them, even with `dshTools: true`: their
   tool naming over ACP is not proven the way Claude Code's was, and an unrecognised bridge
-  call would draw two cards and ask twice. They keep their own tools; the transcript replay on
-  a model switch reaches them like any agent.
+  call would draw two cards and ask twice. The transcript replay on a model switch reaches them
+  like any agent.
+- **omp with native tools off.** In a team, an OFF chat starts as
+  `omp acp --no-tools --no-extensions --no-lsp --config <acp-state>/omp/native-off.yml`.
+  The verified per-launch overlay disables the settings that can add tools back, and the child
+  drops `PI_AUTO_QA`. The overlay leaves omp's own settings and sign-in in place. A launch with
+  an unusable overlay fails. ACP refuses permission requests and ends the process at the first
+  tool notification. The flags and settings were checked against omp 19.1.0. A custom or plugin
+  tool can act before its first notification reaches this backstop.
 
 `dshTools` (live, no schema default) is the bridge, its DSH approval, the drift detector and live
 switching above. Absent means the per-agent default. `acp-claude` bridges because its adapter can

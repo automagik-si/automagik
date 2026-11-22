@@ -85,14 +85,16 @@ export function install(rt) {
 
   function endNativeTools(bot) {
     const acp = ctx.get('acpAgents')
-    if (typeof acp?.endClaudeSession !== 'function') return
+    if (acp == null) return
     const sessions = [rt.chatOf(bot.id)]
     for (const owners of [rt.groupOwners, rt.pastOwners, rt.taskOwners]) {
       for (const [id, owner] of owners) if (owner.botId === bot.id) sessions.push(id)
     }
     for (const id of sessions) {
-      try { acp.endClaudeSession(id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
+      try { acp.endClaudeSession?.(id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
       catch (error) { rt.warn('omni-ui: Claude Session %s could not be ended: %s', id, error) }
+      try { acp.endOmpSession?.(id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
+      catch (error) { rt.warn('omni-ui: omp Session %s could not be ended: %s', id, error) }
     }
   }
 
@@ -110,19 +112,27 @@ export function install(rt) {
       if (block !== undefined) throw refusal(NATIVE_TOOLS_BLOCK_TEXT[block])
       if (rt.botOf(id) !== bot) throw refusal('The Bot team changed. Try again.')
     }
-    const previous = bot.nativeTools === true
-    if (previous === on && !pending.has(bot)) return bot
+    const previous = bot.nativeTools
+    const kept = bot.nativeToolsKept
+    if ((previous === true) === on && kept === undefined && !pending.has(bot)) return bot
     const change = {}
     pending.set(bot, change)
     if (!on) {
       delete bot.nativeTools
+      delete bot.nativeToolsKept
       endNativeTools(bot)
     }
     try {
       await rt.save({ required: true, ...(on ? { enableNativeTools: bot } : {}) })
-      if (on && pending.get(bot) === change && rt.botOf(id) === bot) bot.nativeTools = true
+      if (on && pending.get(bot) === change && rt.botOf(id) === bot) {
+        bot.nativeTools = true
+        delete bot.nativeToolsKept
+      }
     } catch (error) {
-      if (!on && previous && pending.get(bot) === change) bot.nativeTools = true
+      if (!on && pending.get(bot) === change) {
+        if (previous !== undefined) bot.nativeTools = previous
+        if (kept !== undefined) bot.nativeToolsKept = kept
+      }
       throw error
     } finally {
       if (pending.get(bot) === change) pending.delete(bot)

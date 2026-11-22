@@ -39087,7 +39087,15 @@ var nativeToolsCopy = {
   on: "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.",
   off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session."
 };
+var ompNativeToolsCopy = {
+  on: "In its own chat with you, omp uses its own tools. They run outside Automagik's file sandbox. Turning this off stops its running session at once.",
+  off: "With this off, omp has no tools at all, so this Bot can only chat. Groups, tasks and scheduled runs are always like this. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.",
+  blocked: "Here omp has no tools, so this Bot can only chat."
+};
 var nativeToolsZh = {
+  [ompNativeToolsCopy.on]: "在它与你的单独对话中，omp 使用它自己的工具。这些工具在 Automagik 的文件沙盒之外运行。关闭后会立即停止它正在运行的会话。",
+  [ompNativeToolsCopy.off]: "关闭后，omp 没有任何工具，此 Bot 只能聊天。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
+  [ompNativeToolsCopy.blocked]: "在这里 omp 没有任何工具，此 Bot 只能聊天。",
   [nativeToolsCopy.label]: "原生工具",
   [nativeToolsCopy.on]: "在它与你的单独对话中，Claude Code 使用它自己的工具（Bash、Read、Edit…）。这些工具在 Automagik 的文件沙盒之外运行；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。",
   [nativeToolsCopy.off]: "Claude Code 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
@@ -39109,10 +39117,12 @@ var NATIVE_TOOLS_HINTS = {
   "level-unknown": "Not available: the permission level of this Bot's chat could not be read."
 };
 function NativeToolsRow({ bot, roster, run: run3, actions }) {
-  if (markOf(bot.model) !== "acp-claude" || bot.nativeToolsBlock === "multiuser") return null;
+  const mark2 = markOf(bot.model ?? bot.appliedModel);
+  if (mark2 !== "acp-claude" && mark2 !== "acp-omp" || bot.nativeToolsBlock === "multiuser") return null;
+  const copy2 = mark2 === "acp-omp" ? ompNativeToolsCopy : nativeToolsCopy;
   const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock];
-  const on = blocked === void 0 && bot.nativeTools === true;
-  const hint3 = t(blocked ?? (on ? nativeToolsCopy.on : nativeToolsCopy.off));
+  const on = blocked === void 0 && bot.nativeTools === true && (bot.nativeToolsKept === void 0 || bot.nativeToolsKept === mark2);
+  const hint3 = blocked === void 0 ? t(on ? copy2.on : copy2.off) : mark2 === "acp-omp" ? `${t(blocked)} ${t(ompNativeToolsCopy.blocked)}` : t(blocked);
   return (0, import_react98.createElement)(SwitchRow, {
     details: true,
     label: t(nativeToolsCopy.label),

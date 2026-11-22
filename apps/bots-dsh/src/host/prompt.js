@@ -66,6 +66,9 @@ export function install(rt) {
       if (rt.nativeToolsEligible !== undefined) Object.defineProperties(identity, {
         nativeTools: { get: () => rt.nativeToolsFor(sessionId) },
         nativeToolsBlocked: { get: () => !rt.nativeToolsEligible(sessionId) },
+        ...(typeof bot.nativeToolsKept === 'string' ? {
+          nativeToolsAgent: { get: () => rt.nativeToolsEligible(sessionId) ? bot.nativeToolsKept : undefined },
+        } : {}),
       })
       return identity
     })
