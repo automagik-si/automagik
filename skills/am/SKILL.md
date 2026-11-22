@@ -38,6 +38,25 @@ am restart <bot>          # its agent again in its pane's place, on the same con
 am restart <bot> --fresh  # the same, on a new conversation
 ```
 
+From the lead's live HC terminal, `am start <bot> --project <absolute dir on M> --machine M`
+can start a fresh Claude Code conversation with that terminal as its hc parent. The pane
+outlives the lead, and its launch briefing gives the exact address for the result or blocker.
+As with `hc run --on`, M's core (any pane there) can send to, get, read and wait on the lead
+terminal. hc queues its own exit and blocked notes across a lost line. An explicit send can
+fail or have an unclear outcome. Save the result in the project, say its path in the pane,
+and confirm it did not arrive before retrying.
+
+am cannot see M's inbound peers. A peer named for the lead's core ID or a later alias change
+on M can redirect reports. hc resolves core IDs as names too, so a link change between a check
+and the next command can redirect that command. A session-specific hc wrapper on the pane's
+PATH can select another socket. Controllers with separate ledgers can start the same bot twice.
+
+If am cannot verify the route, use `hc run --bg --on M` from the origin HC terminal with hc's
+default parent and explicit first-task and report instructions. This is also the alternative
+for holder placement and linked restarts from an HC terminal. A verified already-running
+start reports the pane's current parent. `hc exec --on M am start …` gives the bot no return
+route, and am cannot detect that case.
+
 `am restart`:
 
 - A Bot that is working or blocked is queued until it is next idle. `am restart --queued` lists the
