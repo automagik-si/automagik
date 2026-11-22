@@ -260,11 +260,12 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
   const rows = teamRows(team)
   const { art, duo } = useArtSizes(ref, skin, rows.length)
   const edges = useScrollEdges(ref, rows.length)
-  const press = row => (onOpen ? () => onOpen(row) : undefined)
-  const status = row => h(Status, { status: row.status, worded, quiet })
+  const press = row => (onOpen && !row.bot?.remote ? () => onOpen(row) : undefined)
+  // A remote row's tag says why it is inert, so its status is the ring alone: the name keeps its room.
+  const status = row => h(Status, { status: row.status, worded: row.bot?.remote ? [] : worded, quiet: row.bot?.seat ? [] : quiet })
   const button = (row, className, extra, ...children) => h('button', {
     key: row.key, type: 'button', className: classes('lb-row', className), 'data-kind': row.kind, 'data-id': row.id,
-    'aria-current': row.key === current ? 'page' : undefined, onClick: press(row), onMouseEnter: nameIfCut,
+    'aria-current': row.key === current ? 'page' : undefined, onClick: press(row), onMouseEnter: row.bot?.remote ? undefined : nameIfCut,
     onContextMenu: onMenu ? (event) => { event.preventDefault(); onMenu(row, event) } : undefined, ...extra,
   }, ...children)
   const draw = (row) => {
@@ -272,10 +273,15 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
     if (row.kind === 'bot') {
       // The row's own status may be silent (a chat says it); the character still plays the Bot's.
       const state = row.bot.state ?? stateOfStatus(statusOr(row.bot.status))
-      return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), null,
+      const tag = row.bot.remote ? t('Needs the scoped link') : row.bot.seat ? row.bot.projectTag : row.bot.roleTag
+      const extra = row.bot.remote ? {
+        'aria-disabled': true,
+        title: t('This Bot is on {machine}. It opens here once the link to that computer is scoped.', { machine: row.bot.machine }),
+      } : null
+      return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), extra,
         h('span', { className: 'lb-art' }, renderArt(row.bot, art, state)),
         h('span', { className: 'lb-name' }, row.name),
-        row.bot.roleTag ? h('span', { className: 'bt-tag' }, row.bot.roleTag) : null,
+        tag ? h('span', { className: 'bt-tag' }, tag) : null,
         row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,
         renderEnd ? renderEnd(row) : null,
         status(row))

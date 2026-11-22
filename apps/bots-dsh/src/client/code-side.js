@@ -11,7 +11,7 @@ import { call } from './api.js'
 import { isRetired } from './viewer.js'
 import { t } from './i18n.js'
 import { FaceSwitch, TwoPartSwitch } from './left-bar-faces.js'
-import { botRowOf, codeHasPane, paneFor, prunePanes, statusKey, stillThere, togglePane } from './code-side-model.js'
+import { botRowOf, codeHasPane, paneFor, prunePanes, seatPaneFor, statusKey, stillThere, togglePane } from './code-side-model.js'
 import { PANE_CHUNK, loadPane } from './code-side-lazy.js'
 import { useCodeRowHerdr } from './work-code-switch.js'
 
@@ -21,6 +21,7 @@ const NO_STATE = {
   side: 'team', face: 'chat', botId: null, seat: false, tree: null, loading: false, error: null, loadedAt: 0,
   selected: null, beside: [], refused: null, barSelected: null, barBeside: [], barRefused: null,
   start: null,
+  seatOrigin: null, seatTerminal: null,
 }
 
 // One store for the window, as the rest of the team's client uses.
@@ -154,17 +155,17 @@ export async function startBot({ id, name, folder = null, launch = null, core = 
  * and the same pane: the seat renders the Code body itself, so the conversation body is not
  * registered underneath it.
  */
-export async function openTerminal(botId, { seat = false } = {}) {
-  set({ face: 'terminal', botId, seat, ...(state.selected?.botId === botId ? {} : seatPanes([])) })
+export async function openTerminal(botId, { seat = false, terminal = null } = {}) {
+  set({ face: 'terminal', botId, seat, seatTerminal: terminal, ...seatPanes([]) })
   const tree = await loadTree({ fresh: true })
-  if (!tree || state.botId !== botId || state.face !== 'terminal' || state.seat !== seat) return
-  const pane = paneFor(tree, botId)
+  if (!tree || state.botId !== botId || state.face !== 'terminal' || state.seat !== seat || state.seatTerminal !== terminal) return
+  const pane = seat ? seatPaneFor(tree, botId, terminal) : paneFor(tree, botId)
   if (pane) selectPane(pane)
 }
 
 /** Flip the view back to the chat; the terminal stream closes with the pane. */
 export function closeTerminal() {
-  set({ face: 'chat', botId: null, seat: false, ...seatPanes([]) })
+  set({ face: 'chat', botId: null, seat: false, seatTerminal: null, ...seatPanes([]) })
 }
 
 /** Choose one tree row's pane (or clear it), without leaving the Code face. */
@@ -176,19 +177,21 @@ export function selectPane(selected, { beside = false } = {}) {
 }
 
 /** The flip's state for one Bot, as the chat header's or the seat's Chat / Terminal switch takes it. */
-export function useCodeFace(botId, { seat = false } = {}) {
+export function useCodeFace(botId, { seat = false, terminal = null } = {}) {
   const current = useSyncExternalStore(storeSubscribe, snapshot, snapshot)
   return {
     face: current.face === 'terminal' && current.botId === botId && current.seat === seat ? 'terminal' : 'chat',
+    seatOrigin: current.seatOrigin,
+    terminalMissing: seat && !current.loading && !seatPaneFor(current.tree, botId, terminal),
     // Whether a Bot has a pane is the renderer's own answer, read when Terminal is pressed:
     // the switch never fetches the tree or the chunk on its own.
-    onFace: (face) => { if (face === 'terminal') void openTerminal(botId, { seat }); else closeTerminal() },
+    onFace: (face) => { if (face === 'terminal') void openTerminal(botId, { seat, terminal }); else closeTerminal() },
   }
 }
 
 /** The open Bot's switch, wired to the flip: the view's entry to Code mode. */
 export function BotFaceSwitch({ bot }) {
-  const code = useCodeFace(bot?.id, { seat: true })
+  const code = useCodeFace(bot?.id, { seat: true, terminal: bot?.terminal })
   return bot?.seat === true ? h(FaceSwitch, { face: code.face, onFace: code.onFace }) : null
 }
 
@@ -197,7 +200,7 @@ export function useCodeSide() {
 }
 
 export function setCodeSide(side) {
-  set({ side, ...(side === 'team' ? barPanes([]) : {}) })
+  set({ side })
   if (side === 'code') void loadTree({ fresh: true })
 }
 
@@ -213,7 +216,7 @@ export function CodeSideSwitch({ current, onSelect }) {
 }
 
 /** A root panel overlays the retained Session or seat panel, with its own terminal selection. */
-export function codePanelNavigation(layout) {
+export function codePanelNavigation(layout, { seatPanel, seatKey, restoreSeat } = {}) {
   let previous = null
   const active = () => layout.panelInfo.getSnapshot().activePanelId
   return {
@@ -226,20 +229,33 @@ export function codePanelNavigation(layout) {
         next = barPanes(list, refused)
       }
       if (active() !== CODE_PANEL) {
-        previous = active()
+        const panel = active()
+        previous = { panel, seat: panel === seatPanel ? seatKey?.() : null }
         layout.selectPanel(CODE_PANEL)
       }
-      set(next)
+      set({ ...next, seatOrigin: null })
+    },
+    reshow(botId) {
+      const origin = state.seatOrigin
+      if (origin?.botId !== botId) return
+      set({ ...barPanes(origin.panes), seatOrigin: null })
+      layout.selectPanel(CODE_PANEL)
     },
     close() {
       if (active() === CODE_PANEL) {
-        try { layout.selectPanel(previous) } catch { layout.selectPanel(null) }
+        try {
+          const panel = previous?.panel ?? null
+          layout.selectPanel(panel === seatPanel && !restoreSeat?.(previous?.seat) ? null : panel)
+        } catch { layout.selectPanel(null) }
       }
       set(barPanes([]))
     },
   }
 }
 
+export function clearSeatOrigin() {
+  if (state.seatOrigin) set({ seatOrigin: null })
+}
 
 /**
  * The body of the Terminal face, for a conversation (registered below) and for a seat's panel
@@ -281,14 +297,25 @@ function CodeTreeHerdr({ render }) {
   return render(useCodeRowHerdr())
 }
 
-export function CodeMainPanel({ onBack }) {
+export function CodeMainPanel({ onBack, openSeat, useSeatRoster = () => ({ seats: [] }) }) {
   const current = useCodeSide()
+  const { seats } = useSeatRoster()
+  const seatForPane = (botId, terminal) => seats.find(seat => seat.id === botId && seat.machine == null && seat.terminal === terminal)
+  const openSeatFace = (botId, terminal) => {
+    const seat = seatForPane(botId, terminal)
+    if (!seat || !openSeat) return
+    set({ seatOrigin: { botId, panes: panesOf(state.barSelected, state.barBeside) } })
+    openSeat(seat, { fromCode: true })
+  }
   return h('div', { className: 'bt-seat', 'data-code-panel': '' },
     h('header', { className: 'bt-seat-head' },
       h('button', { type: 'button', className: 'bt-seat-back', 'aria-label': t('Back'), title: t('Back'), onClick: onBack }, '←')),
     h('div', { className: 'bt-seat-body' },
       h(CodeRenderer, { current, render: pane => h('section', { className: 'cs-host' },
-        h(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, beside: current.barBeside, refused: current.barRefused, loading: current.loading })) })))
+        h(pane.CodeTerminal, {
+          tree: current.tree, selected: current.barSelected, beside: current.barBeside, refused: current.barRefused,
+          loading: current.loading, code: { ...codeApi, seatForPane, openSeatFace, FaceSwitch },
+        })) })))
 }
 
 function CodeRenderer({ current, render, showLoading }) {

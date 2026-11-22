@@ -1,4 +1,6 @@
-import { createServer } from 'node:net'
+import { EventEmitter } from 'node:events'
+import { syncBuiltinESMExports } from 'node:module'
+import net, { createServer } from 'node:net'
 import { join } from 'node:path'
 
 export function listenForCoreStatus(t, path) {
@@ -32,5 +34,31 @@ export function coreProbeFixture(t, root) {
     AUTOMAGIK_HERDR_TEST_ROOTS: root,
     AUTOMAGIK_HERDR_CORE_SOCKET: path,
     HC_SOCKET: '',
+  }
+}
+
+/** Answer server.status in memory when the test exercises the framed subprocess, not the socket. */
+export function coreProbeStandIn(t, root) {
+  const path = join(root, 'core.sock')
+  const requests = []
+  const mock = t.mock.method(net, 'createConnection', (candidate) => {
+    if (candidate !== path) throw new Error('unexpected core socket: ' + candidate)
+    const socket = new EventEmitter()
+    socket.destroy = () => {}
+    socket.write = (line) => {
+      const request = JSON.parse(line)
+      requests.push(request)
+      const answer = { jsonrpc: '2.0', id: request.id, result: { core: { id: 'core-test' } } }
+      if (request.method === 'server.status') socket.emit('data', Buffer.from(JSON.stringify(answer) + '\n'))
+      else socket.emit('close')
+    }
+    queueMicrotask(() => socket.emit('connect'))
+    return socket
+  })
+  syncBuiltinESMExports()
+  t.after(() => { mock.mock.restore(); syncBuiltinESMExports() })
+  return {
+    env: { AUTOMAGIK_HERDR_TEST_ROOTS: root, AUTOMAGIK_HERDR_CORE_SOCKET: path, HC_SOCKET: '' },
+    requests,
   }
 }

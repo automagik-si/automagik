@@ -12010,6 +12010,8 @@ var ZH = {
   "Code: open this Bot’s folder in Herdr": "代码：在 Herdr 中打开这个 Bot 的文件夹",
   "Open Herdr": "打开 Herdr",
   "Open in Herdr": "在 Herdr 中打开",
+  "Needs the scoped link": "需要限定范围的连接",
+  "This Bot is on {machine}. It opens here once the link to that computer is scoped.": "此 Bot 在 {machine} 上。为该电脑设置限定范围的连接后，即可在此打开。",
   "Team or Code": "团队或代码",
   "Code: open Herdr": "代码：打开 Herdr",
   "Opening Herdr…": "正在打开 Herdr…",
@@ -15347,6 +15349,10 @@ function paneFor(tree, botId) {
   if (bot.workers.length > 0) return { botId: bot.id, worker: bot.workers[0].terminal };
   return null;
 }
+function seatPaneFor(tree, botId, terminal) {
+  const bot = botRowOf(tree, botId);
+  return typeof terminal === "string" && bot?.terminal?.id === terminal ? { botId, worker: null } : null;
+}
 function stillThere(selected, tree) {
   if (!selected || !tree?.projects) return null;
   const bot = botRowOf(tree, selected.botId);
@@ -15825,7 +15831,7 @@ function createPaneHub() {
     fail
   };
 }
-function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${botId}:${worker ?? "seat"}` }) {
+function TerminalPane({ botId, worker, title, refusal, hub, faces, paneKey = `${botId}:${worker ?? "seat"}` }) {
   const host = (0, import_react3.useRef)(null);
   const [standaloneHub] = (0, import_react3.useState)(() => hub ? null : createPaneHub());
   const stream = hub ?? standaloneHub;
@@ -16099,6 +16105,7 @@ function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${botId}:
       "div",
       { className: "cs-pane-head" },
       (0, import_react3.createElement)("span", { className: "cs-pane-title", title }, title),
+      faces,
       (0, import_react3.createElement)("span", { className: "cs-pane-note", role: "status", "data-mode": mode }, stateWord),
       refusal ? (0, import_react3.createElement)("span", { className: "cs-paste-note", role: "status", "data-wrap": "" }, refusal) : resumeNote === "paused" ? (0, import_react3.createElement)("span", { className: "cs-paste-note", role: "status" }, t("Typing paused after 60 s idle. Press any key to resume")) : resumeNote === "back" ? (0, import_react3.createElement)("span", { className: "cs-paste-note", role: "status" }, t("Typing is back: type again")) : pasteNote ? (0, import_react3.createElement)("span", { className: "cs-paste-note", role: "status" }, pasteNote === "controls-stripped" ? t("Control characters were removed from the paste") : t("Line breaks were removed from the paste")) : null,
       retryable ? (0, import_react3.createElement)("button", { type: "button", className: "cs-btn", onClick: stream.reconnect }, t("Reconnect")) : null
@@ -16154,6 +16161,7 @@ function herdrAction(herdr, botId) {
     "aria-label": t("Open in Herdr"),
     title: t("Code: open this Bot’s folder in Herdr"),
     disabled: herdr.busy,
+    onPointerEnter: herdr.refresh,
     onClick: (event) => {
       event.stopPropagation();
       herdr.openRow(botId);
@@ -16204,7 +16212,7 @@ function CodeTree({ current, onSelect, sidebar = false, herdr, newControl = null
           status: bot.status,
           current: isCurrent(bot.id),
           note: sidebar ? bot.agent ?? (bot.main ? t("lead") : null) : bot.main ? t("lead") : null,
-          onClick: (options) => onSelect(paneFor(tree, bot.id) ?? { botId: bot.id, worker: null }, options),
+          onClick: (options) => onSelect({ botId: bot.id, worker: null }, options),
           action: canOpenRow ? herdrAction(herdr, bot.id) : null
         }),
         bot.workers.map((worker) => (0, import_react3.createElement)(TreeRow, {
@@ -16232,7 +16240,7 @@ function CodeTree({ current, onSelect, sidebar = false, herdr, newControl = null
     treeRows
   );
 }
-function CodeTerminal({ tree, selected, beside = [], refused, loading }) {
+function CodeTerminal({ tree, selected, beside = [], refused, loading, code }) {
   const [hub] = (0, import_react3.useState)(createPaneHub);
   const panes = [];
   for (const pane of [selected, ...beside].slice(0, MAX_PANES)) {
@@ -16249,7 +16257,10 @@ function CodeTerminal({ tree, selected, beside = [], refused, loading }) {
     loading ? t("Reading this computer’s team…") : t("No terminal for this Bot yet")
   );
   const refusal = refused && (onMac() ? t("Four terminals are shown: {names}. ⌘-click one of them to close it, then add another.", { names: refused.join(", ") }) : t("Four terminals are shown: {names}. Ctrl-click one of them to close it, then add another.", { names: refused.join(", ") }));
-  return (0, import_react3.createElement)("div", { className: "cs-panes", "data-count": panes.length }, panes.map(({ botId, worker, key, title }, index) => (0, import_react3.createElement)(TerminalPane, { key, paneKey: key, hub, botId, worker, title, refusal: index === 0 ? refusal : null })));
+  return (0, import_react3.createElement)("div", { className: "cs-panes", "data-count": panes.length }, panes.map(({ botId, worker, key, title, terminal }, index) => {
+    const faces = worker == null && code?.seatForPane?.(botId, terminal) ? (0, import_react3.createElement)(code.FaceSwitch, { face: "terminal", onFace: () => code.openSeatFace(botId, terminal) }) : null;
+    return (0, import_react3.createElement)(TerminalPane, { key, paneKey: key, hub, botId, worker, title, faces, refusal: index === 0 ? refusal : null });
+  }));
 }
 function CodeBody({ code }) {
   const current = (0, import_react3.useSyncExternalStore)(code.subscribe, code.snapshot, code.snapshot);

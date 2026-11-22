@@ -41,7 +41,7 @@ export const MACHINE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 /** Per-Bot fields only the home file may set; a repo file's are ignored (Threat model). */
 export const HOME_BOT_FIELDS = Object.freeze(['folder', 'machine', 'dsh'])
 /** Top-level fields only the home file may set; never read from a repo file. */
-export const HOME_FIELDS = Object.freeze(['projects', 'shown'])
+export const HOME_FIELDS = Object.freeze(['projects', 'shown', 'front'])
 
 /**
  * Never in either file (RFC 0014): memory, rooms, schedules, secrets, Sessions, photos,
@@ -121,6 +121,16 @@ function shownProblem(entry) {
   return null
 }
 
+function frontProblem(front) {
+  if (!isObject(front)) return 'expected an object'
+  if (front.project !== null && (typeof front.project !== 'string' || !/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(front.project))) {
+    return 'project must be an absolute path or null'
+  }
+  if (!isBotId(front.bot)) return 'bot is not a Bot id'
+  if (front.machine !== undefined && (typeof front.machine !== 'string' || !MACHINE_NAME.test(front.machine))) return 'machine is not a machine name'
+  return null
+}
+
 // How a message names an entry: `bots[2] (b-abcdefghij)`, `projects[0] (/srv/app)`, so the
 // person can find it in the file.
 const entryName = (list, entry, i, key) => {
@@ -172,6 +182,13 @@ export function parseRegistry(text, { kind } = {}) {
       if (bots.length < entry.bots.length) warnings.push(`${entryName('shown', entry, i, 'project')}: bots: an id that is not a Bot id is left out`)
       return { ...entry, bots }
     }).filter(Boolean)
+    if (file.front !== undefined) {
+      const why = frontProblem(file.front)
+      if (why) {
+        warnings.push(`front: ${why}; left out`)
+        delete file.front
+      }
+    }
   }
   const bots = []
   file.bots.forEach((b, i) => {
@@ -259,6 +276,10 @@ export function checkRegistry(file, { kind, before = null } = {}) {
     if (file.name !== undefined && typeof file.name !== 'string') errors.push('name is not text')
     if (file.categories !== undefined && !Array.isArray(file.categories)) errors.push('categories is not a list')
   } else {
+    if (file.front !== undefined) {
+      const why = frontProblem(file.front)
+      if (why) errors.push(`front: ${why}`)
+    }
     if (file.projects !== undefined) {
       if (!Array.isArray(file.projects)) errors.push('projects is not a list')
       else {

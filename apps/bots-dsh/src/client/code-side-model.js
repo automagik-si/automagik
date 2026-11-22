@@ -29,6 +29,11 @@ export function paneFor(tree, botId) {
   return null
 }
 
+export function seatPaneFor(tree, botId, terminal) {
+  const bot = botRowOf(tree, botId)
+  return typeof terminal === 'string' && bot?.terminal?.id === terminal ? { botId, worker: null } : null
+}
+
 /** A selection that still names a pane in `tree`, else null. */
 export function stillThere(selected, tree) {
   if (!selected || !tree?.projects) return null

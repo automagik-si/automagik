@@ -3105,6 +3105,8 @@ var ZH = {
   "Code: open this Bot’s folder in Herdr": "代码：在 Herdr 中打开这个 Bot 的文件夹",
   "Open Herdr": "打开 Herdr",
   "Open in Herdr": "在 Herdr 中打开",
+  "Needs the scoped link": "需要限定范围的连接",
+  "This Bot is on {machine}. It opens here once the link to that computer is scoped.": "此 Bot 在 {machine} 上。为该电脑设置限定范围的连接后，即可在此打开。",
   "Team or Code": "团队或代码",
   "Code: open Herdr": "代码：打开 Herdr",
   "Opening Herdr…": "正在打开 Herdr…",
@@ -24391,6 +24393,10 @@ function paneFor(tree, botId) {
   if (bot.workers.length > 0) return { botId: bot.id, worker: bot.workers[0].terminal };
   return null;
 }
+function seatPaneFor(tree, botId, terminal2) {
+  const bot = botRowOf(tree, botId);
+  return typeof terminal2 === "string" && bot?.terminal?.id === terminal2 ? { botId, worker: null } : null;
+}
 function stillThere(selected, tree) {
   if (!selected || !tree?.projects) return null;
   const bot = botRowOf(tree, selected.botId);
@@ -24495,9 +24501,8 @@ function codeNotices(result) {
   if (typeof result.space?.error === "string" && result.space.error !== "") notes.push({ kind: "space", label: t("Herdr says: {message}", { message: result.space.error }) });
   return notes;
 }
-function createCodeSwitch(bridge, { focused = () => true } = {}) {
-  let state2 = { ...NO_STATE, front: focused() };
-  let footers = 0;
+function createCodeSwitch(bridge) {
+  let state2 = NO_STATE;
   const listeners3 = /* @__PURE__ */ new Set();
   const set2 = (patch) => {
     state2 = { ...state2, ...patch };
@@ -24510,13 +24515,13 @@ function createCodeSwitch(bridge, { focused = () => true } = {}) {
     });
     return reading2;
   };
-  const open = ({ botId, source, update }) => {
+  const open = ({ botId, owner, update }) => {
     if (state2.busy) return Promise.resolve(state2.result);
-    set2({ busy: true, result: null, target: { botId, source } });
+    set2({ busy: true, result: null, target: { botId, owner } });
     const options = typeof update === "boolean" ? { update } : void 0;
     let answer;
     try {
-      answer = Promise.resolve(source === "code" ? options ? bridge.openCodeRow(botId, options) : bridge.openCodeRow(botId) : bridge.open({ botId, ...options }));
+      answer = Promise.resolve(typeof bridge.openCodeRow === "function" ? options ? bridge.openCodeRow(botId, options) : bridge.openCodeRow(botId) : bridge.open({ botId: null, ...options }));
     } catch (error) {
       answer = Promise.reject(error);
     }
@@ -24533,15 +24538,6 @@ function createCodeSwitch(bridge, { focused = () => true } = {}) {
     },
     snapshot: () => state2,
     refresh,
-    setFront(front) {
-      if (front !== state2.front) set2({ front });
-    },
-    mountFooter() {
-      if (++footers === 1) set2({ footerMounted: true });
-      return () => {
-        if (--footers === 0) set2({ footerMounted: false });
-      };
-    },
     open,
     repeat: (update) => state2.target && open({ ...state2.target, update }),
     dismiss() {
@@ -24552,18 +24548,10 @@ function createCodeSwitch(bridge, { focused = () => true } = {}) {
 var switches = /* @__PURE__ */ new WeakMap();
 function switchFor(bridge) {
   if (!bridge || typeof bridge.status !== "function" || typeof bridge.open !== "function") return null;
-  if (!switches.has(bridge)) switches.set(bridge, createCodeSwitch(bridge, { focused: () => globalThis.document?.hasFocus?.() ?? true }));
+  if (!switches.has(bridge)) switches.set(bridge, createCodeSwitch(bridge));
   return switches.get(bridge);
 }
-function shownBotId(roster, sessionId) {
-  if (!sessionId) return null;
-  const bot = roster?.byId?.[sessionId];
-  if (bot) return bot.id;
-  const from = roster?.tasks?.[sessionId]?.from;
-  return typeof from === "string" && roster?.byId?.[from] ? from : null;
-}
-var mainViewId = (list) => Object.values(list.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? "";
-var NO_STATE = { status: null, busy: false, result: null, front: true, target: null, footerMounted: false };
+var NO_STATE = { status: null, busy: false, result: null, target: null };
 var noSubscribe2 = () => () => {
 };
 var noState = () => NO_STATE;
@@ -24594,36 +24582,12 @@ function Notice({ notice, onAnswer, onRetry, onDismiss, busy }) {
     )
   );
 }
-function useCodeControl(footer) {
-  const bridge = globalThis.omniDesktop?.herdr;
-  const control2 = footer || typeof bridge?.openCodeRow === "function" ? switchFor(bridge) : null;
-  const snapshot2 = control2?.snapshot ?? noState;
-  const state2 = (0, import_react52.useSyncExternalStore)(control2?.subscribe ?? noSubscribe2, snapshot2, snapshot2);
-  (0, import_react52.useEffect)(() => {
-    if (!control2) return void 0;
-    const unmount = footer ? control2.mountFooter() : void 0;
-    void control2.refresh();
-    const onFocus = () => {
-      control2.setFront(true);
-      void control2.refresh();
-    };
-    const onBlur = () => control2.setFront(false);
-    globalThis.addEventListener?.("focus", onFocus);
-    globalThis.addEventListener?.("blur", onBlur);
-    return () => {
-      unmount?.();
-      globalThis.removeEventListener?.("focus", onFocus);
-      globalThis.removeEventListener?.("blur", onBlur);
-    };
-  }, [control2, footer]);
-  return { control: control2, state: state2 };
-}
-function HerdrNotices({ control: control2, result, busy, row: row2 }) {
+function HerdrNotices({ control: control2, result, busy }) {
   const notices = result ? codeNotices(result) : [];
   if (!notices.length) return null;
   return (0, import_react52.createElement)(
     "div",
-    { className: "bt-code-notes", "data-code-row": row2 ? "" : void 0 },
+    { className: "bt-code-notes", "data-code-row": "" },
     notices.map((notice) => (0, import_react52.createElement)(Notice, {
       key: notice.kind,
       notice,
@@ -24639,59 +24603,33 @@ function HerdrNotices({ control: control2, result, busy, row: row2 }) {
   );
 }
 function useCodeRowHerdr() {
-  const { control: control2, state: state2 } = useCodeControl(false);
+  const [owner] = (0, import_react52.useState)(() => /* @__PURE__ */ Symbol());
+  const control2 = switchFor(globalThis.omniDesktop?.herdr);
+  const snapshot2 = control2?.snapshot ?? noState;
+  const state2 = (0, import_react52.useSyncExternalStore)(control2?.subscribe ?? noSubscribe2, snapshot2, snapshot2);
+  (0, import_react52.useEffect)(() => {
+    if (!control2) return void 0;
+    const refresh = () => {
+      void control2.refresh();
+    };
+    refresh();
+    globalThis.addEventListener?.("focus", refresh);
+    return () => globalThis.removeEventListener?.("focus", refresh);
+  }, [control2]);
   return {
     visible: () => showsSwitch(state2.status),
     busy: state2.busy,
-    openRow: (botId) => {
-      void control2?.open({ botId, source: "code" });
+    refresh: () => {
+      void control2?.refresh();
     },
-    notices: !state2.footerMounted && state2.target?.source === "code" ? (0, import_react52.createElement)(HerdrNotices, { control: control2, result: state2.result, busy: state2.busy, row: true }) : null
+    openRow: (botId) => {
+      void control2?.open({ botId, owner });
+    },
+    notices: state2.target?.owner === owner ? (0, import_react52.createElement)(HerdrNotices, { control: control2, result: state2.result, busy: state2.busy }) : null
   };
-}
-function WorkCodeSwitch({ roster, useSessions }) {
-  const { control: control2, state: state2 } = useCodeControl(true);
-  const sessionId = useSessions(mainViewId);
-  const visible = showsSwitch(state2.status);
-  const row2 = state2.target?.source === "code";
-  if (!control2 || !visible && !(row2 && state2.result)) return null;
-  const botId = shownBotId(roster, sessionId);
-  const code = () => {
-    void control2.open({ botId });
-  };
-  return (0, import_react52.createElement)(
-    "div",
-    { className: "bt-code-switch-wrap" },
-    visible ? (0, import_react52.createElement)(
-      "div",
-      { className: "bt-code-switch", role: "group", "aria-label": t("Open Herdr"), onPointerEnter: () => {
-        void control2.refresh();
-      } },
-      (0, import_react52.createElement)("button", {
-        type: "button",
-        className: "bt-code-seg",
-        "aria-current": state2.front ? void 0 : "true",
-        "aria-busy": state2.busy || void 0,
-        disabled: state2.busy,
-        title: state2.busy ? t("Opening Herdr…") : botId ? t("Code: open this Bot’s folder in Herdr") : t("Code: open Herdr"),
-        onClick: code
-      }, t("Code"))
-    ) : null,
-    (0, import_react52.createElement)(HerdrNotices, { control: control2, result: state2.result, busy: state2.busy, row: row2 })
-  );
 }
 var WORK_CODE_SWITCH_CSS = `
-.bt-side-top .bt-code-switch-wrap{position:relative;margin-right:auto;min-width:0}
-.bt-code-switch{display:inline-flex;align-items:center;max-width:100%;padding:2px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-main)}
-.bt-code-seg{display:inline-flex;align-items:center;min-width:0;height:24px;padding:0 9px;border:0;border-radius:999px;background:none;color:var(--bt-ink-2);font:600 12px/16px var(--bt-font);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
-.bt-code-seg[aria-current=true]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 0 0 1px var(--bt-line)}
-span.bt-code-seg{cursor:default}
-button.bt-code-seg:hover:not(:disabled):not([aria-current=true]){color:var(--bt-ink)}
-.bt-code-seg:disabled{cursor:default}
-.bt-code-seg[aria-busy]{animation:bt-code-pulse 1.2s ease-in-out infinite}
 .bt-code-notes{position:absolute;top:calc(100% + 6px);left:0;z-index:30;display:flex;flex-direction:column;gap:6px;width:240px;max-width:72vw}
-.lb-foot:has(.bt-code-notes[data-code-row]){position:relative}
-.lb-foot .bt-code-notes[data-code-row]{top:auto;bottom:calc(100% + 6px);max-width:100%}
 .bt-code-notes[data-code-row] .bt-code-note-row{flex-wrap:wrap}
 .bt-code-note{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card);color:var(--bt-ink);box-shadow:0 6px 20px rgba(0,0,0,.12);font:500 12px/17px var(--bt-font)}
 .bt-code-note-text{overflow-wrap:anywhere}
@@ -24700,8 +24638,6 @@ button.bt-code-seg:hover:not(:disabled):not([aria-current=true]){color:var(--bt-
 .bt-code-note-go{border:0;background:var(--bt-accent);color:var(--bt-accent-ink)}
 .bt-code-note-btn{border:1px solid var(--bt-line);background:none;color:var(--bt-ink)}
 .bt-code-note-go:disabled,.bt-code-note-btn:disabled{opacity:.6;cursor:default}
-@keyframes bt-code-pulse{50%{opacity:.45}}
-@media (prefers-reduced-motion:reduce){.bt-code-seg[aria-busy]{animation:none}}
 `;
 
 // src/client/code-side.js
@@ -24722,7 +24658,9 @@ var NO_STATE2 = {
   barSelected: null,
   barBeside: [],
   barRefused: null,
-  start: null
+  start: null,
+  seatOrigin: null,
+  seatTerminal: null
 };
 var listeners2 = /* @__PURE__ */ new Set();
 var state = NO_STATE2;
@@ -24829,15 +24767,15 @@ async function startBot({ id, name, folder = null, launch = null, core = null })
     current({ busy: false });
   }
 }
-async function openTerminal(botId, { seat = false } = {}) {
-  set({ face: "terminal", botId, seat, ...state.selected?.botId === botId ? {} : seatPanes([]) });
+async function openTerminal(botId, { seat = false, terminal: terminal2 = null } = {}) {
+  set({ face: "terminal", botId, seat, seatTerminal: terminal2, ...seatPanes([]) });
   const tree = await loadTree({ fresh: true });
-  if (!tree || state.botId !== botId || state.face !== "terminal" || state.seat !== seat) return;
-  const pane = paneFor(tree, botId);
+  if (!tree || state.botId !== botId || state.face !== "terminal" || state.seat !== seat || state.seatTerminal !== terminal2) return;
+  const pane = seat ? seatPaneFor(tree, botId, terminal2) : paneFor(tree, botId);
   if (pane) selectPane(pane);
 }
 function closeTerminal() {
-  set({ face: "chat", botId: null, seat: false, ...seatPanes([]) });
+  set({ face: "chat", botId: null, seat: false, seatTerminal: null, ...seatPanes([]) });
 }
 function selectPane(selected, { beside = false } = {}) {
   if (!beside) {
@@ -24848,27 +24786,29 @@ function selectPane(selected, { beside = false } = {}) {
   const { list, refused } = togglePane(previous, selected, state.tree);
   if (list !== previous || refused) set(seatPanes(list, refused));
 }
-function useCodeFace(botId, { seat = false } = {}) {
+function useCodeFace(botId, { seat = false, terminal: terminal2 = null } = {}) {
   const current = (0, import_react53.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
   return {
     face: current.face === "terminal" && current.botId === botId && current.seat === seat ? "terminal" : "chat",
+    seatOrigin: current.seatOrigin,
+    terminalMissing: seat && !current.loading && !seatPaneFor(current.tree, botId, terminal2),
     // Whether a Bot has a pane is the renderer's own answer, read when Terminal is pressed:
     // the switch never fetches the tree or the chunk on its own.
     onFace: (face) => {
-      if (face === "terminal") void openTerminal(botId, { seat });
+      if (face === "terminal") void openTerminal(botId, { seat, terminal: terminal2 });
       else closeTerminal();
     }
   };
 }
 function BotFaceSwitch({ bot }) {
-  const code = useCodeFace(bot?.id, { seat: true });
+  const code = useCodeFace(bot?.id, { seat: true, terminal: bot?.terminal });
   return bot?.seat === true ? (0, import_react53.createElement)(FaceSwitch, { face: code.face, onFace: code.onFace }) : null;
 }
 function useCodeSide() {
   return (0, import_react53.useSyncExternalStore)(storeSubscribe, snapshot, snapshot);
 }
 function setCodeSide(side) {
-  set({ side, ...side === "team" ? barPanes([]) : {} });
+  set({ side });
   if (side === "code") void loadTree({ fresh: true });
 }
 function CodeSideSwitch({ current, onSelect }) {
@@ -24884,7 +24824,7 @@ function CodeSideSwitch({ current, onSelect }) {
     parts: [{ name: "team", content: [t("Team")] }, { name: "code", content: [t("Code"), badge] }]
   });
 }
-function codePanelNavigation(layout) {
+function codePanelNavigation(layout, { seatPanel, seatKey, restoreSeat } = {}) {
   let previous = null;
   const active2 = () => layout.panelInfo.getSnapshot().activePanelId;
   return {
@@ -24897,15 +24837,23 @@ function codePanelNavigation(layout) {
         next = barPanes(list, refused);
       }
       if (active2() !== CODE_PANEL) {
-        previous = active2();
+        const panel = active2();
+        previous = { panel, seat: panel === seatPanel ? seatKey?.() : null };
         layout.selectPanel(CODE_PANEL);
       }
-      set(next);
+      set({ ...next, seatOrigin: null });
+    },
+    reshow(botId) {
+      const origin = state.seatOrigin;
+      if (origin?.botId !== botId) return;
+      set({ ...barPanes(origin.panes), seatOrigin: null });
+      layout.selectPanel(CODE_PANEL);
     },
     close() {
       if (active2() === CODE_PANEL) {
         try {
-          layout.selectPanel(previous);
+          const panel = previous?.panel ?? null;
+          layout.selectPanel(panel === seatPanel && !restoreSeat?.(previous?.seat) ? null : panel);
         } catch {
           layout.selectPanel(null);
         }
@@ -24913,6 +24861,9 @@ function codePanelNavigation(layout) {
       set(barPanes([]));
     }
   };
+}
+function clearSeatOrigin() {
+  if (state.seatOrigin) set({ seatOrigin: null });
 }
 function CodeBody() {
   const current = useCodeSide();
@@ -24946,8 +24897,16 @@ function CodeBarList({ current, onSelect }) {
 function CodeTreeHerdr({ render }) {
   return render(useCodeRowHerdr());
 }
-function CodeMainPanel({ onBack }) {
+function CodeMainPanel({ onBack, openSeat, useSeatRoster: useSeatRoster2 = () => ({ seats: [] }) }) {
   const current = useCodeSide();
+  const { seats } = useSeatRoster2();
+  const seatForPane = (botId, terminal2) => seats.find((seat) => seat.id === botId && seat.machine == null && seat.terminal === terminal2);
+  const openSeatFace = (botId, terminal2) => {
+    const seat = seatForPane(botId, terminal2);
+    if (!seat || !openSeat) return;
+    set({ seatOrigin: { botId, panes: panesOf(state.barSelected, state.barBeside) } });
+    openSeat(seat, { fromCode: true });
+  };
   return (0, import_react53.createElement)(
     "div",
     { className: "bt-seat", "data-code-panel": "" },
@@ -24962,7 +24921,14 @@ function CodeMainPanel({ onBack }) {
       (0, import_react53.createElement)(CodeRenderer, { current, render: (pane) => (0, import_react53.createElement)(
         "section",
         { className: "cs-host" },
-        (0, import_react53.createElement)(pane.CodeTerminal, { tree: current.tree, selected: current.barSelected, beside: current.barBeside, refused: current.barRefused, loading: current.loading })
+        (0, import_react53.createElement)(pane.CodeTerminal, {
+          tree: current.tree,
+          selected: current.barSelected,
+          beside: current.barBeside,
+          refused: current.barRefused,
+          loading: current.loading,
+          code: { ...codeApi, seatForPane, openSeatFace, FaceSwitch }
+        })
       ) })
     )
   );
@@ -24989,7 +24955,7 @@ function CodeRenderer({ current, render, showLoading }) {
   if (failed) return (0, import_react53.createElement)("div", { className: "cs-host" }, (0, import_react53.createElement)("p", { className: "cs-empty" }, t("The Code side could not load here.")));
   return showLoading ? (0, import_react53.createElement)("p", { className: "bt-hint", role: "status" }, t("Reading this computer’s team…")) : null;
 }
-function mainViewId2(sessions) {
+function mainViewId(sessions) {
   const list = sessions?.list?.getSnapshot?.();
   return Object.values(list?.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id ?? null;
 }
@@ -25004,10 +24970,10 @@ function installCodeSide(ctx, { start: start2 = null } = {}) {
       listOff();
       listOff = null;
     }
-    openedFor = mainViewId2(ctx.sessions);
+    openedFor = mainViewId(ctx.sessions);
     listOff = ctx.sessions?.list?.subscribe?.(() => {
       if (state.face !== "terminal" || openedFor === null) return;
-      if (mainViewId2(ctx.sessions) !== openedFor) closeTerminal();
+      if (mainViewId(ctx.sessions) !== openedFor) closeTerminal();
     }) ?? null;
   };
   const sync = () => {
@@ -25481,8 +25447,8 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
   const rows2 = teamRows(team);
   const { art, duo } = useArtSizes(ref, skin, rows2.length);
   const edges = useScrollEdges(ref, rows2.length);
-  const press = (row2) => onOpen ? () => onOpen(row2) : void 0;
-  const status = (row2) => (0, import_react57.createElement)(Status, { status: row2.status, worded, quiet: quiet2 });
+  const press = (row2) => onOpen && !row2.bot?.remote ? () => onOpen(row2) : void 0;
+  const status = (row2) => (0, import_react57.createElement)(Status, { status: row2.status, worded: row2.bot?.remote ? [] : worded, quiet: row2.bot?.seat ? [] : quiet2 });
   const button2 = (row2, className, extra, ...children) => (0, import_react57.createElement)("button", {
     key: row2.key,
     type: "button",
@@ -25491,7 +25457,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
     "data-id": row2.id,
     "aria-current": row2.key === current ? "page" : void 0,
     onClick: press(row2),
-    onMouseEnter: nameIfCut,
+    onMouseEnter: row2.bot?.remote ? void 0 : nameIfCut,
     onContextMenu: onMenu ? (event) => {
       event.preventDefault();
       onMenu(row2, event);
@@ -25502,13 +25468,18 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
     if (row2.kind === "section") return (0, import_react57.createElement)("div", { key: row2.key, className: classes("lb-sec", row2.first && "lb-sec-first") }, row2.label);
     if (row2.kind === "bot") {
       const state2 = row2.bot.state ?? stateOfStatus(statusOr(row2.bot.status));
+      const tag = row2.bot.remote ? t("Needs the scoped link") : row2.bot.seat ? row2.bot.projectTag : row2.bot.roleTag;
+      const extra = row2.bot.remote ? {
+        "aria-disabled": true,
+        title: t("This Bot is on {machine}. It opens here once the link to that computer is scoped.", { machine: row2.bot.machine })
+      } : null;
       return button2(
         row2,
         classes(row2.unread && "lb-row-unread", row2.status === "off" && "lb-row-off"),
-        null,
+        extra,
         (0, import_react57.createElement)("span", { className: "lb-art" }, renderArt2(row2.bot, art, state2)),
         (0, import_react57.createElement)("span", { className: "lb-name" }, row2.name),
-        row2.bot.roleTag ? (0, import_react57.createElement)("span", { className: "bt-tag" }, row2.bot.roleTag) : null,
+        tag ? (0, import_react57.createElement)("span", { className: "bt-tag" }, tag) : null,
         row2.unread ? (0, import_react57.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
         renderEnd ? renderEnd(row2) : null,
         status(row2)
@@ -25896,7 +25867,7 @@ function currentKey2(roster, shownId) {
   const agent = (roster.agents ?? []).find((candidate) => (candidate.sessions ?? []).includes(shownId));
   return agent ? `bot:${agent.id}` : void 0;
 }
-function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
+function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [], front = null }) {
   const main = roster.byId?.[roster.mainBotId];
   const shown2 = (key) => key === current;
   const unread = (id, key, own2) => !shown2(key) && (own2 || marked[id] === true);
@@ -25914,29 +25885,59 @@ function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.n
     return { id: item.id, name: tasks ? t("Tasks") : item.name, dsh: tasks ? "tasks" : "agent", channels: [], status: seen.status, unread: unread(item.id, `bot:${item.id}`, seen.unread) };
   };
   const seating = seats.map((seat) => ({
-    id: `seat:${seat.id}`,
+    id: `seat:${seat.key ?? seat.id}`,
+    key: seat.key ?? seat.id,
     seat: true,
     artId: seat.id,
     name: seat.name,
     project: seat.project,
+    folder: seat.folder ?? null,
+    machine: seat.machine,
+    kind: seat.kind,
+    main: seat.main,
     terminal: seat.terminal,
     agent: seat.agent,
     chat: seat.chat,
     status: seat.status,
+    projectTag: seat.project,
+    remote: seat.machine != null,
     channels: [],
     unread: false
   }));
-  const bots = [
-    ...main ? [bot(main)] : [],
-    ...seating,
+  const globals = seating.filter((seat) => (seat.kind ?? (seat.project ? "main" : "global")) === "global");
+  const globalMains = globals.filter((seat) => seat.main === true);
+  const go = globals.length === 1 ? globals[0] : globalMains.length === 1 ? globalMains[0] : null;
+  const projectMains = seating.filter((seat) => (seat.kind ?? (seat.project ? "main" : "global")) === "main").sort((a, b) => String(a.project ?? "").localeCompare(String(b.project ?? "")));
+  const orchestrators = [go, ...globals.filter((seat) => seat !== go), ...projectMains].filter(Boolean);
+  const dsh = [
+    main ? bot(main) : null,
     ...order.filter((entry) => entry.kind === "bot").map((entry) => bot(entry.item)),
     ...order.filter((entry) => entry.kind === "agent").map((entry) => agent(entry.item))
   ].filter(Boolean);
+  const frontSeat = front && seating.find((seat) => seat.artId === front.bot && seat.folder === front.project && (seat.machine ?? null) === (front.machine ?? null));
+  const frontBot = front && front.machine === void 0 && roster.byId?.[front.bot];
+  const frontRow = frontSeat || (frontBot && sameFolder(front.project, frontBot.workDir) ? dsh.find((row2) => row2.id === frontBot.id) : null);
+  const sequence = frontRow ? [frontRow, ...orchestrators, ...dsh] : [dsh.find((row2) => row2.id === main?.id), ...orchestrators, ...dsh];
+  const bots = [...new Map(sequence.filter(Boolean).map((row2) => [row2.id, row2])).values()];
   const groups = order.filter((entry) => entry.kind === "room" && (!entry.item.hidden || shown2(`group:${entry.item.id}`))).map((entry) => {
     const seen = status.groups?.get(entry.item.id) ?? { status: "idle", unread: false };
     return { id: entry.item.id, name: entry.item.name, members: entry.item.members ?? [], status: seen.status, unread: unread(entry.item.id, `group:${entry.item.id}`, seen.unread) };
   });
-  return { frontId: main?.id, bots, groups };
+  return { frontId: frontRow?.id ?? main?.id, bots, groups };
+}
+function sameFolder(project, workDir) {
+  if (!workDir) return project === null;
+  const normalized = (folder) => {
+    const drive = /^[A-Za-z]:[\\/]/.exec(folder);
+    const parts = drive ? folder.slice(3).split(/[\\/]/) : folder.split("/");
+    const path2 = [];
+    for (const part of parts) {
+      if (part === "..") path2.pop();
+      else if (part && part !== ".") path2.push(part);
+    }
+    return `${drive ? drive[0].slice(0, 2) : ""}/${path2.join("/")}`;
+  };
+  return typeof project === "string" && /^(?:\/|[A-Za-z]:[\\/])/.test(workDir) && normalized(project) === normalized(workDir);
 }
 function SeatGlyph({ size }) {
   return (0, import_react58.createElement)(
@@ -25980,11 +25981,11 @@ function SpaceNote({ anchor, onClose }) {
     t("Creating or joining a space comes with Automagik Cloud. Nothing is made from here yet.")
   ), document.body);
 }
-function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown, sideSwitch, codeList }) {
+function LeftBar({ roster, order, marked, seats = [], front, useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, empty, collapse, onKeyDown, sideSwitch, codeList }) {
   const shownId = useSessions((list) => list.ids.find((id) => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? "");
   const current = currentKey2(roster, shownId);
   const status = useTeamStatus({ roster, useSessionStatus, useWork });
-  const team = teamOf({ roster, order, status, marked, current, seats });
+  const team = teamOf({ roster, order, status, marked, current, seats, front });
   const currentId = current?.slice(current.indexOf(":") + 1);
   (0, import_react58.useEffect)(() => {
     if (currentId && marked?.[currentId] === true) actions.clearUnread(currentId);
@@ -26039,7 +26040,7 @@ function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionSta
         sideSwitch ?? null,
         notice,
         codeList ?? (team.bots.length === 0 && empty ? empty : (0, import_react58.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : void 0, label: t("Bot list") })),
-        (0, import_react58.createElement)("div", { className: "lb-foot" }, tools, foot ?? null)
+        (0, import_react58.createElement)("div", { className: "lb-foot" }, tools)
       )
     ),
     note ? (0, import_react58.createElement)(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null
@@ -26064,6 +26065,10 @@ function seatClientId(storage) {
   }
 }
 var seatChatView = createSource({ seat: null });
+var NO_SEATS = Object.freeze([]);
+var EMPTY_SEAT_ROSTER = { seats: NO_SEATS, front: null };
+var seatRosterView = createSource(EMPTY_SEAT_ROSTER);
+var useSeatRoster = () => (0, import_react59.useSyncExternalStore)(seatRosterView.subscribe, seatRosterView.getSnapshot);
 var AGENTS = { claude: "Claude Code", codex: "Codex", omp: "omp" };
 var seatAgentName = (agent) => AGENTS[agent] ?? t("Terminal");
 function seatWordOf(status) {
@@ -26080,7 +26085,23 @@ function seatBotId(seat) {
   const id = seat.id.startsWith("seat:") ? seat.id.slice("seat:".length) : seat.id;
   return id === "" ? null : id;
 }
-var seatTerminalWhy = (seat) => seat === null ? null : typeof seat.terminal === "string" && seat.terminal !== "" ? null : t("This seat is not running on this computer, so its terminal cannot open.");
+function localSeatByKey(seats, key) {
+  return seats.find((seat) => seat.machine == null && (seat.key ?? seat.id) === key);
+}
+var seatNavigation = {
+  seatPanel: SEAT_CHAT_PANEL,
+  seatKey() {
+    const { seat } = seatChatView.getSnapshot();
+    return seat?.key ?? seatBotId(seat);
+  },
+  restoreSeat(key) {
+    const seat = localSeatByKey(seatRosterView.getSnapshot().seats, key);
+    seatChatView.set({ seat: seat ?? null });
+    return Boolean(seat);
+  }
+};
+var NOT_RUNNING = () => t("This seat is not running on this computer, so its terminal cannot open.");
+var seatTerminalWhy = (seat) => seat === null ? null : typeof seat.terminal === "string" && seat.terminal !== "" ? null : NOT_RUNNING();
 function seatWithFreshPane(seat, fresh) {
   if (seat === null || fresh === null || fresh === void 0) return null;
   const next = {
@@ -26092,30 +26113,26 @@ function seatWithFreshPane(seat, fresh) {
     chat: fresh.chat ?? null,
     status: fresh.status ?? seat.status
   };
-  return next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal && next.agent === seat.agent && next.chat === seat.chat && next.status === seat.status ? null : next;
+  return next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal && next.agent === seat.agent && next.chat === seat.chat && next.status === seat.status ? seat : next;
 }
-var NO_SEATS = Object.freeze([]);
 function useSeats(list, enabled2 = true) {
-  const [seats, setSeats] = (0, import_react59.useState)(NO_SEATS);
+  const { seats } = useSeatRoster();
   (0, import_react59.useEffect)(() => {
-    const empty = () => setSeats((now) => now.length === 0 ? now : NO_SEATS);
     if (!enabled2 || typeof list !== "function") {
-      empty();
+      seatRosterView.set(EMPTY_SEAT_ROSTER);
       return void 0;
     }
     let alive = true;
     let timer;
     const tick = async () => {
-      let next = NO_SEATS;
       try {
         const value = await list();
-        next = Array.isArray(value?.seats) ? value.seats : NO_SEATS;
+        if (alive && Array.isArray(value?.seats)) {
+          seatRosterView.set(value.seats.length || value.front ? { seats: value.seats, front: value.front ?? null } : EMPTY_SEAT_ROSTER);
+        }
       } catch {
-        next = NO_SEATS;
       }
       if (!alive) return;
-      if (next.length === 0) empty();
-      else setSeats(next);
       timer = setTimeout(tick, LIST_MS);
     };
     tick();
@@ -26147,53 +26164,80 @@ function mergeFace(now, value, terminal2) {
 function useSeatFace(seat) {
   const [face, setFace] = (0, import_react59.useState)(EMPTY_FACE);
   const terminal2 = typeof seat?.terminal === "string" ? seat.terminal : null;
+  const botId = seatBotId(seat);
   (0, import_react59.useEffect)(() => {
     let alive = true;
     let timer;
     let cursor = null;
-    let client = null;
     if (terminal2 === null) {
       setFace(EMPTY_FACE);
       return void 0;
     }
-    client = seatClientId();
+    const client = seatClientId();
+    let generation;
+    let closed = false;
+    const close = () => {
+      if (closed || generation === void 0) return;
+      closed = true;
+      void call("seat-chat-close", { client, terminal: terminal2, generation }).catch(() => {
+      });
+    };
+    const clearFace = (error) => {
+      close();
+      setFace({ ...EMPTY_FACE, botId, terminal: terminal2, error });
+    };
+    const matches2 = (value) => {
+      if (value?.seat?.id === botId) return true;
+      clearFace(NOT_RUNNING());
+      return false;
+    };
+    const failed = (error) => {
+      if (!alive) return false;
+      const message = hostText(error?.message ?? "");
+      if (error?.code === "bot/refused") clearFace(message);
+      else setFace((now) => ({ ...now, loading: false, error: message }));
+      return error?.code === "bot/unavailable";
+    };
     const read = async () => {
       try {
         const value = await call("seat-chat-read", { client, terminal: terminal2, after: cursor });
-        if (!alive) return;
+        if (!alive || !matches2(value)) return;
         cursor = (value.rows ?? []).at(-1)?.id ?? cursor;
         setFace((now) => mergeFace(now, value, terminal2));
       } catch (error) {
-        if (alive) setFace((now) => ({ ...now, loading: false, error: hostText(error?.message ?? "") }));
-        return;
+        if (!failed(error)) return;
       }
       if (alive) timer = setTimeout(read, READ_MS);
     };
     const open = async () => {
-      setFace((now) => now.terminal === terminal2 ? { ...now, loading: true, error: null } : { ...EMPTY_FACE, terminal: terminal2, loading: true });
+      setFace((now) => now.terminal === terminal2 && now.botId === botId ? { ...now, loading: true, error: null } : { ...EMPTY_FACE, botId, terminal: terminal2, loading: true });
       try {
         const value = await call("seat-chat-open", { client, terminal: terminal2 });
-        if (!alive) return;
+        generation = value?.generation;
+        if (!alive) {
+          close();
+          return;
+        }
         if (value === null) {
           setFace((now) => ({ ...now, loading: false, error: t("This seat holds the chat already open in another window.") }));
           return;
         }
+        if (!matches2(value)) return;
         cursor = (value.rows ?? []).at(-1)?.id ?? null;
         setFace((now) => mergeFace(now, value, terminal2));
         timer = setTimeout(read, READ_MS);
       } catch (error) {
-        if (alive) setFace((now) => ({ ...now, loading: false, error: hostText(error?.message ?? "") }));
+        if (failed(error)) timer = setTimeout(open, READ_MS);
       }
     };
     open();
     return () => {
       alive = false;
       clearTimeout(timer);
-      if (client) void call("seat-chat-close", { client, terminal: terminal2 }).catch(() => {
-      });
+      close();
     };
-  }, [terminal2]);
-  return face;
+  }, [terminal2, botId]);
+  return face.botId === botId && face.terminal === terminal2 ? face : EMPTY_FACE;
 }
 var toolText = (row2) => typeof row2?.summary === "string" && row2.summary.trim() !== "" ? row2.summary : "";
 function WaitingCard({ approval, question }) {
@@ -26247,21 +26291,47 @@ function SeatRow({ row: row2 }) {
   return null;
 }
 var seatSourceNote = (seat) => seat?.chat === "screen" ? t("Screen only: this agent has no transcript reader, so these are its last screens.") : t("Read from this seat’s own transcript. This view never runs or types into it.");
-function SeatChatPanel({ onBack }) {
+var scrollPlaces = /* @__PURE__ */ new Map();
+function saveScroll(terminal2, node, pinned) {
+  if (!terminal2 || !node) return;
+  scrollPlaces.delete(terminal2);
+  scrollPlaces.set(terminal2, { pinned, scrollTop: node.scrollTop });
+  if (scrollPlaces.size > 16) scrollPlaces.delete(scrollPlaces.keys().next().value);
+}
+function SeatChatPanel({ onBack, onReshowCode }) {
   const seat = (0, import_react59.useSyncExternalStore)(seatChatView.subscribe, seatChatView.getSnapshot).seat;
   const face = useSeatFace(seat);
   const botId = seatBotId(seat);
-  const code = useCodeFace(botId, { seat: true });
+  const code = useCodeFace(botId, { seat: true, terminal: seat?.terminal });
   const terminal2 = code.face === "terminal";
   const why = seatTerminalWhy(seat);
   const showingTerminal = terminal2 && why === null;
+  const missingTerminal = showingTerminal && code.terminalMissing;
   const scroll = (0, import_react59.useRef)(null);
   const [pinned, setPinned] = (0, import_react59.useState)(true);
+  const pinnedRef = (0, import_react59.useRef)(true);
+  const restore = (0, import_react59.useRef)(null);
   const length = face.rows.length;
   (0, import_react59.useLayoutEffect)(() => {
     const node = scroll.current;
-    if (node && pinned) node.scrollTop = node.scrollHeight;
-  }, [length, pinned, seat?.terminal]);
+    if (!node || !seat?.terminal) return;
+    const saved = scrollPlaces.get(seat.terminal);
+    pinnedRef.current = saved?.pinned ?? true;
+    setPinned(pinnedRef.current);
+    restore.current = saved?.pinned === false ? saved.scrollTop : null;
+    return () => {
+      if (restore.current === null) saveScroll(seat.terminal, node, pinnedRef.current);
+    };
+  }, [showingTerminal, seat?.terminal]);
+  (0, import_react59.useLayoutEffect)(() => {
+    const node = scroll.current;
+    if (!node) return;
+    if (pinnedRef.current) node.scrollTop = node.scrollHeight;
+    else if (face.terminal === seat?.terminal && !face.loading && restore.current !== null) {
+      node.scrollTop = restore.current;
+      restore.current = null;
+    }
+  }, [length, pinned, seat?.terminal, showingTerminal, face.loading, face.terminal]);
   (0, import_react59.useEffect)(() => {
     if (why !== null && terminal2) closeTerminal();
   }, [why, terminal2]);
@@ -26276,7 +26346,7 @@ function SeatChatPanel({ onBack }) {
     );
   }
   const status = face.status === null ? seat.status : seatWordOf(face.status);
-  const needs = (face.approval !== null || face.question !== null) && status === "needs";
+  const needs = seat.agent === "claude" && (face.approval !== null || face.question !== null) && status === "needs";
   const seatLine = [seat.project, seatAgentName(seat.agent), SEAT_MACHINE()].filter(Boolean).join(" · ");
   return (0, import_react59.createElement)(
     "div",
@@ -26302,7 +26372,11 @@ function SeatChatPanel({ onBack }) {
       ),
       botId === null ? null : (0, import_react59.createElement)(FaceSwitch, {
         face: showingTerminal ? "terminal" : "chat",
-        onFace: code.onFace,
+        onFace: (next) => {
+          saveScroll(seat.terminal, scroll.current, pinnedRef.current);
+          if (next === "terminal" && code.seatOrigin?.botId === botId && onReshowCode) onReshowCode(botId);
+          else code.onFace(next);
+        },
         unavailable: why === null ? {} : { terminal: why }
       }),
       (0, import_react59.createElement)(
@@ -26312,11 +26386,11 @@ function SeatChatPanel({ onBack }) {
         word(status)
       )
     ),
-    why === null ? null : (0, import_react59.createElement)("p", { className: "bt-seat-why", role: "status" }, why),
+    why === null && !missingTerminal ? null : (0, import_react59.createElement)("p", { className: "bt-seat-why", role: "status" }, why ?? NOT_RUNNING()),
     (0, import_react59.createElement)(
       "div",
       { className: "bt-seat-body" },
-      showingTerminal ? (0, import_react59.createElement)(CodeBody, { key: botId }) : (0, import_react59.createElement)(
+      showingTerminal ? missingTerminal ? null : (0, import_react59.createElement)(CodeBody, { key: botId }) : (0, import_react59.createElement)(
         import_react59.Fragment,
         null,
         needs ? (0, import_react59.createElement)(WaitingCard, { approval: face.approval, question: face.question }) : null,
@@ -26329,7 +26403,8 @@ function SeatChatPanel({ onBack }) {
             ref: scroll,
             onScroll: (event) => {
               const node = event.currentTarget;
-              setPinned(node.scrollHeight - node.scrollTop - node.clientHeight < 24);
+              pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24;
+              setPinned(pinnedRef.current);
             }
           },
           face.rows.map((row2) => (0, import_react59.createElement)(SeatRow, { key: row2.id, row: row2 })),
@@ -26339,6 +26414,7 @@ function SeatChatPanel({ onBack }) {
           type: "button",
           className: "bt-seat-latest",
           onClick: () => {
+            pinnedRef.current = true;
             setPinned(true);
             const node = scroll.current;
             if (node) node.scrollTop = node.scrollHeight;
@@ -26946,6 +27022,14 @@ var bootHint = () => {
   const last = clientErrors().at(-1)?.text;
   return last === void 0 ? t("The Bot team could not start. The engine’s startup output — its console, or the app’s startup error box — has the cause.") : t("The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.", { error: last });
 };
+function useFreshSeat(openSeat, seats) {
+  (0, import_react61.useEffect)(() => {
+    if (openSeat === null) return;
+    const fresh = localSeatByKey(seats, openSeat.key ?? seatBotId(openSeat));
+    const next = seatWithFreshPane(openSeat, fresh);
+    if (next !== openSeat) seatChatView.set({ seat: next });
+  }, [seats, openSeat]);
+}
 function TeamSidebar(props) {
   const { wide, expandSidebar, useRoster, useUi, useSessions, actions } = props;
   const listRef = (0, import_react61.useRef)(null);
@@ -26956,13 +27040,9 @@ function TeamSidebar(props) {
   const roster = useRoster((value) => value);
   const code = useCodeSide();
   const openSeat = (0, import_react61.useSyncExternalStore)(seatChatView.subscribe, seatChatView.getSnapshot).seat;
-  const seats = useSeats(actions.seatList, wide || openSeat !== null);
-  (0, import_react61.useEffect)(() => {
-    if (openSeat === null) return;
-    const fresh = seats.find((candidate) => candidate.id === seatBotId(openSeat));
-    const next = seatWithFreshPane(openSeat, fresh);
-    if (next !== null) seatChatView.set({ seat: next });
-  }, [seats, openSeat]);
+  const { front } = useSeatRoster();
+  const seats = useSeats(actions.seatList, wide || openSeat !== null || code.barSelected !== null);
+  useFreshSeat(openSeat, seats);
   const markedUnread = useUi((value) => value.unread);
   const bootFailed = useUi((value) => value.bootFailed === true);
   props.useRegistry((value) => value);
@@ -26995,9 +27075,8 @@ function TeamSidebar(props) {
     return result;
   };
   const team = () => {
-    if (code.side === "team") return;
     actions.closeCodePane?.();
-    setCodeSide("team");
+    if (code.side !== "team") setCodeSide("team");
   };
   const rowActions = {
     ...actions,
@@ -27030,8 +27109,9 @@ function TeamSidebar(props) {
   if (wide) {
     const byId = (id) => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find((agent) => agent.id === id);
     const open = (row2) => {
+      if (row2.bot?.remote) return;
       team();
-      if (row2.bot?.seat) return rowActions.openSeat(row2.bot);
+      if (row2.bot?.seat) return navigate(actions.openSeat, row2.bot);
       if (row2.kind === "chat") return row2.source?.open?.(row2.id);
       if (row2.kind === "group") return rowActions.openSession(row2.id);
       if (row2.bot?.dsh) return rowActions.openAgent(row2.id);
@@ -27057,6 +27137,7 @@ function TeamSidebar(props) {
       order,
       marked: markedUnread,
       seats,
+      front,
       useSessions,
       useSessionStatus: props.useSessionStatus,
       useWork: props.useWork,
@@ -27066,7 +27147,7 @@ function TeamSidebar(props) {
       renderAfter,
       notice,
       onKeyDown: typeToSearch,
-      sideSwitch: (0, import_react61.createElement)(CodeSideSwitch, { current: code, onSelect: (side) => side === "team" ? team() : setCodeSide(side) }),
+      sideSwitch: (0, import_react61.createElement)(CodeSideSwitch, { current: code, onSelect: setCodeSide }),
       codeList: code.side === "code" ? (0, import_react61.createElement)(CodeBarList, { current: code, onSelect: (selected, options) => navigate(actions.openCodePane, selected, options) }) : null,
       // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
       renderEnd: (row2) => {
@@ -27074,7 +27155,6 @@ function TeamSidebar(props) {
         return bot ? (0, import_react61.createElement)(RowBadges, { bot, roster, useWork: props.useWork }) : null;
       },
       tools: (0, import_react61.createElement)(import_react61.Fragment, null, (0, import_react61.createElement)(UpdateButton, { useUpdate: props.useUpdate, actions }), (0, import_react61.createElement)(SidebarTools, toolProps)),
-      foot: (0, import_react61.createElement)(WorkCodeSwitch, { roster, useSessions }),
       collapse: (0, import_react61.createElement)("button", { type: "button", className: "bt-round bt-side-collapse", "aria-label": t("Collapse sidebar"), title: t("Collapse sidebar"), onClick: () => actions.toggleSidebar() }, (0, import_react61.createElement)(SidebarIcon)),
       empty: roster.ready ? null : (0, import_react61.createElement)("div", { className: "bt-hint" }, bootFailed ? bootHint() : t("Setting up your Main Bot…"))
     });
@@ -27086,7 +27166,6 @@ function TeamSidebar(props) {
       "div",
       { className: "bt-side-top" },
       (0, import_react61.createElement)("span", { className: "bt-brand" }, (0, import_react61.createElement)(Lockup, { height: 21 })),
-      (0, import_react61.createElement)(WorkCodeSwitch, { roster, useSessions }),
       (0, import_react61.createElement)(UpdateButton, { useUpdate: props.useUpdate, actions }),
       (0, import_react61.createElement)(SidebarTools, toolProps),
       (0, import_react61.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("Search"), title: t("Search"), onClick: () => actions.openPalette() }, (0, import_react61.createElement)(SearchIcon)),
@@ -27629,7 +27708,7 @@ html[data-automagik-desktop=darwin] .bt-side-top{-webkit-app-region:drag}
 /* The row is the window's title bar: empty space moves the window, while every control in it
    takes clicks. The list is the shell bar's, so a control a builder adds here is covered
    without another rule; the brand is hidden in the app but kept sane. */
-html[data-automagik-desktop=darwin] .bt-side-top :is(.bt-brand,.bt-code-switch,a,button,input,label,select,summary,textarea,[contenteditable],[role=button],[role=checkbox],[role=link],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=radio],[role=slider],[role=switch],[role=tab],[aria-haspopup],[tabindex],[data-menu]){-webkit-app-region:no-drag}
+html[data-automagik-desktop=darwin] .bt-side-top :is(.bt-brand,a,button,input,label,select,summary,textarea,[contenteditable],[role=button],[role=checkbox],[role=link],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=radio],[role=slider],[role=switch],[role=tab],[aria-haspopup],[tabindex],[data-menu]){-webkit-app-region:no-drag}
 html[data-automagik-desktop=darwin] header[class*="_header"]{-webkit-app-region:drag}
 html[data-automagik-desktop=darwin] header[class*="_header"] :is(a,button,input,label,select,summary,textarea,[contenteditable],[role=button],[role=checkbox],[role=link],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=radio],[role=slider],[role=switch],[role=tab],[aria-haspopup],[tabindex],[data-menu]){-webkit-app-region:no-drag}
 /* The fixed details panel overlaps that header but is not its descendant. Native drag
@@ -45958,7 +46037,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   const yieldBrowser = (state2) => state2.panelYield === true || panelFolded("browser");
   const ensureBotHome2 = () => ensureBotHome({ roster, mainView, openSession: actions.openSession });
   let cliLogin;
-  const codePanel = codePanelNavigation(ctx.layout);
+  const codePanel = codePanelNavigation(ctx.layout, seatNavigation);
   const actions = {
     ...teamActions({ call, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession: (id) => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
     selfUpdateStatusSource,
@@ -46063,7 +46142,8 @@ function applyOwner(ctx, { gated = false } = {}) {
     },
     // A seat is not a Session: the bar sets the seat and picks the keyed main panel
     // (RFC 0022 1L). Opening any Session returns the main panel to the conversation.
-    openSeat: (seat) => {
+    openSeat: (seat, { fromCode = false } = {}) => {
+      if (!fromCode) clearSeatOrigin();
       seatChatView.set({ seat });
       try {
         ctx.layout.selectPanel(SEAT_CHAT_PANEL);
@@ -46079,6 +46159,7 @@ function applyOwner(ctx, { gated = false } = {}) {
       }
     },
     closeCodePane: codePanel.close,
+    reshowCodePane: codePanel.reshow,
     seatList: () => call("seat-chat-list"),
     selectPanel: (id) => {
       ctx.layout.selectPanel(id);
@@ -46630,12 +46711,12 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => ctx.slots.inject("main", () => ctx.slots.register({
       name: "main",
       key: SEAT_CHAT_PANEL,
-      inject: () => ({ onBack: () => ctx.layout.selectPanel(null) })
+      inject: () => ({ onBack: () => ctx.layout.selectPanel(null), onReshowCode: actions.reshowCodePane })
     }, SeatChatPanel)),
     () => ctx.slots.inject("main", () => ctx.slots.register({
       name: "main",
       key: CODE_PANEL,
-      inject: () => ({ onBack: codePanel.close })
+      inject: () => ({ onBack: codePanel.close, openSeat: actions.openSeat, useSeatRoster })
     }, CodeMainPanel)),
     () => shadow("sidebar.brand.mark", { priority: BOT_PRIORITY }, BrandMark),
     () => shadow("sidebar.brand.name", { priority: BOT_PRIORITY }, BrandName),

@@ -31,13 +31,13 @@ import { ComposerPermission, ComposerPlus, ComposerVoice, menuIcons } from './co
 import { CHATS_SOURCE, atSources } from './at-menu.js'
 import { BtwDock, BtwTurnTail } from './btw.js'
 import { SIDE_CSS, sideSource } from './side-chat.js'
-import { SEAT_CHAT_CSS, SEAT_CHAT_PANEL, SeatChatPanel, seatChatView } from './seat-chat.js'
+import { SEAT_CHAT_CSS, SEAT_CHAT_PANEL, SeatChatPanel, seatChatView, seatNavigation, useSeatRoster } from './seat-chat.js'
 import { VOICE_BUNDLE, closingReplyText, requestPreparation } from './speech.js'
 import { sameVersion } from './dsh-offer.js'
 import { QuestionCard, QuestionDock } from './questions.js'
 import { DesktopUpdate, DESKTOP_UPDATE_CSS } from './desktop-update.js'
 import { WORK_CODE_SWITCH_CSS } from './work-code-switch.js'
-import { CODE_PANEL, CodeMainPanel, codePanelNavigation, installCodeSide } from './code-side.js'
+import { CODE_PANEL, CodeMainPanel, clearSeatOrigin, codePanelNavigation, installCodeSide } from './code-side.js'
 import { CodeStartMenu, CodeStartStatus } from './code-start-menu.js'
 import { LEFT_BAR_CSS } from './left-bar-css.js'
 import { installBarWidth } from './left-bar-width.js'
@@ -606,7 +606,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   const yieldBrowser = state => state.panelYield === true || panelFolded('browser')
   const ensureBotHome = () => goToBotHome({ roster, mainView, openSession: actions.openSession })
   let cliLogin
-  const codePanel = codePanelNavigation(ctx.layout)
+  const codePanel = codePanelNavigation(ctx.layout, seatNavigation)
   const actions = {
     ...teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession: id => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
     selfUpdateStatusSource,
@@ -713,7 +713,8 @@ function applyOwner(ctx, { gated = false } = {}) {
     },
     // A seat is not a Session: the bar sets the seat and picks the keyed main panel
     // (RFC 0022 1L). Opening any Session returns the main panel to the conversation.
-    openSeat: (seat) => {
+    openSeat: (seat, { fromCode = false } = {}) => {
+      if (!fromCode) clearSeatOrigin()
       seatChatView.set({ seat })
       try { ctx.layout.selectPanel(SEAT_CHAT_PANEL) } catch (error) { noteClientError('seat-chat', error) }
     },
@@ -721,6 +722,7 @@ function applyOwner(ctx, { gated = false } = {}) {
       try { codePanel.open(selected, options) } catch (error) { noteClientError('code-side', error) }
     },
     closeCodePane: codePanel.close,
+    reshowCodePane: codePanel.reshow,
     seatList: () => call('seat-chat-list'),
     selectPanel: (id) => { ctx.layout.selectPanel(id) },
     toggleSidebar: () => { ctx.layout.toggleSidebar() },
@@ -1308,11 +1310,11 @@ function applyOwner(ctx, { gated = false } = {}) {
     // picks it, and opening any Session (or Back) puts the conversation back.
     () => ctx.slots.inject('main', () => ctx.slots.register({
       name: 'main', key: SEAT_CHAT_PANEL,
-      inject: () => ({ onBack: () => ctx.layout.selectPanel(null) }),
+      inject: () => ({ onBack: () => ctx.layout.selectPanel(null), onReshowCode: actions.reshowCodePane }),
     }, SeatChatPanel)),
     () => ctx.slots.inject('main', () => ctx.slots.register({
       name: 'main', key: CODE_PANEL,
-      inject: () => ({ onBack: codePanel.close }),
+      inject: () => ({ onBack: codePanel.close, openSeat: actions.openSeat, useSeatRoster }),
     }, CodeMainPanel)),
     () => shadow('sidebar.brand.mark', { priority: BOT_PRIORITY }, BrandMark),
     () => shadow('sidebar.brand.name', { priority: BOT_PRIORITY }, BrandName),

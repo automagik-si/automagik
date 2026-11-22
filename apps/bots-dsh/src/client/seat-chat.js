@@ -42,6 +42,10 @@ export function seatClientId(storage) {
 
 /** The seat the panel shows: set by the bar's row, kept while the panel is selected. */
 export const seatChatView = createSource({ seat: null })
+const NO_SEATS = Object.freeze([])
+const EMPTY_SEAT_ROSTER = { seats: NO_SEATS, front: null }
+const seatRosterView = createSource(EMPTY_SEAT_ROSTER)
+export const useSeatRoster = () => useSyncExternalStore(seatRosterView.subscribe, seatRosterView.getSnapshot)
 
 const AGENTS = { claude: 'Claude Code', codex: 'Codex', omp: 'omp' }
 /** The agent's name as the header says it; a decoder-less pane is a terminal. */
@@ -68,16 +72,34 @@ export function seatBotId(seat) {
   return id === '' ? null : id
 }
 
+export function localSeatByKey(seats, key) {
+  return seats.find(seat => seat.machine == null && (seat.key ?? seat.id) === key)
+}
+
+export const seatNavigation = {
+  seatPanel: SEAT_CHAT_PANEL,
+  seatKey() {
+    const { seat } = seatChatView.getSnapshot()
+    return seat?.key ?? seatBotId(seat)
+  },
+  restoreSeat(key) {
+    const seat = localSeatByKey(seatRosterView.getSnapshot().seats, key)
+    seatChatView.set({ seat: seat ?? null })
+    return Boolean(seat)
+  },
+}
+
 /** Why a seat cannot show its terminal, in words; null when its own pane is live here. */
+const NOT_RUNNING = () => t('This seat is not running on this computer, so its terminal cannot open.')
 export const seatTerminalWhy = seat => (seat === null
   ? null
   : typeof seat.terminal === 'string' && seat.terminal !== ''
     ? null
-    : t('This seat is not running on this computer, so its terminal cannot open.'))
+    : NOT_RUNNING())
 
 /**
  * The open seat after the bar's next poll: the row's own identity stays, its live facts follow.
- * Null when the row is gone or nothing changed, so the panel does not re-render every poll.
+ * Null clears a withdrawn seat. Unchanged facts keep the same object.
  */
 export function seatWithFreshPane(seat, fresh) {
   if (seat === null || fresh === null || fresh === undefined) return null
@@ -92,42 +114,35 @@ export function seatWithFreshPane(seat, fresh) {
   }
   return next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal
     && next.agent === seat.agent && next.chat === seat.chat && next.status === seat.status
-    ? null : next
+    ? seat : next
 }
-
-/** No seats: one frozen empty list, so an empty reply never changes state or re-renders. */
-const NO_SEATS = Object.freeze([])
 
 /**
  * The bar's seats, polled: `[{ id, name, project, terminal, agent, chat, status, order }]`.
  *
  * `list` is the shell's own stable action (it asks the host); without it nothing is fetched at
- * all, and nothing is fetched when the bar is not the shown one (`enabled`). Depending on a
- * default made here would make a new function every render, and an empty reply stored as a new
- * array would re-render and ask again: the fixture page that has no seat source must see no call.
+ * all, and nothing is fetched when the bar is not the shown one (`enabled`). The seats and
+ * their front are published together so both views read the same answer.
  */
 export function useSeats(list, enabled = true) {
-  const [seats, setSeats] = useState(NO_SEATS)
+  const { seats } = useSeatRoster()
   useEffect(() => {
-    const empty = () => setSeats(now => (now.length === 0 ? now : NO_SEATS))
     if (!enabled || typeof list !== 'function') {
-      empty()
+      seatRosterView.set(EMPTY_SEAT_ROSTER)
       return undefined
     }
     let alive = true
     let timer
     const tick = async () => {
-      let next = NO_SEATS
       try {
         const value = await list()
-        next = Array.isArray(value?.seats) ? value.seats : NO_SEATS
+        if (alive && Array.isArray(value?.seats)) {
+          seatRosterView.set(value.seats.length || value.front ? { seats: value.seats, front: value.front ?? null } : EMPTY_SEAT_ROSTER)
+        }
       } catch {
-        // A host that cannot read seats (no Herdr, an old plugin) lists none; the team is unchanged.
-        next = NO_SEATS
+        // Keep the last successful roster through a failed poll.
       }
       if (!alive) return
-      if (next.length === 0) empty()
-      else setSeats(next)
       timer = setTimeout(tick, LIST_MS)
     }
     tick()
@@ -159,53 +174,78 @@ export function mergeFace(now, value, terminal) {
 export function useSeatFace(seat) {
   const [face, setFace] = useState(EMPTY_FACE)
   const terminal = typeof seat?.terminal === 'string' ? seat.terminal : null
+  const botId = seatBotId(seat)
   useEffect(() => {
     let alive = true
     let timer
     let cursor = null
-    let client = null
     if (terminal === null) {
       setFace(EMPTY_FACE)
       return undefined
     }
-    client = seatClientId()
+    const client = seatClientId()
+    let generation
+    let closed = false
+    const close = () => {
+      if (closed || generation === undefined) return
+      closed = true
+      void call('seat-chat-close', { client, terminal, generation }).catch(() => {})
+    }
+    const clearFace = (error) => {
+      close()
+      setFace({ ...EMPTY_FACE, botId, terminal, error })
+    }
+    const matches = (value) => {
+      if (value?.seat?.id === botId) return true
+      clearFace(NOT_RUNNING())
+      return false
+    }
+    const failed = (error) => {
+      if (!alive) return false
+      const message = hostText(error?.message ?? '')
+      if (error?.code === 'bot/refused') clearFace(message)
+      else setFace(now => ({ ...now, loading: false, error: message }))
+      return error?.code === 'bot/unavailable'
+    }
     const read = async () => {
       try {
         const value = await call('seat-chat-read', { client, terminal, after: cursor })
-        if (!alive) return
+        if (!alive || !matches(value)) return
         cursor = (value.rows ?? []).at(-1)?.id ?? cursor
         setFace(now => mergeFace(now, value, terminal))
       } catch (error) {
-        if (alive) setFace(now => ({ ...now, loading: false, error: hostText(error?.message ?? '') }))
-        return
+        if (!failed(error)) return
       }
       if (alive) timer = setTimeout(read, READ_MS)
     }
     const open = async () => {
       // Another seat's face never stands in for this one: its rows, card and status go first.
-      setFace(now => (now.terminal === terminal ? { ...now, loading: true, error: null } : { ...EMPTY_FACE, terminal, loading: true }))
+      setFace(now => (now.terminal === terminal && now.botId === botId
+        ? { ...now, loading: true, error: null } : { ...EMPTY_FACE, botId, terminal, loading: true }))
       try {
         const value = await call('seat-chat-open', { client, terminal })
-        if (!alive) return
+        generation = value?.generation
+        if (!alive) { close(); return }
         if (value === null) {
           setFace(now => ({ ...now, loading: false, error: t('This seat holds the chat already open in another window.') }))
           return
         }
+        if (!matches(value)) return
         cursor = (value.rows ?? []).at(-1)?.id ?? null
         setFace(now => mergeFace(now, value, terminal))
         timer = setTimeout(read, READ_MS)
       } catch (error) {
-        if (alive) setFace(now => ({ ...now, loading: false, error: hostText(error?.message ?? '') }))
+        if (failed(error)) timer = setTimeout(open, READ_MS)
       }
     }
     open()
     return () => {
       alive = false
       clearTimeout(timer)
-      if (client) void call('seat-chat-close', { client, terminal }).catch(() => {})
+      close()
     }
-  }, [terminal])
-  return face
+  }, [terminal, botId])
+  return face.botId === botId && face.terminal === terminal ? face : EMPTY_FACE
 }
 
 const toolText = (row) => (typeof row?.summary === 'string' && row.summary.trim() !== '' ? row.summary : '')
@@ -266,24 +306,50 @@ export const seatSourceNote = seat => (seat?.chat === 'screen'
  * The main panel a seat row opens. It is root-scoped (a seat has no DSH Session): the bar's
  * store names the seat, this reads its face, and `onBack` returns to the conversation.
  */
-export function SeatChatPanel({ onBack }) {
+const scrollPlaces = new Map()
+
+function saveScroll(terminal, node, pinned) {
+  if (!terminal || !node) return
+  scrollPlaces.delete(terminal)
+  scrollPlaces.set(terminal, { pinned, scrollTop: node.scrollTop })
+  if (scrollPlaces.size > 16) scrollPlaces.delete(scrollPlaces.keys().next().value)
+}
+
+export function SeatChatPanel({ onBack, onReshowCode }) {
   const seat = useSyncExternalStore(seatChatView.subscribe, seatChatView.getSnapshot).seat
   const face = useSeatFace(seat)
   const botId = seatBotId(seat)
   // The same flip and the same Code body a Bot conversation uses (code-side.js), keyed by the
   // seat's registry Bot id. The seat row keeps the body itself; the conversation slot is not
   // registered underneath it.
-  const code = useCodeFace(botId, { seat: true })
+  const code = useCodeFace(botId, { seat: true, terminal: seat?.terminal })
   const terminal = code.face === 'terminal'
   const why = seatTerminalWhy(seat)
   const showingTerminal = terminal && why === null
+  const missingTerminal = showingTerminal && code.terminalMissing
   const scroll = useRef(null)
   const [pinned, setPinned] = useState(true)
+  const pinnedRef = useRef(true)
+  const restore = useRef(null)
   const length = face.rows.length
   useLayoutEffect(() => {
     const node = scroll.current
-    if (node && pinned) node.scrollTop = node.scrollHeight
-  }, [length, pinned, seat?.terminal])
+    if (!node || !seat?.terminal) return
+    const saved = scrollPlaces.get(seat.terminal)
+    pinnedRef.current = saved?.pinned ?? true
+    setPinned(pinnedRef.current)
+    restore.current = saved?.pinned === false ? saved.scrollTop : null
+    return () => { if (restore.current === null) saveScroll(seat.terminal, node, pinnedRef.current) }
+  }, [showingTerminal, seat?.terminal])
+  useLayoutEffect(() => {
+    const node = scroll.current
+    if (!node) return
+    if (pinnedRef.current) node.scrollTop = node.scrollHeight
+    else if (face.terminal === seat?.terminal && !face.loading && restore.current !== null) {
+      node.scrollTop = restore.current
+      restore.current = null
+    }
+  }, [length, pinned, seat?.terminal, showingTerminal, face.loading, face.terminal])
   // A seat that lost its pane always shows its chat, never a Terminal body it cannot open.
   useEffect(() => { if (why !== null && terminal) closeTerminal() }, [why, terminal])
   // Leaving the seat panel leaves its Terminal too: a later conversation never opens on it.
@@ -293,7 +359,7 @@ export function SeatChatPanel({ onBack }) {
       h('div', { className: 'bt-seat-empty' }, t('Choose a seat in the team bar to read its chat.')))
   }
   const status = face.status === null ? seat.status : seatWordOf(face.status)
-  const needs = (face.approval !== null || face.question !== null) && status === 'needs'
+  const needs = seat.agent === 'claude' && (face.approval !== null || face.question !== null) && status === 'needs'
   const seatLine = [seat.project, seatAgentName(seat.agent), SEAT_MACHINE()].filter(Boolean).join(' · ')
   return h('div', { className: 'bt-seat', 'data-seat': seat.id, 'data-seat-face': showingTerminal ? 'terminal' : 'chat' },
     h('header', { className: 'bt-seat-head' },
@@ -308,16 +374,20 @@ export function SeatChatPanel({ onBack }) {
         h('div', { className: 'bt-seat-sub' }, seatLine)),
       botId === null ? null : h(FaceSwitch, {
         face: showingTerminal ? 'terminal' : 'chat',
-        onFace: code.onFace,
+        onFace: (next) => {
+          saveScroll(seat.terminal, scroll.current, pinnedRef.current)
+          if (next === 'terminal' && code.seatOrigin?.botId === botId && onReshowCode) onReshowCode(botId)
+          else code.onFace(next)
+        },
         unavailable: why === null ? {} : { terminal: why },
       }),
       h('span', { className: 'bt-seat-status', 'data-status': status, title: word(status), 'aria-label': word(status) },
         h('span', { className: 'bt-seat-status-mark', 'data-status': status, 'aria-hidden': true }),
         word(status))),
-    why === null ? null : h('p', { className: 'bt-seat-why', role: 'status' }, why),
+    why === null && !missingTerminal ? null : h('p', { className: 'bt-seat-why', role: 'status' }, why ?? NOT_RUNNING()),
     h('div', { className: 'bt-seat-body' },
       showingTerminal
-        ? h(CodeBody, { key: botId })
+        ? (missingTerminal ? null : h(CodeBody, { key: botId }))
         : h(Fragment, null,
           needs ? h(WaitingCard, { approval: face.approval, question: face.question }) : null,
           face.error !== null
@@ -330,7 +400,8 @@ export function SeatChatPanel({ onBack }) {
             className: 'bt-seat-scroll', ref: scroll,
             onScroll: (event) => {
               const node = event.currentTarget
-              setPinned(node.scrollHeight - node.scrollTop - node.clientHeight < 24)
+              pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24
+              setPinned(pinnedRef.current)
             },
           },
             face.rows.map(row => h(SeatRow, { key: row.id, row })),
@@ -339,7 +410,7 @@ export function SeatChatPanel({ onBack }) {
               : null),
           !pinned ? h('button', {
             type: 'button', className: 'bt-seat-latest',
-            onClick: () => { setPinned(true); const node = scroll.current; if (node) node.scrollTop = node.scrollHeight },
+            onClick: () => { pinnedRef.current = true; setPinned(true); const node = scroll.current; if (node) node.scrollTop = node.scrollHeight },
           }, t('Latest')) : null)),
     showingTerminal ? null : h('footer', { className: 'bt-seat-foot' }, seatSourceNote(seat)))
 }

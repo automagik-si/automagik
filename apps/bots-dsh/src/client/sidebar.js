@@ -17,10 +17,9 @@ import { showsDshRow } from './dsh-offer.js'
 import { badges, botChildren, nav, sidebarTools, useEntries } from './extend.js'
 import { agentRowSessions, approvalFor, endLabel, runningTasksOf, taskState, waitsForUser } from './task-card.js'
 import { approvalCount, approvalDetail, useApproval } from './approvals.js'
-import { WorkCodeSwitch } from './work-code-switch.js'
 import { BotPills, pillLabels } from './capability-pills.js'
 import { LeftBar } from './left-bar.js'
-import { seatBotId, seatChatView, seatWithFreshPane, useSeats } from './seat-chat.js'
+import { localSeatByKey, seatBotId, seatChatView, seatWithFreshPane, useSeatRoster, useSeats } from './seat-chat.js'
 import { NATIVE_WORKERS_CSS, NativeWorkers, runningWorkers } from './native-workers.js'
 import { roleOutletVisible, roleTagOf } from '../shared/roles.js'
 
@@ -399,6 +398,15 @@ const bootHint = () => {
     : t('The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.', { error: last })
 }
 
+export function useFreshSeat(openSeat, seats) {
+  useEffect(() => {
+    if (openSeat === null) return
+    const fresh = localSeatByKey(seats, openSeat.key ?? seatBotId(openSeat))
+    const next = seatWithFreshPane(openSeat, fresh)
+    if (next !== openSeat) seatChatView.set({ seat: next })
+  }, [seats, openSeat])
+}
+
 export function TeamSidebar(props) {
   const { wide, expandSidebar, useRoster, useUi, useSessions, actions } = props
   const listRef = useRef(null)
@@ -410,13 +418,9 @@ export function TeamSidebar(props) {
   // An open seat keeps polling even where the bar is a narrow rail, so its switch learns a
   // pane that starts or stops while the panel stays open.
   const openSeat = useSyncExternalStore(seatChatView.subscribe, seatChatView.getSnapshot).seat
-  const seats = useSeats(actions.seatList, wide || openSeat !== null)
-  useEffect(() => {
-    if (openSeat === null) return
-    const fresh = seats.find(candidate => candidate.id === seatBotId(openSeat))
-    const next = seatWithFreshPane(openSeat, fresh)
-    if (next !== null) seatChatView.set({ seat: next })
-  }, [seats, openSeat])
+  const { front } = useSeatRoster()
+  const seats = useSeats(actions.seatList, wide || openSeat !== null || code.barSelected !== null)
+  useFreshSeat(openSeat, seats)
   const markedUnread = useUi(value => value.unread)
   const bootFailed = useUi(value => value.bootFailed === true)
   props.useRegistry(value => value)
@@ -454,9 +458,8 @@ export function TeamSidebar(props) {
     return result
   }
   const team = () => {
-    if (code.side === 'team') return
     actions.closeCodePane?.()
-    setCodeSide('team')
+    if (code.side !== 'team') setCodeSide('team')
   }
   const rowActions = {
     ...actions,
@@ -479,8 +482,9 @@ export function TeamSidebar(props) {
     // The new left bar (left-bar.js): the rail, the Team rows, the same openings as below.
     const byId = id => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find(agent => agent.id === id)
     const open = (row) => {
+      if (row.bot?.remote) return
       team()
-      if (row.bot?.seat) return rowActions.openSeat(row.bot)
+      if (row.bot?.seat) return navigate(actions.openSeat, row.bot)
       if (row.kind === 'chat') return row.source?.open?.(row.id)
       if (row.kind === 'group') return rowActions.openSession(row.id)
       if (row.bot?.dsh) return rowActions.openAgent(row.id)
@@ -505,9 +509,9 @@ export function TeamSidebar(props) {
       return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotWorkers, { ...rowProps, bot }), children) : null
     }
     return h(LeftBar, {
-      roster, order, marked: markedUnread, seats, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
+      roster, order, marked: markedUnread, seats, front, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
       open, menu, renderAfter, notice, onKeyDown: typeToSearch,
-      sideSwitch: h(CodeSideSwitch, { current: code, onSelect: side => (side === 'team' ? team() : setCodeSide(side)) }),
+      sideSwitch: h(CodeSideSwitch, { current: code, onSelect: setCodeSide }),
       codeList: code.side === 'code' ? h(CodeBarList, { current: code, onSelect: (selected, options) => navigate(actions.openCodePane, selected, options) }) : null,
       // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
       renderEnd: (row) => {
@@ -515,7 +519,6 @@ export function TeamSidebar(props) {
         return bot ? h(RowBadges, { bot, roster, useWork: props.useWork }) : null
       },
       tools: h(Fragment, null, h(UpdateButton, { useUpdate: props.useUpdate, actions }), h(SidebarTools, toolProps)),
-      foot: h(WorkCodeSwitch, { roster, useSessions }),
       collapse: h('button', { type: 'button', className: 'bt-round bt-side-collapse', 'aria-label': t('Collapse sidebar'), title: t('Collapse sidebar'), onClick: () => actions.toggleSidebar() }, h(SidebarIcon)),
       empty: roster.ready ? null : h('div', { className: 'bt-hint' }, bootFailed ? bootHint() : t('Setting up your Main Bot…')),
     })
@@ -523,7 +526,6 @@ export function TeamSidebar(props) {
   return h('div', { className: wide ? 'bt-side' : 'bt-side bt-rail', onKeyDown: typeToSearch },
     wide ? h('div', { className: 'bt-side-top' },
       h('span', { className: 'bt-brand' }, h(Lockup, { height: 21 })),
-      h(WorkCodeSwitch, { roster, useSessions }),
       h(UpdateButton, { useUpdate: props.useUpdate, actions }),
       h(SidebarTools, toolProps),
       h('button', { type: 'button', className: 'bt-round', 'aria-label': t('Search'), title: t('Search'), onClick: () => actions.openPalette() }, h(SearchIcon)),
@@ -1022,7 +1024,7 @@ html[data-automagik-desktop=darwin] .bt-side-top{-webkit-app-region:drag}
 /* The row is the window's title bar: empty space moves the window, while every control in it
    takes clicks. The list is the shell bar's, so a control a builder adds here is covered
    without another rule; the brand is hidden in the app but kept sane. */
-html[data-automagik-desktop=darwin] .bt-side-top :is(.bt-brand,.bt-code-switch,a,button,input,label,select,summary,textarea,[contenteditable],[role=button],[role=checkbox],[role=link],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=radio],[role=slider],[role=switch],[role=tab],[aria-haspopup],[tabindex],[data-menu]){-webkit-app-region:no-drag}
+html[data-automagik-desktop=darwin] .bt-side-top :is(.bt-brand,a,button,input,label,select,summary,textarea,[contenteditable],[role=button],[role=checkbox],[role=link],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=radio],[role=slider],[role=switch],[role=tab],[aria-haspopup],[tabindex],[data-menu]){-webkit-app-region:no-drag}
 html[data-automagik-desktop=darwin] header[class*="_header"]{-webkit-app-region:drag}
 html[data-automagik-desktop=darwin] header[class*="_header"] :is(a,button,input,label,select,summary,textarea,[contenteditable],[role=button],[role=checkbox],[role=link],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=radio],[role=slider],[role=switch],[role=tab],[aria-haspopup],[tabindex],[data-menu]){-webkit-app-region:no-drag}
 /* The fixed details panel overlaps that header but is not its descendant. Native drag

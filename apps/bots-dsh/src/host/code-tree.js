@@ -21,7 +21,7 @@ import { execFile } from 'node:child_process'
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { HOME_PATH, REPO_PATH, parseRegistry } from '../shared/registry.js'
-import { attachPath, foldAttach, heldIn, readAttach } from '../shared/attach-record.js'
+import { attachKey, attachPath, foldAttach, heldIn, readAttach } from '../shared/attach-record.js'
 import { foldWorkers, readWorkers, workersOf, workersPath } from '../shared/workers-journal.js'
 import { connectCore } from './code-core.js'
 import { GIT_DIRS, startEnv, trustedHc, trustedProgram } from './code-env.js'
@@ -78,10 +78,17 @@ export const STATUS_WORDS = Object.freeze(['working', 'needs-you', 'idle', 'not-
 
 /** One terminal's status as the bar's words: a person is needed first, then what runs. */
 export function statusWord(terminal) {
-  if (!terminal) return 'not-running'
-  if (terminal.status === 'blocked' || terminal.status === 'error') return 'needs-you'
-  if (terminal.status === 'working') return 'working'
+  if (!terminal || terminal.state === 'finished') return 'not-running'
+  const status = terminal.status?.state ?? terminal.status
+  if (status === 'blocked' || status === 'error') return 'needs-you'
+  if (status === 'working') return 'working'
   return 'idle'
+}
+
+/** The core's current pane is the exact live pane the ledger names. */
+export function confirmedPane(binding, core, terminal) {
+  return core && binding?.core === core && terminal?.state === 'live' && terminal.created_ms === binding.created_ms
+    ? terminal : null
 }
 
 /** The terminal's own size, for an observer that must not reflow it. */
@@ -126,16 +133,14 @@ export function buildCodeTree({ bots = [], projects = [], attach, workers, termi
   for (const bot of inProject) folders.set(resolve(bot.folder), { folder: resolve(bot.folder) })
   const rowsOf = (projectBots, folder = null) => projectBots.map((bot) => {
     const binding = heldIn(attach.fold, bot.id, null)
-    const terminal = binding ? terminals.get(String(binding.terminal)) : undefined
-    // The row must name this computer's core as well: a terminal id reused after a core
-    // wipe is not the binding the ledger wrote.
-    const live = Boolean(binding) && binding.core === core.id && terminal?.created_ms === binding.created_ms
-    const size = live ? sizeOf(terminal) : null
+    const terminal = binding ? confirmedPane(binding, core.id, terminals.get(binding.terminal)) : null
+    const live = terminal !== null
+    const size = sizeOf(terminal)
     const seen = workersOf(workers, bot.id)
-      .filter(worker => worker.core === core.id)
       .map((worker) => {
-        const running = terminals.get(worker.terminal)
-        if (!running || running.created_ms !== worker.created_ms) return null
+        const running = confirmedPane(worker, core.id, terminals.get(worker.terminal))
+        // The fold contains seats of Bots outside this tree as well.
+        if (!running || attach.fold.byKey.has(attachKey(worker))) return null
         return {
           terminal: worker.terminal,
           role: worker.role,
@@ -299,24 +304,29 @@ const isText = value => typeof value === 'string' && value.trim() !== ''
 const ROSTER_KINDS = new Set(['main', 'member'])
 
 /** A file's text, read through one descriptor and at most `limit` bytes; undefined when it is not there, null when it can't be read. */
-function boundedText(path, limit) {
+export function boundedText(path, limit) {
   let fd
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK)
     const stat = fstatSync(fd)
     if (!stat.isFile() || stat.size > limit) return null
-    // Room for the file as it is now, and one byte more to see it grow past the limit.
-    const bytes = Buffer.alloc(Math.min(limit, stat.size) + 1)
-    let size = 0
-    while (size < bytes.length) {
-      const count = readSync(fd, bytes, size, bytes.length - size, null)
-      if (count === 0) break
-      size += count
-    }
-    return size > Math.min(limit, stat.size) ? null : bytes.toString('utf8', 0, size)
+    return boundedDescriptorText(fd, stat.size)
   } catch (error) {
     return error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ? undefined : null
   } finally { if (fd !== undefined) closeSync(fd) }
+}
+
+/** Read at most the size verified by the caller, refusing a file that has grown. */
+export function boundedDescriptorText(fd, fileSize) {
+  // Room for the file as it is now, and one byte more to see it grow past the limit.
+  const bytes = Buffer.alloc(fileSize + 1)
+  let size = 0
+  while (size < bytes.length) {
+    const count = readSync(fd, bytes, size, bytes.length - size, null)
+    if (count === 0) break
+    size += count
+  }
+  return size > fileSize ? null : bytes.toString('utf8', 0, size)
 }
 
 /** One git question in `folder`, as the CLI asks it: its trimmed answer, '' when git says no, null when it can't tell. */
@@ -453,11 +463,48 @@ export async function startTarget(botId, { env = process.env, readFile = readFil
   return { folder, key: facts.keys.get(folder), blocked: startBlock(botId, folder, facts) }
 }
 
-const readLedger = (path, readFile) => {
-  let stat
-  try { stat = statSync(path) } catch (error) { return error?.code === 'ENOENT' ? '' : null }
-  if (!stat.isFile() || stat.size > MAX_LEDGER_BYTES) return null
+const ledgerStat = path => {
+  try { return statSync(path) } catch (error) { return error?.code === 'ENOENT' ? false : null }
+}
+
+const readLedger = (path, readFile, stat = ledgerStat(path)) => {
+  if (stat === false) return ''
+  if (!stat?.isFile() || stat.size > MAX_LEDGER_BYTES) return null
   try { return readFile(path, 'utf8') } catch { return null }
+}
+
+const workerHasNoOtherSeatOwner = (fold, botId, pane) => {
+  const seat = fold.byKey.get(attachKey(pane))
+  return !seat || seat.bot === botId
+}
+
+/** Observers reuse the ownership verdict only while the ledger's metadata stays the same. */
+export function paneStillOwned(pane, worker, { env = process.env, readFile = readFileSync, cache } = {}) {
+  const path = attachPath(appHomeOf(env))
+  const stat = ledgerStat(path)
+  const key = stat ? `${stat.mtimeMs}:${stat.size}:${stat.ino}` : stat
+  if (cache && cache.key === key) return cache.owned
+  const text = readLedger(path, readFile, stat)
+  if (text === null) return false
+  const fold = foldAttach(readAttach(text).rows)
+  const seat = worker == null ? heldIn(fold, pane.botId, null) : null
+  const owned = worker == null ? Boolean(seat && attachKey(seat) === attachKey(pane))
+    : workerHasNoOtherSeatOwner(fold, pane.botId, pane)
+  if (cache) Object.assign(cache, { key, owned })
+  return owned
+}
+
+const workerBinding = (appHome, botId, worker, readFile) =>
+  workersOf(foldWorkers(readWorkers(readLedger(workersPath(appHome), readFile) ?? '').rows), botId)
+    .find(candidate => candidate.terminal === worker)
+
+/** Confirm the registry grant and worker launch before issuing a typing session. */
+export function paneStillGranted(pane, worker, { env = process.env, readFile = readFileSync, warn } = {}) {
+  const bot = readRegistryTree({ env, readFile, warn }).bots.find(candidate => candidate.id === pane.botId)
+  if (!bot || bot.folder !== pane.folder) return false
+  if (worker == null) return true
+  const row = workerBinding(appHomeOf(env), pane.botId, worker, readFile)
+  return Boolean(row && attachKey(row) === attachKey(pane))
 }
 
 /**
@@ -520,23 +567,11 @@ export async function resolvePane({ botId, worker = null, env = process.env, con
   const appHome = appHomeOf(env)
   const attachRows = readAttach(readLedger(attachPath(appHome), readFile) ?? '').rows
   const fold = foldAttach(attachRows)
-  let terminalId = null
-  let createdMs = null
-  let rowCore = null
-  if (worker === null || worker === undefined) {
-    const binding = heldIn(fold, botId, null)
-    if (!binding) return null
-    terminalId = binding.terminal
-    createdMs = binding.created_ms
-    rowCore = binding.core
-  } else {
-    const workers = foldWorkers(readWorkers(readLedger(workersPath(appHome), readFile) ?? '').rows)
-    const found = workersOf(workers, botId).find(candidate => candidate.terminal === worker)
-    if (!found) return null
-    terminalId = found.terminal
-    createdMs = found.created_ms
-    rowCore = found.core
-  }
+  const row = worker == null
+    ? heldIn(fold, botId, null)
+    : workerBinding(appHome, botId, worker, readFile)
+  if (!row) return null
+  const terminalId = row.terminal
   let core
   try {
     core = await connect({ env })
@@ -545,14 +580,13 @@ export async function resolvePane({ botId, worker = null, env = process.env, con
   }
   try {
     const coreId = core.info?.core?.id ?? ''
-    // The row must name this computer's core: a row written on another machine's core with
-    // a colliding terminal id is not this computer's pane.
-    if (!coreId || rowCore !== coreId) return null
-    const terminal = await core.call('terminal.get', { terminal: terminalId })
-    if (!terminal || terminal.created_ms !== createdMs || terminal.state !== 'live') return null
+    if (!coreId || row.core !== coreId) return null
+    const terminal = confirmedPane(row, coreId, await core.call('terminal.get', { terminal: terminalId }))
+    if (!terminal) return null
+    if (worker != null && !workerHasNoOtherSeatOwner(fold, botId, row)) return null
     const size = sizeOf(terminal)
     if (!size) return null
-    return { botId, terminal: terminalId, cols: size.cols, rows: size.rows, core: coreId, name: bot.name, folder: bot.folder }
+    return { botId, terminal: terminalId, created_ms: row.created_ms, cols: size.cols, rows: size.rows, core: coreId, name: bot.name, folder: bot.folder }
   } catch {
     return null
   } finally {

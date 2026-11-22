@@ -265,13 +265,13 @@ test('a live seat shows the switch; Terminal opens that registry Bot pane; Chat 
 
 test('the bar poll updates the open seat only when its live facts change', () => {
   const fresh = { ...seat, id: 'b-aaaaaaaaaa' }
-  assert.equal(seatWithFreshPane(seatRow, fresh), null, 'the same facts do not re-render')
+  assert.equal(seatWithFreshPane(seatRow, fresh), seatRow, 'the same facts do not re-render')
   const started = seatWithFreshPane(seatRow, { ...fresh, terminal: 't2', status: 'working' })
   assert.equal(started.terminal, 't2')
   assert.equal(started.id, 'seat:b-aaaaaaaaaa', 'the row identity stays')
   assert.equal(started.artId, 'b-aaaaaaaaaa')
   assert.equal(seatWithFreshPane(seatRow, { ...fresh, terminal: null, status: 'off' }).terminal, null)
-  assert.equal(seatWithFreshPane(seatRow, null), null, 'a row the poll no longer has changes nothing')
+  assert.equal(seatWithFreshPane(seatRow, undefined), null, 'a withdrawn row clears the open seat')
 })
 
 test('the open seat learns a pane that stops and starts while the panel stays open', () => {

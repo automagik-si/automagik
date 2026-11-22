@@ -10,7 +10,7 @@ import { createElement as h, useEffect, useRef, useState, useSyncExternalStore }
 import { t } from './i18n.js'
 import { installStyles } from './styles.js'
 import { ChevronRightIcon } from './icons.js'
-import { MAX_PANES, paneDetails, paneFor, statusKey, validGrid } from './code-side-model.js'
+import { MAX_PANES, paneDetails, statusKey, validGrid } from './code-side-model.js'
 import { pasteBytes } from './code-side-paste.js'
 import XTERM_CSS from '@xterm/xterm/css/xterm.css'
 
@@ -153,7 +153,7 @@ function createPaneHub() {
  * takes the pane, and its keys go to the host in small batches until typing ends.
  * No key, batch or paste is ever written to a log or a record here.
  */
-export function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${botId}:${worker ?? 'seat'}` }) {
+export function TerminalPane({ botId, worker, title, refusal, hub, faces, paneKey = `${botId}:${worker ?? 'seat'}` }) {
   const host = useRef(null)
   const [standaloneHub] = useState(() => hub ? null : createPaneHub())
   const stream = hub ?? standaloneHub
@@ -418,6 +418,7 @@ export function TerminalPane({ botId, worker, title, refusal, hub, paneKey = `${
   return h('div', { className: 'cs-pane' },
     h('div', { className: 'cs-pane-head' },
       h('span', { className: 'cs-pane-title', title }, title),
+      faces,
       h('span', { className: 'cs-pane-note', role: 'status', 'data-mode': mode }, stateWord),
       refusal ? h('span', { className: 'cs-paste-note', role: 'status', 'data-wrap': '' }, refusal)
         : resumeNote === 'paused' ? h('span', { className: 'cs-paste-note', role: 'status' }, t('Typing paused after 60 s idle. Press any key to resume'))
@@ -461,6 +462,7 @@ function herdrAction(herdr, botId) {
     'aria-label': t('Open in Herdr'),
     title: t('Code: open this Bot’s folder in Herdr'),
     disabled: herdr.busy,
+    onPointerEnter: herdr.refresh,
     onClick: (event) => {
       event.stopPropagation()
       herdr.openRow(botId)
@@ -503,7 +505,7 @@ export function CodeTree({ current, onSelect, sidebar = false, herdr, newControl
           status: bot.status,
           current: isCurrent(bot.id),
           note: sidebar ? bot.agent ?? (bot.main ? t('lead') : null) : bot.main ? t('lead') : null,
-          onClick: options => onSelect(paneFor(tree, bot.id) ?? { botId: bot.id, worker: null }, options),
+          onClick: options => onSelect({ botId: bot.id, worker: null }, options),
           action: canOpenRow ? herdrAction(herdr, bot.id) : null,
         }),
         bot.workers.map(worker => h(TreeRow, {
@@ -528,7 +530,7 @@ export function CodeTree({ current, onSelect, sidebar = false, herdr, newControl
 }
 
 /** The chosen terminals, shared by the seat face and the bar's main Code panel. */
-export function CodeTerminal({ tree, selected, beside = [], refused, loading }) {
+export function CodeTerminal({ tree, selected, beside = [], refused, loading, code }) {
   const [hub] = useState(createPaneHub)
   const panes = []
   for (const pane of [selected, ...beside].slice(0, MAX_PANES)) {
@@ -543,8 +545,11 @@ export function CodeTerminal({ tree, selected, beside = [], refused, loading }) 
   const refusal = refused && (onMac()
     ? t('Four terminals are shown: {names}. ⌘-click one of them to close it, then add another.', { names: refused.join(', ') })
     : t('Four terminals are shown: {names}. Ctrl-click one of them to close it, then add another.', { names: refused.join(', ') }))
-  return h('div', { className: 'cs-panes', 'data-count': panes.length }, panes.map(({ botId, worker, key, title }, index) =>
-    h(TerminalPane, { key, paneKey: key, hub, botId, worker, title, refusal: index === 0 ? refusal : null })))
+  return h('div', { className: 'cs-panes', 'data-count': panes.length }, panes.map(({ botId, worker, key, title, terminal }, index) => {
+    const faces = worker == null && code?.seatForPane?.(botId, terminal)
+      ? h(code.FaceSwitch, { face: 'terminal', onFace: () => code.openSeatFace(botId, terminal) }) : null
+    return h(TerminalPane, { key, paneKey: key, hub, botId, worker, title, faces, refusal: index === 0 ? refusal : null })
+  }))
 }
 
 /** The seat's Terminal face: keep its own tree next to its terminal. */
