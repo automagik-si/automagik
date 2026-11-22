@@ -541,7 +541,8 @@ export function install(rt) {
 
   const staleReview = () => Object.assign(new Error('The learning review inputs changed'), { code: 'bot/stale' })
   const checkReview = (bot, secrets) => {
-    if (stopped || rt.botOf(bot.id) !== bot || privateOwner(bot.id) || secretChange !== secrets) throw staleReview()
+    // The store replaces Bot objects on every reload, so a review is stale only when its Bot is gone or private.
+    if (stopped || rt.botOf(bot.id) === undefined || privateOwner(bot.id) || secretChange !== secrets) throw staleReview()
   }
 
   async function reviewSkill(bot, lines) {
