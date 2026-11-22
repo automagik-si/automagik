@@ -8,7 +8,7 @@ import { call } from './api.js'
 import { GlobeIcon, Favicon, PanelMenu, menuItemFor } from './browser-pane.js'
 import { drawerMenuKeys } from './side-model.js'
 import { useEscape } from './overlay-hooks.js'
-import { BotSettingsForm } from './bot-settings.js'
+import { BotSettingsForm, SwitchRow } from './bot-settings.js'
 import { GroupSettingsForm, ROOM_MODES, roomSubtitle, shownMode } from './group-settings.js'
 import { ModelMenu, needsModelPick } from './model-menu.js'
 import { FolderMenu } from './folder-menu.js'
@@ -21,9 +21,34 @@ import { AutoMissingNote, remoteOfBot, savedLevelOf, levelsOf, pickLevel, cliOfB
 import { reopenPermissionChoice } from './permission-card.js'
 import { BotConnectors } from './connectors.js'
 import { ComputerView } from './computer.js'
-import { t } from './i18n.js'
+import { addStrings, t } from './i18n.js'
+import { nativeToolsZh } from './native-tools-copy.js'
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
+import { markOf as permissionMarkOf } from '../shared/permission-levels.js'
+
+addStrings(nativeToolsZh)
+
+const NATIVE_TOOLS_HINTS = {
+  managed: 'Not available for a Bot that operates Omni or that another plugin manages.',
+  shared: 'Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.',
+  restricted: 'Not available while this Bot has shell access off or denied tools.',
+  'read-only': 'Not available at the Read only level.',
+  'level-unknown': "Not available: the permission level of this Bot's chat could not be read.",
+}
+
+export function NativeToolsRow({ bot, roster, run, actions }) {
+  if (permissionMarkOf(bot.model) !== 'acp-claude' || bot.nativeToolsBlock === 'multiuser') return null
+  const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock]
+  const on = blocked === undefined && bot.nativeTools === true
+  const hint = blocked !== undefined ? t(blocked) : on
+    ? t("In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.")
+    : t("Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Turning this on applies from the next conversation.")
+  return h(SwitchRow, {
+    label: t('Claude Code native tools'), hint, on, disabled: blocked !== undefined || Boolean(roster.readOnly),
+    onChange: value => void run(actions.updateBot(bot.id, { nativeTools: value })),
+  })
+}
 
 function transcriptOf(list, id, name, hiddenTurns = []) {
   const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline
@@ -360,6 +385,7 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
         h(PermissionRow, { key: 'permission', bot, roster, actions, run }),
         h(GrantList, { key: 'grants', bot, roster, actions, useWork }),
         h(BotConnectors, { key: 'connectors', bot, roster, actions, run }),
+        h(NativeToolsRow, { key: 'native-tools', bot, roster, actions, run }),
         h('div', { key: 'folder', className: 'bt-drawer-model' },
           h('div', { className: 'bt-section-title' }, t('Working folder')),
           h(FolderMenu, { value: bot.workDir, actions, run, wide: true, onPick: workDir => run(actions.updateBot(bot.id, { workDir })) })),

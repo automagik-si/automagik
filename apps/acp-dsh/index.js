@@ -98,6 +98,7 @@ export const Config = z.object({
     'Session ids to true for those only. Each native call still shows as a card and its',
     "permission request is answered by DSH's approval at the Session's level. Native commands and",
     "edits run in Claude Code, outside DSH's file sandbox.",
+    "Ignored where the Bot team runs: there a Bot's own switch decides.",
   ].join(' ')),
 })
 
@@ -252,6 +253,7 @@ export function apply(ctx, config = {}, {
     images: () => imageKeeper,
     hostStopping: () => hostStopping.now,
     botIdentity: identityReaders.read,
+    teamManaged: identityReaders.everRegistered,
     // The raw tri-state: an absent setting takes each agent's own switch in AcpAdapter.
     dshTools: () => flagOf(config.dshTools),
     // The raw native-tools setting: AcpAdapter.nativeOn reads it per Session.
@@ -1592,6 +1594,7 @@ export function apply(ctx, config = {}, {
      * one was live or starting.
      */
     endSession: (sessionId, why) => adapter.endSession(sessionId, why),
+    endClaudeSession: (sessionId, why) => adapter.endClaudeSession(sessionId, why),
     /**
      * What acted on one Session's permissions, for a diagnostics view (read-only, a fresh plain
      * copy, undefined for a Session that ran no agent here): { version, agent, startedAt, active,

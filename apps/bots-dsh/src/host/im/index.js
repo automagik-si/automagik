@@ -1144,5 +1144,7 @@ export function install(rt) {
   const imView = () => ({ connections: Object.values(connections()).map(viewOf), platforms: IM_PLATFORMS.filter(platform => adaptersFor().includes(platform.id)).map(platform => platform.id) })
   const imStatusView = () => Object.fromEntries([...statuses.entries()].map(([id, status]) => [id, { state: status.state, ...(status.error !== undefined ? { error: status.error } : {}), at: status.at }]))
 
-  Object.assign(rt, { imView, imStatusView, imViaView, imEndpoint })
+  const imBoundBot = botId => Object.values(connections()).some(conn => conn.enabled !== false
+    && listeners(conn, { botId }).length > 0)
+  Object.assign(rt, { imView, imStatusView, imViaView, imEndpoint, imBoundBot })
 }

@@ -56,11 +56,18 @@ export function install(rt) {
       const { name, role, instructions } = bot
       const rolePrompt = rt.roleRuntime?.acpPrompt?.(sessionId, owner)
       const needsDshTools = roleToolsInDsh(bot, sessionId)
-      return {
+      const identity = {
         name, role, instructions,
         ...(typeof rolePrompt === 'string' ? { rolePrompt } : {}),
         ...(needsDshTools ? { needsDshTools: true } : {}),
       }
+      // Identity also supplies the role on every turn. ACP asks for the switch
+      // only when it creates a process.
+      if (rt.nativeToolsEligible !== undefined) Object.defineProperties(identity, {
+        nativeTools: { get: () => rt.nativeToolsFor(sessionId) },
+        nativeToolsBlocked: { get: () => !rt.nativeToolsEligible(sessionId) },
+      })
+      return identity
     })
     if (typeof off === 'function') {
       const providers = sub.acpAgents.rolePromptProviders

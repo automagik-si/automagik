@@ -36,9 +36,12 @@ export function identityText(identity, part) {
 
 export function createIdentityReaders(warn) {
   const readers = new Set()
+  let registered = false
   return {
+    everRegistered: () => registered,
     register(reader) {
       if (typeof reader !== 'function') return () => {}
+      registered = true
       const entry = { reader }
       readers.add(entry)
       return () => { readers.delete(entry) }

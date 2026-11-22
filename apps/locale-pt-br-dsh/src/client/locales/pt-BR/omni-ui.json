@@ -1,4 +1,12 @@
 {
+  "Claude Code native tools": "Ferramentas nativas do Claude Code",
+  "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.": "Na conversa direta com você, o Claude Code usa as próprias ferramentas (Bash, Read, Edit…). Essas ferramentas rodam fora da área restrita de arquivos do Automagik. O nível de permissão determina o que pede sua aprovação antes. Desligar encerra na hora a sessão em andamento.",
+  "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Turning this on applies from the next conversation.": "O Claude Code usa as ferramentas do Automagik, aprovadas no Automagik. Grupos, tarefas e execuções agendadas sempre usam. Ligar vale a partir da próxima conversa.",
+  "Not available at the Read only level.": "Indisponível no nível Somente leitura.",
+  "Not available: the permission level of this Bot's chat could not be read.": "Indisponível: não foi possível ler o nível de permissão da conversa deste Bot.",
+  "Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.": "Indisponível enquanto este Bot estiver compartilhado com outras pessoas ou houver um plugin de compartilhamento (LiveShare) instalado.",
+  "Not available while this Bot has shell access off or denied tools.": "Indisponível enquanto este Bot estiver sem acesso ao shell ou com ferramentas bloqueadas.",
+  "Not available for a Bot that operates Omni or that another plugin manages.": "Indisponível para um Bot que opera o Omni ou que outro plugin gerencia.",
   "No Bots are shared with you yet.": "Ainda não há Bots compartilhados com você.",
   "Nothing to read here yet.": "Ainda não há mensagens para ler aqui.",
   "You can read this chat, but not send messages.": "Você pode ler esta conversa, mas não enviar mensagens.",

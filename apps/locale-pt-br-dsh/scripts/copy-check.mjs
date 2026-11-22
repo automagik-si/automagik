@@ -51,9 +51,11 @@ export const OMNI_PLUGIN_STRINGS = [
 // then those the plugins above add to the same namespace.
 export async function omniKeys() {
   const { installLocale } = await import('../../bots-dsh/src/client/i18n.js')
+  const { nativeToolsZh } = await import('../../bots-dsh/src/client/native-tools-copy.js')
   let keys = new Set()
   const off = installLocale({ register: (_ns, _locale, dict) => { keys = new Set(Object.keys(dict)); return () => {} }, bind: () => (key) => key })
   off()
+  for (const key of Object.keys(nativeToolsZh)) keys.add(key)
   for (const path of OMNI_PLUGIN_STRINGS) {
     for (const key of JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8')).keys) keys.add(key)
   }

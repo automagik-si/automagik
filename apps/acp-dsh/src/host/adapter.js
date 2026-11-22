@@ -60,6 +60,11 @@ const bridgeRow = message => (
   || (message?.role === 'developer' && message?.source?.kind === SYNTHETIC_KIND)
 )
 
+const ownerInput = message => message.source?.kind === 'user' && message.source.principal === undefined
+  && (message.source.rpcId === undefined || (typeof message.source.rpcId === 'string' && !message.source.rpcId.startsWith('im:')))
+
+const permitsNative = level => level?.sandbox === 'workspace-write' || level?.sandbox === 'danger-full-access'
+
 const detailed = tool => (tool.rawInput !== undefined && tool.rawInput !== null && Object.keys(tool.rawInput).length > 0) || tool.permission !== undefined || tool.status !== 'pending'
 function settle(tool, ms) {
   if (detailed(tool)) return Promise.resolve()
@@ -595,7 +600,7 @@ export class AcpAdapter extends LlmAdapter {
    */
   constructor(ctx, agents, {
     dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
-    botIdentity = () => undefined, access, holds, ownMode = () => undefined, hostStopping = () => false,
+    botIdentity = () => undefined, teamManaged = () => false, access, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
   } = {}) {
@@ -627,6 +632,7 @@ export class AcpAdapter extends LlmAdapter {
     // booleans. Read at each turn's start by `nativeOn`.
     this.nativeTools = nativeTools
     this.botIdentity = botIdentity
+    this.teamManaged = teamManaged
     this.backchannel = backchannel
     this.redact = redactor ?? (text => text)
     this.live = new Map()
@@ -852,6 +858,10 @@ export class AcpAdapter extends LlmAdapter {
    */
   nativeOn(agent, sessionId) {
     if (agent?.disableBuiltInTools !== true || !this.bridgeOn(agent, sessionId)) return false
+    if (this.teamManaged()) {
+      if (agent !== this.agents.get('acp-claude')) return false
+      try { return this.botIdentity(sessionId)?.nativeTools === true } catch { return false }
+    }
     let setting
     try { setting = this.nativeTools() } catch { return false }
     if (setting === true) return true
@@ -1045,14 +1055,21 @@ export class AcpAdapter extends LlmAdapter {
    * @param {string} [why] the sentence a step under way answers
    * @returns {boolean} whether an agent session was live or starting there
    */
-  endSession(sessionId, why) {
-    this.sessionFiles.clear(sessionId, { retire: false })
+  endClaudeSession(sessionId, why) {
+    return this.endSession(sessionId, why, 'acp-claude')
+  }
+
+  endSession(sessionId, why, provider) {
+    if (provider === undefined) this.sessionFiles.clear(sessionId, { retire: false })
     const text = typeof why === 'string' && why.trim() !== '' ? why : HELD_TEXT
     const starting = this.starting.get(sessionId)
-    if (starting !== undefined) starting.held ??= text
-    starting?.upload?.controller.abort()
+    const stopStarting = starting !== undefined && (provider === undefined || starting.provider === provider)
+    if (stopStarting) {
+      starting.held ??= text
+      starting.upload?.controller.abort()
+    }
     const live = this.live.get(sessionId)
-    if (live === undefined) return starting !== undefined
+    if (live === undefined || (provider !== undefined && live.provider !== provider)) return stopStarting
     live.held = text
     live.open = false
     live.substitution = undefined
@@ -1194,6 +1211,10 @@ export class AcpAdapter extends LlmAdapter {
     const owner = this.sessionFiles.owners.get(session?.id)
     if (owner?.session === session && ['permission/preset', 'sandbox/mode', 'approval/policy', 'model/selection'].includes(event?.type)) {
       this.endSession(session.id, 'Image session permission changed. Send a new message to continue.')
+    }
+    if (this.teamManaged() && this.live.get(session?.id)?.native === true
+      && event?.type === 'sandbox/mode' && event.data?.mode === 'read-only') {
+      this.endClaudeSession(session.id, 'This conversation is now Read only. Send a new message to continue.')
     }
     if (event?.type !== 'model/selection') return
     const live = this.live.get(session?.id)
@@ -1405,16 +1426,28 @@ export class AcpAdapter extends LlmAdapter {
       }
       // If the bridge process exited and the adapter has yet to re-attach by the next turn,
       // start a new agent session with DSH's tools and replay the chat to it (#969).
-      let full = false
-      try { full = levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets')).full === true } catch {}
-      // Native-tools mode keeps the agent's own tools, so it keeps the hard ask rules too: the
-      // person's own allow rules must not silently skip the ask for a hard Bash or file case.
-      const native = this.nativeOn(agent, sessionId)
-      const asks = typeof agent.hardAsk === 'function' && !(this.bridgeOn(agent, sessionId) && agent.disableBuiltInTools === true && !native) && !full
-      const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true) && this.bridgeOn(agent, sessionId)
-      if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
+      const levelAtStart = () => {
+        try { return levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets')) } catch { return undefined }
+      }
+      const turnLevel = levelAtStart()
+      const managed = options.provider === 'acp-claude' && this.teamManaged()
+      const inputStart = turnStart(options.messages)
+      const history = options.messages.slice(0, inputStart)
+      const inputs = managed ? options.messages.slice(inputStart).filter(message => message.source?.kind !== 'runtime-context') : []
+      const requestedByOwner = dshAgent.session?.header?.origin !== 'subagent' && inputs.length > 0 && inputs.every(ownerInput)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
       const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
+      // Native-tools mode keeps the agent's own tools, so it keeps the hard ask rules too: the
+      // person's own allow rules must not silently skip the ask for a hard Bash or file case.
+      const native = managed
+        ? live?.native === true && live.nativeManaged === true && requestedByOwner && permitsNative(turnLevel)
+          && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.bridgeOn(agent, sessionId)
+        : this.nativeOn(agent, sessionId)
+      const hardAsks = (enabled, bridged, currentLevel) => typeof agent.hardAsk === 'function'
+        && !(bridged && agent.disableBuiltInTools === true && !enabled) && currentLevel?.full !== true
+      const asks = hardAsks(native, this.bridgeOn(agent, sessionId), turnLevel)
+      const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true) && this.bridgeOn(agent, sessionId)
+      if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       const role = takesIdentity ? rolePromptOf(identityRead) : { digest: '' }
       const turn = this.roleTurns.get(sessionId)
       const sameTurn = live !== undefined && turn !== undefined && live.roleTurn === turn
@@ -1481,7 +1514,6 @@ export class AcpAdapter extends LlmAdapter {
       const prior = lastProviderOf(options.messages)
       // The transcript before this turn: what a replay carries (plan A-5, independent of the
       // bridge; only the kill switch turns it off).
-      const history = options.messages.slice(0, turnStart(options.messages))
       const replaying = this.replayOn()
       if (live === undefined) {
         crossing = replaying && prior !== undefined && prior !== options.provider
@@ -1519,14 +1551,26 @@ export class AcpAdapter extends LlmAdapter {
             const decision = this.bridgeDecision(agent, sessionId)
             const bridged = decision.on
             state.bridgeDefault = decision.setting === undefined ? bridged : undefined
+            if (bridged) await this.backchannel.listen()
+            const spawnManaged = options.provider === 'acp-claude' && this.teamManaged()
+            if (spawnManaged && entry.held !== undefined) return yield* stopped(entry.held)
+            if (bridged && fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined || options.signal?.aborted)) throw new Error('Image permission changed while the bridge started.')
+            // Read the saved switch after asynchronous process preparation, just before
+            // choosing the bridge tools and starting the process that will use them.
+            const spawnLevel = spawnManaged ? levelAtStart() : turnLevel
+            const spawnNative = spawnManaged
+              ? requestedByOwner && !answered(history) && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId)
+              : native
+            const spawnAsks = spawnManaged ? hardAsks(spawnNative, bridged, spawnLevel) : asks
+            state.native = spawnNative
+            state.nativeManaged = spawnManaged
+            state.asks = spawnAsks
             // A Bot whose team or role tools live in DSH gets DSH's extras by default on Codex.
             // An explicit `dshTools: true` keeps the whole preset.
-            const twinsOff = native
+            const twinsOff = spawnNative
               || (bridged && agent.disableBuiltInTools !== true && decision.setting !== true && this.roleToolsInDsh(sessionId))
             state.twinsOff = twinsOff
             if (bridged) {
-              await this.backchannel.listen()
-              if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined || options.signal?.aborted)) throw new Error('Image permission changed while the bridge started.')
               state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true, native: twinsOff })
             }
             this.diagnostics?.started(sessionId, this, agent, state)
@@ -1544,18 +1588,18 @@ export class AcpAdapter extends LlmAdapter {
               mcpServers: state.bridge === undefined ? [] : [this.bridgeServer(state.bridge)],
               // Native-tools mode: the built-in tools stay on (`disableBuiltInTools: false`), with
               // the hard ask rules unless the level is Full.
-              ...(native
-                ? { sessionMeta: { ...(asks ? agent.hardAsk() : {}), disableBuiltInTools: false } }
+              ...(spawnNative
+                ? { sessionMeta: { ...(spawnAsks ? agent.hardAsk() : {}), disableBuiltInTools: false } }
                 : bridged && agent.disableBuiltInTools === true
                   ? { sessionMeta: { disableBuiltInTools: true } }
-                  : asks ? { sessionMeta: agent.hardAsk() } : {}),
+                  : spawnAsks ? { sessionMeta: agent.hardAsk() } : {}),
               dshTools: bridged,
               refresh: agent.refresh,
               onReady: state.bridge === undefined ? undefined : () => this.ready(agent, state),
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
               // In native-tools mode a built-in call is the point, not drift: it gets its mirror
               // card and DSH's approval like any call of an agent without the bridge.
-              onToolCall: tool => { if (!native) this.checkDrift(sessionId, agent, tool) },
+              onToolCall: tool => { if (!spawnNative) this.checkDrift(sessionId, agent, tool) },
               onIgnored: message => this.warn(message),
               onRefusedMcp: tool => this.warn(`${agent.name} asked to run an MCP tool of ${typeof tool.mcpServer === 'string' ? `server "${tool.mcpServer.slice(0, 80)}"` : 'an unnamed server'}: refused, only the ${BRIDGE_NAME} bridge's tools run with DSH's tools on`),
               onMode: seen => this.diagnostics?.mode(sessionId, state, seen),
