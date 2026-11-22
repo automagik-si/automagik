@@ -34,7 +34,7 @@ import { isHcTerminalId } from "../hcProxy.mjs";
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { amPartEntryPath, amPartRunnerPath, briefingFilePath, briefingPath, installHook, launchBriefingText, runnerPath, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
+import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingFileOf, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -647,16 +647,16 @@ const hcSaid = (text) => { try { return JSON.parse(text)?.error?.message ?? text
  * main checkout in git, else the folder itself). The folder is an absolute path on that
  * machine and must be there; a machine that can't be reached is refused, never guessed.
  */
-export async function remoteKeyOf(opts) {
+export async function remoteKeyOf(opts, target = opts.machine) {
   const machine = opts.machine;
   if (!MACHINE_NAME.test(machine)) throw new CliError(`--machine: "${machine}" isn't a machine name (hc machine ls).`, 2);
   if (opts.project === undefined) throw new CliError(`--machine needs --project: the project's folder on ${machine}, as an absolute path.`, 2);
   if (!opts.project.startsWith("/")) throw new CliError(`--project: ${opts.project} is a folder on ${machine}, so give it as an absolute path.`, 2);
   const dir = opts.project.replace(/\/+$/, "") || "/";
-  const there = await remoteIo.exec("test", ["-d", dir], machine);
+  const there = await remoteIo.exec("test", ["-d", dir], target);
   if (there.code === -1) throw new CliError(`${machine} can't be reached: ${hcSaid(there.stderr)}`);
   if (there.code !== 0) throw new CliError(`--project: ${dir} is not a folder on ${machine}.`, 2);
-  return (await remoteProjectOf(machine, dir)).own;
+  return (await remoteProjectOf(target, dir)).own;
 }
 
 /** model.js projectOf for a folder on `machine`: { key, own }, asked there through hc. */
@@ -1294,6 +1294,16 @@ async function ledgerRows(path, readOnly = false, local = false) {
   return readAttachFile(path) ?? [];
 }
 
+async function settleAttachView({ path, core, machines, ended, unknown }) {
+  // Only a pool holder's dropped line is a holder loss; an unreadable pool records none
+  // rather than accusing every linked machine (#1881).
+  let holders = new Set();
+  try { holders = holderMachineNames(); } catch { /* an unreadable pool is the caller's own error */ }
+  const losses = [...holderLossEvents({ ended, core }), ...holderUnreachableEvents({ unknown, machines, core, holders })];
+  if (losses.length) recordHolderLosses(losses);
+  if (ended.length) await sweep(path, ended);
+}
+
 let viewOnce = null;
 /**
  * The ledger as hc confirms it now: { core, path, live: Map bot -> { binding, get },
@@ -1315,19 +1325,13 @@ export function attachView({ readOnly = false } = {}) {
     // `holder_lost`) or a holder machine's line is down, say what it took, once, where the lead
     // can read it back (`am holders losses`). Read-only callers record nothing.
     if (!readOnly && (ended.length || unknown.length)) {
-      // Only a pool holder's dropped line is a holder loss; an unreadable pool records none
-      // rather than accusing every linked machine (#1881).
-      let holders = new Set();
-      try { holders = holderMachineNames(); } catch { /* an unreadable pool is the caller's own error */ }
-      const losses = [...holderLossEvents({ ended, core }), ...holderUnreachableEvents({ unknown, machines, core, holders })];
-      if (losses.length) recordHolderLosses(losses);
+      await settleAttachView({ path, core, machines, ended, unknown });
     }
-    if (ended.length && !readOnly) await sweep(path, ended);
     // live: this computer's bindings by bot. liveAt / unknownAt: every binding by place and bot
     // (atKey; a linked machine's place is its core id, and a project's checkouts on two
     // machines share their bots' ids). byTerminal: by hc address ("lab/t8" for a machine's).
     // unknown: a machine's rows whose machine isn't connected (neither live nor ended).
-    return { core, path, machines, live: new Map(live.filter((l) => placeOfRow(l.binding) === null).map((l) => [l.binding.bot, l])),
+    return { core, path, machines, ended, unknown, ...(readOnly ? { rows } : {}), live: new Map(live.filter((l) => placeOfRow(l.binding) === null).map((l) => [l.binding.bot, l])),
       liveAt: new Map(live.map((l) => [atKey(l.binding.bot, placeOfRow(l.binding)), l])),
       unknownAt: new Map(unknown.map((b) => [atKey(b.bot, placeOfRow(b)), b])),
       byTerminal: new Map(live.map((l) => [addressOf(l.binding, machines), l])) };
@@ -1417,9 +1421,11 @@ async function localPaneGets(rows) {
  * write }). `holds(binding)` confirms a binding with hc ({ binding, get } or null; an ended
  * one gets its end row), `write(rows)` appends. Two CLIs never both attach one bot.
  */
-async function underLedger(fn, { local = false } = {}) {
+async function underLedger(fn, { local = false, importOnWrite = false } = {}) {
   const path = attachPath(appHome());
-  await ledgerRows(path, false, local);
+  // A parented start can still refuse inside the lock. Seed the ledger only on success.
+  const seed = importOnWrite && !existsSync(path) ? await ledgerRows(path, true) : null;
+  if (!importOnWrite) await ledgerRows(path, false, local);
   const core = await coreId();
   const machines = local ? new Map() : await machinesNow();
   try {
@@ -1437,7 +1443,10 @@ async function underLedger(fn, { local = false } = {}) {
         ends.push(closingRow(binding, "end", "sweep", ended[0].reason));
         return null;
       };
-      const write = (rows) => appendAttach(path, [...ends.splice(0), ...rows]);
+      const write = (rows) => {
+        const first = seed && !existsSync(path) ? seed : [];
+        appendAttach(path, [...first, ...ends.splice(0), ...rows]);
+      };
       try { return await fn({ core, machines, byBot, byKey, heldBy, holds, write }); } finally { if (ends.length) appendAttach(path, ends.splice(0)); }
     });
   } catch (e) { throw asCliError(e); }
@@ -1694,9 +1703,13 @@ async function viewOrError({ readOnly = false } = {}) {
  * A label is observation only; only an existing, confirmed binding permits replacement.
  * Each call refreshes machine identity and launch-folder ownership on the target.
  */
-async function linkedObservation(project, bot) {
+async function linkedObservation(project, bot, returnTo = null) {
   const { machine, key } = project;
+  const target = returnTo?.targetCore ?? machine;
   const replyMachines = await hcJson(["machine", "ls"]);
+  if (returnTo && !linkedCoreMatches(replyMachines?.machines, machine, target, returnTo.core)) {
+    refuseLinkedCaller(machine, "The target core changed before launch.");
+  }
   const targets = replyMachines?.machines?.filter?.((m) => m?.name === machine);
   if (!Array.isArray(targets) || targets.length !== 1 || !targets[0].id
       || replyMachines.machines.filter((m) => m?.id === targets[0].id).length !== 1) {
@@ -1710,6 +1723,7 @@ async function linkedObservation(project, bot) {
   if (bindings.some((b) => b.bot === bot.id && b.project === key && b.machine === machine && b.core !== core)) {
     throw new CliError(`${machine}'s core changed since the attachment; inspect and attach the intended pane before restarting.`);
   }
+  // hc ls is an inventory from the origin. Verify each candidate through the pinned target.
   const reply = await hcJson(["ls", "--label", `${BOT_LABEL}=${bot.id}`]);
   if (!Array.isArray(reply) && !Array.isArray(reply?.terminals)) throw new CliError(`hc ls gave no pane list for ${bot.name}; nothing was started.`);
   const listed = new Map();
@@ -1724,16 +1738,18 @@ async function linkedObservation(project, bot) {
   if (bound && !listed.has(bound)) listed.set(bound, null);
   const candidates = [];
   for (const [address, row] of listed) {
-    const get = await checkedPane(address, { strictNotFound: true });
+    const get = returnTo
+      ? await checkedPane(`${target}/${bareId(address)}`, { strictNotFound: true, expectedAddress: address })
+      : await checkedPane(address, { strictNotFound: true });
     if (!get) continue; // actual not_found/finished, never a failed lookup
     if (!get.labels || typeof get.labels !== "object" || Array.isArray(get.labels)) throw new CliError(`hc get ${address} gave no label map; nothing was started.`);
     if (address === bound && get.created_ms !== binding.created_ms) throw new CliError(`${address} is another terminal now (its created_ms changed); inspect and attach the intended pane.`);
     if (address !== bound && get.labels[BOT_LABEL] !== bot.id) throw new CliError(`${address} changed its bot label during observation; nothing was started.`);
-    if (typeof get.cwd !== "string" || !get.cwd.startsWith("/") || (await remoteIo.exec("test", ["-d", get.cwd], machine)).code !== 0) {
+    if (typeof get.cwd !== "string" || !get.cwd.startsWith("/") || (await remoteIo.exec("test", ["-d", get.cwd], target)).code !== 0) {
       throw new CliError(`${address}'s launch folder cannot be confirmed; nothing was started.`);
     }
-    const owner = await remoteProjectOf(machine, get.cwd);
-    const roster = await loadRemoteProject(owner.key, machine);
+    const owner = await remoteProjectOf(target, get.cwd);
+    const roster = await loadRemoteProject(owner.key, target);
     if (!roster.file.bots.some((b) => b.id === bot.id)) throw new CliError(`${address}'s project ownership cannot be confirmed; nothing was started.`);
     if (owner.key !== key) {
       if (address === bound) throw new CliError(`${address}'s launch project differs from its attachment; nothing was started.`);
@@ -2323,15 +2339,23 @@ reports no status to hc can't say it is waiting for an approval: restart refuses
 --machine, on that machine (there it needs --force, since it runs at once); a bot whose helpers
 end with its pane there is refused until each helper's pane is ended (hc kill M/tN).
 
-When HC_TERMINAL_ID identifies a requesting terminal, new linked starts and all linked
-restarts refuse: am cannot verify their return route, including --force/--fresh/swaps/--save
-and --tree. A verified already-running start can still return without launching. With no
-caller identity, ordinary non-orchestrated linked launches remain available.
-For orchestration, launch from the origin HC terminal with hc run --bg --on M, retaining
-its real default or explicit HC parent and supplying first-task/report instructions. Use
-the returned M/tN address at the origin. Do not guess reverse aliases or target-local
-addresses for the origin. Remote exec of local am loses origin provenance; this patch
-cannot detect or repair that case and does not promise report delivery for it.
+From the lead's live HC terminal, am start <bot> --project <absolute dir on M> --machine M
+can start a fresh Claude Code conversation with that terminal as its hc parent. The pane
+outlives the lead and its launch briefing gives it the exact report address. As with hc run
+--on, M's core (any pane there) can send/get/read/wait the lead terminal. hc queues its
+exit and blocked notes across a lost line. An explicit send can fail, so the briefing tells
+the bot to save its result and confirm delivery before retrying.
+
+am cannot see M's inbound peers. A peer named for the lead's core ID or a later alias change
+on M can redirect reports. hc resolves core IDs as names too, so a link change between a check
+and the next command can redirect that command. A session-specific hc wrapper on the pane's
+PATH can select another socket. Controllers with separate ledgers can start the same bot twice.
+
+If am cannot verify the route, including holder placement and linked restarts from an HC
+terminal, use hc run --bg --on M from the origin HC terminal with hc's default parent and
+explicit first-task/report instructions. A verified already-running start reports the
+current parent. Without HC_TERMINAL_ID, ordinary linked launches remain available.
+hc exec --on M am start ... gives the bot no return route and am cannot detect that case.
 
 For a code agent: the am skill teaches these commands,
 https://github.com/automagik-si/automagik/blob/dev/skills/am/SKILL.md
@@ -2904,8 +2928,11 @@ function workerDefaults(opts, entry) {
 
 // ---- commands ----
 
-async function projectFor(opts) {
-  if (opts.machine !== undefined) return loadRemoteProject(await remoteKeyOf(opts), opts.machine);
+async function projectFor(opts, target = opts.machine) {
+  if (opts.machine !== undefined) {
+    const project = await loadRemoteProject(await remoteKeyOf(opts, target), target);
+    return { ...project, machine: opts.machine };
+  }
   return loadProject(await commandKeyOf(opts));
 }
 
@@ -4213,9 +4240,9 @@ function holderMachineNames(config = readHolders()) {
  * names the holder. Counting only `liveAt` let `holders remove` drop a holder that still held
  * an agent, stranding the pane unlinked (#1881).
  */
-async function holderView() {
+async function holderView({ readOnly = false } = {}) {
   const config = readHolders();
-  const view = await attachView();
+  const view = await attachView({ readOnly });
   const counts = new Map(config.holders.map((h) => [h.name, 0]));
   const agents = new Map(config.holders.map((h) => [h.name, []]));
   const bindings = [...view.liveAt.values()].map((l) => l.binding).concat([...view.unknownAt.values()]);
@@ -4251,14 +4278,21 @@ async function holderView() {
  * `local` and `h2` rows, and let a retry put a second seat on `local` while the bot's only
  * binding sat unknown on a holder whose line was down.
  */
-async function reserveHolder({ view, counts, connected, holder, bot }) {
+async function reserveHolder({ view, counts, connected, holder, bot, readOnly }) {
   return withLockAsync(holdersLock(), async () => {
     const config = readHolders();
     const now = Date.now();
     // A reservation whose attach row is already in the ledger is spent, and a stale one (a
     // killed CLI) is dropped: neither takes a seat. The spent one leaves the file here too, so
     // the release that failed has no effect.
-    const { counts: fresh, attached, bound } = holderCountsFromLedger(view.machines, config);
+    const fold = readOnly ? foldAttach(readAttachFile(view.path) ?? view.rows) : undefined;
+    // A caller's preliminary view is read-only until local placement is established.
+    // Exclude exactly the bindings its sweep would drop, retaining any newer attachment.
+    if (fold) for (const { binding } of view.ended) {
+      const key = attachKey(binding);
+      if (fold.byKey.get(key)?.bot === binding.bot) fold.byKey.delete(key);
+    }
+    const { counts: fresh, attached, bound } = holderCountsFromLedger(view.machines, config, fold);
     const live = liveReservations(readReservations(), now).filter((r) => !attached.has(atKey(r.bot, r.holder)));
     const seat = bound.get(bot.id);
     if (seat) throw startSeatRefusal(bot, seat.holder, seat.binding.terminal);
@@ -4273,6 +4307,12 @@ async function reserveHolder({ view, counts, connected, holder, bot }) {
       // Every holder is away: this computer's core still takes the start, never a refused one.
       pick = chooseHolder({ config, counts: merged, connected, holder: LOCAL_HOLDER, reserved });
       if (pick.error) throw new CliError(pick.error, 2);
+    }
+    if (!pick.local && process.env.HC_TERMINAL_ID) refuseLinkedCaller(pick.machine, "The selected seat is on a holder.");
+    if (readOnly) {
+      if (!existsSync(view.path) && existsSync(appHome())) await importLabels(view.path, view.rows);
+      if (view.ended.length || view.unknown.length) await settleAttachView(view);
+      viewOnce = null;
     }
     const id = randomUUID();
     live.push({ id, holder: pick.name, bot: bot.id, at: new Date(now).toISOString() });
@@ -4609,24 +4649,27 @@ async function holderForStart(opts, project, bot) {
     const warning = count >= config.limit ? limitWarning(bot, LOCAL_HOLDER, count, config.limit) : undefined;
     return { local: true, ...(warning ? { limitWarning: warning } : {}) };
   }
-  const { view, counts, connected } = await holderView();
+  const readOnly = Boolean(process.env.HC_TERMINAL_ID);
+  const { view, counts, connected } = await holderView({ readOnly });
   // `--space` is this computer's, never a holder's; reserving it still tells a parallel
   // least-loaded start that the seat is taken.
   const named = opts.space !== undefined ? LOCAL_HOLDER : opts.holder;
-  const { pick, config: current, reservation } = await reserveHolder({ view, counts, connected, holder: named, bot });
+  const { pick, config: current, reservation } = await reserveHolder({ view, counts, connected, holder: named, bot, readOnly });
   const limit = current.limit;
   const warning = pick.atLimit ? limitWarning(bot, pick.name, pick.count, limit) : undefined;
   if (pick.local) return { local: true, reservation, ...(warning ? { limitWarning: warning } : {}) };
   return { holder: pick, reservation, ...(warning ? { limitWarning: warning } : {}) };
 }
 
-async function cmdStart(opts, [ref], warnedRelabels) {
+async function cmdStart(opts, [ref], warnedRelabels, repairCliLinks) {
   const localOnly = opts["local-only"];
   if (opts.tab && !opts.space) throw new CliError("--tab needs --space (the space that tab is in).", 2);
   if (opts.holder !== undefined && opts.machine !== undefined) {
     throw new CliError("--holder picks one of this computer's holders; --machine starts on a linked machine (give one).", 2);
   }
-  const project = await projectFor(opts).catch((e) => {
+  const caller = process.env.HC_TERMINAL_ID;
+  const returnTo = caller && opts.machine !== undefined ? await linkedReturnTo(opts.machine, caller) : null;
+  const project = await projectFor(opts, returnTo?.targetCore).catch((e) => {
     if (localOnly && e instanceof CliError && e.code === 2) throw localStartRefusal("no-folder", e.message, 2);
     throw e;
   });
@@ -4644,8 +4687,11 @@ async function cmdStart(opts, [ref], warnedRelabels) {
   // launch.js checks the folder Start launches in against the project (attachRefusal on
   // keyOf(projectKey)). Here that folder is `key`, which keyOf already returned, and a key
   // keys to itself, so the check can't refuse: it is left out, not forgotten.
-  if (project.machine) return startOnMachine(opts, project, bot);
-  if (localOnly) await pinLocalStartCore();
+  if (project.machine) return startOnMachine(opts, project, bot, returnTo);
+  if (localOnly) {
+    repairCliLinks?.();
+    await pinLocalStartCore();
+  }
   // #1432: a pool with more than one holder puts the new pane on the least loaded one; the
   // holder is a local hc session exposed as a linked machine, so its launch is the pack's own
   // linked-machine start, delegated to a child CLI. One holder (the default) places exactly as
@@ -4680,6 +4726,7 @@ async function cmdStart(opts, [ref], warnedRelabels) {
       if (decision.limitWarning) out.limitWarning = decision.limitWarning;
       return opts.json ? out : out.terminal;
     }
+    if (!localOnly) repairCliLinks?.();
     // One terminal plays a bot: the one the attach ledger names is reported, never a second
     // start (decided again under the ledger's lock, below, with hc run). A bot that lives in the
     // project's own app home is found by the same resolver every read shares (#1128).
@@ -4712,9 +4759,9 @@ const AGENT_WAIT_S = 10;
 // limit ends this CLI, ms since the epoch (launch.js machineCli, before its exec, so it counts
 // run.sh's node search and node's own startup). Unset (a terminal, a Herdr that takes exec's
 // timeout): no deadline. hc's own bound for one call, 15 s, doesn't fit twice in that limit, so
-// the calls after the last check get DEADLINE_CALL_MS each: hc run, then at most two more (hc get
-// and, with no created_ms, hc kill; or, with no address, hc ls and hc kill), and 1 s for the row
-// and the exit: DEADLINE_MARGIN_MS. Checked before a new space is asked for (with
+// successful launch calls get DEADLINE_CALL_MS each, with a spare call and 1 s for the row
+// and exit: DEADLINE_MARGIN_MS. Recovery also needs a fresh core and launch identity before
+// any kill. Checked before a new space is asked for (with
 // DEADLINE_PLACE_MS more for windowPlaceOn's calls) and again just before hc run.
 const DEADLINE = (() => { const n = Number(process.env.AUTOMAGIK_HERDR_DEADLINE); return Number.isSafeInteger(n) && n > 0 ? n : null; })();
 export const DEADLINE_CALL_MS = 5000;
@@ -4923,7 +4970,7 @@ const managedLaunchIo = {
 };
 
 /** Login words for one linked Claude seat. An exception leaves the seat's old route in place. */
-export async function managedLoginOn(machine, core, paneEnv, bot, io = managedLaunchIo, launcher = "shipped") {
+export async function managedLoginOn(machine, core, paneEnv, bot, io = managedLaunchIo, launcher = "shipped", target = machine) {
   const { state, plan, view } = io.readPlanFile();
   const member = claudeMember(state === "ok" ? plan : state === "newer" ? view : null, core);
   if (!member) return null;
@@ -4949,9 +4996,9 @@ export async function managedLoginOn(machine, core, paneEnv, bot, io = managedLa
       const names = bound?.list.filter((m) => m.name === machine);
       if (!bound?.complete || names?.length !== 1 || names[0].id !== core) return exception(why);
       why = "unread";
-      const cli = await io.discover(machine, remaining());
+      const cli = await io.discover(target, remaining());
       if (!cli) return exception(why);
-      const result = await io.resolve(machine, cli, ["--launch-login", "--expect-home", member.home, "--expect-core", core,
+      const result = await io.resolve(target, cli, ["--launch-login", "--expect-home", member.home, "--expect-core", core,
         ...(paneEnv.appHome ? ["--project-home"] : [])], remaining());
       if (["no-core", "wrong-core"].includes(result?.error)) return exception("rebound");
       if (result?.error === "no-home") return exception("no-home");
@@ -4987,16 +5034,19 @@ async function briefingHomeOn(machine, bot, paneEnv, project) {
 // 0600 (no "--": BSD chmod reads it as a file after the mode; the path is absolute). Only ever
 // under an app home that is there (briefingHomeOn); remoteFile.js's own create is
 // left as it is for bots.json.
-const PRIVATE_CREATE_SH = 'umask 077; p=$1; mkdir -p -- "${p%/*}" || exit 1; '
-  + 'if [ -e "$p" ] || [ -L "$p" ]; then exit 17; fi; set -C; '
+const WRITE_PRIVATE_FILE_SH = 'if [ -e "$p" ] || [ -L "$p" ]; then exit 17; fi; set -C; '
   + '{ : > "$p"; } 2>/dev/null || exit 1; '
   + 'printf "%s" "$2" >| "$p" || { rm -f -- "$p"; exit 1; }';
-async function ownFileOn(machine, path, text) {
+const PRIVATE_CREATE_SH = 'umask 077; p=$1; mkdir -p -- "${p%/*}" || exit 1; ' + WRITE_PRIVATE_FILE_SH;
+const PRIVATE_LAUNCH_CREATE_SH = 'umask 077; p=$1; d=${p%/*}; mkdir -p -- "$d" && : > "$d/.pending" || exit 1; '
+  + WRITE_PRIVATE_FILE_SH;
+async function ownFileOn(machine, path, text, { fresh = false } = {}) {
   if (utf8Length(text) > REMOTE_TEXT_MAX) throw new Error(`over ${REMOTE_TEXT_MAX / 1024} KiB, too large to send there`);
-  const before = await readRemoteText(remoteIo, machine, path);
+  const before = fresh ? null : await readRemoteText(remoteIo, machine, path);
   const said = (r) => hcSaid((r.stderr || r.stdout).trim()) || `exit ${r.code}`;
   if (before === null) {
-    const r = await remoteIo.exec("sh", ["-c", PRIVATE_CREATE_SH, "sh", path, text], machine, { timeout: AGENT_WAIT_S });
+    const r = await remoteIo.exec("sh", ["-c", fresh ? PRIVATE_LAUNCH_CREATE_SH : PRIVATE_CREATE_SH, "sh", path, text],
+      machine, { timeout: AGENT_WAIT_S });
     if (r.code === 17) throw new Error("it appeared there since it was read");
     if (r.code !== 0) throw new Error(`couldn't create it: ${said(r)}`);
     return;
@@ -5012,24 +5062,43 @@ async function ownFileOn(machine, path, text) {
  * `machine` through hc under `boxHome`, that machine's app home (briefingHomeOn's; null: no file,
  * that warning said why). An agent whose briefing yields
  * to its own config file (BRIEFING's ownConfig: codex, hermes) starts as it is, since only this
- * computer's config is read. Never throws: { argv, env, warnings }.
+ * computer's config is read. Returns { argv, env, warnings }. A parented launch refuses
+ * if its briefing cannot be selected and written.
  */
-async function briefedOn(machine, project, bot, agentKey, argv, boxHome, guard = null) {
+async function briefedOn(machine, project, bot, agentKey, argv, boxHome, guard = null, returnTo = null) {
   if (agentKey === "hermes" && bot.hermes !== undefined) return { argv, env: {}, warnings: [] };
   const way = briefingWay(agentKey);
   const agents = agentTable();
-  if (!way || briefingOwnConfig(agentKey) || agentKeyOfArgv(argv, agents) !== agentKey) return { argv, env: {}, warnings: [] };
-  const text = launchBriefingText({ self: bot, agent: agentKey, file: project.file, guard, isGit: await projectIsGit(project) });
+  if (!way || briefingOwnConfig(agentKey) || agentKeyOfArgv(argv, agents) !== agentKey) {
+    if (returnTo) refuseLinkedCaller(machine, "The effective command cannot take the launch briefing.");
+    return { argv, env: {}, warnings: [] };
+  }
+  let text = launchBriefingText({ self: bot, agent: agentKey, file: project.file, guard, isGit: await projectIsGit(project) });
+  if (returnTo) {
+    text += `\n\nYou were started from hc terminal \`${returnTo.address}\` on another computer. `
+      + `Send the result of the task it gives you, or your blocker, with \`hc send ${returnTo.address} "<result or blocker>"\`; `
+      + "your roster lead line is for team work, not for this task's result. If a send fails or its outcome is unclear, "
+      + "write the result to a file in the project, say its path in your pane, and do not send it again until you have confirmed it did not arrive.";
+  }
   const warnings = [];
   let launch = null;
   if (way === "file") {
-    const path = boxHome ? briefingFilePath(boxHome, project.key, bot.id) : null;
+    let path = boxHome ? briefingFilePath(boxHome, project.key, bot.id) : null;
+    // The hook identifies the bot by the basename. Give a parented launch its own file,
+    // away from the shared file ordinary starts and restarts use.
+    if (path && returnTo) path = `${dirname(path)}/${returnTo.targetCore}.${returnTo.launch}/${basename(path)}`;
+    launch = briefingLaunch(agentKey, { path });
+    if (returnTo && (!path || briefingFileOf(withBriefing(agentKey, argv, launch, agents)) !== path)) {
+      refuseLinkedCaller(machine, "Claude's effective prompt would not use the launch briefing.");
+    }
     try {
       if (path) {
-        await ownFileOn(machine, path, `${text}\n`);
-        launch = briefingLaunch(agentKey, { path });
+        if (returnTo) returnTo.briefing = path;
+        await ownFileOn(returnTo?.targetCore ?? machine, path, `${text}\n`, { fresh: Boolean(returnTo) });
       }
     } catch (e) {
+      if (returnTo) refuseLinkedCaller(machine, `The launch briefing could not be written on ${machine}: ${e?.message ?? e}`);
+      launch = null;
       warnings.push(`${bot.name} starts on ${machine} without its briefing in its system prompt (${path}: ${e?.message ?? e}).`);
     }
   } else {
@@ -5149,7 +5218,7 @@ async function linkedAmPathWarning(machine, argv, cwd) {
  * with its `spare` shell (freshSpare, its terminal as a bare id) for closeSpare once the bot
  * shows there; null with no window to ask.
  */
-async function windowPlaceOn(machine, key) {
+async function windowPlaceOn(machine, key, target = machine) {
   const find = async () => {
     const r = await runProgram("herdr-app", ["ls"]);
     let spaces;
@@ -5157,7 +5226,7 @@ async function windowPlaceOn(machine, key) {
     if (!spaces) return { spaces: null, hit: null };
     for (const s of spaces.filter((x) => x.machine === machine && x.folder)) {
       let k = s.folder === key ? key : null;
-      if (!k) { try { k = (await remoteProjectOf(machine, s.folder)).key; } catch { k = null; } }
+      if (!k) { try { k = (await remoteProjectOf(target, s.folder)).key; } catch { k = null; } }
       if (k === key) return { spaces, hit: { space: s.id, tab: s.tabs?.find((t) => t.selected)?.id ?? null, from: null } };
     }
     return { spaces, hit: null };
@@ -5183,8 +5252,8 @@ async function windowPlaceOn(machine, key) {
 /**
  * A bot's pane on the project's linked machine: `hc run --on` with Start's labels and the PATH
  * agentThere checked the agent under (the project's pane-env PATH_PREPEND first), as /usr/bin/env
- * PATH=<it>, and HERDR_APP_HOME=<pane-env's> when it sets one (hc run has no --env; --no-parent: no
- * lead as its hc parent there yet, and never the calling terminal), placed in the window on that machine's space. `over`: argv, cwd, place (the old
+ * PATH=<it>, and HERDR_APP_HOME=<pane-env's> when it sets one. `returnTo` keeps hc's default
+ * parent and gives the pane its return route. The pane goes in the linked space. `over`: argv, cwd, place (the old
  * pane's, a restart), carry (labels kept), replacing (a restart: no "already running" check
  * and no attach row here; restartOnMachine writes them once the new pane is up). The briefing is
  * the local start's (#582): in the command (briefedOn) and, for an agent that takes it, the
@@ -5194,15 +5263,16 @@ async function windowPlaceOn(machine, key) {
  * { running } when the ledger names a pane for the bot by the time its lock is taken.
  */
 async function seatOnMachine(project, bot, over = {}) {
-  refuseLinkedCaller(project);
+  const { returnTo } = over;
   const { file, key, machine } = project;
+  const target = returnTo?.targetCore ?? machine;
   if (over.recheck) await over.recheck();
   else {
-    const observed = await linkedObservation(project, bot);
-    if (observed.candidate) return { running: observed.candidate.get.address };
+    const observed = await linkedObservation(project, bot, returnTo);
+    if (observed.candidate) return { running: observed.candidate.get };
   }
-  await checkLinkedProxy(project, bot, over.agent ?? bot.agent);
-  const m = await connectedMachine(machine, "nothing was started");
+  await checkLinkedProxy({ ...project, machine: target }, bot, over.agent ?? bot.agent);
+  const core = returnTo?.targetCore ?? (await connectedMachine(machine, "nothing was started")).id;
   const agentKey = over.agent ?? bot.agent;
   const table = agentTable();
   const agent = table[agentKey];
@@ -5211,20 +5281,20 @@ async function seatOnMachine(project, bot, over = {}) {
   const agyMode = launchAgyMode(bot, agentKey);
   if (!over.argv && bot.model) {
     // #1173: the target's own model list, when it has one, not the controller's stale cache.
-    const list = await modelsOnMachine(machine, key, bot.agent);
+    const list = await modelsOnMachine(target, key, bot.agent);
     if (list !== null && !list.includes(bot.model)) {
       throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't on ${machine}'s ${bot.agent} model list. `
         + `Pick one with am edit ${bot.id} --model <model> --machine ${machine} --project ${key}, or clear it with --no-model.`);
     }
   }
-  const paneEnv = await paneEnvOn(machine, key);
+  const paneEnv = await paneEnvOn(target, key);
   // #823: agy reads its permission list from a file on its own machine, under that machine's
   // app home; with none there the start is refused rather than launched without its list.
   // #1033: plan the path first so `command` and `agentThere` run before `ownFileOn` writes the
   // file on `machine` (a refused non-GUI Mac or missing agent writes nothing there).
   let agySettings = null;
   if (agentKey === "antigravity") {
-    const agyHome = await launchHomeOn(machine, bot, paneEnv, "its Antigravity permission list");
+    const agyHome = await launchHomeOn(target, bot, paneEnv, "its Antigravity permission list");
     if (!agyHome.dir) {
       const create = agyHome.missing ? `\nTo create the project's app home, run ${appHomeInstallCommand(machine, key)}.` : "";
       throw new CliError(`${agyHome.warning}. Nothing was started.${create}`);
@@ -5243,19 +5313,26 @@ async function seatOnMachine(project, bot, over = {}) {
   // A Codex --add-dir is left for that machine to weigh (codexOn, #1142): only it can resolve it.
   const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, codexWhereThere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model),
     ...seatSettingsArgs(agentKey, bot)];
+  if (returnTo) {
+    const why = linkedClaudeProblem(source);
+    if (why) refuseLinkedCaller(machine, why);
+  }
   const chosen = !over.argv && choosesSession(agentKey) && !ownsSession(source) ? newSessionId() : null;
   const command = agyGuarded(agentKey, withAgySettings(agentKey, chosen ? [...source, ...sessionIdArgs(agentKey, chosen)] : source, agySettings?.path));
   refuseLinkedLogin(command, agentKey);
-  // #612: a local absolute override that isn't there falls back to the shipped run when that is.
-  const there = await agentThere(machine, command, agent.name ?? agentKey, paneEnv.prepend,
-    shippedRunFor(agentKey, agent.run, command));
+  // #612: ordinary starts can fall back to the shipped run. A parented start keeps owner arguments.
+  const there = await agentThere(target, command, agent.name ?? agentKey, paneEnv.prepend,
+    returnTo ? null : shippedRunFor(agentKey, agent.run, command)).catch((e) => {
+    if (returnTo) refuseLinkedCaller(machine, e.message);
+    throw e;
+  });
   // #1509 over #1914: under the Bot login policy a Claude or Codex launch on a linked machine is
   // refused here, before any remote call; with the policy off the managed login runs as before.
   refuseLinkedLogin(there.argv, agentKey);
   const managed = launchAgent(there.argv, table) === "claude"
-    ? await managedLoginOn(machine, m.id, paneEnv, bot, managedLaunchIo, claudeLauncher(accountsTable(), command[0])) : null;
+    ? await managedLoginOn(machine, core, paneEnv, bot, managedLaunchIo, claudeLauncher(accountsTable(), command[0]), target) : null;
   if (agySettings) {
-    try { await ownFileOn(machine, agySettings.path, agySettings.text); }
+    try { await ownFileOn(target, agySettings.path, agySettings.text); }
     catch (e) {
       throw new CliError(`${bot.name} wasn't started on ${machine}: its Antigravity permission list couldn't be written `
         + `(${agySettings.path}: ${e?.message ?? e}).`);
@@ -5265,7 +5342,7 @@ async function seatOnMachine(project, bot, over = {}) {
   // no guard on PATH and no briefing paragraph claiming one, and one warning says what the
   // probe found: no guard, a failed probe, or a folder a PATH word cannot carry (#643).
   // Any other agent gets that machine's `hc kill` shim the same way (#955), and is told when it has none.
-  const remote = await guardThere(machine, there.path, agentKey === "dsh-tui" ? "guard" : KILL_GUARD_NAME);
+  const remote = await guardThere(target, there.path, agentKey === "dsh-tui" ? "guard" : KILL_GUARD_NAME);
   const remoteGuard = remote?.dir ?? null;
   const guardWarnings = remoteGuard ? []
     : agentKey === "dsh-tui"
@@ -5276,38 +5353,67 @@ async function seatOnMachine(project, bot, over = {}) {
   // The briefing there, as a local start has it (#582), in that machine's app home while it is
   // there (briefingHomeOn: asked only when a file or the hook needs one; never made).
   const needsHome = !briefingOwnConfig(agentKey) && (briefingWay(agentKey) === "file" || briefingHook(agentKey));
-  const briefingHome = needsHome ? await briefingHomeOn(machine, bot, paneEnv, key) : { dir: null, warnings: [] };
-  const briefed = await briefedOn(machine, project, bot, agentKey, there.argv, briefingHome.dir,
-    agentKey === "dsh-tui" ? Boolean(remoteGuard) : null);
+  const briefingHome = needsHome ? await briefingHomeOn(target, bot, paneEnv, key) : { dir: null, warnings: [] };
+  const pickName = async () => hcName(bot.name, bot.id,
+    new Set(rowsOf(await hcJson(["ls"])).map((r) => r?.name).filter(Boolean)));
+  let name;
+  if (returnTo) {
+    if (!briefingHome.dir) refuseLinkedCaller(machine, `The target has no usable app home for the launch briefing. ${briefingHome.warnings[0] ?? ""}`);
+    const access = 'p=$1; while [ -n "$p" ] && [ ! -e "$p" ] && [ ! -L "$p" ]; do p=${p%/*}; done; '
+      + '[ -d "$p" ] && [ -w "$p" ] && [ -x "$p" ]';
+    const dir = dirname(briefingFilePath(briefingHome.dir, key, bot.id));
+    const writable = await remoteIo.exec("sh", ["-c", access, "sh", dir], target, { timeout: AGENT_WAIT_S }).catch(() => null);
+    if (writable?.code !== 0) refuseLinkedCaller(machine, `The launch briefing folder on ${machine} is not writable and searchable.`);
+    const path = guardPathWith(there.path, remoteGuard);
+    await verifyReturnOn(machine, returnTo, path, key);
+    name = await pickName();
+    if (!name) refuseLinkedCaller(machine, "No unique pane name is available for the bot.");
+    await pruneLinkedBriefings(returnTo, briefingFilePath(briefingHome.dir, key, bot.id), path);
+  }
+  const briefed = await briefedOn(machine, { ...project, machine: target }, bot, agentKey, there.argv, briefingHome.dir,
+    agentKey === "dsh-tui" ? Boolean(remoteGuard) : null, returnTo);
   // #1125: a Codex seat there gets the folders that machine derives for its folder, and its own
   // --add-dir words are weighed there too (#1142: resolved on that machine, never this one).
-  const codexHere = agentKey === "codex" ? await codexOn(machine, over.cwd ?? key, paneEnv, briefed.argv) : null;
+  const codexHere = agentKey === "codex" ? await codexOn(target, over.cwd ?? key, paneEnv, briefed.argv) : null;
   const argv = codexHere ? withCodexGrants(codexHere.argv, codexHere.dirs) : briefed.argv;
   const codexNotes = [codexHere?.warning, agentKey === "codex" ? codexCleanNote(agent.run, codexWhereThere()) : null].filter(Boolean);
   // The hook goes in before the session starts, so Claude Code reads it at startup.
-  const hook = briefingHook(agentKey) && briefingHome.dir ? await briefingHookOn(machine, bot, over.cwd ?? key, briefingHome.dir)
+  const hook = briefingHook(agentKey) && briefingHome.dir ? await briefingHookOn(target, bot, over.cwd ?? key, briefingHome.dir)
     : { written: false, warnings: [] };
   const env = { ...(paneEnv.appHome ? { HERDR_APP_HOME: paneEnv.appHome } : {}), ...briefed.env, ...hermesPairEnv(bot) };
   const carry = over.carry ?? {};
   const labels = { ...paneLabels(file, bot.id, carry, null), ...carry };
   if (chosen) labels[SESSION_LABEL] = chosen;
-  const taken = new Set(rowsOf(await hcJson(["ls"])).map((r) => r?.name).filter(Boolean));
+  if (!returnTo) name = await pickName();
   // A start: that space only, the bot in a tab of its own (as launchSeat).
   if (over.place === undefined && deadlineLeft() < DEADLINE_MARGIN_MS + DEADLINE_PLACE_MS) {
     throw tooLate(bot, machine, key, DEADLINE_MARGIN_MS + DEADLINE_PLACE_MS);
   }
-  const place = over.place !== undefined ? over.place : spaceOnly(await windowPlaceOn(machine, key));
-  const name = hcName(bot.name, bot.id, taken);
+  // Window spaces use the display name. Check its binding before asking the window for one.
+  if (returnTo && !await linkedEndpointsMatch(machine, returnTo)) refuseLinkedCaller(machine, "The origin or target core changed before launch.");
+  const place = over.place !== undefined ? over.place : spaceOnly(await windowPlaceOn(machine, key, target));
   const args = startArgs({ botId: bot.id, name, cwd: over.cwd ?? key, space: place?.space, tab: place?.tab,
-    // No hc parent: hc run's default is the terminal it is started from, and the pane would end with it.
-    parent: ["--no-parent"], argv, labels, path: there.path, env, login: managed?.words ?? [], agent: agentKey, guard: remoteGuard });
-  args.splice(1, 0, "--on", machine);
-  const amPathWarning = hook.checkAmPath ? await linkedAmPathWarning(machine, args.slice(args.indexOf("--") + 1), over.cwd ?? key) : null;
+    parent: returnTo ? ["--outlive-parent"] : ["--no-parent"],
+    argv, labels: returnTo ? { ...labels, [LINKED_LAUNCH_LABEL]: returnTo.launch } : labels, path: there.path, env,
+    login: managed?.words ?? [], agent: agentKey, guard: remoteGuard });
+  args.splice(1, 0, "--on", target);
   const paneWarnings = managed?.warning && (paneEnv.refused || paneEnv.unread) ? [] : paneEnv.warnings;
   const warnings = [...paneWarnings, ...(managed?.warning ? [managed.warning] : []), ...there.warnings, ...guardWarnings, ...briefingHome.warnings, ...briefed.warnings, ...hook.warnings,
-    ...(agySettings?.warnings ?? []), ...codexNotes, ...(amPathWarning ? [amPathWarning] : [])];
-  const run = async () => {
+    ...(agySettings?.warnings ?? []), ...codexNotes];
+  const launch = async () => {
+    const seat = { machine, core, argv, labels, place, hookWritten: hook.written, warnings };
     if (deadlineLeft() < DEADLINE_MARGIN_MS) throw tooLate(bot, machine, key, DEADLINE_MARGIN_MS, place?.spare ? place.space : null);
+    if (returnTo) {
+      if (!await linkedEndpointsMatch(machine, returnTo)) {
+        refuseLinkedCaller(machine, "The origin or target core changed before launch.");
+      }
+      const origin = await linkedCallerCore(machine, returnTo);
+      if (origin.name === returnTo.targetCore) refuseLinkedCaller(machine, "The origin core now captures the target core ID.");
+      if (deadlineLeft() < DEADLINE_MARGIN_MS) throw tooLate(bot, machine, key, DEADLINE_MARGIN_MS, place?.spare ? place.space : null);
+      returnTo.dispatched = true;
+      const reply = await hc(args, callBound()).catch(() => ({ code: -1, stdout: "" }));
+      return { ...seat, ...await confirmParentedRun(reply, machine, name, returnTo), parent: returnTo.address };
+    }
     const r = await hc(args, callBound());
     // Ended at its bound, hc run may still have started the pane there: looked for by name below.
     if (r.code !== 0 && !r.killed) throw new CliError(`hc run on ${machine} failed: ${hcSaid((r.stderr || r.stdout).trim())}`);
@@ -5319,12 +5425,14 @@ async function seatOnMachine(project, bot, over = {}) {
       try { row = rowsOf(parsed(await hc(["ls", "--json"], callBound()), ["ls"])).find((x) => x?.name === name && String(x.address ?? "").startsWith(`${machine}/`)); } catch { /* no matching pane */ }
       const stray = row?.address ?? null;
       const proof = stray ? await paneProof({ row, project }) : "unknown";
-      const killed = stray && !protectsChosenHome(proof) ? (await hcKill(stray, callBound())).code === 0 : false;
+      // A parented launch can win the name while an ordinary timed-out run is in flight.
+      const killed = stray && !row.parent && !protectsChosenHome(proof) ? (await hcKill(stray, callBound())).code === 0 : false;
       const said = r.killed ? `didn't answer within ${(DEADLINE === null ? 15000 : DEADLINE_CALL_MS) / 1000} s` : `gave no terminal address (${r.stdout.trim() || "nothing"})`;
       throw new CliError(`hc run on ${machine} ${said}; `
         + (killed ? `the pane it started (${stray}, named ${name}) was ended.`
           : proof === "chosen" ? `${stray} is named ${name}, but it is a worker on a chosen agent home, so it was left as it is: check it with hc get ${stray}.`
           : proof === "unresolved" ? chosenSeatRefusal(stray, proof, "It was left as it is.")
+          : row?.parent ? `${stray}: cleanup is unconfirmed.`
           : `if a pane named ${name} started there, end it with hc kill.`));
     }
     const get = await hcGet(address, callBound()).catch(() => null);
@@ -5336,32 +5444,53 @@ async function seatOnMachine(project, bot, over = {}) {
       throw new CliError(`${address} started, but hc get gave no created_ms, so it could have no attach row; `
         + (killed ? "it was ended." : `it couldn't be ended: end it with hc kill ${address}.`));
     }
-    return { address, terminal: address.slice(address.indexOf("/") + 1), created_ms: get.created_ms, machine, core: m.id, argv, labels, place,
-      hookWritten: hook.written, warnings };
+    return { ...seat, address, terminal: address.slice(address.indexOf("/") + 1), created_ms: get.created_ms };
   };
-  if (over.replacing) return underLedger(async () => { await over.recheck(); return run(); });
-  const seat = await underLedger(async ({ write }) => {
-    const observed = await linkedObservation(project, bot);
-    if (observed.core !== m.id) throw new CliError(`${machine}'s core changed before launch; nothing was started.`);
-    if (observed.candidate) return { running: observed.candidate.get.address };
-    const seat = await run();
-    try {
-      write([attachRow({ event: "attach", bot: bot.id, project: key, terminal: seat.terminal, core: m.id, created_ms: seat.created_ms, machine, by: "start" })]);
-    } catch (e) {
-      throw new CliError(`${seat.address} runs, but its attach row wasn't written (${e?.message ?? e}): attach it with `
-        + `am attach ${bot.id} ${seat.address} --machine ${machine} --project ${key}`);
+  const start = async () => {
+    const amPathWarning = hook.checkAmPath ? await linkedAmPathWarning(target, args.slice(args.indexOf("--") + 1), over.cwd ?? key) : null;
+    if (amPathWarning) warnings.push(amPathWarning);
+    if (over.replacing) return underLedger(async () => { await over.recheck(); return launch(); });
+    return underLedger(async ({ write }) => {
+      const observed = await linkedObservation(project, bot, returnTo);
+      if (observed.core !== core) {
+        if (returnTo) refuseLinkedCaller(machine, "The target core changed before launch.");
+        throw new CliError(`${machine}'s core changed before launch; nothing was started.`);
+      }
+      if (observed.candidate) return { running: observed.candidate.get };
+      const seat = await launch();
+      try {
+        write([attachRow({ event: "attach", bot: bot.id, project: key, terminal: seat.terminal, core, created_ms: seat.created_ms, machine, by: "start" })]);
+      } catch (e) {
+        if (returnTo) {
+          const ended = await stopParentedRun(seat.terminal, returnTo);
+          returnTo.finished = ended;
+          throw new CliError(`${seat.address}: its attach row wasn't written (${e?.message ?? e}); `
+            + (ended ? "the pane was ended." : "cleanup is unconfirmed."));
+        }
+        throw new CliError(`${seat.address} runs, but its attach row wasn't written (${e?.message ?? e}): attach it with `
+          + `am attach ${bot.id} ${seat.address} --machine ${machine} --project ${key}`);
+      }
+      return seat;
+    }, { importOnWrite: Boolean(returnTo) });
+  };
+  let seat;
+  try {
+    seat = await start();
+  } finally {
+    if (returnTo && place?.spare && (!seat || seat.running)) {
+      const why = await closeUnusedLinkedSpace(place.spare, machine, returnTo, seat?.running);
+      if (why) report([why]);
     }
-    return seat;
-  });
+  }
   if (!seat.running && briefingHook(agentKey)) {
-    const warning = await linkedLedgerWarning(machine, briefingHome.dir, bot, { ...seat, state: "live" });
+    const warning = await linkedLedgerWarning(target, briefingHome.dir, bot, { ...seat, state: "live" });
     if (warning) seat.warnings.push(warning);
   }
   // A space this start made: its spare shell's tab closed once the bot shows there (closeSpare).
-  if (!seat.running && place?.spare && TAB_WAIT_MS > 0) {
+  if (!seat.running && seat.place?.spare && TAB_WAIT_MS > 0) {
     // Under a deadline its waits (TAB_WAIT_MS, then four calls) don't fit: the tab stays, said.
     const why = DEADLINE !== null ? `The new space's spare shell tab wasn't closed: this Herdr's 30 s limit for the sidebar's programs leaves no time for it.`
-      : await closeSpare(place.spare, seat.terminal, machine);
+      : await closeSpare(seat.place.spare, seat.terminal, machine, { target });
     if (why) seat.warnings.push(why);
   }
   return seat;
@@ -5369,33 +5498,307 @@ async function seatOnMachine(project, bot, over = {}) {
 
 const seatOnJson = (bot, seat) => ({ id: bot.id, terminal: seat.terminal, machine: seat.machine,
   argv: maskedArgv(seat.argv, seat.labels?.[SESSION_LABEL] ?? null), labels: maskedLabels(seat.labels),
-  space: seat.place?.space ?? null, tab: seat.place?.tab ?? null, hookWritten: seat.hookWritten ?? false, warnings: seat.warnings });
+  space: seat.place?.space ?? null, tab: seat.place?.tab ?? null, hookWritten: seat.hookWritten ?? false, warnings: seat.warnings,
+  ...(seat.parent ? { parent: seat.parent } : {}) });
 
-/** The remote seat briefing has no supported cross-origin parent/return registration.
- * Refuse orchestration rather than fabricate a reverse alias or forward a bare caller id.
- * A target-local am invoked through remote exec has already lost that origin provenance;
- * absence of HC_TERMINAL_ID here cannot detect or repair that case.
- */
-function refuseLinkedCaller(project) {
-  if (!project.machine || !process.env.HC_TERMINAL_ID) return;
+function refuseLinkedCaller(machine, why) {
+  const target = typeof machine === "string" && MACHINE_NAME.test(machine) ? machine : "M";
   throw new CliError(`Linked am launch cannot verify a return route to the requesting HC terminal; nothing was started or restarted. `
-    + `From the origin HC terminal use hc run --bg --on ${project.machine} with its real default or explicit HC parent and explicit first-task/report instructions. `
-    + `Use the returned ${project.machine}/tN address at the origin. Remote exec of local am loses origin provenance and is not a supported return-route workaround.`,
+    + `${why} From the origin HC terminal, a direct am start <bot> --project <absolute dir on ${target}> --machine ${target} supports a fresh Claude Code launch with a verifiable route. `
+    + `Otherwise, from the origin HC terminal use hc run --bg --on ${target} with its real default HC parent and explicit first-task/report instructions. `
+    + "The launch grants the whole target core send/get/read/wait access to the lead terminal, the pane outlives the lead, and hc exit and blocked notes queue across a lost line while explicit sends can fail. "
+    + "An inbound peer on the target named for the origin core ID, or a later alias change, can redirect the address. Am cannot see the target's inbound peers. "
+    + `Use the returned ${target}/tN address at the origin. hc exec --on ${target} am start gives the bot no return route and am cannot detect that case.`,
   1, { refused: "linked-return-route" });
 }
 
-/** start --machine: the bot's pane there (seatOnMachine); one that runs already is reported. */
-async function startOnMachine(opts, project, bot) {
-  const observed = await linkedObservation(project, bot);
-  if (observed.candidate) {
-    const at = observed.candidate.get.address;
-    return opts.json ? { id: bot.id, running: at.split("/")[1], machine: project.machine } : `${bot.name} is already running in ${at}.`;
+/** Pin hc and ledger identity to the endpoint on which the requesting terminal is live. */
+async function linkedReturnTo(machine, terminal) {
+  if (!isHcTerminalId(terminal)) refuseLinkedCaller(machine, "HC_TERMINAL_ID must be a bare terminal ID.");
+  const env = localHcEnv();
+  // hc ignores am's socket override and only follows the lock when localHcEnv pins it.
+  const sockets = coreSocketDiscovery({ ...env, AUTOMAGIK_HERDR_CORE_SOCKET: "" }).sockets;
+  const socket = sockets[0];
+  if (!socket || (env.HC_TERMINAL_SOCKET !== undefined && env.HC_TERMINAL_SOCKET !== socket)
+      || (env.AUTOMAGIK_HERDR_CORE_SOCKET && env.AUTOMAGIK_HERDR_CORE_SOCKET !== socket)) {
+    refuseLinkedCaller(machine, "The requesting terminal and am's core discovery must agree with hc's socket.");
   }
-  refuseLinkedCaller(project);
+  const core = await linkedCallerCore(machine, { terminal, socket });
+  const id = core?.id;
+  if (typeof id !== "string" || !MACHINE_NAME.test(id)) refuseLinkedCaller(machine, "The pinned hc socket gave no usable core ID.");
+  const list = (await linkedOriginRpc({ socket }, "machine.list"))?.machines;
+  const targetCore = list?.find?.((m) => m?.name === machine)?.id;
+  if (typeof targetCore !== "string" || !MACHINE_NAME.test(targetCore)
+      || !linkedCoreMatches(list, machine, targetCore, id)) {
+    refuseLinkedCaller(machine, "The target core identity is ambiguous or unavailable.");
+  }
+  if (targetCore === id || targetCore === core.name) {
+    refuseLinkedCaller(machine, `The target core ID collides with the origin core identity and captures the return address ${id}/${terminal}.`);
+  }
+  process.env.HC_SOCKET = socket;
+  coreOnce = Promise.resolve(id);
+  return { terminal, core: id, socket, targetCore, address: `${id}/${terminal}`, launch: randomUUID() };
+}
+
+const linkedLead = (returnTo) => linkedOriginRpc(returnTo, "terminal.get",
+  { terminal: returnTo.terminal, caller: returnTo.terminal });
+const liveLinkedLead = (pane, returnTo) => pane?.address === returnTo.terminal && pane.state === "live";
+
+async function linkedCallerCore(machine, returnTo) {
+  const { terminal } = returnTo;
+  const hello = await linkedOriginRpc(returnTo, "hello");
+  const proxy = hello ? null : await linkedOriginRpc(returnTo, "proxy.status");
+  for (const bound of [hello?.you?.terminal, proxy?.terminal]) {
+    if (bound != null && bound !== terminal) {
+      refuseLinkedCaller(machine, "The pinned hc endpoint belongs to a different terminal than HC_TERMINAL_ID.");
+    }
+  }
+  const core = hello?.core ?? (await linkedOriginRpc(returnTo, "server.status"))?.core;
+  if (!core) refuseLinkedCaller(machine, "The pinned hc socket gave no usable core ID.");
+  if (returnTo.core && core.id !== returnTo.core) refuseLinkedCaller(machine, "The origin core changed before launch.");
+  if (!liveLinkedLead(await linkedLead(returnTo), returnTo)) {
+    refuseLinkedCaller(machine, "The requesting terminal is not live on the pinned hc socket.");
+  }
+  return core;
+}
+
+// These Claude options consume a separate value. Other values may use --option=value.
+const CLAUDE_VALUE_OPTIONS = new Set(["--agent", "--agents", "--append-system-prompt", "--effort", "--fallback-model",
+  "--mcp-config", "--model", "--permission-mode", "--settings", "--setting-sources", "--system-prompt"]);
+
+function linkedClaudeProblem(argv) {
+  // A wrapper can discard the prompt arguments or replace the PATH and socket we probe.
+  if (agentKeyOfArgv([argv[0]]) !== "claude") return "The resolved command must launch Claude Code directly.";
+  const options = argv.slice(1);
+  // Include models.js's session options and Claude's PR/cloud resume and attached short forms.
+  if (ownsSession(options) || options.some((word) => /^(?:--(?:from-pr|teleport)(?:=|$)|-[cr][^-])/.test(word))) {
+    return "Claude Code must start a fresh conversation.";
+  }
+  if (options.some((word) => /^--(?:append-)?system-prompt-file(?:=|$)/.test(word))) {
+    return "Claude Code's owner prompt-file options take precedence over am's launch briefing.";
+  }
+  for (let i = 0; i < options.length; i += 1) {
+    const word = options[i];
+    if (!/^--[^-]/.test(word) || /^--(?:help|version|print|init-only)(?:=|$)/.test(word)) {
+      return "Claude Code must start interactively, without a prompt, subcommand, or noninteractive flag.";
+    }
+    if (CLAUDE_VALUE_OPTIONS.has(word) && options[i + 1] !== undefined && !options[i + 1].startsWith("-")) i += 1;
+  }
+  return null;
+}
+
+const CHECK_PANE_HC_SH = `PATH=$1; export PATH
+hc --version >/dev/null || exit 4
+NODE_OPTIONS= NODE_PATH= exec node --input-type=module -e "$2"`;
+
+const returnSocketProbe = () => readFileSync(new URL("../coreSocket.mjs", import.meta.url), "utf8") + `
+const env = { ...process.env, AUTOMAGIK_HERDR_CORE_SOCKET: "" };
+const sockets = coreSockets(env).slice(0, 1);
+const { status } = await coreStatus(env, { sockets });
+`;
+
+/** Read the remote socket directly. Even a read-only hc command can auto-start a core. */
+async function verifyReturnOn(machine, returnTo, path, cwd) {
+  const probe = returnSocketProbe() + `
+const list = status ? (await coreStatus(env, { sockets, method: "machine.list" })).status : null;
+console.log(JSON.stringify({ core: status?.core, machines: list?.machines }));
+`;
+  const originList = await linkedOriginRpc(returnTo, "machine.list");
+  if (!linkedCoreMatches(originList?.machines, machine, returnTo.targetCore, returnTo.core)) {
+    refuseLinkedCaller(machine, "The target core identity is ambiguous or unavailable.");
+  }
+  const reply = await linkedOriginRpc(returnTo, "machine.exec", {
+    on: returnTo.targetCore, cwd, timeout: AGENT_WAIT_S,
+    argv: ["sh", "-c", CHECK_PANE_HC_SH, "sh", path, probe],
+  }, (AGENT_WAIT_S + 10) * 1000);
+  let result;
+  try {
+    if (reply?.code === 0 && reply.timed_out === false) result = JSON.parse(Buffer.from(reply.stdout, "base64").toString("utf8"));
+  } catch { /* no verified response */ }
+  if (result?.core?.id !== returnTo.targetCore || typeof result.core.name !== "string") {
+    refuseLinkedCaller(machine, `The pane's hc on ${machine} could not verify that machine's core.`);
+  }
+  if (!Array.isArray(result.machines) || result.machines.some((m) => typeof m?.name !== "string" || typeof m.id !== "string")) {
+    refuseLinkedCaller(machine, `${machine}'s machine list could not be verified.`);
+  }
+  if ([result.core, ...result.machines].some((m) => m.name === returnTo.core || m.id === returnTo.core)) {
+    refuseLinkedCaller(machine, `A core or machine name or ID on ${machine} captures the return address ${returnTo.address}.`);
+  }
+}
+
+const LINKED_LAUNCH_LABEL = "am.launch";
+const LINKED_RUN_REJECTIONS = new Set(["invalid_params", "invalid_template", "config", "name_taken", "not_found",
+  "machine_unknown", "unknown_method"]);
+const launchGet = (address, bound = callBound()) => hcLookup(address, { ...bound, strictNotFound: true }).catch(() => undefined);
+const linkedCleanupBound = () => {
+  const left = deadlineLeft() - 1000;
+  return DEADLINE === null ? {} : left > 0 ? { timeout: Math.min(left, DEADLINE_CALL_MS) } : null;
+};
+const sameLinkedLaunch = (get, terminal, launch) => typeof get?.address === "string"
+  && get.address.split("/").at(-1) === terminal && get.labels?.[LINKED_LAUNCH_LABEL] === launch;
+
+function linkedCoreMatches(list, machine, core, origin) {
+  if (!Array.isArray(list)) return false;
+  const target = list.find((m) => m?.id === core && m.name === machine && m.state === "connected");
+  return Boolean(target) && !list.some((m) => m !== target
+    && [machine, core, origin].some((name) => name && (m?.name === name || m?.id === name)));
+}
+
+async function linkedOriginRpc(returnTo, method, params, timeoutMs) {
+  const { status } = await coreStatus(localHcEnv(), { sockets: [returnTo.socket], method, params, timeoutMs });
+  return status;
+}
+
+async function linkedEndpointsMatch(machine, returnTo) {
+  const status = await linkedOriginRpc(returnTo, "server.status");
+  if (status?.core?.id !== returnTo.core || status.core.name === returnTo.targetCore) return false;
+  const list = await linkedOriginRpc(returnTo, "machine.list");
+  return linkedCoreMatches(list?.machines, machine, returnTo.targetCore, returnTo.core);
+}
+
+/** B may now be listed under another name. Only its ID is used for cleanup. */
+async function linkedTargetReachable(returnTo) {
+  const status = await linkedOriginRpc(returnTo, "server.status");
+  const core = returnTo.targetCore;
+  if (!status?.core || [status.core.id, status.core.name].includes(core)) return false;
+  const list = (await linkedOriginRpc(returnTo, "machine.list"))?.machines;
+  if (!Array.isArray(list)) return false;
+  const matches = list.filter((m) => m?.id === core || m?.name === core);
+  return matches.length === 1 && matches[0].id === core && matches[0].state === "connected";
+}
+
+async function stopParentedRun(terminal, returnTo) {
+  const at = `${returnTo.targetCore}/${terminal}`;
+  if (!await linkedTargetReachable(returnTo)) return false;
+  let bound = linkedCleanupBound();
+  if (!bound) return false;
+  const get = await launchGet(at, bound);
+  const finished = (pane) => pane === null || (sameLinkedLaunch(pane, terminal, returnTo.launch) && pane.state === "finished");
+  if (finished(get)) return linkedTargetReachable(returnTo);
+  bound = linkedCleanupBound();
+  if (!bound || !sameLinkedLaunch(get, terminal, returnTo.launch)) return false;
+  await hcKill(at, bound).catch(() => null);
+  bound = linkedCleanupBound();
+  return Boolean(bound && finished(await launchGet(at, bound)) && await linkedTargetReachable(returnTo));
+}
+
+async function confirmParentedRun(reply, machine, name, returnTo) {
+  if (reply.code !== 0 && !reply.killed && LINKED_RUN_REJECTIONS.has(hcErrorKind(reply))) {
+    returnTo.finished = true;
+    throw new CliError(`hc run on ${machine} failed: ${hcSaid((reply.stderr || reply.stdout).trim())}`);
+  }
+  const runTerminal = (address) => {
+    const terminal = typeof address === "string" && address.includes("/") && address.split("/").at(-1);
+    return isHcTerminalId(terminal) ? terminal : null;
+  };
+  let terminal;
+  try { terminal = runTerminal(JSON.parse(reply.stdout)?.address); } catch { /* the run reply was lost */ }
+  const answered = reply.code === 0 && Boolean(terminal);
+  if (!answered) {
+    // A lost reply can follow a successful spawn. Search by the launch's label.
+    const args = ["ls", "--all", "--label", `${LINKED_LAUNCH_LABEL}=${returnTo.launch}`, "--json"];
+    const list = await hc(args, callBound()).then((r) => r.code === 0 ? parsed(r, args) : null).catch(() => null);
+    const rows = rowsOf(list);
+    terminal = rows.length === 1 ? runTerminal(rows[0]?.address) : null;
+  }
+  const address = terminal ? `${machine}/${terminal}` : null;
+  const get = terminal ? await launchGet(`${returnTo.targetCore}/${terminal}`) : undefined;
+  const ours = terminal && sameLinkedLaunch(get, terminal, returnTo.launch);
+  returnTo.settled = answered || Boolean(ours);
+  let problem = answered ? "no return route was confirmed" : "launch outcome unknown";
+  if (answered && ours && get.state === "live" && get.parent === returnTo.terminal
+      && Number.isSafeInteger(get.created_ms) && await linkedEndpointsMatch(machine, returnTo)) {
+    if (liveLinkedLead(await linkedLead(returnTo), returnTo)) return { address, terminal, created_ms: get.created_ms };
+    problem = "the lead terminal ended during the start; no return route";
+  }
+  returnTo.finished = Boolean(terminal && await stopParentedRun(terminal, returnTo));
+  const cleanup = returnTo.finished ? "nothing left running" : "cleanup is unconfirmed";
+  throw new CliError(`${address ?? `${machine} (pane named ${name})`}: ${problem}; ${cleanup}.`);
+}
+
+// The full terminal.list result (hc ls) carries labels. Snapshot completed dispatches
+// before listing so a concurrent start that still has to run cannot be pruned.
+const PRUNE_LINKED_BRIEFINGS = `
+const [file, core] = process.argv.slice(1);
+if (status?.core?.id !== core) throw new Error("could not verify the target core");
+const { rmSync, rmdirSync } = await import("node:fs");
+const root = dirname(file);
+const entries = statSync(root, { throwIfNoEntry: false })?.isDirectory() ? readdirSync(root, { withFileTypes: true }) : [];
+const prefix = core + ".";
+const candidates = entries.filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix)
+  && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(entry.name.slice(prefix.length))
+  && statSync(join(root, entry.name, basename(file)), { throwIfNoEntry: false })?.isFile()
+  && !statSync(join(root, entry.name, ".pending"), { throwIfNoEntry: false }));
+const { status: list } = await coreStatus(env, { sockets, method: "terminal.list" });
+if (!Array.isArray(list?.terminals)) throw new Error("could not list live panes");
+const live = new Set(list.terminals.filter((pane) => pane?.state === "live").map((pane) => pane.labels?.["am.launch"]));
+for (const { name } of candidates) {
+  if (live.has(name.slice(prefix.length))) continue;
+  const dir = join(root, name);
+  try {
+    rmSync(join(dir, basename(file)), { force: true });
+    rmdirSync(dir);
+  } catch (error) {
+    if (error.code !== "ENOENT") console.error(dir + ": " + error.message);
+  }
+}
+`;
+
+async function pruneLinkedBriefings(returnTo, file, path) {
+  const r = await remoteIo.exec("sh", ["-c", 'PATH=$1; export PATH; shift; NODE_OPTIONS= NODE_PATH= exec node --input-type=module -e "$@"',
+    "sh", path, returnSocketProbe() + PRUNE_LINKED_BRIEFINGS, file, returnTo.targetCore],
+  returnTo.targetCore, { timeout: AGENT_WAIT_S }).catch(() => null);
+  if (r?.code !== 0 || r.stderr.trim()) {
+    report([`Could not prune older launch briefings on ${returnTo.targetCore}: ${r?.stderr.trim() || "no verified reply"}.`]);
+  }
+}
+
+async function finishLinkedBriefing(returnTo) {
+  if (!returnTo?.briefing) return;
+  const remove = !returnTo.dispatched || returnTo.finished;
+  if (!remove && !returnTo.settled) return;
+  // A completed dispatch is eligible for a future prune; an ambiguous one keeps its input.
+  const command = remove
+    ? 'd=${1%/*}; rm -f -- "$1" "$d/.pending" && { [ ! -d "$d" ] || rmdir -- "$d"; }'
+    : 'rm -f -- "${1%/*}/.pending"';
+  const r = await linkedTargetReachable(returnTo)
+    ? await remoteIo.exec("sh", ["-c", command, "sh", returnTo.briefing],
+      returnTo.targetCore, { timeout: AGENT_WAIT_S }).catch(() => null)
+    : null;
+  if (r?.code !== 0) report([`Could not ${remove ? "remove" : "mark ready to prune"} launch briefing ${returnTo.briefing} on ${returnTo.targetCore}: ${r?.stderr.trim() || "no verified reply"}.`]);
+}
+
+function linkedRunning(opts, project, bot, get, early = false) {
+  const caller = process.env.HC_TERMINAL_ID;
+  const parent = get.parent ?? null;
+  if (opts.json) {
+    const result = early ? { id: bot.id, running: get.address.split("/")[1], machine: project.machine }
+      : { id: bot.id, running: get.address };
+    return caller ? { ...result, parent } : result;
+  }
+  const current = caller ? ` Current hc parent: ${parent ?? "none"}.` : "";
+  return `${bot.name} is already running in ${get.address}.${current}`;
+}
+
+/** start --machine: the bot's pane there (seatOnMachine); one that runs already is reported. */
+async function startOnMachine(opts, project, bot, returnTo) {
+  const { machine } = project;
+  const observed = await linkedObservation(project, bot, returnTo);
+  if (observed.candidate) return linkedRunning(opts, project, bot, observed.candidate.get, true);
+  if (returnTo) {
+    if (holderMachineNames().has(machine)) refuseLinkedCaller(machine, "The requested machine is a holder.");
+    if (bot.agent !== "claude") refuseLinkedCaller(machine, "A parented start needs a fresh Claude Code conversation.");
+  }
   if (opts.space) throw new CliError("--space and --tab are this computer's window places; a start on a linked machine finds its own.", 2);
-  const seat = await seatOnMachine(project, bot);
-  if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
+  let seat;
+  try {
+    seat = await seatOnMachine(project, bot, { returnTo });
+  } finally {
+    await finishLinkedBriefing(returnTo);
+  }
+  if (seat.running) return linkedRunning(opts, project, bot, seat.running);
   report(seat.warnings);
+  if (seat.parent && !opts.json) report([`${seat.address} has hc parent ${seat.parent} and outlives it.`]);
   return opts.json ? seatOnJson(bot, seat) : seat.address;
 }
 
@@ -5543,7 +5946,7 @@ async function restartOnMachine(opts, project, bot, entry, observed) {
   }
   let seat = await seatOnMachine(project, bot, { agent: plan.agent, argv: plan.argv, cwd, place: old ? placementFrom([old]) : undefined,
     carry: { ...carriedLabels(old), ...(session ?? plan.sessionId ? { [SESSION_LABEL]: session ?? plan.sessionId } : {}) }, replacing: Boolean(old), recheck });
-  if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
+  if (seat.running) return linkedRunning(opts, project, bot, seat.running);
   const warnings = [...(turnNote ? [turnNote] : []), ...seat.warnings];
   // #597: the replacement is built from bots.json, never the pane's command; when they differ,
   // one line names only flag names, values masked, and a template by name. A linked machine's
@@ -6100,20 +6503,37 @@ async function idleLocalSpare(terminal) {
  * running (spareTab, shellIdle, shellChildren). Never `confirmed`: Herdr asks the person only
  * before closing a space's last tab, which this never is. Null, or a warning when it failed.
  */
-async function closeSpare(spare, terminal, machine = null, { localOnly = false } = {}) {
+async function closeSpare(spare, terminal, machine = null, { localOnly = false, target = machine } = {}) {
   const shown = await windowShows(terminal, TAB_WAIT_MS, machine);
   if (!shown || shown.space.id !== spare.space) return null;
   if (!spareTab(spare, shown.space.tabs, terminal, true)) return null;
   let idle;
   if (localOnly) idle = await idleLocalSpare(spare.terminal);
   else {
-    const get = await hcGet(machine ? `${machine}/${spare.terminal}` : spare.terminal).catch(() => null);
-    idle = shellIdle(get, await shellChildren(get, machine));
+    const get = await hcGet(target ? `${target}/${spare.terminal}` : spare.terminal).catch(() => null);
+    idle = shellIdle(get, await shellChildren(get, target));
   }
   const tab = spareTab(spare, shown.space.tabs, terminal, idle);
   if (!tab) return null;
   const why = await windowDo("tab.close", { id: tab });
   return why ? `The new space's spare shell tab (${tab}) wasn't closed: ${why}` : null;
+}
+
+/** Discard placement after a failed or superseded parented start, if its shell is still alone. */
+async function closeUnusedLinkedSpace(spare, machine, returnTo, running) {
+  if (!await linkedEndpointsMatch(machine, returnTo)) return null;
+  const target = returnTo.targetCore;
+  const alone = async () => {
+    const space = (await windowRead())?.find((s) => s.id === spare.space && s.machine === machine);
+    const shell = freshSpare(space, spare.terminal, (a, b) => bareId(a) === b);
+    const count = space?.tabs[0]?.paneCount;
+    return spare.fresh && shell?.fresh && shell.tab === spare.tab && (count == null || count === 1);
+  };
+  if (!await alone()) return running ? closeSpare(spare, bareId(running.address), machine, { target }) : null;
+  const get = await hcGet(`${target}/${spare.terminal}`).catch(() => null);
+  if (get?.state !== "live" || !shellIdle(get, await shellChildren(get, target)) || !await alone()) return null;
+  const why = await windowDo("space.close", { id: spare.space, confirmed: true });
+  return why ? `The new space (${spare.space}) wasn't closed: ${why}` : null;
 }
 
 // ---- restart: the bot's agent again, in its pane's place ----
@@ -8506,10 +8926,10 @@ function verifyPaneIdentity(address, get) {
   }
 }
 
-async function checkedPane(address, options) {
+async function checkedPane(address, { expectedAddress = address, ...options } = {}) {
   const get = await hcLookup(address, options);
   if (!get) return null;
-  verifyPaneIdentity(address, get);
+  verifyPaneIdentity(expectedAddress, get);
   return get.state === "live" ? get : null;
 }
 
@@ -8528,7 +8948,7 @@ async function labelledPanes(project, bot, bound, carriedBinding = () => null, l
       listed?.set(row.address, row);
     }
   }
-  const gets = await Promise.all([...addresses].map(checkedPane));
+  const gets = await Promise.all([...addresses].map((address) => checkedPane(address)));
   const scoped = await Promise.all(gets.map(async (get) => {
     if (!get) return null;
     if (!get.labels || typeof get.labels !== "object" || Array.isArray(get.labels)) {
@@ -9077,7 +9497,10 @@ async function shownLinkedObservation(project, bot, want) {
   return observed;
 }
 
-async function cmdRestart(opts, [ref]) {
+async function cmdRestart(opts, [ref], _warnedRelabels, repairCliLinks) {
+  if (opts.machine !== undefined && process.env.HC_TERMINAL_ID) {
+    refuseLinkedCaller(opts.machine, "Linked restarts from an HC terminal do not preserve its return route.");
+  }
   let expect = null;
   if (opts["expect-pane"] !== undefined) {
     if (!opts.machine || !MACHINE_NAME.test(opts.machine) || ["tree", "queued", "cancel", "due", "run-queued"].some((flag) => opts[flag] !== undefined)) {
@@ -9087,10 +9510,11 @@ async function cmdRestart(opts, [ref]) {
   }
   if (opts.due) {
     if (ref) throw new CliError("restart --due takes no bot: it lists every seat over its threshold, or take one with am restart <bot>.", 2);
+    repairCliLinks?.();
     return cmdRestartDue(opts);
   }
-  if (opts["run-queued"]) return runQueuedRestart(opts);
-  if (opts.queued || opts.cancel) return queuedRestarts(opts, ref);
+  if (opts["run-queued"]) { repairCliLinks?.(); return runQueuedRestart(opts); }
+  if (opts.queued || opts.cancel) { repairCliLinks?.(); return queuedRestarts(opts, ref); }
   if (opts.tab && !opts.space) throw new CliError("--tab needs --space (the space that tab is in).", 2);
   const swap = opts.agent !== undefined || opts.model !== undefined;
   if (opts.save && !swap) throw new CliError("--save keeps a swap in the bot's definition; it goes with --agent or --model.", 2);
@@ -9127,12 +9551,15 @@ async function cmdRestart(opts, [ref]) {
   const pin = queued ?? opts._targetPin;
   if (pin && project.machine) throw new CliError("A pinned restart must run on the seat's local core.");
   if (!project.machine && !pin && readHolders().holders.length > 1) {
-    const held = holderHeld(await attachView(), bot.id, key);
+    const caller = process.env.HC_TERMINAL_ID;
+    const held = holderHeld(await attachView({ readOnly: Boolean(caller) }), bot.id, key);
     // Only this project's binding: a clone's same-id bot on a holder is another checkout's.
-    if (held?.holder && held.holder !== LOCAL_HOLDER && held.binding.project === key) return restartOnHolder(opts, project, bot, held);
+    if (held?.holder && held.holder !== LOCAL_HOLDER && held.binding.project === key) {
+      if (caller) refuseLinkedCaller(held.holder, "Linked restarts from an HC terminal do not preserve its return route.");
+      return restartOnHolder(opts, project, bot, held);
+    }
+    if (caller) viewOnce = null;
   }
-  // Before swap validation, preparation or a delegated tree transaction.
-  refuseLinkedCaller(project);
   if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
   if (project.machine) {
     // Observe before swap/model validation can refresh a caller-side model cache.
@@ -9141,6 +9568,7 @@ async function cmdRestart(opts, [ref]) {
     await linkedRestartHeld(project, bot, observed);
     return restartResolved(opts, project, bot, wanted, swap, observed);
   }
+  repairCliLinks?.();
   const explicit = process.env.HERDR_APP_HOME;
   const requested = appHome();
   // New park watchers run directly in their owning home. Legacy watchers can rediscover
@@ -14472,11 +14900,13 @@ async function dispatch(argv, io) {
     return 2;
   }
   if (opts["app-home"] && !linkedInstall) { report(["--app-home is only for machines install."]); return 2; }
+  const callerAction = process.env.HC_TERMINAL_ID && (command === "start" || command === "restart");
   if (command !== "main" && !linkedInstall) {
     if (opts["old-lead"] !== undefined) { report(["--old-lead is only for main."]); return 2; }
     // The accounts read is read-only on every machine (RFC 0043), so it repairs nothing either;
     // nor does the reader's read-only login --check (#1509), nor a linked machine's install (#206).
-    if (!preview && command !== "accounts" && command !== "proxy" && (command !== "login" || !opts.check))
+    // A caller's linked launch may be refused, including after automatic holder selection.
+    if (!preview && !callerAction && command !== "accounts" && command !== "proxy" && (command !== "login" || !opts.check))
       io.repairCliLinks?.();
   }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).
@@ -14490,7 +14920,7 @@ async function dispatch(argv, io) {
   }
   const run = COMMANDS[command];
   if (!run) { process.stderr.write(`am: unknown command "${command}"\n\n${USAGE}\n`); return 2; }
-  const transportEnv = opts["local-only"]
+  const transportEnv = opts["local-only"] || (command === "start" && opts.machine !== undefined && process.env.HC_TERMINAL_ID)
     ? ["HC_SOCKET", "AUTOMAGIK_HERDR_CORE_SOCKET", "HC_SESSION"].map((name) => [name, process.env[name]])
     : [];
   const transportCache = [workerTransportOnce, coreOnce, machinesOnce, viewOnce];
@@ -14507,7 +14937,7 @@ async function dispatch(argv, io) {
     const warnedRelabels = tidy && (command === "start" || command === "attach") ? new Set() : undefined;
     const out = command === "proxy" ? await run(opts, rest, io)
       : linkedInstall ? await run(opts, rest, { ...io, machineCount: tokens.filter((t) => t.kind === "option" && t.name === "machine").length })
-      : await run(opts, rest, warnedRelabels);
+      : await run(opts, rest, warnedRelabels, callerAction ? io.repairCliLinks : undefined);
     if (out === PRINTED) return exitAfter.code;
     const tidyBeforeJson = warnedRelabels !== undefined && opts.json;
     const locality = { localOnly: opts["local-only"] };
@@ -14524,7 +14954,7 @@ async function dispatch(argv, io) {
     return exitAfter.code;
   } catch (e) {
     const botAction = command === "start" || command === "restart";
-    if (botAction && !preview) {
+    if (botAction && !preview && e?.detail?.refused !== "linked-return-route") {
       try {
         const dir = join(appHome(), "automagik-herdr");
         mkdirSync(dir, { recursive: true, mode: 0o700 });

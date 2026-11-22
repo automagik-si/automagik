@@ -34,6 +34,9 @@ if (state.down) {
   process.exit(1);
 }
 const save = () => writeFileSync(statePath, JSON.stringify(state));
+const hcPath = process.env.HC_FAKE_STATE;
+const linkedState = (hc, machine) => process.env.HC_FAKE_TWO_CORE === "1"
+  ? hc.machines?.find((m) => m.name === machine)?.remoteState : null;
 if (command === "do" && state.probe) {
   state.probed = [...(state.probed ?? []), [rest[0], existsSync(state.probe)]];
   save();
@@ -82,12 +85,14 @@ if (command === "do" && rest[0] === "space.new") {
   state.spaces.push({ id: `sp-new${n}`, name: args.name ?? "", folder: args.folder ?? "", machine, active: true,
     tabs: [{ id: `tb-new${n}`, name: "1", active: true, terminals: [{ terminal: shell, pane: `p-new${n}` }], ...count }] });
   if (state.place && process.env.HC_FAKE_STATE) {
-    const hcState = JSON.parse(readFileSync(process.env.HC_FAKE_STATE, "utf8"));
+    const hcState = JSON.parse(readFileSync(hcPath, "utf8"));
+    const target = linkedState(hcState, machine);
+    const core = target ? JSON.parse(readFileSync(target, "utf8")) : hcState;
     const fg = state.shellBusy ? { argv: ["vim", "notes.md"], cwd: args.folder, pid: 9100 + n } : { argv: ["-zsh"], cwd: args.folder, pid: 9000 + n };
     const children = state.shellUnknown ? null : state.shellPgrepError ? "exit1" : state.shellPgrepKilled ? "killed" : state.shellJob ? [String(9500 + n)] : [];
-    hcState.terminals.push({ address: shell, name: bareShell, cwd: args.folder, state: "live", parent: null, created_ms: 1, labels: {},
+    core.terminals.push({ address: target ? bareShell : shell, name: bareShell, cwd: args.folder, state: "live", parent: null, created_ms: 1, labels: {},
       pid: 9000 + n, foreground: fg, status: { app: "zsh", state: "idle" }, children });
-    writeFileSync(process.env.HC_FAKE_STATE, JSON.stringify(hcState));
+    writeFileSync(target ?? hcPath, JSON.stringify(core));
   }
   writeFileSync(statePath, JSON.stringify(state));
   process.stdout.write(JSON.stringify({ pane: `p-new${n}`, terminal: state.qualifiedSpare ? shell : bareShell, ...state.spaceReply }));
@@ -95,6 +100,18 @@ if (command === "do" && rest[0] === "space.new") {
 }
 if (command === "do" && rest[0] === "space.close") {
   const { id } = JSON.parse(rest[1] ?? "{}");
+  const space = state.spaces?.find((s) => s.id === id);
+  if (space?.machine && hcPath) {
+    const target = linkedState(JSON.parse(readFileSync(hcPath, "utf8")), space.machine);
+    if (target) {
+      const core = JSON.parse(readFileSync(target, "utf8"));
+      for (const tab of space.tabs) for (const { terminal } of tab.terminals) {
+        const pane = core.terminals.find((p) => p.address === terminal.split("/").at(-1));
+        if (pane) pane.state = "finished";
+      }
+      writeFileSync(target, JSON.stringify(core));
+    }
+  }
   state.spaces = (state.spaces ?? []).filter((s) => s.id !== id);
   writeFileSync(statePath, JSON.stringify(state));
   process.stdout.write("{}");

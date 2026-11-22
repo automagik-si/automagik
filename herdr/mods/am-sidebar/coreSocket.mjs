@@ -225,8 +225,8 @@ export function userCoreSockets(env = process.env, { platform = process.platform
   return [...paths];
 }
 
-/** One overall deadline; only a failed connection permits trying another candidate. */
-export async function coreStatus(env = process.env, { timeoutMs = 3000, sockets, strict = false } = {}) {
+/** A direct core RPC with one deadline. Only a failed connection permits trying another socket. */
+export async function coreStatus(env = process.env, { timeoutMs = 3000, sockets, strict = false, method = "server.status", params = {} } = {}) {
   const paths = sockets ?? coreSockets(env);
   const until = Date.now() + timeoutMs;
   const tried = [];
@@ -251,7 +251,7 @@ export async function coreStatus(env = process.env, { timeoutMs = 3000, sockets,
         socket = createConnection(path);
         socket.once("connect", () => {
           connected = true;
-          socket.write('{"jsonrpc":"2.0","id":1,"method":"server.status","params":{}}\n');
+          socket.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) + "\n");
         });
         socket.on("data", (chunk) => {
           buffer = Buffer.concat([buffer, chunk]);

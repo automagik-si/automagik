@@ -9,15 +9,16 @@ import { startFakeCore } from "./fake-core.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { attachLine, attachPath, attachRow, closingRow, foldAttach, heldIn, readAttach } from "../mods/am-sidebar/attach.js";
 import { GUARD_DIR, KILL_GUARD_DIR } from "../mods/am-sidebar/workers.js";
-import { AGY_FIXED_DENY, CLAUDE_PERSON_SETTINGS } from "../mods/am-sidebar/models.js";
-import { amPartHookCommand, WORKER_LINE } from "../mods/am-sidebar/briefingText.mjs";
+import { AGY_FIXED_DENY, CLAUDE_PERSON_SETTINGS, briefingFileOf } from "../mods/am-sidebar/models.js";
+import { amPartHookCommand, botOfBriefingFile, briefingFilePath, WORKER_LINE } from "../mods/am-sidebar/briefingText.mjs";
 import { approveProject, recordFileOf } from "../mods/am-sidebar/approved.js";
 import { emptyPlan, PLAN_FILE, planText } from "../mods/am-sidebar/accountsPlanRecord.js";
 import { WRITE_SINCE } from "../mods/am-sidebar/accountsFleet.js";
@@ -93,6 +94,7 @@ function scene(t, { terminals = [], tui = true, caller = false, accounts = false
   // Ordinary linked launches have no requesting HC parent. Dedicated caller tests
   // include a real fixture terminal, rather than inheriting the test runner's identity.
   env.HC_TERMINAL_ID = caller ? "t1" : "";
+  if (caller) Object.assign(env, { HC_SOCKET: core.env.AUTOMAGIK_HERDR_CORE_SOCKET, HC_FAKE_TWO_CORE: "1" });
   const cli = (args, more = {}) => {
     core.control({ ...env, ...more });
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: root, env: { ...env, ...more }, encoding: "utf8" });
@@ -126,8 +128,8 @@ function scene(t, { terminals = [], tui = true, caller = false, accounts = false
   const windowNow = () => JSON.parse(readFileSync(appState, "utf8"));
   const approve = () => approveProject({ project,
     env: { HOME: vm, XDG_DATA_HOME: "" }, approvedBy: "tester" });
-  return { root, project, app, home, cli, on, calls, hcState, setState, rows,
-    windowShows, fakeWindow, appCalls, windowNow, approve };
+  return { root, project, app, home, env, cli, on, calls, hcState, setState, rows,
+    windowShows, fakeWindow, appCalls, windowNow, approve, core };
 }
 
 // The Atlas pane as lab/t8 is: live, under the keep wrapper, no status reported.
@@ -515,6 +517,32 @@ test("managed linked Claude start and plain restart follow the target's record a
   assert.equal(restart.code, 0, restart.err);
   assert.deepEqual(loginAssignments(s.calls().filter(([verb]) => verb === "run").at(-1)), [`CLAUDE_CONFIG_DIR=${nextSlot}`]);
   assert.equal(s.calls().filter((c) => c[0] === "exec" && c.includes("--launch-login")).length, 2);
+});
+
+function launchClock(s, marker, before, after) {
+  const clock = join(s.root, "launch-clock.mjs");
+  writeFileSync(clock, `import { existsSync } from "node:fs";
+if (process.argv[1] === ${JSON.stringify(CLI)}) {
+  const deadline = Number(process.env.AUTOMAGIK_HERDR_DEADLINE);
+  Date.now = () => deadline - (existsSync(${JSON.stringify(marker)}) ? ${after} : ${before});
+}
+`);
+  return { AUTOMAGIK_HERDR_DEADLINE: String(Date.now() + 30_000),
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${clock}`].filter(Boolean).join(" ") };
+}
+
+test("#1635 an ordinary managed start with 26 seconds left resolves its slot before guard discovery", (t) => {
+  const s = scene(t, { accounts: true });
+  writeLaunchPlan(s);
+  shipLaunchReader(s);
+  const slot = writeLinkedLogin(s);
+  const marker = join(s.root, "guard-probe-seen");
+  s.setState((state) => { state.markExec = { contains: "command -v automagik-herdr 2>/dev/null", path: marker }; });
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"], launchClock(s, marker, 26_000, 24_000));
+  assert.equal(r.code, 0, r.err);
+  assert.ok(existsSync(marker));
+  assert.deepEqual(loginAssignments(startedWith(s)), [`CLAUDE_CONFIG_DIR=${slot}`]);
+  assert.doesNotMatch(r.err, /time left.*managed/i);
 });
 
 // #1509 over RFC 0043 (#1914): under this computer's Bot login policy a managed machine's Claude
@@ -2086,7 +2114,7 @@ test("#1635 caller-context start may report the verified existing target without
   const before = linkedFiles(s);
   const r = s.cli(["start", "Atlas", ...s.on, "--force", "--json"]);
   assert.equal(r.code, 0, r.err);
-  assert.deepEqual(r.json(), { id: ATLAS, running: "t8", machine: "vm" });
+  assert.deepEqual(r.json(), { id: ATLAS, running: "t8", machine: "vm", parent: null });
   assert.deepEqual(linkedFiles(s), before);
   noLinkedPreparation(s);
 });
@@ -2096,7 +2124,7 @@ for (const state of ["unknown", "duplicate"]) test(`#1635 caller-context start d
   seedCallerLedger(s);
   s.fakeWindow({ spaces: [] });
   s.setState((data) => {
-    if (state === "unknown") data.failGet = ["vm/t8"];
+    if (state === "unknown") data.failGet = [`${CORE}/t8`];
     else data.terminals.push(atlasPane({ address: "vm/t9", created_ms: 9, cwd: s.project, labels: { bot: ATLAS } }));
   });
   const before = linkedFiles(s);
@@ -2104,7 +2132,7 @@ for (const state of ["unknown", "duplicate"]) test(`#1635 caller-context start d
   assert.equal(r.code, 1, r.err);
   // Transport CliErrors have stderr only; structured refusals also emit JSON.
   if (r.out.trim()) assert.equal(r.json().running, undefined);
-  assert.match(r.err, state === "unknown" ? /hc get vm\/t8 failed/ : /duplicate live labels/);
+  assert.match(r.err, state === "unknown" ? /hc get core-of-vm\/t8 failed/ : /duplicate live labels/);
   assert.deepEqual(linkedFiles(s), before);
   noLinkedPreparation(s);
 });
@@ -2122,6 +2150,817 @@ test("#1635 no-caller member start and restart remain ordinary non-orchestrated 
   assert.ok(runs.every((c) => c.includes("--on") && c.includes("--no-parent")));
   assert.deepEqual(keysSent(s.calls()), []);
   // Compatibility only: this does not prove a cross-origin return/report route.
+});
+
+const LEAD_CORE = "a123456789abcdef0123456789abcdef";
+const RETURN_TO = `${LEAD_CORE}/t1`;
+
+function returnRoute(t, { appHome = true, backingHc = true } = {}) {
+  const s = scene(t, { caller: true, isGit: false });
+  const socket = s.env.AUTOMAGIK_HERDR_CORE_SOCKET;
+  Object.assign(s.env, { HC_SOCKET: socket, HC_TERMINAL_SOCKET: socket, HC_FAKE_LINK_RPC: "1", HC_FAKE_TWO_CORE: "1" });
+  s.core.control(s.env);
+  const vm = join(s.root, "vm"), bin = join(s.root, "vm-bin");
+  const remoteState = join(s.root, "remote-hc.json"), remoteLog = join(s.root, "remote-hc.log");
+  const remoteRpcLog = join(s.root, "remote-rpc.log");
+  writeFileSync(remoteLog, "");
+  const osBin = join(s.root, "vm-os-bin");
+  mkdirSync(osBin);
+  for (const name of ["sh", "test", "git", "dirname", "readlink", "mkdir", "rm", "rmdir", "cat", "env", "printenv", "head", "ls", "id", "stat", "chmod"]) {
+    const tool = [`/usr/bin/${name}`, `/bin/${name}`].find(existsSync);
+    assert.ok(tool, name);
+    symlinkSync(tool, join(osBin, name));
+  }
+  symlinkSync(process.execPath, join(osBin, "node"));
+  const execPath = `${bin}:${osBin}`;
+  const remoteCore = startFakeCore(t, { HC_FAKE_DIRECT_RPC: "1", HC_FAKE_STATE: remoteState,
+    HC_FAKE_RPC_LOG: remoteRpcLog, AUTOMAGIK_HERDR_TEST_ROOTS: s.root });
+  const remoteSocket = remoteCore.env.AUTOMAGIK_HERDR_CORE_SOCKET;
+  const remoteEnv = { ...remoteCore.env, HOME: vm, HC_FAKE_STATE: remoteState, HC_FAKE_LOG: remoteLog,
+    HC_TERMINAL_ID: "", HC_SOCKET: remoteSocket, HC_TERMINAL_SOCKET: "", HC_FAKE_TWO_CORE: "1",
+    HC_FAKE_SOCKET_STATES: JSON.stringify({ [remoteSocket]: remoteState }) };
+  const remote = () => JSON.parse(readFileSync(remoteState, "utf8"));
+  const setRemote = (edit) => { const state = remote(); edit(state); writeFileSync(remoteState, JSON.stringify(state)); };
+  writeFileSync(remoteState, JSON.stringify({ core: { id: CORE, name: "target" }, next: 100, machines: [],
+    peers: [{ id: LEAD_CORE, name: "origin", callsMe: "vm", state: s.env.HC_FAKE_STATE }],
+    terminals: [{ address: "t1", name: "Atlas", labels: { bot: ATLAS }, state: "live", cwd: s.project, created_ms: 1 }] }));
+  s.setState((state) => {
+    state.core = { id: LEAD_CORE, name: "origin" };
+    state.terminals.push({ address: "t7", state: "live", created_ms: 7, labels: {} });
+    Object.assign(state.machines[0], { remoteState, peerName: "origin", env: remoteEnv, execPath, login: { path: execPath } });
+  });
+  if (appHome) packAt(vmApp(s));
+  const shim = shimOnVm(s);
+  const guard = new URL("../mods/am-sidebar/hcGuard.mjs", import.meta.url).href;
+  exe(join(shim, "hc"), `#!${process.execPath}\nimport(${JSON.stringify(guard)}).then(async ({runKillGuard}) => { process.exitCode = await runKillGuard(process.argv.slice(2)); });\n`);
+  if (backingHc) exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+  seedCallerLedger(s);
+  return { ...s, remote, setRemote, remoteState, remoteEnv, remoteLog, remoteRpcLog, execPath, bin, shim };
+}
+
+function executeInPane(s, pane, argv = pane.argv) {
+  const [program, ...args] = argv;
+  return spawnSync(program, args, { cwd: pane.cwd, env: { ...s.env, ...s.remoteEnv, HC_TERMINAL_ID: pane.address }, encoding: "utf8" });
+}
+
+for (const loseReply of [false, true]) test(`#1635 the Claude launch file sends one result to the granting lead ${loseReply ? "even when the reply is lost" : "with the lead's display name taken"}`, (t) => {
+  const s = returnRoute(t);
+  const other = join(s.root, "unrelated-hc.json");
+  writeFileSync(other, JSON.stringify({ terminals: [{ address: "t1", state: "live" }] }));
+  seedCallerLedger({ app: vmApp(s) });
+  // Use Claude's last effective file option and extract the recipient exclusively from that file.
+  exe(join(s.bin, "claude"), `#!${process.execPath}
+const {readFileSync} = require("node:fs");
+const {spawnSync} = require("node:child_process");
+const args = process.argv.slice(2);
+const path = args[args.lastIndexOf("--append-system-prompt-file") + 1];
+const text = readFileSync(path, "utf8");
+const address = /You were started from hc terminal \\x60([^\\x60]+)\\x60/.exec(text)[1];
+const r = spawnSync("hc", ["send", address, "result from the remote Claude fixture"], {stdio: "inherit"});
+process.exitCode = r.status ?? 1;
+`);
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().parent, RETURN_TO);
+  const run = s.calls().find((c) => c[0] === "run");
+  assert.deepEqual(run.slice(0, 3), ["run", "--on", CORE]);
+  const directed = s.calls().filter((call) => ["file", "exec", "run"].includes(call[0]));
+  assert.ok(directed.some((call) => call[0] === "file" && call.at(-1) === join(s.project, ".herdr/bots.json")));
+  assert.ok(directed.every((call) => call[call.indexOf("--on") + 1] === CORE));
+  assert.deepEqual(readJsonLines(s.remoteLog), [["--version"]]);
+  assert.equal(readJsonLines(s.remoteRpcLog).filter(({ method }) => method === "terminal.list").length, 1);
+  assert.ok(run.includes("--outlive-parent") && !run.includes("--no-parent") && !run.includes("--parent"));
+  const pane = s.remote().terminals.find((p) => p.address === r.json().terminal);
+  assert.equal(pane.parent, "origin/t1");
+  assert.equal(pane.die_with_parent, false);
+  const panePath = pane.argv.find((w) => w.startsWith("PATH="));
+  assert.ok(panePath.startsWith(`PATH=${s.shim}:`));
+  const file = briefingFileOf(pane.argv);
+  assert.equal(botOfBriefingFile(file), HEDGE);
+  const text = readFileSync(file, "utf8");
+  assert.match(text, /Your lead: Atlas/);
+  assert.ok(text.includes(`hc send ${RETURN_TO} "<result or blocker>"`));
+  assert.match(text, /outcome is unclear.*confirmed it did not arrive/);
+  s.setRemote((state) => { state.machines = [{ name: "origin", id: "unrelated", state: "connected", remoteState: other }]; });
+  const ungranted = executeInPane(s, pane, ["/usr/bin/env", panePath, "hc", "send", `${LEAD_CORE}/t7`, "denied"]);
+  assert.notEqual(ungranted.status, 0);
+  assert.match(ungranted.stderr, /"kind":"denied"/);
+  if (loseReply) s.setRemote((state) => { state.loseSendReply = true; });
+  const sent = executeInPane(s, pane);
+  assert.equal(sent.status, loseReply ? 1 : 0, sent.stderr);
+  if (loseReply) assert.match(sent.stderr, /reply lost after dispatch/);
+  assert.deepEqual(s.hcState().sent, [{ to: "t1", from: `vm/${pane.address}`, text: "result from the remote Claude fixture" }]);
+  assert.equal(s.remote().sent, undefined, "the roster lead on B did not receive the task result");
+  assert.equal(JSON.parse(readFileSync(other, "utf8")).sent, undefined);
+});
+
+test("#1635 caller checks and run use the pinned socket despite a live t1 on the fallback core", (t) => {
+  const s = returnRoute(t);
+  const right = s.env.HC_FAKE_STATE;
+  const wrong = join(s.root, "wrong-origin.json");
+  const fallback = s.hcState();
+  fallback.core = { id: "wrong-origin", name: "other" };
+  fallback.terminals[0].name = "fallback-lead";
+  writeFileSync(wrong, JSON.stringify(fallback));
+  const other = startFakeCore(t, { HC_FAKE_DIRECT_RPC: "1", HC_FAKE_STATE: wrong, AUTOMAGIK_HERDR_TEST_ROOTS: s.root });
+  const socket = s.env.HC_SOCKET;
+  const otherSocket = other.env.AUTOMAGIK_HERDR_CORE_SOCKET;
+  const transportLog = join(s.root, "transport.jsonl");
+  const map = JSON.stringify({ [socket]: right, [otherSocket]: wrong });
+  const rpcLog = join(s.root, "origin-rpc.jsonl");
+  const env = { HC_FAKE_STATE: wrong, HC_FAKE_SOCKET_STATES: map, HC_FAKE_ENV_LOG: transportLog, HC_FAKE_RPC_LOG: rpcLog };
+  const wrongGet = spawnSync(process.execPath, [FAKE_HC, "get", "t1", "--json"], {
+    env: { ...s.env, ...env, HC_SOCKET: otherSocket, HC_FAKE_STATE: right }, encoding: "utf8",
+  });
+  assert.equal(wrongGet.status, 0, wrongGet.stderr);
+  assert.equal(JSON.parse(wrongGet.stdout).name, "fallback-lead");
+  const start = s.cli(["start", "Hedge", ...s.on, "--json"], env);
+  assert.equal(start.code, 0, start.err);
+  assert.equal(start.json().parent, RETURN_TO);
+  const checked = readJsonLines(rpcLog).filter(({ method, params }) => method === "terminal.get" && params.terminal === "t1");
+  assert.deepEqual(checked.map((row) => row.socket), [socket, socket, socket]);
+  const runs = readJsonLines(transportLog).filter(({ argv }) => argv[0] === "run");
+  assert.deepEqual(runs.map(({ HC_SOCKET }) => HC_SOCKET), [socket]);
+  assert.deepEqual(s.hcState().terminals[0].grants, [CORE]);
+  assert.equal(JSON.parse(readFileSync(wrong, "utf8")).terminals[0].grants, undefined);
+});
+
+test("#1635 ordinary linked Claude launch keeps its parentless argv, briefing and stdout", (t) => {
+  const s = returnRoute(t);
+  const result = s.cli(["start", "Hedge", ...s.on], { HC_TERMINAL_ID: "" });
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.out, "vm/t100\n");
+  assert.doesNotMatch(result.err, /has hc parent/);
+  const run = s.calls().find((c) => c[0] === "run");
+  assert.deepEqual(run.slice(0, 3), ["run", "--on", "vm"]);
+  assert.equal(run.some((word) => word.startsWith("am.launch=")), false);
+  assert.ok(run.includes("--no-parent") && !run.includes("--outlive-parent"));
+  const pane = s.remote().terminals.at(-1);
+  assert.equal(pane.parent, null);
+  assert.doesNotMatch(readFileSync(briefingFileOf(pane.argv), "utf8"), /You were started from hc terminal/);
+});
+
+test("#1635 parented human confirmation keeps stdout and creates a first ledger on success", (t) => {
+  const s = returnRoute(t);
+  rmSync(attachPath(s.app));
+  const result = s.cli(["start", "Hedge", ...s.on]);
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.out, "vm/t100\n");
+  assert.ok(result.err.includes(`vm/t100 has hc parent ${RETURN_TO}`));
+  assert.deepEqual(s.rows().map(({ event, terminal, core }) => [event, terminal, core]), [["attach", "t100", CORE]]);
+});
+
+function assertRouteRefused(s, args, why, env = {}) {
+  const before = linkedFiles(s);
+  const remoteBefore = s.remote();
+  const from = s.calls().length;
+  const r = s.cli([...args, "--json"], env);
+  assert.equal(r.code, 1, r.err);
+  assert.equal(r.json().refused, "linked-return-route");
+  assert.match(r.err, why);
+  assert.match(r.err, /hc run --bg --on vm.*report instructions/);
+  assert.deepEqual(linkedFiles(s), before);
+  assert.deepEqual(s.remote(), remoteBefore);
+  noLaunchOrKill(s, from);
+}
+
+test("#1635 invalid, stale, finished and cross-socket callers do not prepare a launch", (t) => {
+  const s = returnRoute(t);
+  const start = ["start", "Hedge", ...s.on];
+  assertRouteRefused(s, start, /bare terminal ID/, { HC_TERMINAL_ID: "ppid:123" });
+  assertRouteRefused(s, start, /not live/, { HC_TERMINAL_ID: "t3" });
+  s.setState((state) => { state.terminals[1].state = "finished"; });
+  assertRouteRefused(s, start, /not live/, { HC_TERMINAL_ID: "t7" });
+  const statePath = join(s.root, "other-local-core.json");
+  writeFileSync(statePath, JSON.stringify({ core: { id: "wrong-core" }, terminals: [{ address: "t1", state: "live" }] }));
+  const other = startFakeCore(t, { ...s.env, HC_FAKE_STATE: statePath, AUTOMAGIK_HERDR_TEST_ROOTS: s.root });
+  for (const variable of ["HC_TERMINAL_SOCKET", "AUTOMAGIK_HERDR_CORE_SOCKET"]) {
+    assertRouteRefused(s, start, /must agree with hc's socket/, { [variable]: other.env.AUTOMAGIK_HERDR_CORE_SOCKET });
+  }
+  const unused = join(s.root, "unused-origin.sock");
+  assertRouteRefused(s, start, /pinned hc socket gave no usable core ID/,
+    { HC_SOCKET: unused, HC_TERMINAL_SOCKET: unused, AUTOMAGIK_HERDR_CORE_SOCKET: unused });
+  assert.equal(existsSync(unused), false);
+  assert.deepEqual(s.calls(), [], "no hc client call, including remote project resolution");
+});
+
+for (const binding of ["boundTerminal", "proxyTerminal"]) test(`#1635 ${binding} rejects a live caller on someone else's endpoint`, (t) => {
+  const s = returnRoute(t);
+  s.setState((state) => { state[binding] = "t7"; });
+  assertRouteRefused(s, ["start", "Hedge", ...s.on], /endpoint belongs to a different terminal/);
+  assert.deepEqual(s.calls(), []);
+});
+
+test("#1635 linked queue forms leave the local queue and watcher untouched", (t) => {
+  const s = returnRoute(t);
+  const queue = join(s.app, "automagik-herdr/queued-restarts.json");
+  writeFileSync(queue, JSON.stringify([{ id: "q1", botId: HEDGE, botName: "Hedge", terminal: "t9", watcher: "t7", project: s.project }]));
+  const from = s.calls().length;
+  for (const args of [["--queued"], ["Hedge", "--cancel"], ["Hedge", "--run-queued", "q1"]]) {
+    assertRouteRefused(s, ["restart", ...args, ...s.on], /Linked restarts/);
+  }
+  assert.deepEqual(s.calls().slice(from), [], "linked queue forms never reach hc");
+  const local = s.cli(["restart", "Hedge", "--project", s.project, "--run-queued", "q1"], { HC_TERMINAL_ID: "t7" });
+  assert.equal(local.code, 0, local.err);
+  assert.deepEqual(JSON.parse(readFileSync(queue, "utf8")), [], "the local watcher consumed its stale entry");
+});
+
+test("#1635 holder placement refuses before delegation or reservation and still permits local selection", (t) => {
+  const s = returnRoute(t);
+  writeFileSync(join(s.app, "automagik-herdr/holders.json"), JSON.stringify({ holders: ["vm"] }));
+  assertRouteRefused(s, ["start", "Hedge", ...s.on], /requested machine is a holder/);
+  s.setRemote((state) => state.terminals.push({ ...atlasPane({ cwd: s.project, labels: { bot: HEDGE } }), address: "t8" }));
+  seedCallerLedger(s, [linkedRow(s, { bot: HEDGE })]);
+  const existing = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(existing.code, 0, existing.err);
+  assert.deepEqual(existing.json(), { id: HEDGE, running: "t8", machine: "vm", parent: null });
+  assertRouteRefused(s, ["restart", "Hedge", "--project", s.project, "--force"], /Linked restarts/);
+  s.setRemote((state) => state.terminals.pop());
+  const localAtlas = attachRow({ event: "attach", bot: ATLAS, project: s.project, terminal: "t1", core: LEAD_CORE, created_ms: 1, by: "start" });
+  seedCallerLedger(s, [localAtlas]);
+  assertRouteRefused(s, ["start", "Hedge", "--project", s.project], /selected seat is on a holder/);
+  seedCallerLedger(s);
+  exe(join(s.root, "bin", "claude"), "#!/bin/sh\nexit 0\n");
+  const local = s.cli(["start", "Hedge", "--project", s.project]);
+  assert.equal(local.code, 0, local.err);
+  assert.ok(s.calls().some((c) => c[0] === "run" && !c.includes("--on")));
+});
+
+test("#1635 agent settings that cannot consume the launch route are refused and preserved", (t) => {
+  const s = returnRoute(t);
+  const start = ["start", "Hedge", ...s.on];
+  const programs = join(s.app, "programs.json");
+  for (const [args, reason] of [
+    [["--continue"], /fresh conversation/], [["-c"], /fresh conversation/],
+    [["--resume"], /fresh conversation/], [["-r", "old"], /fresh conversation/], [["--resume=old"], /fresh conversation/],
+    [["--from-pr", "42"], /fresh conversation/], [["--from-pr=42"], /fresh conversation/],
+    [["--teleport"], /fresh conversation/], [["--teleport=old"], /fresh conversation/],
+    [["--fork-session"], /fresh conversation/],
+    [["--session-id=4a14e4ec-60ee-45b2-98f8-43e5febc3642"], /fresh conversation/],
+    [["--append-system-prompt-file", "/owner.md"], /owner prompt-file/], [["--system-prompt-file=/owner.md"], /owner prompt-file/],
+    [["--help"], /must start interactively/], [["-h"], /must start interactively/],
+    [["--version"], /must start interactively/], [["-v"], /must start interactively/],
+    [["--print"], /must start interactively/], [["-p"], /must start interactively/],
+    [["--init-only"], /must start interactively/],
+    [["mcp", "list"], /must start interactively/], [["--", "a prompt"], /must start interactively/],
+  ]) {
+    writeFileSync(programs, JSON.stringify({ programs: { claude: { run: ["claude", ...args] } } }));
+    assertRouteRefused(s, start, reason);
+  }
+  const missing = join(s.root, "missing/claude");
+  writeFileSync(programs, JSON.stringify({ programs: { claude: { run: [missing, "--continue"] } } }));
+  const from = s.calls().length;
+  assertRouteRefused(s, start, /fresh conversation/);
+  assert.ok(s.calls().slice(from).every((call) => !call.includes(missing)), "the override was refused before looking for it");
+  writeFileSync(programs, JSON.stringify({ programs: { claude: { run: [missing, "--disallowedTools=Write"] } } }));
+  const before = linkedFiles(s);
+  const refused = s.cli(start);
+  assert.equal(refused.code, 1, refused.err);
+  assert.match(refused.err, /missing\/claude.*isn't installed/);
+  assert.doesNotMatch(refused.err, /shipped run/);
+  assert.deepEqual(linkedFiles(s), before);
+  noLaunchOrKill(s);
+  const path = join(s.project, ".herdr/bots.json");
+  const file = JSON.parse(readFileSync(path, "utf8"));
+  for (const agent of ["codex", "dsh-tui"]) {
+    file.bots[1].agent = agent;
+    writeFileSync(path, JSON.stringify(file));
+    assertRouteRefused(s, start, /needs a fresh Claude Code conversation/);
+  }
+});
+
+test("#1635 pane PATH must run hc --version and reach the target core without autostart", async (t) => {
+  for (const [name, opts, why, versions = []] of [
+    ["no app home", { appHome: false }, /app home there/],
+    ["briefing directory is a file", {}, /briefing folder.*not writable/],
+    ["shim has no backing hc", { backingHc: false }, /pane's hc.*could not verify/],
+    ["hc has a missing interpreter", {}, /pane's hc.*could not verify/],
+    ["wrong target core", {}, /pane's hc.*could not verify/, [["--version"]]],
+    ["pane socket has no core", {}, /pane's hc.*could not verify/, [["--version"]]],
+  ]) await t.test(name, (t) => {
+    const s = returnRoute(t, opts);
+    if (name === "briefing directory is a file") writeFileSync(join(vmApp(s), "automagik-herdr/briefings"), "occupied");
+    if (name === "hc has a missing interpreter") exe(join(s.bin, "hc"), `#!${join(s.root, "missing-interpreter")}\n`);
+    if (name === "wrong target core") s.setRemote((state) => { state.core.id = "unexpected"; });
+    if (name === "pane socket has no core") s.setState((state) => { state.machines[0].env.HC_SOCKET = join(s.root, "unused.sock"); });
+    assertRouteRefused(s, ["start", "Hedge", ...s.on], why);
+    assert.deepEqual(readJsonLines(s.remoteLog), versions);
+    const probe = s.calls().find((call) => call[0] === "exec" && call.some((word) => word.includes("hc --version")));
+    if (!["no app home", "briefing directory is a file"].includes(name)) {
+      assert.ok(probe);
+      assert.equal(probe[probe.indexOf("--") + 5], `${s.shim}:${s.execPath}`);
+      assert.equal(existsSync(join(s.root, "unused.sock")), false);
+    }
+  });
+});
+
+test("#1635 an ambiguous target name or core ID in A's machine list refuses before dispatch", (t) => {
+  const s = returnRoute(t);
+  const start = ["start", "Hedge", ...s.on];
+  for (const alias of [{ id: "vm" }, { name: CORE }, { name: LEAD_CORE }, { id: LEAD_CORE }]) {
+    s.setState((state) => { state.machines[1] = { name: "other", id: "other-id", state: "connected", ...alias }; });
+    assertRouteRefused(s, start, /target core identity is ambiguous/);
+    assert.equal(s.hcState().terminals[0].grants, undefined);
+  }
+});
+
+test("#1635 both pane names taken refuses before writing a launch file", (t) => {
+  const s = returnRoute(t);
+  s.setRemote((state) => state.terminals.push(
+    { address: "t2", name: "hedge", state: "live" },
+    { address: "t3", name: `hedge-${HEDGE.slice(-4)}`, state: "live" },
+  ));
+  assertRouteRefused(s, ["start", "Hedge", ...s.on], /No unique pane name/);
+});
+
+test("#1635 a target machine name or ID that captures the route refuses before preparation", (t) => {
+  const s = returnRoute(t);
+  const other = join(s.root, "capturing-hc.json");
+  writeFileSync(other, JSON.stringify({ terminals: [{ address: "t1", state: "live" }] }));
+  for (const machine of [{ name: LEAD_CORE, id: "another-core" }, { name: "alternate", id: LEAD_CORE }]) {
+    s.setRemote((state) => { state.machines = [{ ...machine, state: "connected", remoteState: other }]; });
+    assertRouteRefused(s, ["start", "Hedge", ...s.on], /captures the return address/);
+    assert.equal(JSON.parse(readFileSync(other, "utf8")).sent, undefined);
+  }
+});
+
+test("#1635 B's own name takes precedence over machines and peers and blocks the return route", (t) => {
+  const s = returnRoute(t);
+  s.setRemote((state) => {
+    state.core.name = LEAD_CORE;
+    state.machines = [{ name: LEAD_CORE, id: "away", state: "unreachable" }];
+  });
+  const collides = executeInPane(s, { cwd: s.project, address: "t2" },
+    ["/usr/bin/env", `PATH=${s.execPath}`, "hc", "send", RETURN_TO, "stays on B"]);
+  assert.equal(collides.status, 0, collides.stderr);
+  assert.deepEqual(s.remote().sent, [{ to: "t1", text: "stays on B" }]);
+  assert.equal(s.hcState().sent, undefined);
+  s.setRemote((state) => { state.machines = []; });
+  assertRouteRefused(s, ["start", "Hedge", ...s.on], /core or machine name or ID.*captures/);
+  s.setRemote((state) => { state.core = { id: LEAD_CORE, name: "target" }; });
+  s.setState((state) => { state.machines[0].id = LEAD_CORE; });
+  assertRouteRefused(s, ["start", "Hedge", ...s.on], /captures the return address/);
+});
+
+for (const bot of [HEDGE, ATLAS]) test(`#1635 a finished ${bot === HEDGE ? "same-bot seat" : "other bot's seat"} leaves the local holder free`, (t) => {
+  const s = returnRoute(t);
+  exe(join(s.root, "bin", "claude"), "#!/bin/sh\nexit 0\n");
+  writeFileSync(join(s.app, "automagik-herdr/holders.json"), JSON.stringify({ holders: ["vm"] }));
+  s.setState((state) => state.terminals.push({ address: "t8", cwd: s.project, created_ms: 8, state: "finished", labels: { bot } }));
+  seedCallerLedger(s, [attachRow({ event: "attach", bot, project: s.project, terminal: "t8", core: LEAD_CORE, created_ms: 8, by: "start" })]);
+  const args = ["start", "Hedge", "--project", s.project, "--json", ...(bot === HEDGE ? ["--holder", "local"] : [])];
+  const r = s.cli(args);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().terminal, "t100");
+  assert.deepEqual(s.rows().map(({ event, terminal }) => [event, terminal]), [["attach", "t8"], ["end", "t8"], ["attach", "t100"]]);
+  assert.ok(s.calls().some((c) => c[0] === "run" && !c.includes("--on")));
+});
+
+test("#1635 a local caller start and restart repair a stale CLI link, while a linked attempt preserves it", (t) => {
+  const s = returnRoute(t);
+  exe(join(s.root, "bin", "claude"), "#!/bin/sh\nexit 0\n");
+  const pack = join(s.app, "mods/am-sidebar/bin");
+  const bin = join(s.home, ".local/bin");
+  for (const dir of [pack, bin]) mkdirSync(dir, { recursive: true });
+  const wrapper = join(pack, "automagik-herdr"), old = `${wrapper}.mjs`;
+  writeFileSync(wrapper, "");
+  writeFileSync(old, "");
+  const link = join(bin, "automagik-herdr");
+  symlinkSync(old, link);
+  assertRouteRefused(s, ["restart", "Hedge", ...s.on], /Linked restarts/);
+  assert.equal(readlinkSync(link), old);
+  for (const verb of ["start", "restart"]) {
+    const r = s.cli([verb, "Hedge", "--project", s.project, "--json", ...(verb === "restart" ? ["--force"] : [])]);
+    assert.equal(r.code, 0, r.err);
+    assert.equal(readlinkSync(link), wrapper);
+    rmSync(link);
+    symlinkSync(old, link);
+  }
+});
+
+// These rows also run in sandboxes without Unix pipes/sockets for child output.
+function cliFileOutput(root, args, env) {
+  const stdout = join(root, "child-stdout"), stderr = join(root, "child-stderr");
+  const out = openSync(stdout, "w"), err = openSync(stderr, "w");
+  try {
+    const result = spawnSync(process.execPath, args, { cwd: root, env, stdio: ["ignore", out, err] });
+    if (result.error) throw result.error;
+    return { status: result.status, stdout: readFileSync(stdout, "utf8"), stderr: readFileSync(stderr, "utf8") };
+  } finally {
+    closeSync(out);
+    closeSync(err);
+    rmSync(stdout);
+    rmSync(stderr);
+  }
+}
+
+test("#1635 a malicious machine name never appears in a suggested command and the refusal explains the grant", (t) => {
+  const root = scratchRoot(t, "am-1635-name-");
+  const name = "vm; $(touch should-not-exist)";
+  const r = cliFileOutput(root, [CLI, "restart", "Hedge", "--machine", name, "--project", root, "--force", "--json"],
+    { ...process.env, HOME: root, HERDR_APP_HOME: root, AUTOMAGIK_HERDR_TEST_ROOTS: root, HC_TERMINAL_ID: "t1" });
+  assert.equal(r.status, 1, r.stderr);
+  assert.doesNotMatch(r.stderr, /should-not-exist|\$\(/);
+  assert.match(r.stderr, /hc run --bg --on M with/);
+  assert.match(r.stderr, /whole target core.*outlives the lead.*notes queue.*sends can fail/);
+  assert.match(r.stderr, /inbound peer.*later alias change.*cannot see the target's inbound peers/);
+  assert.equal(JSON.parse(r.stdout).refused, "linked-return-route");
+  assert.deepEqual(readdirSync(root), []);
+});
+
+test("#1635 fake hc selects by socket and resolves its own prefix before a peer or machine", (t) => {
+  const root = scratchRoot(t, "am-1635-fake-");
+  const fallback = join(root, "fallback.json"), selected = join(root, "selected.json");
+  const socket = join(root, "selected.sock"), log = join(root, "hc.log");
+  const fallbackPane = { address: "t1", name: "fallback", state: "live" };
+  writeFileSync(fallback, JSON.stringify({ terminals: [fallbackPane] }));
+  writeFileSync(selected, JSON.stringify({ core: { id: CORE, name: LEAD_CORE },
+    terminals: [{ ...fallbackPane, name: "selected" }],
+    machines: [{ name: LEAD_CORE, state: "unreachable" }],
+    peers: [{ id: LEAD_CORE, state: fallback }],
+  }));
+  const call = (argv, at, twoCore = "1") => cliFileOutput(root, [FAKE_HC, ...argv, "--json"],
+    { ...process.env, HOME: root, HC_FAKE_STATE: twoCore ? fallback : selected, HC_FAKE_LOG: log,
+      HC_FAKE_TWO_CORE: twoCore, HC_FAKE_SOCKET_STATES: JSON.stringify({ [socket]: selected }), HC_SOCKET: at });
+  for (const [at, name] of [[socket, "selected"], ["", "fallback"]]) {
+    const r = call(["get", "t1"], at);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).name, name);
+  }
+  assert.equal(call(["get", "t1"], join(root, "unmapped.sock")).status, 1);
+  const sent = call(["send", RETURN_TO, "stays on selected"], socket);
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(selected)).sent, [{ to: "t1", text: "stays on selected" }]);
+  assert.equal(JSON.parse(readFileSync(fallback)).sent, undefined);
+  assert.equal(call(["send", RETURN_TO, "legacy prefix"], socket, "").status, 1);
+  assert.equal(call(["get", `${CORE}/t1`], socket, "").status, 4);
+  assert.equal(call(["kill", `${CORE}/t1`], socket, "").status, 4);
+  assert.equal(call(["exec", "--on", CORE, "--", "test", "-d", root], socket, "").status, 3);
+  assert.equal(JSON.parse(readFileSync(selected)).terminals[0].state, "live");
+});
+
+for (const nth of [0, 1, 3]) test(`#1635 existing pane reports its observed parent at candidate check ${nth}`, (t) => {
+  const s = returnRoute(t);
+  const pane = atlasPane({ labels: { bot: HEDGE }, parent: nth === 1 ? null : "another-peer/t9", cwd: s.project });
+  if (nth === 0) s.setRemote((state) => state.terminals.push({ ...pane, address: "t8" }));
+  else s.setState((state) => { state.addAfterLs = { nth, terminal: pane }; });
+  if (nth === 3) s.fakeWindow({ spaces: [], place: true });
+  const before = linkedFiles(s);
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.json().running, /t8$/);
+  assert.equal(r.json().parent, pane.parent);
+  const after = linkedFiles(s);
+  if (nth === 3) {
+    const briefings = join(vmApp(s), "automagik-herdr/briefings");
+    const claude = join(s.project, ".claude");
+    const settings = join(claude, "settings.local.json");
+    assert.deepEqual(readdirSync(briefings), [], "the launch file and UUID directory were removed");
+    const installed = JSON.parse(readFileSync(settings, "utf8"));
+    assert.ok(hookOf(s).includes(join(vmApp(s), "automagik-herdr/briefing.mjs")));
+    assert.equal(installed.hooks.UserPromptSubmit.length, 1);
+    assert.deepEqual(s.appCalls().filter(([op]) => op === "do").map(([, command]) => command), ["space.new", "space.close"]);
+    assert.deepEqual(s.windowNow().spaces, []);
+    assert.equal(s.remote().terminals.find((p) => p.address === "t-sh1").state, "finished");
+    assert.equal(s.remote().terminals.find((p) => p.address === "t8").state, "live");
+    const window = join(s.root, "herdr-app.json");
+    delete before[window];
+    delete after[window];
+    assert.deepEqual(Object.keys(after).filter((path) => !(path in before)).sort(), [briefings, claude, settings].sort());
+    for (const path of [briefings, claude, settings]) delete after[path];
+  }
+  assert.deepEqual(after, before);
+  noLaunchOrKill(s);
+});
+
+function parentedBriefings(s) {
+  const dir = join(vmApp(s), "automagik-herdr/briefings");
+  return briefedIn(vmApp(s)).filter((name) => UUID.test(name.slice(name.lastIndexOf(".") + 1))).sort().flatMap((name) => {
+    const launch = join(dir, name);
+    const files = readdirSync(launch).filter((file) => file !== ".pending");
+    return files.length ? files.map((file) => join(launch, file)) : [launch];
+  });
+}
+
+function cliInBackground(s, args, env = {}) {
+  return new Promise((done) => execFile(process.execPath, [CLI, ...args], { cwd: s.root, env: { ...s.env, ...env } },
+    (error, out, err) => done({ code: error?.code ?? 0, out, err })));
+}
+
+async function waitForMarker(path) {
+  const until = Date.now() + 10_000;
+  while (!existsSync(path) && Date.now() < until) await delay(20);
+  assert.ok(existsSync(path), `fixture did not reach ${path}`);
+}
+
+function replacementMachine(s) {
+  const remoteState = join(s.root, "replacement-hc.json");
+  writeFileSync(remoteState, JSON.stringify({ core: { id: "core-of-replacement", name: "replacement" },
+    next: 101, terminals: [{ address: "t100", name: "unrelated", cwd: s.project, labels: {}, created_ms: 100, state: "live" }] }));
+  const replacement = { ...s.hcState().machines[0], id: "core-of-replacement", remoteState };
+  return { replacement, read: () => JSON.parse(readFileSync(remoteState, "utf8")) };
+}
+
+test("#1635 caller context pins the target before reading the roster", async (t) => {
+  const s = returnRoute(t);
+  const switched = replacementMachine(s);
+  const pause = join(s.root, "release-roster-read");
+  const action = cliInBackground(s, ["start", "Hedge", ...s.on], { HC_FAKE_PAUSE_ROSTER: pause });
+  try {
+    await waitForMarker(`${pause}.ready`);
+    const read = s.calls().find((call) => call[0] === "file" && call.at(-1) === join(s.project, ".herdr/bots.json"));
+    assert.deepEqual(read.slice(0, 5), ["file", "read", "--json", "--on", CORE]);
+    s.setState((state) => {
+      state.machines[0].name = "previous";
+      state.machines.push(switched.replacement);
+    });
+  } finally { writeFileSync(pause, ""); }
+  const r = await action;
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /target core changed before launch/);
+  noLaunchOrKill(s);
+  assert.equal(s.hcState().terminals[0].grants, undefined);
+  assert.deepEqual(s.rows(), []);
+});
+
+for (const kind of ["ordinary target", "parented target", "parented origin"]) test(`#1635 rebinding the ${kind} core during remote preparation prevents run`, async (t) => {
+  const s = returnRoute(t);
+  const switched = replacementMachine(s);
+  if (kind === "parented origin") rmSync(attachPath(s.app));
+  const pause = join(s.root, "continue-hook");
+  const action = cliInBackground(s, ["start", "Hedge", ...s.on], {
+    HC_FAKE_PAUSE_HOOK: pause, HC_TERMINAL_ID: kind === "ordinary target" ? "" : "t1",
+  });
+  try {
+    await waitForMarker(`${pause}.ready`);
+    if (kind !== "ordinary target") assert.equal(parentedBriefings(s).length, 1);
+    s.setState((state) => {
+      if (kind === "parented origin") state.core.id = "replacement-origin";
+      else {
+        state.machines[0].name = "previous";
+        state.machines.push(switched.replacement);
+      }
+    });
+  } finally { writeFileSync(pause, ""); }
+  const r = await action;
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /core changed before launch/);
+  noLaunchOrKill(s);
+  assert.deepEqual(parentedBriefings(s), []);
+  assert.deepEqual(s.rows(), []);
+  if (kind === "parented origin") assert.equal(existsSync(attachPath(s.app)), false);
+});
+
+test("#1635 a lead that ends during remote preparation prevents dispatch", async (t) => {
+  const s = returnRoute(t);
+  const pause = join(s.root, "finish-lead");
+  const action = cliInBackground(s, ["start", "Hedge", ...s.on], { HC_FAKE_PAUSE_HOOK: pause });
+  try {
+    await waitForMarker(`${pause}.ready`);
+    assert.equal(parentedBriefings(s).length, 1);
+    s.setState((state) => { state.terminals.find((pane) => pane.address === "t1").state = "finished"; });
+  } finally { writeFileSync(pause, ""); }
+  const r = await action;
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /requesting terminal is not live on the pinned hc socket/);
+  noLaunchOrKill(s);
+  assert.deepEqual(parentedBriefings(s), []);
+  assert.deepEqual(s.rows(), []);
+});
+
+test("#1635 a lead removed after the final pre-run read triggers confirmed cleanup", (t) => {
+  const s = returnRoute(t);
+  s.setState((state) => { state.removeRunLead = true; });
+  const r = s.cli(["start", "Hedge", ...s.on]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /the lead terminal ended during the start; no return route; nothing left running/);
+  assert.equal(s.hcState().terminals.some((p) => p.address === "t1"), false);
+  assert.deepEqual(s.remote().terminals.filter((p) => p.labels?.bot === HEDGE).map((p) => [p.parent, p.state]), [["origin/t1", "finished"]]);
+  assert.deepEqual(s.calls().filter(([op]) => op === "kill"), [["kill", `${CORE}/t100`]]);
+  assert.deepEqual(parentedBriefings(s), []);
+  assert.deepEqual(s.rows(), []);
+});
+
+for (const parented of [false, true]) test(`#1635 a local attach completes while the ${parented ? "parented" : "ordinary"} start waits on a remote hook read`, async (t) => {
+  const s = returnRoute(t);
+  s.setState((state) => state.terminals.push({ address: "t8", cwd: s.project, created_ms: 8, state: "live", labels: {},
+    foreground: { argv: ["hermes"], cwd: s.project } }));
+  const pause = join(s.root, "release-hook");
+  const action = cliInBackground(s, ["start", "Hedge", ...s.on], {
+    HC_FAKE_PAUSE_HOOK: pause, HC_TERMINAL_ID: parented ? "t1" : "",
+  });
+  try {
+    await waitForMarker(`${pause}.ready`);
+    const attached = s.cli(["attach", "Atlas", "t8", "--project", s.project, "--json"], { HC_TERMINAL_ID: "" });
+    assert.equal(attached.code, 0, attached.err);
+    assert.ok(s.rows().some((row) => row.bot === ATLAS && row.terminal === "t8"));
+    assert.equal(s.calls().some((call) => call[0] === "run"), false, "the start was still waiting for its hook");
+  } finally { writeFileSync(pause, ""); }
+  const r = await action;
+  assert.equal(r.code, 0, r.err);
+});
+
+for (const failGet of [false, true]) test(`#1635 rebinding after run leaves an unrelated t100 alone when get ${failGet ? "fails" : "answers"}`, (t) => {
+  const s = returnRoute(t);
+  const switched = replacementMachine(s);
+  s.setState((state) => { state.runRebind = { standby: "previous", replacement: switched.replacement, failGet }; });
+  const r = s.cli(["start", "Hedge", ...s.on]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, failGet ? /vm\/t100: .*cleanup is unconfirmed/ : /vm\/t100: .*nothing left running/);
+  assert.equal(switched.read().terminals[0].state, "live");
+  assert.ok(s.calls().some(([verb, at]) => verb === "get" && at === `${CORE}/t100`));
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), failGet ? [] : [["kill", `${CORE}/t100`]]);
+  const pane = s.remote().terminals.at(-1);
+  assert.equal(pane.state, failGet ? "live" : "finished");
+  assert.deepEqual(s.rows(), []);
+  assert.deepEqual(parentedBriefings(s), failGet ? [briefingFileOf(pane.argv)] : []);
+});
+
+test("#1635 an origin core change after run cleans up the verified pane and its briefing", (t) => {
+  const s = returnRoute(t);
+  s.setState((state) => { state.runOriginId = "replacement-origin"; });
+  const r = s.cli(["start", "Hedge", ...s.on]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /vm\/t100: no return route was confirmed; nothing left running/);
+  assert.equal(s.remote().terminals.at(-1).state, "finished");
+  assert.deepEqual(parentedBriefings(s), []);
+  assert.deepEqual(s.rows(), []);
+});
+
+test("#1635 an ordinary timed-out run leaves a concurrent parented winner and its briefing in place", async (t) => {
+  const s = returnRoute(t);
+  const competitor = join(s.root, "ordinary-controller");
+  seedCallerLedger({ app: competitor });
+  const pause = join(s.root, "ordinary-run");
+  const action = cliInBackground(s, ["start", "Hedge", ...s.on], {
+    HERDR_APP_HOME: competitor, HC_TERMINAL_ID: "", HC_FAKE_PAUSE_RUN: pause,
+    AUTOMAGIK_HERDR_DEADLINE: String(Date.now() + 30_000),
+  });
+  try {
+    await waitForMarker(`${pause}.ready`);
+    const winner = s.cli(["start", "Hedge", ...s.on]);
+    assert.equal(winner.code, 0, winner.err);
+    const loser = await action;
+    assert.equal(loser.code, 1, loser.err);
+    assert.match(loser.err, /didn't answer within 5 s; vm\/t100: cleanup is unconfirmed/);
+    const pane = s.remote().terminals.at(-1);
+    assert.equal(pane.state, "live");
+    assert.deepEqual(parentedBriefings(s), [briefingFileOf(pane.argv)]);
+    assert.equal(s.calls().some(([verb]) => verb === "kill"), false);
+  } finally { writeFileSync(pause, ""); await action; }
+});
+
+for (const failure of ["write reply lost", "deadline after briefing"]) test(`#1635 ${failure} leaves no launch directory or first controller ledger`, (t) => {
+  const s = returnRoute(t);
+  rmSync(attachPath(s.app));
+  const env = {};
+  if (failure === "write reply lost") {
+    s.setState((state) => { state.loseExecAnswerContaining = "set -C"; });
+  } else {
+    const marker = join(s.root, "briefing-write-seen");
+    s.setState((state) => { state.markExec = { contains: "set -C", path: marker }; });
+    Object.assign(env, launchClock(s, marker, 26_000, 19_000));
+  }
+  const r = s.cli(["start", "Hedge", ...s.on], env);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, failure === "write reply lost" ? /launch briefing could not be written/ : /30 s limit/);
+  noLaunchOrKill(s);
+  assert.deepEqual(parentedBriefings(s), []);
+  assert.equal(existsSync(attachPath(s.app)), false);
+});
+
+test("#1635 a failed launch-file removal is reported on stderr", (t) => {
+  const s = returnRoute(t);
+  s.setState((state) => { state.loseExecAnswerContaining = "set -C"; state.execTimedOut = ["rmdir --"]; });
+  const r = s.cli(["start", "Hedge", ...s.on]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /launch briefing could not be written/);
+  assert.match(r.err, /Could not remove launch briefing.*core-of-vm/);
+  noLaunchOrKill(s);
+  assert.equal(parentedBriefings(s).length, 1);
+});
+
+test("#1635 one target listing prunes only older, inactive launch files for this bot", (t) => {
+  const s = returnRoute(t);
+  function older(n, bot = HEDGE) {
+    const ordinary = briefingFilePath(vmApp(s), s.project, bot);
+    const label = `10000000-0000-4000-8000-00000000000${n}`;
+    const file = join(dirname(ordinary), `${CORE}.${label}`, ordinary.split("/").at(-1));
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "previous briefing");
+    return { label, file };
+  }
+  const ended = older(1), absent = older(2), live = older(3), pending = older(4), other = older(5, ATLAS);
+  writeFileSync(join(dirname(pending.file), ".pending"), "");
+  s.setRemote((state) => state.terminals.push(
+    { address: "t8", state: "finished", labels: { "am.launch": ended.label } },
+    { address: "t9", state: "live", labels: { "am.launch": live.label } },
+  ));
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(existsSync(dirname(ended.file)), false);
+  assert.equal(existsSync(dirname(absent.file)), false);
+  for (const { file } of [live, pending, other]) assert.equal(readFileSync(file, "utf8"), "previous briefing");
+  assert.equal(readJsonLines(s.remoteRpcLog).filter(({ method }) => method === "terminal.list").length, 1);
+});
+
+test("#1635 two target cores sharing an app home keep their own launch briefings", (t) => {
+  const s = returnRoute(t);
+  const start = ["start", "Hedge", ...s.on, "--json"];
+  const a = s.cli(start);
+  assert.equal(a.code, 0, a.err);
+  const first = briefingFileOf(s.remote().terminals.at(-1).argv);
+  const original = readFileSync(first, "utf8");
+  const otherCore = "core-of-second";
+  const otherState = join(s.root, "second-hc.json");
+  const other = startFakeCore(t, { HC_FAKE_DIRECT_RPC: "1", HC_FAKE_STATE: otherState,
+    AUTOMAGIK_HERDR_TEST_ROOTS: s.root });
+  const socket = other.env.AUTOMAGIK_HERDR_CORE_SOCKET;
+  const core = s.remote();
+  writeFileSync(otherState, JSON.stringify({ ...core, core: { id: otherCore, name: "second" }, next: 100, terminals: [] }));
+  s.setState((state) => {
+    state.machines.push({ ...state.machines[0], name: "second", id: otherCore, remoteState: otherState,
+      env: { ...s.remoteEnv, ...other.env, HC_FAKE_STATE: otherState, HC_SOCKET: socket,
+        HC_FAKE_SOCKET_STATES: JSON.stringify({ [socket]: otherState }) } });
+  });
+  const b = s.cli(["start", "Hedge", "--machine", "second", "--project", s.project, "--json"]);
+  assert.equal(b.code, 0, b.err);
+  const second = briefingFileOf(JSON.parse(readFileSync(otherState, "utf8")).terminals.at(-1).argv);
+  assert.deepEqual(parentedBriefings(s), [first, second].sort());
+  assert.equal(readFileSync(first, "utf8"), original);
+  assert.equal(s.remote().terminals.at(-1).state, "live");
+});
+
+test("#1635 invalid_params for an ID-shaped bot name removes the unlaunched briefing", (t) => {
+  const s = returnRoute(t);
+  const roster = join(s.project, ".herdr/bots.json");
+  const file = JSON.parse(readFileSync(roster, "utf8"));
+  file.bots[1].name = "T7";
+  writeFileSync(roster, JSON.stringify(file));
+  const r = s.cli(["start", HEDGE, ...s.on]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /pane name t7 is shaped like a terminal ID/);
+  assert.deepEqual(s.calls().filter(([op]) => op === "run").map((call) => call[call.indexOf("--name") + 1]), ["t7"]);
+  assert.equal(s.calls().some(([op]) => op === "kill"), false);
+  assert.deepEqual(s.remote().terminals.map((p) => p.address), ["t1"]);
+  assert.deepEqual(parentedBriefings(s), []);
+  assert.deepEqual(s.rows(), []);
+});
+
+for (const winnerParented of [true, false]) test(`#1635 a competing launch cannot overwrite the ${winnerParented ? "parented" : "ordinary"} winner's briefing`, async (t) => {
+  const s = returnRoute(t);
+  const competitorHome = join(s.root, "other-controller");
+  seedCallerLedger({ app: competitorHome });
+  const pause = join(s.root, "resume-other-controller");
+  const args = ["start", "Hedge", ...s.on, "--json"];
+  const loser = cliInBackground(s, args, {
+    HERDR_APP_HOME: competitorHome, HC_FAKE_PAUSE_BRIEFING: pause, HC_TERMINAL_ID: winnerParented ? "" : "t1",
+  });
+  let file, text, lost;
+  try {
+    await waitForMarker(`${pause}.ready`);
+    assert.deepEqual(briefedIn(vmApp(s)), [], "the loser has not written its launch file");
+    const won = s.cli(args, { HC_TERMINAL_ID: winnerParented ? "t1" : "" });
+    assert.equal(won.code, 0, won.err);
+    file = briefingFileOf(s.remote().terminals.at(-1).argv);
+    text = readFileSync(file, "utf8");
+    assert.equal(text.includes(RETURN_TO), winnerParented);
+  } finally {
+    writeFileSync(pause, "");
+    lost = await loser;
+  }
+  assert.equal(lost.code, 0, lost.err);
+  assert.equal(JSON.parse(lost.out).running, "vm/t100");
+  assert.equal(readFileSync(file, "utf8"), text);
+  assert.equal(s.remote().terminals.filter((p) => p.labels?.bot === HEDGE && p.state === "live").length, 1);
+  assert.equal(s.calls().some((c) => c[0] === "kill"), false);
+  assert.deepEqual(parentedBriefings(s), winnerParented ? [file] : []);
+  const labels = s.calls().filter(([verb]) => verb === "run").map((call) => call.find((word) => word.startsWith("am.launch=")));
+  assert.equal(labels.length, 1);
+  assert.equal(Boolean(labels[0]), winnerParented);
+});
+
+test("#1635 wrong parent and lost replies report cleanup only when observed", async (t) => {
+  for (const [name, flags, message, finished] of [
+    ["parent mismatch", { dropRunParent: true }, /no return route was confirmed; nothing left running/, true],
+    ["cleanup reply lost after kill", { dropRunParent: true, loseCleanupReply: true }, /nothing left running/, true],
+    ["cleanup reply and verification lost", { dropRunParent: true, loseCleanupReply: true, loseCleanupGet: true }, /vm\/t100: .*cleanup is unconfirmed/, true],
+    ["cleanup did not take", { dropRunParent: true, failKill: "vm/t100" }, /vm\/t100: .*cleanup is unconfirmed/, false],
+    ["run reply lost after spawn", { loseRunReply: true }, /launch outcome unknown; nothing left running/, true],
+  ]) await t.test(name, (t) => {
+    const s = returnRoute(t);
+    s.setState((state) => Object.assign(state, flags));
+    const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+    assert.equal(r.code, 1, r.err);
+    assert.equal(r.out, "");
+    assert.match(r.err, message);
+    assert.doesNotMatch(r.err, /nothing was started/);
+    assert.equal(r.err.includes("nothing left running"), finished && !flags.loseCleanupGet);
+    assert.equal(s.remote().terminals.at(-1).state, finished ? "finished" : "live");
+    assert.deepEqual(s.rows(), []);
+    const pane = s.remote().terminals.at(-1);
+    assert.deepEqual(parentedBriefings(s), finished && !flags.loseCleanupGet ? [] : [briefingFileOf(pane.argv)]);
+  });
 });
 
 // #206 (c): history --machine reads only the rows this computer wrote for that machine's core

@@ -24,21 +24,56 @@ import { appendLine, readJsonLines } from "./log-lines.mjs";
 const args = process.argv.slice(2);
 appendLine(process.env.HC_FAKE_LOG, JSON.stringify(args));
 const { HC_SOCKET, HC_SESSION, HC_TERMINAL_ID, HC_TERMINAL_SOCKET, AUTOMAGIK_HERDR_CORE_SOCKET, HC_FAKE_ORIGIN } = process.env;
+const twoCore = process.env.HC_FAKE_TWO_CORE === "1";
 if (process.env.HC_FAKE_ENV_LOG) appendLine(process.env.HC_FAKE_ENV_LOG, JSON.stringify({
   argv: args, HC_SOCKET, HC_SESSION, HC_TERMINAL_ID, HC_TERMINAL_SOCKET, AUTOMAGIK_HERDR_CORE_SOCKET, origin: HC_FAKE_ORIGIN,
 }));
-const state = JSON.parse(readFileSync(process.env.HC_FAKE_STATE, "utf8"));
+// Like hc, its version command never looks for a socket.
+if (twoCore && args.length === 1 && args[0] === "--version") {
+  process.stdout.write("hc fake\n");
+  process.exit(0);
+}
+const readState = (path) => JSON.parse(readFileSync(path, "utf8"));
+// Two-socket fixtures opt in. Even an unmapped socket must never reach the fallback state.
+const socketStates = twoCore && process.env.HC_FAKE_SOCKET_STATES && JSON.parse(process.env.HC_FAKE_SOCKET_STATES);
+const statePath = HC_SOCKET && socketStates ? socketStates[HC_SOCKET] : process.env.HC_FAKE_STATE;
+if (!statePath) { process.stderr.write("fake hc: that socket has no core\n"); process.exit(1); }
+let state = readState(statePath);
 // The CLI runs several hc calls at once: a save writes a file of its own beside the state and
 // renames it over it (atomic in one folder), so another call never reads one half written.
-const save = () => {
-  const tmp = `${process.env.HC_FAKE_STATE}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2));
-  renameSync(tmp, process.env.HC_FAKE_STATE);
+const saveState = (path, value) => {
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2));
+  renameSync(tmp, path);
 };
+const save = () => saveState(statePath, state);
 const out = (x) => process.stdout.write(`${JSON.stringify(x)}\n`);
 const fail = (msg, code = 1) => { process.stderr.write(`${msg}\n`); process.exit(code); };
 const words = args.filter((a) => a !== "--json");
 const find = (t) => state.terminals.find((x) => x.address === t || x.name === t);
+const nameAddress = (address) => {
+  if (!twoCore) return address;
+  const [prefix, terminal] = address?.split("/") ?? [];
+  if (terminal && ownPrefix(prefix)) return terminal;
+  const m = machineAt(prefix);
+  return terminal && m ? `${m.name}/${terminal}` : address;
+};
+// Opt-in linked cores have their own state and bare IDs. The dialer sees their addresses
+// through its machine name and recognizes its own caller in a returned parent field.
+const ownPrefix = (prefix) => twoCore && Boolean(prefix) && [state.core?.id, state.core?.name].includes(prefix);
+const machineAt = (name) => (state.machines ?? []).find((m) => m.name === name || (twoCore && (m.id ?? `core-${m.name}`) === name));
+const remotePane = (m, pane) => ({ ...pane, address: `${m.name}/${pane.address}`,
+  parent: pane.parent?.startsWith(`${m.peerName}/`) ? pane.parent.slice(m.peerName.length + 1) : pane.parent });
+const allPanes = () => [...state.terminals, ...(state.machines ?? [])
+  .filter((m) => m.remoteState && m.state === "connected")
+  .flatMap((m) => readState(m.remoteState).terminals.map((pane) => remotePane(m, pane)))];
+function pauseAt(path) {
+  writeFileSync(`${path}.ready`, "");
+  const until = Date.now() + 20_000;
+  const sleep = new Int32Array(new SharedArrayBuffer(4));
+  while (!existsSync(path) && Date.now() < until) Atomics.wait(sleep, 0, 0, 20);
+}
+const peerLoss = () => fail(JSON.stringify({ error: { kind: "unavailable", message: "reply lost after dispatch" } }));
 // The log, read once: other calls append to it at the same time, so only its complete lines
 // (log-lines.mjs, #421). This call's own line is among them: it was written whole above.
 const logged = readJsonLines(process.env.HC_FAKE_LOG);
@@ -52,7 +87,7 @@ const callNo = logged.length;
     if (id) by.set(id, [...(by.get(id) ?? []), x.address]);
   }
   for (const [session, panes] of by) {
-    if (panes.length > 1) appendLine(`${process.env.HC_FAKE_STATE}.doubles`, JSON.stringify({ call: callNo, word: words[0], session, panes }));
+    if (panes.length > 1) appendLine(`${statePath}.doubles`, JSON.stringify({ call: callNo, word: words[0], session, panes }));
   }
 }
 // endTurnOn: { word, nth } on a terminal: its turn ends when the nth `hc <word>` call happens
@@ -88,8 +123,10 @@ if (lockProbe && words[1] === lockProbe.terminal && ["get", "kill"].includes(wor
 
 // A linked machine's terminal ("vm/t8") on a machine that isn't connected: unavailable, as hc says.
 if (["get", "label", "kill", "read", "send", "keys", "interrupt"].includes(words[0]) && words[1]?.includes("/")) {
-  const m = (state.machines ?? []).find((x) => x.name === words[1].split("/")[0]);
-  if (!m || m.state !== "connected") fail(JSON.stringify({ error: { kind: m ? "unavailable" : "machine_unknown", message: `${words[1].split("/")[0]} isn't connected` } }), m ? 1 : 4);
+  const prefix = words[1].split("/")[0];
+  const m = machineAt(prefix);
+  const peer = twoCore && words[0] === "send" && (state.peers ?? []).find((p) => [p.id, p.name].includes(prefix));
+  if (!ownPrefix(prefix) && (m || !peer) && m?.state !== "connected") fail(JSON.stringify({ error: { kind: m ? "unavailable" : "machine_unknown", message: `${prefix} isn't connected` } }), m ? 1 : 4);
 }
 
 /**
@@ -182,7 +219,7 @@ switch (words[0]) {
     for (let i = 1; i < words.length; i += 1) if (words[i] === "--label") want.push(words[++i]);
     // --all: finished terminals too (a removed one, hc rm, is in neither list).
     const all = words.includes("--all");
-    const rows = state.terminals.filter((t) => (all || t.state !== "finished") && want.every((kv) => {
+    const rows = allPanes().filter((t) => (all || t.state !== "finished") && want.every((kv) => {
       const [k, v] = [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)];
       return (t.labels ?? {})[k] === v;
     }));
@@ -192,7 +229,14 @@ switch (words[0]) {
     if (state.addAfterLs) {
       state.addAfterLs.seen = (state.addAfterLs.seen ?? 0) + 1;
       if (state.addAfterLs.seen === state.addAfterLs.nth) {
-        state.terminals.push(state.addAfterLs.terminal);
+        const pane = state.addAfterLs.terminal;
+        const [machine, address] = pane.address.split("/");
+        const m = machineAt(machine);
+        if (address && m?.remoteState) {
+          const remote = readState(m.remoteState);
+          remote.terminals.push({ ...pane, address });
+          saveState(m.remoteState, remote);
+        } else state.terminals.push(pane);
         delete state.addAfterLs;
       }
       save();
@@ -209,7 +253,15 @@ switch (words[0]) {
     }
     // state.badGet: terminals hc answers for with text that isn't JSON, exit 0 (#1125).
     if ((state.badGet ?? []).includes(words[1])) { process.stdout.write("not json\n"); process.exit(0); }
-    const t = find(words[1]);
+    const [machine, terminal] = words[1]?.split("/") ?? [];
+    const m = machineAt(machine);
+    if (terminal && m?.remoteState) {
+      const pane = readState(m.remoteState).terminals.find((p) => p.address === terminal);
+      if (!pane) fail(JSON.stringify({ error: { kind: "not_found", message: `no terminal "${words[1]}"` } }), 3);
+      out(remotePane(m, pane));
+      break;
+    }
+    const t = find(nameAddress(words[1]));
     // Like the real one: exit 3 and a not_found error on stderr.
     if (!t) fail(JSON.stringify({ error: { kind: "not_found", message: `no terminal "${words[1]}"` } }), 3);
     // idleAfterGets: while mid-turn, answered that many times, then its turn ends (idle). As hc
@@ -301,6 +353,10 @@ switch (words[0]) {
   case "run": {
     // state.runDelayBeforeMs: the answer waits that long before the terminal exists, so a call
     // killed at its own timeout leaves no terminal behind (the other half of #1262).
+    if (process.env.HC_FAKE_PAUSE_RUN) {
+      pauseAt(process.env.HC_FAKE_PAUSE_RUN);
+      state = readState(statePath);
+    }
     if (state.runDelayBeforeMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.runDelayBeforeMs);
     const labels = {};
     let name = null, cwd = null, parent = null, outlive = false, on = null, noParent = false;
@@ -326,13 +382,48 @@ switch (words[0]) {
     // `env K=V … program …`: the program is the first word after the assignments.
     const program = /(^|\/)env$/.test(argv[0] ?? "") ? argv.slice(1).find((a) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) : argv[0];
     // --on M: a linked machine's terminal, addressed "M/tN" (refused when M isn't connected).
+    const m = on ? machineAt(on) : null;
     if (on) {
-      const m = (state.machines ?? []).find((x) => x.name === on);
       if (!m) fail(JSON.stringify({ error: { kind: "machine_unknown", message: `unknown machine "${on}"` } }), 4);
       if (m.state !== "connected") fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} isn't connected` } }));
     }
     // state.failRun: names whose hc run fails (a name taken, the server refusing).
     if ((state.failRun ?? []).includes(name)) fail(`hc: can't start ${name}`);
+    if (m?.remoteState) {
+      const remote = readState(m.remoteState);
+      if (/^t[0-9]+$/.test(name)) {
+        fail(JSON.stringify({ error: { kind: "invalid_params", message: `pane name ${name} is shaped like a terminal ID` } }));
+      }
+      if (name && remote.terminals.some((p) => p.name === name && p.state === "live")) {
+        fail(JSON.stringify({ error: { kind: "name_taken", message: `hc: pane name ${name} is taken` } }));
+      }
+      const n = remote.next++;
+      const terminal = `t${n}`;
+      const address = `${m.name}/${terminal}`;
+      // Herdr still forwards the caller's address when the terminal ends before its grant.
+      if (state.removeRunLead) state.terminals = state.terminals.filter((p) => p.address !== parent);
+      const caller = state.terminals.find((p) => p.address === parent && p.state === "live");
+      if (caller && (!HC_TERMINAL_SOCKET || HC_TERMINAL_SOCKET === HC_SOCKET)) {
+        caller.grants = [...new Set([...(caller.grants ?? []), remote.core.id])];
+      }
+      if (parent) parent = `${m.peerName}/${parent}`;
+      if (state.dropRunParent) parent = null;
+      remote.terminals.push({ address: terminal, name, cwd, labels, parent, die_with_parent: Boolean(parent) && !outlive,
+        state: "live", created_ms: Date.now(), argv: launch, foreground: { argv, cwd }, status: { app: "claude-code", state: "working" } });
+      saveState(m.remoteState, remote);
+      save();
+      if (state.runRebind) {
+        const { standby, replacement, failGet } = state.runRebind;
+        m.name = standby;
+        state.machines.push(replacement);
+        if (failGet) (state.failGet ??= []).push(`${m.id}/${terminal}`);
+        save();
+      }
+      if (state.runOriginId) { state.core.id = state.runOriginId; save(); }
+      if (state.loseRunReply) peerLoss();
+      out({ address });
+      break;
+    }
     const n = state.next ?? 100;
     // Both the run reply and a later get by name return this address.
     const address = state.runAddress ?? (on ? `${on}/t${n}` : `t${n}`);
@@ -382,8 +473,25 @@ switch (words[0]) {
     break;
   }
   case "send": {
+    const [prefix, target] = words[1]?.split("/") ?? [];
+    const here = target && ownPrefix(prefix);
+    const m = target && !here && machineAt(prefix);
+    const peer = twoCore && target && !here && (state.peers ?? []).find((p) => [p.id, p.name].includes(prefix));
+    if (m?.remoteState || (!m && peer)) {
+      const path = m ? m.remoteState : peer.state;
+      const remote = readState(path);
+      const pane = remote.terminals.find((p) => p.address === target && p.state === "live");
+      if (!m && !pane?.grants?.includes(state.core.id)) fail(JSON.stringify({ error: { kind: "denied", message: "no return grant" } }), 1);
+      if (!pane) fail(JSON.stringify({ error: { kind: "not_found", message: `no terminal ${words[1]}` } }), 3);
+      const from = m ? m.peerName : peer.callsMe;
+      (remote.sent ??= []).push({ to: target, from: `${from}/${HC_TERMINAL_ID}`, text: words.slice(2).join(" ") });
+      saveState(path, remote);
+      if (state.loseSendReply) peerLoss();
+      out({ address: words[1] });
+      break;
+    }
     // The text typed into a terminal, kept in state.sent ([{ to, text }]); state.failSend: terminals that refuse it.
-    const t = find(words[1]);
+    const t = find(here ? target : words[1]);
     if (!t || t.state !== "live") fail(JSON.stringify({ error: { kind: "not_found", message: `no terminal ${words[1]}` } }), 3);
     if ((state.failSend ?? []).includes(t.address)) fail(JSON.stringify({ error: { kind: "blocked", message: `${t.address} is blocked` } }), 9);
     state.sent = [...(state.sent ?? []), { to: t.address, text: words.slice(2).join(" ") }];
@@ -398,9 +506,26 @@ switch (words[0]) {
     break;
   }
   case "kill": {
-    const t = find(words[1]);
+    const [machine, terminal] = words[1]?.split("/") ?? [];
+    const m = machineAt(machine);
+    if (terminal && m?.remoteState) {
+      const remote = readState(m.remoteState);
+      const pane = remote.terminals.find((p) => p.address === terminal);
+      if (!pane) fail(JSON.stringify({ error: { kind: "not_found", message: `no terminal ${words[1]}` } }), 3);
+      if ([words[1], nameAddress(words[1])].includes(state.failKill)) peerLoss();
+      pane.state = "finished";
+      saveState(m.remoteState, remote);
+      if (state.loseCleanupReply) {
+        if (state.loseCleanupGet) (state.failGet ??= []).push(words[1]);
+        save();
+        peerLoss();
+      }
+      out({ address: words[1], state: pane.state });
+      break;
+    }
+    const t = find(nameAddress(words[1]));
     if (!t) fail(`no terminal ${words[1]}`);
-    if (state.failKill === words[1]) fail(`kill refused on ${words[1]}`);
+    if ([words[1], nameAddress(words[1])].includes(state.failKill)) fail(`kill refused on ${words[1]}`);
     t.state = "finished";
     t.finished_ms = Date.now();
     // state.surviveParent: children that outlive their parent's end anyway (a kill that didn't take).
@@ -480,7 +605,7 @@ switch (words[0]) {
       if (args[i] === "--on") on = args[++i]; else if (args[i] === "--cwd") cwd = args[++i]; else if (args[i] === "--timeout") i += 1;
     }
     const argv = args.slice(i + 1);
-    const m = (state.machines ?? []).find((x) => x.name === on);
+    const m = machineAt(on);
     if (!m) fail(JSON.stringify({ error: { kind: "not_found", message: `no machine "${on}"` } }), 3);
     if (m.state !== "connected") fail(`hc: ${on} is not connected`);
     const b64 = (s) => Buffer.from(s ?? "").toString("base64");
@@ -491,6 +616,11 @@ switch (words[0]) {
     // never answers): its sh -c script, else its command, never its data words (a scratch path can hold "-lc");
     // state.execTimedOutAfterMs: how long that answer takes to come back over the link, really waited.
     const program = argv[0] === "sh" && argv[1] === "-c" ? argv[2] : argv[0];
+    if (state.markExec?.contains && program?.includes(state.markExec.contains)) writeFileSync(state.markExec.path, "");
+    const pause = process.env.HC_FAKE_PAUSE_BRIEFING;
+    if (pause && program?.includes("set -C") && argv[4]?.includes("/briefings/")) {
+      pauseAt(pause);
+    }
     const installReply = state.installExecReply;
     if (installReply && program?.includes(installReply.contains)) {
       const nth = logged.filter((a) => a[0] === "exec" && a.some((word) => word.includes(installReply.contains))).length;
@@ -508,8 +638,10 @@ switch (words[0]) {
     const toDisk = (s) => (typeof s === "string" && m.paths ? Object.entries(m.paths).reduce((acc, [from, to]) => acc.replaceAll(from, to), s) : s);
     const fromDisk = (s) => (typeof s === "string" && m.paths ? Object.entries(m.paths).reduce((acc, [from, to]) => acc.replaceAll(to, from), s) : s);
     const mapped = argv.map(toDisk);
+    // In an isolated remote fixture, the scratch PATH stands in for the remote OS bin folders.
+    if (m.execPath && program?.includes("agent=$1 path=")) mapped[2] = mapped[2].replace(" /usr/bin /bin;", ";");
     const r = spawnSync(mapped[0], mapped.slice(1), { cwd: toDisk(cwd) ?? m.home, encoding: "utf8",
-      env: { ...process.env, HOME: m.home, PATH: `${m.path ? `${m.path}:` : ""}/usr/bin:/bin:/usr/sbin:/sbin`,
+      env: { ...process.env, HOME: m.home, PATH: m.execPath ?? `${m.path ? `${m.path}:` : ""}/usr/bin:/bin:/usr/sbin:/sbin`,
         SHELL: new URL("./fake-login-shell", import.meta.url).pathname, FAKE_LOGIN_PATH: m.login?.path ?? "",
         FAKE_LOGIN_NOISE: m.login?.noise ?? "", FAKE_LOGIN_EXIT: m.login?.exit ?? "", ...(m.env ?? {}) } });
     // state.loseExecAnswer: a program (by name) ran there, then the link dropped: unavailable, as hc says.
@@ -526,15 +658,19 @@ switch (words[0]) {
     // hc file read|edit --json --on M [--old=X --new=Y] <path>
     const err = (code, kind, message) => fail(JSON.stringify({ error: { kind, message } }), code);
     const on = args.includes("--on") ? args[args.indexOf("--on") + 1] : null;
-    const m = (state.machines ?? []).find((x) => x.name === on);
+    const m = machineAt(on);
     if (on && !m) err(4, "machine_unknown", `unknown machine "${on}"`);
     if (m && m.state !== "connected") err(1, "unavailable", `${on} is not connected`);
     const givenPath = args.at(-1);
+    const pause = process.env.HC_FAKE_PAUSE_HOOK;
+    if (pause && words[1] === "read" && givenPath.endsWith("/automagik-herdr/briefing.mjs")) pauseAt(pause);
     const path = typeof givenPath === "string" && m?.paths
       ? Object.entries(m.paths).reduce((acc, [from, to]) => acc.replaceAll(from, to), givenPath) : givenPath;
     if (!existsSync(path)) err(3, "not_found", `no file ${givenPath}`);
     const text = readFileSync(path, "utf8");
     if (words[1] === "read") {
+      const pause = process.env.HC_FAKE_PAUSE_ROSTER;
+      if (pause && givenPath.endsWith("/.herdr/bots.json")) pauseAt(pause);
       const lines = text ? text.split("\n").length - (text.endsWith("\n") ? 1 : 0) : 0;
       out({ first: 1, last: lines, lines, text });
       break;
