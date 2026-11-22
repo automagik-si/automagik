@@ -87,8 +87,9 @@ import { isInstalledGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
-import { APPROVAL_REVIEW, approvedProxyEnabled, approvedProxyState, approvedSettingsDir, approvedWorkerHome,
-  commitApproval, escapeForTerminal, parseApprovedRecord, previewApproval, proxyStateFor } from "../approved.js";
+import { APPROVAL_REVIEW, approvalProjectWord, approvedProxyEnabled, approvedProxyState, approvedSettingsDir,
+  approvedWorkerHome, commitApproval, escapeForTerminal, parseApprovedRecord, previewApproval, proxyStateFor,
+  shellWord } from "../approved.js";
 import { hooksNotice } from "../migrateHooks.mjs";
 import { SPACE_LABEL, plan as tidyPlan, planText } from "../tidy.js";
 import { fixNonVisual, readState, spacesOf } from "./state.mjs";
@@ -7064,9 +7065,6 @@ async function helperEnded(terminal, project, ms = 5000) {
   return { ended: false, live: true, why: `it still runs after its parent ended${k.code === 0 ? ` and ${ms / 1000}s after hc kill ${terminal}` : ` (hc kill ${terminal} failed: ${(k.stderr || k.stdout).trim()})`}` };
 }
 
-/** `w` as one shell word. */
-const shellWord = (w) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${String(w).replace(/'/g, "'\\''")}'`);
-
 /**
  * How to run helper plan `p` again by hand, as a child of `parent`: the hc run line the restart
  * would have run (its name, folder, labels, the seat's PATH, its command resumed), which runs as
@@ -13505,7 +13503,7 @@ export async function cmdDshTui(opts, [verb, ...rest], io = {}) {
         ...(seatAgy ? { agyPermissions: { allow: seatAgy.allow, deny: seatAgy.deny, trustedWorkspaces: seatAgy.trustedWorkspaces } } : {}),
         ...(workerAgy ? { workerAgyPermissions: { allow: workerAgy.allow, deny: workerAgy.deny, trustedWorkspaces: workerTrusted } } : {}),
         fix: needsApproval ? "am proxy approve (review the preview, then --confirm), then restart"
-          : !ok || bot.warning ? `am restart ${bot.id}` : null });
+          : !ok || (bot.unmasked ? bot.paneWarning : bot.warning) ? `am restart ${bot.id}` : null });
       if (!ok) r.code = 1;
       if (agent?.leadProject && projectFile) {
         const eff = effectiveLead(projectFile, bot.id, { project: projectKey, projects });
@@ -13587,18 +13585,6 @@ function printApprovalChanges({ note, warnings = [], diff, entries, raw_diff }) 
     process.stdout.write("raw diff:\n");
     for (const line of raw_diff) process.stdout.write(`${escapeForTerminal(line)}\n`);
   }
-}
-
-/** Quote a project path for the confirmation command, including terminal controls in it. */
-function approvalProjectWord(project) {
-  // ANSI-C quoting keeps each control intact in the shell without sending it to the terminal.
-  if (project === escapeForTerminal(project)) return shellWord(project);
-  const escaped = [...project].map((ch) => {
-    if (ch === "'" || ch === "\\") return `\\${ch}`;
-    if (ch === escapeForTerminal(ch)) return ch;
-    return Array.from(Buffer.from(ch), (byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join("");
-  }).join("");
-  return "$'" + escaped + "'";
 }
 
 /** Preview or confirm the exact working roster for the canonical main checkout. */

@@ -1392,8 +1392,11 @@ cannot write the approved record; only an outside change can cause that combinat
 `show` and `dsh-tui doctor` print both values; doctor warns about invalid approval regardless
 of the switches, and warns
 when working off still has a running proxy and retains install checks for a malformed roster.
-Only Linux
-pack-started dsh-tui seats and dsh-tui workers get the helper. `AM_HC_PROXY` no longer opts in
+Only Linux pack-started dsh-tui seats and dsh-tui workers get the helper.
+A local start on macOS ignores the switch and starts plain, with no pack mask yet (RFC 0044 §F).
+While that bot's approved record is valid and on, `am dsh-tui doctor --project <project>` warns for
+it. The rollback's edit, preview and confirmation, each with `--project <project>`, clear the warning.
+`AM_HC_PROXY` no longer opts in
 other bots. C2b-1 prepares the approved switch; leave it off until C2b-2's approved-worker
 allowance and C2c's coordinated sandbox-row enablement have shipped. The profile row stays
 unchanged. For rollback, run `am edit <bot> --hc-proxy off`, preview with

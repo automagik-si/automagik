@@ -54,6 +54,21 @@ export function escapeForTerminal(text) {
     .replace(/[\u202a-\u202e\u2066-\u2069]/g, (ch) => `\\u{${ch.charCodeAt(0).toString(16)}}`);
 }
 
+/** `w` as one shell word. */
+export const shellWord = (w) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${String(w).replace(/'/g, "'\\''")}'`);
+
+/** Quote a project path for the confirmation command, including terminal controls in it. */
+export function approvalProjectWord(project) {
+  // ANSI-C quoting keeps each control intact in the shell without sending it to the terminal.
+  if (project === escapeForTerminal(project)) return shellWord(project);
+  const escaped = [...project].map((ch) => {
+    if (ch === "'" || ch === "\\") return `\\${ch}`;
+    if (ch === escapeForTerminal(ch)) return ch;
+    return Array.from(Buffer.from(ch), (byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join("");
+  }).join("");
+  return "$'" + escaped + "'";
+}
+
 /** A project's canonical folder (symlinks resolved); throws when it is not a folder. */
 export function canonicalProject(project) {
   const real = realpathSync(project);
