@@ -63,6 +63,10 @@ terminal on the computer running that bot:
    Existing workers keep their launch until restarted;
    end and relaunch any workers that also need rollback.
 
+A local start on macOS ignores the switch and starts plain, with no pack mask yet (RFC 0044 §F).
+While that bot's approved record is valid and on, `am dsh-tui doctor --project <project>` warns for
+it. Step 4's edit, preview and confirmation, each with `--project <project>`, clear the warning.
+
 Linked starts and restarts check the target platform first. Non-Linux ignores the switch.
 On Linux they read the target's approved record and refuse an unapproved opt-in; approved on
 refuses because that path cannot verify the stable proxy execution path. Start it locally

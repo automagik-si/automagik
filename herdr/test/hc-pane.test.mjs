@@ -491,3 +491,269 @@ test("G1 (c): a missing record refuses a proxied pane before the child starts", 
   assert.match(r.stderr, /no approved roster .*am proxy approve/s);
   assert.equal(existsSync(out), false);
 });
+
+const macProxyBot = { id: ID.dev, name: "Dev", agent: "dsh-tui", hcProxy: true };
+const approveFix = "am proxy approve (review the preview, then --confirm), then restart";
+
+function writeProxyRoster(s, hcProxy, project = s.project) {
+  const path = join(project, ".herdr", "bots.json");
+  const roster = JSON.parse(readFileSync(join(s.project, ".herdr", "bots.json"), "utf8"));
+  roster.bots[0].hcProxy = hcProxy;
+  writeFileSync(path, JSON.stringify(roster));
+}
+
+async function macProxyRow(s, bot = macProxyBot, bindings = new Map(), project = s.project) {
+  const args = { bots: [bot], project, bindings, env: s.env };
+  if (process.platform === "linux") {
+    assert.deepEqual(await doctorBotProxies({ ...args, platform: "linux" }), await doctorBotProxies(args));
+  }
+  const [row] = await doctorBotProxies({ ...args, platform: "darwin" });
+  return row;
+}
+
+function assertUnmasked(row, observed, paneWarning = false) {
+  assert.equal(row.applicable, false);
+  assert.equal(row.warning, true);
+  assert.equal(row.unmasked, true);
+  assert.equal(row.paneWarning, paneWarning);
+  assert.ok(row.detail.startsWith(`${observed}; this computer is macOS`), row.detail);
+  assert.match(row.detail, /RFC 0044 §F.*starts plain/);
+}
+
+function assertNoUnmasked(row) {
+  assert.equal(Object.hasOwn(row, "unmasked"), false);
+  assert.equal(Object.hasOwn(row, "paneWarning"), false);
+  assert.equal(Object.hasOwn(row, "warning"), false);
+  assert.equal(row.detail, "no attached local pane");
+}
+
+test("macOS doctor warns on approved on with working on or off, and names the inspected project", async (t) => {
+  const s = await scene(t);
+  writeProxyRoster(s, true);
+  approveProject({ project: s.project, env: s.env });
+  for (const hcProxy of [true, false]) {
+    await t.test(`working ${hcProxy ? "on" : "off"}`, async () => {
+      const row = await macProxyRow(s, { ...macProxyBot, hcProxy });
+      assertUnmasked(row, "no attached local pane");
+      assert.equal(row.hcProxyState.working, hcProxy);
+      assert.equal(row.hcProxyState.approved, true);
+      const { approvalProjectWord } = await import("../mods/am-sidebar/approved.js");
+      const project = approvalProjectWord(s.project);
+      assert.ok(row.detail.includes(`am edit ${ID.dev} --hc-proxy off --project ${project}`));
+      assert.ok(row.detail.includes(`am proxy approve --project ${project}`));
+      assert.match(row.detail, /--confirm/);
+      assert.doesNotMatch(row.detail, /am restart|can reach|has access/);
+    });
+  }
+});
+
+test("macOS doctor keeps existing observations for approval controls", async (t) => {
+  const s = await scene(t);
+  const record = recordFileOf(s.project, s.env);
+  rmSync(record);
+  const missing = await macProxyRow(s);
+  assertNoUnmasked(missing);
+  assert.equal(missing.hcProxyState.approved, null);
+
+  writeProxyRoster(s, false);
+  approveProject({ project: s.project, env: s.env });
+  writeProxyRoster(s, true);
+  const approvedOff = await macProxyRow(s);
+  assertNoUnmasked(approvedOff);
+  assert.equal(approvedOff.hcProxyState.approved, false);
+
+  writeFileSync(record, "{invalid json");
+  const invalid = await macProxyRow(s);
+  assertNoUnmasked(invalid);
+  assert.ok(invalid.hcProxyState.error);
+
+  approveProject({ project: s.project, env: s.env });
+  assertNoUnmasked(await macProxyRow(s, { ...macProxyBot, agent: "claude" }));
+
+  writeProxyRoster(s, false);
+  approveProject({ project: s.project, env: s.env });
+  const rolledBack = await macProxyRow(s, { ...macProxyBot, hcProxy: false });
+  assertNoUnmasked(rolledBack);
+  assert.equal(rolledBack.hcProxyState.approved, false);
+});
+
+test("macOS doctor keeps the bound pane's proxy health and rollback warning", async (t) => {
+  const s = await scene(t);
+  writeProxyRoster(s, true);
+  approveProject({ project: s.project, env: s.env });
+  doctorIO(s, macProxyBot);
+  const bindings = new Map([[ID.dev, { terminal: "t300", project: s.project, created_ms: 1 }]]);
+  const proxy = await startProxy({ env: s.env, terminal: "t300", upstream: s.socket,
+    caller: { bot: ID.dev, project: s.project, worker: false }, bound: true, forbiddenRoots: s.forbiddenRoots });
+  t.after(() => proxy.close());
+
+  await t.test("live proxy, working on", async () => {
+    const row = await macProxyRow(s, macProxyBot, bindings);
+    assertUnmasked(row, "proxy is up, core 0.1.14");
+    assert.equal(row.up, true);
+    assert.equal(row.coreVersion, "0.1.14");
+  });
+  await t.test("live proxy, working off", async () => {
+    const row = await macProxyRow(s, { ...macProxyBot, hcProxy: false }, bindings);
+    assertUnmasked(row, "proxy is up, core 0.1.14; rollback not finished", true);
+    assert.equal(row.up, true);
+  });
+
+  await proxy.close();
+  await t.test("down proxy", async () => {
+    const before = s.fake.log.length;
+    const row = await macProxyRow(s, macProxyBot, bindings);
+    assert.equal(s.fake.log.length, before, "a down proxy never queries the core");
+    assert.equal(row.up, false);
+    assertUnmasked(row, "proxy is down or not responding");
+  });
+});
+
+test("macOS doctor's project word escapes a newline and ESC", async (t) => {
+  const s = await scene(t);
+  const project = join(s.root, "ctl proj \n\x1b[31mred\x1b[0m");
+  mkdirSync(join(project, ".herdr"), { recursive: true });
+  writeProxyRoster(s, true, project);
+  approveProject({ project, env: s.env });
+  const row = await macProxyRow(s, macProxyBot, new Map(), project);
+  assertUnmasked(row, "no attached local pane");
+  const { approvalProjectWord } = await import("../mods/am-sidebar/approved.js");
+  const word = approvalProjectWord(project);
+  assert.ok(word.startsWith("$'"));
+  assert.ok(word.includes("\\x0a\\x1b"));
+  assert.equal(row.detail.split(`--project ${word}`).length, 3);
+  assert.doesNotMatch(row.detail, /[\n\x1b]/);
+});
+
+test("the shared shell word keeps the approval printer's quoting", async () => {
+  const { approvalProjectWord, shellWord } = await import("../mods/am-sidebar/approved.js");
+  for (const [value, expected] of [["plain", "plain"], ["a b", "'a b'"], ["it's", "'it'\\''s'"]]) {
+    assert.equal(shellWord(value), expected);
+    assert.equal(approvalProjectWord(value), expected);
+  }
+  assert.equal(shellWord("x\ny"), "'x\ny'");
+  assert.equal(approvalProjectWord("x\ny"), "$'x\\x0ay'");
+});
+
+async function darwinDoctor(s, cwd, preload, args = []) {
+  const { execFile } = await import("node:child_process");
+  const env = Object.fromEntries(Object.entries(s.env).filter(([key]) => !key.startsWith("HC_")));
+  env.XDG_CONFIG_HOME = join(s.home, ".config");
+  const cli = join(dirname(HELPER), "bin", "automagik-herdr.mjs");
+  return new Promise((resolve, reject) => {
+    execFile(process.execPath, ["--import", preload, cli, "dsh-tui", "doctor", "--project", s.project, ...args],
+      { cwd, env }, (error, stdout, stderr) => {
+        const status = error ? error.code : 0;
+        if (!Number.isInteger(status)) return reject(error);
+        resolve({ status, stdout, stderr });
+      });
+  });
+}
+
+test("macOS doctor renders the warning in JSON and text with invariant exit codes", async (t) => {
+  const s = await scene(t);
+  const cwd = join(s.root, "other dir");
+  mkdirSync(cwd);
+  const preload = join(s.root, "darwin.mjs");
+  writeFileSync(preload, 'Object.defineProperty(process, "platform", { value: "darwin" });\n');
+  const record = recordFileOf(s.project, s.env);
+  const approve = () => approveProject({ project: s.project, env: s.env });
+  const checkName = `hc-proxy:${ID.dev}`;
+
+  async function observe() {
+    const json = await darwinDoctor(s, cwd, preload, ["--json"]);
+    assert.ok(json.stdout, json.stderr);
+    const report = JSON.parse(json.stdout);
+    const row = report.checks.find(({ check }) => check === checkName);
+    assert.ok(row);
+    assert.equal(json.status, report.code);
+    const text = await darwinDoctor(s, cwd, preload);
+    assert.equal(text.status, json.status, text.stderr);
+    const line = text.stdout.split("\n").find((value) => value.includes(`${checkName}:`));
+    assert.ok(line, text.stdout);
+    return { status: json.status, report, row, line };
+  }
+
+  rmSync(record);
+  writeProxyRoster(s, true);
+  const baseline = await observe();
+  assert.deepEqual(baseline.row, {
+    check: checkName, ok: true, warning: false, fix: approveFix,
+    detail: "Dev: hcProxy working on; approved missing; no attached local pane",
+  });
+
+  async function check(name, { warning, fix, detail, text, invalid = false }) {
+    const result = await observe();
+    assert.equal(result.status, baseline.status);
+    await t.test(`${name} JSON`, () => {
+      assert.deepEqual({ ok: result.row.ok, warning: result.row.warning, fix: result.row.fix },
+        { ok: true, warning, fix });
+      assert.match(result.row.detail, detail);
+      if (!warning) assert.doesNotMatch(result.row.detail, /macOS/);
+      const rosterWarnings = result.report.checks.filter(({ check }) => check === "approved-roster");
+      assert.equal(rosterWarnings.length, invalid ? 1 : 0);
+      if (invalid) assert.equal(rosterWarnings[0].warning, true);
+    });
+    await t.test(`${name} text`, () => {
+      assert.match(result.line, text);
+      if (!fix) assert.doesNotMatch(result.line, /\(fix:/);
+      if (!warning) assert.doesNotMatch(result.line, /macOS/);
+    });
+  }
+
+  writeProxyRoster(s, false);
+  approve();
+  writeProxyRoster(s, true);
+  await check("approved off", { warning: false, fix: approveFix,
+    detail: /^Dev: hcProxy working on; approved off; no attached local pane$/,
+    text: /^ok   hc-proxy:.*working on; approved off; no attached local pane/ });
+
+  approve();
+  await check("working on, approved on", { warning: true, fix: null,
+    detail: /approved on; no attached local pane; this computer is macOS/,
+    text: /^WARN hc-proxy:b-cccccccccc: Dev: hcProxy working on; approved on; no attached local pane; this computer is macOS/ });
+
+  writeProxyRoster(s, false);
+  await check("working off, approved on", { warning: true, fix: null,
+    detail: /working off; approved on; no attached local pane; this computer is macOS/,
+    text: /^WARN hc-proxy:.*working off; approved on; no attached local pane; this computer is macOS/ });
+
+  doctorIO(s, macProxyBot);
+  const proxy = await startProxy({ env: s.env, terminal: "t300", upstream: s.socket,
+    caller: { bot: ID.dev, project: s.project, worker: false }, bound: true, forbiddenRoots: s.forbiddenRoots });
+  t.after(() => proxy.close());
+  await check("live proxy during rollback", { warning: true, fix: `am restart ${ID.dev}`,
+    detail: /rollback not finished; this computer is macOS/,
+    text: /^WARN hc-proxy:.*rollback not finished; this computer is macOS.*\(fix: am restart b-cccccccccc\)$/ });
+  await proxy.close();
+  rmSync(attachPath(s.app));
+
+  approve();
+  await check("rolled back", { warning: false, fix: null,
+    detail: /working off; approved off; no attached local pane/, text: /^ok   hc-proxy:/ });
+
+  writeFileSync(record, "{invalid json");
+  writeProxyRoster(s, true);
+  await check("invalid approval", { warning: false, fix: approveFix, invalid: true,
+    detail: /working on; approved unknown; invalid approved record .*; no attached local pane/,
+    text: /^ok   hc-proxy:.*working on; approved unknown; invalid approved record/ });
+});
+
+test("Linux doctor keeps its approved and unapproved proxy rows", { skip: process.platform !== "linux" }, async (t) => {
+  const s = await scene(t);
+  writeProxyRoster(s, true);
+  approveProject({ project: s.project, env: s.env });
+  const io = { env: s.env, project: { key: s.project, file: { bots: [macProxyBot] } },
+    forbiddenRoots: s.forbiddenRoots };
+  const checkName = `hc-proxy:${ID.dev}`;
+  const approved = await cmdDshTui({ json: true }, ["doctor"], io);
+  assert.equal(Object.hasOwn(approved.bots[0], "unmasked"), false);
+  const { ok, warning, fix } = approved.checks.find(({ check }) => check === checkName);
+  assert.deepEqual({ ok, warning, fix }, { ok: true, warning: false, fix: null });
+
+  rmSync(recordFileOf(s.project, s.env));
+  const missing = await cmdDshTui({ json: true }, ["doctor"], io);
+  const row = missing.checks.find(({ check }) => check === checkName);
+  assert.equal(row.ok, false);
+  assert.equal(row.fix, approveFix);
+});

@@ -39,7 +39,7 @@ import net from "node:net";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkRow, installRow } from "./bin/dsh-sandbox.mjs";
-import { approvedProxyState, approvedRootOf } from "./approved.js";
+import { approvalProjectWord, approvedProxyState, approvedRootOf } from "./approved.js";
 import { PROJECTS_FILE, listedProjects } from "./model.js";
 import { LEDGER_FILE, dataRootOf, stableRootOf } from "./workers.js";
 import { removePath } from "./layoutSafe.mjs";
@@ -976,10 +976,10 @@ function probeProxy(socketPath, binding, bot, timeoutMs, bindingOnly = false) {
 
 /** Settings and observed proxy health for the current project's bots; read-only and bounded. */
 export async function doctorBotProxies({ bots, project, bindings, env = process.env,
-  timeoutMs = 750 }) {
-  return Promise.all(bots.map(async (bot) => {
+  timeoutMs = 750, platform = process.platform }) {
+  async function observe(bot) {
     const binding = bindings.get(bot.id);
-    const applicable = process.platform === "linux" && bot.agent === "dsh-tui";
+    const applicable = platform === "linux" && bot.agent === "dsh-tui";
     const row = { id: bot.id, name: bot.name, hcProxy: bot.hcProxy === true, applicable,
       hcProxyState: approvedProxyState({ project, bot, env }),
       terminal: binding?.project === project ? binding.terminal : null, up: false, coreVersion: null };
@@ -999,7 +999,23 @@ export async function doctorBotProxies({ bots, project, bindings, env = process.
     return { ...row, warning, detail: row.up
       ? `proxy is up, ${core}${warning ? "; rollback not finished" : ""}`
       : "proxy is down or not responding" };
+  }
+
+  return Promise.all(bots.map(async (bot) => {
+    const today = await observe(bot);
+    const state = today.hcProxyState;
+    if (!(platform === "darwin" && bot.agent === "dsh-tui" && state.error === null && state.approved === true)) return today;
+    return { ...today, unmasked: true, paneWarning: today.warning === true, warning: true,
+      detail: `${today.detail}; ${unmaskedText(bot.id, project)}` };
   }));
+}
+
+function unmaskedText(id, project) {
+  const word = approvalProjectWord(project);
+  return "this computer is macOS, which has no hc mask yet (RFC 0044 §F): a local start of this bot starts "
+    + "plain, without the pack's mask of the core socket and ~/.ssh; to stop asking for the mask, roll "
+    + `back: am edit ${id} --hc-proxy off --project ${word}, then am proxy approve --project ${word}, review `
+    + "the preview and run the printed command (it ends in --confirm <digest>)";
 }
 
 const ATTACH_LEDGER_FILE = "automagik-herdr/attach.jsonl";
