@@ -3,11 +3,12 @@
 // fingerprint.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, unlinkSync, openSync, closeSync, statSync, renameSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, unlinkSync, openSync, closeSync, statSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { store } from './devices.mjs'
 import {
-  judgeCode, cancelCode, shorten, shortenCode, shortenOpen, fingerprint, desktopFingerprint,
+  judgeCode, cancelCode, challengeId, shorten, shortenCode, shortenOpen, fingerprint, desktopFingerprint,
   TRIES_PER_PHONE, TRIES_PER_CODE, COPIED_LIFE,
 } from './pairing.mjs'
 
@@ -29,6 +30,39 @@ test('the right code pairs once and is gone', () => {
   const { verdicts, pending } = play(code(), [['phone-a', 'right'], ['phone-b', 'right']])
   assert.deepEqual(verdicts, ['ok', 'gone'])
   assert.equal(pending, null)
+})
+
+test('a failed completion write reserves the code and recovery finishes only the original grant', async t => {
+  const { acceptPairing, resumePairing, challengeId, COMPLETED, GRANT } = await import('./pairing.mjs')
+  const dir = mkdtempSync(join(tmpdir(), 'pocket-grant-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const pairing = join(dir, 'pairing.json')
+  const receipt = join(dir, COMPLETED)
+  let blockReceipt = true
+  const phones = store(join(dir, 'devices.json'), { held() {
+    if (!blockReceipt) return
+    blockReceipt = false
+    mkdirSync(receipt)
+  } })
+  writeFileSync(pairing, JSON.stringify(code()))
+  // Fail the real receipt rename after the device write. No receipt is created by the fixture.
+  const attempt = (peer, now = NOW) => acceptPairing(dir, phones, {
+    pending: JSON.parse(readFileSync(pairing, 'utf8')), peer, code: 'right', device: peer, now,
+  })
+  assert.throws(() => attempt('phone-a'), /EISDIR|ENOTEMPTY/)
+  assert.equal(phones.list()[0].id, 'phone-a')
+  assert.equal(existsSync(join(dir, GRANT)), true)
+  assert.throws(() => attempt('phone-b'), /Invalid Pocket Link pairing record/)
+  assert.deepEqual(phones.list().map(phone => phone.id), ['phone-a'])
+  rmSync(receipt, { recursive: true })
+  resumePairing(dir, phones, NOW + 1)
+  assert.deepEqual(phones.list().map(({ id, paired }) => [id, paired]), [['phone-a', NOW]])
+  assert.equal(existsSync(pairing), false)
+  assert.equal(existsSync(join(dir, GRANT)), false)
+  assert.equal(JSON.parse(readFileSync(receipt, 'utf8'))[challengeId('right')].name, 'phone-a')
+  assert.equal(acceptPairing(dir, phones, {
+    pending: code(), peer: 'phone-b', code: 'right', device: 'B', now: NOW + 2,
+  }).verdict, 'gone')
 })
 
 test('one phone that keeps guessing locks only itself out; the code still pairs another phone', () => {
@@ -192,4 +226,18 @@ test('the desktop fingerprint shows only the key the bridge is serving', () => {
   assert.equal(desktopFingerprint({ ...status, id: null }, true), null)
   assert.equal(desktopFingerprint(status, false), null)
   assert.equal(desktopFingerprint(null, true), null)
+})
+
+test('conditional cancel and copied leave a replacement code intact', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pocket-pairing-test-'))
+  const path = join(dir, 'pairing.json')
+  try {
+    const replacement = code({ code: 'replacement' })
+    writeFileSync(path, JSON.stringify(replacement))
+    assert.equal(cancelCode(path, NOW, challengeId('old')), false)
+    assert.deepEqual(shortenCode(path, COPIED_LIFE, NOW, { only: challengeId('old'), settle: 0 }), { error: 'gone' })
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), replacement)
+    assert.equal(cancelCode(path, NOW, 'replacement'), false)
+    assert.equal(cancelCode(path, NOW, challengeId('replacement')), true)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

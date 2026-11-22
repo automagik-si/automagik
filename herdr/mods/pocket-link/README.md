@@ -8,46 +8,42 @@ done. Your agents on your phone from anywhere, with no SSH, no password and no p
 
 ## Install
 
-Ask your Herdr agent to add this mod, or do it yourself:
+Run `am pocket pair` on macOS or Linux. Scan the QR code in
+[Automagik Pocket](../../../apps/pocket/README.md), or paste the link. The first install needs
+Node.js 20.3 or newer, npm (about 25 MB), and herdr-core. If you already run the bridge from
+Herdr's dialog, turn it off there first. Update or remove any older copy of the dialog before
+running `am pocket pair`. Your phones stay paired.
 
-1. Copy `mods/pocket-link/` into `~/.config/herdr-app/mods/`.
-2. Merge `keys.json` into `~/.config/herdr-app/keys.json` (⌘⌥P on macOS, Ctrl+Alt+P on Linux).
-3. Open it with ⌘⌥P. The first time, press **Install the bridge** (npm, about 25 MB), then **Turn on**.
+### Herdr dialog
 
-It needs Node.js 20.3+ and herdr-core (`hc`), on macOS or Linux (systemd). Herdr opened from the
-Dock doesn't see a Node that only your shell's rc file adds to PATH. So the dialog also asks your
-login shell, which finds a Node set up in `.zprofile` or `.bash_profile` but not one that
-`.zshrc` or `.bashrc` adds (where nvm usually puts itself), then looks in nvm's, volta's, fnm's,
-asdf's and Homebrew's folders ([RECIPE.md](RECIPE.md#how-it-behaves)).
+To add the dialog to herdr-app, copy `mods/pocket-link/` into `~/.config/herdr-app/mods/` and merge
+`keys.json` into `~/.config/herdr-app/keys.json`. Open it with ⌘⌥P on macOS or Ctrl+Alt+P on Linux.
+It uses am's bridge when installed. With a standalone dialog copy, press **Install the bridge**,
+then **Turn on**. The dialog also looks for Node through your login shell and version managers.
+[Node discovery](RECIPE.md#how-it-behaves)
 
 ## Update
 
-No release ships the mod and nothing updates an installed copy. To update it:
+Run `am update` for an installed Pocket Link, or `am pocket pair` to install it and pair a phone.
+am stages and checks the new packages before stopping a running bridge. If the replacement fails
+to start, am restores the previous version.
 
-1. Press **Turn off** in the dialog. The bridge loads its packages even to stop, so do this before
-   anything changes.
-2. Copy the new `mods/pocket-link/` over the old one from a fresh clone:
+For a manually installed dialog, turn its standalone bridge off before replacing the dialog
+files. Copy the current mod from the Automagik repository:
 
-   ```sh
-   d=$(mktemp -d) && m=~/.config/herdr-app/mods/pocket-link && git clone -q --depth 1 --filter=blob:none --sparse https://github.com/automagik-dev/automagik "$d" && git -C "$d" sparse-checkout set herdr/mods/pocket-link && { cmp -s "$d/herdr/mods/pocket-link/bridge/package-lock.json" "$m/bridge/package-lock.json" || rm -rf "$m/bridge/node_modules"; } && rsync -a "$d/herdr/mods/pocket-link/" "$m/"
-   ```
+```sh
+d=$(mktemp -d) && m=~/.config/herdr-app/mods/pocket-link && git clone -q --depth 1 --filter=blob:none --sparse https://github.com/automagik-dev/automagik "$d" && git -C "$d" sparse-checkout set herdr/mods/pocket-link && { cmp -s "$d/herdr/mods/pocket-link/bridge/package-lock.json" "$m/bridge/package-lock.json" || rm -rf "$m/bridge/node_modules"; } && rsync -a "$d/herdr/mods/pocket-link/" "$m/"
+```
 
-   It compares the bridge's `package-lock.json` before copying. If the packages changed, it
-   deletes `bridge/node_modules`; otherwise `rsync` (without `--delete`) keeps them.
-3. Open the dialog. If it shows **Install the bridge**, press it.
-4. Press **Turn on**.
-
-Pairings live outside the mod folder and stay.
-
-The phone's chat view (RFC 0015) needs a Pocket Link with the chat route (`herdr-pocket/chat/1`,
-the `chat/` folder and `bridge/chat.mjs`). An older one refuses that route, and the phone says
-"Update Pocket Link on this computer for chat" and shows the terminal view as before. Nothing
-updates Pocket Link by itself, so updating it as above is what turns the chat on.
+Reopen the dialog after updating it. A standalone copy may ask you to install its bridge packages
+again. Pairings live outside the mod folder.
 
 ## What it does on your computer
 
-- Runs a small bridge (`mods/pocket-link/bridge/bridge.mjs`) as a login service:
-  a LaunchAgent on macOS, or a systemd user unit on Linux.
+- Runs a small bridge as a LaunchAgent on macOS or a systemd user unit on Linux. am keeps it
+  at `${AM_HOME:-~/.automagik}/parts/pocket.link/current/link/bridge/bridge.mjs`. Run
+  `am pocket link uninstall` to remove the service and the installed files, or
+  `am pocket link uninstall --purge` to also remove the known pairing state files. Purge cannot be undone.
 - **Network:** [iroh](https://iroh.computer). Phones dial this computer by its public key.
   Connections are direct when they can be, otherwise through n0's public relays,
   and always end to end encrypted. The bridge and the phone each publish their public key and the

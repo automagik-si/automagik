@@ -35,6 +35,11 @@ test("the documented am commands and flags are supported by its CLI", () => {
   assert.ok(self.includes("[--json]"));
   assert.match(CLI, /verb === "help"/);
   assert.match(CLI, /await forward\(args\)/);
+  assert.match(HELP, /^  pocket pair .*--state DIR/m);
+  assert.match(HELP, /^  pocket link status\|on\|off\|forget\|reset\|install\|uninstall\|doctor/m);
+  assert.match(README, /am pocket pair/);
+  assert.match(README, /am install pocket\.link/);
+  assert.match(README, /am pocket link uninstall --purge/);
   const pack = readFileSync(new URL("../bin/automagik-herdr.mjs", import.meta.url), "utf8");
   assert.match(pack, /am --version/);
 });

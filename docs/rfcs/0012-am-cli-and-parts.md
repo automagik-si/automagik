@@ -675,22 +675,22 @@ the far side through a fake `hc exec` runner. (`am update`'s own test overrides 
 
 ### Amendment (2026-11-21, #1007): Pocket Link, Pocket's own part
 
-Status: Accepted. The owner's delegate decided the direction on 2026-11-21 (RFC 0030, Decisions
+Status: In delivery. The owner's delegate decided the direction on 2026-11-21 (RFC 0030, Decisions
 (2026-11-21), 4: Pocket Link runs without herdr-app as its own Pocket-owned part, installed and
 started by `am`, paired with `am pocket pair`) and RFC 0046's six questions, each with its
 recommended option. The design is [RFC 0046](0046-pocket-link-without-herdr-app.md), Pocket's;
 this amendment records what changes here.
 
 - **A part `pocket.link`** (proposed id), kind `binary`, `macos` and `linux`, in no set. Its files
-  are byte copies of `herdr/mods/pocket-link/`'s shipped bridge and chat files in `am/pocket-link/`
+  are byte copies of `herdr/mods/pocket-link/`'s shipped bridge and chat files in `am/pocket/link/`
   (`scripts/am-copies.mjs`; Pocket Link stays the source), so `automagik-am-<v>.tgz` carries them
   and they are as signed as am. Its entries ship in the am part, as `herdr.app`'s do. It keeps
   each version in the parts store (`parts/pocket.link/<version>/`, `current` and `previous`).
 - **The `am pocket` group:** `am pocket pair [--minutes N]` (installs the part when missing,
   starts the bridge's login service, prints the QR code and the link) and `am pocket link
   status|on|off|forget|reset`, each a call of the bridge's own verb.
-- **Updates.** When am updates itself and its copy differs from the installed one, am stops the
-  bridge, swaps the version and starts it again; a failed start goes back. The hourly linked
+- **Updates.** When am updates itself and its copy differs from the installed one, am stages and checks the
+  packages first, stops a running bridge, swaps the version and starts it again. A failed start restores the prior version. The hourly linked
   updater never installs `pocket.link`, and 9a never places it on a linked machine.
 - **`writes`** gains the bridge's login service file (LaunchAgent or systemd user unit) and its
   state folder, both today Pocket Link's; the pack's `parts.mjs` rule that no herdr part writes
@@ -700,8 +700,8 @@ this amendment records what changes here.
   (RFC 0046, Decided 3).
 - **Unchanged:** the pack, herdr-app as a part, the bridge's service names, state folder and
   pairing link, and Pocket's `latest.json`, `pocket-lane`, app ID and signing key.
-- **Delivery 8** gains Pocket Link's part as RFC 0046's deliveries 1 and 2 (a herdr patch carrying
-  am, then a herdr patch); Pocket's own part (`android-app`) stays as written.
+- **Delivery 8** gains Pocket Link's part as RFC 0046's deliveries 1 and 2 (one herdr patch carrying
+  am); Pocket's own part (`android-app`) stays as written.
 
 ### Operating systems
 

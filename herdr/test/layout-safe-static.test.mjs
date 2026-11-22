@@ -1,6 +1,7 @@
 // The one door, checked statically (refs #431, #448, #450): a folder leaves mods/ and a file leaves
 // layouts/ only through mods/am-sidebar/layoutSafe.mjs change(). Every .js and .mjs under herdr/mods
-// (Pocket Link left out: it owns its folder) and am/ (its tests left out) is scanned for rmSync,
+// (Pocket Link left out: it owns its folder) and am/ (its tests left out, and am/pocket/link/, the
+// byte copies of Pocket Link; am/pocket/pocket.mjs, the part's manager, is scanned) is scanned for rmSync,
 // renameSync, unlinkSync, cpSync, rmdirSync, layoutSafe.mjs removePath (#550: rmSync that never
 // follows a link), fs.promises' rm, rename, unlink and cp, a bare
 // rm/rename/unlink call (an injected one), and a program run through Herdr's io or an exec (`rm`,
@@ -55,7 +56,7 @@ export function scan(repo = REPO) {
   const rel = (p) => relative(repo, p).split("\\").join("/");
   const inScope = [
     ...files(join(repo, "herdr", "mods"), (p) => /[/\\](pocket-link|node_modules|test)$/.test(p)),
-    ...files(join(repo, "am"), (p) => /[/\\](node_modules|test)$/.test(p)),
+    ...files(join(repo, "am"), (p) => /[/\\](node_modules|test)$/.test(p) || rel(p) === "am/pocket/link"),
   ];
   return inScope.flatMap((path) => {
     const file = rel(path);
@@ -222,6 +223,20 @@ export const ALLOWLIST = [
   ["am/lib/self.mjs", "rmSync(record.path, { force: true })", 1, "undo a signed install's creation of record.json inside am's parts store when there was no prior record"],
   ["am/lib/self.mjs", "rmSync(placed, { recursive: true, force: true })", 1, "remove only the new signed version directory in am's parts store after restoring the prior links and record"],
   ["am/lib/self.mjs", "rmSync(marker, { force: true })", 1, "remove only the marker the failed attempt created in am's parts store after restoring its prior state"],
+  ["am/pocket/pocket.mjs", "renameSync(temp, path)", 1, "save()/remove(): one of Pocket Link's own records: record.json, pending.json and a slot's marker in $AM_HOME/parts/pocket.link, or am-owner.json and purge.pending in Pocket Link's state folder (~/.local/state/automagik-pocket-link*), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(temp, { force: true })", 1, "save()/remove(): one of Pocket Link's own records: record.json, pending.json and a slot's marker in $AM_HOME/parts/pocket.link, or am-owner.json and purge.pending in Pocket Link's state folder (~/.local/state/automagik-pocket-link*), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "unlinkSync(path)", 1, "save()/remove(): one of Pocket Link's own records: record.json, pending.json and a slot's marker in $AM_HOME/parts/pocket.link, or am-owner.json and purge.pending in Pocket Link's state folder (~/.local/state/automagik-pocket-link*), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "cpSync(join(source.folder, path), target)", 1, "copies am's own pocket/ files into a new staging folder inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "cpSync(join(current, MODULES), join(folder, MODULES), { recursive: true, verbatimSymlinks: true })", 1, "reuses the current slot's bridge node_modules in a staging folder; both inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(join(folder, MODULES), { recursive: true, force: true })", 1, "drops node_modules that failed the native probe from a staging folder inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(folder, { recursive: true, force: true })", 1, "removes this run's own failed staging folder inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(path)", 2, "a lock this run holds ($AM_HOME/parts/.pocket.link.lock, the state folder's service.lock, the login service folder's .herdr-pocket-link.lock) or one of Pocket Link's known state files in its recorded state folder (purge, after the owner and folder checks); never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "renameSync(temp, file)", 1, "swaps the current/previous link of Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "unlinkSync(temp)", 1, "removes this run's own temporary link in Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(join(store, name), { recursive: true, force: true })", 2, "prunes dead staging folders and marked slots other than current and previous in Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmdirSync(path)", 1, "removes Pocket Link's part store or its state folder only when empty (uninstall); never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "renameSync(prepared.folder, slot(store, current))", 1, "moves a verified staging folder to its slot, both inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(prepared.folder, { recursive: true, force: true })", 1, "removes this run's staging folder left after a failed commit inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
   ["herdr/mods/am-sidebar/dshTui.mjs", "renameSync(temp, path)", 1, "writeAtomic: dsh-TUI's shim in ~/.local/bin, DSH's dsh-tui profile files under ~/.dsh (or $DSH_HOME) and dsh-TUI's ~/.dsh-tui state: never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/dshTui.mjs", "removePath(cwd, { recursive: true, force: true })", 1, "a temp folder the dsh plugin run works in (mkdtemp in tmpdir)"],
   ["herdr/mods/am-sidebar/dshTui.mjs", "removePath(shim, { force: true })", 1, "the dsh-tui shim in ~/.local/bin: never mods/ or layouts/"],

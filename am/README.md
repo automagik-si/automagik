@@ -103,7 +103,7 @@ It copies the folder into `~/.automagik/parts/automagik.am/<version>/` (`AM_HOME
 (`~/.config/herdr-app` or `HERDR_APP_HOME`), it also links the briefing entry; otherwise it writes
 nothing there. It installs, starts and restarts nothing else: no Herdr app, no herdr-core, no pane.
 
-Without Herdr, am's own commands work: `update`, `rollback`, `self`, `help` and `--version`.
+Without Herdr, am's own commands work, including `pocket`, `update`, `rollback`, `self`, `help` and `--version`.
 Bot and worker commands need Herdr (its `hc` and herdr-core).
 [Install Herdr and the pack](https://github.com/automagik-si/automagik/blob/dev/herdr/README.md#install).
 
@@ -131,6 +131,36 @@ It refuses a pointer older than the newest this machine took and keeps the repla
 exits 1. `am update` moves forward again. The bootstrap above is for a first install:
 use `am update` to move an installed am. A hand-run self install or a rollback is not checked
 against older versions.
+
+## am pocket
+
+Run `am pocket pair` in an interactive terminal on the computer your phone will connect to.
+It installs `pocket.link`, starts its login service and shows a QR code and a link. Open
+Automagik Pocket and scan the code, or paste the link. The code lasts 10 minutes by default
+(`--minutes N` accepts 1–60). Ctrl-C cancels that code or reports when it will expire if
+cancellation fails. The first install downloads about 25 MB from npm. Pocket Link needs Node.js
+20.3 or newer and access to herdr-core on macOS or Linux.
+
+If Herdr's Pocket Link dialog is running the bridge, turn it off there first. Update or remove
+an older copy of the dialog before installing with am. Your computer's key and phone pairings live
+in the state directory. To choose an existing directory on first install, use
+`am pocket pair --state /absolute/path`.
+
+| Command | What it does |
+| --- | --- |
+| `am pocket link status [--json]` | Shows the bridge and paired phones. |
+| `am pocket link on` / `am pocket link off` | Starts or stops the login service. |
+| `am pocket link forget ID` | Removes one phone. |
+| `am pocket link reset` | Asks before changing this computer's key and unpairing every phone. |
+| `am install pocket.link` / `am pocket link install` | Installs and starts the service without issuing a code. |
+| `am doctor pocket.link` / `am pocket link doctor` | Checks the runtime, packages, service, state and dialog. |
+| `am uninstall pocket.link` / `am pocket link uninstall` | Removes the service and managed files and keeps pairings. |
+| `am pocket link uninstall --purge` | Removes the known bridge state files too. Purge cannot be undone. |
+
+`am update` and `am rollback automagik.am` sync an installed Pocket Link from the selected am
+release. An older am without Pocket Link keeps the installed copy. If Pocket Link fails to
+update, am reports the two results independently and exits 1. The retained slot in
+`${AM_HOME:-~/.automagik}/parts/pocket.link/current` carries the local part entries.
 
 ## Uninstall
 

@@ -128,6 +128,7 @@ export default class WorkspaceChrome extends View {
     this.on = Object.fromEntries(PANELS.map((p) => [p.mod, false]));
     this.phone = false;
     this.statusPath = null;
+    this.standaloneStatusPath = null;
     this.hovered = null;   // the name of the tab under the pointer, shown dim in the rail
     this.contributed = []; // buttons other mods declare in their mod.json (contributions.js)
     const footer = Boolean(props()?.footer);
@@ -146,10 +147,21 @@ export default class WorkspaceChrome extends View {
       try { found = (await readTextFile(`${appHome()}/mods/pocket-link/mod.json`)) !== null; } catch { found = false; }
       let phone = false;
       if (found) {
-        if (this.statusPath === null) {
-          const r = await exec("node", ["-e", POCKET_DIR, appHome(), home()]).catch(() => null);
-          if (r?.code === 0 && r.stdout.startsWith("/")) this.statusPath = r.stdout;
-          else console.log("pocket dot: could not resolve the status file", r?.stderr ?? "node did not start");
+        this.pocketStore ??= exec("printenv", ["AM_HOME"])
+          .then(r => r.code === 0 ? r.stdout.trim() : "", () => "")
+          .then(dir => `${(dir || home() + "/.automagik").replace(/\/+$/, "")}/parts/pocket.link`);
+        const store = await this.pocketStore;
+        let state;
+        try { state = JSON.parse(await readTextFile(`${store}/record.json`))?.state; } catch {}
+        if (typeof state === "string" && state.startsWith("/")) {
+          this.statusPath = `${state.replace(/\/+$/, "")}/public-status.json`;
+        } else {
+          if (this.standaloneStatusPath === null) {
+            const r = await exec("node", ["-e", POCKET_DIR, appHome(), home()]).catch(() => null);
+            if (r?.code === 0 && r.stdout.startsWith("/")) this.standaloneStatusPath = r.stdout;
+            else console.log("pocket dot: could not resolve the status file", r?.stderr ?? "node did not start");
+          }
+          this.statusPath = this.standaloneStatusPath;
         }
         if (this.statusPath) {
           try { phone = phoneConnected(await readTextFile(this.statusPath)); } catch { phone = false; }

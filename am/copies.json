@@ -234,6 +234,158 @@
       "to": "am/plugin-lane-keys.json"
     },
     {
+      "from": "herdr/mods/pocket-link/bridge/bridge.mjs",
+      "to": "am/pocket/link/bridge/bridge.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/chat.mjs",
+      "to": "am/pocket/link/bridge/chat.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/devices.mjs",
+      "to": "am/pocket/link/bridge/devices.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/dsh-source.mjs",
+      "to": "am/pocket/link/bridge/dsh-source.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/guard.mjs",
+      "to": "am/pocket/link/bridge/guard.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/package-lock.json",
+      "to": "am/pocket/link/bridge/package-lock.json"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/package.json",
+      "to": "am/pocket/link/bridge/package.json"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/pairing.mjs",
+      "to": "am/pocket/link/bridge/pairing.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/pipe.mjs",
+      "to": "am/pocket/link/bridge/pipe.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/presence.mjs",
+      "to": "am/pocket/link/bridge/presence.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/reset.mjs",
+      "to": "am/pocket/link/bridge/reset.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/service-paths.js",
+      "to": "am/pocket/link/bridge/service-paths.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/service.mjs",
+      "to": "am/pocket/link/bridge/service.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/bridge/state.mjs",
+      "to": "am/pocket/link/bridge/state.mjs"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/answer.js",
+      "to": "am/pocket/link/chat/answer.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/approve.js",
+      "to": "am/pocket/link/chat/approve.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/decode-claude.js",
+      "to": "am/pocket/link/chat/decode-claude.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/decode-codex.js",
+      "to": "am/pocket/link/chat/decode-codex.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/decode-omp.js",
+      "to": "am/pocket/link/chat/decode-omp.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/decode-shared.js",
+      "to": "am/pocket/link/chat/decode-shared.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/dialog.js",
+      "to": "am/pocket/link/chat/dialog.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/engine.js",
+      "to": "am/pocket/link/chat/engine.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/find.js",
+      "to": "am/pocket/link/chat/find.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/folder-rule.js",
+      "to": "am/pocket/link/chat/folder-rule.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/hc.js",
+      "to": "am/pocket/link/chat/hc.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/input.js",
+      "to": "am/pocket/link/chat/input.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/LICENSE-upstream",
+      "to": "am/pocket/link/chat/LICENSE-upstream"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/package.json",
+      "to": "am/pocket/link/chat/package.json"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/paste.js",
+      "to": "am/pocket/link/chat/paste.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/projection.js",
+      "to": "am/pocket/link/chat/projection.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/question.js",
+      "to": "am/pocket/link/chat/question.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/rows.js",
+      "to": "am/pocket/link/chat/rows.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/screen.js",
+      "to": "am/pocket/link/chat/screen.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/status.js",
+      "to": "am/pocket/link/chat/status.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/tail.js",
+      "to": "am/pocket/link/chat/tail.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/types.js",
+      "to": "am/pocket/link/chat/types.js"
+    },
+    {
+      "from": "herdr/mods/pocket-link/chat/UPSTREAM.md",
+      "to": "am/pocket/link/chat/UPSTREAM.md"
+    },
+    {
+      "from": "herdr/mods/pocket-link/LICENSE",
+      "to": "am/pocket/link/LICENSE"
+    },
+    {
       "from": "herdr/mods/am-sidebar/release.js",
       "to": "am/release.js"
     },
