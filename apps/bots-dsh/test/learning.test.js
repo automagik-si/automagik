@@ -152,6 +152,29 @@ const agentsEdit = JSON.stringify({
   edits: [{ op: 'add', after: '- Existing rule', text: '- Keep the report concise.', why: 'The user corrected the report format more than once.' }],
 })
 
+for (const [name, during, made] of [
+  ['a team reload during a review keeps its proposal', rt => { rt.state.bots = Object.fromEntries(Object.entries(rt.state.bots).map(([id, bot]) => [id, { ...bot }])) }, 2],
+  ['a Bot deleted during its review drops the proposal', rt => { delete rt.state.bots.m1 }, 0],
+]) {
+  test(name, async t => {
+    const publicFolder = realpathSync(projectFolder(t))
+    const seed = structuredClone(TEAM)
+    seed.bots.m1.workDir = publicFolder
+    let reviewing
+    const first = new Promise(resolve => { reviewing = rt => { during(rt); resolve(createReply) } })
+    const runtime = await startRuntime({ seed, replies: [first, agentsEdit], config: { learningTimes: { tickMs: 100_000 } } })
+    t.after(() => runtime.stop())
+    runtime.rt.partLines = async function* () { yield { seq: 11, time: 2, who: 'user', text: 'User: Check the public release.' } }
+    await finishTurn(runtime.ctx, { id: 'm1' })
+    await until(() => runtime.learningState().pending?.m1?.includes('m1'))
+    const pass = runtime.rt.learningRun()
+    await until(() => runtime.requests.length > 0)
+    reviewing(runtime.rt)
+    const proposals = await pass
+    assert.equal(proposals, made)
+  })
+}
+
 test('private work is skipped at collection and purged from queued reviews while public work still learns', async t => {
   const privateFolder = realpathSync(projectFolder(t))
   const publicFolder = realpathSync(projectFolder(t))
