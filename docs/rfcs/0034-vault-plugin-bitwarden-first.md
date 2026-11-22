@@ -6,7 +6,7 @@
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-11-19 |
-| Amended | 2026-11-19: the review's blocking findings — the freshness rule, the command-bound approval, the dual-name refusal — and its other gaps, as rules with numbers. Re-amended the same day: the vault Allow path, the sync gate, Bot-safe refusals, the always-read sources file, and a grant bound to command, shell and folder. Q1-Q12 answered the same day as decided, Q6 by the delegated #1668 contract; that contract pins `bw` 2026.10.1, allows only its network-failure list, and refuses and locks every other failure. 2026-11-21: destination grants for delivery 5 decided and held for DSH upstream; the 1Password desktop app integration deferred out of delivery 4 |
+| Amended | 2026-11-19: the review's blocking findings — the freshness rule, the command-bound approval, the dual-name refusal — and its other gaps, as rules with numbers. Re-amended the same day: the vault Allow path, the sync gate, Bot-safe refusals, the always-read sources file, and a grant bound to command, shell and folder. Q1-Q12 answered the same day as decided, Q6 by the delegated #1668 contract; that contract pins `bw` 2026.10.1, allows only its network-failure list, and refuses and locks every other failure. 2026-11-21: destination grants for delivery 5 decided and held for DSH upstream; the 1Password desktop app integration deferred out of delivery 4. 2026-11-22: KeePassXC (delivery 6) deferred, decided by the owner's delegate |
 
 > Approved by Guga's delegation while the owner is away (19/11); the owner may amend on return.
 
@@ -657,8 +657,9 @@ Each delivery is on one release lane, per [RFC 0011](0011-monorepo-parts-and-rel
    process; the value is absent from every file and log; the sync shell path is unchanged.
    *Rollback:* revert; capabilities refuse vault-mapped names again.
 6. **Other managers** (plugin, 3.N.P). Proton Pass, HashiCorp Vault, OS keychains, and KeePassXC
-   through its Secret Service integration. *Check:* a fake CLI per manager, and the same refusal
-   and audit cases. *Rollback:* remove that adapter.
+   through its Secret Service integration. KeePassXC is deferred (Decided questions).
+   *Check:* a fake CLI per manager, and the same refusal and audit cases. *Rollback:* remove that
+   adapter.
 
 Vault writes are not a delivery. They need an owner rule and a later RFC.
 
@@ -719,6 +720,17 @@ evidence or a real-app qualification per OS, launch mode and CLI range, and the 
 of the route (Routes). Until then it cannot be reached: the adapter refuses every `op` call except
 `--version` without a service-account token, and strips inherited `OP_*` variables from the child.
 Service accounts (delivery 4a) are the supported 1Password path.
+
+**KeePassXC (delivery 6) deferred.** Decided 2026-11-22 by the owner's delegate. KeePassXC's
+Secret Service integration confirms each client's access per D-Bus connection by default, and
+Automagik will not ask anyone to turn that off. A design that keeps the default (one long-lived
+connection, a person-started KeePassXC prompt after the approval, refusal on every other outcome;
+approved by the owner's delegate on 2026-11-22) was drafted in #1271 but not qualified: design
+review left open which properties the approval card may read before the person acts, and how a
+pending KeePassXC authorization settles on a bus-address change; no native run was made. Until it
+is, KeePassXC is not a vault source: its owner is refused as unsupported, as today. Reopening
+needs the B′ design (#1271 plan r2) to first close those two points, and the native spike to pass
+on the real application with its defaults on.
 
 1. **Transport for the first cut.** **Decided: the installed `bw` CLI**; the Management API does
    not enter now, because the CLI reaches Bitwarden cloud, self-hosted and Vaultwarden through the
