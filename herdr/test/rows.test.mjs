@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  ASLEEP_MS, liveFrom, botTerminals, poseOf, nextWake, helpersOf, buildTree, placeTrees, placesOf, withSpaceless, visibleRows, botFold, categoryFold, knownBots, projectId,
+  ASLEEP_MS, liveFrom, poseOf, nextWake, helpersOf, buildTree, placeTrees, placesOf, withSpaceless, visibleRows, botFold, categoryFold, knownBots, projectId,
   secondLine, modelDefaultsFrom, modelTextsUpdate, argvToAsk, argvEntry, argvAfter, argvReader, heldClickOf, heldTerminalOf, liveOf, paneCounts, listedKeyOf, parentMarkOf, parentMarkText,
   programForApp, needsYouText, NEEDS_YOU, NEEDS_YOU_PERMISSION,
   NEEDS_OWNER_LABEL, OWNER_QUESTION, ownerQuestionOf, RATE_LIMITED,
@@ -139,34 +139,6 @@ test("liveFrom: the ledger's binding decides the bot, never the pane's bot= labe
   assert.equal(liveOf(live, { key: KEY }, "b-mainmainma"), null, "no row at the wrong machine");
   // Without the ledger the label still decides (the fallback until the CLI answers --all).
   assert.equal(liveOf(liveFrom(terms, known), { key: KEY }, "b-mainmainma").terminal, "t1");
-});
-
-test("liveFrom and botTerminals: a live labelled pane no ledger row names goes by its label; a named one by the ledger (#1875)", () => {
-  const terms = [
-    // Relabelled: the ledger binds t1 to the captain, its label still says the main bot.
-    T("t1", { labels: { bot: "b-mainmainma" }, created_ms: 10 }),
-    // Bound on another machine's ledger: this ledger has no row for hx/t4.
-    T("hx/t4", { labels: { bot: "b-devdevdevd" }, created_ms: 40 }),
-    // The ledger keeps `t2y`; the snapshot names the same pane `wsl/t2y`.
-    T("wsl/t2y", { labels: { bot: "b-loneloneln" }, created_ms: 60 }),
-    // An away binding still names its pane: its label draws nothing.
-    T("t6", { labels: { bot: "b-testtestte" }, created_ms: 70 }),
-  ];
-  const bindings = [
-    { bot: "b-captaincap", terminal: "t1", address: "t1", project: KEY, machine: null, state: "live", created_ms: 10 },
-    { bot: "b-loneloneln", terminal: "t2y", address: "t2y", project: KEY, machine: null, state: "live", created_ms: 60 },
-    { bot: "b-pmpmpmpmpm", terminal: "t6", address: "t6", project: KEY, machine: null, state: "unknown", created_ms: 70 },
-  ];
-  const known = knownBots([{ key: KEY, file }]);
-  const live = liveFrom(terms, known, undefined, undefined, bindings);
-  assert.equal(liveOf(live, { key: KEY }, "b-captaincap").terminal, "t1");
-  assert.equal(liveOf(live, { key: KEY }, "b-mainmainma"), null, "the ledger beats the label on a pane it names");
-  assert.equal(liveOf(live, { key: KEY, machine: "hx" }, "b-devdevdevd").terminal, "hx/t4");
-  assert.equal(liveOf(live, { key: KEY }, "b-loneloneln").terminal, "wsl/t2y");
-  assert.equal(liveOf(live, { key: KEY }, "b-testtestte"), null);
-  assert.equal(liveOf(live, { key: KEY }, "b-pmpmpmpmpm"), null);
-  const rows = botTerminals(terms, known, bindings);
-  assert.deepEqual([...rows].sort(), [["hx/t4", "b-devdevdevd"], ["t1", "b-captaincap"], ["wsl/t2y", "b-loneloneln"]]);
 });
 
 test("an agy pane (#793): agy in front counts even when the table says no agent, and its blocked prompt is needs-you", () => {
@@ -522,9 +494,7 @@ test("heldTerminalOf: a bot's live terminal for its row's click, shown in a pane
   const terms = [...rows, T("t5", { created_ms: 40 })];
   const bindings = [{ bot: "b-a", terminal: "t5", address: "t5", project: null, machine: null, state: "live" }];
   assert.equal(heldTerminalOf("b-a", terms, [], null, () => null, bindings), "t5");
-  assert.equal(heldTerminalOf("b-b", terms, [], null, () => null, bindings), "t4", "a label no binding names still counts (#1875)");
-  const claimed = [...bindings, { bot: "b-a", terminal: "t4", address: "t4", project: null, machine: null, state: "live" }];
-  assert.equal(heldTerminalOf("b-b", terms, [], null, () => null, claimed), null, "a label on a pane the ledger names counts nothing");
+  assert.equal(heldTerminalOf("b-b", terms, [], null, () => null, bindings), null, "the label alone counts nothing");
   assert.equal(heldClickOf("b-a", terms, [], null, () => null, bindings).args.terminal, "t5");
 });
 

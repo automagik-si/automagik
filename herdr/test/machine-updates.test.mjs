@@ -9,12 +9,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { MACHINES_EVERY_MS, MACHINES_KEY, START, UPDATE, entryLine, failureNotice, meterFollows, parseProbe, parseState, readUpdate, startCycle,
-  stateAfter, stateLines, updateOn } from "../mods/am-sidebar/machineUpdates.js";
+  stateAfter, stateLines } from "../mods/am-sidebar/machineUpdates.js";
 import { PACK_MODS } from "../mods/am-sidebar/release.js";
 import { POINTER_SIG_URL, POINTER_URL } from "../mods/am-sidebar/update.mjs";
 import { keys as packKeys, pointerBytes, signatureOf } from "./pointer.mjs";
@@ -439,36 +439,6 @@ test("readUpdate: the machine's own answer, am then the pack; a refusal is that 
   assert.deepEqual(readUpdate({ code: 0, stdout: "via none\n", stderr: "" }, { amOnly: true }), [{ part: "am", state: "absent" }]);
   assert.deepEqual(readUpdate({ code: -1, stdout: "", stderr: "timed out after 600 s" }), [{ part: "am", state: "failed", why: "timed out after 600 s" }]);
   assert.deepEqual(readUpdate({ code: 1, stdout: "via am\n", stderr: "no supported runtime\n" }, { amOnly: true }), [{ part: "am", state: "failed", why: "no supported runtime" }]);
-});
-
-test("#1874: am linked to the pack's automagik-herdr, no am part: the pack's step there, and here nothing runs", async (t) => {
-  // install.sh's host: ~/.local/bin/am -> the pack's automagik-herdr, no ~/.automagik/parts/automagik.am.
-  const root = scratchRoot(t, "am-machines-link-");
-  const home = join(root, "home"), log = join(root, "pack.log");
-  const cliDir = join(home, ".config", "herdr-app", "mods", "am-sidebar");
-  mkdirSync(join(cliDir, "bin"), { recursive: true });
-  mkdirSync(join(home, ".local", "bin"), { recursive: true });
-  writeFileSync(join(cliDir, "VERSION"), "3.160.0\n");
-  writeFileSync(log, "");
-  exe(join(cliDir, "bin", "automagik-herdr"), `#!/bin/sh\necho "$*" >> "${log}"\n`
-    + `echo '${JSON.stringify({ current: "3.150.5", latest: "3.160.0", update: { version: "3.160.0" }, installed: { version: "3.160.0" } })}'\n`);
-  symlinkSync(join(cliDir, "bin", "automagik-herdr"), join(home, ".local", "bin", "am"));
-  const run = async (argv) => {
-    const r = spawnSync(argv[0], argv.slice(1), { encoding: "utf8", cwd: root, env: { PATH: "/usr/bin:/bin", HOME: home } });
-    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
-  };
-  const at = () => new Date("2026-11-20T00:00:00Z");
-  const there = await updateOn(run, "vm", { now: at });
-  assert.deepEqual(there.steps, [{ part: "am", state: "absent" }, { part: "pack", state: "updated", from: "3.150.5", to: "3.160.0" }]);
-  assert.equal(there.result, "updated");
-  assert.deepEqual(there.why, []);
-  assert.equal(readFileSync(log, "utf8"), "update --json\n");
-  // This computer: am alone, and the pack's own command never runs (the sidebar's updater owns it).
-  writeFileSync(log, "");
-  const here = await updateOn(run, null, { now: at });
-  assert.deepEqual(here.steps, [{ part: "am", state: "absent" }]);
-  assert.equal(here.result, "current");
-  assert.equal(readFileSync(log, "utf8"), "");
 });
 
 test("usagemeter follows the lane where there is one, everywhere when agreed to, never after --no-usagemeter", () => {

@@ -90,18 +90,16 @@ echo "packauto $pa"`;
  * Run as `sh -c UPDATE sh [automagik.am]`: the machine's own update, by its own command. First
  * line `via am` (then `am update [automagik.am] --json`'s one JSON value: am, then the pack where
  * installed), `via pack` (no am there, a pack: its `automagik-herdr update --json`) or `via none`
- * (neither; nothing runs). am is there only when its own part is (`parts/automagik.am/current`, as
- * PROBE reads it): without one, `~/.local/bin/am` is install.sh's link to the pack's command (#1874).
- * With `automagik.am` (this computer, whose pack the sidebar's own updater installs): am alone, and
- * never the pack's command. Elsewhere LINKED_UPDATE_ENV marks the pack update as the automatic one
- * (#1505): the target's own auto setting and rollback skip hold, and an older target that ignores
- * the variable keeps the explicit update it had.
+ * (neither; nothing runs). With `automagik.am` (this computer, whose pack the sidebar's own updater
+ * installs): am alone, and never the pack's command. Elsewhere LINKED_UPDATE_ENV marks the pack
+ * update as the automatic one (#1505): the target's own auto setting and rollback skip hold, and an
+ * older target that ignores the variable keeps the explicit update it had.
  */
 export const UPDATE = `set -u
 ${HOMES}
 export ${LINKED_UPDATE_ENV}=1
 am=$HOME/.local/bin/am
-if [ -f "$am" ] && [ -d "$am_home/parts/automagik.am/current" ]; then
+if [ -f "$am" ]; then
   echo "via am"
   if [ -n "\${1:-}" ]; then exec sh "$am" update "$1" --json </dev/null; fi
   exec sh "$am" update --json </dev/null

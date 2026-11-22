@@ -620,8 +620,7 @@ export default class Spaces extends View {
   // here: terminals() carries program.agent, status, status_ms and created_ms on this host;
   // a command line it lacks comes from readBotArgv, read off the drawing path, and counts
   // for liveness too: the program table can say shell while the agent runs). The attach
-  // ledger's bindings, when readLedger has them, name the panes they bind; the labels name
-  // every other pane (#1875).
+  // ledger's bindings, when readLedger has them, name each bot's pane; its labels otherwise.
   prepareBots() {
     const now = this.now ?? Date.now();
     const known = knownBots(this.bots);
