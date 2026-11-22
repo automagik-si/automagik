@@ -1,7 +1,7 @@
 {
   "name": "automagik-herdr",
   "private": true,
-  "version": "3.169.0",
+  "version": "3.169.1",
   "description": "Automagik Herdr: autonomous, cross-harness teams of coding agents in Herdr.",
   "license": "Apache-2.0",
   "type": "module",
