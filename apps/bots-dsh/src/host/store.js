@@ -16,6 +16,7 @@ import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { refusal } from './refusal.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
 import { markOf } from '../shared/permission-levels.js'
+import { effectiveMarkOf, restrictedBot } from '../shared/native-tools.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import updateContract from './update-contract.json' with { type: 'json' }
 
@@ -393,6 +394,28 @@ export function install(rt) {
       state.nativeToolsOmpKept = true
       if (kept > 0) migrated = true
     }
+    // #1564: Codex's own tools became the native-tools switch, off by default. A team saved
+    // before it ran its Codex Bots on Codex's own tools; once, each keeps them in the owner's
+    // direct chat (RFC 0003, Amendment: Codex native tools). A Bot with shell access off or
+    // denied tools stays off: Codex's own tools would bypass both. As for omp, the marker
+    // rides the next real save when nothing was kept.
+    if (state.nativeToolsCodexKept !== true) {
+      let restricted = 0
+      let kept = 0
+      for (const bot of Object.values(state.bots)) {
+        if (bot === null || typeof bot !== 'object' || bot.nativeTools !== undefined || effectiveMarkOf(bot) !== 'acp-codex') continue
+        if (restrictedBot(bot)) {
+          restricted += 1
+          continue
+        }
+        bot.nativeTools = true
+        bot.nativeToolsAgent = 'acp-codex'
+        kept += 1
+      }
+      if (restricted > 0) warn('omni-ui: %d Codex Bot(s) kept off native tools: shell access off or denied tools', restricted)
+      state.nativeToolsCodexKept = true
+      if (kept > 0) migrated = true
+    }
     // A builtin pet the plugin no longer ships would draw nothing: its Bot wears Genie instead.
     // Genie kept from before its approved figure names the old atlas's version: it reads as
     // the Genie shipped now (pets.js shippedPet), whatever the file says, every time.
@@ -718,7 +741,7 @@ export function install(rt) {
     } })
   }
 
-  const save = ({ required = false, copy, enableNativeTools } = {}) => {
+  const save = ({ required = false, copy, enableNativeTools, nativeToolsAgent } = {}) => {
     if (copy !== undefined) return rt.saveCopy(copy.change, copy)
     if (stopped) return required ? Promise.reject(new Error('The Bot team cannot be saved after this host stopped.')) : writing
     refreshShellHolds(state.bots)
@@ -737,7 +760,9 @@ export function install(rt) {
       // acknowledgement. Other saves continue to encode the live Bot record.
       const bot = enableNativeTools
       if (own(state.bots, bot.id) !== bot) throw refusal('The Bot team changed. Try again.')
-      const enabled = { ...bot, nativeTools: true }
+      // The commit point: ON is written for the agent the Bot runs on, or not at all.
+      if (nativeToolsAgent === undefined || effectiveMarkOf(bot) !== nativeToolsAgent) throw refusal('The Bot team changed. Try again.')
+      const enabled = { ...bot, nativeTools: true, nativeToolsAgent }
       delete enabled.nativeToolsKept
       return { ...state, bots: { ...state.bots, [bot.id]: enabled } }
     }, { required })

@@ -1,10 +1,12 @@
 import { callerService, multiuserMode } from './multiuser.js'
 import { refusal } from './refusal.js'
 import { NATIVE_TOOLS_CHANGED_TEXT } from '../shared/held.js'
+import { effectiveMarkOf, NATIVE_AGENTS, nativeToolsOn, restrictedBot } from '../shared/native-tools.js'
 
 export const NATIVE_OFF_TEXT = 'Native tools were turned off for this Bot, so this answer stopped. Send your message again.'
 export const NATIVE_TOOLS_BLOCK_TEXT = Object.freeze({
   multiuser: 'Native tools are not offered in a multi-user workspace yet.',
+  'model-kept': "This model can't turn its native tools off.",
   managed: 'Not available for a Bot that operates Omni or that another plugin manages.',
   shared: 'Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.',
   restricted: 'Not available while this Bot has shell access off or denied tools.',
@@ -42,11 +44,18 @@ export function install(rt) {
     } catch { return 'level-unknown' }
   }
 
+  // A Codex model the switch never applies to: it launches with Codex's own tools in every
+  // Session (acp-dsh agents.js `nativeKeptModels`). acp-dsh answers; no answer is not kept.
+  const modelKept = bot => effectiveMarkOf(bot) === 'acp-codex' && (() => {
+    try { return ctx.get('acpAgents')?.nativeModelKept?.(bot.model ?? bot.appliedModel) === true } catch { return false }
+  })()
+
   function policyBlock(bot) {
     if (multiuserMode() || callerService(ctx)) return 'multiuser'
+    if (modelKept(bot)) return 'model-kept'
     if (bot.kind !== undefined || (rt.isMain(bot.id) && rt.omniLinked?.())) return 'managed'
     if (shared(ctx, bot) || rt.imBoundBot?.(bot.id)) return 'shared'
-    if (bot.shell === false || (Array.isArray(bot.denyTools) && bot.denyTools.length > 0)) return 'restricted'
+    if (restrictedBot(bot)) return 'restricted'
   }
 
   function nativeToolsBlock(bot) {
@@ -90,9 +99,11 @@ export function install(rt) {
     for (const owners of [rt.groupOwners, rt.pastOwners, rt.taskOwners]) {
       for (const [id, owner] of owners) if (owner.botId === bot.id) sessions.push(id)
     }
+    // An older acp-dsh has no endNative: it ends Claude's processes only.
+    const end = typeof acp.endNative === 'function' ? acp.endNative : acp.endClaudeSession
     for (const id of sessions) {
-      try { acp.endClaudeSession?.(id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
-      catch (error) { rt.warn('omni-ui: Claude Session %s could not be ended: %s', id, error) }
+      try { end?.call(acp, id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
+      catch (error) { rt.warn('omni-ui: Session %s could not be ended: %s', id, error) }
       try { acp.endOmpSession?.(id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
       catch (error) { rt.warn('omni-ui: omp Session %s could not be ended: %s', id, error) }
     }
@@ -107,31 +118,37 @@ export function install(rt) {
     const on = patch.nativeTools
     if (typeof on !== 'boolean') throw Object.assign(new Error('Native tools must be true or false.'), { code: 'bot/invalid' })
     if (bot === undefined) throw refusal('Unknown Bot')
+    // ON is for the agent the Bot runs on when it is asked, and only for that agent.
+    const mark = effectiveMarkOf(bot)
     if (on) {
+      if (!NATIVE_AGENTS.includes(mark)) throw refusal("Native tools are not offered for this Bot's agent.")
       const block = await saveBlock(bot) ?? policyBlock(bot)
       if (block !== undefined) throw refusal(NATIVE_TOOLS_BLOCK_TEXT[block])
-      if (rt.botOf(id) !== bot) throw refusal('The Bot team changed. Try again.')
+      if (rt.botOf(id) !== bot || effectiveMarkOf(bot) !== mark) throw refusal('The Bot team changed. Try again.')
     }
-    const previous = bot.nativeTools
-    const kept = bot.nativeToolsKept
-    if ((previous === true) === on && kept === undefined && !pending.has(bot)) return bot
+    // An ON saved for another agent is not ON here: turning it on writes this agent.
+    const previous = on ? nativeToolsOn(bot) : bot.nativeTools === true
+    const saved = { nativeTools: bot.nativeTools, nativeToolsAgent: bot.nativeToolsAgent, nativeToolsKept: bot.nativeToolsKept }
+    const untagged = saved.nativeToolsKept === undefined && (on || saved.nativeToolsAgent === undefined)
+    if (previous === on && untagged && !pending.has(bot)) return bot
     const change = {}
     pending.set(bot, change)
     if (!on) {
       delete bot.nativeTools
+      delete bot.nativeToolsAgent
       delete bot.nativeToolsKept
       endNativeTools(bot)
     }
     try {
-      await rt.save({ required: true, ...(on ? { enableNativeTools: bot } : {}) })
+      await rt.save({ required: true, ...(on ? { enableNativeTools: bot, nativeToolsAgent: mark } : {}) })
       if (on && pending.get(bot) === change && rt.botOf(id) === bot) {
         bot.nativeTools = true
+        bot.nativeToolsAgent = mark
         delete bot.nativeToolsKept
       }
     } catch (error) {
       if (!on && pending.get(bot) === change) {
-        if (previous !== undefined) bot.nativeTools = previous
-        if (kept !== undefined) bot.nativeToolsKept = kept
+        for (const [key, value] of Object.entries(saved)) if (value !== undefined) bot[key] = value
       }
       throw error
     } finally {
@@ -142,6 +159,6 @@ export function install(rt) {
 
   Object.assign(rt, {
     setNativeTools, endNativeTools, nativeToolsBlock, nativeToolsEligible,
-    nativeToolsFor: sessionId => nativeToolsEligible(sessionId) && ownChatBot(sessionId)?.nativeTools === true,
+    nativeToolsFor: sessionId => nativeToolsEligible(sessionId) && nativeToolsOn(ownChatBot(sessionId)),
   })
 }

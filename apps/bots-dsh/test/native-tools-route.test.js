@@ -197,7 +197,8 @@ test('first owner turn in a fresh direct chat gets native tools from saved ON', 
   assert.deepEqual(h.w.executed, [])
   await chat.turn('second owner turn')
   assert.equal(h.w.events('new-session').length, 1)
-  assert.equal(reads, 2)
+  // #1564 PR B (B2-1 (2)): the identity's agent tag reads the saved ON as well, once per read.
+  assert.equal(reads, 4)
 })
 
 async function botFresh(t, h) {

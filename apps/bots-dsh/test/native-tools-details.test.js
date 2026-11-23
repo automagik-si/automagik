@@ -52,7 +52,8 @@ test('Details uses a Claude-only switch with the Read only reason and the normal
   const bot = { id: 'a', model: 'acp-claude/default' }
   const actions = { updateBot: (id, patch) => { updates.push([id, { ...patch }]) } }
   const render = (patch = {}) => row({ bot: { ...bot, ...patch }, roster, actions, run: () => {} })
-  assert.equal(render({ model: 'acp-codex/default' }), null)
+  // #1564 PR B: a Codex Bot now has the row, with Codex's own hint.
+  assert.equal(render({ model: 'acp-codex/default' }).props.hint, "Codex uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.")
   assert.equal(render({ nativeToolsBlock: 'multiuser' }), null)
   assert.equal(render().props.on, false)
   assert.equal(render().props.hint, "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.")

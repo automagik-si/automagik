@@ -22,8 +22,9 @@ async function host(t, { saved = true } = {}) {
   writeFileSync(path, JSON.stringify({
     version: 2, revision: 0, nativeToolsOmpKept: true, mainBotIds: ['a'],
     bots: {
-      a: { id: 'a', sessionId: 'ada', name: 'Ada', model: OMP + '/default', createdAt: 1, ...(saved ? { nativeTools: true } : {}), segments: [{ sessionId: 'old-a' }, { sessionId: 'off-a' }] },
-      b: { id: 'b', sessionId: 'ben', name: 'Ben', model: OMP + '/default', createdAt: 2, nativeTools: true },
+      // #1564 PR B (B2-1 (1)): a saved ON names its agent; an untagged one is Claude's.
+      a: { id: 'a', sessionId: 'ada', name: 'Ada', model: OMP + '/default', createdAt: 1, ...(saved ? { nativeTools: true, nativeToolsAgent: OMP } : {}), segments: [{ sessionId: 'old-a' }, { sessionId: 'off-a' }] },
+      b: { id: 'b', sessionId: 'ben', name: 'Ben', model: OMP + '/default', createdAt: 2, nativeTools: true, nativeToolsAgent: OMP },
     },
   }))
   const active = new Map()
@@ -116,8 +117,10 @@ test('two owner turns at Manual share one ON child without rereading the switch 
   assert.deepEqual(first.args, ['acp'])
   assert.deepEqual(first.servers, [])
   assert.equal(second.pid, first.pid)
-  assert.equal(readsAtStart, 2)
-  assert.equal(reads, readsAtStart)
+  // #1564 PR B (B2-1 (2)): each identity read of the agent tag reads the saved ON too, and
+  // a reused child's eligibility now compares that tag.
+  assert.equal(readsAtStart, 4)
+  assert.equal(reads, readsAtStart + 1)
 })
 
 test('a real scheduled delivery starts OFF and an owner turn replays its history ON', async t => {

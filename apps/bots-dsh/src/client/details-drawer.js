@@ -25,11 +25,12 @@ import { addStrings, t } from './i18n.js'
 import { nativeToolsCopy, nativeToolsZh, ompNativeToolsCopy } from './native-tools-copy.js'
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
-import { markOf as permissionMarkOf } from '../shared/permission-levels.js'
+import { effectiveMarkOf, NATIVE_AGENTS, nativeToolsOn } from '../shared/native-tools.js'
 
 addStrings(nativeToolsZh)
 
 const NATIVE_TOOLS_HINTS = {
+  'model-kept': nativeToolsCopy.modelKept,
   managed: 'Not available for a Bot that operates Omni or that another plugin manages.',
   shared: 'Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.',
   restricted: 'Not available while this Bot has shell access off or denied tools.',
@@ -38,11 +39,13 @@ const NATIVE_TOOLS_HINTS = {
 }
 
 export function NativeToolsRow({ bot, roster, run, actions }) {
-  const mark = permissionMarkOf(bot.model ?? bot.appliedModel)
-  if ((mark !== 'acp-claude' && mark !== 'acp-omp') || bot.nativeToolsBlock === 'multiuser') return null
-  const copy = mark === 'acp-omp' ? ompNativeToolsCopy : nativeToolsCopy
+  const mark = effectiveMarkOf(bot)
+  if (!NATIVE_AGENTS.includes(mark) || bot.nativeToolsBlock === 'multiuser') return null
+  const copy = mark === 'acp-omp' ? ompNativeToolsCopy
+    : mark === 'acp-codex' ? { on: nativeToolsCopy.codexOn, off: nativeToolsCopy.codexOff } : nativeToolsCopy
   const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock]
-  const on = blocked === undefined && bot.nativeTools === true && (bot.nativeToolsKept === undefined || bot.nativeToolsKept === mark)
+  // A Codex model the switch never applies to (`model-kept`) shows OFF and locked: no OFF promise.
+  const on = blocked === undefined && nativeToolsOn(bot)
   const hint = blocked === undefined ? t(on ? copy.on : copy.off)
     : mark === 'acp-omp' ? `${t(blocked)} ${t(ompNativeToolsCopy.blocked)}` : t(blocked)
   return h(SwitchRow, {
