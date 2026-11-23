@@ -914,9 +914,9 @@ const NATIVE_TEAM = {
   }])),
 }
 
-async function nativeSetup(t, schedule = scheduleService()) {
+async function nativeSetup(t, schedule = scheduleService(), services = {}) {
   const sandboxPolicy = { defaultMode: 'workspace-write', resolve: () => ({ mode: 'workspace-write' }) }
-  const { ctx, home, rt, call } = setup({ schedule, sandboxPolicy }, NATIVE_TEAM)
+  const { ctx, home, rt, call } = setup({ schedule, sandboxPolicy, ...services }, NATIVE_TEAM)
   t.after(async () => {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
@@ -958,7 +958,7 @@ test('S-b only one Bot behind the new tasks: the firing follows that Bot, and it
 })
 
 test('S-c one task with two Bots has no owner; the destination and unknown Sessions do not vote', async (t) => {
-  const { rt, schedule, drive } = await nativeSetup(t)
+  const { ctx, rt, schedule, drive, call } = await nativeSetup(t)
   const both = await freshTask(schedule, 'w2')
   for (const involved of [['w2', 'm1'], ['m1', 'w2']]) {
     schedule.tasks.get(both.id).involvedSessionIds = involved
@@ -970,6 +970,12 @@ test('S-c one task with two Bots has no owner; the destination and unknown Sessi
   schedule.tasks.get(both.id).involvedSessionIds = ['w1']
   assert.equal(await drive('fresh-3'), 'w1')
   assert.equal(rt.nativeToolsFor('fresh-3'), true)
+  // A deleted Bot's Sessions do not vote: the task follows the one Bot left.
+  ctx.workspaceRegistry = { archiveSession: async () => {} }
+  const deleted = await call('delete-bot', { id: 'w1' })
+  assert.equal(deleted.ok, true, JSON.stringify(deleted))
+  schedule.tasks.get(both.id).involvedSessionIds = ['w2', 'm1', 'w1']
+  assert.equal(await drive('fresh-4'), 'm1')
 })
 
 test('S-d an exact task decides: a new_once reservation, and a re-drive of a last delivery', async (t) => {
@@ -988,7 +994,7 @@ test('S-d an exact task decides: a new_once reservation, and a re-drive of a las
 })
 
 test('S-e a failed lookup or a task with no Bot leaves no owner, and the delivery still runs', async (t) => {
-  const { rt, schedule, drive } = await nativeSetup(t)
+  const { ctx, rt, schedule, drive } = await nativeSetup(t)
   const warns = []
   t.mock.method(rt, 'warn', (...args) => { warns.push(args) })
   await freshTask(schedule, 'w2')
@@ -1010,6 +1016,84 @@ test('S-e a failed lookup or a task with no Bot leaves no owner, and the deliver
   assert.equal(await drive('fresh-3'), undefined)
   rt.selfOf = selfOf
   assert.equal(await drive('fresh-4'), 'w1')
+  // A subagent child whose durable header cannot be read may be another Bot's: no owner.
+  ctx.sessionPersistence = {
+    stat: async id => {
+      if (id === 'child-unread') throw new Error('header unavailable')
+      if (id !== 'child-read') return undefined
+      return { header: { origin: 'subagent', parentSession: 'w2' } }
+    },
+  }
+  mine.involvedSessionIds = ['w2', 'child-read']
+  assert.equal(await drive('fresh-5'), 'w1')
+  mine.involvedSessionIds = ['w2', 'child-unread']
+  assert.equal(await drive('fresh-6'), undefined)
+  assert.equal(rt.nativeToolsFor('fresh-6'), false)
+  assert.ok(warns.some(([format, id]) =>
+    /native tools stay off in scheduled Session/.test(format) && id === 'fresh-6'))
+})
+
+// ED-1: a re-drive decides the owner again, but until it has, an OFF or a close still reaches the
+// Session's running native turn. The owner is never read from the earlier drive.
+test('ED-1 an OFF while a re-drive looks up its task ends the running native turn', async (t) => {
+  const ended = []
+  const acpAgents = {
+    endNative: (id) => { ended.push(['native', id]) },
+    endOmpSession: (id) => { ended.push(['omp', id]) },
+  }
+  const { ctx, rt, schedule, guard, drive, call } =
+    await nativeSetup(t, scheduleService(), { acpAgents })
+  await freshTask(schedule, 'w2')
+  assert.equal(await drive('fresh-1'), 'w1')
+  const catalog = schedule.catalog
+  let reached
+  let release
+  const looking = new Promise(resolve => { reached = resolve })
+  const held = new Promise(resolve => { release = resolve })
+  schedule.catalog = async () => {
+    reached()
+    await held
+    return catalog.call(schedule)
+  }
+  const redrive = guard('fresh-1', async () => 'ran')
+  await looking
+  assert.equal(rt.scheduledNativeOwner('fresh-1'), undefined)
+  assert.equal(rt.nativeToolsFor('fresh-1'), false)
+  await rt.setNativeTools('w1', { nativeTools: false })
+  assert.deepEqual(ended.filter(([, id]) => id === 'fresh-1'),
+    [['native', 'fresh-1'], ['omp', 'fresh-1']])
+  // A second Bot's task makes the re-drive end with no owner: nothing is left for the end walk.
+  await freshTask(schedule, 'm1', 'Other')
+  release()
+  assert.equal(await redrive, 'ran')
+  schedule.catalog = catalog
+  assert.equal(rt.scheduledNativeOwner('fresh-1'), undefined)
+  assert.deepEqual(rt.scheduledNativeSessions('w1'), [])
+
+  // A re-drive held before its lookup keeps the Session for the end walk only, until it closes.
+  schedule.tasks.clear()
+  await freshTask(schedule, 'w2')
+  assert.equal(await drive('fresh-2'), 'w1')
+  assert.equal(await drive('fresh-3'), 'w1')
+  const hold = rt.multiuserHold
+  rt.multiuserHold = () => true
+  schedule.catalog = async () => { throw new Error('store unavailable') }
+  for (const id of ['fresh-2', 'fresh-3']) {
+    await assert.rejects(guard(id, async () => 'ran'), /multiuser Bot hold/)
+  }
+  schedule.catalog = catalog
+  rt.multiuserHold = hold
+  assert.equal(rt.scheduledNativeOwner('fresh-2'), undefined)
+  assert.deepEqual(rt.scheduledNativeSessions('w1'), ['fresh-2', 'fresh-3'])
+  ended.length = 0
+  ctx.emit('session/disposed', { id: 'fresh-2' })
+  assert.deepEqual(ended, [['native', 'fresh-2'], ['omp', 'fresh-2']])
+  assert.deepEqual(rt.scheduledNativeSessions('w1'), ['fresh-3'])
+  ctx.workspaceRegistry = { archiveSession: async () => {} }
+  const deleted = await call('delete-bot', { id: 'w1' })
+  assert.equal(deleted.ok, true, JSON.stringify(deleted))
+  assert.ok(ended.some(([, id]) => id === 'fresh-3'))
+  assert.deepEqual(rt.scheduledNativeSessions('w1'), [])
 })
 
 // E3-3: no idle native process of a closed scheduled Session survives its map entry.

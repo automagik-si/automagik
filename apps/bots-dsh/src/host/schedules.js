@@ -299,8 +299,9 @@ export function install(rt) {
 
   // The durable header of a Session: the live registry first, then DSH's persisted copy.
   // The live registry only holds Sessions that are loaded, so a subagent child that ended,
-  // or a team loaded after a restart before the child reopened, would be missed.
-  const headerOf = async (sessionId) => {
+  // or a team loaded after a restart before the child reopened, would be missed. A strict
+  // read throws when the persisted copy cannot be read, instead of answering "no header".
+  const headerOf = async (sessionId, { strict = false } = {}) => {
     const live = ctx.sessions?.get?.(sessionId)?.header
     if (live !== undefined) return live
     // The optional store needs an explicit lookup; test contexts may only expose a property.
@@ -310,14 +311,15 @@ export function install(rt) {
       if (persistence === undefined) persistence = ctx.sessionPersistence
       if (typeof persistence?.stat !== 'function') return undefined
       return (await persistence.stat(sessionId))?.header
-    } catch {
+    } catch (error) {
+      if (strict) throw error
       return undefined
     }
   }
   // The Bot an involved Session speaks for: its own chat, a group Session, an earlier part,
   // a task run, or a subagent child (through its parent lineage). DSH records every Session
   // involved in a task, the creating one included.
-  const lineageOf = async (sessionId, { recorded = false } = {}) => {
+  const lineageOf = async (sessionId, { recorded = false, strict = false } = {}) => {
     let current = sessionId
     const ids = []
     for (let depth = 0; typeof current === 'string' && current !== '' && depth < 32; depth += 1) {
@@ -334,7 +336,7 @@ export function install(rt) {
         const id = rt.recordedBotOf?.(current)
         if (id !== undefined) return { bot: { id }, ids }
       }
-      const header = await headerOf(current)
+      const header = await headerOf(current, { strict })
       if (header?.origin !== 'subagent' || header.parentSession === undefined) return { ids }
       current = header.parentSession
     }
@@ -671,11 +673,17 @@ export function install(rt) {
   // leaves no owner, and the Session runs without native tools. The map holds an owner, never a
   // switch.
   const nativeOwners = new Map()
+  // A re-drive decides its owner again from nothing, but the turn an earlier drive started may
+  // still be running: until the lookup settles, the earlier owner's OFF, a close and a Bot delete
+  // still end it. Only the end walk reads this map, never the owner a turn runs with.
+  const redriving = new Map()
+  // An involved Session whose header cannot be read may be another Bot's subagent child, so the
+  // lookup fails (no owner) rather than letting it not vote.
   const entryBotOf = async (entry, sessionId) => {
     let owner
     for (const id of entry.involvedSessionIds ?? []) {
       if (id === sessionId) continue
-      const { bot } = await lineageOf(id)
+      const { bot } = await lineageOf(id, { strict: true })
       if (typeof bot?.id !== 'string') continue
       if (owner !== undefined && owner !== bot.id) return undefined
       owner = bot.id
@@ -707,18 +715,23 @@ export function install(rt) {
       nativeOwners.delete(sessionId)
       try { rt.warn('ds-bot: native tools stay off in scheduled Session %s: %s', sessionId, error) }
       catch {}
+    } finally {
+      redriving.delete(sessionId)
     }
   }
-  // Ends the native process of a fresh scheduled Session before it leaves the map, so a later OFF
-  // never misses one.
+  // Ends the native process of a fresh scheduled Session before it leaves the maps, so a later
+  // OFF never misses one.
   const dropNativeOwner = (sessionId) => {
-    if (!nativeOwners.has(sessionId)) return
+    if (!nativeOwners.has(sessionId) && !redriving.has(sessionId)) return
     try { rt.endNativeSession?.(sessionId) }
-    finally { nativeOwners.delete(sessionId) }
+    finally {
+      nativeOwners.delete(sessionId)
+      redriving.delete(sessionId)
+    }
   }
   rt.scheduledNativeOwner = sessionId => nativeOwners.get(sessionId)
-  rt.scheduledNativeSessions = botId =>
-    [...nativeOwners].filter(([, owner]) => owner === botId).map(([id]) => id)
+  rt.scheduledNativeSessions = botId => [...new Set([...nativeOwners, ...redriving]
+    .filter(([, owner]) => owner === botId).map(([id]) => id))]
   ctx.on('session/disposed', session => {
     if (typeof session?.id === 'string') dropNativeOwner(session.id)
   })
@@ -728,14 +741,20 @@ export function install(rt) {
       for (const id of rt.scheduledNativeSessions(botId)) dropNativeOwner(id)
     })
   }
-  ctx.effect(() => () => nativeOwners.clear(), 'ds-bot: scheduled native owners')
+  ctx.effect(() => () => {
+    nativeOwners.clear()
+    redriving.clear()
+  }, 'ds-bot: scheduled native owners')
 
   // Check deliveries throughout the rollback hold, including Run now and receipt recovery.
   // Outside the hold, guard unbound Sessions through the first sweep and any failed pause.
   // DSH drives deliveries through this waterfall, before the prompt runs. It must never
   // await a management write: that would queue behind the delivery's own serialized drive.
   ctx.on('schedule/resolve-agent', async (sessionId, next) => {
-    nativeOwners.delete(sessionId)
+    if (nativeOwners.has(sessionId)) {
+      redriving.set(sessionId, nativeOwners.get(sessionId))
+      nativeOwners.delete(sessionId)
+    }
     const holding = rt.multiuserHold?.() === true
     if (holding || !swept || stuck.size > 0) {
       if (!holding && await botOfTaskSession(sessionId) !== undefined) {
