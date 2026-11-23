@@ -310,6 +310,15 @@ export function install(rt) {
     } finally { leave() }
   }
 
+  // The level a Bot the person makes stores (no creator, no existing Session), verbatim:
+  // undefined keeps the existing unset representation when the profile already starts at
+  // Workspace; an override is stored when the person's default differs from it. Not
+  // rt.newBotPermission() (permissions.js), the display value, which is never undefined.
+  function newBotStoredPermission() {
+    const personDefault = rt.newBotPermission?.()
+    return state.prefs.permission ?? (personDefault !== rt.permissionCatalog?.()?.defaultPreset ? personDefault : undefined)
+  }
+
   async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }, readScopeSource) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
@@ -368,10 +377,7 @@ export function install(rt) {
       rt.assertOwnToolsModel?.({}, { next: modelRef, denyTools: denied },
         { text: carried.includes('acp_tool') ? OWN_TOOLS_CREATE_TEXT : OWN_TOOLS_MODEL_TEXT })
     }
-    // Keep the existing unset representation when the profile already starts at
-    // Workspace; store an override when the person's default differs from it.
-    const personDefault = rt.newBotPermission?.()
-    const personPermission = state.prefs.permission ?? (personDefault !== rt.permissionCatalog?.()?.defaultPreset ? personDefault : undefined)
+    const personPermission = newBotStoredPermission()
     const permission = existingSessionId !== undefined ? undefined
       : creator !== undefined ? rt.inheritedPermission(creator, opener) ?? state.prefs.permission
         : personPermission
@@ -1824,7 +1830,7 @@ export function install(rt) {
       const bot = rt.botOf(id)
       return bot === undefined ? 'Unknown Bot' : nameRefusal(bot, String(name).trim().slice(0, 40))
     },
-    ensureWorkspace, keepTeamFolder, createSession, createBot, duplicateBot, updateBot, setFlags,
+    ensureWorkspace, keepTeamFolder, createSession, createBot, newBotStoredPermission, duplicateBot, updateBot, setFlags,
     saveSection, reorderSections, deleteSection,
     roomBusy, autoRoomName, retitleRoom, createRoom, updateRoom, deleteRoom,
     setMain, deleteBot, beforeBotDelete, bootstrap, releaseKickoff, greetingOut, holdKickoffAgain, userWrote, userAnswered,

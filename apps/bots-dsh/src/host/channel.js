@@ -152,7 +152,11 @@ export function install(rt) {
   // Models come from DSH, not state.json, so a provider added in Harness settings
   // changes the view without a new revision. So do the permission presets DSH offers and
   // the Bots and groups whose Auto runs as workspace-write (permissions.js).
-  const modelsKey = () => [
+  // Per served model ref, the native-tools block a Bot the person makes there now reads (null:
+  // none), for the New Solver dialog's tick (RFC 0048). Read only, never stored; built once per
+  // answer for both the comparison and the view.
+  const nativeToolsNewMap = () => Object.fromEntries(rt.cachedCatalog().map(entry => [entry.ref, rt.nativeToolsNewBotBlock(entry.ref) ?? null]))
+  const modelsKey = (newBlocks = nativeToolsNewMap()) => [
     rt.cachedCatalog().map(entry => [
       entry.ref, entry.needsKey ? '!' : '', entry.needsSignIn ? '?' : '',
       entry.needsAccount ? '~' : '', entry.covered ? '=' : '',
@@ -171,8 +175,10 @@ export function install(rt) {
       const running = runningOf(bot)
       return running.runningModel === undefined ? '' : `${bot.id}=${running.runningModel}:${running.runningEffort ?? ''}`
     }).join(','),
+    // Only the blocked refs: a flip between none and a block adds or removes an entry.
+    Object.entries(newBlocks).filter(([, block]) => block !== null).map(([ref, block]) => `${ref}=${block}`).join(','),
   ].join('|')
-  const view = roles => ({
+  const view = (roles, newBlocks = nativeToolsNewMap()) => ({
     revision: state.revision,
     workspaceId: state.workspaceId ?? null,
     // `mainBotId` is the first Main Bot, which the sidebar shows as its tile.
@@ -244,7 +250,8 @@ export function install(rt) {
     backgroundModel: rt.cachedBackground?.() ?? null,
     permissions: rt.permissionCatalog?.() ?? null,
     newBotPermission: rt.newBotPermission?.() ?? null,
-    modelsKey: modelsKey(),
+    nativeToolsNew: newBlocks,
+    modelsKey: modelsKey(newBlocks),
     prefs: state.prefs,
     roles,
     // Whether a Desktop window should serve Bot browser reads (see browser.js).
@@ -640,11 +647,12 @@ export function install(rt) {
           const roles = await rt.roleRecordsView()
           await rt.prepareLearning()
           const answer = liveAnswer(roles)
-          if (body.since === state.revision && (body.models === undefined || body.models === modelsKey())) {
+          const newBlocks = nativeToolsNewMap()
+          if (body.since === state.revision && (body.models === undefined || body.models === modelsKey(newBlocks))) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })
             return ok({ revision: state.revision, unchanged: true, liveKey: answer.key, ...answer.value })
           }
-          return ok({ ...view(roles), liveKey: answer.key, ...answer.value })
+          return ok({ ...view(roles, newBlocks), liveKey: answer.key, ...answer.value })
         }
         case 'models':
           await rt.refreshHostModels?.()
