@@ -184,8 +184,12 @@ export const AGENTS = Object.freeze({
   // Agents whose CLI is itself an ACP server (#959): `launch` is how it starts (kind `native`,
   // the CLI with these arguments), and there is no adapter package, so nothing is installed for
   // them. With no `cliPackage`, Automagik never installs these CLIs either: one that is not on
-  // this computer is shown with its install page. Their sign-in is the CLI's own, made in a
-  // terminal (`signInHint`, the command a signed-out turn names); whether it holds is what the
+  // this computer is shown with its install page. The one exception is a row that names a
+  // manual `cliInstall` (Antigravity, #2048): its CLI installs only when the person clicks
+  // Install, from its vendor's release manifest (checked against the manifest's sha512; the
+  // manifest has no signature, agy-source.js), and then updates itself. Their sign-in is the
+  // CLI's own, made in a terminal (`signInHint`, the command a signed-out turn names; for a copy
+  // Automagik installed, its absolute path, signInHintOf); whether it holds is what the
   // agent's own ACP session says (catalog.js `signedIn`), since none of the three has a status
   // command that names one sign-in. They are off until the person turns one on, which is their
   // word that Automagik may use the sign-in that CLI has on this computer (index.js).
@@ -215,7 +219,12 @@ export const AGENTS = Object.freeze({
     defaultName: 'Antigravity',
     fallback: Object.freeze([Object.freeze({ id: 'default', name: 'Antigravity', reasoning: efforts('low', 'medium', 'high') })]),
     cli: 'agy',
-    installUrl: 'https://antigravity.google/docs',
+    // Only the fallback when the app's own install fails: Install is the app's (`cliInstall`).
+    installUrl: 'https://antigravity.google/docs/getting-started',
+    // Installed on the person's click only, from Google's release manifest (agy-source.js),
+    // into acp/clis/agy; never on a timer, a plugin change or a switch. No update: it updates
+    // itself.
+    cliInstall: Object.freeze({ kind: 'manifest', id: 'agy', manual: true }),
     // `agy acp` (its help: "Start the Agent Client Protocol (ACP) stdio server").
     launch: Object.freeze({ kind: 'native', args: Object.freeze(['acp']) }),
     // `agy acp --login`: "Log in with Google interactively, then exit (ACP terminal auth)".
@@ -241,6 +250,40 @@ export const AGENTS = Object.freeze({
 
 /** Whether `spec`'s CLI is itself the ACP server: no adapter package, nothing to install. */
 export const isNative = spec => spec?.launch?.kind === 'native'
+
+/**
+ * The id of the CLI Automagik installs for `spec`, or undefined when it installs none: the npm
+ * package (`cliPackage`) or a manual install's own id (`cliInstall.id`, `agy`). Both share the
+ * `acp/clis` folder names and the CLI store's failure keys, so an id is never also a package.
+ */
+export const cliIdOf = spec => spec?.cliPackage ?? spec?.cliInstall?.id
+
+const TRAVERSAL = /(^|[\\/])\.\.([\\/]|$)/
+// Inside POSIX single quotes everything is literal but the quote itself; a backtick would also
+// end the chat's code span (adapter.js). PowerShell also takes the typographic double quotes.
+const POSIX_UNSAFE = /['`\p{Cc}]/u
+const WIN32_UNSAFE = /["`$\u201C\u201D\u201E\p{Cc}]/u
+
+/**
+ * The terminal command that signs in to `spec`'s CLI, as shown (never run): for a copy
+ * Automagik installed itself (a manual `cliInstall`), which is not on PATH, its absolute path,
+ * quoted for the shell the person pastes it into, with the static hint's arguments. Otherwise,
+ * or when the path holds what that quoting cannot carry, the static `signInHint`.
+ * @param {object} spec an entry of AGENTS
+ * @param {{ path?: string, managed?: boolean } | undefined} detail the CLI as discovery found it
+ */
+export function signInHintOf(spec, detail, platform = process.platform) {
+  const hint = spec?.signInHint
+  if (typeof hint !== 'string' || spec.cliInstall?.manual !== true) return hint
+  const path = detail?.managed === true ? detail.path : undefined
+  if (typeof path !== 'string' || path.length > 4000 || TRAVERSAL.test(path)) return hint
+  if (!hint.startsWith(`${spec.cli} `)) return hint
+  const args = hint.slice(spec.cli.length + 1)
+  if (platform === 'win32') {
+    return /^[A-Za-z]:\\/.test(path) && !WIN32_UNSAFE.test(path) ? `& "${path}" ${args}` : hint
+  }
+  return path.startsWith('/') && !POSIX_UNSAFE.test(path) ? `'${path}' ${args}` : hint
+}
 
 /**
  * How an agent is started, of either kind: { command, args, env, ready, version?, key }.

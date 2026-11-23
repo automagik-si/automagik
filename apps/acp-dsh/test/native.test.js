@@ -12,7 +12,7 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { apply, Config, flagOf, SERVICE } from '../index.js'
 import { MODEL_STATE, withModels } from '../src/host/acp.js'
 import { AcpAdapter, NOTICE_KIND, promptOf } from '../src/host/adapter.js'
-import { AGENTS, isNative, launchOf } from '../src/host/agents.js'
+import { AGENTS, cliIdOf, isNative, launchOf } from '../src/host/agents.js'
 import { Catalog } from '../src/host/catalog.js'
 import { MODEL_ACCESS_REQUIRED } from '../src/host/names.js'
 import { assertLoadable, eventsOf } from './support/bridge-host.js'
@@ -150,8 +150,8 @@ test('a native agent that is not installed is listed with its install page, neve
   // A desktop CLI store: it must never be asked about a CLI Automagik does not install.
   const mine = (what, pkg) => assert.notEqual(pkg, undefined, `the CLI store was asked to ${what} a CLI Automagik does not install`)
   const cliStore = {
-    find: (spec) => { mine('find', spec.cliPackage); return undefined },
-    ensure: (spec) => { mine('install', spec.cliPackage); return Promise.resolve() },
+    find: (spec) => { mine('find', cliIdOf(spec)); return undefined },
+    ensure: (spec) => { mine('install', cliIdOf(spec)); return Promise.resolve() },
     busy: (pkg) => { mine('watch', pkg); return false },
     lastFailure: (pkg) => { mine('report', pkg); return undefined },
     lastError: () => undefined,

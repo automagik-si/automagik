@@ -19,7 +19,7 @@ import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
 import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js'
 import { AcpAdapter, aside, BRIDGE_PATH, SIDE_MODEL } from './src/host/adapter.js'
-import { AGENTS, findCommand, isNative, launchOf, signedInOf } from './src/host/agents.js'
+import { AGENTS, cliIdOf, findCommand, isNative, launchOf, signedInOf, signInHintOf } from './src/host/agents.js'
 import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
@@ -504,7 +504,8 @@ export function apply(ctx, config = {}, {
     // with the models it never applies to (adapter.js nativeKept).
     ...(spec.nativeSwitch ? { nativeSwitch: spec.nativeSwitch } : {}),
     ...(spec.nativeKeptModels ? { nativeKeptModels: spec.nativeKeptModels } : {}),
-    ...(typeof spec.signInHint === 'string' ? { signInHint: spec.signInHint } : {}),
+    // A copy Automagik installed (Antigravity) is not on PATH: the command names its path.
+    ...(typeof spec.signInHint === 'string' ? { signInHint: signInHintOf(spec, cliDetails.get(id)) } : {}),
     ...(spec.modeFor === undefined ? { levelNotice: true } : {}),
     cli,
     // The agent's own models and efforts, read from the adapter release installed now.
@@ -616,8 +617,11 @@ export function apply(ctx, config = {}, {
     const added = []
     for (const [id, spec] of Object.entries(AGENTS)) {
       const external = find(spec.cli)
-      // Only a CLI Automagik installs itself (`cliPackage`) can have a managed copy.
-      const detail = (spec.cliPackage === undefined ? undefined : cliStore?.find(spec, external)) ?? (external ? { path: external, managed: false } : undefined)
+      // An install a hard quit left half done goes now, with no click (a manual CLI's folder).
+      if (spec.cliInstall?.manual) cliStore?.sweep?.(spec)
+      // Only a CLI Automagik installs itself (`cliPackage`, or a manual `cliInstall`) can have a
+      // managed copy.
+      const detail = (cliIdOf(spec) === undefined ? undefined : cliStore?.find(spec, external)) ?? (external ? { path: external, managed: false } : undefined)
       const cli = detail?.path
       cliDetails.set(id, detail)
       if (clis.get(id) !== cli) { signIns.delete(id); signInChecks.delete(id) }
@@ -774,16 +778,19 @@ export function apply(ctx, config = {}, {
 
   // Required desktop tools are independent of model switches and onboarding. Installing
   // them never starts authentication; the existing explicit refresh owns sign-in checks.
-  const ensureCli = (spec, { force = false } = {}) => {
-    // Only a CLI with an official package (`cliPackage`) is Automagik's to install.
-    if (!cliStore || disposed || spec.cliPackage === undefined) return Promise.resolve()
-    return cliStore.ensure(spec, find(spec.cli), { force }).then(() => {
+  const ensureCli = (spec, { force = false, click = false } = {}) => {
+    // Only a CLI with an official package (`cliPackage`) or a manual install (`cliInstall`) is
+    // Automagik's to install, and a manual one only on the person's click (installCli): the
+    // start, the 15 min check, a plugin install, a switch, Retry and refresh never reach it.
+    if (!cliStore || disposed || cliIdOf(spec) === undefined) return Promise.resolve()
+    if (spec.cliInstall?.manual && click !== true) return Promise.resolve()
+    return cliStore.ensure(spec, find(spec.cli), { force, click }).then(() => {
       if (!disposed) reconcile()
     }, () => {
       if (!disposed) {
         // Discovery may have found a newer verified local copy before the registry failed.
         reconcile()
-        warn(ctx, `${spec.defaultName} update check failed: ${cliStore.lastError?.(spec.cliPackage) ?? 'the install failed'}`)
+        warn(ctx, `${spec.defaultName} update check failed: ${cliStore.lastError?.(cliIdOf(spec)) ?? 'the install failed'}`)
       }
     })
   }
@@ -813,9 +820,11 @@ export function apply(ctx, config = {}, {
     const failure = installFailure ?? (native ? undefined : recordWaits.get(spec.adapter))
     const connectorState = native ? undefined : store.stateOf?.(spec.adapter)
     // Only a CLI Automagik installs itself has an install to report; any other is found or missing.
-    const managed = cliStore !== undefined && spec.cliPackage !== undefined
-    const cliFailure = managed ? cliStore.lastFailure(spec.cliPackage) : undefined
-    const cliBusy = managed && cliStore.busy(spec.cliPackage) === true
+    const managed = cliStore !== undefined && cliIdOf(spec) !== undefined
+    // A manual one (Antigravity) installs on the person's click only: missing until then.
+    const manual = managed && spec.cliInstall?.manual === true
+    const cliFailure = managed ? cliStore.lastFailure(cliIdOf(spec)) : undefined
+    const cliBusy = managed && cliStore.busy(cliIdOf(spec)) === true
     const detail = cliDetails.get(id)
     // A connector being reinstalled (Retry, or a start that showed it damaged) is installing:
     // the settings page says so and follows it until it is back.
@@ -839,8 +848,9 @@ export function apply(ctx, config = {}, {
       cli: {
         found: cli !== undefined, installUrl: spec.installUrl,
         // How the person signs in to a CLI that has no sign-in in the app: its terminal command.
-        ...(typeof spec.signInHint === 'string' ? { signInHint: spec.signInHint } : {}),
-        state: cli ? 'ready' : cliBusy || (managed && !cliFailure) ? 'installing' : cliFailure ? 'failed' : 'missing',
+        ...(typeof spec.signInHint === 'string' ? { signInHint: signInHintOf(spec, detail) } : {}),
+        state: cli ? 'ready' : cliBusy || (managed && !manual && !cliFailure) ? 'installing' : cliFailure ? 'failed' : 'missing',
+        ...(manual ? { install: 'manual' } : {}),
         managed: detail?.managed === true,
         ...(detail?.version ? { version: detail.version } : {}),
         ...(cliBusy && cli ? { updating: true } : {}),
@@ -998,6 +1008,8 @@ export function apply(ctx, config = {}, {
   // file, so the app's own restarts wait for an attempt to end.
   const attemptVersions = new Map()
   const logins = new CliLogins({
+    // The command a terminal-only sign-in names: a copy Automagik installed by its path.
+    hintOf: id => signInHintOf(AGENTS[id], cliDetails.get(id)),
     // Why an attempt failed, for the host log (#970): a fixed class, where the attempt stood,
     // the CLI's exit and its version. Never what the CLI printed, a link, a code or an account.
     onFail({ id, cause, phase, exit }) {
@@ -1687,6 +1699,23 @@ export function apply(ctx, config = {}, {
       await probeAll({ fresh: true })
       // The owner asked: the answer waits for every account read.
       await Promise.all(accountReads.values())
+      return status()
+    },
+    /**
+     * Installs a manual CLI (Antigravity) on the person's click: only while its switch is on,
+     * never one that is already here, and never an update. Answers at once, the install under
+     * way (`cli.state: 'installing'`); the agent is offered when it ends.
+     */
+    async installCli(id) {
+      const spec = AGENTS[id]
+      if (spec === undefined) throw new Error(`no ACP agent ${String(id).slice(0, 40)}`)
+      if (spec.cliInstall?.manual !== true || !cliStore) {
+        throw Object.assign(new Error(`Automagik cannot install the ${spec.defaultName} CLI here.`), { code: 'acp-install/unsupported' })
+      }
+      if (!enabled(spec)) throw Object.assign(new Error(`Turn ${spec.defaultName} on first.`), { code: 'acp-install/off' })
+      reconcile({ kick: false })
+      if (clis.get(id) !== undefined) return status()
+      void ensureCli(spec, { force: true, click: true })
       return status()
     },
     /** Retries the required CLI and its connector; answers at once without enabling a model. */

@@ -124,7 +124,7 @@ function isShortClaudeLoginUrl(value) {
 // agent of the table signs in in a terminal with its own command (`signInHint`, agents.js).
 const known = id => Object.hasOwn(AGENTS, id) && Object.hasOwn(URL_PATHS, id)
 const CHOOSE = `Choose ${Object.keys(URL_PATHS).map(id => AGENTS[id]?.defaultName).filter(Boolean).sort().join(' or ')}.`
-const terminalOnly = id => (Object.hasOwn(AGENTS, id) && typeof AGENTS[id].signInHint === 'string' ? failure('terminal', `Sign in to ${AGENTS[id].defaultName} in a terminal: run ${AGENTS[id].signInHint}, then check again.`) : undefined)
+const terminalOnly = (id, hint = AGENTS[id]?.signInHint) => (Object.hasOwn(AGENTS, id) && typeof hint === 'string' ? failure('terminal', `Sign in to ${AGENTS[id].defaultName} in a terminal: run ${hint}, then check again.`) : undefined)
 // A name for the view that opened the attempt; never an access check.
 const labelOf = value => (typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value) ? value : undefined)
 
@@ -165,8 +165,10 @@ function blockBrowser() {
  * record lets tests exercise ownership proof with a fake process.
  */
 export class CliLogins {
-  constructor({ resolve, signedIn = signedInOf, onReady = () => {}, onChange = () => {}, onActivity = () => {}, onFail = () => {}, spawn = spawnProcess, record = spawn === spawnProcess ? recordLogin : () => undefined, now = Date.now, linkTtlMs = LINK_TTL_MS, startupMs = STARTUP_MS, answerMs = ANSWER_TIMEOUT_MS, retainMs = RETAIN_MS, stateTtlMs = STATE_TTL_MS, timers = globalThis } = {}) {
+  constructor({ resolve, hintOf = id => AGENTS[id]?.signInHint, signedIn = signedInOf, onReady = () => {}, onChange = () => {}, onActivity = () => {}, onFail = () => {}, spawn = spawnProcess, record = spawn === spawnProcess ? recordLogin : () => undefined, now = Date.now, linkTtlMs = LINK_TTL_MS, startupMs = STARTUP_MS, answerMs = ANSWER_TIMEOUT_MS, retainMs = RETAIN_MS, stateTtlMs = STATE_TTL_MS, timers = globalThis } = {}) {
     this.resolve = resolve
+    // The terminal command a CLI with no sign-in here names (a managed copy's by its path).
+    this.hintOf = hintOf
     this.signedIn = signedIn
     this.onReady = onReady
     this.onChange = onChange
@@ -301,7 +303,7 @@ export class CliLogins {
    */
   start(id, { label } = {}) {
     if (this.disposed) throw failure('disposed', 'Sign-in is unavailable while Automagik restarts.')
-    if (!known(id)) throw terminalOnly(id) ?? failure('invalid', CHOOSE)
+    if (!known(id)) throw terminalOnly(id, this.hintOf(id)) ?? failure('invalid', CHOOSE)
     const previous = this.flows.get(id)
     if (previous) this.lapse(previous)
     if (previous && this.active(previous)) return this.view(previous)

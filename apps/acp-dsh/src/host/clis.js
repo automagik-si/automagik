@@ -4,11 +4,12 @@
 // the platform package's native executable directly, without writing global bins or settings.
 import { execFile, execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { batchSafe } from './batch-spawn.js'
-import { isExecutable } from './agents.js'
+import { cliIdOf, isExecutable } from './agents.js'
+import { agyPlatform, checkAgyVersion, fetchAgyManifest, installAgy, renameRetry } from './agy-source.js'
 import { CliHomes, HOME_ENV } from './cli-homes.js'
 import { AdapterStore, latestVersion, runInstall } from './install.js'
 
@@ -61,6 +62,8 @@ export function cliLayout(spec, version, platform = cliPlatform()) {
   const { platform: os, arch, musl } = platform
   const suffix = `${os}-${arch}`
   const exe = os === 'win32' ? '.exe' : ''
+  // A CLI installed from its vendor's release manifest (agy-source.js) is its one binary.
+  if (spec.cliInstall?.kind === 'manifest') return { bins: [join('bin', `${spec.cli}${exe}`)] }
   if (spec.key === 'claude') {
     const pkg = `@anthropic-ai/claude-code-${suffix}${os === 'linux' && musl ? '-musl' : ''}`
     return { pkg, dependency: version, bins: [join('node_modules', ...pkg.split('/'), `claude${exe}`)] }
@@ -90,11 +93,24 @@ export async function installCli(dir, spec, version, env, { signal, platform = c
   })
 }
 
+// Said by the store itself when anything but the person's click would install a manual CLI.
+const manualRefusal = () => Object.assign(new Error('acp-install/manual: Antigravity installs only when the person clicks Install'), { code: 'acp-install/manual' })
+
 export class CliStore extends AdapterStore {
+  /**
+   * `manifest`, `installManifest` and `manifestVersion` are the manual install's steps
+   * (agy-source.js); tests hand fakes, so no unit test reaches the network.
+   */
   constructor({ env = process.env, home = clisHome(env), latest = latestVersion,
-    install = installCli, versionOf = cliVersion, versionEnv, platform, ...options } = {}) {
+    install = installCli, versionOf = cliVersion, versionEnv, platform,
+    manifest = fetchAgyManifest, installManifest = installAgy, manifestVersion = checkAgyVersion, ...options } = {}) {
     super({ ...options, home, env, latest, install })
     this.versionOf = versionOf
+    this.manifest = manifest
+    this.installManifest = installManifest
+    this.manifestVersion = manifestVersion
+    // One token per click on Install, taken by the manual install it licenses (installFromManifest).
+    this.clicked = new Map()
     // Registry/package-manager environment stays separate. Only CLI queries use these homes.
     if (versionEnv === undefined) {
       this.versionHomes = new CliHomes(join(dirname(home), 'cli-homes'))
@@ -124,34 +140,66 @@ export class CliStore extends AdapterStore {
     return undefined
   }
 
+  // Once a managed copy exists it is preferred over the person's own, for a manual CLI too.
   find(spec, external) {
-    const selected = this.selected.get(spec.cliPackage)
+    const id = cliIdOf(spec)
+    const selected = this.selected.get(id)
     if (selected && isExecutable(selected.path) && (selected.managed || selected.path === external)) return selected
     // A restart while offline must not fall back to an older global CLI after a managed
     // upgrade. Reuse the verified managed copy until discovery can compare the user's CLI.
-    return this.binOf(spec.cliPackage, spec) ?? (external ? { path: external, managed: false } : undefined)
+    return this.binOf(id, spec) ?? (external ? { path: external, managed: false } : undefined)
   }
 
-  ensure(spec, external, { force = false } = {}) {
-    this.external.set(spec.cliPackage, external)
-    const busy = this.running.get(spec.cliPackage)
+  /**
+   * A manual CLI (`cliInstall.manual`) installs only with `click: true`, the person's click on
+   * Install: anything else is refused here, records no failure and reads no manifest.
+   */
+  ensure(spec, external, { force = false, click = false } = {}) {
+    const id = cliIdOf(spec)
+    if (spec.cliInstall?.manual === true) {
+      if (click !== true) return Promise.reject(manualRefusal())
+      const token = {}
+      if (!this.clicked.has(id)) this.clicked.set(id, new Set())
+      this.clicked.get(id).add(token)
+      return this.ensureNow(id, spec, external, force).finally(() => {
+        const tokens = this.clicked.get(id)
+        tokens?.delete(token)
+        if (tokens?.size === 0) this.clicked.delete(id)
+      })
+    }
+    return this.ensureNow(id, spec, external, force)
+  }
+
+  ensureNow(id, spec, external, force) {
+    this.external.set(id, external)
+    const busy = this.running.get(id)
     if (force && busy) {
       // A plugin update can land after this job read the registry. Its required fresh check
       // must not disappear into that old promise. Coalesce triggers into one queued check;
       // once it starts, a later trigger may queue the next without concurrent downloads.
-      const pending = this.rechecks.get(spec.cliPackage)
+      const pending = this.rechecks.get(id)
       if (pending) return pending
       const next = busy.catch(() => {}).then(() => {
-        this.rechecks.delete(spec.cliPackage)
-        return this.update(spec.cliPackage, spec, { force: true })
+        this.rechecks.delete(id)
+        return this.update(id, spec, { force: true })
       })
-      this.rechecks.set(spec.cliPackage, next)
+      this.rechecks.set(id, next)
       return next
     }
-    return this.update(spec.cliPackage, spec, { force })
+    return this.update(id, spec, { force })
+  }
+
+  /** Removes what an install killed in the middle left in this CLI's folder (no click needed). */
+  sweep(spec) {
+    const id = cliIdOf(spec)
+    if (id === undefined) return
+    const folder = join(this.home, folderOf(id))
+    if (!existsSync(folder)) return
+    try { this.dropStale(folder) } catch {}
   }
 
   async updateNow(pkg, spec, force) {
+    if (spec.cliInstall?.kind === 'manifest') return this.installFromManifest(pkg, spec)
     const existing = this.external.get(pkg)
     const selected = this.find(spec, existing)
     if (!force && selected && this.checked.get(pkg) && this.now() - this.checked.get(pkg) < CLI_CHECK_EVERY_MS) return selected
@@ -207,6 +255,66 @@ export class CliStore extends AdapterStore {
     } finally {
       this.installing.delete(tmp)
       rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+
+  /**
+   * A manual CLI's install, on the person's click only: the person's own copy, else one already
+   * published, else its vendor's release manifest, download, sha512, `--version`, then the
+   * atomic publish. It never compares versions and never updates: the CLI updates itself.
+   */
+  async installFromManifest(pkg, spec) {
+    // The click's token, taken first: no later caller of update/updateNow is licensed by it.
+    const tokens = this.clicked.get(pkg)
+    const token = tokens?.values().next().value
+    if (token === undefined) throw manualRefusal()
+    tokens.delete(token)
+    const existing = this.external.get(pkg)
+    if (existing) return { path: existing, managed: false }
+    const have = this.binOf(pkg, spec)
+    if (have) {
+      this.selected.set(pkg, have)
+      return have
+    }
+    const { signal } = this.quit
+    const key = agyPlatform(this.platform ?? {})
+    const platform = this.platform ?? cliPlatform()
+    const os = platform.platform
+    const folder = join(this.home, folderOf(pkg))
+    mkdirSync(folder, { recursive: true, mode: 0o700 })
+    this.dropStale(folder)
+    const tmp = join(folder, `.install-${process.pid}-${this.now()}-${randomUUID()}`)
+    mkdirSync(tmp, { mode: 0o700 })
+    this.installing.add(tmp)
+    const removeTree = path => rmSync(path, { recursive: true, force: true, ...(os === 'win32' ? { maxRetries: 5, retryDelay: 200 } : {}) })
+    try {
+      const manifest = await this.manifest(key, { signal })
+      if (signal.aborted) throw new Error('install stopped: DSH is quitting')
+      await this.installManifest(tmp, spec, manifest, { signal, platform: os })
+      if (signal.aborted) throw new Error('install stopped: DSH is quitting')
+      const bin = cliLayout(spec, manifest.version, platform).bins.find(bin => isExecutable(join(tmp, bin)))
+      if (!bin) throw new Error(`${spec.defaultName} installed without a runnable native binary`)
+      // The version check runs in a scratch home inside the staging folder, removed before the
+      // publish: the published folder holds only bin/.
+      const scratch = join(tmp, 'home')
+      mkdirSync(scratch, { mode: 0o700 })
+      await this.manifestVersion(join(tmp, bin), manifest.version, { signal, platform: os, scratch })
+      if (signal.aborted) throw new Error('install stopped: DSH is quitting')
+      removeTree(scratch)
+      // Another desktop profile sharing this home may have published one meanwhile: use it.
+      const concurrent = this.binOf(pkg, spec)
+      if (concurrent) {
+        this.selected.set(pkg, concurrent)
+        return concurrent
+      }
+      await renameRetry(tmp, join(folder, `${manifest.version}-${randomUUID()}`), { platform: os })
+      const found = this.binOf(pkg, spec)
+      this.selected.set(pkg, found)
+      this.log(`installed ${spec.defaultName} ${manifest.version}`)
+      return found
+    } finally {
+      this.installing.delete(tmp)
+      removeTree(tmp)
     }
   }
 
