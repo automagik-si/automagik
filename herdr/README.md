@@ -420,8 +420,15 @@ The pack replaces Herdr's `spaces` sidebar with one that draws each project's te
 space: the main bot as a card, categories as headers, captains with their members folded
 under them, planned bots dimmed with their wave. Each bot shows its character, its role and
 model, its agent's icon and its status. The rows and their clicks follow the attach ledger
-(`am whois --all`), not a pane's `bot=` label: after a relabel, a bot is drawn and focused on
-the pane the ledger binds it to (the labels draw the rows only while the CLI can't answer).
+(`am whois --all`) for the panes it names at the current session's `created_ms`: after a
+relabel, a bot is drawn and focused on the pane the ledger binds it to; in that project a bot
+it binds is never drawn from another pane's label. A live pane carrying
+`bot=` that no ledger row names at its generation — an empty answer, a bot bound on another
+machine's ledger, or a snapshot address the ledger kept bare (`wsl/t2y`) — is drawn and
+focused from its label. A replaced pane (a new session at the same address) never inherits
+the old card's status or click; its own `bot=` label may draw it as the bot whose label it
+carries. A planned bot's card stays planned, and a pane labelled with a planned bot is drawn
+as a plain agent row.
 Right-click a bot for its menu: Configure opens the edit form (name, agent, model, role,
 category, lead, worker defaults); Prompt edits its instructions in place and saves them
 as the form does; Run starts it, or focuses its pane when it has one, restarts it (Restart

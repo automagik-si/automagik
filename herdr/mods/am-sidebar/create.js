@@ -15,7 +15,7 @@
 
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Popover, Button, Scrollbar } from "gpui-base";
-import { theme, readTextFile, pickFolder, knownAgents, openOverlay, closeOverlay, spaces, panes, focused, run, home, appHome, settings, hc, notify, exec } from "herdr";
+import { theme, readTextFile, pickFolder, knownAgents, openOverlay, closeOverlay, spaces, panes, terminals, focused, run, home, appHome, settings, hc, notify, exec } from "herdr";
 import * as fs from "fs/promises";
 import { BOTS_PATH, CHARACTERS, MAX_INSTRUCTIONS, RANKS, botsText, parseBots, newBotId, applyBotEdit } from "./model.js";
 import { AGENTS, LEGACY_AGENTS, agModelsPath, configPaths, detectModel } from "./models.js";
@@ -690,7 +690,21 @@ export class BotForm {
   // props.worker is the row's rowWorker(); without it, the bot's own pane by itself.
   focusPane(cx) {
     if (this.busy) return;
-    const w = this.p.worker?.terminal ? this.p.worker : { terminal: this.p.live, botTerminal: null, name: this.p.name ?? null };
+    // #1875: the menu was drawn for one session (props.focusCreated, its generation; older
+    // callers pass only live/liveCreated). Focus only while that pane is still the same
+    // session; a reused address is another pane, so the menu closes with nothing focused.
+    const focus = this.p.focus ?? this.p.live;
+    const focusCreated = this.p.focusCreated ?? this.p.liveCreated;
+    if (focus && Number.isSafeInteger(focusCreated)) {
+      const current = (terminals() ?? []).find((t) => t?.address === focus);
+      if (!current || current.state !== "live"
+        || (Number.isSafeInteger(current.created_ms) && current.created_ms !== focusCreated)) {
+        closeOverlay(this.p.overlay);
+        cx.notify();
+        return;
+      }
+    }
+    const w = this.p.worker?.terminal ? this.p.worker : { terminal: focus, botTerminal: null, name: this.p.name ?? null };
     const plan = workerClick({ ...w, panes: panes(), spaces: spaces() });
     if (plan.kind !== "open") {
       const { command, args } = clickActionOf(w.terminal, panes());
@@ -768,8 +782,8 @@ export class BotForm {
     const project = { key: this.p.project, machine: this.machine }, bot = { id: this.p.bot };
     // The panes this bot can play: its project machine's (this computer's: a bare tN).
     const local = (x) => (typeof x === "string" && x && (this.machine ? x.startsWith(`${this.machine}/`) : !x.includes("/")) ? x : null);
-    const pane = local(this.p.terminal), live = local(this.p.live);
-    const items = new Set(menuItems({ planned: Boolean(this.p.planned), live, pane }));
+    const pane = local(this.p.terminal), live = local(this.p.live), focus = local(this.p.focus ?? this.p.live);
+    const items = new Set(menuItems({ planned: Boolean(this.p.planned), live, focus, pane }));
     // #1172: both contradict an explicit Bot Chat binding; the CLI would only refuse them.
     if (this.paired) { items.delete("restart-fresh"); items.delete("restart-on"); }
     const item = (id, label, onClick) => h_flex().id(id).h(30).px(10).items_center().rounded(7).cursor_pointer()
@@ -786,7 +800,7 @@ export class BotForm {
       .child(item("menu-prompt", `Prompt ${fold("prompt")}`, (cx) => this.toggle("prompt", cx)))
       .when(this.shown.has("prompt"), (el) => el.child(this.promptView(t)))
       .when(items.has("start") || items.has("focus"), (el) => el.child(label("RUN")))
-      .when(items.has("focus"), (el) => el.child(item("menu-focus", this.busy === "focus" ? "Opening…" : `Focus (${live})`, (cx) => this.focusPane(cx))))
+      .when(items.has("focus"), (el) => el.child(item("menu-focus", this.busy === "focus" ? "Opening…" : `Focus (${focus})`, (cx) => this.focusPane(cx))))
       .when(items.has("start"), (el) => el.child(item("menu-start", this.busy === "start" ? "Starting…" : "Start", (cx) => this.start(project, bot, cx))))
       .when(items.has("restart"), (el) => el.child(item("menu-restart", this.busy === "restart" ? "Restarting…" : "Restart", (cx) => this.restart(project, bot, cx))))
       .when(Boolean(this.forceable), (el) => el.child(item("menu-restart-force", this.busy === "restart-force" ? "Restarting…" : "Restart anyway (ends what it is doing)",
