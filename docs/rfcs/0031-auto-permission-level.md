@@ -422,6 +422,13 @@ answer, the answer says so.
    isolated environment with synthetic files, and record per turn: requested and effective mode,
    fallback notices, tool and permission ids, offered and chosen options, final status and effect.
    Leave out headers and raw transcripts.
+
+   **Note (2026-11-22, #1564).** In PR A, after the owner saves ON, Claude Code can use its own
+   tools from the owner's next message in an eligible Bot's direct chat. At either switch
+   setting, Claude Code Auto stays withheld until the signed-in capture and bridge design above
+   are complete.
+   [RFC 0003, Amendment on native tools per Bot](0003-model-routes-and-acp.md#amendment-native-tools-per-bot-2026-11-22-1564)
+
 6. **Question 6:** keep both names, "Auto" and DSH's "Auto review"; they are different levels and
    the second is marked Experimental.
 
