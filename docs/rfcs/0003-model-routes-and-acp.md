@@ -1158,6 +1158,17 @@ this amendment" lines.
     lapses: a day, or a Codex or connector update) runs without the Session's staged image grant
     (the OFF attempt cleared it); the person asks for the image again. Later turns on that model
     are kept from their start.
+- **Denied `acp_tool` (#2026, owner's option A, 2026-11-23).** A kept or measured kept model and
+  Antigravity run their own tools whatever the Bot's Denied tools say, so a call denied as
+  `acp_tool` runs and is only recorded as refused after it ran. A Bot whose Denied tools hold
+  `acp_tool` therefore cannot be put on a Codex model known to keep its own tools at save time,
+  or on Antigravity (model menu, Pocket, update, switch-route, create), and `acp_tool` cannot be
+  added to its Denied tools while it runs on one or while its pending way back is one. Only a
+  save that makes the pair is refused: a Bot already there keeps running (no turn is refused),
+  may still edit its other denied tools and re-pick its current model, and Details names what to
+  change. The check fails open on an unknown model (Codex's `default` before its start model is
+  known, a model measured kept later), and automatic moves (a subscription move, a refused
+  route) stay allowed; both are covered by the Details notice. Hermes is not covered.
 - **DSH's `default`** is the model Codex itself starts on (the last process with its own tools,
   else the catalog's recorded start model); a wrong guess is caught after the model is set and
   that turn ends with "The tools setting changed; send again." and no prompt, including the first
