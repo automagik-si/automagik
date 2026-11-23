@@ -80,8 +80,9 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   test); once filled, a new Solver wears a Solver-family character by default. While it is empty,
   or no entry is a known character or pet, a new Solver wears today's random look. The menu icon
   stays the existing goal icon until the art lands.
-- **Solver characters for Solver Bots only.** A Solver Bot is a Bot made by the new-Solver dialog
-  (the marker is defined in delivery 1). The Solver characters show only for Solver Bots: a
+- **Solver characters for Solver Bots only.** A Solver Bot is a Bot whose role description is
+  exactly `Solver`, as the new-Solver dialog sets it (the marker, under "Contracts introduced";
+  from delivery 2 also the `solver` role tag). The Solver characters show only for Solver Bots: a
   Solver Bot's character chooser shows them, and the new-Solver dialog defaults to one of them; a
   regular Bot's character chooser, its new-Bot card and the welcome picker show none of them. The
   characters' colours are the catalogue's existing ones, unchanged.
@@ -97,9 +98,14 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
 - `rt.newBotStoredPermission()` (`host/roster.js`): the level `buildBot` stores for a Bot the person
   makes, extracted with no behaviour change.
 - The client action `teamState` (the existing `state` read, no pull after it).
-- The Solver Bot marker: the predicate the character chooser reads, defined in delivery 1 from
-  fields the host already stores (a new stored field is an amendment of this RFC); from delivery
-  2 the `solver` role tag.
+- The Solver Bot marker: a Bot is a Solver when its role description is exactly `Solver`, as the
+  delivery 1 dialog sets it. The bots-dsh predicate `isSolverBot(bot)` (`shared/solver-method.js`)
+  is the one place that reads it, comparing `bot.role` to the exported constant
+  `SOLVER_DESCRIPTION` (`'Solver'`), which the dialog also writes; the character chooser imports
+  the predicate and never repeats the literal. The marker is cosmetic (it only chooses which
+  characters are offered), so a person who renames a description to `Solver` gains nothing.
+  Delivery 2's official `solver` role replaces it, and `isSolverBot` then reads both (the role tag
+  or the description), so a delivery 1 Solver keeps its characters. No new stored field.
 - Delivery 2 adds the official role id `solver`.
 
 ## Threat model
