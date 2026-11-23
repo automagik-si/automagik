@@ -113,10 +113,13 @@ export const STAND_IN_LINE = (name, model) => `[${name} does not offer ${model} 
 // An agent whose CLI is not signed in says so with ACP's `auth_required`, at the start of its
 // session or of a prompt. The turn fails with its own code, never ACP_AGENT: a sign-in answers
 // it, another model does not (the Bot team never falls back on it).
-// An agent with no sign-in in the app (`signInHint`, agents.js) names its own terminal command.
-const signInFailure = (agent, error) => finish('error', typeof agent.signInHint === 'string' && agent.signInHint !== ''
-  ? `${agent.name} is not signed in. Run \`${agent.signInHint}\` in a terminal, then send again.`
-  : `${agent.name} is not signed in: ${error?.message ?? error}`, MODEL_ACCESS_REQUIRED)
+// An agent with no sign-in in the app (`signInHint`, agents.js) names its own terminal command;
+// one that signs in only in the app's Settings (`signInWhere`, an agent with its own home) says so.
+const signInFailure = (agent, error) => finish('error', agent.signInWhere === 'settings'
+  ? `${agent.name} is not signed in. Sign in to it in Settings, under Coding agents, then send again.`
+  : typeof agent.signInHint === 'string' && agent.signInHint !== ''
+    ? `${agent.name} is not signed in. Run \`${agent.signInHint}\` in a terminal, then send again.`
+    : `${agent.name} is not signed in: ${error?.message ?? error}`, MODEL_ACCESS_REQUIRED)
 const STOPPED = () => finish('aborted', 'Stopped', 'ABORTED')
 // Thrown out of a Codex start to run the turn again as a kept one from the start's catch, never
 // inside its `try`: an error of that turn is never a connector failure (no rollback, no repair).

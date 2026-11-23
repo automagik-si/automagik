@@ -183,9 +183,11 @@ export class AgentRun {
    * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string,
    *   name: string, provider?: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
    *   onWarn?: (message: string) => void, refuseTools?: boolean, onForbiddenTool?: (tool: any) => void,
-   *   startMs?: number, requestMs?: number,
+   *   startMs?: number, requestMs?: number, authenticate?: string, logout?: boolean,
    *   timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
    *   startMs, requestMs: the deadlines, START_MS and REQUEST_MS unless a test sets shorter ones.
+   *   authenticate: a sign-in run, the id of the ACP auth method to ask for instead of a session.
+   *   logout: a sign-out run, ACP `logout` when the agent offers it, instead of a session.
    *   timers: the clock the deadlines run on, for a test that moves it by hand.
    */
   constructor(spec) {
@@ -266,6 +268,25 @@ export class AgentRun {
           : `its connector speaks ACP protocol version ${answered ?? 'unknown'}, and this app speaks version ${PROTOCOL_VERSION}: update the connector`)
         error.code = 'acp_protocol_mismatch'
         throw error
+      }
+      // A sign-in run (`authenticate`, a method id the agent offers) or a sign-out run
+      // (`logout`) opens no session: it asks that one thing of the agent and ends.
+      if (this.spec.authenticate !== undefined) {
+        const offered = Array.isArray(this.init?.authMethods) ? this.init.authMethods : []
+        if (!offered.some(method => method?.id === this.spec.authenticate)) {
+          throw Object.assign(new Error(`${this.spec.name} did not offer that sign-in`), { code: 'acp-sign-in/unsupported' })
+        }
+        await this.conn.authenticate({ methodId: this.spec.authenticate })
+        this.authenticated = true
+        return
+      }
+      if (this.spec.logout === true) {
+        // Only an agent that says it can sign out over ACP is asked to.
+        if (this.init?.agentCapabilities?.auth?.logout) {
+          await this.conn.logout({})
+          this.loggedOut = true
+        }
+        return
       }
       const identity = this.spec.botIdentity?.()
       this.spec.botIdentity = undefined
@@ -999,6 +1020,8 @@ function connect(run, stream) {
   return {
     connection,
     initialize: params => agent.request(methods.agent.initialize, params),
+    authenticate: params => agent.request(methods.agent.authenticate, params),
+    logout: params => agent.request(methods.agent.logout, params),
     newSession: params => agent.request(session.new, params),
     forkSession: params => agent.request(session.fork, params),
     closeSession: params => agent.request(session.close, params),

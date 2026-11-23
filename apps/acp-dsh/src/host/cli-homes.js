@@ -18,7 +18,11 @@ import { probeWindowsLogin } from './windows-job-probe.js'
 
 export const HOME_ENV = 'AUTOMAGIK_BOT_CLI_HOME'
 const VERSION_ENV = 'AUTOMAGIK_BOT_CLI_VERSION'
-const vendors = new Set(['claude', 'codex'])
+// Antigravity (#2048) has its own home like the other two: agy keeps everything under its
+// HOME's `.gemini` (its own folder name below), and the app's agy never sees the person's.
+const vendors = new Set(['claude', 'codex', 'antigravity'])
+// Each vendor's own config folder in its home, created 0700 with the home.
+const CONFIG = { claude: '.claude', codex: '.codex', antigravity: '.gemini' }
 const runs = new Map()
 // An allowlist, rather than a list of known tokens: future CLI auth overrides must not leak
 // in either. Undefined entries mask process.env where older spawn helpers merge environments.
@@ -110,12 +114,16 @@ export class CliHomes {
     const env = Object.fromEntries(Object.keys(source).map(key => [
       key, inherited.test(key) ? source[key] : undefined,
     ]))
-    const config = join(home, `.${vendor}`)
+    const config = join(home, CONFIG[vendor])
     for (const dir of [config, 'config', 'data', 'cache', 'state', 'roaming', 'local']) {
       mkdirSync(dir === config ? dir : join(home, dir), { recursive: true, mode: 0o700 })
     }
     const selected = {
       ...env,
+      // agy stores its sign-in in the desktop session's Secret Service when it finds a D-Bus
+      // session bus, and that store belongs to the session, not to HOME. Without the bus address
+      // it keeps the sign-in in its file store, inside this home. Claude Code and Codex keep it.
+      ...(vendor === 'antigravity' ? { DBUS_SESSION_BUS_ADDRESS: undefined } : {}),
       HOME: home,
       DSH_HOME: this.identity,
       AUTOMAGIK_HOME: dirname(this.acpHome),

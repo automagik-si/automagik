@@ -53,8 +53,19 @@
 // "codex-edit-ask" is its patch call (an edit `tool_call`, then a permission request; the patch
 // runs only when allowed); "codex-subagent" starts one of its own sub-agents (no permission);
 // "codex-reader <server> <tool>" is one of its MCP resource readers.
+//
+// As an agent with its own home that signs in over ACP (Antigravity, #2048):
+// FAKE_ACP_AUTH_METHODS=a,b offers those `authMethods` ids in `initialize`. FAKE_ACP_AUTH=file
+// refuses `session/new` with auth_required unless `$HOME/.gemini/fake-signed-in` exists, and
+// `authenticate` with an offered id writes that file (the sign-in lives in its HOME only);
+// FAKE_ACP_AUTH_FAIL=1 makes `authenticate` fail instead.
+// FAKE_ACP_ENV_FILE appends, at start, the names of the variables it was given and the values
+// of its home variables only (HOME, USERPROFILE, the XDG folders, CODEX_HOME and the Claude
+// folders). FAKE_ACP_LOGOUT=1 advertises `agentCapabilities.auth.logout` and answers `logout`
+// (traced as `logout` with its HOME).
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { serveAgent } from './serve-agent.mjs'
@@ -79,6 +90,19 @@ const trace = (entry) => {
 const MODES = (process.env.FAKE_ACP_MODES ?? '').split(',').filter(Boolean)
 const SESSION_MODELS = process.env.FAKE_ACP_SESSION_MODELS === '1'
 trace({ event: 'start', args: process.argv.slice(2) })
+const AUTH_METHODS = (process.env.FAKE_ACP_AUTH_METHODS ?? '').split(',').filter(Boolean)
+const SIGNED_IN = () => join(process.env.HOME ?? '', '.gemini', 'fake-signed-in')
+if (process.env.FAKE_ACP_ENV_FILE !== undefined) {
+  const shown = ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME',
+    'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR']
+  const names = Object.keys(process.env).filter(name => !name.startsWith('FAKE_ACP_') && name !== 'ACP_TRACE_FILE').sort()
+  try {
+    appendFileSync(process.env.FAKE_ACP_ENV_FILE, `${JSON.stringify({
+      pid: process.pid, cwd: process.cwd(), names,
+      values: Object.fromEntries(shown.filter(name => name in process.env).map(name => [name, process.env[name]])),
+    })}\n`)
+  } catch {}
+}
 const modesOf = session => (MODES.length === 0 ? {} : { modes: { currentModeId: session.mode, availableModes: MODES.map(id => ({ id, name: id })) } })
 // What a `session/new` answer says of models and modes, in either shape.
 const offersOf = session => ({
@@ -227,10 +251,28 @@ const implementation = {
       ...(process.env.FAKE_ACP_SYSTEM_PROMPT === '1'
         ? { sessionCapabilities: { systemPrompt: {} } } : {}),
     }
-    return { protocolVersion, agentCapabilities, authMethods: [] }
+    if (process.env.FAKE_ACP_LOGOUT === '1') agentCapabilities.auth = { logout: {} }
+    return { protocolVersion, agentCapabilities, authMethods: AUTH_METHODS.map(id => ({ id, name: id })) }
+  },
+  async authenticate(params) {
+    trace({ event: 'authenticate', methodId: params?.methodId })
+    // With no methods offered it answers as it always did; with some, only those.
+    if (AUTH_METHODS.length > 0 && !AUTH_METHODS.includes(params?.methodId)) throw RequestError.invalidParams(undefined, `Unknown auth method: ${params?.methodId}`)
+    if (process.env.FAKE_ACP_AUTH_FAIL === '1') throw RequestError.internalError(undefined, 'the browser sign-in did not finish')
+    if (AUTH === 'file') {
+      mkdirSync(join(process.env.HOME ?? '', '.gemini'), { recursive: true })
+      writeFileSync(SIGNED_IN(), 'yes')
+    }
+    return {}
+  },
+  async logout() {
+    trace({ event: 'logout', home: process.env.HOME })
+    if (process.env.FAKE_ACP_LOGOUT !== '1') throw RequestError.methodNotFound('logout')
+    return {}
   },
   async newSession(params) {
     if (AUTH === 'session') throw RequestError.authRequired(undefined, 'run the CLI\'s login first')
+    if (AUTH === 'file' && !existsSync(SIGNED_IN())) throw RequestError.authRequired(undefined, 'sign in first')
     const sessionId = `fake-${++created}`
     trace({
       event: 'new-session', sessionId,
@@ -307,7 +349,6 @@ const implementation = {
     }
     return { configOptions: configOptions(session) }
   },
-  async authenticate() { return {} },
   async cancel({ sessionId }) {
     trace({ event: 'cancel', sessionId })
     // FAKE_ACP_IGNORE_CANCEL=1: an agent that goes on working after a cancel.

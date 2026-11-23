@@ -194,6 +194,12 @@ export const AGENTS = Object.freeze({
   // command that names one sign-in. They are off until the person turns one on, which is their
   // word that Automagik may use the sign-in that CLI has on this computer (index.js).
   //
+  // The exception is a native agent with `isolatedHome` (Antigravity): it runs in this
+  // installation's own home, as Claude Code and Codex do (cli-homes.js), so the sign-in the
+  // person's terminal has never reaches it. It signs in only in the app: Settings asks it over
+  // ACP (`authenticate` with its `acpSignIn` method), and the terminal command shown as the
+  // fallback runs it in that same home (isolatedSignInHintOf). A Bot never signs it in.
+  //
   // Each is put in its own `default` mode, the one that asks, whatever DSH's level: what it asks
   // is answered by DSH's approval under the Session's level. Its own permission settings still
   // decide what it asks about. No bridge: DSH's tools reach none of them, even with `dshTools`
@@ -229,6 +235,10 @@ export const AGENTS = Object.freeze({
     launch: Object.freeze({ kind: 'native', args: Object.freeze(['acp']) }),
     // `agy acp --login`: "Log in with Google interactively, then exit (ACP terminal auth)".
     signInHint: 'agy acp --login',
+    // Its own home in this installation (#2048), and its sign-in in the app: ACP `authenticate`
+    // with Google's personal sign-in, which opens the browser on this computer.
+    isolatedHome: true,
+    acpSignIn: 'oauth-personal',
     modeFor: () => ['default'],
   }),
   'acp-omp': Object.freeze({
@@ -288,6 +298,36 @@ export function signInHintOf(spec, detail, platform = process.platform) {
 }
 
 /**
+ * The terminal command that signs in to an agent with its own home (`isolatedHome`), as shown
+ * (never run): its CLI by its absolute path, in that home and nothing of the person's. On
+ * POSIX `env -i` drops every other variable (the D-Bus address, XDG_RUNTIME_DIR, API keys);
+ * on Windows the variables last for that PowerShell window only, so it is run in a new one.
+ * Undefined when the home or the path is not absolute or holds what the quoting cannot carry:
+ * the row then offers only its Sign in.
+ * @param {object} spec an entry of AGENTS
+ * @param {{ path?: string } | undefined} detail the CLI as discovery found it
+ * @param {string} home the agent's home (CliHomes.home)
+ */
+export function isolatedSignInHintOf(spec, detail, home, platform = process.platform) {
+  const hint = spec?.signInHint
+  if (typeof hint !== 'string' || !hint.startsWith(`${spec.cli} `)) return undefined
+  const args = hint.slice(spec.cli.length + 1)
+  const path = detail?.path
+  const fits = value => typeof value === 'string' && value.length <= 4000 && !TRAVERSAL.test(value)
+  if (!fits(path) || !fits(home)) return undefined
+  if (platform === 'win32') {
+    const absolute = value => /^[A-Za-z]:\\/.test(value) && !WIN32_UNSAFE.test(value)
+    if (!absolute(home) || !absolute(path) || !path.endsWith(`\\${spec.cli}.exe`)) return undefined
+    return `$env:USERPROFILE="${home}"; $env:HOME="${home}"; $env:HOMEPATH="${home}"; `
+      + `$env:APPDATA="${home}\\roaming"; $env:LOCALAPPDATA="${home}\\local"; & "${path}" ${args}`
+  }
+  const absolute = value => value.startsWith('/') && !POSIX_UNSAFE.test(value)
+  if (!absolute(home) || !absolute(path) || !path.endsWith(`/${spec.cli}`)) return undefined
+  return `env -i PATH="$PATH" TERM="$TERM" LANG="$LANG" HOME='${home}' XDG_CONFIG_HOME='${home}/config' `
+    + `XDG_DATA_HOME='${home}/data' XDG_CACHE_HOME='${home}/cache' XDG_STATE_HOME='${home}/state' '${path}' ${args}`
+}
+
+/**
  * How an agent is started, of either kind: { command, args, env, ready, version?, key }.
  * `ready` is false while an adapter is not installed (a native agent is ready as soon as its
  * CLI is found); `key` names what would run, for the model catalog. The adapter kind runs
@@ -300,7 +340,9 @@ export function signInHintOf(spec, detail, platform = process.platform) {
  */
 export function launchOf(spec, cli, { store, node = { command: process.execPath, env: {} }, cliEnv = {}, env = process.env, stamp = value => value } = {}) {
   if (isNative(spec)) {
-    return { command: cli, args: [...spec.launch.args], env: { ...cliEnv, PATH: [dirname(cli), env.PATH].filter(Boolean).join(delimiter) }, ready: true, key: `native ${stamp(cli)}` }
+    // An agent with its own home: the home is in the key, so a catalog kept from another home
+    // (or from before a Reset) never answers that it is signed in (catalog.js signedIn).
+    return { command: cli, args: [...spec.launch.args], env: { ...cliEnv, PATH: [dirname(cli), env.PATH].filter(Boolean).join(delimiter) }, ready: true, key: `native ${stamp(cli)}${cliEnv.HOME ? ` ${cliEnv.HOME}` : ''}` }
   }
   const bin = store?.binOf(spec.adapter, spec.bin)
   if (bin === undefined) return { ready: false }
