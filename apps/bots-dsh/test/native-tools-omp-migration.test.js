@@ -67,7 +67,8 @@ function host(home) {
   }
   ctx.sessionController = {
     create: async () => ({ sessionId: 'new' }),
-    resolveAgent: async id => ({ agent: { session: { id }, followup: () => {} } }),
+    // An empty conversation, so a model switch needs no handoff.
+    resolveAgent: async id => ({ agent: { session: { id, deriveMessages: () => [] }, followup: () => {} } }),
     selectModel: async () => {},
   }
   ctx.sessionTitle = { rename: async () => {} }
@@ -214,4 +215,65 @@ test('identity carries the migrated provider, and an explicit ON or OFF clears t
   assert.deepEqual(fields(bot), [true, undefined])
   assert.deepEqual(fields(h.stored().bots.a), [true, undefined])
   assert.equal(h.identity('a').nativeToolsAgent, undefined)
+})
+
+const noOmp = {
+  version: 2, revision: 3, mainBotIds: ['claude'],
+  whaleStored: true, octopusStored: true, genieClayStored: true, claudeCodeMoved: true,
+  capabilities: { items: {} },
+  bots: {
+    claude: record('claude', 'acp-claude/default'),
+    api: record('api', 'deepseek/chat'),
+  },
+}
+
+test('a team with no omp Bot loads without a write: same revision, same bytes', async t => {
+  const { home, open } = workspace(t, noOmp)
+  const bytes = read(home)
+  const h = open()
+  await h.rt.load()
+  assert.equal(read(home), bytes)
+  assert.equal(h.stored().revision, 3)
+  assert.equal(h.stored().nativeToolsOmpKept, undefined)
+  assert.equal(h.rt.state.nativeToolsOmpKept, true)
+})
+
+test('an omp Bot created after a no-write load is saved with the marker and stays OFF on reload', async t => {
+  const { home, open } = workspace(t, noOmp)
+  const bytes = read(home)
+  const h = open()
+  await h.rt.load()
+  assert.equal(read(home), bytes)
+  const created = await h.rt.createBot({ name: 'New omp', model: OMP + '/default' })
+  assert.equal(created.model, OMP + '/default')
+  const saved = h.stored()
+  assert.equal(saved.nativeToolsOmpKept, true)
+  assert.equal(Object.hasOwn(saved.bots[created.id], 'nativeTools'), false)
+  await h.dispose()
+
+  const second = open()
+  await second.rt.load()
+  assert.equal(Object.hasOwn(second.rt.botOf(created.id), 'nativeTools'), false)
+  assert.deepEqual(fields(second.rt.botOf(created.id)), [undefined, undefined])
+  assert.deepEqual(fields(second.stored().bots[created.id]), [undefined, undefined])
+})
+
+test('a Bot switched to omp after a no-write load is saved with the marker and stays OFF on reload', async t => {
+  const { home, open } = workspace(t, noOmp)
+  const bytes = read(home)
+  const h = open()
+  await h.rt.load()
+  assert.equal(read(home), bytes)
+  await h.rt.updateBot('api', { model: OMP + '/default' })
+  const saved = h.stored()
+  assert.equal(saved.bots.api.model, OMP + '/default')
+  assert.equal(saved.nativeToolsOmpKept, true)
+  assert.equal(Object.hasOwn(saved.bots.api, 'nativeTools'), false)
+  await h.dispose()
+
+  const second = open()
+  await second.rt.load()
+  assert.equal(second.rt.botOf('api').model, OMP + '/default')
+  assert.deepEqual(fields(second.rt.botOf('api')), [undefined, undefined])
+  assert.deepEqual(fields(second.stored().bots.api), [undefined, undefined])
 })
