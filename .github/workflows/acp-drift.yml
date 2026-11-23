@@ -25,6 +25,10 @@ name: ACP drift
 #    a person opens the pull request, which goes through the normal review and the plugin lane.
 #    Any failure in either job opens or comments on one bump issue. It never merges.
 #
+# 4. agy-scripts: reads Google's Antigravity install scripts as text (never runs them) and the
+#    release manifests they name, against the host acp-dsh pins (#2048). A moved host and a
+#    change since a person last read them each open their own issue.
+#
 # A drift run that could not read npm fails without an issue: the next run decides.
 #
 # Every pull request runs the offline half in the plugin's own suite
@@ -126,6 +130,116 @@ jobs:
           CODE: ${{ steps.drift.outputs.code }}
         run: |
           echo "::error::acp-drift exited ${CODE} (1: drift, 2: npm could not be read)"
+          exit 1
+
+  agy-scripts:
+    # Google's Antigravity install scripts (#2048): acp-dsh installs agy from the same release
+    # manifest they read, pinned in apps/acp-dsh/src/host/agy-source.js. The scripts are read as
+    # text and never run. A host move opens one issue; a change in the scripts or the manifests'
+    # fields since a person last read them opens another (apps/acp-dsh/scripts/agy-scripts.mjs).
+    name: Antigravity install scripts
+    if: github.repository == 'automagik-si/automagik'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    defaults:
+      run:
+        working-directory: apps/acp-dsh
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.9
+
+      - name: Read the scripts and the manifests
+        id: agy
+        run: |
+          set -uo pipefail
+          report="${RUNNER_TEMP}/agy-scripts.json"
+          if node scripts/agy-scripts.mjs --json > "${report}"; then
+            code=0
+          else
+            code=$?
+          fi
+          echo "code=${code}" >> "$GITHUB_OUTPUT"
+          if [ -f "${report}" ] && jq -e '.changed == true' "${report}" > /dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo '### Antigravity install scripts'
+            echo
+            echo '```json'
+            if [ -f "${report}" ]; then cat "${report}"; else echo 'no output'; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update the moved-host issue
+        if: steps.agy.outputs.code == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='acp-dsh: the Antigravity install scripts moved host'
+          body="${RUNNER_TEMP}/agy-moved-issue.md"
+          {
+            echo 'The daily check found that the manifest host acp-dsh pins for Antigravity no longer holds: a script names another base, or a manifest at the pinned base is gone or names a download outside the pinned place. Installs from the app fail until the pin moves.'
+            echo
+            echo '```json'
+            cat "${RUNNER_TEMP}/agy-scripts.json"
+            echo '```'
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            echo 'To clear it: re-read the scripts as text (never run them), move the pin in `apps/acp-dsh/src/host/agy-source.js`, then `node scripts/agy-scripts.mjs --write`, in one pull request.'
+          } > "${body}"
+          number=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${title}\" in:title" --json number,title --jq "map(select(.title == \"${title}\")) | .[0].number // empty")
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" --repo "${GITHUB_REPOSITORY}" --body-file "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body-file "${body}" --label bug --label area:dsh
+          fi
+
+      - name: Open or update the changed-scripts issue
+        if: steps.agy.outputs.code == '3' || (steps.agy.outputs.code == '1' && steps.agy.outputs.changed == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='acp-dsh: the Antigravity install scripts changed; re-read them'
+          body="${RUNNER_TEMP}/agy-changed-issue.md"
+          {
+            echo 'The daily check found that the official Antigravity install scripts, or the fields of its release manifests, are not what a person last read (`apps/acp-dsh/test/fixtures/agy-install.json`). A new field (a signature, say) or a new step may need the app install to follow.'
+            echo
+            echo '```json'
+            cat "${RUNNER_TEMP}/agy-scripts.json"
+            echo '```'
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            echo 'To clear it: re-read the scripts as text (never run them), follow any change in `apps/acp-dsh/src/host/agy-source.js`, then `node scripts/agy-scripts.mjs --write`, in one pull request.'
+          } > "${body}"
+          number=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${title}\" in:title" --json number,title --jq "map(select(.title == \"${title}\")) | .[0].number // empty")
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" --repo "${GITHUB_REPOSITORY}" --body-file "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body-file "${body}" --label bug --label area:dsh
+          fi
+
+      - name: Fail on a move, a change or an unread script
+        if: steps.agy.outputs.code != '0'
+        env:
+          CODE: ${{ steps.agy.outputs.code }}
+        run: |
+          echo "::error::agy-scripts exited ${CODE} (1: moved host, 2: could not read, 3: changed)"
           exit 1
 
   adapters:
