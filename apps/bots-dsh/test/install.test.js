@@ -202,6 +202,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: learning',
     'effect ds-bot: schedule pause retry',
     'on schedule/changed',
+    'on session/disposed',
+    'effect ds-bot: scheduled native owners',
     'on schedule/resolve-agent',
     'on tools/pre-execute',
     'on tools/execute',
