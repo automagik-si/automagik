@@ -461,7 +461,7 @@ async function picker() {
   const { fileURLToPath } = await import('node:url')
   const bundle = await build({
     stdin: {
-      contents: "export { CharacterPicker } from './src/client/companion.js'\nexport { SHAPES, SOLVER_SHAPES } from './src/client/companion-art.js'\nexport { PT_BR } from './src/client/i18n.js'",
+      contents: "export { CharacterPicker } from './src/client/companion.js'\nexport { SHAPES, SOLVER_SHAPES } from './src/client/companion-art.js'\nexport { PT_BR, installLocale } from './src/client/i18n.js'",
       resolveDir: fileURLToPath(new URL('..', import.meta.url)),
     },
     bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
@@ -478,7 +478,7 @@ async function picker() {
 }
 
 test('the companion picker is one choice in two groups: the characters, then the Solvers under their heading', async () => {
-  const { CharacterPicker, SHAPES, SOLVER_SHAPES, PT_BR } = await picker()
+  const { CharacterPicker, SHAPES, SOLVER_SHAPES, PT_BR, installLocale } = await picker()
   const solvers = ['puff', 'sprout', 'cap', 'bell', 'cloud', 'spike', 'floppy', 'antenna', 'cactus', 'bulb', 'chick', 'frog']
   assert.deepEqual([...SOLVER_SHAPES], solvers)
   const picked = []
@@ -496,6 +496,21 @@ test('the companion picker is one choice in two groups: the characters, then the
   assert.equal(heading.props.className, 'oai-muted')
   assert.equal(second.props['aria-labelledby'], heading.props.id)
   assert.equal(PT_BR.Solvers, 'Solvers')
+  // Both groups have a name: "Characters" for the first, the heading for the second.
+  assert.equal(first.props['aria-label'], 'Characters')
+  assert.equal(second.props['aria-label'], undefined)
+  // In pt-BR the first reads "Personagens"; "Solvers" is a product name and stays.
+  const off = installLocale({ register: () => () => {}, bind: () => key => PT_BR[key] ?? key })
+  try {
+    const [primeiro, titulo, segundo] = draw('cactus').children
+    assert.equal(primeiro.props['aria-label'], 'Personagens')
+    assert.deepEqual(titulo.children, ['Solvers'])
+    assert.equal(segundo.props['aria-labelledby'], titulo.props.id)
+    assert.equal(draw('cactus').props['aria-label'], 'Personagem')
+  } finally {
+    off()
+  }
+  assert.equal(draw('cactus').children[0].props['aria-label'], 'Characters')
   // The order: the 21 characters that were there, then the twelve Solvers, none twice.
   const ids = group => group.children.map(radio => radio.props['aria-label'])
   assert.equal(ids(first).length, 21)

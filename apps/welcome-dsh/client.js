@@ -9330,6 +9330,7 @@ var PT_BR = {
   "Drawn with your OpenAI key (gpt-image-1)": "Desenhado com a sua chave da OpenAI (gpt-image-1)",
   "Drawing a companion needs Codex signed in. Sign in to Codex in the AI step, then come back from Settings. For now, pick one.": "Para desenhar uma companhia, é preciso entrar no Codex. Entre no Codex no passo de IA e volte por Configurações. Por enquanto, escolha um personagem.",
   "Character": "Personagem",
+  "Characters": "Personagens",
   // A product name, kept as it is.
   "Solvers": "Solvers",
   "Color": "Cor",
@@ -10252,7 +10253,7 @@ function CharacterPicker({ shape, color, onPick }) {
   return (0, import_react3.createElement)(
     "div",
     { className: "oai-characters", role: "radiogroup", "aria-label": t("Character") },
-    (0, import_react3.createElement)("div", { className: "oai-shapes", role: "group" }, radios(SHAPES2.filter((id) => !SOLVER_SHAPES.includes(id)))),
+    (0, import_react3.createElement)("div", { className: "oai-shapes", role: "group", "aria-label": t("Characters") }, radios(SHAPES2.filter((id) => !SOLVER_SHAPES.includes(id)))),
     // A div: the card gives every paragraph a bottom margin, which would push the label off its group.
     (0, import_react3.createElement)("div", { className: "oai-muted", id: "oai-solvers" }, t("Solvers")),
     (0, import_react3.createElement)("div", { className: "oai-shapes", role: "group", "aria-labelledby": "oai-solvers" }, radios(SOLVER_SHAPES))

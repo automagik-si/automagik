@@ -42,7 +42,7 @@ export function CharacterPicker({ shape, color, onPick }) {
     dangerouslySetInnerHTML: { __html: characterSvg(id, color, 54) },
   }))
   return h('div', { className: 'oai-characters', role: 'radiogroup', 'aria-label': t('Character') },
-    h('div', { className: 'oai-shapes', role: 'group' }, radios(SHAPES.filter(id => !SOLVER_SHAPES.includes(id)))),
+    h('div', { className: 'oai-shapes', role: 'group', 'aria-label': t('Characters') }, radios(SHAPES.filter(id => !SOLVER_SHAPES.includes(id)))),
     // A div: the card gives every paragraph a bottom margin, which would push the label off its group.
     h('div', { className: 'oai-muted', id: 'oai-solvers' }, t('Solvers')),
     h('div', { className: 'oai-shapes', role: 'group', 'aria-labelledby': 'oai-solvers' }, radios(SOLVER_SHAPES)))
