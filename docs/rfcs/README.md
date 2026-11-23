@@ -80,7 +80,7 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0045](0045-dsh-upstream-authored-input-and-caller-turns.md) | DSH upstream: authored input, a caller-scoped turn and a drain | Proposal-only (a proposal to DSH; nothing ships here; from RFC 0038 delivery 5e, #1928, and RFC 0030 delivery 4, #1007) | none (a proposal to DSH; nothing ships here) |
 | [0046](0046-pocket-link-without-herdr-app.md) | Pocket Link without herdr-app: Pocket's own part, installed and paired by `am` | Accepted (Pocket's; 2026-11-21, by the owner's delegate: the direction, RFC 0030 Decisions (2026-11-21), 4, and its six questions, each the recommended option; amends 0012; none merged; #1007) | none (ships outside the five milestones) |
 | [0047](0047-connector-caller-scope.md) | Connectors follow their caller: a saved key's Bot scope and the per-Bot switch in every Session | Accepted (2026-11-21, by the owner's delegate, #1322: Q1-Q7 decided, each the recommended option; one owner resolver for every Session kind, admission at each connector call and transport start from current saved state, connector-owned keys by instance; none merged) | none (ships outside the five milestones) |
-| [0048](0048-the-solver.md) | The Solver | Accepted (2026-11-23: the owner's decisions in #2056 and the lead's acceptance of the D1 plan; no delivery merged) | none (ships outside the five milestones) |
+| [0048](0048-the-solver.md) | The Solver | Accepted (2026-11-23: the owner's decisions in #2056 and, by the owner's delegate, the D1 design; no delivery merged) | none (ships outside the five milestones) |
 
 Milestones, in the owner's order:
 
