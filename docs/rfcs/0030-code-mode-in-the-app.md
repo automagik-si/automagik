@@ -827,6 +827,22 @@ marked there with this section's number. None touches a private key, Play, real 
    herdr-lane CLI start path, then a small plugin change enables its rows. Delivery 6 and What
    moves now, 6, say so.
 
+## Amendment (2026-11-23): four later deliveries
+
+A read of this RFC against its deliveries on 2026-11-23 found four pieces of its design that no
+delivery names: none is in deliveries 0-8, in the 2026-11-20 amendment or in Decisions
+(2026-11-21), and none is built. This amendment names each as a later delivery, L1-L4, so every
+piece of Code mode still to build has a named delivery. It changes no design, no order and no
+condition above; Q19's condition for the pack's last release stays as answered. The lines are
+this file's at this amendment.
+
+| Later delivery | Scope | Source in this RFC | Schedule |
+|---|---|---|---|
+| L1, the Markdown view | A terminal's printed `.md` paths open in the app's own Markdown view | Mod by mod, the `am-markdown` row (line 335) | not scheduled |
+| L2, the header's counts | The machine, branch and agent counts show in the tree's header | Mod by mod, the `am-status` row (line 332) | not scheduled |
+| L3, the phone dot | The phone dot shows in the tree's header, read from Pocket Link's published state | Mod by mod, the `am-footer` row (line 333) | not scheduled |
+| L4, the mailbox for a DSH Bot in a terminal | Delivery 3's mailbox reaches a DSH Bot that runs in a terminal (a dsh-tui seat): the bridge finds its Session from the session terminal field (RFC 0023, section 4), once DSH ships that field | The Genie's two seats and the mailbox, its last bullet (lines 247-250); What waits, the mailbox row (line 655) | not scheduled |
+
 ## Answers (2026-11-19)
 
 The owner's delegate accepted this RFC on 2026-11-19 (issue #1007) and answered every open
