@@ -6,7 +6,8 @@ import { t } from './i18n.js'
 // always in this order. A Bot shows only the pills it has.
 // - Computer: DSH's shell and file tools. Every Bot's Session has them, except a Bot that
 //   operates a linked Omni (the host's omniLinked): the channels plugin takes them away from
-//   every Main Bot and from the Omni Bot (omni-channels-dsh grants.js operatesHere).
+//   every Main Bot and from the Omni Bot (operatesHere) unless the Bot's Native tools switch is
+//   ON. Then it has its agent's own shell and files, which these pills do not show (known limit).
 // - Channels: that same Bot, which works in the user's Omni channels.
 // - Leads the team: a Main Bot (mainBotIds).
 export function pillsOf(roster, bot) {

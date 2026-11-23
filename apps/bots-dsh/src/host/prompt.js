@@ -50,10 +50,26 @@ export function install(rt) {
   const roleToolsInDsh = (bot, sessionId) =>
     rt.taskOwners?.has(sessionId) !== true && (bot.kind === 'genie' || rt.isBotSession?.(sessionId) === true)
   const attachIdentity = (sub) => {
+    // Only the switch, read when ACP creates a process.
+    const nativeGetters = (identity, sessionId, bot) => Object.defineProperties(identity, {
+      nativeTools: { get: () => rt.nativeToolsFor(sessionId) },
+      nativeToolsBlocked: { get: () => !rt.nativeToolsEligible(sessionId) },
+      // The agent the saved ON is for: acp-dsh starts an agent with its own tools only for
+      // its own.
+      nativeToolsAgent: {
+        get: () => rt.nativeToolsEligible(sessionId) ? nativeAgentOf(bot) : undefined,
+      },
+    })
     const off = sub.acpAgents?.botIdentity?.(sessionId => {
       const owner = rt.selfOf(sessionId)
       const bot = owner === undefined ? undefined : rt.botOf(owner)
-      if (bot === undefined) return undefined
+      if (bot === undefined) {
+        // A fresh scheduled Session whose task belongs to one Bot follows that Bot's switch. It is
+        // not the Bot's chat: it gets no name, role or instructions, so no identity text is sent.
+        const scheduled = owner === undefined && rt.nativeToolsEligible !== undefined
+          ? rt.botOf(rt.scheduledNativeOwner?.(sessionId)) : undefined
+        return scheduled === undefined ? undefined : nativeGetters({}, sessionId, scheduled)
+      }
       const { name, role, instructions } = bot
       const rolePrompt = rt.roleRuntime?.acpPrompt?.(sessionId, owner)
       const needsDshTools = roleToolsInDsh(bot, sessionId)
@@ -64,12 +80,7 @@ export function install(rt) {
       }
       // Identity also supplies the role on every turn. ACP asks for the switch
       // only when it creates a process.
-      if (rt.nativeToolsEligible !== undefined) Object.defineProperties(identity, {
-        nativeTools: { get: () => rt.nativeToolsFor(sessionId) },
-        nativeToolsBlocked: { get: () => !rt.nativeToolsEligible(sessionId) },
-        // The agent the saved ON is for: acp-dsh starts an agent with its own tools only for its own.
-        nativeToolsAgent: { get: () => rt.nativeToolsEligible(sessionId) ? nativeAgentOf(bot) : undefined },
-      })
+      if (rt.nativeToolsEligible !== undefined) nativeGetters(identity, sessionId, bot)
       return identity
     })
     if (typeof off === 'function') {

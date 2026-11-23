@@ -120,7 +120,8 @@ test('Bot-callable update_bot cannot write the new field on the team or MCP tool
   assert.equal(h.stored().bots.a.nativeTools, undefined)
 })
 
-test('identity keeps the Bot profile keys, and offers native tools for the current own chat only', async t => {
+// #1564 follow-up: the switch applies in every chat of the Bot, not only its own chat.
+test('identity keeps the Bot profile keys, and offers native tools in every chat of the Bot', async t => {
   const h = await host(t, { saved: true })
   const identity = h.identity('ada')
   assert.deepEqual(Object.keys(identity), ['name', 'role', 'instructions', 'needsDshTools'])
@@ -128,7 +129,8 @@ test('identity keeps the Bot profile keys, and offers native tools for the curre
   assert.equal(identity.nativeTools, true)
   for (const id of ['ada-group', 'old-a', 'starting-a']) {
     assert.equal(h.identity(id).name, 'Ada')
-    assert.equal(h.identity(id).nativeTools, false)
+    assert.equal(h.identity(id).nativeTools, true, id)
+    assert.equal(h.identity(id).nativeToolsBlocked, false, id)
   }
   assert.equal(h.identity('unowned'), undefined)
 })
@@ -160,11 +162,27 @@ test('a pending then rejected owner ON save cannot start a native process', asyn
   assert.deepEqual(h.w.events('new-session').map(row => row.meta.disableBuiltInTools), [true])
 })
 
-test('owner cannot enable native tools for shared, restricted or multiuser Bots', async t => {
+// #1564 follow-up: `shared` is a lock only until the one-time upgrade has run on the host that
+// writes the team (the pending window); restricted and multi-user stay locks.
+test('owner cannot enable native tools for restricted or multiuser Bots, nor shared ones before the upgrade', async t => {
   const h = await host(t)
   const bot = h.rt.botOf('a')
+  const { holdsLock, canWriteTeam } = h.rt
+  delete h.rt.state.nativeToolsLocksRetired
+  h.rt.holdsLock = () => false
+  h.rt.canWriteTeam = () => false
+  bot.people = { mode: 'allowlist', allow: ['visitor'] }
+  const pending = await h.call('update-bot', { id: 'a', nativeTools: true })
+  assert.equal(pending.ok, false)
+  assert.match(pending.error.message, /shared with other people/)
+  assert.equal(h.rt.state.nativeToolsLocksRetired, undefined)
+  Object.assign(h.rt, { holdsLock, canWriteTeam })
+  const upgraded = await h.call('update-bot', { id: 'a', nativeTools: true })
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded))
+  assert.equal(h.rt.state.nativeToolsLocksRetired, true)
+  assert.equal((await h.call('update-bot', { id: 'a', nativeTools: false })).ok, true)
+  delete bot.people
   for (const [fields, reason] of [
-    [{ people: { mode: 'allowlist', allow: ['visitor'] } }, /shared with other people/],
     [{ shell: false }, /shell access off or denied tools/],
   ]) {
     Object.assign(bot, fields)
@@ -185,6 +203,36 @@ test('owner cannot enable native tools for shared, restricted or multiuser Bots'
   assert.equal(h.stored().bots.a.nativeTools, undefined)
 })
 
+// #1564 follow-up (R): once the one-time upgrade has run, the locks it removed no longer refuse ON.
+test('after the upgrade, a Main Bot with Omni linked, Omni, Genie, shared, LiveShare and IM-bound Bots can save ON', async t => {
+  const h = await host(t)
+  assert.equal(h.rt.nativeToolsBlock(h.rt.botOf('a')), undefined)
+  assert.equal(h.rt.state.nativeToolsLocksRetired, true)
+  const fiber = { state: 2 }
+  const { omniLinked, imBoundBot } = h.rt
+  const cases = [
+    ['a', 'Main Bot with Omni linked', () => { h.rt.omniLinked = () => true }, () => { h.rt.omniLinked = omniLinked }],
+    ['b', 'Omni Bot', () => { h.rt.botOf('b').kind = 'omni' }, () => { delete h.rt.botOf('b').kind }],
+    ['b', 'Genie', () => { h.rt.botOf('b').kind = 'genie' }, () => { delete h.rt.botOf('b').kind }],
+    ['b', 'shared', () => { h.rt.botOf('b').people = { mode: 'allowlist', allow: ['visitor'] } }, () => { delete h.rt.botOf('b').people }],
+    ['b', 'LiveShare', () => { h.ctx.registry.set('sharing', { name: 'liveshare-host', fibers: [fiber] }) }, () => { h.ctx.registry.delete('sharing') }],
+    ['b', 'IM-bound', () => { h.rt.imBoundBot = () => true }, () => { h.rt.imBoundBot = imBoundBot }],
+  ]
+  for (const [id, label, set, unset] of cases) {
+    set()
+    try {
+      assert.equal(h.rt.nativeToolsBlock(h.rt.botOf(id)), undefined, label)
+      const on = await h.call('update-bot', { id, nativeTools: true })
+      assert.equal(on.ok, true, `${label}: ${JSON.stringify(on)}`)
+      assert.equal(h.stored().bots[id].nativeTools, true, label)
+      assert.equal(h.rt.nativeToolsBotOn(id), true, label)
+      assert.equal((await h.call('update-bot', { id, nativeTools: false })).ok, true, label)
+    } finally {
+      unset()
+    }
+  }
+})
+
 test('first owner turn in a fresh direct chat gets native tools from saved ON', async t => {
   const h = await host(t, { saved: true })
   assert.equal(h.rt.chatOwners.get('ada'), 'a')
@@ -198,7 +246,8 @@ test('first owner turn in a fresh direct chat gets native tools from saved ON', 
   await chat.turn('second owner turn')
   assert.equal(h.w.events('new-session').length, 1)
   // #1564 PR B (B2-1 (2)): the identity's agent tag reads the saved ON as well, once per read.
-  assert.equal(reads, 4)
+  // #1564 follow-up: the one-time upgrade reads it once, and reuse reads it once (fail closed).
+  assert.equal(reads, 6)
 })
 
 async function botFresh(t, h) {
@@ -246,7 +295,9 @@ const startupContext = () => [
   ['time-context', 'snapshot', 'Current time.'],
 ].map(([kind, form, text]) => createUserMessage({ content: [{ type: 'text', text }], source: { kind, form } }))
 
-test('New conversation replaces the startup Claude on the first owner turn with saved ON', async t => {
+// #1564 follow-up: a handoff turn follows the saved switch too, so the startup relay opens ON
+// and the owner's first turn reuses that process.
+test('New conversation opens the startup Claude ON with saved ON, and the owner turn reuses it', async t => {
   const h = await host(t)
   const saved = await h.call('update-bot', { id: 'b', nativeTools: true })
   assert.equal(saved.ok, true, JSON.stringify(saved))
@@ -266,9 +317,9 @@ test('New conversation replaces the startup Claude on the first owner turn with 
   const generated = startupContext()
   const startupAnswer = await fresh.turn(startup, CLAUDE, generated)
   assert.deepEqual(startupAnswer.at(-1).reason, { kind: 'stop' })
-  h.w.assertToolset(0, false)
-  const off = h.w.adapter.live.get(sessionId).run
-  assert.equal(off.alive, true)
+  h.w.assertToolset(0, true)
+  const on = h.w.adapter.live.get(sessionId).run
+  assert.equal(on.alive, true)
 
   const owner = 'Teste automático (1564-A): plain owner direct Electron'
   const ownerAnswer = await fresh.turn(person(owner))
@@ -284,25 +335,20 @@ test('New conversation replaces the startup Claude on the first owner turn with 
     newSessions: launches.map(({ pid, meta }) => ({ pid, disableBuiltInTools: meta.disableBuiltInTools })),
     prompts: prompts.map(({ pid }, index) => ({ pid, input: index === 0 ? 'handoff' : 'owner' })),
   }))
-  assert.deepEqual(launches.map(row => row.meta.disableBuiltInTools), [true, false],
-    'the handoff opens OFF and the first owner turn opens ON')
-  const [offPid, onPid] = launches.map(row => row.pid)
-  assert.notEqual(offPid, onPid)
-  assert.deepEqual(prompts.map(row => row.pid), [offPid, onPid])
-  await off.gone.catch(() => {})
-  assert.equal(off.alive, false)
-  assert.match(prompts[1].text, /The chat so far, before this new/)
-  assert.match(prompts[1].text, /Handoff \(not from the user\)/)
-  h.w.assertToolset(1, true)
-  const on = h.w.adapter.live.get(sessionId).run
+  assert.deepEqual(launches.map(row => row.meta.disableBuiltInTools), [false],
+    'the handoff opens ON and the first owner turn reuses it')
+  const [onPid] = launches.map(row => row.pid)
+  assert.deepEqual(prompts.map(row => row.pid), [onPid, onPid])
+  assert.equal(h.w.adapter.live.get(sessionId).run, on)
   const persisted = h.rt.botOf('b').nativeTools
   let reads = 0
   Object.defineProperty(h.rt.botOf('b'), 'nativeTools', { get() { reads++; return persisted } })
   await fresh.turn('another owner message')
   assert.equal(h.w.adapter.live.get(sessionId).run, on)
-  assert.equal(h.w.events('new-session').length, 2)
+  assert.equal(h.w.events('new-session').length, 1)
   assert.equal(h.w.events('prompt').at(-1).pid, onPid)
-  assert.equal(reads, 0)
+  // Reuse confirms the saved switch still reads ON (fail closed).
+  assert.equal(reads, 1)
 })
 
 test('the production handoff ACK with a derived system row leaves the first ACP process for the owner to open ON', async t => {
@@ -379,7 +425,8 @@ for (const part of [2, 10]) {
   })
 }
 
-test('a real DSH scheduled delivery to the indexed current chat gets OFF', async t => {
+// #1564 follow-up: a scheduled delivery follows the Bot's switch.
+test('a real DSH scheduled delivery to the indexed current chat follows the saved ON', async t => {
   const h = await host(t, { saved: true, hidden: true })
   const chat = h.chat()
   const ctx = new Context()
@@ -407,7 +454,7 @@ test('a real DSH scheduled delivery to the indexed current chat gets OFF', async
   const schedule = new ScheduleService(ctx, {})
   await schedule.ready
   const task = await schedule.create({
-    title: 'Reminder', prompt: 'bridge read now',
+    title: 'Reminder', prompt: 'native-read now',
     timing: { kind: 'at', at: new Date(Date.now() + 86_400_000).toISOString() },
     target: { kind: 'session', sessionId: h.rt.chatOf('a') },
   })
@@ -415,11 +462,14 @@ test('a real DSH scheduled delivery to the indexed current chat gets OFF', async
   assert.equal(run.lastDelivery.targetSessionId, 'ada')
   assert.equal((await delivered.promise).source.kind, 'schedule')
   await turn
-  h.w.assertToolset(0, false)
-  assert.deepEqual(h.w.executed, ['read'])
+  h.w.assertToolset(0, true)
+  assert.equal(h.w.events('native-tool-ran')[0].name, 'Read')
+  assert.deepEqual(h.w.executed, [])
 })
 
-test('an IM-bound direct chat stays OFF on the carried IM profile', async t => {
+// #1564 follow-up: the upgrade turns an IM-bound Bot's saved ON off once; an ON the person saves
+// after it applies to IM turns too.
+test('an IM-bound direct chat is OFF after the upgrade, and follows an ON saved after it', async t => {
   const h = await host(t, { saved: true, hidden: true, im: true })
   const chat = h.chat()
   const connected = Promise.withResolvers()
@@ -445,6 +495,16 @@ test('an IM-bound direct chat stays OFF on the carried IM profile', async t => {
   assert.match(source.rpcId, /^im:telegram:/)
   await turn
   h.w.assertToolset(0, false)
+  assert.deepEqual(h.w.executed, ['read'])
+  assert.equal(h.rt.botOf('a').nativeTools, false)
+  assert.equal(h.stored().bots.a.nativeTools, false)
+  assert.equal(h.stored().nativeToolsLocksRetired, true)
+  const on = await h.call('update-bot', { id: 'a', nativeTools: true })
+  assert.equal(on.ok, true, JSON.stringify(on))
+  await handlers.onMessage({ chat: { key: 'dm-sender', kind: 'direct' }, sender: { id: 'sender', name: 'Sender' }, text: 'native-read' })
+  await turn
+  h.w.assertToolset(1, true)
+  assert.equal(h.w.events('native-tool-ran')[0].name, 'Read')
   assert.deepEqual(h.w.executed, ['read'])
 })
 

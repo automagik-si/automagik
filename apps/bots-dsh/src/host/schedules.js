@@ -662,11 +662,80 @@ export function install(rt) {
       }
     }
   }
+  // #1564: a fresh Session a `new`/`new_once` task opens has no Bot, so the native tools switch
+  // follows the one Bot behind its task. The hook gets a destination id, not a task id: an exact
+  // task decides it (a `new_once` reservation, or a re-drive of a task's last delivery); else
+  // every `new` task is a candidate, since each firing of a recurring one opens a new Session.
+  // Each task's Bot is the single Bot its involved Sessions resolve to, the destination excluded.
+  // One Bot behind every candidate is the owner; two Bots, a task with no Bot, or a failed lookup
+  // leaves no owner, and the Session runs without native tools. The map holds an owner, never a
+  // switch.
+  const nativeOwners = new Map()
+  const entryBotOf = async (entry, sessionId) => {
+    let owner
+    for (const id of entry.involvedSessionIds ?? []) {
+      if (id === sessionId) continue
+      const { bot } = await lineageOf(id)
+      if (typeof bot?.id !== 'string') continue
+      if (owner !== undefined && owner !== bot.id) return undefined
+      owner = bot.id
+    }
+    return owner
+  }
+  const recordNativeOwner = async (sessionId) => {
+    // Every drive decides again: no read during the lookup sees an older owner.
+    nativeOwners.delete(sessionId)
+    try {
+      if ((await lineageOf(sessionId)).bot !== undefined || service === null) return
+      const entries = await service.catalog()
+      const targets = (entry, kind) =>
+        entry.target?.kind === kind && entry.target.sessionId === sessionId
+      if (entries.some(entry => targets(entry, 'session'))) return
+      const exact = entries.filter(entry => targets(entry, 'new_once')
+        || (NEW_TARGETS.has(entry.target?.kind)
+          && entry.lastDelivery?.targetSessionId === sessionId))
+      const candidates = exact.length > 0 ? exact
+        : entries.filter(entry => entry.target?.kind === 'new')
+      let owner
+      for (const entry of candidates) {
+        const bot = await entryBotOf(entry, sessionId)
+        if (bot === undefined || (owner !== undefined && owner !== bot)) return
+        owner = bot
+      }
+      if (owner !== undefined) nativeOwners.set(sessionId, owner)
+    } catch (error) {
+      nativeOwners.delete(sessionId)
+      try { rt.warn('ds-bot: native tools stay off in scheduled Session %s: %s', sessionId, error) }
+      catch {}
+    }
+  }
+  // Ends the native process of a fresh scheduled Session before it leaves the map, so a later OFF
+  // never misses one.
+  const dropNativeOwner = (sessionId) => {
+    if (!nativeOwners.has(sessionId)) return
+    try { rt.endNativeSession?.(sessionId) }
+    finally { nativeOwners.delete(sessionId) }
+  }
+  rt.scheduledNativeOwner = sessionId => nativeOwners.get(sessionId)
+  rt.scheduledNativeSessions = botId =>
+    [...nativeOwners].filter(([, owner]) => owner === botId).map(([id]) => id)
+  ctx.on('session/disposed', session => {
+    if (typeof session?.id === 'string') dropNativeOwner(session.id)
+  })
+  // A deleted Bot's fresh scheduled Sessions are not released with its chats: end them here.
+  if (typeof rt.beforeBotDelete === 'function') {
+    rt.beforeBotDelete((botId) => {
+      for (const id of rt.scheduledNativeSessions(botId)) dropNativeOwner(id)
+    })
+  }
+  ctx.effect(() => () => nativeOwners.clear(), 'ds-bot: scheduled native owners')
+
   // Check deliveries throughout the rollback hold, including Run now and receipt recovery.
   // Outside the hold, guard unbound Sessions through the first sweep and any failed pause.
   // DSH drives deliveries through this waterfall, before the prompt runs. It must never
   // await a management write: that would queue behind the delivery's own serialized drive.
   ctx.on('schedule/resolve-agent', async (sessionId, next) => {
+    nativeOwners.delete(sessionId)
     const holding = rt.multiuserHold?.() === true
     if (holding || !swept || stuck.size > 0) {
       if (!holding && await botOfTaskSession(sessionId) !== undefined) {
@@ -682,9 +751,18 @@ export function install(rt) {
           : 'ds-bot: a scheduled delivery is blocked until its task can be paused')
       }
     }
-    if (!holding) await recordScheduledBot(sessionId)
-    await checkScheduledReadScope(sessionId)
-    return openedLevel(sessionId, await next())
+    if (!holding) {
+      await recordScheduledBot(sessionId)
+      await recordNativeOwner(sessionId)
+    }
+    try {
+      await checkScheduledReadScope(sessionId)
+      return await openedLevel(sessionId, await next())
+    } catch (error) {
+      // A held delivery leaves no owner behind.
+      nativeOwners.delete(sessionId)
+      throw error
+    }
   })
 
   async function schedulesView() {

@@ -903,3 +903,143 @@ test('an ordinary reminder is not wedged by a reserved fresh id', async (t) => {
   assert.equal(await guard('user-chat', async () => 'ran'), 'ran')
   drive.release()
 })
+
+// #1564 follow-up: a fresh Session a `new`/`new_once` task opens follows the switch of the one
+// Bot behind its task (RFC 0003, Amendment: native tools in every chat of the Bot).
+const NATIVE_TEAM = {
+  ...TEAM,
+  nativeToolsLocksRetired: true,
+  bots: Object.fromEntries(Object.entries(TEAM.bots).map(([id, bot]) => [id, {
+    ...bot, model: 'acp-claude/default', nativeTools: true, nativeToolsAgent: 'acp-claude',
+  }])),
+}
+
+async function nativeSetup(t, schedule = scheduleService()) {
+  const sandboxPolicy = { defaultMode: 'workspace-write', resolve: () => ({ mode: 'workspace-write' }) }
+  const { ctx, home, rt, call } = setup({ schedule, sandboxPolicy }, NATIVE_TEAM)
+  t.after(async () => {
+    await ctx.dispose()
+    rmSync(home, { recursive: true, force: true, maxRetries: 5 })
+  })
+  await rt.load()
+  const guard = (ctx.listeners.get('schedule/resolve-agent') ?? [])[0]
+  // The owner a delivery's prompt would see.
+  const drive = async (sessionId) => {
+    let seen
+    assert.equal(await guard(sessionId, async () => { seen = rt.scheduledNativeOwner(sessionId); return 'ran' }), 'ran')
+    return seen
+  }
+  return { ctx, rt, schedule, guard, drive, call }
+}
+
+test('S-a each firing of a recurring new task is a new Session: two Bots behind the new tasks read OFF', async (t) => {
+  const { rt, schedule, drive } = await nativeSetup(t)
+  await freshTask(schedule, 'w2')
+  const other = await freshTask(schedule, 'm1', 'Other')
+  for (const id of ['fresh-1', 'fresh-2']) {
+    assert.equal(await drive(id), undefined, id)
+    assert.equal(rt.nativeToolsFor(id), false, id)
+  }
+  schedule.tasks.delete(other.id)
+  assert.equal(await drive('fresh-3'), 'w1')
+  assert.equal(rt.nativeToolsFor('fresh-3'), true)
+  assert.deepEqual(rt.scheduledNativeSessions('w1'), ['fresh-3'])
+})
+
+test('S-b only one Bot behind the new tasks: the firing follows that Bot, and its OFF', async (t) => {
+  const { rt, schedule, drive } = await nativeSetup(t)
+  await freshTask(schedule, 'w2')
+  await freshTask(schedule, 'w1', 'From an earlier part')
+  assert.equal(await drive('fresh-1'), 'w1')
+  assert.equal(rt.nativeToolsFor('fresh-1'), true)
+  delete rt.botOf('w1').nativeTools
+  assert.equal(rt.scheduledNativeOwner('fresh-1'), 'w1')
+  assert.equal(rt.nativeToolsFor('fresh-1'), false)
+})
+
+test('S-c one task with two Bots has no owner; the destination and unknown Sessions do not vote', async (t) => {
+  const { rt, schedule, drive } = await nativeSetup(t)
+  const both = await freshTask(schedule, 'w2')
+  for (const involved of [['w2', 'm1'], ['m1', 'w2']]) {
+    schedule.tasks.get(both.id).involvedSessionIds = involved
+    assert.equal(await drive('fresh-1'), undefined, involved.join())
+  }
+  schedule.tasks.get(both.id).involvedSessionIds = ['fresh-2', 'w2', 'ghost-session']
+  assert.equal(await drive('fresh-2'), 'w1')
+  // A past part of the Bot speaks for it.
+  schedule.tasks.get(both.id).involvedSessionIds = ['w1']
+  assert.equal(await drive('fresh-3'), 'w1')
+  assert.equal(rt.nativeToolsFor('fresh-3'), true)
+})
+
+test('S-d an exact task decides: a new_once reservation, and a re-drive of a last delivery', async (t) => {
+  const { schedule, drive } = await nativeSetup(t)
+  await freshTask(schedule, 'w2')
+  await schedule.create({
+    title: 'Once', prompt: 'Check', timing: { kind: 'every', every_seconds: 3600 },
+    target: { kind: 'new_once', sessionId: 'reserved-1' },
+  }, 'm1')
+  assert.equal(await drive('reserved-1'), 'm1')
+  const [mine] = [...schedule.tasks.values()].filter(entry => entry.target.kind === 'new')
+  mine.lastDelivery = { targetSessionId: 'fresh-9' }
+  assert.equal(await drive('fresh-9'), 'w1')
+  // A fresh firing with no exact task: a new_once task is never a candidate for another id.
+  assert.equal(await drive('fresh-10'), 'w1')
+})
+
+test('S-e a failed lookup or a task with no Bot leaves no owner, and the delivery still runs', async (t) => {
+  const { rt, schedule, drive } = await nativeSetup(t)
+  const warns = []
+  t.mock.method(rt, 'warn', (...args) => { warns.push(args) })
+  await freshTask(schedule, 'w2')
+  const anonymous = await freshTask(schedule, 'outside', 'No Bot')
+  assert.equal(await drive('fresh-1'), undefined)
+  schedule.tasks.delete(anonymous.id)
+  const catalog = schedule.catalog
+  schedule.catalog = async () => { throw new Error('store unavailable') }
+  assert.equal(await drive('fresh-2'), undefined)
+  assert.ok(warns.some(([format, id]) => /native tools stay off in scheduled Session/.test(format) && id === 'fresh-2'))
+  schedule.catalog = catalog
+  const [mine] = [...schedule.tasks.values()]
+  mine.involvedSessionIds = ['w2', 'boom']
+  const selfOf = rt.selfOf
+  rt.selfOf = id => {
+    if (id === 'boom') throw new Error('lineage unavailable')
+    return selfOf(id)
+  }
+  assert.equal(await drive('fresh-3'), undefined)
+  rt.selfOf = selfOf
+  assert.equal(await drive('fresh-4'), 'w1')
+})
+
+// E3-3: no idle native process of a closed scheduled Session survives its map entry.
+test('a disposed fresh scheduled Session ends its native process and leaves the map', async (t) => {
+  const { ctx, rt, schedule, drive } = await nativeSetup(t)
+  const ended = []
+  rt.endNativeSession = id => { ended.push(id) }
+  await freshTask(schedule, 'w2')
+  assert.equal(await drive('fresh-1'), 'w1')
+  assert.equal(await drive('fresh-2'), 'w1')
+  ctx.emit('session/disposed', { id: 'fresh-1' })
+  assert.deepEqual(ended, ['fresh-1'])
+  assert.equal(rt.scheduledNativeOwner('fresh-1'), undefined)
+  assert.deepEqual(rt.scheduledNativeSessions('w1'), ['fresh-2'])
+  // A Session that is not in the map ends nothing.
+  ctx.emit('session/disposed', { id: 'w2' })
+  assert.deepEqual(ended, ['fresh-1'])
+})
+
+// A deleted Bot's fresh scheduled Sessions are not released with its chats: the delete ends them.
+test('deleting a Bot ends the native processes of its fresh scheduled Sessions', async (t) => {
+  const { ctx, rt, schedule, drive, call } = await nativeSetup(t)
+  const ended = []
+  rt.endNativeSession = id => { ended.push(id) }
+  await freshTask(schedule, 'w2')
+  assert.equal(await drive('fresh-1'), 'w1')
+  ctx.workspaceRegistry = { archiveSession: async () => {} }
+  const deleted = await call('delete-bot', { id: 'w1' })
+  assert.equal(deleted.ok, true, JSON.stringify(deleted))
+  assert.ok(ended.includes('fresh-1'))
+  assert.equal(rt.scheduledNativeOwner('fresh-1'), undefined)
+  assert.equal(rt.nativeToolsFor('fresh-1'), false)
+})
