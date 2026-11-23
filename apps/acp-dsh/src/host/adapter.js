@@ -53,8 +53,17 @@ export const HELD_TEXT = 'This conversation is on hold while its permission leve
 const NATIVE_TOOLS_CHANGED_TEXT = 'The tools setting changed; send again.'
 // Codex with its own tools off (codex-native.js). Off is not Read only: DSH's tools keep the
 // Session's level.
-const NO_BRIDGE_TEXT = "Codex's own tools are off for this Bot and Automagik's tools are turned off in this app, so Codex was not started. Turn native tools on in the Bot's Details, or turn Automagik's tools back on."
-const offUnavailableText = reason => `Codex could not turn its own tools off (${reason}), so the message was not sent. Turn native tools on in the Bot's Details, or update Automagik.`
+// The Details switch applies only in the owner's direct chat of a Bot it is not blocked for: only
+// there do these texts point to it. Elsewhere (groups, tasks, scheduled runs, a blocked Bot) they
+// name what helps there.
+const noBridgeText = switchHere => "Codex's own tools are off for this Bot and Automagik's tools"
+  + ' are turned off in this app, so Codex was not started. ' + (switchHere
+  ? "Turn native tools on in the Bot's Details, or turn Automagik's tools back on."
+  : "Turn Automagik's tools back on, or switch its model.")
+const offUnavailableText = (reason, switchHere) => 'Codex could not turn its own tools off'
+  + ` (${reason}), so the message was not sent. ` + (switchHere
+  ? "Turn native tools on in the Bot's Details, or update Automagik."
+  : 'Switch its model, or update Automagik.')
 const NATIVE_CALL_TEXT = 'Codex used one of its own tools while they are off, so this answer stopped. Send your message again.'
 
 // The exact disposer of the mirror-tool registration a Session agent carries. It lives on the
@@ -1567,6 +1576,11 @@ export class AcpAdapter extends LlmAdapter {
         && this.savedNativeOn(sessionId, options.provider, reuse)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
       const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
+      // Whether the Details switch could turn this Session's Codex ON, read when the text is made.
+      const switchHere = () => {
+        try { return identityRead?.nativeToolsBlocked === false } catch { return false }
+      }
+      const offText = reason => offUnavailableText(reason, switchHere())
       // A Codex turn that will run with its own tools off never asks for own mode or opens an
       // image-file grant: DSH's read_image reaches images through the bridge.
       const codexOffAtStart = codexRow && !kept && this.teamManaged()
@@ -1763,7 +1777,9 @@ export class AcpAdapter extends LlmAdapter {
                 return yield* stopped(NATIVE_TOOLS_CHANGED_TEXT)
               }
               // Its own tools off and DSH's turned off: nothing would be left to work with.
-              if (!this.bridgeDecision(agent, sessionId, true).on) return yield finish('error', NO_BRIDGE_TEXT, 'acp/native-off-no-bridge')
+              if (!this.bridgeDecision(agent, sessionId, true).on) {
+                return yield finish('error', noBridgeText(switchHere()), 'acp/native-off-no-bridge')
+              }
             }
             const spawnContext = codexOff
               ? { nativeOff: true, cwd: dshAgent?.session?.header?.cwd, signal: options.signal }
@@ -1928,7 +1944,7 @@ export class AcpAdapter extends LlmAdapter {
               if (options.signal?.aborted) return yield STOPPED()
               this.recordMeasured(agent, error.models)
               if (entry.keptRelaunch !== true && (this.nativeKept(agent, options.model) || startUnknown())) return yield* relaunchKept()
-              return yield finish('error', offUnavailableText('this model was not checked'), NATIVE_OFF_UNAVAILABLE)
+              return yield finish('error', offText('this model was not checked'), NATIVE_OFF_UNAVAILABLE)
             }
             // A check that refused OFF is this Codex's answer, not the connector's release.
             const offRefused = error?.code === NATIVE_OFF_UNAVAILABLE
@@ -1941,7 +1957,7 @@ export class AcpAdapter extends LlmAdapter {
               this.mergeMeasured(agent, error.unverified)
               if (entry.keptRelaunch !== true && this.nativeKept(agent, options.model)) return yield* relaunchKept()
             }
-            if (offRefused) return yield finish('error', offUnavailableText(error.reason ?? error.message ?? 'its check failed'), NATIVE_OFF_UNAVAILABLE)
+            if (offRefused) return yield finish('error', offText(error.reason ?? error.message ?? 'its check failed'), NATIVE_OFF_UNAVAILABLE)
             // A missing bridge is this computer's config, not the release: no rollback for it.
             let back = false
             if (!fileContext?.files.length && attempt === 0 && error?.code !== 'acp_bridge_missing' && options.signal?.aborted !== true) {
@@ -2008,7 +2024,7 @@ export class AcpAdapter extends LlmAdapter {
           if (codexRow && live.nativeOff === true) {
             try { ensureCatalog(live.offCatalog) } catch {
               this.endSession(sessionId)
-              return yield finish('error', offUnavailableText('the checked model catalog could not be written'), NATIVE_OFF_UNAVAILABLE)
+              return yield finish('error', offText('the checked model catalog could not be written'), NATIVE_OFF_UNAVAILABLE)
             }
           }
           try {
@@ -2069,7 +2085,7 @@ export class AcpAdapter extends LlmAdapter {
         // OFF on a model its spawn did not check: never prompted (LQ1).
         if (live.nativeOff === true && !live.checkedModels?.includes(slug)) {
           this.endSession(sessionId, undefined, options.provider)
-          return yield finish('error', offUnavailableText('this model was not checked'), NATIVE_OFF_UNAVAILABLE)
+          return yield finish('error', offText('this model was not checked'), NATIVE_OFF_UNAVAILABLE)
         }
         // Launched as kept, now on a checked model, with a Bot team: its own tools on a turn that
         // must be OFF (a stale `default` the other way). This ignores owner eligibility on

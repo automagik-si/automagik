@@ -621,6 +621,39 @@ test('A4 refusals before a process: the kill switch with OFF, and a refused chec
   assert.equal(finishOf(await turnOn(w4, w4.chat('direct'), scheduled('scheduled'))).failure.code, 'acp/native-off-unavailable')
 })
 
+// The Details switch is named only where it could turn this Codex ON.
+test('A4 refusal texts point to the Details switch only in an eligible owner chat', async t => {
+  const refuse = () => Promise.reject(Object.assign(new Error('x'),
+    { code: 'acp/native-off-unavailable', reason: 'a test refusal' }))
+  const SENT = 'Codex could not turn its own tools off (a test refusal),'
+    + ' so the message was not sent.'
+  const DETAILS = "Turn native tools on in the Bot's Details"
+  const eligible = () => ({ name: 'Ada', nativeToolsBlocked: false })
+  // Eligible own chat, switch OFF: the switch would help, so the text names it.
+  const own = world(t, { identity: eligible, offSpawn: refuse })
+  const ownTurn = await turnOn(own, own.chat('direct'), owner('owner'))
+  assert.equal(finishOf(ownTurn).failure.message, `${SENT} ${DETAILS}, or update Automagik.`)
+  // A group, task or scheduled Session, or a blocked Bot, is never ON: no pointer to the
+  // switch, one full stop.
+  const blocked = () => ({ name: 'Ada', nativeToolsBlocked: true })
+  for (const identity of [OFF, blocked, () => undefined]) {
+    const w = world(t, { identity, offSpawn: refuse })
+    const turn = await turnOn(w, w.chat('group'), scheduled('scheduled'))
+    assert.equal(finishOf(turn).failure.message, `${SENT} Switch its model, or update Automagik.`)
+  }
+  // The kill switch with OFF: the same split.
+  const ownOff = world(t, { identity: eligible, dshTools: false })
+  const ownOffTurn = await turnOn(ownOff, ownOff.chat('direct'), owner('owner'))
+  const ownText = finishOf(ownOffTurn).failure.message
+  assert.ok(ownText.endsWith(`${DETAILS}, or turn Automagik's tools back on.`), ownText)
+  const group = world(t, { identity: OFF, dshTools: false })
+  const groupTurn = await turnOn(group, group.chat('group'), scheduled('scheduled'))
+  const text = finishOf(groupTurn).failure.message
+  assert.equal(text.includes(DETAILS), false)
+  const tail = "so Codex was not started. Turn Automagik's tools back on, or switch its model."
+  assert.ok(text.endsWith(tail), text)
+})
+
 test('A5/A6 OFF: Codex\'s own patch and sub-agent calls end the session with no card and never run; bridge calls and the MCP readers do not trip the backstop', async t => {
   const w = world(t, { identity: OFF })
   const chat = w.chat('direct')

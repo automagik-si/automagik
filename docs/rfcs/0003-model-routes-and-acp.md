@@ -1080,9 +1080,17 @@ this amendment" lines.
   process's config names no model, so DSH's `default` stays the model Codex itself starts on. Any
   other failure refuses the turn ("Codex could not turn its own tools off ..."), a deadline or a
   Stop included, except a turn on a model the check measured kept (below); the Session never
-  opens unchecked. The CLI calls run one after another, and one setup at a time per Codex home:
-  about 5-6 seconds more per new OFF agent session, none per turn. A model the composer picks
-  later must be one the spawn checked, else the turn is refused with zero prompts.
+  opens unchecked. Before the check, the spawn writes the chat permission profiles into the
+  Bot's isolated Codex home (`cli-homes`, a new empty home included) and runs one command under
+  them (`codex sandbox -P`) with that home; when Codex cannot, the turn is refused with "its
+  permission profiles are unavailable". That refusal, and the one with DSH's tools turned off,
+  point to the Details switch only in the owner's direct chat of a Bot it is not blocked for; in
+  a group, task or scheduled run, or for a blocked Bot, they say to switch its model, or to update
+  Automagik (to turn Automagik's tools back on, for the second), and a group line shows the
+  refusal's short words, in the interface language. The CLI calls run one after another, and
+  one setup at a time per Codex home: about 5-6 seconds more per new OFF agent session, none per
+  turn. A model the composer picks later must be one the spawn checked, else the turn is refused
+  with zero prompts.
 - **The catalog file.** The checked copy is written, mode 0600, to the installation's ACP folder
   (`codex-native-off/models-<sha256>.json`), outside every Codex home and outside `cli-homes`.
   Copies older than 24 hours are pruned, never the one just written. A fork of an OFF process
