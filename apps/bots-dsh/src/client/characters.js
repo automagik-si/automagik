@@ -46,6 +46,9 @@ export const CHARACTERS = {
 // The picker shows every character at once, six to a row. Ordinary Bots keep their
 // id-based character; only DSH identities default to the blue whale (DSH_LOOK).
 export const PICKER_SHAPES = Object.keys(CHARACTERS)
+// The Solvers, a family of their own: wherever a character is chosen they come after the
+// others, under a "Solvers" heading, starting a row.
+export const SOLVER_SHAPES = ['puff', 'sprout', 'cap', 'bell', 'cloud', 'spike', 'floppy', 'antenna', 'cactus', 'bulb', 'chick', 'frog']
 export const PICKER_COLUMNS = 6
 export const DEFAULT_SHAPES = ['star', 'moon', 'gumdrop', 'peanut', 'bunny', 'kitty', 'acorn']
 export const FALLBACK_SHAPE = 'gumdrop'

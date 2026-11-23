@@ -2964,6 +2964,8 @@ const ZH = {
   '{count} photos added to Yours.': '已有 {count} 张照片加入“你的”。',
   'Not added: {names}': '未添加：{names}',
   'Your pets': '你的宠物',
+  // A product name, kept as it is.
+  'Solvers': 'Solvers',
   'Browse codex-pets.net': '浏览 codex-pets.net',
   'Thousands of pets shared by the Codex community, in the same format. Opening it asks codex-pets.net; a pet you pick is kept on this computer.': '成千上万个由 Codex 社区分享的宠物，格式相同。打开时会访问 codex-pets.net；你选中的宠物会保存在这台电脑上。',
   'Automagik character': 'Automagik 角色',

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CHARACTERS, DEFAULT_SHAPES, FALLBACK_SHAPE, PICKER_SHAPES, bakeMarkup, characterMarkup, defaultShape, hasShape, lookOf, maskOf, shapeOf } from '../src/client/characters.js'
+import { CHARACTERS, DEFAULT_SHAPES, FALLBACK_SHAPE, PICKER_SHAPES, SOLVER_SHAPES, bakeMarkup, characterMarkup, defaultShape, hasShape, lookOf, maskOf, shapeOf } from '../src/client/characters.js'
 
 // The ids are saved with Bots, so the table only ever grows at its end.
 const FIRST = ['whale', 'octopus', 'star', 'moon', 'wave', 'squircle', 'zed', 'hex', 'gumdrop', 'peanut', 'saucer', 'bunny', 'kitty', 'beacon', 'plus', 'magnet', 'acorn', 'pebbles', 'cushion', 'ring', 'gem']
@@ -23,6 +23,8 @@ test('the catalogue is the first 21 characters, then the twelve Solvers as one b
   assert.deepEqual(PICKER_SHAPES, [...FIRST, ...SOLVERS])
   assert.deepEqual(SOLVERS.map(id => shapeOf(id).label), ['Puff', 'Sprout', 'Cap', 'Bell', 'Cloud', 'Spike', 'Floppy', 'Antenna', 'Cactus', 'Bulb', 'Chick', 'Frog'])
   for (const id of SOLVERS) assert.ok(hasShape(id), id)
+  // The list the choosers' "Solvers" section is built from: the table's last twelve.
+  assert.deepEqual(SOLVER_SHAPES, SOLVERS)
 })
 
 test('a Solver is a table entry like any other: body, shade, light and two eyes, in the catalogue\'s fixed tones', () => {

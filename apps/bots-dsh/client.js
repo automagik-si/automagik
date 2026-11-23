@@ -3065,6 +3065,8 @@ var ZH = {
   "{count} photos added to Yours.": "已有 {count} 张照片加入“你的”。",
   "Not added: {names}": "未添加：{names}",
   "Your pets": "你的宠物",
+  // A product name, kept as it is.
+  "Solvers": "Solvers",
   "Browse codex-pets.net": "浏览 codex-pets.net",
   "Thousands of pets shared by the Codex community, in the same format. Opening it asks codex-pets.net; a pet you pick is kept on this computer.": "成千上万个由 Codex 社区分享的宠物，格式相同。打开时会访问 codex-pets.net；你选中的宠物会保存在这台电脑上。",
   "Automagik character": "Automagik 角色",
@@ -5611,6 +5613,7 @@ var CHARACTERS = {
   frog: { label: "Frog", body: "M64.3 7.8l3.5-.5 3 .1 3.6 .8 3.1 1.2 3.1 2 2.6 2.4 2 2.7 1.6 3.1 .9 3.1 .4 3.6-.9 7.7 3.7 2.6 2.7 3 1.6 3.1 .8 3.6-.6 4.6-2.3 5.2-3.8 4.6-6 5.1-.7 1 .5 .6 4.2 1.5 2.4 2 1.2 2.6-.4 3.1-1.3 2.1-2.4 1.9-3.1 1.3-3.1 .5-4.6-.4-3.6-1.8-2.1-2.6-.6-3.6-.4-.4-12.3 3.5-10.8 1.8-.7 .3-.1 .5 2 3.1 .3 2.5-.9 2.6-1.6 1.8-2.6 1.7-3.6 1.1-3.6 .2-3.6-.8-3.2-2-1.2-1.5-.6-1.5 .2-3.1 2.5-3.6 .3-.5-.4-.5-9.4-2.1-6.7-2.8-5.2-3.9-1.7-2-1.5-2.6-.9-4.1 .4-4.1 1.7-4.2 3.4-5.1-2.3-4.6-1.1-4.6 0-4.6 1.2-4.6 2.9-5 4.1-3.9 5.2-2.5 3.1-.7 3-.3 5.7 .9 5.4 2.7 4.3 4.1 3.1 5.5 4.6-.8 1.2-8.3 1.1-3 1.8-3.1 2.2-2.6 3-2.4 3.1-1.7z", shade: "M83.1 13.9l1.1 1.1 1.6 2.5 2 5.7 .1 6.1-.9 4.2 1.4 2.5-.4 1.6-1.1 1-1.7 .7-4.6 .6-5.6-.7-4.3-1.6-2.3-2.1 6.6-5.5 5.1-6.3 2.8-5.7 .3-2zM39.9 24.2l2.7 3.6 1 2.2 0 .9 .6 .5 0 1 1.1 1.1 .3 1-.7 3.1-2.3 3.3-5.1 4.4-7 3.6-6.9 1.7-6.5-.2 .2-.5 4.2-1.9 4.7-2.9 4.1-3.4 3.6-3.7 3-4 1.8-3.1 1.3-4.1zM92.7 39.1l.2-.2 1 1.2 1.1 2.1 1 5.1-.9 4.6-2.7 5.1-3.1 3.7-6.1 5.1-.6 1-6.1 2.8-6.7 3.9-2 .2-5.2 1.8-6.1 1.7-10.8 1.6-.5 .9-1.6-.9-3.1-.5-6.6 0-3.6 .4-.5 .5-7.7-1.6-6.2-2-4.6-2.5-3.2-2.7 3.3 1.1 4 .4 6.1-.1 6.2-.7 13.9-3 15.4-4.9 14.4-6.1 11.8-6.7 4.1-3.1 3.1-2.9 1.7-2.7zM89.8 71.5l.6 .5 .5 1.5-.4 3.1-2.7 3.2-2.6 1.5-3.6 1-4.1 0-3.5-1.1-2.2-1.5 .6 .5 3.6 .1 3.1-.5 3.6-1.2 2.5-1.3 2.6-2 1.4-1.8zM46.6 81.7l.6 .5 .5 1.6-.4 3.1-2.7 3.2-2.5 1.5-3.6 1-4.1 0-3.6-1.1-2.1-1.6 .5 .5 1.6 .2 3.1-.1 5.6-1.7 2.6-1.3 2.5-2 1.4-1.7z", light: "M62.6 8.3l2.5 0 .6 .5 .4 1-.6 2.6-1.8 3-3.1 3.3-3.6 2.6-3.6 1.4-2.1-.3-.8-1.3 .1-1.5 2.2-4.1 2.1-2.5 2.6-2.2zM19.4 18.6l2.5 0 .7 .5 .3 1-.8 3.1-2.1 3.1-3.1 3.1-4.1 2.7-3.1 .9-1.9-.6-.5-1 .3-2.1 3.2-5.1 3.5-3.1zM48.8 29.9l1 1.8 5.2 4.3 1 1.6-2.6 0-4.1-1.5-3.7-4.2zM9 49.4l.3 0 .2 1.5 .7 1.6 2.1 1.7 3.6 1.5 6.2 1 .3 .4-5 1.8-4.6 1.2-3.6 .2-2.8-.7-1.3-1.4-.1-2.1 1.7-3.6zM78 69.9l2.1-.1 .4 1.1-.3 2.1-1.7 2-2 .9-2.1 .3-2-.3-1.6-.7 .2-1.2 1-1 2.4-1.5zM32.3 79.2l5 0-.3 .5 .3 2.5-.5 1.6-1.6 1.5-2.4 .9-2.5 .2-2.1-.6-1-.9 0-1.6 3-3.6z", eyes: [[30.2, 40.6, 11.2, 25.6, -10.6], [73.4, 30.4, 11.2, 25.6, -10.6]] }
 };
 var PICKER_SHAPES = Object.keys(CHARACTERS);
+var SOLVER_SHAPES = ["puff", "sprout", "cap", "bell", "cloud", "spike", "floppy", "antenna", "cactus", "bulb", "chick", "frog"];
 var PICKER_COLUMNS = 6;
 var DEFAULT_SHAPES = ["star", "moon", "gumdrop", "peanut", "bunny", "kitty", "acorn"];
 var FALLBACK_SHAPE = "gumdrop";
@@ -15277,6 +15280,7 @@ var sourceLine = { builtin: "Automagik", team: "Kept by this team", codex: "From
 var capitalize = (word2) => word2[0].toUpperCase() + word2.slice(1);
 var slug = (text2) => String(text2 ?? "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "bot";
 var PICK_MS = 900;
+var shapeEntry = (shape) => ({ key: `shape:${shape}`, kind: "shape", shape, name: shapeOf(shape).label, line: "Automagik character" });
 function automagikRoster({ unfold = false } = {}) {
   return [
     { key: "pet:builtin:genie-clay", kind: "pet", pet: { ...GENIE_PET, name: "Genie" }, name: "Genie", line: "Automagik" },
@@ -15284,8 +15288,18 @@ function automagikRoster({ unfold = false } = {}) {
     { key: "pet:builtin:automagik", kind: "pet", pet: { source: "builtin", id: "automagik", name: "Automagik", version: 2, sleep: true }, name: "Automagik", line: "Automagik" },
     ...unfold ? [{ key: "pet:builtin:unfold", kind: "pet", pet: { ...UNFOLD_PET, name: "Unfold" }, name: "Unfold", line: "Automagik" }] : [],
     { key: "pet:builtin:wisp", kind: "pet", pet: { source: "builtin", id: "wisp", name: "Wisp", version: 2, sleep: false }, name: "Wisp", line: "Automagik" },
-    ...PICKER_SHAPES.filter((shape) => shape !== "octopus").map((shape) => ({ key: `shape:${shape}`, kind: "shape", shape, name: shapeOf(shape).label, line: "Automagik character" }))
+    ...PICKER_SHAPES.filter((shape) => shape !== "octopus" && !SOLVER_SHAPES.includes(shape)).map(shapeEntry)
   ];
+}
+var solverRoster = () => SOLVER_SHAPES.map(shapeEntry);
+function tileBeyond(boxes, at, down) {
+  const here = boxes[at];
+  if (!here) return -1;
+  const beyond = boxes.map((box, index) => ({ box, index })).filter(({ box }) => (box.top - here.top) * down > 1);
+  if (beyond.length === 0) return -1;
+  const rowTop = beyond.reduce((best, { box }) => (box.top - best) * down < 0 ? box.top : best, beyond[0].box.top);
+  const row2 = beyond.filter(({ box }) => Math.abs(box.top - rowTop) <= 1);
+  return row2.reduce((best, entry) => Math.abs(entry.box.left - here.left) < Math.abs(best.box.left - here.left) ? entry : best, row2[0]).index;
 }
 function currentKey(bot, look) {
   if (look.image) return "photo";
@@ -15401,11 +15415,12 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
     void loadPhotos();
   }, []);
   const ours = (0, import_react33.useMemo)(() => automagikRoster({ unfold }), [unfold]);
+  const solvers = (0, import_react33.useMemo)(() => solverRoster(), []);
   const yours = local.map((pet) => ({ key: `pet:${pet.source}:${pet.id}`, kind: "pet", pet, name: pet.name, line: sourceLine[pet.source] ?? pet.source }));
   const theirs = market.market.pets.map((pet) => ({ key: `market:${pet.id}`, kind: "market", pet, name: pet.name, line: pet.by ? t("by {name}", { name: pet.by }) : "codex-pets.net" }));
   const photo = look.image ? [{ key: "photo", kind: "photo", image: look.image, name: t("Photo"), line: t("Uploaded") }] : [];
   const photos = library.filter((entry) => entry.image !== look.image).map((entry) => ({ key: `library:${entry.id}`, kind: "library", image: entry.image, name: entry.name || t("Photo"), line: t("Your photos") }));
-  const all = [...photo, ...photos, ...ours, ...yours, ...theirs];
+  const all = [...photo, ...photos, ...ours, ...solvers, ...yours, ...theirs];
   const item = all.find((entry) => entry.key === focus) ?? ours[0];
   const worn = currentKey(bot, look);
   const move2 = (key) => {
@@ -15459,13 +15474,12 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
       pick4();
       return;
     }
-    const top = tiles[at]?.offsetTop;
-    const columns2 = Math.max(1, tiles.filter((tile2) => tile2.offsetTop === tiles[0]?.offsetTop).length);
-    const step2 = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: columns2, ArrowUp: -columns2 }[event.key];
-    if (step2 === void 0 || at < 0) return;
+    const across = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    const down = { ArrowDown: 1, ArrowUp: -1 }[event.key];
+    if (across === void 0 && down === void 0 || at < 0) return;
     event.preventDefault();
-    const next = tiles[Math.max(0, Math.min(tiles.length - 1, at + step2))];
-    if (next && (step2 === 1 || step2 === -1 || next.offsetTop !== top)) {
+    const next = across !== void 0 ? tiles[Math.max(0, Math.min(tiles.length - 1, at + across))] : tiles[tileBeyond(tiles.map((tile2) => ({ top: tile2.offsetTop, left: tile2.offsetLeft })), at, down)];
+    if (next && next !== tiles[at]) {
       move2(next.dataset.key);
       next.focus();
     }
@@ -15571,6 +15585,7 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
           { ref: gridRef, className: "bt-cs-scroll" },
           photo.length + photos.length > 0 ? section(t("Yours"), [...photo, ...photos]) : null,
           section("Automagik", ours),
+          section(t("Solvers"), solvers),
           yours.length > 0 ? section(t("Your pets"), yours) : null,
           (0, import_react33.createElement)(
             "section",
@@ -18006,22 +18021,28 @@ function ShapeRing({ shape, size }) {
   return (0, import_react42.createElement)("svg", { className: "bt-ring", viewBox: `0 0 ${def.size} ${def.size}`, "aria-hidden": true, dangerouslySetInnerHTML: { __html: markup } });
 }
 function CharacterGrid({ look, hasPhoto = false, onShape, onColor }) {
-  const shapes = [...PICKER_SHAPES, ...Object.keys(SHAPES).filter((id) => !Object.hasOwn(CHARACTERS, id))];
-  if (!shapes.includes(look.shape)) shapes.push(look.shape);
-  const rows2 = [];
-  for (let index = 0; index < shapes.length; index += PICKER_COLUMNS) rows2.push(shapes.slice(index, index + PICKER_COLUMNS));
+  const shapes = [...PICKER_SHAPES.filter((id) => !SOLVER_SHAPES.includes(id)), ...Object.keys(SHAPES).filter((id) => !Object.hasOwn(CHARACTERS, id))];
+  if (!shapes.includes(look.shape) && !SOLVER_SHAPES.includes(look.shape)) shapes.push(look.shape);
+  const rowsOf2 = (ids) => {
+    const rows2 = [];
+    for (let index = 0; index < ids.length; index += PICKER_COLUMNS) rows2.push(ids.slice(index, index + PICKER_COLUMNS));
+    return rows2;
+  };
+  const grid = (ids, label) => (0, import_react42.createElement)("div", { className: "bt-shapes", role: "group", "aria-label": label }, rowsOf2(ids).map((row2, index) => (0, import_react42.createElement)("div", { key: index, className: "bt-shape-row" }, row2.map((id) => (0, import_react42.createElement)("button", {
+    key: id,
+    type: "button",
+    className: "bt-shape",
+    "aria-label": t(shapeOf(id).label),
+    title: t(shapeOf(id).label),
+    "aria-pressed": !hasPhoto && look.shape === id,
+    onClick: () => onShape(id)
+  }, (0, import_react42.createElement)(ShapeRing, { shape: id, size: 36 }), (0, import_react42.createElement)(BotMark, { look: { shape: id, color: look.color }, size: 36 }))))));
   return (0, import_react42.createElement)(
     import_react42.Fragment,
     null,
-    (0, import_react42.createElement)("div", { className: "bt-shapes", role: "group", "aria-label": t("Character shape") }, rows2.map((row2, index) => (0, import_react42.createElement)("div", { key: index, className: "bt-shape-row" }, row2.map((id) => (0, import_react42.createElement)("button", {
-      key: id,
-      type: "button",
-      className: "bt-shape",
-      "aria-label": t(shapeOf(id).label),
-      title: t(shapeOf(id).label),
-      "aria-pressed": !hasPhoto && look.shape === id,
-      onClick: () => onShape(id)
-    }, (0, import_react42.createElement)(ShapeRing, { shape: id, size: 36 }), (0, import_react42.createElement)(BotMark, { look: { shape: id, color: look.color }, size: 36 })))))),
+    grid(shapes, t("Character shape")),
+    (0, import_react42.createElement)("div", { className: "bt-create-step" }, t("Solvers")),
+    grid(SOLVER_SHAPES, t("Solvers")),
     (0, import_react42.createElement)("div", { className: "bt-colors", role: "group", "aria-label": t("Character color") }, CHARACTER_COLORS.map((color) => (0, import_react42.createElement)("button", {
       key: color,
       type: "button",
