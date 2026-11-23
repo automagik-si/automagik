@@ -579,13 +579,13 @@ test('Details places the native tools title and switch together directly below W
   const [title, toggle] = header.children
   assert.equal(row.children.length, 2)
   assert.equal(header.children.length, 2)
-  assert.equal(title.textContent, 'Active Native Tools')
+  assert.equal(title.textContent, 'Native tools')
   assert.equal(toggle.getAttribute('role'), 'switch')
   assert.equal(toggle.getAttribute('aria-label'), title.textContent)
   assert.equal(toggle.getAttribute('aria-checked'), 'false')
   assert.ok(hint.classList.contains('bt-note'))
   assert.match(hint.textContent, /Claude Code uses Automagik's tools/)
-  assert.equal([...body.textContent.matchAll(/Active Native Tools/g)].length, 1)
+  assert.equal([...body.textContent.matchAll(/Native tools/g)].length, 1)
   assert.doesNotMatch(body.textContent, /Claude Code native tools/)
 })
 
