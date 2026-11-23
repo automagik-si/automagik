@@ -97,6 +97,8 @@ const smin = (k, ...parts) => p => parts.map(f => f(p)).reduce((a, b) => {
   return Math.min(a, b) - h * h * k / 4
 })
 const clipBelow = (f, y) => p => Math.max(f(p), y - p[1])
+// The smooth intersection: smin's twin, for a soft cut.
+const smax = (k, a, b) => p => -smin(k, q => -a(q), q => -b(q))(p)
 
 // ---------------------------------------------------------------------------
 // 2D outlines from SVG paths. A path is flattened to polygons, and its signed distance
@@ -358,9 +360,176 @@ const GEOMETRIC = {
   },
 }
 
-// Picker order: the mascots lead, the star second.
+// The Solvers: twelve characters told apart by their outlines, with the same two stubby
+// feet and the same big, low-set eyes. Each model is built facing +z and then turned back
+// by SOLVER_TURN, so its face looks at the viewer more than the view's yaw alone lets a
+// model do.
+const SOLVER_TURN = 22
+const toSolver = ry(SOLVER_TURN)
+const fromSolver = tr(toSolver)
+// A shape or a region of a model's own space, as object space sees it.
+const turned = f => p => f(mul(toSolver, p))
+// A model's front surface at its own (x, y).
+function frontOf(sdf, x, y) {
+  let z = 2.5
+  for (let i = 0; i < 400; i += 1) {
+    const d = sdf([x, y, z])
+    if (d < 1e-4) break
+    z -= Math.max(d, 1e-4)
+  }
+  return [x, y, z]
+}
+// A body of revolution round the y axis: its profile [radius, y] from the top to the
+// bottom, both ends on the axis, its corners cut `cuts` times and rounded by `round`.
+const cut = points => [points[0], ...points.slice(0, -1).flatMap((a, k) => [0.25, 0.75].map(t => [a[0] + (points[k + 1][0] - a[0]) * t, a[1] + (points[k + 1][1] - a[1]) * t])), points.at(-1)]
+function lathe(profile, round = 0, cuts = 2) {
+  const half = Array.from({ length: cuts }).reduce(cut, profile)
+  const loop = [...half, ...half.slice(1, -1).reverse().map(([r, y]) => [-r, y])]
+  return p => polygonDistance([loop], Math.hypot(p[0], p[2]), p[1]) - round
+}
+// The feet every Solver stands on, under its body at (±x, y, z).
+const FOOT = [0.23, 0.15, 0.3]
+const feetAt = (x, y, z) => [ellipsoid([-x, y, z], FOOT), ellipsoid([x, y, z], FOOT)]
+// One Solver: `eyes` is [x, y] of the right eye on the model's front (the left mirrors
+// it) and `eyeHeight` the capsule's height in model units, so the eyes keep their size
+// against the body whatever the model's size in the box. A marking's region is written
+// in the model's own space and goes round the whole body (`all`).
+function solver(label, { body, feet, eyes: [ex, ey], eyeHeight, paints }) {
+  const model = smin(0.05, body, ...feetAt(...feet))
+  return {
+    label,
+    sdf: turned(model),
+    eyes: [-ex, ex].map(x => mul(fromSolver, frontOf(model, x, ey)).slice(0, 2)),
+    eyeHeight,
+    ...(paints ? { paints: paints.map(([region, fill, opacity]) => ({ region: turned(region), fill, opacity, all: true })) } : {}),
+  }
+}
+const spots = list => p => Math.min(...list.map(([c, r]) => len(sub(p, c)) - r))
+
+// Puff: a round body with a soft cloud edge and two round ears.
+const PUFF_RADII = [1, 0.8, 0.85]
+// The rim: the body's outline as the view sees it, walked in equal steps, so its bumps
+// are even. `at` runs 0 to 1 round the outline: 0 at its left, 0.25 at its bottom,
+// 0.5 at its right, 0.75 at its top.
+const PUFF_RIM_AT = (() => {
+  const away = norm(mul(toSolver, mul(toObject, [0, 0, 1])).map((v, i) => v / PUFF_RADII[i]))
+  const e1 = norm(cross(away, [0, 1, 0]))
+  const e2 = cross(away, e1)
+  const point = t => PUFF_RADII.map((r, i) => r * (e1[i] * Math.cos(t) + e2[i] * Math.sin(t)))
+  const STEPS = 720
+  const lengths = [0]
+  for (let k = 1; k <= STEPS; k += 1) lengths.push(lengths[k - 1] + len(sub(point((2 * Math.PI * k) / STEPS), point((2 * Math.PI * (k - 1)) / STEPS))))
+  return (at, out, r) => {
+    const target = (at - Math.floor(at)) * lengths[STEPS]
+    return sphere(point((2 * Math.PI * lengths.findIndex(l => l >= target)) / STEPS).map(v => v * out), r)
+  }
+})()
+const PUFF_BODY = smin(0.1,
+  smax(0.12, smin(0.16,
+    ellipsoid([0, 0, 0], PUFF_RADII),
+    // Sixteen small, shallow bumps, and a tiny curl of two at the top.
+    ...Array.from({ length: 16 }, (_, k) => PUFF_RIM_AT((k + 0.5) / 16, 0.93, 0.13)),
+    PUFF_RIM_AT(0.742, 1.01, 0.1), PUFF_RIM_AT(0.715, 0.99, 0.075)), p => -0.66 - p[1]),
+  sphere([-0.56, 0.72, -0.04], 0.27), sphere([0.56, 0.72, -0.04], 0.27))
+
+// Cap: a mushroom. Its dome's skin at (x, y), for the spots.
+const CAP_DOME = [[0, 0.12, 0], [1.08, 0.78, 0.92]]
+const onCap = (x, y) => [x, y, CAP_DOME[1][2] * Math.sqrt(Math.max(0, 1 - (x / CAP_DOME[1][0]) ** 2 - ((y - CAP_DOME[0][1]) / CAP_DOME[1][1]) ** 2))]
+// Chick: the beak points forward and down, so the view sees a small point under the eyes.
+const CHICK_BEAK = roundCone([0, -0.16, 0.62], [0, -0.42, 0.98], 0.15, 0.04)
+// Bulb: its screw base, from the globe down: each notch's top and bottom, then where the ridge under it ends.
+// The view looks down on the ridges, whose rims close a low notch: a notch is taller than its ridge so it stays open in the outline.
+const BULB_NOTCHES = [[-0.275, -0.405, -0.46], [-0.46, -0.59, -0.645], [-0.645, -0.775, -0.84]]
+// Spike: eight soft cones in a ring, none pointing straight down at the feet.
+const SPIKES = Array.from({ length: 8 }, (_, k) => rad(22.5 + 45 * k)).map(a => roundCone([0.5 * Math.cos(a), 0.5 * Math.sin(a), 0], [1.06 * Math.cos(a), 1.06 * Math.sin(a), 0], 0.26, 0.12))
+
+const SOLVERS = {
+  puff: solver('Puff', { body: PUFF_BODY, feet: [0.36, -0.72, 0.5], eyes: [0.37, 0.2], eyeHeight: 0.84 }),
+  sprout: solver('Sprout', {
+    body: smin(0.07,
+      ellipsoid([0, -0.3, 0], [0.82, 0.68, 0.76]),
+      capsule([0, 0.3, 0], [0, 0.52, 0], 0.1),
+      ellipsoid([-0.42, 0.82, 0], [0.25, 0.54, 0.12], 52),
+      ellipsoid([0.42, 0.82, 0], [0.25, 0.54, 0.12], -52)),
+    feet: [0.34, -0.98, 0.42], eyes: [0.33, -0.3], eyeHeight: 0.8,
+  }),
+  cap: solver('Cap', {
+    body: smin(0.06,
+      smax(0.1, ellipsoid(...CAP_DOME), p => 0.16 - p[1]),
+      ellipsoid([0, -0.42, 0], [0.5, 0.62, 0.48])),
+    feet: [0.25, -1, 0.3], eyes: [0.21, -0.44], eyeHeight: 0.54,
+    paints: [[p => Math.max(spots([[onCap(-0.52, 0.5), 0.17], [onCap(0.12, 0.62), 0.2], [onCap(0.66, 0.44), 0.14], [onCap(-0.14, 0.3), 0.1], [onCap(-0.86, 0.3), 0.1], [onCap(0.42, 0.26), 0.08]])(p), 0.2 - p[1]), '#fff', 0.5]],
+  }),
+  bell: solver('Bell', {
+    body: smin(0.05,
+      lathe([[0, 0.6], [0.34, 0.6], [0.52, 0.4], [0.55, 0.12], [0.6, -0.18], [0.76, -0.44], [1.02, -0.6], [1.04, -0.72], [0.88, -0.76], [0, -0.76]], 0.03),
+      sphere([0, 0.76, 0], 0.17)),
+    feet: [0.34, -0.88, 0.82], eyes: [0.27, -0.2], eyeHeight: 0.74,
+  }),
+  cloud: solver('Cloud', {
+    body: smax(0.08, smin(0.05,
+      sphere([0, 0.16, 0], 0.5), sphere([-0.74, -0.1, 0], 0.38), sphere([0.74, -0.1, 0], 0.38),
+      roundBox([0, -0.36, 0], [1.04, 0.2, 0.48], 0.2)), p => -0.54 - p[1]),
+    feet: [0.4, -0.58, 0.36], eyes: [0.26, -0.06], eyeHeight: 0.6,
+  }),
+  spike: solver('Spike', {
+    body: smin(0.08, sphere([0, 0, 0], 0.7), ...SPIKES),
+    feet: [0.28, -0.74, 0.46], eyes: [0.27, 0], eyeHeight: 0.66,
+  }),
+  floppy: solver('Floppy', {
+    body: smin(0.08,
+      ellipsoid([0, 0.04, 0], [0.5, 0.9, 0.6]),
+      // Each ear leaves the side of the head under its dome, then hangs straight down to the feet.
+      ...[-1, 1].flatMap(side => [
+        capsule([side * 0.38, 0.3, 0], [side * 0.7, 0.22, 0], 0.13),
+        roundCone([side * 0.7, 0.22, 0], [side * 0.79, -0.72, 0], 0.13, 0.15),
+      ])),
+    feet: [0.22, -0.9, 0.38], eyes: [0.23, -0.1], eyeHeight: 0.72,
+  }),
+  antenna: solver('Antenna', {
+    body: smin(0.07,
+      ellipsoid([0, -0.38, 0], [0.8, 0.7, 0.76]),
+      capsule([0, 0.25, 0], [0.05, 0.7, 0], 0.13), capsule([0.05, 0.7, 0], [0.18, 0.98, 0], 0.13),
+      sphere([0.2, 1.06, 0], 0.25)),
+    feet: [0.34, -1.1, 0.44], eyes: [0.33, -0.42], eyeHeight: 0.8,
+  }),
+  cactus: solver('Cactus', {
+    body: smin(0.08,
+      capsule([0, -0.45, 0], [0, 0.5, 0], 0.5),
+      capsule([-0.4, -0.12, 0], [-0.84, -0.12, 0], 0.18), capsule([-0.84, -0.12, 0], [-0.84, 0.3, 0], 0.18),
+      capsule([0.4, 0.12, 0], [0.82, 0.12, 0], 0.18), capsule([0.82, 0.12, 0], [0.82, 0.62, 0], 0.18)),
+    feet: [0.24, -0.98, 0.3], eyes: [0.21, -0.32], eyeHeight: 0.68,
+  }),
+  bulb: solver('Bulb', {
+    // A globe on a screw base: a short straight cylinder under it with three ridges and a
+    // notch above each, cut square and deep (no corner is cut) to show in the outline at 24 px.
+    body: lathe([
+      ...Array.from({ length: 39 }, (_, k) => rad(k * 4)).map(a => [0.71 * Math.sin(a), 0.37 + 0.71 * Math.cos(a)]),
+      ...BULB_NOTCHES.flatMap(([top, bottom, end]) => [[0.14, top], [0.14, bottom], [0.32, bottom], [0.32, end]]),
+      [0, -0.84]], 0.012, 0),
+    feet: [0.2, -1, 0.26], eyes: [0.28, 0.5], eyeHeight: 0.64,
+    paints: [[p => Math.max(Math.min(...BULB_NOTCHES.map(([top, bottom]) => Math.abs(p[1] - (top + bottom) / 2) - (top - bottom) / 2 - 0.005)), Math.hypot(p[0], p[2]) - 0.4), '#000', 0.22]],
+  }),
+  chick: solver('Chick', {
+    body: smin(0.06,
+      smin(0.45, sphere([0, -0.24, 0], 0.74), sphere([0, 0.34, 0], 0.5)),
+      CHICK_BEAK,
+      ellipsoid([-0.8, -0.28, 0.04], [0.22, 0.3, 0.2], -28), ellipsoid([0.8, -0.28, 0.04], [0.22, 0.3, 0.2], 28),
+      roundCone([0, 0.74, 0], [0, 1.2, 0], 0.13, 0.1), roundCone([-0.05, 0.74, 0], [-0.46, 1.02, 0], 0.13, 0.1), roundCone([0.05, 0.74, 0], [0.46, 1.02, 0], 0.13, 0.1)),
+    feet: [0.3, -1, 0.4], eyes: [0.31, -0.02], eyeHeight: 0.78,
+    paints: [[p => CHICK_BEAK(p) - 0.03, '#000', 0.2]],
+  }),
+  frog: solver('Frog', {
+    body: smin(0.1,
+      ellipsoid([0, -0.3, 0], [1.04, 0.5, 0.8]),
+      sphere([-0.5, 0.24, 0.1], 0.43), sphere([0.5, 0.24, 0.1], 0.43)),
+    feet: [0.5, -0.8, 0.44], eyes: [0.5, 0.26], eyeHeight: 0.58,
+  }),
+}
+
+// Picker order: the mascots lead, the star second; the Solvers close the table.
 const ORDER = ['whale', 'star', 'moon', 'wave', 'squircle', 'zed', 'hex']
-const MODELS = { ...Object.fromEntries(ORDER.map(id => [id, MASCOTS[id]])), ...GEOMETRIC }
+const MODELS = { ...Object.fromEntries(ORDER.map(id => [id, MASCOTS[id]])), ...GEOMETRIC, ...SOLVERS }
 
 function contours(field) {
   const at = (i, j) => field[i * (N + 1) + j]
@@ -486,9 +655,22 @@ function surfaceAt(sdf, x, y) {
 
 const f = n => String(+n.toFixed(1))
 
+// Models that share one body are cast once.
+const CASTS = new WeakMap()
+function cast(sdf) {
+  let rays = CASTS.get(sdf)
+  if (!rays) {
+    rays = []
+    for (let i = 0; i <= N; i += 1) for (let j = 0; j <= N; j += 1) rays.push(rayMin(sdf, -EXTENT + j * STEP, EXTENT - i * STEP))
+    CASTS.set(sdf, rays)
+  }
+  return rays
+}
+
 function build(model) {
   const size = (N + 1) * (N + 1)
   const field = new Float64Array(size)
+  const rays = cast(model.sdf)
   const paints = model.paints ?? []
   // Every layer lies inside the body: its field is the body's field where the layer
   // applies and outside everywhere else, so no layer spills past the silhouette.
@@ -496,7 +678,7 @@ function build(model) {
   for (let i = 0; i <= N; i += 1) {
     for (let j = 0; j <= N; j += 1) {
       const k = i * (N + 1) + j
-      const [d, hit] = rayMin(model.sdf, -EXTENT + j * STEP, EXTENT - i * STEP)
+      const [d, hit] = rays[k]
       field[k] = d
       const off = Math.max(d, STEP)
       if (hit === null) {
@@ -509,7 +691,7 @@ function build(model) {
       layers.shade[k] = Math.max(d, (lit - SHADE_AT) * 0.25)
       layers.light[k] = Math.max(d, (LIGHT_AT - lit) * 0.25)
       paints.forEach((paint, index) => {
-        layers.paints[index][k] = hit.n[2] > 0.1 ? Math.max(d, paint.region(hit.p)) : off
+        layers.paints[index][k] = paint.all || hit.n[2] > 0.1 ? Math.max(d, paint.region(hit.p)) : off
       })
     }
   }
@@ -535,7 +717,8 @@ function build(model) {
     const num = v => (v < 0 ? '-' : ' ') + String(Math.abs(v) / 10).replace(/^0\./, '.')
     return `M${f(grid[0][0] / 10)} ${f(grid[0][1] / 10)}l${steps.map(([dx, dy]) => `${num(dx)}${num(dy)}`).join('').trim()}z`
   }).join('')
-  const eyeSize = model.eye ?? 1
+  // `eyeHeight` sizes the eyes in the model's own units; `eye` in the box's.
+  const eyeSize = model.eyeHeight ? (model.eyeHeight * scale) / 23 : model.eye ?? 1
   const eyes = model.eyes.map(([x, y]) => {
     const { p, n } = surfaceAt(model.sdf, x, y)
     const u = norm(cross([0, 1, 0], n))
