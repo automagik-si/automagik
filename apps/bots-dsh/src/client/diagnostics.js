@@ -68,6 +68,10 @@ const FAILURES = {
   SESSION: 'Its group conversation could not open',
   SESSION_RESET: 'Its group conversation could not open, so it starts a new one next time',
   PERMISSION: 'Its permission level could not be set here, so it took no turn',
+  // acp-dsh's Codex OFF refusal (#1564). Its message names the Details switch only in the
+  // owner's direct chat; these words, shown wherever the code is, never do.
+  'acp/native-off-unavailable':
+    'Codex could not turn its own tools off, so the message was not sent',
 }
 
 // The short words for a known code, or undefined.
@@ -76,6 +80,11 @@ export const knownFailure = code => (Object.hasOwn(FAILURES, code ?? '') ? t(FAI
 export function failureLabel(code, message) {
   return knownFailure(code) ?? (message || code || t('Unknown error'))
 }
+
+// The label as a clause inside a sentence that adds its own full stop: a message that already
+// ends with one (a host sentence) would otherwise show two.
+export const failureClause = (code, message) =>
+  String(failureLabel(code, message)).replace(/\s*[.\u3002]+\s*$/, '')
 
 // GitHub refuses very long addresses; past this the diagnostics go by the clipboard.
 const URL_LIMIT = 7000

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { DICTIONARY } from '../src/client/i18n.js'
-import { failureLabel, knownFailure } from '../src/client/diagnostics.js'
+import { failureClause, failureLabel, knownFailure } from '../src/client/diagnostics.js'
 
 test('credential and account failures have short words, in both languages', () => {
   const labels = {
@@ -32,4 +32,26 @@ test('both ACP usage limit codes have a short label and Chinese copy', () => {
   }
   assert.equal(DICTIONARY.zh[label], '编程助手已达到使用限额')
   assert.equal(DICTIONARY.zh['{provider} reached its usage limit.'], '{provider} 已达到使用限额。')
+})
+
+// #1564: the words name no Details switch, which helps only in the owner's direct chat.
+test('the Codex OFF refusal has short words with no switch pointer, in two languages', () => {
+  const label = 'Codex could not turn its own tools off, so the message was not sent'
+  const host = 'Codex could not turn its own tools off (its permission profiles are unavailable),'
+    + ' so the message was not sent.'
+    + " Turn native tools on in the Bot's Details, or update Automagik."
+  assert.equal(failureLabel('acp/native-off-unavailable', host), label)
+  assert.equal(label.includes('Details'), false)
+  assert.equal(DICTIONARY.zh[label], 'Codex 未能关闭它自己的工具，所以消息没有发送')
+})
+
+test('a failure inside a group line never ends in two full stops', () => {
+  const clause = failureClause
+  const host = 'It stopped. Update Automagik.'
+  assert.equal(clause('SOMETHING_NEW', host), 'It stopped. Update Automagik')
+  assert.equal(clause('SOMETHING_NEW', '它停下了。'), '它停下了')
+  assert.equal(clause('SOMETHING_NEW', 'raw text'), 'raw text')
+  assert.equal(clause('QUOTA', 'whatever.'), 'The account is out of quota')
+  assert.equal(clause('acp/native-off-unavailable', 'x.'),
+    'Codex could not turn its own tools off, so the message was not sent')
 })

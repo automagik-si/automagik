@@ -731,6 +731,7 @@ const pack = createPack({
     "Its group conversation could not open": "Não foi possível abrir a conversa em grupo",
     "Its group conversation could not open, so it starts a new one next time": "Não foi possível abrir a conversa em grupo, então uma nova começa na próxima vez",
     "Its permission level could not be set here, so it took no turn": "Não foi possível definir o nível de permissão aqui, então não houve resposta nesta rodada",
+    "Codex could not turn its own tools off, so the message was not sent": "O Codex não conseguiu desligar as próprias ferramentas, então a mensagem não foi enviada",
     "Add files": "Adicionar arquivos",
     "Add photos & files": "Adicionar fotos e arquivos",
     "Upload from computer": "Enviar do computador",
