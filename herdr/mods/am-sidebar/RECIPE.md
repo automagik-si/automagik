@@ -63,6 +63,10 @@ One scrolling column, `chrome` background, 13 px text.
   live and not working, blocked or failed, so the chip clears when the agent works again even
   before the label is removed. A pane that exited or left the snapshot, or a label past the
   pack's stale window (tidy.js's `needsOwnerStale`: a day), draws none.
+  Every turn of a Claude Code pane whose own label is set, bot or worker, the hook adds one line
+  to the context naming the Question and how to clear it (`briefingText.mjs` `needsOwnerReminder`),
+  so it survives `/clear` and compaction; it never clears the label itself (a turn from `hc send` is
+  not the person answering), and with no label, or `hc` missing or slow, it adds nothing.
 - **Create / Edit / Attach picker / bot list** (`create.js`, `formModel.js`) open as a dialog or
   popup (`props.form`: `create` | `edit` | `attach` | `pick` | `menu`), drawn to the approved
   mockup: live character preview, look, name and sidebar preview on the left; role, instructions,
