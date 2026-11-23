@@ -272,7 +272,7 @@ test('I2b: a sign-in link agy prints reaches the status only when it is Google\'
   // Google's page, but a return address that is not agy's loopback listener: never shown.
   const away = [
     google.replace('http%3A%2F%2F127.0.0.1%3A4242%2Fcb', 'https%3A%2F%2Fevil.example%2Fcb'),
-    google.replace('http%3A%2F%2F127.0.0.1%3A4242%2Fcb', 'http%3A%2F%2Fevil.example%3A1%2Fcb'),
+    google.replace('http%3A%2F%2F127.0.0.1%3A4242%2Fcb', 'http%3A%2F%2Fevil.example%3A41234%2Fcb'),
     google.replace('http%3A%2F%2F127.0.0.1%3A4242%2Fcb', 'http%3A%2F%2F127.0.0.1%2Fcb'),
   ]
   const redirected = world(t, { agentEnv: { FAKE_ACP_AUTH_STDERR: away.join(' '), FAKE_ACP_AUTH_HOLD: '1' }, deps: { nativeSignInMs: 1500 } })
@@ -729,7 +729,7 @@ test('I11: on Linux, no acceptable link soon after authenticate ends the attempt
   for (const [agentEnv, refused] of [
     [{ FAKE_ACP_AUTH_HOLD: '1' }, undefined],
     [{ FAKE_ACP_AUTH_HOLD: '1', FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE.replace('accounts.google.com', 'evil.example') }, 'evil.example'],
-    [{ FAKE_ACP_AUTH_HOLD: '1', FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE.replace('localhost%3A43117', 'evil.example%3A1') }, 'evil.example'],
+    [{ FAKE_ACP_AUTH_HOLD: '1', FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE.replace('localhost%3A43117', 'evil.example%3A41234') }, 'evil.example'],
   ]) {
     const w = world(t, { agentEnv, deps: { nativeSignInLinkMs: 300 } })
     await w.service.refresh()

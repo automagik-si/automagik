@@ -433,9 +433,9 @@ test('W1: a sign-in link needs agy\'s loopback return address, with a port', () 
     assert.equal(isSignInUrl(withReturn(back)), true, back)
     assert.equal(ui.openSignInLinks([{ appSignIn: true, signingIn: true, signInUrl: withReturn(back) }], new Set(), { desktop: {}, open: () => {} }), 1, back)
   }
-  for (const back of [undefined, 'https://localhost:43117/cb', 'http://evil.example:1/cb', 'http://localhost/cb', 'http://127.0.0.1/cb',
+  for (const back of [undefined, 'https://localhost:43117/cb', 'http://evil.example:41234/cb', 'http://localhost/cb', 'http://127.0.0.1/cb',
     'http://localhost:1023/cb', 'http://localhost:80/cb',
-    'http://a@localhost:1/cb', 'http://localhost:1/cb#x', 'http://127.0.0.2:1/cb', 'http://localhost.evil.example:1/cb', 'not a url']) {
+    'http://a@localhost:41234/cb', 'http://localhost:41234/cb#x', 'http://127.0.0.2:41234/cb', 'http://localhost.evil.example:41234/cb', 'not a url']) {
     assert.equal(isSignInUrl(withReturn(back)), false, String(back))
     assert.equal(agentView(agy({ signingIn: true, signInUrl: withReturn(back) })).signInUrl, undefined, String(back))
   }

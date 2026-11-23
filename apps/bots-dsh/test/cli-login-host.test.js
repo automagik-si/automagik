@@ -649,11 +649,13 @@ test('Antigravity\'s link: Google\'s own, with agy\'s loopback return and its st
     AGY_URL.replace('https:', 'http:'), AGY_URL.replace('accounts.google.com', 'evil.example'), AGY_URL.replace('response_type=code', 'response_type=token'),
     AGY_URL.replace('state=s1-state-0001', 'state=short'), AGY_URL.replace('&state=s1-state-0001', ''), `${AGY_URL}&state=again-0001`,
     back('http://localhost:1023/cb'), back('http://localhost/cb'), back('https://localhost:41234/cb'), back('http://evil.example:41234/cb'),
+    back('http://a@localhost:41234/cb'), back('http://localhost:41234/cb#x'), back('http://127.0.0.2:41234/cb'),
     `${AGY_URL}#x`, `${AGY_URL} x`, CLAUDE_URL, CODEX_URL,
   ]
   for (const value of cases) {
     assert.equal(cliLoginUrl(value, AGY) === value, welcomeSignInUrl(value), value)
   }
+  assert.equal(welcomeSignInUrl(back('http://a@localhost:41234/cb')), false)
   assert.equal(cliLoginUrl(AGY_URL, AGY), AGY_URL)
   // Each agent keeps its own rule: Google's link is no Claude or Codex link, and back.
   assert.equal(cliLoginUrl(AGY_URL, 'acp-claude'), undefined)

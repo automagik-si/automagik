@@ -424,3 +424,28 @@ test('restore asks for an Antigravity attempt too; none adds nothing, one this B
   other.dispose()
   forgetKnownStates()
 })
+
+test('Antigravity guard, client copy: run-wise decode, authority end and the cap, as the host (G8-3, G8-4)', () => {
+  forgetKnownStates()
+  const S = 'Ab-_.~xyz12345'
+  assert.equal(rememberCallbackState('https://accounts.google.com/o/oauth2/v2/auth?client_id=c'
+    + `&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=${S}`), true)
+  const cb = `http://localhost:41234/auth/callback?code=x&state=${S}`
+  const first = 'https://accounts.google.com/o/oauth2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback'
+    + `&access_type=offline&state=${S}&client_id=c`
+  for (const text of [
+    `${cb.replace('~', '%7E')} worked 100% done`,
+    first.replace('accounts.google.com', 'accounts.google.com:443'),
+    first.replace('accounts.google.com', 'x@accounts.google.com'),
+    `${first} then ${cb}`,
+    `${'state=x '.repeat(63)}${cb}`,
+  ]) assert.equal(carriesKnownState(text), true, text)
+  for (const text of [
+    first,
+    first.replace('accounts.google.com', 'ACCOUNTS.GOOGLE.COM'),
+    `https://accounts.google.com\\x?state=${S}`,
+    `${'state=x '.repeat(64)}${cb}`,
+    'state=%E0%A4%A and %zz',
+  ]) assert.equal(carriesKnownState(text), false, text)
+  forgetKnownStates()
+})
