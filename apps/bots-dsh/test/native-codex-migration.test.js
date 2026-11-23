@@ -254,7 +254,7 @@ test('M7 a Claude ON saved before the switch had a tag stays untouched and reads
   assert.equal(row(await h.view('claudeOn')).props.on, true)
 })
 
-test('M8 an ON saved for another agent on a Bot now on Codex (PR A Claude ON, PR C omp kept) reads ON for Codex; a restricted one and a saved OFF stay OFF', async t => {
+test('M8 an ON saved for another agent on a Bot now on Codex (PR A Claude ON, PR C omp kept) reads ON for Codex; a restricted one stays OFF and an explicit `nativeTools: false` is left as it is', async t => {
   const claudeOn = record('claudeOn', CODEX + '/default', { nativeTools: true })
   const ompKept = record('ompKept', undefined, { appliedModel: CODEX + '/default', nativeTools: true, nativeToolsKept: 'acp-omp' })
   const tagged = record('tagged', CODEX + '/default', { nativeTools: true, nativeToolsAgent: 'acp-claude' })

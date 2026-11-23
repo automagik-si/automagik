@@ -400,7 +400,8 @@ export function install(rt) {
     // denied tools stays off: Codex's own tools would bypass both. As for omp, the marker
     // rides the next real save when nothing was kept. A Bot whose ON was saved for another agent
     // (Claude's untagged ON, omp's migrated one) and now runs on Codex ran on Codex's own tools
-    // too: its ON is moved to Codex. One saved OFF keeps it.
+    // too: its ON is moved to Codex. The app stores an OFF as no value, so a Bot turned OFF is
+    // migrated like any other; only an explicit `nativeTools: false` is left as it is.
     if (state.nativeToolsCodexKept !== true) {
       let restricted = 0
       let kept = 0
