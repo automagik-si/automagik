@@ -1091,6 +1091,15 @@ this amendment" lines.
   one setup at a time per Codex home: about 5-6 seconds more per new OFF agent session, none per
   turn. A model the composer picks later must be one the spawn checked, else the turn is refused
   with zero prompts.
+- **Windows (lead decision, 2026-11-23).** Codex has no chat permission profiles on Windows, so
+  there, and only there, the OFF spawn neither writes nor checks them and is not refused for
+  their absence. Its backstop is Codex's legacy `read-only` mode instead, set before every
+  prompt as on the other systems; a Codex that does not offer that mode fails the turn before
+  any prompt ("Codex would not take DSH's permission level: it offers none of the modes
+  read-only ..."). Everything else is as on Linux and macOS: the same check removes Codex's own
+  tools on every spawn and the bridge is forced. The Details switch is unlocked on Windows, and
+  groups, tasks and scheduled runs there run OFF. Linux and macOS do not change: without the
+  profiles their OFF spawn is still refused.
 - **The catalog file.** The checked copy is written, mode 0600, to the installation's ACP folder
   (`codex-native-off/models-<sha256>.json`), outside every Codex home and outside `cli-homes`.
   Copies older than 24 hours are pruned, never the one just written. A fork of an OFF process

@@ -1151,7 +1151,7 @@ test('K6 nativeKeptRoute (the service nativeModelKept): the kept list, `default`
 // ---------------------------------------------------------------------------------------------
 const FAKE_CLI = join(import.meta.dirname, 'fixtures', 'fake-codex-cli.mjs')
 
-function applied(t, { isolated }) {
+function applied(t, { isolated, platform, profileCheck = () => true }) {
   const root = mkdtempSync(join(tmpdir(), 'codex-native-apply-'))
   const disposers = []
   const logs = []
@@ -1179,7 +1179,8 @@ function applied(t, { isolated }) {
     find: name => ['claude', 'codex'].includes(name) ? process.execPath : undefined,
     signedIn: async () => false,
     account: async () => undefined,
-    profileCheck: () => true,
+    profileCheck,
+    ...(platform === undefined ? {} : { platform }),
   })
   return { root, home, logs, adapter, service: services.acpAgents, codex: adapter.agents.get('acp-codex') }
 }
@@ -1221,4 +1222,78 @@ test('BD-4 apply(): nativeModelKept and endNative are wired; the OFF spawn refus
   a.adapter.recordMeasured(a.codex, ['gpt-6.2-sol'])
   assert.equal(a.service.nativeModelKept('acp-codex/gpt-6.2-sol'), true)
   assert.equal(a.service.nativeModelKept('acp-codex/gpt-5.6-luna'), false)
+})
+
+// ---------------------------------------------------------------------------------------------
+// Windows OFF: Codex has no chat permission profiles there, so an OFF Codex takes its legacy
+// `read-only` mode as the backstop; its own tools still go through the checked config and the
+// bridge is still forced. win32 is simulated through apply()'s `platform` only.
+// ---------------------------------------------------------------------------------------------
+const configsUnder = root => readdirSync(root, { recursive: true })
+  .filter(path => String(path).endsWith('config.toml'))
+
+test('Windows OFF spawn: no chat profiles needed or written, the same checks; Linux still refuses',
+  async t => {
+    const checks = []
+    const w = applied(t, {
+      isolated: true, platform: 'win32',
+      profileCheck: (...args) => { checks.push(args); return true },
+    })
+    const cwd = join(w.root, 'chat')
+    mkdirSync(cwd)
+    const launched = await w.codex.spawn({ nativeOff: true, cwd })
+    assert.equal(launched.nativeOff, true)
+    assert.equal(launched.profileModes, undefined)
+    assert.equal(launched.checkedCwd, cwd)
+    assert.deepEqual(launched.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
+    assert.equal(JSON.parse(launched.env.CODEX_CONFIG).model_catalog_json, launched.offCatalog.path)
+    assert.deepEqual(checks, [], 'no `codex sandbox -P` check')
+    assert.deepEqual(configsUnder(w.root), [], 'no chat profiles written')
+    const off = /Codex runs with its own tools off/
+    assert.ok(w.logs.some(line => off.test(line)), w.logs.join('\n'))
+    // With no ACP folder there is still no OFF check to run: refused for that, not for profiles.
+    const bare = applied(t, { isolated: false, platform: 'win32' })
+    const noFolder = /it has no settings folder/
+    await refused(bare.codex.spawn({ nativeOff: true, cwd: bare.root }), noFolder)
+    const PROFILES = /its permission profiles are unavailable/
+    const linux = applied(t, { isolated: false, platform: 'linux' })
+    await refused(linux.codex.spawn({ nativeOff: true, cwd: linux.root }), PROFILES)
+    const unchecked = applied(t, { isolated: true, platform: 'linux', profileCheck: () => false })
+    await refused(unchecked.codex.spawn({ nativeOff: true, cwd: unchecked.root }), PROFILES)
+  })
+
+test('Windows OFF turn: DSH\'s tools on the legacy read-only mode; missing, refused', async t => {
+  // The world's Codex process is the fake ACP agent; its OFF start is index.js's own spawn.
+  const through = (platform, isolated = true) => {
+    const host = applied(t, { isolated, platform })
+    return async (context, launch) => {
+      const { command, args, env, ...checked } = await host.codex.spawn(context)
+      return { ...launch, env: { ...launch.env, CODEX_CONFIG: env.CODEX_CONFIG }, ...checked }
+    }
+  }
+  const w = world(t, { identity: OFF, offSpawn: through('win32') })
+  const chunks = await turnOn(w, w.chat('direct'), scheduled('scheduled delivery'))
+  assert.equal(finishOf(chunks).kind, 'stop')
+  assert.ok(textOf(chunks).length > 0)
+  assert.deepEqual(offContexts(w), [true])
+  assert.deepEqual(servers(w), [['dsh']], 'only the DSH bridge')
+  const live = w.adapter.live.get('direct')
+  assert.equal(live.nativeOff, true)
+  assert.equal(live.profileModes, undefined)
+  assert.equal(lastMode(w), 'read-only')
+  assert.equal(promptPids(w).length, 1)
+  // A Codex that does not offer `read-only` fails the turn before any prompt.
+  const env = { FAKE_ACP_MODES: 'workspace-write,agent,agent-full-access' }
+  const m = world(t, { identity: OFF, offSpawn: through('win32'), env })
+  const missing = await turnOn(m, m.chat('direct'), scheduled('scheduled delivery'))
+  assert.equal(finishOf(missing).kind, 'error')
+  assert.match(finishOf(missing).failure.message,
+    /would not take DSH's permission level: it offers none of the modes read-only/)
+  assert.deepEqual(m.events('prompt'), [])
+  // Linux: the same OFF turn with no chat profiles is refused, as before.
+  const l = world(t, { identity: OFF, offSpawn: through('linux', false) })
+  const linux = await turnOn(l, l.chat('direct'), scheduled('scheduled delivery'))
+  assert.equal(finishOf(linux).failure.code, 'acp/native-off-unavailable')
+  assert.match(finishOf(linux).failure.message, /its permission profiles are unavailable/)
+  assert.deepEqual(l.events('prompt'), [])
 })

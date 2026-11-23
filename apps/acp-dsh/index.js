@@ -180,7 +180,13 @@ export function apply(ctx, config = {}, {
   installation = process.env.DSH_HOME,
   cliHome: override, consentFile: accountFile,
   logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile,
+  platform = process.platform,
 } = {}) {
+  // Windows has no Codex chat permission profiles (codex-chat-profiles.js). There, and only there,
+  // an OFF Codex takes its legacy `read-only` mode as the backstop instead: adapter.js forces that
+  // mode before every prompt and fails the turn when Codex does not offer it. Its own tools still
+  // go through the checked config and the bridge is still forced. Elsewhere OFF needs the profiles.
+  const offOnLegacyReadOnly = platform === 'win32'
   const identity = installationIdentity(installation)
   const cliHome = override === undefined && store.home ? defaultCliHome(ctx, store.home, identity) : override
   const consentFile = accountFile !== undefined ? accountFile
@@ -572,11 +578,13 @@ export function apply(ctx, config = {}, {
           const cwd = context.cwd ?? env.AUTOMAGIK_BOT_CLI_HOME ?? homedir()
           const profileModes = homes && !isNative(spec) && typeof env.CODEX_HOME === 'string' && typeof env.CODEX_PATH === 'string'
             ? ensureChatProfiles(env.CODEX_HOME, {
-                codexPath: env.CODEX_PATH, log: line => warn(ctx, line),
+                platform, codexPath: env.CODEX_PATH, log: line => warn(ctx, line),
                 verify: profile => profileCheck(env.CODEX_PATH, profile, { cwd: env.CODEX_HOME, env }),
               })
             : undefined
-          if (profileModes === undefined) throw refused('its permission profiles are unavailable')
+          if (profileModes === undefined && !offOnLegacyReadOnly) {
+            throw refused('its permission profiles are unavailable')
+          }
           if (codexOffDir === undefined) throw refused('it has no settings folder')
           const launched = await nativeOffLaunch({ command, args, env }, {
             cwd, dir: codexOffDir, kept: spec.nativeKeptModels ?? [], signal: context.signal,
@@ -589,7 +597,7 @@ export function apply(ctx, config = {}, {
       // (adapter.js keeps them with that session).
       if (homes && !isNative(spec) && spec.key === 'codex' && typeof env.CODEX_HOME === 'string' && typeof env.CODEX_PATH === 'string') {
         const profileModes = ensureChatProfiles(env.CODEX_HOME, {
-          codexPath: env.CODEX_PATH, log: line => warn(ctx, line),
+          platform, codexPath: env.CODEX_PATH, log: line => warn(ctx, line),
           verify: profile => profileCheck(env.CODEX_PATH, profile, { cwd: env.CODEX_HOME, env }),
         })
         if (profileModes !== undefined) return { command, args, env, profileModes,
