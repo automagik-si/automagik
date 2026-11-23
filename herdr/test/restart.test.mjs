@@ -5,8 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { AGENTS, CODEX_MODE_ARGS, canResume, continuesAnywhere, resumeArgs, withoutModel, withoutResume } from "../mods/am-sidebar/models.js";
-import { carriedLabels, claudeTranscriptPath, commandArgv, contextTokensOf, continueRefusal, helperArgs, helperPlan, ledgerSession, launchChange, paneCommand, paneLaunch, paneSession, planText,
+import { AGENTS, CODEX_MODE_ARGS, agentKeyOfArgv, canResume, continuesAnywhere, resumeArgs, withOverrides, withoutModel, withoutResume } from "../mods/am-sidebar/models.js";
+import { carriedLabels, claudeTranscriptPath, commandArgv, contextTokensOf, continueRefusal, helperArgs, helperPlan, keptLaunch, ledgerSession, launchChange, paneCommand, paneLaunch, paneSession, planText,
   restartAnswer, restartArgs, claudeSlug, restartPlan, restartRefusal, sameSessions, sessionId, sessionOf, sharedFolders, sharedFresh, takesWords, withoutPrompt }
   from "../mods/am-sidebar/restart.js";
 
@@ -679,4 +679,155 @@ test("#1557 stale normal and background-shell prompts are not idle above the rat
   assert.equal(hasAgentPrompt(tail), false);
   assert.equal(hasBackgroundShellAtIdlePrompt(tail), false);
   for (const state of ["idle", "working"]) assert.equal(isPaneIdle({ state: "live", status: { state } }, tail), false);
+});
+
+// ---- #1418: a helper started with hc run --keep (hc's keep wrapper at its launch's start) ----
+
+const KEEP = '"$@"; exec "${SHELL:-sh}" -i';
+const KW = ["sh", "-c", KEEP, "sh"];
+const kh = { address: "t8", name: "h", cwd: "/w" };
+const BARE = { argv: ["zsh", "-i"] };
+// What helperPlan gave each of these on dev before #1418 (recorded on 1beb7f7d3, Node 24.9.0).
+const TODAY_KEPT_SHELL = { name: "h", replaced: "t8", cwd: "/w", labels: {}, agent: null, template: null, session: null, mode: "fresh",
+  resume: [], argv: ["sh", "-c", KEEP], agySettings: null, note: "its agent isn't one this pack knows", warning: null };
+const todayShellResumed = (agent) => ({ name: "h", replaced: "t8", cwd: "/w", labels: {}, agent, template: null, session: SID, mode: "resume",
+  resume: ["--resume", SID], argv: ["sh", "-c", KEEP, "sh", "--resume", SID], agySettings: null, note: null, warning: null });
+const TODAY_LOGIN = { loginProblem: { code: "launch-not-direct",
+  reason: "Under the Bot login policy only a direct Claude or Codex command can start; run the agent directly." } };
+const keptRun = (plan) => helperArgs({ name: plan.name, cwd: plan.cwd, labels: plan.labels, parent: "t100", argv: plan.argv, keep: plan.keep });
+const afterDashes = (args) => args.slice(args.indexOf("--") + 1);
+
+test("#1418 keptLaunch: hc's keep wrapper at the launch's start, around a direct command of a known agent other than Hermes, is read through", () => {
+  const live = keptLaunch({ argv: [...KW, "claude", "--model", "x"], foreground: { argv: ["claude", "--model", "x"] } }, AGENTS);
+  assert.deepEqual(live, { keep: true, command: { argv: ["claude", "--model", "x"] }, foreground: ["claude", "--model", "x"] });
+  // The replacement's own shape: the pack's env PATH prefix inside the wrapper is dropped as paneCommand drops it.
+  const replacement = keptLaunch({ argv: [...KW, "/usr/bin/env", "PATH=/g:/bin", "claude", "--resume", SID2], foreground: BARE }, AGENTS, { launchAgent: true });
+  assert.deepEqual(replacement, { keep: true, command: { argv: ["claude", "--resume", SID2] }, foreground: ["zsh", "-i"] });
+  // The wrapper in front is looked through.
+  assert.equal(keptLaunch({ argv: [...KW, "claude"], foreground: { argv: [...KW, "claude"] } }, AGENTS).keep, true);
+  // A worker row of that agent is the plan's agent too.
+  assert.equal(keptLaunch({ argv: [...KW, "claude"], foreground: BARE }, AGENTS, { workerAgent: "claude" }).keep, true);
+});
+
+test("#1418 keptLaunch: any other launch, or keep off (the login policy), gets paneCommand and the raw foreground, keep false", () => {
+  const today = (get) => ({ keep: false, command: paneCommand(get), foreground: get.foreground?.argv ?? null });
+  const cases = [
+    { argv: ["claude", "--model", "x"], foreground: { argv: [...KW, "claude", "--model", "x"] } }, // a direct launch, the wrapper in front
+    { argv: [...KW, "sh", "-c", "claude --model x"], foreground: { argv: ["claude", "--model", "x"] } }, // the wrapper around sh -c
+    { argv: ["/usr/bin/env", "PATH=/g", ...KW, "claude"], foreground: { argv: [...KW, "claude"] } }, // a prefix before the wrapper
+    { argv: ["env", "X=1", "sh", "-c", KEEP, "sh", "claude"], foreground: { argv: ["claude"] } },
+    { argv: [...KW, "hermes", "--tui"], foreground: { argv: ["hermes", "--tui"] } }, // Hermes is left as it was
+    { argv: [...KW, "npm", "run", "dev"], foreground: { argv: ["npm", "run", "dev"] } }, // no agent
+    { argv: [...KW, "claude"], foreground: { argv: ["codex"] } }, // another agent in front
+    { argv: [...KW, "claude"], foreground: BARE }, // its program exited, live: no plan agent
+    { argv: [...KW, "claude"], foreground: { argv: ["vim", "notes"] } },
+  ];
+  for (const get of cases) assert.deepEqual(keptLaunch(get, AGENTS), today(get), JSON.stringify(get.argv));
+  const kept = { argv: [...KW, "claude"], foreground: { argv: ["claude"] } };
+  assert.deepEqual(keptLaunch(kept, AGENTS, { keepAware: false }), today(kept));
+  // A worker row of another agent is the plan's agent: not kept.
+  assert.deepEqual(keptLaunch({ argv: [...KW, "claude"], foreground: BARE }, AGENTS, { workerAgent: "codex", launchAgent: true }),
+    today({ argv: [...KW, "claude"], foreground: BARE }));
+});
+
+test("#1418 helperPlan: a keep-wrapped Claude helper runs its own command again, resumed by its session, with keep (revive, live, its replacement)", () => {
+  const want = (argv) => ({ name: "h", replaced: "t8", cwd: "/w", labels: {}, agent: "claude", template: null, session: SID, mode: "resume",
+    resume: ["--resume", SID], argv, agySettings: null, note: null, warning: null, keep: true });
+  const own = ["claude", "--model", "x", "--resume", SID];
+  // A1: revive, the program exited and hc kept a bare shell.
+  assert.deepEqual(helperPlan({ get: { ...kh, argv: [...KW, "claude", "--model", "x"], foreground: BARE }, session: SID, agents: AGENTS, launchAgent: true }), want(own));
+  // A2: live restart --tree, the wrapper in front; and with Claude in front.
+  assert.deepEqual(helperPlan({ get: { ...kh, argv: [...KW, "claude", "--model", "x"], foreground: { argv: [...KW, "claude", "--model", "x"] } }, session: SID, agents: AGENTS }), want(own));
+  assert.deepEqual(helperPlan({ get: { ...kh, argv: [...KW, "claude", "--model", "x"], foreground: { argv: ["claude", "--model", "x"] } }, session: SID, agents: AGENTS }), want(own));
+  // A3: the replacement as hc records it (the pack's env prefix inside the wrapper, an older resume) plans the same way.
+  const again = helperPlan({ get: { ...kh, argv: [...KW, "/usr/bin/env", "PATH=/g:/bin", "claude", "--resume", SID2], foreground: BARE }, session: SID, agents: AGENTS, launchAgent: true });
+  assert.deepEqual(again, want(["claude", "--resume", SID]));
+  const args = keptRun(again);
+  assert.deepEqual(args.slice(args.indexOf("--keep"), args.indexOf("--keep") + 3), ["--keep", "--parent", "t100"]);
+  assert.deepEqual(afterDashes(args), ["claude", "--resume", SID]);
+});
+
+test("#1418 helperPlan: a keep-wrapped Codex helper with no id of its own gets Codex's launch mode, never resume, with keep", () => {
+  const plan = helperPlan({ get: { ...kh, argv: [...KW, "codex", "--model", "m"], foreground: BARE }, agents: AGENTS, launchAgent: true,
+    fresh: "no conversation of its own could be identified" });
+  assert.deepEqual([plan.agent, plan.mode, plan.keep], ["codex", "fresh", true]);
+  assert.deepEqual(plan.argv, ["codex", "--model", "m", ...CODEX_MODE_ARGS]);
+  assert.ok(!plan.argv.includes("resume") && !plan.argv.includes("--last"));
+});
+
+test("#1418 helperPlan: every other keep-wrapped launch plans exactly as before, keep false and no --keep (recorded results)", () => {
+  const h4 = withOverrides(JSON.stringify({ programs: { hermes: { run: ["/opt/h/hermes-agent", "--tui"] } } }));
+  const cases = {
+    // Z1-Z3: its program exited or something else runs in the kept shell, and nothing names the plan's agent.
+    Z1: [{ get: { ...kh, argv: [...KW, "claude", "--model", "x"], foreground: BARE } }, TODAY_KEPT_SHELL],
+    Z2: [{ get: { ...kh, argv: [...KW, "claude", "--model", "x"], foreground: { argv: ["vim", "notes"] } } }, TODAY_KEPT_SHELL],
+    Z3: [{ get: { ...kh, argv: [...KW, "claude"], foreground: { argv: ["npm", "test"] } } }, TODAY_KEPT_SHELL],
+    // X1-X3: a prefix before the wrapper, or the wrapper around sh -c.
+    X1: [{ get: { ...kh, argv: ["/usr/bin/env", "PATH=/g:/bin", ...KW, "claude", "--model", "x"], foreground: { argv: [...KW, "claude", "--model", "x"] } } }, TODAY_KEPT_SHELL],
+    X2: [{ get: { ...kh, argv: [...KW, "sh", "-c", "claude --model x"], foreground: { argv: [...KW, "sh", "-c", "claude --model x"] } } }, TODAY_KEPT_SHELL],
+    X3: [{ get: { ...kh, argv: ["/usr/bin/env", "PATH=/g", ...KW, "codex", "--model", "m"], foreground: { argv: [...KW, "codex", "--model", "m"] } } }, TODAY_KEPT_SHELL],
+    // N1, N2: no agent of the table inside the wrapper.
+    N1live: [{ get: { ...kh, argv: [...KW, "npm", "run", "dev"], foreground: { argv: ["npm", "run", "dev"] } } }, TODAY_KEPT_SHELL],
+    N1front: [{ get: { ...kh, argv: [...KW, "npm", "run", "dev"], foreground: { argv: [...KW, "npm", "run", "dev"] } } }, TODAY_KEPT_SHELL],
+    N1revive: [{ get: { ...kh, argv: [...KW, "npm", "run", "dev"], foreground: BARE }, launchAgent: true }, TODAY_KEPT_SHELL],
+    N1tail: [{ get: { ...kh, argv: [...KW, "tail", "-f", "log"], foreground: { argv: ["tail", "-f", "log"] } } }, TODAY_KEPT_SHELL],
+    N2: [{ get: { ...kh, argv: [...KW, "./start-claude.sh"], foreground: { argv: ["claude"] } } }, todayShellResumed("claude")],
+    // H1-H5: Hermes, whichever table names it.
+    H1: [{ get: { ...kh, argv: [...KW, "hermes", "--tui"], foreground: { argv: ["hermes", "--tui"] } } }, todayShellResumed("hermes")],
+    H2: [{ get: { ...kh, argv: [...KW, "hermes", "--tui"], foreground: BARE }, launchAgent: true }, TODAY_KEPT_SHELL],
+    H3: [{ get: { ...kh, argv: [...KW, "hermes", "--tui"], foreground: { argv: [...KW, "hermes", "--tui"] } } }, TODAY_KEPT_SHELL],
+    H4: [{ get: { ...kh, argv: [...KW, "/opt/h/hermes-agent", "--tui"], foreground: { argv: ["/opt/h/hermes-agent", "--tui"] } }, agents: h4 }, todayShellResumed("hermes")],
+    H5: [{ get: { ...kh, argv: [...KW, "./run-hermes.sh"], foreground: { argv: ["hermes", "--tui"] } } }, todayShellResumed("hermes")],
+  };
+  for (const [k, [input, today]] of Object.entries(cases)) {
+    const { agents = AGENTS, ...rest } = input;
+    const plan = helperPlan({ session: SID, agents, ...rest });
+    assert.deepEqual(plan, { ...today, keep: false }, k);
+    assert.ok(!keptRun(plan).includes("--keep"), k);
+    assert.deepEqual(afterDashes(keptRun(plan)), today.argv, k);
+    // One reader: the planOf agent (keptLaunch's foreground) is helperPlan's.
+    const kept = keptLaunch(input.get, agents, { launchAgent: Boolean(input.launchAgent) });
+    assert.equal(kept.keep, false, k);
+    assert.equal(agentKeyOfArgv(kept.foreground, agents) ?? (input.launchAgent ? agentKeyOfArgv(kept.command?.argv, agents) : null), plan.agent, k);
+  }
+  // V1 (another agent in front) and a keep inside an env prefix: the same refusal as before.
+  assert.deepEqual(helperPlan({ get: { ...kh, argv: [...KW, "claude", "--model", "x"], foreground: { argv: ["codex"] } }, session: SID, agents: AGENTS }),
+    { name: "h", replaced: "t8", error: "h can't be run again: it runs Codex, but its command runs it in a form this pack can't read, so it can't be given Codex's launch mode (#1125)" });
+  assert.equal(keptLaunch({ argv: [...KW, "claude", "--model", "x"], foreground: { argv: ["codex"] } }, AGENTS).keep, false);
+  assert.deepEqual(helperPlan({ get: { ...kh, argv: ["/usr/bin/env", "X=1", ...KW, "claude", "--model", "x"], foreground: { argv: ["claude", "--model", "x"] } }, session: SID, agents: AGENTS }),
+    { name: "h", replaced: "t8", error: "t8 can't be run again: hc gave no command this pack can reuse for it" });
+  // L1: under the Bot login policy a keep-wrapped helper is refused as before, whatever is in front.
+  for (const [foreground, launchAgent] of [[{ argv: ["claude", "--model", "x"] }, false], [{ argv: [...KW, "claude", "--model", "x"] }, false], [BARE, true]]) {
+    assert.deepEqual(helperPlan({ directLogin: true, get: { ...kh, argv: [...KW, "claude", "--model", "x"], foreground }, session: SID, agents: AGENTS, launchAgent }), TODAY_LOGIN);
+  }
+});
+
+test("#1418 helperPlan: a keep-wrapped worker keeps its rebuilt command and is started again with --keep (W1)", () => {
+  const plan = helperPlan({ get: { ...kh, labels: { "worker.of": "b-1" }, argv: [...KW, "claude"], foreground: BARE }, session: SID, agents: AGENTS, launchAgent: true,
+    worker: { agent: "claude", model: null, effort: null, template: null } });
+  const today = ["claude", "--settings", "{\"promptSuggestionEnabled\":false,\"awaySummaryEnabled\":false,\"env\":{\"CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES\":\"1\"}}",
+    "--permission-mode", "auto", "--resume", SID];
+  assert.deepEqual(plan, { name: "h", replaced: "t8", cwd: "/w", labels: { "worker.of": "b-1" }, agent: "claude", template: null, session: SID, mode: "resume",
+    resume: ["--resume", SID], argv: today, agySettings: null, note: null, warning: null, keep: true });
+  const args = keptRun(plan);
+  assert.deepEqual(args.slice(args.indexOf("--keep"), args.indexOf("--keep") + 3), ["--keep", "--parent", "t100"]);
+  assert.deepEqual(afterDashes(args), today);
+});
+
+test("#1418 helperPlan: a keep-wrapped omp, pi or agy helper plans as its direct form does, with and without a session; only keep differs", () => {
+  for (const [program, session] of [["omp", null], ["omp", "sess-1"], ["pi", null], ["pi", "sess-1"], ["agy", null], ["agy", "sess-1"]]) {
+    const direct = helperPlan({ get: { ...kh, argv: [program, "--x"], foreground: { argv: [program, "--x"] } }, session, agents: AGENTS });
+    const kept = helperPlan({ get: { ...kh, argv: [...KW, program, "--x"], foreground: { argv: [program, "--x"] } }, session, agents: AGENTS });
+    assert.deepEqual(kept, { ...direct, keep: true }, `${program} ${session}`);
+    assert.equal(direct.keep, false);
+  }
+});
+
+test("#1418 helperArgs: keep puts --keep before --parent, and the words after -- are the same; without it, as before", () => {
+  const base = { name: "h", cwd: "/w", labels: { a: "1" }, parent: "t100", argv: ["claude", "--resume", SID], path: "/p" };
+  const before = ["run", "--bg", "--json", "--name", "h", "--cwd", "/w", "--label", "a=1", "--parent", "t100", "--", "/usr/bin/env", "PATH=/p", "claude", "--resume", SID];
+  assert.deepEqual(helperArgs(base), before);
+  assert.deepEqual(helperArgs({ ...base, keep: false }), before);
+  assert.deepEqual(helperArgs({ ...base, keep: true }),
+    ["run", "--bg", "--json", "--name", "h", "--cwd", "/w", "--label", "a=1", "--keep", "--parent", "t100", "--", "/usr/bin/env", "PATH=/p", "claude", "--resume", SID]);
 });

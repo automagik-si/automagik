@@ -2249,3 +2249,186 @@ test("seatHint chooses the roster and safe command form for the seat's recorded 
   assert.match(hint({ seat: machineSeat, machines: machine, folder: null }), /--machine h3 --project <its folder on h3>.*not runnable/);
   assert.match(hint({ seat: machineSeat }), /machine h2 isn't linked now.*no command/);
 });
+
+// ---- #1418 defect A: a helper started with hc run --keep (hc's keep wrapper at its launch's start) ----
+
+const KEEP = '"$@"; exec "${SHELL:-sh}" -i';
+const KW = ["sh", "-c", KEEP, "sh"];
+/** A run's own command: the words after its `--`, from its program (programOf: past the pack's `env [-u NAME…] K=V…`). */
+const commandOf = (run) => {
+  const w = wordsOf(run);
+  const program = programOf(w);
+  return w.slice(program === w[0] ? 0 : w.findIndex((word, i) => word === program && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) && w[i - 1] !== "-u"));
+};
+const optionsOf = (run) => run.slice(0, run.indexOf("--"));
+/** `--keep` right before `--parent <parent>`. */
+const keptUnder = (run, parent) => {
+  const i = optionsOf(run).indexOf("--keep");
+  return i >= 0 && run[i + 1] === "--parent" && run[i + 2] === parent;
+};
+const editPanes = (s, edit) => { const state = s.hcState(); edit(state); writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state)); };
+const paneAt = (state, address) => state.terminals.find((p) => p.address === address);
+
+test("#1418 defect A K1: revive runs a keep-wrapped helper at a bare shell again with --keep, resumed by its own session; once more after its replacement is a bare shell; nothing while its parent is up", (t) => {
+  const s = world(t, { terminals: (p) => [
+    pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }),
+    pane("t8", { cwd: p, parent: "t5", front: ["zsh", "-i"], argv: [...KW, "claude", "--model", "x"], labels: { "agent.session": SID4 } }),
+  ] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = runNamed(s, "t8");
+  assert.ok(run && keptUnder(run, "t100"), run?.join(" "));
+  assert.deepEqual(commandOf(run), ["claude", "--model", "x", "--resume", SID4]);
+  assert.deepEqual(r.json().projects[0].results[0].helpers.map((h) => [h.name, h.outcome]), [["t8", "resumed"]]);
+  for (const text of [r.out, r.err, s.hcState().sent[0].text, JSON.stringify(s.lastReport())]) assert.ok(!text.includes(SID4), text);
+  // The replacement hc recorded: the whole argv inside the keep wrapper, its parent the bot's new pane.
+  const helper = s.hcState().terminals.find((p) => p.name === "t8" && p.state === "live");
+  assert.deepEqual(helper.argv.slice(0, 4), KW);
+  assert.equal(helper.parent, "t100");
+  // Its parent is up: a second revive runs nothing.
+  assert.equal(s.cli(["revive", "--json"]).code, 0);
+  assert.equal(runsOf(s).length, 2);
+  // After another reboot both are bare shells: the helper is run again from its replacement, the same words, kept.
+  editPanes(s, (state) => {
+    paneAt(state, "t100").foreground.argv = ["zsh"];
+    paneAt(state, helper.address).foreground.argv = ["zsh", "-i"];
+  });
+  const again = s.cli(["revive", "--json"]);
+  assert.equal(again.code, 0, again.err);
+  const second = runsOf(s).filter((c) => c[c.indexOf("--name") + 1] === "t8").at(-1);
+  assert.equal(runsOf(s).length, 4);
+  assert.ok(keptUnder(second, "t102"), second.join(" "));
+  assert.deepEqual(commandOf(second), ["claude", "--model", "x", "--resume", SID4]);
+});
+
+const liveTree = (p, t8, { status = "idle" } = {}) => [
+  pane("t5", { bot: ID.main, cwd: p, front: ["claude"], argv: ["claude"], status: "idle", labels: { "agent.session": SID } }),
+  pane("t8", { cwd: p, parent: "t5", status, labels: { "agent.session": SID4 }, ...t8 }),
+];
+
+test("#1418 defect A K2: a live restart --tree runs a keep-wrapped helper (the wrapper in front) again with --keep and its resume; a second restart --tree plans the same", (t) => {
+  const s = world(t, { terminals: (p) => liveTree(p, { front: [...KW, "claude", "--model", "x"], argv: [...KW, "claude", "--model", "x"] }),
+    hcExtra: { keepFront: "wrapper" } });
+  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.equal(r.code, 0, r.err + r.out);
+  const run = runNamed(s, "t8");
+  assert.ok(run && keptUnder(run, "t100"), run?.join(" "));
+  assert.deepEqual(commandOf(run), ["claude", "--model", "x", "--resume", SID4]);
+  // The second restart reads the replacement as hc recorded it (the wrapper in front too).
+  const helper = s.hcState().terminals.find((p) => p.name === "t8" && p.state === "live");
+  assert.deepEqual(helper.foreground.argv.slice(0, 4), KW);
+  editPanes(s, (state) => {
+    for (const a of ["t100", helper.address]) paneAt(state, a).status = { app: "claude-code", state: "idle" };
+  });
+  const again = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.equal(again.code, 0, again.err + again.out);
+  const second = runsOf(s).filter((c) => c[c.indexOf("--name") + 1] === "t8").at(-1);
+  assert.notEqual(second, run);
+  assert.ok(keptUnder(second, "t102"), second.join(" "));
+  assert.deepEqual(commandOf(second), ["claude", "--model", "x", "--resume", SID4]);
+});
+
+test("#1418 defect A K3 (#413): a keep-wrapped helper that tells hc no status refuses a live restart --tree; --force runs it, kept", (t) => {
+  const s = world(t, { terminals: (p) => liveTree(p, { front: [...KW, "claude", "--model", "x"], argv: [...KW, "claude", "--model", "x"] }, { status: null }) });
+  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /t8 doesn't tell hc whether it is busy.*Nothing was started/s);
+  assert.equal(runsOf(s).length, 0);
+  const forced = s.cli(["restart", "Genie", "--tree", "--force", "--json"]);
+  assert.equal(forced.code, 0, forced.err + forced.out);
+  const run = runNamed(s, "t8");
+  assert.ok(run && keptUnder(run, "t100"), run?.join(" "));
+  assert.deepEqual(commandOf(run), ["claude", "--model", "x", "--resume", SID4]);
+});
+
+test("#1418 defect A K4: revive of a keep-wrapped Codex helper with no id of its own starts it fresh in Codex's launch mode, kept, never the folder's latest", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { terminals: (p) => [
+    pane("t5", { bot: ID.main, cwd: p, created: born, labels: { "agent.session": SID } }),
+    pane("t8", { cwd: p, parent: "t5", created: born + 1000, front: ["zsh", "-i"], argv: [...KW, "codex", "--model", "m"] }),
+  ] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const helper = r.json().projects[0].results[0].helpers[0];
+  assert.equal(helper.outcome, "fresh");
+  assert.match(helper.why, /no Codex conversation of its own could be identified for t8/);
+  const run = runNamed(s, "t8");
+  assert.ok(run && keptUnder(run, "t100"), run?.join(" "));
+  const command = commandOf(run);
+  assert.deepEqual(command.slice(0, 3), ["codex", "--model", "m"]);
+  assert.ok(!command.includes("resume") && !command.includes("--last"), command.join(" "));
+});
+
+test("#1418 defect A K5: an unrelated keep-wrapped Codex pane at a bare shell in the folder is a rival: the helper beside it starts fresh, never takes the one rollout", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { terminals: (p) => [
+    pane("t5", { bot: ID.main, cwd: p, created: born, labels: { "agent.session": SID } }),
+    pane("t8", { cwd: p, parent: "t5", created: born + 1000, front: ["zsh"], argv: ["codex"] }),
+    pane("t9", { cwd: p, created: born + 1500, front: ["zsh", "-i"], argv: [...KW, "codex"] }),
+  ] });
+  const id = v7(born + 3000);
+  codexRollout(s, { id, cwd: s.project, dayMs: born + 3000 });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const helper = r.json().projects[0].results[0].helpers[0];
+  assert.deepEqual([helper.name, helper.outcome], ["t8", "fresh"]);
+  assert.match(helper.why, /no Codex conversation of its own could be identified for t8/);
+  const run = runNamed(s, "t8");
+  assert.ok(run && !run.some((word) => word.includes(id)), run?.join(" "));
+  assert.equal(runNamed(s, "t9"), undefined);
+});
+
+test("#1418 defect A K6: under the Bot login policy a keep-wrapped Claude helper is refused as before", (t) => {
+  const s = world(t, { terminals: (p) => [
+    pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }),
+    pane("t8", { cwd: p, parent: "t5", created: 8, front: ["zsh", "-i"], argv: [...KW, "claude", "--model", "x"], labels: { "agent.session": SID4 } }),
+  ] });
+  const claude = loginFixture(t, join(s.root, "acp", "cli-homes"), "claude");
+  const r = s.cli(["revive", "--json"], { env: claude.env });
+  const result = r.json().projects[0].results[0];
+  // Recorded on dev before #1418 (1beb7f7d3): the same exit, outcome, refusal and runs.
+  assert.equal(r.code, 1, r.err);
+  assert.deepEqual([result.name, result.outcome, result.login ?? null, result.why], ["Genie", "failed", null,
+    "Under the Bot login policy only a direct Claude or Codex command can start; run the agent directly. (launch-not-direct)"]);
+  assert.equal(runsOf(s).length, 0);
+});
+
+test("#1418 defect A K7: a keep-wrapped helper whose run fails is reported with a by-hand line that keeps --keep and hides its id", (t) => {
+  const s = world(t, { terminals: (p) => [
+    pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }),
+    pane("t8", { cwd: p, parent: "t5", front: ["zsh", "-i"], argv: [...KW, "claude", "--model", "x"], labels: { "agent.session": SID4 } }),
+  ], hcExtra: { failRun: ["t8"] } });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  const hand = s.lastReport().projects[0].results[0].helpers.find((h) => h.name === "t8").by_hand;
+  assert.match(hand, / --keep --parent t100 -- .* claude --model x --resume '\*\*\*'$/);
+  for (const text of [r.out, r.err, JSON.stringify(s.lastReport())]) assert.ok(!text.includes(SID4), text);
+});
+
+test("#1418 defect A K8, Z: a live restart --tree with a prefix before the wrapper, or a kept Claude helper whose program exited, runs as before: not refused, no --keep", (t) => {
+  for (const t8 of [
+    { front: [...KW, "codex", "--model", "m"], argv: ["/usr/bin/env", "PATH=/g", ...KW, "codex", "--model", "m"] }, // K8
+    { front: ["zsh", "-i"], argv: [...KW, "claude"] }, // Z: the kept shell in front, no worker row
+  ]) {
+    const s = world(t, { terminals: (p) => liveTree(p, t8) });
+    const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+    // Recorded on dev before #1418 (1beb7f7d3): restarted, t8 run as `sh -c <the wrapper>`, nothing kept.
+    assert.equal(r.code, 0, r.err + r.out);
+    const run = runNamed(s, "t8");
+    assert.ok(run && !run.includes("--keep"), run?.join(" "));
+    assert.deepEqual(commandOf(run), ["sh", "-c", KEEP]);
+  }
+});
+
+test("#1418 defect A K9: revive of a keep-wrapped helper running no agent (npm run dev) at a bare shell runs as before: not refused, no --keep", (t) => {
+  const s = world(t, { terminals: (p) => [
+    pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }),
+    pane("t8", { cwd: p, parent: "t5", front: ["zsh", "-i"], argv: [...KW, "npm", "run", "dev"] }),
+  ] });
+  const r = s.cli(["restart", ID.main, "--project", s.project, "--tree", "--revive", "--json"]);
+  // Recorded on dev before #1418 (1beb7f7d3).
+  assert.equal(r.code, 0, r.err + r.out);
+  const run = runNamed(s, "t8");
+  assert.ok(run && !run.includes("--keep"), run?.join(" "));
+  assert.deepEqual(commandOf(run), ["sh", "-c", KEEP]);
+});
