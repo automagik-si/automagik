@@ -566,7 +566,7 @@ test('rfc0039 D4 C8 Details lists and revokes only the selected Bot grants [P]',
 
 for (const [provider, offHint] of [
   ['acp-claude', /Claude Code uses Automagik's tools/],
-  ['acp-omp', /omp has no tools at all, so this Bot can only chat/],
+  ['acp-omp', /omp has no tools at all in any of this Bot's chats, so this Bot can only chat/],
 ]) {
   test(`Details places ${provider}'s native tools title and switch together directly below Working folder`, async t => {
     const { document, root, DetailsDrawer } = mount(t)
