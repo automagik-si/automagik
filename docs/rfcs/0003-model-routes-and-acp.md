@@ -1075,7 +1075,9 @@ this amendment" lines.
   the patch tool. What is left is the bridge's transport: `functions.exec`, `functions.wait` and
   the three MCP resource readers. Every model in the copy is checked once per spawn; a model that
   offers anything else is not offered while OFF. Each removal is proven by its effect, and a home
-  server named `dsh` refuses. Any failure refuses the turn ("Codex could not turn its own tools
+  server named `dsh` refuses. Every read names a model of the copy, never the Codex home's own
+  default (which may be a kept model that shows no tools); the process's config names no model,
+  so DSH's `default` stays the model Codex itself starts on. Any failure refuses the turn ("Codex could not turn its own tools
   off ..."); the Session never opens unchecked. The CLI calls run one after another, and one
   setup at a time per Codex home: about 5-6 seconds more per new OFF agent session, none per
   turn. A model the composer picks later must be one the spawn checked, else the turn is refused
@@ -1095,7 +1097,9 @@ this amendment" lines.
   identity-less, Read only (Codex's own read-only mode, as today). The Details switch shows OFF
   and locked with "This model can't turn its native tools off." and makes no OFF promise. A
   restricted (Q5), managed or shared Codex Bot on a kept model also keeps Codex's own tools, as
-  today; its row shows the kept sentence. A new model of that kind joins the list only by a
+  today; its row shows the kept sentence. The row and ON eligibility follow the Bot's saved
+  model: a Bot saved on a kept model runs its checked-model turns OFF, even in its own chat. A
+  new model of that kind joins the list only by a
   release; until then it fails the check and is not offered while OFF. DSH's `default` is the
   model Codex itself starts on (the last process with its own tools, else the catalog's recorded
   start model); a wrong guess is caught after the model is set and that turn ends with "The tools
@@ -1112,9 +1116,10 @@ this amendment" lines.
 - **Migration (Q1/Q5).** Once per team (marker `nativeToolsCodexKept`), every existing Codex Bot
   keeps Codex's own tools in its own direct chat (`nativeTools: true`,
   `nativeToolsAgent: 'acp-codex'`), except Bots with shell access off or denied tools, which stay
-  OFF. Groups, tasks, scheduled runs, relays, sub-agents, Read only, multi-user, managed and
+  OFF. A Codex Bot whose ON was saved for another agent (a Claude ON from before the tag, omp's
+  migrated one) has it moved to Codex; a saved OFF stays OFF. Groups, tasks, scheduled runs, relays, sub-agents, Read only, multi-user, managed and
   restricted Bots move to DSH's tools, as do identity-less Sessions on a team host, except Bots
   on a kept model.
 - **Rollback.** Revert PR B. Older builds ignore `nativeToolsAgent`, the marker and the
   `codex-native-off` folder. A migrated Codex Bot keeps `nativeTools: true`, which a PR A build
-  applies only to Claude, so a rolled-back Bot later moved to Claude would read ON.
+  applies only to Claude, so a rolled-back Bot later moved to Claude or omp would read ON.
