@@ -1,4 +1,4 @@
-// Browser fixture for the sidebar toggle's one spot (#1502): the pinned DSH SidebarRoot, taken
+// Browser fixture for the sidebar toggle's seat (#1502): the pinned DSH SidebarRoot, taken
 // from its own client bundle (dsh-client-ui-sidebar lib, with the CSS module it injects), around
 // the Bot team's real sidebar, footer entries and style sheets.
 //
@@ -9,12 +9,14 @@
 //   content fading for 150ms, then the rail entering) is, since that is SidebarRoot's code.
 // - The slots: renderSlot draws the Bot team's TeamSidebar for sidebar.workspaces and its footer
 //   entries (FooterAccount, RailToggle, plus `extra` stand-in entries other plugins would add);
-//   the toggle badge is a stand-in dot.
+//   the toggle badge is a stand-in dot. sidebar.settings is empty unless the mount asks: `seated`
+//   draws the Bot team's AccountLauncher there, as the app's settings seat does, and `trigger`
+//   draws a 36px stand-in for the shell's own settings trigger beside the footer Account.
 // - The desktop attributes (data-windows-titlebar, data-platform, data-sidebar-drawer) are set
 //   by the test as the desktop preload and AppFrame set them.
 import { createElement as h, Fragment, useSyncExternalStore } from 'react'
 import { SHELL_CSS } from '../../src/client/styles.js'
-import { SIDEBAR_CSS, TeamSidebar, FooterAccount, RailToggle } from '../../src/client/sidebar.js'
+import { SIDEBAR_CSS, TeamSidebar, FooterAccount, AccountLauncher, RailToggle } from '../../src/client/sidebar.js'
 import { LEFT_BAR_CSS } from '../../src/client/left-bar-css.js'
 import { WORK_CODE_SWITCH_CSS } from '../../src/client/work-code-switch.js'
 import { allThemes, themeCss } from '../../src/client/themes.js'
@@ -65,7 +67,8 @@ const constant = value => pick => pick(value)
 const NO_SESSIONS = { ids: [], byId: {} }
 const NO_WORK = { approvals: [], rooms: {}, failed: {}, waiting: {} }
 
-const state = { collapsed: false, drawer: false, width: 300, extra: 0, bots: 3 }
+const DEFAULTS = { collapsed: false, drawer: false, width: 300, extra: 0, bots: 3, seated: false, trigger: false }
+const state = { ...DEFAULTS }
 let root = null
 let Root = null
 window.toggles = 0
@@ -76,7 +79,7 @@ const actions = {
   openConnectors: () => {}, setSurface: () => {}, seatAccount: () => {}, installUpdate: async () => {},
 }
 const teamProps = {
-  actions, useRoster: hook(roster), useUi: constant({ unread: {} }), useRegistry: constant({}), useSessions: constant(NO_SESSIONS),
+  actions, useRoster: hook(roster), useUi: pick => pick({ unread: {}, accountSeated: state.seated }), useRegistry: constant({}), useSessions: constant(NO_SESSIONS),
   useUpdate: constant({}), useSessionStatus: constant(new Map()), useSessionRetainInfo: (_id, pick) => pick(undefined),
   useActivity: constant({}), useWork: constant(NO_WORK),
 }
@@ -84,6 +87,11 @@ const teamProps = {
 const renderSlot = (name, props) => {
   if (name === 'sidebar.workspaces') return h(TeamSidebar, { ...teamProps, ...props })
   if (name === 'sidebar.toggle.badge') return h('span', { className: 'fx-badge', style: { position: 'absolute', top: '4px', right: '4px', width: '7px', height: '7px', borderRadius: '50%', background: 'currentColor' } })
+  if (name === 'sidebar.settings') {
+    if (state.seated) return h(AccountLauncher, { ...teamProps, ...props })
+    if (state.trigger) return h('button', { type: 'button', className: 'fx-trigger', 'aria-label': 'Shell settings', style: { width: '36px', height: '36px', padding: 0 } })
+    return null
+  }
   if (name === 'sidebar.footer.action') {
     return h(Fragment, null,
       // Another plugin's entries, as the shell lists them before the Bot team's own.
@@ -115,7 +123,7 @@ function render() {
 }
 
 window.mount = (options = {}) => {
-  Object.assign(state, { collapsed: false, drawer: false, width: 300, extra: 0, bots: 3 }, options)
+  Object.assign(state, DEFAULTS, options)
   Root ??= sidebarRoot()
   root ??= createRoot(document.querySelector('[data-slot=sidebar]'))
   render()
