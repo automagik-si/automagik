@@ -633,6 +633,11 @@ test('A4 refusal texts point to the Details switch only in an eligible owner cha
   const own = world(t, { identity: eligible, offSpawn: refuse })
   const ownTurn = await turnOn(own, own.chat('direct'), owner('owner'))
   assert.equal(finishOf(ownTurn).failure.message, `${SENT} ${DETAILS}, or update Automagik.`)
+  // BI-1: a scheduled turn in that same direct chat is never ON, whatever the switch says.
+  const timed = world(t, { identity: eligible, offSpawn: refuse })
+  const timedTurn = await turnOn(timed, timed.chat('direct'), scheduled('scheduled'))
+  const SWITCH = `${SENT} Switch its model, or update Automagik.`
+  assert.equal(finishOf(timedTurn).failure.message, SWITCH)
   // A group, task or scheduled Session, or a blocked Bot, is never ON: no pointer to the
   // switch, one full stop.
   const blocked = () => ({ name: 'Ada', nativeToolsBlocked: true })
@@ -646,6 +651,11 @@ test('A4 refusal texts point to the Details switch only in an eligible owner cha
   const ownOffTurn = await turnOn(ownOff, ownOff.chat('direct'), owner('owner'))
   const ownText = finishOf(ownOffTurn).failure.message
   assert.ok(ownText.endsWith(`${DETAILS}, or turn Automagik's tools back on.`), ownText)
+  const timedOff = world(t, { identity: eligible, dshTools: false })
+  const timedOffTurn = await turnOn(timedOff, timedOff.chat('direct'), scheduled('scheduled'))
+  const timedText = finishOf(timedOffTurn).failure.message
+  assert.equal(timedText.includes(DETAILS), false, timedText)
+  assert.ok(timedText.endsWith("Turn Automagik's tools back on, or switch its model."), timedText)
   const group = world(t, { identity: OFF, dshTools: false })
   const groupTurn = await turnOn(group, group.chat('group'), scheduled('scheduled'))
   const text = finishOf(groupTurn).failure.message

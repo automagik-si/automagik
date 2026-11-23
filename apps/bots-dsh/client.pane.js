@@ -11646,6 +11646,7 @@ var ZH = {
   "Its group conversation could not open, so it starts a new one next time": "它的群聊会话打不开，下次会换一个新的",
   "Its permission level could not be set here, so it took no turn": "它在这里的权限级别未能设置，所以这一轮没有发言",
   "Codex could not turn its own tools off, so the message was not sent": "Codex 未能关闭它自己的工具，所以消息没有发送",
+  "Codex was not started because its own tools and Automagik's tools are both off": "Codex 未启动，因为它自己的工具和 Automagik 的工具都已关闭",
   // The composer's +
   "Add files": "添加文件",
   "Add photos & files": "添加照片和文件",

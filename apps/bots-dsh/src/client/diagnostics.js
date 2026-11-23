@@ -72,6 +72,8 @@ const FAILURES = {
   // owner's direct chat; these words, shown wherever the code is, never do.
   'acp/native-off-unavailable':
     'Codex could not turn its own tools off, so the message was not sent',
+  'acp/native-off-no-bridge':
+    "Codex was not started because its own tools and Automagik's tools are both off",
 }
 
 // The short words for a known code, or undefined.
@@ -82,9 +84,10 @@ export function failureLabel(code, message) {
 }
 
 // The label as a clause inside a sentence that adds its own full stop: a message that already
-// ends with one (a host sentence) would otherwise show two.
+// ends with one (a host sentence) would otherwise show two. Only that one stop goes: an
+// ellipsis keeps its dots.
 export const failureClause = (code, message) =>
-  String(failureLabel(code, message)).replace(/\s*[.\u3002]+\s*$/, '')
+  String(failureLabel(code, message)).trimEnd().replace(/(?<![.\u3002])[.\u3002]$/, '')
 
 // GitHub refuses very long addresses; past this the diagnostics go by the clipboard.
 const URL_LIMIT = 7000

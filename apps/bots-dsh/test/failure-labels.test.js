@@ -55,3 +55,23 @@ test('a failure inside a group line never ends in two full stops', () => {
   assert.equal(clause('acp/native-off-unavailable', 'x.'),
     'Codex could not turn its own tools off, so the message was not sent')
 })
+
+// BI-2: the refusal with Automagik's tools off has its own short words, so a group line does
+// not repeat "switch its model" and is translated.
+test('the Codex OFF refusal with Automagik\'s tools off has short words, in two languages', () => {
+  const label = "Codex was not started because its own tools and Automagik's tools are both off"
+  const host = "Codex's own tools are off for this Bot and Automagik's tools are turned off in this"
+    + " app, so Codex was not started. Turn Automagik's tools back on, or switch its model."
+  assert.equal(failureLabel('acp/native-off-no-bridge', host), label)
+  assert.equal(label.includes('Details'), false)
+  assert.equal(DICTIONARY.zh[label], 'Codex 未启动，因为它自己的工具和 Automagik 的工具都已关闭')
+})
+
+// BI-3: only one closing full stop goes (the line adds its own); an ellipsis keeps its dots.
+test('a group line clause drops one closing full stop only', () => {
+  assert.equal(failureClause('SOMETHING_NEW', 'It waits...'), 'It waits...')
+  assert.equal(failureClause('SOMETHING_NEW', 'It waits…'), 'It waits…')
+  assert.equal(failureClause('SOMETHING_NEW', 'Made in the U.S.'), 'Made in the U.S')
+  assert.equal(failureClause('SOMETHING_NEW', 'It stopped.  '), 'It stopped')
+  assert.equal(failureClause('SOMETHING_NEW', '它停下了。。'), '它停下了。。')
+})

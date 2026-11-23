@@ -1576,8 +1576,10 @@ export class AcpAdapter extends LlmAdapter {
         && this.savedNativeOn(sessionId, options.provider, reuse)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
       const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
-      // Whether the Details switch could turn this Session's Codex ON, read when the text is made.
+      // Whether the Details switch could turn this turn's Codex ON, read when the text is made:
+      // only an owner-requested turn in an eligible direct chat (a scheduled one there never is).
       const switchHere = () => {
+        if (!requestedByOwner) return false
         try { return identityRead?.nativeToolsBlocked === false } catch { return false }
       }
       const offText = reason => offUnavailableText(reason, switchHere())

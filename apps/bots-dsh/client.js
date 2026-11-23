@@ -2741,6 +2741,7 @@ var ZH = {
   "Its group conversation could not open, so it starts a new one next time": "它的群聊会话打不开，下次会换一个新的",
   "Its permission level could not be set here, so it took no turn": "它在这里的权限级别未能设置，所以这一轮没有发言",
   "Codex could not turn its own tools off, so the message was not sent": "Codex 未能关闭它自己的工具，所以消息没有发送",
+  "Codex was not started because its own tools and Automagik's tools are both off": "Codex 未启动，因为它自己的工具和 Automagik 的工具都已关闭",
   // The composer's +
   "Add files": "添加文件",
   "Add photos & files": "添加照片和文件",
@@ -4021,13 +4022,14 @@ var FAILURES = {
   PERMISSION: "Its permission level could not be set here, so it took no turn",
   // acp-dsh's Codex OFF refusal (#1564). Its message names the Details switch only in the
   // owner's direct chat; these words, shown wherever the code is, never do.
-  "acp/native-off-unavailable": "Codex could not turn its own tools off, so the message was not sent"
+  "acp/native-off-unavailable": "Codex could not turn its own tools off, so the message was not sent",
+  "acp/native-off-no-bridge": "Codex was not started because its own tools and Automagik's tools are both off"
 };
 var knownFailure = (code) => Object.hasOwn(FAILURES, code ?? "") ? t(FAILURES[code]) : void 0;
 function failureLabel(code, message) {
   return knownFailure(code) ?? (message || code || t("Unknown error"));
 }
-var failureClause = (code, message) => String(failureLabel(code, message)).replace(/\s*[.\u3002]+\s*$/, "");
+var failureClause = (code, message) => String(failureLabel(code, message)).trimEnd().replace(/(?<![.\u3002])[.\u3002]$/, "");
 var URL_LIMIT = 7e3;
 var WHAT_MAX = 2e3;
 var PASTE_NOTE = "Omni copied the diagnostics to the clipboard. Paste them here.";

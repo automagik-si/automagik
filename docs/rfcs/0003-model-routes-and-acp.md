@@ -1084,10 +1084,11 @@ this amendment" lines.
   Bot's isolated Codex home (`cli-homes`, a new empty home included) and runs one command under
   them (`codex sandbox -P`) with that home; when Codex cannot, the turn is refused with "its
   permission profiles are unavailable". That refusal, and the one with DSH's tools turned off,
-  point to the Details switch only in the owner's direct chat of a Bot it is not blocked for; in
-  a group, task or scheduled run, or for a blocked Bot, they say to switch its model, or to update
-  Automagik (to turn Automagik's tools back on, for the second), and a group line shows the
-  refusal's short words, in the interface language. The CLI calls run one after another, and
+  point to the Details switch only on the owner's own turn in the direct chat of a Bot it is not
+  blocked for; in a group, task or scheduled run (one in that direct chat included), or for a
+  blocked Bot, they say to switch its model, or to update Automagik (to turn Automagik's tools
+  back on, for the second), and a group line shows each refusal's short words, in the interface
+  language. The CLI calls run one after another, and
   one setup at a time per Codex home: about 5-6 seconds more per new OFF agent session, none per
   turn. A model the composer picks later must be one the spawn checked, else the turn is refused
   with zero prompts.
