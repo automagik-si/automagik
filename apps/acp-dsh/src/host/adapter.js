@@ -1464,9 +1464,10 @@ export class AcpAdapter extends LlmAdapter {
       const upgrade = managed && live !== undefined && live.native !== true && live.nativeManaged === true
         && requestedByOwner && permitsNative(turnLevel)
         && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.nativeOn(agent, sessionId)
-      const hardAsks = (enabled, bridged, currentLevel) => typeof agent.hardAsk === 'function'
-        && !(bridged && agent.disableBuiltInTools === true && !enabled) && currentLevel?.full !== true
-      const asks = hardAsks(native, this.bridgeOn(agent, sessionId), turnLevel)
+      const hardAsks = (enabled, currentLevel, bridged) => typeof agent.hardAsk === 'function'
+        && !((bridged ?? this.bridgeOn(agent, sessionId)) && agent.disableBuiltInTools === true && !enabled)
+        && currentLevel?.full !== true
+      const asks = hardAsks(native, turnLevel)
       const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true) && this.bridgeOn(agent, sessionId)
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       const role = takesIdentity ? rolePromptOf(identityRead) : { digest: '' }
@@ -1582,7 +1583,7 @@ export class AcpAdapter extends LlmAdapter {
             const spawnNative = spawnManaged
               ? requestedByOwner && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId)
               : native
-            const spawnAsks = spawnManaged ? hardAsks(spawnNative, bridged, spawnLevel) : asks
+            const spawnAsks = spawnManaged ? hardAsks(spawnNative, spawnLevel, bridged) : asks
             state.native = spawnNative
             state.nativeManaged = spawnManaged
             state.asks = spawnAsks
