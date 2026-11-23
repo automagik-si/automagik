@@ -1,5 +1,5 @@
 import { createElement as h, useEffect, useState } from 'react'
-import { characterMarkup, PICKER_SHAPES, CHARACTER_COLORS } from './vendor/characters.js'
+import { characterMarkup, PICKER_SHAPES, SOLVER_SHAPES, CHARACTER_COLORS } from './vendor/characters.js'
 import { INKS, GRADIENTS } from './vendor/inks.js'
 import { omniHero, unfoldHero } from './octopus.js'
 import { call } from './api.js'
@@ -9,6 +9,8 @@ import { t } from './i18n.js'
 // draws Bots), or the image generated for it. It stands where the octopus used to, on every
 // onboarding step after it exists.
 export const SHAPES = PICKER_SHAPES
+// The Solvers among them: the picker shows these after the others, under their own heading.
+export { SOLVER_SHAPES }
 export const COLORS = CHARACTER_COLORS
 
 let serial = 0

@@ -452,3 +452,68 @@ test('a provider Connect AI just turned on is waited for', async () => {
   assert.deepEqual(await assignModels(team, { waitMs: 5_000, pauseMs: 1 }), ['Omni'])
   assert.deepEqual(team.calls, [['updateBot', 'main', { model: 'anthropic/claude-opus-5-5' }]])
 })
+
+// The companion picker (src/client/companion.js CharacterPicker), rendered once by a React that
+// only builds the tree.
+async function picker() {
+  const { build } = await import('esbuild')
+  const { runInNewContext } = await import('node:vm')
+  const { fileURLToPath } = await import('node:url')
+  const bundle = await build({
+    stdin: {
+      contents: "export { CharacterPicker } from './src/client/companion.js'\nexport { SHAPES, SOLVER_SHAPES } from './src/client/companion-art.js'\nexport { PT_BR } from './src/client/i18n.js'",
+      resolveDir: fileURLToPath(new URL('..', import.meta.url)),
+    },
+    bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
+    external: ['react', 'react-dom', '@automagik/bots-dsh/client'], loader: { '.css': 'text' },
+  })
+  const client = { exports: {} }
+  const react = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
+    useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}],
+    useEffect: () => {}, useRef: current => ({ current }), useCallback: fn => fn, useMemo: fn => fn(),
+  }
+  runInNewContext(bundle.outputFiles[0].text, { module: client, exports: client.exports, URL, setTimeout, clearTimeout, document: { body: null }, require: name => ({ react, 'react-dom': { createPortal: node => node }, '@automagik/bots-dsh/client': {} })[name] })
+  return client.exports
+}
+
+test('the companion picker is one choice in two groups: the characters, then the Solvers under their heading', async () => {
+  const { CharacterPicker, SHAPES, SOLVER_SHAPES, PT_BR } = await picker()
+  const solvers = ['puff', 'sprout', 'cap', 'bell', 'cloud', 'spike', 'floppy', 'antenna', 'cactus', 'bulb', 'chick', 'frog']
+  assert.deepEqual([...SOLVER_SHAPES], solvers)
+  const picked = []
+  const draw = shape => CharacterPicker({ shape, color: 'cyan', onPick: id => picked.push(id) })
+  const tree = draw('cactus')
+  // One radiogroup holds both groups, so it stays one choice.
+  assert.equal(tree.props.role, 'radiogroup')
+  assert.equal(tree.props['aria-label'], 'Character')
+  const [first, heading, second] = tree.children
+  assert.equal(tree.children.length, 3)
+  assert.deepEqual([first.props.role, second.props.role], ['group', 'group'])
+  assert.deepEqual([first.props.className, second.props.className], ['oai-shapes', 'oai-shapes'])
+  // The heading: the product name, in the welcome's existing small-label class, naming its group.
+  assert.deepEqual(heading.children, ['Solvers'])
+  assert.equal(heading.props.className, 'oai-muted')
+  assert.equal(second.props['aria-labelledby'], heading.props.id)
+  assert.equal(PT_BR.Solvers, 'Solvers')
+  // The order: the 21 characters that were there, then the twelve Solvers, none twice.
+  const ids = group => group.children.map(radio => radio.props['aria-label'])
+  assert.equal(ids(first).length, 21)
+  assert.deepEqual(ids(first).slice(0, 3), ['whale', 'octopus', 'star'])
+  assert.equal(ids(first).at(-1), 'gem')
+  assert.deepEqual(ids(second), solvers)
+  assert.deepEqual([...ids(first), ...ids(second)], [...SHAPES])
+  // Keyboard: every radio is a button in the page's tab order (no tabindex takes one out), so Tab
+  // goes from the last character into the Solvers, and Enter or Space picks, as before.
+  const radios = [...first.children, ...second.children]
+  assert.ok(radios.every(radio => radio.type === 'button' && radio.props.type === 'button' && radio.props.role === 'radio' && !('tabIndex' in radio.props) && !('disabled' in radio.props)))
+  // One radio is checked over both groups, whichever group it is in.
+  const checked = shape => { const drawn = draw(shape); return [...drawn.children[0].children, ...drawn.children[2].children].filter(radio => radio.props['aria-checked']).map(radio => radio.props['aria-label']) }
+  assert.deepEqual(checked('cactus'), ['cactus'])
+  assert.deepEqual(checked('gem'), ['gem'])
+  assert.deepEqual(checked(null), [])
+  // A pick in either group reports that character.
+  radios.find(radio => radio.props['aria-label'] === 'frog').props.onClick()
+  radios.find(radio => radio.props['aria-label'] === 'gem').props.onClick()
+  assert.deepEqual(picked, ['frog', 'gem'])
+})
