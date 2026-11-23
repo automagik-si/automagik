@@ -302,3 +302,153 @@ describe('Follow Omni\'s jobs around the hold', () => {
     expect(jobOf('release').map(line => line.trim())).toContain('needs: carry');
   });
 });
+
+// The newest step, run as written with a stand-in `gh`: from its top to where it has chosen
+// `newest`, then the plugin check on that release. Omni's releases of February 2026 were
+// 2.YYYYMMDD.N, which sort -V ranks above every 2.YYMMDD.N since (#1564).
+describe('Follow Omni\'s candidate', () => {
+  const step = runOf('The newest Omni release');
+  const cut = step.indexOf('read_json() {');
+  const choose = step.slice(0, cut);
+  const check = step.slice(cut, step.indexOf('\ndone\n', cut) + '\ndone\n'.length);
+  const legacy = ['2.20260216.5', '2.20260221.1'];
+
+  type Choice = { pin?: string; releases?: string[]; want?: string; dryRun?: boolean };
+  function candidate({ pin = '2.261120.2', releases = [], want = '', dryRun = false }: Choice) {
+    const dir = mkdtempSync(join(tmpdir(), 'follow-omni-candidate-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      mkdirSync(join(dir, 'apps', 'desktop'), { recursive: true });
+      writeFileSync(join(dir, 'apps', 'desktop', 'omni.json'), JSON.stringify({ version: pin }));
+      writeFileSync(join(dir, 'versions'), releases.map(version => `${version}\n`).join(''));
+      writeFileSync(join(dir, 'requests'), '');
+      writeFileSync(join(dir, 'bin', 'gh'), '#!/usr/bin/env bash\necho "$*" >> requests\ncat versions\n', { mode: 0o755 });
+      const run = spawnSync('bash', ['-c', `${choose}\nprintf 'selected=%s\\n' "$newest"`], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: {
+          PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`,
+          OMNI: 'automagik-si/omni',
+          DRY_RUN: dryRun ? 'true' : 'false',
+          WANT_VERSION: want,
+          WANT_COMMIT: '',
+          WANT_DEV: '',
+          SKIP_HOLD: 'false',
+          GITHUB_EVENT_NAME: want ? 'workflow_dispatch' : 'schedule',
+          EVENT_ACTION: '',
+          GITHUB_STEP_SUMMARY: '/dev/null',
+        },
+      });
+      return { status: run.status, out: run.stdout.trim(), asked: readFileSync(join(dir, 'requests'), 'utf8') !== '' };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // The plugin check for the release `newest`, Omni's two plugins at the given versions
+  // (`undefined`: its package.json cannot be read).
+  function plugins(newest: string, versions: { channels?: string; canvas?: string }) {
+    const dir = mkdtempSync(join(tmpdir(), 'follow-omni-plugins-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      for (const [app, version] of [['omni-channels-dsh', versions.channels], ['omni-canvas-dsh', versions.canvas]] as const) {
+        if (version !== undefined) writeFileSync(join(dir, `${app}.json`), JSON.stringify({ version }));
+      }
+      writeFileSync(join(dir, 'requests'), '');
+      writeFileSync(join(dir, 'bin', 'gh'), `#!/usr/bin/env bash
+set -euo pipefail
+echo "$2" >> requests
+[[ "$1" == api && "$3 $4" == '--jq .content' ]]
+app="\${2#repos/automagik-si/omni/contents/apps/}"
+app="\${app%%/*}"
+[[ "$2" == "repos/automagik-si/omni/contents/apps/\${app}/package.json?ref=v\${newest}" ]]
+base64 "\${app}.json"
+`, { mode: 0o755 });
+      const run = spawnSync('bash', ['-c', `set -euo pipefail\n${check}\necho passed`], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`, OMNI: 'automagik-si/omni', newest },
+      });
+      return { status: run.status, out: run.stdout.trim(), requests: readFileSync(join(dir, 'requests'), 'utf8').trim().split('\n') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test('is found as the workflow writes it', () => {
+    expect(cut).toBeGreaterThan(-1);
+    expect(choose).toContain('newest="${WANT_VERSION}"');
+    expect(choose).toContain('# follow: end');
+    expect(check).toContain('for app in omni-channels-dsh omni-canvas-dsh; do');
+    expect(check).toContain('not following it');
+  });
+
+  test('a legacy date-style release is never the candidate, wherever the list has it', () => {
+    const current = ['2.261120.2', '2.261121.9', '2.261121.12'];
+    for (const releases of [[...legacy, ...current], [...current.toReversed(), ...legacy.toReversed()]]) {
+      expect(candidate({ releases })).toEqual({ status: 0, out: 'selected=2.261121.12', asked: true });
+    }
+  });
+
+  test('never lower than the pin: a legacy release beside a pin at or above every current one is not followed', () => {
+    const lists: [string[], string][] = [
+      [[...legacy, '2.261119.2', '2.261120.2'], '2.261120.2'],
+      [['2.261119.2', ...legacy], '2.261119.2'],
+      [legacy, 'none'],
+    ];
+    for (const [releases, newest] of lists) {
+      expect(candidate({ releases })).toEqual({ status: 0, out: `Omni ${newest}: omni.json is at 2.261120.2, nothing to follow`, asked: true });
+    }
+  });
+
+  test('omni_version is the candidate as given with dry_run, also one that is not newer, and the releases are not read', () => {
+    for (const want of ['2.261121.12', '2.261119.2', '2.261120.2', '2.20260221.1']) {
+      expect(candidate({ want, dryRun: true, releases: [...legacy, '2.261121.12'] })).toEqual({ status: 0, out: `selected=${want}`, asked: false });
+    }
+  });
+
+  test('omni_version is refused without dry_run, and when it is not a release version', () => {
+    const real = candidate({ want: '2.261121.12', releases: ['2.261121.12'] });
+    expect(real.status).toBe(1);
+    expect(real.out).toContain('::error ::omni_version, omni_commit and dev_sha are only taken with dry_run');
+    expect(real.asked).toBe(false);
+    for (const want of ['v2.261121.12', '2.261121', '2.261121.12-rc.1', '2.261121.12\nversion=x']) {
+      const run = candidate({ want, dryRun: true });
+      expect(run.status).toBe(1);
+      expect(run.out).toBe('::error ::omni_version is not a release version (x.y.z)');
+      expect(run.asked).toBe(false);
+    }
+  });
+
+  test('the plugins at or below their release pass, read at that release\'s tag', () => {
+    const run = plugins('2.261121.12', { channels: '2.261121.12', canvas: '2.261121.6' });
+    expect(run).toEqual({
+      status: 0,
+      out: 'passed',
+      requests: [
+        'repos/automagik-si/omni/contents/apps/omni-channels-dsh/package.json?ref=v2.261121.12',
+        'repos/automagik-si/omni/contents/apps/omni-canvas-dsh/package.json?ref=v2.261121.12',
+      ],
+    });
+  });
+
+  test('a plugin ahead of its release, or unreadable, is not followed', () => {
+    const ahead = plugins('2.261121.12', { channels: '2.261121.13', canvas: '2.261121.6' });
+    expect(ahead.status).toBe(0);
+    expect(ahead.out).toBe("::notice ::Omni 2.261121.12: omni-channels-dsh is at '2.261121.13', ahead of its release or unreadable: not following it");
+    const canvas = plugins('2.261121.12', { channels: '2.261121.12', canvas: '2.261122.1' });
+    expect(canvas.status).toBe(0);
+    expect(canvas.out).toBe("::notice ::Omni 2.261121.12: omni-canvas-dsh is at '2.261122.1', ahead of its release or unreadable: not following it");
+    const unreadable = plugins('2.261121.12', { canvas: '2.261121.6' });
+    expect(unreadable.status).toBe(0);
+    expect(unreadable.out).toBe("::notice ::Omni 2.261121.12: omni-channels-dsh is at '', ahead of its release or unreadable: not following it");
+  });
+
+  test('the plugin check stays as strict across the two schemes: a legacy version beside a current release is refused', () => {
+    const run = plugins('2.261121.12', { channels: '2.20260221.1', canvas: '2.261121.6' });
+    expect(run.status).toBe(0);
+    expect(run.out).toBe("::notice ::Omni 2.261121.12: omni-channels-dsh is at '2.20260221.1', ahead of its release or unreadable: not following it");
+    // A legacy release given by omni_version is checked against its own plugins, in its scheme.
+    expect(plugins('2.20260221.1', { channels: '2.20260220.6', canvas: '2.20260221.1' }).out).toBe('passed');
+  });
+});

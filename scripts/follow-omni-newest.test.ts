@@ -64,3 +64,33 @@ test('never moves down to an older release', () => {
 test('follows nothing when no release is listed', () => {
   expect(pick('2.261120.2', [])).toEqual({ out: 'Omni none: omni.json is at 2.261120.2, nothing to follow', requests: ['gh'] });
 });
+
+// Omni's releases of February 2026 were 2.YYYYMMDD.N. sort -V ranks that minor above every
+// 2.YYMMDD.N since, so one of them was always the newest and Omni was never followed (#1564).
+const legacy = ['2.20260216.5', '2.20260220.6', '2.20260221.1'];
+
+test('a legacy date-style release listed before the current ones is not the newest', () => {
+  expect(pick('2.261120.2', [...legacy, '2.261120.2', '2.261121.9', '2.261121.12'])).toEqual({ out: 'selected=2.261121.12', requests: ['gh'] });
+});
+
+test('a legacy date-style release listed after the current ones is not the newest', () => {
+  expect(pick('2.261120.2', ['2.261121.12', '2.261121.9', '2.261120.2', ...legacy.toReversed()])).toEqual({ out: 'selected=2.261121.12', requests: ['gh'] });
+});
+
+test('a legacy date-style release beside a pin that is the newest release is not followed', () => {
+  for (const releases of [[...legacy, '2.261119.2', '2.261120.2'], ['2.261120.2', '2.261119.2', ...legacy]]) {
+    expect(pick('2.261120.2', releases)).toEqual({
+      out: 'Omni 2.261120.2: omni.json is at 2.261120.2, nothing to follow',
+      requests: ['gh'],
+    });
+  }
+});
+
+test('follows nothing when only legacy date-style releases are listed', () => {
+  expect(pick('2.261120.2', legacy)).toEqual({ out: 'Omni none: omni.json is at 2.261120.2, nothing to follow', requests: ['gh'] });
+});
+
+test('only the retired scheme is left out: a six-digit day and a later major still rank', () => {
+  expect(pick('2.261120.2', [...legacy, '2.261231.1'])).toEqual({ out: 'selected=2.261231.1', requests: ['gh'] });
+  expect(pick('2.261120.2', [...legacy, '2.261231.1', '3.20270101.1'])).toEqual({ out: 'selected=3.20270101.1', requests: ['gh'] });
+});

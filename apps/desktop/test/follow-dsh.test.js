@@ -87,7 +87,7 @@ test('follow-omni runs on Omni\'s dispatch and the outside daily clock, taking t
   // what is followed is still only what the lookup lists (or a dry run's omni_version).
   assert.match(text, /for try in 1 2 3 4 5 6; do\n\s+unlisted \|\| break\n[\s\S]*?sleep 20\n\s+lookup\n\s+done\n/)
   assert.match(text, /if unlisted; then\n\s+echo "::warning ::Omni dispatched \$\{wanted\}/)
-  assert.deepEqual([...text.matchAll(/\bnewest=(.*)/g)].map(match => match[1]), ['"${WANT_VERSION}"', '$(sort -V releases.txt | tail -1)'])
+  assert.deepEqual([...text.matchAll(/\bnewest=(.*)/g)].map(match => match[1]), ['"${WANT_VERSION}"', "$(sed -E '/^2\\.20[0-9]{6}\\.[0-9]+$/d' releases.txt | sort -V | tail -1)"])
   // The newest listed release is followed as it is (#1915): npm's server no longer picks it.
   assert.doesNotMatch(text, /registry\.npmjs\.org|\$\{candidate\}|read -r candidate/)
   assert.match(text, /# follow: start\n[\s\S]*?! above "\$\{newest\}" "\$\{current\}"[\s\S]*?# follow: end\n/)
