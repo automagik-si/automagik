@@ -296,6 +296,25 @@ test('a combined move away plus acp_tool is refused before anything is written; 
     saved(await h.call('update-bot', { id: 'a', denyTools: ['acp_tool'] }))
     assert.deepEqual(pair(h.stored().bots.a), [SOL, ['acp_tool']])
   }
+  // CD-2: removing acp_tool and moving to such a model in one patch is refused before anything
+  // is written (the switch's own check reads the live list); two steps work.
+  {
+    const { open } = workspace(t, team({ b: record('b', SOL, { permissionRev: 3, denyTools: ['acp_tool'] }) }))
+    const h = await open()
+    let cleared = 0
+    const clearAuto = h.rt.clearAuto
+    h.rt.clearAuto = (...args) => { cleared += 1; return clearAuto(...args) }
+    refusedWith(await h.call('update-bot', { id: 'b', model: KEPT, denyTools: [] }), OWN_TOOLS_MODEL_TEXT)
+    const now = h.rt.botOf('b')
+    assert.deepEqual([...pair(now), now.permissionRev], [SOL, ['acp_tool'], 3])
+    assert.deepEqual(pair(h.stored().bots.b), [SOL, ['acp_tool']])
+    assert.equal(cleared, 0)
+    assert.deepEqual(h.selects, [])
+    saved(await h.call('update-bot', { id: 'b', denyTools: [] }))
+    saved(await h.call('update-bot', { id: 'b', model: KEPT }))
+    assert.deepEqual(pair(h.rt.botOf('b')), [KEPT, undefined])
+    assert.deepEqual(pair(h.stored().bots.b), [KEPT, undefined])
+  }
 })
 
 // ---- Races (A-1, B-1, B-2, C-1, C-2) ----
@@ -471,6 +490,28 @@ test('C-2 control: with no model change meanwhile the list goes back, also on di
   assert.deepEqual(pair(h.stored().bots.a), [SOL, ['acp_tool']])
 })
 
+test('CD-1 a refused update leaves a Denied tools list saved meanwhile in place', async (t) => {
+  // U's own list is still on the record when it fails, unless a newer save D replaced it: then
+  // D's list stays (newer changes win), in memory and on disk, whichever way U's restore goes.
+  for (const [start, mine, theirs] of [
+    [['bash'], ['bash', 'write'], ['bash', 'acp_tool']],
+    [['acp_tool'], [], ['write']],
+  ]) {
+    const { open } = workspace(t, team({ a: record('a', SOL, { denyTools: start }) }))
+    const h = await open()
+    const gate = Promise.withResolvers()
+    const reached = Promise.withResolvers()
+    h.ctx.sessionTitle.rename = async () => { reached.resolve(); await gate.promise; throw new Error('title refused') }
+    const widening = h.call('update-bot', { id: 'a', name: 'X', denyTools: mine })
+    await reached.promise
+    saved(await h.call('update-bot', { id: 'a', denyTools: theirs }))
+    gate.resolve()
+    assert.equal((await widening).ok, false)
+    assert.deepEqual(pair(h.rt.botOf('a')), [SOL, theirs])
+    assert.deepEqual(pair(h.stored().bots.a), [SOL, theirs])
+  }
+})
+
 // ---- Create (A-6, B-3) ----
 
 test('create refuses a Bot that would deny acp_tool on a model that runs its own tools', async (t) => {
@@ -522,6 +563,22 @@ test('create_bot skips a fallback that runs its own tools, and refuses when none
   const none = await tool.execute(args('None'), exec)
   assert.match(String(none), new RegExp(OWN_TOOLS_CREATE_TEXT.replace(/[.]/g, '\\.')))
   assert.equal(Object.values(h.rt.state.bots).some(entry => entry.name === 'None'), false)
+})
+
+test('create_bot by a creator that allows acp_tool, asked to deny it on a kept model, gets the model text', async (t) => {
+  const { open } = workspace(t, team({}))
+  const h = await open()
+  const tool = h.rt.teamTools.find(entry => entry.name === 'create_bot')
+  const exec = { agent: { id: 'chat-main', session: { id: 'chat-main' } } }
+  const args = name => ({ name, role: 'r', instructions: 'Work.', deny_tools: ['acp_tool'] })
+  const bots = Object.keys(h.rt.state.bots).length
+  assert.equal(await tool.execute({ ...args('Kept'), model: KEPT }, exec), `Could not create the Bot: ${OWN_TOOLS_MODEL_TEXT}`)
+  assert.equal(Object.keys(h.rt.state.bots).length, bots, 'no Bot was made')
+  assert.equal(Object.values(h.stored().bots).some(entry => entry.name === 'Kept'), false)
+  // Control: the same call on a model that is not one makes the Bot.
+  await tool.execute({ ...args('Luna'), model: LUNA }, exec)
+  const made = Object.values(h.rt.state.bots).find(entry => entry.name === 'Luna')
+  assert.deepEqual(pair(made), [LUNA, ['acp_tool']])
 })
 
 // ---- The update_bot tool (A-5) ----
@@ -601,4 +658,37 @@ test('a refused route may put a Bot that denies acp_tool on a kept default; the 
   assert.equal(h.rt.botOf('a').model, KEPT)
   assert.deepEqual(pair(h.stored().bots.a), [KEPT, ['acp_tool']])
   assert.equal((await h.view('a')).ownTools, true)
+})
+
+test('a subscription move may put a Bot that denies acp_tool on a kept Codex model; the view says so', async (t) => {
+  const { open } = workspace(t, team({ a: record('a', 'openai-codex/gpt-5.5', { denyTools: ['acp_tool'] }) }))
+  const h = await open({ acp: {
+    inspect: async id => ({ id, on: true, signedIn: true, cli: { found: true }, connector: { state: 'ready' } }),
+  } })
+  await h.rt.moveSubscriptionBots()
+  assert.deepEqual(pair(h.rt.botOf('a')), [KEPT, ['acp_tool']])
+  assert.deepEqual(pair(h.stored().bots.a), [KEPT, ['acp_tool']])
+  assert.equal(h.warnings.some(line => /were not moved|not applied/.test(line)), false, h.warnings.join('\n'))
+  assert.equal((await h.view('a')).ownTools, true)
+})
+
+// ---- The model remembered with a sign-in (A-5, cli-login.js applyChoices) ----
+
+test('a model chosen with a sign-in is refused like any save, and the choice says why', async (t) => {
+  const { open } = workspace(t, team({ a: record('a', SOL, { denyTools: ['acp_tool'] }) }))
+  const attempt = {
+    id: CODEX, attemptId: randomUUID(), status: 'waiting', expiresAt: Date.now() + 600_000, openedBy: 'a',
+    url: 'https://auth.openai.com/codex/device', userCode: 'ABCD-1234',
+  }
+  const h = await open({ acp: { loginStart: async () => ({ ...attempt }), loginCurrent: async () => ({ ...attempt }) } })
+  const actions = h.rt.cliLoginActions
+  await actions['cli-login-start']({ botId: 'a', provider: CODEX, model: KEPT })
+  const choice = async () => (await actions['cli-login-current']({ botId: 'a', provider: CODEX })).attempt.choice
+  assert.deepEqual(await choice(), { ref: KEPT, state: 'pending' })
+  h.ctx.emit('acp-dsh/login-ready', { id: CODEX })
+  for (let i = 0; i < 50 && (await choice())?.state === 'pending'; i++) await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(await choice(), { ref: KEPT, state: 'failed', message: OWN_TOOLS_MODEL_TEXT, kept: SOL })
+  assert.deepEqual(pair(h.rt.botOf('a')), [SOL, ['acp_tool']])
+  assert.deepEqual(pair(h.stored().bots.a), [SOL, ['acp_tool']])
+  assert.deepEqual(h.selects, [])
 })

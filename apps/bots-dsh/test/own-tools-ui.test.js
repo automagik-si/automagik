@@ -221,3 +221,79 @@ test('every own-tools text reads in Chinese and in Brazilian Portuguese, host re
     for (const text of texts) assert.equal(hostText(text), pt[text])
   } finally { off() }
 })
+
+// A proposal card's Apply (propose_bot_change) saves through update-bot like the form does: a
+// host refusal comes back through api.js, worded in the person's language, and the card draws
+// it in its error line. Its own bundle and stand-in React keep what the card sets.
+test('a proposal card whose Apply is refused shows the own-tools refusal in its error line', async () => {
+  const { outputFiles: [card] } = await build({
+    stdin: {
+      contents: [
+        "export { ProposalCard } from './src/client/settings-card.js'",
+        "export { call } from './src/client/api.js'",
+        "export { installLocale } from './src/client/i18n.js'",
+      ].join('\n'),
+      resolveDir: fileURLToPath(new URL('..', import.meta.url)),
+    },
+    bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
+    external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
+  })
+  // useState hands out the values queued in `states`, and records every value set, by the
+  // order of its useState call in a draw (the card's state first, then its error).
+  let states = []
+  let slot = 0
+  const sets = []
+  const stateful = {
+    ...react,
+    useState: (initial) => {
+      const index = slot++
+      return [states.length > 0 ? states.shift() : initial, (value) => { sets.push([index, value]) }]
+    },
+  }
+  const draw = (values) => {
+    states = values
+    slot = 0
+    return ProposalCard(props)
+  }
+  const requests = []
+  const fetch = async (_route, options) => {
+    requests.push(JSON.parse(options.body))
+    return { ok: true, json: async () => ({ ok: false, error: { code: 'bot/refused', message: OWN_TOOLS_MODEL_TEXT } }) }
+  }
+  const loaded = { exports: {} }
+  runInNewContext(card.text, {
+    module: loaded, exports: loaded.exports, URL, URLSearchParams, setTimeout, clearTimeout, console, fetch, Promise,
+    require: name => (name === 'react' ? stateful : name === 'react-dom' ? { createPortal: node => node }
+      : name === '@deepseek-ai/dsh-client-ui-primitives' ? { MarkdownText: () => null } : {}),
+    window: { innerWidth: 1280, innerHeight: 800, matchMedia: () => ({ matches: false }) },
+    document: { body: { dataset: {} }, activeElement: null },
+    matchMedia: () => ({ matches: false }),
+  })
+  const { ProposalCard, call, installLocale: install } = loaded.exports
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
+  const bot = { id: 'b', name: 'B', model: SOL, denyTools: ['acp_tool'] }
+  const props = {
+    proposal: { bot: 'b', change: { model: KEPT } },
+    roster: { ...roster, bots: [bot], byId: { b: bot } },
+    actions: { updateBot: (id, patch) => call('update-bot', { id, ...patch }) },
+  }
+  const off = install({
+    register: () => () => {},
+    bind: () => key => pt[key] ?? key,
+    language: () => 'pt-BR',
+  })
+  try {
+    const [apply] = find(draw(['open', '']), node => node.type === 'button' && node.props.className === 'bt-q-submit')
+    await apply.props.onClick()
+    assert.deepEqual(requests.map(request => [request.endpoint, request.payload]), [['update-bot', { id: 'b', model: KEPT }]])
+    const last = index => sets.findLast(([at]) => at === index)?.[1]
+    assert.equal(last(0), 'open')
+    const message = last(1)
+    assert.equal(message, pt[OWN_TOOLS_MODEL_TEXT])
+    // Drawn again with what Apply set: the card is open, and its error line says why.
+    const errors = find(draw([last(0), message]), node => node.props?.className === 'bt-error bt-propcard-error')
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0].props.role, 'alert')
+    assert.equal(textOf(errors[0]), pt[OWN_TOOLS_MODEL_TEXT])
+  } finally { off() }
+})

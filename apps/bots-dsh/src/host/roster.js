@@ -17,7 +17,7 @@ import { commandCapableAgent, crossesHarness, shellHoldModelOf, shellHoldText } 
 import { cleanPetId, shippedPet } from './pets.js'
 import { cleanDenyTools, cleanShell } from './tool-deny.js'
 import { peopleOf } from './people.js'
-import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_MODEL_TEXT, addsAcpToolDeny } from '../shared/own-tools.js'
+import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_MODEL_TEXT, addsAcpToolDeny, deniesAcpTool } from '../shared/own-tools.js'
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -741,7 +741,11 @@ export function install(rt) {
       const runsOn = bot.model ?? bot.appliedModel
       const target = modelRef === undefined ? runsOn : modelRef === null ? bot.appliedModel : modelRef
       const nextDeny = denyTools === undefined ? bot.denyTools : denyTools
-      if (modelRef != null) rt.assertOwnToolsModel?.(bot, { next: target, denyTools: nextDeny })
+      // The switch checks again against the live list, which this patch writes only after it:
+      // a patch that removes acp_tool and moves to such a model is refused here already.
+      if (modelRef != null) {
+        rt.assertOwnToolsModel?.(bot, { next: target, denyTools: deniesAcpTool(bot.denyTools) ? bot.denyTools : nextDeny })
+      }
       if (denyTools !== undefined) {
         // The model this patch leaves may become its way back (model-state.js noteModelChoice).
         const leaving = modelRef != null && target !== runsOn
@@ -907,19 +911,25 @@ export function install(rt) {
         // back too, on the record and on its Sessions, so the refused update leaves it as it was.
         // So does the Denied tools list, unless putting acp_tool back would leave it beside a
         // model that runs its own tools (#2026): a list that does not add it goes back first.
-        const later = denyTools !== undefined && addsAcpToolDeny(bot.denyTools, denyBefore)
-        if (denyTools !== undefined && !later) putDeny(denyBefore)
+        // Only a list that is still this update's own write goes back: a save made meanwhile
+        // is newer and stays (`denyTools` is the cleaned list putDeny stored, so identity tells).
+        const stillOurs = () => denyTools !== undefined
+          && (denyTools === null ? !Object.hasOwn(bot, 'denyTools') : bot.denyTools === denyTools)
+        const ours = stillOurs()
+        const later = ours && addsAcpToolDeny(bot.denyTools, denyBefore)
+        if (ours && !later) putDeny(denyBefore)
         if (modelChanged) await restoreModel(bot, modelBefore)
-        if (later) {
+        if (later && stillOurs()) {
           try {
             rt.assertOwnToolsDeny?.(bot, { next: denyBefore, self: modelChanged })
             putDeny(denyBefore)
-          } catch {
-            rt.warn('ds-bot: acp_tool stays allowed for %s: denying it again would leave it on a model that runs its own tools', bot.name)
+          } catch (refusalError) {
+            rt.warn('ds-bot: acp_tool stays allowed for %s: %s', bot.name, refusalError?.message ?? refusalError)
           }
         }
-        // A save during the step may already hold the refused list.
-        if (denyTools !== undefined && (!modelChanged || later)) {
+        // A save during the step may already hold the refused list, and restoreModel's own save
+        // can be skipped when its apply fails: whenever the list was ours, save it again.
+        if (ours) {
           await rt.save().catch(failure => rt.warn('ds-bot: the Denied tools of %s were not saved back: %s', bot.name, failure?.message ?? failure))
         }
         throw error

@@ -1166,9 +1166,11 @@ this amendment" lines.
   added to its Denied tools while it runs on one or while its pending way back is one. Only a
   save that makes the pair is refused: a Bot already there keeps running (no turn is refused),
   may still edit its other denied tools and re-pick its current model, and Details names what to
-  change. The check fails open on an unknown model (Codex's `default` before its start model is
-  known, a model measured kept later), and automatic moves (a subscription move, a refused
-  route) stay allowed; both are covered by the Details notice. Hermes is not covered.
+  change. Removing `acp_tool` and moving to such a model in one patch is refused; two steps work.
+  The check fails open on an unknown model (Codex's `default` before its start model is known, a
+  model measured kept later, a measured record from another Codex release), and automatic moves
+  (a subscription move, a refused route) stay allowed; both are covered by the Details notice.
+  Hermes is not covered.
 - **DSH's `default`** is the model Codex itself starts on (the last process with its own tools,
   else the catalog's recorded start model); a wrong guess is caught after the model is set and
   that turn ends with "The tools setting changed; send again." and no prompt, including the first
