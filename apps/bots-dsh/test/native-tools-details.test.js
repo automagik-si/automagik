@@ -26,7 +26,7 @@ test('Details registers its translated copy through the normal locale service', 
   })
   try {
     const row = NativeToolsRow(props)
-    assert.equal(row.props.label, '已启用的原生工具')
+    assert.equal(row.props.label, '原生工具')
     assert.equal(row.props.hint, '在“仅可查看”级别下不可用。')
     for (const key of Object.keys(nativeToolsZh)) {
       assert.equal(zh[key], nativeToolsZh[key])
@@ -34,9 +34,9 @@ test('Details registers its translated copy through the normal locale service', 
     }
     assert.equal(pt[nativeToolsCopy.off], 'O Claude Code usa as ferramentas do Automagik, aprovadas no Automagik. Grupos, tarefas e execuções agendadas sempre usam. Vale a partir da sua próxima mensagem no chat direto deste Bot. Desligar encerra a sessão em andamento.')
     active = 'pt'
-    assert.equal(NativeToolsRow(props).props.label, 'Tools nativas ativas')
+    assert.equal(NativeToolsRow(props).props.label, 'Tools nativas')
   } finally { off() }
-  assert.equal(NativeToolsRow(props).props.label, 'Active Native Tools')
+  assert.equal(NativeToolsRow(props).props.label, 'Native tools')
 })
 const module = { exports: {} }
 runInNewContext(outputFiles[0].text, {
