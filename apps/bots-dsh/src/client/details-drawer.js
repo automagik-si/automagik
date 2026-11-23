@@ -22,35 +22,18 @@ import { reopenPermissionChoice } from './permission-card.js'
 import { BotConnectors } from './connectors.js'
 import { ComputerView } from './computer.js'
 import { addStrings, t } from './i18n.js'
-import { nativeToolsCopy, nativeToolsZh, ompNativeToolsCopy } from './native-tools-copy.js'
+import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
-import { effectiveMarkOf, NATIVE_AGENTS, nativeToolsOn } from '../shared/native-tools.js'
 import { OWN_TOOLS_NOTICE, ownToolsNotice } from '../shared/own-tools.js'
 
 addStrings(nativeToolsZh)
 
-const NATIVE_TOOLS_HINTS = {
-  'model-kept': nativeToolsCopy.modelKept,
-  managed: 'Not available for a Bot that operates Omni or that another plugin manages.',
-  shared: 'Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.',
-  restricted: 'Not available while this Bot has shell access off or denied tools.',
-  'read-only': 'Not available at the Read only level.',
-  'level-unknown': "Not available: the permission level of this Bot's chat could not be read.",
-}
-
 export function NativeToolsRow({ bot, roster, run, actions }) {
-  const mark = effectiveMarkOf(bot)
-  if (!NATIVE_AGENTS.includes(mark) || bot.nativeToolsBlock === 'multiuser') return null
-  const copy = mark === 'acp-omp' ? ompNativeToolsCopy
-    : mark === 'acp-codex' ? { on: nativeToolsCopy.codexOn, off: nativeToolsCopy.codexOff } : nativeToolsCopy
-  const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock]
-  // A Codex model the switch never applies to (`model-kept`) shows OFF and locked: no OFF promise.
-  const on = blocked === undefined && nativeToolsOn(bot)
-  const hint = blocked === undefined ? t(on ? copy.on : copy.off)
-    : mark === 'acp-omp' ? `${t(blocked)} ${t(ompNativeToolsCopy.blocked)}` : t(blocked)
+  const view = nativeSwitchView(bot, roster)
+  if (view === null) return null
   return h(SwitchRow, {
-    details: true, label: t(nativeToolsCopy.label), hint, on, disabled: blocked !== undefined || Boolean(roster.readOnly),
+    details: true, label: t(nativeToolsCopy.label), hint: view.hint.map(key => t(key)).join(' '), on: view.on, disabled: view.disabled,
     onChange: value => void run(actions.updateBot(bot.id, { nativeTools: value })),
   })
 }

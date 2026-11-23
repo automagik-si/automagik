@@ -3711,7 +3711,23 @@ const pack = createPack({
     "The signed release did not offer a newer compatible plugin set.": "A versão assinada não ofereceu um conjunto de plugins compatível e mais recente.",
     "Work recovery is unconfirmed because the saved notes could not be read.": "Não foi possível ler as anotações salvas para confirmar a retomada do trabalho.",
     "The supervisor could not confirm a healthy running instance.": "O supervisor não conseguiu confirmar que a instância estava funcionando corretamente.",
-    "Done: the same version is installed again.": "Pronto: a mesma versão foi instalada de novo."
+    "Done: the same version is installed again.": "Pronto: a mesma versão foi instalada de novo.",
+    "New Solver": "Novo Solver",
+    "Plans, does the work and has it reviewed": "Planeja, faz o trabalho e pede revisão",
+    "Solver": "Solver",
+    "Reviewer": "Revisor",
+    "New reviewer on another model": "Novo revisor em outro modelo",
+    "Fresh session": "Sessão nova",
+    "{name} reviewer": "Revisor de {name}",
+    "Another Bot on a different model or agent reviews its plan and its result.": "Outro Bot, em outro modelo ou agente, revisa o plano e o resultado.",
+    "Each review runs in a fresh session that sees only your request and the result. The delivery says so.": "Cada revisão roda em uma sessão nova, que vê só o seu pedido e o resultado. A entrega informa isso.",
+    "No other model is set up, so reviews run in a fresh session.": "Nenhum outro modelo está configurado, então as revisões rodam em uma sessão nova.",
+    "Off by default. The Solver also works without them, with its reviewer.": "Desligado por padrão. O Solver também funciona sem as tools nativas, com o revisor.",
+    "Nothing was created: {error}": "Nada foi criado: {error}",
+    "Native tools could not be turned on, so nothing was created: {error}": "Não foi possível ligar as tools nativas, então nada foi criado: {error}",
+    "{name} could not be removed after the failure. Delete it in its Details.": "Não foi possível remover {name} após a falha. Exclua em Detalhes.",
+    "{name} may have been created. Check the sidebar and delete it in its Details if you do not want it.": "{name} pode ter sido criado. Confira a barra lateral e exclua em Detalhes se não quiser.",
+    "{name} was created, but your request was not sent: {error}": "{name} foi criado, mas o seu pedido não foi enviado: {error}"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

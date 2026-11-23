@@ -110,6 +110,9 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     closeMenu: () => { ui.set(state => (state.menu ? { ...state, menu: null } : state)) },
     closeOverlay: () => { ui.set(state => ({ ...state, newChat: null, newChatSection: null, exchange: null, details: state.newChat || state.exchange ? state.details : null })) },
     createBot: payload => after(call('create-bot', payload)),
+    // The team's full view, read once with no pull after it (the New Solver dialog's check of what a
+    // failed create left behind).
+    teamState: () => call('state', {}),
     // genie-dsh's: the folder's repository's Genie, made in a free color when it has none.
     createGenie: folder => after(call('genie-create', { folder })),
     // welcome-dsh's: the Omni Bot again, after it was deleted (the team view's omniAddable).

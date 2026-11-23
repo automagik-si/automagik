@@ -158,3 +158,46 @@ test('Shift+Enter and IME confirmation keep their default behavior', async () =>
     assert.deepEqual(calls.send, [])
   }
 })
+
+// New Solver (RFC 0048): with an empty query it sits with the fixed lines after the first ones;
+// while typing it comes after the Bots that match, so a name and Enter still opens that Bot.
+const typed = (query) => {
+  const opened = []
+  const bots = [{ id: 'sam', name: 'Sam', role: 'helper' }, { id: 'ada', name: 'Ada', role: '' }]
+  const roster = { ready: true, prefs: {}, bots, byId: { sam: bots[0], ada: bots[1] }, roomsById: {}, agents: [] }
+  const actions = {
+    closeOverlay() {}, openSession: id => opened.push(id), send: async () => {}, setFlags: async () => {},
+  }
+  const view = mount({ mode: 'new', roster, actions })
+  const recipient = () => all(view.render(), child => child.type === 'input' && child.props['aria-label'] === 'Recipient')[0]
+  recipient().props.onChange({ target: { value: query } })
+  return { view, opened, recipient, list: () => options(view.render()) }
+}
+
+test('typing a Bot name that starts like "solver" still puts that Bot first, and Enter opens it', async () => {
+  const s = typed('s')
+  assert.deepEqual(s.list().map(option => option.props['data-flip']), ['sam', 'solver', 'create'])
+  s.recipient().props.onKeyDown(enter())
+  await tick()
+  assert.deepEqual(s.opened, ['sam'])
+  const sol = typed('sol')
+  assert.deepEqual(sol.list().map(option => option.props['data-flip']), ['solver', 'create'])
+  assert.equal(text(sol.list()[0]).includes('New Solver'), true)
+})
+
+test('with an empty query New Solver is listed and the first line stays Create new Bot', () => {
+  const empty = typed('')
+  const keys = empty.list().map(option => option.props['data-flip'])
+  assert.equal(keys[0], 'new')
+  assert.deepEqual(keys.slice(0, 4), ['new', 'group', 'agent', 'solver'])
+  assert.equal(empty.list()[0].props['aria-selected'], true)
+})
+
+test('the palette\'s solver mode opens the New Solver dialog straight away', () => {
+  const bots = [{ id: 'sam', name: 'Sam', role: '' }]
+  const view = mount({ mode: 'solver', roster: { ready: true, prefs: {}, bots, byId: { sam: bots[0] }, roomsById: {}, agents: [], models: [] }, actions: { closeOverlay() {}, folderProbe: async () => null } })
+  const solver = all(view.render(), child => typeof child.type === 'function' && child.type.name === 'NewSolver')[0]
+  assert.ok(solver, 'no New Solver dialog')
+  assert.equal(solver.props.canGoBack, false)
+  assert.equal(solver.props.sectionId, null)
+})

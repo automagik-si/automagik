@@ -1,3 +1,5 @@
+import { effectiveMarkOf, NATIVE_AGENTS, nativeToolsOn } from '../shared/native-tools.js'
+
 // Details-only strings. Register them with the main client so the Code pane
 // keeps the same dictionary and standalone bundle.
 export const nativeToolsCopy = {
@@ -13,6 +15,36 @@ export const ompNativeToolsCopy = {
   on: "omp uses its own tools in all of this Bot's chats: its direct chat, groups, tasks and scheduled runs, with anyone who can talk to it. They run outside Automagik's file sandbox. Turning this off stops its running sessions at once.",
   off: "With this off, omp has no tools at all in any of this Bot's chats, so this Bot can only chat. Turning this on applies from the next message in each chat.",
   blocked: 'Here omp has no tools, so this Bot can only chat.',
+}
+
+// The text a lock shows, by the host's `nativeToolsBlock` code.
+export const NATIVE_TOOLS_HINTS = {
+  'model-kept': nativeToolsCopy.modelKept,
+  managed: 'Not available for a Bot that operates Omni or that another plugin manages.',
+  shared: 'Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.',
+  restricted: 'Not available while this Bot has shell access off or denied tools.',
+  'read-only': 'Not available at the Read only level.',
+  'level-unknown': "Not available: the permission level of this Bot's chat could not be read.",
+}
+
+/**
+ * The native-tools switch as one Bot shows it: null when it has no switch (an agent without
+ * one, or a multi-user workspace), else whether it reads ON, whether it is locked, the lock's
+ * code and the hint as untranslated keys (joined with a space once translated). The Details
+ * switch and the New Solver dialog's tick both read this one function, so they always show
+ * the same thing for the same Bot.
+ */
+export function nativeSwitchView(bot, roster) {
+  const mark = effectiveMarkOf(bot)
+  if (!NATIVE_AGENTS.includes(mark) || bot.nativeToolsBlock === 'multiuser') return null
+  const copy = mark === 'acp-omp' ? ompNativeToolsCopy
+    : mark === 'acp-codex' ? { on: nativeToolsCopy.codexOn, off: nativeToolsCopy.codexOff } : nativeToolsCopy
+  const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock]
+  // A Codex model the switch never applies to (`model-kept`) shows OFF and locked: no OFF promise.
+  const on = blocked === undefined && nativeToolsOn(bot)
+  const hint = blocked === undefined ? [on ? copy.on : copy.off]
+    : mark === 'acp-omp' ? [blocked, ompNativeToolsCopy.blocked] : [blocked]
+  return { mark, on, disabled: blocked !== undefined || Boolean(roster?.readOnly), blocked, hint }
 }
 
 export const nativeToolsZh = {

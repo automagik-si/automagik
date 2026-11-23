@@ -12300,7 +12300,24 @@ var ZH = {
   "Back to the team": "返回团队",
   "Reading the seat…": "正在读取席位…",
   "No transcript rows yet. The seat is quiet.": "还没有对话记录。这个席位很安静。",
-  "Latest": "最新"
+  "Latest": "最新",
+  // New Solver (RFC 0048).
+  "New Solver": "新建 Solver",
+  "Plans, does the work and has it reviewed": "规划、完成工作并交由审阅",
+  "Solver": "Solver",
+  "Reviewer": "审阅者",
+  "New reviewer on another model": "在另一个模型上新建审阅者",
+  "Fresh session": "全新会话",
+  "{name} reviewer": "{name} 审阅者",
+  "Another Bot on a different model or agent reviews its plan and its result.": "另一个使用不同模型或代理的 Bot 审阅它的计划和结果。",
+  "Each review runs in a fresh session that sees only your request and the result. The delivery says so.": "每次审阅都在全新会话中进行，只看到你的请求和结果。交付时会说明这一点。",
+  "No other model is set up, so reviews run in a fresh session.": "没有设置其他模型，因此审阅在全新会话中进行。",
+  "Off by default. The Solver also works without them, with its reviewer.": "默认关闭。没有它们，Solver 也能和审阅者一起工作。",
+  "Nothing was created: {error}": "未创建任何内容：{error}",
+  "Native tools could not be turned on, so nothing was created: {error}": "无法开启原生工具，因此未创建任何内容：{error}",
+  "{name} could not be removed after the failure. Delete it in its Details.": "失败后无法移除 {name}。请在其详情中删除。",
+  "{name} may have been created. Check the sidebar and delete it in its Details if you do not want it.": "{name} 可能已被创建。请查看侧边栏，如不需要，请在其详情中删除。",
+  "{name} was created, but your request was not sent: {error}": "{name} 已创建，但你的请求没有发送：{error}"
 };
 var HOST_ERRORS = [
   [/^Could not reach the mail server at (.+)\. Check the server address\.$/, "连不上邮件服务器 $1，请检查服务器地址。"],
