@@ -200,7 +200,7 @@ test('T15: a row without install keeps today\'s lines, and the new lines read in
   const off = ui.installLocale({ register: () => () => {}, bind: () => (key, params) => fill(ui.PT_BR[key] ?? key, params) })
   try {
     assert.match(textOf(rowOf(agy())), /O Automagik pode instalar para você\./)
-    assert.match(textOf(rowOf(agy({}, { found: true, state: 'ready', managed: true, version: '1.5.15' }))), /instalada pelo Automagik na versão 1\.5\.15; ela se atualiza sozinha/)
+    assert.match(textOf(rowOf(agy({}, { found: true, state: 'ready', managed: true, version: '1.5.15' }))), /o Automagik instalou a versão 1\.5\.15; a CLI se atualiza por conta própria/)
   } finally {
     off()
   }

@@ -9256,7 +9256,7 @@ var PT_BR = {
   "Install it yourself instead": "Ou instale por conta própria",
   "The {cli} CLI is not on this computer. Automagik can install it for you.": "A CLI {cli} não está neste computador. O Automagik pode instalar para você.",
   "The {cli} CLI is not on this computer. Turn {name} on to install it.": "A CLI {cli} não está neste computador. Ligue o {name} para instalar.",
-  "Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).": "A CLI {cli} está neste computador (instalada pelo Automagik na versão {version}; ela se atualiza sozinha).",
+  "Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).": "A CLI {cli} está neste computador (o Automagik instalou a versão {version}; a CLI se atualiza por conta própria).",
   "Updating {name} automatically…": "Atualizando o {name} automaticamente…",
   "The {name} installation or update failed: {error}": "A instalação ou atualização do {name} falhou: {error}",
   "The {name} installation or update failed.": "A instalação ou atualização do {name} falhou.",
