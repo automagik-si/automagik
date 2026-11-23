@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { sep } from 'node:path'
 import { z } from 'zod'
 import { parse } from './payloads.js'
+import { isSignInUrl } from './sign-in-url.js'
 
 export const ACP_SERVICE = 'acpAgents'
 export const ACP_ENTRY = 'acp-dsh'
@@ -75,21 +76,14 @@ export function isSignInHint(hint) {
   const isolated = POSIX_ISOLATED.exec(hint) ?? WIN32_ISOLATED.exec(hint)
   return isolated !== null && !TRAVERSAL.test(isolated[1]) && !TRAVERSAL.test(isolated[2])
 }
-// The one word that says why an in-app sign-in failed (acp-dsh `signInError`).
-const SIGN_IN_ERRORS = new Set(['unsupported', 'timeout', 'failed'])
-// A sign-in link agy printed while it signs in (acp-dsh `signInUrl`, agents.js isSignInUrl):
-// only Google's own OAuth entry points, over https, asking for a code for a named client.
-const GOOGLE_SIGN_IN = new Set(['accounts.google.com/o/oauth2/v2/auth', 'accounts.google.com/o/oauth2/auth'])
-export function isSignInUrl(value) {
-  if (typeof value !== 'string' || value.length > 8192 || /[\p{Cc}\s]/u.test(value)) return false
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) return false
-    if (!GOOGLE_SIGN_IN.has(`${url.hostname}${url.pathname}`)) return false
-    return url.searchParams.get('response_type') === 'code'
-      && /^[\w.-]{1,256}$/.test(url.searchParams.get('client_id') ?? '')
-  } catch { return false }
-}
+// The one word that says why an in-app sign-in failed (acp-dsh `signInError`); `no-browser`:
+// agy handed no sign-in link the app could open.
+const SIGN_IN_ERRORS = new Set(['unsupported', 'timeout', 'failed', 'no-browser'])
+// acp-dsh's two log words, as status fields for acceptance; the page draws neither.
+const SIGN_OUT_OVER_ACP = new Set(['yes', 'no'])
+const LAST_SIGN_OUT = new Set(['done', 'none', 'failed'])
+// A sign-in link agy handed over while it signs in (sign-in-url.js).
+export { isSignInUrl }
 
 const shownPath = (path) => {
   if (typeof path !== 'string') return undefined
@@ -148,6 +142,8 @@ export function agentView(agent) {
     ...(agent.appSignIn === true && agent.signingIn === true && isSignInUrl(agent.signInUrl) ? { signInUrl: agent.signInUrl } : {}),
     ...(SIGN_IN_ERRORS.has(agent.signInError) ? { signInError: agent.signInError } : {}),
     ...(agent.signInWhere === 'terminal' ? { signInWhere: 'terminal' } : {}),
+    ...(agent.appSignIn === true && SIGN_OUT_OVER_ACP.has(agent.signOutOverAcp) ? { signOutOverAcp: agent.signOutOverAcp } : {}),
+    ...(agent.appSignIn === true && LAST_SIGN_OUT.has(agent.lastSignOut) ? { lastSignOut: agent.lastSignOut } : {}),
     // Its account is the person's own too (Windows Credential Manager): the row says so.
     ...(agent.sharedAccount === true ? { sharedAccount: true } : {}),
     listed: agent.model?.listed === true,

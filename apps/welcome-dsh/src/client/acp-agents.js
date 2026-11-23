@@ -1,5 +1,6 @@
 import { createElement as h, useCallback, useEffect, useRef, useState } from 'react'
 import { call } from './api.js'
+import { isSignInUrl } from '../host/sign-in-url.js'
 import { t } from './i18n.js'
 import { raised } from './clay.js'
 
@@ -230,9 +231,38 @@ function appSignInLines(agent, name) {
   if (agent.signInError === 'unsupported') lines.push({ tone: 'bad', text: t('{name} did not offer a Google sign-in. Try again.', { name }) })
   if (agent.signInError === 'timeout') lines.push({ tone: 'bad', text: t('The sign-in to {name} took too long. Try again.', { name }) })
   if (agent.signInError === 'failed') lines.push({ tone: 'bad', text: t('The sign-in to {name} did not finish. Try again.', { name }) })
+  if (agent.signInError === 'no-browser') lines.push({ tone: 'bad', text: t('The browser did not open. Try again.') })
   if (agent.signedIn !== false) return lines
   lines.push({ tone: 'bad', text: t('Not signed in to {name}.', { name }), action: 'native-login' })
   return lines
+}
+
+// The sign-in links already opened, shared by every useAcp (Settings, Connect AI, a remount), so
+// one link opens one browser tab. Each link carries its attempt's own `state`; the last few do.
+const OPENED_SIGN_IN_LINKS = new Set()
+const OPENED_KEPT = 8
+
+/**
+ * Opens, once each, the sign-in link of an agent that signs in here and is signing in
+ * (Antigravity, #2048): only in the desktop app (`desktop`, its preload), where Electron hands a
+ * `window.open` to the person's default browser (shell.openExternal); and only a link that
+ * passes isSignInUrl here too. Elsewhere the row's link needs a click. Answers how many it opened.
+ */
+export function openSignInLinks(agents, seen = OPENED_SIGN_IN_LINKS, {
+  desktop = globalThis.omniDesktop,
+  open = url => globalThis.window?.open?.(url, '_blank', 'noreferrer'),
+} = {}) {
+  if (desktop === undefined || !Array.isArray(agents)) return 0
+  let opened = 0
+  for (const agent of agents) {
+    const url = agent?.signInUrl
+    if (agent?.appSignIn !== true || agent.signingIn !== true || !isSignInUrl(url) || seen.has(url)) continue
+    seen.add(url)
+    while (seen.size > OPENED_KEPT) seen.delete(seen.values().next().value)
+    try { open(url) } catch {}
+    opened++
+  }
+  return opened
 }
 
 // The agents' state from the host, refreshed (CLI search, sign-in) when the page opens and
@@ -270,6 +300,8 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     const timer = setInterval(() => { void load(false) }, pollMs)
     return () => clearInterval(timer)
   }, [pollMs, load])
+  // In the desktop app, a sign-in link handed over opens in the person's own browser at once.
+  useEffect(() => { openSignInLinks(view?.agents) }, [view])
 
   // The agent whose Sign out waits for the person's Continue.
   const [signingOut, setSigningOut] = useState(null)

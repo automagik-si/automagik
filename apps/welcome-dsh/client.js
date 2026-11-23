@@ -12539,6 +12539,30 @@ function SubscriptionSignIn({ tile, onBack, onSaved, glitch }) {
   );
 }
 
+// src/host/sign-in-url.js
+var GOOGLE_SIGN_IN = /* @__PURE__ */ new Set(["accounts.google.com/o/oauth2/v2/auth", "accounts.google.com/o/oauth2/auth"]);
+var LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
+function isLoopbackReturn(value) {
+  if (typeof value !== "string") return false;
+  try {
+    const back = new URL(value);
+    return back.protocol === "http:" && LOOPBACK.has(back.hostname) && back.port !== "" && !back.username && !back.password && !back.hash;
+  } catch {
+    return false;
+  }
+}
+function isSignInUrl(value) {
+  if (typeof value !== "string" || value.length > 8192 || /[\p{Cc}\s]/u.test(value)) return false;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return false;
+    if (!GOOGLE_SIGN_IN.has(`${url.hostname}${url.pathname}`)) return false;
+    return url.searchParams.get("response_type") === "code" && /^[\w.-]{1,256}$/.test(url.searchParams.get("client_id") ?? "") && isLoopbackReturn(url.searchParams.get("redirect_uri"));
+  } catch {
+    return false;
+  }
+}
+
 // src/client/redact.js
 var CREDENTIAL_MARK = "[hidden]";
 function basicCredential(match, scheme, token) {
@@ -12780,9 +12804,31 @@ function appSignInLines(agent, name) {
   if (agent.signInError === "unsupported") lines.push({ tone: "bad", text: t("{name} did not offer a Google sign-in. Try again.", { name }) });
   if (agent.signInError === "timeout") lines.push({ tone: "bad", text: t("The sign-in to {name} took too long. Try again.", { name }) });
   if (agent.signInError === "failed") lines.push({ tone: "bad", text: t("The sign-in to {name} did not finish. Try again.", { name }) });
+  if (agent.signInError === "no-browser") lines.push({ tone: "bad", text: t("The browser did not open. Try again.") });
   if (agent.signedIn !== false) return lines;
   lines.push({ tone: "bad", text: t("Not signed in to {name}.", { name }), action: "native-login" });
   return lines;
+}
+var OPENED_SIGN_IN_LINKS = /* @__PURE__ */ new Set();
+var OPENED_KEPT = 8;
+function openSignInLinks(agents, seen = OPENED_SIGN_IN_LINKS, {
+  desktop = globalThis.omniDesktop,
+  open = (url) => globalThis.window?.open?.(url, "_blank", "noreferrer")
+} = {}) {
+  if (desktop === void 0 || !Array.isArray(agents)) return 0;
+  let opened = 0;
+  for (const agent of agents) {
+    const url = agent?.signInUrl;
+    if (agent?.appSignIn !== true || agent.signingIn !== true || !isSignInUrl(url) || seen.has(url)) continue;
+    seen.add(url);
+    while (seen.size > OPENED_KEPT) seen.delete(seen.values().next().value);
+    try {
+      open(url);
+    } catch {
+    }
+    opened++;
+  }
+  return opened;
 }
 function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
   const [view, setView] = (0, import_react9.useState)(null);
@@ -12818,6 +12864,9 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     }, pollMs);
     return () => clearInterval(timer);
   }, [pollMs, load]);
+  (0, import_react9.useEffect)(() => {
+    openSignInLinks(view?.agents);
+  }, [view]);
   const [signingOut, setSigningOut] = (0, import_react9.useState)(null);
   const say = (id, message) => setProblems((previous) => ({ ...previous, [id]: message }));
   const act = async (id, endpoint, payload, words = (message) => message) => {

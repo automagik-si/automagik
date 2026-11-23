@@ -307,7 +307,8 @@ export function signInHintOf(spec, detail, platform = process.platform) {
 /**
  * Whether `value` is a sign-in link `spec` may hand the page while it signs in: only one of its
  * own OAuth entry points (`signInUrls`), over https, with no account, port or fragment, asking
- * for a code for a named client. Never an arbitrary URL printed by a process.
+ * for a code for a named client, with a loopback return address (isLoopbackReturn). Never an
+ * arbitrary URL printed or handed over by a process.
  * @param {object} spec an entry of AGENTS
  * @param {unknown} value
  */
@@ -321,14 +322,59 @@ export function isSignInUrl(spec, value) {
     if (!allowed.includes(`${url.hostname}${url.pathname}`)) return false
     return url.searchParams.get('response_type') === 'code'
       && /^[\w.-]{1,256}$/.test(url.searchParams.get('client_id') ?? '')
+      && isLoopbackReturn(url.searchParams.get('redirect_uri'))
   } catch { return false }
+}
+
+// Where Google sends the person back: agy's own listener on this computer, `http:` on a
+// loopback host with an explicit port, no account or fragment. The path is not pinned: the
+// loopback is the point, and an agy release may move its path.
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]'])
+function isLoopbackReturn(value) {
+  if (typeof value !== 'string') return false
+  try {
+    const back = new URL(value)
+    return back.protocol === 'http:' && LOOPBACK.has(back.hostname) && back.port !== ''
+      && !back.username && !back.password && !back.hash
+  } catch { return false }
+}
+
+/**
+ * A D-Bus session bus address that can never connect: `/dev/null` is a character device on
+ * every Linux and macOS, so no path under it can exist or be made, root included. agy finds the
+ * session bus by the user id when the address is unset, so it gets this one instead (#2048).
+ */
+export const NO_BUS_ADDRESS = 'unix:path=/dev/null/automagik-no-bus'
+
+/** The name agy runs its browser opener by, found on PATH, where Automagik stands in for it. */
+export const SIGN_IN_OPENERS = Object.freeze({ linux: 'xdg-open', darwin: 'open' })
+
+/**
+ * The stand-in for agy's browser opener during an in-app sign-in (#2048): it opens nothing and
+ * only appends the one https link it is given to `<drop>/links`, for the app to read, check and
+ * open itself. Shell built-ins only, so it execs nothing. Undefined when `drop` is not an
+ * absolute path the single quotes can carry.
+ * @param {string} drop the attempt's own folder
+ */
+export function signInOpenerScript(drop) {
+  if (typeof drop !== 'string' || !drop.startsWith('/') || drop.length > 4000 || TRAVERSAL.test(drop)
+    || POSIX_UNSAFE.test(drop)) return undefined
+  return `#!/bin/sh
+# Automagik: hands agy's sign-in link to the app. It opens nothing and reads nothing else.
+[ "$#" -eq 1 ] || exit 0
+case "$1" in https://*) ;; *) exit 0 ;; esac
+umask 077
+printf '%s\\n' "$1" >> '${drop}/links'
+exit 0
+`
 }
 
 /**
  * The terminal command that signs in to an agent with its own home (`isolatedHome`), for the log
  * only (never run, never shown on the page or in a chat): its CLI by its absolute path, in that
- * home and nothing of the person's. On POSIX `env -i` drops every other variable (the D-Bus
- * address, XDG_RUNTIME_DIR, API keys); on Windows the variables last for that PowerShell window
+ * home and nothing of the person's. On POSIX `env -i` drops every other variable
+ * (XDG_RUNTIME_DIR, API keys) and the D-Bus address is one that can never connect
+ * (NO_BUS_ADDRESS); on Windows the variables last for that PowerShell window
  * only, so it is run in a new one. Undefined when the home or the path is not absolute or holds
  * what the quoting cannot carry.
  * @param {object} spec an entry of AGENTS
@@ -350,7 +396,7 @@ export function isolatedSignInHintOf(spec, detail, home, platform = process.plat
   }
   const absolute = value => value.startsWith('/') && !POSIX_UNSAFE.test(value)
   if (!absolute(home) || !absolute(path) || !path.endsWith(`/${spec.cli}`)) return undefined
-  return `env -i PATH="$PATH" TERM="$TERM" LANG="$LANG" HOME='${home}' XDG_CONFIG_HOME='${home}/config' `
+  return `env -i DBUS_SESSION_BUS_ADDRESS='${NO_BUS_ADDRESS}' PATH="$PATH" TERM="$TERM" LANG="$LANG" HOME='${home}' XDG_CONFIG_HOME='${home}/config' `
     + `XDG_DATA_HOME='${home}/data' XDG_CACHE_HOME='${home}/cache' XDG_STATE_HOME='${home}/state' '${path}' ${args}`
 }
 

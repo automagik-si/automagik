@@ -83,7 +83,7 @@ test('the host passes the sign-in fields only with exact values', () => {
   assert.equal(view.signInError, 'timeout')
   assert.equal(view.signInWhere, 'terminal')
   assert.equal(view.sharedAccount, true)
-  for (const word of ['unsupported', 'timeout', 'failed']) assert.equal(agentView(agy({ signInError: word })).signInError, word)
+  for (const word of ['unsupported', 'timeout', 'failed', 'no-browser']) assert.equal(agentView(agy({ signInError: word })).signInError, word)
   const odd = agentView(agy({ appSignIn: 'yes', signingIn: 1, signInError: 'aborted', signInWhere: 'settings', sharedAccount: 'true', signInUrl: GOOGLE }))
   for (const field of ['appSignIn', 'signingIn', 'signInError', 'signInWhere', 'sharedAccount', 'signInUrl']) assert.equal(odd[field], undefined, field)
 })
@@ -176,7 +176,9 @@ const react = {
   useEffect: () => {}, useRef: current => ({ current }), useCallback: fn => fn,
 }
 const client = { exports: {} }
-runInNewContext(bundle.outputFiles[0].text, { module: client, exports: client.exports, setTimeout, clearTimeout, setInterval, clearInterval, require: name => ({ react, 'react-dom': {} })[name] })
+// The page's globals: the W3 wiring test sets `omniDesktop` and `window` on it.
+const sandbox = { module: client, exports: client.exports, setTimeout, clearTimeout, setInterval, clearInterval, URL, require: name => ({ react, 'react-dom': {} })[name] }
+runInNewContext(bundle.outputFiles[0].text, sandbox)
 const ui = client.exports
 const locale = fakeLocale()
 locale.addLanguage({ id: 'pt-BR', fallback: 'en' })
@@ -398,4 +400,131 @@ test('every new line reads in pt-BR; Antigravity\'s sign-in lines and the Window
   assert.ok(zh.includes('Signed in to Antigravity.'))
   assert.ok(!zh.includes(WARNING))
   assert.doesNotMatch(zh, /\{/)
+})
+
+// ---- r5: the app opens the sign-in link (#2048, owner) ---------------------------------------
+
+const withReturn = (back) => {
+  const url = new URL(GOOGLE)
+  if (back === undefined) url.searchParams.delete('redirect_uri')
+  else url.searchParams.set('redirect_uri', back)
+  return url.href
+}
+
+test('W1: a sign-in link needs agy\'s loopback return address, with a port', () => {
+  for (const back of ['http://localhost:43117/auth/callback', 'http://127.0.0.1:4242/cb', 'http://[::1]:5000/cb']) {
+    assert.equal(isSignInUrl(withReturn(back)), true, back)
+    assert.equal(ui.openSignInLinks([{ appSignIn: true, signingIn: true, signInUrl: withReturn(back) }], new Set(), { desktop: {}, open: () => {} }), 1, back)
+  }
+  for (const back of [undefined, 'https://localhost:43117/cb', 'http://evil.example:1/cb', 'http://localhost/cb', 'http://127.0.0.1/cb',
+    'http://a@localhost:1/cb', 'http://localhost:1/cb#x', 'http://127.0.0.2:1/cb', 'http://localhost.evil.example:1/cb', 'not a url']) {
+    assert.equal(isSignInUrl(withReturn(back)), false, String(back))
+    assert.equal(agentView(agy({ signingIn: true, signInUrl: withReturn(back) })).signInUrl, undefined, String(back))
+  }
+})
+
+test('W2: no browser: "The browser did not open. Try again.", then the signed-out line and Sign in', () => {
+  for (const [id, bad, out, signIn] of [
+    ['en', 'The browser did not open. Try again.', 'Not signed in to Antigravity.', 'Sign in'],
+    ['pt-BR', 'O navegador não abriu. Tente de novo.', 'Sem login no Antigravity.', 'Entrar'],
+    ['zh', '浏览器没有打开。请重试。', '未登录 Antigravity。', 'Sign in'],
+  ]) {
+    const tree = inLocale(id, () => rowOf(agy({ signInError: 'no-browser' })))
+    const lines = findAll(tree, node => node.type === 'p' && /oai-acp-line/.test(node.props.className ?? '')).map(textOf)
+    const at = lines.indexOf(bad)
+    assert.ok(at >= 0, `${id}: ${lines.join(' | ')}`)
+    assert.equal(lines[at + 1], `${out}${signIn}`, id)
+    assert.equal(buttons(tree, signIn).length, 1, id)
+    noCommand(textOf(tree), `no-browser ${id}`)
+  }
+  assert.equal(agentView(agy({ signInError: 'no-browser' })).signInError, 'no-browser')
+  assert.equal(agentView(agy({ signInError: 'no-display' })).signInError, undefined)
+})
+
+test('W3: a handed-over link opens once, only in the desktop app, only while signing in', () => {
+  const row = url => agentView(agy({ signingIn: true, signInUrl: url }))
+  const opened = []
+  const seen = new Set()
+  const open = url => opened.push(url)
+  for (let i = 0; i < 3; i++) ui.openSignInLinks([row(GOOGLE)], seen, { desktop: {}, open })
+  assert.deepEqual(opened, [GOOGLE])
+  const second = GOOGLE.replace('state=s1', 'state=s2')
+  assert.equal(ui.openSignInLinks([row(GOOGLE), row(second)], seen, { desktop: {}, open }), 1)
+  assert.deepEqual(opened, [GOOGLE, second])
+  // Not in the desktop app, not signing in, not a row that signs in here, or a link that fails
+  // the check here too: nothing opens.
+  const never = []
+  const other = GOOGLE.replace('state=s1', 'state=s3')
+  const refuse = (agents, inDesktop = true) => assert.equal(ui.openSignInLinks(agents, new Set(), { desktop: inDesktop ? {} : undefined, open: url => never.push(url) }), 0)
+  refuse([row(other)], false)
+  refuse([{ ...row(other), signingIn: undefined }])
+  refuse([{ ...row(other), appSignIn: undefined }])
+  for (const bad of [other.replace('accounts.google.com', 'evil.example'), withReturn('https://evil.example/cb'), 'javascript:alert(1)']) {
+    refuse([{ id: 'acp-antigravity', appSignIn: true, signingIn: true, signInUrl: bad }])
+  }
+  refuse(undefined)
+  assert.deepEqual(never, [])
+  // Settings and Connect AI share the opened links: one tab for one link (G5-3).
+  const shared = new Set()
+  const settings = []
+  const connect = []
+  const third = GOOGLE.replace('state=s1', 'state=s4')
+  ui.openSignInLinks([row(third)], shared, { desktop: {}, open: url => settings.push(url) })
+  ui.openSignInLinks([row(third)], shared, { desktop: {}, open: url => connect.push(url) })
+  assert.deepEqual([...settings, ...connect], [third])
+  // Only the last eight are kept; an opener that throws stops nothing.
+  const capped = new Set()
+  for (let i = 0; i < 12; i++) {
+    ui.openSignInLinks([row(GOOGLE.replace('state=s1', `state=c${i}`))], capped, { desktop: {}, open: () => { throw new Error('x') } })
+  }
+  assert.equal(capped.size, 8)
+  assert.equal(capped.has(GOOGLE.replace('state=s1', 'state=c11')), true)
+  assert.equal(capped.has(GOOGLE.replace('state=s1', 'state=c0')), false)
+})
+
+test('W3: useAcp opens a handed-over link in the desktop app, once across Settings, Connect AI and a remount', () => {
+  const url = GOOGLE.replace('state=s1', 'state=wired')
+  const view = { available: true, agents: [agentView(agy({ signingIn: true, signInUrl: url }))] }
+  const calls = []
+  const cleanups = []
+  const saved = { useState: react.useState, useEffect: react.useEffect }
+  let first
+  react.useState = (initial) => {
+    if (first) { first = false; return [view, () => {}] }
+    return [typeof initial === 'function' ? initial() : initial, () => {}]
+  }
+  react.useEffect = (fn) => { const done = fn(); if (typeof done === 'function') cleanups.push(done) }
+  const mount = () => { first = true; ui.useAcp(async () => view) }
+  try {
+    // Not in the desktop app: nothing opens.
+    sandbox.window = { open: (...args) => calls.push(args) }
+    mount()
+    assert.deepEqual(calls, [])
+    sandbox.omniDesktop = {}
+    mount()
+    mount()
+    mount()
+  } finally {
+    Object.assign(react, saved)
+    for (const done of cleanups) done()
+    delete sandbox.omniDesktop
+    delete sandbox.window
+  }
+  assert.deepEqual(calls, [[url, '_blank', 'noreferrer']])
+})
+
+test('W4: the two sign-out words pass only as exact words, only with appSignIn, and draw nothing', () => {
+  for (const word of ['yes', 'no']) assert.equal(agentView(agy({ signOutOverAcp: word })).signOutOverAcp, word)
+  for (const word of ['done', 'none', 'failed']) assert.equal(agentView(agy({ lastSignOut: word })).lastSignOut, word)
+  for (const [field, value] of [['signOutOverAcp', 'maybe'], ['signOutOverAcp', true], ['lastSignOut', 'ok'], ['lastSignOut', 1]]) {
+    assert.equal(agentView(agy({ [field]: value }))[field], undefined, `${field} ${value}`)
+  }
+  const plain = agentView(agy({ appSignIn: undefined, signOutOverAcp: 'yes', lastSignOut: 'done' }))
+  assert.equal(plain.signOutOverAcp, undefined)
+  assert.equal(plain.lastSignOut, undefined)
+  for (const over of [{}, { signedIn: true }, { signingIn: true }, { signInError: 'no-browser' }]) {
+    const bare = rowOf(agy(over))
+    const words = rowOf(agy({ ...over, signOutOverAcp: 'yes', lastSignOut: 'done' }))
+    assert.equal(JSON.stringify(words), JSON.stringify(bare), JSON.stringify(over))
+  }
 })

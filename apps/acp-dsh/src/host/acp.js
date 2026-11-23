@@ -280,6 +280,8 @@ export class AgentRun {
         if (!offered.some(method => method?.id === this.spec.authenticate)) {
           throw Object.assign(new Error(`${this.spec.name} did not offer that sign-in`), { code: 'acp-sign-in/unsupported' })
         }
+        // The sign-in run's own clock starts here (index.js signInNative, the 15 s rule).
+        try { this.spec.onAuthenticate?.() } catch {}
         await this.conn.authenticate({ methodId: this.spec.authenticate })
         this.authenticated = true
         return

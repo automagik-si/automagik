@@ -14,7 +14,7 @@
 // this plugin's live settings, written through DSH's settings service.
 import { sessionFileConfig } from './src/host/session-files.js'
 import { execFile, spawn } from 'node:child_process'
-import { dirname, join, posix, sep } from 'node:path'
+import { delimiter, dirname, join, posix, sep } from 'node:path'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
 import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js'
@@ -39,6 +39,7 @@ import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
 import { writeOmpOverlay } from './src/host/omp-overlay.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
 import { retiredLine } from './src/host/retired-home.js'
+import { makeSignInOpener, readSignInLinks, removeSignInOpener, sweepSignInOpeners } from './src/host/sign-in-opener.js'
 import { enginesFor, PRESSURE_METHOD, pressureGuard } from './src/host/pressure.js'
 import { redactorFor } from './src/host/redact.js'
 import {
@@ -184,7 +185,7 @@ export function apply(ctx, config = {}, {
   cliHome: override, consentFile: accountFile,
   logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile,
   platform = process.platform,
-  nativeSignInMs = 600_000, nativeLogoutMs = 30_000,
+  nativeSignInMs = 600_000, nativeLogoutMs = 30_000, nativeSignInLinkMs = 15_000,
 } = {}) {
   // Windows has no Codex chat permission profiles (codex-chat-profiles.js). There, and only there,
   // an OFF Codex takes its legacy `read-only` mode as the backstop instead: adapter.js forces that
@@ -210,6 +211,8 @@ export function apply(ctx, config = {}, {
   if (homes) for (const vendor of ['claude', 'codex', 'antigravity']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.
   }
+  // Sign-in attempts' folders a crash left behind (signInNative's stand-in opener).
+  if (homes) sweepSignInOpeners(homes.acpHome)
   if (homes) for (const vendor of ['claude', 'codex']) void homes.recoverLogins(vendor).catch(() => {})
   if (cliStore === undefined && !config.fakeAgent
     && (process.env.AUTOMAGIK_APP_BROWSER === '1' || process.env.AUTOMAGIK_PNPM)) {
@@ -318,6 +321,11 @@ export function apply(ctx, config = {}, {
   // `failed`), kept until the next attempt or a check that finds it signed in.
   const nativeSignIns = new Map()
   const nativeSignInErrors = new Map()
+  // For acceptance, the two log words as status fields, set where the log lines are written:
+  // whether the agent offers a sign-out over ACP (`yes|no`), and how the last sign-out over ACP
+  // went (`done|none|failed`; cleared when a sign-in starts).
+  const signOutOverAcp = new Map()
+  const lastSignOuts = new Map()
   const abortNativeSignIn = (id) => { nativeSignIns.get(id)?.controller.abort() }
   // Account consent inside the isolated home (#869, consent.js): a signed-in CLI is used for
   // chats/images only once the person said so. `consentStates` is what the last
@@ -348,10 +356,12 @@ export function apply(ctx, config = {}, {
     try { home = homes.home(spec.key) } catch { return undefined }
     return isolatedSignInHintOf(spec, detail, home, platform)
   }
-  // Path A needs a browser on the computer that runs DSH: on Linux, an X display (a
-  // Wayland-only browser cannot start without the XDG_RUNTIME_DIR the agent's home leaves out).
+  // Path A needs a browser on the computer that runs DSH. The app opens it in the person's own
+  // session (signInNative's stand-in hands it the link), so on Linux it needs a display there:
+  // X11 or Wayland.
+  const displaySet = name => typeof process.env[name] === 'string' && process.env[name] !== ''
   const browserHere = () => platform === 'darwin' || platform === 'win32'
-    || (typeof process.env.DISPLAY === 'string' && process.env.DISPLAY !== '')
+    || displaySet('DISPLAY') || displaySet('WAYLAND_DISPLAY')
   const consentStates = new Map()
   const accountsSeen = new Map()
   // The account reads still running behind an answer already given (`probe`), and a count per
@@ -943,6 +953,8 @@ export function apply(ctx, config = {}, {
           ? { signInUrl: nativeSignIns.get(id).url } : {}),
         ...(nativeSignInErrors.has(id) ? { signInError: nativeSignInErrors.get(id) } : {}),
         ...(browserHere() ? {} : { signInWhere: 'terminal' }),
+        ...(signOutOverAcp.has(id) ? { signOutOverAcp: signOutOverAcp.get(id) } : {}),
+        ...(lastSignOuts.has(id) ? { lastSignOut: lastSignOuts.get(id) } : {}),
       } : {}),
       // Windows keeps the sign-in in Credential Manager, which belongs to the Windows account
       // and not to the home: there the account is shared with the person's own agy.
@@ -1325,6 +1337,7 @@ export function apply(ctx, config = {}, {
         run = new AgentRun({ command, args, env, cwd: env[HOME_ENV], name: spec.name, logout: true,
           startMs: nativeLogoutMs })
         await run.start()
+        if (run.init !== undefined) signOutOverAcp.set(id, run.init?.agentCapabilities?.auth?.logout ? 'yes' : 'no')
         word = run.loggedOut === true ? 'done' : 'none'
       }
     } catch {
@@ -1332,6 +1345,7 @@ export function apply(ctx, config = {}, {
     } finally {
       try { run?.dispose() } catch {}
     }
+    lastSignOuts.set(id, word)
     info(ctx, `${spec.defaultName} sign-out over ACP: ${word}`)
   }
 
@@ -1406,10 +1420,13 @@ export function apply(ctx, config = {}, {
   }
 
   // The in-app sign-in of an agent with its own home (Antigravity, #2048): ACP `authenticate`
-  // with its `acpSignIn` method, in that home, which opens the browser on this computer. It
-  // answers at once (`signingIn` on its status row); one attempt per agent. A home left paused
-  // (a sign-out that did not finish) or unreadable is first retired for a fresh one, as Reset
-  // does, so no old sign-in is reused.
+  // with its `acpSignIn` method, in that home. It answers at once (`signingIn` on its status
+  // row); one attempt per agent. A home left paused (a sign-out that did not finish) or
+  // unreadable is first retired for a fresh one, as Reset does, so no old sign-in is reused.
+  // agy never opens the browser itself on Linux and macOS: a stand-in for its opener, first on
+  // the sign-in run's PATH only, hands the link over (sign-in-opener.js), the status carries it
+  // once it passes isSignInUrl, and the app opens it in the person's own browser. On Linux an
+  // attempt with no link nativeSignInLinkMs after `authenticate` ends as `no-browser`.
   async function signInNative(id) {
     restartGuard()
     const spec = AGENTS[id]
@@ -1441,6 +1458,8 @@ export function apply(ctx, config = {}, {
         homes.resume(spec.key)
         paused = homes.paused(spec.key)
       } catch (error) {
+        // The recovery's sign-out word is not the person's Sign out: it does not stay.
+        lastSignOuts.delete(id)
         nativeSignInErrors.set(id, 'failed')
         const line = homeRelativeText(redactInstallerOutput(String(error?.message ?? error))).split('\n')[0].slice(0, 300)
         warn(ctx, `the sign-in to ${spec.defaultName} could not start in a fresh home: ${line}`)
@@ -1455,26 +1474,71 @@ export function apply(ctx, config = {}, {
     const attempt = { controller }
     nativeSignIns.set(id, attempt)
     nativeSignInErrors.delete(id)
+    lastSignOuts.delete(id)
+    const current = () => !disposed && nativeSignIns.get(id) === attempt && !controller.signal.aborted
+    // Ends this attempt as `no-browser`: the browser cannot open from it. `why` goes to the log.
+    const noBrowser = (why) => {
+      if (!current()) return
+      attempt.noBrowser = why
+      attempt.url = undefined
+      controller.abort()
+    }
     void (async () => {
       let run
       let word
+      let opener
+      let poll
+      let linkTimer
       try {
         const { command, args, env } = launch(spec, clis.get(id), id)
         // A sign-in link the agent prints while it waits (its browser may not have opened) is
         // shown as a link, only when it is one of its own OAuth entry points (isSignInUrl).
         let printed = ''
+        const found = (url) => {
+          if (attempt.url !== undefined || !current()) return
+          attempt.url = url
+          publish()
+        }
         const onStderr = (chunk) => {
           if (attempt.url !== undefined || controller.signal.aborted) return
           printed = (printed + chunk).slice(-16_384)
           const urls = printed.match(/https:\/\/[^\s<>"'\p{Cc}]+/gu) ?? []
-          const url = urls.find(found => isSignInUrl(spec, found))
-          if (url === undefined) return
-          attempt.url = url
-          if (!disposed && nativeSignIns.get(id) === attempt) publish()
+          const url = urls.find(link => isSignInUrl(spec, link))
+          if (url !== undefined) found(url)
         }
-        run = new AgentRun({ command, args, env, cwd: env[HOME_ENV], name: spec.name,
-          authenticate: spec.acpSignIn, startMs: nativeSignInMs, onStderr })
-        await run.start({ signal: controller.signal })
+        // The stand-in for agy's opener (Linux, macOS), on this run's PATH only.
+        let runEnv = env
+        if (platform === 'linux' || platform === 'darwin') {
+          opener = makeSignInOpener(homes.acpHome, platform)
+          if (opener !== undefined) {
+            runEnv = { ...env, PATH: [opener.bin, env.PATH].filter(Boolean).join(delimiter) }
+            // What it handed over, read while the attempt runs. Two different links that both
+            // pass are not told apart: the attempt ends instead (a same-user writer, R10).
+            poll = setInterval(() => {
+              if (!current()) return
+              const links = new Set(readSignInLinks(opener.links).filter(line => isSignInUrl(spec, line)))
+              if (links.size > 1) noBrowser('more than one sign-in link')
+              else if (links.size === 1) found([...links][0])
+            }, 200)
+            poll.unref?.()
+          } else if (platform === 'linux') {
+            // No stand-in, so no link could reach the app: the browser cannot open.
+            attempt.noBrowser = 'agy handed no sign-in link'
+          }
+        }
+        // On Linux the link comes right after `authenticate`, or the browser will not open.
+        const onAuthenticate = () => {
+          if (platform !== 'linux') return
+          linkTimer = setTimeout(() => {
+            if (attempt.url === undefined) noBrowser('agy handed no sign-in link')
+          }, nativeSignInLinkMs)
+          linkTimer.unref?.()
+        }
+        if (attempt.noBrowser === undefined) {
+          run = new AgentRun({ command, args, env: runEnv, cwd: env[HOME_ENV], name: spec.name,
+            authenticate: spec.acpSignIn, startMs: nativeSignInMs, onStderr, onAuthenticate })
+          await run.start({ signal: controller.signal })
+        }
       } catch (error) {
         if (!controller.signal.aborted) {
           word = error?.code === 'acp-sign-in/unsupported' ? 'unsupported' : isUnanswered(error) ? 'timeout' : 'failed'
@@ -1485,14 +1549,24 @@ export function apply(ctx, config = {}, {
           }
         }
       } finally {
+        clearTimeout(linkTimer)
+        clearInterval(poll)
         if (run?.init !== undefined) {
           const ids = methodIds(run.init)
+          const logout = run.init?.agentCapabilities?.auth?.logout ? 'yes' : 'no'
+          signOutOverAcp.set(id, logout)
           info(ctx, `${spec.defaultName} offers sign-in methods: ${ids.length > 0 ? ids.join(', ') : 'none'}; `
-            + `sign-out over ACP: ${run.init?.agentCapabilities?.auth?.logout ? 'yes' : 'no'}`)
+            + `sign-out over ACP: ${logout}`)
         }
         try { run?.dispose() } catch {}
+        if (opener !== undefined) removeSignInOpener(opener.dir)
       }
       try {
+        if (!disposed && attempt.noBrowser !== undefined) {
+          nativeSignInErrors.set(id, 'no-browser')
+          logTerminalHint(spec, id, `the browser did not open (${attempt.noBrowser})`)
+          return
+        }
         if (disposed || controller.signal.aborted) return
         if (word !== undefined) {
           nativeSignInErrors.set(id, word)

@@ -11,6 +11,7 @@ import {
   assertGeneration, CliGenerations, GENERATION_ENV, ownershipAt, ownershipState,
   POINTER_ENV, removeDeadOwnership,
 } from './cli-generations.js'
+import { NO_BUS_ADDRESS } from './agents.js'
 import { installationDigest, installationIdentity, publishSelectedRoot } from './installation.js'
 import { processState, validBirth } from './process-identity.js'
 import { retiredHomes, writeRetiredNote } from './retired-home.js'
@@ -120,11 +121,12 @@ export class CliHomes {
     }
     const selected = {
       ...env,
-      // agy stores its sign-in in the desktop session's Secret Service when it finds a D-Bus
-      // session bus, and that store belongs to the session, not to HOME. Without the bus address
-      // it is expected to keep the sign-in in its file store, inside this home (agy's changelog;
-      // checked at acceptance). Claude Code and Codex keep the address.
-      ...(vendor === 'antigravity' ? { DBUS_SESSION_BUS_ADDRESS: undefined } : {}),
+      // agy stores its sign-in in the desktop session's Secret Service when it reaches a D-Bus
+      // session bus, and that store belongs to the session, not to HOME. agy finds the session
+      // bus by the user id when the address is unset, so it gets one that can never connect
+      // (NO_BUS_ADDRESS) and keeps the sign-in in its file store, inside this home (agy's
+      // changelog; checked at acceptance). Claude Code and Codex keep the address.
+      ...(vendor === 'antigravity' ? { DBUS_SESSION_BUS_ADDRESS: NO_BUS_ADDRESS } : {}),
       HOME: home,
       DSH_HOME: this.identity,
       AUTOMAGIK_HOME: dirname(this.acpHome),

@@ -361,9 +361,14 @@ differs from Claude Code and Codex:
   `auth_required` reads as signed out at once. Antigravity is the exception: it runs in this
   installation's own home and signs in in the app only (`signInNative`, ACP `authenticate`);
   its status carries no command, `loginStart` refuses it with `acp-login/app`, a signed-out
-  turn names Settings, and its terminal command in that home goes only to the log. A sign-in
-  link it prints while it waits reaches the status as `signInUrl` only when it is one of
-  Google's own OAuth entry points (`isSignInUrl`).
+  turn names Settings, and its terminal command in that home goes only to the log. On Linux
+  and macOS the sign-in run alone gets a stand-in for agy's browser opener first on its PATH
+  (`src/host/sign-in-opener.js`): it opens nothing and hands the link over in an owner-only
+  folder under `acp/sign-in`. A link reaches the status as `signInUrl` only when it is one of
+  Google's own OAuth entry points with a loopback return address (`isSignInUrl`), and the app
+  opens it. On Linux, no link 15 seconds after `authenticate` ends the attempt as
+  `no-browser`. agy's D-Bus session bus address is one that never connects
+  (`NO_BUS_ADDRESS`), because agy finds the bus by the user id when the address is unset.
 - **Models.** Antigravity offers its models and efforts as config options, as the adapters do.
   Hermes offers them only as the session's own list (`models` in the `session/new` answer,
   switched with `session/set_model`); the plugin reads that list when the agent has no model

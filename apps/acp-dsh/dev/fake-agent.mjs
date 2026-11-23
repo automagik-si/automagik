@@ -63,11 +63,16 @@
 // FAKE_ACP_AUTH_HOLD=1 then keeps `authenticate` waiting, as for a person in the browser.
 // FAKE_ACP_ENV_FILE appends, at start, the names of the variables it was given and the values
 // of its home variables only (HOME, USERPROFILE, the XDG folders, CODEX_HOME and the Claude
-// folders). FAKE_ACP_LOGOUT=1 advertises `agentCapabilities.auth.logout` and answers `logout`
+// folders), of the D-Bus address, and its PATH (`path`) with its first entry (`pathHead`).
+// FAKE_ACP_LOGOUT=1 advertises `agentCapabilities.auth.logout` and answers `logout`
 // (traced as `logout` with its HOME).
-import { spawn } from 'node:child_process'
+// FAKE_ACP_AUTH_OPEN=<url> stands for agy's browser opener call during `authenticate`: it runs
+// the opener named FAKE_ACP_OPENER (default `xdg-open`) with that URL, only from the first PATH
+// entry and only when that entry is an attempt's stand-in folder (`/sign-in/<uuid>/bin`), so a
+// test never starts a real browser, and traces `opener` with whether it found one.
+import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { serveAgent } from './serve-agent.mjs'
@@ -96,11 +101,12 @@ const AUTH_METHODS = (process.env.FAKE_ACP_AUTH_METHODS ?? '').split(',').filter
 const SIGNED_IN = () => join(process.env.HOME ?? '', '.gemini', 'fake-signed-in')
 if (process.env.FAKE_ACP_ENV_FILE !== undefined) {
   const shown = ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME',
-    'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR']
+    'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR', 'DBUS_SESSION_BUS_ADDRESS']
   const names = Object.keys(process.env).filter(name => !name.startsWith('FAKE_ACP_') && name !== 'ACP_TRACE_FILE').sort()
   try {
     appendFileSync(process.env.FAKE_ACP_ENV_FILE, `${JSON.stringify({
       pid: process.pid, cwd: process.cwd(), names,
+      path: process.env.PATH ?? null, pathHead: (process.env.PATH ?? '').split(delimiter)[0],
       values: Object.fromEntries(shown.filter(name => name in process.env).map(name => [name, process.env[name]])),
     })}\n`)
   } catch {}
@@ -261,6 +267,13 @@ const implementation = {
     // With no methods offered it answers as it always did; with some, only those.
     if (AUTH_METHODS.length > 0 && !AUTH_METHODS.includes(params?.methodId)) throw RequestError.invalidParams(undefined, `Unknown auth method: ${params?.methodId}`)
     if (process.env.FAKE_ACP_AUTH_STDERR) process.stderr.write(`${process.env.FAKE_ACP_AUTH_STDERR}\n`)
+    if (process.env.FAKE_ACP_AUTH_OPEN) {
+      const head = (process.env.PATH ?? '').split(delimiter)[0]
+      const opener = join(head, process.env.FAKE_ACP_OPENER ?? 'xdg-open')
+      const found = /\/sign-in\/[0-9a-f-]{36}\/bin$/.test(head) && existsSync(opener)
+      if (found) spawnSync(opener, [process.env.FAKE_ACP_AUTH_OPEN], { stdio: 'ignore', timeout: 5000 })
+      trace({ event: 'opener', found })
+    }
     if (process.env.FAKE_ACP_AUTH_HOLD === '1') await new Promise(() => {})
     if (process.env.FAKE_ACP_AUTH_FAIL === '1') throw RequestError.internalError(undefined, 'the browser sign-in did not finish')
     if (AUTH === 'file') {

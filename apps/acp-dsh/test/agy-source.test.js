@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { AGENTS } from '../src/host/agents.js'
+import { AGENTS, NO_BUS_ADDRESS } from '../src/host/agents.js'
 import {
   AGY_DOWNLOAD_HOST, AGY_DOWNLOAD_PATH, AGY_MANIFEST_BASE, AGY_PLATFORMS, AGY_SCRIPTS, AGY_SCRIPTS_BASE,
   agyPlatform, agyVersion, checkAgyVersion, fetchAgyManifest, installAgy, renameRetry,
@@ -254,7 +254,7 @@ test('T6: the version reader takes the forms agy may print, refuses prereleases,
     if (stdout instanceof Error) done(stdout, '')
     else done(null, stdout)
   }
-  const env = { PATH: '/usr/bin', HOME: '/srv/person', AUTOMAGIK_TEST_SECRET: 'planted', ANTHROPIC_API_KEY: 'x', SystemRoot: 'C:\\Windows', windir: 'C:\\Windows', ComSpec: 'cmd.exe', PATHEXT: '.EXE', APPDATA: 'C:\\Users\\p' }
+  const env = { PATH: '/usr/bin', HOME: '/srv/person', AUTOMAGIK_TEST_SECRET: 'planted', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/4242/bus', ANTHROPIC_API_KEY: 'x', SystemRoot: 'C:\\Windows', windir: 'C:\\Windows', ComSpec: 'cmd.exe', PATHEXT: '.EXE', APPDATA: 'C:\\Users\\p' }
   const read = (stdout, platform = 'linux') => agyVersion('/stage/bin/agy', { run: runner(stdout), platform, scratch: '/stage/home', env })
   for (const out of ['1.5.15', 'agy 1.5.15', 'agy version v1.5.15', 'Antigravity CLI 1.5.15', '1.5.15-5514532022517760', 'agy version 1.5.15 (5514532022517760)', '1.5.15+abc', '1.5.15\nmore']) {
     assert.equal((await read(`${out}\n`)).version, '1.5.15', out)
@@ -264,15 +264,18 @@ test('T6: the version reader takes the forms agy may print, refuses prereleases,
 
   assert.deepEqual(seen[0].args, ['--version'])
   assert.equal(seen[0].file, '/stage/bin/agy')
-  assert.deepEqual(Object.keys(seen[0].options.env).sort(), ['AGY_CLI_DISABLE_AUTO_UPDATE', 'APPDATA', 'HOME', 'LOCALAPPDATA', 'PATH', 'USERPROFILE', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME'])
+  assert.deepEqual(Object.keys(seen[0].options.env).sort(), ['AGY_CLI_DISABLE_AUTO_UPDATE', 'APPDATA', 'DBUS_SESSION_BUS_ADDRESS', 'HOME', 'LOCALAPPDATA', 'PATH', 'USERPROFILE', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME'])
   assert.equal(seen[0].options.env.AGY_CLI_DISABLE_AUTO_UPDATE, 'true')
+  // The install-time run reaches no session bus either (#2048): the address never connects.
+  assert.equal(seen[0].options.env.DBUS_SESSION_BUS_ADDRESS, NO_BUS_ADDRESS)
+  assert.equal(seen[0].options.env.DBUS_SESSION_BUS_ADDRESS, 'unix:path=/dev/null/automagik-no-bus')
   assert.equal(seen[0].options.env.HOME, '/stage/home')
   assert.equal(seen[0].options.env.PATH, '/usr/bin')
   assert.equal(seen[0].options.cwd, '/stage/home')
   assert.equal('AUTOMAGIK_TEST_SECRET' in seen[0].options.env, false)
   seen.length = 0
   await read('1.5.15', 'win32')
-  assert.deepEqual(Object.keys(seen[0].options.env).sort(), ['AGY_CLI_DISABLE_AUTO_UPDATE', 'APPDATA', 'ComSpec', 'HOME', 'LOCALAPPDATA', 'PATH', 'PATHEXT', 'SystemRoot', 'TEMP', 'TMP', 'USERPROFILE', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'windir'])
+  assert.deepEqual(Object.keys(seen[0].options.env).sort(), ['AGY_CLI_DISABLE_AUTO_UPDATE', 'APPDATA', 'ComSpec', 'DBUS_SESSION_BUS_ADDRESS', 'HOME', 'LOCALAPPDATA', 'PATH', 'PATHEXT', 'SystemRoot', 'TEMP', 'TMP', 'USERPROFILE', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'windir'])
   assert.equal(seen[0].options.env.APPDATA, '/stage/home')
   assert.equal(seen[0].options.env.TEMP, '/stage/home')
   assert.equal('AUTOMAGIK_TEST_SECRET' in seen[0].options.env, false)

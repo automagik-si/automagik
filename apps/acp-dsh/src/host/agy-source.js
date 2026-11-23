@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto'
 import { lstatSync, mkdirSync, renameSync, rmSync, chmodSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { join } from 'node:path'
+import { NO_BUS_ADDRESS } from './agents.js'
 import { batchSafe } from './batch-spawn.js'
 import { INSTALL_TIMEOUT_MS } from './install.js'
 import { redactText } from './redact.js'
@@ -237,6 +238,9 @@ export function agyVersion(path, { run: runner = execFile, signal, platform = pr
     HOME: scratch, USERPROFILE: scratch, LOCALAPPDATA: scratch, APPDATA: scratch,
     XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, XDG_STATE_HOME: scratch,
     AGY_CLI_DISABLE_AUTO_UPDATE: 'true',
+    // agy finds the session bus by the user id when the address is unset (#2048): this run
+    // gets one that can never connect, as every other agy run does (cli-homes.js).
+    DBUS_SESSION_BUS_ADDRESS: NO_BUS_ADDRESS,
   }
   if (platform === 'win32') {
     for (const key of ['SystemRoot', 'windir', 'ComSpec', 'PATHEXT']) if (env[key] !== undefined) own[key] = env[key]

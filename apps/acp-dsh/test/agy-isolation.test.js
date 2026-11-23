@@ -3,16 +3,21 @@
 // nothing is downloaded and no credential is read: the fake's "sign-in" is a marker file in
 // the HOME it was given.
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync,
+  utimesSync, writeFileSync,
+} from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { apply, SERVICE } from '../index.js'
-import { AGENTS, isolatedSignInHintOf, launchOf } from '../src/host/agents.js'
+import { AGENTS, isolatedSignInHintOf, launchOf, NO_BUS_ADDRESS } from '../src/host/agents.js'
 import { assertGeneration } from '../src/host/cli-generations.js'
 import { CliHomes, HOME_ENV, stopRuns, trackRun } from '../src/host/cli-homes.js'
 import { CliLogins } from '../src/host/login.js'
+import { readSignInLinks } from '../src/host/sign-in-opener.js'
 
 const ID = 'acp-antigravity'
 const SPEC = AGENTS[ID]
@@ -20,8 +25,8 @@ const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-agent.mjs')
 const unixOnly = { skip: process.platform === 'win32' ? 'the fake agy uses a POSIX shebang' : false }
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
-// What must never reach agy: the session bus, the runtime folder, API keys and Cloud
-// credentials, and the switch that would stop its own updater.
+// What must never reach agy: the runtime folder, API keys and Cloud credentials, and the switch
+// that would stop its own updater. The session bus address it gets is one that never connects.
 const PLANTED = {
   DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/4242/bus',
   XDG_RUNTIME_DIR: '/run/user/4242',
@@ -29,8 +34,10 @@ const PLANTED = {
   GOOGLE_APPLICATION_CREDENTIALS: '/planted/adc.json',
   AGY_CLI_DISABLE_AUTO_UPDATE: 'true',
   DISPLAY: ':99',
+  // Not set in these tests unless one says so (I3).
+  WAYLAND_DISPLAY: undefined,
 }
-const NEVER = ['DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'GEMINI_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS', 'AGY_CLI_DISABLE_AUTO_UPDATE']
+const NEVER = ['XDG_RUNTIME_DIR', 'GEMINI_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS', 'AGY_CLI_DISABLE_AUTO_UPDATE']
 
 // The person's own environment for this test: a scratch HOME, and the planted variables.
 function plant(t, extra = {}) {
@@ -74,8 +81,9 @@ const homeOf = (cliHome) => {
   return join(cliHome, 'homes', 'antigravity', readFileSync(pointer, 'utf8'))
 }
 
-function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, hermes = false, external = true } = {}) {
+function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, hermes = false, external = true, prepare } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-agy-iso-'))
+  prepare?.(dir)
   const cliHome = join(dir, 'acp', 'cli-homes')
   const envFile = join(dir, 'agy-env.jsonl')
   const traceFile = join(dir, 'agy-trace.jsonl')
@@ -168,6 +176,8 @@ const checkIsolated = (entry, home) => {
   assert.equal(entry.values.CLAUDE_CONFIG_DIR, join(home, '.claude'))
   assert.equal(entry.values.CLAUDE_SECURESTORAGE_CONFIG_DIR, join(home, '.claude'))
   for (const name of NEVER) assert.equal(entry.names.includes(name), false, name)
+  // agy finds the session bus by the user id when the address is unset: it gets one that never connects.
+  assert.equal(entry.values.DBUS_SESSION_BUS_ADDRESS, NO_BUS_ADDRESS)
 }
 
 test('I1: the probe, a Session and the sign-in each run agy in its own home, without the bus or a key', unixOnly, async (t) => {
@@ -202,8 +212,8 @@ test('I1: the probe, a Session and the sign-in each run agy in its own home, wit
     assert.equal(other.environment('claude').DBUS_SESSION_BUS_ADDRESS, PLANTED.DBUS_SESSION_BUS_ADDRESS)
     assert.equal(other.environment('codex').DBUS_SESSION_BUS_ADDRESS, PLANTED.DBUS_SESSION_BUS_ADDRESS)
     const env = other.environment('antigravity')
-    assert.equal(Object.hasOwn(env, 'DBUS_SESSION_BUS_ADDRESS'), true)
-    assert.equal(env.DBUS_SESSION_BUS_ADDRESS, undefined)
+    assert.equal(env.DBUS_SESSION_BUS_ADDRESS, 'unix:path=/dev/null/automagik-no-bus')
+    assert.ok(env.DBUS_SESSION_BUS_ADDRESS.startsWith('unix:path=/dev/null/'))
   } finally { other.dispose() }
 })
 
@@ -254,6 +264,19 @@ test('I2b: a sign-in link agy prints reaches the status only when it is Google\'
   await sleep(300)
   assert.equal((await other.row()).signInUrl, undefined)
   assert.equal((await other.signedIn()).signInError, 'timeout')
+  // Google's page, but a return address that is not agy's loopback listener: never shown.
+  const away = [
+    google.replace('http%3A%2F%2F127.0.0.1%3A4242%2Fcb', 'https%3A%2F%2Fevil.example%2Fcb'),
+    google.replace('http%3A%2F%2F127.0.0.1%3A4242%2Fcb', 'http%3A%2F%2Fevil.example%3A1%2Fcb'),
+    google.replace('http%3A%2F%2F127.0.0.1%3A4242%2Fcb', 'http%3A%2F%2F127.0.0.1%2Fcb'),
+  ]
+  const redirected = world(t, { agentEnv: { FAKE_ACP_AUTH_STDERR: away.join(' '), FAKE_ACP_AUTH_HOLD: '1' }, deps: { nativeSignInMs: 1500 } })
+  await redirected.service.refresh()
+  await redirected.service.signInNative(ID)
+  await until(() => redirected.traces().some(entry => entry.event === 'authenticate'), 'the sign-in to start')
+  await sleep(300)
+  assert.equal((await redirected.row()).signInUrl, undefined)
+  assert.equal((await redirected.signedIn()).signInUrl, undefined)
 })
 
 const signInPid = (w, from) => w.envs().slice(from).at(-1)?.pid
@@ -320,6 +343,12 @@ test('I3: the refusals, and no browser on a Linux without a display', unixOnly, 
     const other = world(t, { platform })
     assert.equal((await other.row()).signInWhere, undefined)
   }
+  // Wayland with no X display: the app opens the browser in the person's session, so it can.
+  process.env.WAYLAND_DISPLAY = 'wayland-0'
+  try {
+    const wayland = world(t)
+    assert.equal((await wayland.row()).signInWhere, undefined)
+  } finally { delete process.env.WAYLAND_DISPLAY }
 })
 
 test('I4: Sign out retires the home, stops its work, keeps the old one, and the next check is signed out', unixOnly, async (t) => {
@@ -460,6 +489,11 @@ test('I6: the terminal command in the agy home, by platform, for the log only; n
     assert.throws(() => logins.start(ID), error => error.code === 'acp-login/invalid' && !error.message.includes('agy acp --login'))
   } finally { logins.dispose() }
 
+  // On POSIX the command reaches no session bus either.
+  const at = '/srv/a/.automagik/acp/cli-homes/antigravity'
+  assert.equal(isolatedSignInHintOf(SPEC, { path: '/srv/a/bin/agy' }, at, 'linux'),
+    `env -i DBUS_SESSION_BUS_ADDRESS='unix:path=/dev/null/automagik-no-bus' PATH="$PATH" TERM="$TERM" LANG="$LANG" HOME='${at}' `
+    + `XDG_CONFIG_HOME='${at}/config' XDG_DATA_HOME='${at}/data' XDG_CACHE_HOME='${at}/cache' XDG_STATE_HOME='${at}/state' '/srv/a/bin/agy' acp --login`)
   const win = 'C:\\Users\\a\\.automagik\\acp\\cli-homes\\antigravity'
   const exe = 'C:\\Users\\a\\AppData\\Local\\agy\\bin\\agy.exe'
   assert.equal(isolatedSignInHintOf(SPEC, { path: exe }, win, 'win32'),
@@ -574,4 +608,218 @@ test('I9: a damaged agy pointer never blocks restart or dispose; an unproved Cla
   assert.deepEqual(answer, { ok: false, step: 'runs' })
   assert.ok(readdirSync(join(c.cliHome, 'instances', 'claude')).length > 0)
   other.dispose()
+})
+
+// ---- r5: the app opens the sign-in link; agy never starts a browser (#2048, owner) ----------
+
+const LOCAL_GOOGLE = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
+  + '&redirect_uri=http%3A%2F%2Flocalhost%3A43117%2Fauth%2Fcallback&response_type=code&state=r5'
+const STAND_IN = drop => `#!/bin/sh
+# Automagik: hands agy's sign-in link to the app. It opens nothing and reads nothing else.
+[ "$#" -eq 1 ] || exit 0
+case "$1" in https://*) ;; *) exit 0 ;; esac
+umask 077
+printf '%s\\n' "$1" >> '${drop}/links'
+exit 0
+`
+const ATTEMPT_BIN = /\/sign-in\/[0-9a-f-]{36}\/bin$/
+// The env-file line of the sign-in run: the only one whose PATH leads with an attempt's folder.
+const standInRuns = w => w.envs().filter(entry => ATTEMPT_BIN.test(entry.pathHead))
+const mode = path => statSync(path).mode & 0o777
+
+test('I10: on Linux a stand-in for agy\'s opener, on the sign-in run\'s PATH only, hands the link to the status', unixOnly, async (t) => {
+  plant(t)
+  const hour = 60 * 60 * 1000
+  const OLD = 'aaaaaaaa-1111-2222-3333-444444444444'
+  const NEW = 'bbbbbbbb-1111-2222-3333-444444444444'
+  const w = world(t, {
+    agentEnv: { FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE, FAKE_ACP_AUTH_HOLD: '1' },
+    prepare: (dir) => {
+      const root = join(dir, 'acp', 'sign-in')
+      for (const name of [OLD, NEW, 'not-an-attempt']) mkdirSync(join(root, name, 'bin'), { recursive: true })
+      writeFileSync(join(root, 'cccccccc-1111-2222-3333-444444444444'), '')
+      const at = (name, ago) => { const when = new Date(Date.now() - ago); utimesSync(join(root, name), when, when) }
+      at(OLD, 2 * hour)
+      at(NEW, 60 * 1000)
+      at('not-an-attempt', 2 * hour)
+      at('cccccccc-1111-2222-3333-444444444444', 2 * hour)
+    },
+  })
+  // Startup sweep: only an attempt's folder older than an hour goes.
+  const root = join(w.dir, 'acp', 'sign-in')
+  assert.deepEqual(readdirSync(root).sort(), ['bbbbbbbb-1111-2222-3333-444444444444', 'cccccccc-1111-2222-3333-444444444444', 'not-an-attempt'])
+  await w.service.refresh()
+  await w.turn()
+  await w.service.signInNative(ID)
+  const row = await until(async () => { const now = await w.row(); return now.signInUrl ? now : undefined }, 'the sign-in link')
+  assert.equal(row.signInUrl, LOCAL_GOOGLE)
+  assert.equal(row.signingIn, true)
+  assert.ok(!w.logs.some(line => line.includes('accounts.google.com')), w.logs.join('\n'))
+  assert.deepEqual(w.traces().filter(entry => entry.event === 'opener').map(entry => entry.found), [true])
+  // The sign-in run's PATH leads with this attempt's folder, holding only the stand-in.
+  const runs = standInRuns(w)
+  assert.equal(runs.length, 1)
+  const bin = runs[0].pathHead
+  const drop = dirname(bin)
+  assert.equal(dirname(drop), root)
+  assert.match(runs[0].path, /\/bin/)
+  assert.deepEqual(readdirSync(bin), ['xdg-open'])
+  assert.equal(mode(drop), 0o700)
+  assert.equal(mode(bin), 0o700)
+  assert.equal(mode(join(bin, 'xdg-open')), 0o700)
+  assert.equal(readFileSync(join(bin, 'xdg-open'), 'utf8'), STAND_IN(drop))
+  assert.equal(readFileSync(join(drop, 'links'), 'utf8'), `${LOCAL_GOOGLE}\n`)
+  // The probe and the Session never get it.
+  const others = w.envs().filter(entry => entry.pid !== runs[0].pid)
+  assert.ok(others.length >= 2)
+  for (const entry of others) assert.doesNotMatch(entry.path, /\/sign-in\//)
+  // Switched off: the attempt's folder goes with it.
+  w.config.antigravity = false
+  w.emit('loader/volatile-update')
+  await w.signedIn()
+  assert.equal(existsSync(drop), false)
+})
+
+test('I10: the stand-in hands over only an https link, and the read never follows a link or waits on a FIFO', unixOnly, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-iso-stand-in-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const script = join(dir, 'xdg-open')
+  writeFileSync(script, STAND_IN(dir), { mode: 0o700 })
+  for (const args of [['http://example.com/x'], ['file:///etc/passwd'], [LOCAL_GOOGLE, 'extra'], []]) {
+    assert.equal(spawnSync(script, args).status, 0)
+  }
+  assert.equal(existsSync(join(dir, 'links')), false)
+  assert.equal(spawnSync(script, [LOCAL_GOOGLE]).status, 0)
+  assert.equal(mode(join(dir, 'links')), 0o600)
+  assert.deepEqual(readSignInLinks(join(dir, 'links')), [LOCAL_GOOGLE])
+  // A line still being written is not read.
+  appendFileSync(join(dir, 'links'), 'https://partial')
+  assert.deepEqual(readSignInLinks(join(dir, 'links')), [LOCAL_GOOGLE])
+  writeFileSync(join(dir, 'elsewhere'), `${LOCAL_GOOGLE}\n`)
+  symlinkSync(join(dir, 'elsewhere'), join(dir, 'linked'))
+  assert.deepEqual(readSignInLinks(join(dir, 'linked')), [])
+  if (spawnSync('mkfifo', [join(dir, 'fifo')]).status === 0) assert.deepEqual(readSignInLinks(join(dir, 'fifo')), [])
+  assert.deepEqual(readSignInLinks(join(dir, 'missing')), [])
+})
+
+test('I11: on Linux, no acceptable link soon after authenticate ends the attempt as no-browser', unixOnly, async (t) => {
+  plant(t)
+  for (const [agentEnv, refused] of [
+    [{ FAKE_ACP_AUTH_HOLD: '1' }, undefined],
+    [{ FAKE_ACP_AUTH_HOLD: '1', FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE.replace('accounts.google.com', 'evil.example') }, 'evil.example'],
+    [{ FAKE_ACP_AUTH_HOLD: '1', FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE.replace('localhost%3A43117', 'evil.example%3A1') }, 'evil.example'],
+  ]) {
+    const w = world(t, { agentEnv, deps: { nativeSignInLinkMs: 300 } })
+    await w.service.refresh()
+    const from = w.envs().length
+    await w.service.signInNative(ID)
+    const row = await w.signedIn()
+    assert.equal(row.signInError, 'no-browser')
+    assert.equal(row.signedIn, false)
+    assert.equal(row.signInUrl, undefined)
+    assert.equal(Object.hasOwn(row.cli, 'signInHint'), false)
+    assert.ok(w.logs.some(line => line.startsWith('acp-dsh: Antigravity: the browser did not open (agy handed no sign-in link); its terminal sign-in, for support: env -i ')), w.logs.join('\n'))
+    if (refused !== undefined) {
+      assert.deepEqual(w.traces().filter(entry => entry.event === 'opener').map(entry => entry.found), [true])
+      assert.ok(!w.logs.some(line => line.includes(refused)), w.logs.join('\n'))
+    }
+    await endsClean(w, from)
+    assert.deepEqual(readdirSync(join(w.dir, 'acp', 'sign-in')), [])
+  }
+  // Two different acceptable links: neither is shown, and the attempt ends.
+  const w = world(t, { agentEnv: { FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE, FAKE_ACP_AUTH_HOLD: '1' } })
+  await w.service.refresh()
+  await w.service.signInNative(ID)
+  await until(async () => (await w.row()).signInUrl, 'the sign-in link')
+  const drop = dirname(standInRuns(w)[0].pathHead)
+  appendFileSync(join(drop, 'links'), `${LOCAL_GOOGLE.replace('state=r5', 'state=other')}\n`)
+  const row = await w.signedIn()
+  assert.equal(row.signInError, 'no-browser')
+  assert.equal(row.signInUrl, undefined)
+  assert.ok(w.logs.some(line => line.startsWith('acp-dsh: Antigravity: the browser did not open (more than one sign-in link); ')), w.logs.join('\n'))
+  assert.ok(!w.logs.some(line => line.includes('accounts.google.com')), w.logs.join('\n'))
+})
+
+test('I12: macOS stands in as `open` with no link rule; Windows has no stand-in', unixOnly, async (t) => {
+  plant(t)
+  const mac = world(t, { platform: 'darwin', agentEnv: { FAKE_ACP_AUTH_HOLD: '1' }, deps: { nativeSignInLinkMs: 300 } })
+  await mac.service.refresh()
+  await mac.service.signInNative(ID)
+  await until(() => mac.traces().some(entry => entry.event === 'authenticate'), 'the sign-in to start')
+  await sleep(600)
+  const waiting = await mac.row()
+  assert.equal(waiting.signingIn, true)
+  assert.equal(waiting.signInError, undefined)
+  assert.deepEqual(readdirSync(standInRuns(mac)[0].pathHead), ['open'])
+  mac.config.antigravity = false
+  mac.emit('loader/volatile-update')
+  await mac.signedIn()
+  const linked = world(t, { platform: 'darwin', agentEnv: { FAKE_ACP_AUTH_HOLD: '1', FAKE_ACP_OPENER: 'open', FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE } })
+  await linked.service.refresh()
+  await linked.service.signInNative(ID)
+  assert.equal((await until(async () => (await linked.row()).signInUrl, 'the sign-in link')), LOCAL_GOOGLE)
+  linked.config.antigravity = false
+  linked.emit('loader/volatile-update')
+  await linked.signedIn()
+
+  const win = world(t, { platform: 'win32', agentEnv: { FAKE_ACP_AUTH_HOLD: '1', FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE }, deps: { nativeSignInLinkMs: 300 } })
+  await win.service.refresh()
+  const from = win.envs().length
+  await win.service.signInNative(ID)
+  await until(() => win.traces().some(entry => entry.event === 'authenticate'), 'the sign-in to start')
+  await sleep(600)
+  const row = await win.row()
+  assert.equal(row.signingIn, true)
+  assert.equal(row.signInError, undefined)
+  assert.deepEqual(standInRuns(win), [])
+  for (const entry of win.envs().slice(from)) assert.doesNotMatch(entry.path, /\/sign-in\//)
+  assert.deepEqual(win.traces().filter(entry => entry.event === 'opener').map(entry => entry.found), [false])
+  assert.equal(existsSync(join(win.dir, 'acp', 'sign-in')), false)
+  win.config.antigravity = false
+  win.emit('loader/volatile-update')
+  await win.signedIn()
+})
+
+test('I13: the two log words ride on the status, equal to the log lines', unixOnly, async (t) => {
+  plant(t)
+  for (const [agentEnv, deps, overAcp, out] of [
+    [{}, {}, 'no', 'none'],
+    [{ FAKE_ACP_LOGOUT: '1' }, {}, 'yes', 'done'],
+    [{ FAKE_ACP_LOGOUT: '1', FAKE_ACP_DEAF_TO: 'logout' }, { nativeLogoutMs: 300 }, 'yes', 'failed'],
+  ]) {
+    const w = world(t, { agentEnv, deps })
+    await w.service.refresh()
+    const before = await w.row()
+    assert.equal(before.signOutOverAcp, undefined)
+    assert.equal(before.lastSignOut, undefined)
+    await w.service.signInNative(ID)
+    const row = await w.signedIn()
+    assert.equal(row.signedIn, true)
+    assert.equal(row.signOutOverAcp, overAcp)
+    assert.ok(w.logs.includes(`acp-dsh: Antigravity offers sign-in methods: oauth-personal; sign-out over ACP: ${overAcp}`), w.logs.join('\n'))
+    assert.equal(row.lastSignOut, undefined)
+    await w.service.accountSignOutNative(ID)
+    const after = await w.row()
+    assert.equal(after.lastSignOut, out)
+    assert.ok(w.logs.includes(`acp-dsh: Antigravity sign-out over ACP: ${out}`), w.logs.join('\n'))
+    assert.equal(after.signOutOverAcp, overAcp)
+    // A following Sign in click clears the sign-out word.
+    await w.service.signInNative(ID)
+    assert.equal((await w.row()).lastSignOut, undefined)
+    assert.equal((await w.signedIn()).lastSignOut, undefined)
+  }
+  // A Sign in whose recovery of a paused home fails keeps no sign-out word from that recovery.
+  const w = world(t)
+  await w.service.refresh()
+  await w.service.accountSignOutNative(ID)
+  assert.equal((await w.row()).lastSignOut, 'none')
+  const home = w.home()
+  writeFileSync(join(home, 'paused'), '')
+  rmSync(join(home, 'version'), { force: true })
+  mkdirSync(join(home, 'version'))
+  const logs = w.logs.length
+  const answered = (await w.service.signInNative(ID)).agents.find(entry => entry.id === ID)
+  assert.equal(answered.signInError, 'failed')
+  assert.ok(w.logs.slice(logs).includes('acp-dsh: Antigravity sign-out over ACP: none'), w.logs.slice(logs).join('\n'))
+  assert.equal(answered.lastSignOut, undefined)
 })
