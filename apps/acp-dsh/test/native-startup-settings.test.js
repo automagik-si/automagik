@@ -6,6 +6,87 @@ import { CLAUDE, holdNativeStartup, nativeWorld, person } from './fixtures/manag
 const notice = 'The tools setting changed; send again.'
 const textOf = chunks => chunks.filter(chunk => chunk.type === 'block-end' && chunk.block.type === 'text').map(chunk => chunk.block.text).join('')
 
+for (const [kind, identity] of [
+  ['a Workspace without an identity', undefined],
+  ['an eligible Bot with no saved switch', { name: 'Ada', nativeToolsBlocked: false }],
+]) {
+  test(`team registration during standalone ON startup stops ${kind} before its first prompt`, async t => {
+    const w = nativeWorld(t, { hidden: true, managed: false })
+    const chat = w.chat('direct')
+    const startup = holdNativeStartup(t, w)
+    const pending = chat.turn('owner before team registration')
+    let on
+    let legacyPid
+    try {
+      on = await Promise.race([startup.entered, pending.then(() => assert.fail('ON startup did not reach the hold'))])
+      w.assertToolset(0, true)
+      const [launch] = w.events('new-session')
+      legacyPid = launch.pid
+      assert.equal(on.child.pid, legacyPid)
+      assert.equal(on.alive, true)
+      assert.equal(launch.systemPrompt, undefined)
+      assert.equal(w.identityReaders.everRegistered(), false)
+      assert.deepEqual(w.events('prompt'), [], 'the ON PID has no prompt before registration')
+      w.identityReaders.register(id => id === chat.session.id ? identity : undefined)
+      assert.equal(w.identityReaders.everRegistered(), true)
+      assert.equal(w.identityReaders.read(chat.session.id), identity)
+      assert.deepEqual(w.events('prompt'), [], 'registration sends no prompt while startup is held')
+    } finally {
+      startup.release()
+    }
+
+    const stopped = await pending
+    if (!on.alive) await on.gone.catch(() => {})
+    const first = {
+      launchPids: w.events('new-session').map(row => row.pid),
+      promptPids: w.events('prompt').map(row => row.pid),
+      reason: stopped.at(-1).reason,
+      text: textOf(stopped),
+      exit: on.exited,
+    }
+    const next = await chat.turn('next owner message after registration')
+    const launches = w.events('new-session')
+    const flags = launches.map(row => row.meta.disableBuiltInTools)
+    const promptPids = w.events('prompt').map(row => row.pid)
+    t.diagnostic(JSON.stringify({ first, next: { launchPids: launches.map(row => row.pid), flags, promptPids } }))
+
+    assert.deepEqual(first.promptPids, [], 'the legacy ON PID receives no prompt after registration')
+    assert.deepEqual(first.launchPids, [legacyPid], 'the interrupted turn did not retry')
+    assert.deepEqual(first.reason, { kind: 'stop' })
+    assert.equal(first.text, notice)
+    assert.ok(first.exit, 'the legacy ON PID exited before the next owner message')
+    assert.deepEqual(next.at(-1).reason, { kind: 'stop' })
+    assert.deepEqual(flags, [false, true])
+    assert.notEqual(launches[1].pid, legacyPid)
+    assert.deepEqual(promptPids, [launches[1].pid])
+    assert.match(w.events('prompt')[0].text, /next owner message after registration/)
+    assert.equal(launches[1].systemPrompt?.includes('You are Ada') ?? false, identity !== undefined)
+  })
+}
+
+test('a standalone ON startup without team registration prompts its original PID', async t => {
+  const w = nativeWorld(t, { hidden: true, managed: false })
+  const chat = w.chat('direct')
+  const startup = holdNativeStartup(t, w)
+  const pending = chat.turn('standalone owner message')
+  try {
+    await Promise.race([startup.entered, pending.then(() => assert.fail('ON startup did not reach the hold'))])
+    w.assertToolset(0, true)
+    assert.deepEqual(w.events('prompt'), [])
+  } finally {
+    startup.release()
+  }
+  const reply = await pending
+  const launchPids = w.events('new-session').map(row => row.pid)
+  const promptPids = w.events('prompt').map(row => row.pid)
+  t.diagnostic(JSON.stringify({ launchPids, flags: [false], promptPids }))
+  assert.equal(w.identityReaders.everRegistered(), false)
+  assert.deepEqual(reply.at(-1).reason, { kind: 'stop' })
+  assert.equal(launchPids.length, 1)
+  assert.deepEqual(promptPids, launchPids)
+  assert.match(w.events('prompt')[0].text, /standalone owner message/)
+})
+
 for (const change of ['saved switch OFF', 'effective Read only', 'unknown level', 'a throwing preset reader']) {
   test(`an ON startup stops before its first prompt after ${change}`, async t => {
     let saved = true

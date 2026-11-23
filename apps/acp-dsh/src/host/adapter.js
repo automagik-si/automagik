@@ -1731,7 +1731,8 @@ export class AcpAdapter extends LlmAdapter {
       }
       // A refused model can leave the run alive with no prompt yet. Revalidate when its
       // eventual first prompt is ready, too. AgentRun sets promptEnded during its first prompt.
-      const startingNative = live.nativeManaged === true && live.native === true && live.run.promptEnded === undefined
+      const firstNativePrompt = options.provider === 'acp-claude' && live.native === true && live.run.promptEnded === undefined
+      const startingNative = firstNativePrompt && live.nativeManaged === true
       const stopForNativeChange = () => {
         this.endClaudeSession(sessionId, NATIVE_TOOLS_CHANGED_TEXT)
         return stopped(NATIVE_TOOLS_CHANGED_TEXT)
@@ -1754,7 +1755,7 @@ export class AcpAdapter extends LlmAdapter {
         const why = `${agent.name} would not take ${options.model}${at}: ${reason}`
         return yield finish('error', why)
       }
-      const level = startingNative ? levelAtStart()
+      const level = firstNativePrompt && (startingNative || this.teamManaged()) ? this.readLevel(dshAgent?.session, true)
         : levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
       if (level === undefined) return yield* stopForNativeChange()
       const originalModes = agent.modeFor?.(level)
@@ -1905,14 +1906,17 @@ export class AcpAdapter extends LlmAdapter {
       }
       // The first prompt is the last point where startup can lose its tool authority. The
       // permission mode, bridge and gates above can all wait after the ON process exists.
-      if (startingNative) {
+      const managedNow = firstNativePrompt && this.teamManaged()
+      if (startingNative || managedNow) {
         const held = entry.held ?? live.held
         if (held !== undefined) return yield* stopped(held)
         if (options.signal?.aborted) {
           this.end(sessionId, live)
           return yield STOPPED()
         }
-        if (!permitsNative(levelAtStart()) || !this.teamManaged() || !this.nativeOn(agent, sessionId)) return yield* stopForNativeChange()
+        // Team registration during startup invalidates the standalone hidden ON grant.
+        if (!startingNative || !managedNow || !permitsNative(this.readLevel(dshAgent?.session, true))
+          || !this.nativeOn(agent, sessionId)) return yield* stopForNativeChange()
       }
       started()
       live.replay = undefined

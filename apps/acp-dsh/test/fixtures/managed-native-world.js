@@ -7,6 +7,7 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { AcpAdapter } from '../../src/host/adapter.js'
 import { AGENTS } from '../../src/host/agents.js'
 import { Backchannel } from '../../src/host/backchannel.js'
+import { createIdentityReaders } from '../../src/host/identity.js'
 
 export const CLAUDE = 'acp-claude'
 export const CODEX = 'acp-codex'
@@ -18,6 +19,7 @@ export function holdNativeStartup(t, w) {
   const ready = w.adapter.ready
   t.mock.method(w.adapter, 'ready', async function (agent, state) {
     await ready.call(this, agent, state)
+    // AgentRun awaits this hook after the spawned peer has answered session/new.
     if (state.native === true) {
       entered.resolve(state.run)
       await release.promise
@@ -67,8 +69,11 @@ export function nativeWorld(t, { identity, hidden, managed = true, env } = {}) {
   const claude = { ...cli(CLAUDE), hardAsk, disableBuiltInTools, modeFor }
   const codex = cli(CODEX)
   const backchannel = new Backchannel({ ctx })
+  const identityReaders = createIdentityReaders(() => {})
+  if (managed) identityReaders.register(identity ?? (() => undefined))
   const adapter = new AcpAdapter(ctx, new Map([[CLAUDE, claude], [CODEX, codex]]), {
-    botIdentity: identity, teamManaged: () => managed, nativeTools: () => hidden, dshTools: () => undefined, backchannel,
+    botIdentity: identityReaders.read, teamManaged: identityReaders.everRegistered,
+    nativeTools: () => hidden, dshTools: () => undefined, backchannel,
   })
   t.after(() => {
     adapter.dispose()
@@ -110,5 +115,5 @@ export function nativeWorld(t, { identity, hidden, managed = true, env } = {}) {
     assert.equal(list.tools.includes('bash'), !expected)
     assert.equal(list.tools.includes('read'), !expected)
   }
-  return { adapter, backchannel, claude, services, chat, events, assertToolset, executed }
+  return { adapter, backchannel, claude, services, chat, events, assertToolset, executed, identityReaders }
 }
