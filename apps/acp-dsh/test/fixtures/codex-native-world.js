@@ -16,7 +16,7 @@ export const KEPT = 'gpt-5.5'
  * A fake `run` (execFile's shape) for codexCli. `answers` overrides any reply:
  * `features`, `models`, `servers` (stdout strings), `prompt(config)` (stdout or undefined for
  * the capture; it also gets `calls`, every call so far), `hang` (a predicate on the call: never
- * answers until killed). `homeDefault` names the Codex home's own default model: a prompt read
+ * answers until killed), `exit(call)` (an exit code: Codex answers and says no). `homeDefault` names the Codex home's own default model: a prompt read
  * that names no model answers that model's capture (`gpt-5.5` shows no tool block, as the real
  * one does); unset, such a read answers the full capture.
  */
@@ -42,6 +42,14 @@ export function fakeCodex({ answers = {}, delayMs = 1, homeDefault } = {}) {
     if (answers.hang?.(call)) return child
     active += 1
     if (active > 1) overlap = true
+    const code = answers.exit?.(call)
+    if (typeof code === 'number') {
+      setTimeout(() => {
+        active -= 1
+        callback(Object.assign(new Error(`exit ${code}`), { code }), '', 'refused')
+      }, delayMs)
+      return child
+    }
     let stdout
     if (what === 'mcp list --json') stdout = answers.servers ?? '[]'
     else if (what === 'features list') stdout = answers.features ?? fixture('features.txt')

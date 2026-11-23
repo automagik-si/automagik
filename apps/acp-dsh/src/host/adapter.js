@@ -20,7 +20,7 @@ import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
 import { SessionFiles, restrictedLevel } from './session-files.js'
 import { chatProfileModes } from './codex-chat-profiles.js'
-import { ensureCatalog, keptModel, modelPart, NATIVE_OFF_UNAVAILABLE } from './codex-native.js'
+import { CATALOG_MAX_AGE_MS, ensureCatalog, keptModel, modelPart, NATIVE_OFF_UNAVAILABLE, NATIVE_OFF_UNVERIFIABLE } from './codex-native.js'
 import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './identity.js'
 import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
@@ -632,6 +632,9 @@ export class AcpAdapter extends LlmAdapter {
     // Codex agent row -> the model its last process with its own tools started on: what DSH's
     // `default` is for that agent when a turn decides whether its model is kept (nativeKept).
     this.startModels = new Map()
+    // Codex agent row -> the models its last check measured with no tool block, when its catalog
+    // cannot keep them (measuredKept): read like `nativeKeptModels` for a day (B1-4).
+    this.measured = new Map()
     // Asked before a turn opens on an agent (#869): a text when its signed-in account has not
     // been confirmed for the app, else undefined. Never asked for a call that continues a turn.
     this.access = access
@@ -924,15 +927,47 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   /**
-   * Whether a Codex turn's model is on the row's kept list (`nativeKeptModels`): such a model
-   * launches as today, with Codex's own tools, whatever the switch says. DSH's `default` is
-   * the model Codex itself starts with: the last one a process with its own tools reported,
-   * else the catalog's recorded start model. Unknown is not kept (the checked path).
+   * Whether a Codex turn's model is kept: on the row's kept list (`nativeKeptModels`) or in the
+   * set its last check measured with no tool block (B1-4). Such a model launches as today, with
+   * Codex's own tools, whatever the switch says. DSH's `default` is the model Codex itself starts
+   * with: the last one a process with its own tools reported, else the catalog's recorded start
+   * model. Unknown is not kept (the checked path).
    */
   nativeKept(agent, model) {
     if (agent?.nativeSwitch !== 'config') return false
     const id = model === DEFAULT_MODEL ? (this.startModels.get(agent) ?? agent.catalog?.ownModel?.()) : model
-    return keptModel(agent, modelPart(id))
+    return this.keptSlug(agent, modelPart(id))
+  }
+
+  /** Whether a Codex model slug launches as today: the row's kept list or the measured set. */
+  keptSlug(agent, slug) {
+    return keptModel(agent, slug) || (typeof slug === 'string' && this.measuredKept(agent).includes(slug))
+  }
+
+  /**
+   * The models a Codex check last measured with no tool block (codex-native.js `unverified`):
+   * the catalog's record, kept beside its start model on disk, else this host's for a day.
+   */
+  measuredKept(agent) {
+    try {
+      if (typeof agent?.catalog?.measuredKept === 'function') {
+        const models = agent.catalog.measuredKept()
+        return Array.isArray(models) ? models : []
+      }
+      const mine = this.measured.get(agent)
+      const age = mine === undefined ? -1 : Date.now() - mine.at
+      return age >= 0 && age < CATALOG_MAX_AGE_MS ? mine.models : []
+    } catch { return [] }
+  }
+
+  /** Record what a Codex check measured with no tool block, replacing its last record. */
+  recordMeasured(agent, models) {
+    const slugs = [...new Set((Array.isArray(models) ? models : []).map(modelPart).filter(slug => slug !== undefined))]
+    if (typeof agent?.catalog?.recordMeasured === 'function') {
+      try { agent.catalog.recordMeasured(slugs) } catch {}
+      return
+    }
+    this.measured.set(agent, { models: slugs, at: Date.now() })
   }
 
   /** `nativeKept` for a Bot's route (`acp-codex/<model>`), for the Bot team's Details row. */
@@ -1500,7 +1535,9 @@ export class AcpAdapter extends LlmAdapter {
       // Codex's switch (`nativeSwitch: 'config'`) and a model on its kept list, which launches
       // as today, with Codex's own tools, whatever the switch says (RFC 0003, Codex amendment).
       const codexRow = agent.nativeSwitch === 'config'
-      const kept = codexRow && this.nativeKept(agent, options.model)
+      // `keptRelaunch`: this turn's OFF check measured its model with no tool block, so it runs
+      // as today in this same turn (B1-4, below).
+      const kept = codexRow && (entry.keptRelaunch === true || this.nativeKept(agent, options.model))
       const managed = ['acp-claude', 'acp-codex'].includes(options.provider) && this.teamManaged() && !kept
       const omp = agent.nativeSwitch === 'args'
       const levelAtStart = () => this.readLevel(dshAgent?.session, managed || (omp && this.teamManaged()))
@@ -1670,6 +1707,20 @@ export class AcpAdapter extends LlmAdapter {
           } catch {}
         }
         const text = takesIdentity ? identityText(identityRead, role.part) : undefined
+        // A Codex OFF check that measured this turn's model with no tool block (B1-4): the turn
+        // runs again from its start as a kept one (today's launch), with no notice. Nothing of the
+        // OFF attempt was started. Once per turn.
+        const relaunchKept = () => {
+          entry.keptRelaunch = true
+          entry.nativeOff = undefined
+          try { this.ctx.logger?.info?.(`acp-dsh: ${agent.name} shows no tools to check on this model; it runs with its own tools, as before`) } catch {}
+          return this.step(options, entry)
+        }
+        // `default` whose start model is not known yet: what Codex starts on is not known either.
+        const startUnknown = () => {
+          if (options.model !== DEFAULT_MODEL) return false
+          try { return (this.startModels.get(agent) ?? agent.catalog?.ownModel?.()) === undefined } catch { return true }
+        }
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
         // session start is tried once more on that one: the turn is not lost to a bad release.
@@ -1706,8 +1757,17 @@ export class AcpAdapter extends LlmAdapter {
             const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
             // omp's launch spec is synchronous and it has no bridge to prepare.
             // Keep its policy decision and actual spawn in the same event-loop turn.
-            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, offCatalog, ...spec } = omp ? launch : await launch
+            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, ...spec } = omp ? launch : await launch
             if (spawnOmpManaged && entry.held !== undefined) return yield* stopped(entry.held)
+            // The check measured these models with no tool block: kept from now on (B1-4 (b)). When
+            // this turn's model is one of them it runs as today, in this same turn.
+            if (codexOff && Array.isArray(unverified)) {
+              this.recordMeasured(agent, unverified)
+              if (entry.keptRelaunch !== true && this.nativeKept(agent, options.model)) {
+                if (options.signal?.aborted) return yield STOPPED()
+                return yield* relaunchKept()
+              }
+            }
             if (codexOff) {
               // The checks ran for this start: its folder, at least one model, its own tools off.
               const real = path => { try { return realpathSync(path) } catch { return undefined } }
@@ -1841,6 +1901,15 @@ export class AcpAdapter extends LlmAdapter {
             if (error?.code === 'acp-account/busy') {
               return yield finish('error', error.message, MODEL_ACCESS_REQUIRED)
             }
+            // Every model of this Codex answered its check with no tool block (B1-4): none is
+            // refused. The turn runs as today in this same turn when its model is now kept, or is
+            // `default` with no known start model; any other model was not checked (LQ1).
+            if (error?.code === NATIVE_OFF_UNVERIFIABLE) {
+              if (options.signal?.aborted) return yield STOPPED()
+              this.recordMeasured(agent, error.models)
+              if (entry.keptRelaunch !== true && (this.nativeKept(agent, options.model) || startUnknown())) return yield* relaunchKept()
+              return yield finish('error', offUnavailableText('this model was not checked'), NATIVE_OFF_UNAVAILABLE)
+            }
             // A check that refused OFF is this Codex's answer, not the connector's release.
             const offRefused = error?.code === NATIVE_OFF_UNAVAILABLE
             if (offRefused && options.signal?.aborted) return yield STOPPED()
@@ -1968,7 +2037,7 @@ export class AcpAdapter extends LlmAdapter {
           return stopped(NATIVE_TOOLS_CHANGED_TEXT)
         }
         // OFF on a kept model (a stale `default`): the next turn launches it as today.
-        if (live.nativeOff === true && keptModel(agent, slug)) return yield* restart()
+        if (live.nativeOff === true && this.keptSlug(agent, slug)) return yield* restart()
         // OFF on a model its spawn did not check: never prompted (LQ1).
         if (live.nativeOff === true && !live.checkedModels?.includes(slug)) {
           this.endSession(sessionId, undefined, options.provider)
@@ -1978,9 +2047,9 @@ export class AcpAdapter extends LlmAdapter {
         // must be OFF (a stale `default` the other way). This ignores owner eligibility on
         // purpose (a kept turn reads no owner input): at worst one more "send again" on a stale
         // `default`, and it fails closed. The next turn opens by the usual rule.
-        if (live.nativeKept === true && !keptModel(agent, slug) && this.teamManaged()
+        if (live.nativeKept === true && !this.keptSlug(agent, slug) && this.teamManaged()
           && !(requestedByOwner && permitsNative(levelAtStart()) && this.nativeOn(agent, sessionId, options.provider))) return yield* restart()
-        live.nativeKept = keptModel(agent, slug)
+        live.nativeKept = this.keptSlug(agent, slug)
       }
       const checkLevel = startingNative || ((firstNativePrompt || startingOmp) && this.teamManaged())
       const level = checkLevel ? this.readLevel(dshAgent?.session, true)

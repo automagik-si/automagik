@@ -555,7 +555,8 @@ export function readOffered(stdout) {
       }
     }
   }
-  if (blocks === 0) throw checkError('unsupported', 'Codex showed no tool block')
+  // The one answer that means "nothing to check" (codex-native.js: such a model is unverifiable).
+  if (blocks === 0) throw checkError('unsupported', 'Codex showed no tool block', { noBlock: true })
   return { tools: [...new Set(tools)], nested: [...new Set(nested)], skills: [...new Set(skills)].slice(0, MAX_SKILLS) }
 }
 

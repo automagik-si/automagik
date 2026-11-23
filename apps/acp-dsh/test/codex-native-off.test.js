@@ -11,6 +11,7 @@ import { apply } from '../index.js'
 import { AGENTS } from '../src/host/agents.js'
 import { Session } from '@deepseek-ai/dsh-session'
 import { AgentRun } from '../src/host/acp.js'
+import { Catalog } from '../src/host/catalog.js'
 import { CHECKED, codexWorld, fakeCodex, finishOf, fixture, KEPT, owner, scheduled, textOf, turnOn, withFunction, withTool } from './fixtures/codex-native-world.js'
 import { CLAUDE, CODEX, holdNativeStartup } from './fixtures/managed-native-world.js'
 
@@ -135,7 +136,7 @@ test('N3 no verdict is reused: two homes run two full checks, the same launch tw
   assert.equal(fake.calls.filter(call => call.home === other).length, first)
 })
 
-test('N4 per model: a failing model is dropped and logged, a kept model is never probed, nothing left refuses; the home default is never read', async t => {
+test('N4 per model: a failing model is dropped and logged, a kept model is never probed, one with no tool block is measured kept, all with none are unverifiable (not refused); the home default is never read', async t => {
   const lunaSpawns = { prompt: ({ undone, model }) => undone === undefined && model === 'gpt-5.6-luna'
     ? withTool({ type: 'namespace', name: 'collaboration', description: '', tools: [{ type: 'function', name: 'spawn_agent', description: 'x', parameters: {}, strict: false }] }) : undefined }
   const s = scratch(t)
@@ -146,22 +147,69 @@ test('N4 per model: a failing model is dropped and logged, a kept model is never
   assert.deepEqual(JSON.parse(readFileSync(result.catalog.path, 'utf8')).models.map(model => model.slug), ['gpt-6.2-sol'])
   assert.ok(lines.includes('acp-dsh: Codex model gpt-5.6-luna could not be checked with its own tools off; it is not offered while they are off'))
   assert.equal(fake.calls.some(call => call.model === 'gpt-5.5'), false)
-  // Not on the kept list: its missing tool block drops it from the copy, with the log line.
+  // Not on the kept list: it answers with no tool block, so it is measured kept (B1-4 (b)): left
+  // out of the copy the process gets, returned beside the checked models, with its own line.
   const open = fakeCodex()
   const unkept = []
   const plain = await nativeOffSetup(s.launch, { cwd: s.cwd, dir: s.dir, kept: [], run: open.run, log: line => unkept.push(line) })
   assert.deepEqual(plain.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
+  assert.deepEqual(plain.unverified, ['gpt-5.5'])
+  assert.deepEqual(JSON.parse(readFileSync(plain.catalog.path, 'utf8')).models.map(model => model.slug), ['gpt-6.2-sol', 'gpt-5.6-luna'])
   assert.ok(open.calls.some(call => call.model === 'gpt-5.5'))
-  assert.ok(unkept.includes('acp-dsh: Codex model gpt-5.5 could not be checked with its own tools off; it is not offered while they are off'))
+  assert.ok(unkept.includes("acp-dsh: Codex model gpt-5.5 shows no tools to check; it runs with Codex's own tools, as before"), unkept.join('\n'))
+  assert.equal(unkept.some(line => line.includes('gpt-5.5 could not be checked')), false)
   // A home whose own default model shows no tool block (gpt-5.5, as the real one): the setup
   // passes on the copy's models and never reads the default (BD-1).
   for (const fake of [fakeCodex({ homeDefault: KEPT }), fakeCodex({ answers: { prompt: ({ undone, model }) => undone === undefined && model === undefined ? '[]' : undefined } })]) {
     const passed = await setup(scratch(t), fake)
     assert.deepEqual(passed.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
+    assert.deepEqual(passed.unverified, [])
     assert.equal(fake.calls.some(call => call.what === 'debug prompt-input' && call.model === undefined), false)
     assert.equal(fake.calls.some(call => call.model === KEPT), false)
   }
-  await refused(setup(scratch(t), fakeCodex({ answers: { prompt: ({ undone, model }) => undone === undefined && model !== undefined ? '[]' : undefined } })), /no model could be checked/)
+  // Every model of the copy answers with no tool block (BF-1, B1-4): none can be checked, so none
+  // is refused. The setup says so with its own code and the models, never the refusal.
+  const none = []
+  await assert.rejects(setup(scratch(t), fakeCodex({ answers: { prompt: ({ undone, model }) => undone === undefined && model !== undefined ? '[]' : undefined } }), { log: line => none.push(line) }), error => {
+    assert.equal(error.code, 'acp/native-off-unverifiable')
+    assert.deepEqual(error.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
+    assert.doesNotMatch(error.message, /no model could be checked/)
+    return true
+  })
+  assert.ok(none.includes("acp-dsh: Codex shows no tools to check for gpt-6.2-sol, gpt-5.6-luna; they run with Codex's own tools, as before"), none.join('\n'))
+})
+
+test('N4c the safety limit: a model with no tool block beside a non-zero exit, an unknown form or a forbidden tool still refuses (LQ1)', async t => {
+  const noBlock = ({ undone, model }) => undone === undefined && model === 'gpt-6.2-sol' ? '[]' : undefined
+  const luna = answer => config => noBlock(config) ?? (config.undone === undefined && config.model === 'gpt-5.6-luna' ? answer : undefined)
+  const cases = [
+    ['a non-zero exit', { prompt: noBlock, exit: call => call.what === 'debug prompt-input' && call.model === 'gpt-5.6-luna' ? 1 : undefined }],
+    ['an unknown form', { prompt: luna(JSON.stringify([{ type: 'mystery' }])) }],
+    ['a forbidden tool', { prompt: luna(withFunction('apply_patch')) }],
+  ]
+  for (const [label, answers] of cases) {
+    await assert.rejects(setup(scratch(t), fakeCodex({ answers })), error => {
+      assert.equal(error.code, 'acp/native-off-unavailable', label)
+      assert.match(error.message, /no model could be checked/, label)
+      assert.equal(error.models, undefined, label)
+      return true
+    })
+  }
+  // Every copy model refused for another reason than a missing tool block: refused, not unverifiable.
+  await refused(setup(scratch(t), fakeCodex({ answers: { exit: call => call.what === 'debug prompt-input' ? 1 : undefined } })), /no model could be checked/)
+})
+
+test('BF-2 a deadline during the skills reads or the per-model reads refuses as a deadline, never as "no model could be checked"', async t => {
+  const LATE = 1e12
+  // Step 4: the clock passes the deadline once the catalog was read.
+  const step4 = fakeCodex()
+  await refused(setup(scratch(t), step4, { now: () => step4.calls.some(call => call.what === 'debug models') ? LATE : 0 }), /in time/)
+  assert.equal(step4.calls.some(call => call.what === 'debug prompt-input'), false)
+  // Step 5: sol shows no tool block, luna reads the skills; the clock passes the deadline after
+  // sol's per-model read, before luna's.
+  const step5 = fakeCodex({ answers: { prompt: ({ undone, model }) => undone === undefined && model === 'gpt-6.2-sol' ? '[]' : undefined } })
+  const solReads = () => step5.calls.filter(call => call.what === 'debug prompt-input' && call.model === 'gpt-6.2-sol').length
+  await refused(setup(scratch(t), step5, { now: () => solReads() >= 2 ? LATE : 0 }), /in time/)
 })
 
 test('N4b the probe: skills read on the first copy model with a tool block, the final read and every effect on a checked model with apply_patch; CODEX_CONFIG names no model', async t => {
@@ -183,6 +231,8 @@ test('N4b the probe: skills read on the first copy model with a tool block, the 
   const skip = fakeCodex({ homeDefault: KEPT, answers: { prompt: ({ undone, model }) => undone === undefined && model === 'gpt-6.2-sol' ? '[]' : undefined } })
   const result = await setup(scratch(t), skip)
   assert.deepEqual(result.models, ['gpt-5.6-luna'])
+  assert.deepEqual(result.unverified, ['gpt-6.2-sol'])
+  assert.deepEqual(launched.unverified, [])
   assert.deepEqual(skip.calls.filter(call => call.what === 'debug prompt-input').slice(0, 2).map(call => call.model), ['gpt-6.2-sol', 'gpt-5.6-luna'])
 })
 
@@ -733,7 +783,7 @@ test('K2c a home default with no tool block: a checked model opens OFF; `default
   // A scheduled turn on a checked model opens OFF on the bridge alone, with one prompt.
   const a = homeDefaultWorld(t)
   const first = await turnOn(a.w, a.w.chat('direct'), scheduled('checked'), { model: 'gpt-6.2-sol' })
-  assert.equal(finishOf(first) === 'error', false, JSON.stringify(textOf(first)))
+  assert.equal(finishOf(first)?.kind === 'error', false, JSON.stringify(textOf(first)))
   assert.deepEqual(offContexts(a.w), [true])
   assert.deepEqual(servers(a.w), [['dsh']])
   assert.equal(promptPids(a.w).length, 1)
@@ -757,6 +807,86 @@ test('K2c a home default with no tool block: a checked model opens OFF; `default
   assert.deepEqual(offContexts(c.w), [false])
   assert.equal(promptPids(c.w).length, 1)
   assert.equal(c.fake.calls.length, 0)
+})
+
+// BF-1 and (b): a Codex whose copy models (`noBlock` picks them) answer with no tool block. The
+// OFF spawn runs the real checks; `catalog` (a real Catalog) keeps the measured set on disk.
+function noBlockWorld(t, noBlock, { catalog } = {}) {
+  const fake = fakeCodex({ homeDefault: KEPT, answers: { prompt: ({ undone, model }) => undone === undefined && model !== undefined && noBlock(model) ? '[]' : undefined } })
+  const w = world(t, {
+    identity: OFF, start: KEPT,
+    offSpawn: (context, launch) => nativeOffLaunch(launch, { cwd: context.cwd, dir: join(context.cwd, '.codex-native-off'), kept: [KEPT], run: fake.run, signal: context.signal }),
+  })
+  if (catalog !== undefined) w.codex.catalog = catalog
+  return { w, fake }
+}
+function savedCatalog(t, { measured } = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'codex-native-catalog-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  writeFileSync(join(home, 'acp-codex.json'), `${JSON.stringify({ key: 'codex-test', at: Date.now(), start: null, models: [{ id: 'default', name: 'Codex' }], ...(measured ? { measured } : {}) })}\n`)
+  const make = () => new Catalog({ id: 'acp-codex', name: 'Codex', defaultName: 'Codex', fallback: [{ id: 'default', name: 'Codex' }], home, key: () => 'codex-test', spawn: () => { throw new Error('no probe here') } })
+  return { home, make }
+}
+
+test('K2d every model of the copy shows no tool block (B1-4): the OFF turn runs as today in the same turn, no notice; the models read kept; the next turn makes no check', async t => {
+  const { w, fake } = noBlockWorld(t, () => true)
+  const first = await turnOn(w, w.chat('direct'), scheduled('scheduled'), { model: 'gpt-6.2-sol' })
+  assert.notEqual(finishOf(first)?.kind, 'error', JSON.stringify(textOf(first)))
+  assert.equal(textOf(first).includes(NOTICE), false)
+  assert.deepEqual(offContexts(w), [true, false])
+  assert.deepEqual(servers(w), [[]])
+  assert.equal(promptPids(w).length, 1)
+  assert.equal(w.adapter.live.get('direct').nativeKept, true)
+  assert.equal(w.adapter.live.get('direct').nativeOff, false)
+  for (const slug of CHECKED) assert.equal(w.adapter.nativeKeptRoute(`acp-codex/${slug}`), true, slug)
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-6-astra'), false)
+  const calls = fake.calls.length
+  await turnOn(w, w.chat('second'), scheduled('again'), { model: 'gpt-6.2-sol' })
+  assert.equal(fake.calls.length, calls)
+  assert.deepEqual(offContexts(w), [true, false, false])
+  assert.equal(promptPids(w).length, 2)
+  // `default` with an unknown start model in such a home: today's launch in the same turn too.
+  const b = noBlockWorld(t, () => true)
+  const fallback = await turnOn(b.w, b.w.chat('direct'), scheduled('default'))
+  assert.notEqual(finishOf(fallback)?.kind, 'error', JSON.stringify(textOf(fallback)))
+  assert.equal(textOf(fallback).includes(NOTICE), false)
+  assert.deepEqual(offContexts(b.w), [true, false])
+  assert.equal(promptPids(b.w).length, 1)
+  // A Stop during the checks stays a Stop.
+  const c = noBlockWorld(t, () => true)
+  const controller = new AbortController()
+  controller.abort()
+  const stopped = await turnOn(c.w, c.w.chat('direct'), scheduled('stopped'), { model: 'gpt-6.2-sol', signal: controller.signal })
+  assert.deepEqual(promptPids(c.w), [])
+  assert.equal(c.w.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), false, JSON.stringify(textOf(stopped)))
+})
+
+test('K2e (b) one model with no tool block beside a checkable one: the OFF turn on it runs as today, the checkable one opens OFF, the row locks only the no-block model; the set is kept on disk', async t => {
+  const saved = savedCatalog(t)
+  const { w } = noBlockWorld(t, model => model === 'gpt-6.2-sol', { catalog: saved.make() })
+  const first = await turnOn(w, w.chat('sol'), scheduled('on sol'), { model: 'gpt-6.2-sol' })
+  assert.notEqual(finishOf(first)?.kind, 'error', JSON.stringify(textOf(first)))
+  assert.equal(textOf(first).includes(NOTICE), false)
+  assert.deepEqual(offContexts(w), [true, false])
+  assert.deepEqual(servers(w), [[]])
+  assert.equal(promptPids(w).length, 1)
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), true)
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-5.6-luna'), false)
+  const luna = await turnOn(w, w.chat('luna'), scheduled('on luna'), { model: 'gpt-5.6-luna' })
+  assert.notEqual(finishOf(luna)?.kind, 'error', JSON.stringify(textOf(luna)))
+  assert.deepEqual(offContexts(w), [true, false, true])
+  assert.deepEqual(servers(w).at(-1), ['dsh'])
+  assert.equal(promptPids(w).length, 2)
+  assert.equal(w.adapter.live.get('luna').nativeOff, true)
+  // luna's check measured sol again (still no tool block): sol stays kept, luna stays checkable.
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), true)
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-5.6-luna'), false)
+  // After an app restart the row reads the set from the catalog's file at once.
+  const after = world(t, { identity: OFF })
+  after.codex.catalog = saved.make()
+  assert.equal(after.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), true)
+  assert.equal(after.adapter.nativeKeptRoute('acp-codex/gpt-5.6-luna'), false)
+  assert.deepEqual(JSON.parse(readFileSync(join(saved.home, 'acp-codex.json'), 'utf8')).measured.models, ['gpt-6.2-sol'])
 })
 
 test('K3 a live OFF process asked for gpt-5.5 is remade with today\'s launch; the OFF PID gets no prompt', async t => {
@@ -848,7 +978,7 @@ function applied(t, { isolated }) {
     account: async () => undefined,
     profileCheck: () => true,
   })
-  return { root, home, logs, service: services.acpAgents, codex: adapter.agents.get('acp-codex') }
+  return { root, home, logs, adapter, service: services.acpAgents, codex: adapter.agents.get('acp-codex') }
 }
 
 test('BD-4 apply(): nativeModelKept and endNative are wired; the OFF spawn refuses without chat profiles and checks in the ACP folder with the kept list', async t => {
@@ -882,4 +1012,10 @@ test('BD-4 apply(): nativeModelKept and endNative are wired; the OFF spawn refus
   assert.ok(launched.profileModes)
   assert.ok(a.logs.some(line => /Codex runs with its own tools off; .*models 2\/3$/.test(line)), a.logs.join('\n'))
   assert.equal(a.logs.some(line => line.includes('gpt-5.5 could not be checked')), false)
+  assert.equal(a.logs.some(line => line.includes('gpt-5.5 shows no tools')), false)
+  assert.deepEqual(launched.unverified, [])
+  // A measured set recorded through the adapter reads kept in the service (BF-1).
+  a.adapter.recordMeasured(a.codex, ['gpt-6.2-sol'])
+  assert.equal(a.service.nativeModelKept('acp-codex/gpt-6.2-sol'), true)
+  assert.equal(a.service.nativeModelKept('acp-codex/gpt-5.6-luna'), false)
 })

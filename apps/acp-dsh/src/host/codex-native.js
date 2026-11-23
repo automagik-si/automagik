@@ -9,9 +9,14 @@
 // copy of `codex debug models` with that field cleared. Each model in the copy is checked once
 // per spawn; one that fails is not offered while OFF. A model on the agent row's
 // `nativeKeptModels` (Codex shows its tools for it nowhere a check can read) never reaches this
-// path: it launches as today, with Codex's own tools. The checks never read the Codex home's own
-// default model (it may be a kept one): each prompt read names a model of the copy, and the
-// process's config names none, so DSH's `default` stays Codex's own start model.
+// path: it launches as today, with Codex's own tools. A copy model whose read answers with no
+// tool block at all is the same kind, measured (B1-4 (b)): the setup returns it beside the
+// checked models, the adapter keeps it like `nativeKeptModels` and its turns run as today. When
+// every copy model answers so, the setup rejects with `acp/native-off-unverifiable` instead of
+// refusing. Only that exact answer counts: an exit code, a form this code cannot read, a
+// forbidden tool, a deadline or a Stop still refuse (LQ1). The checks never read the Codex
+// home's own default model (it may be a kept one): each prompt read names a model of the copy,
+// and the process's config names none, so DSH's `default` stays Codex's own start model.
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -34,6 +39,8 @@ export const NATIVE_OFF_NESTED = Object.freeze(['list_mcp_resources', 'list_mcp_
 /** Dropped from each model's `experimental_supported_tools` in the catalog copy. */
 export const CATALOG_DROPS = Object.freeze(['send_message_to_user_async', 'clock'])
 export const NATIVE_OFF_UNAVAILABLE = 'acp/native-off-unavailable'
+/** Every copy model answered with no tool block: nothing to check, the models run as today. */
+export const NATIVE_OFF_UNVERIFIABLE = 'acp/native-off-unverifiable'
 export const NATIVE_OFF_DEADLINE_MS = 60_000
 export const CATALOG_MAX_AGE_MS = 24 * 3600_000
 
@@ -46,6 +53,14 @@ export function unavailable(reason, cause) {
   const text = String(reason ?? 'the check failed').slice(0, 200)
   return Object.assign(new Error(text), { code: NATIVE_OFF_UNAVAILABLE, reason: text, ...(cause?.stopped === true ? { stopped: true } : {}) })
 }
+
+/** Every model of the copy answered with no tool block: `models` run as today (B1-4). */
+function unverifiable(models) {
+  return Object.assign(new Error('no model of this Codex shows its tools'), { code: NATIVE_OFF_UNVERIFIABLE, models: [...models] })
+}
+
+/** A read Codex answered with no tool block at all (image.js readOffered), and nothing else. */
+const noBlock = error => error?.kind === 'unsupported' && error.noBlock === true
 
 /**
  * The catalog slug of a codex-acp `model` option value. codex-acp 2.9.0 offers bare slugs
@@ -200,20 +215,28 @@ async function setupOnce(launch, { cwd, dir, kept = [], signal, run = execFile, 
   let catalog = writeCatalog(dir, copy)
   // 4. The person's own skills, from two reads of a prompt, each off by name. Skills are not per
   // model: the reads name the first model of the copy whose prompt shows a tool block, never the
-  // home's default. When none shows one, no model can be checked (LQ1).
+  // home's default. A read Codex answered and refused moves to the next model; a deadline or a
+  // Stop refuses at once. When every model answered with no tool block, none can be checked and
+  // none is refused (B1-4); any other end is a refusal (LQ1).
   let skills = []
   const skillRead = slug => cli(['debug', 'prompt-input'], `the offered tools of ${slug}`, { ...nativeOffOverrides({ servers, extras, skills, project, catalog: catalog.path }), model: slug })
   let reader
   let first
+  const blockless = []
   for (const model of copy.models) {
     try {
       first = readOffered(await skillRead(model.slug))
       reader = model.slug
       break
     } catch (error) {
-      if (error?.kind !== 'unsupported' && error?.code !== NATIVE_OFF_UNAVAILABLE) throw error
+      if (error?.kind !== 'unsupported') throw error
       if (signal?.aborted) throw unavailable('the check was stopped', { stopped: true })
+      if (noBlock(error)) blockless.push(model.slug)
     }
+  }
+  if (reader === undefined && blockless.length === copy.models.length) {
+    log(`acp-dsh: Codex shows no tools to check for ${blockless.join(', ')}; they run with Codex's own tools, as before`)
+    throw unverifiable(blockless)
   }
   if (reader === undefined) throw unavailable('no model could be checked with its own tools off')
   for (let pass = 0; pass < 2; pass += 1) {
@@ -223,21 +246,28 @@ async function setupOnce(launch, { cwd, dir, kept = [], signal, run = execFile, 
     skills = [...skills, ...more]
   }
   // 5. Every model in the copy, under the whole config with that model. One that offers anything
-  // but the transport, or shows no tool block, is not offered while OFF (LQ1).
+  // but the transport, or that Codex refused, is not offered while OFF (LQ1). One that answered
+  // with no tool block is measured kept (B1-4 (b)): not in the copy the process gets, returned
+  // in `unverified`, so its turns run as today. A deadline or a Stop refuses at once.
   const models = []
+  const unverified = []
   for (const model of copy.models) {
     const config = { ...nativeOffOverrides({ servers, extras, skills, project, catalog: catalog.path }), model: model.slug }
-    let fine = false
+    let failed
     try {
       checkOffered(readOffered(await cli(['debug', 'prompt-input'], `the offered tools of ${model.slug}`, config)), OFF_RULES)
-      fine = true
     } catch (error) {
-      if (error?.kind !== 'unsupported' && error?.code !== NATIVE_OFF_UNAVAILABLE) throw error
+      if (error?.kind !== 'unsupported') throw error
       if (signal?.aborted) throw unavailable('the check was stopped', { stopped: true })
+      failed = error
     }
-    if (fine) models.push(model.slug)
-    else log(`acp-dsh: Codex model ${model.slug} could not be checked with its own tools off; it is not offered while they are off`)
+    if (failed === undefined) models.push(model.slug)
+    else if (noBlock(failed)) {
+      unverified.push(model.slug)
+      log(`acp-dsh: Codex model ${model.slug} shows no tools to check; it runs with Codex's own tools, as before`)
+    } else log(`acp-dsh: Codex model ${model.slug} could not be checked with its own tools off; it is not offered while they are off`)
   }
+  if (models.length === 0 && unverified.length === copy.models.length) throw unverifiable(unverified)
   if (models.length === 0) throw unavailable('no model could be checked with its own tools off')
   // 6. The final copy holds the checked models only; older copies go after a day.
   if (models.length !== copy.models.length) {
@@ -260,7 +290,7 @@ async function setupOnce(launch, { cwd, dir, kept = [], signal, run = execFile, 
     if (!gained(offered, shown, effect.gains)) throw unavailable(`Codex ignores ${effect.name}`)
   }
   log(`acp-dsh: Codex runs with its own tools off; it offers ${offered.tools.join(', ')} (exec reaches ${offered.nested.join(', ')}); models ${models.length}/${listedCount}`)
-  return { overrides, offered, models, catalog }
+  return { overrides, offered, models, unverified, catalog }
 }
 
 // One setup at a time per Codex home: several OFF spawns at once never run their CLI calls
@@ -271,8 +301,10 @@ const chains = new Map()
 /**
  * The checks an OFF spawn rests on, against the Codex this spawn starts (its env, its home)
  * from the Session's real folder. Nothing is cached: every spawn checks again. Resolves
- * `{ overrides, offered, models, catalog: { path, bytes, sha256 } }`; rejects with
- * `code: 'acp/native-off-unavailable'` and the reason.
+ * `{ overrides, offered, models, unverified, catalog: { path, bytes, sha256 } }` (`unverified`:
+ * the copy models measured with no tool block); rejects with `code: 'acp/native-off-unavailable'`
+ * and the reason, or with `code: 'acp/native-off-unverifiable'` and `models` when every copy
+ * model answered with no tool block.
  * @param {{ command: string, args?: string[], env?: Record<string, string> }} launch
  */
 export function nativeOffSetup(launch, options = {}) {
@@ -293,7 +325,7 @@ export function nativeOffSetup(launch, options = {}) {
       })
       return await setupOnce(launch, options)
     } catch (error) {
-      if (error?.code === NATIVE_OFF_UNAVAILABLE) throw error
+      if (error?.code === NATIVE_OFF_UNAVAILABLE || error?.code === NATIVE_OFF_UNVERIFIABLE) throw error
       throw unavailable(error?.message ?? error, error)
     } finally {
       release()
@@ -305,12 +337,12 @@ export function nativeOffSetup(launch, options = {}) {
 /**
  * The launch of an OFF Codex process: the checked overrides as its CODEX_CONFIG, and what the
  * adapter verifies before it starts it (the folder the checks ran in, the checked models and
- * the catalog bytes a fork may need again).
+ * the catalog bytes a fork may need again), with the models measured kept (`unverified`).
  */
 export async function nativeOffLaunch(launch, { cwd, ...options }) {
-  const { overrides, models, catalog } = await nativeOffSetup(launch, { cwd, ...options })
+  const { overrides, models, unverified, catalog } = await nativeOffSetup(launch, { cwd, ...options })
   return {
     command: launch.command, args: launch.args, env: { ...launch.env, CODEX_CONFIG: JSON.stringify(overrides) },
-    nativeOff: true, checkedCwd: cwd, models, offCatalog: catalog,
+    nativeOff: true, checkedCwd: cwd, models, unverified, offCatalog: catalog,
   }
 }

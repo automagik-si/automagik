@@ -109,6 +109,17 @@ export function isModel(model) {
   return reasoning.defaultEffort === undefined || ids.includes(reasoning.defaultEffort)
 }
 
+// A model slug as Codex names it (codex-native.js modelPart).
+const SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const slugsOf = models => [...new Set((Array.isArray(models) ? models : []).filter(slug => typeof slug === 'string' && SLUG.test(slug)))]
+
+/** A measured set as `recordMeasured` keeps it ({ key, at, models }), else undefined. */
+function measuredOf(value) {
+  if (value === null || typeof value !== 'object' || !isText(value.key) || !Number.isFinite(value.at)) return undefined
+  if (!Array.isArray(value.models) || slugsOf(value.models).length !== value.models.length) return undefined
+  return { key: value.key, at: value.at, models: [...value.models] }
+}
+
 export class Catalog {
   /**
    * @param {{
@@ -124,6 +135,10 @@ export class Catalog {
     this.waitMs = spec.waitMs ?? LIST_WAIT_MS
     this.file = spec.home ? join(spec.home, `${spec.id}.json`) : undefined
     this.saved = this.read()
+    // The models the last check of this agent with its own tools off measured with no tool block
+    // (Codex, codex-native.js; #1564 B1-4): kept beside the start model, so the Details row reads
+    // them right after a restart. Read for the release that measured them, and for a day.
+    this.measured = measuredOf(this.saved?.measured)
     this.live = undefined
     this.probing = undefined
     this.listed = undefined
@@ -157,12 +172,13 @@ export class Catalog {
     }
   }
 
-  write(key, models, start = null) {
+  write(key, models, start = null, at = this.now()) {
     if (this.file === undefined) return
     try {
       mkdirSync(this.spec.home, { recursive: true })
       const tmp = `${this.file}.${process.pid}.tmp`
-      writeFileSync(tmp, `${JSON.stringify({ key, at: this.now(), start, models: models.map(({ probed, ...model }) => model) }, null, 2)}\n`)
+      const measured = this.measured === undefined ? {} : { measured: this.measured }
+      writeFileSync(tmp, `${JSON.stringify({ key, at, start, models: models.map(({ probed, ...model }) => model), ...measured }, null, 2)}\n`)
       renameSync(tmp, this.file)
     } catch (error) {
       this.spec.log?.(`could not keep ${this.spec.name}'s models: ${error?.message ?? error}`)
@@ -360,6 +376,35 @@ export class Catalog {
   ownModel() {
     const start = this.live?.start ?? this.saved?.start
     return typeof start === 'string' ? start : undefined
+  }
+
+  /**
+   * The models measured kept now: recorded for the release installed now, less than a day ago.
+   * Anything else, or a failure, is none.
+   */
+  measuredKept() {
+    try {
+      const measured = this.measured
+      if (measured === undefined || measured.key !== this.spec.key()) return []
+      const age = this.now() - measured.at
+      return age >= 0 && age < STALE_MS ? [...measured.models] : []
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Record the models a check measured with no tool block, replacing the last record. It is
+   * written into the kept file without changing the catalog's own age; with no kept file yet it
+   * is held here and the next probe writes it.
+   */
+  recordMeasured(models) {
+    let key
+    try { key = this.spec.key() } catch { return }
+    if (!isText(key)) return
+    this.measured = { key, at: this.now(), models: slugsOf(models) }
+    const saved = this.saved
+    if (saved !== undefined && saved.start !== undefined && typeof saved.at === 'number') this.write(saved.key, saved.models, saved.start, saved.at)
   }
 
   /** One model by id, or undefined when the agent does not offer it. */
