@@ -1,7 +1,7 @@
 // The catalog of an agent's models and efforts: read from the agent, kept on disk, stood in for
 // while the agent has not answered.
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -147,7 +147,8 @@ test('a kept catalog from the release installed now is not probed again at start
   const { writeFileSync } = await import('node:fs')
   const home = scratch()
   t.after(() => rmSync(home, { recursive: true, force: true }))
-  writeFileSync(join(home, 'acp-test.json'), JSON.stringify({ key: 'v1', at: Date.now() - 60 * 60 * 1000, models: [{ id: 'default', name: 'Kept' }] }))
+  // #1564 PR B (B2-2 (b)): this release keeps the start model too; a file without it is read again once.
+  writeFileSync(join(home, 'acp-test.json'), JSON.stringify({ key: 'v1', at: Date.now() - 60 * 60 * 1000, start: null, models: [{ id: 'default', name: 'Kept' }] }))
   let spawned = 0
   const same = catalog(home, { key: () => 'v1', spawn: () => { spawned++; return fake } })
   t.after(() => same.dispose())
@@ -539,4 +540,70 @@ test('a refresh that fails during effort reads restores the last complete catalo
   await refresh
   assert.deepEqual(made.current(), complete)
   assert.equal(readFileSync(made.file, 'utf8'), disk)
+})
+
+test('the models a Codex check measured with no tool block are kept beside the start model, for the release that measured them and a day (#1564 BF-1)', async (t) => {
+  const home = scratch()
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const file = join(home, 'acp-test.json')
+  writeFileSync(file, `${JSON.stringify({ key: 'v1', at: 5, start: 'fake-large', models: [{ id: 'fake-large', name: 'Fake large' }] })}\n`)
+  let now = 1_000_000
+  const first = catalog(home, { now: () => now })
+  assert.deepEqual(first.measuredKept(), [])
+  first.recordMeasured(['gpt-6.2-sol', 'gpt-6.2-sol', 'bad slug', 42])
+  assert.deepEqual(first.measuredKept(), ['gpt-6.2-sol'])
+  const kept = JSON.parse(readFileSync(file, 'utf8'))
+  // The catalog's own age, start model and models are left as they were.
+  assert.equal(kept.at, 5)
+  assert.equal(kept.start, 'fake-large')
+  assert.deepEqual(kept.models, [{ id: 'fake-large', name: 'Fake large' }])
+  assert.deepEqual(kept.measured, { key: 'v1', at: now, models: ['gpt-6.2-sol'] })
+  // After a restart it is read from the file at once.
+  const next = catalog(home, { now: () => now })
+  assert.deepEqual(next.measuredKept(), ['gpt-6.2-sol'])
+  assert.equal(next.ownModel(), 'fake-large')
+  // Another release does not read it; neither does anyone a day later.
+  assert.deepEqual(catalog(home, { key: () => 'v2', now: () => now }).measuredKept(), [])
+  now += STALE_MS
+  assert.deepEqual(next.measuredKept(), [])
+  // A later measurement replaces it, an empty one included.
+  next.recordMeasured(['gpt-5.6-luna'])
+  assert.deepEqual(catalog(home, { now: () => now }).measuredKept(), ['gpt-5.6-luna'])
+  next.recordMeasured([])
+  assert.deepEqual(catalog(home, { now: () => now }).measuredKept(), [])
+  // A measured entry of another shape is ignored; the catalog itself is still read.
+  writeFileSync(file, `${JSON.stringify({ key: 'v1', at: 5, start: 'fake-large', models: [{ id: 'fake-large', name: 'Fake large' }], measured: { key: 'v1', at: now, models: 'gpt-6.2-sol' } })}\n`)
+  const odd = catalog(home, { now: () => now })
+  assert.deepEqual(odd.measuredKept(), [])
+  assert.equal(odd.ownModel(), 'fake-large')
+  // With no kept catalog yet it holds in memory, and the next probe's write keeps it with the models.
+  const empty = scratch()
+  t.after(() => rmSync(empty, { recursive: true, force: true }))
+  const fresh = catalog(empty, { now: () => now })
+  fresh.recordMeasured(['gpt-6.2-sol'])
+  assert.deepEqual(fresh.measuredKept(), ['gpt-6.2-sol'])
+  assert.throws(() => readFileSync(join(empty, 'acp-test.json')), { code: 'ENOENT' })
+  fresh.write('v1', [{ id: 'fake-large', name: 'Fake large', probed: true }], 'fake-large')
+  const written = JSON.parse(readFileSync(join(empty, 'acp-test.json'), 'utf8'))
+  assert.equal(written.at, now)
+  assert.deepEqual(written.measured.models, ['gpt-6.2-sol'])
+  assert.deepEqual(catalog(empty, { now: () => now }).measuredKept(), ['gpt-6.2-sol'])
+})
+
+test('the Details row reads the measured models whatever their age, never another release\'s (#1564 BG-3)', async (t) => {
+  const home = scratch()
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const file = join(home, 'acp-test.json')
+  writeFileSync(file, `${JSON.stringify({ key: 'v1', at: 5, start: 'fake-large', models: [{ id: 'fake-large', name: 'Fake large' }] })}\n`)
+  let now = 1_000_000
+  const made = catalog(home, { now: () => now })
+  made.recordMeasured(['gpt-6.2-sol'])
+  now += STALE_MS + 60_000
+  // A turn checks again after a day; the row stays locked.
+  assert.deepEqual(made.measuredKept(), [])
+  assert.deepEqual(made.measuredKept({ anyAge: true }), ['gpt-6.2-sol'])
+  // After a restart too, read from the file.
+  assert.deepEqual(catalog(home, { now: () => now }).measuredKept({ anyAge: true }), ['gpt-6.2-sol'])
+  // Another release (a Codex or connector update) is read by neither.
+  assert.deepEqual(catalog(home, { key: () => 'v2', now: () => now }).measuredKept({ anyAge: true }), [])
 })

@@ -60,7 +60,7 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
   const modelOption = run.option('model')
   const startEffort = reasoningOf(run.option('thought_level'))
   if (modelOption === undefined) {
-    const state = { models: [{ id: DEFAULT_MODEL, name: defaultName, reasoning: startEffort, probed: true }], complete: true }
+    const state = { models: [{ id: DEFAULT_MODEL, name: defaultName, reasoning: startEffort, probed: true }], complete: true, start: null }
     seen(state)
     return state
   }
@@ -73,7 +73,8 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
   for (const model of models) {
     if (model.id === start) Object.assign(model, { reasoning: startEffort, probed: true })
   }
-  const state = { models, complete: false }
+  // The model the agent itself starts on: what DSH's `default` is for it (adapter.js nativeKept).
+  const state = { models, complete: false, start: typeof start === 'string' ? start : null }
   seen(state)
   for (const model of models) {
     if (model.probed) continue
@@ -91,7 +92,7 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
 
 /**
  * @typedef {{ id: string, name: string, description?: string, reasoning?: { efforts: { id: string, name: string, description?: string }[], defaultEffort?: string }, probed?: boolean }} CatalogModel
- * @typedef {{ models: CatalogModel[], complete: boolean }} CatalogState
+ * @typedef {{ models: CatalogModel[], complete: boolean, start?: string | null }} CatalogState
  */
 
 const isText = value => typeof value === 'string' && value.length > 0
@@ -106,6 +107,17 @@ export function isModel(model) {
   const ids = reasoning.efforts.map(effort => effort.id)
   if (new Set(ids).size !== ids.length) return false
   return reasoning.defaultEffort === undefined || ids.includes(reasoning.defaultEffort)
+}
+
+// A model slug as Codex names it (codex-native.js modelPart).
+const SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const slugsOf = models => [...new Set((Array.isArray(models) ? models : []).filter(slug => typeof slug === 'string' && SLUG.test(slug)))]
+
+/** A measured set as `recordMeasured` keeps it ({ key, at, models }), else undefined. */
+function measuredOf(value) {
+  if (value === null || typeof value !== 'object' || !isText(value.key) || !Number.isFinite(value.at)) return undefined
+  if (!Array.isArray(value.models) || slugsOf(value.models).length !== value.models.length) return undefined
+  return { key: value.key, at: value.at, models: [...value.models] }
 }
 
 export class Catalog {
@@ -123,13 +135,18 @@ export class Catalog {
     this.waitMs = spec.waitMs ?? LIST_WAIT_MS
     this.file = spec.home ? join(spec.home, `${spec.id}.json`) : undefined
     this.saved = this.read()
+    // The models the last check of this agent with its own tools off measured with no tool block
+    // (Codex, codex-native.js; #1564 B1-4): kept beside the start model, so the Details row reads
+    // them right after a restart. Read for the release that measured them, and for a day.
+    this.measured = measuredOf(this.saved?.measured)
     this.live = undefined
     this.probing = undefined
     this.listed = undefined
     // A kept catalog read from the release and CLI installed now is not read again at start
     // unless it is a day old: a new adapter release or an updated CLI changes the key.
     this.probedKey = this.saved?.key
-    this.readAt = typeof this.saved?.at === 'number' ? this.saved.at : undefined
+    // A file kept before the start model was recorded is read again once, so it gets one.
+    this.readAt = typeof this.saved?.at === 'number' && this.saved.start !== undefined ? this.saved.at : undefined
     this.failedAt = undefined
     this.run = undefined
     this.disposed = false
@@ -148,18 +165,20 @@ export class Catalog {
     if (this.file === undefined) return undefined
     try {
       const saved = JSON.parse(readFileSync(this.file, 'utf8'))
-      return Array.isArray(saved?.models) && saved.models.length > 0 && saved.models.every(isModel) ? saved : undefined
+      const start = saved?.start === undefined || saved.start === null || isText(saved.start)
+      return Array.isArray(saved?.models) && saved.models.length > 0 && saved.models.every(isModel) && start ? saved : undefined
     } catch {
       return undefined
     }
   }
 
-  write(key, models) {
+  write(key, models, start = null, at = this.now()) {
     if (this.file === undefined) return
     try {
       mkdirSync(this.spec.home, { recursive: true })
       const tmp = `${this.file}.${process.pid}.tmp`
-      writeFileSync(tmp, `${JSON.stringify({ key, at: this.now(), models: models.map(({ probed, ...model }) => model) }, null, 2)}\n`)
+      const measured = this.measured === undefined ? {} : { measured: this.measured }
+      writeFileSync(tmp, `${JSON.stringify({ key, at, start, models: models.map(({ probed, ...model }) => model), ...measured }, null, 2)}\n`)
       renameSync(tmp, this.file)
     } catch (error) {
       this.spec.log?.(`could not keep ${this.spec.name}'s models: ${error?.message ?? error}`)
@@ -266,8 +285,8 @@ export class Catalog {
       if (!current()) return
       if (!state.complete) throw new Error('it stopped before every model was read')
       this.readAt = this.now()
-      this.saved = { key, at: this.readAt, models: structuredClone(state.models) }
-      this.write(key, state.models)
+      this.saved = { key, at: this.readAt, start: state.start ?? null, models: structuredClone(state.models) }
+      this.write(key, state.models, state.start ?? null)
     } catch (error) {
       if (!current()) return
       if (previous !== undefined) this.live = previous
@@ -348,6 +367,46 @@ export class Catalog {
   signedOut() {
     this.access = false
     if (this.probing === undefined) this.probedKey = undefined
+  }
+
+  /**
+   * The model the agent itself starts on, as its last probe saw it (or as kept on disk), else
+   * undefined. Never waited for.
+   */
+  ownModel() {
+    const start = this.live?.start ?? this.saved?.start
+    return typeof start === 'string' ? start : undefined
+  }
+
+  /**
+   * The models measured kept now: recorded for the release installed now, less than a day ago.
+   * `anyAge` (the Details row and the Bot team's ON eligibility, which can only block; #1564
+   * BG-3) drops the day, never the release. Anything else, or a failure, is none.
+   */
+  measuredKept({ anyAge = false } = {}) {
+    try {
+      const measured = this.measured
+      if (measured === undefined || measured.key !== this.spec.key()) return []
+      if (anyAge) return [...measured.models]
+      const age = this.now() - measured.at
+      return age >= 0 && age < STALE_MS ? [...measured.models] : []
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Record the models a check measured with no tool block, replacing the last record. It is
+   * written into the kept file without changing the catalog's own age; with no kept file yet it
+   * is held here and the next probe writes it.
+   */
+  recordMeasured(models) {
+    let key
+    try { key = this.spec.key() } catch { return }
+    if (!isText(key)) return
+    this.measured = { key, at: this.now(), models: slugsOf(models) }
+    const saved = this.saved
+    if (saved !== undefined && saved.start !== undefined && typeof saved.at === 'number') this.write(saved.key, saved.models, saved.start, saved.at)
   }
 
   /** One model by id, or undefined when the agent does not offer it. */

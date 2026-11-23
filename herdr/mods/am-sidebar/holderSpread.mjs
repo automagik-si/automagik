@@ -12,6 +12,8 @@
 // documented in README. Pure: no `herdr`, no `node:` import, so the CLI and the tests share it.
 // Apache-2.0.
 
+import { attachKey } from "./attach.js";
+
 /** The holder pool's file under the app home (beside the attach and workers ledgers). */
 export const HOLDERS_FILE = "automagik-herdr/holders.json";
 /** The one holder before the lead adds another: this computer's own hc core. */
@@ -149,16 +151,28 @@ export function spreadSummary({ config, counts = new Map() } = {}) {
     largest: rows.reduce((n, r) => Math.max(n, r.count), 0), limit: rows[0]?.limit ?? DEFAULT_HOLDER_LIMIT };
 }
 
-/** One holder-loss record. Never a path, a socket or an environment value: a holder's name, the bots it took. */
-export function lossEvent({ at = new Date().toISOString(), holder = LOCAL_HOLDER, agents = [], reason = "holder_lost" } = {}) {
+/** A holder's name, its bots and optional seat identities. Never a path, socket, address or environment value. */
+export function lossEvent({ at = new Date().toISOString(), holder = LOCAL_HOLDER, agents = [], reason = "holder_lost", seats } = {}) {
   const ids = [...new Set((agents ?? []).map((a) => (typeof a === "string" ? a : a?.bot)).filter((x) => typeof x === "string" && x))].sort();
-  return { v: 1, at: String(at), holder: String(holder || LOCAL_HOLDER), reason: String(reason), agents: ids };
+  const event = { v: 1, at: String(at), holder: String(holder || LOCAL_HOLDER), reason: String(reason), agents: ids };
+  if (seats) {
+    event.seats = seats.map(({ bot, core, terminal, created_ms, machine, identity }) => ({
+      bot, core, terminal, created_ms, machine: machine ?? null, ...(identity === "uncertain" ? { identity } : {}),
+    })).sort((a, b) => a.bot.localeCompare(b.bot) || a.terminal.localeCompare(b.terminal));
+  }
+  return event;
 }
 
-/** Two loss records are the same loss when the same holder took the same bots at the same time. */
-export const sameLoss = (a, b) => Boolean(a && b)
-  && a.holder === b.holder && a.reason === b.reason && a.at === b.at
-  && JSON.stringify(a.agents ?? []) === JSON.stringify(b.agents ?? []);
+/** A seat keeps its identity across observations. Older records can only be compared by their summaries. */
+export function sameLoss(a, b) {
+  if (!a || !b) return false;
+  if (Array.isArray(a.seats) && Array.isArray(b.seats)) {
+    const keys = (event) => JSON.stringify([...new Set(event.seats.map(attachKey))].sort());
+    return keys(a) === keys(b);
+  }
+  return a.holder === b.holder && a.reason === b.reason && a.at === b.at
+    && JSON.stringify(a.agents ?? []) === JSON.stringify(b.agents ?? []);
+}
 
 /** A loss record's one line for people: `holder lost: 3 agents in holder "local" (a, b, c) at …`. */
 export function lossLine(event) {

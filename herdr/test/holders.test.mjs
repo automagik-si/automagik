@@ -21,15 +21,17 @@ const burstId = (i) => `b-${"a".repeat(9)}${"bcdefghijklmn"[i]}`;
 const BURST = Array.from({ length: 13 }, (_, i) => burstId(i));
 const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
 
-function scene(t) {
+function scene(t, { folder = "proj" } = {}) {
   const root = scratchRoot(t, "hb-holders-");
   const bin = join(root, "bin"), home = join(root, "home"), app = join(root, "app"), vmBin = join(root, "vm-bin");
   for (const d of [bin, home, app, vmBin]) mkdirSync(d, { recursive: true });
   exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
   exe(join(bin, "herdr-app"), "#!/bin/sh\nexit 1\n");
+  for (const command of ["herdr-core", "systemctl"]) exe(join(bin, command), "#!/bin/sh\nexit 125\n");
+  exe(join(bin, "am"), `#!/bin/sh\nexec "${process.execPath}" "${CLI}" "$@"\n`);
   for (const a of ["claude", "codex"]) { exe(join(bin, a), "#!/bin/sh\nexit 0\n"); exe(join(vmBin, a), "#!/bin/sh\nexit 0\n"); }
   const look = { character: "star", colour: "blue" };
-  const project = scratchProject(root, "proj", { bots: { version: 1, categories: [], bots: [
+  const project = scratchProject(root, folder, { bots: { version: 1, categories: [], bots: [
     { id: MAIN, name: "Main", kind: "main", look, role: "lead", instructions: "", agent: "claude" },
     { id: MEMBER, name: "Member", kind: "member", lead: MAIN, look, role: "r", instructions: "", agent: "claude" },
     { id: WORKER, name: "Worker", kind: "member", lead: MAIN, look, role: "r", instructions: "", agent: "claude" },
@@ -42,8 +44,8 @@ function scene(t) {
     GIT_CEILING_DIRECTORIES: root, HC_SESSION: "", HC_SOCKET: "", HC_TERMINAL_ID: "", HC_TERMINAL_SOCKET: "" };
   const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
   Object.assign(env, core.env);
-  const cli = (args) => {
-    const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
+  const cli = (args, extraEnv) => {
+    const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...extraEnv }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   // A start that must be launched beside another one: no sleep, the promises settle on close.
@@ -72,7 +74,8 @@ function scene(t) {
     }
     writeFileSync(file, JSON.stringify(def));
   };
-  return { root, project, app, cli, cliAsync, state, setState, calls, rows, holdersFile, lossesFile, reservationsFile,
+  const runHint = (line) => spawnSync("/bin/sh", ["-c", line], { cwd: project, env, encoding: "utf8" });
+  return { root, project, app, cli, cliAsync, runHint, state, setState, calls, rows, holdersFile, lossesFile, reservationsFile,
     reservations, addBots };
 }
 
@@ -460,4 +463,281 @@ test("a corrupt holders.json is said, not silently replaced by one holder", (t) 
   assert.equal(start.code, 0, start.err);
   assert.match(start.err, /am: holders: the file isn't JSON/);
   assert.equal(s.rows().filter((r) => r.event === "attach" && r.machine == null).length, 1);
+});
+
+const MINUTE = 60_000;
+const launchCount = (s) => s.calls().filter((c) => c[0] === "run").length;
+
+function ok(result) {
+  assert.equal(result.code, 0, result.err);
+  return result;
+}
+
+function endInHolderLoss(s, address, changes = () => {}) {
+  s.setState((st) => {
+    const terminal = st.terminals.find((x) => x.address === address);
+    assert.ok(terminal, address);
+    Object.assign(terminal, { state: "finished", reason: "holder_lost", finished_ms: Date.now() - MINUTE });
+    changes(terminal);
+  });
+}
+
+function localLoss(t, stamp = "matching") {
+  const s = scene(t, { folder: "project with space" });
+  const created = Date.now() - 60 * MINUTE;
+  ok(s.cli(["holders", "add", "--local", "h2"]));
+  s.setState((st) => { st.runCreatedMs = created; });
+  ok(s.cli(["start", "Main", "--json"]));
+  assert.equal(s.rows().find((r) => r.bot === MAIN).created_ms, created);
+  endInHolderLoss(s, "t100", (terminal) => {
+    if (stamp === "missing") delete terminal.created_ms;
+    if (stamp === "mismatched") terminal.created_ms += 1;
+  });
+  return { s, created };
+}
+
+function pass(s, bootMs, ...flags) {
+  return ok(s.cli(["revive", "--json", "--wait", "0", ...flags], {
+    AUTOMAGIK_HERDR_BOOT_MS: String(bootMs), AUTOMAGIK_HERDR_REVIVE_SETTLE_MS: "0",
+  })).json();
+}
+
+function realPass(s, bootMs, { refused = null, launches, boot = true }) {
+  const before = launchCount(s);
+  const reply = pass(s, bootMs, ...(boot ? ["--boot"] : []));
+  assert.equal(reply.ran, true);
+  const main = reply.projects.flatMap((p) => p.results).find((r) => r.bot === MAIN);
+  assert.ok(main, JSON.stringify(reply));
+  assert.equal(main.refused, refused, main.why);
+  if (refused) assert.equal(main.outcome, "skipped");
+  else assert.ok(["fresh", "resumed"].includes(main.outcome), main.why);
+  assert.equal(launchCount(s) - before, launches);
+  return reply;
+}
+
+function sweepLoss(s) {
+  const r = ok(s.cli(["holders", "--json"]));
+  const end = s.rows().find((row) => row.bot === MAIN && row.event === "end");
+  assert.equal(end?.by, "sweep");
+  return r;
+}
+
+test("holder loss: ordinary revive refuses an unswept seat, and after sweep has nothing to bring back", (t) => {
+  const { s, created } = localLoss(t);
+  const bootMs = created + 11 * MINUTE;
+  const before = s.rows();
+  const target = pass(s, bootMs, "--dry-run").targets.find((x) => x.bot === MAIN);
+  assert.equal(target?.action, "skip");
+  assert.equal(target.refused, "ordinary_pass");
+  assert.match(target.why, /may still be running.*By hand: am restart b-aaaaaaaaaa --project '/);
+  const reply = realPass(s, bootMs, { refused: "ordinary_pass", launches: 0, boot: false });
+  assert.match(reply.projects[0].report, /Left alone: Main/);
+  assert.deepEqual(s.rows(), before);
+  sweepLoss(s);
+  assert.deepEqual(pass(s, bootMs, "--dry-run").targets, []);
+  assert.equal(ok(s.cli(["revive", "--dry-run", "--wait", "0"])).out.trim(), "There is nothing to bring back.");
+});
+
+for (const stamp of ["matching", "missing", "mismatched"]) {
+  for (const swept of [false, true]) {
+    const order = swept ? "after sweep" : "before sweep";
+    test(`holder loss: a pre-boot seat with a ${stamp} hc stamp starts once ${order}`, (t) => {
+      const { s, created } = localLoss(t, stamp);
+      const bootMs = created + 11 * MINUTE;
+      const unswept = pass(s, bootMs, "--boot", "--dry-run").targets.find((x) => x.bot === MAIN);
+      assert.equal(unswept?.action, "restart");
+      assert.equal(s.rows().some((r) => r.event === "end"), false);
+      if (swept) {
+        if (stamp === "missing") {
+          const ordinary = pass(s, bootMs, "--dry-run").targets.find((x) => x.bot === MAIN);
+          assert.equal(ordinary?.action, "skip");
+          assert.equal(ordinary.refused, "uncertain_identity");
+        }
+        sweepLoss(s);
+        const losses = ok(s.cli(["holders", "losses", "--json"])).json().losses;
+        assert.deepEqual(losses.flatMap((e) => e.seats), stamp === "mismatched" ? [] : [{
+          bot: MAIN, core: "core-holder", terminal: "t100", created_ms: created, machine: null,
+          ...(stamp === "missing" ? { identity: "uncertain" } : {}), now: "not_attached",
+        }]);
+        if (stamp === "missing") assert.match(ok(s.cli(["holders", "losses"])).out, /hc gave no creation stamp/);
+      }
+      realPass(s, bootMs, { launches: 1 });
+    });
+
+    test(`holder loss: a current-boot seat with a ${stamp} hc stamp starts zero agents ${order}`, (t) => {
+      const { s, created } = localLoss(t, stamp);
+      const bootMs = created - MINUTE;
+      const before = launchCount(s);
+      if (swept) {
+        sweepLoss(s);
+        assert.deepEqual(pass(s, bootMs).projects, []);
+      } else {
+        realPass(s, bootMs, { refused: stamp === "matching" ? "ordinary_pass" : "uncertain_identity", launches: 0, boot: false });
+      }
+      realPass(s, bootMs, { refused: swept || stamp === "matching" ? "this_boot" : "uncertain_identity", launches: 0 });
+      assert.equal(launchCount(s), before);
+    });
+  }
+}
+
+test("holder loss: plus nine minutes and the exact ten-minute boundary refuse in either sweep order", (t) => {
+  for (const swept of [false, true]) {
+    const { s, created } = localLoss(t);
+    if (swept) sweepLoss(s);
+    for (const minutes of [9, 10]) {
+      const target = pass(s, created + minutes * MINUTE, "--boot", "--dry-run").targets.find((x) => x.bot === MAIN);
+      assert.equal(target?.action, "skip");
+      assert.equal(target.refused, "inside_margin");
+    }
+    realPass(s, created + 10 * MINUTE, { refused: "inside_margin", launches: 0 });
+  }
+});
+
+test("holder loss: a failed diagnostic append leaves the sweep and boot eligibility intact", (t) => {
+  for (const eligible of [false, true]) {
+    const { s, created } = localLoss(t, "missing");
+    const bootMs = created + (eligible ? 11 : -1) * MINUTE;
+    mkdirSync(s.lossesFile);
+    assert.match(sweepLoss(s).err, /couldn't record this loss in holder-loss\.log .*am holders losses won't list it/);
+    assert.deepEqual(ok(s.cli(["holders", "losses", "--json"])).json().losses, []);
+    realPass(s, bootMs, { refused: eligible ? null : "this_boot", launches: eligible ? 1 : 0 });
+  }
+});
+
+test("holder losses: the local hint runs as printed, omits resume, and reads later ledger changes", (t) => {
+  const { s, created } = localLoss(t);
+  const finished = s.state().terminals.find((term) => term.address === "t100").finished_ms;
+  const swept = sweepLoss(s);
+  assert.match(swept.err, /Main \(b-aaaaaaaaaa\) was in local\/t100/);
+  assert.match(swept.err, /Its program may still be running/);
+  const text = ok(s.cli(["holders", "losses"])).out;
+  assert.match(text, /not attached again/);
+  assert.match(ok(s.cli(["holders"])).out, /1 lost seat.*not attached again/);
+  const json = ok(s.cli(["holders", "losses", "--json"])).out;
+  const [event] = JSON.parse(json).losses;
+  assert.equal(event.at, new Date(finished).toISOString());
+  assert.deepEqual(event.seats, [{ bot: MAIN, core: "core-holder", terminal: "t100", created_ms: created, machine: null, now: "not_attached" }]);
+  assert.ok(!json.includes(s.project) && !readFileSync(s.lossesFile, "utf8").includes(s.project));
+  const command = text.match(/By hand: (am restart .*?) \(a new conversation\)/)?.[1];
+  assert.ok(command?.endsWith(`--project '${s.project}'`), text);
+  s.setState((st) => { delete st.runCreatedMs; });
+  const before = launchCount(s);
+  const restarted = s.runHint(command);
+  assert.equal(restarted.status, 0, restarted.stderr);
+  assert.equal(launchCount(s) - before, 1);
+  assert.ok(!s.calls().filter((c) => c[0] === "run").at(-1).includes("--resume"));
+  const attached = s.rows().filter((r) => r.event === "attach" && r.bot === MAIN);
+  assert.equal(attached.length, 2);
+  const readback = ok(s.cli(["holders", "losses"])).out;
+  assert.ok(readback.includes(`attached again since (in ${attached[1].terminal})`), readback);
+  assert.doesNotMatch(readback, /By hand:/);
+  ok(s.cli(["detach", MAIN]));
+  assert.match(ok(s.cli(["holders", "losses"])).out, /detached since/);
+});
+
+test("holder losses: am start after a sweep is reported as attached again", (t) => {
+  const { s } = localLoss(t);
+  sweepLoss(s);
+  const before = launchCount(s);
+  const { terminal } = ok(s.cli(["start", MAIN, "--json"])).json();
+  assert.equal(launchCount(s) - before, 1);
+  const readback = ok(s.cli(["holders", "losses"])).out;
+  assert.ok(readback.includes(`attached again since (in ${terminal})`), readback);
+  assert.doesNotMatch(readback, /By hand:/);
+  const [loss] = ok(s.cli(["holders", "losses", "--json"])).json().losses;
+  assert.equal(loss.seats[0].now, "attached_again");
+  ok(s.cli(["detach", MAIN]));
+  assert.match(ok(s.cli(["holders", "losses"])).out, /detached since/);
+});
+
+function machineLoss(t) {
+  const s = scene(t);
+  ok(s.cli(["holders", "add", "--local", "h2"]));
+  ok(s.cli(["start", "Main", "--json"]));
+  const member = ok(s.cli(["start", "Member", "--json"])).json();
+  assert.equal(member.machine, "h2");
+  const address = `h2/${member.terminal}`;
+  endInHolderLoss(s, address);
+  return { s, address };
+}
+
+test("holder losses: the machine command runs on the linked host with its roster and no resume", (t) => {
+  const { s, address } = machineLoss(t);
+  ok(s.cli(["holders", "--json"]));
+  const text = ok(s.cli(["holders", "losses"])).out;
+  assert.ok(text.includes(`was in ${address}`), text);
+  const command = text.match(/By hand: (am restart .*?); it runs on h2 with that machine's roster/)?.[1];
+  assert.equal(command, `am restart ${MEMBER} --machine h2 --project ${s.project}`);
+  const before = launchCount(s);
+  const result = s.runHint(command);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(launchCount(s) - before, 1);
+  const run = s.calls().filter((c) => c[0] === "run").at(-1);
+  assert.equal(run[run.indexOf("--on") + 1], "h2");
+  assert.ok(!run.includes("--resume"));
+});
+
+test("holder losses: machine hints ignore a different local roster and resolve the current machine by core", (t) => {
+  const { s } = machineLoss(t);
+  ok(s.cli(["holders", "--json"]));
+  const botsPath = join(s.project, ".herdr/bots.json");
+  const roster = JSON.parse(readFileSync(botsPath, "utf8"));
+  const member = roster.bots.find((bot) => bot.id === MEMBER);
+  Object.assign(member, { name: "Local Roster Name", agent: "hermes", hermes: { home: join(s.root, "hermes"), profile: "test" } });
+  writeFileSync(botsPath, JSON.stringify(roster));
+
+  s.setState((st) => { st.machines.find((m) => m.name === "h2").name = "h3"; });
+  const hint = ok(s.cli(["holders", "losses"])).out;
+  assert.match(hint, /--machine h3 --project .*runs on h3 with that machine's roster/);
+  assert.doesNotMatch(hint, /Local Roster Name|Hermes|new conversation/);
+  s.setState((st) => { st.machines.find((m) => m.name === "h3").state = "disconnected"; });
+  assert.match(ok(s.cli(["holders", "losses"])).out, /h3 isn't connected now; the command refuses until it is/);
+  s.setState((st) => { st.machines = []; });
+  const away = ok(s.cli(["holders", "losses"])).out;
+  assert.match(away, /state unknown \(machine h2 isn't linked now\)/);
+  assert.doesNotMatch(away, /am restart/);
+});
+
+test("holder losses: a machine seat with no folder keeps both flags in a non-runnable hint", (t) => {
+  const { s } = machineLoss(t);
+  const rows = s.rows().map((r) => r.bot === MEMBER ? { ...r, project: null } : r);
+  writeFileSync(attachPath(s.app), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  ok(s.cli(["holders", "--json"]));
+  const text = ok(s.cli(["holders", "losses"])).out;
+  assert.match(text, /am restart b-bbbbbbbbbb --machine h2 --project <its folder on h2>/);
+  assert.match(text, /not runnable as printed/);
+});
+
+test("holder losses: a local paired Hermes definition has neither a restart command nor a conversation claim", (t) => {
+  const { s } = localLoss(t);
+  const path = join(s.project, ".herdr/bots.json");
+  const roster = JSON.parse(readFileSync(path, "utf8"));
+  Object.assign(roster.bots[0], { agent: "hermes", hermes: { home: join(s.root, "hermes"), profile: "test" } });
+  writeFileSync(path, JSON.stringify(roster));
+  sweepLoss(s);
+  const text = ok(s.cli(["holders", "losses"])).out;
+  assert.match(text, /doesn't cover a paired Hermes Bot/);
+  assert.doesNotMatch(text, /am restart|new conversation/);
+});
+
+test("holder losses: the locked holds path records once and legacy records give no seat hint", (t) => {
+  const { s } = localLoss(t);
+  const checked = ok(s.cli(["detach", MAIN]));
+  assert.match(checked.err, /holder lost: 1 agent/);
+  assert.equal(s.rows().find((r) => r.event === "end").by, "sweep");
+  ok(s.cli(["holders", "--json"]));
+  assert.equal(readJsonLines(s.lossesFile).length, 1);
+  appendFileSync(s.lossesFile, JSON.stringify({ v: 1, at: "unknown", holder: "legacy", reason: "holder_lost", agents: [MEMBER] }) + "\n");
+  const legacy = ok(s.cli(["holders", "losses", "--all"])).out.split('holder "legacy"')[1];
+  assert.match(legacy, /which panes is not on record/);
+  assert.doesNotMatch(legacy, /am restart/);
+});
+
+test("holder losses: a terminal id reused before the sweep doesn't count as the original seat's loss", (t) => {
+  const { s, created } = localLoss(t);
+  s.setState((st) => {
+    Object.assign(st.terminals.find((x) => x.address === "t100"), { reuseAfterGets: 0, reuseCreated: created + 1 });
+  });
+  sweepLoss(s);
+  assert.deepEqual(ok(s.cli(["holders", "losses", "--json"])).json().losses, []);
 });

@@ -18,7 +18,7 @@ import { HandoffCall } from './handoff-card.js'
 import { AppAccessCall, ComputerCallRow, ComputerHandoffCall } from './computer.js'
 import { dateLocale, t } from './i18n.js'
 import { call } from './api.js'
-import { failureLabel } from './diagnostics.js'
+import { failureClause } from './diagnostics.js'
 import { turnReasoning, thinkingStep, opensReply, stepActivity } from './turn-reasoning.js'
 import { parseReplies, relayRange, stackReplies } from '../shared/group-replies.js'
 import { FOLD_AT, FOLD_HUGE, NEVER, stripLongNote, useFold } from './fold.js'
@@ -984,7 +984,7 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
   }
   if (reply.kind === 'failed') {
     return h('div', { className: 'bt-event bt-event-error', role: 'status', title: [reply.code, reply.status, reply.text].filter(Boolean).join(' · ') },
-      t('{name} stopped: {reason}. Switch its model or ask it to go on.', { name: bot.name, reason: failureLabel(reply.code, reply.text) }))
+      t('{name} stopped: {reason}. Switch its model or ask it to go on.', { name: bot.name, reason: failureClause(reply.code, reply.text) }))
   }
   if (reply.kind === 'lookup') {
     return h('div', { className: 'bt-event' },

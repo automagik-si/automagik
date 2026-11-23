@@ -1,6 +1,7 @@
 // Prompt: one section whose text depends only on the rendering Session's own Bot
 // record, so the prefix stays byte-stable across turns and roster changes.
 import { OMNI_KIND } from './roster.js'
+import { nativeAgentOf } from '../shared/native-tools.js'
 
 const TEAM_RULES = [
   '## How your Bot team works',
@@ -56,11 +57,20 @@ export function install(rt) {
       const { name, role, instructions } = bot
       const rolePrompt = rt.roleRuntime?.acpPrompt?.(sessionId, owner)
       const needsDshTools = roleToolsInDsh(bot, sessionId)
-      return {
+      const identity = {
         name, role, instructions,
         ...(typeof rolePrompt === 'string' ? { rolePrompt } : {}),
         ...(needsDshTools ? { needsDshTools: true } : {}),
       }
+      // Identity also supplies the role on every turn. ACP asks for the switch
+      // only when it creates a process.
+      if (rt.nativeToolsEligible !== undefined) Object.defineProperties(identity, {
+        nativeTools: { get: () => rt.nativeToolsFor(sessionId) },
+        nativeToolsBlocked: { get: () => !rt.nativeToolsEligible(sessionId) },
+        // The agent the saved ON is for: acp-dsh starts an agent with its own tools only for its own.
+        nativeToolsAgent: { get: () => rt.nativeToolsEligible(sessionId) ? nativeAgentOf(bot) : undefined },
+      })
+      return identity
     })
     if (typeof off === 'function') {
       const providers = sub.acpAgents.rolePromptProviders

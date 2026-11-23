@@ -132,3 +132,21 @@ test("a loss record names the holder and the bots it took, and nothing else", ()
   assert.equal(sameLoss(e, { ...e, agents: ["b-one"] }), false);
   assert.equal(sameLoss(e, { ...e, at: "2026-11-16T10:00:01.000Z" }), false);
 });
+
+test("holder loss seats are sorted, store only identity fields, and deduplicate across observation times", () => {
+  const first = { bot: "b-one", core: "c1", terminal: "t2", created_ms: 10, machine: null };
+  const second = { bot: "b-two", core: "c2", terminal: "t1", created_ms: 20, machine: "h2", identity: "uncertain" };
+  const third = { ...first, terminal: "t3" };
+  const event = lossEvent({ agents: ["b-two", "b-one"], seats: [
+    { ...second, project: "/tmp/project", socket: "/tmp/socket", address: "h2/t1" },
+    { ...third, identity: "confirmed", env: { HOME: "/tmp/home" } }, first,
+  ] });
+  assert.deepEqual(event.seats, [first, third, second]);
+  assert.ok(sameLoss(event, { ...event, at: "different observation time", seats: [...event.seats].reverse() }));
+  assert.ok(!sameLoss(event, { ...event, seats: [first, second, { ...third, created_ms: 11 }] }));
+  assert.ok(!sameLoss(event, { ...event, seats: [first, second] }));
+  const legacy = lossEvent({ at: "unknown", holder: "h2", agents: ["b-one"], reason: "holder_unreachable" });
+  assert.ok(!Object.hasOwn(legacy, "seats"));
+  assert.ok(sameLoss(legacy, { ...legacy }));
+  assert.ok(!sameLoss(legacy, { ...legacy, at: "later" }));
+});

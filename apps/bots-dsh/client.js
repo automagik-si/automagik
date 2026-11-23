@@ -2019,6 +2019,7 @@ var ZH = {
   "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.": "无法为这个对话设置权限级别，所以代理没有在这里运行。重启 DeepSeek Harness 或更改权限级别会再试一次。",
   "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.": "DeepSeek Harness 无法确认这个对话来自哪里，所以代理没有在这里运行。请再发一次消息；如果一直这样，请重启 DeepSeek Harness。",
   "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.": "正在检查这个对话的权限级别，所以代理暂时没有在这里运行。请稍后再发一次消息。",
+  "The tools setting changed; send again.": "工具设置已更改，请重新发送。",
   "A task needs your approval": "有任务等你批准",
   "Task {title} is waiting for approval: {tool}": "任务 {title} 等你批准：{tool}",
   "a tool": "一个工具",
@@ -2740,6 +2741,8 @@ var ZH = {
   "Its group conversation could not open": "它的群聊会话打不开",
   "Its group conversation could not open, so it starts a new one next time": "它的群聊会话打不开，下次会换一个新的",
   "Its permission level could not be set here, so it took no turn": "它在这里的权限级别未能设置，所以这一轮没有发言",
+  "Codex could not turn its own tools off, so the message was not sent": "Codex 未能关闭它自己的工具，所以消息没有发送",
+  "Codex was not started because its own tools and Automagik's tools are both off": "Codex 未启动，因为它自己的工具和 Automagik 的工具都已关闭",
   // The composer's +
   "Add files": "添加文件",
   "Add photos & files": "添加照片和文件",
@@ -4027,12 +4030,17 @@ var FAILURES = {
   TRANSPORT: "Could not reach the model service",
   SESSION: "Its group conversation could not open",
   SESSION_RESET: "Its group conversation could not open, so it starts a new one next time",
-  PERMISSION: "Its permission level could not be set here, so it took no turn"
+  PERMISSION: "Its permission level could not be set here, so it took no turn",
+  // acp-dsh's Codex OFF refusal (#1564). Its message names the Details switch only in the
+  // owner's direct chat; these words, shown wherever the code is, never do.
+  "acp/native-off-unavailable": "Codex could not turn its own tools off, so the message was not sent",
+  "acp/native-off-no-bridge": "Codex was not started because its own tools and Automagik's tools are both off"
 };
 var knownFailure = (code) => Object.hasOwn(FAILURES, code ?? "") ? t(FAILURES[code]) : void 0;
 function failureLabel(code, message) {
   return knownFailure(code) ?? (message || code || t("Unknown error"));
 }
+var failureClause = (code, message) => String(failureLabel(code, message)).trimEnd().replace(/(?<![.\u3002])[.\u3002]$/, "");
 var URL_LIMIT = 7e3;
 var WHAT_MAX = 2e3;
 var PASTE_NOTE = "Omni copied the diagnostics to the clipboard. Paste them here.";
@@ -10237,7 +10245,8 @@ var approvalDetail = (entry) => entry.detail?.code || entry.shownTarget || (entr
 var HELD_NOT_SET = "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.";
 var HELD_UNREAD = "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.";
 var ACP_HELD_TEXT = "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.";
-var HELD_LINES = /* @__PURE__ */ new Set([HELD_NOT_SET, HELD_UNREAD, ACP_HELD_TEXT]);
+var NATIVE_TOOLS_CHANGED_TEXT = "The tools setting changed; send again.";
+var HELD_LINES = /* @__PURE__ */ new Set([HELD_NOT_SET, HELD_UNREAD, ACP_HELD_TEXT, NATIVE_TOOLS_CHANGED_TEXT]);
 
 // src/client/stops.js
 var heldText = (text2) => HELD_LINES.has(text2) ? t(text2) : text2;
@@ -17866,12 +17875,19 @@ function Switch({ on, label, disabled, onChange }) {
     (0, import_react42.createElement)("span", { className: "bt-switch-knob", "aria-hidden": true })
   );
 }
-function SwitchRow({ label, hint: hint3, on, disabled, onChange }) {
+function SwitchRow({ label, hint: hint3, on, disabled, onChange, details = false }) {
+  const toggle = (0, import_react42.createElement)(Switch, { on, label, disabled, onChange });
+  if (details) return (0, import_react42.createElement)(
+    "div",
+    null,
+    (0, import_react42.createElement)("div", { className: "bt-drawer-switch-head" }, (0, import_react42.createElement)("span", null, label), toggle),
+    hint3 ? (0, import_react42.createElement)("div", { className: "bt-note" }, hint3) : null
+  );
   return (0, import_react42.createElement)(
     "div",
     { className: "bt-set-row bt-bs-row" },
     (0, import_react42.createElement)("span", { className: "bt-set-copy" }, (0, import_react42.createElement)("span", { className: "bt-bs-label" }, label), hint3 ? (0, import_react42.createElement)("span", { className: "bt-set-hint" }, hint3) : null),
-    (0, import_react42.createElement)(Switch, { on, label, disabled, onChange })
+    toggle
   );
 }
 function ShapeRing({ shape, size }) {
@@ -18437,6 +18453,7 @@ label.bt-bs-row{cursor:text}
 .bt-bs-danger .bt-bs-label{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-bs-danger[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 8%,transparent)}
 .bt-bs-danger[data-confirm]:hover{background:color-mix(in srgb,var(--bt-danger) 12%,transparent)}
+.bt-drawer-switch-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .bt-switch{position:relative;flex:none;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--bt-line-2);cursor:pointer;transition:background-color .2s ease}
 .bt-switch[aria-checked=true]{background:var(--bt-accent)}
 .bt-switch:disabled{opacity:.45;cursor:default}
@@ -21853,7 +21870,7 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
     return (0, import_react49.createElement)(
       "div",
       { className: "bt-event bt-event-error", role: "status", title: [reply.code, reply.status, reply.text].filter(Boolean).join(" · ") },
-      t("{name} stopped: {reason}. Switch its model or ask it to go on.", { name: bot.name, reason: failureLabel(reply.code, reply.text) })
+      t("{name} stopped: {reason}. Switch its model or ask it to go on.", { name: bot.name, reason: failureClause(reply.code, reply.text) })
     );
   }
   if (reply.kind === "lookup") {
@@ -39110,8 +39127,74 @@ function PermissionChoiceDock({ sessionId, useRoster, actions }) {
   return (0, import_react97.createElement)("div", { className: "bt-q-dock" }, (0, import_react97.createElement)(PermissionCard, { key: bot.id, bot, catalog, roster, actions, onClose: close, onSaved: close }));
 }
 
+// src/client/native-tools-copy.js
+var nativeToolsCopy = {
+  label: "Native tools",
+  on: "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.",
+  off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.",
+  codexOn: "In its own chat with you, Codex uses its own tools (commands, file edits…). They run in Codex's own sandbox, outside Automagik's. What asks you first depends on the permission level. Turning this off stops its running session at once.",
+  codexOff: "Codex uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.",
+  modelKept: "This model can't turn its native tools off."
+};
+var ompNativeToolsCopy = {
+  on: "In its own chat with you, omp uses its own tools. They run outside Automagik's file sandbox. Turning this off stops its running session at once.",
+  off: "With this off, omp has no tools at all, so this Bot can only chat. Groups, tasks and scheduled runs are always like this. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.",
+  blocked: "Here omp has no tools, so this Bot can only chat."
+};
+var nativeToolsZh = {
+  [ompNativeToolsCopy.on]: "在它与你的单独对话中，omp 使用它自己的工具。这些工具在 Automagik 的文件沙盒之外运行。关闭后会立即停止它正在运行的会话。",
+  [ompNativeToolsCopy.off]: "关闭后，omp 没有任何工具，此 Bot 只能聊天。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
+  [ompNativeToolsCopy.blocked]: "在这里 omp 没有任何工具，此 Bot 只能聊天。",
+  [nativeToolsCopy.label]: "原生工具",
+  [nativeToolsCopy.on]: "在它与你的单独对话中，Claude Code 使用它自己的工具（Bash、Read、Edit…）。这些工具在 Automagik 的文件沙盒之外运行；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。",
+  [nativeToolsCopy.off]: "Claude Code 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
+  [nativeToolsCopy.codexOn]: "在它与你的单独对话中，Codex 使用它自己的工具（命令、文件编辑…）。这些工具在 Codex 自己的沙盒中运行，不在 Automagik 的沙盒内；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。",
+  [nativeToolsCopy.codexOff]: "Codex 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
+  [nativeToolsCopy.modelKept]: "此模型无法关闭其原生工具。",
+  "Not available at the Read only level.": "在“仅可查看”级别下不可用。",
+  "Not available: the permission level of this Bot's chat could not be read.": "不可用：无法读取此 Bot 对话的权限级别。",
+  "Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.": "此 Bot 已与他人共享，或已安装共享插件（LiveShare），因此不可用。",
+  "Not available while this Bot has shell access off or denied tools.": "此 Bot 关闭了 Shell 访问或设置了禁止使用的工具，因此不可用。",
+  "Not available for a Bot that operates Omni or that another plugin manages.": "对于操作 Omni 或由其他插件管理的 Bot 不可用。"
+};
+
+// src/shared/native-tools.js
+var NATIVE_AGENTS = Object.freeze(["acp-claude", "acp-codex", "acp-omp"]);
+var effectiveMarkOf = (bot) => markOf(bot?.model ?? bot?.appliedModel);
+var nativeAgentOf = (bot) => bot?.nativeTools === true ? bot.nativeToolsAgent ?? bot.nativeToolsKept ?? "acp-claude" : void 0;
+var nativeToolsOn = (bot) => {
+  const agent = nativeAgentOf(bot);
+  return agent !== void 0 && agent === effectiveMarkOf(bot);
+};
+var restrictedBot = (bot) => bot?.shell === false || Array.isArray(bot?.denyTools) && bot.denyTools.length > 0;
+
 // src/client/details-drawer.js
 var import_react98 = require("react");
+addStrings(nativeToolsZh);
+var NATIVE_TOOLS_HINTS = {
+  "model-kept": nativeToolsCopy.modelKept,
+  managed: "Not available for a Bot that operates Omni or that another plugin manages.",
+  shared: "Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.",
+  restricted: "Not available while this Bot has shell access off or denied tools.",
+  "read-only": "Not available at the Read only level.",
+  "level-unknown": "Not available: the permission level of this Bot's chat could not be read."
+};
+function NativeToolsRow({ bot, roster, run: run3, actions }) {
+  const mark2 = effectiveMarkOf(bot);
+  if (!NATIVE_AGENTS.includes(mark2) || bot.nativeToolsBlock === "multiuser") return null;
+  const copy2 = mark2 === "acp-omp" ? ompNativeToolsCopy : mark2 === "acp-codex" ? { on: nativeToolsCopy.codexOn, off: nativeToolsCopy.codexOff } : nativeToolsCopy;
+  const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock];
+  const on = blocked === void 0 && nativeToolsOn(bot);
+  const hint3 = blocked === void 0 ? t(on ? copy2.on : copy2.off) : mark2 === "acp-omp" ? `${t(blocked)} ${t(ompNativeToolsCopy.blocked)}` : t(blocked);
+  return (0, import_react98.createElement)(SwitchRow, {
+    details: true,
+    label: t(nativeToolsCopy.label),
+    hint: hint3,
+    on,
+    disabled: blocked !== void 0 || Boolean(roster.readOnly),
+    onChange: (value) => void run3(actions.updateBot(bot.id, { nativeTools: value }))
+  });
+}
 function transcriptOf(list, id, name, hiddenTurns = []) {
   const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline;
   if (!Array.isArray(outline)) return "";
@@ -39562,6 +39645,7 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
           (0, import_react98.createElement)("div", { className: "bt-section-title" }, t("Working folder")),
           (0, import_react98.createElement)(FolderMenu, { value: bot.workDir, actions, run: run3, wide: true, onPick: (workDir) => run3(actions.updateBot(bot.id, { workDir })) })
         ),
+        (0, import_react98.createElement)(NativeToolsRow, { key: "native-tools", bot, roster, actions, run: run3 }),
         bot.instructions ? (0, import_react98.createElement)(About, { key: "about", text: bot.instructions }) : (0, import_react98.createElement)("button", { key: "about", type: "button", className: "bt-more", onClick: () => setView("settings") }, t("Add instructions in Bot settings")),
         roster.memory === false ? null : (0, import_react98.createElement)(MemoryRow, { key: "memory", owner: { id: bot.id, name: bot.name }, actions }),
         usage ? (0, import_react98.createElement)(

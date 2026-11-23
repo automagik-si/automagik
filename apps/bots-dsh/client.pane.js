@@ -10924,6 +10924,7 @@ var ZH = {
   "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.": "无法为这个对话设置权限级别，所以代理没有在这里运行。重启 DeepSeek Harness 或更改权限级别会再试一次。",
   "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.": "DeepSeek Harness 无法确认这个对话来自哪里，所以代理没有在这里运行。请再发一次消息；如果一直这样，请重启 DeepSeek Harness。",
   "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.": "正在检查这个对话的权限级别，所以代理暂时没有在这里运行。请稍后再发一次消息。",
+  "The tools setting changed; send again.": "工具设置已更改，请重新发送。",
   "A task needs your approval": "有任务等你批准",
   "Task {title} is waiting for approval: {tool}": "任务 {title} 等你批准：{tool}",
   "a tool": "一个工具",
@@ -11645,6 +11646,8 @@ var ZH = {
   "Its group conversation could not open": "它的群聊会话打不开",
   "Its group conversation could not open, so it starts a new one next time": "它的群聊会话打不开，下次会换一个新的",
   "Its permission level could not be set here, so it took no turn": "它在这里的权限级别未能设置，所以这一轮没有发言",
+  "Codex could not turn its own tools off, so the message was not sent": "Codex 未能关闭它自己的工具，所以消息没有发送",
+  "Codex was not started because its own tools and Automagik's tools are both off": "Codex 未启动，因为它自己的工具和 Automagik 的工具都已关闭",
   // The composer's +
   "Add files": "添加文件",
   "Add photos & files": "添加照片和文件",

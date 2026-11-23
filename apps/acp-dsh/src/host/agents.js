@@ -169,10 +169,17 @@ export const AGENTS = Object.freeze({
     // index.js supplies the chat profile modes after writing the isolated home's profiles.
     // DSH's Auto is Codex's auto review. Most wanted first, the strict mode last (see above).
     modeFor: level => (level.full ? ['agent-full-access', 'workspace-write'] : level.auto ? ['agent', 'workspace-write'] : level.sandbox === 'read-only' ? ['read-only'] : ['workspace-write']),
-    // codex-acp has no switch for its built-in tools, so they stay and are named in the turn;
-    // it ignores `tools/list_changed` and a new server list on resume, so a changed tool set
+    // Codex keeps its own tools unless the Bot team's switch keeps them off for a Session; then
+    // a config checked on every spawn removes all but the bridge's transport, and the spawn is
+    // refused otherwise (codex-native.js). A model on `nativeKeptModels` always keeps them. It
+    // ignores `tools/list_changed` and a new server list on resume, so a changed tool set
     // arrives by fork (session/fork with the new servers, then session/close on the source).
     refresh: 'fork',
+    nativeSwitch: 'config',
+    // Models whose tools Codex does not show to `debug prompt-input` (not code mode; measured
+    // on codex-cli 0.171.0). The Bot team's switch does not apply to them: they launch as
+    // today, with Codex's own tools (RFC 0003, Codex amendment).
+    nativeKeptModels: Object.freeze(['gpt-5.5']),
   }),
   // Agents whose CLI is itself an ACP server (#959): `launch` is how it starts (kind `native`,
   // the CLI with these arguments), and there is no adapter package, so nothing is installed for
@@ -224,6 +231,8 @@ export const AGENTS = Object.freeze({
     installUrl: 'https://github.com/can1357/oh-my-pi',
     // `omp acp` (its help: "Run omp as an ACP (Agent Client Protocol) server over stdio").
     launch: Object.freeze({ kind: 'native', args: Object.freeze(['acp']) }),
+    nativeSwitch: 'args',
+    offArgs: Object.freeze(['--no-tools', '--no-extensions', '--no-lsp']),
     // `omp login`: "Log in to a model provider (terminal counterpart of /login)".
     signInHint: 'omp login',
     modeFor: () => ['default'],

@@ -15,6 +15,8 @@ import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { refusal } from './refusal.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
+import { markOf } from '../shared/permission-levels.js'
+import { effectiveMarkOf, nativeToolsOn, restrictedBot } from '../shared/native-tools.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import updateContract from './update-contract.json' with { type: 'json' }
 
@@ -371,6 +373,54 @@ export function install(rt) {
       state.claudeCodeMoved = true
       migrated = true
     }
+    // Existing omp Bots keep their native tools in the owner's direct chat once.
+    // Nothing to keep writes nothing: the marker set here rides the next real save, which
+    // encodes the whole state, so an omp Bot made or switched later is saved with it and
+    // starts OFF.
+    if (state.nativeToolsOmpKept !== true) {
+      let restricted = 0
+      let kept = 0
+      for (const bot of Object.values(state.bots)) {
+        if (bot.nativeTools !== undefined || markOf(bot.model ?? bot.appliedModel) !== 'acp-omp') continue
+        if (bot.shell === false || (Array.isArray(bot.denyTools) && bot.denyTools.length > 0)) {
+          restricted += 1
+          continue
+        }
+        bot.nativeTools = true
+        bot.nativeToolsKept = 'acp-omp'
+        kept += 1
+      }
+      if (restricted > 0) warn('omni-ui: %d omp Bot(s) keep native tools off: shell access off or denied tools', restricted)
+      state.nativeToolsOmpKept = true
+      if (kept > 0) migrated = true
+    }
+    // #1564: Codex's own tools became the native-tools switch, off by default. A team saved
+    // before it ran its Codex Bots on Codex's own tools; once, each keeps them in the owner's
+    // direct chat (RFC 0003, Amendment: Codex native tools). A Bot with shell access off or
+    // denied tools stays off: Codex's own tools would bypass both. As for omp, the marker
+    // rides the next real save when nothing was kept. A Bot whose ON was saved for another agent
+    // (Claude's untagged ON, omp's migrated one) and now runs on Codex ran on Codex's own tools
+    // too: its ON is moved to Codex. The app stores an OFF as no value, so a Bot turned OFF is
+    // migrated like any other; only an explicit `nativeTools: false` is left as it is.
+    if (state.nativeToolsCodexKept !== true) {
+      let restricted = 0
+      let kept = 0
+      for (const bot of Object.values(state.bots)) {
+        if (bot === null || typeof bot !== 'object' || effectiveMarkOf(bot) !== 'acp-codex') continue
+        if (bot.nativeTools === false || nativeToolsOn(bot)) continue
+        if (restrictedBot(bot)) {
+          restricted += 1
+          continue
+        }
+        bot.nativeTools = true
+        bot.nativeToolsAgent = 'acp-codex'
+        delete bot.nativeToolsKept
+        kept += 1
+      }
+      if (restricted > 0) warn('omni-ui: %d Codex Bot(s) kept off native tools: shell access off or denied tools', restricted)
+      state.nativeToolsCodexKept = true
+      if (kept > 0) migrated = true
+    }
     // A builtin pet the plugin no longer ships would draw nothing: its Bot wears Genie instead.
     // Genie kept from before its approved figure names the old atlas's version: it reads as
     // the Genie shipped now (pets.js shippedPet), whatever the file says, every time.
@@ -696,7 +746,7 @@ export function install(rt) {
     } })
   }
 
-  const save = ({ required = false, copy } = {}) => {
+  const save = ({ required = false, copy, enableNativeTools, nativeToolsAgent } = {}) => {
     if (copy !== undefined) return rt.saveCopy(copy.change, copy)
     if (stopped) return required ? Promise.reject(new Error('The Bot team cannot be saved after this host stopped.')) : writing
     refreshShellHolds(state.bots)
@@ -710,7 +760,16 @@ export function install(rt) {
       state.autoStamp = state.revision
       state.version = STATE_VERSION
       state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
-      return state
+      if (enableNativeTools === undefined) return state
+      // ON belongs to this write's encoding until the owner route receives its
+      // acknowledgement. Other saves continue to encode the live Bot record.
+      const bot = enableNativeTools
+      if (own(state.bots, bot.id) !== bot) throw refusal('The Bot team changed. Try again.')
+      // The commit point: ON is written for the agent the Bot runs on, or not at all.
+      if (nativeToolsAgent === undefined || effectiveMarkOf(bot) !== nativeToolsAgent) throw refusal('The Bot team changed. Try again.')
+      const enabled = { ...bot, nativeTools: true, nativeToolsAgent }
+      delete enabled.nativeToolsKept
+      return { ...state, bots: { ...state.bots, [bot.id]: enabled } }
     }, { required })
   }
 

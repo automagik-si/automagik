@@ -195,7 +195,31 @@ Claude Code keeps its own tools and Automagik adds its extras. The owner's words
 is to use claude code + automagik extras, not replace claude code native`s with automagik`s,
 that makes your harness lose all your power."
 
-- **The setting.** `nativeTools` in this plugin's config (the `acpAgents` service's plugin,
+- **Bot teams.** Turn on **Claude Code native tools** in the Bot's Details. The saved
+  switch applies to a new Claude Code process on the first owner turn in a fresh direct
+  conversation. Groups, shared chats, IM, schedules, tasks, subagents and history replay
+  use the DSH tool path. Read only blocks the switch and the launch. Turning it off ends
+  the Bot's Claude Code processes. The Bot team's switch supersedes hidden config for
+  the entire host once the team has registered.
+- **omp Bot teams.** The **omp native tools** switch applies on the next owner message in the
+  Bot's direct chat, subject to the permission checks. ON keeps `omp acp`. OFF is chat only,
+  with no DSH bridge. Turning it off stops that Bot's starting and live ON omp processes.
+  If native tools become unavailable before an ON process receives its first prompt, the turn
+  stops and the owner can send again. Existing eligible omp Bots keep their ON choice
+  for omp in a one-time migration.
+- **Codex Bot teams (#1564 PR B).** The **Native tools** switch keeps Codex's own tools for the
+  owner's turns in the Bot's direct chat. Every other turn, and every Codex Session without a Bot
+  identity once a team is registered, runs with Codex's own tools off: Codex works with DSH's
+  tools through the bridge and has none of its own (`src/host/codex-native.js`). Off is not Read
+  only: DSH's tools keep the Session's level and DSH's approvals. A config checked on every spawn
+  leaves only the bridge's transport (`exec`, `wait`, the three MCP resource readers), through a
+  generated model catalog without the patch tool, written to the ACP folder's `codex-native-off/`;
+  a failed check refuses the turn. Codex's own mode is set to its `read-only` id only as a backstop
+  against its own tools. A model on `nativeKeptModels` (today `gpt-5.5`) launches as before, with
+  Codex's own tools, in every Session; its switch shows OFF and locked. With no Bot team ever
+  registered, Codex runs as before. Existing Codex Bots keep their own tools once, in their own
+  chat (Bots with shell access off or denied tools excepted).
+- **Standalone ACP.** `nativeTools` in this plugin's config (the `acpAgents` service's plugin,
   `acp-dsh`), hidden from settings forms like `dshTools`. Absent (the default) or `false` is
   today's behaviour for everyone. `true` turns it on for every Claude Code Session; an object
   turns it on per Bot, by the Bot's name, or per DSH Session id. A key that says `false` wins
@@ -244,6 +268,17 @@ that makes your harness lose all your power."
 
   Manual is the guarded level; Auto is convenience, and its review sees only what reaches the
   mirror.
+
+  Codex (PR B), by switch state:
+
+  | Level | Codex OFF (DSH's tools only) | Codex ON (its own tools) |
+  |---|---|---|
+  | Read only | not offered: OFF | ON not offered; a live ON process ends |
+  | Manual | Codex mode `read-only` id (backstop); DSH's `edit`/`bash` ask in DSH | `workspace-write`; Codex's own asks reach DSH's dialog |
+  | DSH Auto review | `read-only` id, own mode never asked; DSH's Auto judges bridge calls | Codex's own mode only through the owner's Auto choice |
+  | Full | `read-only` id; DSH's tools run without asking | `agent-full-access`; nothing asks |
+
+  A kept model (`gpt-5.5`) keeps the ON column in every Session.
 - **A turn Claude Code opens itself.** A native background task or subagent can finish after its
   DSH turn ended and wake Claude Code on its own. There is no DSH step then, and none can be
   opened out of band because the DSH agent loop owns turn numbering. At Manual and Full the
@@ -320,8 +355,15 @@ differs from Claude Code and Codex:
   fails the turn. A table agent with no mode for DSH's level would say so once in the chat.
 - **No DSH tool bridge.** DSH's tools do not reach them, even with `dshTools: true`: their
   tool naming over ACP is not proven the way Claude Code's was, and an unrecognised bridge
-  call would draw two cards and ask twice. They keep their own tools; the transcript replay on
-  a model switch reaches them like any agent.
+  call would draw two cards and ask twice. The transcript replay on a model switch reaches them
+  like any agent.
+- **omp with native tools off.** In a team, an OFF chat starts as
+  `omp acp --no-tools --no-extensions --no-lsp --config <acp-state>/omp/native-off.yml`.
+  The verified per-launch overlay disables the settings that can add tools back, and the child
+  drops `PI_AUTO_QA`. The overlay leaves omp's own settings and sign-in in place. A launch with
+  an unusable overlay fails. ACP refuses permission requests and ends the process at the first
+  tool notification. The flags and settings were checked against omp 19.1.0. A custom or plugin
+  tool can act before its first notification reaches this backstop.
 
 `dshTools` (live, no schema default) is the bridge, its DSH approval, the drift detector and live
 switching above. Absent means the per-agent default. `acp-claude` bridges because its adapter can

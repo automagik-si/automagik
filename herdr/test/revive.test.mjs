@@ -183,6 +183,14 @@ test("reportLine: one line: who resumed, who is on a new conversation and why, w
   for (const word of ["/home/u", "Genie", "Dev", "Cap", "/q"]) assert.ok(!counts.includes(word), counts);
 });
 
+test("reportLine: a holder-loss restart hint shares its final period with the report (#1432)", async () => {
+  const { seatHint } = await import("../mods/am-sidebar/revive.js");
+  const bot = "b-aaaaaaaaaa", folder = "/a b", core = "c1";
+  const hint = seatHint({ seat: { bot, core }, folder, core, def: { agent: "claude" } });
+  const line = reportLine(folder, [{ name: "Main", bot, outcome: "skipped", why: `make sure it stopped first. ${hint}` }]);
+  assert.match(line, /Left alone: Main, .* \(a new conversation\)\. To keep a bot down/);
+});
+
 test("unitText: a oneshot user unit that runs revive --boot and waits for herdr-core itself; only a unit with the pack's mark is ours", () => {
   const text = unitText({ runner: "/home/u/.local/bin/automagik-herdr", env: { HERDR_APP_HOME: "/home/u/my app/100%" }, wait: 600 });
   assert.ok(text.startsWith(`${UNIT_MARK}\n[Unit]\n`), text);
@@ -2155,4 +2163,89 @@ test("revive --last: a record that isn't JSON exits 1 and says so; --last with a
     assert.match(u.err, /revive --last \[--json\]/, args.join(" "));
   }
   assert.deepEqual(s.sysCalls(), [], "service install never ran");
+});
+
+test("preBootSeat: requires a known boot and an integer stamp strictly before the ten-minute margin", async () => {
+  const { PRE_BOOT_MARGIN_MS, preBootSeat } = await import("../mods/am-sidebar/revive.js");
+  const boot = 3_600_000, minute = 60_000;
+  assert.equal(PRE_BOOT_MARGIN_MS, 10 * minute);
+  for (const [stamp, expected] of [[9, false], [10, false], [11, true]]) {
+    assert.equal(preBootSeat(boot - stamp * minute, boot), expected);
+  }
+  assert.equal(preBootSeat(undefined, boot), false);
+  assert.equal(preBootSeat(1.5, boot), false);
+  for (const invalid of [NaN, 0, undefined]) assert.equal(preBootSeat(0, invalid), false);
+});
+
+test("lostSeatRefusal: only the boot pass can use a pre-boot binding despite missing or conflicting hc stamps", async () => {
+  const { lostSeatRefusal } = await import("../mods/am-sidebar/revive.js");
+  const bootMs = 3_600_000;
+  const preBoot = { created_ms: bootMs - 11 * 60_000 };
+  const recent = { created_ms: bootMs - 9 * 60_000 };
+  const current = { created_ms: bootMs };
+  const lost = (target) => ({ reason: "holder_lost", created_ms: target.created_ms });
+  const reason = (target, get, boot, time = bootMs) => lostSeatRefusal({ target, get, boot, bootMs: time })?.code ?? null;
+  for (const get of [lost(preBoot), { reason: "holder_lost" }, { ...lost(preBoot), created_ms: 7 }, { ...lost(preBoot), created_ms: 1.5 }]) {
+    assert.equal(reason(preBoot, get, true), null);
+    assert.equal(reason(preBoot, get, false), get.created_ms === preBoot.created_ms ? "ordinary_pass" : "uncertain_identity");
+  }
+  assert.equal(reason(recent, lost(recent), true), "inside_margin");
+  assert.equal(reason(current, lost(current), true), "this_boot");
+  assert.equal(reason(current, { reason: "holder_lost" }, true), "uncertain_identity");
+  assert.equal(reason(preBoot, lost(preBoot), true, NaN), "no_boot_time");
+  assert.equal(reason({ ...preBoot, swept: true }, undefined, true), null);
+  assert.equal(reason({ ...recent, swept: true }, undefined, true), "inside_margin");
+  assert.equal(reason({ ...current, swept: true }, undefined, true), "this_boot");
+  assert.equal(reason({ ...current, swept: true }, undefined, true, 0), "no_boot_time");
+  assert.equal(reason(current, undefined, true), null);
+  assert.equal(reason(current, { reason: "finished" }, true), null);
+  assert.equal(reason(current, { reason: "finished" }, false), null);
+  const swept = reviveTargets({ swept: [{ ...current, terminal: "t1", bot: "b-aaaaaaaaaa", project: "/p" }] });
+  assert.equal(swept.targets[0].swept, true);
+});
+
+test("the revive command quotes a folder as one POSIX or zsh word", async () => {
+  const { q } = await import("../mods/am-sidebar/revive.js");
+  assert.equal(q("/a-b/0.txt"), "/a-b/0.txt");
+  assert.equal(q("/a b"), "'/a b'");
+  assert.equal(q("/it's here"), "'/it'\\''s here'");
+  assert.equal(q("=sh"), "'=sh'");
+  assert.equal(byHandCommand("b-aaaaaaaaaa", "/a b"), "am restart b-aaaaaaaaaa --project '/a b' --tree");
+});
+
+test("seatNow distinguishes a newer attachment, a detach, an exact end and missing evidence", async () => {
+  const { seatNow } = await import("../mods/am-sidebar/revive.js");
+  const seat = { bot: "b-aaaaaaaaaa", core: "c1", terminal: "t1", created_ms: 1, machine: null };
+  const attach = { ...seat, v: 1, event: "attach", project: "/p" };
+  const end = { ...attach, event: "end" };
+  const newer = { ...attach, terminal: "t2", created_ms: 2 };
+  assert.equal(seatNow([attach, end], seat).now, "not_attached");
+  assert.equal(seatNow([attach, end, newer], seat).now, "attached_again");
+  assert.equal(seatNow([attach, end, newer, { ...newer, event: "detach" }], seat).now, "detached");
+  assert.equal(seatNow([attach], seat).now, "unknown");
+  assert.equal(seatNow([end].map((row) => ({ ...row, core: "c2" })), seat).now, "unknown");
+  assert.equal(seatNow([attach, end, { ...newer, core: "c2", machine: "h2" }], seat).now, "not_attached");
+});
+
+test("seatHint chooses the roster and safe command form for the seat's recorded destination", async () => {
+  const { seatHint } = await import("../mods/am-sidebar/revive.js");
+  const bot = "b-aaaaaaaaaa";
+  const seat = { bot, core: "c1", terminal: "t1" };
+  const base = { seat, core: "c1", folder: "/a b", def: { id: bot, name: "Main", agent: "claude" } };
+  const hint = (extra) => seatHint({ ...base, ...extra });
+  assert.match(hint({}), /am restart b-aaaaaaaaaa --project '\/a b' \(a new conversation\)/);
+  assert.match(hint({ folder: null, def: undefined }), /from its project's folder: am restart b-aaaaaaaaaa/);
+  for (const core of [null, "c2"]) assert.match(hint({ core }), /its core can't be confirmed.*no command/);
+  assert.match(hint({ def: undefined }), /bots\.json can't be read.*no command/);
+  assert.match(hint({ def: null }), /no longer defines it.*no command/);
+  assert.match(hint({ def: { ...base.def, agent: "hermes", hermes: {} } }), /doesn't cover a paired Hermes Bot/);
+  assert.match(hint({ def: { ...base.def, agent: "hermes" } }), /am restart.*new conversation/);
+  const machineSeat = { ...seat, machine: "h2" };
+  const machine = new Map([["c1", { name: "h3", connected: false }]]);
+  const remote = hint({ seat: machineSeat, machines: machine, def: { agent: "hermes", hermes: {} } });
+  assert.match(remote, /--machine h3 --project '\/a b'; it runs on h3 with that machine's roster/);
+  assert.match(remote, /h3 isn't connected now/);
+  assert.doesNotMatch(remote, /Hermes|new conversation/);
+  assert.match(hint({ seat: machineSeat, machines: machine, folder: null }), /--machine h3 --project <its folder on h3>.*not runnable/);
+  assert.match(hint({ seat: machineSeat }), /machine h2 isn't linked now.*no command/);
 });

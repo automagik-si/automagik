@@ -622,6 +622,7 @@ export function install(rt) {
   }
 
   async function updateBot(id, patch, actorId, fromSessionId, options) {
+    if (Object.hasOwn(patch, 'nativeTools')) return rt.setNativeTools(id, patch, actorId)
     if (Object.hasOwn(patch, 'people')) throw refusal('Only the user can choose who may talk to ' + (rt.botOf(id)?.name ?? 'this Bot'))
     const run = () => updateBotRecord(id, patch, actorId, fromSessionId, options)
     return patch.model !== undefined || patch.effort !== undefined ? withModelChange(id, run, options?.admit !== undefined) : run()
@@ -908,6 +909,9 @@ export function install(rt) {
         else bot.shellHeld = holdBefore
       }
       throw error
+    }
+    if (bot.nativeTools === true && (shell !== undefined || denyTools !== undefined || patch.permission !== undefined)) {
+      rt.endNativeTools(bot)
     }
     // The list or the shell changed: every Session of this Bot is lifted and re-set from
     // the new record, so a shell tool added or removed here takes effect at once.

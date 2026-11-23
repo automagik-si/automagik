@@ -45,6 +45,14 @@
 // traces `own-tool-ran` with the mode it ran in; "unasked twice" runs two.
 // FAKE_ACP_REFUSE_MODES=a,b refuses those session/set_mode requests with invalidParams.
 // FAKE_ACP_IGNORE_CANCEL=1 makes it ignore `session/cancel`, as a stuck agent would.
+//
+// As codex-acp (#1564 PR B): FAKE_ACP_MODELS=a,b,c offers those model slugs instead of the fake
+// ones (each with low/medium/high efforts) and FAKE_ACP_START_MODEL picks the one a session
+// starts on. "codex-bridge <tool> [<json arguments>]" calls a bridge tool the way codex-acp
+// reports one (kind execute, `rawInput.server`, `_meta.is_mcp_tool_call`, no name);
+// "codex-edit-ask" is its patch call (an edit `tool_call`, then a permission request; the patch
+// runs only when allowed); "codex-subagent" starts one of its own sub-agents (no permission);
+// "codex-reader <server> <tool>" is one of its MCP resource readers.
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync } from 'node:fs'
 import { Readable, Writable } from 'node:stream'
@@ -52,11 +60,12 @@ import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotoc
 import { serveAgent } from './serve-agent.mjs'
 
 const EXTRA_EFFORT = process.env.FAKE_ACP_EXTRA_EFFORT
-const MODELS = [
+const MODELS = process.env.FAKE_ACP_MODELS ? process.env.FAKE_ACP_MODELS.split(',').filter(Boolean).map(value => ({ value, name: value, efforts: ['low', 'medium', 'high'], effort: 'medium' })) : [
   { value: 'fake-large', name: 'Fake Large', efforts: ['low', 'medium', 'high'], effort: 'medium' },
   { value: 'fake-small', name: 'Fake Small', description: 'Quick and cheap', efforts: ['low', 'high', ...(EXTRA_EFFORT ? [EXTRA_EFFORT] : [])], effort: 'low' },
   { value: 'fake-plain', name: 'Fake Plain', efforts: [], effort: undefined },
 ]
+const START_MODEL = MODELS.find(entry => entry.value === process.env.FAKE_ACP_START_MODEL) ?? MODELS[0]
 const OFFERS = process.env.FAKE_ACP_NO_OPTIONS !== '1'
 const DEFAULT_ROW = process.env.FAKE_ACP_NO_DEFAULT_EFFORT === '1' ? [] : [{ value: 'default', name: 'Default' }]
 const SKIP_MCP = process.env.FAKE_ACP_SKIP_MCP === '1'
@@ -204,7 +213,7 @@ const sessions = new Map()
 let created = 0
 
 function newSession(sessionId, cwd) {
-  const session = { cwd, cancelled: false, turns: 0, model: MODELS[0].value, effort: MODELS[0].effort, mode: MODES[0], mcp: new Map() }
+  const session = { cwd, cancelled: false, turns: 0, model: START_MODEL.value, effort: START_MODEL.effort, mode: MODES[0], mcp: new Map() }
   sessions.set(sessionId, session)
   return session
 }
@@ -318,6 +327,27 @@ const implementation = {
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    // omp OFF exercises permission and notification independently. The permission
+    // request comes first and neither refusal path sends a tool notification.
+    if (/omp-permission-first/.test(said)) {
+      const answer = await conn.requestPermission({
+        sessionId,
+        toolCall: { toolCallId: 'permission-first', title: 'Run echo?', kind: 'execute' },
+        options: [
+          { optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+          ...(/no-reject/.test(said) ? [] : [{ optionId: 'omp-reject', name: 'Reject', kind: 'reject_once' }]),
+        ],
+      })
+      trace({ event: 'permission-answer', answer: answer.outcome })
+      return { stopReason: 'end_turn' }
+    }
+    const firstTool = /omp-first-(tool_call(?:_update)?)/.exec(said)
+    if (firstTool) {
+      for (const id of ['first', 'second']) {
+        await update({ sessionUpdate: firstTool[1], toolCallId: id, title: 'Unexpected tool', kind: 'execute', status: 'completed' })
+      }
+      return { stopReason: 'end_turn' }
+    }
     const denies = /reviewer denies (\d+)/.exec(said)
     if (denies) {
       for (let n = 0; n < Number(denies[1]); n++) {
@@ -433,6 +463,55 @@ const implementation = {
       const outcome = answer.outcome.outcome === 'selected' ? answer.outcome.optionId : answer.outcome.outcome
       await update({ sessionUpdate: 'tool_call_update', toolCallId, status: outcome === 'yes' ? 'completed' : 'failed' })
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` MCP permission: ${outcome}.` } })
+      return { stopReason: 'end_turn' }
+    }
+    // codex-acp's own shapes (#1564 PR B), each checked before the generic "bridge" trigger.
+    const codexBridge = /codex-bridge (\S+)(?: (\{.*\}))?/.exec(said)
+    if (codexBridge !== null) {
+      const name = codexBridge[1]
+      const args = codexBridge[2] === undefined ? {} : JSON.parse(codexBridge[2])
+      const toolCallId = `codex-bridge-${session.turns}`
+      await update({ sessionUpdate: 'tool_call', toolCallId, title: `mcp.dsh.${name}`, kind: 'execute', status: 'in_progress', rawInput: { server: 'dsh', tool: name, arguments: args }, _meta: { is_mcp_tool_call: true } })
+      let text = 'the bridge is not connected'
+      const connection = session.mcp.get('dsh')
+      if (connection !== undefined) {
+        try {
+          const answer = await connection.request('tools/call', { name, arguments: args })
+          text = (answer.content ?? []).map(block => block.text ?? '').join('\n') || '(no text)'
+        } catch (error) {
+          text = `bridge failed: ${error?.message ?? error}`
+        }
+      }
+      await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text } }] })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` The bridge said: ${text}` } })
+      return { stopReason: 'end_turn' }
+    }
+    if (/codex-edit-ask/.test(said)) {
+      const toolCallId = `codex-edit-${session.turns}`
+      await update({ sessionUpdate: 'tool_call', toolCallId, title: 'Editing files', kind: 'edit', status: 'in_progress' })
+      const answer = await conn.requestPermission({
+        sessionId,
+        toolCall: { toolCallId, title: 'Edit files?', kind: 'edit' },
+        options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }],
+      })
+      const outcome = answer.outcome.outcome === 'selected' ? answer.outcome.optionId : answer.outcome.outcome
+      trace({ event: 'permission-answer', answer: answer.outcome })
+      if (outcome === 'yes') trace({ event: 'patch-ran', toolCallId })
+      return { stopReason: 'end_turn' }
+    }
+    if (/codex-subagent/.test(said)) {
+      const toolCallId = `codex-agent-${session.turns}`
+      await update({ sessionUpdate: 'tool_call', toolCallId, title: 'Start subagent explorer', kind: 'other', status: 'in_progress' })
+      trace({ event: 'subagent-started', toolCallId })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' A sub-agent started.' } })
+      return { stopReason: 'end_turn' }
+    }
+    const reader = /codex-reader (\S+) (\S+)/.exec(said)
+    if (reader !== null) {
+      const toolCallId = `codex-reader-${session.turns}`
+      await update({ sessionUpdate: 'tool_call', toolCallId, title: `mcp.${reader[1]}.${reader[2]}`, kind: 'execute', status: 'in_progress', rawInput: { server: reader[1], tool: reader[2], arguments: {} }, _meta: { is_mcp_tool_call: true } })
+      await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'no resources' } }] })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' The reader answered.' } })
       return { stopReason: 'end_turn' }
     }
     // An MCP call from codex-acp: no structured name at all, only `is_mcp_tool_call`.

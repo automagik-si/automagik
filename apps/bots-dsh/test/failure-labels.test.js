@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { DICTIONARY } from '../src/client/i18n.js'
-import { failureLabel, knownFailure } from '../src/client/diagnostics.js'
+import { failureClause, failureLabel, knownFailure } from '../src/client/diagnostics.js'
 
 test('credential and account failures have short words, in both languages', () => {
   const labels = {
@@ -32,4 +32,46 @@ test('both ACP usage limit codes have a short label and Chinese copy', () => {
   }
   assert.equal(DICTIONARY.zh[label], '编程助手已达到使用限额')
   assert.equal(DICTIONARY.zh['{provider} reached its usage limit.'], '{provider} 已达到使用限额。')
+})
+
+// #1564: the words name no Details switch, which helps only in the owner's direct chat.
+test('the Codex OFF refusal has short words with no switch pointer, in two languages', () => {
+  const label = 'Codex could not turn its own tools off, so the message was not sent'
+  const host = 'Codex could not turn its own tools off (its permission profiles are unavailable),'
+    + ' so the message was not sent.'
+    + " Turn native tools on in the Bot's Details, or update Automagik."
+  assert.equal(failureLabel('acp/native-off-unavailable', host), label)
+  assert.equal(label.includes('Details'), false)
+  assert.equal(DICTIONARY.zh[label], 'Codex 未能关闭它自己的工具，所以消息没有发送')
+})
+
+test('a failure inside a group line never ends in two full stops', () => {
+  const clause = failureClause
+  const host = 'It stopped. Update Automagik.'
+  assert.equal(clause('SOMETHING_NEW', host), 'It stopped. Update Automagik')
+  assert.equal(clause('SOMETHING_NEW', '它停下了。'), '它停下了')
+  assert.equal(clause('SOMETHING_NEW', 'raw text'), 'raw text')
+  assert.equal(clause('QUOTA', 'whatever.'), 'The account is out of quota')
+  assert.equal(clause('acp/native-off-unavailable', 'x.'),
+    'Codex could not turn its own tools off, so the message was not sent')
+})
+
+// BI-2: the refusal with Automagik's tools off has its own short words, so a group line does
+// not repeat "switch its model" and is translated.
+test('the Codex OFF refusal with Automagik\'s tools off has short words, in two languages', () => {
+  const label = "Codex was not started because its own tools and Automagik's tools are both off"
+  const host = "Codex's own tools are off for this Bot and Automagik's tools are turned off in this"
+    + " app, so Codex was not started. Turn Automagik's tools back on, or switch its model."
+  assert.equal(failureLabel('acp/native-off-no-bridge', host), label)
+  assert.equal(label.includes('Details'), false)
+  assert.equal(DICTIONARY.zh[label], 'Codex 未启动，因为它自己的工具和 Automagik 的工具都已关闭')
+})
+
+// BI-3: only one closing full stop goes (the line adds its own); an ellipsis keeps its dots.
+test('a group line clause drops one closing full stop only', () => {
+  assert.equal(failureClause('SOMETHING_NEW', 'It waits...'), 'It waits...')
+  assert.equal(failureClause('SOMETHING_NEW', 'It waits…'), 'It waits…')
+  assert.equal(failureClause('SOMETHING_NEW', 'Made in the U.S.'), 'Made in the U.S')
+  assert.equal(failureClause('SOMETHING_NEW', 'It stopped.  '), 'It stopped')
+  assert.equal(failureClause('SOMETHING_NEW', '它停下了。。'), '它停下了。。')
 })

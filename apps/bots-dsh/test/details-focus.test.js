@@ -564,6 +564,37 @@ test('rfc0039 D4 C8 Details lists and revokes only the selected Bot grants [P]',
   assert.deepEqual(stopped, ['grant-1'])
 })
 
+for (const [provider, offHint] of [
+  ['acp-claude', /Claude Code uses Automagik's tools/],
+  ['acp-omp', /omp has no tools at all, so this Bot can only chat/],
+]) {
+  test(`Details places ${provider}'s native tools title and switch together directly below Working folder`, async t => {
+    const { document, root, DetailsDrawer } = mount(t)
+    const bot = { ...grantBot, model: `${provider}/default` }
+    await act(() => root.render(React.createElement(DetailsDrawer, {
+      ...panelProps, sessionId: bot.id, roster: { ...grantRoster, byId: { [bot.id]: bot }, bots: [bot] }, actions: {},
+    })))
+
+    const body = document.querySelector('.bt-drawer-body')
+    const folder = [...body.children].find(row => row.firstElementChild?.textContent === 'Working folder')
+    assert.ok(folder)
+    const row = folder.nextElementSibling
+    const [header, hint] = row.children
+    const [title, toggle] = header.children
+    assert.equal(row.children.length, 2)
+    assert.equal(header.children.length, 2)
+    assert.ok(header.classList.contains('bt-drawer-switch-head'))
+    assert.equal(title.textContent, 'Native tools')
+    assert.equal(toggle.getAttribute('role'), 'switch')
+    assert.equal(toggle.getAttribute('aria-label'), title.textContent)
+    assert.equal(toggle.getAttribute('aria-checked'), 'false')
+    assert.ok(hint.classList.contains('bt-note'))
+    assert.match(hint.textContent, offHint)
+    assert.equal([...body.textContent.matchAll(/Native tools/g)].length, 1)
+    assert.doesNotMatch(body.textContent, /Claude Code native tools/)
+  })
+}
+
 test('rfc0039 D4 C9 an older host still opens ordinary Live rows [C]', async t => {
   const { document, root, LiveRail } = mount(t)
   const opened = []
