@@ -2,7 +2,7 @@
 // service). Codex runs only through fakes here: a fake `codex` for the checks, the fake ACP agent
 // for the process. Nothing reads a real Codex home.
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -351,11 +351,15 @@ test('N8 a symlinked folder: the checks run at its real path, the launch answers
   const s = scratch(t)
   const link = join(s.root, 'linked-chat')
   symlinkSync(s.cwd, link)
+  // The temp folder may itself sit behind a symlink (macOS: /var -> /private/var), so the real
+  // path comes from the file system, never from the path this test built.
+  const real = realpathSync(s.cwd)
+  assert.notEqual(real, link)
   const fake = fakeCodex()
   const launched = await nativeOffLaunch(s.launch, { cwd: link, dir: s.dir, kept: ['gpt-5.5'], run: fake.run })
   assert.equal(launched.checkedCwd, link)
-  assert.ok(fake.calls.every(call => call.cwd === s.cwd))
-  assert.deepEqual(Object.keys(JSON.parse(launched.env.CODEX_CONFIG).projects), [s.cwd])
+  assert.deepEqual([...new Set(fake.calls.map(call => call.cwd))], [real])
+  assert.deepEqual(Object.keys(JSON.parse(launched.env.CODEX_CONFIG).projects), [real])
 })
 
 test('offCatalog clears apply_patch, drops the catalog extras and the kept models, and refuses an empty result', () => {
