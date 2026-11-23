@@ -15,9 +15,12 @@ export const KEPT = 'gpt-5.5'
 /**
  * A fake `run` (execFile's shape) for codexCli. `answers` overrides any reply:
  * `features`, `models`, `servers` (stdout strings), `prompt(config)` (stdout or undefined for
- * the capture), `hang` (a predicate on the call: never answers until killed).
+ * the capture; it also gets `calls`, every call so far), `hang` (a predicate on the call: never
+ * answers until killed). `homeDefault` names the Codex home's own default model: a prompt read
+ * that names no model answers that model's capture (`gpt-5.5` shows no tool block, as the real
+ * one does); unset, such a read answers the full capture.
  */
-export function fakeCodex({ answers = {}, delayMs = 1 } = {}) {
+export function fakeCodex({ answers = {}, delayMs = 1, homeDefault } = {}) {
   const calls = []
   const kills = []
   let active = 0
@@ -47,8 +50,9 @@ export function fakeCodex({ answers = {}, delayMs = 1 } = {}) {
       const undone = has('shell_tool = true') ? 'shell_tool' : has('view_image = true') ? 'view_image'
         : !has('model_catalog_json=') ? 'catalog' : has('disable_native_tools = false') ? 'collaboration'
           : has('experimental_request_user_input = { enabled = true }') ? 'user_input' : undefined
-      stdout = answers.prompt?.({ undone, model, config })
-        ?? (undone !== undefined ? fixture(`prompt-undo-${undone}.json`)
+      stdout = answers.prompt?.({ undone, model, config, calls: calls.slice(0, -1) })
+        ?? (model === undefined && homeDefault !== undefined ? fixture(`prompt-model-${homeDefault}.json`)
+          : undone !== undefined ? fixture(`prompt-undo-${undone}.json`)
           : model !== undefined ? fixture(`prompt-model-${model}.json`) : fixture('prompt-full.json'))
     } else stdout = ''
     setTimeout(() => {

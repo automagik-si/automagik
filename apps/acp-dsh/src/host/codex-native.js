@@ -9,7 +9,9 @@
 // copy of `codex debug models` with that field cleared. Each model in the copy is checked once
 // per spawn; one that fails is not offered while OFF. A model on the agent row's
 // `nativeKeptModels` (Codex shows its tools for it nowhere a check can read) never reaches this
-// path: it launches as today, with Codex's own tools.
+// path: it launches as today, with Codex's own tools. The checks never read the Codex home's own
+// default model (it may be a kept one): each prompt read names a model of the copy, and the
+// process's config names none, so DSH's `default` stays Codex's own start model.
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -196,10 +198,26 @@ async function setupOnce(launch, { cwd, dir, kept = [], signal, run = execFile, 
   const listedCount = (Array.isArray(listed) ? listed : listed?.models)?.length ?? 0
   let copy = offCatalog(listed, { drop: kept })
   let catalog = writeCatalog(dir, copy)
-  // 4. The person's own skills, from two reads of the default model's prompt, each off by name.
+  // 4. The person's own skills, from two reads of a prompt, each off by name. Skills are not per
+  // model: the reads name the first model of the copy whose prompt shows a tool block, never the
+  // home's default. When none shows one, no model can be checked (LQ1).
   let skills = []
+  const skillRead = slug => cli(['debug', 'prompt-input'], `the offered tools of ${slug}`, { ...nativeOffOverrides({ servers, extras, skills, project, catalog: catalog.path }), model: slug })
+  let reader
+  let first
+  for (const model of copy.models) {
+    try {
+      first = readOffered(await skillRead(model.slug))
+      reader = model.slug
+      break
+    } catch (error) {
+      if (error?.kind !== 'unsupported' && error?.code !== NATIVE_OFF_UNAVAILABLE) throw error
+      if (signal?.aborted) throw unavailable('the check was stopped', { stopped: true })
+    }
+  }
+  if (reader === undefined) throw unavailable('no model could be checked with its own tools off')
   for (let pass = 0; pass < 2; pass += 1) {
-    const offered = readOffered(await cli(['debug', 'prompt-input'], 'the offered tools', nativeOffOverrides({ servers, extras, skills, project, catalog: catalog.path })))
+    const offered = pass === 0 ? first : readOffered(await skillRead(reader))
     const more = offered.skills.filter(name => !skills.includes(name))
     if (more.length === 0) break
     skills = [...skills, ...more]
@@ -227,14 +245,18 @@ async function setupOnce(launch, { cwd, dir, kept = [], signal, run = execFile, 
     catalog = writeCatalog(dir, copy)
   }
   pruneCatalogs(dir, { now, keepPath: catalog.path })
-  // 7. The default model under the final config, and the switches under it.
+  // 7. A checked model under the final config, and the switches under it. The probe is a checked
+  // model whose own catalog entry has `apply_patch_tool_type`, so undoing the catalog copy can
+  // show `apply_patch` (step 8). The returned overrides name no model.
   const overrides = nativeOffOverrides({ servers, extras, skills, project, catalog: catalog.path })
-  const offered = readOffered(await cli(['debug', 'prompt-input'], 'the offered tools', overrides))
+  const source = new Map(((Array.isArray(listed) ? listed : listed?.models) ?? []).map(model => [model?.slug, model]))
+  const probe = models.find(slug => (source.get(slug)?.apply_patch_tool_type ?? null) !== null) ?? models[0]
+  const offered = readOffered(await cli(['debug', 'prompt-input'], `the offered tools of ${probe}`, { ...overrides, model: probe }))
   checkOffered(offered, OFF_RULES)
   checkFeatures(readFeatures(await cli(['features', 'list'], 'the feature list', overrides)), { required: NATIVE_OFF_REQUIRED, also: [], on: null })
-  // 8. Each removal proven by its effect.
+  // 8. Each removal proven by its effect, on the same model.
   for (const effect of EFFECTS) {
-    const shown = readOffered(await cli(['debug', 'prompt-input'], `the ${effect.name} switch`, effect.undo(overrides)))
+    const shown = readOffered(await cli(['debug', 'prompt-input'], `the ${effect.name} switch`, { ...effect.undo(overrides), model: probe }))
     if (!gained(offered, shown, effect.gains)) throw unavailable(`Codex ignores ${effect.name}`)
   }
   log(`acp-dsh: Codex runs with its own tools off; it offers ${offered.tools.join(', ')} (exec reaches ${offered.nested.join(', ')}); models ${models.length}/${listedCount}`)

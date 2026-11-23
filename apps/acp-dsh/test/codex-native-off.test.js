@@ -4,9 +4,10 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { CATALOG_DROPS, keptModel, modelPart, NATIVE_OFF_NESTED, NATIVE_OFF_TOOLS, nativeOffLaunch, nativeOffSetup, offCatalog, pruneCatalogs } from '../src/host/codex-native.js'
+import { apply } from '../index.js'
 import { AGENTS } from '../src/host/agents.js'
 import { Session } from '@deepseek-ai/dsh-session'
 import { AgentRun } from '../src/host/acp.js'
@@ -88,15 +89,19 @@ test('N1 the FULL capture is accepted: overrides, CODEX_CONFIG, the transport on
   assert.deepEqual([...offered.nested].sort(), [...NATIVE_OFF_NESTED].sort())
 })
 
+// The final read (step 7): the probe slug (the first checked model with `apply_patch_tool_type`,
+// gpt-6.2-sol here), read again after every model was checked one by one. Never the home default.
+const PROBE = 'gpt-6.2-sol'
+const finalRead = ({ undone, model, calls }) => undone === undefined && model === PROBE && calls.some(call => call.model === 'gpt-5.6-luna')
 const N2 = [
-  ['apply_patch still nested', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? fixture('prompt-undo-catalog.json') : undefined }],
-  ['a collaboration tool', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? fixture('prompt-undo-collaboration.json') : undefined }],
-  ['a multi-agent v1 spawn_agent', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? withFunction('spawn_agent') : undefined }],
-  ['request_user_input', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? fixture('prompt-undo-user_input.json') : undefined }],
-  ['send_message_to_user_async', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? withFunction('send_message_to_user_async') : undefined }],
-  ['exec_command', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? fixture('prompt-undo-shell_tool.json') : undefined }],
-  ['a hosted web_search', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? withTool({ type: 'web_search' }) : undefined }],
-  ['an image_gen tool', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? withTool({ type: 'namespace', name: 'image_gen', description: '', tools: [{ type: 'function', name: 'generate', description: 'x', parameters: {}, strict: false }] }) : undefined }],
+  ['apply_patch still nested', { prompt: call => finalRead(call) ? fixture('prompt-undo-catalog.json') : undefined }],
+  ['a collaboration tool', { prompt: call => finalRead(call) ? fixture('prompt-undo-collaboration.json') : undefined }],
+  ['a multi-agent v1 spawn_agent', { prompt: call => finalRead(call) ? withFunction('spawn_agent') : undefined }],
+  ['request_user_input', { prompt: call => finalRead(call) ? fixture('prompt-undo-user_input.json') : undefined }],
+  ['send_message_to_user_async', { prompt: call => finalRead(call) ? withFunction('send_message_to_user_async') : undefined }],
+  ['exec_command', { prompt: call => finalRead(call) ? fixture('prompt-undo-shell_tool.json') : undefined }],
+  ['a hosted web_search', { prompt: call => finalRead(call) ? withTool({ type: 'web_search' }) : undefined }],
+  ['an image_gen tool', { prompt: call => finalRead(call) ? withTool({ type: 'namespace', name: 'image_gen', description: '', tools: [{ type: 'function', name: 'generate', description: 'x', parameters: {}, strict: false }] }) : undefined }],
   ...['shell_tool', 'view_image', 'catalog', 'collaboration', 'user_input'].map(name => [`the ${name} removal undone gains nothing`, { prompt: ({ undone }) => undone === name ? fixture('prompt-full.json') : undefined }]),
   ['debug models unreadable', { models: 'not json' }],
   ['debug models empty', { models: '{"models":[]}' }],
@@ -105,7 +110,9 @@ const N2 = [
 ]
 for (const [label, answers] of N2) {
   test(`N2 refuses: ${label}`, async t => {
-    await refused(setup(scratch(t), fakeCodex({ answers })))
+    const fake = fakeCodex({ answers, homeDefault: KEPT })
+    await refused(setup(scratch(t), fake))
+    assert.equal(fake.calls.some(call => call.what === 'debug prompt-input' && call.model === undefined), false)
   })
 }
 
@@ -128,7 +135,7 @@ test('N3 no verdict is reused: two homes run two full checks, the same launch tw
   assert.equal(fake.calls.filter(call => call.home === other).length, first)
 })
 
-test('N4 per model: a failing model is dropped and logged, a kept model is never probed, the default failing or nothing left refuses', async t => {
+test('N4 per model: a failing model is dropped and logged, a kept model is never probed, nothing left refuses; the home default is never read', async t => {
   const lunaSpawns = { prompt: ({ undone, model }) => undone === undefined && model === 'gpt-5.6-luna'
     ? withTool({ type: 'namespace', name: 'collaboration', description: '', tools: [{ type: 'function', name: 'spawn_agent', description: 'x', parameters: {}, strict: false }] }) : undefined }
   const s = scratch(t)
@@ -146,8 +153,37 @@ test('N4 per model: a failing model is dropped and logged, a kept model is never
   assert.deepEqual(plain.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
   assert.ok(open.calls.some(call => call.model === 'gpt-5.5'))
   assert.ok(unkept.includes('acp-dsh: Codex model gpt-5.5 could not be checked with its own tools off; it is not offered while they are off'))
-  await refused(setup(scratch(t), fakeCodex({ answers: { prompt: ({ undone, model }) => undone === undefined && model === undefined ? '[]' : undefined } })))
+  // A home whose own default model shows no tool block (gpt-5.5, as the real one): the setup
+  // passes on the copy's models and never reads the default (BD-1).
+  for (const fake of [fakeCodex({ homeDefault: KEPT }), fakeCodex({ answers: { prompt: ({ undone, model }) => undone === undefined && model === undefined ? '[]' : undefined } })]) {
+    const passed = await setup(scratch(t), fake)
+    assert.deepEqual(passed.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
+    assert.equal(fake.calls.some(call => call.what === 'debug prompt-input' && call.model === undefined), false)
+    assert.equal(fake.calls.some(call => call.model === KEPT), false)
+  }
   await refused(setup(scratch(t), fakeCodex({ answers: { prompt: ({ undone, model }) => undone === undefined && model !== undefined ? '[]' : undefined } })), /no model could be checked/)
+})
+
+test('N4b the probe: skills read on the first copy model with a tool block, the final read and every effect on a checked model with apply_patch; CODEX_CONFIG names no model', async t => {
+  const models = JSON.parse(fixture('models.json'))
+  const list = Array.isArray(models) ? models : models.models
+  for (const model of list) if (model.slug === 'gpt-6.2-sol') model.apply_patch_tool_type = null
+  const s = scratch(t)
+  const fake = fakeCodex({ homeDefault: KEPT, answers: { models: JSON.stringify(models) } })
+  const launched = await nativeOffLaunch(s.launch, { cwd: s.cwd, dir: s.dir, kept: [KEPT], run: fake.run })
+  assert.deepEqual(launched.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
+  assert.equal('model' in JSON.parse(launched.env.CODEX_CONFIG), false)
+  const reads = fake.calls.filter(call => call.what === 'debug prompt-input')
+  assert.equal(reads.some(call => call.model === undefined), false)
+  assert.equal(reads[0].model, 'gpt-6.2-sol')
+  // After the per-model reads (sol, luna): the final read and the five effects, all on luna.
+  const lunaAt = reads.findIndex(call => call.model === 'gpt-5.6-luna')
+  assert.deepEqual(reads.slice(lunaAt + 1).map(call => call.model), Array(6).fill('gpt-5.6-luna'))
+  // The first copy model shows no tool block: the skills reads move on to the next one, and it is dropped.
+  const skip = fakeCodex({ homeDefault: KEPT, answers: { prompt: ({ undone, model }) => undone === undefined && model === 'gpt-6.2-sol' ? '[]' : undefined } })
+  const result = await setup(scratch(t), skip)
+  assert.deepEqual(result.models, ['gpt-5.6-luna'])
+  assert.deepEqual(skip.calls.filter(call => call.what === 'debug prompt-input').slice(0, 2).map(call => call.model), ['gpt-6.2-sol', 'gpt-5.6-luna'])
 })
 
 test('N5 Stop: aborting mid-check refuses and kills the running CLI call', async t => {
@@ -681,6 +717,48 @@ test('K2b unknown start model: the OFF spawn on gpt-5.5 stops once with zero pro
   assert.equal(w2.adapter.startModels.has(w2.codex), false)
 })
 
+// BD-1: a Codex home whose own default model is gpt-5.5 (no tool block, as the real one) and a
+// codex-acp that starts on it. The OFF spawn runs the real checks (nativeOffLaunch) on the fake CLI.
+function homeDefaultWorld(t) {
+  const fake = fakeCodex({ homeDefault: KEPT })
+  const w = world(t, {
+    identity: OFF, start: KEPT,
+    offSpawn: (context, launch) => nativeOffLaunch(launch, { cwd: context.cwd, dir: join(context.cwd, '.codex-native-off'), kept: [KEPT], run: fake.run, signal: context.signal }),
+  })
+  return { w, fake }
+}
+const defaultReads = fake => fake.calls.filter(call => call.what === 'debug prompt-input' && call.model === undefined)
+
+test('K2c a home default with no tool block: a checked model opens OFF; `default` with an unknown start stops once then launches as today; a known start launches as today', async t => {
+  // A scheduled turn on a checked model opens OFF on the bridge alone, with one prompt.
+  const a = homeDefaultWorld(t)
+  const first = await turnOn(a.w, a.w.chat('direct'), scheduled('checked'), { model: 'gpt-6.2-sol' })
+  assert.equal(finishOf(first) === 'error', false, JSON.stringify(textOf(first)))
+  assert.deepEqual(offContexts(a.w), [true])
+  assert.deepEqual(servers(a.w), [['dsh']])
+  assert.equal(promptPids(a.w).length, 1)
+  assert.ok(a.fake.calls.length > 0)
+  assert.deepEqual(defaultReads(a.fake), [])
+  // `default` with the start model unknown: the OFF process starts on gpt-5.5, stops once with
+  // the notice and no prompt; the next turn is today's launch.
+  const b = homeDefaultWorld(t)
+  const chat = b.w.chat('direct')
+  const stopped = await turnOn(b.w, chat, scheduled('first'))
+  assert.deepEqual(textOf(stopped), [NOTICE])
+  assert.deepEqual(promptPids(b.w), [])
+  await turnOn(b.w, chat, scheduled('second'))
+  assert.deepEqual(offContexts(b.w), [true, false])
+  assert.equal(promptPids(b.w).length, 1)
+  assert.deepEqual(defaultReads(b.fake), [])
+  // The start model known (gpt-5.5): today's launch directly, no check.
+  const c = homeDefaultWorld(t)
+  c.w.codex.catalog.ownModel = () => KEPT
+  await turnOn(c.w, c.w.chat('direct'), scheduled('known'))
+  assert.deepEqual(offContexts(c.w), [false])
+  assert.equal(promptPids(c.w).length, 1)
+  assert.equal(c.fake.calls.length, 0)
+})
+
 test('K3 a live OFF process asked for gpt-5.5 is remade with today\'s launch; the OFF PID gets no prompt', async t => {
   const w = world(t, { identity: OFF })
   const chat = w.chat('direct')
@@ -731,4 +809,77 @@ test('K6 nativeKeptRoute (the service nativeModelKept): the kept list, `default`
   assert.equal(kept('acp-codex/default'), true)
   w.codex.catalog.ownModel = () => { throw new Error('broken') }
   assert.equal(kept('acp-codex/default'), false)
+})
+
+// ---------------------------------------------------------------------------------------------
+// BD-4: index.js's own wiring, through apply(): the two service methods and the Codex agent's OFF
+// spawn branch. The adapter is a stand-in codex-acp whose `cli` answers from the captures
+// (fixtures/fake-codex-cli.mjs); no real Codex, no real Codex home.
+// ---------------------------------------------------------------------------------------------
+const FAKE_CLI = join(import.meta.dirname, 'fixtures', 'fake-codex-cli.mjs')
+
+function applied(t, { isolated }) {
+  const root = mkdtempSync(join(tmpdir(), 'codex-native-apply-'))
+  const disposers = []
+  const logs = []
+  const services = {}
+  let adapter
+  const ctx = {
+    logger: { warn: line => logs.push(line), info: line => logs.push(line) },
+    llm: { registerAdapter: (_ids, value) => { adapter = value; return Object.assign(() => {}, { replace() {} }) } },
+    agents: { list: () => [], get: () => undefined },
+    get: name => services[name],
+    on() {},
+    provide: (name, value) => { services[name] = value },
+    effect: setup => disposers.push(setup()),
+  }
+  t.after(() => {
+    for (const dispose of disposers) dispose?.()
+    rmSync(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'acp', 'adapters')
+  const store = { binOf: () => ({ path: FAKE_CLI, version: 'test' }), busy: () => false, update: async () => {}, dispose() {}, ...(isolated ? { home } : {}) }
+  apply(ctx, { claude: true, codex: true, dshTools: false }, {
+    store,
+    cliHome: isolated ? join(root, 'homes') : undefined,
+    consentFile: join(root, 'consent.json'),
+    find: name => ['claude', 'codex'].includes(name) ? process.execPath : undefined,
+    signedIn: async () => false,
+    account: async () => undefined,
+    profileCheck: () => true,
+  })
+  return { root, home, logs, service: services.acpAgents, codex: adapter.agents.get('acp-codex') }
+}
+
+test('BD-4 apply(): nativeModelKept and endNative are wired; the OFF spawn refuses without chat profiles and checks in the ACP folder with the kept list', async t => {
+  const a = applied(t, { isolated: true })
+  assert.equal(a.service.nativeModelKept('acp-codex/gpt-5.5'), true)
+  assert.equal(a.service.nativeModelKept('acp-codex/gpt-6.2-sol'), false)
+  assert.equal(typeof a.service.endNative, 'function')
+  assert.equal(a.service.endNative('no-such-session', 'off', 'changed'), false)
+  // No chat profiles (no isolated homes): refused before any check.
+  const b = applied(t, { isolated: false })
+  await assert.rejects(b.codex.spawn({ nativeOff: true, cwd: b.root }), error => {
+    assert.equal(error.code, 'acp/native-off-unavailable')
+    assert.match(error.message, /its permission profiles are unavailable/)
+    return true
+  })
+  // With profiles: the real checks run on the stand-in CLI, in the ACP folder's codex-native-off,
+  // with the row's kept list (gpt-5.5 is never probed, so no line drops it).
+  if (process.platform === 'win32') return
+  const cwd = join(a.root, 'chat')
+  mkdirSync(cwd)
+  const launched = await a.codex.spawn({ nativeOff: true, cwd })
+  const dir = join(dirname(a.home), 'codex-native-off')
+  assert.equal(launched.nativeOff, true)
+  assert.equal(launched.checkedCwd, cwd)
+  assert.deepEqual(launched.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
+  assert.equal(dirname(launched.offCatalog.path), dir)
+  const config = JSON.parse(launched.env.CODEX_CONFIG)
+  assert.equal(config.model_catalog_json, launched.offCatalog.path)
+  assert.equal('model' in config, false)
+  assert.deepEqual(JSON.parse(readFileSync(launched.offCatalog.path, 'utf8')).models.map(model => model.slug), ['gpt-6.2-sol', 'gpt-5.6-luna'])
+  assert.ok(launched.profileModes)
+  assert.ok(a.logs.some(line => /Codex runs with its own tools off; .*models 2\/3$/.test(line)), a.logs.join('\n'))
+  assert.equal(a.logs.some(line => line.includes('gpt-5.5 could not be checked')), false)
 })
