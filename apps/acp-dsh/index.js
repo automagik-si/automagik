@@ -34,6 +34,7 @@ import { createIdentityReaders, IDENTITY_PROVIDERS } from './src/host/identity.j
 import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNAVAILABLE, unsupported } from './src/host/image.js'
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
+import { writeOmpOverlay } from './src/host/omp-overlay.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
 import { retiredLine } from './src/host/retired-home.js'
 import { enginesFor, PRESSURE_METHOD, pressureGuard } from './src/host/pressure.js'
@@ -150,8 +151,9 @@ function defaultCliHome(ctx, storeHome, identity) {
  * @param {any} ctx
  * @param {{ claude?: any, codex?: any, hermes?: any, antigravity?: any, omp?: any, sideModel?: any, fakeAgent?: string, dshTools?: any, nativeTools?: any }}
  *   [config]
- * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any>, installation?: string, cliHome?: string, evidenceOf?: typeof accountEvidenceOf }} [deps]
+ * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, ompOverlayDir?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any>, installation?: string, cliHome?: string, evidenceOf?: typeof accountEvidenceOf }} [deps]
  *   catalogHome: where each agent's models and efforts are kept (beside the adapters by default).
+ *   ompOverlayDir: overrides the private ACP state folder for omp's OFF overlay in tests.
  *   loginSpawn, loginTimers: tests only, a fake CLI process and clock for sign-in attempts.
  *   loginRecord: tests only, ownership records with a fake sign-in process.
  *   checkTimers: tests only, the clock of the retries after a connector check that failed.
@@ -167,7 +169,9 @@ export function apply(ctx, config = {}, {
   store = new AdapterStore({ log: message => info(ctx, message) }),
   cliStore,
   find = name => findCommand(name), signedIn = signedInOf,
-  catalogHome = store.home ? join(dirname(store.home), 'catalog') : undefined,
+  catalogHome = typeof store.home === 'string' ? join(dirname(store.home), 'catalog') : undefined,
+  ompOverlayDir = typeof store.home === 'string' ? join(dirname(store.home), 'omp')
+    : typeof catalogHome === 'string' ? join(dirname(catalogHome), 'omp') : undefined,
   loginSpawn, loginTimers, loginRecord, loginProbe, imageSetup, account = accountOf, evidenceOf = accountEvidenceOf,
   installation = process.env.DSH_HOME,
   cliHome: override, consentFile: accountFile,
@@ -486,6 +490,7 @@ export function apply(ctx, config = {}, {
     // A native agent takes no bridge, names its own sign-in command when signed out, and says
     // so in the chat when it has no mode for DSH's level (adapter.js).
     ...(isNative(spec) ? { bridge: false } : {}),
+    ...(spec.nativeSwitch === 'args' ? { nativeSwitch: 'args' } : {}),
     ...(typeof spec.signInHint === 'string' ? { signInHint: spec.signInHint } : {}),
     ...(spec.modeFor === undefined ? { levelNotice: true } : {}),
     cli,
@@ -546,6 +551,11 @@ export function apply(ctx, config = {}, {
         throw new Error(failed
           ? `its ACP adapter (${spec.adapter}) is still being installed; the last install failed: ${failed}`
           : `its ACP adapter (${spec.adapter}) is still being installed; send this again in a minute`)
+      }
+      if (spec.nativeSwitch === 'args' && context?.nativeOff === true) {
+        if (ompOverlayDir === undefined) throw new Error(`${spec.defaultName} could not start with its tools off: it has no settings folder.`)
+        const overlay = writeOmpOverlay(ompOverlayDir)
+        return { command, args: [...args, ...spec.offArgs, '--config', overlay], env: { ...env, PI_AUTO_QA: undefined } }
       }
       // The chat profiles of the Bot's isolated Codex home, for the session this process starts
       // (adapter.js keeps them with that session).
@@ -1595,6 +1605,7 @@ export function apply(ctx, config = {}, {
      */
     endSession: (sessionId, why) => adapter.endSession(sessionId, why),
     endClaudeSession: (sessionId, why, startupWhy) => adapter.endClaudeSession(sessionId, why, startupWhy),
+    endOmpSession: (sessionId, why, startupWhy) => adapter.endOmpSession(sessionId, why, startupWhy),
     /**
      * What acted on one Session's permissions, for a diagnostics view (read-only, a fresh plain
      * copy, undefined for a Session that ran no agent here): { version, agent, startedAt, active,

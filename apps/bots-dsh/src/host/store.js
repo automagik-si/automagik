@@ -15,6 +15,7 @@ import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { refusal } from './refusal.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
+import { markOf } from '../shared/permission-levels.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import updateContract from './update-contract.json' with { type: 'json' }
 
@@ -371,6 +372,27 @@ export function install(rt) {
       state.claudeCodeMoved = true
       migrated = true
     }
+    // Existing omp Bots keep their native tools in the owner's direct chat once.
+    // Nothing to keep writes nothing: the marker set here rides the next real save, which
+    // encodes the whole state, so an omp Bot made or switched later is saved with it and
+    // starts OFF.
+    if (state.nativeToolsOmpKept !== true) {
+      let restricted = 0
+      let kept = 0
+      for (const bot of Object.values(state.bots)) {
+        if (bot.nativeTools !== undefined || markOf(bot.model ?? bot.appliedModel) !== 'acp-omp') continue
+        if (bot.shell === false || (Array.isArray(bot.denyTools) && bot.denyTools.length > 0)) {
+          restricted += 1
+          continue
+        }
+        bot.nativeTools = true
+        bot.nativeToolsKept = 'acp-omp'
+        kept += 1
+      }
+      if (restricted > 0) warn('omni-ui: %d omp Bot(s) keep native tools off: shell access off or denied tools', restricted)
+      state.nativeToolsOmpKept = true
+      if (kept > 0) migrated = true
+    }
     // A builtin pet the plugin no longer ships would draw nothing: its Bot wears Genie instead.
     // Genie kept from before its approved figure names the old atlas's version: it reads as
     // the Genie shipped now (pets.js shippedPet), whatever the file says, every time.
@@ -715,7 +737,9 @@ export function install(rt) {
       // acknowledgement. Other saves continue to encode the live Bot record.
       const bot = enableNativeTools
       if (own(state.bots, bot.id) !== bot) throw refusal('The Bot team changed. Try again.')
-      return { ...state, bots: { ...state.bots, [bot.id]: { ...bot, nativeTools: true } } }
+      const enabled = { ...bot, nativeTools: true }
+      delete enabled.nativeToolsKept
+      return { ...state, bots: { ...state.bots, [bot.id]: enabled } }
     }, { required })
   }
 

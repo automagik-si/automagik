@@ -182,7 +182,8 @@ export class AgentRun {
   /**
    * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string,
    *   name: string, provider?: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
-   *   onWarn?: (message: string) => void, startMs?: number, requestMs?: number,
+   *   onWarn?: (message: string) => void, refuseTools?: boolean, onForbiddenTool?: (tool: any) => void,
+   *   startMs?: number, requestMs?: number,
    *   timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
    *   startMs, requestMs: the deadlines, START_MS and REQUEST_MS unless a test sets shorter ones.
    *   timers: the clock the deadlines run on, for a test that moves it by hand.
@@ -439,6 +440,7 @@ export class AgentRun {
     this.queue = []
     this.reviews = { denied: 0, inRow: 0, last: undefined, after: false }
     this.promptEnded = false
+    this.forbiddenToolSeen = false
     this.cancelled = false
     // The calls of the prompts before this one are over for DSH too: their cards ran in turns
     // that have ended, and a call already known never gets a second card. A question for one
@@ -774,6 +776,13 @@ export class AgentRun {
       if (known.retired !== true) this.changeTool(known, update)
       return known
     }
+    if (this.spec.refuseTools === true) {
+      if (!this.forbiddenToolSeen) {
+        this.forbiddenToolSeen = true
+        this.spec.onForbiddenTool?.(update)
+      }
+      return undefined
+    }
     if (this.reviews?.last) this.reviews.after = true
     const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now() }
     // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
@@ -885,6 +894,7 @@ export class AgentRun {
    */
   onPermission(params, signal) {
     if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
+    if (this.spec.refuseTools === true) return Promise.resolve(refusal('rejected', params.options ?? []))
     const known = this.tools.get(params.toolCall?.toolCallId)
     const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall })
     if (tool === undefined) return Promise.resolve(CANCELLED)

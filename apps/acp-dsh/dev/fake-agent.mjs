@@ -318,6 +318,27 @@ const implementation = {
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    // omp OFF exercises permission and notification independently. The permission
+    // request comes first and neither refusal path sends a tool notification.
+    if (/omp-permission-first/.test(said)) {
+      const answer = await conn.requestPermission({
+        sessionId,
+        toolCall: { toolCallId: 'permission-first', title: 'Run echo?', kind: 'execute' },
+        options: [
+          { optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+          ...(/no-reject/.test(said) ? [] : [{ optionId: 'omp-reject', name: 'Reject', kind: 'reject_once' }]),
+        ],
+      })
+      trace({ event: 'permission-answer', answer: answer.outcome })
+      return { stopReason: 'end_turn' }
+    }
+    const firstTool = /omp-first-(tool_call(?:_update)?)/.exec(said)
+    if (firstTool) {
+      for (const id of ['first', 'second']) {
+        await update({ sessionUpdate: firstTool[1], toolCallId: id, title: 'Unexpected tool', kind: 'execute', status: 'completed' })
+      }
+      return { stopReason: 'end_turn' }
+    }
     const denies = /reviewer denies (\d+)/.exec(said)
     if (denies) {
       for (let n = 0; n < Number(denies[1]); n++) {

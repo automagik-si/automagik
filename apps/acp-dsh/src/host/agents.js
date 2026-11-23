@@ -224,6 +224,8 @@ export const AGENTS = Object.freeze({
     installUrl: 'https://github.com/can1357/oh-my-pi',
     // `omp acp` (its help: "Run omp as an ACP (Agent Client Protocol) server over stdio").
     launch: Object.freeze({ kind: 'native', args: Object.freeze(['acp']) }),
+    nativeSwitch: 'args',
+    offArgs: Object.freeze(['--no-tools', '--no-extensions', '--no-lsp']),
     // `omp login`: "Log in to a model provider (terminal counterpart of /login)".
     signInHint: 'omp login',
     modeFor: () => ['default'],

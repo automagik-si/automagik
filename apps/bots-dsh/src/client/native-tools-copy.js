@@ -6,7 +6,16 @@ export const nativeToolsCopy = {
   off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.",
 }
 
+export const ompNativeToolsCopy = {
+  on: "In its own chat with you, omp uses its own tools. They run outside Automagik's file sandbox. Turning this off stops its running session at once.",
+  off: "With this off, omp has no tools at all, so this Bot can only chat. Groups, tasks and scheduled runs are always like this. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.",
+  blocked: 'Here omp has no tools, so this Bot can only chat.',
+}
+
 export const nativeToolsZh = {
+  [ompNativeToolsCopy.on]: '在它与你的单独对话中，omp 使用它自己的工具。这些工具在 Automagik 的文件沙盒之外运行。关闭后会立即停止它正在运行的会话。',
+  [ompNativeToolsCopy.off]: '关闭后，omp 没有任何工具，此 Bot 只能聊天。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。',
+  [ompNativeToolsCopy.blocked]: '在这里 omp 没有任何工具，此 Bot 只能聊天。',
   [nativeToolsCopy.label]: '原生工具',
   [nativeToolsCopy.on]: '在它与你的单独对话中，Claude Code 使用它自己的工具（Bash、Read、Edit…）。这些工具在 Automagik 的文件沙盒之外运行；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。',
   [nativeToolsCopy.off]: 'Claude Code 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。',
