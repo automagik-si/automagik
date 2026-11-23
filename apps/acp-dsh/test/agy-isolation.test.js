@@ -227,6 +227,35 @@ test('I2: signed out, then Sign in: signingIn, then signed in; the sign-in is in
   assert.deepEqual(w.traces().filter(entry => entry.event === 'authenticate').map(entry => entry.methodId), ['oauth-personal'])
 })
 
+test('I2b: a sign-in link agy prints reaches the status only when it is Google\'s own, and only while it waits', unixOnly, async (t) => {
+  plant(t)
+  const google = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
+    + '&redirect_uri=http%3A%2F%2F127.0.0.1%3A4242%2Fcb&response_type=code&state=s1'
+  const w = world(t, { agentEnv: {
+    FAKE_ACP_AUTH_STDERR: `Open https://accounts.google.com.evil.example/o/oauth2/v2/auth?response_type=code&client_id=x or ${google} to sign in.`,
+    FAKE_ACP_AUTH_HOLD: '1',
+  } })
+  await w.service.refresh()
+  await w.service.signInNative(ID)
+  const row = await until(async () => { const now = await w.row(); return now.signInUrl ? now : undefined }, 'the sign-in link')
+  assert.equal(row.signInUrl, google)
+  assert.equal(row.signingIn, true)
+  assert.ok(!w.logs.some(line => line.includes('accounts.google.com')), w.logs.join('\n'))
+  // Switched off: the attempt ends and its link goes with it.
+  w.config.antigravity = false
+  w.emit('loader/volatile-update')
+  const after = await w.signedIn()
+  assert.equal(after.signInUrl, undefined)
+  // Only links that are not Google's: none reaches the status.
+  const other = world(t, { agentEnv: { FAKE_ACP_AUTH_STDERR: 'Open https://evil.example/o/oauth2/v2/auth?response_type=code&client_id=x', FAKE_ACP_AUTH_HOLD: '1' }, deps: { nativeSignInMs: 1500 } })
+  await other.service.refresh()
+  await other.service.signInNative(ID)
+  await until(() => other.traces().some(entry => entry.event === 'authenticate'), 'the sign-in to start')
+  await sleep(300)
+  assert.equal((await other.row()).signInUrl, undefined)
+  assert.equal((await other.signedIn()).signInError, 'timeout')
+})
+
 const signInPid = (w, from) => w.envs().slice(from).at(-1)?.pid
 async function endsClean(w, from) {
   const pid = await until(() => signInPid(w, from), 'the sign-in process')
@@ -250,6 +279,10 @@ test('I3: a method not offered, a failure, no answer and a switch-off each end t
     const row = await w.signedIn()
     assert.equal(row.signInError, word)
     assert.equal(row.signedIn, false)
+    // The page gets the word only; the command in the agy home goes to the log (#2048, owner).
+    assert.equal(row.cli.signInHint, undefined)
+    assert.equal(row.signInUrl, undefined)
+    assert.ok(w.logs.some(line => line.startsWith(`acp-dsh: Antigravity: the sign-in ended (${word}); its terminal sign-in, for support: env -i `)), w.logs.join('\n'))
     if (word === 'unsupported') assert.deepEqual(w.traces().filter(entry => entry.event === 'authenticate'), [])
     await endsClean(w, from)
   }
@@ -274,11 +307,15 @@ test('I3: the refusals, and no browser on a Linux without a display', unixOnly, 
   await assert.rejects(missing.service.signInNative(ID), { code: 'acp-sign-in/missing' })
   await assert.rejects(missing.service.signInNative('acp-hermes'), { code: 'acp-sign-in/unsupported' })
   await assert.rejects(missing.service.signInNative('acp-claude'), { code: 'acp-sign-in/unsupported' })
-  // No DISPLAY on Linux: only the terminal command.
+  // No DISPLAY on Linux: Sign in answers that the browser did not open (#2048, owner), with no
+  // command; the command in the agy home goes to the log only.
   delete process.env.DISPLAY
   const bare = world(t)
   assert.equal((await bare.row()).signInWhere, 'terminal')
-  await assert.rejects(bare.service.signInNative(ID), { code: 'acp-sign-in/no-display' })
+  assert.equal((await bare.row()).cli.signInHint, undefined)
+  await assert.rejects(bare.service.signInNative(ID), { code: 'acp-sign-in/no-display', message: 'The browser did not open. Try again.' })
+  assert.ok(bare.logs.some(line => line.startsWith('acp-dsh: Antigravity: there is no browser on this computer; its terminal sign-in, for support: env -i ')
+    && line.includes(`HOME='${bare.home()}'`)), bare.logs.join('\n'))
   for (const platform of ['darwin', 'win32']) {
     const other = world(t, { platform })
     assert.equal((await other.row()).signInWhere, undefined)
@@ -400,12 +437,15 @@ test('I4: a damaged agy pointer does not stop Sign out; Windows offers none', un
   assert.equal(windows.logoutCalls.length, 0)
 })
 
-test('I6: the terminal fallback in the agy home, by platform; none for what the quoting cannot carry', unixOnly, async (t) => {
+test('I6: the terminal command in the agy home, by platform, for the log only; none for what the quoting cannot carry', unixOnly, async (t) => {
   plant(t)
   const w = world(t)
-  const home = w.home()
-  const command = `env -i PATH="$PATH" TERM="$TERM" LANG="$LANG" HOME='${home}' XDG_CONFIG_HOME='${home}/config' XDG_DATA_HOME='${home}/data' XDG_CACHE_HOME='${home}/cache' XDG_STATE_HOME='${home}/state' '${w.agy}' acp --login`
-  assert.equal((await w.row()).cli.signInHint, command)
+  // Owner decision (#2048): the status carries no command for Antigravity, signed out or not.
+  await w.service.refresh()
+  const row = await w.row()
+  assert.equal(row.signedIn, false)
+  assert.equal(Object.hasOwn(row.cli, 'signInHint'), false)
+  assert.doesNotMatch(JSON.stringify(row), /acp --login|env -i/)
   // The chat and the login route point to Settings, never to the static command.
   assert.equal(w.adapter.agents.get(ID).signInHint, undefined)
   assert.equal(w.adapter.agents.get(ID).signInWhere, 'settings')

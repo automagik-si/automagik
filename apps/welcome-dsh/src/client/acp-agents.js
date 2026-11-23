@@ -17,10 +17,10 @@ import { raised } from './clay.js'
 // sees a link, a code or a credential. The terminal command signs in to a shared CLI home.
 //
 // Antigravity runs in this installation's own home (#2048, `appSignIn`): its row signs in here,
-// over ACP, with its browser opening on this computer (Sign in), names the terminal command that
-// signs in to that same home as the fallback, and signs out by retiring the home (Sign out). On
-// Windows its account is shared with the person's own agy (`sharedAccount`): every state of the
-// row says so, and there is no Sign out.
+// over ACP, with its browser opening on this computer (Sign in), as Claude Code's and Codex's
+// rows read, never with a terminal command or a path, and signs out by retiring the home
+// (Sign out). On Windows its account is shared with the person's own agy (`sharedAccount`):
+// every state of the row says so, and there is no Sign out.
 
 export const CLI_OF = { 'acp-claude': 'claude', 'acp-codex': 'codex', 'acp-hermes': 'hermes', 'acp-antigravity': 'agy', 'acp-omp': 'omp' }
 export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'HM', 'acp-antigravity': 'AG', 'acp-omp': 'OM' }
@@ -29,6 +29,8 @@ export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'H
 // command that signs in (`cli.signInHint`). They are off until the person turns one on, which
 // is their word that the app may use the sign-in that CLI already has on this computer.
 export const isNative = agent => agent?.connector?.native === true
+// acp-dsh's refusal of a sign-in with no browser on this computer (signInNative `no-display`).
+const BROWSER_DID_NOT_OPEN = 'The browser did not open. Try again.'
 const isolatedSignIn = agent => agent.authScope === 'isolated' && !isNative(agent)
 const signInCommand = agent => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key
 // How the person signs in to the CLI in a terminal, the other way to the chat's row.
@@ -212,25 +214,24 @@ export function agentLines(agent, entry) {
 // Windows keeps Antigravity's sign-in in Credential Manager, shared with the person's own agy.
 const sharedLine = name => ({ tone: 'muted', text: t('On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.', { name }) })
 
-// The sign-in lines of an agent that signs in here (`appSignIn`): under way, why the last one
-// failed, signed out with Sign in (or, with no browser on this computer, the terminal command
-// only), and the terminal command as the fallback.
+// The sign-in lines of an agent that signs in here (`appSignIn`), as Claude Code's and Codex's
+// read: under way (with the sign-in link agy printed, if any), why the last one failed, and
+// signed out with Sign in. Never a terminal command or a path (#2048, owner): with no browser
+// on this computer, Sign in answers that the browser did not open.
 function appSignInLines(agent, name) {
   const lines = []
-  const command = agent.cli.signInHint
-  if (agent.signingIn === true) return [{ tone: 'wait', text: t('Finish the sign-in to {name} in your browser…', { name }) }]
-  if (agent.signInError === 'unsupported') lines.push({ tone: 'bad', text: t('{name} did not offer a Google sign-in. Use the terminal command below.', { name }) })
+  if (agent.signingIn === true) {
+    return [{
+      tone: 'wait',
+      text: t('Finish the sign-in to {name} in your browser…', { name }),
+      ...(agent.signInUrl ? { link: { href: agent.signInUrl, text: t('Sign in with {name}', { name }) } } : {}),
+    }]
+  }
+  if (agent.signInError === 'unsupported') lines.push({ tone: 'bad', text: t('{name} did not offer a Google sign-in. Try again.', { name }) })
   if (agent.signInError === 'timeout') lines.push({ tone: 'bad', text: t('The sign-in to {name} took too long. Try again.', { name }) })
   if (agent.signInError === 'failed') lines.push({ tone: 'bad', text: t('The sign-in to {name} did not finish. Try again.', { name }) })
   if (agent.signedIn !== false) return lines
-  if (agent.signInWhere === 'terminal') {
-    lines.push(command
-      ? { tone: 'bad', text: t('Not signed in to {name}. This computer has no browser for the sign-in: run {command} in a new terminal window, then check again.', { name, command }), action: 'check' }
-      : { tone: 'bad', text: t('Not signed in to {name}. This computer has no browser for the sign-in.', { name }), action: 'check' })
-    return lines
-  }
-  lines.push({ tone: 'bad', text: t('Not signed in to {name}. Sign in here: your browser opens to finish.', { name }), action: 'native-login' })
-  if (command) lines.push({ tone: 'muted', text: t('If no browser opens, run {command} in a new terminal window, then check again.', { command }), action: 'check' })
+  lines.push({ tone: 'bad', text: t('Not signed in to {name}.', { name }), action: 'native-login' })
   return lines
 }
 
@@ -274,7 +275,7 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
   const [signingOut, setSigningOut] = useState(null)
   const say = (id, message) => setProblems(previous => ({ ...previous, [id]: message }))
   // Whether the host took it; a refusal leaves its words on the row.
-  const act = async (id, endpoint, payload) => {
+  const act = async (id, endpoint, payload, words = message => message) => {
     say(id, null)
     setBusy(id)
     let ok = true
@@ -282,7 +283,7 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
       show(await request(endpoint, payload))
     } catch (error) {
       ok = false
-      say(id, error.message)
+      say(id, words(error.message))
     }
     if (live.current) setBusy(null)
     return ok
@@ -307,7 +308,8 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     check: agent => act(agent.id, 'acp', { refresh: true }),
     // An agent that signs in here: Sign in starts it (its browser opens), and Sign out asks
     // first, with the same words as the account switch, then retires its home.
-    nativeLogin: agent => act(agent.id, 'acp-sign-in', { id: agent.id }),
+    // With no browser on this computer acp-dsh refuses in fixed words, read in the page's language.
+    nativeLogin: agent => act(agent.id, 'acp-sign-in', { id: agent.id }, message => (message === BROWSER_DID_NOT_OPEN ? t('The browser did not open. Try again.') : message)),
     signOutPending: signingOut,
     askSignOut: (agent) => { say(agent.id, null); setSigningOut(agent.id) },
     cancelSignOut: () => setSigningOut(null),

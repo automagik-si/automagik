@@ -197,8 +197,9 @@ export const AGENTS = Object.freeze({
   // The exception is a native agent with `isolatedHome` (Antigravity): it runs in this
   // installation's own home, as Claude Code and Codex do (cli-homes.js), so the sign-in the
   // person's terminal has never reaches it. It signs in only in the app: Settings asks it over
-  // ACP (`authenticate` with its `acpSignIn` method), and the terminal command shown as the
-  // fallback runs it in that same home (isolatedSignInHintOf). A Bot never signs it in.
+  // ACP (`authenticate` with its `acpSignIn` method). Its terminal command in that same home
+  // (isolatedSignInHintOf) goes only to the log, never to the page or a chat. A Bot never signs
+  // it in.
   //
   // Each is put in its own `default` mode, the one that asks, whatever DSH's level: what it asks
   // is answered by DSH's approval under the Session's level. Its own permission settings still
@@ -239,6 +240,12 @@ export const AGENTS = Object.freeze({
     // with Google's personal sign-in, which opens the browser on this computer.
     isolatedHome: true,
     acpSignIn: 'oauth-personal',
+    // Google's own OAuth entry points: a sign-in link agy prints while it signs in is shown as a
+    // link only when it is one of these (isSignInUrl).
+    signInUrls: Object.freeze([
+      'accounts.google.com/o/oauth2/v2/auth',
+      'accounts.google.com/o/oauth2/auth',
+    ]),
     modeFor: () => ['default'],
   }),
   'acp-omp': Object.freeze({
@@ -298,12 +305,32 @@ export function signInHintOf(spec, detail, platform = process.platform) {
 }
 
 /**
- * The terminal command that signs in to an agent with its own home (`isolatedHome`), as shown
- * (never run): its CLI by its absolute path, in that home and nothing of the person's. On
- * POSIX `env -i` drops every other variable (the D-Bus address, XDG_RUNTIME_DIR, API keys);
- * on Windows the variables last for that PowerShell window only, so it is run in a new one.
- * Undefined when the home or the path is not absolute or holds what the quoting cannot carry:
- * the row then offers only its Sign in.
+ * Whether `value` is a sign-in link `spec` may hand the page while it signs in: only one of its
+ * own OAuth entry points (`signInUrls`), over https, with no account, port or fragment, asking
+ * for a code for a named client. Never an arbitrary URL printed by a process.
+ * @param {object} spec an entry of AGENTS
+ * @param {unknown} value
+ */
+export function isSignInUrl(spec, value) {
+  const allowed = spec?.signInUrls
+  if (!Array.isArray(allowed) || typeof value !== 'string' || value.length > 8192) return false
+  if (/[\p{Cc}\s]/u.test(value)) return false
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) return false
+    if (!allowed.includes(`${url.hostname}${url.pathname}`)) return false
+    return url.searchParams.get('response_type') === 'code'
+      && /^[\w.-]{1,256}$/.test(url.searchParams.get('client_id') ?? '')
+  } catch { return false }
+}
+
+/**
+ * The terminal command that signs in to an agent with its own home (`isolatedHome`), for the log
+ * only (never run, never shown on the page or in a chat): its CLI by its absolute path, in that
+ * home and nothing of the person's. On POSIX `env -i` drops every other variable (the D-Bus
+ * address, XDG_RUNTIME_DIR, API keys); on Windows the variables last for that PowerShell window
+ * only, so it is run in a new one. Undefined when the home or the path is not absolute or holds
+ * what the quoting cannot carry.
  * @param {object} spec an entry of AGENTS
  * @param {{ path?: string } | undefined} detail the CLI as discovery found it
  * @param {string} home the agent's home (CliHomes.home)

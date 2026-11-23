@@ -358,7 +358,12 @@ differs from Claude Code and Codex:
   and again when the person asks (`refresh()`) while it is not signed in; no other check opens
   a session, because each of these agents keeps every session it opens in its own history.
   A session that opens does not prove a provider key works: a turn that then answers
-  `auth_required` reads as signed out at once.
+  `auth_required` reads as signed out at once. Antigravity is the exception: it runs in this
+  installation's own home and signs in in the app only (`signInNative`, ACP `authenticate`);
+  its status carries no command, `loginStart` refuses it with `acp-login/app`, a signed-out
+  turn names Settings, and its terminal command in that home goes only to the log. A sign-in
+  link it prints while it waits reaches the status as `signInUrl` only when it is one of
+  Google's own OAuth entry points (`isSignInUrl`).
 - **Models.** Antigravity offers its models and efforts as config options, as the adapters do.
   Hermes offers them only as the session's own list (`models` in the `session/new` answer,
   switched with `session/set_model`); the plugin reads that list when the agent has no model

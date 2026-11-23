@@ -77,6 +77,19 @@ export function isSignInHint(hint) {
 }
 // The one word that says why an in-app sign-in failed (acp-dsh `signInError`).
 const SIGN_IN_ERRORS = new Set(['unsupported', 'timeout', 'failed'])
+// A sign-in link agy printed while it signs in (acp-dsh `signInUrl`, agents.js isSignInUrl):
+// only Google's own OAuth entry points, over https, asking for a code for a named client.
+const GOOGLE_SIGN_IN = new Set(['accounts.google.com/o/oauth2/v2/auth', 'accounts.google.com/o/oauth2/auth'])
+export function isSignInUrl(value) {
+  if (typeof value !== 'string' || value.length > 8192 || /[\p{Cc}\s]/u.test(value)) return false
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) return false
+    if (!GOOGLE_SIGN_IN.has(`${url.hostname}${url.pathname}`)) return false
+    return url.searchParams.get('response_type') === 'code'
+      && /^[\w.-]{1,256}$/.test(url.searchParams.get('client_id') ?? '')
+  } catch { return false }
+}
 
 const shownPath = (path) => {
   if (typeof path !== 'string') return undefined
@@ -98,7 +111,8 @@ export function agentView(agent) {
       found: agent.cli?.found === true,
       ...(typeof agent.cli?.installUrl === 'string' && agent.cli.installUrl.startsWith('https://') ? { installUrl: agent.cli.installUrl } : {}),
       // The terminal command that signs in to a CLI with no sign-in in the app (isSignInHint).
-      ...(isSignInHint(agent.cli?.signInHint) ? { signInHint: agent.cli.signInHint } : {}),
+      // Never for one that signs in here (Antigravity): no command reaches its row (#2048).
+      ...(agent.appSignIn !== true && isSignInHint(agent.cli?.signInHint) ? { signInHint: agent.cli.signInHint } : {}),
       // A CLI the app installs only when the person clicks Install (Antigravity), and whether
       // the copy found is the one it installed (its row says it updates itself).
       ...(agent.cli?.install === 'manual' ? { install: 'manual', ...(agent.cli.managed === true ? { managed: true } : {}) } : {}),
@@ -131,6 +145,7 @@ export function agentView(agent) {
     // An agent with its own home that signs in here (Antigravity, #2048): exact values only.
     ...(agent.appSignIn === true ? { appSignIn: true } : {}),
     ...(agent.signingIn === true ? { signingIn: true } : {}),
+    ...(agent.appSignIn === true && agent.signingIn === true && isSignInUrl(agent.signInUrl) ? { signInUrl: agent.signInUrl } : {}),
     ...(SIGN_IN_ERRORS.has(agent.signInError) ? { signInError: agent.signInError } : {}),
     ...(agent.signInWhere === 'terminal' ? { signInWhere: 'terminal' } : {}),
     // Its account is the person's own too (Windows Credential Manager): the row says so.

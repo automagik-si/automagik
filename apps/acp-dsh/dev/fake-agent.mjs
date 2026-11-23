@@ -58,7 +58,9 @@
 // FAKE_ACP_AUTH_METHODS=a,b offers those `authMethods` ids in `initialize`. FAKE_ACP_AUTH=file
 // refuses `session/new` with auth_required unless `$HOME/.gemini/fake-signed-in` exists, and
 // `authenticate` with an offered id writes that file (the sign-in lives in its HOME only);
-// FAKE_ACP_AUTH_FAIL=1 makes `authenticate` fail instead.
+// FAKE_ACP_AUTH_FAIL=1 makes `authenticate` fail instead. FAKE_ACP_AUTH_STDERR is printed on
+// stderr when `authenticate` starts (a sign-in link, as agy may print one), and
+// FAKE_ACP_AUTH_HOLD=1 then keeps `authenticate` waiting, as for a person in the browser.
 // FAKE_ACP_ENV_FILE appends, at start, the names of the variables it was given and the values
 // of its home variables only (HOME, USERPROFILE, the XDG folders, CODEX_HOME and the Claude
 // folders). FAKE_ACP_LOGOUT=1 advertises `agentCapabilities.auth.logout` and answers `logout`
@@ -258,6 +260,8 @@ const implementation = {
     trace({ event: 'authenticate', methodId: params?.methodId })
     // With no methods offered it answers as it always did; with some, only those.
     if (AUTH_METHODS.length > 0 && !AUTH_METHODS.includes(params?.methodId)) throw RequestError.invalidParams(undefined, `Unknown auth method: ${params?.methodId}`)
+    if (process.env.FAKE_ACP_AUTH_STDERR) process.stderr.write(`${process.env.FAKE_ACP_AUTH_STDERR}\n`)
+    if (process.env.FAKE_ACP_AUTH_HOLD === '1') await new Promise(() => {})
     if (process.env.FAKE_ACP_AUTH_FAIL === '1') throw RequestError.internalError(undefined, 'the browser sign-in did not finish')
     if (AUTH === 'file') {
       mkdirSync(join(process.env.HOME ?? '', '.gemini'), { recursive: true })

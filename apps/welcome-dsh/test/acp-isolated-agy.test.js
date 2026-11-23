@@ -1,7 +1,8 @@
 // Antigravity in its own home (#2048, isolation amendment): the host passes the sign-in fields
-// only with exact values and the isolated terminal command only in its two shapes,
-// `acp-sign-in`/`acp-sign-out` call acp-dsh through, and the row signs in here, signs out with
-// a confirm, and shows the Windows warning in every state (English, pt-BR and Chinese).
+// only with exact values, the isolated terminal command only in its two shapes and never to
+// Antigravity's own row, `acp-sign-in`/`acp-sign-out` call acp-dsh through, and the row signs
+// in here as Claude Code's and Codex's do (no command, no path), signs out with a confirm, and
+// shows the Windows warning in every state (English, pt-BR and Chinese).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { dirname } from 'node:path'
@@ -9,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 import { install } from '../src/host/endpoint.js'
-import { ACP_ENTRY, agentView, isSignInHint } from '../src/host/acp.js'
+import { ACP_ENTRY, agentView, isSignInHint, isSignInUrl } from '../src/host/acp.js'
 import { needsViewer } from '../src/host/viewer-policy.js'
 import { fakeContext } from './fake-ctx.js'
 import { fakeLocale } from './fake-locale.js'
@@ -38,7 +39,9 @@ test('the isolated command passes in its two shapes, with a home under cli-homes
   for (const hint of [posix(POSIX_HOME), posix(POSIX_GENERATION), posix(POSIX_HOME, `/srv/a/.automagik/acp/clis/agy/1.5.15-${UUID}/bin/agy`),
     win32(WIN32_HOME), win32(WIN32_GENERATION), win32("C:\\Users\\o'hara\\.automagik\\acp\\cli-homes\\antigravity")]) {
     assert.equal(isSignInHint(hint), true, hint)
-    assert.equal(agentView(agy({}, { signInHint: hint })).cli.signInHint, hint)
+    // Owner decision (#2048): a row that signs in here never carries a command to the page.
+    assert.equal(agentView(agy({}, { signInHint: hint })).cli.signInHint, undefined)
+    assert.equal(agentView(agy({ appSignIn: undefined }, { signInHint: hint })).cli.signInHint, hint)
   }
   const bad = [
     posix('/srv/a/.automagik/acp/other/antigravity'),
@@ -81,8 +84,38 @@ test('the host passes the sign-in fields only with exact values', () => {
   assert.equal(view.signInWhere, 'terminal')
   assert.equal(view.sharedAccount, true)
   for (const word of ['unsupported', 'timeout', 'failed']) assert.equal(agentView(agy({ signInError: word })).signInError, word)
-  const odd = agentView(agy({ appSignIn: 'yes', signingIn: 1, signInError: 'aborted', signInWhere: 'settings', sharedAccount: 'true' }))
-  for (const field of ['appSignIn', 'signingIn', 'signInError', 'signInWhere', 'sharedAccount']) assert.equal(odd[field], undefined, field)
+  const odd = agentView(agy({ appSignIn: 'yes', signingIn: 1, signInError: 'aborted', signInWhere: 'settings', sharedAccount: 'true', signInUrl: GOOGLE }))
+  for (const field of ['appSignIn', 'signingIn', 'signInError', 'signInWhere', 'sharedAccount', 'signInUrl']) assert.equal(odd[field], undefined, field)
+})
+
+const GOOGLE = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=123-abc.apps.googleusercontent.com'
+  + '&redirect_uri=http%3A%2F%2F127.0.0.1%3A4242%2Foauth2callback&response_type=code&scope=openid&state=s1'
+
+test('a sign-in link reaches the row only while signing in, and only Google\'s own entry points', () => {
+  assert.equal(agentView(agy({ signingIn: true, signInUrl: GOOGLE })).signInUrl, GOOGLE)
+  assert.equal(isSignInUrl(GOOGLE.replace('/v2/auth', '/auth')), true)
+  // Not while no sign-in runs, and never for a row that does not sign in here.
+  assert.equal(agentView(agy({ signInUrl: GOOGLE })).signInUrl, undefined)
+  assert.equal(agentView(agy({ appSignIn: undefined, signingIn: true, signInUrl: GOOGLE })).signInUrl, undefined)
+  for (const bad of [
+    GOOGLE.replace('https:', 'http:'),
+    GOOGLE.replace('accounts.google.com', 'accounts.google.com.evil.example'),
+    GOOGLE.replace('accounts.google.com', 'evil.example'),
+    GOOGLE.replace('accounts.google.com', 'a@accounts.google.com'),
+    GOOGLE.replace('accounts.google.com', 'accounts.google.com:8443'),
+    GOOGLE.replace('/o/oauth2/v2/auth', '/o/oauth2/v2/other'),
+    GOOGLE.replace('response_type=code', 'response_type=token'),
+    GOOGLE.replace('client_id=123-abc.apps.googleusercontent.com', 'client_id='),
+    `${GOOGLE}#x`,
+    `${GOOGLE} x`,
+    `${GOOGLE}\n`,
+    'javascript:alert(1)',
+    `${GOOGLE}&pad=${'a'.repeat(8200)}`,
+    42,
+  ]) {
+    assert.equal(isSignInUrl(bad), false, String(bad).slice(0, 120))
+    assert.equal(agentView(agy({ signingIn: true, signInUrl: bad })).signInUrl, undefined)
+  }
 })
 
 function host(service) {
@@ -178,22 +211,47 @@ const acpOf = (over = {}) => {
 const rowOf = (row, acp = acpOf()) => render(ui.AcpAgentRow({ agent: agentView(row), acp }))
 const buttons = (tree, label) => findAll(tree, node => node.type === 'button' && textOf(node) === label)
 const inLocale = (id, work) => { locale.setLocale(id); try { return work() } finally { locale.setLocale('en') } }
+// useAcp under the stand-in react, with each problem the row would show recorded in `said`.
+function withHooks(make, said) {
+  const saved = react.useState
+  react.useState = (initial) => {
+    let value = typeof initial === 'function' ? initial() : initial
+    return [value, (next) => {
+      value = typeof next === 'function' ? next(value) : next
+      if (value && typeof value === 'object' && Object.hasOwn(value, 'acp-antigravity')) said.push(value)
+    }]
+  }
+  try { return make() } finally { react.useState = saved }
+}
 
-test('signed out: Sign in here, with the terminal command as the fallback; no terminal-only line', () => {
+// No command, no path and no terminal in any of Antigravity's sign-in lines (#2048, owner).
+const noCommand = (text, what) => {
+  for (const pattern of [/acp --login/, /env -i/, /\$env:/, /cli-homes/, /\/srv\//, /C:\\/, /\/bin\/agy/, /agy\.exe/, /Run /, /\{/]) {
+    assert.doesNotMatch(text, pattern, what)
+  }
+}
+const SIGNED_OUT_LINE = (tree) => findAll(tree, node => node.type === 'p' && /oai-acp-line/.test(node.props.className ?? '')
+  && textOf(node).startsWith('Not signed in to Antigravity.'))
+
+test('signed out: only "Not signed in to Antigravity." and Sign in, as Claude Code and Codex read', () => {
   const acp = acpOf()
+  // The host drops the command; the row would not show one if it came anyway.
+  for (const tree of [rowOf(agy(), acp), render(ui.AcpAgentRow({ agent: agy(), acp }))]) {
+    const [line] = SIGNED_OUT_LINE(tree)
+    assert.ok(line)
+    assert.equal(textOf(line), 'Not signed in to Antigravity.Sign in')
+    noCommand(textOf(tree), 'signed out')
+    assert.deepEqual(findAll(tree, node => node.type === 'details' || node.type === 'code'), [])
+    assert.deepEqual(buttons(tree, 'Copy'), [])
+    assert.deepEqual(buttons(tree, 'Check again'), [])
+  }
   const tree = rowOf(agy(), acp)
-  const text = textOf(tree)
-  assert.match(text, /Not signed in to Antigravity\. Sign in here: your browser opens to finish\./)
-  assert.ok(text.includes(`If no browser opens, run ${posix(POSIX_HOME)} in a new terminal window, then check again.`))
-  assert.doesNotMatch(text, /in a terminal, then check again\./)
-  assert.doesNotMatch(text, /\{/)
   buttons(tree, 'Sign in')[0].props.onClick()
   assert.deepEqual(acp.acted, [['sign-in', 'acp-antigravity']])
-  assert.equal(buttons(tree, 'Check again').length, 1)
-  // Without a command the row offers Sign in alone.
+  // Without a command the row reads the same.
   const bare = rowOf(agy({}, { signInHint: undefined }))
   assert.equal(buttons(bare, 'Sign in').length, 1)
-  assert.doesNotMatch(textOf(bare), /If no browser opens/)
+  assert.equal(textOf(SIGNED_OUT_LINE(bare)[0]), 'Not signed in to Antigravity.Sign in')
   // Off: nothing to sign in to; the off line says the sign-in is the app's own.
   const off = rowOf(agy({ on: false, connector: { state: 'off', native: true }, signedIn: undefined }))
   assert.deepEqual(buttons(off, 'Sign in'), [])
@@ -201,26 +259,52 @@ test('signed out: Sign in here, with the terminal command as the fallback; no te
   assert.doesNotMatch(textOf(off), /already has on this computer/)
 })
 
-test('signing in, each failure, and no browser on this computer', () => {
+test('signing in, with agy\'s sign-in link as a link; each failure; and no browser on this computer', async () => {
   const busy = rowOf(agy({ signingIn: true }))
   assert.match(textOf(busy), /Finish the sign-in to Antigravity in your browser…/)
   assert.deepEqual(buttons(busy, 'Sign in'), [])
+  assert.deepEqual(findAll(busy, node => node.type === 'a'), [])
+  // A link agy printed: the row's link, worded as Claude's link flow (Sign in with {name}).
+  const linked = rowOf(agy({ signingIn: true, signInUrl: GOOGLE }))
+  const [link] = findAll(linked, node => node.type === 'a')
+  assert.equal(link.props.href, GOOGLE)
+  assert.equal(link.props.target, '_blank')
+  assert.equal(link.props.rel, 'noreferrer')
+  assert.equal(link.props.className, 'oai-link')
+  assert.equal(textOf(link), 'Sign in with Antigravity')
+  noCommand(textOf(linked), 'signing in')
   for (const [word, line] of [
-    ['unsupported', 'Antigravity did not offer a Google sign-in. Use the terminal command below.'],
+    ['unsupported', 'Antigravity did not offer a Google sign-in. Try again.'],
     ['timeout', 'The sign-in to Antigravity took too long. Try again.'],
     ['failed', 'The sign-in to Antigravity did not finish. Try again.'],
   ]) {
     const tree = rowOf(agy({ signInError: word }))
     assert.ok(textOf(tree).includes(line), word)
     assert.equal(buttons(tree, 'Sign in').length, 1)
+    noCommand(textOf(tree), word)
   }
-  const terminal = rowOf(agy({ signInWhere: 'terminal' }))
-  assert.ok(textOf(terminal).includes(`Not signed in to Antigravity. This computer has no browser for the sign-in: run ${posix(POSIX_HOME)} in a new terminal window, then check again.`))
-  assert.deepEqual(buttons(terminal, 'Sign in'), [])
-  assert.equal(buttons(terminal, 'Check again').length, 1)
-  const none = rowOf(agy({ signInWhere: 'terminal' }, { signInHint: undefined }))
-  assert.match(textOf(none), /Not signed in to Antigravity\. This computer has no browser for the sign-in\./)
-  assert.deepEqual(buttons(none, 'Sign in'), [])
+  // No browser on this computer: the same row, and Sign in answers that the browser did not open.
+  for (const row of [agy({ signInWhere: 'terminal' }), agy({ signInWhere: 'terminal' }, { signInHint: undefined })]) {
+    const terminal = rowOf(row)
+    assert.equal(textOf(SIGNED_OUT_LINE(terminal)[0]), 'Not signed in to Antigravity.Sign in')
+    assert.deepEqual(buttons(terminal, 'Check again'), [])
+    noCommand(textOf(terminal), 'no browser')
+  }
+  const said = []
+  const refusing = async () => { throw new Error('The browser did not open. Try again.') }
+  const acp = withHooks(() => ui.useAcp(refusing), said)
+  assert.equal(await acp.nativeLogin(agy({ signInWhere: 'terminal' })), false)
+  assert.equal(said.at(-1)?.['acp-antigravity'], 'The browser did not open. Try again.')
+  const ptSaid = []
+  const ptAcp = withHooks(() => ui.useAcp(refusing), ptSaid)
+  locale.setLocale('pt-BR')
+  try { await ptAcp.nativeLogin(agy({ signInWhere: 'terminal' })) } finally { locale.setLocale('en') }
+  assert.equal(ptSaid.at(-1)?.['acp-antigravity'], 'O navegador não abriu. Tente de novo.')
+  // Any other refusal keeps acp-dsh's words.
+  const other = []
+  const busyAcp = withHooks(() => ui.useAcp(async () => { throw new Error('The Bot account is changing.') }), other)
+  await busyAcp.nativeLogin(agy())
+  assert.equal(other.at(-1)?.['acp-antigravity'], 'The Bot account is changing.')
 })
 
 test('signed in: Sign out asks first, then signs out; Cancel keeps it', () => {
@@ -260,28 +344,54 @@ test('Windows: the shared-account warning in every state, and never a Sign out',
   assert.ok(!textOf(rowOf(agy({ signedIn: true }))).includes(WARNING))
 })
 
-const NEW_KEYS = [
-  'Not signed in to {name}. Sign in here: your browser opens to finish.',
-  'If no browser opens, run {command} in a new terminal window, then check again.',
+// Antigravity's own sign-in lines, in Chinese too (#2048, owner).
+const ZH_KEYS = [
+  'Not signed in to {name}.',
+  'The browser did not open. Try again.',
   'Finish the sign-in to {name} in your browser…',
-  '{name} did not offer a Google sign-in. Use the terminal command below.',
+  '{name} did not offer a Google sign-in. Try again.',
   'The sign-in to {name} took too long. Try again.',
   'The sign-in to {name} did not finish. Try again.',
+]
+const NEW_KEYS = [
+  ...ZH_KEYS,
+  'Sign in with {name}',
   'Automagik keeps its own {name} sign-in, apart from the one in your terminal.',
-  'Not signed in to {name}. This computer has no browser for the sign-in: run {command} in a new terminal window, then check again.',
-  'Not signed in to {name}. This computer has no browser for the sign-in.',
   'Sign out',
   'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.',
 ]
+// The keys of the inline terminal command, gone with it.
+const GONE_KEYS = [
+  'Not signed in to {name}. Sign in here: your browser opens to finish.',
+  'If no browser opens, run {command} in a new terminal window, then check again.',
+  '{name} did not offer a Google sign-in. Use the terminal command below.',
+  'Not signed in to {name}. This computer has no browser for the sign-in: run {command} in a new terminal window, then check again.',
+  'Not signed in to {name}. This computer has no browser for the sign-in.',
+]
 
-test('every new line reads in pt-BR; the Windows warning in Chinese, with the rest in English', () => {
+test('every new line reads in pt-BR; Antigravity\'s sign-in lines and the Windows warning in Chinese', () => {
   for (const key of NEW_KEYS) assert.equal(typeof ui.PT_BR[key], 'string', key)
-  assert.deepEqual(Object.keys(ui.ZH), [NEW_KEYS.at(-1)])
+  for (const key of GONE_KEYS) assert.equal(ui.PT_BR[key], undefined, key)
+  assert.deepEqual(Object.keys(ui.ZH), [...ZH_KEYS, NEW_KEYS.at(-1)])
+  for (const text of [...NEW_KEYS.map(key => ui.PT_BR[key]), ...Object.values(ui.ZH)]) noCommand(text.replace(/\{name\}/g, ''), text)
+  for (const key of ZH_KEYS) for (const text of [key, ui.PT_BR[key], ui.ZH[key]]) assert.doesNotMatch(text, /terminal|终端|command|comando|命令/i, text)
   const pt = inLocale('pt-BR', () => textOf(rowOf(agy({ signedIn: true, sharedAccount: true }))))
   assert.match(pt, /No Windows, a conta do Antigravity é compartilhada: .*Sair não está disponível aqui: saia pelo próprio Antigravity\./)
   assert.doesNotMatch(pt, /\{/)
-  const ptOut = inLocale('pt-BR', () => textOf(rowOf(agy())))
-  assert.match(ptOut, /Sem login no Antigravity\. Entre por aqui: o navegador abre para concluir o login\./)
+  const ptOut = inLocale('pt-BR', () => rowOf(agy()))
+  assert.equal(textOf(findAll(ptOut, node => node.type === 'p' && textOf(node).startsWith('Sem login'))[0]), 'Sem login no Antigravity.Entrar')
+  noCommand(textOf(ptOut), 'pt-BR')
+  const ptLink = inLocale('pt-BR', () => rowOf(agy({ signingIn: true, signInUrl: GOOGLE })))
+  assert.equal(textOf(findAll(ptLink, node => node.type === 'a')[0]), 'Entrar com Antigravity')
+  assert.match(textOf(ptLink), /Conclua o login no Antigravity pelo navegador…/)
+  // Chinese: the signed-out line, the wait line and each failure.
+  const zhOut = inLocale('zh', () => rowOf(agy()))
+  assert.equal(textOf(findAll(zhOut, node => node.type === 'p' && textOf(node).startsWith('未登录'))[0]), '未登录 Antigravity。Sign in')
+  noCommand(textOf(zhOut), 'zh')
+  assert.match(inLocale('zh', () => textOf(rowOf(agy({ signingIn: true })))), /请在浏览器中完成 Antigravity 的登录…/)
+  for (const [word, line] of [['unsupported', 'Antigravity 没有提供 Google 登录。请重试。'], ['timeout', 'Antigravity 的登录用时过长。请重试。'], ['failed', 'Antigravity 的登录没有完成。请重试。']]) {
+    assert.ok(inLocale('zh', () => textOf(rowOf(agy({ signInError: word })))).includes(line), word)
+  }
   // DSH's Chinese id is `zh`: the warning reads in Chinese, its neighbour line in English.
   const zh = inLocale('zh', () => textOf(rowOf(agy({ signedIn: true, sharedAccount: true }))))
   assert.ok(zh.includes('在 Windows 上，Antigravity 的账号是共享的：Automagik 和你在这台电脑上自己的 Antigravity 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 Antigravity 中退出。'))

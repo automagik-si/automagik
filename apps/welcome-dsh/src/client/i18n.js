@@ -329,15 +329,13 @@ export const PT_BR = {
   'Could not tell whether you are signed in to {name}.': 'Não foi possível saber se há login no {name}.',
   'Sign in': 'Entrar',
   // Antigravity in its own home (#2048): its sign-in in the app, and Windows's shared account
-  'Not signed in to {name}. Sign in here: your browser opens to finish.': 'Sem login no {name}. Entre por aqui: o navegador abre para concluir o login.',
-  'If no browser opens, run {command} in a new terminal window, then check again.': 'Se nenhum navegador abrir, rode {command} em uma nova janela de terminal e verifique de novo.',
+  'Not signed in to {name}.': 'Sem login no {name}.',
+  'The browser did not open. Try again.': 'O navegador não abriu. Tente de novo.',
   'Finish the sign-in to {name} in your browser…': 'Conclua o login no {name} pelo navegador…',
-  '{name} did not offer a Google sign-in. Use the terminal command below.': 'O {name} não ofereceu login com Google. Use o comando de terminal abaixo.',
+  '{name} did not offer a Google sign-in. Try again.': 'O {name} não ofereceu login com Google. Tente de novo.',
   'The sign-in to {name} took too long. Try again.': 'O login no {name} demorou demais. Tente de novo.',
   'The sign-in to {name} did not finish. Try again.': 'O login no {name} não terminou. Tente de novo.',
   'Automagik keeps its own {name} sign-in, apart from the one in your terminal.': 'O Automagik mantém um login próprio do {name}, separado do login do seu terminal.',
-  'Not signed in to {name}. This computer has no browser for the sign-in: run {command} in a new terminal window, then check again.': 'Sem login no {name}. Este computador não tem um navegador para o login: rode {command} em uma nova janela de terminal e verifique de novo.',
-  'Not signed in to {name}. This computer has no browser for the sign-in.': 'Sem login no {name}. Este computador não tem um navegador para o login.',
   'Sign out': 'Sair',
   'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.': 'No Windows, a conta do {name} é compartilhada: o Automagik e o seu próprio {name} neste computador usam o mesmo login, guardado no Gerenciador de Credenciais do Windows. Sair não está disponível aqui: saia pelo próprio {name}.',
   'No Bot chat to sign in from here. Run {command} in a terminal instead.': 'Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.',
@@ -597,10 +595,16 @@ export const PT_BR = {
 // English is the key itself; registering it keeps the namespace whole in both languages.
 const EN = Object.fromEntries(Object.keys(PT_BR).map(key => [key, key]))
 
-// Chinese: only the Windows warning of Antigravity's row (#2048); every other key reads in
-// English. `zh` is the Chinese id of DSH's locale service (dsh-client-locale 0.2.2-rc.2 lists
+// Chinese: Antigravity's own lines (#2048): its sign-in in the app and the Windows warning.
+// Every other key reads in English, the buttons and the link label shared with other rows too. `zh` is the Chinese id of DSH's locale service (dsh-client-locale 0.2.2-rc.2 lists
 // `zh` and `en`; `zh-CN` is only the page's lang attribute).
 export const ZH = {
+  'Not signed in to {name}.': '未登录 {name}。',
+  'The browser did not open. Try again.': '浏览器没有打开。请重试。',
+  'Finish the sign-in to {name} in your browser…': '请在浏览器中完成 {name} 的登录…',
+  '{name} did not offer a Google sign-in. Try again.': '{name} 没有提供 Google 登录。请重试。',
+  'The sign-in to {name} took too long. Try again.': '{name} 的登录用时过长。请重试。',
+  'The sign-in to {name} did not finish. Try again.': '{name} 的登录没有完成。请重试。',
   'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.': '在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。',
 }
 

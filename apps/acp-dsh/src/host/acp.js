@@ -237,7 +237,11 @@ export class AgentRun {
     for (const pipe of [child.stdin, child.stdout, child.stderr]) pipe.unref?.()
     this.holdOn()
     child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (chunk) => { this.stderr = (this.stderr + chunk).slice(-STDERR_KEEP) })
+    child.stderr.on('data', (chunk) => {
+      this.stderr = (this.stderr + chunk).slice(-STDERR_KEEP)
+      // A sign-in run reads what the agent prints there (a sign-in link, index.js signInNative).
+      try { this.spec.onStderr?.(chunk) } catch {}
+    })
     const gone = new Promise((_, fail) => {
       child.once('error', error => fail(error))
       child.once('exit', (code, signal) => {

@@ -197,7 +197,9 @@ while its CLI is missing, installing or failed, or signed in but not answering y
 - for Hermes, Antigravity and omp (acp-dsh's native-ACP agents, off until switched on): the
   same row without a connector line, with what switching it on means while it is off, and with
   the terminal command that signs in instead of a Bot's chat (`hermes acp --setup`,
-  `agy acp --login`, `omp login`); Automagik never installs these CLIs;
+  `omp login`); Automagik never installs these CLIs but Antigravity's, on the person's click.
+  Antigravity runs in its own home and signs in here only: signed out, its row says *Not signed
+  in to Antigravity.* with **Sign in**, and never shows a terminal command or a path;
 - whether the agent's CLI (`claude`, `codex`) is on this computer, as acp-dsh's own store has
   it: installing or updating it by itself, failed with its error and **Retry**, or found with
   its version; with its install link and **Check again** when it is missing;
@@ -311,7 +313,7 @@ The shape was read from DSH 0.2.1-rc.2:
 | `acp-switch` | `{ id, on }` | Writes acp-dsh's `claude` or `codex` setting in the entry its service names (`settingsEntry`, else `acp-dsh`) at the revision `describe()` gave. |
 | `acp-retry` | `{ id }` | Starts a failed connector install again. |
 | `acp-install` | `{ id }` | Installs a CLI acp-dsh installs only on the person's click (Antigravity, `cli.install: 'manual'`) through its `installCli`, while the agent is on; answers at once with the install under way. Refused while off, or by an acp-dsh without `installCli`. Needs the owner viewer like `acp-switch`. |
-| `acp-sign-in` | `{ id }` | Signs in to an agent with its own home in this installation (Antigravity, `appSignIn: true`) through acp-dsh's `signInNative`: agy's browser sign-in opens on this computer. Answers at once with `signingIn: true`; a failure leaves `signInError` (`unsupported`, `timeout` or `failed`). Refused while off, without the CLI, or with no browser here (`signInWhere: 'terminal'`). Needs the owner viewer. |
+| `acp-sign-in` | `{ id }` | Signs in to an agent with its own home in this installation (Antigravity, `appSignIn: true`) through acp-dsh's `signInNative`: agy's browser sign-in opens on this computer. Answers at once with `signingIn: true`, and a sign-in link agy printed while it waits as `signInUrl` (only Google's own OAuth entry points; the row shows it as a link); a failure leaves `signInError` (`unsupported`, `timeout` or `failed`). Refused while off, without the CLI, or with no browser here (`signInWhere: 'terminal'`: "The browser did not open. Try again."). Needs the owner viewer. |
 | `acp-sign-out` | `{ id }` | Signs out of that agent by retiring its home (acp-dsh's `accountSignOutNative`, as Reset does). Refused for a row without `appSignIn` and where the account is shared (`sharedAccount: true`, Windows). Needs the owner viewer. |
 | `bot-type` | `{ type: 'omni' }` | What the Omni Bot starts with, as groups: model and thinking (DSH's default), plugins with versions, tool groups with their switches, skills, folder and permissions. |
 

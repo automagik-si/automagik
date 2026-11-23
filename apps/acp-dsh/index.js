@@ -20,7 +20,7 @@ import z from '@deepseek-ai/schemastery'
 import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js'
 import { AcpAdapter, aside, BRIDGE_PATH, SIDE_MODEL } from './src/host/adapter.js'
 import { AgentRun, isUnanswered } from './src/host/acp.js'
-import { AGENTS, cliIdOf, findCommand, isNative, isolatedSignInHintOf, launchOf, signedInOf, signInHintOf } from './src/host/agents.js'
+import { AGENTS, cliIdOf, findCommand, isNative, isolatedSignInHintOf, isSignInUrl, launchOf, signedInOf, signInHintOf } from './src/host/agents.js'
 import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
@@ -341,8 +341,8 @@ export function apply(ctx, config = {}, {
   const homed = spec => homes !== undefined && (!isNative(spec) || spec?.isolatedHome === true)
   const homedNative = spec => homed(spec) && isNative(spec)
   const homeIds = Object.keys(AGENTS).filter(id => homed(AGENTS[id]))
-  // The homed native agent's terminal fallback, in its own home; undefined when it cannot be
-  // shown safely (agents.js isolatedSignInHintOf).
+  // The homed native agent's terminal command, in its own home, for the log only (never the
+  // page or a chat); undefined when it cannot be quoted safely (agents.js isolatedSignInHintOf).
   const isolatedHint = (spec, detail) => {
     let home
     try { home = homes.home(spec.key) } catch { return undefined }
@@ -896,8 +896,8 @@ export function apply(ctx, config = {}, {
       cli: {
         found: cli !== undefined, installUrl: spec.installUrl,
         // How the person signs in to a CLI that has no sign-in in the app: its terminal command.
-        // An agent with its own home names the command that signs in there, or none.
-        ...(homedNative(spec) ? (typeof isolatedHint(spec, detail) === 'string' ? { signInHint: isolatedHint(spec, detail) } : {})
+        // An agent with its own home signs in in the app only: no command (#2048, owner).
+        ...(homedNative(spec) ? {}
           : typeof spec.signInHint === 'string' ? { signInHint: signInHintOf(spec, detail) } : {}),
         state: cli ? 'ready' : cliBusy || (managed && !manual && !cliFailure) ? 'installing' : cliFailure ? 'failed' : 'missing',
         ...(manual ? { install: 'manual' } : {}),
@@ -933,11 +933,14 @@ export function apply(ctx, config = {}, {
       ...(signIns.get(id) === undefined ? {} : { signedIn: signIns.get(id) }),
       ...(homes && !native ? { authScope: 'isolated' } : {}),
       // An agent with its own home that signs in in the app (Antigravity): Settings offers Sign
-      // in (signInNative), says while it runs and, in one word, why the last one failed. With no
-      // browser on this computer, only the terminal command (`signInWhere: 'terminal'`).
+      // in (signInNative), says while it runs, with the sign-in link the agent printed if any,
+      // and, in one word, why the last one failed. With no browser on this computer, Sign in
+      // answers that the browser did not open (`signInWhere: 'terminal'`).
       ...(homedNative(spec) && typeof spec.acpSignIn === 'string' ? {
         appSignIn: true,
         ...(nativeSignIns.has(id) ? { signingIn: true } : {}),
+        ...(typeof nativeSignIns.get(id)?.url === 'string'
+          ? { signInUrl: nativeSignIns.get(id).url } : {}),
         ...(nativeSignInErrors.has(id) ? { signInError: nativeSignInErrors.get(id) } : {}),
         ...(browserHere() ? {} : { signInWhere: 'terminal' }),
       } : {}),
@@ -1071,10 +1074,8 @@ export function apply(ctx, config = {}, {
   const attemptVersions = new Map()
   const logins = new CliLogins({
     // The command a terminal-only sign-in names: a copy Automagik installed by its path. An
-    // agent with its own home names only the command that signs in there, else none (null, so
-    // the static command, which signs in the person's own home, is never named).
-    hintOf: id => (homedNative(AGENTS[id]) ? isolatedHint(AGENTS[id], cliDetails.get(id)) ?? null
-      : signInHintOf(AGENTS[id], cliDetails.get(id))),
+    // agent with its own home names none (null): it signs in in the app only (#2048).
+    hintOf: id => (homedNative(AGENTS[id]) ? null : signInHintOf(AGENTS[id], cliDetails.get(id))),
     // Why an attempt failed, for the host log (#970): a fixed class, where the attempt stood,
     // the CLI's exit and its version. Never what the CLI printed, a link, a code or an account.
     onFail({ id, cause, phase, exit }) {
@@ -1396,6 +1397,13 @@ export function apply(ctx, config = {}, {
   const methodIds = init => (Array.isArray(init?.authMethods) ? init.authMethods : [])
     .map(method => method?.id).filter(value => typeof value === 'string' && /^[a-z0-9-]{1,40}$/.test(value)).slice(0, 8)
   const signInFailure = (code, message) => Object.assign(new Error(message), { code: `acp-sign-in/${code}` })
+  // The terminal command that signs in to a homed native agent's own home, for support: the
+  // log only, never the page or a chat (#2048, owner).
+  const logTerminalHint = (spec, id, why) => {
+    const hint = isolatedHint(spec, cliDetails.get(id))
+    if (typeof hint !== 'string') return
+    info(ctx, `${spec.defaultName}: ${why}; its terminal sign-in, for support: ${hint}`)
+  }
 
   // The in-app sign-in of an agent with its own home (Antigravity, #2048): ACP `authenticate`
   // with its `acpSignIn` method, in that home, which opens the browser on this computer. It
@@ -1412,7 +1420,8 @@ export function apply(ctx, config = {}, {
     reconcile({ kick: false })
     if (clis.get(id) === undefined) throw signInFailure('missing', `Install ${spec.defaultName} first.`)
     if (!browserHere()) {
-      throw signInFailure('no-display', 'This computer has no browser for the sign-in. Use the terminal command.')
+      logTerminalHint(spec, id, 'there is no browser on this computer')
+      throw signInFailure('no-display', 'The browser did not open. Try again.')
     }
     if (nativeSignIns.has(id)) return status()
     if (accountChanges.has(id)) throw accountFailure('busy', 'The Bot account is changing.')
@@ -1451,8 +1460,20 @@ export function apply(ctx, config = {}, {
       let word
       try {
         const { command, args, env } = launch(spec, clis.get(id), id)
+        // A sign-in link the agent prints while it waits (its browser may not have opened) is
+        // shown as a link, only when it is one of its own OAuth entry points (isSignInUrl).
+        let printed = ''
+        const onStderr = (chunk) => {
+          if (attempt.url !== undefined || controller.signal.aborted) return
+          printed = (printed + chunk).slice(-16_384)
+          const urls = printed.match(/https:\/\/[^\s<>"'\p{Cc}]+/gu) ?? []
+          const url = urls.find(found => isSignInUrl(spec, found))
+          if (url === undefined) return
+          attempt.url = url
+          if (!disposed && nativeSignIns.get(id) === attempt) publish()
+        }
         run = new AgentRun({ command, args, env, cwd: env[HOME_ENV], name: spec.name,
-          authenticate: spec.acpSignIn, startMs: nativeSignInMs })
+          authenticate: spec.acpSignIn, startMs: nativeSignInMs, onStderr })
         await run.start({ signal: controller.signal })
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -1475,6 +1496,7 @@ export function apply(ctx, config = {}, {
         if (disposed || controller.signal.aborted) return
         if (word !== undefined) {
           nativeSignInErrors.set(id, word)
+          logTerminalHint(spec, id, `the sign-in ended (${word})`)
           return
         }
         // Signed in: the agent's own session says so, read afresh in the same home.

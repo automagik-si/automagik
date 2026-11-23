@@ -9274,15 +9274,13 @@ var PT_BR = {
   "Could not tell whether you are signed in to {name}.": "Não foi possível saber se há login no {name}.",
   "Sign in": "Entrar",
   // Antigravity in its own home (#2048): its sign-in in the app, and Windows's shared account
-  "Not signed in to {name}. Sign in here: your browser opens to finish.": "Sem login no {name}. Entre por aqui: o navegador abre para concluir o login.",
-  "If no browser opens, run {command} in a new terminal window, then check again.": "Se nenhum navegador abrir, rode {command} em uma nova janela de terminal e verifique de novo.",
+  "Not signed in to {name}.": "Sem login no {name}.",
+  "The browser did not open. Try again.": "O navegador não abriu. Tente de novo.",
   "Finish the sign-in to {name} in your browser…": "Conclua o login no {name} pelo navegador…",
-  "{name} did not offer a Google sign-in. Use the terminal command below.": "O {name} não ofereceu login com Google. Use o comando de terminal abaixo.",
+  "{name} did not offer a Google sign-in. Try again.": "O {name} não ofereceu login com Google. Tente de novo.",
   "The sign-in to {name} took too long. Try again.": "O login no {name} demorou demais. Tente de novo.",
   "The sign-in to {name} did not finish. Try again.": "O login no {name} não terminou. Tente de novo.",
   "Automagik keeps its own {name} sign-in, apart from the one in your terminal.": "O Automagik mantém um login próprio do {name}, separado do login do seu terminal.",
-  "Not signed in to {name}. This computer has no browser for the sign-in: run {command} in a new terminal window, then check again.": "Sem login no {name}. Este computador não tem um navegador para o login: rode {command} em uma nova janela de terminal e verifique de novo.",
-  "Not signed in to {name}. This computer has no browser for the sign-in.": "Sem login no {name}. Este computador não tem um navegador para o login.",
   "Sign out": "Sair",
   "On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.": "No Windows, a conta do {name} é compartilhada: o Automagik e o seu próprio {name} neste computador usam o mesmo login, guardado no Gerenciador de Credenciais do Windows. Sair não está disponível aqui: saia pelo próprio {name}.",
   "No Bot chat to sign in from here. Run {command} in a terminal instead.": "Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.",
@@ -9534,6 +9532,12 @@ var PT_BR = {
 };
 var EN = Object.fromEntries(Object.keys(PT_BR).map((key) => [key, key]));
 var ZH = {
+  "Not signed in to {name}.": "未登录 {name}。",
+  "The browser did not open. Try again.": "浏览器没有打开。请重试。",
+  "Finish the sign-in to {name} in your browser…": "请在浏览器中完成 {name} 的登录…",
+  "{name} did not offer a Google sign-in. Try again.": "{name} 没有提供 Google 登录。请重试。",
+  "The sign-in to {name} took too long. Try again.": "{name} 的登录用时过长。请重试。",
+  "The sign-in to {name} did not finish. Try again.": "{name} 的登录没有完成。请重试。",
   "On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.": "在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。"
 };
 var fill = (text, params) => params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text;
@@ -12621,6 +12625,7 @@ var import_react9 = require("react");
 var CLI_OF = { "acp-claude": "claude", "acp-codex": "codex", "acp-hermes": "hermes", "acp-antigravity": "agy", "acp-omp": "omp" };
 var LOGO_OF = { "acp-claude": "CC", "acp-codex": "CX", "acp-hermes": "HM", "acp-antigravity": "AG", "acp-omp": "OM" };
 var isNative = (agent) => agent?.connector?.native === true;
+var BROWSER_DID_NOT_OPEN = "The browser did not open. Try again.";
 var isolatedSignIn = (agent) => agent.authScope === "isolated" && !isNative(agent);
 var signInCommand = (agent) => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key;
 var SIGN_IN_OF = { "acp-claude": "claude auth login", "acp-codex": "codex login" };
@@ -12765,18 +12770,18 @@ function agentLines(agent, entry) {
 var sharedLine = (name) => ({ tone: "muted", text: t("On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.", { name }) });
 function appSignInLines(agent, name) {
   const lines = [];
-  const command = agent.cli.signInHint;
-  if (agent.signingIn === true) return [{ tone: "wait", text: t("Finish the sign-in to {name} in your browser…", { name }) }];
-  if (agent.signInError === "unsupported") lines.push({ tone: "bad", text: t("{name} did not offer a Google sign-in. Use the terminal command below.", { name }) });
+  if (agent.signingIn === true) {
+    return [{
+      tone: "wait",
+      text: t("Finish the sign-in to {name} in your browser…", { name }),
+      ...agent.signInUrl ? { link: { href: agent.signInUrl, text: t("Sign in with {name}", { name }) } } : {}
+    }];
+  }
+  if (agent.signInError === "unsupported") lines.push({ tone: "bad", text: t("{name} did not offer a Google sign-in. Try again.", { name }) });
   if (agent.signInError === "timeout") lines.push({ tone: "bad", text: t("The sign-in to {name} took too long. Try again.", { name }) });
   if (agent.signInError === "failed") lines.push({ tone: "bad", text: t("The sign-in to {name} did not finish. Try again.", { name }) });
   if (agent.signedIn !== false) return lines;
-  if (agent.signInWhere === "terminal") {
-    lines.push(command ? { tone: "bad", text: t("Not signed in to {name}. This computer has no browser for the sign-in: run {command} in a new terminal window, then check again.", { name, command }), action: "check" } : { tone: "bad", text: t("Not signed in to {name}. This computer has no browser for the sign-in.", { name }), action: "check" });
-    return lines;
-  }
-  lines.push({ tone: "bad", text: t("Not signed in to {name}. Sign in here: your browser opens to finish.", { name }), action: "native-login" });
-  if (command) lines.push({ tone: "muted", text: t("If no browser opens, run {command} in a new terminal window, then check again.", { command }), action: "check" });
+  lines.push({ tone: "bad", text: t("Not signed in to {name}.", { name }), action: "native-login" });
   return lines;
 }
 function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
@@ -12815,7 +12820,7 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
   }, [pollMs, load]);
   const [signingOut, setSigningOut] = (0, import_react9.useState)(null);
   const say = (id, message) => setProblems((previous) => ({ ...previous, [id]: message }));
-  const act = async (id, endpoint, payload) => {
+  const act = async (id, endpoint, payload, words = (message) => message) => {
     say(id, null);
     setBusy(id);
     let ok = true;
@@ -12823,7 +12828,7 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
       show(await request2(endpoint, payload));
     } catch (error) {
       ok = false;
-      say(id, error.message);
+      say(id, words(error.message));
     }
     if (live.current) setBusy(null);
     return ok;
@@ -12847,7 +12852,8 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     check: (agent) => act(agent.id, "acp", { refresh: true }),
     // An agent that signs in here: Sign in starts it (its browser opens), and Sign out asks
     // first, with the same words as the account switch, then retires its home.
-    nativeLogin: (agent) => act(agent.id, "acp-sign-in", { id: agent.id }),
+    // With no browser on this computer acp-dsh refuses in fixed words, read in the page's language.
+    nativeLogin: (agent) => act(agent.id, "acp-sign-in", { id: agent.id }, (message) => message === BROWSER_DID_NOT_OPEN ? t("The browser did not open. Try again.") : message),
     signOutPending: signingOut,
     askSignOut: (agent) => {
       say(agent.id, null);
