@@ -122,7 +122,8 @@ export class CliHomes {
       ...env,
       // agy stores its sign-in in the desktop session's Secret Service when it finds a D-Bus
       // session bus, and that store belongs to the session, not to HOME. Without the bus address
-      // it keeps the sign-in in its file store, inside this home. Claude Code and Codex keep it.
+      // it is expected to keep the sign-in in its file store, inside this home (agy's changelog;
+      // checked at acceptance). Claude Code and Codex keep the address.
       ...(vendor === 'antigravity' ? { DBUS_SESSION_BUS_ADDRESS: undefined } : {}),
       HOME: home,
       DSH_HOME: this.identity,

@@ -347,8 +347,14 @@ test('I4: an agy that signs out over ACP is asked to, in the old home, before th
   assert.equal((await w.signedIn()).signedIn, true)
   assert.ok(w.logs.includes('acp-dsh: Antigravity offers sign-in methods: oauth-personal; sign-out over ACP: yes'))
   const old = w.home()
+  const started = w.envs().length
   await w.service.accountSignOutNative(ID)
-  assert.deepEqual(w.traces().filter(entry => entry.event === 'logout').map(entry => entry.home), [old])
+  const logouts = w.traces().filter(entry => entry.event === 'logout')
+  assert.deepEqual(logouts.map(entry => entry.home), [old])
+  // The logout run itself started isolated in the old home: no bus, no key, every folder there.
+  const logoutRuns = w.envs().slice(started).filter(entry => entry.pid === logouts[0].pid)
+  assert.equal(logoutRuns.length, 1)
+  for (const entry of logoutRuns) checkIsolated(entry, old)
   assert.ok(w.logs.includes('acp-dsh: Antigravity sign-out over ACP: done'))
   assert.notEqual(w.home(), old)
 
@@ -502,7 +508,14 @@ test('I9: a damaged agy pointer never blocks restart or dispose; an unproved Cla
   plant(t)
   const w = world(t)
   writeFileSync(join(w.cliHome, 'current', 'antigravity'), 'not-a-generation')
+  // The Claude runs are still stopped: a tracked run's stop is called.
+  const claudeHomes = new CliHomes(w.cliHome)
+  let claudeStops = 0
+  const stop = async () => { claudeStops++ }
+  trackRun({ spec: { env: claudeHomes.environment('claude') }, stop })
   assert.deepEqual(await w.service.prepareRestart(), { ok: true })
+  assert.equal(claudeStops, 1)
+  claudeHomes.dispose()
 
   const d = world(t)
   writeFileSync(join(d.cliHome, 'current', 'antigravity'), 'not-a-generation')
