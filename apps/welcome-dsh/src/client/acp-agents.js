@@ -99,8 +99,8 @@ export function agentLines(agent, entry) {
       lines.push({
         tone: 'bad',
         text: agent.cli.error ? t('The {name} installation or update failed: {error}', { name, error: redactText(agent.cli.error) }) : t('The {name} installation or update failed.', { name }),
-        action: 'install',
-        label: t('Retry'),
+        // Retry installs, so it shows only while the agent is on; off keeps the text and the link.
+        ...(agent.on ? { action: 'install', label: t('Retry') } : {}),
         ...(agent.cli.installUrl ? { link: { href: agent.cli.installUrl, text: t('Install it yourself instead') } } : {}),
         ...(agent.cli.diagnostic ? { details: { diagnostic: redactText(agent.cli.diagnostic), ...(agent.cli.logPath ? { logPath: agent.cli.logPath } : {}) } } : {}),
       })

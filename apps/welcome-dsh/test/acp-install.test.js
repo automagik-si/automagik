@@ -70,6 +70,11 @@ test('T13b: the managed agy\'s quoted command passes, in its two shapes only; an
     `& "C:\\Users\\a"b\\acp\\clis\\agy\\1.5.15-${UUID}\\bin\\agy.exe" acp --login`,
     `& "${WIN32_PATH.replace('agy.exe', 'agy')}" acp --login`,
     `& "${WIN32_PATH}" acp --login extra`,
+    // C1 controls, line separators and bidi controls change what the shown command reads as.
+    `'/srv/a\u202Eb/.automagik/acp/clis/agy/1.5.15-${UUID}/bin/agy' acp --login`,
+    `'/srv/a\u2028b/.automagik/acp/clis/agy/1.5.15-${UUID}/bin/agy' acp --login`,
+    `'/srv/a\u0085b/.automagik/acp/clis/agy/1.5.15-${UUID}/bin/agy' acp --login`,
+    `& "C:\\Users\\a\u2066b\\acp\\clis\\agy\\1.5.15-${UUID}\\bin\\agy.exe" acp --login`,
   ]
   for (const value of bad) assert.equal(hint(value), undefined, value)
   // A single quote is legal in a Windows path: only the POSIX shape refuses it.
@@ -180,6 +185,12 @@ test('T15: installing, failed and found', () => {
   const [link] = links(failed)
   assert.equal(link.props.href, GETTING_STARTED)
   assert.equal(textOf(link), 'Install it yourself instead')
+  // Turned off after the failure: the text and the link stay, the Retry that would install goes.
+  const failedOff = rowOf(agy({ on: false, connector: { state: 'off', native: true } }, { state: 'failed', error: 'Antigravity\'s download did not match its published checksum' }))
+  assert.match(textOf(failedOff), /The Antigravity installation or update failed: Antigravity's download did not match its published checksum/)
+  assert.deepEqual(buttons(failedOff, 'Retry'), [])
+  assert.deepEqual(buttons(failedOff, 'Install'), [])
+  assert.equal(links(failedOff)[0].props.href, GETTING_STARTED)
 
   const found = rowOf(agy({ signedIn: false, connector: { state: 'ready', native: true } }, { found: true, state: 'ready', managed: true, version: '1.5.15', signInHint: POSIX_HINT }))
   const text = textOf(found)

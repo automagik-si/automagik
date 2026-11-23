@@ -210,6 +210,9 @@ test('T11b: the person\'s own agy keeps the plain command; a path the quoting ca
     ['C:\\Users\\a$b\\bin\\agy.exe', 'win32'],
     ['C:\\Users\\a/..\\b\\agy.exe', 'win32'],
     ['\\\\server\\share\\agy.exe', 'win32'],
+    ['/srv/a\u202Eb/.automagik/acp/clis/agy/1.5.15-x/bin/agy', 'linux'],
+    ['/srv/a\u2028b/.automagik/acp/clis/agy/1.5.15-x/bin/agy', 'linux'],
+    ['C:\\Users\\a\u2066b\\acp\\clis\\agy\\1.5.15-x\\bin\\agy.exe', 'win32'],
   ]) assert.equal(signInHintOf(SPEC, managed(path), platform), 'agy acp --login', path)
   assert.equal(signInHintOf(SPEC, { path: '/opt/agy', managed: false }), 'agy acp --login')
   assert.equal(signInHintOf(AGENTS['acp-hermes'], managed('/opt/hermes')), 'hermes acp --setup')

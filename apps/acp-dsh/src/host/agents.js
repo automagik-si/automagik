@@ -261,8 +261,10 @@ export const cliIdOf = spec => spec?.cliPackage ?? spec?.cliInstall?.id
 const TRAVERSAL = /(^|[\\/])\.\.([\\/]|$)/
 // Inside POSIX single quotes everything is literal but the quote itself; a backtick would also
 // end the chat's code span (adapter.js). PowerShell also takes the typographic double quotes.
-const POSIX_UNSAFE = /['`\p{Cc}]/u
-const WIN32_UNSAFE = /["`$\u201C\u201D\u201E\p{Cc}]/u
+// Line separators and bidi controls are refused too: they make the shown command read
+// differently from what it pastes. welcome-dsh's isSignInHint uses the same class.
+const POSIX_UNSAFE = /['`\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069]/u
+const WIN32_UNSAFE = /["`$\u201C\u201D\u201E\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069]/u
 
 /**
  * The terminal command that signs in to `spec`'s CLI, as shown (never run): for a copy

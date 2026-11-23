@@ -50,8 +50,11 @@ const shownText = (text) => {
 const BARE_HINT = /^[a-z][a-z0-9]{0,23}( [a-z0-9-]{1,24}){0,4}$/
 const V = String.raw`(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)`
 const UUID = String.raw`[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}`
-const POSIX_AGY = new RegExp(String.raw`^'(/[^'\`\u0000-\u001f\u007f]*/acp/clis/agy/${V}-${UUID}/bin/agy)' acp --login$`)
-const WIN32_AGY = new RegExp(String.raw`^& "([A-Za-z]:\\[^"\`$\u201C\u201D\u201E\u0000-\u001f\u007f]*\\acp\\clis\\agy\\${V}-${UUID}\\bin\\agy\.exe)" acp --login$`)
+// The path's class is acp-dsh's (agents.js POSIX_UNSAFE, WIN32_UNSAFE): controls, line separators
+// and bidi controls refused; \x60 is the backtick.
+const UNSHOWN = String.raw`\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069`
+const POSIX_AGY = new RegExp(String.raw`^'(/[^'\x60${UNSHOWN}]*/acp/clis/agy/${V}-${UUID}/bin/agy)' acp --login$`, 'u')
+const WIN32_AGY = new RegExp(String.raw`^& "([A-Za-z]:\\[^"\x60$\u201C\u201D\u201E${UNSHOWN}]*\\acp\\clis\\agy\\${V}-${UUID}\\bin\\agy\.exe)" acp --login$`, 'u')
 const TRAVERSAL = /(^|[\\/])\.\.([\\/]|$)/
 export function isSignInHint(hint) {
   if (typeof hint !== 'string' || hint.length > 4096) return false

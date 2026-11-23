@@ -151,7 +151,7 @@ test('a native agent that is not installed is listed with its install page, neve
   const mine = (what, pkg) => assert.notEqual(pkg, undefined, `the CLI store was asked to ${what} a CLI Automagik does not install`)
   const cliStore = {
     find: (spec) => { mine('find', cliIdOf(spec)); return undefined },
-    ensure: (spec) => { mine('install', cliIdOf(spec)); return Promise.resolve() },
+    ensure: (spec, _external, options) => { mine('install', cliIdOf(spec)); assert.ok(spec.cliInstall?.manual !== true || options?.click === true, 'a manual CLI was asked to install without a click'); return Promise.resolve() },
     busy: (pkg) => { mine('watch', pkg); return false },
     lastFailure: (pkg) => { mine('report', pkg); return undefined },
     lastError: () => undefined,

@@ -166,6 +166,8 @@ jobs:
           else
             code=$?
           fi
+          # A crash before the report (an import or syntax error exits 1 too) is a read failure, never a move.
+          if ! jq -e . "${report}" > /dev/null 2>&1; then code=2; fi
           echo "code=${code}" >> "$GITHUB_OUTPUT"
           if [ -f "${report}" ] && jq -e '.changed == true' "${report}" > /dev/null; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -190,7 +192,7 @@ jobs:
           title='acp-dsh: the Antigravity install scripts moved host'
           body="${RUNNER_TEMP}/agy-moved-issue.md"
           {
-            echo 'The daily check found that the manifest host acp-dsh pins for Antigravity no longer holds: a script names another base, or a manifest at the pinned base is gone or names a download outside the pinned place. Installs from the app fail until the pin moves.'
+            echo 'The daily check found that the manifest host acp-dsh pins for Antigravity no longer holds: a script names another base, or a manifest at the pinned base is gone, names a download outside the pinned place, or names a version or file the app does not accept. Installs from the app fail until the pin moves.'
             echo
             echo '```json'
             cat "${RUNNER_TEMP}/agy-scripts.json"

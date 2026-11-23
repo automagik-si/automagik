@@ -790,7 +790,8 @@ export function apply(ctx, config = {}, {
       if (!disposed) {
         // Discovery may have found a newer verified local copy before the registry failed.
         reconcile()
-        warn(ctx, `${spec.defaultName} update check failed: ${cliStore.lastError?.(cliIdOf(spec)) ?? 'the install failed'}`)
+        // A manual CLI only ever installs on a click: there is no update check to speak of.
+        warn(ctx, `${spec.defaultName} ${spec.cliInstall?.manual ? 'install failed' : 'update check failed'}: ${cliStore.lastError?.(cliIdOf(spec)) ?? 'the install failed'}`)
       }
     })
   }

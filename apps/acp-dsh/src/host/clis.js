@@ -314,7 +314,7 @@ export class CliStore extends AdapterStore {
       return found
     } finally {
       this.installing.delete(tmp)
-      removeTree(tmp)
+      try { removeTree(tmp) } catch {}
     }
   }
 

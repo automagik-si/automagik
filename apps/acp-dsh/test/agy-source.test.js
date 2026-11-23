@@ -134,6 +134,8 @@ test('T4: the manifest is read from the pinned host with no redirect, and only t
     URL_OF().replace(AGY_DOWNLOAD_HOST, `${AGY_DOWNLOAD_HOST}:8443`),
     `${URL_OF()}?x=1`,
     `${URL_OF()}#frag`,
+    `${URL_OF()}?`,
+    `${URL_OF()}#`,
     URL_OF().replace('/linux-x64/', '\\linux-x64/'),
     URL_OF().replace('/linux-x64/', '/linux-x64/%2f'),
     URL_OF('1.5.15', 'linux-x64/cli.zip'),

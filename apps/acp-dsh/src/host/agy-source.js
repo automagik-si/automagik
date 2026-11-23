@@ -67,7 +67,8 @@ export function agyPlatform({ platform = process.platform, arch = process.arch, 
  * version (or the version and a build number). Otherwise undefined.
  */
 export function agyDownloadUrl(raw, version, key) {
-  if (typeof raw !== 'string' || /%2f|%5c|\\|\.\./i.test(raw)) return undefined
+  // `?` and `#` are refused even when empty: the parsed URL would drop them, the href keeps them.
+  if (typeof raw !== 'string' || /%2f|%5c|\\|\.\.|[?#]/i.test(raw)) return undefined
   let u
   try { u = new URL(raw) } catch { return undefined }
   if (u.protocol !== 'https:' || u.hostname !== AGY_DOWNLOAD_HOST || u.port !== '') return undefined
