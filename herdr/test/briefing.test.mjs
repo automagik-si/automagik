@@ -529,6 +529,23 @@ test("#2059 briefing.mjs: a set needs-owner label adds one reminder line, bot or
   assert.equal((await brief({ HC_TERMINAL_ID: "t5" })).stdout, "");
 });
 
+test("#2059 briefing.mjs: a worker's reminder is silent when hc is missing or hangs, and the call is cut by its own timeout", async (t) => {
+  const { root, brief } = await scratch(t);
+  const fx = JSON.parse(readFileSync(join(root, "hc.json"), "utf8"));
+  fx.terminals.t5.labels[NEEDS_OWNER_LABEL] = "Ship now?";
+  fx.slow = ["t5"];
+  writeFileSync(join(root, "hc.json"), JSON.stringify(fx));
+  const missing = await brief({ HC_TERMINAL_ID: "t5", PATH: `${NODE_DIR}:/usr/bin:/bin` });
+  assert.equal(missing.stdout, "");
+  const began = Date.now();
+  const hung = await brief({ HC_TERMINAL_ID: "t5", HERDR_BRIEFING_TIME_SCALE: "1" });
+  assert.equal(hung.stdout, "");
+  assert.equal(hung.stderr, "");
+  assert.ok(Date.now() - began < 5000, "well inside the hook's 10 s");
+  assert.match(readFileSync(join(root, "hc.json.slow"), "utf8"), /^hung get t5$/m);
+  assert.doesNotMatch(readFileSync(join(root, "hc.json.slow"), "utf8"), /^answered/m);
+});
+
 test("briefing.mjs: silent for a bot of a project with no bots.json, and for a planned bot's id", async (t) => {
   const { root, main, tree, brief } = await scratch(t);
   const other = scratchProject(root, "elsewhere");
