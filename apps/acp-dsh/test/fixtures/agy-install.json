@@ -12,13 +12,13 @@
       "bytes": 7165,
       "sha256": "51c2cb4fada22ce0228da71b9506370383d6544bfebcec85fe7616a52b805344",
       "baseLine": "$DOWNLOAD_BASE_URL = \"https://antigravity-cli-auto-updater-974169037036.us-central1.run.app\"",
-      "manifestLine": "$MANIFEST_URL = \"$DOWNLOAD_BASE_URL/manifests/$platform.json\""
+      "manifestLine": "$manifest = Invoke-RestMethod -Uri \"$DOWNLOAD_BASE_URL/manifests/$platform.json\""
     },
     "install.cmd": {
       "bytes": 6006,
       "sha256": "15aa0bd50ea4d4f53df35b96a6347567cf95231d327f69eae74ece23fde52509",
       "baseLine": "set \"DOWNLOAD_BASE_URL=https://antigravity-cli-auto-updater-974169037036.us-central1.run.app\"",
-      "manifestLine": "set \"MANIFEST_URL=%DOWNLOAD_BASE_URL%/manifests/%PLATFORM%.json\""
+      "manifestLine": "set \"MANIFEST_URL=!DOWNLOAD_BASE_URL!/manifests/!PLATFORM!.json\""
     }
   },
   "platforms": [
