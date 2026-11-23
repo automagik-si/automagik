@@ -1212,8 +1212,10 @@ this amendment" lines.
   scheduled Sessions. A live process is reused only while the saved switch still reads ON.
 - **Upgrade.** Once, a Bot that sat in the removed lock with the switch ON gets `nativeTools: false`
   (marker `nativeToolsLocksRetired`). The removed lock covers Bots shared with people, an active
-  LiveShare share at upgrade, and Bots bound to an IM connection. `managed` Bots are not part of
-  the upgrade: their saved value is not written, and the lock keeps them off. Bots already
+  LiveShare share at upgrade, and Bots bound to an IM connection. A Main Bot with Omni configured
+  (linked, or a saved link not read yet at host start) is turned off once the same way. Other
+  `managed` Bots are not part of the upgrade: their saved value is not written, and the lock
+  keeps them off. Bots already
   off are not written; other Bots do not change. Nothing gains native tools without the person.
   The check runs on the host that writes the team; until it has run there, an affected Bot shows
   its old lock reason and runs without native tools.

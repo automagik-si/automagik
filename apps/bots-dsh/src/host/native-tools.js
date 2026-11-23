@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { callerService, multiuserMode } from './multiuser.js'
 import { refusal } from './refusal.js'
 import { NATIVE_TOOLS_CHANGED_TEXT } from '../shared/held.js'
@@ -54,8 +56,12 @@ export function install(rt) {
   // Amendment: native tools in every chat of the Bot): `shared`, shared with people, bound to an
   // IM connection, or a live LiveShare share. It lives on only for the upgrade below and until it
   // has run on the host that writes the team. Any throw goes to the caller. `managed` is not
-  // removed: Omni's plugin takes the tools of a Bot that operates it.
+  // removed: Omni's plugin takes the tools of a Bot that operates it. A Main Bot with Omni
+  // configured counts here too, read from the saved link, so the upgrade writes its ON off once
+  // even while `omniLinked()` still reads false at host start (before `omniChannels` registers).
   function lockOf(bot, liveShare) {
+    if (rt.isMain(bot.id) && (rt.omniLinked?.() === true || typeof rt.config?.omni?.url === 'string'
+      || (typeof rt.home === 'string' && existsSync(join(rt.home, 'omni.json'))))) return 'shared'
     const people = bot.people
     if (people !== undefined && (people?.mode !== 'owners' || !Array.isArray(people.allow)
       || people.allow.length !== 0)) return 'shared'

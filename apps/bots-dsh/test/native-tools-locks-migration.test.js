@@ -2,7 +2,7 @@
 // upgrade that turns off, once, the switch of every Bot that sat in the lock this change removes
 // (`shared`). `managed` stays a lock and is not part of the upgrade.
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -111,7 +111,6 @@ test('(a2) managed Bots are not written by the upgrade and stay locked after it'
     ['omni kind', on('x', { kind: 'omni' }), false],
     ['genie kind', on('x', { kind: 'genie' }), false],
     ['unfold kind', on('x', { kind: 'unfold' }), false],
-    ['Main Bot with Omni linked', on('main'), true],
   ]
   for (const [label, bot, linked] of cases) {
     const h = host(t, { bots: [bot, on('free')] })
@@ -128,6 +127,69 @@ test('(a2) managed Bots are not written by the upgrade and stay locked after it'
     assert.equal(h.saves.length, 0, label)
     assert.equal(h.rt.nativeToolsFor('chat-free'), true, label)
   }
+})
+
+// EDD-1: a Main Bot with Omni configured is written off once by the upgrade, even while the
+// `omniChannels` service is not registered yet at host start (`omniLinked()` still false), so a
+// stored ON cannot reach its groups, tasks or scheduled Sessions in that window. The `managed`
+// line itself stays as it was.
+test('(a3) a Main Bot with Omni configured is written off once, even before Omni is linked',
+  async t => {
+  const cases = [
+    ['omni.json in the home, Omni not linked yet', h => {
+      writeFileSync(join(h.rt.home, 'omni.json'), '{}')
+      h.rt.omniLinked = () => false
+    }, undefined],
+    ['Omni URL in the config', h => {
+      h.rt.config = { omni: { url: 'http://omni.invalid' } }
+    }, undefined],
+    ['Omni linked', h => { h.rt.omniLinked = () => true }, 'managed'],
+  ]
+  for (const [label, configure, block] of cases) {
+    const main = on('main')
+    const h = host(t, { bots: [main, on('free')] })
+    configure(h)
+    h.rt.groupOwners.set('group-main', { botId: 'main' })
+    h.rt.selfOf = id => h.rt.chatOwners.get(id) ?? h.rt.groupOwners.get(id)?.botId
+    assert.equal(h.rt.nativeToolsFor('group-main'), false, label)
+    assert.deepEqual(fieldsOf(main), [false, undefined, undefined], label)
+    assert.equal(h.rt.state.nativeToolsLocksRetired, true, label)
+    assert.equal(h.rt.nativeToolsBlock(main), block, label)
+    assert.equal(h.rt.nativeToolsFor('chat-main'), false, label)
+    assert.equal(h.rt.nativeToolsBotOn('main'), false, label)
+    assert.equal(h.rt.nativeToolsFor('chat-free'), true, label)
+    await Promise.resolve()
+    assert.equal(h.saves.length, 1, label)
+    assert.equal(h.saves[0].nativeToolsLocksRetired, true, label)
+    assert.equal(h.saves[0].bots.main.nativeTools, false, label)
+    // Once only: later reads write nothing.
+    assert.equal(h.rt.nativeToolsFor('group-main'), false, label)
+    await Promise.resolve()
+    assert.equal(h.saves.length, 1, label)
+  }
+
+  // Already off: nothing is written; the marker rides the next save.
+  const offMains = [
+    { id: 'main', model: CLAUDE, nativeTools: false }, { id: 'main', model: CLAUDE },
+  ]
+  for (const main of offMains) {
+    const h = host(t, { bots: [main, on('free')] })
+    writeFileSync(join(h.rt.home, 'omni.json'), '{}')
+    h.rt.omniLinked = () => false
+    assert.equal(h.rt.nativeToolsFor('chat-main'), false)
+    assert.equal(h.rt.state.nativeToolsLocksRetired, true)
+    assert.equal(h.rt.botOf('main').nativeTools, main.nativeTools)
+    await Promise.resolve()
+    assert.equal(h.saves.length, 0)
+  }
+
+  // Without Omni configured, the Main Bot is not part of the upgrade.
+  const plain = host(t, { bots: [on('main')] })
+  plain.rt.omniLinked = () => false
+  assert.equal(plain.rt.nativeToolsFor('chat-main'), true)
+  assert.equal(plain.rt.botOf('main').nativeTools, true)
+  await Promise.resolve()
+  assert.equal(plain.saves.length, 0)
 })
 
 test('(b) LiveShare counts only when live at the pass; one registry read per pass', async t => {

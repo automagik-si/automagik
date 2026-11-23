@@ -230,9 +230,9 @@ that makes your harness lose all your power."
   or denied tools excepted).
 - **Upgrade (#1564).** Once, a Bot that sat in the lock this version removes (shared with
   people, bound to an IM connection, or an active LiveShare share) with the switch on gets it
-  turned off, so nothing gains native tools until the person turns it on again. A Bot that
-  operates Omni or that another plugin manages stays locked, as before: Omni's plugin takes its
-  tools.
+  turned off, so nothing gains native tools until the person turns it on again. A Main Bot with
+  Omni configured is turned off once the same way. A Bot that operates Omni or that another
+  plugin manages stays locked, as before: Omni's plugin takes its tools.
 - **Standalone ACP.** `nativeTools` in this plugin's config (the `acpAgents` service's plugin,
   `acp-dsh`), hidden from settings forms like `dshTools`. Absent (the default) or `false` is
   today's behaviour for everyone. `true` turns it on for every Claude Code Session; an object
