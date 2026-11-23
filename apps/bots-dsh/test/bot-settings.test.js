@@ -213,3 +213,23 @@ test('settings renders a verified package name literally in its tag', () => {
     .filter(node => node.props?.className === 'bt-tag')
   assert.deepEqual(tags.map(node => node.props.children[0]), ['<Catalog fixture>'])
 })
+
+// #2048 (parity): a refused Antigravity model offers Sign in, which opens its row in this Bot's chat.
+test('Bot settings: Sign in for an Antigravity model opens its sign-in row', () => {
+  const saved = react.useState
+  let given = false
+  // The first null state of the form is the model's pending sign-in (bot-settings.js `signIn`).
+  react.useState = (initial) => {
+    if (initial === null && !given) { given = true; return ['acp-antigravity/default', () => {}] }
+    return saved(initial)
+  }
+  const opened = []
+  let tree
+  try {
+    tree = walk(BotSettingsForm({ bot: { ...bot, model: 'acp-antigravity/default' }, roster: { models: [] }, actions: { openCliLogin: (...args) => opened.push(args) }, run: fn => fn }))
+  } finally { react.useState = saved }
+  const button = tree.find(node => node.type === 'button' && node.props.children.includes('Sign in'))
+  assert.ok(button)
+  button.props.onClick()
+  assert.deepEqual(opened, [['b', 'acp-antigravity', 'acp-antigravity/default']])
+})

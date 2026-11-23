@@ -726,3 +726,77 @@ for (const late of ['signedIn', 'onReady']) {
     assert.equal(h.logins.current(CLAUDE).status, 'starting')
   })
 }
+
+// ---- #2048 paste-back: an Antigravity link's state, refused in a chat message (L1) ----------
+
+const AGY_STATE = 'Ab-_.~xyz12345'
+const AGY_CALLBACK = `http://localhost:41234/auth/callback?code=4%2F0Abc&state=${AGY_STATE}`
+const AGY_LINK = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
+  + `&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=${AGY_STATE}`
+
+test('L1: a remembered Antigravity state is recognised after state= for a day; Claude\'s #state is unchanged', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  assert.equal(h.logins.textMatches(AGY_CALLBACK), false, 'nothing remembered yet')
+  h.logins.rememberCallbackState(AGY_STATE)
+  // Only its keyed hash and length are kept.
+  assert.equal(JSON.stringify([...h.logins.callbackStates.keys()]).includes(AGY_STATE), false)
+  assert.deepEqual([...h.logins.callbackLengths], [[AGY_STATE.length, 1]])
+  for (const text of [
+    AGY_CALLBACK,
+    `It ended on (${AGY_CALLBACK}).`,
+    `"${AGY_CALLBACK}",`,
+    `${AGY_CALLBACK.slice(0, -4)}\n${AGY_CALLBACK.slice(-4)}`,
+    AGY_CALLBACK.replace('state=', 'STATE='),
+    encodeURIComponent(AGY_CALLBACK),
+    AGY_CALLBACK.replace('~', '%7E'),
+    `${AGY_LINK} then ${AGY_CALLBACK}`,
+    // G8-3: a stray % later in the text does not stop the decoded test.
+    `${AGY_CALLBACK.replace('~', '%7E')} worked 100% done`,
+  ]) assert.equal(h.logins.textMatches(text), true, text)
+  for (const text of [
+    AGY_LINK,
+    // Google's link with its return address first (G7-1): still its own state, still allowed.
+    'https://accounts.google.com/o/oauth2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback'
+      + `&access_type=offline&state=${AGY_STATE}&client_id=c`,
+    AGY_CALLBACK.replace(AGY_STATE, 'Zz-_.~xyz12345'),
+    AGY_CALLBACK.replace(AGY_STATE, AGY_STATE.slice(0, -1)),
+    'http://localhost:3000/?state=something-else',
+    // G8-3: a malformed escape is left raw, and nothing throws.
+    'state=%E0%A4%A',
+    `${AGY_STATE} alone`,
+  ]) assert.equal(h.logins.textMatches(text), false, text)
+  // G8-4: only the authority accounts.google.com itself is skipped (a port or userinfo is not).
+  assert.equal(h.logins.textMatches(`https://accounts.google.com:443/o/oauth2/auth?state=${AGY_STATE}`), true)
+  assert.equal(h.logins.textMatches(`https://u@accounts.google.com/o/oauth2/auth?state=${AGY_STATE}`), true)
+  assert.equal(h.logins.textMatches(`https://ACCOUNTS.GOOGLE.COM/o/oauth2/auth?state=${AGY_STATE}`), false)
+  // Claude's #state path is unchanged beside it.
+  assert.equal(h.logins.textMatches(`code#${STATE}`), false)
+  h.clock.advance(STATE_TTL_MS - 1)
+  assert.equal(h.logins.textMatches(AGY_CALLBACK), true)
+  h.clock.advance(1)
+  assert.equal(h.logins.textMatches(AGY_CALLBACK), false)
+  assert.equal(h.logins.callbackStates.size, 0)
+  assert.equal(h.logins.callbackLengths.size, 0, 'the lengths are pruned with the states')
+  // A refused state (too short, a space) is not remembered.
+  h.logins.rememberCallbackState('short')
+  h.logins.rememberCallbackState('has a space in it')
+  assert.equal(h.logins.callbackStates.size, 0)
+})
+
+test('L1: at most 64 state= / state%3d occurrences per reading, and a token cut at 3 x 512 characters', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  h.logins.rememberCallbackState(AGY_STATE)
+  // Both spellings count together: the 65th occurrence is not read, the 64th is.
+  const filler = n => Array.from({ length: n }, (_, i) => (i % 2 ? 'state=x ' : 'state%3dx ')).join('')
+  assert.equal(h.logins.textMatches(`${filler(63)}state=${AGY_STATE}`), true)
+  assert.equal(h.logins.textMatches(`${filler(64)}state=${AGY_STATE}`), false)
+  // A remembered 512-character state, fully percent-encoded once, still fits in the token.
+  const long = 'a'.repeat(511) + '~'
+  h.logins.rememberCallbackState(long)
+  const encoded = [...long].map(c => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`).join('')
+  assert.equal(encoded.length, 3 * 512)
+  assert.equal(h.logins.textMatches(`http://localhost:41234/auth/callback?code=a&state=${encoded}`), true)
+  assert.equal(h.logins.textMatches(`http://localhost:41234/auth/callback?code=a&state=x${encoded}`), false)
+})

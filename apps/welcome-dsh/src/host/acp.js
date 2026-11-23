@@ -11,7 +11,10 @@
 //   acp-install { id }      installs a CLI the app installs only on the person's click
 //                           (Antigravity, acp-dsh `installCli`), while its switch is on
 //   acp-sign-in { id }      signs in to an agent with its own home in the app (Antigravity,
-//                           acp-dsh `signInNative`): its browser opens on this computer
+//                           acp-dsh `signInNative`): its link opens in the person's browser
+//   acp-sign-in-callback { id, attempt, url }
+//                           the address the browser ended on after signing in on any
+//                           computer, for that attempt (acp-dsh `signInCallback`, #2048)
 //   acp-sign-out { id }     signs out of it by retiring its home (acp-dsh
 //                           `accountSignOutNative`); never where its account is shared (Windows)
 import { homedir } from 'node:os'
@@ -29,6 +32,12 @@ const AgentId = z.enum(ACP_IDS)
 const RefreshPayload = z.object({ refresh: z.boolean().optional() })
 const SwitchPayload = z.object({ id: AgentId, on: z.boolean() })
 const RetryPayload = z.object({ id: AgentId })
+const CallbackPayload = z.object({ id: AgentId, url: z.string().max(8192) })
+const UUID_RE = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
+// The two refusals of a pasted address (#2048): not this attempt's, or no attempt waiting. The
+// second is the Claude/Codex chat's own sentence (parity).
+const NOT_THIS_SIGN_IN = 'This link is not from this sign-in.'
+const EXPIRED_SIGN_IN = 'This sign-in expired. Start again.'
 const SIGN_IN_CHECKS = new Set(['timeout', 'unreadable'])
 
 const failure = (code, message) => Object.assign(new Error(message), { code })
@@ -78,7 +87,9 @@ export function isSignInHint(hint) {
 }
 // The one word that says why an in-app sign-in failed (acp-dsh `signInError`); `no-browser`:
 // agy handed no sign-in link the app could open.
-const SIGN_IN_ERRORS = new Set(['unsupported', 'timeout', 'failed', 'no-browser'])
+const SIGN_IN_ERRORS = new Set(['unsupported', 'timeout', 'failed', 'no-browser', 'expired'])
+// How the last in-app attempt ended (acp-dsh `signInEnd`), for acceptance only: the page draws none.
+const SIGN_IN_ENDS = new Set(['agent-error', 'agent-exit', 'deadline', 'window', 'checking', 'unreachable'])
 // acp-dsh's two log words, as status fields for acceptance; the page draws neither.
 const SIGN_OUT_OVER_ACP = new Set(['yes', 'no'])
 const LAST_SIGN_OUT = new Set(['done', 'none', 'failed'])
@@ -140,8 +151,16 @@ export function agentView(agent) {
     ...(agent.appSignIn === true ? { appSignIn: true } : {}),
     ...(agent.signingIn === true ? { signingIn: true } : {}),
     ...(agent.appSignIn === true && agent.signingIn === true && isSignInUrl(agent.signInUrl) ? { signInUrl: agent.signInUrl } : {}),
+    // The paste-back of that attempt (#2048): its id, whether the field is offered, whether a
+    // pasted address was delivered, and when the link stops being good. Never the address.
+    ...(agent.appSignIn === true && agent.signingIn === true && typeof agent.signInAttempt === 'string'
+      && UUID_RE.test(agent.signInAttempt) ? { signInAttempt: agent.signInAttempt } : {}),
+    ...(agent.appSignIn === true && agent.signingIn === true && agent.signInPaste === true ? { signInPaste: true } : {}),
+    ...(agent.appSignIn === true && agent.signingIn === true && agent.signInChecking === true ? { signInChecking: true } : {}),
+    ...(agent.appSignIn === true && agent.signingIn === true && Number.isFinite(agent.signInExpiresAt)
+      ? { signInExpiresAt: agent.signInExpiresAt } : {}),
     ...(SIGN_IN_ERRORS.has(agent.signInError) ? { signInError: agent.signInError } : {}),
-    ...(agent.signInWhere === 'terminal' ? { signInWhere: 'terminal' } : {}),
+    ...(agent.appSignIn === true && SIGN_IN_ENDS.has(agent.signInEnd) ? { signInEnd: agent.signInEnd } : {}),
     ...(agent.appSignIn === true && SIGN_OUT_OVER_ACP.has(agent.signOutOverAcp) ? { signOutOverAcp: agent.signOutOverAcp } : {}),
     ...(agent.appSignIn === true && LAST_SIGN_OUT.has(agent.lastSignOut) ? { lastSignOut: agent.lastSignOut } : {}),
     // Its account is the person's own too (Windows Credential Manager): the row says so.
@@ -247,6 +266,25 @@ export function createAcpActions(ctx) {
         if (typeof error?.code === 'string' && /^acp-(?:sign-in|account)\//.test(error.code)) throw refused(String(error.message).slice(0, 300))
         throw error
       }
+    },
+    // The address the browser ended on after the person signed in, on this computer or another,
+    // for the attempt the page shows (#2048, paste-back). acp-dsh checks it and hands it once
+    // to agy's own listener; it is never logged or answered. A stale page's attempt id answers
+    // that the sign-in expired.
+    'acp-sign-in-callback': async (payload) => {
+      const asked = parse(CallbackPayload, payload)
+      if (asked === undefined) throw refused(NOT_THIS_SIGN_IN)
+      if (typeof payload?.attempt !== 'string' || !UUID_RE.test(payload.attempt)) throw refused(EXPIRED_SIGN_IN)
+      const acp = service()
+      if (acp === undefined) throw refused('The ACP agents plugin is not running in this DSH.')
+      if (typeof acp.signInCallback !== 'function') throw refused('This ACP agents plugin cannot sign in to that agent here.')
+      try {
+        await acp.signInCallback(asked.id, payload.attempt, asked.url)
+      } catch (error) {
+        if (typeof error?.code === 'string' && /^acp-(?:sign-in|account)\//.test(error.code)) throw refused(String(error.message).slice(0, 300))
+        throw refused(EXPIRED_SIGN_IN)
+      }
+      return view(next => next.status())
     },
     // Sign out of such an agent: only a row that signs in here, and never one whose account is
     // shared (Windows), where retiring its home would not sign out. acp-dsh refuses that too.

@@ -9528,7 +9528,16 @@ var PT_BR = {
   "Sign in on their page, then paste the address it ends on here.": "Faça login na página do provedor e cole aqui o endereço da página final.",
   "Copy your {what} from ": "Copie o valor “{what}” em ",
   " and paste it here. It stays in DSH's credential store on this computer.": " e cole aqui. Fica no cofre de credenciais do DSH, neste computador.",
-  "The address you landed on": "O endereço da página final"
+  "The address you landed on": "O endereço da página final",
+  // Antigravity's sign-in from any computer (#2048, paste-back). The expired sentence and the
+  // expiry are the Bot chat's own (bots-dsh omni-ui), byte for byte.
+  "Your Google account, through Antigravity": "Sua conta Google, pelo Antigravity",
+  "This link is not from this sign-in.": "Este link não é deste login.",
+  "Signed in on another computer? Paste the address the browser ends on:": "Entrou em outro computador? Cole o endereço em que o navegador parou:",
+  "Finishing the sign-in to {name}…": "Concluindo o login em {name}…",
+  "This sign-in expired. Start again.": "Este login expirou. Comece de novo.",
+  "Send": "Enviar",
+  "Expires at {time}": "Expira às {time}"
 };
 var EN = Object.fromEntries(Object.keys(PT_BR).map((key) => [key, key]));
 var ZH = {
@@ -9538,7 +9547,19 @@ var ZH = {
   "{name} did not offer a Google sign-in. Try again.": "{name} 没有提供 Google 登录。请重试。",
   "The sign-in to {name} took too long. Try again.": "{name} 的登录用时过长。请重试。",
   "The sign-in to {name} did not finish. Try again.": "{name} 的登录没有完成。请重试。",
-  "On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.": "在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。"
+  "On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.": "在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。",
+  // Its row in Connect AI and its sign-in from any computer (#2048, paste-back). The expired
+  // sentence and the expiry are the Bot chat's own (bots-dsh i18n.js), byte for byte.
+  "Your Google account, through Antigravity": "你的 Google 账号，通过 Antigravity",
+  "Installing {name}…": "正在安装 {name}…",
+  "The {cli} CLI is not on this computer. Automagik can install it for you.": "这台电脑上没有 {cli} CLI。Automagik 可以为你安装。",
+  "The {cli} CLI is not on this computer. Turn {name} on to install it.": "这台电脑上没有 {cli} CLI。开启 {name} 即可安装。",
+  "Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).": "已找到 {cli} CLI（由 Automagik 安装，版本 {version}；它会自行更新）。",
+  "This link is not from this sign-in.": "此链接不属于本次登录。",
+  "Signed in on another computer? Paste the address the browser ends on:": "在另一台电脑上登录了？请粘贴浏览器最后停留的地址：",
+  "Finishing the sign-in to {name}…": "正在完成 {name} 的登录…",
+  "This sign-in expired. Start again.": "本次登录已过期，请重新开始。",
+  "Expires at {time}": "{time} 过期"
 };
 var fill = (text, params) => params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text;
 var bound = null;
@@ -12546,18 +12567,22 @@ function isLoopbackReturn(value) {
   if (typeof value !== "string") return false;
   try {
     const back = new URL(value);
-    return back.protocol === "http:" && LOOPBACK.has(back.hostname) && back.port !== "" && !back.username && !back.password && !back.hash;
+    return back.protocol === "http:" && LOOPBACK.has(back.hostname) && /^\d+$/.test(back.port) && Number(back.port) >= 1024 && !back.username && !back.password && !back.hash;
   } catch {
     return false;
   }
 }
+var stateOf = (url) => {
+  const states2 = url.searchParams.getAll("state");
+  return states2.length === 1 && /^[^\p{Cc}\s]{8,512}$/u.test(states2[0]);
+};
 function isSignInUrl(value) {
   if (typeof value !== "string" || value.length > 8192 || /[\p{Cc}\s]/u.test(value)) return false;
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return false;
     if (!GOOGLE_SIGN_IN.has(`${url.hostname}${url.pathname}`)) return false;
-    return url.searchParams.get("response_type") === "code" && /^[\w.-]{1,256}$/.test(url.searchParams.get("client_id") ?? "") && isLoopbackReturn(url.searchParams.get("redirect_uri"));
+    return url.searchParams.get("response_type") === "code" && /^[\w.-]{1,256}$/.test(url.searchParams.get("client_id") ?? "") && isLoopbackReturn(url.searchParams.get("redirect_uri")) && stateOf(url);
   } catch {
     return false;
   }
@@ -12650,6 +12675,9 @@ var CLI_OF = { "acp-claude": "claude", "acp-codex": "codex", "acp-hermes": "herm
 var LOGO_OF = { "acp-claude": "CC", "acp-codex": "CX", "acp-hermes": "HM", "acp-antigravity": "AG", "acp-omp": "OM" };
 var isNative = (agent) => agent?.connector?.native === true;
 var BROWSER_DID_NOT_OPEN = "The browser did not open. Try again.";
+var NOT_THIS_SIGN_IN = "This link is not from this sign-in.";
+var EXPIRED_SIGN_IN = "This sign-in expired. Start again.";
+var signInWords = (message) => message === BROWSER_DID_NOT_OPEN ? t("The browser did not open. Try again.") : message === NOT_THIS_SIGN_IN ? t("This link is not from this sign-in.") : message === EXPIRED_SIGN_IN ? t("This sign-in expired. Start again.") : message;
 var isolatedSignIn = (agent) => agent.authScope === "isolated" && !isNative(agent);
 var signInCommand = (agent) => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key;
 var SIGN_IN_OF = { "acp-claude": "claude auth login", "acp-codex": "codex login" };
@@ -12666,7 +12694,7 @@ var POLL_MS2 = 2e3;
 var UNREACHABLE_POLL_MS = 15e3;
 var SETTINGS_SECTION = "acp-agents";
 var cliBusy = (agent) => agent.cli.state === "installing" || agent.cli.updating === true;
-function stateOf(agent) {
+function stateOf2(agent) {
   if (agent.cli.state === "installing") return "installing";
   if (agent.cli.updating === true) return "updating";
   if (agent.cli.state === "failed" || !agent.cli.found && agent.cli.error) return "failed";
@@ -12680,7 +12708,7 @@ function stateOf(agent) {
   return "ready";
 }
 function badgeOf(agent) {
-  const state = stateOf(agent);
+  const state = stateOf2(agent);
   if (state === "no-cli") return t("Not installed");
   if (state === "off") return t("Off");
   if (state === "installing") return agent.cli.state === "installing" ? t("Installing") : t("Setting up");
@@ -12787,20 +12815,28 @@ function agentLines(agent, entry) {
   if (state === "ready") {
     if (!isNative(agent)) lines.push({ tone: "ok", text: version ? t("Connector ready (version {version}).", { version }) : t("Connector ready.") });
     if (agent.restartNeeded) lines.push({ tone: "bad", text: t("Restart DSH to see {name} in the model picker.", { name }) });
-    else if (stateOf(agent) === "ready") lines.push({ tone: "ok", text: t("Ready: pick {name} in the model picker.", { name }), ready: true });
+    else if (stateOf2(agent) === "ready") lines.push({ tone: "ok", text: t("Ready: pick {name} in the model picker.", { name }), ready: true });
   }
   return lines;
 }
 var sharedLine = (name) => ({ tone: "muted", text: t("On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.", { name }) });
+var timeOf = (at2) => new Date(at2).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 function appSignInLines(agent, name) {
   const lines = [];
   if (agent.signingIn === true) {
-    return [{
+    if (agent.signInChecking === true) return [{ tone: "wait", text: t("Finishing the sign-in to {name}…", { name }) }];
+    lines.push({
       tone: "wait",
       text: t("Finish the sign-in to {name} in your browser…", { name }),
-      ...agent.signInUrl ? { link: { href: agent.signInUrl, text: t("Sign in with {name}", { name }) } } : {}
-    }];
+      ...agent.signInUrl ? { link: { href: agent.signInUrl, text: t("Sign in with {name}", { name }) }, copy: agent.signInUrl } : {}
+    });
+    if (agent.signInPaste === true && agent.signInUrl && typeof agent.signInAttempt === "string") {
+      lines.push({ tone: "muted", text: t("Signed in on another computer? Paste the address the browser ends on:"), action: "callback" });
+    }
+    if (Number.isFinite(agent.signInExpiresAt)) lines.push({ tone: "muted", text: t("Expires at {time}", { time: timeOf(agent.signInExpiresAt) }) });
+    return lines;
   }
+  if (agent.signInError === "expired") lines.push({ tone: "bad", text: t("This sign-in expired. Start again.") });
   if (agent.signInError === "unsupported") lines.push({ tone: "bad", text: t("{name} did not offer a Google sign-in. Try again.", { name }) });
   if (agent.signInError === "timeout") lines.push({ tone: "bad", text: t("The sign-in to {name} took too long. Try again.", { name }) });
   if (agent.signInError === "failed") lines.push({ tone: "bad", text: t("The sign-in to {name} did not finish. Try again.", { name }) });
@@ -12891,18 +12927,22 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     flip: async (agent) => {
       const on2 = !(wanted[agent.id] ?? agent.on);
       setWanted((previous) => ({ ...previous, [agent.id]: on2 }));
-      if (!await act(agent.id, "acp-switch", { id: agent.id, on: on2 }) && live.current) {
+      const ok = await act(agent.id, "acp-switch", { id: agent.id, on: on2 });
+      if (!ok && live.current) {
         setWanted((previous) => previous[agent.id] === on2 ? Object.fromEntries(Object.entries(previous).filter(([id]) => id !== agent.id)) : previous);
       }
+      return ok;
     },
     retry: (agent) => act(agent.id, "acp-retry", { id: agent.id }),
     // The person's click on Install (a CLI the app installs only then).
     install: (agent) => act(agent.id, "acp-install", { id: agent.id }),
     check: (agent) => act(agent.id, "acp", { refresh: true }),
-    // An agent that signs in here: Sign in starts it (its browser opens), and Sign out asks
-    // first, with the same words as the account switch, then retires its home.
-    // With no browser on this computer acp-dsh refuses in fixed words, read in the page's language.
-    nativeLogin: (agent) => act(agent.id, "acp-sign-in", { id: agent.id }, (message) => message === BROWSER_DID_NOT_OPEN ? t("The browser did not open. Try again.") : message),
+    // An agent that signs in here: Sign in starts it (its link opens in the person's browser),
+    // and Sign out asks first, with the same words as the account switch, then retires its home.
+    // acp-dsh's fixed refusals read in the page's language.
+    nativeLogin: (agent) => act(agent.id, "acp-sign-in", { id: agent.id }, signInWords),
+    // The address the browser ended on, for the attempt the row shows (#2048, paste-back).
+    callback: (agent, url) => act(agent.id, "acp-sign-in-callback", { id: agent.id, attempt: agent.signInAttempt, url }, signInWords),
     signOutPending: signingOut,
     askSignOut: (agent) => {
       say(agent.id, null);
@@ -12928,7 +12968,52 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     }
   };
 }
+function rememberSignInLink(url, scope = globalThis) {
+  try {
+    scope[CHAT_LOGIN]?.remember?.(url);
+  } catch {
+  }
+}
+function CopyLink({ url }) {
+  const [copied, setCopied] = (0, import_react9.useState)(false);
+  return (0, import_react9.createElement)("button", {
+    type: "button",
+    className: "oai-copy oai-acp-act",
+    onClick: () => globalThis.navigator?.clipboard?.writeText(url).then(() => setCopied(true), () => {
+    })
+  }, copied ? t("Copied") : t("Copy"));
+}
+function CallbackField({ agent, acp, busy }) {
+  const send = (event) => {
+    event.preventDefault();
+    const input = event.currentTarget?.elements?.namedItem?.("sign-in-address");
+    if (!input) return;
+    const value = input.value;
+    input.value = "";
+    if (typeof value === "string" && value.trim() !== "") void acp.callback(agent, value);
+  };
+  return (0, import_react9.createElement)(
+    "form",
+    { className: "oai-setup-form", onSubmit: send },
+    (0, import_react9.createElement)(
+      "div",
+      { className: "oai-field" },
+      (0, import_react9.createElement)("input", {
+        type: "password",
+        name: "sign-in-address",
+        autoComplete: "off",
+        spellCheck: false,
+        "aria-label": t("Signed in on another computer? Paste the address the browser ends on:"),
+        "data-1p-ignore": "true",
+        "data-lpignore": "true",
+        "data-bwignore": "true"
+      }),
+      (0, import_react9.createElement)("button", { type: "submit", className: "oai-ghost oai-acp-act", disabled: busy }, t("Send"))
+    )
+  );
+}
 function AcpLine({ line, agent, acp, busy, accountControls }) {
+  if (line.copy) rememberSignInLink(line.copy);
   const canSwitch = line.action === "switch" && accountControls !== void 0;
   const signOut = line.action === "native-sign-out";
   const confirmingOut = signOut && acp.signOutPending === agent.id;
@@ -12942,6 +13027,7 @@ function AcpLine({ line, agent, acp, busy, accountControls }) {
       { className: `oai-acp-line oai-acp-${line.tone}${line.tone === "wait" ? " oai-waiting" : ""}`, ...line.tone === "bad" ? { role: "status" } : {} },
       confirming ? t("This stops running Bot work for this account. Continue?") : line.text,
       line.link ? [" ", (0, import_react9.createElement)("a", { key: "link", className: "oai-link", href: line.link.href, target: "_blank", rel: "noreferrer" }, line.link.text)] : null,
+      line.copy ? (0, import_react9.createElement)(CopyLink, { url: line.copy }) : null,
       line.action === "retry" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.retry(agent) }, t("Retry")) : null,
       line.action === "install" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.install(agent) }, line.label ?? t("Install")) : null,
       line.action === "login" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.login(agent) }, line.label ?? t("Sign in")) : null,
@@ -12952,6 +13038,7 @@ function AcpLine({ line, agent, acp, busy, accountControls }) {
       confirming ? accountButton(t("Continue"), () => confirmingOut ? acp.nativeSignOut(agent) : accountControls.confirm(agent)) : null,
       confirming ? accountButton(t("Cancel"), confirmingOut ? acp.cancelSignOut : accountControls.cancel) : null
     ),
+    line.action === "callback" ? (0, import_react9.createElement)(CallbackField, { agent, acp, busy }) : null,
     line.details ? (0, import_react9.createElement)(
       "details",
       { className: "oai-acp-details" },
@@ -12968,7 +13055,7 @@ function AcpAgentRow({ agent, acp, accountControls }) {
   const lines = agentLines({ ...agent, on: on2 }, accountControls?.accounts[agent.id]);
   return (0, import_react9.createElement)(
     "div",
-    { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf({ ...agent, on: on2 }) },
+    { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf2({ ...agent, on: on2 }) },
     (0, import_react9.createElement)(
       "div",
       { className: "oai-ai-row" },
@@ -13124,7 +13211,7 @@ var ACP_CSS = `
 var import_react10 = require("react");
 var VENDOR_TERMS = "Personal use under the vendor's terms";
 var FIRST_OTHERS = 4;
-var LOGOS = { claude: "C", chatgpt: "G", deepseek: "D", kimi: "K", copilot: "P", grok: "X", openai: "O", openrouter: "R", zai: "Z", moonshot: "M", opencode: "OC", cliproxy: "⇄", ollama: "L" };
+var LOGOS = { claude: "C", chatgpt: "G", antigravity: LOGO_OF["acp-antigravity"], deepseek: "D", kimi: "K", copilot: "P", grok: "X", openai: "O", openrouter: "R", zai: "Z", moonshot: "M", opencode: "OC", cliproxy: "⇄", ollama: "L" };
 function subscriptionRows(subscriptions) {
   if (!subscriptions) return [];
   return SUBSCRIPTION_TILES.map((tile) => {
@@ -13312,7 +13399,7 @@ function SignInOrKey({ row, provider, onSaved, onClose }) {
     (0, import_react10.createElement)("button", { type: "button", onClick: () => setWay("key") }, (0, import_react10.createElement)("strong", null, t("Use an API key")), (0, import_react10.createElement)("span", null, t("Billed per use")))
   );
 }
-var CLI_ROWS = { claude: "acp-claude", chatgpt: "acp-codex" };
+var CLI_ROWS = { claude: "acp-claude", chatgpt: "acp-codex", antigravity: "acp-antigravity" };
 function cliAgentOf(row, acp) {
   const id = CLI_ROWS[row.id];
   if (id === void 0) return void 0;
@@ -13320,8 +13407,25 @@ function cliAgentOf(row, acp) {
 }
 var acpBusy = (acp) => acp ? acp.busy !== null : false;
 var canSignIn = (agent) => agent.cli.found === true && agent.cli.state !== "installing" && agent.cli.state !== "failed" && agent.cli.updating !== true;
+var appRow = (agent) => agent?.appSignIn === true;
+function AppAgentSetup({ agent, acp, onClose }) {
+  const busy = acpBusy(acp);
+  const problem = acp?.problems?.[agent.id];
+  const cancel = async () => {
+    if (agent.signedIn !== true && acp.isOn(agent)) await acp.flip(agent);
+    onClose();
+  };
+  return (0, import_react10.createElement)(
+    "div",
+    { className: "oai-signin" },
+    (0, import_react10.createElement)("div", { className: "oai-acp-lines" }, agentLines(agent).map((line, i) => (0, import_react10.createElement)(AcpLine, { key: i, line, agent, acp, busy }))),
+    problem ? (0, import_react10.createElement)("p", { className: "oai-error", role: "alert" }, problem) : null,
+    (0, import_react10.createElement)("button", { type: "button", className: "oai-quiet", onClick: cancel }, t("Cancel"))
+  );
+}
 function CliSetup({ row, agent, acp, onSaved, onClose }) {
   const [way, setWay] = (0, import_react10.useState)(null);
+  if (appRow(agent) && acp) return (0, import_react10.createElement)(AppAgentSetup, { agent, acp, onClose });
   if (way === "key" || agent === void 0 && row.keyUrl) return (0, import_react10.createElement)(KeyForm, { row, provider: providerOf(row), onSaved });
   if (agent === void 0) return (0, import_react10.createElement)("p", null, t("This DSH offers no {name} sign-in.", { name: row.name }));
   const busy = acpBusy(acp);
@@ -13376,7 +13480,8 @@ function Duplicates({ row, onDedupe }) {
 function Row({ row, acp, open, busy, problem, onFlip, onSaved, onClose, onDedupe }) {
   const logo = LOGOS[row.id] ?? row.name.slice(0, 1);
   const agent = cliAgentOf(row, acp);
-  const settling = !row.on && !open && agent?.on === true && agent.signedIn === true && agent.cli.found === true;
+  const settling = !row.on && !open && agent?.on === true && (agent.signedIn === true && agent.cli.found === true || appRow(agent));
+  const agentProblem = appRow(agent) && !open ? acp?.problems?.[agent.id] : null;
   return (0, import_react10.createElement)(
     "div",
     { className: `oai-ai${row.on ? " oai-ai-on" : ""}` },
@@ -13396,6 +13501,7 @@ function Row({ row, acp, open, busy, problem, onFlip, onSaved, onClose, onDedupe
     open && !row.on ? (0, import_react10.createElement)("div", { className: "oai-ai-setup" }, (0, import_react10.createElement)(Setup, { row, acp, onSaved, onClose })) : null,
     settling ? (0, import_react10.createElement)("div", { className: "oai-acp-lines" }, agentLines(agent).map((line, i) => (0, import_react10.createElement)(AcpLine, { key: i, line, agent, acp, busy: busy || acpBusy(acp) }))) : null,
     problem ? (0, import_react10.createElement)("p", { className: "oai-error oai-ai-problem", role: "alert" }, problem) : null,
+    agentProblem ? (0, import_react10.createElement)("p", { className: "oai-error oai-ai-problem", role: "alert" }, agentProblem) : null,
     (0, import_react10.createElement)(Duplicates, { row, onDedupe })
   );
 }
@@ -13417,9 +13523,10 @@ function ConnectAiStep(props) {
     setRows(reply.rows ?? []);
     setSubs(reply.subscriptions ?? null);
   }, []);
+  const agentsDigest = agentsDigestOf(acp.view);
   (0, import_react10.useEffect)(() => {
     void refresh();
-  }, [refresh, acp.view]);
+  }, [refresh, agentsDigest]);
   (0, import_react10.useEffect)(() => {
     if (state) glitch();
   }, [state, glitch]);
@@ -13438,6 +13545,16 @@ function ConnectAiStep(props) {
   const flip = async (row) => {
     const action = flipAction(row);
     say(row.id, null);
+    const agent = cliAgentOf(row, acp);
+    if (action === "setup" && appRow(agent)) {
+      if (!acp.isOn(agent)) {
+        if (await acp.flip(agent)) setOpen(row.id);
+      } else if (open === row.id) {
+        await acp.flip(agent);
+        setOpen(null);
+      } else setOpen(row.id);
+      return;
+    }
     if (action === "setup") {
       setOpen((current) => current === row.id ? null : row.id);
       return;
@@ -13483,6 +13600,17 @@ function ConnectAiStep(props) {
     onModels: () => finish2("models"),
     onContinue: () => proceed()
   });
+}
+function agentsDigestOf(view) {
+  return JSON.stringify((view?.agents ?? []).map((agent) => [
+    agent.id,
+    agent.on,
+    agent.signedIn,
+    agent.cli?.found,
+    agent.cli?.state,
+    agent.connector?.state,
+    agent.restartNeeded
+  ]));
 }
 function ConnectAiView({ state, rows, subscriptions, open, showAll, glitching, rowProps, onShowAll, onSkip, onModels, onContinue }) {
   const all = rows === null ? null : [...rows, ...subscriptionRows(subscriptions)];

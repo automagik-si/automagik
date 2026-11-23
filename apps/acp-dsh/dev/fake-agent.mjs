@@ -70,7 +70,18 @@
 // the opener named FAKE_ACP_OPENER (default `xdg-open`) with that URL, only from the first PATH
 // entry and only when that entry is an attempt's stand-in folder (`/sign-in/<uuid>/bin`), so a
 // test never starts a real browser, and traces `opener` with whether it found one.
+// FAKE_ACP_AUTH_LISTEN=1 stands for agy's own sign-in listener (#2048, paste-back): during
+// `authenticate` it listens on 127.0.0.1 (a free port), builds Google's link with
+// `redirect_uri=http://localhost:<port>/auth/callback` and a random state, hands it to the
+// opener as FAKE_ACP_AUTH_OPEN does, and traces `listen` with the port. A GET of that path with
+// the right state and one code answers 200 and signs in; any other answers 400 and it keeps
+// waiting (FAKE_ACP_AUTH_ANSWER=400 answers 400 to every GET). Each GET is traced as `callback`
+// with whether it was right, never its code. The listener closes when `authenticate` ends.
+// FAKE_ACP_AUTH_WINDOW_MS=<n> rejects `authenticate` after n ms (agy ending its own wait), and
+// FAKE_ACP_AUTH_EXIT=1 exits with 1 right after printing FAKE_ACP_AUTH_STDERR.
 import { spawn, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { createServer } from 'node:http'
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
@@ -267,13 +278,49 @@ const implementation = {
     // With no methods offered it answers as it always did; with some, only those.
     if (AUTH_METHODS.length > 0 && !AUTH_METHODS.includes(params?.methodId)) throw RequestError.invalidParams(undefined, `Unknown auth method: ${params?.methodId}`)
     if (process.env.FAKE_ACP_AUTH_STDERR) process.stderr.write(`${process.env.FAKE_ACP_AUTH_STDERR}\n`)
-    if (process.env.FAKE_ACP_AUTH_OPEN) {
+    if (process.env.FAKE_ACP_AUTH_EXIT === '1') setTimeout(() => process.exit(1), 50)
+    const open = (url) => {
       const head = (process.env.PATH ?? '').split(delimiter)[0]
       const opener = join(head, process.env.FAKE_ACP_OPENER ?? 'xdg-open')
       const found = /\/sign-in\/[0-9a-f-]{36}\/bin$/.test(head) && existsSync(opener)
-      if (found) spawnSync(opener, [process.env.FAKE_ACP_AUTH_OPEN], { stdio: 'ignore', timeout: 5000 })
+      if (found) spawnSync(opener, [url], { stdio: 'ignore', timeout: 5000 })
       trace({ event: 'opener', found })
     }
+    if (process.env.FAKE_ACP_AUTH_OPEN) open(process.env.FAKE_ACP_AUTH_OPEN)
+    const windowMs = Number(process.env.FAKE_ACP_AUTH_WINDOW_MS)
+    const ownEnd = Number.isFinite(windowMs) && windowMs > 0
+      ? new Promise((resolve, reject) => setTimeout(() => reject(RequestError.internalError(undefined, 'the sign-in wait ended')), windowMs))
+      : undefined
+    if (process.env.FAKE_ACP_AUTH_LISTEN === '1') {
+      const state = randomBytes(16).toString('hex')
+      let server
+      const signedIn = new Promise((resolve) => {
+        server = createServer((req, res) => {
+          let right = false
+          try {
+            const url = new URL(req.url ?? '/', 'http://localhost')
+            right = process.env.FAKE_ACP_AUTH_ANSWER !== '400' && url.pathname === '/auth/callback'
+              && url.searchParams.getAll('state').length === 1 && url.searchParams.get('state') === state
+              && url.searchParams.getAll('code').length === 1 && url.searchParams.get('code') !== ''
+          } catch {}
+          trace({ event: 'callback', right })
+          res.writeHead(right ? 200 : 400, { 'content-type': 'text/plain', connection: 'close' })
+          res.end(right ? 'signed in' : 'no')
+          if (right) resolve()
+        })
+      })
+      const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
+      trace({ event: 'listen', port })
+      const redirect = encodeURIComponent(`http://localhost:${port}/auth/callback`)
+      open(`https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com&redirect_uri=${redirect}`
+        + `&response_type=code&state=${state}`)
+      try {
+        await (ownEnd === undefined ? signedIn : Promise.race([signedIn, ownEnd]))
+      } finally {
+        server.closeAllConnections?.()
+        server.close()
+      }
+    } else if (ownEnd !== undefined) await ownEnd
     if (process.env.FAKE_ACP_AUTH_HOLD === '1') await new Promise(() => {})
     if (process.env.FAKE_ACP_AUTH_FAIL === '1') throw RequestError.internalError(undefined, 'the browser sign-in did not finish')
     if (AUTH === 'file') {

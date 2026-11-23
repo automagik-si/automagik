@@ -494,7 +494,7 @@ const cascade = [
   { ref: 'acp-codex/gpt-6.1-sol', id: 'gpt-6.1-sol', provider: 'acp-codex', providerName: 'Codex', via: 'cli', name: '6.1 Sol' },
 ]
 
-function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', appliedModel: 'acp-codex/default', effort: 'high' }, chat = false, onPick, onPickEffort, routePolicy, prefs } = {}) {
+function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', appliedModel: 'acp-codex/default', effort: 'high' }, chat = false, onPick, onPickEffort, routePolicy, prefs, models = cascade, more = {} } = {}) {
   const updates = []
   const chosen = []
   const switched = []
@@ -503,8 +503,9 @@ function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', a
     chooseModelInChat: (id, ref, patch) => { chosen.push([id, ref, { ...patch }]); return Promise.resolve() },
     switchRoute: (id, ref, patch) => { switched.push([id, ref, { ...patch }]); return Promise.resolve() },
     openHarnessSettings: () => {},
+    ...more,
   }
-  const roster = { ready: true, byId: { [bot.id]: bot }, models: cascade, defaultModel: 'deepseek/flash', ...(routePolicy ? { routePolicy } : {}), ...(prefs ? { prefs } : {}) }
+  const roster = { ready: true, byId: { [bot.id]: bot }, models, defaultModel: 'deepseek/flash', ...(routePolicy ? { routePolicy } : {}), ...(prefs ? { prefs } : {}) }
   menuOpen = true
   try {
     const open = drawMenu({ bot, roster, actions, run: promise => promise, chat, onPick, onPickEffort })
@@ -836,4 +837,15 @@ test('a shell-off Bot whose retired plan route is gone asks for a model, not a s
   assert.equal(modelHint({ id: 'chief', name: 'Omni', model: 'openai-codex/gpt-6.1-sol', subscriptionShellHeld: held }, roster),
     'This model no longer answers, and this Bot cannot move to Codex while its shell is off. '
       + "Pick a model that uses DeepSeek Harness's tools, or turn its shell on.")
+})
+
+// #2048 (parity): an Antigravity model that needs a sign-in opens its row in the Bot's chat,
+// as Claude Code's and Codex's do.
+test('in a Bot\'s chat, an Antigravity model that needs a sign-in opens its sign-in row', () => {
+  const opened = []
+  const agy = { ref: 'acp-antigravity/default', id: 'default', provider: 'acp-antigravity', providerName: 'Antigravity', via: 'cli', name: 'Antigravity', needsSignIn: true }
+  const menu = openMenu({ chat: true, models: [...cascade, agy], more: { openCliLogin: (...args) => { opened.push(args); return true } } })
+  menu.steps.props.onModel(agy, 'acp')
+  assert.deepEqual(opened, [['b1', 'acp-antigravity', undefined]])
+  assert.deepEqual([menu.updates, menu.chosen, menu.switched], [[], [], []])
 })

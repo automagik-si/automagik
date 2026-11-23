@@ -5,6 +5,7 @@
 // shows the Windows warning in every state (English, pt-BR and Chinese).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
@@ -12,6 +13,7 @@ import { build } from 'esbuild'
 import { install } from '../src/host/endpoint.js'
 import { ACP_ENTRY, agentView, isSignInHint, isSignInUrl } from '../src/host/acp.js'
 import { needsViewer } from '../src/host/viewer-policy.js'
+import { installLocale as installOwnLocale, PT_BR as OWN_PT_BR, ZH as OWN_ZH } from '../src/client/i18n.js'
 import { fakeContext } from './fake-ctx.js'
 import { fakeLocale } from './fake-locale.js'
 
@@ -81,15 +83,16 @@ test('the host passes the sign-in fields only with exact values', () => {
   assert.equal(view.appSignIn, true)
   assert.equal(view.signingIn, true)
   assert.equal(view.signInError, 'timeout')
-  assert.equal(view.signInWhere, 'terminal')
+  // r6 (#2048): a Linux without a display signs in from another computer; `signInWhere` is gone.
+  assert.equal(view.signInWhere, undefined)
   assert.equal(view.sharedAccount, true)
-  for (const word of ['unsupported', 'timeout', 'failed', 'no-browser']) assert.equal(agentView(agy({ signInError: word })).signInError, word)
+  for (const word of ['unsupported', 'timeout', 'failed', 'no-browser', 'expired']) assert.equal(agentView(agy({ signInError: word })).signInError, word)
   const odd = agentView(agy({ appSignIn: 'yes', signingIn: 1, signInError: 'aborted', signInWhere: 'settings', sharedAccount: 'true', signInUrl: GOOGLE }))
   for (const field of ['appSignIn', 'signingIn', 'signInError', 'signInWhere', 'sharedAccount', 'signInUrl']) assert.equal(odd[field], undefined, field)
 })
 
 const GOOGLE = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=123-abc.apps.googleusercontent.com'
-  + '&redirect_uri=http%3A%2F%2F127.0.0.1%3A4242%2Foauth2callback&response_type=code&scope=openid&state=s1'
+  + '&redirect_uri=http%3A%2F%2F127.0.0.1%3A4242%2Foauth2callback&response_type=code&scope=openid&state=s1-state-0001'
 
 test('a sign-in link reaches the row only while signing in, and only Google\'s own entry points', () => {
   assert.equal(agentView(agy({ signingIn: true, signInUrl: GOOGLE })).signInUrl, GOOGLE)
@@ -207,6 +210,7 @@ const acpOf = (over = {}) => {
     check: row => acted.push(['check', row.id]), login: row => acted.push(['login', row.id]),
     nativeLogin: row => acted.push(['sign-in', row.id]), askSignOut: row => acted.push(['ask-sign-out', row.id]),
     nativeSignOut: row => acted.push(['sign-out', row.id]), cancelSignOut: () => acted.push(['cancel']),
+    callback: (row, url) => acted.push(['callback', row.id, url]),
     ...over,
   }
 }
@@ -362,6 +366,19 @@ const NEW_KEYS = [
   'Sign out',
   'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.',
 ]
+// Antigravity's Connect AI row and its sign-in from any computer, in Chinese too (#2048, r6).
+const R6_ZH_KEYS = [
+  'Your Google account, through Antigravity',
+  'Installing {name}…',
+  'The {cli} CLI is not on this computer. Automagik can install it for you.',
+  'The {cli} CLI is not on this computer. Turn {name} on to install it.',
+  'Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).',
+  'This link is not from this sign-in.',
+  'Signed in on another computer? Paste the address the browser ends on:',
+  'Finishing the sign-in to {name}…',
+  'This sign-in expired. Start again.',
+  'Expires at {time}',
+]
 // The keys of the inline terminal command, gone with it.
 const GONE_KEYS = [
   'Not signed in to {name}. Sign in here: your browser opens to finish.',
@@ -374,8 +391,8 @@ const GONE_KEYS = [
 test('every new line reads in pt-BR; Antigravity\'s sign-in lines and the Windows warning in Chinese', () => {
   for (const key of NEW_KEYS) assert.equal(typeof ui.PT_BR[key], 'string', key)
   for (const key of GONE_KEYS) assert.equal(ui.PT_BR[key], undefined, key)
-  assert.deepEqual(Object.keys(ui.ZH), [...ZH_KEYS, NEW_KEYS.at(-1)])
-  for (const text of [...NEW_KEYS.map(key => ui.PT_BR[key]), ...Object.values(ui.ZH)]) noCommand(text.replace(/\{name\}/g, ''), text)
+  assert.deepEqual(Object.keys(ui.ZH), [...ZH_KEYS, NEW_KEYS.at(-1), ...R6_ZH_KEYS])
+  for (const text of [...NEW_KEYS.map(key => ui.PT_BR[key]), ...Object.values(ui.ZH)]) noCommand(text.replace(/\{(?:name|cli|version|time)\}/g, ''), text)
   for (const key of ZH_KEYS) for (const text of [key, ui.PT_BR[key], ui.ZH[key]]) assert.doesNotMatch(text, /terminal|终端|command|comando|命令/i, text)
   const pt = inLocale('pt-BR', () => textOf(rowOf(agy({ signedIn: true, sharedAccount: true }))))
   assert.match(pt, /No Windows, a conta do Antigravity é compartilhada: .*Sair não está disponível aqui: saia pelo próprio Antigravity\./)
@@ -417,6 +434,7 @@ test('W1: a sign-in link needs agy\'s loopback return address, with a port', () 
     assert.equal(ui.openSignInLinks([{ appSignIn: true, signingIn: true, signInUrl: withReturn(back) }], new Set(), { desktop: {}, open: () => {} }), 1, back)
   }
   for (const back of [undefined, 'https://localhost:43117/cb', 'http://evil.example:1/cb', 'http://localhost/cb', 'http://127.0.0.1/cb',
+    'http://localhost:1023/cb', 'http://localhost:80/cb',
     'http://a@localhost:1/cb', 'http://localhost:1/cb#x', 'http://127.0.0.2:1/cb', 'http://localhost.evil.example:1/cb', 'not a url']) {
     assert.equal(isSignInUrl(withReturn(back)), false, String(back))
     assert.equal(agentView(agy({ signingIn: true, signInUrl: withReturn(back) })).signInUrl, undefined, String(back))
@@ -527,4 +545,180 @@ test('W4: the two sign-out words pass only as exact words, only with appSignIn, 
     const words = rowOf(agy({ ...over, signOutOverAcp: 'yes', lastSignOut: 'done' }))
     assert.equal(JSON.stringify(words), JSON.stringify(bare), JSON.stringify(over))
   }
+})
+
+// ---- r6 cycle: sign in from any computer, paste back the address (#2048, owner) ------------
+
+const ATTEMPT = '0a1b2c3d-1111-2222-3333-444455556666'
+const PASTING = { signingIn: true, signInUrl: GOOGLE, signInAttempt: ATTEMPT, signInPaste: true, signInExpiresAt: Date.UTC(2026, 10, 23, 15, 4) }
+
+test('W5: the paste-back fields pass only as exact values, only with appSignIn, and the first four only while signing in', () => {
+  const view = agentView(agy({ ...PASTING, signInChecking: true, signInEnd: 'window' }))
+  assert.equal(view.signInAttempt, ATTEMPT)
+  assert.equal(view.signInPaste, true)
+  assert.equal(view.signInChecking, true)
+  assert.equal(view.signInExpiresAt, PASTING.signInExpiresAt)
+  assert.equal(view.signInEnd, 'window')
+  assert.equal(view.signInWhere, undefined)
+  for (const word of ['agent-error', 'agent-exit', 'deadline', 'window', 'checking', 'unreachable']) {
+    assert.equal(agentView(agy({ signInEnd: word })).signInEnd, word)
+  }
+  assert.equal(agentView(agy({ signInError: 'expired' })).signInError, 'expired')
+  for (const [field, value] of [['signInAttempt', 'not-a-uuid'], ['signInAttempt', ATTEMPT.toUpperCase()], ['signInPaste', 'true'],
+    ['signInChecking', 1], ['signInExpiresAt', 'soon'], ['signInExpiresAt', Infinity], ['signInEnd', 'aborted'], ['signInEnd', true]]) {
+    assert.equal(agentView(agy({ ...PASTING, [field]: value }))[field], undefined, `${field} ${value}`)
+  }
+  // Not while no sign-in runs, and never for a row that does not sign in here.
+  const idle = agentView(agy({ ...PASTING, signingIn: undefined, signInChecking: true }))
+  for (const field of ['signInAttempt', 'signInPaste', 'signInChecking', 'signInExpiresAt']) assert.equal(idle[field], undefined, field)
+  const other = agentView(agy({ ...PASTING, appSignIn: undefined, signInChecking: true, signInEnd: 'window' }))
+  for (const field of ['signInAttempt', 'signInPaste', 'signInChecking', 'signInExpiresAt', 'signInEnd']) assert.equal(other[field], undefined, field)
+})
+
+test('W6: acp-sign-in-callback calls acp-dsh through with { id, attempt, url }, in its words, and needs the owner viewer', async () => {
+  const calls = []
+  const rows = [agy(PASTING)]
+  const URL_PASTED = 'http://localhost:4242/oauth2callback?code=c&state=s1-state-0001'
+  const service = {
+    status: async () => ({ agents: rows }),
+    signInCallback: async (id, attempt, url) => {
+      calls.push([id, attempt, url])
+      if (calls.length === 2) throw Object.assign(new Error('This link is not from this sign-in.'), { code: 'acp-sign-in/not-this-sign-in' })
+      if (calls.length === 3) throw Object.assign(new Error('This sign-in expired. Start again.'), { code: 'acp-sign-in/expired' })
+      if (calls.length === 4) throw new Error(`boom ${url}`)
+      return { agents: rows }
+    },
+  }
+  const fake = host(service)
+  const send = payload => fake.handle('acp-sign-in-callback', payload)
+  const ok = await send({ id: 'acp-antigravity', attempt: ATTEMPT, url: URL_PASTED })
+  assert.equal(ok.ok, true)
+  assert.doesNotMatch(JSON.stringify(ok), /code=c/)
+  assert.deepEqual(calls, [['acp-antigravity', ATTEMPT, URL_PASTED]])
+  assert.deepEqual((await send({ id: 'acp-antigravity', attempt: ATTEMPT, url: URL_PASTED })).error, { code: 'omni-ai/refused', message: 'This link is not from this sign-in.' })
+  assert.deepEqual((await send({ id: 'acp-antigravity', attempt: ATTEMPT, url: URL_PASTED })).error, { code: 'omni-ai/refused', message: 'This sign-in expired. Start again.' })
+  // Anything else acp-dsh throws reads as expired, and never echoes the address.
+  const odd = await send({ id: 'acp-antigravity', attempt: ATTEMPT, url: URL_PASTED })
+  assert.deepEqual(odd.error, { code: 'omni-ai/refused', message: 'This sign-in expired. Start again.' })
+  // A bad payload: not this sign-in; a stale page's attempt id: expired. acp-dsh is not asked.
+  for (const payload of [{ id: 'acp-antigravity', attempt: ATTEMPT }, { id: 'acp-gemini', attempt: ATTEMPT, url: 'x' },
+    { id: 'acp-antigravity', attempt: ATTEMPT, url: 'a'.repeat(8193) }, { id: 'acp-antigravity', attempt: ATTEMPT, url: 42 }, null]) {
+    assert.deepEqual((await send(payload)).error, { code: 'omni-ai/refused', message: 'This link is not from this sign-in.' }, JSON.stringify(payload)?.slice(0, 80))
+  }
+  for (const attempt of [undefined, 'not-a-uuid', 42]) {
+    assert.deepEqual((await send({ id: 'acp-antigravity', attempt, url: URL_PASTED })).error, { code: 'omni-ai/refused', message: 'This sign-in expired. Start again.' }, String(attempt))
+  }
+  assert.equal(calls.length, 4)
+  assert.match((await host({ status: async () => ({ agents: rows }) }).handle('acp-sign-in-callback', { id: 'acp-antigravity', attempt: ATTEMPT, url: URL_PASTED })).error.message, /cannot sign in/)
+  assert.equal(needsViewer('acp-sign-in-callback'), true)
+})
+
+const pasteForm = tree => findAll(tree, node => node.type === 'form')
+const remembered = []
+sandbox[Symbol.for('automagik.cli-login')] = { remember: url => remembered.push(url) }
+
+test('W7: signing in shows the link, Copy, the paste field and the expiry; Send empties the field first', async () => {
+  const acp = acpOf()
+  const tree = rowOf(agy(PASTING), acp)
+  const [link] = findAll(tree, node => node.type === 'a')
+  assert.equal(link.props.href, GOOGLE)
+  assert.equal(buttons(tree, 'Copy').length, 1)
+  assert.match(textOf(tree), /Signed in on another computer\? Paste the address the browser ends on:/)
+  assert.match(textOf(tree), /Expires at /)
+  const [form] = pasteForm(tree)
+  const [input] = findAll(form, node => node.type === 'input')
+  assert.equal(input.props.type, 'password')
+  assert.equal(input.props.autoComplete, 'off')
+  assert.equal(input.props.spellCheck, false)
+  assert.equal(input.props['data-1p-ignore'], 'true')
+  assert.equal(input.props['data-lpignore'], 'true')
+  assert.equal(input.props['data-bwignore'], 'true')
+  assert.equal(input.props.value, undefined, 'the field is never in the page\'s state')
+  assert.equal(buttons(form, 'Send').length, 1)
+  // Send: the field is emptied before the request.
+  const field = { value: '  http://localhost:4242/oauth2callback?code=c&state=s1-state-0001 ' }
+  let seenAtCall
+  const sending = acpOf({ callback: (row, url) => { seenAtCall = field.value; sending.acted.push(['callback', row.id, url]) } })
+  const [sendForm] = pasteForm(rowOf(agy(PASTING), sending))
+  sendForm.props.onSubmit({ preventDefault() {}, currentTarget: { elements: { namedItem: name => (name === 'sign-in-address' ? field : null) } } })
+  assert.equal(seenAtCall, '')
+  assert.equal(field.value, '')
+  assert.deepEqual(sending.acted, [['callback', 'acp-antigravity', '  http://localhost:4242/oauth2callback?code=c&state=s1-state-0001 ']])
+  // The Bot team's chat guard learns the link (its composer refuses the address it ends on).
+  assert.ok(remembered.includes(GOOGLE))
+  // useAcp sends { id, attempt, url } and reads both refusals in the page's language.
+  const requests = []
+  const said = []
+  const answers = ['This link is not from this sign-in.', 'This sign-in expired. Start again.']
+  const live = withHooks(() => ui.useAcp(async (endpoint, payload) => {
+    requests.push([endpoint, payload])
+    if (endpoint === 'acp-sign-in-callback') throw new Error(answers.shift())
+    return { available: true, agents: [] }
+  }), said)
+  locale.setLocale('pt-BR')
+  try {
+    await live.callback(agentView(agy(PASTING)), 'http://localhost:4242/x')
+    await live.callback(agentView(agy(PASTING)), 'http://localhost:4242/y')
+  } finally { locale.setLocale('en') }
+  // The payloads come from the bundle's own realm: compared as JSON.
+  assert.deepEqual(JSON.parse(JSON.stringify(requests.filter(([endpoint]) => endpoint === 'acp-sign-in-callback'))), [
+    ['acp-sign-in-callback', { id: 'acp-antigravity', attempt: ATTEMPT, url: 'http://localhost:4242/x' }],
+    ['acp-sign-in-callback', { id: 'acp-antigravity', attempt: ATTEMPT, url: 'http://localhost:4242/y' }],
+  ])
+  assert.deepEqual(said.map(problem => problem['acp-antigravity']).filter(Boolean), ['Este link não é deste login.', 'Este login expirou. Comece de novo.'])
+  // Delivered: only "Finishing…", no field and no link.
+  const checking = rowOf(agy({ ...PASTING, signInPaste: undefined, signInChecking: true }))
+  assert.match(textOf(checking), /Finishing the sign-in to Antigravity…/)
+  assert.deepEqual(pasteForm(checking), [])
+  assert.deepEqual(findAll(checking, node => node.type === 'a'), [])
+  // A link with no paste offered (an older acp-dsh): the link and Copy, no field.
+  const linkOnly = rowOf(agy({ signingIn: true, signInUrl: GOOGLE }))
+  assert.equal(buttons(linkOnly, 'Copy').length, 1)
+  assert.deepEqual(pasteForm(linkOnly), [])
+  // Expired: the chat's own sentence, then the signed-out line and Sign in.
+  const expired = rowOf(agy({ signInError: 'expired' }))
+  const lines = findAll(expired, node => node.type === 'p' && /oai-acp-line/.test(node.props.className ?? '')).map(textOf)
+  assert.ok(lines.includes('This sign-in expired. Start again.'), lines.join(' | '))
+  assert.equal(buttons(expired, 'Sign in').length, 1)
+  // Every state, in every language: no command, no path.
+  for (const id of ['en', 'pt-BR', 'zh']) {
+    for (const row of [agy(PASTING), agy({ ...PASTING, signInPaste: undefined, signInChecking: true }), agy({ signInError: 'expired' })]) {
+      noCommand(inLocale(id, () => textOf(rowOf(row))).replace(/\{/g, ''), id)
+    }
+  }
+  const pt = inLocale('pt-BR', () => textOf(rowOf(agy(PASTING))))
+  assert.match(pt, /Entrou em outro computador\? Cole o endereço em que o navegador parou:/)
+  assert.match(pt, /Expira às /)
+  assert.match(pt, /Copiar/)
+  assert.match(inLocale('pt-BR', () => textOf(rowOf(agy({ ...PASTING, signInPaste: undefined, signInChecking: true })))), /Concluindo o login em Antigravity…/)
+  assert.match(inLocale('pt-BR', () => textOf(rowOf(agy({ signInError: 'expired' })))), /Este login expirou\. Comece de novo\./)
+  const zh = inLocale('zh', () => textOf(rowOf(agy(PASTING))))
+  assert.match(zh, /在另一台电脑上登录了？请粘贴浏览器最后停留的地址：/)
+  assert.match(zh, /过期/)
+  // ZH keeps the buttons in English (Connect AI choice F).
+  assert.match(zh, /Copy/)
+  assert.match(zh, /Send/)
+  assert.match(inLocale('zh', () => textOf(rowOf(agy({ ...PASTING, signInPaste: undefined, signInChecking: true })))), /正在完成 Antigravity 的登录…/)
+})
+
+// Kept last: it installs the module's own locale binding and resets it (G8-1).
+test('the expired sentence is the chat\'s, byte for byte', () => {
+  const KEY = 'This sign-in expired. Start again.'
+  const source = readFileSync(new URL('../../bots-dsh/src/client/i18n.js', import.meta.url), 'utf8')
+  const found = source.split('\n').filter(line => line.trimStart().startsWith(`${JSON.stringify(KEY)}:`))
+  assert.equal(found.length, 1)
+  const zh = JSON.parse(found[0].trimStart().slice(JSON.stringify(KEY).length + 1).trim().replace(/,$/, ''))
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))[KEY]
+  assert.equal(typeof zh, 'string')
+  assert.ok(zh.length > 0)
+  assert.equal(typeof pt, 'string')
+  assert.ok(pt.length > 0)
+  assert.equal(OWN_ZH[KEY], zh)
+  assert.equal(OWN_PT_BR[KEY], pt)
+  let seen
+  const dispose = installOwnLocale({ register(ns, tables) { seen = { ns, tables }; return () => {} }, bind() { return key => key } })
+  try {
+    assert.equal(seen.ns, 'welcome.team')
+    assert.equal(seen.tables.en[KEY], KEY)
+  } finally { dispose() }
 })

@@ -1031,3 +1031,18 @@ test('a passive catalog miss leaves enumeration, saves and unblocking to the des
   assert.equal(rt.save.mock.callCount(), 1)
   assert.equal(rt.unblockBots.mock.callCount(), 1)
 })
+
+// G6-18 (#2048): with only Antigravity's models running and DSH's default needing a key nobody
+// set, the first model that can run is Antigravity's named one, never its `default` alias, as
+// a Claude-only or Codex-only setup gives theirs (parity).
+test('with only Antigravity on, the default model is its first named model', async () => {
+  const providers = { deepseek: [{ id: 'deepseek-v4-pro' }], 'acp-antigravity': [{ id: 'default', name: 'Default' }, { id: 'gemini-3-pro', name: 'Gemini 3 Pro' }] }
+  const acp = { status: async () => ({ agents: [{ id: 'acp-antigravity', signedIn: true, on: true, cli: { found: true }, connector: { state: 'ready' } }] }) }
+  const ctx = {
+    llm: { listProviders: () => Object.keys(providers).map(id => ({ id })), listModels: async id => providers[id] },
+    get: name => (name === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-v4-pro' }) } : name === 'acpAgents' ? acp : undefined),
+  }
+  const rt = { ctx, state: { bots: {} }, missingKeys: async () => new Set(['deepseek']) }
+  install(rt)
+  assert.equal(await rt.defaultModel(), 'acp-antigravity/gemini-3-pro')
+})

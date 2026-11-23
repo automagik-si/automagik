@@ -590,12 +590,22 @@ export const PT_BR = {
   'Copy your {what} from ': 'Copie o valor “{what}” em ',
   ' and paste it here. It stays in DSH\'s credential store on this computer.': ' e cole aqui. Fica no cofre de credenciais do DSH, neste computador.',
   'The address you landed on': 'O endereço da página final',
+  // Antigravity's sign-in from any computer (#2048, paste-back). The expired sentence and the
+  // expiry are the Bot chat's own (bots-dsh omni-ui), byte for byte.
+  'Your Google account, through Antigravity': 'Sua conta Google, pelo Antigravity',
+  'This link is not from this sign-in.': 'Este link não é deste login.',
+  'Signed in on another computer? Paste the address the browser ends on:': 'Entrou em outro computador? Cole o endereço em que o navegador parou:',
+  'Finishing the sign-in to {name}…': 'Concluindo o login em {name}…',
+  'This sign-in expired. Start again.': 'Este login expirou. Comece de novo.',
+  'Send': 'Enviar',
+  'Expires at {time}': 'Expira às {time}',
 }
 
 // English is the key itself; registering it keeps the namespace whole in both languages.
 const EN = Object.fromEntries(Object.keys(PT_BR).map(key => [key, key]))
 
-// Chinese: Antigravity's own lines (#2048): its sign-in in the app and the Windows warning.
+// Chinese: Antigravity's own lines (#2048): its sign-in in the app, its Connect AI row and the
+// Windows warning.
 // Every other key reads in English, the buttons and the link label shared with other rows too. `zh` is the Chinese id of DSH's locale service (dsh-client-locale 0.2.2-rc.2 lists
 // `zh` and `en`; `zh-CN` is only the page's lang attribute).
 export const ZH = {
@@ -606,6 +616,18 @@ export const ZH = {
   'The sign-in to {name} took too long. Try again.': '{name} 的登录用时过长。请重试。',
   'The sign-in to {name} did not finish. Try again.': '{name} 的登录没有完成。请重试。',
   'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.': '在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。',
+  // Its row in Connect AI and its sign-in from any computer (#2048, paste-back). The expired
+  // sentence and the expiry are the Bot chat's own (bots-dsh i18n.js), byte for byte.
+  'Your Google account, through Antigravity': '你的 Google 账号，通过 Antigravity',
+  'Installing {name}…': '正在安装 {name}…',
+  'The {cli} CLI is not on this computer. Automagik can install it for you.': '这台电脑上没有 {cli} CLI。Automagik 可以为你安装。',
+  'The {cli} CLI is not on this computer. Turn {name} on to install it.': '这台电脑上没有 {cli} CLI。开启 {name} 即可安装。',
+  'Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).': '已找到 {cli} CLI（由 Automagik 安装，版本 {version}；它会自行更新）。',
+  'This link is not from this sign-in.': '此链接不属于本次登录。',
+  'Signed in on another computer? Paste the address the browser ends on:': '在另一台电脑上登录了？请粘贴浏览器最后停留的地址：',
+  'Finishing the sign-in to {name}…': '正在完成 {name} 的登录…',
+  'This sign-in expired. Start again.': '本次登录已过期，请重新开始。',
+  'Expires at {time}': '{time} 过期',
 }
 
 const fill = (text, params) => (params

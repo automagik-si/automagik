@@ -307,8 +307,10 @@ export function signInHintOf(spec, detail, platform = process.platform) {
 /**
  * Whether `value` is a sign-in link `spec` may hand the page while it signs in: only one of its
  * own OAuth entry points (`signInUrls`), over https, with no account, port or fragment, asking
- * for a code for a named client, with a loopback return address (isLoopbackReturn). Never an
- * arbitrary URL printed or handed over by a process.
+ * for a code for a named client, with a loopback return address on port 1024 or above
+ * (isLoopbackReturn) and one printable state of 8-512 characters, which a pasted-back address
+ * must carry (#2048, sign-in-callback.js). Never an arbitrary URL printed or handed over by a
+ * process.
  * @param {object} spec an entry of AGENTS
  * @param {unknown} value
  */
@@ -322,7 +324,7 @@ export function isSignInUrl(spec, value) {
     if (!allowed.includes(`${url.hostname}${url.pathname}`)) return false
     return url.searchParams.get('response_type') === 'code'
       && /^[\w.-]{1,256}$/.test(url.searchParams.get('client_id') ?? '')
-      && isLoopbackReturn(url.searchParams.get('redirect_uri'))
+      && isLoopbackReturn(url.searchParams.get('redirect_uri')) && stateOf(url)
   } catch { return false }
 }
 
@@ -334,9 +336,15 @@ function isLoopbackReturn(value) {
   if (typeof value !== 'string') return false
   try {
     const back = new URL(value)
-    return back.protocol === 'http:' && LOOPBACK.has(back.hostname) && back.port !== ''
-      && !back.username && !back.password && !back.hash
+    return back.protocol === 'http:' && LOOPBACK.has(back.hostname) && /^\d+$/.test(back.port)
+      && Number(back.port) >= 1024 && !back.username && !back.password && !back.hash
   } catch { return false }
+}
+
+// The state agy waits for back: exactly one, printable, 8-512 characters (#2048, paste-back).
+const stateOf = url => {
+  const states = url.searchParams.getAll('state')
+  return states.length === 1 && /^[^\p{Cc}\s]{8,512}$/u.test(states[0])
 }
 
 /**

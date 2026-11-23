@@ -18,10 +18,12 @@ import { raised } from './clay.js'
 // sees a link, a code or a credential. The terminal command signs in to a shared CLI home.
 //
 // Antigravity runs in this installation's own home (#2048, `appSignIn`): its row signs in here,
-// over ACP, with its browser opening on this computer (Sign in), as Claude Code's and Codex's
-// rows read, never with a terminal command or a path, and signs out by retiring the home
-// (Sign out). On Windows its account is shared with the person's own agy (`sharedAccount`):
-// every state of the row says so, and there is no Sign out.
+// over ACP (Sign in), as Claude Code's and Codex's rows read, never with a terminal command or
+// a path, and signs out by retiring the home (Sign out). Its sign-in link shows with a Copy
+// button and, in the desktop app, opens in the person's own browser; signed in on another
+// computer, the person pastes back the address the browser ended on (`acp-sign-in-callback`).
+// The same lines draw in Connect AI (AcpLine). On Windows its account is shared with the
+// person's own agy (`sharedAccount`): every state of the row says so, and there is no Sign out.
 
 export const CLI_OF = { 'acp-claude': 'claude', 'acp-codex': 'codex', 'acp-hermes': 'hermes', 'acp-antigravity': 'agy', 'acp-omp': 'omp' }
 export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'HM', 'acp-antigravity': 'AG', 'acp-omp': 'OM' }
@@ -30,8 +32,14 @@ export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'H
 // command that signs in (`cli.signInHint`). They are off until the person turns one on, which
 // is their word that the app may use the sign-in that CLI already has on this computer.
 export const isNative = agent => agent?.connector?.native === true
-// acp-dsh's refusal of a sign-in with no browser on this computer (signInNative `no-display`).
+// acp-dsh's refusal of a sign-in with no browser on this computer (an older acp-dsh's
+// `no-display`), and the two refusals of a pasted address (#2048): read in the page's language.
 const BROWSER_DID_NOT_OPEN = 'The browser did not open. Try again.'
+const NOT_THIS_SIGN_IN = 'This link is not from this sign-in.'
+const EXPIRED_SIGN_IN = 'This sign-in expired. Start again.'
+const signInWords = message => (message === BROWSER_DID_NOT_OPEN ? t('The browser did not open. Try again.')
+  : message === NOT_THIS_SIGN_IN ? t('This link is not from this sign-in.')
+    : message === EXPIRED_SIGN_IN ? t('This sign-in expired. Start again.') : message)
 const isolatedSignIn = agent => agent.authScope === 'isolated' && !isNative(agent)
 const signInCommand = agent => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key
 // How the person signs in to the CLI in a terminal, the other way to the chat's row.
@@ -215,19 +223,30 @@ export function agentLines(agent, entry) {
 // Windows keeps Antigravity's sign-in in Credential Manager, shared with the person's own agy.
 const sharedLine = name => ({ tone: 'muted', text: t('On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.', { name }) })
 
+// The time a sign-in link stops being good, in the page's own clock.
+const timeOf = at => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+
 // The sign-in lines of an agent that signs in here (`appSignIn`), as Claude Code's and Codex's
-// read: under way (with the sign-in link agy printed, if any), why the last one failed, and
-// signed out with Sign in. Never a terminal command or a path (#2048, owner): with no browser
-// on this computer, Sign in answers that the browser did not open.
+// read: under way (with the sign-in link agy handed over, a Copy button, and the field for the
+// address the browser ends on when the sign-in happens on another computer), why the last one
+// failed, and signed out with Sign in. Never a terminal command or a path (#2048, owner); never
+// the pasted address.
 function appSignInLines(agent, name) {
   const lines = []
   if (agent.signingIn === true) {
-    return [{
+    if (agent.signInChecking === true) return [{ tone: 'wait', text: t('Finishing the sign-in to {name}…', { name }) }]
+    lines.push({
       tone: 'wait',
       text: t('Finish the sign-in to {name} in your browser…', { name }),
-      ...(agent.signInUrl ? { link: { href: agent.signInUrl, text: t('Sign in with {name}', { name }) } } : {}),
-    }]
+      ...(agent.signInUrl ? { link: { href: agent.signInUrl, text: t('Sign in with {name}', { name }) }, copy: agent.signInUrl } : {}),
+    })
+    if (agent.signInPaste === true && agent.signInUrl && typeof agent.signInAttempt === 'string') {
+      lines.push({ tone: 'muted', text: t('Signed in on another computer? Paste the address the browser ends on:'), action: 'callback' })
+    }
+    if (Number.isFinite(agent.signInExpiresAt)) lines.push({ tone: 'muted', text: t('Expires at {time}', { time: timeOf(agent.signInExpiresAt) }) })
+    return lines
   }
+  if (agent.signInError === 'expired') lines.push({ tone: 'bad', text: t('This sign-in expired. Start again.') })
   if (agent.signInError === 'unsupported') lines.push({ tone: 'bad', text: t('{name} did not offer a Google sign-in. Try again.', { name }) })
   if (agent.signInError === 'timeout') lines.push({ tone: 'bad', text: t('The sign-in to {name} took too long. Try again.', { name }) })
   if (agent.signInError === 'failed') lines.push({ tone: 'bad', text: t('The sign-in to {name} did not finish. Try again.', { name }) })
@@ -330,18 +349,22 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
       const on = !(wanted[agent.id] ?? agent.on)
       setWanted(previous => ({ ...previous, [agent.id]: on }))
       // Refused: the switch goes back to what acp-dsh has, and nothing waits for it to settle.
-      if (!(await act(agent.id, 'acp-switch', { id: agent.id, on })) && live.current) {
+      const ok = await act(agent.id, 'acp-switch', { id: agent.id, on })
+      if (!ok && live.current) {
         setWanted(previous => (previous[agent.id] === on ? Object.fromEntries(Object.entries(previous).filter(([id]) => id !== agent.id)) : previous))
       }
+      return ok
     },
     retry: agent => act(agent.id, 'acp-retry', { id: agent.id }),
     // The person's click on Install (a CLI the app installs only then).
     install: agent => act(agent.id, 'acp-install', { id: agent.id }),
     check: agent => act(agent.id, 'acp', { refresh: true }),
-    // An agent that signs in here: Sign in starts it (its browser opens), and Sign out asks
-    // first, with the same words as the account switch, then retires its home.
-    // With no browser on this computer acp-dsh refuses in fixed words, read in the page's language.
-    nativeLogin: agent => act(agent.id, 'acp-sign-in', { id: agent.id }, message => (message === BROWSER_DID_NOT_OPEN ? t('The browser did not open. Try again.') : message)),
+    // An agent that signs in here: Sign in starts it (its link opens in the person's browser),
+    // and Sign out asks first, with the same words as the account switch, then retires its home.
+    // acp-dsh's fixed refusals read in the page's language.
+    nativeLogin: agent => act(agent.id, 'acp-sign-in', { id: agent.id }, signInWords),
+    // The address the browser ended on, for the attempt the row shows (#2048, paste-back).
+    callback: (agent, url) => act(agent.id, 'acp-sign-in-callback', { id: agent.id, attempt: agent.signInAttempt, url }, signInWords),
     signOutPending: signingOut,
     askSignOut: (agent) => { say(agent.id, null); setSigningOut(agent.id) },
     cancelSignOut: () => setSigningOut(null),
@@ -364,7 +387,44 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
   }
 }
 
+// Arms the Bot team's chat guard (bots-dsh cli-login.js bridge `remember`) with a sign-in link
+// this page shows, so a chat message carrying the address it ends on is refused there too.
+function rememberSignInLink(url, scope = globalThis) {
+  try { scope[CHAT_LOGIN]?.remember?.(url) } catch {}
+}
+
+// The link's Copy button, as the welcome's other Copy buttons (oai-copy).
+function CopyLink({ url }) {
+  const [copied, setCopied] = useState(false)
+  return h('button', {
+    type: 'button', className: 'oai-copy oai-acp-act',
+    onClick: () => globalThis.navigator?.clipboard?.writeText(url).then(() => setCopied(true), () => {}),
+  }, copied ? t('Copied') : t('Copy'))
+}
+
+// The field for the address the browser ended on (#2048, paste-back): never kept in the page's
+// state; Send empties the field before the request.
+function CallbackField({ agent, acp, busy }) {
+  const send = (event) => {
+    event.preventDefault()
+    const input = event.currentTarget?.elements?.namedItem?.('sign-in-address')
+    if (!input) return
+    const value = input.value
+    input.value = ''
+    if (typeof value === 'string' && value.trim() !== '') void acp.callback(agent, value)
+  }
+  return h('form', { className: 'oai-setup-form', onSubmit: send },
+    h('div', { className: 'oai-field' },
+      h('input', {
+        type: 'password', name: 'sign-in-address', autoComplete: 'off', spellCheck: false,
+        'aria-label': t('Signed in on another computer? Paste the address the browser ends on:'),
+        'data-1p-ignore': 'true', 'data-lpignore': 'true', 'data-bwignore': 'true',
+      }),
+      h('button', { type: 'submit', className: 'oai-ghost oai-acp-act', disabled: busy }, t('Send'))))
+}
+
 export function AcpLine({ line, agent, acp, busy, accountControls }) {
+  if (line.copy) rememberSignInLink(line.copy)
   const canSwitch = line.action === 'switch' && accountControls !== undefined
   const signOut = line.action === 'native-sign-out'
   const confirmingOut = signOut && acp.signOutPending === agent.id
@@ -374,6 +434,7 @@ export function AcpLine({ line, agent, acp, busy, accountControls }) {
     h('p', { className: `oai-acp-line oai-acp-${line.tone}${line.tone === 'wait' ? ' oai-waiting' : ''}`, ...(line.tone === 'bad' ? { role: 'status' } : {}) },
       confirming ? t('This stops running Bot work for this account. Continue?') : line.text,
       line.link ? [' ', h('a', { key: 'link', className: 'oai-link', href: line.link.href, target: '_blank', rel: 'noreferrer' }, line.link.text)] : null,
+      line.copy ? h(CopyLink, { url: line.copy }) : null,
       line.action === 'retry' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.retry(agent) }, t('Retry')) : null,
       line.action === 'install' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.install(agent) }, line.label ?? t('Install')) : null,
       line.action === 'login' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.login(agent) }, line.label ?? t('Sign in')) : null,
@@ -383,6 +444,7 @@ export function AcpLine({ line, agent, acp, busy, accountControls }) {
       signOut && !confirming ? accountButton(t('Sign out'), () => acp.askSignOut(agent)) : null,
       confirming ? accountButton(t('Continue'), () => (confirmingOut ? acp.nativeSignOut(agent) : accountControls.confirm(agent))) : null,
       confirming ? accountButton(t('Cancel'), confirmingOut ? acp.cancelSignOut : accountControls.cancel) : null),
+    line.action === 'callback' ? h(CallbackField, { agent, acp, busy }) : null,
     line.details ? h('details', { className: 'oai-acp-details' },
       h('summary', null, t('Install details')),
       h('pre', { className: 'oai-acp-diagnostic' }, line.details.diagnostic),

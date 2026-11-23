@@ -50,9 +50,14 @@ for (const type of ['keydown', 'keyup', 'input', 'beforeinput', 'paste', 'copy',
 // The host, faked: one attempt per agent, any view of the owner reads it.
 export const STATE = 'Sentinel_State_ABCdef0123456789'
 window.STATE = STATE
-window.host = { attempts: {}, signedIn: { 'acp-codex': false, 'acp-claude': false }, choices: {}, restarted: false, hold: {}, release: {}, sequence: 0 }
+// Antigravity's link and the address the browser ends on (#2048): Google's link, its state.
+export const AGY_STATE = 'Agy-_.~state_0123456789'
+window.AGY_STATE = AGY_STATE
+window.AGY_LINK = `https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=${AGY_STATE}`
+window.AGY_CALLBACK = `http://localhost:41234/auth/callback?code=4%2F0Abc&state=${AGY_STATE}`
+window.host = { attempts: {}, signedIn: { 'acp-codex': false, 'acp-claude': false, 'acp-antigravity': false }, choices: {}, restarted: false, hold: {}, release: {}, sequence: 0 }
 const refused = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
-const linkOf = provider => (provider === 'acp-codex' ? 'https://auth.openai.com/codex/device'
+const linkOf = provider => (provider === 'acp-codex' ? 'https://auth.openai.com/codex/device' : provider === 'acp-antigravity' ? window.AGY_LINK
   : `https://claude.ai/oauth/authorize?code=true&client_id=${'c'.repeat(240)}&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&state=${STATE}`)
 const view = provider => {
   const attempt = window.host.attempts[provider]
@@ -89,7 +94,9 @@ const call = async (endpoint, payload) => {
       if (!live(provider)) {
         window.host.attempts[provider] = { id: provider, attemptId: `attempt_${provider.replace('-', '_')}_${String(++window.host.sequence).padStart(20, '0')}`, status: 'waiting',
           expiresAt: Date.now() + 600_000, expiresBy: 'app', openedBy: botId, url: linkOf(provider),
-          ...(provider === 'acp-codex' ? { userCode: 'ABCD-1234' } : { prompt: { id: 'claude-code', label: 'Authorization code', secret: true } }) }
+          ...(provider === 'acp-codex' ? { userCode: 'ABCD-1234' }
+            : provider === 'acp-antigravity' ? { prompt: { id: 'agy-callback', label: 'Sign-in address', secret: true } }
+              : { prompt: { id: 'claude-code', label: 'Authorization code', secret: true } }) }
       }
       return view(provider)
     }
@@ -101,6 +108,12 @@ const call = async (endpoint, payload) => {
       if (window.host.restarted || window.host.attempts[provider]?.attemptId !== payload.attemptId) throw refused('This sign-in has ended. Start again.', 'bot/login-ended')
       return view(provider)
     case 'cli-login-answer':
+      // Antigravity: the right address is delivered; agy finishes when the test says so.
+      if (provider === 'acp-antigravity') {
+        if (payload.value !== window.AGY_CALLBACK) throw refused('This link is not from this sign-in.', 'bot/invalid')
+        Object.assign(window.host.attempts[provider], { checking: true, prompt: undefined })
+        return view(provider)
+      }
       if (payload.value !== `authcode-XYZ#${STATE}`) throw refused('Paste the complete code shown by Claude, including the part after #.', 'bot/invalid')
       window.finishSignIn(provider)
       return view(provider)
@@ -373,7 +386,7 @@ root.render(slots.renderSlot('root', {}))
 
 window.setBots = (bots, { blank = false, shown } = {}) => {
   for (const bot of bots) if (!runtimes.has(bot.id)) runtimes.set(bot.id, makeSession(bot.id, blank))
-  roster.set(indexRoster({ bots, rooms: [], agents: [], models: [{ ref: 'deepseek-official/deepseek-flash', name: 'DeepSeek Flash' }, { ref: 'acp-claude/default', name: 'Claude Code' }, { ref: 'acp-codex/default', name: 'Codex' }], prefs: {} }))
+  roster.set(indexRoster({ bots, rooms: [], agents: [], models: [{ ref: 'deepseek-official/deepseek-flash', name: 'DeepSeek Flash' }, { ref: 'acp-claude/default', name: 'Claude Code' }, { ref: 'acp-codex/default', name: 'Codex' }, { ref: 'acp-antigravity/default', name: 'Antigravity' }], prefs: {} }))
   for (const bot of [...bots].reverse()) if (shown === undefined || bot.id !== shown) selectSession(bot.id)
   if (shown !== undefined) selectSession(shown)
   else selectSession(bots[0].id)

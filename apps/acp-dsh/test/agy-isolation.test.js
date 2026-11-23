@@ -103,6 +103,7 @@ function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, h
   const services = {}
   const disposers = []
   const listeners = new Map()
+  const events = []
   const session = { id: 's1', header: { cwd: dir }, append: () => ({ seq: 1 }) }
   const agent = {
     session, model: { current: () => ({ provider: ID, model: 'default' }) }, options: { provider: ID },
@@ -125,7 +126,7 @@ function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, h
     on: (name, listener) => { listeners.set(name, [...(listeners.get(name) ?? []), listener]); return () => {} },
     effect: (fn) => { disposers.push(fn()) },
     provide: (name, value) => { services[name] = value },
-    emit: () => {},
+    emit: (name, payload) => { events.push({ name, payload }) },
   }
   const store = {
     binOf: () => undefined, busy: () => false, lastError: () => undefined, lastFailure: () => undefined,
@@ -143,7 +144,7 @@ function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, h
   t.after(async () => { dispose(); await sleep(50); rmSync(dir, { recursive: true, force: true }) })
   const service = services[SERVICE]
   return {
-    dir, cliHome, agy, clis, logs, logoutCalls, config: live, service, dispose,
+    dir, cliHome, agy, clis, logs, logoutCalls, events, config: live, service, dispose,
     get adapter() { return registered.adapter },
     home: () => homeOf(cliHome),
     envs: () => lines(envFile),
@@ -243,7 +244,7 @@ const signInEmptied = w => assert.deepEqual(readdirSync(join(w.dir, 'acp', 'sign
 test('I2b: a sign-in link agy prints reaches the status only when it is Google\'s own, and only while it waits', unixOnly, async (t) => {
   plant(t)
   const google = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
-    + '&redirect_uri=http%3A%2F%2F127.0.0.1%3A4242%2Fcb&response_type=code&state=s1'
+    + '&redirect_uri=http%3A%2F%2F127.0.0.1%3A4242%2Fcb&response_type=code&state=s1-state-0001'
   const w = world(t, { agentEnv: {
     FAKE_ACP_AUTH_STDERR: `Open https://accounts.google.com.evil.example/o/oauth2/v2/auth?response_type=code&client_id=x or ${google} to sign in.`,
     FAKE_ACP_AUTH_HOLD: '1',
@@ -329,7 +330,7 @@ test('I3: a method not offered, a failure, no answer and a switch-off each end t
   await endsClean(w, from)
 })
 
-test('I3: the refusals, and no browser on a Linux without a display', unixOnly, async (t) => {
+test('I3: the refusals; with no display on Linux Sign in starts and offers the paste (G6-7)', unixOnly, async (t) => {
   plant(t)
   const off = world(t, { config: { antigravity: false } })
   await assert.rejects(off.service.signInNative(ID), { code: 'acp-sign-in/off' })
@@ -337,20 +338,34 @@ test('I3: the refusals, and no browser on a Linux without a display', unixOnly, 
   await assert.rejects(missing.service.signInNative(ID), { code: 'acp-sign-in/missing' })
   await assert.rejects(missing.service.signInNative('acp-hermes'), { code: 'acp-sign-in/unsupported' })
   await assert.rejects(missing.service.signInNative('acp-claude'), { code: 'acp-sign-in/unsupported' })
-  // No DISPLAY on Linux: Sign in answers that the browser did not open (#2048, owner), with no
-  // command; the command in the agy home goes to the log only.
+  // No DISPLAY on Linux (#2048, r6 choice 3): the sign-in can finish on another computer, so
+  // Sign in starts, the link is shown and the paste is offered; no `signInWhere`.
   delete process.env.DISPLAY
-  const bare = world(t)
-  assert.equal((await bare.row()).signInWhere, 'terminal')
+  const bare = world(t, { agentEnv: { FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE, FAKE_ACP_AUTH_HOLD: '1' } })
+  assert.equal((await bare.row()).signInWhere, undefined)
   assert.equal((await bare.row()).cli.signInHint, undefined)
-  await assert.rejects(bare.service.signInNative(ID), { code: 'acp-sign-in/no-display', message: 'The browser did not open. Try again.' })
-  assert.ok(bare.logs.some(line => line.startsWith('acp-dsh: Antigravity: there is no browser on this computer; its terminal sign-in, for support: env -i ')
-    && line.includes(`HOME='${bare.home()}'`)), bare.logs.join('\n'))
+  await bare.service.refresh()
+  await bare.service.signInNative(ID)
+  const waiting = await until(async () => { const now = await bare.row(); return now.signInPaste ? now : undefined }, 'the paste field')
+  assert.equal(waiting.signInUrl, LOCAL_GOOGLE)
+  assert.equal(waiting.signInWhere, undefined)
+  bare.config.antigravity = false
+  bare.emit('loader/volatile-update')
+  await bare.signedIn()
+  // Kept (G6-7): no DISPLAY and no link handed over: the attempt ends `no-browser` at
+  // nativeSignInLinkMs, and the command in the agy home goes to the log only.
+  const nolink = world(t, { agentEnv: { FAKE_ACP_AUTH_HOLD: '1' }, deps: { nativeSignInLinkMs: 300 } })
+  await nolink.service.refresh()
+  await nolink.service.signInNative(ID)
+  const ended = await nolink.signedIn()
+  assert.equal(ended.signInError, 'no-browser')
+  assert.equal(ended.cli.signInHint, undefined)
+  assert.ok(nolink.logs.some(line => line.startsWith('acp-dsh: Antigravity: the browser did not open (agy handed no sign-in link); its terminal sign-in, for support: env -i ')
+    && line.includes(`HOME='${nolink.home()}'`)), nolink.logs.join('\n'))
   for (const platform of ['darwin', 'win32']) {
     const other = world(t, { platform })
     assert.equal((await other.row()).signInWhere, undefined)
   }
-  // Wayland with no X display: the app opens the browser in the person's session, so it can.
   process.env.WAYLAND_DISPLAY = 'wayland-0'
   try {
     const wayland = world(t)
@@ -485,11 +500,11 @@ test('I6: the terminal command in the agy home, by platform, for the log only; n
   // The chat and the login route point to Settings, never to the static command.
   assert.equal(w.adapter.agents.get(ID).signInHint, undefined)
   assert.equal(w.adapter.agents.get(ID).signInWhere, 'settings')
-  assert.throws(() => w.service.loginStart(ID), (error) => {
-    assert.equal(error.code, 'acp-login/app')
-    assert.equal(error.message, 'Sign in to Antigravity in Settings, under Coding agents.')
-    return !error.message.includes('agy acp --login')
-  })
+  // A Bot's chat starts the same in-app attempt (#2048, parity), never a terminal-only one.
+  const view = await w.service.loginStart(ID, { label: 'bot-1' })
+  assert.match(view.attemptId, UUID)
+  assert.doesNotMatch(JSON.stringify(view), /acp --login|env -i/)
+  await w.signedIn()
   // A null hint (an unsafe path) reaches no terminal command either.
   const logins = new CliLogins({ hintOf: () => null })
   try {
@@ -620,7 +635,7 @@ test('I9: a damaged agy pointer never blocks restart or dispose; an unproved Cla
 // ---- r5: the app opens the sign-in link; agy never starts a browser (#2048, owner) ----------
 
 const LOCAL_GOOGLE = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
-  + '&redirect_uri=http%3A%2F%2Flocalhost%3A43117%2Fauth%2Fcallback&response_type=code&state=r5'
+  + '&redirect_uri=http%3A%2F%2Flocalhost%3A43117%2Fauth%2Fcallback&response_type=code&state=r5-state-0001'
 const STAND_IN = drop => `#!/bin/sh
 # Automagik: hands agy's sign-in link to the app. It opens nothing and reads nothing else.
 [ "$#" -eq 1 ] || exit 0
@@ -831,4 +846,311 @@ test('I13: the two log words ride on the status, equal to the log lines', unixOn
   assert.equal(answered.signInError, 'failed')
   assert.ok(w.logs.slice(logs).includes('acp-dsh: Antigravity sign-out over ACP: none'), w.logs.slice(logs).join('\n'))
   assert.equal(answered.lastSignOut, undefined)
+})
+
+// ---- r6 cycle: sign in from any computer, paste back the address (#2048, owner) ------------
+
+// The address the browser ends on for the link a row (or a chat view) shows, with any part changed.
+const pasteFor = (row, { code = 'SECRET-CODE-1', host = 'localhost', port, path, state } = {}) => {
+  const link = new URL(row.signInUrl ?? row.url)
+  const back = new URL(link.searchParams.get('redirect_uri'))
+  return `http://${host}:${port ?? back.port}${path ?? back.pathname}?code=${code}`
+    + `&state=${encodeURIComponent(state ?? link.searchParams.get('state'))}`
+}
+const portOf = row => Number(new URL(new URL(row.signInUrl).searchParams.get('redirect_uri')).port)
+const linked = w => until(async () => { const now = await w.row(); return now.signInPaste ? now : undefined }, 'the paste field')
+const callbacks = w => w.traces().filter(entry => entry.event === 'callback')
+const noSecret = (w, ...more) => {
+  for (const text of [...w.logs, ...more]) assert.doesNotMatch(text, /SECRET|\/auth\/callback\?/, text)
+}
+const errorText = error => JSON.stringify(Object.getOwnPropertyNames(error).map(key => String(error[key])))
+const refusedWith = (code, message) => (error) => {
+  assert.equal(error.code, `acp-sign-in/${code}`)
+  assert.equal(error.message, message)
+  assert.doesNotMatch(errorText(error), /SECRET/)
+  return true
+}
+const NOT_THIS = ['not-this-sign-in', 'This link is not from this sign-in.']
+const EXPIRED = ['expired', 'This sign-in expired. Start again.']
+// A port that held agy's listener, taken again by a test server once agy let it go.
+async function takePort(t, port) {
+  const { createServer } = await import('node:http')
+  const seen = []
+  const server = createServer((req, res) => { seen.push(req.url); res.end() })
+  const end = Date.now() + 10_000
+  for (;;) {
+    const ok = await new Promise((resolve) => {
+      server.once('error', () => resolve(false))
+      server.listen(port, '127.0.0.1', () => resolve(true))
+    })
+    if (ok) break
+    if (Date.now() > end) assert.fail(`port ${port} was not released`)
+    await sleep(50)
+  }
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  return seen
+}
+
+test('I14: only that attempt\'s address signs in, once; refusals keep it open; nothing of the code is logged', unixOnly, async (t) => {
+  plant(t)
+  const w = world(t, { agentEnv: { FAKE_ACP_AUTH_LISTEN: '1' } })
+  await w.service.refresh()
+  await w.service.signInNative(ID)
+  const row = await linked(w)
+  assert.match(row.signInAttempt, UUID)
+  assert.equal(row.signInChecking, undefined)
+  assert.ok(Number.isFinite(row.signInExpiresAt))
+  const port = portOf(row)
+  for (const value of [
+    pasteFor(row, { port: port === 65535 ? port - 1 : port + 1 }),
+    pasteFor(row, { state: 'another-state-0001' }),
+    pasteFor(row, { host: 'evil.example' }),
+    pasteFor(row, { path: '/auth/other' }),
+    pasteFor(row).replace('http:', 'https:'),
+  ]) {
+    await assert.rejects(w.service.signInCallback(ID, row.signInAttempt, value), refusedWith(...NOT_THIS))
+    const still = await w.row()
+    assert.equal(still.signingIn, true)
+    assert.equal(still.signInPaste, true)
+  }
+  // G6-11 (c): an address URL cannot parse (port 99999) holds no part of the paste.
+  await assert.rejects(w.service.signInCallback(ID, row.signInAttempt, pasteFor(row, { port: 99999 })), refusedWith(...NOT_THIS))
+  assert.deepEqual(callbacks(w), [], 'a refused address is never delivered')
+  // The right one: delivered once, and agy signs in.
+  const answered = (await w.service.signInCallback(ID, row.signInAttempt, `  ${pasteFor(row)}\n`)).agents.find(entry => entry.id === ID)
+  assert.doesNotMatch(JSON.stringify(answered), /SECRET/)
+  const done = await w.signedIn()
+  assert.equal(done.signedIn, true)
+  assert.equal(done.signInError, undefined)
+  assert.equal(done.signInEnd, undefined)
+  assert.deepEqual(callbacks(w).map(entry => entry.right), [true])
+  signInEmptied(w)
+  // Single use: a second paste of the same address is refused, and never delivered.
+  await assert.rejects(w.service.signInCallback(ID, row.signInAttempt, pasteFor(row)), refusedWith(...EXPIRED))
+  // G6-11 (a): agy let its port go; a server taking it gets nothing from a late paste.
+  const seen = await takePort(t, port)
+  await assert.rejects(w.service.signInCallback(ID, row.signInAttempt, pasteFor(row)), refusedWith(...EXPIRED))
+  assert.deepEqual(seen, [])
+  // An old attempt id after a new attempt: refused.
+  await w.service.signInNative(ID)
+  const next = await linked(w)
+  assert.notEqual(next.signInAttempt, row.signInAttempt)
+  await assert.rejects(w.service.signInCallback(ID, row.signInAttempt, pasteFor(next)), refusedWith(...EXPIRED))
+  assert.equal((await w.row()).signingIn, true)
+  w.config.antigravity = false
+  w.emit('loader/volatile-update')
+  await w.signedIn()
+  noSecret(w, JSON.stringify(await w.row()))
+})
+
+test('I14: a late paste after Cancel, Sign out or switch-off reaches nobody on that port', unixOnly, async (t) => {
+  plant(t)
+  for (const end of ['cancel', 'sign-out', 'switch-off']) {
+    const w = world(t, { agentEnv: { FAKE_ACP_AUTH_LISTEN: '1' } })
+    await w.service.refresh()
+    const view = await w.service.loginStart(ID, { label: 'bot-1' })
+    const row = await linked(w)
+    assert.equal(row.signInAttempt, view.attemptId)
+    if (end === 'cancel') assert.equal(w.service.loginCancel(ID, view.attemptId).status, 'cancelled')
+    if (end === 'sign-out') await w.service.accountSignOutNative(ID)
+    if (end === 'switch-off') { w.config.antigravity = false; w.emit('loader/volatile-update') }
+    const after = await w.signedIn()
+    // An abort ends the attempt with no error word (G6-16 b).
+    assert.equal(after.signInError, undefined, end)
+    const seen = await takePort(t, portOf(row))
+    await assert.rejects(w.service.signInCallback(ID, row.signInAttempt, pasteFor(row)), refusedWith(...EXPIRED))
+    assert.deepEqual(seen, [], end)
+    signInEmptied(w)
+  }
+})
+
+test('I14: agy answering 400 leaves it checking, then failed (G6-6); an address that reaches no one is unreachable', unixOnly, async (t) => {
+  plant(t)
+  const w = world(t, { agentEnv: { FAKE_ACP_AUTH_LISTEN: '1', FAKE_ACP_AUTH_ANSWER: '400' },
+    deps: { nativeSignInCheckMs: 600, nativeSignInWindowMs: 300 } })
+  await w.service.refresh()
+  await w.service.signInNative(ID)
+  const row = await linked(w)
+  await w.service.signInCallback(ID, row.signInAttempt, pasteFor(row))
+  const checking = await w.row()
+  assert.equal(checking.signInChecking, true)
+  assert.equal(checking.signInPaste, undefined)
+  assert.equal(checking.signInExpiresAt, undefined)
+  // A delivered paste suspends the window (300 ms): still checking after it.
+  await sleep(450)
+  assert.equal((await w.row()).signingIn, true)
+  const ended = await w.signedIn()
+  assert.equal(ended.signInError, 'failed')
+  assert.equal(ended.signInEnd, 'checking')
+  assert.deepEqual(callbacks(w).map(entry => entry.right), [false])
+  assert.ok(w.logs.includes('acp-dsh: agy answered the sign-in address with HTTP 400'), w.logs.join('\n'))
+  assert.ok(w.logs.includes('acp-dsh: the sign-in to Antigravity was not finished by agy after the address was delivered'), w.logs.join('\n'))
+  noSecret(w)
+  signInEmptied(w)
+  // Nobody listens on the link's port: the attempt ends expired, unreachable.
+  const away = world(t, { agentEnv: { FAKE_ACP_AUTH_OPEN: LOCAL_GOOGLE, FAKE_ACP_AUTH_HOLD: '1' } })
+  await away.service.refresh()
+  await away.service.signInNative(ID)
+  const waiting = await linked(away)
+  await assert.rejects(away.service.signInCallback(ID, waiting.signInAttempt, pasteFor(waiting)), refusedWith(...EXPIRED))
+  const gone = await away.signedIn()
+  assert.equal(gone.signInError, 'expired')
+  assert.equal(gone.signInEnd, 'unreachable')
+  noSecret(away)
+  signInEmptied(away)
+})
+
+test('I14: agy\'s own echo of the address is logged with its code hidden (G6-11 d)', unixOnly, async (t) => {
+  plant(t)
+  const w = world(t, { agentEnv: {
+    FAKE_ACP_AUTH_STDERR: 'GET /auth/callback?code=SECRET-CODE-1&state=r5-state-0001', FAKE_ACP_AUTH_HOLD: '1', FAKE_ACP_AUTH_EXIT: '1',
+  } })
+  await w.service.refresh()
+  await w.service.signInNative(ID)
+  const row = await w.signedIn()
+  assert.equal(row.signInError, 'failed')
+  assert.equal(row.signInEnd, 'agent-exit')
+  const line = w.logs.find(entry => entry.startsWith('acp-dsh: the sign-in to Antigravity did not finish: '))
+  assert.ok(line?.includes('code=[hidden]'), w.logs.join('\n'))
+  assert.ok(!w.logs.some(entry => entry.includes('SECRET')), w.logs.join('\n'))
+})
+
+test('I15: a link is good for 240 s from authenticate by default; the window ends it as expired on Linux and macOS', unixOnly, async (t) => {
+  plant(t)
+  const w = world(t, { agentEnv: { FAKE_ACP_AUTH_LISTEN: '1' } })
+  await w.service.refresh()
+  const before = Date.now()
+  await w.service.signInNative(ID)
+  const row = await until(async () => { const now = await w.row(); return Number.isFinite(now.signInExpiresAt) ? now : undefined }, 'the expiry')
+  const after = Date.now()
+  assert.ok(row.signInExpiresAt - 240_000 >= before - 50 && row.signInExpiresAt - 240_000 <= after + 50, `${row.signInExpiresAt - 240_000} ${before} ${after}`)
+  w.config.antigravity = false
+  w.emit('loader/volatile-update')
+  await w.signedIn()
+  for (const platform of ['linux', 'darwin']) {
+    const short = world(t, { platform, agentEnv: { FAKE_ACP_AUTH_LISTEN: '1', ...(platform === 'darwin' ? { FAKE_ACP_OPENER: 'open' } : {}) },
+      deps: { nativeSignInWindowMs: 1000, nativeSignInLinkMs: 300 } })
+    await short.service.refresh()
+    await short.service.signInNative(ID)
+    const waiting = await linked(short)
+    // Past the link rule (Linux), still open.
+    await sleep(400)
+    assert.equal((await short.row()).signingIn, true, platform)
+    assert.equal((await short.row()).signInError, undefined, platform)
+    const ended = await short.signedIn()
+    assert.equal(ended.signInError, 'expired', platform)
+    assert.equal(ended.signInEnd, 'window', platform)
+    assert.ok(short.logs.includes('acp-dsh: the sign-in to Antigravity expired'), short.logs.join('\n'))
+    await assert.rejects(short.service.signInCallback(ID, waiting.signInAttempt, pasteFor(waiting)), refusedWith(...EXPIRED))
+    assert.deepEqual(callbacks(short), [])
+    signInEmptied(short)
+  }
+  // agy ends its own wait first: failed, agent-error.
+  const own = world(t, { agentEnv: { FAKE_ACP_AUTH_LISTEN: '1', FAKE_ACP_AUTH_WINDOW_MS: '300' } })
+  await own.service.refresh()
+  await own.service.signInNative(ID)
+  const ended = await own.signedIn()
+  assert.equal(ended.signInError, 'failed')
+  assert.equal(ended.signInEnd, 'agent-error')
+  // A new attempt clears the end word.
+  await own.service.signInNative(ID)
+  assert.equal((await own.row()).signInEnd, undefined)
+  own.config.antigravity = false
+  own.emit('loader/volatile-update')
+  await own.signedIn()
+})
+
+test('I16: a Bot chat gets the same attempt through the five login calls, and the busy signal counts it', unixOnly, async (t) => {
+  plant(t)
+  const w = world(t, { agentEnv: { FAKE_ACP_AUTH_LISTEN: '1' } })
+  await w.service.refresh()
+  const busy = name => w.events.filter(entry => entry.name === name).map(entry => entry.payload.active)
+  assert.equal(w.service.loginCurrent(ID), undefined)
+  const started = await w.service.loginStart(ID, { label: 'bot-1' })
+  assert.match(started.attemptId, UUID)
+  assert.ok(['starting', 'waiting'].includes(started.status))
+  assert.equal(w.service.loginActive(), 1)
+  assert.equal(w.service.loginActivity().active, 1)
+  assert.deepEqual(busy('acp-dsh/login-activity').slice(-1), [1])
+  assert.deepEqual(busy('acp-dsh/login-active').slice(-1), [1])
+  await linked(w)
+  const view = w.service.loginStatus(ID, started.attemptId)
+  assert.equal(view.status, 'waiting')
+  assert.equal(view.openedBy, 'bot-1')
+  assert.equal(view.expiresBy, 'app')
+  assert.ok(Number.isFinite(view.expiresAt))
+  assert.deepEqual(view.prompt, { id: 'agy-callback', secret: true })
+  assert.match(view.url, /^https:\/\/accounts\.google\.com\//)
+  assert.deepEqual(w.service.loginCurrent(ID), view)
+  // Settings sees the same attempt; a second start returns it.
+  assert.equal((await w.row()).signInAttempt, started.attemptId)
+  assert.equal((await w.service.loginStart(ID, { label: 'bot-2' })).attemptId, started.attemptId)
+  // A wrong address: refused, the attempt goes on.
+  await assert.rejects(w.service.loginAnswer(ID, started.attemptId, pasteFor(view, { state: 'another-state-0001' })), refusedWith(...NOT_THIS))
+  const answered = await w.service.loginAnswer(ID, started.attemptId, pasteFor(view))
+  assert.doesNotMatch(JSON.stringify(answered), /SECRET/)
+  const ready = await until(() => { const now = w.service.loginStatus(ID, started.attemptId); return now.status === 'ready' ? now : undefined }, 'ready')
+  assert.deepEqual(ready, { id: ID, attemptId: started.attemptId, status: 'ready' })
+  assert.equal(w.service.loginCurrent(ID), undefined)
+  assert.equal(w.events.filter(entry => entry.name === 'acp-dsh/login-ready').length, 1)
+  assert.deepEqual(w.events.find(entry => entry.name === 'acp-dsh/login-ready').payload, { id: ID })
+  await until(() => w.service.loginActive() === 0, 'the attempt to end')
+  assert.deepEqual(busy('acp-dsh/login-activity').slice(-1), [0])
+  assert.deepEqual(busy('acp-dsh/login-active').slice(-1), [0])
+  assert.throws(() => w.service.loginStatus(ID, 'aaaaaaaa-1111-2222-3333-444444444444'), { code: 'acp-login/not-found' })
+  // Cancel: the process ends, the chat reads `cancelled` by its id, and current has nothing.
+  const from = w.envs().length
+  const second = await w.service.loginStart(ID, { label: 'bot-1' })
+  await linked(w)
+  assert.deepEqual(w.service.loginCancel(ID, second.attemptId), { id: ID, attemptId: second.attemptId, status: 'cancelled' })
+  await w.signedIn()
+  await endsClean(w, from)
+  assert.equal(w.service.loginCurrent(ID), undefined)
+  assert.equal(w.service.loginStatus(ID, second.attemptId).status, 'cancelled')
+  assert.throws(() => w.service.loginCancel(ID, second.attemptId), { code: 'acp-login/not-found' })
+  // Expired: current has nothing, status says expired.
+  const short = world(t, { agentEnv: { FAKE_ACP_AUTH_LISTEN: '1' }, deps: { nativeSignInWindowMs: 500 } })
+  await short.service.refresh()
+  const third = await short.service.loginStart(ID)
+  await short.signedIn()
+  assert.equal(short.service.loginCurrent(ID), undefined)
+  assert.equal(short.service.loginStatus(ID, third.attemptId).status, 'expired')
+})
+
+test('I17: once a link is taken, a message carrying the address it ends on matches; the link itself does not', unixOnly, async (t) => {
+  plant(t)
+  const STATE = 'Ab-_.~xyz12345'
+  const link = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
+    + `&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=${STATE}`
+  const callback = `http://localhost:41234/auth/callback?code=4%2F0Abc&state=${STATE}`
+  const w = world(t, { agentEnv: { FAKE_ACP_AUTH_OPEN: link, FAKE_ACP_AUTH_HOLD: '1' } })
+  await w.service.refresh()
+  assert.equal(w.service.loginTextMatches(callback), false, 'no link taken yet')
+  await w.service.signInNative(ID)
+  await linked(w)
+  // Only an Antigravity state is remembered (no Claude link shown): it still matches (G7-5).
+  for (const text of [
+    callback,
+    `Here: ${callback} done`,
+    `(${callback})`, `${callback}.`, `${callback},`, `"${callback}"`,
+    callback.replace(STATE, `${STATE.slice(0, 4)}\n${STATE.slice(4)}`),
+    callback.replace(STATE, `${STATE.slice(0, 4)}​${STATE.slice(4)}`),
+    callback.replace('~', '%7E'),
+    encodeURIComponent(callback),
+    callback.replace('state=', 'STATE='),
+    `${'https://accounts.google.com/o/oauth2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback'
+      + `&access_type=offline&state=${STATE}&client_id=c`} then ${callback}`,
+  ]) assert.equal(w.service.loginTextMatches(text), true, text)
+  for (const text of [
+    link,
+    'https://accounts.google.com/o/oauth2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback'
+      + `&access_type=offline&state=${STATE}&client_id=c`,
+    'http://localhost:3000/?state=something-else-1',
+    callback.replace(STATE, 'Zz-_.~xyz12345'),
+  ]) assert.equal(w.service.loginTextMatches(text), false, text)
+  w.config.antigravity = false
+  w.emit('loader/volatile-update')
+  await w.signedIn()
+  // The attempt ended: the state is still recognised.
+  assert.equal(w.service.loginTextMatches(callback), true)
 })

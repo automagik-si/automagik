@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createCliLogin } from '../src/client/cli-login-state.js'
-import { carriesKnownState, forgetKnownStates, rememberLinkState, DONE_MS, APPLY_FAILED_MS } from '../src/client/cli-login-model.js'
+import { carriesKnownState, forgetKnownStates, rememberCallbackState, rememberLinkState, DONE_MS, APPLY_FAILED_MS } from '../src/client/cli-login-model.js'
 import { teamActions } from '../src/client/team-actions.js'
 import { createSource, indexRoster } from '../src/client/sources.js'
 import { call } from '../src/client/api.js'
@@ -352,4 +352,75 @@ test('a sign-in row closes when its Bot\'s model moves to another provider, exce
   login.followModels()
   assert.equal(login.getSnapshot().rows.c.stage, 'attempt', 'the attempt is the CLI\'s, not the Bot\'s pick')
   login.dispose()
+})
+
+// ---- Antigravity in a Bot's chat (#2048, r6 parity) ------------------------------------------
+
+const AGY = 'acp-antigravity'
+const AGY_STATE = 'Ab-_.~xyz12345'
+const AGY_URL = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
+  + `&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=${AGY_STATE}`
+const AGY_CALLBACK = `http://localhost:41234/auth/callback?code=4%2F0Abc&state=${AGY_STATE}`
+
+test('Antigravity: its row shows the link and the address field; the page learns its state; an expired attempt fails with the chat\'s sentence', async () => {
+  forgetKnownStates()
+  const clock = manualTimers()
+  const { actions, host, calls } = fakeHost()
+  actions.cliLoginStart = async (botId, provider) => {
+    calls.push(['start', botId, provider])
+    host.attempt = { id: provider, attemptId: 'attempt_000000000000000000000002', status: 'waiting', openedBy: botId, expiresAt: clock.now() + 240_000, expiresBy: 'app',
+      url: AGY_URL, prompt: { id: 'agy-callback', label: 'Sign-in address', secret: true } }
+    return { ...host.attempt }
+  }
+  actions.cliLoginAnswer = async (botId, provider, attemptId, value) => {
+    calls.push(['answer', provider, value])
+    host.attempt = { ...host.attempt, checking: true }
+    delete host.attempt.prompt
+    return { ...host.attempt }
+  }
+  const login = createCliLogin({ actions, timers: clock.timers, now: clock.now })
+  await login.open({ botId: 'a', provider: AGY })
+  assert.equal(login.getSnapshot().rows.a.stage, 'offer')
+  await login.start('a')
+  const row = login.getSnapshot().rows.a
+  assert.equal(row.stage, 'attempt')
+  assert.equal(row.attempt.url, AGY_URL)
+  assert.equal(row.attempt.prompt.id, 'agy-callback')
+  // The address it ends on is refused in a message from now on; the link itself is not.
+  assert.equal(carriesKnownState(`here: ${AGY_CALLBACK}`), true)
+  assert.equal(carriesKnownState(AGY_URL), false)
+  assert.equal(await login.answer('a', AGY_CALLBACK), true)
+  assert.deepEqual(calls.find(call => call[0] === 'answer'), ['answer', AGY, AGY_CALLBACK])
+  assert.equal(login.getSnapshot().rows.a.attempt.checking, true)
+  assert.ok(!JSON.stringify(login.getSnapshot()).includes('4%2F0Abc'), 'the address is never kept')
+  // acp-dsh ended it as expired: the chat's own sentence.
+  host.attempt = { ...host.attempt, status: 'expired', message: 'This sign-in expired. Start again.' }
+  delete host.attempt.checking
+  await clock.advance(1500)
+  assert.equal(login.getSnapshot().rows.a.stage, 'failed')
+  assert.equal(login.getSnapshot().rows.a.message, 'This sign-in expired. Start again.')
+  login.dispose()
+  assert.equal(rememberCallbackState('https://accounts.google.com/o/oauth2/v2/auth?state=short'), false)
+  assert.equal(rememberCallbackState(`${AGY_URL}&state=again-0001`), false, 'one state only')
+  forgetKnownStates()
+})
+
+test('restore asks for an Antigravity attempt too; none adds nothing, one this Bot opened comes back', async () => {
+  const clock = manualTimers()
+  const { actions, calls } = fakeHost()
+  const page = createCliLogin({ actions, timers: clock.timers, now: clock.now })
+  await page.restore('a')
+  assert.deepEqual(calls.filter(call => call[0] === 'current').map(call => call[2]), ['acp-codex', 'acp-claude', AGY])
+  assert.deepEqual(page.getSnapshot().rows, {})
+  page.dispose()
+  const live = fakeHost()
+  live.actions.cliLoginCurrent = async (botId, provider) => (provider === AGY
+    ? { id: provider, attempt: { id: provider, attemptId: 'attempt_000000000000000000000003', status: 'waiting', openedBy: 'b', url: AGY_URL } }
+    : { id: provider, attempt: null })
+  const other = createCliLogin({ actions: live.actions, timers: clock.timers, now: clock.now })
+  await other.restore('b')
+  assert.equal(other.getSnapshot().rows.b.provider, AGY)
+  assert.equal(other.getSnapshot().rows.b.stage, 'attempt')
+  other.dispose()
+  forgetKnownStates()
 })

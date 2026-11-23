@@ -330,6 +330,33 @@ test('a found row with a value in it reads in pt-BR around the value', () => {
   }
 })
 
+// Antigravity's Connect AI row (#2048, r6): its own lines read in Chinese; the shared buttons
+// stay English (Connect AI choice F).
+test('in Chinese, the Antigravity row\'s own lines read in Chinese and Install stays English', () => {
+  const agent = state => ({
+    id: 'acp-antigravity', key: 'antigravity', name: 'Antigravity', on: true, appSignIn: true, signedIn: false,
+    cli: { found: false, state: 'missing', install: 'manual', ...state }, connector: { state: 'ready', native: true }, restartNeeded: false,
+  })
+  const acpOf = a => ({ view: { available: true, agents: [a] }, busy: null, problems: {}, isOn: x => x.on })
+  const row = { id: 'antigravity', name: 'Antigravity', via: 'Your Google account, through Antigravity', kind: 'signin', ready: false, on: false, found: null }
+  const draw = a => textOf(render(flow.Row({ row, acp: acpOf(a), open: true, busy: false, onFlip() {}, onSaved() {}, onClose() {}, onDedupe() {} })))
+  locale.setLocale('zh')
+  try {
+    const missing = draw(agent())
+    assert.match(missing, /你的 Google 账号，通过 Antigravity/)
+    assert.match(missing, /这台电脑上没有 agy CLI。Automagik 可以为你安装。/)
+    assert.match(missing, /Install/)
+    assert.match(draw(agent({ state: 'installing' })), /正在安装 Antigravity…/)
+    assert.match(draw(agent({ found: true, state: 'ready', managed: true, version: '1.5.15' })), /已找到 agy CLI（由 Automagik 安装，版本 1\.5\.15；它会自行更新）。/)
+    assert.match(draw({ ...agent(), on: false }), /这台电脑上没有 agy CLI。开启 Antigravity 即可安装。/)
+    const signing = draw({ ...agent({ found: true, state: 'ready' }), signingIn: true, signInExpiresAt: 1_800_000_000_000,
+      signInUrl: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fcb&response_type=code&state=s1-state-0001' })
+    assert.match(signing, /过期/)
+  } finally {
+    locale.setLocale('en')
+  }
+})
+
 test('uninstalling the locale puts the flow back in English', () => {
   uninstall()
   assert.equal(flow.t('Turn on your AIs'), 'Turn on your AIs')
