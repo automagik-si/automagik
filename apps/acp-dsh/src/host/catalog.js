@@ -380,12 +380,14 @@ export class Catalog {
 
   /**
    * The models measured kept now: recorded for the release installed now, less than a day ago.
-   * Anything else, or a failure, is none.
+   * `anyAge` (the Details row, #1564 BG-3) drops the day, never the release. Anything else, or a
+   * failure, is none.
    */
-  measuredKept() {
+  measuredKept({ anyAge = false } = {}) {
     try {
       const measured = this.measured
       if (measured === undefined || measured.key !== this.spec.key()) return []
+      if (anyAge) return [...measured.models]
       const age = this.now() - measured.at
       return age >= 0 && age < STALE_MS ? [...measured.models] : []
     } catch {

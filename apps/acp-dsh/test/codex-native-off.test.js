@@ -10,6 +10,7 @@ import { CATALOG_DROPS, keptModel, modelPart, NATIVE_OFF_NESTED, NATIVE_OFF_TOOL
 import { apply } from '../index.js'
 import { AGENTS } from '../src/host/agents.js'
 import { Session } from '@deepseek-ai/dsh-session'
+import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { AgentRun } from '../src/host/acp.js'
 import { Catalog } from '../src/host/catalog.js'
 import { CHECKED, codexWorld, fakeCodex, finishOf, fixture, KEPT, owner, scheduled, textOf, turnOn, withFunction, withTool } from './fixtures/codex-native-world.js'
@@ -179,24 +180,86 @@ test('N4 per model: a failing model is dropped and logged, a kept model is never
   assert.ok(none.includes("acp-dsh: Codex shows no tools to check for gpt-6.2-sol, gpt-5.6-luna; they run with Codex's own tools, as before"), none.join('\n'))
 })
 
-test('N4c the safety limit: a model with no tool block beside a non-zero exit, an unknown form or a forbidden tool still refuses (LQ1)', async t => {
-  const noBlock = ({ undone, model }) => undone === undefined && model === 'gpt-6.2-sol' ? '[]' : undefined
-  const luna = answer => config => noBlock(config) ?? (config.undone === undefined && config.model === 'gpt-5.6-luna' ? answer : undefined)
-  const cases = [
-    ['a non-zero exit', { prompt: noBlock, exit: call => call.what === 'debug prompt-input' && call.model === 'gpt-5.6-luna' ? 1 : undefined }],
-    ['an unknown form', { prompt: luna(JSON.stringify([{ type: 'mystery' }])) }],
-    ['a forbidden tool', { prompt: luna(withFunction('apply_patch')) }],
-  ]
-  for (const [label, answers] of cases) {
+// sol answers with no tool block; luna fails for its own reason (N4c, BG-1 (b)).
+const solNoBlock = ({ undone, model }) => undone === undefined && model === 'gpt-6.2-sol' ? '[]' : undefined
+const lunaAnswers = answer => config => solNoBlock(config) ?? (config.undone === undefined && config.model === 'gpt-5.6-luna' ? answer : undefined)
+const N4C = [
+  ['a non-zero exit', { prompt: solNoBlock, exit: call => call.what === 'debug prompt-input' && call.model === 'gpt-5.6-luna' ? 1 : undefined }],
+  ['an unknown form', { prompt: lunaAnswers(JSON.stringify([{ type: 'mystery' }])) }],
+  ['a forbidden tool', { prompt: lunaAnswers(withFunction('apply_patch')) }],
+]
+
+test('N4c the safety limit: a model with no tool block beside a non-zero exit, an unknown form or a forbidden tool still refuses (LQ1), carrying the no-block model (BG-1)', async t => {
+  for (const [label, answers] of N4C) {
     await assert.rejects(setup(scratch(t), fakeCodex({ answers })), error => {
       assert.equal(error.code, 'acp/native-off-unavailable', label)
       assert.match(error.message, /no model could be checked/, label)
       assert.equal(error.models, undefined, label)
+      // The refusal is luna's; sol's own answer is the accepted one, so it travels with it.
+      assert.deepEqual(error.unverified, ['gpt-6.2-sol'], label)
       return true
     })
   }
   // Every copy model refused for another reason than a missing tool block: refused, not unverifiable.
-  await refused(setup(scratch(t), fakeCodex({ answers: { exit: call => call.what === 'debug prompt-input' ? 1 : undefined } })), /no model could be checked/)
+  await assert.rejects(setup(scratch(t), fakeCodex({ answers: { exit: call => call.what === 'debug prompt-input' ? 1 : undefined } })), error => {
+    assert.equal(error.code, 'acp/native-off-unavailable')
+    assert.match(error.message, /no model could be checked/)
+    assert.equal(error.unverified, undefined)
+    return true
+  })
+})
+
+// A read under the shell_tool switch undone (step 8's first effect).
+const shellUndone = call => call.config.some(entry => entry.includes('shell_tool = true'))
+// Step 7's final read of luna (the only checked model): a luna read after sol's step-5 read
+// (sol's second) and after luna's own step-5 read.
+const lunaFinal = ({ undone, model, calls }) => {
+  if (undone !== undefined || model !== 'gpt-5.6-luna') return false
+  const reads = calls.filter(call => call.what === 'debug prompt-input').map(call => call.model)
+  const solStep5 = reads.indexOf('gpt-6.2-sol', reads.indexOf('gpt-6.2-sol') + 1)
+  return solStep5 !== -1 && reads.indexOf('gpt-5.6-luna', solStep5) !== -1
+}
+const ignoresShell = config => solNoBlock(config) ?? (config.undone === 'shell_tool' ? fixture('prompt-model-gpt-5.6-luna.json') : undefined)
+
+test('BG-1 a setup that fails after a model was measured with no tool block carries it (step 7, step 8); a deadline, a Stop or an unreadable call never does', async t => {
+  // Step 8: Codex ignores the shell_tool switch. The refusal is the switch's, not sol's.
+  await assert.rejects(setup(scratch(t), fakeCodex({ answers: { prompt: ignoresShell } })), error => {
+    assert.equal(error.code, 'acp/native-off-unavailable')
+    assert.match(error.message, /Codex ignores shell_tool/)
+    assert.deepEqual(error.unverified, ['gpt-6.2-sol'])
+    return true
+  })
+  // Step 7: the probe's final read still offers apply_patch (wrapped by nativeOffSetup).
+  await assert.rejects(setup(scratch(t), fakeCodex({ answers: { prompt: config => solNoBlock(config) ?? (lunaFinal(config) ? fixture('prompt-undo-catalog.json') : undefined) } })), error => {
+    assert.equal(error.code, 'acp/native-off-unavailable')
+    assert.deepEqual(error.unverified, ['gpt-6.2-sol'])
+    return true
+  })
+  // (c) A deadline in step 8, after sol was measured: still the deadline, nothing carried.
+  const late = fakeCodex({ answers: { prompt: solNoBlock } })
+  await assert.rejects(setup(scratch(t), late, { now: () => late.calls.some(shellUndone) ? 1e12 : 0 }), error => {
+    assert.equal(error.code, 'acp/native-off-unavailable')
+    assert.match(error.message, /in time/)
+    assert.equal(error.unverified, undefined)
+    return true
+  })
+  // A Stop in step 8: a Stop, nothing carried.
+  const controller = new AbortController()
+  const stop = fakeCodex({ answers: { prompt: config => { if (config.undone === 'shell_tool') controller.abort(); return solNoBlock(config) } } })
+  await assert.rejects(setup(scratch(t), stop, { signal: controller.signal }), error => {
+    assert.equal(error.code, 'acp/native-off-unavailable')
+    assert.equal(error.stopped, true)
+    assert.equal(error.unverified, undefined)
+    return true
+  })
+  // A step-8 call that never answers (unreadable): refused, nothing carried.
+  const hung = fakeCodex({ answers: { prompt: solNoBlock, hang: shellUndone } })
+  await assert.rejects(setup(scratch(t), hung, { timeoutMs: 200 }), error => {
+    assert.equal(error.code, 'acp/native-off-unavailable')
+    assert.match(error.message, /in time/)
+    assert.equal(error.unverified, undefined)
+    return true
+  })
 })
 
 test('BF-2 a deadline during the skills reads or the per-model reads refuses as a deadline, never as "no model could be checked"', async t => {
@@ -887,6 +950,113 @@ test('K2e (b) one model with no tool block beside a checkable one: the OFF turn 
   assert.equal(after.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), true)
   assert.equal(after.adapter.nativeKeptRoute('acp-codex/gpt-5.6-luna'), false)
   assert.deepEqual(JSON.parse(readFileSync(join(saved.home, 'acp-codex.json'), 'utf8')).measured.models, ['gpt-6.2-sol'])
+})
+
+// BG-1/BG-2: sol answers with no tool block and the setup's other answers are `answers`. The OFF
+// spawn runs the real checks; the connector's rollback and repair are counted.
+function measuringWorld(t, answers, { catalog, now } = {}) {
+  const fake = fakeCodex({ homeDefault: KEPT, answers })
+  const w = world(t, {
+    identity: OFF, start: KEPT,
+    offSpawn: (context, launch) => nativeOffLaunch(launch, {
+      cwd: context.cwd, dir: join(context.cwd, '.codex-native-off'), kept: [KEPT], run: fake.run, signal: context.signal,
+      ...(now === undefined ? {} : { now: () => now(fake) }),
+    }),
+  })
+  if (catalog !== undefined) w.codex.catalog = catalog
+  const rollback = t.mock.fn(() => false)
+  const repair = t.mock.fn(() => false)
+  Object.assign(w.codex, { rollback, repair })
+  return { w, fake, rollback, repair }
+}
+const measuredOnDisk = saved => JSON.parse(readFileSync(join(saved.home, 'acp-codex.json'), 'utf8')).measured
+
+test('BG-1 (a) Codex ignores shell_tool after sol showed no tool block: the sol turn runs as today, luna is refused, the record is merged, no rollback', async t => {
+  const saved = savedCatalog(t, { measured: { key: 'codex-test', at: Date.now(), models: ['gpt-6-astra'] } })
+  const { w, rollback, repair } = measuringWorld(t, { prompt: ignoresShell }, { catalog: saved.make() })
+  const sol = await turnOn(w, w.chat('sol'), scheduled('on sol'), { model: 'gpt-6.2-sol' })
+  assert.notEqual(finishOf(sol)?.kind, 'error', JSON.stringify(textOf(sol)))
+  assert.equal(textOf(sol).includes(NOTICE), false)
+  assert.deepEqual(offContexts(w), [true, false])
+  assert.deepEqual(servers(w), [[]])
+  assert.equal(promptPids(w).length, 1)
+  assert.equal(w.adapter.live.get('sol').nativeKept, true)
+  // The row locks sol; the earlier record is merged, never replaced.
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), true)
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-5.6-luna'), false)
+  assert.deepEqual(measuredOnDisk(saved).models, ['gpt-6-astra', 'gpt-6.2-sol'])
+  const luna = await turnOn(w, w.chat('luna'), scheduled('on luna'), { model: 'gpt-5.6-luna' })
+  assert.equal(finishOf(luna)?.kind, 'error')
+  assert.equal(finishOf(luna).failure.code, 'acp/native-off-unavailable')
+  assert.match(finishOf(luna).failure.message, /Codex ignores shell_tool/)
+  assert.equal(promptPids(w).length, 1)
+  assert.equal(rollback.mock.callCount(), 0)
+  assert.equal(repair.mock.callCount(), 0)
+})
+
+test('BG-1 (b) the N4c refusals with a turn on sol: sol runs as today, luna is still refused', async t => {
+  for (const [label, answers] of N4C) {
+    const { w } = measuringWorld(t, answers)
+    const sol = await turnOn(w, w.chat('sol'), scheduled('on sol'), { model: 'gpt-6.2-sol' })
+    assert.notEqual(finishOf(sol)?.kind, 'error', `${label}: ${JSON.stringify(textOf(sol))}`)
+    assert.deepEqual(offContexts(w), [true, false], label)
+    assert.equal(promptPids(w).length, 1, label)
+    assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), true, label)
+    const luna = await turnOn(w, w.chat('luna'), scheduled('on luna'), { model: 'gpt-5.6-luna' })
+    assert.equal(finishOf(luna)?.failure?.code, 'acp/native-off-unavailable', label)
+    assert.match(finishOf(luna).failure.message, /no model could be checked/, label)
+    assert.equal(promptPids(w).length, 1, label)
+    assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-5.6-luna'), false, label)
+  }
+})
+
+test('BG-1 (c) a deadline in step 8 after sol was measured: the sol turn is still refused in time, nothing is recorded', async t => {
+  const saved = savedCatalog(t)
+  const { w } = measuringWorld(t, { prompt: solNoBlock }, { catalog: saved.make(), now: fake => fake.calls.some(shellUndone) ? 1e12 : 0 })
+  const sol = await turnOn(w, w.chat('sol'), scheduled('on sol'), { model: 'gpt-6.2-sol' })
+  assert.equal(finishOf(sol)?.failure?.code, 'acp/native-off-unavailable')
+  assert.match(finishOf(sol).failure.message, /in time/)
+  assert.deepEqual(offContexts(w), [true])
+  assert.equal(promptPids(w).length, 0)
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), false)
+  assert.equal(measuredOnDisk(saved), undefined)
+})
+
+test('BG-2 an exception inside the same-turn kept relaunch leaves the turn: no connector rollback, no repair', async t => {
+  const { w, rollback, repair } = measuringWorld(t, { prompt: solNoBlock })
+  const chat = w.chat('sol')
+  chat.history.push(scheduled('on sol'))
+  const stream = w.adapter.stream(markAgentLoopRequest({ provider: CODEX, model: 'gpt-6.2-sol', sessionId: chat.session.id, messages: [...chat.history] }))
+  const first = await stream.next()
+  assert.equal(first.done, false)
+  // The relaunch is running the kept turn (OFF check, then today's launch).
+  assert.deepEqual(offContexts(w), [true, false])
+  await assert.rejects(stream.throw(new Error('thrown inside the kept turn')), /thrown inside the kept turn/)
+  assert.equal(rollback.mock.callCount(), 0)
+  assert.equal(repair.mock.callCount(), 0)
+})
+
+test('BG-3 a measured record older than a day with the same key keeps the row locked while its turn measures again; another key unlocks the row', async t => {
+  const old = { key: 'codex-test', at: Date.now() - 2 * 24 * 3600_000, models: ['gpt-6.2-sol'] }
+  const saved = savedCatalog(t, { measured: old })
+  const w = world(t, { identity: OFF })
+  w.codex.catalog = saved.make()
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), true)
+  assert.equal(w.adapter.nativeKeptRoute('acp-codex/gpt-5.6-luna'), false)
+  assert.equal(w.adapter.nativeKept(w.codex, 'gpt-6.2-sol'), false)
+  const other = savedCatalog(t, { measured: { ...old, key: 'codex-other' } })
+  const w2 = world(t, { identity: OFF })
+  w2.codex.catalog = other.make()
+  assert.equal(w2.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), false)
+  // The turn on sol checks again: sol now shows its tools, so it opens OFF and the row unlocks.
+  const again = savedCatalog(t, { measured: old })
+  const { w: w3 } = noBlockWorld(t, () => false, { catalog: again.make() })
+  const sol = await turnOn(w3, w3.chat('sol'), scheduled('on sol'), { model: 'gpt-6.2-sol' })
+  assert.notEqual(finishOf(sol)?.kind, 'error', JSON.stringify(textOf(sol)))
+  assert.deepEqual(offContexts(w3), [true])
+  assert.equal(w3.adapter.live.get('sol').nativeOff, true)
+  assert.equal(w3.adapter.nativeKeptRoute('acp-codex/gpt-6.2-sol'), false)
+  assert.deepEqual(measuredOnDisk(again).models, [])
 })
 
 test('K3 a live OFF process asked for gpt-5.5 is remade with today\'s launch; the OFF PID gets no prompt', async t => {

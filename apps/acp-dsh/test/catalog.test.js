@@ -589,3 +589,21 @@ test('the models a Codex check measured with no tool block are kept beside the s
   assert.deepEqual(written.measured.models, ['gpt-6.2-sol'])
   assert.deepEqual(catalog(empty, { now: () => now }).measuredKept(), ['gpt-6.2-sol'])
 })
+
+test('the Details row reads the measured models whatever their age, never another release\'s (#1564 BG-3)', async (t) => {
+  const home = scratch()
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const file = join(home, 'acp-test.json')
+  writeFileSync(file, `${JSON.stringify({ key: 'v1', at: 5, start: 'fake-large', models: [{ id: 'fake-large', name: 'Fake large' }] })}\n`)
+  let now = 1_000_000
+  const made = catalog(home, { now: () => now })
+  made.recordMeasured(['gpt-6.2-sol'])
+  now += STALE_MS + 60_000
+  // A turn checks again after a day; the row stays locked.
+  assert.deepEqual(made.measuredKept(), [])
+  assert.deepEqual(made.measuredKept({ anyAge: true }), ['gpt-6.2-sol'])
+  // After a restart too, read from the file.
+  assert.deepEqual(catalog(home, { now: () => now }).measuredKept({ anyAge: true }), ['gpt-6.2-sol'])
+  // Another release (a Codex or connector update) is read by neither.
+  assert.deepEqual(catalog(home, { key: () => 'v2', now: () => now }).measuredKept({ anyAge: true }), [])
+})

@@ -109,6 +109,9 @@ const signInFailure = (agent, error) => finish('error', typeof agent.signInHint 
   ? `${agent.name} is not signed in. Run \`${agent.signInHint}\` in a terminal, then send again.`
   : `${agent.name} is not signed in: ${error?.message ?? error}`, MODEL_ACCESS_REQUIRED)
 const STOPPED = () => finish('aborted', 'Stopped', 'ABORTED')
+// Thrown out of a Codex start to run the turn again as a kept one from the start's catch, never
+// inside its `try`: an error of that turn is never a connector failure (no rollback, no repair).
+const KEPT_RELAUNCH = Symbol('acp-dsh kept relaunch')
 
 /**
  * What the person reads when the agent did not answer in time. A start that hangs is usually a
@@ -931,33 +934,47 @@ export class AcpAdapter extends LlmAdapter {
    * set its last check measured with no tool block (B1-4). Such a model launches as today, with
    * Codex's own tools, whatever the switch says. DSH's `default` is the model Codex itself starts
    * with: the last one a process with its own tools reported, else the catalog's recorded start
-   * model. Unknown is not kept (the checked path).
+   * model. Unknown is not kept (the checked path). `anyAge` (the Details row only) reads the
+   * measured set whatever its age (BG-3).
    */
-  nativeKept(agent, model) {
+  nativeKept(agent, model, { anyAge = false } = {}) {
     if (agent?.nativeSwitch !== 'config') return false
     const id = model === DEFAULT_MODEL ? (this.startModels.get(agent) ?? agent.catalog?.ownModel?.()) : model
-    return this.keptSlug(agent, modelPart(id))
+    return this.keptSlug(agent, modelPart(id), { anyAge })
   }
 
   /** Whether a Codex model slug launches as today: the row's kept list or the measured set. */
-  keptSlug(agent, slug) {
-    return keptModel(agent, slug) || (typeof slug === 'string' && this.measuredKept(agent).includes(slug))
+  keptSlug(agent, slug, { anyAge = false } = {}) {
+    return keptModel(agent, slug) || (typeof slug === 'string' && this.measuredKept(agent, { anyAge }).includes(slug))
   }
 
   /**
    * The models a Codex check last measured with no tool block (codex-native.js `unverified`):
-   * the catalog's record, kept beside its start model on disk, else this host's for a day.
+   * the catalog's record, kept beside its start model on disk, else this host's. A turn reads
+   * it for a day, then checks again; `anyAge` (the Details row) reads it whatever its age, for
+   * the release that measured it, so the row never unlocks and promises OFF because a day
+   * passed (BG-3).
    */
-  measuredKept(agent) {
+  measuredKept(agent, { anyAge = false } = {}) {
     try {
       if (typeof agent?.catalog?.measuredKept === 'function') {
-        const models = agent.catalog.measuredKept()
+        const models = agent.catalog.measuredKept({ anyAge })
         return Array.isArray(models) ? models : []
       }
       const mine = this.measured.get(agent)
-      const age = mine === undefined ? -1 : Date.now() - mine.at
+      if (mine === undefined) return []
+      if (anyAge) return mine.models
+      const age = Date.now() - mine.at
       return age >= 0 && age < CATALOG_MAX_AGE_MS ? mine.models : []
     } catch { return [] }
+  }
+
+  /**
+   * Add models a Codex check measured with no tool block before another reason refused it
+   * (BG-1): merged into the current record, never replacing it.
+   */
+  mergeMeasured(agent, models) {
+    this.recordMeasured(agent, [...this.measuredKept(agent), ...(Array.isArray(models) ? models : [])])
   }
 
   /** Record what a Codex check measured with no tool block, replacing its last record. */
@@ -977,7 +994,7 @@ export class AcpAdapter extends LlmAdapter {
       const at = route.indexOf('/')
       if (at <= 0) return false
       const agent = this.agents.get(route.slice(0, at))
-      return this.nativeKept(agent, route.slice(at + 1)) === true
+      return this.nativeKept(agent, route.slice(at + 1), { anyAge: true }) === true
     } catch { return false }
   }
 
@@ -1765,7 +1782,8 @@ export class AcpAdapter extends LlmAdapter {
               this.recordMeasured(agent, unverified)
               if (entry.keptRelaunch !== true && this.nativeKept(agent, options.model)) {
                 if (options.signal?.aborted) return yield STOPPED()
-                return yield* relaunchKept()
+                // Run from the catch, out of this `try` (BG-2).
+                throw KEPT_RELAUNCH
               }
             }
             if (codexOff) {
@@ -1883,6 +1901,8 @@ export class AcpAdapter extends LlmAdapter {
             try { agent.proven?.() } catch {}
             break
           } catch (error) {
+            // Not a failed start: the turn runs again as a kept one, outside the start's `try`.
+            if (error === KEPT_RELAUNCH) return yield* relaunchKept()
             // Nothing is left of a start that failed: the process is gone with its bridge.
             this.end(sessionId, state)
             state.run = undefined
@@ -1913,6 +1933,14 @@ export class AcpAdapter extends LlmAdapter {
             // A check that refused OFF is this Codex's answer, not the connector's release.
             const offRefused = error?.code === NATIVE_OFF_UNAVAILABLE
             if (offRefused && options.signal?.aborted) return yield STOPPED()
+            // Refused for another model's reason after this check measured models with no tool
+            // block (BG-1): they are kept (merged into the record), and a turn on one of them runs
+            // as today in this same turn. A deadline, a Stop, a config error or an unreadable
+            // call carries none (codex-native.js).
+            if (offRefused && Array.isArray(error.unverified) && error.unverified.length > 0) {
+              this.mergeMeasured(agent, error.unverified)
+              if (entry.keptRelaunch !== true && this.nativeKept(agent, options.model)) return yield* relaunchKept()
+            }
             if (offRefused) return yield finish('error', offUnavailableText(error.reason ?? error.message ?? 'its check failed'), NATIVE_OFF_UNAVAILABLE)
             // A missing bridge is this computer's config, not the release: no rollback for it.
             let back = false

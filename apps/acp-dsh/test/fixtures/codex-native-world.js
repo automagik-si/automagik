@@ -16,9 +16,10 @@ export const KEPT = 'gpt-5.5'
  * A fake `run` (execFile's shape) for codexCli. `answers` overrides any reply:
  * `features`, `models`, `servers` (stdout strings), `prompt(config)` (stdout or undefined for
  * the capture; it also gets `calls`, every call so far), `hang` (a predicate on the call: never
- * answers until killed), `exit(call)` (an exit code: Codex answers and says no). `homeDefault` names the Codex home's own default model: a prompt read
- * that names no model answers that model's capture (`gpt-5.5` shows no tool block, as the real
- * one does); unset, such a read answers the full capture.
+ * answers until killed), `exit(call)` (an exit code: Codex answers and says no). `homeDefault`
+ * names the Codex home's own default model: a prompt read that names no model answers that
+ * model's capture (`gpt-5.5` shows no tool block, as the real one does); unset, such a read
+ * answers the full capture.
  */
 export function fakeCodex({ answers = {}, delayMs = 1, homeDefault } = {}) {
   const calls = []

@@ -48,10 +48,33 @@ const off = names => Object.fromEntries(names.map(name => [name, false]))
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const CATALOG_FILE = /^models-[0-9a-f]{64}\.json$/
 
-/** A refusal of the OFF spawn: the turn shows the unavailable text with `reason`. */
+/**
+ * A refusal of the OFF spawn: the turn shows the unavailable text with `reason`. A cause's
+ * `unverified` (the models measured with no tool block before another reason refused, BG-1)
+ * travels with it.
+ */
 export function unavailable(reason, cause) {
   const text = String(reason ?? 'the check failed').slice(0, 200)
-  return Object.assign(new Error(text), { code: NATIVE_OFF_UNAVAILABLE, reason: text, ...(cause?.stopped === true ? { stopped: true } : {}) })
+  return Object.assign(new Error(text), {
+    code: NATIVE_OFF_UNAVAILABLE, reason: text,
+    ...(cause?.stopped === true ? { stopped: true } : {}),
+    ...(Array.isArray(cause?.unverified) ? { unverified: [...cause.unverified] } : {}),
+  })
+}
+
+/** The deadline of a setup: never carries the models measured before it (BG-1). */
+const lateCheck = () => Object.assign(unavailable('the checks could not be made in time'), { deadline: true })
+
+/**
+ * A setup's refusal after `slugs` answered with no tool block (BG-1): the refusal carries them,
+ * so their turns run as today. Only Codex's own answer (`unsupported`) or this setup's refusal
+ * does; a deadline, a Stop, a config error or an unreadable call refuses as it is.
+ */
+function carrying(error, slugs) {
+  if (slugs.length === 0) return error
+  const carries = error?.kind === 'unsupported'
+    || (error?.code === NATIVE_OFF_UNAVAILABLE && error.stopped !== true && error.deadline !== true)
+  return carries ? Object.assign(error, { unverified: [...slugs] }) : error
 }
 
 /** Every model of the copy answered with no tool block: `models` run as today (B1-4). */
@@ -196,7 +219,7 @@ async function setupOnce(launch, { cwd, dir, kept = [], signal, run = execFile, 
   const left = () => {
     if (signal?.aborted) throw unavailable('the check was stopped', { stopped: true })
     const ms = Math.min(timeoutMs, until - now())
-    if (ms <= 0) throw unavailable('the checks could not be made in time')
+    if (ms <= 0) throw lateCheck()
     return ms
   }
   // 1. The person's own MCP servers, each turned off by name. One named like the bridge would
@@ -217,7 +240,8 @@ async function setupOnce(launch, { cwd, dir, kept = [], signal, run = execFile, 
   // model: the reads name the first model of the copy whose prompt shows a tool block, never the
   // home's default. A read Codex answered and refused moves to the next model; a deadline or a
   // Stop refuses at once. When every model answered with no tool block, none can be checked and
-  // none is refused (B1-4); any other end is a refusal (LQ1).
+  // none is refused (B1-4); any other end is a refusal (LQ1) that carries the models with no
+  // tool block (BG-1).
   let skills = []
   const skillRead = slug => cli(['debug', 'prompt-input'], `the offered tools of ${slug}`, { ...nativeOffOverrides({ servers, extras, skills, project, catalog: catalog.path }), model: slug })
   let reader
@@ -238,7 +262,7 @@ async function setupOnce(launch, { cwd, dir, kept = [], signal, run = execFile, 
     log(`acp-dsh: Codex shows no tools to check for ${blockless.join(', ')}; they run with Codex's own tools, as before`)
     throw unverifiable(blockless)
   }
-  if (reader === undefined) throw unavailable('no model could be checked with its own tools off')
+  if (reader === undefined) throw carrying(unavailable('no model could be checked with its own tools off'), blockless)
   for (let pass = 0; pass < 2; pass += 1) {
     const offered = pass === 0 ? first : readOffered(await skillRead(reader))
     const more = offered.skills.filter(name => !skills.includes(name))
@@ -268,29 +292,34 @@ async function setupOnce(launch, { cwd, dir, kept = [], signal, run = execFile, 
     } else log(`acp-dsh: Codex model ${model.slug} could not be checked with its own tools off; it is not offered while they are off`)
   }
   if (models.length === 0 && unverified.length === copy.models.length) throw unverifiable(unverified)
-  if (models.length === 0) throw unavailable('no model could be checked with its own tools off')
-  // 6. The final copy holds the checked models only; older copies go after a day.
-  if (models.length !== copy.models.length) {
-    copy = { ...copy, models: copy.models.filter(model => models.includes(model.slug)) }
-    catalog = writeCatalog(dir, copy)
+  if (models.length === 0) throw carrying(unavailable('no model could be checked with its own tools off'), unverified)
+  // Steps 6-8. A refusal here is not the no-block models' answer: it carries them (BG-1).
+  try {
+    // 6. The final copy holds the checked models only; older copies go after a day.
+    if (models.length !== copy.models.length) {
+      copy = { ...copy, models: copy.models.filter(model => models.includes(model.slug)) }
+      catalog = writeCatalog(dir, copy)
+    }
+    pruneCatalogs(dir, { now, keepPath: catalog.path })
+    // 7. A checked model under the final config, and the switches under it. The probe is a checked
+    // model whose own catalog entry has `apply_patch_tool_type`, so undoing the catalog copy can
+    // show `apply_patch` (step 8). The returned overrides name no model.
+    const overrides = nativeOffOverrides({ servers, extras, skills, project, catalog: catalog.path })
+    const source = new Map(((Array.isArray(listed) ? listed : listed?.models) ?? []).map(model => [model?.slug, model]))
+    const probe = models.find(slug => (source.get(slug)?.apply_patch_tool_type ?? null) !== null) ?? models[0]
+    const offered = readOffered(await cli(['debug', 'prompt-input'], `the offered tools of ${probe}`, { ...overrides, model: probe }))
+    checkOffered(offered, OFF_RULES)
+    checkFeatures(readFeatures(await cli(['features', 'list'], 'the feature list', overrides)), { required: NATIVE_OFF_REQUIRED, also: [], on: null })
+    // 8. Each removal proven by its effect, on the same model.
+    for (const effect of EFFECTS) {
+      const shown = readOffered(await cli(['debug', 'prompt-input'], `the ${effect.name} switch`, { ...effect.undo(overrides), model: probe }))
+      if (!gained(offered, shown, effect.gains)) throw unavailable(`Codex ignores ${effect.name}`)
+    }
+    log(`acp-dsh: Codex runs with its own tools off; it offers ${offered.tools.join(', ')} (exec reaches ${offered.nested.join(', ')}); models ${models.length}/${listedCount}`)
+    return { overrides, offered, models, unverified, catalog }
+  } catch (error) {
+    throw carrying(error, unverified)
   }
-  pruneCatalogs(dir, { now, keepPath: catalog.path })
-  // 7. A checked model under the final config, and the switches under it. The probe is a checked
-  // model whose own catalog entry has `apply_patch_tool_type`, so undoing the catalog copy can
-  // show `apply_patch` (step 8). The returned overrides name no model.
-  const overrides = nativeOffOverrides({ servers, extras, skills, project, catalog: catalog.path })
-  const source = new Map(((Array.isArray(listed) ? listed : listed?.models) ?? []).map(model => [model?.slug, model]))
-  const probe = models.find(slug => (source.get(slug)?.apply_patch_tool_type ?? null) !== null) ?? models[0]
-  const offered = readOffered(await cli(['debug', 'prompt-input'], `the offered tools of ${probe}`, { ...overrides, model: probe }))
-  checkOffered(offered, OFF_RULES)
-  checkFeatures(readFeatures(await cli(['features', 'list'], 'the feature list', overrides)), { required: NATIVE_OFF_REQUIRED, also: [], on: null })
-  // 8. Each removal proven by its effect, on the same model.
-  for (const effect of EFFECTS) {
-    const shown = readOffered(await cli(['debug', 'prompt-input'], `the ${effect.name} switch`, { ...effect.undo(overrides), model: probe }))
-    if (!gained(offered, shown, effect.gains)) throw unavailable(`Codex ignores ${effect.name}`)
-  }
-  log(`acp-dsh: Codex runs with its own tools off; it offers ${offered.tools.join(', ')} (exec reaches ${offered.nested.join(', ')}); models ${models.length}/${listedCount}`)
-  return { overrides, offered, models, unverified, catalog }
 }
 
 // One setup at a time per Codex home: several OFF spawns at once never run their CLI calls
@@ -303,8 +332,10 @@ const chains = new Map()
  * from the Session's real folder. Nothing is cached: every spawn checks again. Resolves
  * `{ overrides, offered, models, unverified, catalog: { path, bytes, sha256 } }` (`unverified`:
  * the copy models measured with no tool block); rejects with `code: 'acp/native-off-unavailable'`
- * and the reason, or with `code: 'acp/native-off-unverifiable'` and `models` when every copy
- * model answered with no tool block.
+ * and the reason (with `unverified` when models were measured with no tool block before another
+ * reason refused, never for a deadline, a Stop, a config error or an unreadable call), or with
+ * `code: 'acp/native-off-unverifiable'` and `models` when every copy model answered with no tool
+ * block.
  * @param {{ command: string, args?: string[], env?: Record<string, string> }} launch
  */
 export function nativeOffSetup(launch, options = {}) {
