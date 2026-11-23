@@ -1790,7 +1790,8 @@ export class AcpAdapter extends LlmAdapter {
       // eventual first prompt is ready, too. AgentRun sets promptEnded during its first prompt.
       const firstClaudePrompt = options.provider === 'acp-claude' && live.native === true && live.run.promptEnded === undefined
       const startingClaude = firstClaudePrompt && live.nativeManaged === true
-      const startingOmp = omp && live.nativeOff === false && live.run.promptEnded === undefined
+      // A plain omp child may have launched before the Bot team registered.
+      const startingOmp = omp && live.nativeOff !== true && live.run.promptEnded === undefined
       const stopForNativeChange = () => {
         if (startingOmp) {
           this.endSession(sessionId, NATIVE_TOOLS_CHANGED_TEXT, options.provider,
@@ -1816,7 +1817,8 @@ export class AcpAdapter extends LlmAdapter {
         const why = `${agent.name} would not take ${options.model}${at}: ${reason}`
         return yield finish('error', why)
       }
-      const level = startingOmp || (firstClaudePrompt && (startingClaude || this.teamManaged())) ? this.readLevel(dshAgent?.session, true)
+      const checkLevel = startingClaude || ((firstClaudePrompt || startingOmp) && this.teamManaged())
+      const level = checkLevel ? this.readLevel(dshAgent?.session, true)
         : levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
       if (level === undefined) return yield* stopForNativeChange()
       const originalModes = agent.modeFor?.(level)
@@ -1968,7 +1970,8 @@ export class AcpAdapter extends LlmAdapter {
       // The first prompt is the last point where startup can lose its tool authority. The
       // permission mode, bridge and gates above can all wait after the ON process exists.
       const managedClaudeNow = firstClaudePrompt && this.teamManaged()
-      if (startingOmp || startingClaude || managedClaudeNow) {
+      const checkOmp = startingOmp && this.teamManaged()
+      if (checkOmp || startingClaude || managedClaudeNow) {
         const held = entry.held ?? live.held
         if (held !== undefined) return yield* stopped(held)
         if (options.signal?.aborted) {
@@ -1976,7 +1979,7 @@ export class AcpAdapter extends LlmAdapter {
           return yield STOPPED()
         }
         // Team registration during startup invalidates the standalone hidden ON grant.
-        const allowed = startingOmp ? this.teamManaged() && ompNativeAllowed()
+        const allowed = checkOmp ? ompNativeAllowed()
           : startingClaude && managedClaudeNow && permitsNative(this.readLevel(dshAgent?.session, true))
             && this.nativeOn(agent, sessionId, options.provider)
         if (!allowed) return yield* stopForNativeChange()

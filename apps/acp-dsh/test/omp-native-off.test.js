@@ -412,6 +412,104 @@ test('team registration during an asynchronous startup gate makes the first laun
   assert.deepEqual(h.conversation('late-registration').args, offArgs(h.overlayPath))
 })
 
+for (const [label, identity, input, options] of [
+  ['Workspace without a Bot identity', () => undefined],
+  ['Bot default OFF', () => ({ name: 'Sofia' })],
+  ['Bot saved OFF', () => ({ ...nativeOn(), nativeTools: false })],
+  ['Bot saved ON with no owner input', nativeOn, { kind: 'schedule' }],
+  ['Bot saved ON with another provider tag', () => ({ ...nativeOn(), nativeToolsAgent: 'acp-claude' })],
+  ['Bot saved ON with unknown level', nativeOn, undefined, { sandbox: false }],
+]) {
+  test(`late team registration stops a held omp start for ${label}`, async t => {
+    const h = ompWorld(t, options)
+    const chat = h.chat()
+    const hold = holdOmpStart(t, h, chat.session.id)
+    const marker = 'plain late-team-start'
+    const turn = chat.turn(input ? createUserMessage({ content: [{ type: 'text', text: marker }], source: input }) : marker)
+    let run
+    try {
+      run = await hold.run(turn)
+      assert.ok(run.alive)
+      assert.ok(h.events('new-session').some(row => row.pid === run.child.pid))
+      assert.equal(h.adapter.live.get(chat.session.id).nativeOff, undefined)
+      assert.deepEqual(h.events('prompt'), [])
+      h.service.botIdentity(identity)
+    } finally {
+      hold.release()
+    }
+    const chunks = await turn
+    const legacyPid = run.child.pid
+    const promptPids = h.events('prompt').map(row => row.pid)
+    t.diagnostic(JSON.stringify({ legacyPid, argv: run.spec.args, promptPids, notice: textBlocks(chunks), alive: run.alive, exit: run.exited }))
+    assert.deepEqual(promptPids, [])
+    assert.equal(chunks.at(-1).reason.kind, 'stop')
+    assert.deepEqual(textBlocks(chunks), [toolsChanged])
+    await run.gone.catch(() => {})
+    assert.ok(run.exited)
+    assert.equal(run.alive, false)
+    assert.equal(h.adapter.live.has(chat.session.id), false)
+    assert.deepEqual(hold.runs, [run])
+
+    // The scheduled turn was denied because it lacked owner input. A genuine owner
+    // message with the saved ON choice should now be eligible, unlike the other cases.
+    const nextOn = input?.kind === 'schedule'
+    const next = await chat.turn('plain owner-after-registration')
+    const child = h.conversation('owner-after-registration')
+    const replacement = h.adapter.live.get(chat.session.id)
+    t.diagnostic(JSON.stringify({ legacyPid, exit: run.exited, nextPid: child.pid, argv: child.args, servers: child.servers, provider: replacement.provider }))
+    assert.equal(next.at(-1).reason.kind, 'stop')
+    assert.notEqual(child.pid, legacyPid)
+    assert.deepEqual(child.args, nextOn ? ['acp'] : offArgs(h.overlayPath))
+    assert.deepEqual(child.servers, [])
+    assert.equal(replacement.provider, OMP)
+    assert.equal(replacement.run.spec.dshTools, false)
+    assert.equal(replacement.run.spec.refuseTools === true, !nextOn)
+  })
+}
+
+for (const [label, register, stop] of [
+  ['standalone without registration', undefined, false],
+  ['newly managed with eligible saved ON', nativeOn, false],
+  ['explicit Stop during late registration', () => ({ name: 'Sofia' }), true],
+]) {
+  test(`a held omp start honors ${label}`, async t => {
+    const h = ompWorld(t)
+    const chat = h.chat()
+    const controller = new AbortController()
+    const hold = holdOmpStart(t, h, chat.session.id)
+    const marker = 'held-registration-control'
+    const turn = stop
+      ? chat.stream({ messages: [ownerMessage(marker)], signal: controller.signal })
+      : chat.turn(marker)
+    let run
+    try {
+      run = await hold.run(turn)
+      if (register) h.service.botIdentity(register)
+      if (stop) controller.abort()
+    } finally {
+      hold.release()
+    }
+    const chunks = await turn
+    const reason = chunks.at(-1).reason
+    if (stop) {
+      await run.gone.catch(() => {})
+      assert.ok(run.exited)
+      assert.deepEqual(h.events('prompt'), [])
+      assert.deepEqual(textBlocks(chunks), [])
+      assert.equal(reason.kind, 'aborted')
+      assert.equal(reason.failure.message, 'Stopped')
+      assert.equal(reason.failure.code, 'ABORTED')
+    } else {
+      assert.equal(reason.kind, 'stop')
+      assert.match(textBlocks(chunks).join(''), /It printed hello/)
+      assert.equal(h.conversation(marker).pid, run.child.pid)
+      assert.equal(run.spec.refuseTools, undefined)
+    }
+    assert.deepEqual(hold.runs, [run])
+    t.diagnostic(JSON.stringify({ pid: run.child.pid, promptPids: h.events('prompt').map(row => row.pid), reason, exit: run.exited }))
+  })
+}
+
 test('a forbidden notification from a retired OFF child cannot stop its replacement', async t => {
   const h = ompWorld(t)
   h.service.botIdentity(() => ({ name: 'Sofia' }))
