@@ -9330,9 +9330,6 @@ var PT_BR = {
   "Drawn with your OpenAI key (gpt-image-1)": "Desenhado com a sua chave da OpenAI (gpt-image-1)",
   "Drawing a companion needs Codex signed in. Sign in to Codex in the AI step, then come back from Settings. For now, pick one.": "Para desenhar uma companhia, é preciso entrar no Codex. Entre no Codex no passo de IA e volte por Configurações. Por enquanto, escolha um personagem.",
   "Character": "Personagem",
-  "Characters": "Personagens",
-  // A product name, kept as it is.
-  "Solvers": "Solvers",
   "Color": "Cor",
   "Its name": "Nome",
   "Hatching…": "Nascendo…",
@@ -10239,26 +10236,6 @@ async function avatarOf(src) {
     return void 0;
   }
 }
-function CharacterPicker({ shape, color, onPick }) {
-  const radios = (ids) => ids.map((id) => (0, import_react3.createElement)("button", {
-    key: id,
-    type: "button",
-    role: "radio",
-    "aria-checked": shape === id,
-    "aria-label": id,
-    className: "oai-shape",
-    onClick: () => onPick(id),
-    dangerouslySetInnerHTML: { __html: characterSvg(id, color, 54) }
-  }));
-  return (0, import_react3.createElement)(
-    "div",
-    { className: "oai-characters", role: "radiogroup", "aria-label": t("Character") },
-    (0, import_react3.createElement)("div", { className: "oai-shapes", role: "group", "aria-label": t("Characters") }, radios(SHAPES2.filter((id) => !SOLVER_SHAPES.includes(id)))),
-    // A div: the card gives every paragraph a bottom margin, which would push the label off its group.
-    (0, import_react3.createElement)("div", { className: "oai-muted", id: "oai-solvers" }, t("Solvers")),
-    (0, import_react3.createElement)("div", { className: "oai-shapes", role: "group", "aria-labelledby": "oai-solvers" }, radios(SOLVER_SHAPES))
-  );
-}
 function CompanionStep(props) {
   const state = useGate(props);
   const finish2 = useFinish(props);
@@ -10345,10 +10322,23 @@ function CompanionStep(props) {
     ) : (0, import_react3.createElement)(
       "div",
       { className: "oai-pick" },
-      (0, import_react3.createElement)(CharacterPicker, { shape: image ? null : shape, color, onPick: (id) => {
-        setImage(null);
-        setShape(id);
-      } }),
+      (0, import_react3.createElement)(
+        "div",
+        { className: "oai-shapes", role: "radiogroup", "aria-label": t("Character") },
+        SHAPES2.map((id) => (0, import_react3.createElement)("button", {
+          key: id,
+          type: "button",
+          role: "radio",
+          "aria-checked": shape === id && !image,
+          "aria-label": id,
+          className: "oai-shape",
+          onClick: () => {
+            setImage(null);
+            setShape(id);
+          },
+          dangerouslySetInnerHTML: { __html: characterSvg(id, color, 54) }
+        }))
+      ),
       (0, import_react3.createElement)(
         "div",
         { className: "oai-swatches", role: "radiogroup", "aria-label": t("Color") },
@@ -12275,7 +12265,7 @@ var ONBOARD_CSS = `
 .oai-describe label,.oai-name label{font-size:13px;color:var(--oai-ink2)}
 .oai-describe textarea,.oai-name input{width:100%;border:0;${recessed("var(--oai-niche)")};border-radius:var(--oai-r-sm);color:var(--oai-ink);padding:11px 14px;font:inherit;resize:vertical}
 .oai-describe textarea:focus,.oai-name input:focus{outline:3px solid var(--oai-ring);outline-offset:2px}
-.oai-name .oai-row,.oai-characters{display:grid;gap:10px}
+.oai-name .oai-row{display:grid;gap:10px}
 .oai-chips{display:flex;flex-wrap:wrap;gap:8px}
 .oai-card button.oai-chip{display:inline-block;width:auto;min-height:32px;margin:0;font-weight:500;${raised("var(--oai-clay)", 2)};color:var(--oai-ink);border-radius:999px;padding:5px 12px;font:inherit;font-size:13px;cursor:pointer}
 .oai-card button.oai-chip:active:not(:disabled){${pressed("var(--oai-clay)", 2)}}

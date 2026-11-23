@@ -32,7 +32,7 @@ export const ONBOARD_CSS = `
 .oai-describe label,.oai-name label{font-size:13px;color:var(--oai-ink2)}
 .oai-describe textarea,.oai-name input{width:100%;border:0;${recessed('var(--oai-niche)')};border-radius:var(--oai-r-sm);color:var(--oai-ink);padding:11px 14px;font:inherit;resize:vertical}
 .oai-describe textarea:focus,.oai-name input:focus{outline:3px solid var(--oai-ring);outline-offset:2px}
-.oai-name .oai-row,.oai-characters{display:grid;gap:10px}
+.oai-name .oai-row{display:grid;gap:10px}
 .oai-chips{display:flex;flex-wrap:wrap;gap:8px}
 .oai-card button.oai-chip{display:inline-block;width:auto;min-height:32px;margin:0;font-weight:500;${raised('var(--oai-clay)', 2)};color:var(--oai-ink);border-radius:999px;padding:5px 12px;font:inherit;font-size:13px;cursor:pointer}
 .oai-card button.oai-chip:active:not(:disabled){${pressed('var(--oai-clay)', 2)}}

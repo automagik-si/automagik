@@ -1,6 +1,6 @@
 import { createElement as h, useEffect, useState } from 'react'
 import { call } from './api.js'
-import { characterSvg, COLORS, Egg, Hero, SHAPES, SOLVER_SHAPES, swatchOf, useCompanion } from './companion-art.js'
+import { characterSvg, COLORS, Egg, Hero, SHAPES, swatchOf, useCompanion } from './companion-art.js'
 import { Stage, useFinish, useGate, useGlitch } from './stage.js'
 import { t } from './i18n.js'
 
@@ -31,21 +31,6 @@ async function avatarOf(src) {
   } catch {
     return undefined
   }
-}
-
-// The characters to pick from: one choice (a radiogroup) in two groups, the characters and
-// then the Solvers under their heading, each group a grid that starts its own row.
-export function CharacterPicker({ shape, color, onPick }) {
-  const radios = ids => ids.map(id => h('button', {
-    key: id, type: 'button', role: 'radio', 'aria-checked': shape === id, 'aria-label': id, className: 'oai-shape',
-    onClick: () => onPick(id),
-    dangerouslySetInnerHTML: { __html: characterSvg(id, color, 54) },
-  }))
-  return h('div', { className: 'oai-characters', role: 'radiogroup', 'aria-label': t('Character') },
-    h('div', { className: 'oai-shapes', role: 'group', 'aria-label': t('Characters') }, radios(SHAPES.filter(id => !SOLVER_SHAPES.includes(id)))),
-    // A div: the card gives every paragraph a bottom margin, which would push the label off its group.
-    h('div', { className: 'oai-muted', id: 'oai-solvers' }, t('Solvers')),
-    h('div', { className: 'oai-shapes', role: 'group', 'aria-labelledby': 'oai-solvers' }, radios(SOLVER_SHAPES)))
 }
 
 export function CompanionStep(props) {
@@ -129,7 +114,12 @@ export function CompanionStep(props) {
             : h('p', { className: 'oai-note' }, t('Drawing a companion needs Codex signed in. Sign in to Codex in the AI step, then come back from Settings. For now, pick one.')),
           drawing ? h('div', { className: 'oai-drawing', 'aria-hidden': 'true' }) : null)
       : h('div', { className: 'oai-pick' },
-          h(CharacterPicker, { shape: image ? null : shape, color, onPick: (id) => { setImage(null); setShape(id) } }),
+          h('div', { className: 'oai-shapes', role: 'radiogroup', 'aria-label': t('Character') },
+            SHAPES.map(id => h('button', {
+              key: id, type: 'button', role: 'radio', 'aria-checked': shape === id && !image, 'aria-label': id, className: 'oai-shape',
+              onClick: () => { setImage(null); setShape(id) },
+              dangerouslySetInnerHTML: { __html: characterSvg(id, color, 54) },
+            }))),
           h('div', { className: 'oai-swatches', role: 'radiogroup', 'aria-label': t('Color') },
             COLORS.map(id => h('button', { key: id, type: 'button', role: 'radio', 'aria-checked': color === id, 'aria-label': id, className: 'oai-swatch', style: { background: swatchOf(id) }, onClick: () => setColor(id) })))),
     h('div', { className: 'oai-name' },

@@ -387,9 +387,6 @@ export const PT_BR = {
   'Drawn with your OpenAI key (gpt-image-1)': 'Desenhado com a sua chave da OpenAI (gpt-image-1)',
   'Drawing a companion needs Codex signed in. Sign in to Codex in the AI step, then come back from Settings. For now, pick one.': 'Para desenhar uma companhia, é preciso entrar no Codex. Entre no Codex no passo de IA e volte por Configurações. Por enquanto, escolha um personagem.',
   'Character': 'Personagem',
-  'Characters': 'Personagens',
-  // A product name, kept as it is.
-  'Solvers': 'Solvers',
   'Color': 'Cor',
   'Its name': 'Nome',
   'Hatching…': 'Nascendo…',
