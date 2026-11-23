@@ -1178,7 +1178,7 @@ this amendment" lines.
   migrated like any other Codex Bot; only an explicit `nativeTools: false` stays OFF. Moved back
   to Claude or omp afterwards, it reads OFF there (its ON names Codex). (**Superseded
   2026-11-23** by [native tools in every chat][everywhere] for groups, tasks, scheduled runs,
-  relays, managed and shared Bots.) Groups, tasks, scheduled
+  relays and shared Bots; managed Bots stay locked.) Groups, tasks, scheduled
   runs, relays, sub-agents, Read only, multi-user, managed and restricted Bots move to DSH's
   tools, as do identity-less Sessions on a team host, except Bots on a kept or measured kept
   model.
@@ -1199,24 +1199,27 @@ this amendment" lines.
   every `new` task on the host belongs to that single Bot with the switch ON. Two Bots, no Bot, or
   a failed lookup = OFF. If it is reopened after a restart, or after it closed, it reads OFF until
   it is driven again. Such a Session gets no Bot name, role or instructions: only the switch.
-- **Removed.** Owner-input eligibility, and the `managed`, `shared`/IM-bound and own-chat-only
-  locks. **Kept:** Read only and an unreadable level (per Session), `restricted` (shell access off
-  or denied tools), multi-user server mode (the switch stays hidden and native tools stay off until
+- **Removed.** Owner-input eligibility, and the `shared`/IM-bound and own-chat-only locks.
+  **Kept:** `managed`: the Bots that operate Omni (the Omni Bot, and a Main Bot while Omni is
+  linked) and Bots another plugin manages (Genie and Unfold-managed Bots). Omni's plugin takes the
+  tools of a Bot that operates it, so its switch stays off and locked. Read only and an
+  unreadable level (per Session), `restricted` (shell access off or denied tools), multi-user
+  server mode (the switch stays hidden and native tools stay off until
   [RFC 0038](0038-cloud-multiuser-caller-principal.md) delivery 3), and identity-less Sessions
   (OFF): DSH subagent Sessions and Omni chat threads and answer children. A kept model runs as
   today, with its own tools, at every level (Read only and shell-off included).
 - **Turning it off.** OFF ends the Bot's chat, group, past and task Sessions and its fresh
   scheduled Sessions. A live process is reused only while the saved switch still reads ON.
-- **Upgrade.** Once, a Bot that sat in a removed lock with the switch ON gets `nativeTools: false`
-  (marker `nativeToolsLocksRetired`). The removed locks are: operates Omni or is managed by a
-  plugin (the Omni Bot, Genie and Unfold-managed Bots, a Main Bot while Omni is linked), shared
-  with people, an active LiveShare share at upgrade, and bound to an IM connection. Bots already
+- **Upgrade.** Once, a Bot that sat in the removed lock with the switch ON gets `nativeTools: false`
+  (marker `nativeToolsLocksRetired`). The removed lock covers Bots shared with people, an active
+  LiveShare share at upgrade, and Bots bound to an IM connection. `managed` Bots are not part of
+  the upgrade: their saved value is not written, and the lock keeps them off. Bots already
   off are not written; other Bots do not change. Nothing gains native tools without the person.
   The check runs on the host that writes the team; until it has run there, an affected Bot shows
   its old lock reason and runs without native tools.
-- **Omni.** An operating Bot keeps its computer tools and `start_task` while the switch is ON for
-  the Session (Omni's own release). Omni chat threads and answer children are not covered yet
-  (next amendment).
+- **Omni.** A Bot that operates Omni stays locked (`managed`): Omni's plugin takes its tools, so
+  this amendment gives it no native tools and needs no change in Omni. Omni chat threads and
+  answer children have no Bot identity and run without native tools.
 - **Threat model.** Group members, IM/WhatsApp senders, LiveShare guests and scheduled prompts can
   drive commands and edits outside DSH's file sandbox on a Bot whose owner turned it ON. This is
   the owner's decision.
@@ -1224,5 +1227,5 @@ this amendment" lines.
   tools per Bot" Eligibility and launch, the Codex amendment's Eligibility (including "ON is never
   inherited…"), its refusal texts' "owner's own turn in the direct chat", and its migration's
   "Groups, tasks, scheduled runs … move to DSH's tools".
-- **Rollback.** Revert the change: the locks return, a saved `false` stays `false`, and older
-  builds ignore the marker.
+- **Rollback.** Revert the change: the removed locks return, a saved `false` stays `false`, and
+  older builds ignore the marker.
