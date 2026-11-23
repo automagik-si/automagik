@@ -97,6 +97,9 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
 - `rt.newBotStoredPermission()` (`host/roster.js`): the level `buildBot` stores for a Bot the person
   makes, extracted with no behaviour change.
 - The client action `teamState` (the existing `state` read, no pull after it).
+- The Solver Bot marker: the predicate the character chooser reads, defined in delivery 1 from
+  fields the host already stores (a new stored field is an amendment of this RFC); from delivery
+  2 the `solver` role tag.
 - Delivery 2 adds the official role id `solver`.
 
 ## Threat model
