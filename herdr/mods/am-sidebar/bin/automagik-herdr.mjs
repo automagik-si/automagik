@@ -46,7 +46,7 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   taskIdProblem, taskWorkerName, TEMPLATE_SHAPE, codexTemplateRefusal, codexTemplateWarning, templateAgent, workerArgs, workerBranch, workerKillRefusal, workerPlan, workerRole, worktreeFolder,
   workLeft, writesWorktree } from "../workers.js";
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, contextTokensOf, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
-  isPaneIdle, pendingDialog, paneCommand, planText as restartText, rateLimitDialog, rateLimitLine, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders, wakeWait } from "../restart.js";
+  isPaneIdle, keptLaunch, pendingDialog, paneCommand, planText as restartText, rateLimitDialog, rateLimitLine, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders, wakeWait } from "../restart.js";
 import { screenLines } from "../dialog.js";
 import { automaticDelivery, hasRateLimitHold } from "../delivery.mjs";
 export { hasRateLimitHold } from "../delivery.mjs";
@@ -6919,7 +6919,9 @@ function discoveredSession(agentKey, get, ledger, panes, seat) {
     if (p.address === get.address) continue;
     for (const k of [SESSION_LABEL, "revive.session"]) if (typeof p.labels?.[k] === "string" && p.labels[k]) claimed.add(p.labels[k]);
     if (!(inFolder(p.cwd) || inFolder(p.foreground?.cwd))) continue;
-    if (agentKeyOfArgv(unwrapKeep(p.foreground?.argv), agents) !== agentKey && agentKeyOfArgv(paneCommand(p)?.argv, agents) !== agentKey) continue;
+    // #1418: a launch in hc's keep wrapper is read through it (keptLaunch); an extra rival only fails closed.
+    if (agentKeyOfArgv(unwrapKeep(p.foreground?.argv), agents) !== agentKey
+      && agentKeyOfArgv(keptLaunch(p, agents, { launchAgent: true }).command?.argv, agents) !== agentKey) continue;
     rivals.push({ terminal: p.address, created_ms: Number.isSafeInteger(p.created_ms) ? p.created_ms : null });
   }
   const id = sessionFor(agentKey, pickSession({ createdMs: get.created_ms, candidates, claimed, rivals }));
@@ -7168,7 +7170,7 @@ function byHand(p, parent) {
   }
   const loginWarnings = [];
   const args = helperArgs({ name: p.name, cwd: p.cwd, labels: p.labels, parent, ...helperCommand(p),
-    login: claudeLogin(p.argv, loginWarnings), env: p.env });
+    login: claudeLogin(p.argv, loginWarnings), env: p.env, keep: p.keep });
   const notes = [p.session ? `# resumes its session by id: put the id where *** stands; hc get ${p.replaced} shows it (its agent.session `
     + "or revive.session label), and so does the workers ledger"
     : "# no session id known: it resumes its folder's latest conversation"];
@@ -7261,7 +7263,7 @@ async function rerunHelpers(plans, parent, say) {
       catch (e) { failed(e.message); continue; }
     }
     const env = p.agent === "dsh-tui" && loginPolicyActive(process.env) ? { ...p.env, ...loginPolicyForward(process.env) } : p.env;
-    const helperRun = helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login, env });
+    const helperRun = helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login, env, keep: p.keep });
     const guardWhy = launchGuardProblem(helperRun, name ?? p.name);
     if (guardWhy) { failed(guardWhy); continue; }
     const r = await hc(helperRun);
@@ -7369,10 +7371,13 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
   }
   const planOf = (h, fresh = null) => {
     const worker = workerRowOf(ledger, h.address);
+    // #1418: hc's keep wrapper around the helper's own command, read as helperPlan reads it.
+    const kept = keptLaunch(h, agents, { keepAware: !loginPolicyActive(process.env), launchAgent: revive && isBareShell(h),
+      workerAgent: worker?.agent ?? null });
     // #939, revive only: a helper hc kept as a bare shell names its agent by its launch command.
-    const launch = revive && isBareShell(h) ? paneCommand(h) : null;
+    const launch = revive && isBareShell(h) ? kept.command : null;
     const shellAgent = launch?.shell ? templateAgent(launch.shell, agents) : null;
-    const agentKey = agentKeyOfArgv(h.foreground?.argv, agents) ?? worker?.agent
+    const agentKey = agentKeyOfArgv(kept.foreground, agents) ?? worker?.agent
       ?? agentKeyOfArgv(launch?.argv, agents) ?? (shellAgent === "codex" || shellAgent === "kimi" ? shellAgent : null);
     // A helper that is itself a bot (attached by hand): its binding moves with it.
     const binding = view.byTerminal.get(h.address)?.binding ?? null;
@@ -7414,7 +7419,7 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     // worker runs its own command as written and gets nothing of the pack's.
     const templateWorker = Boolean(worker?.template || h.labels?.[WORKER_TEMPLATE_LABEL]);
     const codexWithheld = agentKey === "codex" && !planned.error && !templateWorker && grantPlan
-      ? localCodexWarning(worker || h.labels?.[WORKER_OF_LABEL] ? agents.codex?.run : paneCommand(h)?.argv, grantPlan) : null;
+      ? localCodexWarning(worker || h.labels?.[WORKER_OF_LABEL] ? agents.codex?.run : kept.command?.argv, grantPlan) : null;
     return { ...planned, codexWithheld,
       worker, binding, proxyIdentity, env: homeEnv,
       createdMs: Number.isSafeInteger(h.created_ms) ? h.created_ms : null };

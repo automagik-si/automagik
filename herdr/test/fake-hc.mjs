@@ -359,7 +359,7 @@ switch (words[0]) {
     }
     if (state.runDelayBeforeMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.runDelayBeforeMs);
     const labels = {};
-    let name = null, cwd = null, parent = null, outlive = false, on = null, noParent = false;
+    let name = null, cwd = null, parent = null, outlive = false, on = null, noParent = false, keep = false;
     let i = 1;
     // Options, then argv: after `--`, or from the first word that isn't an option (a template).
     for (; i < words.length && words[i] !== "--" && words[i].startsWith("--"); i += 1) {
@@ -370,17 +370,22 @@ switch (words[0]) {
       else if (words[i] === "--on") on = words[++i];
       else if (words[i] === "--outlive-parent") outlive = true;
       else if (words[i] === "--no-parent") noParent = true;
+      else if (words[i] === "--keep") keep = true;
     }
     const given = words.slice(words[i] === "--" ? i + 1 : i);
     // A template (no `--`, a name state.templates lists): hc runs its command through sh -c
     // and types the task in as the first message; its foreground is the command's program.
     const template = words[i] !== "--" ? (state.templates ?? []).find((x) => x.name === given[0]) ?? null : null;
-    const launch = template ? ["sh", "-c", template.command] : given;
-    const argv = foregroundOf(launch);
+    const own = template ? ["sh", "-c", template.command] : given;
+    // --keep (#1418): like the real one, the whole argv inside hc's keep wrapper; its program in
+    // front, or the wrapper itself when state.keepFront is "wrapper".
+    const launch = keep ? ["sh", "-c", '"$@"; exec "${SHELL:-sh}" -i', "sh", ...own] : own;
+    const fg = foregroundOf(own);
+    const argv = keep && state.keepFront === "wrapper" ? launch : fg;
     // Like the real one: with no --parent and no --no-parent, the calling terminal is its parent.
     if (!parent && !noParent && process.env.HC_TERMINAL_ID) parent = process.env.HC_TERMINAL_ID;
     // `env K=V … program …`: the program is the first word after the assignments.
-    const program = /(^|\/)env$/.test(argv[0] ?? "") ? argv.slice(1).find((a) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) : argv[0];
+    const program = /(^|\/)env$/.test(fg[0] ?? "") ? fg.slice(1).find((a) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) : fg[0];
     // --on M: a linked machine's terminal, addressed "M/tN" (refused when M isn't connected).
     const m = on ? machineAt(on) : null;
     if (on) {
