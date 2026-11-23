@@ -22,7 +22,7 @@ runInNewContext(outputFiles[0].text, {
   module, exports: module.exports,
   require: name => (name === 'react' ? react : name === 'react-dom' ? { createPortal: node => node } : {}),
 })
-const { BotSettingsForm, CharacterGrid } = module.exports
+const { BotSettingsForm } = module.exports
 
 function walk(node, found = []) {
   if (Array.isArray(node)) { for (const child of node) walk(child, found); return found }
@@ -234,30 +234,20 @@ test('Bot settings: Sign in for an Antigravity model opens its sign-in row', () 
   assert.deepEqual(opened, [['b', 'acp-antigravity', 'acp-antigravity/default']])
 })
 
-test('the character grid shows the Solvers as their own group, under a heading, starting a row', () => {
-  const picked = []
-  const tree = CharacterGrid({ look: { shape: 'cap', color: 'red' }, onShape: id => picked.push(id), onColor() {} })
-  const parts = tree.props.children
-  // The characters, the heading in the card's own group-label class, the Solvers, the colors.
-  assert.deepEqual(parts.map(part => part.props.className), ['bt-shapes', 'bt-create-step', 'bt-shapes', 'bt-colors'])
-  const rowsOf = group => group.props.children.map(row => row.props.children.map(button => button.props.title))
-  const [first, heading, solvers] = parts
-  assert.deepEqual(rowsOf(first).map(row => row.length), [6, 6, 6, 3])
-  assert.deepEqual(rowsOf(first).flat().slice(0, 3), ['Whale', 'Octopus', 'Star'])
-  assert.equal(rowsOf(first).flat().at(-1), 'Gem')
-  assert.deepEqual(heading.props.children, ['Solvers'])
-  assert.equal(solvers.props['aria-label'], 'Solvers')
-  // Two full rows of six, in the catalogue's order: no Solver starts mid-row.
-  assert.deepEqual(rowsOf(solvers), [['Puff', 'Sprout', 'Cap', 'Bell', 'Cloud', 'Spike'], ['Floppy', 'Antenna', 'Cactus', 'Bulb', 'Chick', 'Frog']])
-  // The worn Solver is pressed in its own group and is not repeated among the others.
-  const buttons = walk(tree).filter(node => node.props?.className === 'bt-shape')
-  assert.equal(buttons.length, 33)
-  assert.deepEqual(buttons.filter(button => button.props['aria-pressed']).map(button => button.props.title), ['Cap'])
-  buttons.find(button => button.props.title === 'Frog').props.onClick()
-  buttons.find(button => button.props.title === 'Gem').props.onClick()
-  assert.deepEqual(picked, ['frog', 'gem'])
-  // A stored shape the catalogue does not know still gets its tile, among the first group.
-  const odd = CharacterGrid({ look: { shape: 'nope', color: 'red' }, onShape() {}, onColor() {} })
-  assert.deepEqual(rowsOf(odd.props.children[0]).map(row => row.length), [6, 6, 6, 4])
-  assert.deepEqual(rowsOf(odd.props.children[2]).map(row => row.length), [6, 6])
+test('the new-Bot card\'s character grid offers the 21 characters and no Solver', () => {
+  const { CharacterGrid } = module.exports
+  const SOLVERS = ['Puff', 'Sprout', 'Cap', 'Bell', 'Cloud', 'Spike', 'Floppy', 'Antenna', 'Cactus', 'Bulb', 'Chick', 'Frog']
+  const draw = shape => CharacterGrid({ look: { shape, color: 'red' }, onShape() {}, onColor() {} })
+  const tree = draw('moon')
+  // The characters, then the colors: no heading and no second group.
+  assert.deepEqual(tree.props.children.map(part => part.props.className), ['bt-shapes', 'bt-colors'])
+  const rowsOf = grid => grid.props.children[0].props.children.map(row => row.props.children.map(button => button.props.title))
+  assert.deepEqual(rowsOf(tree).map(row => row.length), [6, 6, 6, 3])
+  const titles = rowsOf(tree).flat()
+  assert.equal(titles.length, 21)
+  assert.deepEqual(titles.filter(title => SOLVERS.includes(title)), [])
+  assert.ok(!walk(tree).some(node => node.props?.children?.includes?.('Solvers')))
+  assert.equal(walk(tree).filter(node => node.props?.className === 'bt-shape').length, 21)
+  // A stored shape the grid does not list still gets its tile, the 22nd.
+  assert.deepEqual(rowsOf(draw('nope')).map(row => row.length), [6, 6, 6, 4])
 })

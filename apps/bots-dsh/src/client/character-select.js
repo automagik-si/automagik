@@ -1,6 +1,6 @@
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CHARACTER_COLORS, MAIN_LOOK, PICKER_SHAPES, SOLVER_SHAPES, shapeOf } from './characters.js'
+import { CHARACTERS, CHARACTER_COLORS, MAIN_LOOK, PICKER_SHAPES, SOLVER_SHAPES, shapeOf } from './characters.js'
 import { paintCss } from './inks.js'
 import { BotMark, GENIE_PET, lookOf, petOf, servedPet, UNFOLD_PET, useBaked } from './mark.js'
 import { PetSprite } from './pet.js'
@@ -9,12 +9,14 @@ import { CloseIcon } from './icons.js'
 import { t } from './i18n.js'
 import { importPhotos, loadLibrary } from './avatar-library.js'
 import { checkViewer, requestViewer, viewerChanged, viewerRefused, viewerResponse } from './viewer.js'
+import { isSolverBot } from '../shared/solver-method.js'
 
 // -------------------------------------------------------------------------
 // The character select: where a Bot's look is chosen, as a fighting game's select screen. The
 // stage on the left plays the highlighted character big, under a spotlight, with its name; the
 // roster on the right lists Automagik's own first (Genie, Omni and every character, in the
-// color picked on the stage), then the Solvers in a section of their own, then the person's
+// color picked on the stage), then the Solvers in a section of their own (a Solver Bot's
+// chooser only), then the person's
 // (pets the team keeps and Codex's own), then
 // codex-pets.net, which is asked only once that section is opened. Arrow keys move the cursor,
 // Enter picks, Escape leaves. The pick plays a jump before the select closes.
@@ -29,7 +31,7 @@ const shapeEntry = shape => ({ key: `shape:${shape}`, kind: 'shape', shape, name
 
 /**
  * The roster's Automagik section: Genie, Omni, the logo pet, Unfold, Wisp, then the characters
- * (the Solvers have their own section: solverRoster).
+ * any Bot may pick (the Solvers have their own section: solversFor).
  * Unfold is there only where the host lists its pet (Unfold's own instance).
  */
 export function automagikRoster({ unfold = false } = {}) {
@@ -39,12 +41,14 @@ export function automagikRoster({ unfold = false } = {}) {
     { key: 'pet:builtin:automagik', kind: 'pet', pet: { source: 'builtin', id: 'automagik', name: 'Automagik', version: 2, sleep: true }, name: 'Automagik', line: 'Automagik' },
     ...(unfold ? [{ key: 'pet:builtin:unfold', kind: 'pet', pet: { ...UNFOLD_PET, name: 'Unfold' }, name: 'Unfold', line: 'Automagik' }] : []),
     { key: 'pet:builtin:wisp', kind: 'pet', pet: { source: 'builtin', id: 'wisp', name: 'Wisp', version: 2, sleep: false }, name: 'Wisp', line: 'Automagik' },
-    ...PICKER_SHAPES.filter(shape => shape !== 'octopus' && !SOLVER_SHAPES.includes(shape)).map(shapeEntry),
+    ...PICKER_SHAPES.filter(shape => shape !== 'octopus').map(shapeEntry),
   ]
 }
 
 /** The roster's Solvers section: the twelve, in the catalogue's order. */
 export const solverRoster = () => SOLVER_SHAPES.map(shapeEntry)
+/** The Solvers a Bot's chooser offers: all of them to a Solver Bot, none to any other. */
+export const solversFor = bot => (isSolverBot(bot) ? solverRoster() : [])
 
 /**
  * The tile an Arrow Down (`down` 1) or Arrow Up (-1) reaches from tile `at`, given every tile's
@@ -186,13 +190,16 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   useEffect(() => { void loadPhotos() }, [])
 
   const ours = useMemo(() => automagikRoster({ unfold }), [unfold])
-  const solvers = useMemo(() => solverRoster(), [])
+  const solvers = useMemo(() => solversFor(bot), [bot.role])
   const yours = local.map(pet => ({ key: `pet:${pet.source}:${pet.id}`, kind: 'pet', pet, name: pet.name, line: sourceLine[pet.source] ?? pet.source }))
   const theirs = market.market.pets.map(pet => ({ key: `market:${pet.id}`, kind: 'market', pet, name: pet.name, line: pet.by ? t('by {name}', { name: pet.by }) : 'codex-pets.net' }))
   const photo = look.image ? [{ key: 'photo', kind: 'photo', image: look.image, name: t('Photo'), line: t('Uploaded') }] : []
   const photos = library.filter(entry => entry.image !== look.image).map(entry => ({ key: `library:${entry.id}`, kind: 'library', image: entry.image, name: entry.name || t('Photo'), line: t('Your photos') }))
   const all = [...photo, ...photos, ...ours, ...solvers, ...yours, ...theirs]
-  const item = all.find(entry => entry.key === focus) ?? ours[0]
+  // A worn character the roster does not offer (a Solver on a Bot that is not a Solver Bot, the
+  // octopus in another color) stays on the stage, with no tile: Choose keeps it, in the picked color.
+  const wornShape = !look.image && !look.pet && Object.hasOwn(CHARACTERS, look.shape) ? shapeEntry(look.shape) : null
+  const item = all.find(entry => entry.key === focus) ?? wornShape ?? ours[0]
   const worn = currentKey(bot, look)
 
   // A new highlight greets: the fighter waves once, then stands.
@@ -296,7 +303,7 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
         h('div', { ref: gridRef, className: 'bt-cs-scroll' },
           photo.length + photos.length > 0 ? section(t('Yours'), [...photo, ...photos]) : null,
           section('Automagik', ours),
-          section(t('Solvers'), solvers),
+          solvers.length > 0 ? section(t('Solvers'), solvers) : null,
           yours.length > 0 ? section(t('Your pets'), yours) : null,
           h('section', { className: 'bt-cs-sec' },
             h('h3', { className: 'bt-cs-label' }, 'codex-pets.net',

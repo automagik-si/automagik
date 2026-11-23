@@ -1,7 +1,7 @@
 // Plain helpers for the New Solver dialog (RFC 0048, delivery 1), kept free of React so tests
 // can load them. A Solver is an ordinary Bot: no `kind`, made with the person's own create-bot,
 // its native tools turned on through update-bot on their own, its method in its instructions.
-import { CHARACTERS, DEFAULT_COLORS, DEFAULT_SHAPES } from './characters.js'
+import { CHARACTERS, DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from './characters.js'
 import { createPayload, freshBotName, setUp, startModel } from './bot-draft.js'
 import { isRefusal } from './api.js'
 import { t } from './i18n.js'
@@ -9,9 +9,9 @@ import { markOf } from '../shared/permission-levels.js'
 import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, solverInstructions } from '../shared/solver-method.js'
 
 // The Solver's character slot: avatar objects as the host's cleanAvatar keeps them, `{ shape }`
-// of a CHARACTERS key or `{ pet: { source: 'builtin', id, version } }`. Empty until the Solver
-// characters are in the catalogue; the change that adds them fills this list and nothing else.
-export const SOLVER_LOOKS = []
+// of a CHARACTERS key or `{ pet: { source: 'builtin', id, version } }`. The twelve Solver
+// characters of the catalogue: a new Solver wears one of them.
+export const SOLVER_LOOKS = SOLVER_SHAPES.map(shape => ({ shape }))
 
 const pick = (list, random) => list[Math.floor(random() * list.length)]
 

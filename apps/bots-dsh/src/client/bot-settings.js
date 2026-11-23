@@ -1,6 +1,6 @@
 import { createElement as h, Fragment, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { paintCss } from './inks.js'
-import { CHARACTERS, PICKER_SHAPES, PICKER_COLUMNS, SOLVER_SHAPES, CHARACTER_COLORS, SHAPES, shapeOf, bodyOf, maskBox, holes, nextMarkSerial } from './characters.js'
+import { CHARACTERS, PICKER_SHAPES, PICKER_COLUMNS, CHARACTER_COLORS, SHAPES, shapeOf, bodyOf, maskBox, holes, nextMarkSerial } from './characters.js'
 import { isMainOf } from './sources.js'
 import { PencilIcon, ChevronRightIcon } from './icons.js'
 import { BotMark } from './mark.js'
@@ -93,24 +93,17 @@ function ShapeRing({ shape, size }) {
   return h('svg', { className: 'bt-ring', viewBox: `0 0 ${def.size} ${def.size}`, 'aria-hidden': true, dangerouslySetInnerHTML: { __html: markup } })
 }
 
-// Every character shape, six to a row; the Solvers after them under their own heading (the
-// new-Bot card's group label), starting a row; then the color swatches.
+// Every character shape, six to a row, then the color swatches.
 export function CharacterGrid({ look, hasPhoto = false, onShape, onColor }) {
-  const shapes = [...PICKER_SHAPES.filter(id => !SOLVER_SHAPES.includes(id)), ...Object.keys(SHAPES).filter(id => !Object.hasOwn(CHARACTERS, id))]
-  if (!shapes.includes(look.shape) && !SOLVER_SHAPES.includes(look.shape)) shapes.push(look.shape)
-  const rowsOf = (ids) => {
-    const rows = []
-    for (let index = 0; index < ids.length; index += PICKER_COLUMNS) rows.push(ids.slice(index, index + PICKER_COLUMNS))
-    return rows
-  }
-  const grid = (ids, label) => h('div', { className: 'bt-shapes', role: 'group', 'aria-label': label }, rowsOf(ids).map((row, index) => h('div', { key: index, className: 'bt-shape-row' }, row.map(id => h('button', {
-    key: id, type: 'button', className: 'bt-shape', 'aria-label': t(shapeOf(id).label), title: t(shapeOf(id).label), 'aria-pressed': !hasPhoto && look.shape === id,
-    onClick: () => onShape(id),
-  }, h(ShapeRing, { shape: id, size: 36 }), h(BotMark, { look: { shape: id, color: look.color }, size: 36 }))))))
+  const shapes = [...PICKER_SHAPES, ...Object.keys(SHAPES).filter(id => !Object.hasOwn(CHARACTERS, id))]
+  if (!shapes.includes(look.shape)) shapes.push(look.shape)
+  const rows = []
+  for (let index = 0; index < shapes.length; index += PICKER_COLUMNS) rows.push(shapes.slice(index, index + PICKER_COLUMNS))
   return h(Fragment, null,
-    grid(shapes, t('Character shape')),
-    h('div', { className: 'bt-create-step' }, t('Solvers')),
-    grid(SOLVER_SHAPES, t('Solvers')),
+    h('div', { className: 'bt-shapes', role: 'group', 'aria-label': t('Character shape') }, rows.map((row, index) => h('div', { key: index, className: 'bt-shape-row' }, row.map(id => h('button', {
+      key: id, type: 'button', className: 'bt-shape', 'aria-label': t(shapeOf(id).label), title: t(shapeOf(id).label), 'aria-pressed': !hasPhoto && look.shape === id,
+      onClick: () => onShape(id),
+    }, h(ShapeRing, { shape: id, size: 36 }), h(BotMark, { look: { shape: id, color: look.color }, size: 36 })))))),
     h('div', { className: 'bt-colors', role: 'group', 'aria-label': t('Character color') }, CHARACTER_COLORS.map(color => h('button', {
       key: color, type: 'button', className: 'bt-color', 'aria-label': t(capitalize(color)), title: t(capitalize(color)), 'aria-pressed': look.color === color,
       onClick: () => onColor(color),

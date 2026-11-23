@@ -18,12 +18,14 @@ test('every character draws its markup and mask without a missing layer', () => 
   }
 })
 
-test('the catalogue is the first 21 characters, then the twelve Solvers as one block', () => {
+test('the catalogue is the first 21 characters, then the twelve Solvers; any Bot may pick only the 21', () => {
   assert.deepEqual(Object.keys(CHARACTERS), [...FIRST, ...SOLVERS])
-  assert.deepEqual(PICKER_SHAPES, [...FIRST, ...SOLVERS])
+  // The characters any Bot may pick hold no Solver: only a Solver Bot's chooser offers those.
+  assert.deepEqual(PICKER_SHAPES, FIRST)
+  assert.ok(!PICKER_SHAPES.some(id => SOLVERS.includes(id)))
   assert.deepEqual(SOLVERS.map(id => shapeOf(id).label), ['Puff', 'Sprout', 'Cap', 'Bell', 'Cloud', 'Spike', 'Floppy', 'Antenna', 'Cactus', 'Bulb', 'Chick', 'Frog'])
   for (const id of SOLVERS) assert.ok(hasShape(id), id)
-  // The list the choosers' "Solvers" section is built from: the table's last twelve.
+  // The list a Solver Bot's "Solvers" section is built from: the table's last twelve.
   assert.deepEqual(SOLVER_SHAPES, SOLVERS)
 })
 
