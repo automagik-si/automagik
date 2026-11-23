@@ -25971,10 +25971,11 @@ html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]:has(.lb-
 [class*="_root"]:has(.lb-host) [class*="_scrollArea"]:has(.lb-host){grid-template-columns:0 minmax(0,1fr) 0;grid-template-rows:0 max-content 0 minmax(0,1fr);margin:0}
 [class*="_root"]:has(.lb-host) [class*="_scrollFade"]{display:none}
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
-/* Anchor against the card so footer entries and a scrolling list cannot move the toggle. */
-html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.lb-host) .bt-foot-toggle{position:absolute;left:calc(10px - var(--lb-panel-gap));bottom:calc(18px - var(--lb-panel-gap));margin:0}
-/* The rail draws its icons at 18px (DSH's rail spec), so the glyph keeps its size across the fold. */
-.bt-side-collapse.bt-foot-toggle svg{width:18px;height:18px}
+/* Anchor against the card so footer entries and a scrolling list cannot move the toggle. It is
+   centred in the rail column, under the tiles. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.lb-host) .bt-foot-toggle{position:absolute;left:calc((var(--lb-rail-w) - 36px)/2);bottom:calc(18px - var(--lb-panel-gap));margin:0}
+/* The toggle's glyph is 20px here and on the rail (sidebar.js), so it keeps its size across the fold. */
+.bt-side-collapse.bt-foot-toggle svg{width:20px;height:20px}
 /* Keep the drawer's rail control until a footer seat takes over outside the drawer. */
 [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.bt-foot-toggle) .lb-railcol .bt-side-collapse{display:none}
 /* The drawer retains its rail control and its existing placement. */
@@ -27959,18 +27960,23 @@ html[data-automagik-desktop=darwin] header[class*="_header"] :is(a,button,input,
    regions ignore DOM z-index/pointer-events: subtract the panel so its top actions click. */
 html[data-automagik-desktop=darwin] .bt-panel{-webkit-app-region:no-drag}
 /* The collapsed sidebar is a 56px rail, and DSH's card around it left its content 12px: the
-   marks were cut. It keeps a 6px margin and no side padding, everything centred in it. */
-[class*="_root"][class*="_collapsed"]{margin:6px!important;padding-left:0!important;padding-right:0!important}
+   marks were cut. It keeps a 4px margin and no side padding, everything centred in it. The
+   toggle's seat and the card's height below subtract twice this margin (8px). */
+[class*="_root"][class*="_collapsed"]{margin:4px!important;padding-left:0!important;padding-right:0!important}
 [class*="_collapsed"]>[class*="_logoRow"],[class*="_collapsed"] [class*="_regionArea"]{width:100%;display:flex;justify-content:center}
-[class*="_collapsed"]>[class*="_footArea"]{width:100%;justify-items:center;padding-left:0!important;padding-right:0!important}
-/* The rail's card keeps its 6px inset, so its native toggle shares the footer's viewport box. */
-html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"][class*="_collapsed"]{position:relative;height:calc(100% - 12px)}
+/* One column as wide as the card, so the Account is centred in it and not in the open footer's first column. */
+[class*="_collapsed"]>[class*="_footArea"]{width:100%;grid-template-columns:minmax(0,1fr);column-gap:0;justify-items:center;padding-left:0!important;padding-right:0!important}
+/* The rail's card keeps its 4px inset on every side (8px is twice the margin above), so its
+   native toggle sits at the footer seat's height. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"][class*="_collapsed"]{position:relative;height:calc(100% - 8px)}
 /* The toggle leaves the logo row without reserving an empty seat above the Bot list. */
 html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_logoRow"]{height:0!important;margin:0!important}
-/* DSH keeps the badge and keyboard hints while the control moves below every footer entry. */
-html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"] [data-sidebar-toggle]{position:absolute;left:4px;bottom:12px;margin:0}
+/* DSH keeps the badge and keyboard hints while the control moves below every footer entry. It is
+   centred in the card by a fixed offset, so the folding track cannot slide it: the rail (56px) less
+   8px, twice the card's margin above, less the 36px control. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"] [data-sidebar-toggle]{position:absolute;left:calc((var(--lb-rail-w) - 8px - 36px)/2);bottom:14px;margin:0}
 /* Footer entries need a whole control's height above the bottom seat, even on short windows. */
-html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_footArea"]{padding-bottom:calc(12px + 36px + var(--lb-rail-gap))!important}
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_footArea"]{padding-bottom:calc(14px + 36px + var(--lb-rail-gap))!important}
 /* A horizontal rail entrance would move the toggle away from the seat it just replaced. */
 html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:bt-rail-toggle-in 150ms var(--ds-ease-in-out) backwards}
 /* Only opacity changes so a mid-animation press still lands on the same control. */
@@ -27987,6 +27993,9 @@ html:not([data-windows-titlebar]):not([data-platform=darwin]) body[data-bt-motio
    pseudo-element would appear beside the native icon when DSH reveals it on hover. */
 [class*="_collapsed"] [data-sidebar-toggle] [class*="_railMark"]{display:none}
 [class*="_collapsed"] [data-sidebar-toggle] [class*="_panelIcon"]{display:inline!important}
+/* The glyph is 20px where the footer seat's is (left-bar-css.js); a Windows title bar, macOS and
+   the drawer keep DSH's own size in both states. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"] [data-sidebar-toggle] [class*="_panelIcon"]{width:20px;height:20px}
 /* macOS, collapsed: the rail starts below the traffic lights, and the chat's header leaves
    them room where they reach past the rail. */
 html[data-automagik-desktop=darwin]:not([data-automagik-fullscreen]) [class*="_root"][class*="_collapsed"]{padding-top:52px!important}
@@ -28025,6 +28034,11 @@ ${NATIVE_WORKERS_CSS}
 .bt-channels-moved{gap:8px;justify-content:flex-start;padding:0 12px}
 [class*="_footArea"]:has(.bt-foot-account)>[class*="_settingsArea"]{grid-column:3}
 [class*="_footArea"]:has(.bt-foot-account)>[class*="_settingsArea"] button[class*="_trigger"] [class*="_label"]{display:none!important}
+/* On the rail the footer seat is one column too: the Account and the shell's settings trigger
+   stack, each centred in the card. An empty settings seat takes no row. */
+[class*="_collapsed"]>[class*="_footArea"]:has(.bt-foot-account){grid-template-columns:minmax(0,1fr);column-gap:0}
+[class*="_collapsed"]>[class*="_footArea"]:has(.bt-foot-account)>[class*="_footerActions"]>div>.bt-connect-wrap,[class*="_collapsed"]>[class*="_footArea"]:has(.bt-foot-account)>[class*="_settingsArea"]{grid-column:1}
+[class*="_collapsed"]>[class*="_footArea"]:has(.bt-foot-account)>[class*="_settingsArea"]:empty{display:none}
 
 
 /* The update cloud springs in when a newer Omni shows up; its arrow drops in a

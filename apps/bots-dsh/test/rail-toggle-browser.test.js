@@ -1,9 +1,11 @@
-// #1502: the sidebar toggle keeps one spot. In a real browser, with the pinned DSH SidebarRoot
-// around the Bot team's sidebar (fixtures/rail-toggle-browser-app.js): the visible toggle has the
-// same box with the bar open and folded to the rail, anchored at the card's bottom under every
-// footer entry, through the fold and the unfold, with the keyboard too; the drawer, a Windows
-// title bar and macOS keep their own controls; and the rail's "This computer" mark, which opens
-// nothing, has no hover state. RAIL_TOGGLE_SHOTS=<folder> saves screenshots of both states there.
+// #1502: the sidebar toggle has one seat in each state. In a real browser, with the pinned DSH
+// SidebarRoot around the Bot team's sidebar (fixtures/rail-toggle-browser-app.js): the visible
+// toggle is centred under the tiles with the bar open and centred in the rail's card when folded,
+// at one height, anchored at the card's bottom under every footer entry; it stays on its seat
+// through the fold and the unfold, with the keyboard too; the rail's Account is centred in the
+// card; the drawer, a Windows title bar and macOS keep their own controls; and the rail's "This
+// computer" mark, which opens nothing, has no hover state. RAIL_TOGGLE_SHOTS=<folder> saves
+// screenshots of both states there.
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -80,7 +82,10 @@ const look = page => page.evaluate(() => {
   const [one] = toggles
   const center = one ? box(one) : null
   const hit = center ? document.elementFromPoint(center.left + center.width / 2, center.top + center.height / 2) : null
-  const icon = one?.querySelector('svg[class*="_panelIcon"], svg')
+  // DSH's switch draws its rail mark before the panel icon, so the glyph is picked by kind.
+  const icon = !one ? null : one.matches('[data-sidebar-toggle]') ? one.querySelector('svg[class*="_panelIcon"]') : one.querySelector('svg')
+  const all = selector => [...document.querySelectorAll(selector)].filter(shown).map(box)
+  const settings = document.querySelector('[class*="_footArea"]>[class*="_settingsArea"]')
   const above = [...document.querySelectorAll('[class*="_footArea"] .bt-account, [class*="_footArea"] .fx-extra')].filter(shown).map(box)
   const rail = [...document.querySelectorAll('.lb-tile, .bt-rail .bt-round, .bt-rail .bt-row, [class*="_collapsed"] [class*="_newSession"]')].filter(shown).map(box)
   return {
@@ -90,6 +95,10 @@ const look = page => page.evaluate(() => {
     icon: icon ? box(icon) : null,
     hit: hit ? (one.contains(hit) ? 'toggle' : hit.tagName + '.' + hit.className) : null,
     above, rail,
+    tiles: all('.lb-tile'), column: all('.lb-railcol'), rows: all('.bt-rail .bt-row'),
+    accounts: all('[class*="_footArea"] .bt-account'), triggers: all('[class*="_footArea"] .fx-trigger'),
+    settingsShown: settings ? getComputedStyle(settings).display !== 'none' : null,
+    view: { width: innerWidth, height: innerHeight },
     badge: one ? Boolean([...one.querySelectorAll('.fx-badge')].find(shown)) : false,
     collapsed: Boolean(document.querySelector('[class*="_root"][class*="_collapsed"]')),
     focused: document.activeElement === one,
@@ -103,9 +112,14 @@ const settle = async (page) => {
 const near = (a, b, label) => {
   for (const key of ['left', 'top', 'width', 'height']) assert.ok(Math.abs(a[key] - b[key]) <= 0.5, `${label}: ${key} ${a[key]} vs ${b[key]}`)
 }
+const middle = box => box.left + box.width / 2
+const close = (a, b, label) => assert.ok(Math.abs(a - b) <= 0.5, `${label}: ${a} vs ${b}`)
 const shot = async (page, name) => { if (SHOTS) await page.screenshot({ path: join(SHOTS, `${name}.png`) }) }
+// A loop of many cases closes each case's browser as it ends: left open until the test ends, they
+// add up past a capped run's memory limit (scripts/capped-run).
+const done = page => page.context().browser().close()
 
-test('the toggle has one box with the bar open and on the rail, at the card\'s bottom, under every footer entry', async (t) => {
+test('the toggle is centred under the tiles when open and in the card on the rail, at one height, under every footer entry', async (t) => {
   for (const size of SIZES) {
     for (const [theme, dark] of [['deepseek', false], ['deepseek', true], ['clay', false]]) {
       for (const extra of [0, 1, 3]) {
@@ -124,11 +138,33 @@ test('the toggle has one box with the bar open and on the rail, at the card\'s b
         assert.equal(rail.count, 1, `${label} rail: one toggle (${rail.kinds})`)
         assert.deepEqual([wide.kinds[0], rail.kinds[0]], ['foot', 'shell'], label)
         assert.equal(rail.collapsed, true)
-        near(wide.box, rail.box, `${label}: the toggle's box`)
-        near(wide.icon, rail.icon, `${label}: the toggle's icon`)
+        // Open: centred in the rail column, under every tile, 10px inside the card.
+        assert.ok(wide.tiles.length > 0 && wide.column.length === 1, `${label} open: the rail column and its tiles are drawn`)
+        for (const tile of wide.tiles) close(middle(wide.box), middle(tile), `${label} open: the toggle's centre under a tile`)
+        close(middle(wide.box), middle(wide.column[0]), `${label} open: the toggle's centre in the rail column`)
+        close(wide.box.left - wide.card.left, 10, `${label} open: the toggle's offset in the card`)
+        // Rail: the card sits 4px inside the 56px column on every side, and the toggle is centred in it.
+        close(rail.card.left, 4, `${label} rail: the card's left`)
+        close(rail.card.width, 48, `${label} rail: the card's width`)
+        close(rail.card.top, 4, `${label} rail: the card's top`)
+        close(rail.card.bottom, rail.view.height - 4, `${label} rail: the card's bottom`)
+        close(middle(rail.box), middle(rail.card), `${label} rail: the toggle's centre in the card`)
+        close(rail.box.left - rail.card.left, 6, `${label} rail: the toggle's offset in the card`)
+        assert.ok(rail.rows.length > 0, `${label} rail: the Bot rows are drawn`)
+        for (const row of rail.rows) close(middle(rail.box), middle(row), `${label} rail: the toggle's centre under a Bot row`)
+        // One height and one size across the fold.
+        for (const key of ['top', 'width', 'height']) close(wide.box[key], rail.box[key], `${label}: the toggle's ${key} across the fold`)
         for (const [state, at] of [['open', wide], ['rail', rail]]) {
+          // The glyph is 20px and centred in the 36px control.
+          assert.ok(at.icon, `${label} ${state}: the toggle draws its glyph`)
+          close(at.icon.width, 20, `${label} ${state}: the glyph's width`)
+          close(at.icon.height, 20, `${label} ${state}: the glyph's height`)
+          close(middle(at.icon), middle(at.box), `${label} ${state}: the glyph's centre`)
+          close(at.icon.top + at.icon.height / 2, at.box.top + at.box.height / 2, `${label} ${state}: the glyph's middle`)
+          close(at.box.width, 36, `${label} ${state}: the control's width`)
+          close(at.box.height, 36, `${label} ${state}: the control's height`)
           assert.equal(at.hit, 'toggle', `${label} ${state}: a press at its centre reaches it`)
-          // Anchored at the card's bottom-left, inside the card.
+          // Anchored at the card's bottom, inside the card.
           assert.ok(at.box.left >= at.card.left && at.box.bottom <= at.card.bottom && at.card.bottom - at.box.bottom <= 16, `${label} ${state}: at the card's bottom (${JSON.stringify(at.box)} in ${JSON.stringify(at.card)})`)
           // Nothing of the footer or the rail under it.
           for (const other of [...at.above, ...at.rail]) {
@@ -139,18 +175,30 @@ test('the toggle has one box with the bar open and on the rail, at the card\'s b
         // On the rail, the account and every other entry sit above it.
         for (const other of rail.above) assert.ok(other.bottom <= rail.box.top, `${label} rail: footer entry above the toggle`)
         assert.equal(rail.badge, true, `${label} rail: the toggle keeps its badge`)
+        await done(page)
       }
     }
   }
 })
 
-test('the toggle never leaves its spot while the bar folds and unfolds, quickly or not', async (t) => {
+test('the toggle never leaves its seat while the bar folds and unfolds, quickly or not', async (t) => {
   for (const reducedMotion of [false, true]) {
     const page = await fixture(t, { html: { reducedMotion } })
     if (!page) return
+    // AppFrame animates the sidebar track for 300ms while SidebarRoot puts the rail in at 150ms:
+    // replayed here, so a toggle placed against the still-folding card's width would slide.
+    await page.addStyleTag({ content: '#frame{transition:grid-template-columns .3s ease-in-out}' })
     await page.evaluate(() => window.mount({ extra: 1 }))
     await settle(page)
-    const spot = (await look(page)).box
+    const open = (await look(page)).box
+    await page.evaluate(() => window.setState({ collapsed: true }))
+    await settle(page)
+    const folded = (await look(page)).box
+    await page.evaluate(() => window.setState({ collapsed: false }))
+    await settle(page)
+    const seats = { foot: open, shell: folded }
+    close(open.top, folded.top, 'the two seats share one height')
+    close(open.left - folded.left, 8, 'the open seat is 8px right of the rail seat')
     // Each frame of the fold, then an unfold before the rail settles, then a full unfold.
     const frames = async (count) => {
       const out = []
@@ -171,8 +219,46 @@ test('the toggle never leaves its spot while the bar folds and unfolds, quickly 
     watch.push(...await frames(20))
     for (const [at, frame] of watch.entries()) {
       assert.ok(frame.count <= 1, `frame ${at}${reducedMotion ? ' (reduced motion)' : ''}: ${frame.kinds}`)
-      if (frame.count === 1) near(frame.box, spot, `frame ${at}${reducedMotion ? ' (reduced motion)' : ''}`)
+      if (frame.count === 1) near(frame.box, seats[frame.kinds[0]], `frame ${at}${reducedMotion ? ' (reduced motion)' : ''}: the ${frame.kinds[0]} toggle on its seat`)
     }
+    // The watch did see the rail's toggle while the card was still wider than the settled rail.
+    assert.ok(watch.some(frame => frame.count === 1 && frame.kinds[0] === 'shell' && frame.card.width > 60), `the track was still folding under the rail's toggle${reducedMotion ? ' (reduced motion)' : ''}`)
+  }
+})
+
+test('the rail centres the Account in the card, in the settings seat and in the footer seat', async (t) => {
+  // The settings seat is the app's; the footer seat stands in when no plugin holds that seat, with
+  // the shell's own settings trigger beside it or with nothing there.
+  const SEATS = [['settings seat', { seated: true }], ['footer seat, empty settings seat', {}], ['footer seat, shell trigger', { trigger: true }]]
+  for (const extra of [0, 1]) {
+    const bottoms = {}
+    for (const [seat, options] of SEATS) {
+      const page = await fixture(t)
+      if (!page) return
+      const label = `${seat}, extra ${extra}`
+      await page.evaluate(options => window.mount(options), { ...options, extra, collapsed: true })
+      await settle(page)
+      const at = await look(page)
+      await shot(page, `account-${seat.replace(/[^a-z]+/g, '-')}-${extra}`)
+      assert.equal(at.collapsed, true, label)
+      assert.equal(at.accounts.length, 1, `${label}: one Account`)
+      assert.equal(at.triggers.length, options.trigger ? 1 : 0, `${label}: the shell trigger`)
+      const items = [...at.accounts, ...at.triggers]
+      for (const item of items) {
+        close(middle(item), middle(at.card), `${label}: a footer control's centre in the card`)
+        assert.ok(item.left >= at.card.left && item.right <= at.card.right, `${label}: inside the card (${JSON.stringify(item)} in ${JSON.stringify(at.card)})`)
+        assert.ok(item.bottom <= at.box.top, `${label}: above the toggle`)
+      }
+      for (const entry of at.above) close(middle(entry), middle(at.card), `${label}: a footer entry's centre in the card`)
+      // The Account and the shell trigger stack; neither covers the other.
+      const [account, trigger] = items
+      if (trigger) assert.ok(account.bottom <= trigger.top || trigger.bottom <= account.top, `${label}: the Account and the trigger do not overlap`)
+      if (seat === 'footer seat, empty settings seat') assert.equal(at.settingsShown, false, `${label}: the empty settings seat takes no row`)
+      bottoms[seat] = account.bottom
+      await done(page)
+    }
+    // An empty settings seat adds no row gap: the footer Account stands where the seated one does.
+    close(bottoms['footer seat, empty settings seat'], bottoms['settings seat'], `extra ${extra}: the footer Account's bottom`)
   }
 })
 
@@ -235,11 +321,14 @@ test('the drawer, a Windows title bar and macOS keep their own controls', async 
     assert.equal(open.kinds.includes('foot'), false, `${Object.keys(html)} open: ${open.kinds}`)
     await page.evaluate(() => window.setState({ collapsed: true }))
     await settle(page)
-    const position = await page.evaluate(() => {
+    const own = await page.evaluate(() => {
       const toggle = document.querySelector('[data-sidebar-toggle]')
-      return toggle ? getComputedStyle(toggle).position : null
+      const icon = toggle?.querySelector('svg[class*="_panelIcon"]')
+      return { position: toggle ? getComputedStyle(toggle).position : null, drawn: icon ? icon.getBoundingClientRect().width : null, given: icon ? Number(icon.getAttribute('width')) : null }
     })
-    assert.notEqual(position, 'absolute', `${Object.keys(html)} rail: the shell's switch is not moved`)
+    assert.notEqual(own.position, 'absolute', `${Object.keys(html)} rail: the shell's switch is not moved`)
+    assert.ok(own.given > 0 && own.given !== 20, `${Object.keys(html)} rail: DSH gives its glyph a size (${own.given})`)
+    assert.equal(own.drawn, own.given, `${Object.keys(html)} rail: the shell's glyph keeps DSH's size`)
   }
 })
 
