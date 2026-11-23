@@ -1079,10 +1079,10 @@ this amendment" lines.
   copy, never the Codex home's own default (which may be a kept model that shows no tools); the
   process's config names no model, so DSH's `default` stays the model Codex itself starts on. Any
   other failure refuses the turn ("Codex could not turn its own tools off ..."), a deadline or a
-  Stop included; the Session never opens unchecked. The CLI calls run one after another, and one
-  setup at a time per Codex home: about 5-6 seconds more per new OFF agent session, none per
-  turn. A model the composer picks later must be one the spawn checked, else the turn is refused
-  with zero prompts.
+  Stop included, except a turn on a model the check measured kept (below); the Session never
+  opens unchecked. The CLI calls run one after another, and one setup at a time per Codex home:
+  about 5-6 seconds more per new OFF agent session, none per turn. A model the composer picks
+  later must be one the spawn checked, else the turn is refused with zero prompts.
 - **The catalog file.** The checked copy is written, mode 0600, to the installation's ACP folder
   (`codex-native-off/models-<sha256>.json`), outside every Codex home and outside `cli-homes`.
   Copies older than 24 hours are pruned, never the one just written. A fork of an OFF process
@@ -1101,20 +1101,36 @@ this amendment" lines.
   today; its row shows the kept sentence. The row and ON eligibility follow the Bot's saved
   model: a Bot saved on a kept model runs its checked-model turns OFF, even in its own chat.
 - **Measured kept models (lead decisions B1-4 and the mixed-model option (b), 2026-11-23).** A
-  model of the copy whose read Codex answers with a valid prompt and no tool block at all shows
-  nothing to check, like `gpt-5.5`: it is measured kept, whether or not other models are
-  checkable. It runs as today, with Codex's own tools, in every Session, and its row shows OFF and
-  locked with the kept sentence. No turn is refused for it: the OFF turn that measured it runs
-  again at once as a kept one (today's launch, no notice). A Codex whose listed models all show no
-  tools is treated as if they were all kept; a `default` there whose start model is not known yet
-  runs as today too. The measured set is the last check's (a later check that shows a model's
-  tools takes it out), kept beside the catalog's recorded start model in its saved file, so the
-  row is right after a restart; it is read for the connector release that measured it, for a
-  day. Only that exact answer counts: an exit code, a prompt this code cannot read, a forbidden
-  tool, a deadline or a Stop still refuse (LQ1), because an unreadable answer is never an
-  unverifiable one; a model the check never read (not in Codex's list) is still refused as
-  unchecked. The turn that first measures a model in an image Session runs without its staged
-  image grant (the OFF attempt cleared it); later turns on that model are kept from their start.
+  model of the copy whose read Codex answers with exit 0 and a JSON prompt list holding no tool
+  block shows nothing to check, like `gpt-5.5`: the accepted signature is the empty list `[]`
+  (the real `gpt-5.5` answer, exactly), and a list of message items only counts the same. Such a
+  model is measured kept, whether or not other models are checkable, and also when the check
+  then refuses for a reason that is not its own (another model's read, the final read, or a
+  switch Codex ignores). It runs as today, with Codex's own tools, in every Session, and its row
+  shows OFF and locked with the kept sentence. No turn is refused for it: the OFF turn that
+  measured it runs again at once as a kept one (today's launch, no notice), once. A Codex whose
+  listed models all show no tools is treated as if they were all kept; a `default` there whose
+  start model is not known yet runs as today too. A Codex update whose prompt read shows no tool
+  block for any model makes every model measured kept, which is the behaviour before this PR; the
+  rows then show the kept sentence.
+  - **The record.** The measured set is the last passed check's (a later check that shows a
+    model's tools takes it out; a check refused for another reason adds its no-block models and
+    takes none out), kept beside the catalog's recorded start model in its saved file, so the
+    row is right after a restart. It covers the whole Codex agent row, not each account or
+    Session folder: one Session's check applies to every Session of the row, and a sign-in to
+    another account keeps it (always in the "as today" direction). A turn reads it for the
+    connector and Codex release that measured it, for a day, then checks again; the Details row
+    reads it for that release whatever its age, so the row never unlocks and promises OFF
+    because a day passed. A stale record can keep a model that became checkable on Codex's own
+    tools for up to a day, until an OFF check of that Codex replaces it.
+  - **The safety limit.** Only that exact answer counts: an exit code, a prompt this code cannot
+    read, a forbidden tool, a deadline, a Stop, a config error or an unreadable call still refuse
+    (LQ1) and keep no model, because an unreadable answer is never an unverifiable one; a model
+    the check never read (not in Codex's list) is still refused as unchecked.
+  - **Image grant.** A turn that measures a model (the first one, and the first after the record
+    lapses: a day, or a Codex or connector update) runs without the Session's staged image grant
+    (the OFF attempt cleared it); the person asks for the image again. Later turns on that model
+    are kept from their start.
 - **DSH's `default`** is the model Codex itself starts on (the last process with its own tools,
   else the catalog's recorded start model); a wrong guess is caught after the model is set and
   that turn ends with "The tools setting changed; send again." and no prompt, including the first
