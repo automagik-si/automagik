@@ -6,9 +6,13 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout } from 'node:timers/promises'
 import { LANE_KEYS } from '../../desktop/src/lane-keys.js'
-import { GENIE_PLUGIN, GENIE_RELEASE, OMNI_PLUGINS, OMNI_RELEASE, teamVersion } from '../src/host/bot-types.js'
-import { chooseGenie, chooseOmni, compareVersions, createReleases, dshCheck, registryOf, satisfies } from '../src/host/release-resolve.js'
-import { PKG } from './lane-fixture.js'
+import { GENIE_PIN, OMNI_PIN } from './pin-fixture.js'
+
+// Loaded after the pin fixture: bot-types.js reads the pins as it loads. The Omni pin moves with
+// every Omni release, and no case here may depend on where it is.
+const { GENIE_PLUGIN, GENIE_RELEASE, OMNI_PLUGINS, OMNI_RELEASE, teamVersion } = await import('../src/host/bot-types.js')
+const { chooseGenie, chooseOmni, compareVersions, createReleases, dshCheck, registryOf, satisfies } = await import('../src/host/release-resolve.js')
+const { PKG } = await import('./lane-fixture.js')
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519')
 const key = { keyId: 'test-key', publicKey: publicKey.export({ type: 'spki', format: 'pem' }) }
@@ -70,6 +74,11 @@ function fixture(t, options = {}) {
   const releases = createReleases({ fetch, keys, env: { AUTOMAGIK_HOME: home }, ...options })
   return { files, asked, releases, home, omni: () => releases.omni([], PKG.version), genie: () => releases.genie([], PKG.version) }
 }
+
+test('the pins are the fixture\'s, not the ones package.json carries', () => {
+  assert.deepEqual(OMNI_RELEASE, OMNI_PIN)
+  assert.deepEqual(GENIE_RELEASE, GENIE_PIN)
+})
 
 test('publisher lane keys are separate and Genie uses the desktop key', () => {
   const carried = JSON.parse(readFileSync(new URL('../src/host/publisher-keys.json', import.meta.url), 'utf8'))
