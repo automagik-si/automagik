@@ -237,6 +237,9 @@ test('I2: signed out, then Sign in: signingIn, then signed in; the sign-in is in
   assert.deepEqual(w.traces().filter(entry => entry.event === 'authenticate').map(entry => entry.methodId), ['oauth-personal'])
 })
 
+// Every attempt's own folder goes when it ends, whatever the end (GS-4): `<acp>/sign-in` holds no entry.
+const signInEmptied = w => assert.deepEqual(readdirSync(join(w.dir, 'acp', 'sign-in')), [])
+
 test('I2b: a sign-in link agy prints reaches the status only when it is Google\'s own, and only while it waits', unixOnly, async (t) => {
   plant(t)
   const google = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
@@ -264,6 +267,7 @@ test('I2b: a sign-in link agy prints reaches the status only when it is Google\'
   await sleep(300)
   assert.equal((await other.row()).signInUrl, undefined)
   assert.equal((await other.signedIn()).signInError, 'timeout')
+  signInEmptied(other)
   // Google's page, but a return address that is not agy's loopback listener: never shown.
   const away = [
     google.replace('http%3A%2F%2F127.0.0.1%3A4242%2Fcb', 'https%3A%2F%2Fevil.example%2Fcb'),
@@ -277,6 +281,7 @@ test('I2b: a sign-in link agy prints reaches the status only when it is Google\'
   await sleep(300)
   assert.equal((await redirected.row()).signInUrl, undefined)
   assert.equal((await redirected.signedIn()).signInUrl, undefined)
+  signInEmptied(redirected)
 })
 
 const signInPid = (w, from) => w.envs().slice(from).at(-1)?.pid
@@ -307,6 +312,7 @@ test('I3: a method not offered, a failure, no answer and a switch-off each end t
     assert.equal(row.signInUrl, undefined)
     assert.ok(w.logs.some(line => line.startsWith(`acp-dsh: Antigravity: the sign-in ended (${word}); its terminal sign-in, for support: env -i `)), w.logs.join('\n'))
     if (word === 'unsupported') assert.deepEqual(w.traces().filter(entry => entry.event === 'authenticate'), [])
+    signInEmptied(w)
     await endsClean(w, from)
   }
   // Switched off while it waits: the attempt ends, with no error word to show.
@@ -319,6 +325,7 @@ test('I3: a method not offered, a failure, no answer and a switch-off each end t
   w.emit('loader/volatile-update')
   const row = await w.signedIn()
   assert.equal(row.signInError, undefined)
+  signInEmptied(w)
   await endsClean(w, from)
 })
 
@@ -795,6 +802,7 @@ test('I13: the two log words ride on the status, equal to the log lines', unixOn
     await w.service.signInNative(ID)
     const row = await w.signedIn()
     assert.equal(row.signedIn, true)
+    signInEmptied(w)
     assert.equal(row.signOutOverAcp, overAcp)
     assert.ok(w.logs.includes(`acp-dsh: Antigravity offers sign-in methods: oauth-personal; sign-out over ACP: ${overAcp}`), w.logs.join('\n'))
     assert.equal(row.lastSignOut, undefined)
@@ -807,6 +815,7 @@ test('I13: the two log words ride on the status, equal to the log lines', unixOn
     await w.service.signInNative(ID)
     assert.equal((await w.row()).lastSignOut, undefined)
     assert.equal((await w.signedIn()).lastSignOut, undefined)
+    signInEmptied(w)
   }
   // A Sign in whose recovery of a paused home fails keeps no sign-out word from that recovery.
   const w = world(t)
