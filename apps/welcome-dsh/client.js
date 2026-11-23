@@ -9252,6 +9252,11 @@ var PT_BR = {
   "Found the {cli} CLI on this computer.": "A CLI {cli} está neste computador.",
   "Found the {cli} CLI on this computer (version {version}).": "A CLI {cli} está neste computador (versão {version}).",
   "Installing {name} automatically…": "Instalando o {name} automaticamente…",
+  "Installing {name}…": "Instalando o {name}…",
+  "Install it yourself instead": "Ou instale por conta própria",
+  "The {cli} CLI is not on this computer. Automagik can install it for you.": "A CLI {cli} não está neste computador. O Automagik pode instalar para você.",
+  "The {cli} CLI is not on this computer. Turn {name} on to install it.": "A CLI {cli} não está neste computador. Ligue o {name} para instalar.",
+  "Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).": "A CLI {cli} está neste computador (instalada pelo Automagik na versão {version}; ela se atualiza sozinha).",
   "Updating {name} automatically…": "Atualizando o {name} automaticamente…",
   "The {name} installation or update failed: {error}": "A instalação ou atualização do {name} falhou: {error}",
   "The {name} installation or update failed.": "A instalação ou atualização do {name} falhou.",
@@ -12648,6 +12653,25 @@ function agentLines(agent, entry) {
   const name = agent.name;
   const cli = CLI_OF[agent.id] ?? agent.key;
   const lines = [];
+  const manual = agent.cli.install === "manual";
+  if (manual && !agent.cli.found) {
+    if (cliBusy(agent)) lines.push({ tone: "wait", text: t("Installing {name}…", { name }) });
+    else if (agent.cli.state === "failed" || agent.cli.error) {
+      lines.push({
+        tone: "bad",
+        text: agent.cli.error ? t("The {name} installation or update failed: {error}", { name, error: redactText(agent.cli.error) }) : t("The {name} installation or update failed.", { name }),
+        action: "install",
+        label: t("Retry"),
+        ...agent.cli.installUrl ? { link: { href: agent.cli.installUrl, text: t("Install it yourself instead") } } : {},
+        ...agent.cli.diagnostic ? { details: { diagnostic: redactText(agent.cli.diagnostic), ...agent.cli.logPath ? { logPath: agent.cli.logPath } : {} } } : {}
+      });
+    } else if (agent.on) {
+      lines.push({ tone: "muted", text: t("The {cli} CLI is not on this computer. Automagik can install it for you.", { cli }), action: "install" });
+    } else {
+      lines.push({ tone: "muted", text: t("The {cli} CLI is not on this computer. Turn {name} on to install it.", { cli, name }) });
+    }
+    return lines;
+  }
   if (cliBusy(agent)) {
     lines.push({ tone: "wait", text: agent.cli.updating ? t("Updating {name} automatically…", { name }) : t("Installing {name} automatically…", { name }) });
   } else if (agent.cli.state === "failed" || agent.cli.error) {
@@ -12662,7 +12686,10 @@ function agentLines(agent, entry) {
     if (lines.length === 0) lines.push({ tone: "muted", text: t("The {cli} CLI is not on this computer. Install it, sign in, then check again.", { cli }), ...agent.cli.installUrl ? { link: { href: agent.cli.installUrl, text: t("Install {name}", { name }) } } : {}, action: "check" });
     return lines;
   }
-  lines.push({ tone: "ok", text: agent.cli.version ? t("Found the {cli} CLI on this computer (version {version}).", { cli, version: agent.cli.version }) : t("Found the {cli} CLI on this computer.", { cli }) });
+  lines.push({
+    tone: "ok",
+    text: manual && agent.cli.managed === true && agent.cli.version ? t("Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).", { cli, version: agent.cli.version }) : agent.cli.version ? t("Found the {cli} CLI on this computer (version {version}).", { cli, version: agent.cli.version }) : t("Found the {cli} CLI on this computer.", { cli })
+  });
   if (agent.signedIn === true && agent.consent !== "needed") {
     const canSwitch = isolatedSignIn(agent) && entry?.authScope === "isolated" && entry.signedIn === true;
     const account = canSwitch && entry.account?.kind === "account" ? entry.account.email ?? entry.account.org : void 0;
@@ -12774,6 +12801,8 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
       }
     },
     retry: (agent) => act(agent.id, "acp-retry", { id: agent.id }),
+    // The person's click on Install (a CLI the app installs only then).
+    install: (agent) => act(agent.id, "acp-install", { id: agent.id }),
     check: (agent) => act(agent.id, "acp", { refresh: true }),
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
@@ -12803,6 +12832,7 @@ function AcpLine({ line, agent, acp, busy, accountControls }) {
       confirming ? t("This stops running Bot work for this account. Continue?") : line.text,
       line.link ? [" ", (0, import_react9.createElement)("a", { key: "link", className: "oai-link", href: line.link.href, target: "_blank", rel: "noreferrer" }, line.link.text)] : null,
       line.action === "retry" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.retry(agent) }, t("Retry")) : null,
+      line.action === "install" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.install(agent) }, line.label ?? t("Install")) : null,
       line.action === "login" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.login(agent) }, line.label ?? t("Sign in")) : null,
       line.action === "check" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.check(agent) }, t("Check again")) : null,
       canSwitch && !confirming ? accountButton(t("Switch account"), () => accountControls.ask(agent)) : null,
@@ -12822,7 +12852,7 @@ function AcpAgentRow({ agent, acp, accountControls }) {
   const on2 = acp.isOn(agent);
   const busy = acp.busy !== null || accountControls?.busy === true;
   const badge = badgeOf({ ...agent, on: on2 });
-  const lines = agentLines(agent, accountControls?.accounts[agent.id]);
+  const lines = agentLines({ ...agent, on: on2 }, accountControls?.accounts[agent.id]);
   return (0, import_react9.createElement)(
     "div",
     { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf({ ...agent, on: on2 }) },

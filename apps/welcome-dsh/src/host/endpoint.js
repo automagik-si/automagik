@@ -41,9 +41,10 @@ import { needsViewer } from './viewer-policy.js'
 //   omni-server-check { version, fallback? }, omni-github-install, omni-github-status,
 //   omni-github-cancel, omni-github-ack
 //                      the route to install Omni and the welcome's installer job
-//   acp, acp-switch, acp-retry
+//   acp, acp-switch, acp-retry, acp-install
 //                      Claude Code and Codex through @automagik/acp-dsh: its acpAgents
-//                      service's status, and its claude/codex settings (src/host/acp.js)
+//                      service's status, and its claude/codex settings (src/host/acp.js);
+//                      acp-install installs Antigravity on the person's click
 //   migrate-probe, migrate-start, migrate-status, migrate-omni-status, migrate-restore-hermes
 //                      the "From another tool" step: Hermes's Telegram channel and its key,
 //                      and the way back to Hermes after an unknown Omni result

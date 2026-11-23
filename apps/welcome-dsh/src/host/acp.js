@@ -8,6 +8,8 @@
 //                           whether it is signed in (the page does this when it opens)
 //   acp-switch { id, on }   turns an agent on or off in acp-dsh's settings
 //   acp-retry { id }        starts a failed connector install again
+//   acp-install { id }      installs a CLI the app installs only on the person's click
+//                           (Antigravity, acp-dsh `installCli`), while its switch is on
 import { homedir } from 'node:os'
 import { sep } from 'node:path'
 import { z } from 'zod'
@@ -42,6 +44,22 @@ const shownText = (text) => {
   }
   return out
 }
+// The terminal command that signs in to a CLI with no sign-in in the app: a plain command line,
+// or exactly the command for a copy of Antigravity acp-dsh installed itself, which is not on
+// PATH and so is named by its path, quoted (acp-dsh agents.js signInHintOf). Shown, never run.
+const BARE_HINT = /^[a-z][a-z0-9]{0,23}( [a-z0-9-]{1,24}){0,4}$/
+const V = String.raw`(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)`
+const UUID = String.raw`[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}`
+const POSIX_AGY = new RegExp(String.raw`^'(/[^'\`\u0000-\u001f\u007f]*/acp/clis/agy/${V}-${UUID}/bin/agy)' acp --login$`)
+const WIN32_AGY = new RegExp(String.raw`^& "([A-Za-z]:\\[^"\`$\u201C\u201D\u201E\u0000-\u001f\u007f]*\\acp\\clis\\agy\\${V}-${UUID}\\bin\\agy\.exe)" acp --login$`)
+const TRAVERSAL = /(^|[\\/])\.\.([\\/]|$)/
+export function isSignInHint(hint) {
+  if (typeof hint !== 'string' || hint.length > 4096) return false
+  if (BARE_HINT.test(hint)) return true
+  const path = (POSIX_AGY.exec(hint) ?? WIN32_AGY.exec(hint))?.[1]
+  return path !== undefined && !TRAVERSAL.test(path)
+}
+
 const shownPath = (path) => {
   if (typeof path !== 'string') return undefined
   const home = homedir()
@@ -61,9 +79,11 @@ export function agentView(agent) {
     cli: {
       found: agent.cli?.found === true,
       ...(typeof agent.cli?.installUrl === 'string' && agent.cli.installUrl.startsWith('https://') ? { installUrl: agent.cli.installUrl } : {}),
-      // The terminal command that signs in to a CLI with no sign-in in the app: a plain command
-      // line, nothing else.
-      ...(typeof agent.cli?.signInHint === 'string' && /^[a-z][a-z0-9]{0,23}( [a-z0-9-]{1,24}){0,4}$/.test(agent.cli.signInHint) ? { signInHint: agent.cli.signInHint } : {}),
+      // The terminal command that signs in to a CLI with no sign-in in the app (isSignInHint).
+      ...(isSignInHint(agent.cli?.signInHint) ? { signInHint: agent.cli.signInHint } : {}),
+      // A CLI the app installs only when the person clicks Install (Antigravity), and whether
+      // the copy found is the one it installed (its row says it updates itself).
+      ...(agent.cli?.install === 'manual' ? { install: 'manual', ...(agent.cli.managed === true ? { managed: true } : {}) } : {}),
       ...(['missing', 'installing', 'failed', 'ready'].includes(agent.cli?.state) ? { state: agent.cli.state } : {}),
       ...(typeof agent.cli?.version === 'string' ? { version: shownText(redactText(agent.cli.version)).slice(0, 80) } : {}),
       ...(agent.cli?.updating === true ? { updating: true } : {}),
@@ -162,6 +182,20 @@ export function createAcpActions(ctx) {
       const acp = service()
       if (acp === undefined) throw refused('The ACP agents plugin is not running in this DSH.')
       return view(next => next.retry(asked.id))
+    },
+    // The person's click on Install. acp-dsh refuses while the agent is off; its words go back.
+    'acp-install': async (payload) => {
+      const asked = parse(RetryPayload, payload)
+      if (asked === undefined) throw invalid('Say which agent.')
+      const acp = service()
+      if (acp === undefined) throw refused('The ACP agents plugin is not running in this DSH.')
+      if (typeof acp.installCli !== 'function') throw refused('This ACP agents plugin cannot install that CLI.')
+      try {
+        return await view(next => next.installCli(asked.id))
+      } catch (error) {
+        if (typeof error?.code === 'string' && error.code.startsWith('acp-install/')) throw refused(String(error.message).slice(0, 300))
+        throw error
+      }
     },
   }
 }
