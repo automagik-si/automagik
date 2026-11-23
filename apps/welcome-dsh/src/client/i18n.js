@@ -1,9 +1,10 @@
 // The welcome's copy follows the DSH language: the companion step, the team step, Connect AI with
 // its sign-ins and the Claude Code and Codex rows (acp-agents.js), the step rail. Keys are the
-// English text; welcome.team is registered in English and in Brazilian Portuguese, and a key with
-// no text in the active language reads in English. Copy is looked up at render time, so nothing
-// caches a translated string. Names stay as written (products, providers, plans, the companion's
-// name ideas), and so do the host's error messages and what a provider's sign-in says.
+// English text; welcome.team is registered in English, in Brazilian Portuguese and in Chinese
+// (only Antigravity's Windows warning so far), and a key with no text in the active language
+// reads in English. Copy is looked up at render time, so nothing caches a translated string.
+// Names stay as written (products, providers, plans, the companion's name ideas), and so do the
+// host's error messages and what a provider's sign-in says.
 
 export const NAMESPACE = 'welcome.team'
 
@@ -327,6 +328,18 @@ export const PT_BR = {
   'Could not check the sign-in to {name}: {cli} took too long to answer.': 'Não foi possível verificar o login no {name}: o {cli} demorou demais para responder.',
   'Could not tell whether you are signed in to {name}.': 'Não foi possível saber se há login no {name}.',
   'Sign in': 'Entrar',
+  // Antigravity in its own home (#2048): its sign-in in the app, and Windows's shared account
+  'Not signed in to {name}. Sign in here: your browser opens to finish.': 'Sem login no {name}. Entre por aqui: o navegador abre para concluir o login.',
+  'If no browser opens, run {command} in a new terminal window, then check again.': 'Se nenhum navegador abrir, rode {command} em uma nova janela de terminal e verifique de novo.',
+  'Finish the sign-in to {name} in your browser…': 'Conclua o login no {name} pelo navegador…',
+  '{name} did not offer a Google sign-in. Use the terminal command below.': 'O {name} não ofereceu login com Google. Use o comando de terminal abaixo.',
+  'The sign-in to {name} took too long. Try again.': 'O login no {name} demorou demais. Tente de novo.',
+  'The sign-in to {name} did not finish. Try again.': 'O login no {name} não terminou. Tente de novo.',
+  'Automagik keeps its own {name} sign-in, apart from the one in your terminal.': 'O Automagik mantém um login próprio do {name}, separado do login do seu terminal.',
+  'Not signed in to {name}. This computer has no browser for the sign-in: run {command} in a new terminal window, then check again.': 'Sem login no {name}. Este computador não tem um navegador para o login: rode {command} em uma nova janela de terminal e verifique de novo.',
+  'Not signed in to {name}. This computer has no browser for the sign-in.': 'Sem login no {name}. Este computador não tem um navegador para o login.',
+  'Sign out': 'Sair',
+  'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.': 'No Windows, a conta do {name} é compartilhada: o Automagik e o seu próprio {name} neste computador usam o mesmo login, guardado no Gerenciador de Credenciais do Windows. Sair não está disponível aqui: saia pelo próprio {name}.',
   'No Bot chat to sign in from here. Run {command} in a terminal instead.': 'Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.',
   'Sign-in needs a Bot chat. If you have no Bot yet, set one up first.': 'Para entrar, você precisa de um chat de Bot. Se ainda não tiver um Bot, configure um primeiro.',
   'Sign in from the Bot\'s chat, then come back to finish setting up.': 'Entre pelo chat do Bot e volte para terminar a configuração.',
@@ -584,6 +597,13 @@ export const PT_BR = {
 // English is the key itself; registering it keeps the namespace whole in both languages.
 const EN = Object.fromEntries(Object.keys(PT_BR).map(key => [key, key]))
 
+// Chinese: only the Windows warning of Antigravity's row (#2048); every other key reads in
+// English. `zh` is the Chinese id of DSH's locale service (dsh-client-locale 0.2.2-rc.2 lists
+// `zh` and `en`; `zh-CN` is only the page's lang attribute).
+export const ZH = {
+  'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.': '在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。',
+}
+
 const fill = (text, params) => (params
   ? text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
   : text)
@@ -595,7 +615,7 @@ export function installLocale(locale) {
   if (!locale || typeof locale.register !== 'function' || typeof locale.bind !== 'function') return () => {}
   // DSH 0.2.2 lists both `pt` (its own entry) and the locale pack's `pt-BR`; the same copy
   // must answer for either, or a reader moved onto DSH's `pt` falls back to English here.
-  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, 'pt-BR': PT_BR })
+  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, 'pt-BR': PT_BR, zh: ZH })
   const mine = locale.bind(NAMESPACE)
   bound = mine
   return () => {

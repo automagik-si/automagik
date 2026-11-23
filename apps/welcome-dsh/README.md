@@ -311,6 +311,8 @@ The shape was read from DSH 0.2.1-rc.2:
 | `acp-switch` | `{ id, on }` | Writes acp-dsh's `claude` or `codex` setting in the entry its service names (`settingsEntry`, else `acp-dsh`) at the revision `describe()` gave. |
 | `acp-retry` | `{ id }` | Starts a failed connector install again. |
 | `acp-install` | `{ id }` | Installs a CLI acp-dsh installs only on the person's click (Antigravity, `cli.install: 'manual'`) through its `installCli`, while the agent is on; answers at once with the install under way. Refused while off, or by an acp-dsh without `installCli`. Needs the owner viewer like `acp-switch`. |
+| `acp-sign-in` | `{ id }` | Signs in to an agent with its own home in this installation (Antigravity, `appSignIn: true`) through acp-dsh's `signInNative`: agy's browser sign-in opens on this computer. Answers at once with `signingIn: true`; a failure leaves `signInError` (`unsupported`, `timeout` or `failed`). Refused while off, without the CLI, or with no browser here (`signInWhere: 'terminal'`). Needs the owner viewer. |
+| `acp-sign-out` | `{ id }` | Signs out of that agent by retiring its home (acp-dsh's `accountSignOutNative`, as Reset does). Refused for a row without `appSignIn` and where the account is shared (`sharedAccount: true`, Windows). Needs the owner viewer. |
 | `bot-type` | `{ type: 'omni' }` | What the Omni Bot starts with, as groups: model and thinking (DSH's default), plugins with versions, tool groups with their switches, skills, folder and permissions. |
 
 The host declares `inject: ['settings', 'credentials', 'connection']`; `connection` serves
