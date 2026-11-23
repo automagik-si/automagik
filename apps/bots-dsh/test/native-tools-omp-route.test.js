@@ -102,7 +102,7 @@ test('Read only set during startup gives OFF argv on the very first chat launch'
   assert.deepEqual(h.conversation('level-dropped').args, offArgs(h.overlayPath))
 })
 
-test('two owner turns at Manual share one ON child without rereading the switch on reuse', async t => {
+test('two owner turns at Manual share one ON child, re-checking the saved ON\'s agent tag on reuse', async t => {
   const h = await host(t)
   const bot = h.rt.botOf('a')
   bot.nativeToolsKept = OMP
@@ -121,6 +121,25 @@ test('two owner turns at Manual share one ON child without rereading the switch 
   // a reused child's eligibility now compares that tag.
   assert.equal(readsAtStart, 4)
   assert.equal(reads, readsAtStart + 1)
+})
+
+// #1564 PR B (BD-5): the tag check on reuse is what remakes the child when ending it failed.
+test('turning OFF while endOmpSession throws: the next owner turn does not reuse the ON child', async t => {
+  const h = await host(t)
+  const chat = h.chat()
+  await chat.turn('plain owner-on')
+  const on = h.conversation('owner-on')
+  assert.deepEqual(on.args, ['acp'])
+  let ends = 0
+  h.service.endOmpSession = () => { ends += 1; throw new Error('test: the omp child could not be ended') }
+  const off = await h.call('update-bot', { id: 'a', nativeTools: false })
+  assert.equal(off.ok, true, JSON.stringify(off))
+  assert.equal(ends > 0, true)
+  assert.equal(h.stored().bots.a.nativeTools, undefined)
+  await chat.turn('plain owner-after-off')
+  const after = h.conversation('owner-after-off')
+  assert.notEqual(after.pid, on.pid)
+  assert.deepEqual(after.args, offArgs(h.overlayPath))
 })
 
 test('a real scheduled delivery starts OFF and an owner turn replays its history ON', async t => {

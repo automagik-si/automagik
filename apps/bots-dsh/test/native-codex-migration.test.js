@@ -254,6 +254,39 @@ test('M7 a Claude ON saved before the switch had a tag stays untouched and reads
   assert.equal(row(await h.view('claudeOn')).props.on, true)
 })
 
+test('M8 an ON saved for another agent on a Bot now on Codex (PR A Claude ON, PR C omp kept) reads ON for Codex; a restricted one and a saved OFF stay OFF', async t => {
+  const claudeOn = record('claudeOn', CODEX + '/default', { nativeTools: true })
+  const ompKept = record('ompKept', undefined, { appliedModel: CODEX + '/default', nativeTools: true, nativeToolsKept: 'acp-omp' })
+  const tagged = record('tagged', CODEX + '/default', { nativeTools: true, nativeToolsAgent: 'acp-claude' })
+  const restrictedOn = record('restrictedOn', CODEX + '/default', { nativeTools: true, nativeToolsKept: 'acp-omp', shell: false })
+  const savedOff = record('savedOff', CODEX + '/default', { nativeTools: false })
+  const { home, open } = workspace(t, { ...unmarked, bots: { ...unmarked.bots, claudeOn, ompKept, tagged, restrictedOn, savedOff } })
+  const h = open()
+  await h.rt.load()
+  for (const stored of [h.rt.state, h.stored()]) {
+    assertMigrated(stored)
+    for (const id of ['claudeOn', 'ompKept', 'tagged']) assert.deepEqual(fields(stored.bots[id]), ON, id)
+    assert.deepEqual(fields(stored.bots.restrictedOn), [true, undefined, 'acp-omp'])
+    assert.deepEqual(stored.bots.savedOff, savedOff)
+  }
+  for (const id of ['claudeOn', 'ompKept', 'tagged']) {
+    assert.equal(h.rt.nativeToolsFor('chat-' + id), true, id)
+    assert.equal(h.identity('chat-' + id).nativeToolsAgent, CODEX, id)
+    assert.equal(row(await h.view(id)).props.on, true, id)
+  }
+  for (const id of ['restrictedOn', 'savedOff']) {
+    assert.equal(h.rt.nativeToolsFor('chat-' + id), false, id)
+    assert.equal(row(await h.view(id)).props.on, false, id)
+  }
+  assert.deepEqual(codexWarnings(h), ['omni-ui: 3 Codex Bot(s) kept off native tools: shell access off or denied tools'])
+  await h.dispose()
+  const bytes = read(home)
+  const second = open()
+  await second.rt.load()
+  assert.equal(read(home), bytes)
+  assert.deepEqual(codexWarnings(second), [])
+})
+
 test('a team with no Codex Bot loads without a write: same revision and bytes, marker in memory only', async t => {
   const { home, open } = workspace(t, noCodex)
   const bytes = read(home)

@@ -16,7 +16,7 @@ import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { refusal } from './refusal.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
 import { markOf } from '../shared/permission-levels.js'
-import { effectiveMarkOf, restrictedBot } from '../shared/native-tools.js'
+import { effectiveMarkOf, nativeToolsOn, restrictedBot } from '../shared/native-tools.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import updateContract from './update-contract.json' with { type: 'json' }
 
@@ -398,18 +398,22 @@ export function install(rt) {
     // before it ran its Codex Bots on Codex's own tools; once, each keeps them in the owner's
     // direct chat (RFC 0003, Amendment: Codex native tools). A Bot with shell access off or
     // denied tools stays off: Codex's own tools would bypass both. As for omp, the marker
-    // rides the next real save when nothing was kept.
+    // rides the next real save when nothing was kept. A Bot whose ON was saved for another agent
+    // (Claude's untagged ON, omp's migrated one) and now runs on Codex ran on Codex's own tools
+    // too: its ON is moved to Codex. One saved OFF keeps it.
     if (state.nativeToolsCodexKept !== true) {
       let restricted = 0
       let kept = 0
       for (const bot of Object.values(state.bots)) {
-        if (bot === null || typeof bot !== 'object' || bot.nativeTools !== undefined || effectiveMarkOf(bot) !== 'acp-codex') continue
+        if (bot === null || typeof bot !== 'object' || effectiveMarkOf(bot) !== 'acp-codex') continue
+        if (bot.nativeTools === false || nativeToolsOn(bot)) continue
         if (restrictedBot(bot)) {
           restricted += 1
           continue
         }
         bot.nativeTools = true
         bot.nativeToolsAgent = 'acp-codex'
+        delete bot.nativeToolsKept
         kept += 1
       }
       if (restricted > 0) warn('omni-ui: %d Codex Bot(s) kept off native tools: shell access off or denied tools', restricted)
