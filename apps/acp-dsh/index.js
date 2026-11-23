@@ -26,6 +26,7 @@ import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
 import { CliStore, CLI_CHECK_EVERY_MS } from './src/host/clis.js'
 import { CliHomes, HOME_ENV, stopRuns } from './src/host/cli-homes.js'
 import { canRunProfile, ensureChatProfiles } from './src/host/codex-chat-profiles.js'
+import { NATIVE_OFF_UNAVAILABLE, nativeOffLaunch } from './src/host/codex-native.js'
 import { CONSENT_FILE, ConsentStore } from './src/host/consent.js'
 import { adaptersHome, AdapterStore, CHECK_TICK_MS, homeRelativeText, redactInstallerOutput } from './src/host/install.js'
 import { installationCliHome, installationIdentity } from './src/host/installation.js'
@@ -151,9 +152,11 @@ function defaultCliHome(ctx, storeHome, identity) {
  * @param {any} ctx
  * @param {{ claude?: any, codex?: any, hermes?: any, antigravity?: any, omp?: any, sideModel?: any, fakeAgent?: string, dshTools?: any, nativeTools?: any }}
  *   [config]
- * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, ompOverlayDir?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any>, installation?: string, cliHome?: string, evidenceOf?: typeof accountEvidenceOf }} [deps]
+ * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, ompOverlayDir?: string, codexOffDir?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any>, installation?: string, cliHome?: string, evidenceOf?: typeof accountEvidenceOf }} [deps]
  *   catalogHome: where each agent's models and efforts are kept (beside the adapters by default).
  *   ompOverlayDir: overrides the private ACP state folder for omp's OFF overlay in tests.
+ *   codexOffDir: where an OFF Codex's checked model catalogs are written (the ACP folder's
+ *   `codex-native-off`, outside every Codex home), for tests.
  *   loginSpawn, loginTimers: tests only, a fake CLI process and clock for sign-in attempts.
  *   loginRecord: tests only, ownership records with a fake sign-in process.
  *   checkTimers: tests only, the clock of the retries after a connector check that failed.
@@ -172,6 +175,7 @@ export function apply(ctx, config = {}, {
   catalogHome = typeof store.home === 'string' ? join(dirname(store.home), 'catalog') : undefined,
   ompOverlayDir = typeof store.home === 'string' ? join(dirname(store.home), 'omp')
     : typeof catalogHome === 'string' ? join(dirname(catalogHome), 'omp') : undefined,
+  codexOffDir = typeof store.home === 'string' ? join(dirname(store.home), 'codex-native-off') : undefined,
   loginSpawn, loginTimers, loginRecord, loginProbe, imageSetup, account = accountOf, evidenceOf = accountEvidenceOf,
   installation = process.env.DSH_HOME,
   cliHome: override, consentFile: accountFile,
@@ -490,7 +494,10 @@ export function apply(ctx, config = {}, {
     // A native agent takes no bridge, names its own sign-in command when signed out, and says
     // so in the chat when it has no mode for DSH's level (adapter.js).
     ...(isNative(spec) ? { bridge: false } : {}),
-    ...(spec.nativeSwitch === 'args' ? { nativeSwitch: 'args' } : {}),
+    // The Bot team's native-tools switch: omp by its launch args, Codex by a checked config,
+    // with the models it never applies to (adapter.js nativeKept).
+    ...(spec.nativeSwitch ? { nativeSwitch: spec.nativeSwitch } : {}),
+    ...(spec.nativeKeptModels ? { nativeKeptModels: spec.nativeKeptModels } : {}),
     ...(typeof spec.signInHint === 'string' ? { signInHint: spec.signInHint } : {}),
     ...(spec.modeFor === undefined ? { levelNotice: true } : {}),
     cli,
@@ -556,6 +563,27 @@ export function apply(ctx, config = {}, {
         if (ompOverlayDir === undefined) throw new Error(`${spec.defaultName} could not start with its tools off: it has no settings folder.`)
         const overlay = writeOmpOverlay(ompOverlayDir)
         return { command, args: [...args, ...spec.offArgs, '--config', overlay], env: { ...env, PI_AUTO_QA: undefined } }
+      }
+      // Codex with its own tools off: the config this start runs with is checked first, against
+      // this start's own home and folder (codex-native.js). Image grants never come with it.
+      if (spec.key === 'codex' && context?.nativeOff === true) {
+        return (async () => {
+          const refused = reason => Object.assign(new Error(reason), { code: NATIVE_OFF_UNAVAILABLE, reason })
+          const cwd = context.cwd ?? env.AUTOMAGIK_BOT_CLI_HOME ?? homedir()
+          const profileModes = homes && !isNative(spec) && typeof env.CODEX_HOME === 'string' && typeof env.CODEX_PATH === 'string'
+            ? ensureChatProfiles(env.CODEX_HOME, {
+                codexPath: env.CODEX_PATH, log: line => warn(ctx, line),
+                verify: profile => profileCheck(env.CODEX_PATH, profile, { cwd: env.CODEX_HOME, env }),
+              })
+            : undefined
+          if (profileModes === undefined) throw refused('its permission profiles are unavailable')
+          if (codexOffDir === undefined) throw refused('it has no settings folder')
+          const launched = await nativeOffLaunch({ command, args, env }, {
+            cwd, dir: codexOffDir, kept: spec.nativeKeptModels ?? [], signal: context.signal,
+            log: line => info(ctx, line.replace(/^acp-dsh: /, '')),
+          })
+          return { ...launched, profileModes }
+        })()
       }
       // The chat profiles of the Bot's isolated Codex home, for the session this process starts
       // (adapter.js keeps them with that session).
@@ -1606,6 +1634,18 @@ export function apply(ctx, config = {}, {
     endSession: (sessionId, why) => adapter.endSession(sessionId, why),
     endClaudeSession: (sessionId, why, startupWhy) => adapter.endClaudeSession(sessionId, why, startupWhy),
     endOmpSession: (sessionId, why, startupWhy) => adapter.endOmpSession(sessionId, why, startupWhy),
+    /**
+     * Ends one Session's agent process when it holds its own tools: Claude's in native mode, a
+     * Codex whose switch let it keep them (never an OFF Codex or one on a kept model). A process
+     * still before its first prompt answers `startupWhy`.
+     */
+    endNative: (sessionId, why, startupWhy) => adapter.endNative(sessionId, why, startupWhy),
+    /**
+     * Whether a Bot's route (`acp-codex/<model>`) is on a model the native-tools switch never
+     * applies to: it launches with Codex's own tools in every Session (agents.js
+     * `nativeKeptModels`). Anything else, or a failure, is false.
+     */
+    nativeModelKept: route => adapter.nativeKeptRoute(route),
     /**
      * What acted on one Session's permissions, for a diagnostics view (read-only, a fresh plain
      * copy, undefined for a Session that ran no agent here): { version, agent, startedAt, active,

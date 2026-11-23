@@ -6,6 +6,7 @@
 // (tool.js), so DSH shows the card and asks for approval. The next step drains what the agent
 // said since. DSH keeps the Session, its history and the sidebar.
 import { randomUUID } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
@@ -19,6 +20,7 @@ import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
 import { SessionFiles, restrictedLevel } from './session-files.js'
 import { chatProfileModes } from './codex-chat-profiles.js'
+import { ensureCatalog, keptModel, modelPart, NATIVE_OFF_UNAVAILABLE } from './codex-native.js'
 import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './identity.js'
 import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
@@ -49,6 +51,11 @@ export const HOLD_WAIT_MS = 10_000
 /** What a held Session's step answers when no gate gave a sentence of its own (it threw, never answered, or answered nothing readable). */
 export const HELD_TEXT = 'This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.'
 const NATIVE_TOOLS_CHANGED_TEXT = 'The tools setting changed; send again.'
+// Codex with its own tools off (codex-native.js). Off is not Read only: DSH's tools keep the
+// Session's level.
+const NO_BRIDGE_TEXT = "Codex's own tools are off for this Bot and Automagik's tools are turned off in this app, so Codex was not started. Turn native tools on in the Bot's Details, or turn Automagik's tools back on."
+const offUnavailableText = reason => `Codex could not turn its own tools off (${reason}), so the message was not sent. Turn native tools on in the Bot's Details, or update Automagik.`
+const NATIVE_CALL_TEXT = 'Codex used one of its own tools while they are off, so this answer stopped. Send your message again.'
 
 // The exact disposer of the mirror-tool registration a Session agent carries. It lives on the
 // agent, never in this module: a plugin reload replaces the module and the adapter while the
@@ -622,6 +629,9 @@ export class AcpAdapter extends LlmAdapter {
     // `endSession` marks it, so a Session ended before its agent session exists (the consent
     // wait, the start) still refuses that turn.
     this.starting = new Map()
+    // Codex agent row -> the model its last process with its own tools started on: what DSH's
+    // `default` is for that agent when a turn decides whether its model is kept (nativeKept).
+    this.startModels = new Map()
     // Asked before a turn opens on an agent (#869): a text when its signed-in account has not
     // been confirmed for the app, else undefined. Never asked for a call that continues a turn.
     this.access = access
@@ -836,12 +846,16 @@ export class AcpAdapter extends LlmAdapter {
    * Whether DSH's tools reach an agent at all: an explicit true/false decides, and an absent
    * setting takes the adapter's own switch (`bridgeDefault`).
    */
-  bridgeDecision(agent, sessionId) {
+  bridgeDecision(agent, sessionId, off = this.live.get(sessionId)?.nativeOff === true) {
     if (this.backchannel === undefined) return { on: false, setting: undefined }
     // A row that declares no bridge (`bridge: false`, the native agents) gets none, even with
     // `dshTools: true`: its bridge calls would not be recognised, so each would draw a mirror
     // card beside the bridge's rows and ask twice.
     if (agent?.bridge === false) return { on: false, setting: undefined }
+    // Codex with its own tools off works only through the bridge: it is on unless the admin's
+    // kill switch says false (then the spawn is refused). A spawn passes its own value; the live
+    // entry's serves the reads after it.
+    if (off) return { on: this.dshTools() !== false, setting: undefined }
     const setting = this.dshTools()
     if (typeof setting === 'boolean') return { on: setting, setting }
     return { on: this.bridgeDefault(agent, sessionId), setting: undefined }
@@ -860,10 +874,23 @@ export class AcpAdapter extends LlmAdapter {
    * @param {string} provider the route being started
    */
   nativeOn(agent, sessionId, provider) {
-    if (agent?.disableBuiltInTools !== true || !this.bridgeOn(agent, sessionId)) return false
+    // Codex (`nativeSwitch: 'config'`) keeps its own tools by default and needs no bridge for
+    // them; its team switch turns them off (codex-native.js).
+    const codexRow = agent?.nativeSwitch === 'config'
+    if (!codexRow && (agent?.disableBuiltInTools !== true || !this.bridgeOn(agent, sessionId))) return false
     if (this.teamManaged()) {
-      return agent === this.agents.get('acp-claude') && this.savedNativeOn(sessionId, provider)
+      const expected = codexRow ? 'acp-codex' : 'acp-claude'
+      if (agent !== this.agents.get(expected) || (provider !== undefined && provider !== expected)) return false
+      // A Bot with no agent tag is from before Codex had the switch: its ON is Claude's.
+      // No identity is OFF (fail closed).
+      try {
+        const identity = this.botIdentity(sessionId)
+        return identity?.nativeToolsBlocked !== true && identity?.nativeTools === true
+          && (identity.nativeToolsAgent ?? 'acp-claude') === expected
+      } catch { return false }
     }
+    // With no Bot team ever registered, Codex launches as it always has.
+    if (codexRow) return true
     let setting
     try { setting = this.nativeTools() } catch { return false }
     if (setting === true) return true
@@ -891,8 +918,31 @@ export class AcpAdapter extends LlmAdapter {
       // Readers that only supply the switch still have to confirm ON.
       const blocked = who?.nativeToolsBlocked
       if (blocked === true || (!(reuse && blocked === false) && who?.nativeTools !== true)) return false
-      const kept = who.nativeToolsAgent
-      return kept === undefined || kept === provider
+      // An ON always names its agent: an untagged one is not this provider's.
+      return who.nativeToolsAgent === provider
+    } catch { return false }
+  }
+
+  /**
+   * Whether a Codex turn's model is on the row's kept list (`nativeKeptModels`): such a model
+   * launches as today, with Codex's own tools, whatever the switch says. DSH's `default` is
+   * the model Codex itself starts with: the last one a process with its own tools reported,
+   * else the catalog's recorded start model. Unknown is not kept (the checked path).
+   */
+  nativeKept(agent, model) {
+    if (agent?.nativeSwitch !== 'config') return false
+    const id = model === DEFAULT_MODEL ? (this.startModels.get(agent) ?? agent.catalog?.ownModel?.()) : model
+    return keptModel(agent, modelPart(id))
+  }
+
+  /** `nativeKept` for a Bot's route (`acp-codex/<model>`), for the Bot team's Details row. */
+  nativeKeptRoute(route) {
+    try {
+      if (typeof route !== 'string') return false
+      const at = route.indexOf('/')
+      if (at <= 0) return false
+      const agent = this.agents.get(route.slice(0, at))
+      return this.nativeKept(agent, route.slice(at + 1)) === true
     } catch { return false }
   }
 
@@ -1085,6 +1135,25 @@ export class AcpAdapter extends LlmAdapter {
     return this.endSession(sessionId, startingNative ? startupWhy : why, 'acp-claude')
   }
 
+  /**
+   * End one Session's agent process when it holds its own tools (#1564): Claude's in native
+   * mode (endClaudeSession), and Codex's when its switch let it keep them. An OFF Codex and one
+   * on a kept model are left running. A Codex still starting there is held as Claude's is.
+   * @returns {boolean} whether a process was live or starting there
+   */
+  endNative(sessionId, why, startupWhy) {
+    const live = this.live.get(sessionId)
+    if (live?.provider === 'acp-codex') {
+      if (live.native !== true || live.nativeKept === true) return false
+      return this.endSession(sessionId, startupWhy !== undefined && live.nativeManaged === true
+        && live.run?.promptEnded === undefined ? startupWhy : why, 'acp-codex')
+    }
+    if (live === undefined && this.starting.get(sessionId)?.provider === 'acp-codex') {
+      return this.endSession(sessionId, startupWhy ?? why, 'acp-codex')
+    }
+    return this.endClaudeSession(sessionId, why, startupWhy)
+  }
+
   endOmpSession(sessionId, why, startupWhy) {
     const live = this.live.get(sessionId)
     if (!this.teamManaged() || live?.provider !== 'acp-omp' || live.nativeOff === true) return false
@@ -1183,7 +1252,9 @@ export class AcpAdapter extends LlmAdapter {
     this.backchannel.revoke(previous)
     try {
       await live.run.held(() => live.run.fork({
-        cwd: dshAgent?.session?.header?.cwd ?? homedir(),
+        // An OFF Codex forks where its tools were checked.
+        cwd: live.nativeOff === true && typeof live.checkedCwd === 'string' ? live.checkedCwd
+          : dshAgent?.session?.header?.cwd ?? homedir(),
         mcpServers: [this.bridgeServer(next)],
       }), { ms: 0, signal })
     } catch (error) {
@@ -1249,12 +1320,14 @@ export class AcpAdapter extends LlmAdapter {
     if (this.teamManaged() && ['sandbox/mode', 'permission/preset', 'approval/policy'].includes(event?.type)) {
       const live = this.live.get(session?.id)
       const claudeOn = live?.provider === 'acp-claude' && live.nativeManaged === true && live.native === true
+      // A Codex process on a kept model keeps today's behaviour at Read only (Codex's own mode).
+      const codexOn = live?.provider === 'acp-codex' && live.nativeManaged === true && live.native === true && live.nativeKept !== true
       const ompOn = live?.provider === 'acp-omp' && live.nativeOff !== true
-      if ((claudeOn || ompOn)
+      if ((claudeOn || codexOn || ompOn)
         && ((event.type === 'sandbox/mode' && event.data?.mode === 'read-only') || !permitsNative(this.readLevel(session, true)))) {
         const readOnly = 'This conversation is now Read only. Send a new message to continue.'
         if (ompOn) this.endOmpSession(session.id, readOnly, NATIVE_TOOLS_CHANGED_TEXT)
-        else this.endClaudeSession(session.id, readOnly, NATIVE_TOOLS_CHANGED_TEXT)
+        else this.endNative(session.id, readOnly, NATIVE_TOOLS_CHANGED_TEXT)
       }
     }
     if (event?.type !== 'model/selection') return
@@ -1424,12 +1497,33 @@ export class AcpAdapter extends LlmAdapter {
         yield* blocks.close()
         return yield finish('stop')
       }
+      // Codex's switch (`nativeSwitch: 'config'`) and a model on its kept list, which launches
+      // as today, with Codex's own tools, whatever the switch says (RFC 0003, Codex amendment).
+      const codexRow = agent.nativeSwitch === 'config'
+      const kept = codexRow && this.nativeKept(agent, options.model)
+      const managed = ['acp-claude', 'acp-codex'].includes(options.provider) && this.teamManaged() && !kept
+      const omp = agent.nativeSwitch === 'args'
+      const levelAtStart = () => this.readLevel(dshAgent?.session, managed || (omp && this.teamManaged()))
+      const turnLevel = levelAtStart()
+      const inputStart = turnStart(options.messages)
+      const history = options.messages.slice(0, inputStart)
+      const inputs = managed || omp ? options.messages.slice(inputStart).filter(message => !CONTEXT_KINDS.has(message.source?.kind)) : []
+      const requestedByOwner = dshAgent.session?.header?.origin !== 'subagent' && inputs.some(ownerInput)
+      const ompNativeAllowed = (reuse = false) => requestedByOwner && permitsNative(levelAtStart())
+        && this.savedNativeOn(sessionId, options.provider, reuse)
+      const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
+      const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
+      // A Codex turn that will run with its own tools off never asks for own mode or opens an
+      // image-file grant: DSH's read_image reaches images through the bridge.
+      const codexOffAtStart = codexRow && !kept && this.teamManaged()
+        && !(requestedByOwner && permitsNative(turnLevel) && this.nativeOn(agent, sessionId, options.provider))
       // Only a genuine user message activates staged file authority. The trailing-tool
       // guard above remains the sole continuation rule; no approval creates a prompt.
       let fileOwner
       let fileContext
       let keepsFiles = () => false
-      if (agent.sessionFiles === true) {
+      if (codexOffAtStart && this.sessionFiles.owners.has(sessionId)) this.sessionFiles.clear(sessionId, { retire: false })
+      if (agent.sessionFiles === true && !codexOffAtStart) {
         const level = levelOf(this.ctx.get?.('approval'), dshAgent.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
         let strictChat = restrictedLevel(level)
         if (strictChat && level.sandbox === 'workspace-write' && agent.ownMode !== undefined) {
@@ -1468,23 +1562,12 @@ export class AcpAdapter extends LlmAdapter {
       }
       // If the bridge process exited and the adapter has yet to re-attach by the next turn,
       // start a new agent session with DSH's tools and replay the chat to it (#969).
-      const managed = options.provider === 'acp-claude' && this.teamManaged()
-      const omp = agent.nativeSwitch === 'args'
-      const levelAtStart = () => this.readLevel(dshAgent?.session, managed || (omp && this.teamManaged()))
-      const turnLevel = levelAtStart()
-      const inputStart = turnStart(options.messages)
-      const history = options.messages.slice(0, inputStart)
-      const inputs = managed || omp ? options.messages.slice(inputStart).filter(message => !CONTEXT_KINDS.has(message.source?.kind)) : []
-      const requestedByOwner = dshAgent.session?.header?.origin !== 'subagent' && inputs.some(ownerInput)
-      const ompNativeAllowed = (reuse = false) => requestedByOwner && permitsNative(levelAtStart())
-        && this.savedNativeOn(sessionId, options.provider, reuse)
-      const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
-      const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
       // Native-tools mode keeps the agent's own tools, so it keeps the hard ask rules too: the
       // person's own allow rules must not silently skip the ask for a hard Bash or file case.
-      const native = managed
+      // For a Codex row, `native` means its process holds Codex's own tools.
+      const native = kept ? true : managed
         ? live?.native === true && live.nativeManaged === true && requestedByOwner && permitsNative(turnLevel)
-          && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.bridgeOn(agent, sessionId)
+          && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && (codexRow || this.bridgeOn(agent, sessionId))
         : this.nativeOn(agent, sessionId, options.provider)
       // An eligible owner turn replaces a managed OFF process when the saved switch is ON.
       const upgrade = managed && live !== undefined && live.native !== true && live.nativeManaged === true
@@ -1597,17 +1680,47 @@ export class AcpAdapter extends LlmAdapter {
             // omp's tool set is launch argv. Decide it after the startup awaits,
             // so a permission change during startup applies to the first process.
             const spawnOmpManaged = omp && this.teamManaged()
-            const nativeOff = spawnOmpManaged ? !ompNativeAllowed() : undefined
+            // Codex keeps its own tools only on an eligible owner turn whose saved switch is ON for
+            // it, or on a kept model, or with no Bot team; anything else starts it OFF.
+            const codexManaged = codexRow && !kept && this.teamManaged()
+            const preOn = !codexManaged || (requestedByOwner && permitsNative(levelAtStart()) && this.nativeOn(agent, sessionId, options.provider))
+            const codexOff = codexRow && !preOn
+            const nativeOff = spawnOmpManaged ? !ompNativeAllowed() : codexRow ? codexOff : undefined
             entry.nativeOff = state.nativeOff = nativeOff
-            const spawnContext = {
-              ...(fileContext === undefined ? {} : { sessionFiles: fileContext }),
-              ...(nativeOff === true ? { nativeOff: true } : {}),
+            if (codexOff) {
+              // ON when the turn started, OFF now: a staged image grant cannot come with it.
+              if (fileOwner !== undefined) {
+                this.sessionFiles.clear(sessionId, { owner: fileOwner })
+                started()
+                return yield* stopped(NATIVE_TOOLS_CHANGED_TEXT)
+              }
+              // Its own tools off and DSH's turned off: nothing would be left to work with.
+              if (!this.bridgeDecision(agent, sessionId, true).on) return yield finish('error', NO_BRIDGE_TEXT, 'acp/native-off-no-bridge')
             }
+            const spawnContext = codexOff
+              ? { nativeOff: true, cwd: dshAgent?.session?.header?.cwd, signal: options.signal }
+              : {
+                  ...(fileContext === undefined ? {} : { sessionFiles: fileContext }),
+                  ...(nativeOff === true ? { nativeOff: true } : {}),
+                }
             const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
             // omp's launch spec is synchronous and it has no bridge to prepare.
             // Keep its policy decision and actual spawn in the same event-loop turn.
-            const { profileModes, sessionFileMode, sessionFileEnabled, ...spec } = omp ? launch : await launch
+            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, offCatalog, ...spec } = omp ? launch : await launch
             if (spawnOmpManaged && entry.held !== undefined) return yield* stopped(entry.held)
+            if (codexOff) {
+              // The checks ran for this start: its folder, at least one model, its own tools off.
+              const real = path => { try { return realpathSync(path) } catch { return undefined } }
+              const checkedAt = typeof checkedCwd === 'string' ? real(checkedCwd) : undefined
+              const runsAt = real(dshAgent?.session?.header?.cwd ?? spec.env?.AUTOMAGIK_BOT_CLI_HOME ?? homedir())
+              if (spawnedOff !== true || !Array.isArray(models) || models.length === 0 || checkedAt === undefined || checkedAt !== runsAt) {
+                throw Object.assign(new Error('its check did not match this start'), { code: NATIVE_OFF_UNAVAILABLE, reason: 'its check did not match this start' })
+              }
+            }
+            state.checkedModels = codexOff ? models : undefined
+            state.offCatalog = codexOff ? offCatalog : undefined
+            state.checkedCwd = codexOff ? checkedCwd : undefined
+            state.nativeKept = kept
             state.profileModes = profileModes
             state.sessionFileMode = sessionFileMode
             state.sessionFileEnabled = sessionFileEnabled === true
@@ -1617,27 +1730,30 @@ export class AcpAdapter extends LlmAdapter {
               this.sessionFiles.clear(sessionId, { owner: fileOwner })
               state.fileOwner = fileOwner = undefined
             }
-            const decision = this.bridgeDecision(agent, sessionId)
+            const decision = this.bridgeDecision(agent, sessionId, codexOff)
             const bridged = decision.on
             state.bridgeDefault = decision.setting === undefined ? bridged : undefined
             if (bridged) await this.backchannel.listen()
-            const spawnManaged = options.provider === 'acp-claude' && this.teamManaged()
+            const spawnManaged = ['acp-claude', 'acp-codex'].includes(options.provider) && this.teamManaged() && !kept
             if (spawnManaged && entry.held !== undefined) return yield* stopped(entry.held)
             if (bridged && fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined || options.signal?.aborted)) throw new Error('Image permission changed while the bridge started.')
             // Read the saved switch after asynchronous process preparation, just before
             // choosing the bridge tools and starting the process that will use them.
             const spawnLevel = spawnManaged ? levelAtStart() : turnLevel
-            const spawnNative = spawnManaged
+            // An OFF Codex never turns ON mid-spawn.
+            const spawnNative = codexOff ? false : spawnManaged
               ? requestedByOwner && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId, options.provider)
               : native
+            // ON before the spawn, no longer after it: no process starts, the next turn opens OFF.
+            if (codexRow && preOn && spawnManaged && !spawnNative) return yield* stopped(NATIVE_TOOLS_CHANGED_TEXT)
             const spawnAsks = spawnManaged ? hardAsks(spawnNative, spawnLevel, bridged) : asks
-            state.native = spawnNative
+            state.native = codexRow ? !codexOff : spawnNative
             state.nativeManaged = spawnManaged
             state.asks = spawnAsks
             // A Bot whose team or role tools live in DSH gets DSH's extras by default on Codex.
-            // An explicit `dshTools: true` keeps the whole preset.
-            const twinsOff = spawnNative
-              || (bridged && agent.disableBuiltInTools !== true && decision.setting !== true && this.roleToolsInDsh(sessionId))
+            // An explicit `dshTools: true` keeps the whole preset, and so does an OFF Codex.
+            const roleExtras = bridged && agent.disableBuiltInTools !== true && decision.setting !== true && this.roleToolsInDsh(sessionId)
+            const twinsOff = codexRow ? !codexOff && roleExtras : spawnNative || roleExtras
             state.twinsOff = twinsOff
             if (bridged) {
               state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true, native: twinsOff })
@@ -1657,19 +1773,26 @@ export class AcpAdapter extends LlmAdapter {
               mcpServers: state.bridge === undefined ? [] : [this.bridgeServer(state.bridge)],
               // Native-tools mode: the built-in tools stay on (`disableBuiltInTools: false`), with
               // the hard ask rules unless the level is Full.
-              ...(spawnNative
+              ...(spawnNative && !codexRow
                 ? { sessionMeta: { ...(spawnAsks ? agent.hardAsk() : {}), disableBuiltInTools: false } }
                 : bridged && agent.disableBuiltInTools === true
                   ? { sessionMeta: { disableBuiltInTools: true } }
                   : spawnAsks ? { sessionMeta: agent.hardAsk() } : {}),
               dshTools: bridged,
-              ...(nativeOff === true ? {
+              ...(omp && nativeOff === true ? {
                 refuseTools: true,
                 onForbiddenTool: () => {
                   if (this.live.get(sessionId) === state && state.run === run) {
                     this.endSession(sessionId, OMP_TOOLS_OFF_TEXT, options.provider,
                       candidate => candidate === state || candidate === entry)
                   }
+                },
+              } : {}),
+              ...(codexOff ? {
+                nativeOff: true,
+                onNativeOffCall: tool => {
+                  this.warn(`${agent.name} used one of its own tools (${tool.kind ?? 'other'}) while they are off: its session was ended`)
+                  if (this.live.get(sessionId) === state && state.run === run) this.endSession(sessionId, NATIVE_CALL_TEXT, options.provider)
                 },
               } : {}),
               refresh: agent.refresh,
@@ -1693,6 +1816,9 @@ export class AcpAdapter extends LlmAdapter {
               if (state.run === run && state.bridge !== undefined) this.backchannel.revoke(state.bridge)
             })
             await starting
+            // DSH's `default` for Codex is the model a process with its own tools started on. An
+            // OFF process reads a catalog without the kept models, so it never says.
+            if (codexRow && !codexOff && typeof run.startModel === 'string') this.startModels.set(agent, run.startModel)
             if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined)) throw new Error('Image permission changed during startup.')
             try { agent.proven?.() } catch {}
             break
@@ -1715,6 +1841,10 @@ export class AcpAdapter extends LlmAdapter {
             if (error?.code === 'acp-account/busy') {
               return yield finish('error', error.message, MODEL_ACCESS_REQUIRED)
             }
+            // A check that refused OFF is this Codex's answer, not the connector's release.
+            const offRefused = error?.code === NATIVE_OFF_UNAVAILABLE
+            if (offRefused && options.signal?.aborted) return yield STOPPED()
+            if (offRefused) return yield finish('error', offUnavailableText(error.reason ?? error.message ?? 'its check failed'), NATIVE_OFF_UNAVAILABLE)
             // A missing bridge is this computer's config, not the release: no rollback for it.
             let back = false
             if (!fileContext?.files.length && attempt === 0 && error?.code !== 'acp_bridge_missing' && options.signal?.aborted !== true) {
@@ -1776,6 +1906,14 @@ export class AcpAdapter extends LlmAdapter {
             this.endSession(sessionId)
             return yield* stopped('The image session ended when its tools changed. Ask for image permission again.')
           }
+          // A fork of an OFF Codex reads the catalog its spawn checked: written back first when
+          // it is missing or changed.
+          if (codexRow && live.nativeOff === true) {
+            try { ensureCatalog(live.offCatalog) } catch {
+              this.endSession(sessionId)
+              return yield finish('error', offUnavailableText('the checked model catalog could not be written'), NATIVE_OFF_UNAVAILABLE)
+            }
+          }
           try {
             await this.refork(agent, live, dshAgent, options.signal)
           } catch (error) {
@@ -1788,15 +1926,17 @@ export class AcpAdapter extends LlmAdapter {
       }
       // A refused model can leave the run alive with no prompt yet. Revalidate when its
       // eventual first prompt is ready, too. AgentRun sets promptEnded during its first prompt.
-      const firstClaudePrompt = options.provider === 'acp-claude' && live.native === true && live.run.promptEnded === undefined
-      const startingClaude = firstClaudePrompt && live.nativeManaged === true
+      // A Codex process on a kept model holds its own tools by that rule, not by the switch.
+      const firstNativePrompt = (options.provider === 'acp-claude' || codexRow) && live.native === true
+        && live.nativeKept !== true && live.run.promptEnded === undefined
+      const startingNative = firstNativePrompt && live.nativeManaged === true
       // A plain omp child may have launched before the Bot team registered.
       const startingOmp = omp && live.nativeOff !== true && live.run.promptEnded === undefined
       const stopForNativeChange = () => {
         if (startingOmp) {
           this.endSession(sessionId, NATIVE_TOOLS_CHANGED_TEXT, options.provider,
             candidate => candidate === entry || candidate === live)
-        } else this.endClaudeSession(sessionId, NATIVE_TOOLS_CHANGED_TEXT)
+        } else this.endSession(sessionId, NATIVE_TOOLS_CHANGED_TEXT, options.provider)
         return stopped(NATIVE_TOOLS_CHANGED_TEXT)
       }
       // The Session's model and effort, then its level as the agent's own permission mode, before every prompt.
@@ -1817,15 +1957,43 @@ export class AcpAdapter extends LlmAdapter {
         const why = `${agent.name} would not take ${options.model}${at}: ${reason}`
         return yield finish('error', why)
       }
-      const checkLevel = startingClaude || ((firstClaudePrompt || startingOmp) && this.teamManaged())
+      // The model now on a Codex process decides which launch it needed. Every branch that ends
+      // here sends no prompt.
+      if (codexRow) {
+        const value = live.run.option('model')?.currentValue
+        const slug = modelPart(value)
+        const restart = () => {
+          if (typeof value === 'string') this.startModels.set(agent, value)
+          this.endSession(sessionId, undefined, options.provider)
+          return stopped(NATIVE_TOOLS_CHANGED_TEXT)
+        }
+        // OFF on a kept model (a stale `default`): the next turn launches it as today.
+        if (live.nativeOff === true && keptModel(agent, slug)) return yield* restart()
+        // OFF on a model its spawn did not check: never prompted (LQ1).
+        if (live.nativeOff === true && !live.checkedModels?.includes(slug)) {
+          this.endSession(sessionId, undefined, options.provider)
+          return yield finish('error', offUnavailableText('this model was not checked'), NATIVE_OFF_UNAVAILABLE)
+        }
+        // Launched as kept, now on a checked model, with a Bot team: its own tools on a turn that
+        // must be OFF (a stale `default` the other way). This ignores owner eligibility on
+        // purpose (a kept turn reads no owner input): at worst one more "send again" on a stale
+        // `default`, and it fails closed. The next turn opens by the usual rule.
+        if (live.nativeKept === true && !keptModel(agent, slug) && this.teamManaged()
+          && !(requestedByOwner && permitsNative(levelAtStart()) && this.nativeOn(agent, sessionId, options.provider))) return yield* restart()
+        live.nativeKept = keptModel(agent, slug)
+      }
+      const checkLevel = startingNative || ((firstNativePrompt || startingOmp) && this.teamManaged())
       const level = checkLevel ? this.readLevel(dshAgent?.session, true)
         : levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
       if (level === undefined) return yield* stopForNativeChange()
       const originalModes = agent.modeFor?.(level)
       const profiles = live.profileModes
-      const modes = live.sessionFileMode ? [live.sessionFileMode] : profiles ? chatProfileModes(originalModes, profiles) : originalModes
-      const strict = live.sessionFileMode ? [live.sessionFileMode] : profiles ? chatProfileModes([originalModes?.at(-1)], profiles) : [originalModes?.at(-1)]
-      const possible = agent.ownMode !== undefined && level.sandbox === 'workspace-write' && level.policy === 'ask' && !level.full && !level.auto
+      // An OFF Codex is put in its own read-only mode before every prompt (a fork included), as a
+      // backstop against its own tools only: DSH's tools run in DSH, at the Session's level.
+      const offModes = codexRow && live.nativeOff === true ? (profiles ? chatProfileModes(['read-only'], profiles) : ['read-only']) : undefined
+      const modes = offModes ?? (live.sessionFileMode ? [live.sessionFileMode] : profiles ? chatProfileModes(originalModes, profiles) : originalModes)
+      const strict = offModes ?? (live.sessionFileMode ? [live.sessionFileMode] : profiles ? chatProfileModes([originalModes?.at(-1)], profiles) : [originalModes?.at(-1)])
+      const possible = offModes === undefined && agent.ownMode !== undefined && level.sandbox === 'workspace-write' && level.policy === 'ask' && !level.full && !level.auto
       const candidate = possible && live.run.modes?.availableModes?.some(mode => mode.id === agent.ownMode)
       let own = 'none'
       if (candidate) {
@@ -1850,7 +2018,7 @@ export class AcpAdapter extends LlmAdapter {
         if (possible && own !== 'yes') {
           if (live.ownSent === true || live.sessionFileMode) await live.run.setMode(strict, { signal: options.signal, force: true })
           else await live.run.setMode(modes, { signal: options.signal })
-        } else if (!possible) await live.run.setMode(modes, { signal: options.signal, force: Boolean(live.sessionFileMode) })
+        } else if (!possible) await live.run.setMode(modes, { signal: options.signal, force: Boolean(live.sessionFileMode) || offModes !== undefined })
         if (live.held !== undefined) return yield* stopped(live.held)
       } catch (error) {
         if (live.held !== undefined) return yield* stopped(live.held)
@@ -1899,7 +2067,7 @@ export class AcpAdapter extends LlmAdapter {
       // level that has changed, and a gate that lets go here must not let this turn through.
       const late = entry.held ?? live.held ?? await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
       if (!uploadValid()) return yield uploadStopped()
-      if (uploads === undefined && !startingClaude && !startingOmp) started()
+      if (uploads === undefined && !startingNative && !startingOmp) started()
       if (late !== undefined) {
         this.endSession(sessionId, late)
         return yield* stopped(late)
@@ -1969,9 +2137,9 @@ export class AcpAdapter extends LlmAdapter {
       }
       // The first prompt is the last point where startup can lose its tool authority. The
       // permission mode, bridge and gates above can all wait after the ON process exists.
-      const managedClaudeNow = firstClaudePrompt && this.teamManaged()
+      const managedNativeNow = firstNativePrompt && this.teamManaged()
       const checkOmp = startingOmp && this.teamManaged()
-      if (checkOmp || startingClaude || managedClaudeNow) {
+      if (checkOmp || startingNative || managedNativeNow) {
         const held = entry.held ?? live.held
         if (held !== undefined) return yield* stopped(held)
         if (options.signal?.aborted) {
@@ -1980,7 +2148,7 @@ export class AcpAdapter extends LlmAdapter {
         }
         // Team registration during startup invalidates the standalone hidden ON grant.
         const allowed = checkOmp ? ompNativeAllowed()
-          : startingClaude && managedClaudeNow && permitsNative(this.readLevel(dshAgent?.session, true))
+          : startingNative && managedNativeNow && permitsNative(this.readLevel(dshAgent?.session, true))
             && this.nativeOn(agent, sessionId, options.provider)
         if (!allowed) return yield* stopForNativeChange()
       }

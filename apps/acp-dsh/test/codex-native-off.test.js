@@ -1,0 +1,734 @@
+// #1564 PR B: Codex native tools OFF (codex-native.js, the adapter's Codex row, index.js's
+// service). Codex runs only through fakes here: a fake `codex` for the checks, the fake ACP agent
+// for the process. Nothing reads a real Codex home.
+import assert from 'node:assert/strict'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { test } from 'node:test'
+import { CATALOG_DROPS, keptModel, modelPart, NATIVE_OFF_NESTED, NATIVE_OFF_TOOLS, nativeOffLaunch, nativeOffSetup, offCatalog, pruneCatalogs } from '../src/host/codex-native.js'
+import { AGENTS } from '../src/host/agents.js'
+import { Session } from '@deepseek-ai/dsh-session'
+import { AgentRun } from '../src/host/acp.js'
+import { CHECKED, codexWorld, fakeCodex, finishOf, fixture, KEPT, owner, scheduled, textOf, turnOn, withFunction, withTool } from './fixtures/codex-native-world.js'
+import { CLAUDE, CODEX, holdNativeStartup } from './fixtures/managed-native-world.js'
+
+const recorded = JSON.parse(readFileSync(new URL('./fixtures/codex-acp-2.9.0-models.json', import.meta.url), 'utf8'))
+
+function scratch(t) {
+  const root = mkdtempSync(join(tmpdir(), 'codex-native-off-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const home = join(root, 'codex-home')
+  const cwd = join(root, 'chat')
+  const dir = join(root, 'acp', 'codex-native-off')
+  mkdirSync(home, { recursive: true })
+  mkdirSync(cwd, { recursive: true })
+  return { root, home, cwd, dir, launch: { command: process.execPath, args: ['codex-acp.js'], env: { CODEX_HOME: home, CODEX_PATH: '/fake/codex', AUTOMAGIK_BOT_CLI_HOME: root } } }
+}
+
+const setup = (s, fake, more = {}) => nativeOffSetup(s.launch, { cwd: s.cwd, dir: s.dir, kept: ['gpt-5.5'], run: fake.run, ...more })
+const refused = async (promise, pattern) => {
+  await assert.rejects(promise, error => {
+    assert.equal(error.code, 'acp/native-off-unavailable')
+    if (pattern) assert.match(error.message, pattern)
+    return true
+  })
+}
+
+test('the Codex row carries the switch and the kept list (one source of "unverifiable")', () => {
+  assert.equal(AGENTS['acp-codex'].nativeSwitch, 'config')
+  assert.deepEqual(AGENTS['acp-codex'].nativeKeptModels, ['gpt-5.5'])
+  assert.equal(Object.isFrozen(AGENTS['acp-codex'].nativeKeptModels), true)
+})
+
+test('modelPart reads codex-acp 2.9.0 model values (bare slugs) and fails closed on any other shape', () => {
+  for (const value of recorded.values) assert.equal(modelPart(value), value)
+  assert.equal(modelPart(recorded.currentValue), recorded.currentValue)
+  for (const value of [undefined, null, 42, '', 'gpt-5.5/high', 'gpt 5.5', '../x', { value: 'gpt-5.5' }]) assert.equal(modelPart(value), undefined)
+  const row = AGENTS['acp-codex']
+  assert.equal(keptModel(row, modelPart('gpt-5.5')), true)
+  assert.equal(keptModel(row, modelPart('gpt-5.6-luna')), false)
+  assert.equal(keptModel(row, modelPart('gpt-5.5/high')), false)
+  assert.equal(keptModel({}, 'gpt-5.5'), false)
+})
+
+test('N1 the FULL capture is accepted: overrides, CODEX_CONFIG, the transport only, a private catalog outside the Codex home', async t => {
+  const s = scratch(t)
+  const fake = fakeCodex({ answers: { servers: JSON.stringify([{ name: 'personal' }]) } })
+  const lines = []
+  const launched = await nativeOffLaunch(s.launch, { cwd: s.cwd, dir: s.dir, kept: ['gpt-5.5'], run: fake.run, log: line => lines.push(line) })
+  const config = JSON.parse(launched.env.CODEX_CONFIG)
+  assert.equal(launched.nativeOff, true)
+  assert.equal(launched.checkedCwd, s.cwd)
+  assert.deepEqual(launched.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
+  assert.deepEqual(config.features.multi_agent_v2, { enabled: false, disable_native_tools: true })
+  assert.equal(config.features.shell_tool, false)
+  assert.equal(config.features.view_image, false)
+  for (const name of ['unified_exec', 'image_generation', 'multi_agent', 'code_mode', 'apps', 'plugins', 'goals']) assert.equal(config.features[name], false, name)
+  assert.deepEqual(config.tools, { experimental_request_user_input: { enabled: false } })
+  assert.equal(config.web_search, 'disabled')
+  assert.deepEqual(config.mcp_servers, { personal: { enabled: false } })
+  assert.equal(config.skills.bundled.enabled, false)
+  const file = config.model_catalog_json
+  assert.equal(file, launched.offCatalog.path)
+  assert.ok(file.startsWith(s.dir + '/'))
+  assert.equal(file.startsWith(s.home), false)
+  assert.equal(statSync(file).mode & 0o777, 0o600)
+  const catalog = JSON.parse(readFileSync(file, 'utf8'))
+  assert.deepEqual(catalog.models.map(model => model.slug), ['gpt-6.2-sol', 'gpt-5.6-luna'])
+  for (const model of catalog.models) {
+    assert.equal(model.apply_patch_tool_type, null)
+    for (const name of CATALOG_DROPS) assert.equal(model.experimental_supported_tools.includes(name), false)
+  }
+  assert.equal(readFileSync(file, 'utf8'), launched.offCatalog.bytes)
+  assert.equal(readdirSync(s.home).length, 0)
+  assert.match(lines.at(-1), /^acp-dsh: Codex runs with its own tools off; it offers functions\.exec, functions\.wait \(exec reaches list_mcp_resource_templates, list_mcp_resources, read_mcp_resource\); models 2\/3$/)
+  const offered = (await setup(scratch(t), fakeCodex())).offered
+  assert.deepEqual(offered.tools, [...NATIVE_OFF_TOOLS])
+  assert.deepEqual([...offered.nested].sort(), [...NATIVE_OFF_NESTED].sort())
+})
+
+const N2 = [
+  ['apply_patch still nested', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? fixture('prompt-undo-catalog.json') : undefined }],
+  ['a collaboration tool', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? fixture('prompt-undo-collaboration.json') : undefined }],
+  ['a multi-agent v1 spawn_agent', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? withFunction('spawn_agent') : undefined }],
+  ['request_user_input', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? fixture('prompt-undo-user_input.json') : undefined }],
+  ['send_message_to_user_async', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? withFunction('send_message_to_user_async') : undefined }],
+  ['exec_command', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? fixture('prompt-undo-shell_tool.json') : undefined }],
+  ['a hosted web_search', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? withTool({ type: 'web_search' }) : undefined }],
+  ['an image_gen tool', { prompt: ({ undone, model }) => undone === undefined && model === undefined ? withTool({ type: 'namespace', name: 'image_gen', description: '', tools: [{ type: 'function', name: 'generate', description: 'x', parameters: {}, strict: false }] }) : undefined }],
+  ...['shell_tool', 'view_image', 'catalog', 'collaboration', 'user_input'].map(name => [`the ${name} removal undone gains nothing`, { prompt: ({ undone }) => undone === name ? fixture('prompt-full.json') : undefined }]),
+  ['debug models unreadable', { models: 'not json' }],
+  ['debug models empty', { models: '{"models":[]}' }],
+  ['shell_tool unknown to this Codex', { features: fixture('features.txt').split('\n').filter(line => !line.startsWith('shell_tool ')).join('\n') }],
+  ['a home server named dsh', { servers: JSON.stringify([{ name: 'dsh' }]) }],
+]
+for (const [label, answers] of N2) {
+  test(`N2 refuses: ${label}`, async t => {
+    await refused(setup(scratch(t), fakeCodex({ answers })))
+  })
+}
+
+test('N2 refuses: the checks out of time', async t => {
+  const fake = fakeCodex({ answers: { hang: call => call.what === 'debug models' } })
+  await refused(setup(scratch(t), fake, { deadlineMs: 50, timeoutMs: 50 }))
+  assert.ok(fake.kills.some(kill => kill.what === 'debug models'))
+})
+
+test('N3 no verdict is reused: two homes run two full checks, the same launch twice runs twice', async t => {
+  const s = scratch(t)
+  const other = join(s.root, 'other-home')
+  mkdirSync(other)
+  const fake = fakeCodex({ answers: { servers: JSON.stringify([{ name: 'personal' }]) } })
+  await setup(s, fake)
+  const first = fake.calls.length
+  await nativeOffSetup({ ...s.launch, env: { ...s.launch.env, CODEX_HOME: other } }, { cwd: s.cwd, dir: s.dir, kept: ['gpt-5.5'], run: fake.run })
+  await setup(s, fake)
+  assert.equal(fake.calls.length, first * 3)
+  assert.equal(fake.calls.filter(call => call.home === other).length, first)
+})
+
+test('N4 per model: a failing model is dropped and logged, a kept model is never probed, the default failing or nothing left refuses', async t => {
+  const lunaSpawns = { prompt: ({ undone, model }) => undone === undefined && model === 'gpt-5.6-luna'
+    ? withTool({ type: 'namespace', name: 'collaboration', description: '', tools: [{ type: 'function', name: 'spawn_agent', description: 'x', parameters: {}, strict: false }] }) : undefined }
+  const s = scratch(t)
+  const fake = fakeCodex({ answers: lunaSpawns })
+  const lines = []
+  const result = await setup(s, fake, { log: line => lines.push(line) })
+  assert.deepEqual(result.models, ['gpt-6.2-sol'])
+  assert.deepEqual(JSON.parse(readFileSync(result.catalog.path, 'utf8')).models.map(model => model.slug), ['gpt-6.2-sol'])
+  assert.ok(lines.includes('acp-dsh: Codex model gpt-5.6-luna could not be checked with its own tools off; it is not offered while they are off'))
+  assert.equal(fake.calls.some(call => call.model === 'gpt-5.5'), false)
+  // Not on the kept list: its missing tool block drops it from the copy, with the log line.
+  const open = fakeCodex()
+  const unkept = []
+  const plain = await nativeOffSetup(s.launch, { cwd: s.cwd, dir: s.dir, kept: [], run: open.run, log: line => unkept.push(line) })
+  assert.deepEqual(plain.models, ['gpt-6.2-sol', 'gpt-5.6-luna'])
+  assert.ok(open.calls.some(call => call.model === 'gpt-5.5'))
+  assert.ok(unkept.includes('acp-dsh: Codex model gpt-5.5 could not be checked with its own tools off; it is not offered while they are off'))
+  await refused(setup(scratch(t), fakeCodex({ answers: { prompt: ({ undone, model }) => undone === undefined && model === undefined ? '[]' : undefined } })))
+  await refused(setup(scratch(t), fakeCodex({ answers: { prompt: ({ undone, model }) => undone === undefined && model !== undefined ? '[]' : undefined } })), /no model could be checked/)
+})
+
+test('N5 Stop: aborting mid-check refuses and kills the running CLI call', async t => {
+  const controller = new AbortController()
+  const fake = fakeCodex({ answers: { hang: call => call.what === 'debug prompt-input' && call.model === 'gpt-5.6-luna' } })
+  const pending = setup(scratch(t), fake, { signal: controller.signal })
+  while (!fake.calls.some(call => call.model === 'gpt-5.6-luna')) await new Promise(resolve => setTimeout(resolve, 2))
+  controller.abort()
+  await assert.rejects(pending, error => error.code === 'acp/native-off-unavailable' && error.stopped === true)
+  assert.ok(fake.kills.some(kill => kill.what === 'debug prompt-input'))
+  const before = fake.calls.length
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(fake.calls.length, before)
+})
+
+test('N6 prune: copies older than 24 hours go, younger ones and the new file stay, other files are left', async t => {
+  const s = scratch(t)
+  mkdirSync(s.dir, { recursive: true })
+  const now = Date.now()
+  const old = join(s.dir, `models-${'a'.repeat(64)}.json`)
+  const young = join(s.dir, `models-${'b'.repeat(64)}.json`)
+  const keep = join(s.dir, `models-${'c'.repeat(64)}.json`)
+  const other = join(s.dir, 'notes.txt')
+  for (const file of [old, young, keep, other]) writeFileSync(file, '{}')
+  const at = hours => (now - hours * 3600_000) / 1000
+  utimesSync(old, at(25), at(25))
+  utimesSync(young, at(23), at(23))
+  utimesSync(keep, at(30), at(30))
+  utimesSync(other, at(48), at(48))
+  pruneCatalogs(s.dir, { now: () => now, keepPath: keep })
+  assert.deepEqual(readdirSync(s.dir).sort(), [young, keep, other].map(file => file.slice(s.dir.length + 1)).sort())
+  const result = await setup(s, fakeCodex())
+  assert.ok(readdirSync(s.dir).includes(result.catalog.path.slice(s.dir.length + 1)))
+})
+
+test('N7 one CLI call at a time within a setup', async t => {
+  const fake = fakeCodex({ delayMs: 3 })
+  await setup(scratch(t), fake)
+  assert.ok(fake.calls.length >= 13, String(fake.calls.length))
+  assert.equal(fake.overlapped(), false)
+})
+
+test('N7b two setups started together on one Codex home never overlap their CLI calls', async t => {
+  const s = scratch(t)
+  const fake = fakeCodex({ delayMs: 3 })
+  const [a, b] = await Promise.all([setup(s, fake), setup(s, fake)])
+  assert.deepEqual(a.models, b.models)
+  assert.equal(fake.overlapped(), false)
+})
+
+test('N8 a symlinked folder: the checks run at its real path, the launch answers the path it was given', async t => {
+  const s = scratch(t)
+  const link = join(s.root, 'linked-chat')
+  symlinkSync(s.cwd, link)
+  const fake = fakeCodex()
+  const launched = await nativeOffLaunch(s.launch, { cwd: link, dir: s.dir, kept: ['gpt-5.5'], run: fake.run })
+  assert.equal(launched.checkedCwd, link)
+  assert.ok(fake.calls.every(call => call.cwd === s.cwd))
+  assert.deepEqual(Object.keys(JSON.parse(launched.env.CODEX_CONFIG).projects), [s.cwd])
+})
+
+test('offCatalog clears apply_patch, drops the catalog extras and the kept models, and refuses an empty result', () => {
+  const copy = offCatalog(JSON.parse(fixture('models.json')), { drop: ['gpt-5.5'] })
+  assert.deepEqual(copy.models.map(model => model.slug), ['gpt-6.2-sol', 'gpt-5.6-luna'])
+  assert.deepEqual(copy.models[0].experimental_supported_tools, ['request_user_input_async', 'literature_search_query', 'multi_agent_v2_in_code_mode'])
+  assert.throws(() => offCatalog({ models: [{ slug: 'gpt-5.5' }] }, { drop: ['gpt-5.5'] }), { code: 'acp/native-off-unavailable' })
+  assert.throws(() => offCatalog({ models: 'x' }), { code: 'acp/native-off-unavailable' })
+})
+
+// ---------------------------------------------------------------------------------------------
+// The adapter's Codex row on PR A's managed world (codex-native-world.js). The fake ACP agent
+// offers Codex model slugs; a spawn under `nativeOff` answers what a passed check returns.
+// ---------------------------------------------------------------------------------------------
+const NOTICE = 'The tools setting changed; send again.'
+const ON = () => ({ name: 'Ada', nativeTools: true, nativeToolsAgent: CODEX })
+const OFF = () => ({ name: 'Ada' })
+const MODELS = [...CHECKED, 'gpt-6-astra', KEPT]
+const world = (t, options = {}) => codexWorld(t, { models: MODELS, ...options })
+const sessions = w => w.events('new-session')
+const servers = w => sessions(w).map(row => row.servers)
+const pids = w => sessions(w).map(row => row.pid)
+const promptPids = w => w.events('prompt').map(row => row.pid)
+const offContexts = w => w.contexts.map(context => context?.nativeOff === true)
+const lastMode = (w, pid) => w.events('set-mode').filter(row => pid === undefined || row.pid === pid).at(-1)?.modeId
+const sourced = (text, source) => ({ ...owner(text), source })
+const freshRelay = () => sourced('[Handoff · part 2]\nThe user started a fresh conversation (part 2) in your own chat. This message is not from the user.', { kind: 'bot', form: 'relay', role: 'handoff', handoff: true })
+
+/** DSH tools with an `edit` that really writes its file; counts DSH's approval asks. */
+function writingTools(w) {
+  const asked = []
+  const defs = ['bash', 'read', 'list_bots', 'edit'].map(name => ({ name, description: name, parameters: { type: 'object', properties: {} } }))
+  w.services.tools = {
+    definitions: () => defs,
+    executable: name => defs.find(tool => tool.name === name),
+    execute: async ({ calls: [call] }) => {
+      w.executed.push(call.name)
+      const args = typeof call.arguments === 'string' ? JSON.parse(call.arguments || '{}') : call.arguments ?? {}
+      if (call.name === 'edit') writeFileSync(args.path, args.text)
+      return { results: [{ callId: call.id, result: { content: [{ type: 'text', text: `ran ${call.name}` }] } }] }
+    },
+  }
+  const request = w.services.approval.request
+  w.services.approval.request = async req => { asked.push(req.toolName); return request(req) }
+  return asked
+}
+
+/** A Session whose header says it is a DSH subagent's child. */
+function subagentChat(w, id) {
+  const session = Session.create(id, undefined, { version: 4, id, createdAt: 0, isSeeded: false, cwd: tmpdir(), origin: 'subagent' })
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  const agent = { session, ctx: { tools: { register: () => () => {} } } }
+  const get = w.adapter.ctx.agents.get
+  w.adapter.ctx.agents.get = sid => sid === id ? agent : get(sid)
+  return { session, history: [] }
+}
+
+test('A1 OFF launch on a scheduled turn: bridge forced for a Bot without needsDshTools, read-only id, DSH edit writes at Workspace (one DSH ask) and at Full (none)', async t => {
+  const w = world(t, { identity: OFF })
+  const asked = writingTools(w)
+  const chat = w.chat('direct')
+  const file = join(chat.session.header.cwd, 'written.txt')
+  await turnOn(w, chat, scheduled('scheduled delivery'))
+  assert.deepEqual(offContexts(w), [true])
+  assert.deepEqual(servers(w), [['dsh']])
+  assert.ok(w.events('mcp-list').length > 0, 'the bridge listed its tools')
+  const live = w.adapter.live.get('direct')
+  assert.equal(live.native, false)
+  assert.equal(live.nativeOff, true)
+  assert.equal(live.bridgeDefault, true)
+  assert.equal(lastMode(w), 'read-only')
+  assert.ok(w.events('mcp-list')[0].tools.includes('bash'), 'an OFF Codex gets DSH\'s whole preset')
+  const workspace = await turnOn(w, chat, scheduled(`codex-bridge edit ${JSON.stringify({ path: file, text: 'workspace' })}`))
+  assert.equal(finishOf(workspace).kind, 'stop')
+  assert.equal(readFileSync(file, 'utf8'), 'workspace')
+  assert.deepEqual(asked, ['edit'])
+  w.services.approval.effectivePolicy = () => 'never'
+  chat.session.append('sandbox/mode', { mode: 'danger-full-access' })
+  await turnOn(w, chat, scheduled(`codex-bridge edit ${JSON.stringify({ path: file, text: 'full' })}`))
+  assert.equal(readFileSync(file, 'utf8'), 'full')
+  assert.deepEqual(asked, ['edit'])
+  assert.equal(lastMode(w), 'read-only', 'still its read-only id after the fork')
+  assert.deepEqual(pids(w).length, 1)
+})
+
+for (const [label, identity] of [['A-B8a identity-less Workspace Session', () => undefined], ['A-B1i ON saved for Claude', () => ({ ...ON(), nativeToolsAgent: 'acp-claude' })], ['A-B1i ON with no agent tag', () => ({ name: 'Ada', nativeTools: true })]]) {
+  test(`${label}, team: OFF, servers exactly dsh, the bridge listened, read-only id`, async t => {
+    const w = world(t, { identity })
+    const chat = w.chat('workspace')
+    await turnOn(w, chat, owner('owner turn'))
+    assert.deepEqual(offContexts(w), [true])
+    assert.deepEqual(servers(w), [['dsh']])
+    assert.ok(w.events('mcp-list').length > 0)
+    assert.equal(lastMode(w), 'read-only')
+  })
+}
+
+test('A-B8b no Bot team ever registered: today\'s Codex launch, no check', async t => {
+  const w = world(t, { managed: false })
+  await turnOn(w, w.chat('direct'), owner('owner turn'))
+  assert.deepEqual(offContexts(w), [false])
+  assert.deepEqual(servers(w), [[]])
+  assert.equal(w.adapter.live.get('direct').native, true)
+})
+
+for (const [label, message] of [
+  ['A-B1c a scheduled turn into the ON Bot\'s direct chat', scheduled('scheduled delivery')],
+  ['A-B1d a Bot relay request', sourced('a request', { kind: 'bot', form: 'relay', role: 'request', senderName: 'Other' })],
+  ['A-B1e a resumed relay', sourced('resumed handoff', { kind: 'user', handoff: true, resume: true })],
+]) {
+  test(`${label} opens OFF`, async t => {
+    const w = world(t, { identity: ON })
+    await turnOn(w, w.chat('direct'), message)
+    assert.deepEqual(offContexts(w), [true])
+    assert.deepEqual(servers(w), [['dsh']])
+  })
+}
+
+test('A-B1h a DSH subagent origin opens OFF even with an owner-shaped input', async t => {
+  const w = world(t, { identity: ON })
+  await turnOn(w, subagentChat(w, 'child'), owner('from the parent'))
+  assert.deepEqual(offContexts(w), [true])
+})
+
+test('owner turn with the switch ON for Codex: today\'s launch (ON), its own tools', async t => {
+  const w = world(t, { identity: ON })
+  await turnOn(w, w.chat('direct'), owner('owner turn'))
+  assert.deepEqual(offContexts(w), [false])
+  const live = w.adapter.live.get('direct')
+  assert.equal(live.native, true)
+  assert.equal(live.nativeManaged, true)
+  assert.deepEqual(servers(w), [[]])
+})
+
+test('A-B1g an owner turn with a time-context row opens ON', async t => {
+  const w = world(t, { identity: ON })
+  const chat = w.chat('direct')
+  chat.history.push(sourced('Current time.', { kind: 'time-context', form: 'snapshot' }))
+  await turnOn(w, chat, owner('owner turn'))
+  assert.deepEqual(offContexts(w), [false])
+})
+
+test('A-B1f/B1a a live ON then a scheduled turn remakes it OFF; a relay then the owner remakes OFF to ON', async t => {
+  const w = world(t, { identity: ON })
+  const chat = w.chat('direct')
+  await turnOn(w, chat, owner('owner first'))
+  const on = w.adapter.live.get('direct').run
+  await turnOn(w, chat, scheduled('scheduled delivery'))
+  assert.deepEqual(offContexts(w), [false, true])
+  assert.equal(sessions(w).length, 2)
+  await on.gone.catch(() => {})
+  assert.equal(on.alive, false)
+  const relayChat = w.chat('fresh')
+  await turnOn(w, relayChat, freshRelay())
+  const off = w.adapter.live.get('fresh').run
+  await turnOn(w, relayChat, owner('owner after the relay'))
+  assert.deepEqual(offContexts(w), [false, true, true, false])
+  const [, , offPid, onPid] = pids(w)
+  assert.notEqual(offPid, onPid)
+  assert.equal(promptPids(w).at(-1), onPid)
+  await off.gone.catch(() => {})
+  assert.equal(off.alive, false)
+})
+
+test('A-S1 team registration during a standalone ON startup stops it before its first prompt; the next turn opens OFF', async t => {
+  const w = world(t, { managed: false })
+  const chat = w.chat('direct')
+  const gate = Promise.withResolvers()
+  const entered = Promise.withResolvers()
+  const heldBack = w.adapter.heldBack.bind(w.adapter)
+  let calls = 0
+  t.mock.method(w.adapter, 'heldBack', async (...args) => {
+    calls += 1
+    if (calls === 2) { entered.resolve(); await gate.promise }
+    return heldBack(...args)
+  })
+  const pending = turnOn(w, chat, owner('owner before the team'))
+  await entered.promise
+  w.identityReaders.register(() => undefined)
+  gate.resolve()
+  const stopped = await pending
+  assert.deepEqual(textOf(stopped), [NOTICE])
+  assert.deepEqual(promptPids(w), [])
+  await turnOn(w, chat, owner('owner after the team'))
+  assert.deepEqual(offContexts(w), [false, true])
+})
+
+test('A-S4 the switch turned OFF while the ON spawn prepares its bridge: no process, the notice, the next turn OFF', async t => {
+  let identity = { ...ON(), needsDshTools: true }
+  const w = world(t, { identity: () => identity })
+  const listen = w.backchannel.listen.bind(w.backchannel)
+  t.mock.method(w.backchannel, 'listen', async () => { identity = { name: 'Ada', needsDshTools: true }; return listen() })
+  const chat = w.chat('direct')
+  const stopped = await turnOn(w, chat, owner('owner turn'))
+  assert.deepEqual(textOf(stopped), [NOTICE])
+  assert.equal(sessions(w).length, 0)
+  t.mock.restoreAll()
+  await turnOn(w, chat, owner('owner again'))
+  assert.deepEqual(offContexts(w), [false, true])
+})
+
+test('A-S5 Read only during a held ON startup ends it with the notice and no prompt; A-S6 a Stop there is a Stop', async t => {
+  const w = world(t, { identity: () => ({ ...ON(), needsDshTools: true }) })
+  const chat = w.chat('direct')
+  const startup = holdNativeStartup(t, w)
+  const pending = turnOn(w, chat, owner('owner turn'))
+  const run = await startup.entered
+  chat.session.append('sandbox/mode', { mode: 'read-only' })
+  w.adapter.noteEvent(chat.session, { type: 'sandbox/mode', data: { mode: 'read-only' } })
+  startup.release()
+  const stopped = await pending
+  assert.deepEqual(textOf(stopped), [NOTICE])
+  assert.deepEqual(w.events('prompt').filter(row => row.pid === run.child.pid), [])
+  const w2 = world(t, { identity: () => ({ ...ON(), needsDshTools: true }) })
+  const chat2 = w2.chat('direct')
+  const startup2 = holdNativeStartup(t, w2)
+  const controller = new AbortController()
+  const pending2 = turnOn(w2, chat2, owner('owner turn'), { signal: controller.signal })
+  await startup2.entered
+  controller.abort()
+  startup2.release()
+  assert.equal(finishOf(await pending2).kind, 'aborted')
+})
+
+test('A-RO Read only ends a live ON Codex at once; a live OFF and a live kept process keep their PID', async t => {
+  const w = world(t, { identity: ON })
+  const on = w.chat('on')
+  await turnOn(w, on, owner('owner turn'))
+  const off = w.chat('off')
+  await turnOn(w, off, scheduled('scheduled'))
+  const kept = w.chat('kept')
+  await turnOn(w, kept, scheduled('scheduled kept'), { model: KEPT })
+  for (const chat of [on, off, kept]) {
+    chat.session.append('sandbox/mode', { mode: 'read-only' })
+    w.adapter.noteEvent(chat.session, { type: 'sandbox/mode', data: { mode: 'read-only' } })
+  }
+  assert.equal(w.adapter.live.has('on'), false)
+  assert.equal(w.adapter.live.has('off'), true)
+  assert.equal(w.adapter.live.has('kept'), true)
+})
+
+test('A4 refusals before a process: the kill switch with OFF, and a refused check (no rollback, no repair, no prompt)', async t => {
+  const w = world(t, { identity: OFF, dshTools: false })
+  const chunks = await turnOn(w, w.chat('direct'), scheduled('scheduled'))
+  assert.equal(finishOf(chunks).failure.code, 'acp/native-off-no-bridge')
+  assert.equal(w.contexts.length, 0)
+  assert.equal(sessions(w).length, 0)
+  const w2 = world(t, { identity: OFF, offSpawn: () => Promise.reject(Object.assign(new Error('x'), { code: 'acp/native-off-unavailable', reason: 'a test refusal' })) })
+  const rollback = t.mock.fn(() => true)
+  const repair = t.mock.fn(() => true)
+  Object.assign(w2.codex, { rollback, repair })
+  const refused = await turnOn(w2, w2.chat('direct'), scheduled('scheduled'))
+  assert.equal(finishOf(refused).failure.code, 'acp/native-off-unavailable')
+  assert.match(finishOf(refused).failure.message, /Codex could not turn its own tools off \(a test refusal\), so the message was not sent/)
+  assert.equal(rollback.mock.callCount(), 0)
+  assert.equal(repair.mock.callCount(), 0)
+  assert.equal(sessions(w2).length, 0)
+  // A check made for another folder, or with no model, is refused the same way.
+  const w3 = world(t, { identity: OFF, offSpawn: (context, launch) => Promise.resolve({ ...launch, nativeOff: true, checkedCwd: tmpdir(), models: [...CHECKED] }) })
+  assert.equal(finishOf(await turnOn(w3, w3.chat('direct'), scheduled('scheduled'))).failure.code, 'acp/native-off-unavailable')
+  const w4 = world(t, { identity: OFF, offSpawn: (context, launch) => Promise.resolve({ ...launch, nativeOff: true, checkedCwd: context.cwd, models: [] }) })
+  assert.equal(finishOf(await turnOn(w4, w4.chat('direct'), scheduled('scheduled'))).failure.code, 'acp/native-off-unavailable')
+})
+
+test('A5/A6 OFF: Codex\'s own patch and sub-agent calls end the session with no card and never run; bridge calls and the MCP readers do not trip the backstop', async t => {
+  const w = world(t, { identity: OFF })
+  const chat = w.chat('direct')
+  for (const [text, label] of [['codex-reader codex list_mcp_resources', 'codex reader'], ['codex-reader dsh read_mcp_resource', 'bridge reader'], ['codex-bridge bash', 'bridge call'], ['mcp-ask-bridge', 'bridge permission']]) {
+    const chunks = await turnOn(w, chat, scheduled(text))
+    assert.equal(finishOf(chunks).kind, 'stop', label)
+    assert.equal(textOf(chunks).some(line => line.includes('Codex used one of its own tools')), false, label)
+  }
+  assert.ok(textOf(await turnOn(w, chat, scheduled('mcp-ask-bridge'))).join('').includes('MCP permission: yes'))
+  const pid = pids(w).at(-1)
+  for (const text of ['codex-edit-ask', 'codex-subagent']) {
+    // A chat of its own: a fresh process replays the chat, and the fake answers the first trigger it reads.
+    const chunks = await turnOn(w, w.chat(text), scheduled(text))
+    assert.ok(textOf(chunks).includes('Codex used one of its own tools while they are off, so this answer stopped. Send your message again.'), text)
+    assert.equal(chunks.some(chunk => chunk.block?.type === 'tool-call'), false, text)
+    assert.equal(w.adapter.live.has(text), false, text)
+  }
+  assert.equal(w.events('patch-ran').length, 0)
+  assert.equal(w.events('subagent-started').length, 1, 'the fake started it; the session ended at its first sight')
+  assert.equal(w.adapter.live.get('direct').run.child.pid, pid, 'the bridge chat kept its process')
+})
+
+test('A5 permission line: under nativeOff a question for a call that is not the bridge\'s is refused with the agent\'s reject option', async () => {
+  const ended = []
+  const run = new AgentRun({ command: process.execPath, cwd: tmpdir(), name: 'Codex', nativeOff: true, dshTools: true, refresh: 'fork', onNativeOffCall: tool => ended.push(tool.kind) })
+  const options = [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }]
+  const answer = await run.onPermission({ toolCall: { toolCallId: 'patch-1', title: 'Edit files?', kind: 'edit' }, options })
+  assert.deepEqual(answer, { outcome: { outcome: 'selected', optionId: 'no' } })
+  assert.deepEqual(ended, ['edit'])
+  const bridge = await run.onPermission({ toolCall: { toolCallId: 'b-1', title: 'mcp.dsh.bash', kind: 'execute', rawInput: { server: 'dsh', tool: 'bash' }, _meta: { is_mcp_tool_call: true } }, _meta: { is_mcp_tool_approval: true }, options })
+  run.seeTool({ toolCallId: 'b-2', title: 'mcp.dsh.bash', kind: 'execute', rawInput: { server: 'dsh', tool: 'bash' }, _meta: { is_mcp_tool_call: true } })
+  assert.deepEqual(ended, ['edit'])
+  void bridge
+})
+
+test('A7 an OFF turn clears a staged image grant and never activates it; A7b ON at the turn start and OFF at the spawn stops with the notice', async t => {
+  const w = world(t, { identity: OFF })
+  const chat = w.chat('direct')
+  const lifetime = new AbortController()
+  w.adapter.sessionFiles.owners.set('direct', { session: chat.session, lifetime, grant: { staged: true } })
+  const chunks = await turnOn(w, chat, owner('owner turn'))
+  assert.equal(w.adapter.sessionFiles.owners.has('direct'), false)
+  assert.equal(textOf(chunks).some(line => /Image session permission changed/.test(line)), false)
+  assert.deepEqual(offContexts(w), [true])
+  let identity = ON()
+  const w2 = world(t, { identity: () => identity })
+  w2.codex.sessionFiles = true
+  w2.codex.ownMode = undefined
+  w2.services.sandboxPolicy.resolve = () => ({ mode: 'read-only' })
+  w2.adapter.access = async () => { identity = OFF(); return undefined }
+  const owners = []
+  const make = w2.adapter.sessionFiles.owner.bind(w2.adapter.sessionFiles)
+  t.mock.method(w2.adapter.sessionFiles, 'owner', (...args) => { const made = make(...args); owners.push(made); return made })
+  const chat2 = w2.chat('direct')
+  // Read only would keep ON from starting; ON at the start needs Workspace, so read that for the switch only.
+  const read = w2.adapter.readLevel.bind(w2.adapter)
+  t.mock.method(w2.adapter, 'readLevel', (session, failClosed) => ({ ...read(session, failClosed), sandbox: 'workspace-write' }))
+  const flipped = await turnOn(w2, chat2, owner('owner turn'))
+  if (owners.length > 0) {
+    assert.deepEqual(textOf(flipped), [NOTICE])
+    assert.equal(w2.contexts.length, 0)
+    assert.equal(textOf(flipped).some(line => /exact image profile/.test(line)), false)
+    assert.equal(w2.adapter.sessionFiles.owners.has('direct'), false)
+  } else {
+    t.diagnostic('A7b: the session-files block made no owner in this harness')
+    assert.fail('A7b needs a staged owner')
+  }
+})
+
+test('A9 model guard: a live OFF process takes a checked model on the same PID; an unchecked one is refused with zero prompts', async t => {
+  const w = world(t, { identity: OFF })
+  const chat = w.chat('direct')
+  await turnOn(w, chat, scheduled('first'), { model: 'gpt-6.2-sol' })
+  const [pid] = pids(w)
+  await turnOn(w, chat, scheduled('second on luna'), { model: 'gpt-5.6-luna' })
+  assert.deepEqual(pids(w), [pid])
+  assert.equal(promptPids(w).filter(p => p === pid).length, 2)
+  const refused = await turnOn(w, chat, scheduled('third on astra'), { model: 'gpt-6-astra' })
+  assert.equal(finishOf(refused).failure.code, 'acp/native-off-unavailable')
+  assert.match(finishOf(refused).failure.message, /this model was not checked/)
+  assert.equal(promptPids(w).length, 2)
+})
+
+test('A10 Auto under OFF: no own mode is asked or sent, and a bridge edit goes through DSH', async t => {
+  const w = world(t, { identity: OFF })
+  w.services.permissionPresets = { current: () => 'auto' }
+  const asked = t.mock.fn(() => () => 'yes')
+  w.adapter.ownMode = asked
+  writingTools(w)
+  const chat = w.chat('direct')
+  const file = join(chat.session.header.cwd, 'auto.txt')
+  const chunks = await turnOn(w, chat, scheduled(`codex-bridge edit ${JSON.stringify({ path: file, text: 'auto' })}`))
+  assert.equal(asked.mock.callCount(), 0)
+  assert.equal(w.events('set-mode').some(row => row.modeId === 'agent'), false)
+  assert.equal(lastMode(w), 'read-only')
+  assert.equal(w.adapter.live.get('direct').own, false)
+  // DSH's Auto path took the call (here its review has no route, so it refused): never a silent allow.
+  assert.match(textOf(chunks).join(''), /Auto review cannot see this call/)
+  assert.deepEqual(w.executed, [])
+  assert.equal(existsSync(file), false)
+})
+
+test('A11 an OFF fork finds its checked catalog: a deleted file is written back with the same bytes; an unwritable folder refuses with zero prompts', async t => {
+  const w = world(t, { identity: OFF })
+  const chat = w.chat('direct')
+  await turnOn(w, chat, scheduled('first'))
+  const { offCatalog: catalog } = w.adapter.live.get('direct')
+  rmSync(catalog.path)
+  chat.session.append('sandbox/mode', { mode: 'danger-full-access' })
+  w.services.approval.effectivePolicy = () => 'never'
+  await turnOn(w, chat, scheduled('after the level change'))
+  assert.ok(w.events('fork').length >= 1)
+  assert.equal(readFileSync(catalog.path, 'utf8'), catalog.bytes)
+  const before = w.events('prompt').length
+  rmSync(catalog.path)
+  const { chmodSync } = await import('node:fs')
+  chmodSync(join(catalog.path, '..'), 0o500)
+  t.after(() => { try { chmodSync(join(catalog.path, '..'), 0o700) } catch {} })
+  chat.session.append('sandbox/mode', { mode: 'workspace-write' })
+  w.services.approval.effectivePolicy = () => 'ask'
+  const refused = await turnOn(w, chat, scheduled('after another change'))
+  assert.equal(finishOf(refused).failure.code, 'acp/native-off-unavailable')
+  assert.equal(w.events('prompt').length, before)
+  assert.equal(w.adapter.live.has('direct'), false)
+})
+
+test('A-E endNative: a starting ON Codex and a live ON one before its first prompt get the notice; a live ON one after it the OFF text; live OFF and kept processes stay', async t => {
+  const w = world(t, { identity: ON })
+  const chat = w.chat('starting')
+  const gate = Promise.withResolvers()
+  const entered = Promise.withResolvers()
+  w.adapter.access = async () => { entered.resolve(); await gate.promise; return undefined }
+  const pending = turnOn(w, chat, owner('owner turn'))
+  await entered.promise
+  assert.equal(w.adapter.endNative('starting', 'OFF text', NOTICE), true)
+  gate.resolve()
+  assert.deepEqual(textOf(await pending), [NOTICE])
+  w.adapter.access = undefined
+  const live = w.chat('live')
+  await turnOn(w, live, owner('owner turn'))
+  assert.equal(w.adapter.endNative('live', 'OFF text', NOTICE), true)
+  assert.equal(w.adapter.live.has('live'), false)
+  const off = w.chat('off')
+  await turnOn(w, off, scheduled('scheduled'))
+  const kept = w.chat('kept')
+  await turnOn(w, kept, scheduled('kept'), { model: KEPT })
+  assert.equal(w.adapter.endNative('off', 'OFF text', NOTICE), false)
+  assert.equal(w.adapter.endNative('kept', 'OFF text', NOTICE), false)
+  assert.equal(w.adapter.live.has('off'), true)
+  assert.equal(w.adapter.live.has('kept'), true)
+  // Claude keeps PR A's path: a held native startup answers the notice.
+  const c = world(t, { identity: () => ({ name: 'Ada', nativeTools: true }) })
+  const claudeChat = c.chat('claude')
+  const startup = holdNativeStartup(t, c)
+  const claudeTurn = turnOn(c, claudeChat, owner('owner turn'), { provider: CLAUDE })
+  await startup.entered
+  assert.equal(c.adapter.endNative('claude', 'OFF text', NOTICE), true)
+  startup.release()
+  assert.deepEqual(textOf(await claudeTurn), [NOTICE])
+})
+
+const keptKinds = [
+  ['owner chat, switch ON', ON, () => owner('owner')],
+  ['owner chat, switch OFF', OFF, () => owner('owner')],
+  ['scheduled', ON, () => scheduled('scheduled')],
+  ['relay request', ON, () => sourced('request', { kind: 'bot', form: 'relay', role: 'request', senderName: 'Other' })],
+  ['group', () => ({ name: 'Ada' }), () => sourced('group message', { kind: 'user', principal: { kind: 'person', id: 'member' } })],
+  ['identity-less', () => undefined, () => owner('owner')],
+  ['restricted Bot (shell off)', () => ({ name: 'Ada', nativeToolsBlocked: true }), () => owner('owner')],
+  ['Read only', ON, () => owner('owner'), true],
+  ['DSH subagent origin', ON, () => owner('owner'), false, true],
+]
+for (const [label, identity, message, readOnly, sub] of keptKinds) {
+  test(`K1 kept model gpt-5.5, ${label}: today's launch, no check`, async t => {
+    const w = world(t, { identity })
+    const chat = sub ? subagentChat(w, 'child') : w.chat('chat')
+    if (readOnly) chat.session.append('sandbox/mode', { mode: 'read-only' })
+    await turnOn(w, chat, message(), { model: KEPT })
+    assert.deepEqual(offContexts(w), [false])
+    assert.deepEqual(servers(w), [[]])
+    const live = w.adapter.live.get(chat.session.id)
+    assert.equal(live.native, true)
+    assert.equal(live.nativeKept, true)
+  })
+}
+
+test('K2 `default` resolved to the recorded start model gpt-5.5 is kept: today\'s launch', async t => {
+  const w = world(t, { identity: OFF, start: KEPT })
+  w.codex.catalog.ownModel = () => KEPT
+  await turnOn(w, w.chat('direct'), scheduled('scheduled'))
+  assert.deepEqual(offContexts(w), [false])
+  assert.equal(w.adapter.live.get('direct').nativeKept, true)
+})
+
+test('K2b unknown start model: the OFF spawn on gpt-5.5 stops once with zero prompts, the next turn launches as today; an OFF run never records the start model', async t => {
+  const w = world(t, { identity: OFF, start: KEPT })
+  const chat = w.chat('direct')
+  const first = await turnOn(w, chat, scheduled('first'))
+  assert.deepEqual(textOf(first), [NOTICE])
+  assert.deepEqual(promptPids(w), [])
+  assert.equal(w.adapter.live.has('direct'), false)
+  await turnOn(w, chat, scheduled('second'))
+  assert.deepEqual(offContexts(w), [true, false])
+  assert.equal(promptPids(w).length, 1)
+  const w2 = world(t, { identity: OFF })
+  await turnOn(w2, w2.chat('direct'), scheduled('checked start'))
+  assert.equal(w2.adapter.startModels.has(w2.codex), false)
+})
+
+test('K3 a live OFF process asked for gpt-5.5 is remade with today\'s launch; the OFF PID gets no prompt', async t => {
+  const w = world(t, { identity: OFF })
+  const chat = w.chat('direct')
+  await turnOn(w, chat, scheduled('off first'))
+  const off = w.adapter.live.get('direct').run
+  await turnOn(w, chat, scheduled('now kept'), { model: KEPT })
+  assert.deepEqual(offContexts(w), [true, false])
+  const [offPid, keptPid] = pids(w)
+  assert.deepEqual(promptPids(w), [offPid, keptPid])
+  await off.gone.catch(() => {})
+  assert.equal(off.alive, false)
+})
+
+test('K4 a live kept process meeting a checked model is remade: OFF for a non-owner turn, ON for an eligible owner turn', async t => {
+  const w = world(t, { identity: ON })
+  const chat = w.chat('direct')
+  await turnOn(w, chat, scheduled('kept'), { model: KEPT })
+  await turnOn(w, chat, scheduled('checked'), { model: 'gpt-6.2-sol' })
+  assert.deepEqual(offContexts(w), [false, true])
+  assert.deepEqual(servers(w).at(-1), ['dsh'])
+  const chat2 = w.chat('direct2')
+  await turnOn(w, chat2, scheduled('kept'), { model: KEPT })
+  await turnOn(w, chat2, owner('owner on checked'), { model: 'gpt-6.2-sol' })
+  assert.deepEqual(offContexts(w), [false, true, false, false])
+  assert.equal(sessions(w).length, 4)
+  assert.equal(w.adapter.live.get('direct2').nativeManaged, true)
+})
+
+test('K5 a kept-launched process whose `default` turned out checked stops once on a non-owner turn; the next turn opens OFF', async t => {
+  const w = world(t, { identity: ON, start: 'gpt-6.2-sol' })
+  w.codex.catalog.ownModel = () => KEPT
+  const chat = w.chat('direct')
+  const first = await turnOn(w, chat, scheduled('first'))
+  assert.deepEqual(textOf(first), [NOTICE])
+  assert.deepEqual(promptPids(w), [])
+  assert.equal(w.adapter.startModels.get(w.codex), 'gpt-6.2-sol')
+  await turnOn(w, chat, scheduled('second'))
+  assert.deepEqual(offContexts(w), [false, true])
+})
+
+test('K6 nativeKeptRoute (the service nativeModelKept): the kept list, `default` by its start model, nothing else', async t => {
+  const w = world(t, { identity: OFF })
+  const kept = route => w.adapter.nativeKeptRoute(route)
+  assert.equal(kept('acp-codex/gpt-5.5'), true)
+  for (const route of ['acp-codex/gpt-5.6-luna', 'acp-claude/gpt-5.5', 'acp-claude/default', 'garbage', '', '/gpt-5.5', undefined, 42]) assert.equal(kept(route), false, String(route))
+  assert.equal(kept('acp-codex/default'), false)
+  w.codex.catalog.ownModel = () => KEPT
+  assert.equal(kept('acp-codex/default'), true)
+  w.codex.catalog.ownModel = () => { throw new Error('broken') }
+  assert.equal(kept('acp-codex/default'), false)
+})

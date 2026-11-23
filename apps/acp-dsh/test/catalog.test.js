@@ -147,7 +147,8 @@ test('a kept catalog from the release installed now is not probed again at start
   const { writeFileSync } = await import('node:fs')
   const home = scratch()
   t.after(() => rmSync(home, { recursive: true, force: true }))
-  writeFileSync(join(home, 'acp-test.json'), JSON.stringify({ key: 'v1', at: Date.now() - 60 * 60 * 1000, models: [{ id: 'default', name: 'Kept' }] }))
+  // #1564 PR B (B2-2 (b)): this release keeps the start model too; a file without it is read again once.
+  writeFileSync(join(home, 'acp-test.json'), JSON.stringify({ key: 'v1', at: Date.now() - 60 * 60 * 1000, start: null, models: [{ id: 'default', name: 'Kept' }] }))
   let spawned = 0
   const same = catalog(home, { key: () => 'v1', spawn: () => { spawned++; return fake } })
   t.after(() => same.dispose())

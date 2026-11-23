@@ -1,0 +1,41 @@
+{
+ "models": [
+  {
+   "slug": "gpt-6.2-sol",
+   "display_name": "GPT-6.2-Sol",
+   "tool_mode": "code_mode_only",
+   "multi_agent_version": "v2",
+   "apply_patch_tool_type": "freeform",
+   "experimental_supported_tools": [
+    "request_user_input_async",
+    "send_message_to_user_async",
+    "clock",
+    "literature_search_query",
+    "multi_agent_v2_in_code_mode"
+   ],
+   "visibility": "list",
+   "priority": 1,
+   "shell_type": "unified_exec"
+  },
+  {
+   "slug": "gpt-5.6-luna",
+   "display_name": "GPT-5.6-Luna",
+   "tool_mode": "code_mode_only",
+   "multi_agent_version": "v1",
+   "apply_patch_tool_type": "freeform",
+   "experimental_supported_tools": [],
+   "visibility": "list",
+   "priority": 10,
+   "shell_type": "unified_exec"
+  },
+  {
+   "slug": "gpt-5.5",
+   "display_name": "GPT-5.5",
+   "apply_patch_tool_type": "freeform",
+   "experimental_supported_tools": [],
+   "visibility": "list",
+   "priority": 13,
+   "shell_type": "unified_exec"
+  }
+ ]
+}

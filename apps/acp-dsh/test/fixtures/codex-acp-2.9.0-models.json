@@ -1,0 +1,17 @@
+{
+ "recorded": "codex-acp 2.9.0 session/new, model config option, scratch CODEX_HOME signed out (stage 4 evidence (a), 2026-11-23)",
+ "currentValue": "gpt-6.2-sol",
+ "values": [
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
+  "gpt-6.1-terra",
+  "gpt-6.1-sol",
+  "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5"
+ ]
+}

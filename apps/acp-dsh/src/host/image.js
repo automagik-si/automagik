@@ -290,7 +290,7 @@ const stoppedCheck = () => checkError('unreadable', 'the check was stopped', { p
  * standard output; nothing of it is logged. Past `timeoutMs`, or when `signal` aborts, the
  * command and the Codex it started are killed together and the answer does not wait for them.
  */
-function codexCli(launch, args, { run = execFile, timeoutMs = MCP_LIST_TIMEOUT_MS, what, refusal = 'unreadable', cwd = tmpdir(), signal, profiled = false } = {}) {
+export function codexCli(launch, args, { run = execFile, timeoutMs = MCP_LIST_TIMEOUT_MS, what, refusal = 'unreadable', cwd = tmpdir(), signal, profiled = false } = {}) {
   return new Promise((resolve, reject) => {
     const rejectCheck = error => reject(Object.assign(error, { profiled }))
     if (signal?.aborted) return rejectCheck(stoppedCheck())
@@ -383,13 +383,14 @@ export function readFeatures(stdout) {
  * this Codex lists (and has not removed), the only ones the run then sends.
  * @param {Map<string, { stage: string, on: boolean }>} rows read with the required overrides
  */
-export function checkFeatures(rows, { required = IMAGE_FEATURES_OFF, also = IMAGE_FEATURES_ALSO_OFF } = {}) {
+export function checkFeatures(rows, { required = IMAGE_FEATURES_OFF, also = IMAGE_FEATURES_ALSO_OFF, on = IMAGE_FEATURE_ON } = {}) {
   const live = name => rows.has(name) && rows.get(name).stage !== 'removed'
   for (const name of required) {
     if (!live(name)) throw checkError('unsupported', `Codex does not know the feature ${name}`)
     if (rows.get(name).on) throw checkError('unsupported', `Codex did not turn the feature ${name} off`)
   }
-  if (!live(IMAGE_FEATURE_ON) || !rows.get(IMAGE_FEATURE_ON).on) throw checkError('unsupported', `Codex did not turn the feature ${IMAGE_FEATURE_ON} on`)
+  // `on: null` (Codex with its own tools off, codex-native.js) turns no feature on.
+  if (on !== null && (!live(on) || !rows.get(on).on)) throw checkError('unsupported', `Codex did not turn the feature ${on} on`)
   return also.filter(name => live(name) && !required.includes(name))
 }
 
@@ -558,15 +559,19 @@ export function readOffered(stdout) {
   return { tools: [...new Set(tools)], nested: [...new Set(nested)], skills: [...new Set(skills)].slice(0, MAX_SKILLS) }
 }
 
-/** Refuses any offered tool that is not on the fixed list or the image tool's own. */
-export function checkOffered({ tools, nested }) {
+/**
+ * Refuses any offered tool that is not on the fixed list or the image tool's own. The lists
+ * default to the image run's; `hosted: false` (Codex with its own tools off, codex-native.js)
+ * refuses the image tool too.
+ */
+export function checkOffered({ tools, nested }, { tools: allowed = IMAGE_TOOLS_ALLOWED, nested: allowedNested = IMAGE_NESTED_ALLOWED, hosted = true, run = 'the image run' } = {}) {
   for (const name of tools) {
-    if (IMAGE_TOOLS_ALLOWED.includes(name) || name === `type:${IMAGE_HOSTED_TYPE}` || name.startsWith(`${IMAGE_NAMESPACE}.`)) continue
-    throw checkError('unsupported', `Codex offers a tool the image run does not allow (${shown(name)})`)
+    if (allowed.includes(name) || (hosted && (name === `type:${IMAGE_HOSTED_TYPE}` || name.startsWith(`${IMAGE_NAMESPACE}.`)))) continue
+    throw checkError('unsupported', `Codex offers a tool ${run} does not allow (${shown(name)})`)
   }
   for (const name of nested) {
-    if (IMAGE_NESTED_ALLOWED.includes(name) || name.startsWith(`${IMAGE_NAMESPACE}__`)) continue
-    throw checkError('unsupported', `Codex offers a nested tool the image run does not allow (${shown(name)})`)
+    if (allowedNested.includes(name) || (hosted && name.startsWith(`${IMAGE_NAMESPACE}__`))) continue
+    throw checkError('unsupported', `Codex offers a nested tool ${run} does not allow (${shown(name)})`)
   }
 }
 

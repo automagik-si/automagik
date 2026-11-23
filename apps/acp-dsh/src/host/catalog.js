@@ -60,7 +60,7 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
   const modelOption = run.option('model')
   const startEffort = reasoningOf(run.option('thought_level'))
   if (modelOption === undefined) {
-    const state = { models: [{ id: DEFAULT_MODEL, name: defaultName, reasoning: startEffort, probed: true }], complete: true }
+    const state = { models: [{ id: DEFAULT_MODEL, name: defaultName, reasoning: startEffort, probed: true }], complete: true, start: null }
     seen(state)
     return state
   }
@@ -73,7 +73,8 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
   for (const model of models) {
     if (model.id === start) Object.assign(model, { reasoning: startEffort, probed: true })
   }
-  const state = { models, complete: false }
+  // The model the agent itself starts on: what DSH's `default` is for it (adapter.js nativeKept).
+  const state = { models, complete: false, start: typeof start === 'string' ? start : null }
   seen(state)
   for (const model of models) {
     if (model.probed) continue
@@ -91,7 +92,7 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
 
 /**
  * @typedef {{ id: string, name: string, description?: string, reasoning?: { efforts: { id: string, name: string, description?: string }[], defaultEffort?: string }, probed?: boolean }} CatalogModel
- * @typedef {{ models: CatalogModel[], complete: boolean }} CatalogState
+ * @typedef {{ models: CatalogModel[], complete: boolean, start?: string | null }} CatalogState
  */
 
 const isText = value => typeof value === 'string' && value.length > 0
@@ -129,7 +130,8 @@ export class Catalog {
     // A kept catalog read from the release and CLI installed now is not read again at start
     // unless it is a day old: a new adapter release or an updated CLI changes the key.
     this.probedKey = this.saved?.key
-    this.readAt = typeof this.saved?.at === 'number' ? this.saved.at : undefined
+    // A file kept before the start model was recorded is read again once, so it gets one.
+    this.readAt = typeof this.saved?.at === 'number' && this.saved.start !== undefined ? this.saved.at : undefined
     this.failedAt = undefined
     this.run = undefined
     this.disposed = false
@@ -148,18 +150,19 @@ export class Catalog {
     if (this.file === undefined) return undefined
     try {
       const saved = JSON.parse(readFileSync(this.file, 'utf8'))
-      return Array.isArray(saved?.models) && saved.models.length > 0 && saved.models.every(isModel) ? saved : undefined
+      const start = saved?.start === undefined || saved.start === null || isText(saved.start)
+      return Array.isArray(saved?.models) && saved.models.length > 0 && saved.models.every(isModel) && start ? saved : undefined
     } catch {
       return undefined
     }
   }
 
-  write(key, models) {
+  write(key, models, start = null) {
     if (this.file === undefined) return
     try {
       mkdirSync(this.spec.home, { recursive: true })
       const tmp = `${this.file}.${process.pid}.tmp`
-      writeFileSync(tmp, `${JSON.stringify({ key, at: this.now(), models: models.map(({ probed, ...model }) => model) }, null, 2)}\n`)
+      writeFileSync(tmp, `${JSON.stringify({ key, at: this.now(), start, models: models.map(({ probed, ...model }) => model) }, null, 2)}\n`)
       renameSync(tmp, this.file)
     } catch (error) {
       this.spec.log?.(`could not keep ${this.spec.name}'s models: ${error?.message ?? error}`)
@@ -266,8 +269,8 @@ export class Catalog {
       if (!current()) return
       if (!state.complete) throw new Error('it stopped before every model was read')
       this.readAt = this.now()
-      this.saved = { key, at: this.readAt, models: structuredClone(state.models) }
-      this.write(key, state.models)
+      this.saved = { key, at: this.readAt, start: state.start ?? null, models: structuredClone(state.models) }
+      this.write(key, state.models, state.start ?? null)
     } catch (error) {
       if (!current()) return
       if (previous !== undefined) this.live = previous
@@ -348,6 +351,15 @@ export class Catalog {
   signedOut() {
     this.access = false
     if (this.probing === undefined) this.probedKey = undefined
+  }
+
+  /**
+   * The model the agent itself starts on, as its last probe saw it (or as kept on disk), else
+   * undefined. Never waited for.
+   */
+  ownModel() {
+    const start = this.live?.start ?? this.saved?.start
+    return typeof start === 'string' ? start : undefined
   }
 
   /** One model by id, or undefined when the agent does not offer it. */

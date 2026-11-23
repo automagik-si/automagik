@@ -80,7 +80,7 @@ for (const location of ['adapter store default', 'catalog fallback', 'injected']
 
 for (const [label, identity] of [
   ['legacy without a team', undefined],
-  ['saved ON at Manual', () => ({ name: 'Sofia', nativeTools: true })],
+  ['saved ON at Manual', () => ({ name: 'Sofia', nativeTools: true, nativeToolsAgent: OMP })],
 ]) {
   test(label + ' launches plain omp acp with its inherited environment', async t => {
     const h = ompWorld(t)
@@ -316,7 +316,7 @@ test('Read only immediately retires a live ON child and the next owner turn is O
 
 test('loss of the native identity retires the ON child before the next prompt', async t => {
   const h = ompWorld(t)
-  let identity = { name: 'Sofia', nativeTools: true }
+  let identity = { name: 'Sofia', nativeTools: true, nativeToolsAgent: OMP }
   h.service.botIdentity(() => identity)
   const chat = h.chat()
   await chat.turn('plain loss-first')
@@ -392,7 +392,7 @@ for (const kind of ['tool_call', 'tool_call_update']) {
 
 test('ON still asks through DSH for a tool and receives the result', async t => {
   const h = ompWorld(t)
-  h.service.botIdentity(() => ({ name: 'Sofia', nativeTools: true }))
+  h.service.botIdentity(() => ({ name: 'Sofia', nativeTools: true, nativeToolsAgent: OMP }))
   const chunks = await h.chat().turn('run it on-permission-control')
   assert.equal(h.approvals.length, 1)
   assert.match(textBlocks(chunks).join(''), /It printed hello/)

@@ -796,6 +796,14 @@ export class AgentRun {
     // when it takes the event and makes no card for it. Drift found later is marked there
     // if the event is still queued; an existing card keeps its question for its body to ask.
     if (tool.drift === true) tool.unanswerable = true
+    // Codex with its own tools off offers none, so a call that is not the bridge's (or one of
+    // Codex's two MCP list readers) means the check missed one: it gets no card and no answer
+    // but a refusal, and the adapter ends the session (codex-native.js).
+    if (this.spec.nativeOff === true && !allowedOff(tool)) {
+      tool.refused = 'rejected'
+      tool.unanswerable = true
+      try { this.spec.onNativeOffCall?.(tool) } catch {}
+    }
     this.tools.set(tool.id, tool)
     this.turn.add(tool.id)
     this.push({ type: 'tool', id: tool.id })
@@ -921,6 +929,8 @@ export class AgentRun {
     }
     const skipped = this.answerSkippedMcp(tool, params.options ?? [])
     if (skipped !== undefined) return Promise.resolve(skipped)
+    // Codex with its own tools off: a question for any call but the bridge's is refused at once.
+    if (this.spec.nativeOff === true && !allowedOff(tool)) return Promise.resolve(refusal('rejected', params.options ?? []))
     // DSH already refused this call before the mirror's body could ask (refuse): no body is
     // left to answer the agent, so the refusal is its answer.
     if (tool.refused !== undefined) return Promise.resolve(refusal(tool.refused, params.options ?? []))
@@ -999,6 +1009,15 @@ function connect(run, stream) {
     prompt: params => agent.request(session.prompt, params),
     cancel: params => agent.notify(session.cancel, params),
   }
+}
+
+// The calls Codex with its own tools off may make: the bridge's tools, and Codex's own two MCP
+// list readers. Identity comes from markCall (the server and the MCP mark), never the kind.
+const OFF_READERS = new Set(['list_mcp_resources', 'list_mcp_resource_templates'])
+function allowedOff(tool) {
+  if (tool?.mcp !== true) return false
+  if (tool.mcpServer === BRIDGE_NAME) return true
+  return tool.mcpServer === 'codex' && OFF_READERS.has(tool.rawInput?.tool)
 }
 
 // A refusal as the agent's own reject option; a stopped call, or an agent that offers no reject
