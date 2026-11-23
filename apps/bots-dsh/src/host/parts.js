@@ -2846,6 +2846,17 @@ export function install(rt) {
         + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
     }
     checkShell(model)
+    // A Bot that denies acp_tool cannot move to a model that runs its own tools (#2026). The
+    // live list is read again at the last check before the route is written.
+    const checkOwnTools = (ref) => {
+      try {
+        rt.assertOwnToolsModel?.(bot, { next: ref, denyTools: bot.denyTools })
+      } catch (error) {
+        note('refused', 'acp_tool denied')
+        throw error
+      }
+    }
+    checkOwnTools(model)
     if (typeof current !== 'string' || !crossesHarness(current, model)) throw refused('refused', `${bot.name} is already on that route.`)
     // A level picked with the crossing belongs to the fresh part. Without one, the Bot's
     // current level travels with it; desiredEffort drops it if the new model lacks it.
@@ -2856,6 +2867,7 @@ export function install(rt) {
       note('refused', 'model or thinking level unavailable')
       throw error
     }
+    checkOwnTools(target)
     // A saved plan ref can resolve to the CLI the Bot is already using.
     if (crossesHarness(current, target)) assertRouteAllowed(bot, target, entry)
     try {
@@ -2883,6 +2895,7 @@ export function install(rt) {
     const checkCurrent = () => {
       if (bot.sessionPinned === true) refusePinned()
       checkShell(target)
+      checkOwnTools(target)
       if (rt.botOf(botId) === bot && rt.chatOf(botId) === sessionId && (agent.id ?? agent.session?.id) === sessionId
         && (bot.model ?? bot.appliedModel) === current && !switches.has(sessionId) && !checkpoints.has(sessionId)) return
       note('refused', 'conversation changed or busy')

@@ -17,6 +17,7 @@ import { commandCapableAgent, crossesHarness, shellHoldModelOf, shellHoldText } 
 import { cleanPetId, shippedPet } from './pets.js'
 import { cleanDenyTools, cleanShell } from './tool-deny.js'
 import { peopleOf } from './people.js'
+import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_MODEL_TEXT, addsAcpToolDeny } from '../shared/own-tools.js'
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -361,6 +362,12 @@ export function install(rt) {
     }
     const carried = Array.isArray(creator?.denyTools) ? creator.denyTools : []
     const denied = carried.length === 0 ? denyTools : cleanDenyTools([...new Set([...carried, ...(denyTools ?? [])])])
+    // A Bot that denies acp_tool cannot start on a model that runs its own tools (#2026), the
+    // team default included. A list carried from the creator says so in the refusal.
+    if (modelRef) {
+      rt.assertOwnToolsModel?.({}, { next: modelRef, denyTools: denied },
+        { text: carried.includes('acp_tool') ? OWN_TOOLS_CREATE_TEXT : OWN_TOOLS_MODEL_TEXT })
+    }
     // Keep the existing unset representation when the profile already starts at
     // Workspace; store an override when the person's default differs from it.
     const personDefault = rt.newBotPermission?.()
@@ -727,6 +734,21 @@ export function install(rt) {
         throw error
       }
     }
+    // A Bot that denies acp_tool and a model that runs its own tools (#2026): a save that makes
+    // that pair is refused here, before anything is written or an account is observed. Each
+    // write below checks again, with no await between its check and its write.
+    {
+      const runsOn = bot.model ?? bot.appliedModel
+      const target = modelRef === undefined ? runsOn : modelRef === null ? bot.appliedModel : modelRef
+      const nextDeny = denyTools === undefined ? bot.denyTools : denyTools
+      if (modelRef != null) rt.assertOwnToolsModel?.(bot, { next: target, denyTools: nextDeny })
+      if (denyTools !== undefined) {
+        // The model this patch leaves may become its way back (model-state.js noteModelChoice).
+        const leaving = modelRef != null && target !== runsOn
+        rt.assertOwnToolsDeny?.(bot, { next: nextDeny, runsOn: target,
+          ...(leaving ? { wayBack: bot.previousModel ?? runsOn } : {}) })
+      }
+    }
     const modelBeforeAccess = bot.model ?? bot.appliedModel
     if (modelRef != null) {
       // ACP access can record an account observation. Recheck before starting it and
@@ -830,50 +852,84 @@ export function install(rt) {
         throw new Error('The Bot changed while clearing Auto.')
       }
     }
-    if (modelChanged) await switchModel(bot, patch, modelRef, effortId, modelEntry, advanceModelRev)
     const roleBefore = bot.role
     const instructionsBefore = bot.instructions
     let unapplied
+    const putDeny = (list) => {
+      if (list === undefined || list === null) delete bot.denyTools
+      else bot.denyTools = list
+    }
+    // From the switch to the end of this step, a rollback could still put the old model back:
+    // another save may not add acp_tool meanwhile (own-tools.js, `settlingModel`).
+    if (modelChanged) settle(id, 1)
     try {
-      if (nextName !== undefined) {
-        bot.name = nextName
-        const sessionId = rt.chatOf(id)
-        const session = bot.shellHeld !== undefined ? ctx.sessions?.get?.(sessionId) : (await rt.resolveAgent(sessionId)).session
-        if (session !== undefined) await ctx.sessionTitle.rename(session, nextName)
-        await followMemberNames(Object.values(state.rooms).filter(room => room.members.includes(id)))
+      if (modelChanged) await switchModel(bot, patch, modelRef, effortId, modelEntry, advanceModelRev)
+      const denyBefore = Object.hasOwn(bot, 'denyTools') ? bot.denyTools : undefined
+      if (denyTools !== undefined) {
+        // Checked against the live model and way back, then written, with no await between.
+        try {
+          rt.assertOwnToolsDeny?.(bot, { next: denyTools, self: modelChanged })
+        } catch (error) {
+          if (modelChanged) await restoreModel(bot, modelBefore)
+          throw error
+        }
+        putDeny(denyTools)
       }
-      if (role !== undefined) bot.role = role
-      if (patch.instructions !== undefined) bot.instructions = String(patch.instructions).trim()
-      if (patch.color !== undefined) {
-        if (patch.color === null) delete bot.color
-        else if (isColor(currentColor(patch.color))) bot.color = currentColor(patch.color)
+      try {
+        if (nextName !== undefined) {
+          bot.name = nextName
+          const sessionId = rt.chatOf(id)
+          const session = bot.shellHeld !== undefined ? ctx.sessions?.get?.(sessionId) : (await rt.resolveAgent(sessionId)).session
+          if (session !== undefined) await ctx.sessionTitle.rename(session, nextName)
+          await followMemberNames(Object.values(state.rooms).filter(room => room.members.includes(id)))
+        }
+        if (role !== undefined) bot.role = role
+        if (patch.instructions !== undefined) bot.instructions = String(patch.instructions).trim()
+        if (patch.color !== undefined) {
+          if (patch.color === null) delete bot.color
+          else if (isColor(currentColor(patch.color))) bot.color = currentColor(patch.color)
+        }
+        if (patch.avatar !== undefined) {
+          const avatar = cleanAvatar(patch.avatar)
+          if (avatar) bot.avatar = avatar
+          else delete bot.avatar
+        }
+        if (patch.permission !== undefined) {
+          // A level that was kept but did not reach every Session: the update goes on, and
+          // the person is told last.
+          await rt.setPermission(bot, patch.permission).catch((error) => {
+            if (error?.levelNotApplied !== true) throw error
+            unapplied = error
+          })
+        }
+      } catch (error) {
+        // A step after the switch still failed (the title, the level's apply): the model goes
+        // back too, on the record and on its Sessions, so the refused update leaves it as it was.
+        // So does the Denied tools list, unless putting acp_tool back would leave it beside a
+        // model that runs its own tools (#2026): a list that does not add it goes back first.
+        const later = denyTools !== undefined && addsAcpToolDeny(bot.denyTools, denyBefore)
+        if (denyTools !== undefined && !later) putDeny(denyBefore)
+        if (modelChanged) await restoreModel(bot, modelBefore)
+        if (later) {
+          try {
+            rt.assertOwnToolsDeny?.(bot, { next: denyBefore, self: modelChanged })
+            putDeny(denyBefore)
+          } catch {
+            rt.warn('ds-bot: acp_tool stays allowed for %s: denying it again would leave it on a model that runs its own tools', bot.name)
+          }
+        }
+        // A save during the step may already hold the refused list.
+        if (denyTools !== undefined && (!modelChanged || later)) {
+          await rt.save().catch(failure => rt.warn('ds-bot: the Denied tools of %s were not saved back: %s', bot.name, failure?.message ?? failure))
+        }
+        throw error
       }
-      if (patch.avatar !== undefined) {
-        const avatar = cleanAvatar(patch.avatar)
-        if (avatar) bot.avatar = avatar
-        else delete bot.avatar
-      }
-      if (patch.permission !== undefined) {
-        // A level that was kept but did not reach every Session: the update goes on, and
-        // the person is told last.
-        await rt.setPermission(bot, patch.permission).catch((error) => {
-          if (error?.levelNotApplied !== true) throw error
-          unapplied = error
-        })
-      }
-    } catch (error) {
-      // A step after the switch still failed (the title, the level's apply): the model goes
-      // back too, on the record and on its Sessions, so the refused update leaves it as it was.
-      if (modelChanged) await restoreModel(bot, modelBefore)
-      throw error
+    } finally {
+      if (modelChanged) settle(id, -1)
     }
     if (browserGrants !== undefined) {
       if (browserGrants === null) delete bot.browserGrants
       else bot.browserGrants = browserGrants
-    }
-    if (denyTools !== undefined) {
-      if (denyTools === null) delete bot.denyTools
-      else bot.denyTools = denyTools
     }
     checkHeldChoice()
     // A change states the capability on the record. An absent field still reads as a
@@ -976,6 +1032,14 @@ export function install(rt) {
     }
   }
 
+  // Updates between their model switch and their end, per Bot (C-1 of #2026's review).
+  const settling = new Map()
+  function settle(id, step) {
+    const count = (settling.get(id) ?? 0) + step
+    if (count > 0) settling.set(id, count)
+    else settling.delete(id)
+  }
+
   const picking = new Map()
   async function whilePicking(bot, run) {
     picking.set(bot.id, (picking.get(bot.id) ?? 0) + 1)
@@ -1027,6 +1091,10 @@ export function install(rt) {
             : !ownsModelFields(bot, before) || bot.blocked !== blockedBefore)) {
             throw new Error('The Bot changed during model selection.')
           }
+          // The live list, before DSH selects anything (#2026).
+          if (!selected && patch.model !== undefined && modelRef != null) {
+            rt.assertOwnToolsModel?.(bot, { next: modelRef, denyTools: bot.denyTools })
+          }
         }
         try {
           await rt.applyModel(bot, { force: true, modelEntry, checkChoice, selected: () => {
@@ -1041,6 +1109,10 @@ export function install(rt) {
           throw error
         }
         return
+      }
+      // The live list, right before the pick is written (#2026).
+      if (patch.model !== undefined && modelRef != null) {
+        rt.assertOwnToolsModel?.(bot, { next: modelRef, denyTools: bot.denyTools })
       }
       choose()
       try {
@@ -1737,7 +1809,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    pickingModel: id => picking.has(id), whilePicking, withModelChange,
+    pickingModel: id => picking.has(id), settlingModel: id => settling.get(id) ?? 0, whilePicking, withModelChange,
     botNameRefusal: (id, name) => {
       const bot = rt.botOf(id)
       return bot === undefined ? 'Unknown Bot' : nameRefusal(bot, String(name).trim().slice(0, 40))

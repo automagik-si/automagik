@@ -26,6 +26,7 @@ import { nativeToolsCopy, nativeToolsZh, ompNativeToolsCopy } from './native-too
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
 import { effectiveMarkOf, NATIVE_AGENTS, nativeToolsOn } from '../shared/native-tools.js'
+import { OWN_TOOLS_NOTICE, ownToolsNotice } from '../shared/own-tools.js'
 
 addStrings(nativeToolsZh)
 
@@ -384,7 +385,9 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
         h('div', { key: 'model', className: 'bt-drawer-model' },
           h('div', { className: 'bt-section-title' }, t('Model')),
           h(ModelMenu, { bot, roster, actions, run, wide: true }),
-          needsModelPick(bot, roster) ? h('div', { className: 'bt-note' }, t('Pick a model and {name} can start.', { name: bot.name })) : null),
+          needsModelPick(bot, roster) ? h('div', { className: 'bt-note' }, t('Pick a model and {name} can start.', { name: bot.name })) : null,
+          // A Bot already denying acp_tool on a model that runs its own tools keeps running (#2026).
+          ownToolsNotice(bot) ? h('div', { className: 'bt-note', 'data-own-tools': '' }, t(OWN_TOOLS_NOTICE)) : null),
         bot.engine ? h(AgentSessions, { key: 'sessions', bot, part, run, useSessions }) : null,
         h(PermissionRow, { key: 'permission', bot, roster, actions, run }),
         h(GrantList, { key: 'grants', bot, roster, actions, useWork }),

@@ -9,6 +9,7 @@ import { hostText, t } from './i18n.js'
 import { HostModelMenu } from './host-model-menu.js'
 import { AgentMark, DshMarkIcon, HerdrMarkIcon } from './marks.js'
 import { commandCapableAgent, crossesHarness, routeOf, selectorRouteOf } from '../shared/routes.js'
+import { OWN_TOOLS_MENU_HINT, OWN_TOOLS_MODEL_TEXT, ownToolsRefused } from '../shared/own-tools.js'
 import { HermesMark, HERMES_MARK_CSS } from './hermes-mark.js'
 import { HermesRemoteConnect } from './hermes-remote.js'
 
@@ -442,13 +443,15 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
         open ? entries.map((entry) => {
           const herdr = route === 'herdr'
           const pending = entry.pending === true
-          const off = herdr || pending || offModel(entry)
-          const why = herdr || pending ? t('Not available yet') : modelUnavailableText(entry)
+          // A Bot that denies acp_tool is not offered a model that runs its own tools (#2026).
+          const refused = !herdr && ownToolsRefused(bot, entry)
+          const off = herdr || pending || offModel(entry) || refused
+          const why = herdr || pending ? t('Not available yet') : refused ? t(OWN_TOOLS_MENU_HINT) : modelUnavailableText(entry)
           const name = herdr ? herdrModelLabel(entry) : modelLabel(entry)
           const more = withLevels && !off && effortRows(knownEfforts(entry)).length > 0
           return h('button', {
             key: entry.ref ?? entry.id, type: 'button', role: 'menuitemradio', 'aria-checked': !herdr && !pending && entry.ref === current,
-            title: entry.ref, 'aria-haspopup': more ? 'menu' : undefined,
+            title: refused ? t(OWN_TOOLS_MODEL_TEXT) : entry.ref, 'aria-haspopup': more ? 'menu' : undefined,
             'data-unavailable': off ? '' : undefined,
             'aria-label': why ? `${name} · ${why}` : undefined,
             onClick: () => onModel(entry, route),
@@ -481,7 +484,10 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
         const pending = agent.pending === true
         const here = route === 'acp' && current !== undefined && current.startsWith(`${agent.provider}/`)
         const signedOut = !herdr && !pending && agent.models.every(entry => offModel(entry)) && agent.models.some(entry => entry.needsSignIn || entry.needsAccount)
-        const why = herdr || pending ? t('Not available yet') : signedOut ? t('Needs a sign-in') : undefined
+        // Every model it serves runs its own tools and the Bot denies acp_tool (#2026). It still
+        // opens its model step, where each row says why.
+        const ownRefused = !herdr && !pending && !here && agent.models.length > 0 && agent.models.every(entry => ownToolsRefused(bot, entry))
+        const why = herdr || pending ? t('Not available yet') : signedOut ? t('Needs a sign-in') : ownRefused ? t(OWN_TOOLS_MENU_HINT) : undefined
         const now = here ? modelLabel(agent.models.find(entry => entry.ref === current) ?? {}) ?? agent.name : undefined
         return h('button', {
           key: agent.provider ?? agent.id, type: 'button', role: 'menuitem', 'aria-haspopup': route === 'hermes-remote' && onRemote ? 'dialog' : 'menu', 'data-current': here ? '' : undefined,
@@ -776,6 +782,8 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // its sign-in row in the chat, and Herdr's models wait for #1007.
   const onModel = (model, route) => {
     if (route === 'herdr' || model.ref === undefined) return
+    // Refused before a sign-in or a key is asked for: no pick, no request (#2026).
+    if (ownToolsRefused(bot, model)) return
     if (model.needsKey) {
       if (typeof actions.setProviderKey === 'function') { setKeyFor(model); return }
       const manage = manageModels(actions)
