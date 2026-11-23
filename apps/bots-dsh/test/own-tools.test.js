@@ -300,11 +300,12 @@ test('a combined move away plus acp_tool is refused before anything is written; 
   // is written (the switch's own check reads the live list); two steps work.
   {
     const { open } = workspace(t, team({ b: record('b', SOL, { permissionRev: 3, denyTools: ['acp_tool'] }) }))
-    const h = await open()
+    // The patch also sets a level, so a save that got past the early check would clear Auto.
+    const h = await open({ services: { permissionPresets: { resolve: () => ({ sandbox: 'workspace-write' }) } } })
     let cleared = 0
     const clearAuto = h.rt.clearAuto
     h.rt.clearAuto = (...args) => { cleared += 1; return clearAuto(...args) }
-    refusedWith(await h.call('update-bot', { id: 'b', model: KEPT, denyTools: [] }), OWN_TOOLS_MODEL_TEXT)
+    refusedWith(await h.call('update-bot', { id: 'b', model: KEPT, denyTools: [], permission: 'workspace' }), OWN_TOOLS_MODEL_TEXT)
     const now = h.rt.botOf('b')
     assert.deepEqual([...pair(now), now.permissionRev], [SOL, ['acp_tool'], 3])
     assert.deepEqual(pair(h.stored().bots.b), [SOL, ['acp_tool']])
