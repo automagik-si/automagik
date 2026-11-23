@@ -8,6 +8,10 @@
 //   a sequence older than one it took, the replaced copy kept (`am rollback automagik.am`); then
 //   the pack's own `update` where a pack is installed (herdr-lane's pointer, its sha256, its kept
 //   set, `update --rollback`). Nothing here reads a pointer for the machine or hands it a file.
+//   Where `~/.local/bin/am` is the pack's own command (install.sh's link, or the link `am self
+//   uninstall` hands back), the machine is pack-only: a linked machine runs the pack's update, and
+//   this computer runs nothing there (#1874). The store staying after an uninstall is not proof
+//   that am is the active command; the link is.
 // - usagemeter is meterFleet.js's install: the meter-lane pointer checked once here, the build's
 //   sha256 checked on the machine, never a downgrade, the old binary kept as usagemeter.prev. On a
 //   machine that has a usagemeter, or everywhere the person agreed to (meterScope `all`); never
@@ -59,15 +63,51 @@ app_home=\${HERDR_APP_HOME:-$HOME/.config/herdr-app}
 setting=$am_home/${SETTING_FILE}`;
 
 /**
+ * `am_link_kind`: which command `~/.local/bin/am` is — `am` when the link resolves into am's own
+ * parts store, `pack` when it is one of the pack's CLI entries under an app home (both folder names,
+ * wrapper or `.mjs`), `other` for a file or a link elsewhere, `missing` when there is none.
+ * install.sh links the pack's own automagik-herdr there where am has no part, and `am self
+ * uninstall` hands the link back to the pack; the store stays in both cases, so the link, not the
+ * store, says which command is active (#1874). The same ownership amInstallState.js's command()
+ * classifies and install.sh's am_link_is_am/link_ours match. A relative target is resolved from its
+ * link's folder, and a link to a link is followed, so the compared path is the command itself.
+ */
+const AM_LINK = `am_link_kind() {
+  l=$1
+  if [ ! -L "$l" ]; then
+    if [ -e "$l" ]; then echo other; else echo missing; fi
+    return
+  fi
+  to=$(readlink "$l" 2>/dev/null) || { echo other; return; }
+  n=0
+  while [ "$n" -lt 8 ]; do
+    case $to in /*) ;; *) to=$(dirname "$l")/$to ;; esac
+    l=$to
+    [ -L "$l" ] || break
+    to=$(readlink "$l" 2>/dev/null) || { echo other; return; }
+    n=$((n+1))
+  done
+  case $to in
+    */parts/automagik.am/*) echo am ;;
+    */mods/am-sidebar/bin/automagik-herdr|*/mods/am-sidebar/bin/automagik-herdr.mjs|*/mods/spaces-agents/bin/automagik-herdr|*/mods/spaces-agents/bin/automagik-herdr.mjs) echo pack ;;
+    *) echo other ;;
+  esac
+}`;
+
+/**
  * Run as `sh -c PROBE`: five lines, `am <v>`, `pack <v>`, `meter <v>` (`-`: not installed; `?`: a
  * usagemeter that reports no version), `auto on|off` (the linked updater's switch, the file above)
  * and `packauto on|off|-` (the machine's own pack setting from auto-update.json, `-`: no pack). It
- * reads files and asks usagemeter its version; it changes nothing.
+ * reads files and asks usagemeter its version; it changes nothing. `am` is the store's version only
+ * where `~/.local/bin/am` is am's own link: a host whose link is the pack's command (or whose link
+ * is gone) has no active am there, even while an uninstall keeps the store (#1874).
  */
 export const PROBE = `set -u
 ${HOMES}
+${AM_LINK}
 one() { v=$(head -n 1 "$1" 2>/dev/null | tr -cd '0-9A-Za-z.+-' | cut -c1-40); echo "$2 \${v:--}"; }
-one "$am_home/parts/automagik.am/current/VERSION" am
+am=$HOME/.local/bin/am
+if [ "$(am_link_kind "$am")" = am ]; then one "$am_home/parts/automagik.am/current/VERSION" am; else echo "am -"; fi
 if [ -f "$app_home/mods/am-sidebar/VERSION" ]; then one "$app_home/mods/am-sidebar/VERSION" pack
 else one "$app_home/mods/spaces-agents/VERSION" pack; fi
 m=$HOME/.local/bin/usagemeter; v=
@@ -90,16 +130,19 @@ echo "packauto $pa"`;
  * Run as `sh -c UPDATE sh [automagik.am]`: the machine's own update, by its own command. First
  * line `via am` (then `am update [automagik.am] --json`'s one JSON value: am, then the pack where
  * installed), `via pack` (no am there, a pack: its `automagik-herdr update --json`) or `via none`
- * (neither; nothing runs). With `automagik.am` (this computer, whose pack the sidebar's own updater
- * installs): am alone, and never the pack's command. Elsewhere LINKED_UPDATE_ENV marks the pack
- * update as the automatic one (#1505): the target's own auto setting and rollback skip hold, and an
- * older target that ignores the variable keeps the explicit update it had.
+ * (neither; nothing runs). `~/.local/bin/am` is am's only where the link resolves into am's store;
+ * where it is the pack's own command (install.sh's link, or an uninstalled am's handed-back link)
+ * the host is pack-only (#1874). With `automagik.am` (this computer, whose pack the sidebar's own
+ * updater installs): am alone, and never the pack's command. Elsewhere LINKED_UPDATE_ENV marks the
+ * pack update as the automatic one (#1505): the target's own auto setting and rollback skip hold,
+ * and an older target that ignores the variable keeps the explicit update it had.
  */
 export const UPDATE = `set -u
 ${HOMES}
+${AM_LINK}
 export ${LINKED_UPDATE_ENV}=1
 am=$HOME/.local/bin/am
-if [ -f "$am" ]; then
+if [ -f "$am" ] && [ "$(am_link_kind "$am")" != pack ]; then
   echo "via am"
   if [ -n "\${1:-}" ]; then exec sh "$am" update "$1" --json </dev/null; fi
   exec sh "$am" update --json </dev/null
