@@ -48,9 +48,11 @@ test('every chat of the Bot takes the saved native tools switch', () => {
   for (const id of ['direct-a', 'group-a', 'old-a', 'task-a']) assert.equal(rt.nativeToolsFor(id), false, id)
 })
 
-test('multiuser, restricted and unknown or Read only levels block eligibility; managed only before the upgrade', t => {
+// #1564 follow-up: `managed` stays a lock after the upgrade (Omni's plugin takes their tools).
+test('multiuser, managed, restricted and unknown or Read only levels block eligibility', t => {
   const cases = [
     [{ services: { automagikCaller: { version: 2, multiuser: true } } }, 'multiuser'],
+    [{ a: { kind: 'omni' } }, 'managed'],
     [{ a: { shell: false } }, 'restricted'],
     [{ a: { denyTools: ['read'] } }, 'restricted'],
     [{ session: {}, services: { sandboxPolicy: { resolve: () => ({ mode: 'read-only' }) } } }, 'read-only'],
@@ -63,21 +65,16 @@ test('multiuser, restricted and unknown or Read only levels block eligibility; m
       assert.equal(rt.nativeToolsFor('direct-a'), false)
     }
   }
-  // Pending window (no upgrade marker): the old `managed` lock and its code.
-  const pending = runtime({ a: { kind: 'omni' } })
-  assert.equal(pending.nativeToolsBlock(pending.botOf('a')), 'managed')
-  assert.equal(pending.nativeToolsFor('direct-a'), false)
-  const upgraded = runtime({ a: { kind: 'omni' }, ...RETIRED })
-  assert.equal(upgraded.nativeToolsBlock(upgraded.botOf('a')), undefined)
-  assert.equal(upgraded.nativeToolsFor('direct-a'), true)
   const rt = runtime()
   rt.omniLinked = () => true
   assert.equal(rt.nativeToolsBlock(rt.botOf('a')), 'managed')
   assert.equal(rt.nativeToolsBlock(rt.botOf('b')), undefined)
   const linked = runtime(RETIRED)
   linked.omniLinked = () => true
-  assert.equal(linked.nativeToolsBlock(linked.botOf('a')), undefined)
-  assert.equal(linked.nativeToolsBotOn('a'), true)
+  assert.equal(linked.nativeToolsBlock(linked.botOf('a')), 'managed')
+  assert.equal(linked.nativeToolsFor('group-a'), false)
+  assert.equal(linked.nativeToolsBotOn('a'), false)
+  assert.equal(linked.nativeToolsBotOn('b'), true)
   t.mock.method(rt, 'omniLinked', () => false)
   t.mock.method(rt.ctx, 'get', () => undefined)
   assert.equal(rt.nativeToolsBlock(rt.botOf('a')), 'level-unknown')

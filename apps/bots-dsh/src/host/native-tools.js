@@ -1,5 +1,3 @@
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
 import { callerService, multiuserMode } from './multiuser.js'
 import { refusal } from './refusal.js'
 import { NATIVE_TOOLS_CHANGED_TEXT } from '../shared/held.js'
@@ -52,23 +50,19 @@ export function install(rt) {
     try { return ctx.get('acpAgents')?.nativeModelKept?.(bot.model ?? bot.appliedModel) === true } catch { return false }
   })()
 
-  // The locks the switch had before it applied in every chat of the Bot (#1564, RFC 0003,
-  // Amendment: native tools in every chat of the Bot). They live on only for the upgrade below and
-  // until it has run on the host that writes the team. Any throw goes to the caller.
-  // `managed`: operates Omni or another plugin manages it. Omni counts as linked from its saved
-  // link too, since its service may not be up yet at the first read.
-  // `shared`: shared with people, bound to an IM connection, or a live LiveShare share.
-  const omniLinkedNow = () => rt.omniLinked?.() === true || typeof rt.config?.omni?.url === 'string'
-    || (typeof rt.home === 'string' && existsSync(join(rt.home, 'omni.json')))
+  // The lock the switch had before it applied in every chat of the Bot (#1564, RFC 0003,
+  // Amendment: native tools in every chat of the Bot): `shared`, shared with people, bound to an
+  // IM connection, or a live LiveShare share. It lives on only for the upgrade below and until it
+  // has run on the host that writes the team. Any throw goes to the caller. `managed` is not
+  // removed: Omni's plugin takes the tools of a Bot that operates it.
   function lockOf(bot, liveShare) {
-    if (bot.kind !== undefined || (rt.isMain(bot.id) && omniLinkedNow())) return 'managed'
     const people = bot.people
     if (people !== undefined && (people?.mode !== 'owners' || !Array.isArray(people.allow)
       || people.allow.length !== 0)) return 'shared'
     if (rt.imBoundBot?.(bot.id) === true || liveShare()) return 'shared'
   }
 
-  // The one-time upgrade: a Bot that sat in a removed lock with the switch ON is turned off once,
+  // The one-time upgrade: a Bot that sat in the removed lock with the switch ON is turned off once,
   // so nothing gains native tools without the person. It runs at the first native read or switch
   // write on a host that writes the loaded team. Phase 1 only reads: a throw writes nothing,
   // sets no marker, warns once and is tried again at the next read. Phase 2 cannot throw: it
@@ -110,7 +104,8 @@ export function install(rt) {
     retireRemovedLocks()
     if (multiuserMode() || callerService(ctx)) return 'multiuser'
     if (modelKept(bot)) return 'model-kept'
-    // Until the upgrade has run, a Bot in a removed lock keeps it, as before.
+    if (bot.kind !== undefined || (rt.isMain(bot.id) && rt.omniLinked?.())) return 'managed'
+    // Until the upgrade has run, a Bot in the removed lock keeps it, as before.
     if (rt.state?.nativeToolsLocksRetired !== true) {
       try {
         const lock = lockOf(bot, () => liveShareActive(ctx))
@@ -240,7 +235,7 @@ export function install(rt) {
   }
 
   // Read only: whether the Bot's switch is ON for the agent it runs on and no Bot-wide lock
-  // blocks it (Omni's prompt rules read it).
+  // blocks it (a managed Bot, one that operates Omni included, always reads false).
   const nativeToolsBotOn = botId => {
     const bot = rt.botOf(botId)
     return bot !== undefined && policyBlock(bot) === undefined && nativeToolsOn(bot)

@@ -203,17 +203,16 @@ test('owner cannot enable native tools for restricted or multiuser Bots, nor sha
   assert.equal(h.stored().bots.a.nativeTools, undefined)
 })
 
-// #1564 follow-up (R): once the one-time upgrade has run, the locks it removed no longer refuse ON.
-test('after the upgrade, a Main Bot with Omni linked, Omni, Genie, shared, LiveShare and IM-bound Bots can save ON', async t => {
+// #1564 follow-up (R): once the one-time upgrade has run, the lock it removed no longer refuses ON.
+// A Bot that operates Omni or that another plugin manages stays locked: Omni's plugin takes its
+// tools.
+test('after the upgrade, shared, LiveShare and IM-bound Bots save ON; managed do not', async t => {
   const h = await host(t)
   assert.equal(h.rt.nativeToolsBlock(h.rt.botOf('a')), undefined)
   assert.equal(h.rt.state.nativeToolsLocksRetired, true)
   const fiber = { state: 2 }
   const { omniLinked, imBoundBot } = h.rt
   const cases = [
-    ['a', 'Main Bot with Omni linked', () => { h.rt.omniLinked = () => true }, () => { h.rt.omniLinked = omniLinked }],
-    ['b', 'Omni Bot', () => { h.rt.botOf('b').kind = 'omni' }, () => { delete h.rt.botOf('b').kind }],
-    ['b', 'Genie', () => { h.rt.botOf('b').kind = 'genie' }, () => { delete h.rt.botOf('b').kind }],
     ['b', 'shared', () => { h.rt.botOf('b').people = { mode: 'allowlist', allow: ['visitor'] } }, () => { delete h.rt.botOf('b').people }],
     ['b', 'LiveShare', () => { h.ctx.registry.set('sharing', { name: 'liveshare-host', fibers: [fiber] }) }, () => { h.ctx.registry.delete('sharing') }],
     ['b', 'IM-bound', () => { h.rt.imBoundBot = () => true }, () => { h.rt.imBoundBot = imBoundBot }],
@@ -227,6 +226,26 @@ test('after the upgrade, a Main Bot with Omni linked, Omni, Genie, shared, LiveS
       assert.equal(h.stored().bots[id].nativeTools, true, label)
       assert.equal(h.rt.nativeToolsBotOn(id), true, label)
       assert.equal((await h.call('update-bot', { id, nativeTools: false })).ok, true, label)
+    } finally {
+      unset()
+    }
+  }
+  const managed = [
+    ['a', 'Main Bot with Omni linked', () => { h.rt.omniLinked = () => true },
+      () => { h.rt.omniLinked = omniLinked }],
+    ['b', 'Omni Bot', () => { h.rt.botOf('b').kind = 'omni' },
+      () => { delete h.rt.botOf('b').kind }],
+    ['b', 'Genie', () => { h.rt.botOf('b').kind = 'genie' }, () => { delete h.rt.botOf('b').kind }],
+  ]
+  for (const [id, label, set, unset] of managed) {
+    set()
+    try {
+      assert.equal(h.rt.nativeToolsBlock(h.rt.botOf(id)), 'managed', label)
+      const on = await h.call('update-bot', { id, nativeTools: true })
+      assert.equal(on.ok, false, label)
+      assert.match(on.error.message, /operates Omni or that another plugin manages/, label)
+      assert.notEqual(h.stored().bots[id].nativeTools, true, label)
+      assert.equal(h.rt.nativeToolsBotOn(id), false, label)
     } finally {
       unset()
     }

@@ -1,7 +1,8 @@
 // #1564 follow-up (RFC 0003, Amendment: native tools in every chat of the Bot): the one-time
-// upgrade that turns off, once, the switch of every Bot that sat in a lock this change removes.
+// upgrade that turns off, once, the switch of every Bot that sat in the lock this change removes
+// (`shared`). `managed` stays a lock and is not part of the upgrade.
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -25,10 +26,9 @@ function registryOf(fibers) {
 
 function host(t, options) {
   const { bots, registry = registryOf(), loaded = true, holds = true, canWrite = false } = options
-  const { state = {}, omniFile = false } = options
+  const { state = {} } = options
   const home = mkdtempSync(join(tmpdir(), 'native-locks-'))
   t.after(() => rmSync(home, { recursive: true, force: true }))
-  if (omniFile) writeFileSync(join(home, 'omni.json'), '{}')
   const saves = []
   const warns = []
   const rt = {
@@ -76,24 +76,19 @@ function host(t, options) {
 
 const fieldsOf = bot => [bot.nativeTools, bot.nativeToolsAgent, bot.nativeToolsKept]
 
+const SHARED = { people: { mode: 'allowlist', allow: ['visitor'] } }
+
 test('(a) each removed lock: an ON Bot gets false once, with the marker, in one save', async t => {
   const cases = [
-    ['omni kind', on('x', { kind: 'omni' }), {}],
-    ['genie kind', on('x', { kind: 'genie' }), {}],
-    ['unfold kind', on('x', { kind: 'unfold' }), {}],
-    ['Main Bot with Omni linked', on('main'), { linked: true }],
-    ['Main Bot with only the saved Omni link', on('main'), { omniFile: true }],
-    ['shared with people', on('x', { people: { mode: 'allowlist', allow: ['visitor'] } }), {}],
+    ['shared with people', on('x', SHARED), {}],
     ['IM-bound', on('x'), { im: true }],
     ['omp kept ON', {
-      id: 'x', model: 'acp-omp/default', nativeTools: true, nativeToolsKept: 'acp-omp',
-      kind: 'omni',
+      id: 'x', model: 'acp-omp/default', nativeTools: true, nativeToolsKept: 'acp-omp', ...SHARED,
     }, {}],
   ]
-  for (const [label, bot, { linked, omniFile, im }] of cases) {
+  for (const [label, bot, { im }] of cases) {
     const other = on('free')
-    const h = host(t, { bots: [bot, other], omniFile })
-    if (linked) h.rt.omniLinked = () => true
+    const h = host(t, { bots: [bot, other] })
     if (im) h.rt.imBoundBot = id => id === 'x'
     assert.equal(h.rt.nativeToolsBlock(other), undefined, label)
     assert.deepEqual(fieldsOf(bot), [false, undefined, undefined], label)
@@ -106,6 +101,32 @@ test('(a) each removed lock: an ON Bot gets false once, with the marker, in one 
     // The lock itself is gone: the Bot can be turned ON again.
     assert.equal(h.rt.nativeToolsBlock(bot), undefined, label)
     assert.equal(h.rt.nativeToolsFor('chat-' + bot.id), false, label)
+  }
+})
+
+// `managed` is not removed: the upgrade leaves an operating or plugin-managed Bot's saved switch as
+// it is, and the lock keeps it off before and after the upgrade.
+test('(a2) managed Bots are not written by the upgrade and stay locked after it', async t => {
+  const cases = [
+    ['omni kind', on('x', { kind: 'omni' }), false],
+    ['genie kind', on('x', { kind: 'genie' }), false],
+    ['unfold kind', on('x', { kind: 'unfold' }), false],
+    ['Main Bot with Omni linked', on('main'), true],
+  ]
+  for (const [label, bot, linked] of cases) {
+    const h = host(t, { bots: [bot, on('free')] })
+    if (linked) h.rt.omniLinked = () => true
+    assert.equal(h.rt.nativeToolsBlock(bot), 'managed', label)
+    assert.equal(h.rt.state.nativeToolsLocksRetired, true, label)
+    assert.deepEqual(fieldsOf(bot), [true, 'acp-claude', undefined], label)
+    assert.equal(h.rt.nativeToolsFor('chat-' + bot.id), false, label)
+    assert.equal(h.rt.nativeToolsEligible('chat-' + bot.id), false, label)
+    assert.equal(h.rt.nativeToolsBotOn(bot.id), false, label)
+    await assert.rejects(h.rt.setNativeTools(bot.id, { nativeTools: true }),
+      { message: NATIVE_TOOLS_BLOCK_TEXT.managed }, label)
+    await Promise.resolve()
+    assert.equal(h.saves.length, 0, label)
+    assert.equal(h.rt.nativeToolsFor('chat-free'), true, label)
   }
 })
 
@@ -133,7 +154,7 @@ test('(b) LiveShare counts only when live at the pass; one registry read per pas
 
 test('(c) Bots already off are not written; the marker rides; later choices survive', async t => {
   const h = host(t, { bots: [
-    { id: 'off', model: CLAUDE, nativeTools: false, kind: 'omni' },
+    { id: 'off', model: CLAUDE, nativeTools: false, ...SHARED },
     { id: 'none', model: CLAUDE, people: { mode: 'allowlist', allow: ['visitor'] } },
     on('free'),
   ] })
@@ -169,7 +190,7 @@ test('(c) Bots already off are not written; the marker rides; later choices surv
 test('(d) a throw in the check writes nothing, sets no marker, warns once and retries', async t => {
   const registry = registryOf([{ state: 1 }])
   registry.fail = true
-  const h = host(t, { bots: [on('x'), on('y', { kind: 'omni' })], registry })
+  const h = host(t, { bots: [on('x'), on('y', SHARED)], registry })
   assert.equal(h.rt.nativeToolsBlock(h.rt.botOf('x')), 'shared')
   assert.equal(h.rt.nativeToolsFor('chat-x'), false)
   assert.equal(h.rt.botOf('x').nativeTools, true)
@@ -199,7 +220,7 @@ test('(d) a throw in the check writes nothing, sets no marker, warns once and re
   assert.equal(sharing.rt.botOf('x').nativeTools, false)
 
   // A throw at the second Bot of the check: the first is not written either.
-  const partial = host(t, { bots: [on('first', { kind: 'omni' }), on('second')] })
+  const partial = host(t, { bots: [on('first', SHARED), on('second')] })
   partial.rt.imBoundBot = (id) => {
     if (id === 'second') throw new Error('IM state unreadable')
     return false
@@ -214,19 +235,20 @@ test('(d) a throw in the check writes nothing, sets no marker, warns once and re
 test('(e) until the check runs where the team is written, the old locks stay', async t => {
   for (const options of [{ holds: false }, { loaded: false }]) {
     const h = host(t, { ...options, bots: [
-      on('omni', { kind: 'omni' }), on('people', { people: { mode: 'allowlist', allow: [] } }),
-      { id: 'off', model: CLAUDE, kind: 'genie' }, on('free'),
+      on('im'), on('people', { people: { mode: 'allowlist', allow: [] } }),
+      { id: 'off', model: CLAUDE, ...SHARED }, on('free'),
     ] })
-    assert.equal(h.rt.nativeToolsBlock(h.rt.botOf('omni')), 'managed')
+    h.rt.imBoundBot = id => id === 'im'
+    assert.equal(h.rt.nativeToolsBlock(h.rt.botOf('im')), 'shared')
     assert.equal(h.rt.nativeToolsBlock(h.rt.botOf('people')), 'shared')
-    for (const id of ['omni', 'people']) {
+    for (const id of ['im', 'people']) {
       assert.equal(h.rt.nativeToolsFor('chat-' + id), false, id)
       assert.equal(h.rt.nativeToolsEligible('chat-' + id), false, id)
       assert.equal(h.rt.nativeToolsBotOn(id), false, id)
       assert.equal(h.rt.botOf(id).nativeTools, true, id)
     }
     await assert.rejects(h.rt.setNativeTools('off', { nativeTools: true }),
-      { message: NATIVE_TOOLS_BLOCK_TEXT.managed })
+      { message: NATIVE_TOOLS_BLOCK_TEXT.shared })
     assert.equal(h.rt.nativeToolsFor('chat-free'), true)
     assert.equal(h.rt.state.nativeToolsLocksRetired, undefined)
     await Promise.resolve()
@@ -240,16 +262,19 @@ test('(e) until the check runs where the team is written, the old locks stay', a
 
   // E3-2: a host that cannot hold the lock but writes the team runs the check.
   const broken = host(t, { holds: false, canWrite: true, bots: [
-    on('omni', { kind: 'omni' }), { id: 'off', model: CLAUDE, kind: 'genie' },
+    on('people', SHARED), { id: 'off', model: CLAUDE, ...SHARED }, on('omni', { kind: 'omni' }),
   ] })
-  assert.equal(broken.rt.nativeToolsBlock(broken.rt.botOf('omni')), undefined)
-  assert.equal(broken.rt.botOf('omni').nativeTools, false)
+  assert.equal(broken.rt.nativeToolsBlock(broken.rt.botOf('people')), undefined)
+  assert.equal(broken.rt.botOf('people').nativeTools, false)
   assert.equal(broken.rt.state.nativeToolsLocksRetired, true)
   await Promise.resolve()
   assert.equal(broken.saves.length, 1)
-  // After the marker: no code, and ON saves.
+  // After the marker: no code, and ON saves; a managed Bot keeps its lock and its saved value.
   await broken.rt.setNativeTools('off', { nativeTools: true })
   assert.equal(broken.rt.botOf('off').nativeTools, true)
   assert.equal(broken.rt.nativeToolsFor('chat-off'), true)
   assert.equal(broken.rt.nativeToolsBotOn('off'), true)
+  assert.equal(broken.rt.nativeToolsBlock(broken.rt.botOf('omni')), 'managed')
+  assert.equal(broken.rt.botOf('omni').nativeTools, true)
+  assert.equal(broken.rt.nativeToolsFor('chat-omni'), false)
 })
