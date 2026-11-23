@@ -1,6 +1,7 @@
 // Prompt: one section whose text depends only on the rendering Session's own Bot
 // record, so the prefix stays byte-stable across turns and roster changes.
 import { OMNI_KIND } from './roster.js'
+import { nativeAgentOf } from '../shared/native-tools.js'
 
 const TEAM_RULES = [
   '## How your Bot team works',
@@ -66,9 +67,8 @@ export function install(rt) {
       if (rt.nativeToolsEligible !== undefined) Object.defineProperties(identity, {
         nativeTools: { get: () => rt.nativeToolsFor(sessionId) },
         nativeToolsBlocked: { get: () => !rt.nativeToolsEligible(sessionId) },
-        ...(typeof bot.nativeToolsKept === 'string' ? {
-          nativeToolsAgent: { get: () => rt.nativeToolsEligible(sessionId) ? bot.nativeToolsKept : undefined },
-        } : {}),
+        // The agent the saved ON is for: acp-dsh starts an agent with its own tools only for its own.
+        nativeToolsAgent: { get: () => rt.nativeToolsEligible(sessionId) ? nativeAgentOf(bot) : undefined },
       })
       return identity
     })

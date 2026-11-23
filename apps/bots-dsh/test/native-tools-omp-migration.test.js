@@ -89,11 +89,15 @@ function host(home) {
 
 function assertMigrated(state, codexMarker) {
   assert.equal(state.nativeToolsOmpKept, true)
-  assert.equal(state.nativeToolsCodexKept, codexMarker)
+  // #1564 PR B: the Codex migration runs in the same adopt and always leaves its marker; an
+  // unmarked team's Codex Bot keeps Codex's own tools once (checked below).
+  assert.equal(state.nativeToolsCodexKept, true)
   for (const id of ['a', 'b']) assert.deepEqual(fields(state.bots[id]), [true, OMP])
   for (const id of ['shell', 'deny']) assert.deepEqual(fields(state.bots[id]), [undefined, undefined])
   assert.deepEqual(fields(state.bots.explicit), [false, undefined])
-  for (const id of ['claude', 'codex', 'api']) assert.deepEqual(state.bots[id], beforeC.bots[id])
+  for (const id of ['claude', 'api']) assert.deepEqual(state.bots[id], beforeC.bots[id])
+  assert.deepEqual(state.bots.codex, codexMarker === true ? beforeC.bots.codex
+    : { ...beforeC.bots.codex, nativeTools: true, nativeToolsAgent: 'acp-codex' })
 }
 
 test('Q6 migrates existing omp model and appliedModel exactly once, preserving restrictions and other providers', async t => {
@@ -214,7 +218,8 @@ test('identity carries the migrated provider, and an explicit ON or OFF clears t
   assert.equal(enabled.ok, true, JSON.stringify(enabled))
   assert.deepEqual(fields(bot), [true, undefined])
   assert.deepEqual(fields(h.stored().bots.a), [true, undefined])
-  assert.equal(h.identity('a').nativeToolsAgent, undefined)
+  // #1564 PR B (B2-1 (2), (3)): ON saves the agent it is for, and the identity names it.
+  assert.equal(h.identity('a').nativeToolsAgent, 'acp-claude')
 })
 
 const noOmp = {

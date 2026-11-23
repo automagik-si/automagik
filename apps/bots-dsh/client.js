@@ -2740,6 +2740,8 @@ var ZH = {
   "Its group conversation could not open": "它的群聊会话打不开",
   "Its group conversation could not open, so it starts a new one next time": "它的群聊会话打不开，下次会换一个新的",
   "Its permission level could not be set here, so it took no turn": "它在这里的权限级别未能设置，所以这一轮没有发言",
+  "Codex could not turn its own tools off, so the message was not sent": "Codex 未能关闭它自己的工具，所以消息没有发送",
+  "Codex was not started because its own tools and Automagik's tools are both off": "Codex 未启动，因为它自己的工具和 Automagik 的工具都已关闭",
   // The composer's +
   "Add files": "添加文件",
   "Add photos & files": "添加照片和文件",
@@ -4017,12 +4019,17 @@ var FAILURES = {
   TRANSPORT: "Could not reach the model service",
   SESSION: "Its group conversation could not open",
   SESSION_RESET: "Its group conversation could not open, so it starts a new one next time",
-  PERMISSION: "Its permission level could not be set here, so it took no turn"
+  PERMISSION: "Its permission level could not be set here, so it took no turn",
+  // acp-dsh's Codex OFF refusal (#1564). Its message names the Details switch only in the
+  // owner's direct chat; these words, shown wherever the code is, never do.
+  "acp/native-off-unavailable": "Codex could not turn its own tools off, so the message was not sent",
+  "acp/native-off-no-bridge": "Codex was not started because its own tools and Automagik's tools are both off"
 };
 var knownFailure = (code) => Object.hasOwn(FAILURES, code ?? "") ? t(FAILURES[code]) : void 0;
 function failureLabel(code, message) {
   return knownFailure(code) ?? (message || code || t("Unknown error"));
 }
+var failureClause = (code, message) => String(failureLabel(code, message)).trimEnd().replace(/(?<![.\u3002])[.\u3002]$/, "");
 var URL_LIMIT = 7e3;
 var WHAT_MAX = 2e3;
 var PASTE_NOTE = "Omni copied the diagnostics to the clipboard. Paste them here.";
@@ -21845,7 +21852,7 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
     return (0, import_react49.createElement)(
       "div",
       { className: "bt-event bt-event-error", role: "status", title: [reply.code, reply.status, reply.text].filter(Boolean).join(" · ") },
-      t("{name} stopped: {reason}. Switch its model or ask it to go on.", { name: bot.name, reason: failureLabel(reply.code, reply.text) })
+      t("{name} stopped: {reason}. Switch its model or ask it to go on.", { name: bot.name, reason: failureClause(reply.code, reply.text) })
     );
   }
   if (reply.kind === "lookup") {
@@ -39085,7 +39092,10 @@ function PermissionChoiceDock({ sessionId, useRoster, actions }) {
 var nativeToolsCopy = {
   label: "Native tools",
   on: "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.",
-  off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session."
+  off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.",
+  codexOn: "In its own chat with you, Codex uses its own tools (commands, file edits…). They run in Codex's own sandbox, outside Automagik's. What asks you first depends on the permission level. Turning this off stops its running session at once.",
+  codexOff: "Codex uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.",
+  modelKept: "This model can't turn its native tools off."
 };
 var ompNativeToolsCopy = {
   on: "In its own chat with you, omp uses its own tools. They run outside Automagik's file sandbox. Turning this off stops its running session at once.",
@@ -39099,6 +39109,9 @@ var nativeToolsZh = {
   [nativeToolsCopy.label]: "原生工具",
   [nativeToolsCopy.on]: "在它与你的单独对话中，Claude Code 使用它自己的工具（Bash、Read、Edit…）。这些工具在 Automagik 的文件沙盒之外运行；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。",
   [nativeToolsCopy.off]: "Claude Code 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
+  [nativeToolsCopy.codexOn]: "在它与你的单独对话中，Codex 使用它自己的工具（命令、文件编辑…）。这些工具在 Codex 自己的沙盒中运行，不在 Automagik 的沙盒内；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。",
+  [nativeToolsCopy.codexOff]: "Codex 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
+  [nativeToolsCopy.modelKept]: "此模型无法关闭其原生工具。",
   "Not available at the Read only level.": "在“仅可查看”级别下不可用。",
   "Not available: the permission level of this Bot's chat could not be read.": "不可用：无法读取此 Bot 对话的权限级别。",
   "Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.": "此 Bot 已与他人共享，或已安装共享插件（LiveShare），因此不可用。",
@@ -39106,10 +39119,21 @@ var nativeToolsZh = {
   "Not available for a Bot that operates Omni or that another plugin manages.": "对于操作 Omni 或由其他插件管理的 Bot 不可用。"
 };
 
+// src/shared/native-tools.js
+var NATIVE_AGENTS = Object.freeze(["acp-claude", "acp-codex", "acp-omp"]);
+var effectiveMarkOf = (bot) => markOf(bot?.model ?? bot?.appliedModel);
+var nativeAgentOf = (bot) => bot?.nativeTools === true ? bot.nativeToolsAgent ?? bot.nativeToolsKept ?? "acp-claude" : void 0;
+var nativeToolsOn = (bot) => {
+  const agent = nativeAgentOf(bot);
+  return agent !== void 0 && agent === effectiveMarkOf(bot);
+};
+var restrictedBot = (bot) => bot?.shell === false || Array.isArray(bot?.denyTools) && bot.denyTools.length > 0;
+
 // src/client/details-drawer.js
 var import_react98 = require("react");
 addStrings(nativeToolsZh);
 var NATIVE_TOOLS_HINTS = {
+  "model-kept": nativeToolsCopy.modelKept,
   managed: "Not available for a Bot that operates Omni or that another plugin manages.",
   shared: "Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.",
   restricted: "Not available while this Bot has shell access off or denied tools.",
@@ -39117,11 +39141,11 @@ var NATIVE_TOOLS_HINTS = {
   "level-unknown": "Not available: the permission level of this Bot's chat could not be read."
 };
 function NativeToolsRow({ bot, roster, run: run3, actions }) {
-  const mark2 = markOf(bot.model ?? bot.appliedModel);
-  if (mark2 !== "acp-claude" && mark2 !== "acp-omp" || bot.nativeToolsBlock === "multiuser") return null;
-  const copy2 = mark2 === "acp-omp" ? ompNativeToolsCopy : nativeToolsCopy;
+  const mark2 = effectiveMarkOf(bot);
+  if (!NATIVE_AGENTS.includes(mark2) || bot.nativeToolsBlock === "multiuser") return null;
+  const copy2 = mark2 === "acp-omp" ? ompNativeToolsCopy : mark2 === "acp-codex" ? { on: nativeToolsCopy.codexOn, off: nativeToolsCopy.codexOff } : nativeToolsCopy;
   const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock];
-  const on = blocked === void 0 && bot.nativeTools === true && (bot.nativeToolsKept === void 0 || bot.nativeToolsKept === mark2);
+  const on = blocked === void 0 && nativeToolsOn(bot);
   const hint3 = blocked === void 0 ? t(on ? copy2.on : copy2.off) : mark2 === "acp-omp" ? `${t(blocked)} ${t(ompNativeToolsCopy.blocked)}` : t(blocked);
   return (0, import_react98.createElement)(SwitchRow, {
     details: true,

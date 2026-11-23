@@ -3,7 +3,8 @@ import { test } from 'node:test'
 import { install } from '../src/host/native-tools.js'
 
 function runtime({ registry = new Map(), a = {}, services = {}, session } = {}) {
-  const bots = new Map([['a', { id: 'a', nativeTools: true, ...a }], ['b', { id: 'b', nativeTools: true }]])
+  // #1564 PR B: ON is bound to the agent a Bot runs on, so these Bots run on Claude.
+  const bots = new Map([['a', { id: 'a', model: 'acp-claude/default', nativeTools: true, ...a }], ['b', { id: 'b', model: 'acp-claude/default', nativeTools: true }]])
   const rt = {
     ctx: {
       registry,

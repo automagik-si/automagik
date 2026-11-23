@@ -1046,3 +1046,134 @@ Codex preserves the reference picture's distinctive shapes and text before this 
   requests that Claude sends. Which native calls ask depends on the level and Claude's own rules.
   Hard asks apply below Full access. [ACP README permission matrix](../../apps/acp-dsh/README.md#native-tools-mode-nativetools-1564)
 - **Rollback.** Revert PR A. Older builds keep and ignore the Bot's `nativeTools` field.
+
+## Amendment: Codex native tools (2026-11-23, #1564 PR B)
+
+Decided by the owner's delegate, 2026-11-23. It extends the amendment above ("native tools per
+Bot") to Codex and, for Codex, supersedes its "Pending deliveries" and "Migration ... outside
+this amendment" lines.
+
+- **What OFF means.** Codex works with DSH's tools through the bridge and has none of its own.
+  OFF is not Read only: DSH's tools keep the Session's permission level, so at Workspace, Auto
+  and Full DSH's `edit` and `bash` write with DSH's approvals, as for any bridged agent. Codex's
+  internal sandbox mode is set to its `read-only` id before every prompt (a fork included) only
+  as a backstop against Codex's own tools; it does not limit DSH's tools, which run in DSH.
+- **Eligibility.** The same as Claude's: ON only on an owner turn in the Bot's own direct chat,
+  with the saved switch ON for `acp-codex`, at Workspace or Full, for a Bot no block applies
+  to. Every other turn opens OFF: scheduled deliveries, relays (`handoff`, `request`, resumed),
+  tasks, groups, IM, LiveShare, DSH subagent Sessions. ON is never inherited: a turn without
+  owner input remakes a live ON process OFF, and an eligible owner turn remakes a live OFF one ON.
+- **No Bot identity (lead decision B-8, 2026-11-23).** (1) Once a Bot team is registered, a Codex
+  Session without a Bot identity (Workspace, the Code pane) runs OFF, fail closed, with DSH's
+  tools only. (2) Codex outside a team, on a host where no Bot team was ever registered, runs as
+  before, with its own tools.
+- **The check (LQ1, LQ2).** Every OFF spawn runs a check against the Codex it starts (its home,
+  its folder) and no verdict is cached. A config (`CODEX_CONFIG`) turns off Codex's features,
+  its v2 sub-agent tools (`multi_agent_v2.disable_native_tools`), its question tool, web search,
+  the person's own MCP servers and skills by name, and gives the process a copy of
+  `codex debug models` with `apply_patch_tool_type` cleared: the only config path that removes
+  the patch tool. What is left is the bridge's transport: `functions.exec`, `functions.wait` and
+  the three MCP resource readers. Every model in the copy is checked once per spawn; a model that
+  offers anything else, or whose read Codex refuses, is not offered while OFF. Each removal is
+  proven by its effect, and a home server named `dsh` refuses. Every read names a model of the
+  copy, never the Codex home's own default (which may be a kept model that shows no tools); the
+  process's config names no model, so DSH's `default` stays the model Codex itself starts on. Any
+  other failure refuses the turn ("Codex could not turn its own tools off ..."), a deadline or a
+  Stop included, except a turn on a model the check measured kept (below); the Session never
+  opens unchecked. Before the check, the spawn writes the chat permission profiles into the
+  Bot's isolated Codex home (`cli-homes`, a new empty home included) and runs one command under
+  them (`codex sandbox -P`) with that home; when Codex cannot, the turn is refused with "its
+  permission profiles are unavailable". That refusal, and the one with DSH's tools turned off,
+  point to the Details switch only on the owner's own turn in the direct chat of a Bot it is not
+  blocked for; in a group, task or scheduled run (one in that direct chat included), or for a
+  blocked Bot, they say to switch its model, or to update Automagik (to turn Automagik's tools
+  back on, for the second), and a group line shows each refusal's short words, in the interface
+  language. The CLI calls run one after another, and
+  one setup at a time per Codex home: about 5-6 seconds more per new OFF agent session, none per
+  turn. A model the composer picks later must be one the spawn checked, else the turn is refused
+  with zero prompts.
+- **Windows (lead decision, 2026-11-23).** Codex has no chat permission profiles on Windows, so
+  there, and only there, the OFF spawn neither writes nor checks them and is not refused for
+  their absence. Its backstop is Codex's legacy `read-only` mode instead, set before every
+  prompt as on the other systems; a Codex that does not offer that mode fails the turn before
+  any prompt ("Codex would not take DSH's permission level: it offers none of the modes
+  read-only ..."). Everything else is as on Linux and macOS: the same check removes Codex's own
+  tools on every spawn and the bridge is forced. The Details switch is unlocked on Windows, and
+  groups, tasks and scheduled runs there run OFF. Linux and macOS do not change: without the
+  profiles their OFF spawn is still refused.
+- **The catalog file.** The checked copy is written, mode 0600, to the installation's ACP folder
+  (`codex-native-off/models-<sha256>.json`), outside every Codex home and outside `cli-homes`.
+  Copies older than 24 hours are pruned, never the one just written. A fork of an OFF process
+  writes the checked bytes back first when the file is missing (Codex refuses a fork whose
+  catalog file is gone).
+- **Calls that do not ask (LQ3).** A Codex call that is not the bridge's or one of its two MCP
+  list readers is not offered; if one appears anyway its card is not drawn, a permission question
+  for it is refused with the agent's reject option, and the session ends ("Codex used one of its
+  own tools while they are off ...").
+- **Kept models (lead decision B1-4, 2026-11-23).** A model on the Codex row's
+  `nativeKeptModels` (today `gpt-5.5`, whose tools Codex shows to no check) launches as today,
+  with Codex's own tools, in every Session: owner chat, group, task, schedule, relay, sub-agent,
+  identity-less, Read only (Codex's own read-only mode, as today). The Details switch shows OFF
+  and locked with "This model can't turn its native tools off." and makes no OFF promise. A
+  restricted (Q5), managed or shared Codex Bot on a kept model also keeps Codex's own tools, as
+  today; its row shows the kept sentence. The row and ON eligibility follow the Bot's saved
+  model: a Bot saved on a kept model runs its checked-model turns OFF, even in its own chat.
+- **Measured kept models (lead decisions B1-4 and the mixed-model option (b), 2026-11-23).** A
+  model of the copy whose read Codex answers with exit 0 and a JSON prompt list holding no tool
+  block shows nothing to check, like `gpt-5.5`: the accepted signature is a prompt list of known
+  items with no tool block (the real `gpt-5.5` answer is message items only; `[]` counts the
+  same). Such a model is measured kept, whether or not other models are checkable, and also when
+  the check then refuses for a reason that is not its own (another model's read, the final read,
+  or a switch Codex ignores). It runs as today, with Codex's own tools, in every Session, and its
+  row shows OFF and locked with the kept sentence. No turn is refused for it: the OFF turn that
+  measured it runs again at once as a kept one (today's launch, no notice), once. A Codex whose
+  listed models all show no tools is treated as if they were all kept; a `default` there whose
+  start model is not known yet runs as today too. A Codex update whose prompt read shows no tool
+  block for any model makes every model measured kept, which is the behaviour before this PR;
+  the rows then show the kept sentence.
+  - **The record.** The measured set is the last passed check's (a later check that shows a
+    model's tools takes it out; a check refused for another reason adds its no-block models and
+    takes none out), kept beside the catalog's recorded start model in its saved file, so the
+    row is right after a restart. It covers the whole Codex agent row, not each account or
+    Session folder: one Session's check applies to every Session of the row, and a sign-in to
+    another account keeps it (always in the "as today" direction). A turn reads it for the
+    connector and Codex release that measured it, for a day, then checks again; the Details row
+    reads it for that release whatever its age, so the row never unlocks and promises OFF
+    because a day passed. A refused check merges its no-block models into the record and
+    re-dates the older ones, even those it has just read as checkable, so a stale record can
+    keep a model that became checkable on Codex's own tools until a check of that Codex passes,
+    or for a day after the last refused check that measured any model with no tool block.
+  - **The safety limit.** Only that exact answer counts: an exit code, a prompt this code cannot
+    read, a forbidden tool, a deadline, a Stop, Codex's `Invalid configuration` or an unreadable
+    call still refuse
+    (LQ1) and keep no model, because an unreadable answer is never an unverifiable one; a model
+    the check never read (not in Codex's list) is still refused as unchecked.
+  - **Image grant.** A turn that measures a model (the first one, and the first after the record
+    lapses: a day, or a Codex or connector update) runs without the Session's staged image grant
+    (the OFF attempt cleared it); the person asks for the image again. Later turns on that model
+    are kept from their start.
+- **DSH's `default`** is the model Codex itself starts on (the last process with its own tools,
+  else the catalog's recorded start model); a wrong guess is caught after the model is set and
+  that turn ends with "The tools setting changed; send again." and no prompt, including the first
+  turn after an upgrade, before the catalog is read again.
+- **Session files.** The image-file grant ("Allow for this chat session") never activates in an
+  OFF Codex Session, and a staged grant is cleared; DSH's `read_image` reaches images through the
+  bridge.
+- **Read only** retires a live ON Codex at once; an OFF one and one on a kept model keep running.
+- **The switch's agent.** ON is saved with the agent it is for (`nativeToolsAgent`): a Bot moved
+  to another agent reads OFF and reads ON again when it moves back. An ON saved before the tag is
+  Claude's; omp's migrated `nativeToolsKept` is read as omp's. The Details row now shows for Bots
+  on the team default model (`appliedModel`) too.
+- **Migration (Q1/Q5).** Once per team (marker `nativeToolsCodexKept`), every existing Codex Bot
+  keeps Codex's own tools in its own direct chat (`nativeTools: true`,
+  `nativeToolsAgent: 'acp-codex'`), except Bots with shell access off or denied tools, which stay
+  OFF. A Codex Bot whose ON was saved for another agent (a Claude ON from before the tag, omp's
+  migrated one) has it moved to Codex. The app stores an OFF as no value, so such a Bot is
+  migrated like any other Codex Bot; only an explicit `nativeTools: false` stays OFF. Moved back
+  to Claude or omp afterwards, it reads OFF there (its ON names Codex). Groups, tasks, scheduled
+  runs, relays, sub-agents, Read only, multi-user, managed and restricted Bots move to DSH's
+  tools, as do identity-less Sessions on a team host, except Bots on a kept or measured kept
+  model.
+- **Rollback.** Revert PR B. Older builds ignore `nativeToolsAgent`, the marker and the
+  `codex-native-off` folder. A migrated Codex Bot keeps `nativeTools: true`, which a PR A build
+  applies only to Claude, so a rolled-back Bot later moved to Claude or omp would read ON.

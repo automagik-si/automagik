@@ -54,7 +54,9 @@ test('an omp migration tag shows OFF on Claude, and other agent rows stay absent
   assert.equal(claude.props.label, label)
   assert.equal(claude.props.details, true)
   assert.equal(claude.props.on, false)
-  for (const provider of ['acp-codex', 'acp-hermes', 'acp-antigravity']) assert.equal(render({ model: provider + '/default' }), null)
+  // #1564 PR B: Codex has the row too; Hermes and Antigravity still have none.
+  for (const provider of ['acp-hermes', 'acp-antigravity']) assert.equal(render({ model: provider + '/default' }), null)
+  assert.equal(render({ model: 'acp-codex/default' }).props.on, false)
 })
 
 test('both locale services carry the shared title and the approved omp descriptions', () => {

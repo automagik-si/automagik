@@ -3,6 +3,9 @@
   "With this off, omp has no tools at all, so this Bot can only chat. Groups, tasks and scheduled runs are always like this. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.": "Com isto desligado, o omp fica sem nenhuma ferramenta, e este Bot só pode conversar. Grupos, tarefas e execuções agendadas são sempre assim. Vale a partir da sua próxima mensagem no chat direto deste Bot. Desligar encerra a sessão em andamento.",
   "Here omp has no tools, so this Bot can only chat.": "Aqui o omp fica sem ferramentas, e este Bot só pode conversar.",
   "Native tools": "Tools nativas",
+  "In its own chat with you, Codex uses its own tools (commands, file edits…). They run in Codex's own sandbox, outside Automagik's. What asks you first depends on the permission level. Turning this off stops its running session at once.": "Na conversa direta com você, o Codex usa as próprias ferramentas (comandos, edição de arquivos…). Essas ferramentas rodam na área restrita do próprio Codex, fora da do Automagik. O nível de permissão determina o que pede sua aprovação antes. Desligar encerra na hora a sessão em andamento.",
+  "Codex uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.": "O Codex usa as ferramentas do Automagik, aprovadas no Automagik. Grupos, tarefas e execuções agendadas sempre usam. Vale a partir da sua próxima mensagem no chat direto deste Bot. Desligar encerra a sessão em andamento.",
+  "This model can't turn its native tools off.": "Este modelo não permite desligar as tools nativas.",
   "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.": "Na conversa direta com você, o Claude Code usa as próprias ferramentas (Bash, Read, Edit…). Essas ferramentas rodam fora da área restrita de arquivos do Automagik. O nível de permissão determina o que pede sua aprovação antes. Desligar encerra na hora a sessão em andamento.",
   "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.": "O Claude Code usa as ferramentas do Automagik, aprovadas no Automagik. Grupos, tarefas e execuções agendadas sempre usam. Vale a partir da sua próxima mensagem no chat direto deste Bot. Desligar encerra a sessão em andamento.",
   "Not available at the Read only level.": "Indisponível no nível Somente leitura.",
@@ -670,6 +673,10 @@
   "Its group conversation could not open": "Não foi possível abrir a conversa em grupo",
   "Its group conversation could not open, so it starts a new one next time": "Não foi possível abrir a conversa em grupo, então uma nova começa na próxima vez",
   "Its permission level could not be set here, so it took no turn": "Não foi possível definir o nível de permissão aqui, então não houve resposta nesta rodada",
+  "Codex could not turn its own tools off, so the message was not sent":
+    "O Codex não conseguiu desligar as próprias ferramentas, então a mensagem não foi enviada",
+  "Codex was not started because its own tools and Automagik's tools are both off":
+    "O Codex não foi iniciado porque as próprias ferramentas e as do Automagik estão desligadas",
   "Add files": "Adicionar arquivos",
   "Add photos & files": "Adicionar fotos e arquivos",
   "Upload from computer": "Enviar do computador",
