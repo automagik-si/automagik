@@ -934,8 +934,8 @@ export class AcpAdapter extends LlmAdapter {
    * set its last check measured with no tool block (B1-4). Such a model launches as today, with
    * Codex's own tools, whatever the switch says. DSH's `default` is the model Codex itself starts
    * with: the last one a process with its own tools reported, else the catalog's recorded start
-   * model. Unknown is not kept (the checked path). `anyAge` (the Details row only) reads the
-   * measured set whatever its age (BG-3).
+   * model. Unknown is not kept (the checked path). `anyAge` (the Details row and the Bot team's
+   * ON eligibility, which can only block) reads the measured set whatever its age (BG-3).
    */
   nativeKept(agent, model, { anyAge = false } = {}) {
     if (agent?.nativeSwitch !== 'config') return false
@@ -951,9 +951,9 @@ export class AcpAdapter extends LlmAdapter {
   /**
    * The models a Codex check last measured with no tool block (codex-native.js `unverified`):
    * the catalog's record, kept beside its start model on disk, else this host's. A turn reads
-   * it for a day, then checks again; `anyAge` (the Details row) reads it whatever its age, for
-   * the release that measured it, so the row never unlocks and promises OFF because a day
-   * passed (BG-3).
+   * it for a day, then checks again; `anyAge` (the Details row and the Bot team's ON
+   * eligibility, which can only block) reads it whatever its age, for the release that
+   * measured it, so the row never unlocks and promises OFF because a day passed (BG-3).
    */
   measuredKept(agent, { anyAge = false } = {}) {
     try {
@@ -1935,8 +1935,8 @@ export class AcpAdapter extends LlmAdapter {
             if (offRefused && options.signal?.aborted) return yield STOPPED()
             // Refused for another model's reason after this check measured models with no tool
             // block (BG-1): they are kept (merged into the record), and a turn on one of them runs
-            // as today in this same turn. A deadline, a Stop, a config error or an unreadable
-            // call carries none (codex-native.js).
+            // as today in this same turn. A deadline, a Stop, Codex's `Invalid configuration` or
+            // an unreadable call carries none (codex-native.js).
             if (offRefused && Array.isArray(error.unverified) && error.unverified.length > 0) {
               this.mergeMeasured(agent, error.unverified)
               if (entry.keptRelaunch !== true && this.nativeKept(agent, options.model)) return yield* relaunchKept()

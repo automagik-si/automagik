@@ -68,7 +68,8 @@ const lateCheck = () => Object.assign(unavailable('the checks could not be made 
 /**
  * A setup's refusal after `slugs` answered with no tool block (BG-1): the refusal carries them,
  * so their turns run as today. Only Codex's own answer (`unsupported`) or this setup's refusal
- * does; a deadline, a Stop, a config error or an unreadable call refuses as it is.
+ * does; a deadline, a Stop, Codex's `Invalid configuration` or an unreadable call carries none
+ * and refuses as it is.
  */
 function carrying(error, slugs) {
   if (slugs.length === 0) return error
@@ -333,7 +334,8 @@ const chains = new Map()
  * `{ overrides, offered, models, unverified, catalog: { path, bytes, sha256 } }` (`unverified`:
  * the copy models measured with no tool block); rejects with `code: 'acp/native-off-unavailable'`
  * and the reason (with `unverified` when models were measured with no tool block before another
- * reason refused, never for a deadline, a Stop, a config error or an unreadable call), or with
+ * reason refused, never for a deadline, a Stop, Codex's `Invalid configuration` or an unreadable
+ * call), or with
  * `code: 'acp/native-off-unverifiable'` and `models` when every copy model answered with no tool
  * block.
  * @param {{ command: string, args?: string[], env?: Record<string, string> }} launch

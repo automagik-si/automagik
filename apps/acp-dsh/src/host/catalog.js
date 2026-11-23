@@ -380,8 +380,8 @@ export class Catalog {
 
   /**
    * The models measured kept now: recorded for the release installed now, less than a day ago.
-   * `anyAge` (the Details row, #1564 BG-3) drops the day, never the release. Anything else, or a
-   * failure, is none.
+   * `anyAge` (the Details row and the Bot team's ON eligibility, which can only block; #1564
+   * BG-3) drops the day, never the release. Anything else, or a failure, is none.
    */
   measuredKept({ anyAge = false } = {}) {
     try {

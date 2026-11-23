@@ -1643,7 +1643,8 @@ export function apply(ctx, config = {}, {
     /**
      * Whether a Bot's route (`acp-codex/<model>`) is on a model the native-tools switch never
      * applies to: it launches with Codex's own tools in every Session (agents.js
-     * `nativeKeptModels`). Anything else, or a failure, is false.
+     * `nativeKeptModels`, or a model a check measured with no tool block for this Codex release,
+     * any age). Anything else, or a failure, is false.
      */
     nativeModelKept: route => adapter.nativeKeptRoute(route),
     /**

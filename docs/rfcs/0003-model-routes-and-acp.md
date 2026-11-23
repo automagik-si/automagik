@@ -1102,17 +1102,17 @@ this amendment" lines.
   model: a Bot saved on a kept model runs its checked-model turns OFF, even in its own chat.
 - **Measured kept models (lead decisions B1-4 and the mixed-model option (b), 2026-11-23).** A
   model of the copy whose read Codex answers with exit 0 and a JSON prompt list holding no tool
-  block shows nothing to check, like `gpt-5.5`: the accepted signature is the empty list `[]`
-  (the real `gpt-5.5` answer, exactly), and a list of message items only counts the same. Such a
-  model is measured kept, whether or not other models are checkable, and also when the check
-  then refuses for a reason that is not its own (another model's read, the final read, or a
-  switch Codex ignores). It runs as today, with Codex's own tools, in every Session, and its row
-  shows OFF and locked with the kept sentence. No turn is refused for it: the OFF turn that
+  block shows nothing to check, like `gpt-5.5`: the accepted signature is a prompt list of known
+  items with no tool block (the real `gpt-5.5` answer is message items only; `[]` counts the
+  same). Such a model is measured kept, whether or not other models are checkable, and also when
+  the check then refuses for a reason that is not its own (another model's read, the final read,
+  or a switch Codex ignores). It runs as today, with Codex's own tools, in every Session, and its
+  row shows OFF and locked with the kept sentence. No turn is refused for it: the OFF turn that
   measured it runs again at once as a kept one (today's launch, no notice), once. A Codex whose
   listed models all show no tools is treated as if they were all kept; a `default` there whose
   start model is not known yet runs as today too. A Codex update whose prompt read shows no tool
-  block for any model makes every model measured kept, which is the behaviour before this PR; the
-  rows then show the kept sentence.
+  block for any model makes every model measured kept, which is the behaviour before this PR;
+  the rows then show the kept sentence.
   - **The record.** The measured set is the last passed check's (a later check that shows a
     model's tools takes it out; a check refused for another reason adds its no-block models and
     takes none out), kept beside the catalog's recorded start model in its saved file, so the
@@ -1121,10 +1121,13 @@ this amendment" lines.
     another account keeps it (always in the "as today" direction). A turn reads it for the
     connector and Codex release that measured it, for a day, then checks again; the Details row
     reads it for that release whatever its age, so the row never unlocks and promises OFF
-    because a day passed. A stale record can keep a model that became checkable on Codex's own
-    tools for up to a day, until an OFF check of that Codex replaces it.
+    because a day passed. A refused check merges its no-block models into the record and
+    re-dates the older ones, even those it has just read as checkable, so a stale record can
+    keep a model that became checkable on Codex's own tools until a check of that Codex passes,
+    or for a day after the last refused check that measured any model with no tool block.
   - **The safety limit.** Only that exact answer counts: an exit code, a prompt this code cannot
-    read, a forbidden tool, a deadline, a Stop, a config error or an unreadable call still refuse
+    read, a forbidden tool, a deadline, a Stop, Codex's `Invalid configuration` or an unreadable
+    call still refuse
     (LQ1) and keep no model, because an unreadable answer is never an unverifiable one; a model
     the check never read (not in Codex's list) is still refused as unchecked.
   - **Image grant.** A turn that measures a model (the first one, and the first after the record
