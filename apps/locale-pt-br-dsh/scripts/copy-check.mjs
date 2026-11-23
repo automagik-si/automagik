@@ -50,10 +50,13 @@ export const OMNI_PLUGIN_STRINGS = [
 // The omni-ui keys: the Bot team's (its locale hook registers them as the zh dictionary's keys),
 // then those the plugins above add to the same namespace.
 export async function omniKeys() {
-  const { installLocale } = await import('../../bots-dsh/src/client/i18n.js')
+  const { addStrings, installLocale } = await import('../../bots-dsh/src/client/i18n.js')
+  const { nativeToolsZh } = await import('../../bots-dsh/src/client/native-tools-copy.js')
+  const removeDetails = addStrings(nativeToolsZh)
   let keys = new Set()
   const off = installLocale({ register: (_ns, _locale, dict) => { keys = new Set(Object.keys(dict)); return () => {} }, bind: () => (key) => key })
   off()
+  removeDetails()
   for (const path of OMNI_PLUGIN_STRINGS) {
     for (const key of JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8')).keys) keys.add(key)
   }

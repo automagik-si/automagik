@@ -195,7 +195,13 @@ Claude Code keeps its own tools and Automagik adds its extras. The owner's words
 is to use claude code + automagik extras, not replace claude code native`s with automagik`s,
 that makes your harness lose all your power."
 
-- **The setting.** `nativeTools` in this plugin's config (the `acpAgents` service's plugin,
+- **Bot teams.** Turn on **Claude Code native tools** in the Bot's Details. The saved
+  switch applies to a new Claude Code process on the first owner turn in a fresh direct
+  conversation. Groups, shared chats, IM, schedules, tasks, subagents and history replay
+  use the DSH tool path. Read only blocks the switch and the launch. Turning it off ends
+  the Bot's Claude Code processes. The Bot team's switch supersedes hidden config for
+  the entire host once the team has registered.
+- **Standalone ACP.** `nativeTools` in this plugin's config (the `acpAgents` service's plugin,
   `acp-dsh`), hidden from settings forms like `dshTools`. Absent (the default) or `false` is
   today's behaviour for everyone. `true` turns it on for every Claude Code Session; an object
   turns it on per Bot, by the Bot's name, or per DSH Session id. A key that says `false` wins

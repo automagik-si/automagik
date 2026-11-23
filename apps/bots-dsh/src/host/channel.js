@@ -160,6 +160,7 @@ export function install(rt) {
     ].join('')).join(','),
     rt.cachedDefault() ?? '', rt.cachedBackground?.() ?? '', rt.permissionKey?.() ?? '',
     rt.modelsEpoch?.() ?? 0,
+    Object.values(state.bots).map(bot => [bot.nativeTools === true, rt.nativeToolsBlock(bot) ?? ''].join('/')).join(','),
     // Fresh reads each poll catch selection changes and Agents appearing or going, without a listener or state revision.
     Object.values(state.bots).map(bot => {
       const running = runningOf(bot)
@@ -183,12 +184,14 @@ export function install(rt) {
     // (agents.js rollbackAdoption) would pass, so the menu offers rollback only then.
     bots: Object.values(state.bots).map(({ segments, kickoff, ...bot }) => {
       const tail = rt.chatTail(rt.chatOf(bot.id))
+      const nativeToolsBlock = rt.nativeToolsBlock(bot)
       return {
         ...bot, sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
         ...(bot.dshAgentId === undefined ? {} : { adoptionHistoryMatches: rt.adoptionHistoryMatches(bot.id) }),
         ...rt.permissionFallbackOf('bot', bot),
         ...rt.autoViewOf?.(bot),
         ...runningOf(bot),
+        ...(nativeToolsBlock === undefined ? {} : { nativeToolsBlock }),
         ...(tail ? { lastAt: tail.lastAt, preview: tail.preview } : {}),
       }
     }),
@@ -315,6 +318,7 @@ export function install(rt) {
       return false
     }
   }
+  rt.omniLinked = omniLinked
   // The live fields' sources are spread across the host with no single change
   // counter, so the serialized answer itself is the detector: a poll whose `live`
   // still names it gets only the key back, not the fields again. The key carries
@@ -528,6 +532,7 @@ export function install(rt) {
         return fail('Only the user can choose who may talk to a Bot, in its settings', 'bot/refused')
       }
       if (endpoint === 'update-bot' && Object.hasOwn(body, 'people')) {
+        if (Object.hasOwn(body, 'nativeTools')) throw invalid('Change native tools on their own.')
         if (Object.keys(body).some(key => key !== 'id' && key !== 'people' && key !== 'expect')) {
           return fail('Save who may talk to a Bot on its own', 'bot/refused')
         }

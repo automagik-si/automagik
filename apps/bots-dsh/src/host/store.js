@@ -696,7 +696,7 @@ export function install(rt) {
     } })
   }
 
-  const save = ({ required = false, copy } = {}) => {
+  const save = ({ required = false, copy, enableNativeTools } = {}) => {
     if (copy !== undefined) return rt.saveCopy(copy.change, copy)
     if (stopped) return required ? Promise.reject(new Error('The Bot team cannot be saved after this host stopped.')) : writing
     refreshShellHolds(state.bots)
@@ -710,7 +710,12 @@ export function install(rt) {
       state.autoStamp = state.revision
       state.version = STATE_VERSION
       state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
-      return state
+      if (enableNativeTools === undefined) return state
+      // ON belongs to this write's encoding until the owner route receives its
+      // acknowledgement. Other saves continue to encode the live Bot record.
+      const bot = enableNativeTools
+      if (own(state.bots, bot.id) !== bot) throw refusal('The Bot team changed. Try again.')
+      return { ...state, bots: { ...state.bots, [bot.id]: { ...bot, nativeTools: true } } }
     }, { required })
   }
 

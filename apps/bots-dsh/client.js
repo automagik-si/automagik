@@ -2018,6 +2018,7 @@ var ZH = {
   "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.": "无法为这个对话设置权限级别，所以代理没有在这里运行。重启 DeepSeek Harness 或更改权限级别会再试一次。",
   "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.": "DeepSeek Harness 无法确认这个对话来自哪里，所以代理没有在这里运行。请再发一次消息；如果一直这样，请重启 DeepSeek Harness。",
   "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.": "正在检查这个对话的权限级别，所以代理暂时没有在这里运行。请稍后再发一次消息。",
+  "The tools setting changed; send again.": "工具设置已更改，请重新发送。",
   "A task needs your approval": "有任务等你批准",
   "Task {title} is waiting for approval: {tool}": "任务 {title} 等你批准：{tool}",
   "a tool": "一个工具",
@@ -10219,7 +10220,8 @@ var approvalDetail = (entry) => entry.detail?.code || entry.shownTarget || (entr
 var HELD_NOT_SET = "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.";
 var HELD_UNREAD = "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.";
 var ACP_HELD_TEXT = "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.";
-var HELD_LINES = /* @__PURE__ */ new Set([HELD_NOT_SET, HELD_UNREAD, ACP_HELD_TEXT]);
+var NATIVE_TOOLS_CHANGED_TEXT = "The tools setting changed; send again.";
+var HELD_LINES = /* @__PURE__ */ new Set([HELD_NOT_SET, HELD_UNREAD, ACP_HELD_TEXT, NATIVE_TOOLS_CHANGED_TEXT]);
 
 // src/client/stops.js
 var heldText = (text2) => HELD_LINES.has(text2) ? t(text2) : text2;
@@ -17848,12 +17850,19 @@ function Switch({ on, label, disabled, onChange }) {
     (0, import_react42.createElement)("span", { className: "bt-switch-knob", "aria-hidden": true })
   );
 }
-function SwitchRow({ label, hint: hint3, on, disabled, onChange }) {
+function SwitchRow({ label, hint: hint3, on, disabled, onChange, details = false }) {
+  const toggle = (0, import_react42.createElement)(Switch, { on, label, disabled, onChange });
+  if (details) return (0, import_react42.createElement)(
+    "div",
+    null,
+    (0, import_react42.createElement)("div", { className: "bt-drawer-switch-head" }, (0, import_react42.createElement)("span", null, label), toggle),
+    hint3 ? (0, import_react42.createElement)("div", { className: "bt-note" }, hint3) : null
+  );
   return (0, import_react42.createElement)(
     "div",
     { className: "bt-set-row bt-bs-row" },
     (0, import_react42.createElement)("span", { className: "bt-set-copy" }, (0, import_react42.createElement)("span", { className: "bt-bs-label" }, label), hint3 ? (0, import_react42.createElement)("span", { className: "bt-set-hint" }, hint3) : null),
-    (0, import_react42.createElement)(Switch, { on, label, disabled, onChange })
+    toggle
   );
 }
 function ShapeRing({ shape, size }) {
@@ -18419,6 +18428,7 @@ label.bt-bs-row{cursor:text}
 .bt-bs-danger .bt-bs-label{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-bs-danger[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 8%,transparent)}
 .bt-bs-danger[data-confirm]:hover{background:color-mix(in srgb,var(--bt-danger) 12%,transparent)}
+.bt-drawer-switch-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .bt-switch{position:relative;flex:none;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--bt-line-2);cursor:pointer;transition:background-color .2s ease}
 .bt-switch[aria-checked=true]{background:var(--bt-accent)}
 .bt-switch:disabled{opacity:.45;cursor:default}
@@ -39071,8 +39081,47 @@ function PermissionChoiceDock({ sessionId, useRoster, actions }) {
   return (0, import_react97.createElement)("div", { className: "bt-q-dock" }, (0, import_react97.createElement)(PermissionCard, { key: bot.id, bot, catalog, roster, actions, onClose: close, onSaved: close }));
 }
 
+// src/client/native-tools-copy.js
+var nativeToolsCopy = {
+  label: "Active Native Tools",
+  on: "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.",
+  off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session."
+};
+var nativeToolsZh = {
+  [nativeToolsCopy.label]: "已启用的原生工具",
+  [nativeToolsCopy.on]: "在它与你的单独对话中，Claude Code 使用它自己的工具（Bash、Read、Edit…）。这些工具在 Automagik 的文件沙盒之外运行；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。",
+  [nativeToolsCopy.off]: "Claude Code 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
+  "Not available at the Read only level.": "在“仅可查看”级别下不可用。",
+  "Not available: the permission level of this Bot's chat could not be read.": "不可用：无法读取此 Bot 对话的权限级别。",
+  "Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.": "此 Bot 已与他人共享，或已安装共享插件（LiveShare），因此不可用。",
+  "Not available while this Bot has shell access off or denied tools.": "此 Bot 关闭了 Shell 访问或设置了禁止使用的工具，因此不可用。",
+  "Not available for a Bot that operates Omni or that another plugin manages.": "对于操作 Omni 或由其他插件管理的 Bot 不可用。"
+};
+
 // src/client/details-drawer.js
 var import_react98 = require("react");
+addStrings(nativeToolsZh);
+var NATIVE_TOOLS_HINTS = {
+  managed: "Not available for a Bot that operates Omni or that another plugin manages.",
+  shared: "Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.",
+  restricted: "Not available while this Bot has shell access off or denied tools.",
+  "read-only": "Not available at the Read only level.",
+  "level-unknown": "Not available: the permission level of this Bot's chat could not be read."
+};
+function NativeToolsRow({ bot, roster, run: run3, actions }) {
+  if (markOf(bot.model) !== "acp-claude" || bot.nativeToolsBlock === "multiuser") return null;
+  const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock];
+  const on = blocked === void 0 && bot.nativeTools === true;
+  const hint3 = t(blocked ?? (on ? nativeToolsCopy.on : nativeToolsCopy.off));
+  return (0, import_react98.createElement)(SwitchRow, {
+    details: true,
+    label: t(nativeToolsCopy.label),
+    hint: hint3,
+    on,
+    disabled: blocked !== void 0 || Boolean(roster.readOnly),
+    onChange: (value) => void run3(actions.updateBot(bot.id, { nativeTools: value }))
+  });
+}
 function transcriptOf(list, id, name, hiddenTurns = []) {
   const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline;
   if (!Array.isArray(outline)) return "";
@@ -39520,6 +39569,7 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
           (0, import_react98.createElement)("div", { className: "bt-section-title" }, t("Working folder")),
           (0, import_react98.createElement)(FolderMenu, { value: bot.workDir, actions, run: run3, wide: true, onPick: (workDir) => run3(actions.updateBot(bot.id, { workDir })) })
         ),
+        (0, import_react98.createElement)(NativeToolsRow, { key: "native-tools", bot, roster, actions, run: run3 }),
         bot.instructions ? (0, import_react98.createElement)(About, { key: "about", text: bot.instructions }) : (0, import_react98.createElement)("button", { key: "about", type: "button", className: "bt-more", onClick: () => setView("settings") }, t("Add instructions in Bot settings")),
         roster.memory === false ? null : (0, import_react98.createElement)(MemoryRow, { key: "memory", owner: { id: bot.id, name: bot.name }, actions }),
         usage ? (0, import_react98.createElement)(

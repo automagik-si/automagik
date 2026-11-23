@@ -322,7 +322,7 @@ function presetOf(session) {
 }
 
 /** The Session's level: its sandbox mode, its approval policy, and whether that is full access. */
-export function levelOf(approval, session, sandboxPolicy, permissionPresets) {
+export function levelOf(approval, session, sandboxPolicy, permissionPresets, { failClosed = false } = {}) {
   let policy
   let sandbox
   let preset
@@ -330,7 +330,9 @@ export function levelOf(approval, session, sandboxPolicy, permissionPresets) {
     policy = approval?.effectivePolicy?.(session)
     sandbox = sandboxOf(session, sandboxPolicy)
     preset = permissionPresets?.current?.(session)
-  } catch {}
+  } catch {
+    if (failClosed) return undefined
+  }
   // Auto is the identity the review gate reads (dsh-experimental-auto-review checks
   // `permissionPresets.current(session) !== AUTO_PRESET`), never the knob bundle: a custom
   // preset with Auto's `ask` + `danger-full-access` has no reviewer, so the bridge must keep its

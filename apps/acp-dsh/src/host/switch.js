@@ -232,6 +232,8 @@ export function isHandoff(message) {
   return message?.role === 'user' && message?.source?.handoff === true
 }
 
+export const CONTEXT_KINDS = new Set(['runtime-context', 'skill-catalog', 'time-context'])
+
 /** Whether `messages` hold an answer: an assistant turn that is not a bridge's synthetic block. */
 export function answered(messages) {
   return (messages ?? []).some(message =>
