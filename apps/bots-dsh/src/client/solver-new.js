@@ -15,7 +15,7 @@ import { nameProblem } from '../shared/mentions.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import {
   SOLVER_LOOKS, createSolver, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
-  reviewerPayload, solverCandidate, solverLook, solverPayload, solverStartModel,
+  reviewerPayload, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
 } from './solver-draft.js'
 import { DEFAULT_COLORS, DEFAULT_SHAPES } from './characters.js'
 
@@ -82,7 +82,11 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
     if (result.solver && !result.sendError) { onCreated(result.solver); return }
     if (result.solver) {
       setMade(result.solver)
-      setError(t('{name} was created, but your request was not sent: {error}', { name: result.solver.name, error: result.sendError?.message ?? String(result.sendError) }))
+      // A send that was not refused may still have reached the host: never say it was not sent.
+      const sent = { name: result.solver.name, error: result.sendError?.message ?? String(result.sendError) }
+      setError(uncertain(result.sendError)
+        ? t('{name} was created, but your request may not have been sent: {error}', sent)
+        : t('{name} was created, but your request was not sent: {error}', sent))
       return
     }
     const text = result.error?.message ?? String(result.error)
@@ -125,7 +129,7 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
           isHermesRemote(model) ? h('span', { className: 'bt-note bt-danger' }, t("This model uses its Hermes profile's own instructions.")) : null),
         h('div', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Project folder')),
-          h(FolderMenu, { value: folder || undefined, team: true, actions, run, onPick: (path) => { setError(''); setFolder(path) }, wide: true })),
+          h(FolderMenu, { value: folder || undefined, actions, run, onPick: (path) => { setError(''); setFolder(path) }, wide: true })),
         h('div', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Reviewer')),
           h('select', {
@@ -134,8 +138,8 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
           }, choices.map(entry => h('option', { key: entry.key, value: entry.key },
             entry.kind === 'new' ? t('New reviewer on another model') : entry.kind === 'bot' ? entry.name : t('Fresh session')))),
           choice.kind === 'new' ? h(ModelMenu, {
-            bot: { id: 'new-reviewer', name: reviewerName(roster, finalName), model: newModel }, roster, actions, wide: true,
-            // The reviewer is another model: the Solver's own is not a pick.
+            bot: { id: 'new-reviewer', name: reviewerName(roster, finalName), model: newModel }, roster, actions, wide: true, withEfforts: false,
+            // The reviewer is another model: the Solver's own is not a pick. It has no level of its own.
             onPick: (ref) => { if (ref !== model) setReviewerModel(ref) },
           }) : null,
           choice.kind === 'new' && isHermesRemote(newModel) ? h('span', { className: 'bt-note bt-danger' }, t("This model uses its Hermes profile's own instructions.")) : null,

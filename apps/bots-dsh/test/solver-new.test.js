@@ -147,7 +147,7 @@ const dialog = ({ roster = rosterOf(), actions = fakeActions(), brief = 'Compare
     select: () => find(node => node.type === 'select')[0],
     tick: () => find(node => node.type === 'input' && node.props.type === 'checkbox')[0],
     modelMenu: id => find(node => node.props?.bot?.id === id && typeof node.props.onPick === 'function')[0],
-    folder: () => find(node => node.props?.team === true && typeof node.props.onPick === 'function')[0],
+    folder: () => find(node => node.type?.name === 'FolderMenu')[0],
     alert: () => text(find(node => node.props?.role === 'alert')),
     notes: () => find(node => node.props?.role === 'status').map(text),
     text: () => text(tree()),
@@ -314,6 +314,40 @@ test('a failed brief keeps both Bots and says the request was not sent', async (
   assert.equal(text(ui.go()), 'Done')
   ui.go().props.onClick()
   assert.deepEqual(ui.created.map(bot => bot.id), ['s-new'])
+})
+
+test('an unknown send outcome says the request may not have been sent', async () => {
+  const network = Object.assign(new Error('Network down'), { code: 'NETWORK' })
+  const ui = dialog({ actions: fakeActions({ fail: { send: network } }) })
+  ui.tickNative()
+  await ui.create()
+  assert.equal(ui.actions.calls.some(call => call[0] === 'deleteBot'), false)
+  assert.equal(ui.alert(), 'Solver was created, but your request may not have been sent: Network down')
+  assert.equal(text(ui.go()), 'Done')
+})
+
+test('the reviewer model menu has no thinking level: a pick sends no update-bot', () => {
+  const ui = dialog()
+  const menu = ui.modelMenu('new-reviewer')
+  assert.equal(menu.props.withEfforts, false)
+  assert.equal(menu.props.onPickEffort, undefined)
+  menu.props.onPick(CODEX)
+  assert.equal(ui.modelMenu('new-reviewer').props.bot.model, CODEX)
+  assert.deepEqual(ui.actions.calls, [])
+})
+
+test('the folder menu is the working-folder menu: a picked folder can go back to the team workspace', async () => {
+  const ui = dialog()
+  assert.ok(ui.folder())
+  assert.equal(ui.folder().props.team, undefined)
+  ui.folder().props.onPick('/work/repo')
+  assert.equal(ui.folder().props.value, '/work/repo')
+  ui.folder().props.onPick('')
+  assert.equal(ui.folder().props.value, undefined)
+  await ui.create()
+  const creates = ui.actions.calls.filter(call => call[0] === 'createBot').map(call => call[1])
+  assert.deepEqual(creates.map(payload => payload.role), ['Reviewer', 'Solver'])
+  for (const payload of creates) assert.equal(Object.hasOwn(payload, 'workDir'), false, payload.role)
 })
 
 test('(6) the tick: hidden where Details has no switch, locked where it is locked, omp says it can only chat', () => {

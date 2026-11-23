@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { MAX_INSTRUCTIONS } from '../src/shared/registry.js'
-import { REVIEWER_INSTRUCTIONS, SOLVER_METHOD_VERSION, solverInstructions } from '../src/shared/solver-method.js'
+import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_METHOD_VERSION, isSolverBot, solverInstructions } from '../src/shared/solver-method.js'
+import { reviewerPayload, solverPayload } from '../src/client/solver-draft.js'
 
 const RULES = "Review this as a reviewer. Check it against the request's own words, not against the plan's claims."
   + ' Answer first with one verdict, SHIP, FIX-FIRST or BLOCKED, then the evidence: each problem with where'
@@ -70,4 +71,17 @@ test('the reviewer made by the dialog reviews only, against the request', () => 
   assert.ok(REVIEWER_INSTRUCTIONS.includes("Check it against the request's own words, not against the plan's claims."))
   assert.ok(REVIEWER_INSTRUCTIONS.includes('SHIP, FIX-FIRST or BLOCKED'))
   assert.ok(REVIEWER_INSTRUCTIONS.includes('Change no files; review only.'))
+})
+
+test('the Solver marker: a Bot whose role description is exactly the one the dialog writes', () => {
+  assert.equal(SOLVER_DESCRIPTION, 'Solver')
+  const look = { shape: 'moon', color: 'teal' }
+  const { payload } = solverPayload({ name: 'Ada', look, model: 'acp-claude/default', brief: 'Compare two libraries', reviewer: 'Ada reviewer', dedicated: true })
+  assert.equal(payload.role, SOLVER_DESCRIPTION)
+  assert.equal(isSolverBot(payload), true)
+  assert.equal(isSolverBot({ role: 'Solver' }), true)
+  const reviewer = reviewerPayload({ name: 'Ada reviewer', look, model: 'deepseek/deepseek-v4-flash' })
+  for (const bot of [reviewer, {}, null, undefined, { role: '' }, { role: 'solver' }, { role: ' Solver' }, { role: 'Solver ' }, { role: 'Solver helper' }, { role: 'Reviewer' }]) {
+    assert.equal(isSolverBot(bot), false, JSON.stringify(bot))
+  }
 })

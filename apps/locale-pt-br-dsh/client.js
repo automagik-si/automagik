@@ -3727,7 +3727,8 @@ const pack = createPack({
     "Native tools could not be turned on, so nothing was created: {error}": "Não foi possível ligar as tools nativas, então nada foi criado: {error}",
     "{name} could not be removed after the failure. Delete it in its Details.": "Não foi possível remover {name} após a falha. Exclua em Detalhes.",
     "{name} may have been created. Check the sidebar and delete it in its Details if you do not want it.": "{name} pode ter sido criado. Confira a barra lateral e exclua em Detalhes se não quiser.",
-    "{name} was created, but your request was not sent: {error}": "{name} foi criado, mas o seu pedido não foi enviado: {error}"
+    "{name} was created, but your request was not sent: {error}": "{name} foi criado, mas o seu pedido não foi enviado: {error}",
+    "{name} was created, but your request may not have been sent: {error}": "{name} foi criado, mas o seu pedido pode não ter sido enviado: {error}"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

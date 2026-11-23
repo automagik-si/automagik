@@ -12317,7 +12317,8 @@ var ZH = {
   "Native tools could not be turned on, so nothing was created: {error}": "无法开启原生工具，因此未创建任何内容：{error}",
   "{name} could not be removed after the failure. Delete it in its Details.": "失败后无法移除 {name}。请在其详情中删除。",
   "{name} may have been created. Check the sidebar and delete it in its Details if you do not want it.": "{name} 可能已被创建。请查看侧边栏，如不需要，请在其详情中删除。",
-  "{name} was created, but your request was not sent: {error}": "{name} 已创建，但你的请求没有发送：{error}"
+  "{name} was created, but your request was not sent: {error}": "{name} 已创建，但你的请求没有发送：{error}",
+  "{name} was created, but your request may not have been sent: {error}": "{name} 已创建，但你的请求可能没有发送：{error}"
 };
 var HOST_ERRORS = [
   [/^Could not reach the mail server at (.+)\. Check the server address\.$/, "连不上邮件服务器 $1，请检查服务器地址。"],

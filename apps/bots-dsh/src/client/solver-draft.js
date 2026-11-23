@@ -6,7 +6,7 @@ import { createPayload, freshBotName, setUp, startModel } from './bot-draft.js'
 import { isRefusal } from './api.js'
 import { t } from './i18n.js'
 import { markOf } from '../shared/permission-levels.js'
-import { REVIEWER_INSTRUCTIONS, solverInstructions } from '../shared/solver-method.js'
+import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, solverInstructions } from '../shared/solver-method.js'
 
 // The Solver's character slot: avatar objects as the host's cleanAvatar keeps them, `{ shape }`
 // of a CHARACTERS key or `{ pet: { source: 'builtin', id, version } }`. Empty until the Solver
@@ -128,7 +128,7 @@ export function reviewerPayload({ name, look, model, workDir }) {
 export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, native = false }) {
   const payload = createPayload({
     name, look, model, effort, sectionId, ownLook: true, avatar: avatarOfLook(look),
-    brief: native ? '' : brief, role: 'Solver', instructions: solverInstructions({ reviewer, dedicated }),
+    brief: native ? '' : brief, role: SOLVER_DESCRIPTION, instructions: solverInstructions({ reviewer, dedicated }),
   })
   if (workDir) payload.workDir = workDir
   return { payload, ...(native && brief ? { sendBrief: brief } : {}) }

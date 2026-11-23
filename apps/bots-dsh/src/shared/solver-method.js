@@ -5,6 +5,11 @@
 
 export const SOLVER_METHOD_VERSION = 1
 
+// The Solver marker (RFC 0048, delivery 1): a Bot whose role description is exactly this. Cosmetic: it
+// decides which characters a chooser offers. Delivery 2's official `solver` role replaces it and reads both.
+export const SOLVER_DESCRIPTION = 'Solver'
+export const isSolverBot = bot => bot?.role === SOLVER_DESCRIPTION
+
 // The reviewer's rules. A reviewer the dialog makes keeps them as its instructions; an existing
 // Bot gets them at the start of every review message.
 export const REVIEWER_RULES = "Check it against the request's own words, not against the plan's"
