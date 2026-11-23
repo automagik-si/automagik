@@ -15,11 +15,12 @@ name: Follow Omni
 # below its version and admit the desktop runtime in the same DSH patch series as their
 # harness, it boots that Omni with dev's plugins (boot-check.yml, the check CI runs), and only
 # when it boots does it move omni.json on dev and cut an Automagik release (release.yml): the
-# bump is pushed with GITHUB_TOKEN, so CI never boots it before installed apps update. An Omni
-# that fails the boot is not followed and the run fails; the next run tries it again. The bump
-# commit is built on exactly the dev commit that booted and pushed without force: when dev
-# moved during the boot, the push is refused, nothing is carried, and the next run boots the
-# new dev. Nothing untested rides along.
+# bump is pushed with GITHUB_TOKEN, so CI never boots it before installed apps update. For the
+# same reason the boot job also runs, on the candidate pin, the tests that read the pin. An Omni
+# that fails the boot or those tests is not followed and the run fails; the next run tries it
+# again. The bump commit is built on exactly the dev commit that booted and pushed without
+# force: when dev moved during the boot, the push is refused, nothing is carried, and the next
+# run boots the new dev. Nothing untested rides along.
 # Downgrades and a different patch series wait for a coordinated harness move.
 #
 # It carries at most one Omni a UTC day (#371): when the commit by which dev last moved omni.json
@@ -282,7 +283,8 @@ jobs:
       omni_commit: ${{ needs.follow.outputs.commit }}
 
   carry:
-    # Only after the candidate booted: a failed boot fails the run here and nothing moves. The
+    # Only after the candidate booted and the tests that read the pin passed on it (the boot
+    # job): a failure there fails the run here and nothing moves. The
     # bump goes on the dev commit that booted, and only a fast-forward of dev is pushed. A held
     # candidate (omni.json already moved today, UTC) is not carried, so nothing is released.
     name: Move to it

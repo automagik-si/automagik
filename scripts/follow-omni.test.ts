@@ -5,7 +5,7 @@
 // never carried.
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -450,5 +450,113 @@ base64 "\${app}.json"
     expect(run.out).toBe("::notice ::Omni 2.261121.12: omni-channels-dsh is at '2.20260221.1', ahead of its release or unreadable: not following it");
     // A legacy release given by omni_version is checked against its own plugins, in its scheme.
     expect(plugins('2.20260221.1', { channels: '2.20260220.6', canvas: '2.20260221.1' }).out).toBe('passed');
+  });
+});
+
+// Follow Omni pushes its bump with GITHUB_TOKEN, so no CI run tests the pin it carries before a
+// release is cut on it: v3.172.0 went out with a welcome test red on dev. The boot job
+// (boot-check.yml, called with the candidate) writes the candidate pin as carry does and runs the
+// tests that read the pin on it; carry, which makes the commit, needs that job.
+describe('Follow Omni tests the candidate pin before it commits it', () => {
+  const root = join(import.meta.dir, '..');
+  const workflow = Bun.YAML.parse(lines.join('\n')) as any;
+  const boot = (Bun.YAML.parse(readFileSync(join(root, '.github', 'workflows', 'boot-check.yml'), 'utf8')) as any).jobs.boot;
+  const steps: any[] = boot.steps;
+  const at = (name: string) => steps.findIndex(step => step.name === name);
+  const name = 'The tests that read the pin';
+  const tests = steps[at(name)];
+
+  test('the step runs on a candidate, on the pin written as carry writes it', () => {
+    expect(tests).toBeDefined();
+    expect(tests.if).toBe("inputs.omni_version != ''");
+    const written = steps[at('The candidate Omni')];
+    expect(written.if).toBe("inputs.omni_version != ''");
+    for (const file of ['apps/desktop/omni.json', 'apps/welcome-dsh/package.json']) expect(written.run).toContain(file);
+    expect(at(name)).toBeGreaterThan(at('The candidate Omni'));
+    // The welcome's tests need the installed harness, and its tool list the candidate's plugins.
+    expect(at(name)).toBeGreaterThan(at('Install'));
+    expect(at(name)).toBeGreaterThan(at("Omni's plugins at the candidate"));
+    expect(steps[at("Omni's plugins at the candidate")].run).toContain('origin "${OMNI_COMMIT}"');
+  });
+
+  test('it runs the tests that read omni.json or the welcome\'s pin', () => {
+    const listed = [
+      'apps/desktop/test/version.test.js',
+      'test/bot-types.test.js',
+      'test/install-resolved.test.js',
+      'test/omni-github-contract.test.js',
+      'test/release-resolve.test.js',
+    ];
+    for (const file of listed) expect(tests.run).toContain(file);
+    expect(tests.run).toContain('cd apps/welcome-dsh\n');
+    // A welcome test that names the pin (OMNI_RELEASE) is in the step: a new one is added here.
+    const welcome = join(root, 'apps', 'welcome-dsh', 'test');
+    const naming = readdirSync(welcome)
+      .filter(file => file.endsWith('.test.js') && readFileSync(join(welcome, file), 'utf8').includes('OMNI_RELEASE'))
+      .map(file => `test/${file}`);
+    expect(naming).toContain('test/release-resolve.test.js');
+    for (const file of naming) expect(tests.run).toContain(file);
+  });
+
+  test('a failing test fails the boot job, and carry never runs without that job', () => {
+    for (const part of [tests, boot, workflow.jobs.boot]) expect(part['continue-on-error']).toBeUndefined();
+    expect(workflow.jobs.boot.uses).toBe('./.github/workflows/boot-check.yml');
+    expect(workflow.jobs.boot.with).toEqual({
+      ref: '${{ needs.follow.outputs.dev }}',
+      omni_version: '${{ needs.follow.outputs.version }}',
+      omni_commit: '${{ needs.follow.outputs.commit }}',
+    });
+    expect(workflow.jobs.carry.needs).toEqual(['follow', 'boot']);
+    // No status function in carry's `if`: a failed or skipped boot job skips it.
+    expect(ifOf('carry')).not.toMatch(/always|failure|cancelled|success/);
+    // The commit is made in carry alone, on the dev commit the boot job tested.
+    expect(lines.filter(line => line.includes('git commit')).length).toBe(1);
+    expect(runOf('Move omni.json and the welcome to it')).toContain('git commit');
+    expect(jobOf('carry').map(line => line.trim())).toContain('ref: ${{ needs.follow.outputs.dev }}');
+  });
+
+  // The step as written, with stand-ins for node and bun that log their arguments; `fail` is a
+  // word of the command line that makes the stand-in fail.
+  function runStep(fail = '') {
+    const dir = mkdtempSync(join(tmpdir(), 'follow-omni-pin-tests-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      mkdirSync(join(dir, 'apps', 'welcome-dsh'), { recursive: true });
+      const standIn = '#!/usr/bin/env bash\necho "$(basename "$0") $*" >> "$CALLS"\n[[ -z "$FAIL" || " $* " != *" $FAIL "* ]]\n';
+      for (const bin of ['node', 'bun']) writeFileSync(join(dir, 'bin', bin), standIn, { mode: 0o755 });
+      const calls = join(dir, 'calls');
+      writeFileSync(calls, '');
+      const run = spawnSync('/bin/bash', ['-c', tests.run], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { PATH: `${join(dir, 'bin')}:/usr/bin:/bin`, CALLS: calls, FAIL: fail },
+      });
+      return { status: run.status, calls: readFileSync(calls, 'utf8').trim().split('\n') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test('as written, it runs the desktop test, installs the welcome and runs its tests', () => {
+    expect(runStep()).toEqual({
+      status: 0,
+      calls: [
+        'node --test apps/desktop/test/version.test.js',
+        'bun install --frozen-lockfile --ignore-scripts',
+        'node --import ./test/harness-resolve.mjs --test test/bot-types.test.js test/install-resolved.test.js test/omni-github-contract.test.js test/release-resolve.test.js',
+      ],
+    });
+  });
+
+  test('as written, any failure stops it: nothing later runs and the step fails', () => {
+    const desktop = runStep('apps/desktop/test/version.test.js');
+    expect(desktop.status).not.toBe(0);
+    expect(desktop.calls).toEqual(['node --test apps/desktop/test/version.test.js']);
+    const install = runStep('install');
+    expect(install.status).not.toBe(0);
+    expect(install.calls.length).toBe(2);
+    const welcome = runStep('test/release-resolve.test.js');
+    expect(welcome.status).not.toBe(0);
+    expect(welcome.calls.length).toBe(3);
   });
 });
