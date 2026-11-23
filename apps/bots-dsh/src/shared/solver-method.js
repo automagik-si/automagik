@@ -7,6 +7,7 @@ export const SOLVER_METHOD_VERSION = 1
 
 // The Solver marker (RFC 0048, delivery 1): a Bot whose role description is exactly this. Cosmetic: it
 // decides which characters a chooser offers. Delivery 2's official `solver` role replaces it and reads both.
+// Never gate a permission or capability on it: delivery 3's task-start reads the `solver` role pin, not this.
 export const SOLVER_DESCRIPTION = 'Solver'
 export const isSolverBot = bot => bot?.role === SOLVER_DESCRIPTION
 
