@@ -16,22 +16,27 @@ const { outputFiles } = await build({
 
 test('Details registers its translated copy through the normal locale service', () => {
   const { installLocale, NativeToolsRow } = module.exports
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
+  const props = { bot: { id: 'a', model: 'acp-claude/default', nativeToolsBlock: 'read-only' }, roster: {} }
+  let active = 'zh'
   let zh
   const off = installLocale({
     register: (_namespace, _locale, dictionary) => { zh = dictionary; return () => {} },
-    bind: () => key => zh[key] ?? key,
+    bind: () => key => (active === 'zh' ? zh : pt)[key] ?? key,
   })
   try {
-    const row = NativeToolsRow({ bot: { id: 'a', model: 'acp-claude/default', nativeToolsBlock: 'read-only' }, roster: {} })
-    assert.equal(row.props.label, 'Claude Code 原生工具')
+    const row = NativeToolsRow(props)
+    assert.equal(row.props.label, '已启用的原生工具')
     assert.equal(row.props.hint, '在“仅可查看”级别下不可用。')
-    const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
     for (const key of Object.keys(nativeToolsZh)) {
       assert.equal(zh[key], nativeToolsZh[key])
       assert.ok(pt[key] && pt[key] !== key, key)
     }
     assert.equal(pt[nativeToolsCopy.off], 'O Claude Code usa as ferramentas do Automagik, aprovadas no Automagik. Grupos, tarefas e execuções agendadas sempre usam. Vale a partir da sua próxima mensagem no chat direto deste Bot. Desligar encerra a sessão em andamento.')
+    active = 'pt'
+    assert.equal(NativeToolsRow(props).props.label, 'Tools nativas ativas')
   } finally { off() }
+  assert.equal(NativeToolsRow(props).props.label, 'Active Native Tools')
 })
 const module = { exports: {} }
 runInNewContext(outputFiles[0].text, {
@@ -60,4 +65,9 @@ test('Details uses a Claude-only switch with the Read only reason and the normal
   render().props.onChange(true)
   assert.deepEqual(updates, [['a', { nativeTools: true }]])
   assert.equal(render().props.on, false)
+  render({ nativeTools: true }).props.onChange(false)
+  assert.deepEqual(updates, [['a', { nativeTools: true }], ['a', { nativeTools: false }]])
+  const readOnly = row({ bot: { ...bot, nativeTools: true }, roster: { readOnly: true } })
+  assert.equal(readOnly.props.disabled, true)
+  assert.equal(readOnly.props.on, true)
 })

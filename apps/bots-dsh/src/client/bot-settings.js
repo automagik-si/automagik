@@ -72,10 +72,14 @@ export function Switch({ on, label, disabled, onChange }) {
 }
 
 // A row with a switch. Not a label: a click on the copy must not flip it twice.
-export function SwitchRow({ label, hint, on, disabled, onChange }) {
+export function SwitchRow({ label, hint, on, disabled, onChange, details = false }) {
+  const toggle = h(Switch, { on, label, disabled, onChange })
+  if (details) return h('div', null,
+    h('div', { className: 'bt-drawer-switch-head' }, h('span', null, label), toggle),
+    hint ? h('div', { className: 'bt-note' }, hint) : null)
   return h('div', { className: 'bt-set-row bt-bs-row' },
     h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, label), hint ? h('span', { className: 'bt-set-hint' }, hint) : null),
-    h(Switch, { on, label, disabled, onChange }))
+    toggle)
 }
 
 // The selection ring of a picker cell follows the shape: a 1px line 3px outside it.
@@ -476,6 +480,7 @@ label.bt-bs-row{cursor:text}
 .bt-bs-danger .bt-bs-label{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-bs-danger[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 8%,transparent)}
 .bt-bs-danger[data-confirm]:hover{background:color-mix(in srgb,var(--bt-danger) 12%,transparent)}
+.bt-drawer-switch-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .bt-switch{position:relative;flex:none;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--bt-line-2);cursor:pointer;transition:background-color .2s ease}
 .bt-switch[aria-checked=true]{background:var(--bt-accent)}
 .bt-switch:disabled{opacity:.45;cursor:default}

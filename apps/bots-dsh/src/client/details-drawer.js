@@ -43,7 +43,7 @@ export function NativeToolsRow({ bot, roster, run, actions }) {
   const on = blocked === undefined && bot.nativeTools === true
   const hint = t(blocked ?? (on ? nativeToolsCopy.on : nativeToolsCopy.off))
   return h(SwitchRow, {
-    label: t(nativeToolsCopy.label), hint, on, disabled: blocked !== undefined || Boolean(roster.readOnly),
+    details: true, label: t(nativeToolsCopy.label), hint, on, disabled: blocked !== undefined || Boolean(roster.readOnly),
     onChange: value => void run(actions.updateBot(bot.id, { nativeTools: value })),
   })
 }
@@ -383,10 +383,10 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
         h(PermissionRow, { key: 'permission', bot, roster, actions, run }),
         h(GrantList, { key: 'grants', bot, roster, actions, useWork }),
         h(BotConnectors, { key: 'connectors', bot, roster, actions, run }),
-        h(NativeToolsRow, { key: 'native-tools', bot, roster, actions, run }),
         h('div', { key: 'folder', className: 'bt-drawer-model' },
           h('div', { className: 'bt-section-title' }, t('Working folder')),
           h(FolderMenu, { value: bot.workDir, actions, run, wide: true, onPick: workDir => run(actions.updateBot(bot.id, { workDir })) })),
+        h(NativeToolsRow, { key: 'native-tools', bot, roster, actions, run }),
         bot.instructions
           ? h(About, { key: 'about', text: bot.instructions })
           : h('button', { key: 'about', type: 'button', className: 'bt-more', onClick: () => setView('settings') }, t('Add instructions in Bot settings')),

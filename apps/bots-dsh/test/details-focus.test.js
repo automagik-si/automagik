@@ -564,6 +564,31 @@ test('rfc0039 D4 C8 Details lists and revokes only the selected Bot grants [P]',
   assert.deepEqual(stopped, ['grant-1'])
 })
 
+test('Details places the native tools title and switch together directly below Working folder', async t => {
+  const { document, root, DetailsDrawer } = mount(t)
+  const bot = { ...grantBot, model: 'acp-claude/default' }
+  await act(() => root.render(React.createElement(DetailsDrawer, {
+    ...panelProps, sessionId: bot.id, roster: { ...grantRoster, byId: { [bot.id]: bot }, bots: [bot] }, actions: {},
+  })))
+
+  const body = document.querySelector('.bt-drawer-body')
+  const folder = [...body.children].find(row => row.firstElementChild?.textContent === 'Working folder')
+  assert.ok(folder)
+  const row = folder.nextElementSibling
+  const [header, hint] = row.children
+  const [title, toggle] = header.children
+  assert.equal(row.children.length, 2)
+  assert.equal(header.children.length, 2)
+  assert.equal(title.textContent, 'Active Native Tools')
+  assert.equal(toggle.getAttribute('role'), 'switch')
+  assert.equal(toggle.getAttribute('aria-label'), title.textContent)
+  assert.equal(toggle.getAttribute('aria-checked'), 'false')
+  assert.ok(hint.classList.contains('bt-note'))
+  assert.match(hint.textContent, /Claude Code uses Automagik's tools/)
+  assert.equal([...body.textContent.matchAll(/Active Native Tools/g)].length, 1)
+  assert.doesNotMatch(body.textContent, /Claude Code native tools/)
+})
+
 test('rfc0039 D4 C9 an older host still opens ordinary Live rows [C]', async t => {
   const { document, root, LiveRail } = mount(t)
   const opened = []

@@ -17850,12 +17850,19 @@ function Switch({ on, label, disabled, onChange }) {
     (0, import_react42.createElement)("span", { className: "bt-switch-knob", "aria-hidden": true })
   );
 }
-function SwitchRow({ label, hint: hint3, on, disabled, onChange }) {
+function SwitchRow({ label, hint: hint3, on, disabled, onChange, details = false }) {
+  const toggle = (0, import_react42.createElement)(Switch, { on, label, disabled, onChange });
+  if (details) return (0, import_react42.createElement)(
+    "div",
+    null,
+    (0, import_react42.createElement)("div", { className: "bt-drawer-switch-head" }, (0, import_react42.createElement)("span", null, label), toggle),
+    hint3 ? (0, import_react42.createElement)("div", { className: "bt-note" }, hint3) : null
+  );
   return (0, import_react42.createElement)(
     "div",
     { className: "bt-set-row bt-bs-row" },
     (0, import_react42.createElement)("span", { className: "bt-set-copy" }, (0, import_react42.createElement)("span", { className: "bt-bs-label" }, label), hint3 ? (0, import_react42.createElement)("span", { className: "bt-set-hint" }, hint3) : null),
-    (0, import_react42.createElement)(Switch, { on, label, disabled, onChange })
+    toggle
   );
 }
 function ShapeRing({ shape, size }) {
@@ -18421,6 +18428,7 @@ label.bt-bs-row{cursor:text}
 .bt-bs-danger .bt-bs-label{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-bs-danger[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 8%,transparent)}
 .bt-bs-danger[data-confirm]:hover{background:color-mix(in srgb,var(--bt-danger) 12%,transparent)}
+.bt-drawer-switch-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .bt-switch{position:relative;flex:none;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--bt-line-2);cursor:pointer;transition:background-color .2s ease}
 .bt-switch[aria-checked=true]{background:var(--bt-accent)}
 .bt-switch:disabled{opacity:.45;cursor:default}
@@ -39075,12 +39083,12 @@ function PermissionChoiceDock({ sessionId, useRoster, actions }) {
 
 // src/client/native-tools-copy.js
 var nativeToolsCopy = {
-  label: "Claude Code native tools",
+  label: "Active Native Tools",
   on: "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.",
   off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session."
 };
 var nativeToolsZh = {
-  [nativeToolsCopy.label]: "Claude Code 原生工具",
+  [nativeToolsCopy.label]: "已启用的原生工具",
   [nativeToolsCopy.on]: "在它与你的单独对话中，Claude Code 使用它自己的工具（Bash、Read、Edit…）。这些工具在 Automagik 的文件沙盒之外运行；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。",
   [nativeToolsCopy.off]: "Claude Code 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。",
   "Not available at the Read only level.": "在“仅可查看”级别下不可用。",
@@ -39106,6 +39114,7 @@ function NativeToolsRow({ bot, roster, run: run3, actions }) {
   const on = blocked === void 0 && bot.nativeTools === true;
   const hint3 = t(blocked ?? (on ? nativeToolsCopy.on : nativeToolsCopy.off));
   return (0, import_react98.createElement)(SwitchRow, {
+    details: true,
     label: t(nativeToolsCopy.label),
     hint: hint3,
     on,
@@ -39554,13 +39563,13 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
         (0, import_react98.createElement)(PermissionRow, { key: "permission", bot, roster, actions, run: run3 }),
         (0, import_react98.createElement)(GrantList, { key: "grants", bot, roster, actions, useWork }),
         (0, import_react98.createElement)(BotConnectors, { key: "connectors", bot, roster, actions, run: run3 }),
-        (0, import_react98.createElement)(NativeToolsRow, { key: "native-tools", bot, roster, actions, run: run3 }),
         (0, import_react98.createElement)(
           "div",
           { key: "folder", className: "bt-drawer-model" },
           (0, import_react98.createElement)("div", { className: "bt-section-title" }, t("Working folder")),
           (0, import_react98.createElement)(FolderMenu, { value: bot.workDir, actions, run: run3, wide: true, onPick: (workDir) => run3(actions.updateBot(bot.id, { workDir })) })
         ),
+        (0, import_react98.createElement)(NativeToolsRow, { key: "native-tools", bot, roster, actions, run: run3 }),
         bot.instructions ? (0, import_react98.createElement)(About, { key: "about", text: bot.instructions }) : (0, import_react98.createElement)("button", { key: "about", type: "button", className: "bt-more", onClick: () => setView("settings") }, t("Add instructions in Bot settings")),
         roster.memory === false ? null : (0, import_react98.createElement)(MemoryRow, { key: "memory", owner: { id: bot.id, name: bot.name }, actions }),
         usage ? (0, import_react98.createElement)(

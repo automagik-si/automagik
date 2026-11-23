@@ -1,13 +1,13 @@
 // Details-only strings. Register them with the main client so the Code pane
 // keeps the same dictionary and standalone bundle.
 export const nativeToolsCopy = {
-  label: 'Claude Code native tools',
+  label: 'Active Native Tools',
   on: "In its own chat with you, Claude Code uses its own tools (Bash, Read, Edit…). They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running session at once.",
   off: "Claude Code uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session.",
 }
 
 export const nativeToolsZh = {
-  [nativeToolsCopy.label]: 'Claude Code 原生工具',
+  [nativeToolsCopy.label]: '已启用的原生工具',
   [nativeToolsCopy.on]: '在它与你的单独对话中，Claude Code 使用它自己的工具（Bash、Read、Edit…）。这些工具在 Automagik 的文件沙盒之外运行；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。',
   [nativeToolsCopy.off]: 'Claude Code 使用 Automagik 的工具，并在 Automagik 中审批。群组、任务和定时运行始终如此。从你在此 Bot 的单独对话中发送的下一条消息起生效。关闭后会结束正在运行的会话。',
   'Not available at the Read only level.': '在“仅可查看”级别下不可用。',
