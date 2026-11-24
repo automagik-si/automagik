@@ -239,3 +239,10 @@ test('the octopus in a color other than Omni\'s is kept: on the stage, no tile, 
   assert.deepEqual(saved, [['b', { avatar: { shape: 'octopus' }, color: 'red' }]])
   assert.deepEqual(used, [])
 })
+
+test('D2 G1 a Solver pin makes the Solvers available without the Solver description', () => {
+  const nodes = chooser({ id: 'b', name: 'Research', role: 'Researcher',
+    roles: [{ id: 'solver', version: '3.1.2', attachedAt: '2026-11-24T00:00:00Z', grants: [] }] }).draw()
+  assert.ok(headings(nodes).includes('Solvers'))
+  assert.ok(SOLVER_KEYS.every(key => keysOf(nodes).includes(key)))
+})

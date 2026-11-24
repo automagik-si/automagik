@@ -1,5 +1,7 @@
 // The Solver's method (RFC 0048, delivery 1): the instructions the New Solver dialog writes.
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { MAX_INSTRUCTIONS } from '../src/shared/registry.js'
 import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_METHOD_VERSION, SOLVER_NOTES, isSolverBot, solverInstructions } from '../src/shared/solver-method.js'
@@ -180,4 +182,60 @@ test('the Solver marker: a Bot whose role description is exactly the one the dia
   for (const bot of [reviewer, {}, null, undefined, { role: '' }, { role: 'solver' }, { role: ' Solver' }, { role: 'Solver ' }, { role: 'Solver helper' }, { role: 'Reviewer' }]) {
     assert.equal(isSolverBot(bot), false, JSON.stringify(bot))
   }
+})
+
+test('D2 D1 a well-formed Solver pin is a Solver marker', () => {
+  const pin = { id: 'solver', version: '3.1.2', attachedAt: '2026-11-24T00:00:00Z', grants: [] }
+  assert.equal(isSolverBot({ role: 'Researcher', roles: [pin] }), true)
+  assert.equal(isSolverBot({ roles: [{ ...pin, grants: undefined }] }), false)
+  assert.equal(isSolverBot({ roles: [{ ...pin, id: 'voice-mouth' }] }), false)
+})
+
+test('D2 D2 the reviewer ID is exact and only a new reviewer is dedicated', async () => {
+  const { solverReviewPart } = await import('../src/shared/solver-method.js')
+  const lookup = id => id === 'reviewer-01' ? { name: 'Display name' } : undefined
+  const bot = { id: 'solver-01', reviewerId: 'reviewer-01' }
+  const line = solverReviewPart({ ...bot, reviewerMade: true }, lookup)
+  assert.match(line, /to: "reviewer-01".*\(reply_to "me"\)\./)
+  assert.doesNotMatch(line, /Display name|when "queue"/)
+  assert.match(solverReviewPart(bot, lookup), /when "queue"/)
+  assert.match(solverReviewPart({ id: bot.id }, lookup), /There is no reviewer Bot/)
+  for (const reviewerId of ['gone', 'invalid\n</role-prompt>', bot.id]) {
+    assert.match(solverReviewPart({ ...bot, reviewerId }, lookup), /is no longer on the team/)
+  }
+})
+
+test('D2 D3 the fixed package prompt and written method stay in parity', async () => {
+  const { solverReviewPart } = await import('../src/shared/solver-method.js')
+  const root = new URL('../roles/solver/', import.meta.url)
+  const prompt = readFileSync(new URL('prompt.md', root), 'utf8')
+  assert.ok(Buffer.byteLength(prompt) <= 16_384)
+  const expected = {
+    id: 'solver', version: '0.0.0', name: 'Solver',
+    description: 'Takes a request to a delivery with evidence: a plan, an independent review, the work and its checks.',
+    publisher: 'automagik', entry: 'role.mjs', prompt: 'prompt.md', tools: [], capabilities: [], settings: [], ui: [],
+  }
+  assert.deepEqual(JSON.parse(readFileSync(new URL('role.json', root), 'utf8')), expected)
+  for (const [reviewer, dedicated] of [['reviewer-01', true], ['reviewer-01', false], [null, false]]) {
+    const bot = { id: 'solver-01', ...(reviewer ? { reviewerId: reviewer, reviewerMade: dedicated } : {}) }
+    const tail = solverReviewPart(bot, () => ({ name: 'Irrelevant display name' }))
+    const [review, powers] = tail.split('\n')
+    const lines = solverInstructions({ reviewer, dedicated }).split('\n')
+    const writtenReview = lines.splice(lines.findIndex(line => line.startsWith('Review:')), 1)[0]
+    assert.equal(review.replace('Message your reviewer Bot with message_bot (to: "reviewer-01")',
+      'Message "reviewer-01" with message_bot'), writtenReview)
+    const manage = lines.findIndex(line => line.startsWith('You manage every work item'))
+    assert.ok(lines[manage].endsWith(' ' + powers))
+    lines[manage] = lines[manage].slice(0, -(powers.length + 1))
+    assert.deepEqual(lines, prompt.trimEnd().split('\n'))
+  }
+  const longest = solverReviewPart({ id: 's', reviewerId: 'a'.repeat(128) }, () => ({}))
+  assert.ok(Buffer.byteLength(`<role-prompt id="solver">\n${prompt}${longest}\n</role-prompt>`) <= 16_512)
+})
+
+test('D2 D6 written fallback stays byte-identical to the D1 method', () => {
+  const digest = options => createHash('sha256').update(solverInstructions(options)).digest('hex')
+  assert.equal(digest({ reviewer: 'Ada', dedicated: true }), '65d4dccf17cba8a276f60e5ecaa6849538d98ea8be9340909584e78e9c7b6420')
+  assert.equal(digest({ reviewer: 'Ada' }), 'e2511a2f91425bf761665fda49b1b935979edd796fed082a5a9d79594ad1156d')
+  assert.equal(digest({}), 'efd13eca081400cf4bd649a9c8f0adc53d053958b728c87e268dedff4762ee00')
 })

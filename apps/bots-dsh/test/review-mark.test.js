@@ -788,3 +788,14 @@ test('a delivery made while the reviewer still has the work is marked pending, n
   endTurn(bot.id, 'Done.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
 })
+
+test('D2 G2 a pin-only Solver is tracked through delivery', async t => {
+  const b = bench(t)
+  const solver = await b.solver()
+  solver.role = 'Researcher'
+  solver.roles = [{ id: 'solver', version: '3.1.2', attachedAt: '2026-11-24T00:00:00Z', grants: [] }]
+  b.person(solver.id, 'Review the fixture')
+  b.endTurn(solver.id, 'Review: fresh session. Done.')
+  const roster = (await b.call('state')).value
+  assert.equal(roster.bots.find(bot => bot.id === solver.id).reviewMark?.review, 'fresh')
+})

@@ -1,8 +1,8 @@
-// New Solver (RFC 0048, delivery 1): a dialog that makes an ordinary Bot set up to solve a request
+// New Solver (RFC 0048, delivery 2): a dialog that makes an ordinary Bot set up to solve a request
 // end to end, with a reviewer on another model or a fresh-session review, and native tools as
 // the person's own tick. Nothing exists until Create; what Create makes is said, and what a
 // failure leaves behind is named (solver-draft.js createSolver).
-import { createElement as h, useEffect, useState } from 'react'
+import { createElement as h, useEffect, useRef, useState } from 'react'
 import { BotMark } from './mark.js'
 import { FolderMenu } from './folder-menu.js'
 import { ModelMenu } from './model-menu.js'
@@ -11,6 +11,8 @@ import { useEscape } from './overlay-hooks.js'
 import { freshBotName } from './bot-draft.js'
 import { addStrings, hostText, t } from './i18n.js'
 import { presetDanger, presetName } from './permission-picker.js'
+import { ROLES_OFF_REASON, rolesOn } from '../shared/roles.js'
+import { SOLVER_ROLE_ID } from '../shared/solver-method.js'
 import { nameProblem } from '../shared/mentions.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import {
@@ -21,6 +23,12 @@ import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 import { DEFAULT_COLORS, DEFAULT_SHAPES } from './characters.js'
 
 addStrings(nativeToolsZh)
+
+const roleNotes = {
+  install: 'The Solver role could not be installed now, so this Solver uses the written method. The role is attached when it can be installed.',
+  attach: 'The Solver role could not be attached now, so this Solver uses the written method. The role is attached when it can be.',
+  [ROLES_OFF_REASON]: 'Roles are turned off for this team, so this Solver uses the written method.',
+}
 
 const pick = list => list[Math.floor(Math.random() * list.length)]
 
@@ -34,6 +42,7 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const [reviewerModel, setReviewerModel] = useState(null)
   const [ticked, setTicked] = useState(false)
   const [guarded, setGuarded] = useState(true)
+  const inFlight = useRef(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notes, setNotes] = useState([])
@@ -63,43 +72,51 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const hermes = isHermesRemote(model) || (choice.kind === 'new' && isHermesRemote(newModel))
   const permission = roster.newBotPermission ?? roster.prefs?.permission ?? roster.permissions?.defaultPreset
   const blocked = busy || made !== null || clash || Boolean(problem) || !model || Boolean(roster.readOnly) || hermes
+  const intendsInstall = rolesOn(roster.prefs) && !Object.hasOwn(roster.roles ?? {}, SOLVER_ROLE_ID)
   const create = async () => {
-    if (blocked) return
+    if (blocked || inFlight.current) return
+    inFlight.current = true
     setError('')
     setNotes([])
     setBusy(true)
-    const before = new Set(roster.bots.map(bot => bot.id))
-    const workDir = folder || undefined
-    const reviewer = choice.kind === 'new' ? { kind: 'new' } : choice.kind === 'bot' ? { kind: 'bot', name: choice.name, botId: choice.botId } : { kind: 'fresh' }
-    const guard = reviewer.kind !== 'fresh' && guarded
-    const result = await createSolver({
-      actions, before, reviewer, native,
-      reviewerPayload: choice.kind === 'new' ? reviewerPayload({
-        name: reviewerName(roster, finalName), look: { shape: pick(DEFAULT_SHAPES), color: pick(DEFAULT_COLORS) }, model: newModel, workDir,
-      }) : undefined,
-      solverPayloadFor: ({ reviewer: reviewerBot, dedicated, reviewerId }) => solverPayload({
-        name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, native, guard,
-      }),
-    })
-    setBusy(false)
-    if (result.solver && !result.sendError) { onCreated(result.solver); return }
-    if (result.solver) {
-      setMade(result.solver)
-      // A send that was not refused may still have reached the host: never say it was not sent.
-      const sent = { name: result.solver.name, error: result.sendError?.message ?? String(result.sendError) }
-      setError(uncertain(result.sendError)
-        ? t('{name} was created, but your request may not have been sent: {error}', sent)
-        : t('{name} was created, but your request was not sent: {error}', sent))
-      return
+    try {
+      const before = new Set(roster.bots.map(bot => bot.id))
+      const workDir = folder || undefined
+      const reviewer = choice.kind === 'new' ? { kind: 'new' } : choice.kind === 'bot' ? { kind: 'bot', name: choice.name, botId: choice.botId } : { kind: 'fresh' }
+      const guard = reviewer.kind !== 'fresh' && guarded
+      const result = await createSolver({
+        actions, before, reviewer, native, prefs: roster.prefs,
+        reviewerPayload: choice.kind === 'new' ? reviewerPayload({
+          name: reviewerName(roster, finalName), look: { shape: pick(DEFAULT_SHAPES), color: pick(DEFAULT_COLORS) }, model: newModel, workDir,
+        }) : undefined,
+        solverPayloadFor: ({ reviewer: reviewerBot, dedicated, reviewerId }) => solverPayload({
+          name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, guard,
+        }),
+      })
+      if (result.solver && !result.sendError && !result.roleNote) { onCreated(result.solver); return }
+      if (result.solver) {
+        setMade(result.solver)
+        if (result.roleNote) setNotes([t(roleNotes[result.roleNote])])
+        if (!result.sendError) return
+        // A send that was not refused may still have reached the host: never say it was not sent.
+        const sent = { name: result.solver.name, error: result.sendError?.message ?? String(result.sendError) }
+        setError(uncertain(result.sendError)
+          ? t('{name} was created, but your request may not have been sent: {error}', sent)
+          : t('{name} was created, but your request was not sent: {error}', sent))
+        return
+      }
+      const text = result.error?.message ?? String(result.error)
+      setError(!result.nothing ? text
+        : result.step === 4 ? t('Native tools could not be turned on, so nothing was created: {error}', { error: text })
+          : t('Nothing was created: {error}', { error: text }))
+      setNotes([
+        ...result.unremoved.map(bot => t('{name} could not be removed after the failure. Delete it in its Details.', { name: bot })),
+        ...result.maybe.map(bot => t('{name} may have been created. Check the sidebar and delete it in its Details if you do not want it.', { name: bot })),
+      ])
+    } finally {
+      inFlight.current = false
+      setBusy(false)
     }
-    const text = result.error?.message ?? String(result.error)
-    setError(!result.nothing ? text
-      : result.step === 3 ? t('Native tools could not be turned on, so nothing was created: {error}', { error: text })
-        : t('Nothing was created: {error}', { error: text }))
-    setNotes([
-      ...result.unremoved.map(bot => t('{name} could not be removed after the failure. Delete it in its Details.', { name: bot })),
-      ...result.maybe.map(bot => t('{name} may have been created. Check the sidebar and delete it in its Details if you do not want it.', { name: bot })),
-    ])
   }
   const reviewerNote = choice.kind === 'fresh'
     ? [choices.length === 1 ? t('No other model is set up, so reviews run in a fresh session.') : null,
@@ -173,6 +190,8 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
           t('New Bots start at {level}.', { level: presetName(permission, roster.permissions) })),
         error ? h('div', { className: 'bt-error', role: 'alert', style: { padding: 0 } }, error) : null,
         notes.map(note => h('div', { key: note, className: 'bt-note bt-danger', role: 'status' }, note)),
+        intendsInstall && made === null ? h('div', { className: 'bt-note' },
+          t('If the Solver role is not installed yet, Create installs it first.')) : null,
         h('div', { className: 'bt-create-foot' },
           h('button', { type: 'button', className: 'bt-soft', onClick: onBack }, canGoBack ? t('Back') : t('Cancel')),
           made !== null

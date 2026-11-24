@@ -10,6 +10,7 @@ export const ROLE_CAPABILITIES = Object.freeze(['audio-out', 'task-start', 'rout
 const REPOSITORY = 'https://github.com/automagik-si/automagik'
 const RELEASES = `${REPOSITORY}/releases/download/`
 const PKG = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
+export const ROLE_PLUGIN_VERSION = PKG.version
 const MAX_PACKAGE = 16 * 1024 * 1024
 export const ROLE_EVIDENCE_LIMITS = [MAX_PACKAGE, 256 * 1024, 1024]
 const UNCHECKED = Object.freeze({ available: false, roles: Object.freeze([]) })
@@ -86,7 +87,7 @@ function catalogEntries(raw, release, warn) {
 }
 
 export function createRoleCatalog({ fetch = globalThis.fetch, keys = ROLE_KEYS, base = RELEASES, now = Date.now, canFetch, warn }) {
-  const release = `${base}v${PKG.version}/`
+  const release = `${base}v${ROLE_PLUGIN_VERSION}/`
   let cached = { view: UNCHECKED }
   let expires = -Infinity
   let inFlight

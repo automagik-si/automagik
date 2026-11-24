@@ -6,7 +6,8 @@ import { createPayload, freshBotName, setUp, startModel } from './bot-draft.js'
 import { isRefusal } from './api.js'
 import { dateLocale, t } from './i18n.js'
 import { AUTO, AUTO_ROW, markOf } from '../shared/permission-levels.js'
-import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, isSolverBot, solverInstructions } from '../shared/solver-method.js'
+import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isSolverBot, solverInstructions } from '../shared/solver-method.js'
+import { packageAttachment, ROLES_OFF_REASON, rolesOn, sameRolePin } from '../shared/roles.js'
 import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 
 // The Solver's character slot: avatar objects as the host's cleanAvatar keeps them, `{ shape }`
@@ -123,22 +124,23 @@ export function reviewerPayload({ name, look, model, workDir }) {
 /**
  * The Solver's create-bot payload, written once its reviewer's real name is known (`reviewer`:
  * that name, or null for fresh-session reviews; `dedicated`: made by this dialog; `reviewerId`:
- * its id, which the host's "unreviewed" mark reads, review-mark.js). With native
- * tools ticked the brief is not in the payload: it is sent after the switch (`sendBrief`), so
- * the task's first turn already runs with them. `guard`: the Review guard tick, sent only with a
+ * its id, which the host's review mark reads). The brief is sent after the role
+ * attempt and any native tools switch. `guard`: the Review guard tick, sent only with a
  * reviewer Bot (review-guard.js), in the Solver's own create, so it is never half made.
  */
-export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, native = false, guard = false }) {
+export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, guard = false }) {
   const payload = createPayload({
     name, look, model, effort, sectionId, ownLook: true, avatar: avatarOfLook(look),
-    brief: native ? '' : brief, role: SOLVER_DESCRIPTION, instructions: solverInstructions({ reviewer, dedicated }),
+    role: SOLVER_DESCRIPTION, instructions: solverInstructions({ reviewer, dedicated }),
   })
   if (workDir) payload.workDir = workDir
+  payload.waitingRole = SOLVER_ROLE_ID
   if (typeof reviewer === 'string' && reviewer !== '' && typeof reviewerId === 'string' && reviewerId !== '') {
     payload.reviewerId = reviewerId
+    if (dedicated) payload.reviewerMade = true
     if (guard === true) payload.reviewGuard = true
   }
-  return { payload, ...(native && brief ? { sendBrief: brief } : {}) }
+  return { payload, ...(brief ? { sendBrief: brief } : {}) }
 }
 
 /**
@@ -208,13 +210,14 @@ export function mayHaveBeenCreated(before, fresh, known = []) {
 
 /**
  * Makes the Solver through the person's own actions, best effort (RFC 0048): 1. the new reviewer,
- * 2. the Solver, with the reviewer's real name in its instructions, 3. native tools on their own,
- * 4. the brief. A failure at 1-3 deletes, newest first, only what this run made (never an
+ * 2. the Solver with written instructions, 3. an attempt to attach the Solver role, 4. native
+ * tools, 5. the brief. Install is attempted before either Bot is created. A Bot or native-tools
+ * refusal deletes, newest first, only what this run made (never an
  * existing Bot, never by name) and reads the team again when what happened is not known. It
  * never throws: the answer says what was made, what may have been made, and what is left.
  * `before`: the Bot ids the team had before Create.
  */
-export async function createSolver({ actions, before, reviewer, reviewerPayload: firstPayload, solverPayloadFor, native = false }) {
+export async function createSolver({ actions, before, reviewer, reviewerPayload: firstPayload, solverPayloadFor, native = false, prefs }) {
   const made = []
   const unsure = []
   let step = 0
@@ -229,6 +232,18 @@ export async function createSolver({ actions, before, reviewer, reviewerPayload:
     }
   }
   let solver
+  let version
+  let roleNote
+  if (!rolesOn(prefs)) roleNote = ROLES_OFF_REASON
+  else {
+    try {
+      const install = await actions.installRole(SOLVER_ROLE_ID)
+      if (install?.installed === false) roleNote = 'install'
+      version = install?.version
+    } catch (error) {
+      roleNote = error?.reason === ROLES_OFF_REASON ? ROLES_OFF_REASON : 'install'
+    }
+  }
   try {
     let name = null
     let dedicated = false
@@ -246,15 +261,36 @@ export async function createSolver({ actions, before, reviewer, reviewerPayload:
     step = 2
     const { payload, sendBrief } = solverPayloadFor({ reviewer: name, dedicated, reviewerId })
     solver = await make(payload)
-    if (native) {
+    if (roleNote === undefined) {
       step = 3
+      try {
+        const attached = await actions.attachRole(solver.id, SOLVER_ROLE_ID)
+        if (attached?.pending) roleNote = 'attach'
+      } catch (error) {
+        if (error?.reason === ROLES_OFF_REASON) roleNote = ROLES_OFF_REASON
+        else {
+          roleNote = 'attach'
+          try {
+            const fresh = await actions.teamState()
+            const bot = fresh?.bots?.find(bot => bot.id === solver.id)
+            const pin = packageAttachment(bot)
+            if (rolesOn(fresh?.prefs) && bot?.role === SOLVER_DESCRIPTION && bot.instructions === ''
+              && pin?.id === SOLVER_ROLE_ID && pin.version === version
+              && sameRolePin(pin, fresh.roleRuntime?.[solver.id]?.pin)) roleNote = undefined
+          } catch { /* The fallback remains in place when completion is uncertain. */ }
+        }
+      }
+    }
+    const result = { solver, ...(roleNote === undefined ? {} : { roleNote }) }
+    if (native) {
+      step = 4
       await actions.updateBot(solver.id, { nativeTools: true })
     }
     if (sendBrief) {
-      step = 4
-      try { await actions.send(solver.id, sendBrief) } catch (error) { return { solver, sendError: error } }
+      step = 5
+      try { await actions.send(solver.id, sendBrief) } catch (error) { return { ...result, sendError: error } }
     }
-    return { solver }
+    return result
   } catch (error) {
     const left = []
     for (const bot of [...made].reverse()) {

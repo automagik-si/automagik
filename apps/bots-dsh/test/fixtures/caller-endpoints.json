@@ -296,5 +296,10 @@
       "update-check",
       "update-install"
     ]
+  },
+  "ownerFields": {
+    "create-bot": { "request": ["waitingRole", "reviewerMade"] },
+    "role-attach": { "response": ["value.pending", "error.reason=roles-off"] },
+    "role-install": { "response": ["error.reason=roles-off"] }
   }
 }

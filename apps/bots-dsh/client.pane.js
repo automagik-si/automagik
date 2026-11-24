@@ -12323,6 +12323,10 @@ var ZH = {
   "No transcript rows yet. The seat is quiet.": "还没有对话记录。这个席位很安静。",
   "Latest": "最新",
   // New Solver (RFC 0048).
+  "If the Solver role is not installed yet, Create installs it first.": "如果尚未安装 Solver 角色，点击创建会先安装它。",
+  "The Solver role could not be installed now, so this Solver uses the written method. The role is attached when it can be installed.": "目前无法安装 Solver 角色，因此此 Solver 使用书面方法。角色可安装时会自动附加。",
+  "The Solver role could not be attached now, so this Solver uses the written method. The role is attached when it can be.": "目前无法附加 Solver 角色，因此此 Solver 使用书面方法。角色可附加时会自动附加。",
+  "Roles are turned off for this team, so this Solver uses the written method.": "此团队已关闭角色，因此此 Solver 使用书面方法。",
   "New Solver": "新建 Solver",
   "Plans, does the work and has it reviewed": "规划、完成工作并交由审阅",
   "Solver": "Solver",

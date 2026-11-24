@@ -756,23 +756,30 @@ if (import.meta.main) {
     const [dir, version, sha, , file, signature, previousVersion] = args;
     if (git('rev-parse', 'HEAD').trim() !== sha) throw new Error('pack-roles: HEAD must equal the cut SHA');
     if (roleArtifactNames(dir).length) throw new Error('pack-roles: output directory already holds a role artifact');
-    const { packRoleSources, predecessorRoles } = await import('./role-pack');
+    const { checkBundledSolver, packRoleSources, predecessorRoles } = await import('./role-pack');
     let predecessor;
     if (file !== undefined) {
       const catalog = verifyRoleFiles(file, signature, previousVersion);
       predecessor = predecessorRoles(catalog.roles, roleRelease(previousVersion), previousVersion);
     }
+    const { ROLE_PLUGIN_VERSION } = await import('../apps/bots-dsh/src/host/role-catalog.js');
+    if (version === ROLE_PLUGIN_VERSION) {
+      checkBundledSolver({ root: ROOT, sha, version, neverShipped, predecessorVersion: previousVersion, release: true });
+    }
     for (const role of packRoleSources({ root: ROOT, dir, version, sha, release: roleRelease(version), neverShipped, predecessor })) {
       console.log(`${role.id} ${role.version} ${role.sha256}`);
     }
   } else if (command === 'check-roles' && args.length <= 1) {
-    const { packRoleSources } = await import('./role-pack');
+    const { checkBundledSolver, packRoleSources } = await import('./role-pack');
+    const { ROLE_PLUGIN_VERSION } = await import('../apps/bots-dsh/src/host/role-catalog.js');
+    const sha = args[0] ?? 'HEAD';
+    checkBundledSolver({ root: ROOT, sha, version: ROLE_PLUGIN_VERSION, neverShipped });
     const dir = mkdtempSync(join(tmpdir(), 'check-roles-'));
     // Budget for the longest version components and the release's full UTC timestamp.
     const version = `${MAX_PART}.${MAX_PART}.${MAX_PART}`;
     const issuedAt = '2000-01-01T00:00:00Z';
     try {
-      const roles = packRoleSources({ root: ROOT, dir, version, sha: args[0] ?? 'HEAD', release: roleRelease(version), neverShipped });
+      const roles = packRoleSources({ root: ROOT, dir, version, sha, release: roleRelease(version), neverShipped });
       serializeRoles(version, issuedAt, await stagedRoles(dir, version, roles.map(role => role.id)));
     } finally {
       rmSync(dir, { recursive: true, force: true });

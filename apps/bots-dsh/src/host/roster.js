@@ -9,6 +9,9 @@ import { constants } from 'node:fs'
 import { access, mkdir } from 'node:fs/promises'
 import { osBlocked } from './folder-access.js'
 import { refusal } from './refusal.js'
+import { instructionsDigest, unchangedSolverWaiter } from './roles.js'
+import { packageAttachment } from '../shared/roles.js'
+import { SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isWrittenSolverMethod, solverInstructions } from '../shared/solver-method.js'
 import { DRAFT_SWEEP_MAX, MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOTICE_MAX, SECTION_COLORS, SECTION_NAME_MAX, inUnfoldInstance } from './constants.js'
 import { currentColor, isColor, normalize, unquote } from './text.js'
 import { nameProblem } from '../shared/mentions.js'
@@ -319,7 +322,7 @@ export function install(rt) {
     return state.prefs.permission ?? (personDefault !== rt.permissionCatalog?.()?.defaultPreset ? personDefault : undefined)
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard }, readScopeSource) {
+  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy }, readScopeSource) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
@@ -393,9 +396,14 @@ export function install(rt) {
       if (agent?.session?.id !== id) throw refusal('The existing Session could not be resolved')
       await ctx.sessionTitle.rename(agent.session, cleanName)
     }
+    let bot
     try {
       const resolvedSecId = !main ? resolveSectionInput({ section, sectionId }) : undefined
-      state.bots[id] = {
+      const instructionsText = String(instructions).trim()
+      const waitForSolver = instructionsText !== '' && ((waitingRole === SOLVER_ROLE_ID && roleText === SOLVER_DESCRIPTION)
+        || waitingRole?.hostCopy === true)
+      const keptReviewer = typeof reviewerId === 'string' && reviewerId !== id && rt.botOf(reviewerId) !== undefined
+      bot = {
         id,
         name: cleanName,
         role: roleText,
@@ -422,15 +430,20 @@ export function install(rt) {
         ...(resolvedSecId ? { sectionId: resolvedSecId } : {}),
         // The Bot that reviews a Solver's work (the New Solver dialog's choice). Cosmetic: only
         // the "unreviewed" mark reads it (review-mark.js); it grants and refuses nothing.
-        ...(typeof reviewerId === 'string' && reviewerId !== id && rt.botOf(reviewerId) !== undefined ? { reviewerId } : {}),
+        ...(keptReviewer ? { reviewerId, ...(reviewerMade === true ? { reviewerMade: true } : {}) } : {}),
         // The person's review guard (review-guard.js): only with that reviewer kept, and only from the
         // person's create-bot (the New Solver tick) or a copy of a guarded Solver.
-        ...(reviewGuard === true && typeof reviewerId === 'string' && reviewerId !== id && rt.botOf(reviewerId) !== undefined ? { reviewGuard: true } : {}),
-        instructions: String(instructions).trim(),
+        ...(reviewGuard === true && keptReviewer ? { reviewGuard: true } : {}),
+        instructions: instructionsText,
+        ...(solverCopy ? { roles: [solverCopy.pin] } : {}),
+        ...(waitForSolver ? { waitingRole: {
+          id: SOLVER_ROLE_ID, instructions: instructionsDigest(instructionsText), role: roleText,
+        } } : {}),
         createdAt: Date.now(),
         createdBy: createdBy ?? null,
         capabilities: [],
       }
+      if (!solverCopy) state.bots[id] = bot
       if (main) state.mainBotIds.push(id)
       const original = rt.botOf(copyOf)
       const language = rt.uiLanguage?.()
@@ -447,16 +460,35 @@ export function install(rt) {
               : 'The user just created you. Greet the user in one short message, then ask in one short question what you should focus on.'
       const opening = `${kickoff}\n${OWN_RULES}`
       const text = !main && language ? `${opening}\nWrite in ${language}.` : opening
-      const bot = state.bots[id]
       rt.reviewCreated?.(bot, Boolean(brief) && !main && !original && creator === undefined)
       const greeting = { text, from: createdBy ?? null, ...(main ? { main: true } : {}) }
       // The Bot is saved by now; a failure here must not archive it in the catch below.
+      const saveBot = async () => {
+        if (solverCopy) {
+          const check = () => {
+            solverCopy.check()
+            if (rt.botOf(id)) throw refusal('Session already belongs to the team')
+          }
+          // A copy with custom instructions requires the verified role before
+          // it can enter the roster or schedule a greeting.
+          await rt.saveCopy(team => {
+            check()
+            team.bots[id] = structuredClone(bot)
+          }, { beforeCommit: check, afterWrite: () => {
+            state.bots[id] = bot
+            rt.indexSessions()
+          } })
+        } else {
+          await rt.save()
+        }
+        if (waitForSolver) rt.solverSettle?.armTimer()
+      }
       const scopeTools = () => rt.resolveAgent(id)
         .catch(error => rt.warn('omni-ui: scoped tools for %s not applied: %s', cleanName, error))
       // A host-owned conversation already has its own history and turn source. Adoption
       // adds only its team identity, never a greeting or a deferred model turn.
       if (existingSessionId !== undefined) {
-        await rt.save()
+        await saveBot()
         await scopeTools()
         return bot
       }
@@ -477,12 +509,12 @@ export function install(rt) {
       }
       if (modelRef === undefined) {
         bot.kickoff = greeting
-        await rt.save()
+        await saveBot()
         // The Session was resolved before the Bot existed, so its scoped tools land now.
         await scopeTools()
         return bot
       }
-      await rt.save()
+      await saveBot()
       if (inheritAuto !== undefined && existingSessionId === undefined) await rt.markInherited?.(bot, inheritAuto.route)
       await scopeTools()
       // The greeting runs on the Bot's own model, once its provider is registered.
@@ -498,6 +530,7 @@ export function install(rt) {
       return bot
     } catch (error) {
       // The Bot's Session was already made: archive it instead of leaving an orphan.
+      if (solverCopy && rt.botOf(id) !== undefined) throw error
       delete state.bots[id]
       rt.dropGrantsForBot?.(id)
       rt.dropGrantsForSession?.(id)
@@ -505,7 +538,7 @@ export function install(rt) {
       rt.chatOwners.delete(id)
       // A save that another change queued meanwhile still carries this Bot; a later
       // one writes the team without it.
-      void rt.save().catch(() => {})
+      if (!solverCopy) void rt.save().catch(() => {})
       if (existingSessionId === undefined) await ctx.workspaceRegistry.archiveSession(id)
         .catch(archiveError => rt.warn('ds-bot: archiving the Session for %s failed: %s', cleanName, archiveError))
       throw error
@@ -583,10 +616,19 @@ export function install(rt) {
     // A folder that went away since leaves the copy in the team workspace.
     const workDir = bot.workDir !== undefined && await rt.isFolder(bot.workDir) ? bot.workDir : undefined
     // No await from here to createBot's check, so two copies at once get different names.
-    return createBot({
+    const pin = packageAttachment(bot)
+    const solverPin = pin?.id === SOLVER_ROLE_ID
+    const text = bot.instructions ?? ''
+    const generated = unchangedSolverWaiter(bot, state.prefs) && isWrittenSolverMethod(text)
+    const keepWritten = solverPin && isWrittenSolverMethod(text)
+    const regenerate = generated || (solverPin && text.trim() === '')
+    const reviewer = typeof bot.reviewerId === 'string' ? rt.botOf(bot.reviewerId)?.name ?? null : null
+    const createCopy = solverCopy => createBot({
       name: freshName(`${bot.name} copy`),
       role: bot.role,
-      instructions: bot.instructions,
+      instructions: regenerate ? solverInstructions({ reviewer, dedicated: false }) : bot.instructions,
+      ...(regenerate && (generated || solverPin) ? { waitingRole: { hostCopy: true } } : {}),
+      solverCopy,
       color: bot.color,
       avatar: bot.avatar,
       model: served ? bot.model : undefined,
@@ -605,6 +647,16 @@ export function install(rt) {
       // capability away here would not be the user's choice either.
       ...(bot.shell === false ? { shell: false } : {}),
     })
+    if (solverPin && !regenerate && !keepWritten) return rt.withSolverCopy(bot, pin, createCopy)
+    const copy = await createCopy()
+    if (solverPin) {
+      try {
+        await rt.attachRole(copy.id, SOLVER_ROLE_ID)
+      } catch {
+        // A proven written method already serves this copy. If marked, it can settle later.
+      }
+    }
+    return copy
   }
 
   // Pocket owns the model-change slot exclusively through Auto clearing, selection
@@ -1815,6 +1867,7 @@ export function install(rt) {
     if (!back) return
     try {
       await rt.save()
+    if (bot.waitingRole?.id === SOLVER_ROLE_ID) rt.solverSettle?.armTimer()
     } catch (error) {
       rt.warn('ds-bot: Bot %s is back in its groups, but that was not saved: %s', id, error)
     }

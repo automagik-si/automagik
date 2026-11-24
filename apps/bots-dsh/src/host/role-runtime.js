@@ -1,5 +1,6 @@
 import { defineTool, parameterSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools'
 import { packageAttachment, rolesOn, sameRolePin } from '../shared/roles.js'
+import { SOLVER_ROLE_ID, solverReviewPart } from '../shared/solver-method.js'
 import { routeOf } from '../shared/routes.js'
 import { createRoleSettings } from './role-settings.js'
 import { createRoleVoice } from './role-voice.js'
@@ -10,6 +11,7 @@ import { output } from './tools.js'
 const START_MS = 5_000
 const inactive = "This Bot's role changed. Try again."
 const cancelled = 'Voice / Mouth speech was cancelled.'
+const promptOnly = manifest => manifest.tools.length === 0 && manifest.settings.length === 0
 const validSpeech = text => typeof text === 'string' && text.length <= 2000 && Boolean(text.trim())
 
 function boundedStart(start) {
@@ -33,6 +35,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
 
   const owner = sessionId => rt.roomOwners?.has(sessionId) || rt.taskOwners?.has(sessionId) ? undefined
     : rt.chatOwners?.get(sessionId) ?? rt.groupOwners?.get(sessionId)?.botId
+  const promptOwner = sessionId => rt.roomOwners?.has(sessionId) ? undefined : rt.selfOf?.(sessionId)
   const ownBot = id => rt.own?.(state.bots, id)
   const enabled = () => !disposed && rolesOn(state.prefs) && rt.readOnly?.() === undefined && rt.holdsLock?.() === true
   const current = (id, held) => enabled() && attachments.get(id) === held && ownBot(id) === held.bot
@@ -47,7 +50,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
 
   async function moduleFor(details, sha256) {
     const { manifest, entryBytes } = details
-    if (!manifest.tools.length && !manifest.settings.length) return undefined
+    if (promptOnly(manifest)) return undefined
     const key = `${manifest.id}@${manifest.version}:${sha256.toLowerCase()}`
     if (!installedModules.has(key)) {
       const url = `data:text/javascript;base64,${entryBytes.toString('base64')}#${key}`
@@ -58,7 +61,6 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
 
   async function stage(details, sha256) {
     const module = await moduleFor(details, sha256)
-    // P3 also accepted declarative manifests with an empty module.
     if (typeof module?.install !== 'function') return undefined
     const declarations = new Map(details.manifest.tools.map(tool => {
       const bounds = new Map()
@@ -125,6 +127,11 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       }
       const details = await proof
       if (!current(held.bot.id, held)) return
+      if (promptOnly(details.manifest)) {
+        held.manifest = details.manifest
+        held.runtime = Object.freeze({ manifest: details.manifest, prompt: details.prompt, tools: [], dispose() {} })
+        return
+      }
       if (rt.botRunnerRequired !== undefined) {
         held.manifest = details.manifest
         return
@@ -155,7 +162,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   function reconcile() {
     for (const [id, held] of attachments) if (!current(id, held)) drop(id, held)
     for (const [sessionId, snapshot] of turnPrompts) {
-      if (owner(sessionId) !== snapshot.id || !ownBot(snapshot.id)) turnPrompts.delete(sessionId)
+      if (promptOwner(sessionId) !== snapshot.id || ownBot(snapshot.id) !== snapshot.bot) turnPrompts.delete(sessionId)
     }
     voice.cancelInvalid()
     if (!enabled()) return
@@ -179,7 +186,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     const sessionId = agent.session?.id ?? agent.id
     const id = owner(sessionId)
     const held = id === undefined ? undefined : active(id)
-    if (!held) return undefined
+    if (!held?.runtime.tools.length) return undefined
     if (held === existing) return { key: held }
     let registered = true
     let lastTurn
@@ -252,16 +259,17 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   const acp = ref => routeOf(String(ref ?? '').split('/')[0]).connectedBy === 'acp'
   const reaches = ref =>
     rt.acpRolePromptProviders?.includes?.(String(ref ?? '').split('/')[0]) === true
-  function partOf(held) {
-    if (!held?.runtime.prompt) return undefined
-    return `<role-prompt id="${held.pin.id}">\n${held.runtime.prompt.trimEnd()}\n</role-prompt>`
+  function partOf(sessionId, held) {
+    if (!held?.runtime.prompt?.trim() || (owner(sessionId) === undefined && !promptOnly(held.manifest))) return undefined
+    const tail = held.pin.id === SOLVER_ROLE_ID ? `\n${solverReviewPart(held.bot, ownBot)}` : ''
+    return `<role-prompt id="${held.pin.id}">\n${held.runtime.prompt.trimEnd()}${tail}\n</role-prompt>`
   }
   function partFor(sessionId, id) {
     const turn = turnPrompts.get(sessionId)
-    return turn?.id === id ? turn.part : partOf(active(id))
+    return turn?.id === id ? turn.part : partOf(sessionId, active(id))
   }
   function prompt(sessionId, agent) {
-    const id = owner(sessionId)
+    const id = promptOwner(sessionId)
     if (id === undefined) return undefined
     const bot = ownBot(id)
     if (!bot) return undefined
@@ -270,16 +278,30 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     return partFor(sessionId, id)
   }
   function acpPrompt(sessionId, botId) {
-    if (owner(sessionId) !== botId || !ownBot(botId)) return undefined
+    if (promptOwner(sessionId) !== botId || !ownBot(botId)) return undefined
     return partFor(sessionId, botId)
+  }
+  function instructionsFor(sessionId, bot) {
+    const turn = turnPrompts.get(sessionId)
+    return (turn?.bot === bot ? turn.instructions : undefined) ?? bot.instructions
   }
   function event(sessionId, event) {
     if (disposed) return
     voice.event(sessionId, event)
-    if (event.type === 'turn/end') turnPrompts.delete(sessionId)
+    if (event.type === 'turn/end') {
+      const turn = turnPrompts.get(sessionId)
+      turnPrompts.delete(sessionId)
+      if (turn?.instructions && turn.bot.waitingRole?.id === SOLVER_ROLE_ID) rt.solverSettle?.schedule()
+    }
     if (event.type === 'turn/start') {
-      const id = owner(sessionId)
-      if (id !== undefined) turnPrompts.set(sessionId, { id, part: partOf(active(id)) })
+      const id = promptOwner(sessionId)
+      const bot = ownBot(id)
+      if (!bot) return
+      const part = partOf(sessionId, active(id))
+      // A greeting may begin before attachment. Keep its complete method if
+      // writing the new pin later clears the instructions on the live Bot.
+      const instructions = !part && bot.waitingRole?.id === SOLVER_ROLE_ID ? bot.instructions : undefined
+      turnPrompts.set(sessionId, { id, bot, part, instructions })
     }
   }
 
@@ -291,7 +313,11 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
 
   return {
-    voice, event, reconcile, tools, prompt, acpPrompt, requireAttachment, settings,
+    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings,
+    serving(id, record, pin) {
+      const held = active(id)
+      return held?.record === record && sameRolePin(held?.pin, pin) && Boolean(held.runtime.prompt?.trim())
+    },
     async prepare(details, sha256) {
       try {
         const runtime = await stage(details, sha256)
@@ -301,12 +327,16 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
         throw refusal('The role runtime could not start.')
       }
     },
+    keepProof(record, details) {
+      pins.set(record, Promise.resolve(details))
+    },
     reset(record) {
       if (record) pins.delete(record)
     },
     ready: id => id === undefined ? Promise.all([...attachments.values()].map(held => held.ready)) : attachments.get(id)?.ready,
     view: () => Object.fromEntries([...attachments].flatMap(([id, held]) => {
-      if (!current(id, held) || !held.manifest) return []
+      if (!current(id, held) || !held.manifest
+        || (held.pin.id === SOLVER_ROLE_ID && !held.runtime?.prompt?.trim())) return []
       const ref = held.bot.appliedModel ?? held.bot.model
       return [[id, {
         pin: held.pin, settings: held.manifest.settings,

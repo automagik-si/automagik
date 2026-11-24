@@ -10,6 +10,7 @@ import { absoluteLinks } from './links.js'
 import { NAME_MAX } from './requests.js'
 import { headOf, unquote } from './text.js'
 import { mentionSpans } from '../shared/mentions.js'
+import { isSolverBot } from '../shared/solver-method.js'
 import { BUILTIN_ROLES, genieDetached } from '../shared/roles.js'
 import { checkShownView, showViewDescription, showViewParameters } from 'deep-view/core'
 import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
@@ -230,7 +231,7 @@ export function install(rt) {
     name: 'message_bot',
     description: 'Send a message to another Bot on the team. If that Bot is working, it reads your message at its next step and can change course, then answers once that work is done; if it is idle, it starts on it right away. Its reply arrives later as a new message to you; with reply_to "user" it answers the user in its own chat instead, and with reply_to "none" nothing comes back at all. In a group chat it reaches only members of that group, as writing "@Name" there does. With request_id you name the request yourself: a repeat of that name with the same message is not sent again, but gives the receipt of the first call back.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Exact Bot name from list_bots' },
+      to: { type: 'string', required: true, description: 'Bot ID or exact Bot name from list_bots' },
       message: { type: 'string', required: true, description: 'Self-contained message; the other Bot cannot see this conversation' },
       images: { type: 'array', items: { type: 'string' }, description: 'Pictures to send along, each by its name, sha256 or saved path as your own chat shows it; the other Bot gets its own copy. Only pictures you were given.' },
       reply_to: {
@@ -254,7 +255,8 @@ export function install(rt) {
       if (Array.isArray(args.images) && args.images.length > 4) return refusedMessage('Not sent: send at most 4 pictures in one message_bot call.')
       const sender = callerBot(exec)
       if (sender === undefined) return refusedMessage('Only Bots on the team can use message_bot.')
-      const target = rt.findBot(args.to)
+      const toReviewer = isSolverBot(sender) && args.to === sender.reviewerId
+      const target = toReviewer ? rt.botOf(args.to) : rt.findBot(args.to)
       if (target === undefined) return refusedMessage(`No Bot named ${args.to}. Team: ${Object.values(state.bots).map(bot => bot.name).join(', ')}`)
       if (target.id === sender.id) return refusedMessage('You cannot message yourself.')
       if (String(args.message ?? '').trim() === '') return refusedMessage('Write a message to send.')

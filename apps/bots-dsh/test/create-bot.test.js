@@ -1,5 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { fixture, serviceStub } from './caller-fixture.js'
 import { createPayload, freshBotName, startModel } from '../src/client/bot-draft.js'
 
 const models = [
@@ -51,4 +53,48 @@ test('a new Bot\'s form never starts on a model that is not set up or offered tw
   ]
   assert.equal(startModel({ models: lineup, defaultModel: 'acp-claude/default' }), 'acp-codex/gpt-5.6-sol')
   assert.equal(startModel({ models: lineup.slice(0, 3), defaultModel: null }), '')
+})
+
+test('D2 C1 create-bot derives the wait marker from the stored text and the Solver description', async t => {
+  const f = fixture(t, { service: serviceStub({ multiuser: false }), seed: state => { state.prefs.roles = false } })
+  await f.start()
+  const answer = await f.call('create-bot', {
+    name: 'Wait fixture', role: 'Solver', instructions: '  Method.  ', waitingRole: 'solver', instructionsDigest: 'ignored',
+  })
+  assert.equal(answer.ok, true, JSON.stringify(answer))
+  const stored = f.saved().bots[answer.value.id]
+  assert.deepEqual(stored.waitingRole, {
+    id: 'solver', instructions: createHash('sha256').update('Method.').digest('hex'), role: 'Solver',
+  })
+  for (const [index, options] of [
+    { waitingRole: { id: 'solver', instructions: 'untrusted' } },
+    { waitingRole: 'other' }, { role: 'Researcher' }, { instructions: '  ' },
+  ].entries()) {
+    const other = await f.call('create-bot', {
+      name: `Other fixture ${index}`, role: 'Solver', instructions: 'Method.', waitingRole: 'solver', ...options,
+    })
+    assert.equal(other.ok, true, JSON.stringify(other))
+    assert.equal(Object.hasOwn(f.saved().bots[other.value.id], 'waitingRole'), false)
+  }
+})
+
+test('D2 C2 only a kept reviewer can be dedicated and both stored fields stay internal', async t => {
+  const f = fixture(t, { service: serviceStub({ multiuser: false }), seed: state => { state.prefs.roles = false } })
+  await f.start()
+  const response = await f.call('create-bot', {
+    name: 'Dedicated fixture', role: 'Solver', instructions: 'Method.', waitingRole: 'solver', reviewerId: 'b', reviewerMade: true,
+  })
+  assert.equal(response.ok, true, JSON.stringify(response))
+  const { id } = response.value
+  assert.equal(f.saved().bots[id].reviewerMade, true)
+  const responseWithout = await f.call('create-bot', { name: 'Fresh fixture', role: 'Solver', reviewerId: 'gone', reviewerMade: true })
+  assert.equal(responseWithout.ok, true, JSON.stringify(responseWithout))
+  assert.equal(Object.hasOwn(f.saved().bots[responseWithout.value.id], 'reviewerMade'), false)
+  const roster = (await f.call('state')).value
+  const updated = await f.call('update-bot', { id, color: 'blue' })
+  assert.equal(updated.ok, true, JSON.stringify(updated))
+  for (const bot of [response.value, roster.bots.find(bot => bot.id === id), updated.value]) {
+    assert.equal(Object.hasOwn(bot, 'waitingRole'), false)
+    assert.equal(Object.hasOwn(bot, 'reviewerMade'), false)
+  }
 })

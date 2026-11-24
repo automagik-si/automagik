@@ -4,6 +4,7 @@ export const BUILTIN_ROLES = Object.freeze({
 })
 
 export const GENIE_ATTACH_REFUSAL = 'Genie can be given to another Bot after the next Genie update.'
+export const ROLES_OFF_REASON = 'roles-off'
 export const rolesOn = prefs => prefs?.roles !== false
 
 export const RESERVED_ROLE_IDS = Object.freeze(['data'])

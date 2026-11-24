@@ -592,7 +592,7 @@ export function install(rt) {
       delete state.bots[chatId].sessions
       // A Solver's review fields are the New Solver dialog's and the person's: an adopted record
       // carries none of them, so no adopted Bot is held with no reviewer (RFC 0048 delivery 1.5).
-      for (const key of ['reviewGuard', 'reviewerId', 'reviewGuardNotice', 'reviewTrack']) delete state.bots[chatId][key]
+      for (const key of ['reviewGuard', 'reviewerId', 'reviewGuardNotice', 'reviewTrack', 'waitingRole', 'reviewerMade']) delete state.bots[chatId][key]
       const creationFields = {}
       for (const key of ['pendingCreation', 'creationToken', 'creationSessionId', 'creationCleanup']) {
         delete state.bots[chatId][key]

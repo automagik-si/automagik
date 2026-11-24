@@ -107,6 +107,7 @@ export function install(rt) {
     if (observedLoss || lockTerm === 0) return
     observedLoss = true
     lockTerm++
+    rt.solverSettle?.cancel()
     rt.dropAllGrants?.()
   }
   const lock = homeLock(join(home, 'state.lock'), { onLost: onLockLost })
@@ -572,6 +573,7 @@ export function install(rt) {
     const stale = Object.values(state.rooms).filter(room => !room.named && room.name !== rt.autoRoomName(room.members))
     for (const room of stale) room.name = rt.autoRoomName(room.members)
     indexSessions()
+    rt.solverSettle?.adopted()
     rt.hostAuthority?.restore()
     teamRead = valid
     if (lockEpoch > 1) rt.connectorStateChanged?.()
