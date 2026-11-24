@@ -96,6 +96,20 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   settings serves its prompt part without evaluating a module, including in task Sessions that
   speak as its Bot. A copy keeps the role or a proven written method. A delivery 1 Solver keeps
   its own instructions.
+- **Tasks** (delivery 3). The person can grant `task-start` in Details under Role. A task from
+  that grant runs at the narrower of the Bot's level, the calling Session's proven level, and
+  its group's level. The calling level stays as a cap and later Bot or group changes can narrow
+  the task. A verified bundled Solver uses the running plugin's declared capabilities
+  (`task-start` and `route-policy`). Catalog roles use their signed manifest.
+  An unnamed task follows the asking Bot's saved, applied, or fallback model as resolved from
+  the captured catalog. Naming an exact model ref requires both grants,
+  including for Main and Omni. The model must be ready to run on a native or ACP route allowed
+  by the plugin's `routePolicy`. A fresh team with no explicit policy saves a seed allowing
+  native and ACP, with native only for DSH Bots. An explicit policy supersedes the saved seed.
+  A missing effective policy, an empty policy, or one with no applicable route allows no named
+  models. Remote Hermes and local agents are excluded. The refusal lists the models the Bot
+  can name, using the same eligibility checks as the start. A task on omp with native tools off
+  can only chat. Bot task starts are unavailable in multiuser mode.
 - **Review guard** (delivery 1.5): a per-Solver switch, on by default in the dialog when the
   reviewer is a Bot, and turned on once at the upgrade for an existing Solver whose reviewer Bot is
   on the team (a later OFF stays off). While it is on, the Solver's work calls in its own chat (and
@@ -107,6 +121,9 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   routes whose calls are DSH tools. On Claude Code with native tools at Workspace it holds only for
   calls that ask first. It does not hold on Codex or omp native tools, or at Full access or Auto,
   and Details says so. The 'unreviewed' mark stays on every route.
+  Delivery 3 checks the live guard at `start_task`, including after a plan verdict. The refusal
+  directs the person to turn the guard off in Details. The host checks before allocating the
+  task Session and again before its first turn.
 - **The character slot.** `SOLVER_LOOKS` in `solver-draft.js` holds avatar objects as the
   host keeps them (`{ shape }` of a known character, or a built-in pet). Whichever of D1 and the
   change that adds the Solver characters lands second fills it, editing only this list (and its
@@ -124,6 +141,9 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
 
 ## Contracts introduced
 
+- `start_task` accepts an optional `model`. Tasks started under the role grants persist
+  `botBound` and their opener `permissionCap`. Fresh teams may persist `taskRoutePolicySeed`
+  in their team configuration.
 - The roster view field `nativeToolsNew` (owner view only, read-only, never stored): per served
   model ref, the native-tools block a Bot the person makes there now would read, `null` for none.
   Its builder is `rt.nativeToolsNewBotBlock` (`host/native-tools.js`); the blocked refs are part of
@@ -236,9 +256,10 @@ calls that do not ask) are outside it.
    the release makes the dialog write instructions again. A Bot whose written method was cleared
    still has its attachment and needs written instructions or a runtime that serves the part.
    A waiting Bot keeps its written method.
-3. **D3:** RFC 0037's `task-start` capability for the Solver, at the narrower of its own and the
-   caller's level; tasks may name an allowed route for model diversity. Plugin lane; acceptance
-   and rollback set in its own issue.
+3. **D3:** Plugin lane. In the installed app, a guarded Solver's `start_task` refusal shows
+   the Details remedy. With the guard off and both grants enabled, a refused model lists
+   eligible alternatives. Retrying with a listed ref starts the task on that provider and model.
+   Reverting the release removes the new admission and model parameter. Stored grants stay inert.
 4. **D4:** an optional group "Solver + reviewer" running its steps as `group_goal` stages; a time
    cap, and a level picker capped at the person's new-Bot default (never wider). Plugin lane;
    acceptance and rollback set in its own issue.

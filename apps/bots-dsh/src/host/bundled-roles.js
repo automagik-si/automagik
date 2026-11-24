@@ -3,6 +3,9 @@ import { readFileSync } from 'node:fs'
 import { SOLVER_ROLE_ID } from '../shared/solver-method.js'
 
 export const BUNDLED_ROLE_IDS = Object.freeze([SOLVER_ROLE_ID])
+export const BUNDLED_ROLE_CAPABILITIES = Object.freeze({
+  [SOLVER_ROLE_ID]: Object.freeze(['task-start', 'route-policy']),
+})
 // Only the release cut adds versions to this history. The candidate digest is
 // checked against the source before the cut and never authenticates an install.
 export const BUNDLED_ROLE_HISTORY = Object.freeze({

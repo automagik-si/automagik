@@ -347,7 +347,7 @@ export function installRoles(rt, deps = {}) {
     if (typeof id !== 'string' || typeof on !== 'boolean') throw refusal('Invalid role grant.')
     await runtime.ready(id)
     const held = runtime.requireAttachment(id, role)
-    if (!held.manifest.capabilities.includes(capability)) throw refusal('This role does not declare that capability.')
+    if (!runtime.capabilitiesOf(held).includes(capability)) throw refusal('This role does not declare that capability.')
     const before = held.bot.roles[0]
     const check = () => {
       packages.requireWriter()

@@ -3,7 +3,7 @@ import { constants } from 'node:fs'
 import * as fsPromises from 'node:fs/promises'
 import { dirname, isAbsolute, join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { BUNDLED_ROLE_HISTORY, BUNDLED_ROLE_IDS, bundleDigest, expectedBundleDigest, manifestBytes } from './bundled-roles.js'
+import { BUNDLED_ROLE_CAPABILITIES, BUNDLED_ROLE_HISTORY, BUNDLED_ROLE_IDS, bundleDigest, expectedBundleDigest, manifestBytes } from './bundled-roles.js'
 import { compareVersions } from './lane-verify.js'
 import { attachedRoleIds, isPackageRoleId, isRoleId, isRoleVersion, ROLES_OFF_REASON, ROLE_SOURCE_UNCONFIRMED, rolesOn } from '../shared/roles.js'
 import { isSha256, parseRoleJson, plainObject, ROLE_EVIDENCE_LIMITS, ROLE_PLUGIN_VERSION, roleDescription, roleName, roleToolName, validCapabilities } from './role-catalog.js'
@@ -237,6 +237,7 @@ export function createRolePackages(rt, catalog, {
   const fingerprints = new WeakMap()
   // Declarations here also attest that this exact record passed official install admission.
   const verified = new WeakMap()
+  const verifiedBundled = record => record?.source === 'bundled' && verified.has(record)
   const runtimeDamage = new WeakMap()
   const warn = (...args) => rt.warn?.(...args)
   const hasRecord = id => Boolean(ownRecord(state.roles, id))
@@ -376,6 +377,7 @@ export function createRolePackages(rt, catalog, {
           ...(record.source !== 'bundled' ? { sha256: record.sha256.toLowerCase() } : {}),
           attachable: attachable(id, record, entries?.get(id)),
           ...verified.get(record),
+          ...(verifiedBundled(record) && BUNDLED_ROLE_IDS.includes(id) ? { capabilities: BUNDLED_ROLE_CAPABILITIES[id] } : {}),
         },
       })
     }
@@ -697,5 +699,5 @@ export function createRolePackages(rt, catalog, {
 
   const damage = (record, reason) => runtimeDamage.set(record, { status: 'damaged', reason })
   return { install, uninstall, recordsView, detailsView, hasRecord, recordOf, expectRecord, requireWriter, requireAttachable, requireOfficial,
-    authenticate, verifyExisting, damage, damaged: record => runtimeDamage.has(record) }
+    authenticate, verifyExisting, verifiedBundled, damage, damaged: record => runtimeDamage.has(record) }
 }

@@ -26,6 +26,11 @@ runInNewContext(bundle.outputFiles[0].text, {
   document: undefined, window: undefined, Date, Math, JSON, Intl, setTimeout, clearTimeout,
 })
 const { approvalView, argsOf, isTeamApproval, TeamApproval, ChildApprovalDock } = module.exports
+
+test('a named task approval shows the requested model', () => {
+  const view = approvalView('mcp__dsh__start_task', { title: 'Fixture', model: 'acp-fake/two' }, 'Fixture')
+  assert.deepEqual(JSON.parse(JSON.stringify(view.rows)), [['title', 'Fixture'], ['Requested model', 'acp-fake/two']])
+})
 const plain = value => JSON.parse(JSON.stringify(value))
 
 test('a Claude Code chat\'s delegation reads as a handoff, with the message as a quote', () => {

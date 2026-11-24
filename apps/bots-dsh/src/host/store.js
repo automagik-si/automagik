@@ -17,6 +17,7 @@ import { refusal } from './refusal.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
 import { markOf } from '../shared/permission-levels.js'
 import { effectiveMarkOf, nativeToolsOn, restrictedBot } from '../shared/native-tools.js'
+import { TASK_ROUTE_DEFAULT } from '../shared/route-policy.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import { GUARD_OFF_NOTICE } from '../shared/guard-groups.js'
 import updateContract from './update-contract.json' with { type: 'json' }
@@ -641,12 +642,15 @@ export function install(rt) {
     // Unnamed groups from before names followed their members may still list old names.
     const stale = Object.values(state.rooms).filter(room => !room.named && room.name !== rt.autoRoomName(room.members))
     for (const room of stale) room.name = rt.autoRoomName(room.members)
+    // An explicit policy permanently supersedes a fresh team's install seed.
+    const retiredSeed = writer && !aside && rt.config?.routePolicy !== undefined && Object.hasOwn(state, 'taskRoutePolicySeed')
+    if (retiredSeed) delete state.taskRoutePolicySeed
     indexSessions()
     rt.solverSettle?.adopted()
     rt.hostAuthority?.restore()
     teamRead = valid
     if (lockEpoch > 1) rt.connectorStateChanged?.()
-    return { migrated: migrated || stale.length > 0, stale, repaired }
+    return { migrated: migrated || stale.length > 0, stale, repaired, retiredSeed }
   }
 
   const saveMigration = async required => {
@@ -662,14 +666,15 @@ export function install(rt) {
     if (holder !== undefined) warn('ds-bot: %s', readOnly())
     const parsed = readFileState()
     teamPresentAtLoad = parsed !== undefined ? true : stuck === undefined && !aside ? false : null
-    const { migrated, stale, repaired } = adopt(parsed)
+    const { migrated, stale, repaired, retiredSeed } = adopt(parsed)
     if (holder !== undefined) return
+    if (teamPresentAtLoad === false && rt.config?.routePolicy === undefined) state.taskRoutePolicySeed = TASK_ROUTE_DEFAULT
     // A file set aside just now stays where it is: the person's bytes were copied, and the
     // fresh team reaches the disk on the next real save rather than within this read.
-    if (migrated && stuck === undefined && !aside) {
+    if ((migrated || retiredSeed) && stuck === undefined && !aside) {
       // A failed write must not poison `loaded`: the migrated state stays in
       // memory and the next save() writes it.
-      await saveMigration(repaired)
+      await saveMigration(repaired || retiredSeed)
     }
     // Not awaited: renaming a session must not hold up the first roster read.
     for (const room of stale) void rt.retitleRoom(room)
@@ -703,12 +708,12 @@ export function install(rt) {
           warn('ds-bot: %s changed while no host held the team; it is adopted, and this host\'s state is lost because it could not be kept aside: %s', statePath, error)
         }
       }
-      const { repaired } = adopt(readFileState())
+      const { repaired, retiredSeed } = adopt(readFileState())
       recoveryPending = false
-      return repaired
+      return repaired || retiredSeed
     })
     writing = run.catch(() => {})
-    const tracked = run.then(repaired => repaired ? saveMigration(true) : undefined)
+    const tracked = run.then(required => required ? saveMigration(true) : undefined)
       .finally(() => { if (adopting === tracked) adopting = undefined })
     adopting = tracked
     return tracked
@@ -733,8 +738,8 @@ export function install(rt) {
       if (holder === undefined) {
         warn('omni-ui: the other dsh has closed; this one now saves the Bot team')
         warnedReadOnly = false
-        const { repaired } = adopt(readFileState())
-        if (repaired) await saveMigration(true)
+        const { repaired, retiredSeed } = adopt(readFileState())
+        if (repaired || retiredSeed) await saveMigration(true)
         lockGained()
         return
       }
@@ -759,8 +764,9 @@ export function install(rt) {
       return
     }
     if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) {
-      const { repaired } = adopt(readFileState())
-      if (repaired && holder === undefined) await saveMigration(true)
+      const { repaired, retiredSeed } = adopt(readFileState())
+      if (retiredSeed) await save({ required: true })
+      else if (repaired && holder === undefined) await saveMigration(true)
     }
   }
 
@@ -819,6 +825,8 @@ export function install(rt) {
   rt.teamGeneration = () => ({ epoch: lockEpoch, term: lockTerm })
   const sameGeneration = gen => gen?.epoch === lockEpoch && gen.term === lockTerm
   rt.sameTeam = gen => sameGeneration(gen) && rt.holdsLock()
+  // A stopped host may undo its own unsaved edits in memory. Only a current writer can save them.
+  rt.canRestoreTeamInMemory = gen => sameGeneration(gen) && (stopped || rt.holdsLock())
   rt.dropAutoMarks = () => {
     let dropped = false
     for (const bot of Object.values(state.bots ?? {})) {

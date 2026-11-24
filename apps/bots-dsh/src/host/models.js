@@ -419,22 +419,23 @@ export function install(rt) {
   // and a route a CLI covers; the jobs beside the chats keep their own rule.
   // DSH's default on a ChatGPT or Claude sign-in it cannot run that way is read as the same
   // model on that plan's CLI, when the CLI can run.
-  function pickDefault(entries, canRun = configured) {
+  function pickDefault(entries, canRun = configured, captured) {
     // Neither a refused route nor one that cannot run is picked.
     const usable = answerable(entries).filter(canRun)
-    const ref = defaultRef()
+    const ref = captured === undefined ? defaultRef() : captured.modelDefault
     const chosen = usable.find(entry => entry.ref === ref)
     if (chosen) return chosen.ref
     const signIn = entries.find(entry => entry.ref === ref && entry.covered === true)
     const peer = signIn === undefined ? undefined : cliPeerOf(signIn, usable)
     if (peer) return peer.ref
-    const seen = Array.isArray(state.providersSeen) ? state.providersSeen : []
+    const seen = captured === undefined ? providersSeen() : JSON.parse(captured.providersSeen)
     const rank = entry => (seen.includes(entry.provider) ? seen.indexOf(entry.provider) : seen.length)
     const ordered = usable.map((entry, index) => ({ entry, index })).sort((a, b) => rank(a.entry) - rank(b.entry) || a.index - b.index).map(({ entry }) => entry)
     const first = ordered[0]?.provider
     const own = ordered.filter(entry => entry.provider === first)
     return (own.find(entry => entry.id !== 'default' && entry.superseded !== true) ?? own.find(entry => entry.id !== 'default') ?? own[0])?.ref
   }
+  const providersSeen = () => Array.isArray(state.providersSeen) ? state.providersSeen : []
   const defaultModel = async ({ noCommands = false } = {}) => pickDefault(await catalog({ noCommands }))
 
   // The model a create that names none starts on: the team's pick while the catalog
@@ -556,12 +557,20 @@ export function install(rt) {
   // for a Bot that waits; another model of the same CLI is still taken. `aside`: a call
   // beside the chat that runs no tool (memory.js) keeps the plain rule.
   const stayed = new Set()
-  const plainModel = async (bot, noCommands) => {
-    const entries = await catalog({ noCommands })
+  function plainModelIn(bot, entries, captured) {
     if (entries.some(entry => entry.ref === bot.model)) return bot.model
     // A fallback is never one that needs a key.
-    return entries.some(entry => entry.ref === bot.appliedModel && entry.needsKey !== true) ? bot.appliedModel : pickDefault(entries)
+    return entries.some(entry => entry.ref === bot.appliedModel && entry.needsKey !== true) ? bot.appliedModel : pickDefault(entries, configured, captured)
   }
+  const plainModel = async (bot, noCommands) => plainModelIn(bot, await catalog({ noCommands }))
+  // A role task uses the same choice as desiredModel's aside route, from the
+  // captured Bot and the catalog already read for the eligibility scan.
+  const taskAskerState = bot => ({
+    model: bot.model, appliedModel: bot.appliedModel,
+    asideAllowed: Boolean(bot.model) && onDsh(bot) && !rt.switchingChat?.(bot.id),
+    modelDefault: defaultRef(), providersSeen: JSON.stringify(providersSeen()),
+  })
+  const taskAskerModel = (captured, entries) => captured.asideAllowed ? plainModelIn(captured, entries, captured) : undefined
   // Whether going from the Bot's saved model to `ref` leaves its coding CLI.
   const offCli = (bot, ref) => ref !== undefined && ref !== bot.model && leavesCli(splitRef(bot.model), splitRef(ref))
   const stays = (bot, ref) => {
@@ -954,10 +963,13 @@ export function install(rt) {
     assembleLlm,
     modelsEpoch: () => catalogEpoch,
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
-    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
+    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, taskAskerState, taskAskerModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
     selectSessionModel, reselectOwnRoute, keepsCarriedRoute, assertReadableRoute, storedRouteOf: storedRoute,
     applyModel, waitForModel, syncModels, routeRefused,
-    dropCatalog: () => { catalogCache = { at: 0, value: [] } },
+    dropCatalog: () => {
+      invalidate()
+      catalogCache = { at: 0, value: [] }
+    },
   })
 }

@@ -32,6 +32,24 @@ test('every literal the client translates has a Chinese entry', () => {
   assert.deepEqual(missing, [])
 })
 
+test('task model refusals use the specific retry templates in Chinese and Portuguese', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const examples = [
+    ['Models you may name: native-a/one and 4 more.', 'Models you may name: {models} and {n} more.'],
+    ['Models you may name: none; leave out model.', 'Models you may name: none; leave out model.'],
+    ['Models you may name: native-a/one.', 'Models you may name: {models}.'],
+    ['native-a/one could not be selected for the task.', '{model} could not be selected for the task.'],
+  ]
+  const undo = installLocale(fakeLocale('zh'))
+  try {
+    for (const [example, key] of examples) {
+      assert.equal(hostTemplateOf(example), key)
+      assert.ok(pt[key])
+      assert.notEqual(hostText(example), example)
+    }
+  } finally { undo() }
+})
+
 test('coding agent access messages name the renamed Settings section in all three languages', () => {
   const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
   assert.equal(ACCESS_MESSAGES.off, 'Turn on {connection} in Settings → Coding agents before using this model.')

@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { approvalPolicyOf } from './approval-policy.js'
 
-export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule', 'guard', 'guard-request']
+export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule', 'guard', 'guard-request', 'guard-launch']
 export const STOP_KEEP_MS = 6 * 60 * 60 * 1000
 export const STOPS_MAX = 50
 export const CALLS_MAX = 20
@@ -19,6 +19,7 @@ export const WHY_EN = {
   // the plan it waits for.
   guard: 'the review guard waits for the reviewer\'s verdict on the plan; you can turn it off in Details',
   'guard-request': 'the review guard waits for the reviewer\'s verdict on a new plan, because another Bot sent a new request; you can turn it off in Details',
+  'guard-launch': 'the review guard is on and prevents starting tasks; you can turn it off in Details',
 }
 
 export function stopLineEn(entry) {

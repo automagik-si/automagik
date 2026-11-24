@@ -30,7 +30,7 @@ import { redactorFor } from './redact.js'
 import { OWN_TOOLS_MODEL_TEXT } from '../shared/own-tools.js'
 import { answerSender, failureLine, opensTurn, turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
-import { routeAllowed } from '../shared/route-policy.js'
+import { routeAllowed, routeLabel } from '../shared/route-policy.js'
 import { ACP_NAME, CROSSING_DEADLINE_MS, commandCapableAgent, crossesHarness, isHermesRoute, routeOfRef, shellHoldText } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
@@ -4143,8 +4143,7 @@ export function install(rt) {
   function assertRouteAllowed(bot, target, entry) {
     if (routeAllowed(bot, target, rt.routePolicy)) return
     routeAttempt(bot, bot.model ?? bot.appliedModel, target, entry)('refused', 'route policy')
-    const route = { native: 'Native', acp: 'ACP', herdr: 'Herdr', 'hermes-remote': 'Remote Hermes' }[routeOfRef(target).route]
-    throw refused('refused', `${bot.name} cannot use the ${route} route.`)
+    throw refused('refused', `${bot.name} cannot use the ${routeLabel(target)} route.`)
   }
 
   // A missing model can stop a crossing before the usual route checks run.
