@@ -724,6 +724,14 @@ test('G16/G16b: a held native subagent question is rejected first in the approva
   } finally {
     rt.botOf = botOf
   }
+  const botOfSession = rt.botOfSession
+  rt.botOfSession = () => { throw new Error('lookup failed') }
+  try {
+    answer = await ask(request(plainSolver.id, edit))
+    assert.ok(answer.reached.length > 1, JSON.stringify(answer))
+  } finally {
+    rt.botOfSession = botOfSession
+  }
   await step()
   reply(ada.id, bot.id, 'SHIP')
   answer = await ask(request(bot.id, edit))

@@ -178,6 +178,7 @@ work refused.
 
 1.5. **D1.5 (#2056):** the review guard. Plugin lane. Acceptance: the installed-app rows in its
    PR. Rollback: reverting the release removes the switch; the stored field is ignored.
+
 2. **D2:** `roles/solver/` official role (tag, prompt part, pinned version); the dialog attaches it
    and stops writing instructions; existing D1 Solvers keep theirs. Plugin lane, with a cut that
    carries the role. Check: a new Solver carries the `solver` tag and no written instructions; a
