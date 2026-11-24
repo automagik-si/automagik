@@ -113,9 +113,10 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   endpoint or Bot tool changes it later. `reviewTrack` is written only by the host, per request in
   the Solver's own chat (and the subagents under it): when the request opened, the person's last
   message in it, its first and last work calls (a write to exactly its notes file,
-  `.solver/notes.md` in its folder, is not one), at most 4 verdicts (the last whole-word SHIP,
-  FIX-FIRST or BLOCKED in a reply from `reviewerId` that starts a line, follows `Verdict:` or ends a
-  line after a sentence) and the last delivery's mark. No view carries `reviewTrack`: the owner's
+  `.solver/notes.md` in its folder, never dates the plan side), at most 4 verdicts (the last
+  whole-word SHIP, FIX-FIRST or BLOCKED in a reply from `reviewerId` that starts a line, follows
+  `Verdict:` or ends a line after a sentence, never asked, one of a list of options or inside a
+  fenced code block) and the last delivery's mark. No view carries `reviewTrack`: the owner's
   view shows only `reviewMark`, the last mark (plan and result reviewed, plan unreviewed, result
   unreviewed, delivered before the reviewer answered, fresh session not checked, or no reviewer),
   and neither field is ever a caller-view field. Like the Solver marker it grants and refuses

@@ -164,16 +164,17 @@ export function install(rt) {
   }
 
   // A call the executor let through, on a Session of `bot`; `own`: the Session is its own
-  // chat or a subagent under it; `base`: the Session's folder. A write to exactly the Solver's
-  // notes file in its folder is not work (SR4-2).
+  // chat or a subagent under it; `base`: the Session's folder.
   function reviewWork(bot, own, name, args, definition, base) {
     if (!own || !tracked(bot) || !isWorkCall(name, args, definition)) return
     const folder = bot.workDir ?? rt.teamFolder?.()
-    if (isNotesWrite(name, args, folder, base ?? folder)) return
+    const notes = isNotesWrite(name, args, folder, base ?? folder)
     const track = trackOf(bot)
     if (track.delivered === true) return
     const at = Date.now()
-    track.firstWorkAt ??= at
+    // A write to exactly the notes file never dates the plan side (SR4-2), but it is still work
+    // for the result: a verdict must follow it (SR5-1).
+    if (!notes) track.firstWorkAt ??= at
     track.lastWorkAt = at
     save()
   }

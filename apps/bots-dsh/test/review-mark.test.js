@@ -120,7 +120,17 @@ test('verdictOf reads a whole-word verdict at the start of any line, after "Verd
     // Mid-line, or inside a word, never counts.
     'This is not a SHIP yet.', 'not a SHIP yet', 'Looks fine to me, a SHIP from me.', 'Answer first with one verdict, SHIP, FIX-FIRST or BLOCKED, then the evidence.',
     'It is a SHIP', 'Is this a SHIP?', 'The plan is fine. SHIPPING it later.', 'Done. SHIP it once the tests pass.', 'verdict: ship', 'NOTSHIP', 'reSHIP',
+    // SR5-2: an echoed option list, a question, a list of options, a fenced block.
+    'SHIP, FIX-FIRST or BLOCKED.', 'You asked for one verdict:\nSHIP, FIX-FIRST or BLOCKED.\nI could not open the file.', 'SHIP? no.', 'SHIP ? no.',
+    'FIX-FIRST or SHIP', 'SHIP / FIX-FIRST / BLOCKED', 'Verdict: SHIP, FIX-FIRST or BLOCKED', '**SHIP**, FIX-FIRST or BLOCKED',
+    'The options are:\n* SHIP\n* FIX-FIRST\n* BLOCKED', 'The options are:\n- SHIP\n- FIX-FIRST\n- BLOCKED', 'Options:\n1. SHIP\n2. FIX-FIRST\n3. BLOCKED',
+    '> * SHIP', '+ SHIP', '```\nSHIP\n```', '```text\nFIX-FIRST\n```\nI could not open the file.', '```SHIP```', '  ```\n  BLOCKED',
   ]) assert.equal(verdictOf(value), undefined, String(value))
+  // SR5-2: a verdict still counts after a fenced block, with a comment after a comma, and after "Verdict:" in a list item.
+  for (const [value, verdict] of [
+    ['```\nSHIP\n```\nFIX-FIRST\nLine 2 overclaims.', 'FIX-FIRST'], ['SHIP, with one note below.', 'SHIP'], ['FIX-FIRST: line 2, then SHIP', 'FIX-FIRST'],
+    ['- **Verdict:** SHIP', 'SHIP'], ['Checked.\n* Verdict: BLOCKED (no access)', 'BLOCKED'], ['SHIP\n```\nnpm test\n```', 'SHIP'], ['I checked it. Ready? SHIP', 'SHIP'],
+  ]) assert.equal(verdictOf(value), verdict, value)
 })
 
 test('a work call on every route: DSH tools, the dsh bridge, and an ACP agent\'s own tools', () => {
@@ -507,7 +517,7 @@ test('a person\'s message before the Solver opens its review work still waits fo
   person(bot.id, 'Request 1.')
   await step()
   person(bot.id, 'Also cover the edge case.')
-  assert.equal(typeof bot.reviewTrack.personAt, 'number')
+  assert.ok(bot.reviewTrack.personAt > bot.reviewTrack.requestAt, 'the second message dates personAt')
   await step()
   rt.openWork('w-plan', { from: bot.id, to: ada.id })
   endTurn(bot.id, 'Sent my plan for review.')
@@ -557,9 +567,57 @@ test('a write to exactly the notes file before the plan verdict keeps the plan r
   await step()
   reply(ada.id, bot.id, 'SHIP')
   await step()
+  // SR5-1: a notes write after the result verdict is still work for the result side.
   await guard({ name: 'write', arguments: { file_path: '.solver/notes.md' }, agent: { id: bot.id } })
   endTurn(bot.id, 'Delivered: compare.md.')
-  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
+})
+
+// SR5-1: an answer written only into the notes file after two plan verdicts, delivered with no
+// result review, reads result unreviewed (never "Plan and result reviewed").
+test('a notes-only deliverable with no result review reads result unreviewed', async (t) => {
+  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { folder } = notesFolder(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  bot.workDir = folder
+  person(bot.id, 'Research two libraries and give me a one-page comparison.')
+  await step()
+  reply(ada.id, bot.id, 'FIX-FIRST\nAdd a licence check to the plan.')
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  await step()
+  assert.equal(await guard({ name: 'write', arguments: { file_path: '.solver/notes.md', content: '# Comparison' }, agent: { id: bot.id } }), 'ran')
+  assert.equal(bot.reviewTrack.firstWorkAt, undefined)
+  assert.equal(typeof bot.reviewTrack.lastWorkAt, 'number')
+  await step()
+  endTurn(bot.id, 'Delivered: the comparison is in .solver/notes.md.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
+})
+
+// SR5-1: a delivered file that is a symlink into the notes file, changed through a notes write after
+// the result verdict, reads result unreviewed.
+test('a delivered symlink into the notes file changed after the result verdict reads result unreviewed', async (t) => {
+  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { folder } = notesFolder(t)
+  mkdirSync(join(folder, '.solver'))
+  writeFileSync(join(folder, '.solver', 'notes.md'), 'reviewed text')
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  bot.workDir = folder
+  person(bot.id, 'Write report.md.')
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  await step()
+  await guard({ name: 'bash', arguments: { command: 'ln -s .solver/notes.md report.md' }, agent: { id: bot.id } })
+  symlinkSync('.solver/notes.md', join(folder, 'report.md'))
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  await step()
+  assert.equal(isNotesPath('.solver/notes.md', folder, folder), true)
+  await guard({ name: 'write', arguments: { file_path: '.solver/notes.md', content: 'unreviewed text' }, agent: { id: bot.id } })
+  endTurn(bot.id, 'Delivered: report.md.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
 })
 
 test('any other write before the plan verdict marks the plan unreviewed: lookalikes, .., another folder, a symlink, a link', async (t) => {
