@@ -12692,7 +12692,7 @@ function badgeOf(agent) {
   if (state === "ready") return t("Ready");
   return null;
 }
-function agentLines(agent, entry) {
+function agentLines(agent, entry, { settings = false } = {}) {
   const name = agent.name;
   const cli = CLI_OF[agent.id] ?? agent.key;
   const lines = [];
@@ -12738,7 +12738,7 @@ function agentLines(agent, entry) {
   if (agent.sharedAccount === true) lines.push(sharedLine(name));
   const app = agent.appSignIn === true;
   if (agent.signedIn === true && agent.consent !== "needed" && app) {
-    lines.push({ tone: "ok", text: t("Signed in to {name}.", { name }), ...agent.sharedAccount === true ? {} : { action: "native-sign-out" } });
+    lines.push({ tone: "ok", text: t("Signed in to {name}.", { name }), ...agent.sharedAccount === true ? {} : { action: settings ? "native-switch" : "native-sign-out" } });
   } else if (agent.signedIn === true && agent.consent !== "needed") {
     const canSwitch = isolatedSignIn(agent) && entry?.authScope === "isolated" && entry.signedIn === true;
     const account = canSwitch && entry.account?.kind === "account" ? entry.account.email ?? entry.account.org : void 0;
@@ -12884,8 +12884,8 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     // The person's click on Install (a CLI the app installs only then).
     install: (agent) => act(agent.id, "acp-install", { id: agent.id }),
     check: (agent) => act(agent.id, "acp", { refresh: true }),
-    // An agent that signs in here: Sign in starts it (its link opens in the person's browser),
-    // and Sign out asks first, with the same words as the account switch, then retires its home.
+    // An agent that signs in here: Sign in starts it (its link shows; a person's click opens it),
+    // and Sign out and Switch account ask first, with the account switch's words.
     // acp-dsh's fixed refusals read in the page's language.
     nativeLogin: (agent) => act(agent.id, "acp-sign-in", { id: agent.id }, signInWords),
     // The address the browser ended on, for the attempt the row shows (#2048, paste-back).
@@ -12899,6 +12899,13 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     nativeSignOut: (agent) => {
       setSigningOut(null);
       return act(agent.id, "acp-sign-out", { id: agent.id });
+    },
+    // Switch account (Settings), one action as Claude Code's and Codex's: sign out, then a new
+    // sign-in at once. A refused sign-out starts none.
+    switchAccount: async (agent) => {
+      setSigningOut(null);
+      if (!await act(agent.id, "acp-sign-out", { id: agent.id })) return false;
+      return act(agent.id, "acp-sign-in", { id: agent.id }, signInWords);
     },
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
@@ -12963,7 +12970,8 @@ function AcpLine({ line, agent, acp, busy, accountControls }) {
   if (line.copy) rememberSignInLink(line.copy);
   const canSwitch = line.action === "switch" && accountControls !== void 0;
   const signOut = line.action === "native-sign-out";
-  const confirmingOut = signOut && acp.signOutPending === agent.id;
+  const nativeSwitch = line.action === "native-switch";
+  const confirmingOut = (signOut || nativeSwitch) && acp.signOutPending === agent.id;
   const confirming = canSwitch && accountControls.pending === agent.id || confirmingOut;
   const accountButton = (label, onClick) => (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick }, label);
   return (0, import_react9.createElement)(
@@ -12981,8 +12989,9 @@ function AcpLine({ line, agent, acp, busy, accountControls }) {
       line.action === "check" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.check(agent) }, t("Check again")) : null,
       line.action === "native-login" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.nativeLogin(agent) }, t("Sign in")) : null,
       canSwitch && !confirming ? accountButton(t("Switch account"), () => accountControls.ask(agent)) : null,
+      nativeSwitch && !confirming ? accountButton(t("Switch account"), () => acp.askSignOut(agent)) : null,
       signOut && !confirming ? accountButton(t("Sign out"), () => acp.askSignOut(agent)) : null,
-      confirming ? accountButton(t("Continue"), () => confirmingOut ? acp.nativeSignOut(agent) : accountControls.confirm(agent)) : null,
+      confirming ? accountButton(t("Continue"), () => !confirmingOut ? accountControls.confirm(agent) : nativeSwitch ? acp.switchAccount(agent) : acp.nativeSignOut(agent)) : null,
       confirming ? accountButton(t("Cancel"), confirmingOut ? acp.cancelSignOut : accountControls.cancel) : null
     ),
     line.action === "callback" ? (0, import_react9.createElement)(CallbackField, { agent, acp, busy }) : null,
@@ -12999,7 +13008,7 @@ function AcpAgentRow({ agent, acp, accountControls }) {
   const on2 = acp.isOn(agent);
   const busy = acp.busy !== null || accountControls?.busy === true;
   const badge = badgeOf({ ...agent, on: on2 });
-  const lines = agentLines({ ...agent, on: on2 }, accountControls?.accounts[agent.id]);
+  const lines = agentLines({ ...agent, on: on2 }, accountControls?.accounts[agent.id], { settings: true });
   return (0, import_react9.createElement)(
     "div",
     { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf({ ...agent, on: on2 }) },

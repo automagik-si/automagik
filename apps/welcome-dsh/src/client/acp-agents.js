@@ -18,11 +18,14 @@ import { raised } from './clay.js'
 //
 // Antigravity runs in this installation's own home (#2048, `appSignIn`): its row signs in here,
 // over ACP (Sign in), as Claude Code's and Codex's rows read, never with a terminal command or
-// a path, and signs out by retiring the home (Sign out). Its sign-in link shows with a Copy
+// a path. Signed in, its Settings row offers Switch account, as theirs do: one action that
+// signs out (retiring the home) and starts a new sign-in at once; Connect AI's row offers
+// Sign out. Its sign-in link shows with a Copy
 // button; nothing opens it by itself: a person's click opens it. Signed in on another computer,
 // the person pastes back the address the browser ended on (`acp-sign-in-callback`).
 // The same lines draw in Connect AI (AcpLine). On Windows its account is shared with the
-// person's own agy (`sharedAccount`): every state of the row says so, and there is no Sign out.
+// person's own agy (`sharedAccount`): every state of the row says so, and there is no Sign out
+// (nor Switch account, which signs out first).
 
 export const CLI_OF = { 'acp-claude': 'claude', 'acp-codex': 'codex', 'acp-hermes': 'hermes', 'acp-antigravity': 'agy', 'acp-omp': 'omp' }
 export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'HM', 'acp-antigravity': 'AG', 'acp-omp': 'OM' }
@@ -97,9 +100,10 @@ export { redactText }
  * where to find the model. Each line: { tone: ok|wait|bad|muted, text, link?, action? }, an
  * action being 'check' (look again), 'login' (the sign-in row in a Bot's chat), 'retry' (the
  * connector's install, or the CLI's) or 'install' (a CLI the app installs only on the person's
- * click). An account in Settings can also offer 'switch'.
+ * click). An account in Settings can also offer 'switch'; an agent that signs in here offers
+ * 'native-switch' in Settings (`settings`) and 'native-sign-out' elsewhere (Connect AI).
  */
-export function agentLines(agent, entry) {
+export function agentLines(agent, entry, { settings = false } = {}) {
   const name = agent.name
   const cli = CLI_OF[agent.id] ?? agent.key
   const lines = []
@@ -149,8 +153,9 @@ export function agentLines(agent, entry) {
   if (agent.sharedAccount === true) lines.push(sharedLine(name))
   const app = agent.appSignIn === true
   if (agent.signedIn === true && agent.consent !== 'needed' && app) {
-    // Sign out retires this installation's home; not where the account is shared (Windows).
-    lines.push({ tone: 'ok', text: t('Signed in to {name}.', { name }), ...(agent.sharedAccount === true ? {} : { action: 'native-sign-out' }) })
+    // Settings switches the account, as Claude Code's and Codex's rows there do; Connect AI signs
+    // out. Both retire this installation's home: not where the account is shared (Windows).
+    lines.push({ tone: 'ok', text: t('Signed in to {name}.', { name }), ...(agent.sharedAccount === true ? {} : { action: settings ? 'native-switch' : 'native-sign-out' }) })
   } else if (agent.signedIn === true && agent.consent !== 'needed') {
     const canSwitch = isolatedSignIn(agent) && entry?.authScope === 'isolated' && entry.signedIn === true
     const account = canSwitch && entry.account?.kind === 'account' ? entry.account.email ?? entry.account.org : undefined
@@ -324,8 +329,8 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     // The person's click on Install (a CLI the app installs only then).
     install: agent => act(agent.id, 'acp-install', { id: agent.id }),
     check: agent => act(agent.id, 'acp', { refresh: true }),
-    // An agent that signs in here: Sign in starts it (its link opens in the person's browser),
-    // and Sign out asks first, with the same words as the account switch, then retires its home.
+    // An agent that signs in here: Sign in starts it (its link shows; a person's click opens it),
+    // and Sign out and Switch account ask first, with the account switch's words.
     // acp-dsh's fixed refusals read in the page's language.
     nativeLogin: agent => act(agent.id, 'acp-sign-in', { id: agent.id }, signInWords),
     // The address the browser ended on, for the attempt the row shows (#2048, paste-back).
@@ -334,6 +339,13 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     askSignOut: (agent) => { say(agent.id, null); setSigningOut(agent.id) },
     cancelSignOut: () => setSigningOut(null),
     nativeSignOut: (agent) => { setSigningOut(null); return act(agent.id, 'acp-sign-out', { id: agent.id }) },
+    // Switch account (Settings), one action as Claude Code's and Codex's: sign out, then a new
+    // sign-in at once. A refused sign-out starts none.
+    switchAccount: async (agent) => {
+      setSigningOut(null)
+      if (!await act(agent.id, 'acp-sign-out', { id: agent.id })) return false
+      return act(agent.id, 'acp-sign-in', { id: agent.id }, signInWords)
+    },
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
     reload: () => load(false),
@@ -392,7 +404,8 @@ export function AcpLine({ line, agent, acp, busy, accountControls }) {
   if (line.copy) rememberSignInLink(line.copy)
   const canSwitch = line.action === 'switch' && accountControls !== undefined
   const signOut = line.action === 'native-sign-out'
-  const confirmingOut = signOut && acp.signOutPending === agent.id
+  const nativeSwitch = line.action === 'native-switch'
+  const confirmingOut = (signOut || nativeSwitch) && acp.signOutPending === agent.id
   const confirming = (canSwitch && accountControls.pending === agent.id) || confirmingOut
   const accountButton = (label, onClick) => h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick }, label)
   return h('div', { className: 'oai-acp-line-block' },
@@ -406,8 +419,9 @@ export function AcpLine({ line, agent, acp, busy, accountControls }) {
       line.action === 'check' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.check(agent) }, t('Check again')) : null,
       line.action === 'native-login' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.nativeLogin(agent) }, t('Sign in')) : null,
       canSwitch && !confirming ? accountButton(t('Switch account'), () => accountControls.ask(agent)) : null,
+      nativeSwitch && !confirming ? accountButton(t('Switch account'), () => acp.askSignOut(agent)) : null,
       signOut && !confirming ? accountButton(t('Sign out'), () => acp.askSignOut(agent)) : null,
-      confirming ? accountButton(t('Continue'), () => (confirmingOut ? acp.nativeSignOut(agent) : accountControls.confirm(agent))) : null,
+      confirming ? accountButton(t('Continue'), () => (!confirmingOut ? accountControls.confirm(agent) : nativeSwitch ? acp.switchAccount(agent) : acp.nativeSignOut(agent))) : null,
       confirming ? accountButton(t('Cancel'), confirmingOut ? acp.cancelSignOut : accountControls.cancel) : null),
     line.action === 'callback' ? h(CallbackField, { agent, acp, busy }) : null,
     line.details ? h('details', { className: 'oai-acp-details' },
@@ -420,8 +434,8 @@ export function AcpAgentRow({ agent, acp, accountControls }) {
   const on = acp.isOn(agent)
   const busy = acp.busy !== null || accountControls?.busy === true
   const badge = badgeOf({ ...agent, on })
-  // The switch as the person just set it: Install follows it at once.
-  const lines = agentLines({ ...agent, on }, accountControls?.accounts[agent.id])
+  // The switch as the person just set it: Install follows it at once. This row is Settings'.
+  const lines = agentLines({ ...agent, on }, accountControls?.accounts[agent.id], { settings: true })
   return h('div', { className: `oai-ai oai-acp${on ? ' oai-ai-on' : ''}`, 'data-acp': agent.id, 'data-state': stateOf({ ...agent, on }) },
     h('div', { className: 'oai-ai-row' },
       h('div', { className: 'oai-logo', 'aria-hidden': true }, LOGO_OF[agent.id] ?? agent.name.slice(0, 1)),

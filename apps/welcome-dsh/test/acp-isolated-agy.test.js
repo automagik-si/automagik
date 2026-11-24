@@ -210,6 +210,7 @@ const acpOf = (over = {}) => {
     check: row => acted.push(['check', row.id]), login: row => acted.push(['login', row.id]),
     nativeLogin: row => acted.push(['sign-in', row.id]), askSignOut: row => acted.push(['ask-sign-out', row.id]),
     nativeSignOut: row => acted.push(['sign-out', row.id]), cancelSignOut: () => acted.push(['cancel']),
+    switchAccount: row => acted.push(['switch', row.id]),
     callback: (row, url) => acted.push(['callback', row.id, url]),
     ...over,
   }
@@ -303,19 +304,66 @@ test('signing in, with agy\'s sign-in link as a link; each failure; and no brows
   assert.equal(other.at(-1)?.['acp-antigravity'], 'The Bot account is changing.')
 })
 
-test('signed in: Sign out asks first, then signs out; Cancel keeps it', () => {
+test('signed in, in Settings: Switch account as Claude Code and Codex; Continue signs out, then signs in at once', async () => {
   const acp = acpOf()
   const tree = rowOf(agy({ signedIn: true }), acp)
   assert.match(textOf(tree), /Signed in to Antigravity\./)
-  buttons(tree, 'Sign out')[0].props.onClick()
+  // Claude Code's and Codex's Settings rows offer Switch account and no Sign out: so does this one.
+  const [switchAccount] = buttons(tree, 'Switch account')
+  assert.equal(switchAccount.props.className, 'oai-ghost oai-acp-act')
+  assert.deepEqual(buttons(tree, 'Sign out'), [])
+  switchAccount.props.onClick()
   assert.deepEqual(acp.acted, [['ask-sign-out', 'acp-antigravity']])
+  // Their question, their Continue and Cancel.
   const asking = acpOf({ signOutPending: 'acp-antigravity' })
   const confirm = rowOf(agy({ signedIn: true }), asking)
   assert.match(textOf(confirm), /This stops running Bot work for this account\. Continue\?/)
-  assert.deepEqual(buttons(confirm, 'Sign out'), [])
+  assert.deepEqual(buttons(confirm, 'Switch account'), [])
   buttons(confirm, 'Continue')[0].props.onClick()
   buttons(confirm, 'Cancel')[0].props.onClick()
-  assert.deepEqual(asking.acted, [['sign-out', 'acp-antigravity'], ['cancel']])
+  assert.deepEqual(asking.acted, [['switch', 'acp-antigravity'], ['cancel']])
+  // Their words in pt-BR too (ZH reads the shared buttons in English, as theirs do).
+  assert.equal(inLocale('pt-BR', () => buttons(rowOf(agy({ signedIn: true })), 'Trocar de conta').length), 1)
+  // The one action: acp-sign-out, then acp-sign-in at once; the sign-in link shows as before.
+  const id = { id: 'acp-antigravity' }
+  const calls = []
+  const switching = withHooks(() => ui.useAcp(async (endpoint, payload) => { calls.push([endpoint, { ...payload }]); return { available: true, agents: [] } }), [])
+  assert.equal(await switching.switchAccount(agy({ signedIn: true })), true)
+  assert.deepEqual(calls, [['acp-sign-out', id], ['acp-sign-in', id]])
+  // A refused sign-out starts no sign-in, and its words stay on the row.
+  const said = []
+  const refusedCalls = []
+  const refused = withHooks(() => ui.useAcp(async (endpoint, payload) => {
+    refusedCalls.push([endpoint, { ...payload }])
+    if (endpoint === 'acp-sign-out') throw new Error('The Bot account is changing.')
+    return { available: true, agents: [] }
+  }), said)
+  assert.equal(await refused.switchAccount(agy({ signedIn: true })), false)
+  assert.deepEqual(refusedCalls, [['acp-sign-out', id]])
+  assert.equal(said.at(-1)?.['acp-antigravity'], 'The Bot account is changing.')
+  // A refused sign-in reads in the page's words, as Sign in's do.
+  const late = []
+  const expired = withHooks(() => ui.useAcp(async (endpoint) => {
+    if (endpoint === 'acp-sign-in') throw new Error('This sign-in expired. Start again.')
+    return { available: true, agents: [] }
+  }), late)
+  locale.setLocale('pt-BR')
+  try { assert.equal(await expired.switchAccount(agy({ signedIn: true })), false) } finally { locale.setLocale('en') }
+  assert.equal(late.at(-1)?.['acp-antigravity'], ui.PT_BR['This sign-in expired. Start again.'])
+})
+
+test('signed in, in Connect AI\'s lines: Sign out stays, never Switch account', () => {
+  // Connect AI draws the same lines with no Settings row (connect-ai.js): unchanged.
+  const lines = ui.agentLines(agentView(agy({ signedIn: true })))
+  assert.deepEqual(Array.from(lines.filter(line => line.text.startsWith('Signed in to')), line => line.action), ['native-sign-out'])
+  const acp = acpOf()
+  const [line] = lines.filter(row => row.action === 'native-sign-out')
+  const tree = render(ui.AcpLine({ line, agent: agentView(agy({ signedIn: true })), acp, busy: false }))
+  assert.deepEqual(buttons(tree, 'Switch account'), [])
+  buttons(tree, 'Sign out')[0].props.onClick()
+  const asking = acpOf({ signOutPending: 'acp-antigravity' })
+  buttons(render(ui.AcpLine({ line, agent: agentView(agy({ signedIn: true })), acp: asking, busy: false })), 'Continue')[0].props.onClick()
+  assert.deepEqual([...acp.acted, ...asking.acted], [['ask-sign-out', 'acp-antigravity'], ['sign-out', 'acp-antigravity']])
 })
 
 test('Windows: the shared-account warning in every state, and never a Sign out', () => {
@@ -333,6 +381,8 @@ test('Windows: the shared-account warning in every state, and never a Sign out',
     assert.ok(textOf(tree).includes(WARNING), JSON.stringify(row))
     assert.doesNotMatch(textOf(tree), /Settings stay separate/)
     assert.deepEqual(buttons(tree, 'Sign out'), [])
+    // Switch account signs out first: not where the account is shared either.
+    assert.deepEqual(buttons(tree, 'Switch account'), [])
   }
   // The off line keeps what is true there: the sign-in is the one this computer already has.
   assert.match(textOf(rowOf(agy({ ...shared, on: false, connector: { state: 'off', native: true }, signedIn: undefined }))), /already has on this computer/)

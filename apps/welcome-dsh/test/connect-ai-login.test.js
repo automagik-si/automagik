@@ -428,6 +428,19 @@ test('Y4: with its setup closed (a reload) and a sign-in under way, the link, Co
   } finally { step.done() }
 })
 
+test('Y4b: signed in, Connect AI\'s row is unchanged: Sign out, never Switch account', async () => {
+  const step = await agyStep(agy({ on: true, signedIn: true, restartNeeded: true }))
+  try {
+    assert.match(textOf(step.tree()), /Signed in to Antigravity\./)
+    assert.equal(buttons(step.tree(), 'Switch account').length, 0)
+    buttons(step.tree(), 'Sign out')[0].props.onClick()
+    await step.run.settle()
+    buttons(step.tree(), 'Continue')[0].props.onClick()
+    await step.run.settle()
+    assert.deepEqual(requests.filter(([name]) => name === 'acp-sign-out' || name === 'acp-sign-in'), [['acp-sign-out', { id: 'acp-antigravity' }]])
+  } finally { step.done() }
+})
+
 test('Y5: on Windows every state says the account is shared, and there is no Sign out', async () => {
   for (const [over, cli] of [[{ on: true }, MISSING], [{ on: true }, {}], [PASTING, {}], [{ on: true, signedIn: true, restartNeeded: true }, {}]]) {
     const step = await agyStep(agy({ ...over, sharedAccount: true }, cli))
