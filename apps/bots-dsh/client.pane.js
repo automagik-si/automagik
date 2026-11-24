@@ -8997,6 +8997,18 @@ function machineRefusal({ state, why }) {
   if (state === "unreadable") return MACHINE_MESSAGES["unreadable-file"];
 }
 
+// src/shared/own-tools.js
+var OWN_TOOLS_AGENTS = Object.freeze(["acp-antigravity"]);
+var OWN_TOOLS_MODEL_TEXT = "This Bot denies acp_tool, and this model runs its own tools anyway. Remove acp_tool from Denied tools first, or pick another model.";
+var OWN_TOOLS_MENU_HINT = "Not with acp_tool denied";
+var OWN_TOOLS_DENY_TEXT = "acp_tool cannot be denied while this Bot runs on a model that runs its own tools. Pick another model first.";
+var OWN_TOOLS_NOTICE = "acp_tool is denied, but this model runs its own tools, so those calls still run and show as refused. Remove acp_tool from Denied tools in Bot settings, or pick another model.";
+var OWN_TOOLS_CREATE_TEXT = "A Bot made by a Bot that denies acp_tool cannot run on a model that runs its own tools. Name another model.";
+var deniesAcpTool = (list) => Array.isArray(list) && list.includes("acp_tool");
+var addsAcpToolDeny = (before, next) => deniesAcpTool(next) && !deniesAcpTool(before);
+var ownToolsRefused = (bot, entry) => entry?.ownTools === true && deniesAcpTool(bot?.denyTools) && entry.ref !== (bot.model ?? bot.appliedModel);
+var ownToolsNotice = (bot) => bot?.ownTools === true && deniesAcpTool(bot.denyTools);
+
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
@@ -10424,6 +10436,11 @@ var ZH = {
   "The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.": "Bot 团队在授予工具时执行此设置：它会移除这些工具，而不会把 shell 放进操作系统沙箱。",
   "This removes this Bot's own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.": "这只会移除这个 Bot 自己的 shell 工具；它不能阻止另一个有 shell 的 Bot，或操作系统用户，读取这个 Bot 能读取的文件。",
   "Denied tools": "禁止使用的工具",
+  [OWN_TOOLS_MODEL_TEXT]: "此 Bot 禁止使用 acp_tool，但此模型仍会使用它自己的工具。请先从“禁止使用的工具”中移除 acp_tool，或选择其他模型。",
+  [OWN_TOOLS_MENU_HINT]: "已禁止 acp_tool 时不可用",
+  [OWN_TOOLS_DENY_TEXT]: "此 Bot 运行的模型会使用它自己的工具，因此不能禁止 acp_tool。请先选择其他模型。",
+  [OWN_TOOLS_NOTICE]: "acp_tool 已被禁止，但此模型会使用它自己的工具，这些调用仍会运行并显示为已拒绝。请在 Bot 设置中从“禁止使用的工具”移除 acp_tool，或选择其他模型。",
+  [OWN_TOOLS_CREATE_TEXT]: "由禁止使用 acp_tool 的 Bot 创建的 Bot 不能在会使用它自己的工具的模型上运行。请指定其他模型。",
   "Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.": "精确的工具名，每行一个或用逗号分隔，区分大小写。留空表示允许所有工具。",
   "What this Bot does": "这个 Bot 做什么",
   "Its job on the team. Part of the Bot's system prompt.": "它在团队里的分工，会写进 Bot 的系统提示词。",

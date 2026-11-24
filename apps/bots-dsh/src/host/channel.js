@@ -148,6 +148,7 @@ export function install(rt) {
     } catch { return {} }
   }
   rt.runningOf = runningOf
+  const ownTools = ref => rt.ownToolsRoute?.(ref) === true
   // Models come from DSH, not state.json, so a provider added in Harness settings
   // changes the view without a new revision. So do the permission presets DSH offers and
   // the Bots and groups whose Auto runs as workspace-write (permissions.js).
@@ -161,6 +162,10 @@ export function install(rt) {
     rt.cachedDefault() ?? '', rt.cachedBackground?.() ?? '', rt.permissionKey?.() ?? '',
     rt.modelsEpoch?.() ?? 0,
     Object.values(state.bots).map(bot => [bot.nativeTools === true, rt.nativeToolsBlock(bot) ?? ''].join('/')).join(','),
+    // Which models run their own tools whatever the Denied tools say (#2026): Codex can measure
+    // a model as kept with no new revision.
+    rt.cachedCatalog().map(entry => ownTools(entry.ref) ? 1 : 0).join(''),
+    Object.values(state.bots).map(bot => ownTools(bot.model ?? bot.appliedModel) ? 1 : 0).join(''),
     // Fresh reads each poll catch selection changes and Agents appearing or going, without a listener or state revision.
     Object.values(state.bots).map(bot => {
       const running = runningOf(bot)
@@ -192,6 +197,7 @@ export function install(rt) {
         ...rt.autoViewOf?.(bot),
         ...runningOf(bot),
         ...(nativeToolsBlock === undefined ? {} : { nativeToolsBlock }),
+        ...(ownTools(bot.model ?? bot.appliedModel) ? { ownTools: true } : {}),
         ...(tail ? { lastAt: tail.lastAt, preview: tail.preview } : {}),
       }
     }),
@@ -232,7 +238,8 @@ export function install(rt) {
     connectorRequests: state.connectorRequests ?? {},
     mailRequests: state.mailRequests ?? {},
     colors: [...COLORS, ...EXTRA_COLORS],
-    models: rt.cachedCatalog(),
+    // `ownTools`: the model runs its own tools whatever the Bot's Denied tools say (#2026).
+    models: rt.cachedCatalog().map(entry => ownTools(entry.ref) ? { ...entry, ownTools: true } : entry),
     defaultModel: rt.cachedDefault() ?? null,
     backgroundModel: rt.cachedBackground?.() ?? null,
     permissions: rt.permissionCatalog?.() ?? null,

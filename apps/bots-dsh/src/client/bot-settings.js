@@ -18,6 +18,7 @@ import { SPRING_SHAPE, SPRING_TAP, Segmented, spring } from './motion.js'
 import { hostText, t } from './i18n.js'
 import { useVoices } from './voice-settings.js'
 import { cliProviderOf } from './cli-login-model.js'
+import { OWN_TOOLS_DENY_TEXT, addsAcpToolDeny } from '../shared/own-tools.js'
 import { CliAccounts } from './cli-accounts.js'
 import { AdvancedSettings, ADVANCED_SETTINGS_CSS } from './advanced-settings.js'
 import {
@@ -419,7 +420,12 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
         placeholder: 'bash, write',
         onSave: (text) => {
           const names = parseDenyTools(text)
-          save({ denyTools: names.length ? names : null })
+          // acp_tool is not added while the Bot runs on a model that runs its own tools
+          // (#2026); the host refuses it too. Keeping or removing it saves.
+          if (bot.ownTools === true && addsAcpToolDeny(bot.denyTools, names)) {
+            return run(Promise.reject(new Error(t(OWN_TOOLS_DENY_TEXT))))
+          }
+          return save({ denyTools: names.length ? names : null })
         },
       }))),
     ...extraCards.map(entry => h(entry.Component, { key: entry.id, bot, roster, actions, run, Card, Row, SwitchRow })),
