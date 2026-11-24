@@ -187,6 +187,7 @@ export function reviewGuardView(bot, roster, level) {
     const time = new Date(bot.reviewGuardWaitingSince).toLocaleTimeString(dateLocale(), { hour: 'numeric', minute: '2-digit' })
     lines.push(t(REVIEW_GUARD_COPY.waiting, { reviewer: reviewer.name, time }))
   }
+  lines.push(t(REVIEW_GUARD_COPY.scope))
   return { on, disabled: readOnly, lines }
 }
 

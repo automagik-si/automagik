@@ -1170,7 +1170,7 @@ test('concurrent readers share the first health check for the same install recor
   assert.equal(reads, 1)
 })
 
-const BUNDLED_DIGEST = '86f8735cd32f7121cf2cf549daff949d3c5a9e54c223f35ba84b79564abec1cb'
+const BUNDLED_DIGEST = 'aea7ee75576c29d86ce0503ccea2e4d005fddd2f38efb8888f152fac2321838d'
 const BUNDLE_NAMES = ['prompt.md', 'role.json', 'role.mjs']
 const bundleSource = new URL('../roles/solver/', import.meta.url)
 const installedSolverDir = (f, version = PLUGIN_VERSION) => join(f.rolesDir, 'solver', version)
@@ -1594,18 +1594,22 @@ test('D2 B12 deletion, roles off, lock loss, and disposal each release the timer
 test('D2 B13 waiting copies regenerate queued reviews and refuse edited text with roles off', async t => {
   const instructions = solverInstructions({ reviewer: BOT.name, dedicated: true })
   const waiting = fixtureSolver('waiting-solver', { instructions, waitingRole: waitFor(instructions), reviewerId: BOT.id, reviewerMade: true })
+  const { dedicated: d1 } = JSON.parse(await fs.readFile(new URL('./fixtures/solver-method-d1.json', import.meta.url), 'utf8'))
+  const d1Waiting = fixtureSolver('d1-waiting-solver', { instructions: d1, waitingRole: waitFor(d1), reviewerId: BOT.id, reviewerMade: true })
   const edited = fixtureSolver('edited-solver', { instructions: 'Person changed these instructions.' })
   const f = await fixture(t, {
-    roleDeps: {}, extra: { prefs: { roles: false }, bots: { [BOT.id]: BOT, [waiting.id]: waiting, [edited.id]: edited } },
+    roleDeps: {}, extra: { prefs: { roles: false }, bots: { [BOT.id]: BOT, [waiting.id]: waiting, [d1Waiting.id]: d1Waiting, [edited.id]: edited } },
   })
-  const copy = await f.call('duplicate-bot', { id: waiting.id })
-  assert.equal(copy.ok, true, JSON.stringify(copy))
-  const stored = (await f.disk()).bots[copy.value.id]
-  assert.equal(Object.hasOwn(copy.value, 'waitingRole'), false)
-  assert.equal(Object.hasOwn(stored, 'reviewerMade'), false)
-  assert.equal(stored.reviewerId, BOT.id)
-  assert.equal(stored.instructions, solverInstructions({ reviewer: BOT.name, dedicated: false }))
-  assert.deepEqual(stored.waitingRole, waitFor(stored.instructions))
+  for (const source of [waiting, d1Waiting]) {
+    const copy = await f.call('duplicate-bot', { id: source.id })
+    assert.equal(copy.ok, true, JSON.stringify(copy))
+    const stored = (await f.disk()).bots[copy.value.id]
+    assert.equal(Object.hasOwn(copy.value, 'waitingRole'), false)
+    assert.equal(Object.hasOwn(stored, 'reviewerMade'), false)
+    assert.equal(stored.reviewerId, BOT.id)
+    assert.equal(stored.instructions, solverInstructions({ reviewer: BOT.name, dedicated: false }))
+    assert.deepEqual(stored.waitingRole, waitFor(stored.instructions))
+  }
 
   const before = await fs.readFile(f.statePath, 'utf8')
   refused(await f.call('duplicate-bot', { id: edited.id }), /Roles are turned off/)

@@ -199,14 +199,14 @@ test('zh-TW shows every character label in Traditional Chinese', () => {
   assert.deepEqual(labels.map(label => toTraditional(DICTIONARY.zh[label])), ['絨球', '嫩芽', '蘑菇', '鈴鐺', '雲朵', '刺球', '垂耳', '天線', '仙人掌', '燈泡', '小雞', '青蛙'])
 })
 
-// #2056 D1.5: every person-facing line of the review guard (K1-K14) in Chinese and Brazilian
+// #2056 D1.5: every person-facing line of the review guard (K1-K14 and scope) in Chinese and Brazilian
 // Portuguese, each with the English text's placeholders.
 test('the review guard lines have Chinese and Brazilian Portuguese texts with the same placeholders', async () => {
   const { REVIEW_GUARD_COPY } = await import('../src/shared/review-guard.js')
   const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
   const holes = text => [...String(text).matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort().join(',')
   const keys = Object.values(REVIEW_GUARD_COPY)
-  assert.equal(keys.length, 14)
+  assert.equal(keys.length, 15)
   for (const key of keys) {
     assert.equal(typeof DICTIONARY.zh[key], 'string', key)
     assert.equal(typeof pt[key], 'string', key)

@@ -12362,6 +12362,7 @@ var ZH = {
   "Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.": "只拦住 Claude Code 会先询问的步骤。它自己的允许规则、钩子和已保存的批准可能让某个步骤在守卫看到之前就运行，而该步骤仍可能显示为已拒绝。",
   "Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.": "在此级别不拦截：没有任何步骤会先询问。只有交付标记会显示未审阅的工作。",
   "Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.": "在此代理上不拦截：它自己的工具无需询问即可运行。只有交付标记会显示未审阅的工作。",
+  "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation, its Omni automation runs that open their own conversation, and its group conversations are not held.": "仅在此 Bot 自己的聊天及其在其中启动的子代理中生效。它开启新对话的计划任务、开启独立对话的 Omni 自动化运行以及群组对话不受约束。",
   "Its reviewer is no longer on the team: work stays held until you turn this off.": "它的审阅者已不在团队中：在你关闭此项之前，工作会一直被拦住。",
   "Off: {name} has no reviewer Bot on the team, so there is no verdict to wait for.": "已关闭：{name} 在团队中没有审阅 Bot，因此没有可等待的结论。",
   "the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details": "审阅守卫正在等待审阅者对计划的结论；你可以在详情中关闭它",

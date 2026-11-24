@@ -242,12 +242,13 @@ test('how far the guard holds on each route (PLAN-D15 §5 and r1.9)', () => {
 test('the Review guard line in Details: per route, gone, no reviewer Bot, waiting since', () => {
   const roster = { byId: { r1: { id: 'r1', name: 'Ada reviewer' } } }
   const bot = extra => ({ id: 's1', name: 'Sol', role: 'Solver', reviewerId: 'r1', model: FLASH, ...extra })
-  assert.equal(reviewGuardText(bot({ reviewGuard: true }), roster, 'ask'),
-    "Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers.")
-  assert.equal(reviewGuardText(bot({ reviewGuard: true, model: CLAUDE, nativeTools: true, nativeToolsAgent: 'acp-claude' }), roster, 'ask'), REVIEW_GUARD_COPY.asks)
+  const hard = "Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers."
+  const scope = "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation, its Omni automation runs that open their own conversation, and its group conversations are not held."
+  assert.equal(reviewGuardText(bot({ reviewGuard: true }), roster, 'ask'), `${hard} ${scope}`)
+  assert.equal(reviewGuardText(bot({ reviewGuard: true, model: CLAUDE, nativeTools: true, nativeToolsAgent: 'acp-claude' }), roster, 'ask'), `${REVIEW_GUARD_COPY.asks} ${scope}`)
   assert.equal(REVIEW_GUARD_COPY.asks, 'Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.')
-  assert.equal(reviewGuardText(bot({ reviewGuard: true, model: CLAUDE, nativeTools: true, nativeToolsAgent: 'acp-claude' }), roster, 'full'), REVIEW_GUARD_COPY.level)
-  assert.equal(reviewGuardText(bot({ reviewGuard: true, model: CODEX, nativeTools: true, nativeToolsAgent: 'acp-codex' }), roster, 'ask'), REVIEW_GUARD_COPY.agent)
+  assert.equal(reviewGuardText(bot({ reviewGuard: true, model: CLAUDE, nativeTools: true, nativeToolsAgent: 'acp-claude' }), roster, 'full'), `${REVIEW_GUARD_COPY.level} ${scope}`)
+  assert.equal(reviewGuardText(bot({ reviewGuard: true, model: CODEX, nativeTools: true, nativeToolsAgent: 'acp-codex' }), roster, 'ask'), `${REVIEW_GUARD_COPY.agent} ${scope}`)
   const gone = reviewGuardView(bot({ reviewGuard: true }), { byId: {} }, 'ask')
   assert.deepEqual(gone, { on: true, disabled: false, lines: ['Its reviewer is no longer on the team: work stays held until you turn this off.'] })
   for (const solver of [bot({ reviewerId: undefined }), bot({ reviewerId: 'gone' })]) {
@@ -258,8 +259,10 @@ test('the Review guard line in Details: per route, gone, no reviewer Bot, waitin
   assert.equal(off.on, false)
   assert.equal(off.disabled, false)
   const waiting = reviewGuardView(bot({ reviewGuard: true, reviewGuardWaitingSince: Date.UTC(2026, 10, 24, 12, 5) }), roster, 'ask')
-  assert.equal(waiting.lines.length, 2)
+  assert.equal(waiting.lines.length, 3)
+  assert.equal(waiting.lines[0], hard)
   assert.match(waiting.lines[1], /^Waiting for Ada reviewer's verdict on the plan since .+\.$/)
+  assert.equal(waiting.lines[2], scope)
   assert.equal(reviewGuardView(bot({ reviewGuard: true }), { ...roster, readOnly: true }, 'ask').disabled, true)
 })
 
