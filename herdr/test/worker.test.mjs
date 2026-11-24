@@ -3002,6 +3002,18 @@ test("worker #2057: every agent's worker task carries the SAME tail", async (t) 
         writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { "my-hermes": { run: ["uvx", "hermes-agent"] } } }));
         return started(s, ["--branch", "r/1g", "--agent", "my-hermes"]);
       } },
+    { row: "1i plain, an alias of an overridden hermes program (agentKeyOfArgv)", hermes: true,
+      run: (s) => {
+        stub(s, "hermes-cli");
+        writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { hermes: { run: ["hermes-cli"] }, "my-h": { run: ["hermes-cli"] } } }));
+        return started(s, ["--branch", "r/1i", "--agent", "my-h"]);
+      } },
+    { row: "1j template form, hermes redirected in a shell (QS-2)", hermes: true, templateForm: true,
+      templates: [...TEMPLATES, { name: "herm-log", command: "bash -lc 'hermes>log'" }],
+      run: (s) => started(s, ["--branch", "r/1j", "--template", "herm-log"]) },
+    { row: "1k template form, hermes in a shell's backticks (QS-2)", hermes: true, templateForm: true,
+      templates: [...TEMPLATES, { name: "herm-tick", command: "bash -lc '`hermes`'" }],
+      run: (s) => started(s, ["--branch", "r/1k", "--template", "herm-tick"]) },
     { row: "2 plain antigravity", before: "-i", run: (s) => started(s, ["--branch", "r/2", "--agent", "antigravity"]) },
     { row: "3 plain dsh-tui", before: "--",
       run: (s) => { stub(s, "dsh-tui"); return started(s, ["--branch", "r/3", "--agent", "dsh-tui"]); } },
