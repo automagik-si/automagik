@@ -6,7 +6,7 @@ import { createPayload, freshBotName, setUp, startModel } from './bot-draft.js'
 import { isRefusal } from './api.js'
 import { t } from './i18n.js'
 import { markOf } from '../shared/permission-levels.js'
-import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, isSolverBot, solverInstructions } from '../shared/solver-method.js'
+import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, solverInstructions } from '../shared/solver-method.js'
 
 // The Solver's character slot: avatar objects as the host's cleanAvatar keeps them, `{ shape }`
 // of a CHARACTERS key or `{ pet: { source: 'builtin', id, version } }`. Empty until the Solver
@@ -139,12 +139,13 @@ export function solverPayload({ name, look, model, effort, workDir, brief, secti
 /**
  * The line Details shows for a Solver's last delivery, from the host's mark (review-mark.js):
  * which review the host saw, "plan unreviewed" or "result unreviewed" when a verdict was
- * missing. Null for a Bot that is not a Solver or has delivered nothing yet.
+ * missing. Null for a Bot the host has no mark for (it has delivered nothing as a Solver); a mark
+ * it has stays shown after a role change. With no reviewer Bot it claims no review.
  */
 export function reviewMarkText(bot, roster) {
   const mark = bot?.reviewMark
-  if (!isSolverBot(bot) || mark === null || typeof mark !== 'object') return null
-  if (mark.review === 'fresh') return t('Reviewed in a fresh session, which the app cannot check.')
+  if (mark === null || typeof mark !== 'object') return null
+  if (mark.review === 'fresh') return t('Review not checked: this Solver has no reviewer Bot, and the app cannot see a fresh-session review.')
   if (mark.review !== 'bot') return t('Unreviewed: its reviewer is no longer on the team.')
   const name = roster?.byId?.[bot.reviewerId]?.name ?? t('its reviewer')
   if (mark.plan === true && mark.result === true) return t('Plan and result reviewed by {name}.', { name })

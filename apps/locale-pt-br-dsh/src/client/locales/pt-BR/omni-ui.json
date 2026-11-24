@@ -3679,7 +3679,7 @@
   "{name} was created, but your request may not have been sent: {error}": "{name} foi criado, mas o seu pedido pode não ter sido enviado: {error}",
   "Last delivery": "Última entrega",
   "its reviewer": "o revisor",
-  "Reviewed in a fresh session, which the app cannot check.": "Revisão em uma sessão nova, que o app não consegue verificar.",
+  "Review not checked: this Solver has no reviewer Bot, and the app cannot see a fresh-session review.": "Revisão não verificada: este Solver não tem um Bot revisor, e o app não consegue ver uma revisão em sessão nova.",
   "Unreviewed: its reviewer is no longer on the team.": "Sem revisão: o revisor não está mais na equipe.",
   "Plan and result reviewed by {name}.": "Plano e resultado revisados por {name}.",
   "Plan unreviewed: {name} gave no verdict before the work started.": "Plano sem revisão: {name} não deu veredito antes de o trabalho começar.",

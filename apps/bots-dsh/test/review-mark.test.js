@@ -75,8 +75,12 @@ function bench(t) {
     if (reply) event(sessionId, 'assistant/message', { message: { content: text(reply) } })
     event(sessionId, 'turn/end', { turn: seq, reason })
   }
-  // The reviewer answering the Solver's request (the path every reply takes, turns.js).
-  const reply = (fromId, toId, value, extra = {}) => answerSender(rt, fromId, { exchangeId: `x${++seq}`, senderSessionId: toId, ...extra }, value)
+  // The reviewer answering the Solver's request (the path every reply takes, turns.js), on the work
+  // message_bot opened for it now (`opened: false`: a reply whose work is gone; `exchangeId`: a given one).
+  const reply = (fromId, toId, value, { opened = true, exchangeId = `x${++seq}`, ...extra } = {}) => {
+    if (opened && rt.state.works?.[exchangeId] === undefined) rt.openWork(exchangeId, { from: toId, to: fromId })
+    return answerSender(rt, fromId, { exchangeId, senderSessionId: toId, ...extra }, value)
+  }
   // A Solver as the dialog makes it, through the person's create-bot route.
   const solver = async ({ reviewerId, brief = '' } = {}) => {
     const answer = await call('create-bot', { name: `Solver ${++created}`, role: 'Solver', instructions: 'Method.', brief, ...(reviewerId ? { reviewerId } : {}) })
@@ -314,4 +318,123 @@ test('another Bot is never tracked or marked, and the guard runs its calls as be
     const view = (await call('state', {})).value.bots.find(entry => entry.id === bot.id)
     assert.equal(view.reviewMark, undefined, bot.name)
   }
+})
+
+// SR3-2: a verdict counts only for work the current request opened. Request 1's late SHIP, after
+// the wait for it was given up, never marks request 2's plan reviewed.
+test('a late verdict from an earlier request does not review the current one', async (t) => {
+  const { rt, guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  person(bot.id, 'Request 1.')
+  await step()
+  rt.openWork('w-r1', { from: bot.id, to: ada.id })
+  endTurn(bot.id, 'Sent my result for review.')
+  // The person stops waiting: the work is gone, and the Solver delivers.
+  rt.dropWork('w-r1')
+  endTurn(bot.id, 'Delivered without the verdict.')
+  assert.equal(bot.reviewTrack.delivered, true)
+  await step()
+  person(bot.id, 'Request 2.')
+  await step()
+  // Request 1's SHIP lands now, before request 2's first work call: no work record, no verdict.
+  reply(ada.id, bot.id, 'SHIP', { exchangeId: 'w-r1', opened: false })
+  assert.deepEqual(bot.reviewTrack.verdicts, [])
+  // A work record opened before this request opened is not this request's review either.
+  rt.openWork('w-old', { from: bot.id, to: ada.id })
+  rt.state.works['w-old'].at = bot.reviewTrack.requestAt - 1
+  reply(ada.id, bot.id, 'SHIP', { exchangeId: 'w-old' })
+  assert.deepEqual(bot.reviewTrack.verdicts, [])
+  await step()
+  await guard({ name: 'write', arguments: {}, agent: { id: bot.id } })
+  await step()
+  endTurn(bot.id, 'Request 2 done.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: false, result: false })
+  // Request 2's own review, on work it opened, still counts.
+  person(bot.id, 'Request 3.')
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  assert.equal(bot.reviewTrack.verdicts.length, 1)
+})
+
+// SR3-1: a copy of a Solver keeps its reviewer, so its mark reads that reviewer's verdicts.
+test('a copy of a Solver keeps its reviewer id, checked again', async (t) => {
+  const { rt, call, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  const copy = await call('duplicate-bot', { id: bot.id })
+  assert.equal(copy.ok, true, JSON.stringify(copy))
+  assert.equal(rt.botOf(copy.value.id).reviewerId, ada.id)
+  assert.equal(rt.botOf(copy.value.id).role, 'Solver')
+  // A reviewer gone since is not carried to the copy (buildBot keeps only a Bot on the team).
+  assert.equal((await call('delete-bot', { id: ada.id })).ok, true)
+  const orphan = await call('duplicate-bot', { id: bot.id })
+  assert.equal(orphan.ok, true, JSON.stringify(orphan))
+  assert.equal(rt.botOf(orphan.value.id).reviewerId, undefined)
+  // A copy of a Solver with no reviewer gets none.
+  const fresh = await solver()
+  const freshCopy = await call('duplicate-bot', { id: fresh.id })
+  assert.equal(rt.botOf(freshCopy.value.id).reviewerId, undefined)
+})
+
+// SR3-6: a corrupted stored track never throws on a reply, a tool call, a turn's end or the view.
+test('a corrupted stored review track is repaired, never thrown on', async (t) => {
+  const { call, guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  for (const bad of ['garbage', 7, [], null, { verdicts: 5, last: 'x', firstWorkAt: {} }, { requested: true, requestAt: 'now', verdicts: [null, 7, { verdict: 'SHIP' }], last: [1] }]) {
+    const label = JSON.stringify(bad)
+    bot.reviewTrack = bad
+    assert.doesNotThrow(() => reply(ada.id, bot.id, 'SHIP'), label)
+    bot.reviewTrack = bad
+    assert.equal(await guard({ name: 'write', arguments: {}, agent: { id: bot.id } }), 'ran', label)
+    bot.reviewTrack = bad
+    assert.doesNotThrow(() => endTurn(bot.id, 'Done.'), label)
+    bot.reviewTrack = bad
+    const view = await call('state', {})
+    assert.equal(view.ok, true, label)
+    assert.equal(view.value.bots.find(entry => entry.id === bot.id).reviewMark, undefined, label)
+    bot.reviewTrack = bad
+    assert.doesNotThrow(() => person(bot.id, 'Next.'), label)
+    assert.ok(Array.isArray(bot.reviewTrack.verdicts), label)
+  }
+  // The repaired track marks the next delivery as usual.
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  await step()
+  await guard({ name: 'write', arguments: {}, agent: { id: bot.id } })
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  endTurn(bot.id, 'Done.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+})
+
+// SR3-7: the lineage walk and the work date run only for a Solver's calls.
+test('only a Solver\'s tool calls reach the review mark', async (t) => {
+  const { rt, guard, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  const plain = await rt.createBot({ name: 'Plain', instructions: 'Free.', pickModel: true })
+  const seen = []
+  const real = rt.reviewWork
+  rt.reviewWork = (who, ...rest) => { seen.push(who.id); return real(who, ...rest) }
+  assert.equal(await guard({ name: 'write', arguments: {}, agent: { id: plain.id } }), 'ran')
+  assert.equal(await guard({ name: 'write', arguments: {}, agent: { id: bot.id } }), 'ran')
+  assert.deepEqual(seen, [bot.id])
+})
+
+// SR3-8: the last mark stays in the view after the Bot's description changes.
+test('the last mark stays shown after the Solver\'s description changes', async (t) => {
+  const { rt, call, person, endTurn, reply, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  person(bot.id, 'Do it.')
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  endTurn(bot.id, 'Done.')
+  assert.equal(bot.reviewTrack.last.review, 'bot')
+  assert.equal((await call('update-bot', { id: bot.id, role: 'Helper' })).ok, true)
+  assert.equal(rt.botOf(bot.id).role, 'Helper')
+  const view = (await call('state', {})).value.bots.find(entry => entry.id === bot.id)
+  assert.deepEqual({ ...view.reviewMark, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
 })

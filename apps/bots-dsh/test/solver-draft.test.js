@@ -170,11 +170,16 @@ test('the review mark line: plan missing, result missing, both present, both mis
   assert.equal(line({ review: 'bot', plan: true, result: false }), 'Result unreviewed: Ada reviewer gave no verdict on the finished work.')
   assert.equal(line({ review: 'bot', plan: true, result: true }), 'Plan and result reviewed by Ada reviewer.')
   assert.equal(line({ review: 'bot', plan: false, result: false }), 'Plan and result unreviewed: no verdict from Ada reviewer came in time.')
-  assert.equal(line({ review: 'fresh' }), 'Reviewed in a fresh session, which the app cannot check.')
+  // SR3-1: with no reviewer Bot the line claims no review: the host cannot see one.
+  assert.equal(line({ review: 'fresh' }), 'Review not checked: this Solver has no reviewer Bot, and the app cannot see a fresh-session review.')
+  assert.doesNotMatch(line({ review: 'fresh' }), /^Reviewed/)
   assert.equal(line({ review: 'none' }), 'Unreviewed: its reviewer is no longer on the team.')
   // A reviewer renamed or gone since is "its reviewer".
   assert.equal(reviewMarkText(solver({ review: 'bot', plan: true, result: true }), { byId: {} }), 'Plan and result reviewed by its reviewer.')
-  // Nothing before a first delivery, and nothing for a Bot that is not a Solver.
+  // Nothing before a first delivery, and nothing for a Bot the host has no mark for.
   assert.equal(line(undefined), null)
-  assert.equal(reviewMarkText({ role: 'Helper', reviewMark: { review: 'bot', plan: true, result: true } }, roster), null)
+  assert.equal(reviewMarkText({ role: 'Helper' }, roster), null)
+  // SR3-8: a mark stays shown after the Bot's description changes (update_bot { role }).
+  assert.equal(reviewMarkText({ role: 'Helper', reviewerId: 'r1', reviewMark: { review: 'bot', plan: false, result: true } }, roster),
+    'Plan unreviewed: Ada reviewer gave no verdict before the work started.')
 })

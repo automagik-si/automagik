@@ -3328,7 +3328,7 @@ const ZH = {
   // The Solver's review mark (#2056).
   'Last delivery': '上次交付',
   'its reviewer': '它的审阅者',
-  'Reviewed in a fresh session, which the app cannot check.': '已在全新会话中审阅，应用无法核实。',
+  'Review not checked: this Solver has no reviewer Bot, and the app cannot see a fresh-session review.': '审阅未核实：此 Solver 没有审阅 Bot，应用无法看到全新会话中的审阅。',
   'Unreviewed: its reviewer is no longer on the team.': '未审阅：它的审阅者已不在团队中。',
   'Plan and result reviewed by {name}.': '计划和结果已由 {name} 审阅。',
   'Plan unreviewed: {name} gave no verdict before the work started.': '计划未审阅：{name} 在工作开始前没有给出结论。',

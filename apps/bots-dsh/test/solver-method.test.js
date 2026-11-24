@@ -89,14 +89,15 @@ test('a named reviewer is asked first for the plan and the result; a fresh sessi
 })
 
 // #2056 SN-1: message_bot's reply only ever arrives later, as a new message, so the Solver ends its
-// turn to wait for the verdict instead of delivering BLOCKED-review in the same turn.
+// turn to wait for the verdict instead of delivering in the same turn. SR3-3 (the lead's option (b)):
+// a person who asks for the delivery first gets the fresh-session review, not a BLOCKED-review delivery.
 test('a named reviewer\'s verdict comes later as a new message, and the turn ends to wait for it', () => {
   for (const [name, dedicated] of [['Ada reviewer', true], ['Ben', false], [QUOTES, false]]) {
     const text = solverInstructions({ reviewer: name, dedicated })
     const wait = 'Its verdict comes later as a new message: end your turn to wait for it.'
-    const early = 'If the person asks for the delivery first, deliver marked BLOCKED-review.'
+    const early = 'If the person asks for the delivery first, your reviewer has not answered: run the fresh-session review, quote that no verdict came, then deliver.'
     assert.ok(text.includes(`and the delivery quotes that failure. ${wait} ${early} Fresh-session review:`), name)
-    assert.doesNotMatch(text, /has not answered|after your other work is done/, name)
+    assert.doesNotMatch(text, /after your other work is done|deliver marked BLOCKED-review\./, name)
   }
 })
 
@@ -113,10 +114,10 @@ test('a failed or hung reviewer falls back to a fresh unbiased session, never th
     assert.ok(text.includes('never replace it with a subagent or your own review.'), name)
     assert.ok(text.includes("Fresh-session review: Run each review in a fresh session that shares nothing with you: a subagent (Agent, Task or another subagent tool) given only the person's request word for word and the plan or deliverable, never your notes, reasoning or earlier reviews."), name)
     assert.ok(text.includes('With no subagent tool, never review your own work and call it independent: deliver with the missing review named as the blocker.'), name)
-    // Every SN rule stays: named reviewer first, the verdict as a new message, the turn ends to wait,
-    // BLOCKED-review when the person asks first.
+    // Every SN rule stays: named reviewer first, the verdict as a new message, the turn ends to wait;
+    // when the person asks first, the fresh-session review runs and quotes that no verdict came (SR3-3).
     assert.ok(text.includes(`Message ${JSON.stringify(name)} with message_bot FIRST for every review`), name)
-    assert.ok(text.includes('Its verdict comes later as a new message: end your turn to wait for it. If the person asks for the delivery first, deliver marked BLOCKED-review.'), name)
+    assert.ok(text.includes('Its verdict comes later as a new message: end your turn to wait for it. If the person asks for the delivery first, your reviewer has not answered: run the fresh-session review, quote that no verdict came, then deliver.'), name)
     assert.ok(text.includes(mark), name)
     // The mark is part of step 10, the delivery.
     assert.ok(text.split('\n').find(line => line.startsWith('10. Deliver:')).endsWith(mark), name)
@@ -142,7 +143,8 @@ test('with no reviewer Bot every review runs in a fresh session, and the deliver
 })
 
 test('the instructions stay under the instructions limit with the longest reviewer name', () => {
-  for (const reviewer of [LONG, QUOTES]) {
+  // SR3-3: the longer "asks for the delivery first" sentence still fits with 40 quotes or backslashes.
+  for (const reviewer of [LONG, QUOTES, '\\'.repeat(40)]) {
     for (const dedicated of [true, false]) {
       const text = solverInstructions({ reviewer, dedicated })
       assert.ok(text.length <= MAX_INSTRUCTIONS, `${reviewer[0]} ${dedicated} ${text.length}`)

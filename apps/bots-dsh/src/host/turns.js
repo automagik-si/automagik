@@ -92,9 +92,12 @@ export const failureLine = failure => `${failure.code}${failure.status ? ` ${fai
 export function answerSender(rt, id, source, text, long, shouldSend) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
+  // When the work this answers was opened, read before closeWork deletes it: a Solver's review
+  // mark counts a verdict only for work its current request opened (review-mark.js).
+  const workAt = rt.state?.works?.[source.exchangeId]?.at
   const work = rt.closeWork?.(source.exchangeId, name, text)
   // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
-  rt.reviewVerdict?.(rt.selfOf(id), source.senderSessionId, source.senderRoomId, text)
+  rt.reviewVerdict?.(rt.selfOf(id), source.senderSessionId, source.senderRoomId, text, workAt)
   // A reply that arrives after the user gave up the wait is a late answer: it closes
   // nothing, opens nothing, and says on it that the wait was already over.
   const late = work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined

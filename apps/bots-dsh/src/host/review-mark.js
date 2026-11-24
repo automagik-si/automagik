@@ -39,6 +39,30 @@ export function isWorkCall(name, args, definition) {
   return reachesShell(name, definition)
 }
 
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const isTime = value => typeof value === 'number' && Number.isFinite(value)
+
+/**
+ * A stored review track, kept as the host writes it, or undefined when it is not one. Fields of
+ * the wrong type are dropped, and only well-formed verdicts and the last mark kept.
+ * @param {unknown} track - `bot.reviewTrack` as loaded.
+ */
+export function cleanTrack(track) {
+  if (!isRecord(track)) return undefined
+  const verdicts = Array.isArray(track.verdicts)
+    ? track.verdicts.filter(entry => isRecord(entry) && typeof entry.verdict === 'string' && isTime(entry.at)).slice(-VERDICTS_KEPT)
+    : []
+  return {
+    requested: track.requested === true,
+    requestAt: isTime(track.requestAt) ? track.requestAt : 0,
+    ...(isTime(track.firstWorkAt) ? { firstWorkAt: track.firstWorkAt } : {}),
+    ...(isTime(track.lastWorkAt) ? { lastWorkAt: track.lastWorkAt } : {}),
+    verdicts,
+    ...(track.delivered === true ? { delivered: true } : {}),
+    ...(isRecord(track.last) && typeof track.last.review === 'string' ? { last: track.last } : {}),
+  }
+}
+
 export function install(rt) {
   const save = () => void rt.save?.().catch?.(() => {})
   const tracked = bot => bot !== undefined && isSolverBot(bot)
@@ -46,9 +70,15 @@ export function install(rt) {
   // verdicts, delivered, last }. `requested`: a person asked for something (a message in its
   // own chat, or the brief it was made with), so the next delivery answers it; a greeting does
   // not. `last` is the last delivery's mark, which the view shows.
-  const trackOf = bot => (bot.reviewTrack ??= { requested: false, requestAt: bot.createdAt ?? 0, verdicts: [] })
+  // A stored track is read as the host wrote it, or repaired: a corrupted state.json must not
+  // throw on a reply, a tool call or a turn's end (SR3-6).
+  const trackOf = (bot) => {
+    const track = cleanTrack(bot.reviewTrack)
+    bot.reviewTrack = track ?? { requested: false, requestAt: bot.createdAt ?? 0, verdicts: [] }
+    return bot.reviewTrack
+  }
   const open = (bot, at) => {
-    const last = bot.reviewTrack?.last
+    const last = cleanTrack(bot.reviewTrack)?.last
     bot.reviewTrack = { requested: true, requestAt: at, verdicts: [], ...(last ? { last } : {}) }
   }
   const reviewOf = (bot) => {
@@ -68,7 +98,7 @@ export function install(rt) {
   function reviewRequest(botId) {
     const bot = rt.botOf(botId)
     if (!tracked(bot)) return
-    const track = bot.reviewTrack
+    const track = cleanTrack(bot.reviewTrack)
     if (track?.requested === true && track.delivered !== true) return
     open(bot, Date.now())
     save()
@@ -88,14 +118,16 @@ export function install(rt) {
 
   // A reply going from `fromId` to the Bot `toId` that asked it. It counts only when it is the
   // Solver's own reviewer answering a request from the Solver's own chat, and opens with a verdict.
-  function reviewVerdict(fromId, toId, roomId, text) {
+  // `workAt`: when the work it answers was opened. A reply to work opened before this request (a
+  // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
+  function reviewVerdict(fromId, toId, roomId, text, workAt) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     const verdict = verdictOf(text)
-    if (verdict === undefined) return
+    if (verdict === undefined || typeof workAt !== 'number') return
     const track = trackOf(bot)
-    if (track.delivered === true) return
-    track.verdicts = [...(track.verdicts ?? []), { verdict, at: Date.now() }].slice(-VERDICTS_KEPT)
+    if (track.delivered === true || workAt < track.requestAt) return
+    track.verdicts = [...track.verdicts, { verdict, at: Date.now() }].slice(-VERDICTS_KEPT)
     save()
   }
 
@@ -104,8 +136,9 @@ export function install(rt) {
   function reviewTurnEnd(botId, { completed, wroteText }) {
     const bot = rt.botOf(botId)
     if (!tracked(bot) || !completed || !wroteText) return
-    const track = bot.reviewTrack
+    const track = cleanTrack(bot.reviewTrack)
     if (track?.requested !== true || track.delivered === true) return
+    bot.reviewTrack = track
     const review = reviewOf(bot)
     if (review === 'bot' && Object.values(rt.state?.works ?? {}).some(work => work?.from === bot.id && work?.to === bot.reviewerId)) return
     track.last = deliveryMark(track, review, Date.now())
@@ -114,7 +147,12 @@ export function install(rt) {
   }
 
   // What the view shows of it: the last delivery's mark only, never the timestamps it came from.
-  const reviewMarkOf = (bot, track = bot?.reviewTrack) => (tracked(bot) && track?.last ? { reviewMark: { ...track.last } } : {})
+  // It stays once there is one, even when the Bot is no longer a Solver (SR3-8): a role change
+  // must not hide the mark of the work it delivered.
+  const reviewMarkOf = (bot, track = bot?.reviewTrack) => {
+    const last = cleanTrack(track)?.last
+    return last ? { reviewMark: { ...last } } : {}
+  }
 
   Object.assign(rt, { reviewCreated, reviewRequest, reviewWork, reviewVerdict, reviewTurnEnd, reviewMarkOf })
 }

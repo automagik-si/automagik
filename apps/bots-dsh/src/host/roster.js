@@ -593,6 +593,9 @@ export function install(rt) {
       workDir,
       sectionId: bot.sectionId,
       copyOf: bot.id,
+      // A copy of a Solver keeps its reviewer (buildBot checks it again), so its review mark
+      // reads that reviewer's verdicts, not a fresh-session review it cannot see (#2056).
+      ...(typeof bot.reviewerId === 'string' ? { reviewerId: bot.reviewerId } : {}),
       // A copy keeps a shell the original was denied: the copy is new, but taking a
       // capability away here would not be the user's choice either.
       ...(bot.shell === false ? { shell: false } : {}),

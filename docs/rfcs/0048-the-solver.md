@@ -107,12 +107,16 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   characters are offered), so a person who renames a description to `Solver` gains nothing.
   Delivery 2's official `solver` role replaces it, and `isSolverBot` then reads both (the role tag
   or the description), so a delivery 1 Solver keeps its characters. The marker adds no stored field.
-- **Solver review mark** (delivery 1): a Solver Bot may store `reviewerId`, the id of its reviewer
-  Bot, which the New Solver dialog sends once with the person's `create-bot`. The host marks each
-  delivery of the Solver's own chat from the work calls and the reviewer verdicts it saw
-  (`reviewMark` in the owner's view: plan and result reviewed, plan unreviewed, result unreviewed,
-  fresh session, or no reviewer). Like the Solver marker it is cosmetic: it grants and refuses
-  nothing and is never a caller-view field; delivery 1.5's hard guard keys on its own user-only
+- **Solver review mark** (delivery 1): two cosmetic stored fields. `reviewerId` is the id of the
+  Solver's reviewer Bot: the New Solver dialog sends it once with the person's `create-bot`, the
+  host keeps it only when it names another Bot on the team, a copy of the Solver keeps it, and no
+  endpoint or Bot tool changes it later. `reviewTrack` is written only by the host, per request in
+  the Solver's own chat (and the subagents under it): when the request opened, its first and last
+  work calls, at most 4 verdicts (SHIP, FIX-FIRST or BLOCKED opening a reply from `reviewerId`) and
+  the last delivery's mark. No view carries `reviewTrack`: the owner's view shows only
+  `reviewMark`, the last mark (plan and result reviewed, plan unreviewed, result unreviewed, fresh
+  session not checked, or no reviewer), and neither field is ever a caller-view field. Like the
+  Solver marker it grants and refuses nothing; delivery 1.5's hard guard keys on its own user-only
   field.
 - Delivery 2 adds the official role id `solver`.
 
