@@ -10,6 +10,8 @@ import { guardGroupRefusal, refusal } from './refusal.js'
 import { guardGroupText } from '../shared/guard-groups.js'
 import { teamToolOf } from './approvals.js'
 import { cleanTrack, isNotesWrite } from './review-mark.js'
+import { activeSolverLimit, limitWhat, solverTracked } from './solver-progress.js'
+import { reachesShell } from './tool-deny.js'
 
 // The team tools (constants.js TEAM_TOOLS, each on exactly one list) open while the plan waits for
 // its verdict: they read the team, a chat or a memory, or ask the person. `update_bot` and
@@ -18,7 +20,7 @@ export const OPEN_TEAM_TOOLS = Object.freeze([
   'list_bots', 'list_bot_models', 'list_capabilities', 'list_connectors', 'list_secrets', 'read_own_chat',
   'read_group_chat', 'read_browser', 'recall', 'remember', 'forget',
   'ask_user', 'request_secret', 'request_connector', 'show_view', 'show_settings', 'propose_bot_change',
-  'update_bot', 'message_bot',
+  'update_bot', 'message_bot', 'solver_progress',
 ])
 // The team tools held while the plan waits: they change the team, act outside it or start work.
 // The tools other plugins define (`find_chats`, the automations, Omni's) are not proven read-only
@@ -40,6 +42,14 @@ const OPEN = new Set([...OPEN_TEAM_TOOLS, ...OPEN_HOST_TOOLS, ...OPEN_DSH_TOOLS]
 // An ACP agent's own call (`acp_tool`) that only reads, searches, fetches or thinks (Claude Code's
 // Agent/Task spawn arrives as `think`).
 const ACP_OPEN_KINDS = new Set(['read', 'search', 'fetch', 'think'])
+// Attempt holds permit only reads, the question, notes and the designated
+// reviewer. In particular, the plan guard allows several writes and launches.
+const ATTEMPT_READS = new Set([
+  'list_bots', 'list_bot_models', 'list_capabilities', 'list_connectors', 'list_secrets',
+  'read_own_chat', 'read_group_chat', 'read_browser', 'recall', 'ask_user', 'solver_progress',
+  'mail_read', 'mail_search', 'browser_snapshot', 'browser_screenshot', 'browser_tabs',
+  'read', 'read_image', 'grep', 'glob', 'web_search', 'web_fetch', 'list_subagent_models', 'get_goal',
+])
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const quoted = name => JSON.stringify(String(name ?? ''))
@@ -102,18 +112,42 @@ export function install(rt) {
     }
   }
 
+  function solverCall(bot, name, args, definition, base) {
+    const folder = bot.workDir ?? rt.teamFolder?.()
+    const team = teamToolOf(name)
+    const checkCommand = name === 'acp_tool' ? args?.kind === 'execute' : reachesShell(name, definition)
+    const notes = isNotesWrite(name, args, folder, base ?? folder)
+    const review = team === 'message_bot' && typeof args?.to === 'string' && !!reviewerOf(bot)
+      && (args.to === bot.reviewerId || rt.findBot?.(args.to)?.id === bot.reviewerId)
+    const acpRead = name === 'acp_tool' && args?.kind !== 'think'
+      && ACP_OPEN_KINDS.has(args?.kind) && args?.input?.command === undefined && args?.input?.cmd === undefined
+    return { relevant: !notes && (checkCommand || (!review && !acpRead && !ATTEMPT_READS.has(team))), checkCommand }
+  }
+
   /**
    * Whether the guard refuses one call: { text, why } (the refusal, and the stop's reason), or
    * undefined. `own`: the Session is the Bot's own chat or a subagent under it.
    */
-  function reviewGuardHolds(bot, own, name, args, definition, base) {
-    if (bot?.reviewGuard !== true || !own) return undefined
+  function reviewGuardHolds(bot, own, name, args, definition, base, call) {
+    if (!own || !solverTracked(bot)) return undefined
     const track = cleanTrack(bot.reviewTrack)
+    const tool = name === 'acp_tool' && typeof args?.title === 'string' && args.title !== '' ? args.title : teamToolOf(name) || 'this tool'
+    const { relevant, checkCommand } = solverCall(bot, name, args, definition, base)
+    const limit = activeSolverLimit(bot, track)
+    if (limit && relevant) {
+      return { why: 'limit', text: `${bot.name} cannot use ${tool}: it reached its attempt limit (${limitWhat(limit)}). Ask the person how to proceed: say what you did, what still fails, the likely cause and the exact decision you need. Work resumes when the person answers, or when the person turns Auto on.` }
+    }
+    const pending = track?.solver?.pending
+    // A native ACP mirror and its later approval can describe the same action.
+    const sameNativeCall = name === 'acp_tool' && !!call && pending?.call === call
+    if (relevant && (rt.solverProgressBusy?.(bot) || (pending && (!checkCommand || !call || pending.call) && !sameNativeCall))) {
+      return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Finish recording the current Solver progress before doing more work.` }
+    }
+    if (bot.reviewGuard !== true) return undefined
     if (typeof track?.planVerdictAt === 'number') return undefined
     const held = heldCall(rt, bot, name, args, definition, base)
     if (held === undefined) return undefined
     const why = track?.openedBy === 'bot' ? 'guard-request' : 'guard'
-    const tool = name === 'acp_tool' && typeof args?.title === 'string' && args.title !== '' ? args.title : teamToolOf(name) || 'this tool'
     const reviewer = reviewerOf(bot)
     if (reviewer === undefined) {
       return { why, text: waiting(`${bot.name} cannot use ${tool}: its review guard is on and its reviewer is no longer on the team. Deliver what you have with this blocker named; only the person can turn the guard off in ${bot.name}'s Details.`) }
@@ -134,7 +168,7 @@ export function install(rt) {
   // the record may be the other call's: a card or a false hold, never a release (the executor
   // re-checks the call's own arguments). A held bridge ask leaves the guard's text on
   // `bridgeCall.refused`, which acp-dsh hands the agent instead of "The person rejected".
-  function reviewGuardAsk(request) {
+  async function reviewGuardAsk(request) {
     const bridge = request?.toolName !== 'acp_tool' && isRecord(request?.bridgeCall)
       && typeof request.toolName === 'string' && request.toolName !== ''
     if (request?.toolName !== 'acp_tool' && !bridge) return undefined
@@ -142,13 +176,14 @@ export function install(rt) {
     const sessionId = agent?.id ?? agent?.session?.id
     if (typeof sessionId !== 'string') return undefined
     const bot = rt.botOfSession?.(sessionId, agent)
-    if (bot?.reviewGuard !== true) return undefined
-    if (bridge && teamToolOf(request.toolName) === 'start_task') {
+    if (!solverTracked(bot)) return undefined
+    if (bot.reviewGuard === true && bridge && teamToolOf(request.toolName) === 'start_task') {
       const held = taskLaunchHold(bot.id)
       rt.noteStop?.(sessionId, { why: held.why, tool: request.toolName, callId: request.callId, text: held.text }, agent)
       request.bridgeCall.refused = { reason: held.text }
       return held
     }
+    if (bot.reviewGuard !== true && !activeSolverLimit(bot) && !bot.reviewTrack?.solver?.plan && !rt.solverProgressBusy?.(bot)) return undefined
     if (rt.ownChatLineage?.(sessionId, agent, bot) !== true) return undefined
     // From here the question is the guarded Bot's own: an error holds it (fails closed, as the
     // executor's path does), and only this Bot's question is refused (DG-3).
@@ -157,8 +192,16 @@ export function install(rt) {
       try { base = agent?.session === undefined ? undefined : rt.sessionFolder?.(agent.session) } catch {}
       if (bridge) return bridgeHeld(request, bot, sessionId, base)
       const mirror = request.mirrorCall
-      const held = reviewGuardHolds(bot, true, 'acp_tool', isRecord(mirror) ? mirror : undefined, undefined, base)
-      if (held === undefined) return undefined
+      const args = isRecord(mirror) ? mirror : undefined
+      const call = typeof request.callId === 'string' ? `${sessionId}:${request.callId}` : undefined
+      const held = reviewGuardHolds(bot, true, 'acp_tool', args, undefined, base, call)
+      if (held === undefined) {
+        if (bot.reviewTrack?.solver?.plan) {
+          const finish = await rt.solverBeforeWork?.(bot, { ...solverCall(bot, 'acp_tool', args, undefined, base), call })
+          finish?.()
+        }
+        return undefined
+      }
       rt.noteStop?.(sessionId, { why: held.why, ...(typeof mirror?.title === 'string' ? { tool: mirror.title } : {}), callId: request.callId, text: held.text, child: true }, agent)
       return held
     } catch {
@@ -175,10 +218,14 @@ export function install(rt) {
     const agent = request.agent
     const liveId = agent?.session?.id ?? sessionId
     const call = typeof request.callId === 'string' ? rt.live?.get(liveId)?.calls?.get(request.callId) : undefined
-    if (call?.name !== request.toolName || typeof call?.args !== 'string') return undefined
+    const known = call?.name === request.toolName && typeof call?.args === 'string'
+    if (!known && !activeSolverLimit(bot)) return undefined
     let args
-    try { args = JSON.parse(call.args) } catch {}
-    const held = reviewGuardHolds(bot, true, request.toolName, args, undefined, base)
+    if (known) {
+      try { args = JSON.parse(call.args) } catch {}
+    }
+    const held = reviewGuardHolds(bot, true, request.toolName, args, undefined, base,
+      typeof request.callId === 'string' ? `${sessionId}:${request.callId}` : undefined)
     if (held === undefined) return undefined
     rt.noteStop?.(sessionId, { why: held.why, tool: request.toolName, callId: request.callId, text: held.text }, agent)
     request.bridgeCall.refused = { reason: held.text }
@@ -251,6 +298,27 @@ export function install(rt) {
     return bot
   }
 
+  async function setSolverAuto(id, patch, actorId) {
+    const bot = rt.botOf(id)
+    if (actorId !== undefined) throw refusal(`Only the person can turn Auto on or off for ${bot?.name ?? 'this Bot'}.`)
+    if (Object.keys(patch).some(key => key !== 'id' && key !== 'solverAuto')) {
+      throw refusal('Change Auto on its own, without other settings.')
+    }
+    const on = patch.solverAuto
+    if (typeof on !== 'boolean') throw Object.assign(new Error('Auto is true or false.'), { code: 'bot/invalid' })
+    if (bot === undefined) throw refusal('Unknown Bot')
+    if (!solverTracked(bot)) throw refusal('Auto is a Solver setting.')
+    const set = target => {
+      if (on) target.solverAuto = true
+      else delete target.solverAuto
+    }
+    const assertCurrent = () => { if (rt.botOf(id) !== bot) throw refusal('The Bot team changed. Try again.') }
+    await rt.saveCopy(copy => set(copy.bots[id]), {
+      durable: true, beforeCommit: assertCurrent, afterWrite: () => set(bot),
+    })
+    return bot
+  }
+
   // What the owner's view shows while the guard holds: since when the plan waits for its verdict.
   const reviewGuardViewOf = (bot, track = bot?.reviewTrack) => {
     if (bot?.reviewGuard !== true) return {}
@@ -261,7 +329,7 @@ export function install(rt) {
 
   Object.assign(rt, {
     reviewGuardHolds, reviewGuardAsk, setReviewGuard, reviewGuardViewOf,
-    reviewGuardOn, groupsOf, checkGuardGroupJoin, taskLaunchHold,
+    reviewGuardOn, groupsOf, checkGuardGroupJoin, taskLaunchHold, setSolverAuto, solverCall,
   })
 }
 
@@ -271,9 +339,9 @@ export function install(rt) {
  * is refused before Auto, a person's grant, Pocket or the card can allow it (H6-1).
  */
 export function installAhead(rt) {
-  rt.ctx.on('approval/request', (request, next) => {
+  rt.ctx.on('approval/request', async (request, next) => {
     let held
-    try { held = rt.reviewGuardAsk?.(request) } catch {}
+    try { held = await rt.reviewGuardAsk?.(request) } catch {}
     return held === undefined ? next() : 'rejected'
   }, { prepend: true })
   installPreExecute(rt)
@@ -287,6 +355,7 @@ export function installAhead(rt) {
  */
 function installPreExecute(rt) {
   rt.ctx.on('tools/pre-execute', function reviewGuardGate(exec, next) {
+    // The native ACP approval is intercepted above. The mirror is a UI record.
     if (exec?.name === 'acp_tool') return next()
     let found
     try { found = rt.reviewGuardOfExec?.(exec) } catch { return next() }

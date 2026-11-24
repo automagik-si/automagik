@@ -10,6 +10,24 @@ export const SOLVER_METHOD_VERSION = 1
 // The Solver's notes file, one exact path in its folder (#2056 SR4-2). The review mark does not count a
 // write to exactly this file as work (review-mark.js), so notes never read as "plan unreviewed".
 export const SOLVER_NOTES = '.solver/notes.md'
+export const SOLVER_FIX_LIMIT = 3
+export const SOLVER_REPLAN_LIMIT = 2
+
+export const solverAutoOn = (bot, progress) => bot.solverAuto === true || progress?.auto === true
+
+export function solverLimitsPart(bot) {
+  const progress = bot.reviewTrack?.delivered === true ? undefined : bot.reviewTrack?.solver
+  const mode = solverAutoOn(bot, progress)
+    ? 'Auto is on: work alone until delivered, without stopping at attempt limits. Done still means every check from step 1 passes AND your reviewer approves the result (SHIP); never deliver broken work as done. Record every check run and every re-plan with solver_progress.'
+    : `Done means every check from step 1 passes AND your reviewer approves the result (SHIP); never call anything done otherwise. Record every check run and every re-plan with solver_progress. Limits: ${SOLVER_FIX_LIMIT} fix attempts per failing check, ${SOLVER_REPLAN_LIMIT} re-plans per request. At a limit, stop and ask the person: what you did, what still fails, the likely cause and the exact decision you need. Never deliver broken work as done and never loop. Turn Auto on only when the person's own message asks you to work alone until delivered: call solver_progress auto with their exact words.`
+  return [
+    mode,
+    'Use solver_progress status to get the active request ID. Pass it as request in every progress update. Register every agreed check with a stable ID using plan, then send that plan to your reviewer with message_bot (solver_review "plan", solver_request set to the request ID). Include the same check IDs and their meaning in the plan. Keep IDs for the same checks across re-plans even when their labels change.',
+    'Before each check run use start with a unique run ID and the check IDs it covers. Run the check, then record all its outcomes with checks and that run ID before attempting more work. Repeat the same ID only to retry a progress call. Record replan with its own unique run ID before replacing the plan. After a failing run or relevant work, verify all agreed checks again on the current result.',
+    'After every agreed check passes, use message_bot with solver_review "result" and solver_request for the result review. Wait for the designated reviewer to answer. Only its independent SHIP can certify Done. Ask for a decision at a limit even on a route whose native actions the host cannot intercept.',
+    'If this route does not offer the progress or review tool, keep your own check and attempt record and follow these limits. Explain the missing host evidence in your delivery and withhold Done.',
+  ].join('\n')
+}
 
 // The reviewer's rules. A reviewer the dialog makes keeps them as its instructions; an existing
 // Bot gets them at the start of every review message.

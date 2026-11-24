@@ -516,6 +516,16 @@ test('the Review guard tick stays on where the guard holds nothing, with the not
   assert.doesNotMatch(ui.text(), /Held only for the steps|Not held/)
 })
 
+test('the New Solver Auto switch defaults off and sends the setting with a fresh reviewer', async () => {
+  const ui = dialog()
+  const tick = () => all(ui.tree(), node => node.props?.['aria-label'] === 'Auto: work until delivered')[0]
+  ui.choose('fresh')
+  assert.equal(tick().props.checked, false)
+  tick().props.onChange({ target: { checked: true } })
+  await ui.create()
+  assert.equal(ui.actions.calls.find(([kind, payload]) => kind === 'createBot' && payload.role === 'Solver')[1].solverAuto, true)
+})
+
 const K1 = 'If the Solver role is not installed yet, Create installs it first.'
 const K4 = 'Roles are turned off for this team, so this Solver uses the written method.'
 

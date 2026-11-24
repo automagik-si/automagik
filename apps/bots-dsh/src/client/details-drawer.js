@@ -27,7 +27,7 @@ import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
 import { effectiveMarkOf } from '../shared/native-tools.js'
 import { OWN_TOOLS_NOTICE, ownToolsNotice } from '../shared/own-tools.js'
-import { guardLevelOf, reviewGuardView, reviewMarkText } from './solver-draft.js'
+import { guardLevelOf, reviewGuardView, reviewMarkText, solverAutoView } from './solver-draft.js'
 import { REVIEW_GUARD_COPY } from '../shared/review-guard.js'
 
 addStrings(nativeToolsZh)
@@ -53,6 +53,16 @@ export function ReviewGuardRow({ bot, roster, run, actions }) {
     details: true, label: t(REVIEW_GUARD_COPY.label), hint: view.lines.join(' '), on: view.on, disabled: view.disabled,
     onChange: value => void run(actions.updateBot(bot.id, { reviewGuard: value })),
   }))
+}
+
+export function SolverAutoRow({ bot, roster, run, actions }) {
+  const saved = savedLevelOf(bot, roster.permissions ?? {})
+  const view = solverAutoView(bot, roster, guardLevelOf(saved, presetDanger(saved)))
+  if (view === null) return null
+  return h(SwitchRow, {
+    details: true, label: t('Auto: work until delivered'), hint: view.lines.join(' '), on: view.on, disabled: view.disabled,
+    onChange: value => void run(actions.updateBot(bot.id, { solverAuto: value })),
+  })
 }
 
 function transcriptOf(list, id, name, hiddenTurns = []) {
@@ -403,10 +413,11 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
           h(FolderMenu, { value: bot.workDir, actions, run, wide: true, onPick: workDir => run(actions.updateBot(bot.id, { workDir })) })),
         h(NativeToolsRow, { key: 'native-tools', bot, roster, actions, run }),
         h(ReviewGuardRow, { key: 'review-guard', bot, roster, actions, run }),
+        h(SolverAutoRow, { key: 'solver-auto', bot, roster, actions, run }),
         // A Solver's last delivery: which review the host saw (#2056).
         reviewMarkText(bot, roster) ? h('div', { key: 'review-mark', className: 'bt-drawer-model', 'data-review-mark': bot.reviewMark.review },
           h('div', { className: 'bt-section-title' }, t('Last delivery')),
-          h('div', { className: 'bt-note' }, reviewMarkText(bot, roster))) : null,
+          reviewMarkText(bot, roster).split('\n').map(line => h('div', { key: line, className: 'bt-note' }, line))) : null,
         bot.instructions
           ? h(About, { key: 'about', text: bot.instructions })
           : h('button', { key: 'about', type: 'button', className: 'bt-more', onClick: () => setView('settings') }, t('Add instructions in Bot settings')),

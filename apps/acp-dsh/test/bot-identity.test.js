@@ -86,7 +86,7 @@ function host(t, {
     },
   }
   const adapter = new AcpAdapter(ctx, new Map([[provider, {
-    ...AGENTS[provider], spawn: async () => spawn(f.spec),
+    ...AGENTS[provider], spawn: provider === 'acp-omp' ? () => spawn(f.spec) : async () => spawn(f.spec),
   }]]), {
     dshTools, access, cancelWaitMs,
     botIdentity: id => { reads.push(id); return botIdentity ? botIdentity(id) : bots.get(id) },
@@ -216,6 +216,17 @@ test('running session keeps its identity and a fresh session reads edited text',
   assert.deepEqual(h.reads, ['ada', 'ada', 'ada'])
   const edited = text.replace('Check files.', 'Read the diff.')
   assert.deepEqual(h.rows('new')[1].systemPrompt, append(edited))
+})
+
+test('omp receives the Solver limits supplement once without the role snapshot', async t => {
+  const limits = partOf('SOLVER-LIMITS-SENTINEL', 'solver')
+  const h = host(t, { provider: 'acp-omp', profiles: new Map([
+    ['ada', { ...identity, rolePrompt: part, solverLimitsPrompt: limits }],
+  ]) })
+  await h.step('ada')
+  const [opened] = h.rows('new')
+  assert.deepEqual(opened.systemPrompt, append(limits))
+  assert.ok(!JSON.stringify(h.rows('prompt')).includes('SOLVER-LIMITS-SENTINEL'))
 })
 
 test("another Bot's identity and native tool policy never cross", async t => {

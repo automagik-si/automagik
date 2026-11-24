@@ -28,7 +28,7 @@ import { isComputerTool } from './computer/catalog.js'
 import { changesWorkingFolder } from './folders.js'
 import { refusal } from './refusal.js'
 import { teamToolOf } from './approvals.js'
-import { isSolverBot } from '../shared/solver-method.js'
+import { solverTracked } from './solver-progress.js'
 
 /** The most names one Bot may deny. */
 export const DENY_MAX = 64
@@ -540,13 +540,20 @@ export function install(rt) {
       // (review-guard.js). Only a Solver or a guarded Bot walks the lineage: every other Bot's call
       // skips it. The Session's folder is where a relative path lands (a write to the Solver's notes
       // file is not work).
-      if (isSolverBot(bot) || bot.reviewGuard === true) {
-        const { sessionId, base, own, definition, held } = reviewGuardOf(exec, bot, name)
+      if (solverTracked(bot)) {
+        const { sessionId, base, own, definition, held, call } = reviewGuardOf(exec, bot, name)
         if (held !== undefined) {
           rt.noteStop?.(sessionId, { why: held.why, tool: name, callId: exec.callId, text: held.text }, exec.agent)
           throw refusal(held.text)
         }
+        const observed = own ? rt.solverCall?.(bot, name, exec.arguments, definition, base) : undefined
+        const finish = observed?.relevant ? await rt.solverBeforeWork?.(bot, { ...observed, call }) : undefined
         rt.reviewWork?.(bot, own, name, exec.arguments, definition, base)
+        try {
+          return await (rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next))
+        } finally {
+          finish?.()
+        }
       }
       return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
     }
@@ -563,7 +570,8 @@ export function install(rt) {
     const base = exec.agent?.session === undefined ? undefined : rt.sessionFolder?.(exec.agent.session)
     const own = ownChatLineage(sessionId, exec.agent, bot)
     const definition = definitionOf(exec)
-    return { sessionId, base, own, definition, held: rt.reviewGuardHolds?.(bot, own, name, exec.arguments, definition, base) }
+    const call = typeof exec.callId === 'string' ? `${sessionId}:${exec.callId}` : undefined
+    return { sessionId, base, own, definition, call, held: rt.reviewGuardHolds?.(bot, own, name, exec.arguments, definition, base, call) }
   }
 
   // The same hold for `tools/pre-execute` (review-guard.js installAhead), with guardTool's own
@@ -573,7 +581,8 @@ export function install(rt) {
     const name = typeof exec?.name === 'string' ? exec.name : ''
     if (name === '' || exec?.agent === undefined) return undefined
     const bot = botOfSession(exec.agent?.id ?? exec.agent?.session?.id, exec.agent)
-    if (bot === undefined || (!isSolverBot(bot) && bot.reviewGuard !== true)) return undefined
+    if (!solverTracked(bot)) return undefined
+
     const launch = taskLaunchOf(exec, bot)
     if (launch !== undefined) return launch
     if (deniedNames(bot, exec.agent).includes(name)) return undefined

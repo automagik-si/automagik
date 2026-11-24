@@ -128,13 +128,14 @@ export function reviewerPayload({ name, look, model, workDir }) {
  * attempt and any native tools switch. `guard`: the Review guard tick, sent only with a
  * reviewer Bot (review-guard.js), in the Solver's own create, so it is never half made.
  */
-export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, guard = false }) {
+export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, guard = false, auto = false }) {
   const payload = createPayload({
     name, look, model, effort, sectionId, ownLook: true, avatar: avatarOfLook(look),
     role: SOLVER_DESCRIPTION, instructions: solverInstructions({ reviewer, dedicated }),
   })
   if (workDir) payload.workDir = workDir
   payload.waitingRole = SOLVER_ROLE_ID
+  if (auto === true) payload.solverAuto = true
   if (typeof reviewer === 'string' && reviewer !== '' && typeof reviewerId === 'string' && reviewerId !== '') {
     payload.reviewerId = reviewerId
     if (dedicated) payload.reviewerMade = true
@@ -152,14 +153,45 @@ export function solverPayload({ name, look, model, effort, workDir, brief, secti
 export function reviewMarkText(bot, roster) {
   const mark = bot?.reviewMark
   if (mark === null || typeof mark !== 'object') return null
+  const reviewed = reviewText(mark, bot, roster)
+  const outcome = bot.solverStatus?.outcome
+  const name = mark.reviewer?.name ?? roster?.byId?.[bot.reviewerId]?.name ?? t('its reviewer')
+  const completion = mark.done === true ? t('Done: every check passed and {name} approved.', { name })
+    : outcome?.reason === 'checks' ? t('Not marked done: current passing results are missing for agreed checks.')
+      : outcome?.reason === 'review' ? t('Not marked done: {name} has not approved the current result on a different model.', { name })
+        : null
+  return completion ? `${reviewed}\n${completion}` : reviewed
+}
+
+function reviewText(mark, bot, roster) {
   if (mark.review === 'fresh') return t('Review not checked: this Solver has no reviewer Bot, and the app cannot see a fresh-session review.')
   if (mark.review !== 'bot') return t('Unreviewed: its reviewer is no longer on the team.')
-  const name = roster?.byId?.[bot.reviewerId]?.name ?? t('its reviewer')
+  const name = mark.reviewer?.name ?? roster?.byId?.[bot.reviewerId]?.name ?? t('its reviewer')
   if (mark.pending === true) return t('{name} had not answered when this was delivered; the app cannot see a fresh-session review.', { name })
   if (mark.plan === true && mark.result === true) return t('Plan and result reviewed by {name}.', { name })
   if (mark.result === true) return t('Plan unreviewed: {name} gave no verdict before the work started.', { name })
   if (mark.plan === true) return t('Result unreviewed: {name} gave no verdict on the finished work.', { name })
   return t('Plan and result unreviewed: no verdict from {name} came in time.', { name })
+}
+
+export function solverAutoHint(bot, level) {
+  const reach = reviewGuardReach(bot, level)
+  return reach !== 'hard' || level !== 'ask'
+    ? t('Attempt limits are prompt-only for actions this route runs outside the host.')
+    : null
+}
+
+export function solverAutoView(bot, roster, level) {
+  if (!isSolverBot(bot) && bot?.reviewGuard !== true && bot?.solverAuto !== true && !bot?.solverStatus) return null
+  const limit = bot.solverStatus?.limit
+  const request = bot.solverStatus?.auto
+  const lines = [
+    ...(typeof request === 'boolean' ? [request ? t('Auto is on for this request.') : t('This request follows the saved Auto setting.')] : []),
+    ...(limit ? [limit.kind === 'fix' ? t('Waiting for your answer after the attempt limit for {check}.', { check: limit.check })
+      : t('Waiting for your answer after the re-plan limit.')] : []),
+    solverAutoHint(bot, level),
+  ].filter(Boolean)
+  return { on: bot.solverAuto === true, disabled: Boolean(roster?.readOnly), lines }
 }
 
 /**

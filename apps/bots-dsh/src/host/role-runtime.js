@@ -1,6 +1,7 @@
 import { defineTool, parameterSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools'
 import { packageAttachment, rolesOn, sameRolePin } from '../shared/roles.js'
-import { SOLVER_ROLE_ID, solverReviewPart } from '../shared/solver-method.js'
+import { SOLVER_ROLE_ID, solverLimitsPart, solverReviewPart } from '../shared/solver-method.js'
+import { solverTracked } from './solver-progress.js'
 import { routeOf } from '../shared/routes.js'
 import { createRoleSettings } from './role-settings.js'
 import { createRoleVoice } from './role-voice.js'
@@ -328,14 +329,17 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       if (warning) return warning
     }
   }
-  function partOf(sessionId, held) {
-    if (!held?.runtime.prompt?.trim() || (owner(sessionId) === undefined && !promptOnly(held.manifest))) return undefined
-    const tail = held.pin.id === SOLVER_ROLE_ID ? `\n${solverReviewPart(held.bot, ownBot)}` : ''
-    return `<role-prompt id="${held.pin.id}">\n${held.runtime.prompt.trimEnd()}${tail}\n</role-prompt>`
+  function partOf(sessionId, held, bot) {
+    const limits = solverTracked(bot) && rt.chatOwners?.get(sessionId) === bot.id ? solverLimitsPart(bot) : undefined
+    const role = held?.runtime.prompt?.trim() && (owner(sessionId) !== undefined || promptOnly(held.manifest))
+    if (!role) return limits ? `<role-prompt id="solver">\n${limits}\n</role-prompt>` : undefined
+    const solver = held.pin.id === SOLVER_ROLE_ID
+    const pieces = [held.runtime.prompt.trimEnd(), ...(solver ? [solverReviewPart(held.bot, ownBot)] : []), ...(limits ? [limits] : [])]
+    return `<role-prompt id="${held.pin.id}">\n${pieces.join('\n')}\n</role-prompt>`
   }
   function partFor(sessionId, id) {
     const turn = turnPrompts.get(sessionId)
-    return turn?.id === id ? turn.part : partOf(sessionId, active(id))
+    return turn?.id === id ? turn.part : partOf(sessionId, active(id), ownBot(id))
   }
   function prompt(sessionId, agent) {
     const id = promptOwner(sessionId)
@@ -367,13 +371,14 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       const id = promptOwner(sessionId)
       const bot = ownBot(id)
       if (!bot) return
-      const part = partOf(sessionId, active(id))
+      const held = active(id)
+      const part = partOf(sessionId, held, bot)
       // A greeting may begin before attachment. Keep its complete method if
       // writing the new pin later clears the instructions on the live Bot.
       let instructions
       if (bot.waitingRole?.id === SOLVER_ROLE_ID) {
         const provider = liveProvider(sessionId, session)
-        if (!part || (provider ? providerWarning(provider) : savedWarning(bot))) instructions = bot.instructions
+        if (!held?.runtime.prompt?.trim() || (provider ? providerWarning(provider) : savedWarning(bot))) instructions = bot.instructions
       }
       turnPrompts.set(sessionId, { id, bot, part, instructions })
     }

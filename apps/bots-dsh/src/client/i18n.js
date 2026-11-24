@@ -3393,6 +3393,16 @@ const ZH = {
   "The review guard is on: change the model in Settings, not here.": "审阅守卫已开启：请在设置中更改模型，不要在这里更改。",
   "Waiting for {reviewer}'s verdict on the plan since {time}.": "自 {time} 起等待 {reviewer} 对计划的结论。",
   "the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details": "审阅守卫正在等待审阅者对新计划的结论，因为另一个 Bot 发来了新请求；你可以在详情中关闭它",
+  "Auto: work until delivered": "自动模式：工作直至交付",
+  "Attempt limits are prompt-only for actions this route runs outside the host.": "此路径在宿主之外执行的操作仅通过提示词约束尝试次数。",
+  "Auto is on for this request.": "此请求已单独开启自动模式。",
+  "This request follows the saved Auto setting.": "此请求使用已保存的自动模式设置。",
+  "Waiting for your answer after the attempt limit for {check}.": "{check} 已达到尝试上限，正在等待你的答复。",
+  "Waiting for your answer after the re-plan limit.": "已达到重新规划上限，正在等待你的答复。",
+  "Done: every check passed and {name} approved.": "已完成：所有检查均已通过，且 {name} 已批准。",
+  "Not marked done: current passing results are missing for agreed checks.": "未标记为完成：仍有约定的检查缺少当前版本的通过结果。",
+  "Not marked done: {name} has not approved the current result on a different model.": "未标记为完成：{name} 尚未使用不同的模型批准当前结果。",
+  "the Solver reached an attempt limit and is waiting for your answer": "Solver 已达到尝试上限，正在等待你的答复",
 }
 
 // Host errors stay English, since Bots read them too; they are translated where the

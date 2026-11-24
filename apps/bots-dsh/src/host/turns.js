@@ -11,6 +11,7 @@ import { absoluteLinks } from './links.js'
 import { splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { reminderText } from './schedules.js'
+import { modelOf } from './solver-progress.js'
 
 // What a running tool call is about, for an approval card.
 export const detailOfArgs = raw => {
@@ -100,7 +101,7 @@ export const failureLine = failure => `${failure.code}${failure.status ? ` ${fai
 // The reply a sender waits for, sent the way a finished turn sends it: the work it was
 // for closes, and the answer goes up to the Bot that asked. `id` is the Session the
 // answer comes from; `source` is the trigger the turn answered.
-export function answerSender(rt, id, source, text, long, shouldSend) {
+export function answerSender(rt, id, source, text, long, shouldSend, model) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
   // When the work this answers was opened, read before closeWork deletes it: a Solver's review
@@ -113,7 +114,7 @@ export function answerSender(rt, id, source, text, long, shouldSend) {
     && answered.room === undefined && answered.fromRoom === undefined
     ? { exchangeId, replyTo: source.exchangeId } : undefined
   // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
-  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply)
+  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply, reply === undefined ? undefined : model)
   // A reply that arrives after the user gave up the wait is a late answer: it closes
   // nothing, opens nothing, and says on it that the wait was already over.
   const late = work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
@@ -553,7 +554,7 @@ export function install(rt) {
   // reply in its Session there while it is still a member. A sender that asked for it
   // while working on another Bot's request goes on with that work when it reads it.
   // `long`: the text as attachLong sends it, when it went as a file.
-  const tellSender = (id, source, text, long) => answerSender(rt, id, source, text, long)
+  const tellSender = (id, source, text, long, model) => answerSender(rt, id, source, text, long, undefined, model)
 
   // Runs before a deleted Bot leaves the team. Its Sessions stop with it, and the
   // turn/end that follows is no longer the team's, so their activity and turn records go
@@ -1101,11 +1102,23 @@ export function install(rt) {
           const own = rt.chatOwners.get(id)
           if (own !== undefined) rt.userWrote(own)
           // A person's request to a Solver opens the review its delivery is marked with (review-mark.js).
-          if (own !== undefined && source.kind === 'user' && source.handoff !== true) rt.reviewRequest?.(own)
-          // Any user message answers or supersedes the open question card and view card.
+          const human = source.kind === 'user'
+            && !source.handoff && !source.resumed && !source.resumedByUpdate && !source.forwarded && !source.generated
+          if (own !== undefined && human) {
+            const plain = event.data.content
+            rt.reviewRequest?.(own, { text: plain?.length === 1 && plain[0]?.type === 'text' ? plain[0].text : undefined })
+          } else if (own !== undefined && source.kind === REPLY_KIND && typeof source.callId === 'string' && source.outcome === 'answered') {
+            let card
+            try { card = JSON.parse(textOf(event.data.content)) } catch {}
+            if (card?.kind === 'answer_to_pending_question' && card.tool === 'ask_user' && card.callId === source.callId) {
+              rt.reviewRequest?.(own, { text: card.answers?.[0]?.custom, question: source.callId })
+            }
+          }
+          // Fresh messages supersede a card. A card reply answers its matching question.
           let dropped = false
-          if (state.questions[id] !== undefined) {
-            rt.closeCard(id, state.questions[id], 'replied')
+          const question = state.questions[id]
+          if (question !== undefined && (human || source.callId === (question.callId ?? question.id))) {
+            rt.closeCard(id, question, 'replied')
             delete state.questions[id]
             dropped = true
           }
@@ -1267,7 +1280,8 @@ export function install(rt) {
           && promisesWork(lastText) && !rt.callsRoomMember?.(id, info, lastText)
         const retry = (wroteCall || promisedOnly) && info?.retried !== true && !(info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))
         // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
-        if (owner !== undefined && !retry) rt.reviewTurnEnd?.(owner, { completed: failure === undefined && reason?.kind === 'completed', wroteText })
+        const model = reason?.kind === 'completed' ? modelOf(rt, undefined, session) : undefined
+        if (owner !== undefined && !retry) rt.reviewTurnEnd?.(owner, { completed: failure === undefined && reason?.kind === 'completed', wroteText, model })
         if (retry) {
           if (promisedOnly) {
             const opening = stripWrittenCalls(lastText ?? '')
@@ -1299,7 +1313,7 @@ export function install(rt) {
           } else if (reply !== '' || reason?.kind === 'aborted') {
             // A turn stopped before it could answer still owes the sender a line,
             // or it would wait forever for a reply that never comes.
-            tellSender(id, source, reply !== '' ? reply : `${name} was stopped before it could answer your message.`)
+            tellSender(id, source, reply !== '' ? reply : `${name} was stopped before it could answer your message.`, undefined, model)
           }
         }
         // Work a Bot asked for, also when what came back for it opens the turn: while
@@ -1313,9 +1327,9 @@ export function install(rt) {
           if (rt.waitsWork(work)) return rt.holdWork(work, reply)
           // With what came back, the answer may pass what one message carries.
           const text = rt.answerText(work, reply, name)
-          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text)
+          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text, undefined, model)
           void rt.attachLong(text, `Answer from ${name}.txt`)
-            .then(long => tellSender(id, asker, text, long))
+            .then(long => tellSender(id, asker, text, long, model))
             .catch(error => rt.warn('omni-ui: answer from %s not sent: %s', name, error))
         }
         // A retried turn answers the same waiter or sender, so this one passes nothing on.

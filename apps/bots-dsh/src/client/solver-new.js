@@ -18,7 +18,7 @@ import { nameProblem } from '../shared/mentions.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import {
   SOLVER_LOOKS, createSolver, guardLevelOf, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
-  reviewerPayload, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
+  reviewerPayload, solverAutoHint, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
 } from './solver-draft.js'
 import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 import { DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from './characters.js'
@@ -43,6 +43,7 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const [reviewerModel, setReviewerModel] = useState(null)
   const [ticked, setTicked] = useState(false)
   const [guarded, setGuarded] = useState(true)
+  const [auto, setAuto] = useState(false)
   const inFlight = useRef(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -91,7 +92,7 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
           name: reviewerName(roster, finalName), look: { shape: pick(DEFAULT_SHAPES), color: pick(DEFAULT_COLORS) }, model: newModel, workDir,
         }) : undefined,
         solverPayloadFor: ({ reviewer: reviewerBot, dedicated, reviewerId }) => solverPayload({
-          name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, guard,
+          name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, guard, auto,
         }),
       })
       if (result.solver && !result.sendError && !result.roleNote) { onCreated(result.solver); return }
@@ -126,8 +127,11 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const tickHint = shownView === null ? '' : shownView.hint.map(key => t(key)).join(' ')
   // The Review guard tick (RFC 0048 delivery 1.5): only with a reviewer Bot, on by default, with the
   // line Details shows for the chosen model and level, so it never claims a hold the route lacks.
-  const guardReach = model && choice.kind !== 'fresh' ? reviewGuardReach(solverCandidate(roster, model, native), guardLevelOf(permission, presetDanger(permission))) : null
+  const candidate = solverCandidate(roster, model, native)
+  const level = guardLevelOf(permission, presetDanger(permission))
+  const guardReach = model && choice.kind !== 'fresh' ? reviewGuardReach(candidate, level) : null
   const guardHint = guardReach === null || guardReach === 'hard' ? null : t(REVIEW_GUARD_COPY[guardReach])
+  const autoHint = model ? solverAutoHint(candidate, level) : null
   const worksWithout = shownView !== null && !shownView.disabled && ['acp-claude', 'acp-codex'].includes(shownView.mark)
   return h('div', { className: 'bt-create', role: 'dialog', 'aria-label': t('New Solver') },
     h('div', { className: 'bt-create-head' },
@@ -192,6 +196,14 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
             }), ' ', t(REVIEW_GUARD_COPY.tick)),
           h('span', { className: 'bt-note' }, t(REVIEW_GUARD_COPY.tickNote)),
           guardHint === null ? null : h('span', { className: 'bt-note' }, guardHint)),
+        h('div', { className: 'bt-field', 'data-solver-auto': auto ? 'on' : 'off' },
+          h('label', { className: 'bt-field-label' },
+            h('input', {
+              type: 'checkbox', checked: auto, disabled: busy,
+              'aria-label': t('Auto: work until delivered'),
+              onChange: event => setAuto(event.target.checked),
+            }), ' ', t('Auto: work until delivered')),
+          autoHint === null ? null : h('span', { className: 'bt-note' }, autoHint)),
         permission == null ? null : h('div', { className: 'bt-note' },
           t('New Bots start at {level}.', { level: presetName(permission, roster.permissions) })),
         error ? h('div', { className: 'bt-error', role: 'alert', style: { padding: 0 } }, error) : null,

@@ -18,6 +18,7 @@ import { ROLE_MAX } from '../shared/bot-profile.js'
 import { isGuardGroupRefusal, refusal } from './refusal.js'
 import { registerTrustedTool } from './tool-registrations.js'
 import { deniesAcpTool } from '../shared/own-tools.js'
+import { solverTracked } from './solver-progress.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
 // A message_bot call that sent nothing answers with this object rather than a string, so
@@ -105,6 +106,11 @@ export function install(rt) {
   const { ctx, state } = rt
 
   const callerBot = (exec) => rt.botOf(rt.selfOf(exec.agent?.id))
+  const solverCaller = exec => {
+    const sessionId = exec.agent?.id ?? exec.agent?.session?.id
+    const bot = rt.botOfSession?.(sessionId, exec.agent)
+    return { bot, own: bot !== undefined && rt.ownChatLineage?.(sessionId, exec.agent, bot) === true }
+  }
   // Only the Bot's own chat and its group Sessions take the role mask and guard.
   // Genie itself refuses calls from task runs, subagents and fresh schedule Sessions.
   const roleBotOf = id => (rt.chatOwners?.has(id) || rt.groupOwners?.has(id) ? rt.botOf(rt.selfOf(id)) : undefined)
@@ -227,6 +233,26 @@ export function install(rt) {
   const turnOf = exec => rt.live.get(exec.agent?.id)?.turn
 
   rt.teamTools.push(defineTool({
+    name: 'solver_progress',
+    description: 'Record progress in your own Solver chat. Use status for the active request ID, plan for agreed check IDs, start before a run, checks for its outcomes, replan before a new plan, and auto with the person\'s exact affirmative request.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['status', 'plan', 'start', 'checks', 'replan', 'auto'] },
+      request: { type: 'string', description: 'Active request ID from status, required for updates' },
+      run: { type: 'string', description: 'Distinct, stable ID for a check run or re-plan' },
+      checks: { type: 'array', items: { type: 'string' }, description: 'Stable check IDs for the plan or this run' },
+      results: { type: 'array', items: { type: 'object', additionalProperties: false,
+        properties: { check: { type: 'string', required: true }, pass: { type: 'boolean', required: true } } } },
+      quote: { type: 'string', description: 'The person’s exact affirmative instruction to turn Auto on for this request' },
+    },
+    output,
+    async execute(args, exec) {
+      await rt.load()
+      const { bot, own } = solverCaller(exec)
+      return rt.solverProgress(bot, own, args)
+    },
+  }))
+
+  rt.teamTools.push(defineTool({
     name: 'message_bot',
     description: 'Send a message to another Bot on the team. If that Bot is working, it reads your message at its next step and can change course, then answers once that work is done; if it is idle, it starts on it right away. Its reply arrives later as a new message to you; with reply_to "user" it answers the user in its own chat instead, and with reply_to "none" nothing comes back at all. In a group chat it reaches only members of that group, as writing "@Name" there does. With request_id you name the request yourself: a repeat of that name with the same message is not sent again, but gives the receipt of the first call back.',
     parameters: {
@@ -247,6 +273,8 @@ export function install(rt) {
         type: 'string',
         description: `Your own name for this request, up to ${NAME_MAX} characters, so that a repeat of it is not sent twice. Send the same request_id with the same message when you repeat a call: the receipt of the first call comes back and nothing is sent again. A request_id names one request: with other content it is refused.`,
       },
+      solver_review: { type: 'string', enum: ['plan', 'result'], description: 'Solver only. Designate this exchange as the plan or result review.' },
+      solver_request: { type: 'string', description: 'Active Solver request ID when designating a review' },
     },
     output: messageOutput,
     async execute(args, exec) {
@@ -267,9 +295,15 @@ export function install(rt) {
       // No reply is owed to the sender: the message is read where it lands, and no
       // answer is routed back or handed on. A private Bot still answers the user.
       const noReply = args.reply_to === 'none'
+      const designating = args.solver_review !== undefined || args.solver_request !== undefined
+      const designatedCaller = designating ? solverCaller(exec) : undefined
+      if (designating && (!['plan', 'result'].includes(args.solver_review) || !designatedCaller.own
+        || designatedCaller.bot !== sender || toUser || noReply || sender.reviewerId !== target.id)) {
+        return refusedMessage('Designate a review in your own Solver chat with your assigned reviewer and a reply to you.')
+      }
       const name = typeof args.request_id === 'string' ? args.request_id.trim() : ''
       if (name.length > NAME_MAX) return refusedMessage(`The request_id is ${name.length} characters long; a request name is at most ${NAME_MAX}.`)
-      const text = absoluteLinks(String(args.message), rt.sessionFolder?.(exec.agent?.session ?? exec.agent))
+      let text = absoluteLinks(String(args.message), rt.sessionFolder?.(exec.agent?.session ?? exec.agent))
       const room = rt.roomOf(rt.groupOwners.get(exec.agent?.id)?.roomId)
       const images = []
       if (Array.isArray(args.images) && args.images.length > 0) {
@@ -289,7 +323,8 @@ export function install(rt) {
           to: target.id,
           message: String(args.message ?? '').replace(/\r\n?/g, '\n').trim(),
           reply_to: toUser ? 'user' : noReply ? 'none' : 'me',
-          when: args.when === 'queue' ? 'queue' : 'now',
+          when: designating || args.when === 'queue' ? 'queue' : 'now',
+          ...(designating ? { solver_review: args.solver_review, solver_request: args.solver_request } : {}),
           ...(images.length > 0 ? { images: images.map(ref => ref.attachmentId).sort() } : {}),
         },
       })
@@ -334,9 +369,17 @@ export function install(rt) {
         const status = rt.statusOf(target.id)
         // A request it has not read yet, sent for the same work, takes this one in, so
         // messages to a Bot that cannot read them do not pile up.
-        const earlier = unreadRequest(agent, sender.id, toUser)
+        const unread = designating ? undefined : unreadRequest(agent, sender.id, toUser)
+        const earlier = unread && !state.works?.[unread.message.source.exchangeId]?.name?.startsWith('solver-review-') ? unread : undefined
         const joinable = earlier !== undefined && (toUser || rt.sameWork(earlier.message.source.exchangeId, work))
         const before = joinable ? bodyOf(earlier.message) : undefined
+        const reviewExchange = designating ? randomUUID() : undefined
+        if (designating) {
+          const checks = await rt.solverReview(sender, target, true, {
+            kind: args.solver_review, request: args.solver_request, exchangeId: reviewExchange, agent: exec.agent,
+          })
+          text = `Designated Solver ${args.solver_review} review. Agreed check IDs: ${checks.join(', ')}.\n\n${text}`
+        }
         let long = await rt.attachLong(before ? `${before.text}\n\n${text}` : text, `Message from ${sender.name}.txt`)
         // Nothing went out, so a named request must not take this as a delivered
         // receipt: admitRequest drops the pending record instead, and a retry can send.
@@ -344,15 +387,18 @@ export function install(rt) {
         const joins = before !== undefined && agent.inbox?.remove?.(earlier.message.id) === true
         if (before !== undefined && !joins) long = await rt.attachLong(text, `Message from ${sender.name}.txt`) ?? long
         const working = rt.live.get(chat)?.turn !== undefined
-        const steer = (args.when !== 'queue' && !toUser) || (joins && earlier.steered)
-        const exchangeId = joins ? earlier.message.source.exchangeId : randomUUID()
+        const steer = (!designating && args.when !== 'queue' && !toUser) || (joins && earlier.steered)
+        const exchangeId = joins ? earlier.message.source.exchangeId : (reviewExchange ?? randomUUID())
         // The merged message owes nothing only when neither message it took in does.
         const earlierNoReply = earlier !== undefined && earlier.message.source.noReply === true
         const mergedNoReply = noReply && (joins ? earlierNoReply : true)
         if (joins) rt.forgetDelivery?.(exchangeId)
         // A request that owes a reply needs its work, also when it grew out of an
         // earlier no-reply message that had none.
-        if (!toUser && !mergedNoReply && state.works?.[exchangeId] === undefined) rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work })
+        if (!toUser && !mergedNoReply && state.works?.[exchangeId] === undefined) {
+          rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work,
+            ...(designating ? { name: `solver-review-${args.solver_review}` } : {}) })
+        }
         try {
           await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(mergedNoReply ? { noReply: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
         } catch (error) {
@@ -438,6 +484,7 @@ export function install(rt) {
     },
     output,
     async execute(args, exec) {
+      if (Object.hasOwn(args, 'solverAuto')) throw refusal('Only the person can turn Auto on or off for a Solver.')
       await rt.load()
       const self = rt.selfOf(exec.agent?.id)
       if (!rt.isMain(self)) return 'Only the Main Bot can create Bots. Ask the Main Bot instead.'
@@ -520,6 +567,7 @@ export function install(rt) {
     },
     output,
     async execute(args, exec) {
+      if (Object.hasOwn(args, 'solverAuto')) throw refusal('Only the person can turn Auto on or off for a Solver.')
       if (Object.hasOwn(args, 'people')) {
         const bot = args.bot ? rt.findBot(args.bot) : rt.botOf(rt.selfOf(exec.agent?.id))
         throw refusal('Only the user can choose who may talk to ' + (bot?.name ?? 'this Bot'))
@@ -911,7 +959,7 @@ export function install(rt) {
         .filter(option => option.label !== '')
         .slice(0, 6)
       if (options.length === 0) return 'Give at least one option.'
-      state.questions[id] = {
+      const card = {
         id: randomUUID(),
         ...(exec.callId ? { callId: exec.callId } : {}),
         question: String(args.question ?? '').trim(),
@@ -921,6 +969,8 @@ export function install(rt) {
         ...(args.allowCustom === true ? { allowCustom: true } : {}),
         askedAt: Date.now(),
       }
+      await rt.solverQuestion?.(rt.chatOwners.get(id), card.callId ?? card.id)
+      state.questions[id] = card
       await rt.save()
       rt.cardShown?.(id, 'question', state.questions[id].question)
       exec.concludeTurn?.()
@@ -1187,6 +1237,7 @@ export function install(rt) {
     if (held?.tools === true) {
       for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
         if (relayOnly && def.name !== 'group_relay') continue
+        if (def.name === 'solver_progress' && (!rt.chatOwners.has(id) || !solverTracked(rt.botOf(rt.selfOf(id))))) continue
         if (held.added?.has(def.name) === true) continue
         try {
           const dispose = registerTrustedTool(agent.ctx.tools, def)
@@ -1222,6 +1273,7 @@ export function install(rt) {
     const registered = []
     for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
       if (relayOnly && def.name !== 'group_relay') continue
+      if (def.name === 'solver_progress' && (!rt.chatOwners.has(id) || !solverTracked(rt.botOf(rt.selfOf(id))))) continue
       try {
         const dispose = registerTrustedTool(agent.ctx.tools, def)
         if (typeof dispose === 'function') {

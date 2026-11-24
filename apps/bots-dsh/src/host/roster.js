@@ -372,7 +372,7 @@ export function install(rt) {
   }
 
   async function buildBot(cleanName, options, readScopeSource) {
-    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy } = options
+    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy, solverAuto } = options
     if (existingSessionId !== undefined && (createdBy !== undefined || reviewerId !== undefined || reviewGuard !== undefined)) {
       throw refusal('An adopted Session takes no creator or reviewer.')
     }
@@ -502,6 +502,9 @@ export function install(rt) {
         // The person's review guard (review-guard.js): only with that reviewer kept, and only from the
         // person's create-bot (the New Solver tick) or a copy of a guarded Solver.
         ...(reviewGuard === true && next.reviewerId !== undefined ? { reviewGuard: true } : {}),
+        ...(solverAuto === true && createdBy === undefined
+          && (next.role === SOLVER_DESCRIPTION || solverCopy || (copyOf && rt.botOf(copyOf)?.solverAuto === true))
+          ? { solverAuto: true } : {}),
         instructions: next.instructions,
         ...(next.roles ? { roles: next.roles } : {}),
         ...(waitForSolver ? { waitingRole: {
@@ -738,6 +741,7 @@ export function install(rt) {
       ...(typeof bot.reviewerId === 'string' ? { reviewerId: bot.reviewerId } : {}),
       // And its review guard: a copy only narrows, and copying is the person's.
       ...(bot.reviewGuard === true ? { reviewGuard: true } : {}),
+      ...(bot.solverAuto === true ? { solverAuto: true } : {}),
       // A copy keeps a shell the original was denied: the copy is new, but taking a
       // capability away here would not be the user's choice either.
       ...(bot.shell === false ? { shell: false } : {}),
@@ -834,6 +838,7 @@ export function install(rt) {
   async function updateBot(id, patch, actorId, fromSessionId, options) {
     if (Object.hasOwn(patch, 'nativeTools')) return rt.setNativeTools(id, patch, actorId)
     if (Object.hasOwn(patch, 'reviewGuard')) return rt.setReviewGuard(id, patch, actorId)
+    if (Object.hasOwn(patch, 'solverAuto')) return rt.setSolverAuto(id, patch, actorId)
     // While the review guard is on, only the person moves the Bot to another model (H5-1).
     if (patch.model !== undefined && actorId !== undefined && rt.botOf(id)?.reviewGuard === true) {
       throw refusal(`Only the person can move ${rt.botOf(id).name} to another model while its review guard is on.`)

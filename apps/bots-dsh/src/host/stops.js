@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { approvalPolicyOf } from './approval-policy.js'
 
-export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule', 'guard', 'guard-request', 'guard-launch']
+export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule', 'guard', 'guard-request', 'guard-launch', 'limit']
 export const STOP_KEEP_MS = 6 * 60 * 60 * 1000
 export const STOPS_MAX = 50
 export const CALLS_MAX = 20
@@ -20,6 +20,7 @@ export const WHY_EN = {
   guard: 'the review guard waits for the reviewer\'s verdict on the plan; you can turn it off in Details',
   'guard-request': 'the review guard waits for the reviewer\'s verdict on a new plan, because another Bot sent a new request; you can turn it off in Details',
   'guard-launch': 'the review guard is on and prevents starting tasks; you can turn it off in Details',
+  limit: 'the Solver reached an attempt limit and is waiting for your answer',
 }
 
 export function stopLineEn(entry) {
@@ -155,7 +156,7 @@ export function install(rt) {
       if (stop) noteResolved(stop)
       // A subagent's step the review guard held: its parent is told so (who-refused.js), and never
       // to run that step itself.
-      if (stop && (detail.why === 'guard' || detail.why === 'guard-request')) noteUnasked(sessionId, detail, agent)
+      if (stop && ['guard', 'guard-request', 'limit'].includes(detail.why)) noteUnasked(sessionId, detail, agent)
     } catch {}
   }
   const stopsView = () => { prune(); return [...entries.values()].filter(({ entry }) => entry.count > 0).map(({ entry }) => copy(entry)) }

@@ -1639,7 +1639,8 @@ export class AcpAdapter extends LlmAdapter {
       const ompNativeAllowed = () => permitsNative(levelAtStart())
         && this.savedNativeOn(sessionId, options.provider)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
-      const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
+      const botIdentity = takesIdentity || options.provider === 'acp-omp' ? readIdentity(this.botIdentity, sessionId) : undefined
+      const identityRead = takesIdentity ? botIdentity : undefined
       // Whether the Details switch could turn this turn's Codex ON, read when the text is made: any
       // Session of a Bot it is not blocked for.
       const switchHere = () => {
@@ -1717,7 +1718,10 @@ export class AcpAdapter extends LlmAdapter {
       const asks = hardAsks(native, turnLevel)
       const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true) && this.bridgeOn(agent, sessionId)
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
-      const role = takesIdentity ? rolePromptOf(identityRead) : { digest: '' }
+      // Other ACP agents can receive the Solver's method supplement through the
+      // existing identity prompt delivery, without adopting the whole Bot role.
+      const role = takesIdentity ? rolePromptOf(identityRead)
+        : rolePromptOf({ name: botIdentity?.name, rolePrompt: botIdentity?.solverLimitsPrompt })
       const turn = this.roleTurns.get(sessionId)
       const sameTurn = live !== undefined && turn !== undefined && live.roleTurn === turn
       const roleChanged = live !== undefined && !sameTurn && (live.roleDigest ?? '') !== role.digest
@@ -1809,7 +1813,7 @@ export class AcpAdapter extends LlmAdapter {
               `acp-dsh: ${agent.name} Bot role prompt refused (${role.refused})`)
           } catch {}
         }
-        const text = takesIdentity ? identityText(identityRead, role.part) : undefined
+        const text = takesIdentity ? identityText(identityRead, role.part) : role.part
         // A Codex OFF check that measured this turn's model with no tool block (B1-4): the turn
         // runs again from its start as a kept one (today's launch), with no notice. Nothing of the
         // OFF attempt was started. Once per turn.

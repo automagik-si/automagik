@@ -7,12 +7,17 @@
 // Solver are not marked: only its own chat (and the subagents under it).
 import { lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
-import { SOLVER_NOTES, isSolverBot } from '../shared/solver-method.js'
+import { SOLVER_NOTES } from '../shared/solver-method.js'
 import { VERDICTS_KEPT, deliveryMark, verdictOf } from '../shared/review-mark.js'
 import { guardVerdictOf } from '../shared/review-guard.js'
 import { teamToolOf } from './approvals.js'
 import { SOURCE_KIND } from './constants.js'
 import { reachesShell } from './tool-deny.js'
+import { refusal } from './refusal.js'
+import {
+  activeSolverLimit, cleanProgress, designateReview, invalidateResult, modelOf, newProgress,
+  normalizedAutoInstruction, recordProgress, recordSolverVerdict, resumeProgress, solverOutcome, solverTracked,
+} from './solver-progress.js'
 
 // The tools that change files by name (as private-bots.js and auto-judge.js read them), after
 // the `dsh` bridge's `mcp__dsh__` prefix is taken off.
@@ -105,6 +110,7 @@ export function cleanTrack(track) {
   const verdicts = Array.isArray(track.verdicts)
     ? track.verdicts.filter(entry => isRecord(entry) && typeof entry.verdict === 'string' && isTime(entry.at)).slice(-VERDICTS_KEPT)
     : []
+  const solver = cleanProgress(track.solver)
   return {
     requested: track.requested === true,
     requestAt: isTime(track.requestAt) ? track.requestAt : 0,
@@ -117,6 +123,8 @@ export function cleanTrack(track) {
     ...(track.openedBy === 'bot' ? { openedBy: 'bot' } : {}),
     ...(typeof track.openerId === 'string' && track.openerId !== '' ? { openerId: track.openerId } : {}),
     verdicts,
+    ...(solver ? { solver } : {}),
+    ...(isRecord(track.outcome) ? { outcome: track.outcome } : {}),
     ...(track.delivered === true ? { delivered: true } : {}),
     ...(isRecord(track.last) && typeof track.last.review === 'string' ? { last: track.last } : {}),
   }
@@ -127,8 +135,10 @@ export function install(rt) {
   // Unread host exchanges for each Bot's current request. A part switch can give
   // the inbox message a new id while keeping its exchange id and replyTo.
   const unread = new WeakMap()
-  // A guarded Bot stays tracked whatever its role says: the guard never reads the marker.
-  const tracked = bot => bot !== undefined && (isSolverBot(bot) || bot.reviewGuard === true)
+  const tracked = solverTracked
+  const autoInstructions = new WeakMap()
+  const progressWrites = new WeakSet()
+  const runningWork = new WeakMap()
   // The record of the request in progress: { requested, requestAt, personAt, firstWorkAt,
   // lastWorkAt, verdicts, delivered, last }. `requested`: a person asked for something (a message
   // in its own chat, or the brief it was made with), so the next delivery answers it; a greeting
@@ -142,10 +152,12 @@ export function install(rt) {
     bot.reviewTrack = track ?? { requested: false, requestAt: bot.createdAt ?? 0, verdicts: [] }
     return bot.reviewTrack
   }
-  const open = (bot, at) => {
+  const open = (bot, at, origin = 'person') => {
     unread.delete(bot)
-    const last = cleanTrack(bot.reviewTrack)?.last
-    bot.reviewTrack = { requested: true, requestAt: at, personAt: at, verdicts: [], ...(last ? { last } : {}) }
+    const { last, outcome } = cleanTrack(bot.reviewTrack) ?? {}
+    bot.reviewTrack = { requested: true, requestAt: at, personAt: at, verdicts: [], solver: newProgress(origin),
+      ...(last ? { last } : {}), ...(outcome ? { outcome } : {}) }
+    autoInstructions.delete(bot)
   }
   const reviewOf = (bot) => {
     if (typeof bot.reviewerId !== 'string' || bot.reviewerId === '') return 'fresh'
@@ -155,25 +167,130 @@ export function install(rt) {
   // A Solver just made, with the brief it was made with (its first request) or none (a greeting).
   function reviewCreated(bot, brief) {
     if (!tracked(bot)) return
-    if (brief) open(bot, bot.createdAt ?? Date.now())
+    if (brief) open(bot, bot.createdAt ?? Date.now(), bot.createdBy ? 'bot' : 'person')
     else trackOf(bot)
   }
 
   // A person's message in the Solver's own chat. After a delivery, or with no request open, it
   // opens the next request; while one is open (the Solver waits for its reviewer) it only dates the
   // person's last message, so reviewer work opened before it no longer holds the delivery (SR4-1).
-  function reviewRequest(botId) {
+  function reviewRequest(botId, { text, question } = {}) {
     const bot = rt.botOf(botId)
     if (!tracked(bot)) return
-    const track = cleanTrack(bot.reviewTrack)
-    if (track?.requested === true && track.delivered !== true) {
-      track.personAt = Date.now()
-      bot.reviewTrack = track
-      save()
-      return
+    const before = bot.reviewTrack
+    let track = cleanTrack(before)
+    const instruction = normalizedAutoInstruction(text)
+    // omp's native adapter has no team-tool bridge. Its own-chat instruction
+    // can still select the request's mode through this trusted input.
+    const noProgressTool = (bot.appliedModel ?? bot.model)?.startsWith('acp-omp/') === true
+    const remember = current => {
+      if (current.solver.origin === 'person' && instruction && !noProgressTool) {
+        autoInstructions.set(bot, { request: current.solver.request, instruction })
+      } else {
+        autoInstructions.delete(bot)
+      }
     }
-    open(bot, Date.now())
+    if (track?.requested === true && track.delivered !== true) {
+      track.solver ??= newProgress(track.openedBy === 'bot' ? 'bot' : 'person')
+      const limit = activeSolverLimit(bot, track) ?? track.solver.limit
+      if (question !== undefined && (!limit || limit.question !== question)) return
+      track.personAt = Date.now()
+      if (track.solver.plan && !instruction) invalidateResult(track.solver)
+      const directAuto = noProgressTool && instruction && track.solver.origin === 'person' && !track.solver.auto
+      if (limit || directAuto) {
+        if (limit) resumeProgress(track.solver, limit)
+        if (directAuto) track.solver.auto = true
+        void saveProgress(bot, before, track.solver, track).then(() => {
+          if (bot.reviewTrack === track) remember(track)
+        }).catch(() => {})
+        return
+      }
+      bot.reviewTrack = track
+    } else {
+      if (question !== undefined) return
+      open(bot, Date.now())
+      track = bot.reviewTrack
+      if (noProgressTool && instruction) track.solver.auto = true
+    }
+    remember(track)
     save()
+  }
+
+  // Do not publish an acknowledged progress update until the selective D2 write
+  // has committed. A request or work transition during the write invalidates it.
+  async function saveProgress(bot, before, solver, next = { ...before, solver }) {
+    if (progressWrites.has(bot)) throw refusal('A Solver progress update is still being saved.')
+    const assertCurrent = () => {
+      if (rt.botOf(bot.id) !== bot || bot.reviewTrack !== before) throw refusal('The Solver request changed. Read solver_progress status again.')
+    }
+    progressWrites.add(bot)
+    try {
+      await rt.saveCopy(copy => {
+        assertCurrent()
+        copy.bots[bot.id].reviewTrack = next
+      }, {
+        durable: true,
+        beforeCommit: assertCurrent,
+        afterWrite: () => { if (bot.reviewTrack === before) bot.reviewTrack = next },
+      })
+    } finally {
+      progressWrites.delete(bot)
+    }
+  }
+
+  async function solverProgress(bot, own, args) {
+    if (!own || !tracked(bot)) return 'Only a Solver records its progress, in its own chat.'
+    const before = bot.reviewTrack
+    const track = cleanTrack(before)
+    if (!track?.requested || track.delivered) return 'There is no active Solver request in this chat.'
+    if (progressWrites.has(bot)) return 'A Solver progress update is still being saved.'
+    track.solver = structuredClone(track.solver ?? newProgress(track.openedBy === 'bot' ? 'bot' : 'person'))
+    if (args.action === 'status') {
+      if (!before.solver) await saveProgress(bot, before, track.solver)
+      const { request, plan, pending, auto } = track.solver
+      return [`Request: ${request}`, `Mode: ${bot.solverAuto === true || auto ? 'Auto' : 'Normal'}`,
+        ...(plan ? [`Agreed check IDs: ${plan.checks.join(', ')}`] : []),
+        ...(pending ? [`Open check run: ${pending.run}`] : []),
+        ...(activeSolverLimit(bot, track) ? ['Work is held for the person.'] : []),
+      ].join('\n')
+    }
+    if (args.request !== track.solver.request) return 'Use the active request ID from solver_progress status.'
+    const authority = autoInstructions.get(bot)
+    const changed = recordProgress(bot, track, args, {
+      now: Date.now(),
+      authorizedAuto: authority?.request === args.request && authority.instruction === normalizedAutoInstruction(args.quote),
+      running: runningWork.has(bot),
+    })
+    if (changed.changed) {
+      await saveProgress(bot, before, track.solver)
+      if (args.action === 'auto' && autoInstructions.get(bot) === authority) autoInstructions.delete(bot)
+    }
+    return changed.text
+  }
+
+  async function solverReview(bot, reviewer, own, { kind, request, exchangeId, agent }) {
+    const before = bot.reviewTrack
+    const track = cleanTrack(before)
+    if (!own || !tracked(bot) || bot.reviewerId !== reviewer.id || !track?.solver
+      || !track.requested || track.delivered || track.solver.request !== request) {
+      throw refusal('Use the active Solver request and its designated reviewer in your own chat.')
+    }
+    if (progressWrites.has(bot) || runningWork.has(bot)) throw refusal('Finish the current Solver work before requesting a review.')
+    const progress = structuredClone(track.solver)
+    const issue = designateReview(progress, { kind, exchangeId, reviewerId: reviewer.id, model: modelOf(rt, agent) })
+    if (issue) throw refusal(issue)
+    await saveProgress(bot, before, progress)
+    return progress.plan.checks
+  }
+
+  async function solverQuestion(botId, callId) {
+    const bot = rt.botOf(botId)
+    const before = bot?.reviewTrack
+    const track = cleanTrack(before)
+    const limit = activeSolverLimit(bot, track)
+    if (!limit) return
+    if (progressWrites.has(bot)) throw refusal('A Solver progress update is still being saved.')
+    await saveProgress(bot, before, { ...track.solver, limit: { ...limit, question: callId } })
   }
 
   // A call the executor let through, on a Session of `bot`; `own`: the Session is its own
@@ -190,6 +307,32 @@ export function install(rt) {
     if (!notes) track.firstWorkAt ??= at
     track.lastWorkAt = at
     save()
+  }
+
+  // Durably invalidate passing evidence before work can change the result. A
+  // check may run one mediated command, then must report before more work.
+  async function solverBeforeWork(bot, { relevant, checkCommand, call }) {
+    const before = bot.reviewTrack
+    const track = cleanTrack(before)
+    if (!relevant || !track?.requested || track.delivered || !track.solver?.plan) return
+    const progress = track.solver
+    const pending = progress.pending
+    if (pending && checkCommand && call) {
+      if (pending.call === call) return
+      progress.pending = { ...pending, call }
+      await saveProgress(bot, before, progress)
+    } else if (progress.passed.length > 0 || progress.review) {
+      invalidateResult(progress)
+      await saveProgress(bot, before, progress)
+    }
+    const work = runningWork.get(bot) ?? new Set()
+    const token = {}
+    work.add(token)
+    runningWork.set(bot, work)
+    return () => {
+      work.delete(token)
+      if (work.size === 0) runningWork.delete(bot)
+    }
   }
 
   function rememberReply(bot, exchangeId, reviewerId, replyTo, workAt) {
@@ -226,18 +369,23 @@ export function install(rt) {
   // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
   // The guard's own strict reading (guardVerdictOf) dates the plan's verdict once per request, for
   // every tracked Bot, so a guard turned on mid-request reads a verdict that already came.
-  function reviewVerdict(fromId, toId, roomId, text, workAt, reply) {
+  function reviewVerdict(fromId, toId, roomId, text, workAt, reply, model) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     if (typeof workAt !== 'number') return
     const verdict = verdictOf(text)
-    const planVerdict = guardVerdictOf(text, rt.botOf(fromId)?.name)
+    const reviewer = rt.botOf(fromId)
+    const planVerdict = guardVerdictOf(text, reviewer?.name)
     const track = trackOf(bot)
     if (track.delivered === true || workAt < track.requestAt) return
-    if (verdict !== undefined || planVerdict !== undefined) {
+    if (verdict !== undefined || planVerdict !== undefined || reply !== undefined) {
       const at = Date.now()
       if (planVerdict !== undefined) track.planVerdictAt ??= at
       if (verdict !== undefined) track.verdicts = [...track.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
+      if (reviewer) {
+        const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
+        recordSolverVerdict(track.solver, reply?.replyTo, reviewer, strict, model)
+      }
       save()
     }
     if (reply === undefined || !track.requested || !isTime(workAt)) return
@@ -319,18 +467,29 @@ export function install(rt) {
   // and the reviewer's own message open nothing.
   function reviewBotRequest(botId, senderId, { noReply = false } = {}) {
     const bot = rt.botOf(botId)
-    if (bot?.reviewGuard !== true || typeof senderId !== 'string' || senderId === botId) return
+    if (!tracked(bot) || typeof senderId !== 'string' || senderId === botId) return
     const track = cleanTrack(bot.reviewTrack)
     const dates = noReply || senderId === bot.reviewerId
     if (track?.requested === true && track.delivered !== true) {
-      if (!isTime(track.planVerdictAt)) return
       if (dates || senderId === track.openerId) return
-      open(bot, Date.now())
+      const progress = track.solver
+      if (progress?.plan || progress?.pending || progress?.review) {
+        invalidateResult(progress)
+        if (progress.plan) progress.plan = { checks: progress.plan.checks, revision: progress.plan.revision, superseded: true }
+        bot.reviewTrack = track
+        save()
+      }
+      autoInstructions.delete(bot)
+      if (bot.reviewGuard !== true || !isTime(track.planVerdictAt)) {
+        return
+      }
+      open(bot, Date.now(), 'bot')
+      if (progress) bot.reviewTrack.solver = progress
       if (isTime(track.personAt)) bot.reviewTrack.personAt = track.personAt
       else delete bot.reviewTrack.personAt
     } else {
       if (dates) return
-      open(bot, Date.now())
+      open(bot, Date.now(), 'bot')
     }
     bot.reviewTrack.openedBy = 'bot'
     bot.reviewTrack.openerId = senderId
@@ -341,11 +500,12 @@ export function install(rt) {
   // with nothing out to its reviewer, is a delivery: it is marked once per request. Reviewer work
   // opened before the person's last message does not hold it: a person who asks for the delivery
   // first gets it (SR3-3 (b)), and the late verdict on that work is dropped (SR4-1).
-  function reviewTurnEnd(botId, { completed, wroteText }) {
+  function reviewTurnEnd(botId, { completed, wroteText, model }) {
     const bot = rt.botOf(botId)
     if (!tracked(bot) || !completed || !wroteText) return
     const track = cleanTrack(bot.reviewTrack)
     if (track?.requested !== true || track.delivered === true) return
+    if (activeSolverLimit(bot, track) || progressWrites.has(bot)) return
     bot.reviewTrack = track
     const review = reviewOf(bot)
     const works = Object.values(rt.state?.works ?? {})
@@ -355,7 +515,8 @@ export function install(rt) {
     // Reviewer work this request opened, still out when the person asked: delivered before its
     // verdict (Run 3). Work left from an earlier request is not this one's.
     const pending = review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && typeof work.at === 'number' && work.at >= track.requestAt)
-    track.last = deliveryMark(track, review, Date.now(), { pending })
+    track.outcome = solverOutcome(bot, track, review, pending, model)
+    track.last = { ...deliveryMark(track, review, Date.now(), { pending }), ...(track.outcome.done ? { done: true, reviewer: track.outcome.reviewer } : {}) }
     track.delivered = true
     save()
   }
@@ -368,5 +529,18 @@ export function install(rt) {
     return last ? { reviewMark: { ...last } } : {}
   }
 
-  Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf })
+  const solverStatusOf = (bot, stored = bot?.reviewTrack) => {
+    const track = cleanTrack(stored)
+    if (!tracked(bot) && !track?.solver && !track?.outcome) return {}
+    const limit = activeSolverLimit(bot, track)
+    return { solverStatus: {
+      ...(track?.requested && !track.delivered ? { auto: track.solver?.auto === true } : {}),
+      ...(limit ? { limit: { kind: limit.kind, check: limit.check } } : {}),
+      ...(track?.outcome ? { outcome: track.outcome } : {}),
+    } }
+  }
+
+  Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf,
+    solverProgress, solverReview, solverQuestion, solverStatusOf, solverBeforeWork,
+    solverProgressBusy: bot => progressWrites.has(bot) })
 }

@@ -15,6 +15,7 @@ export function whyText(why) {
     case 'guard': return t('the review guard waits for the reviewer\'s verdict on the plan; you can turn it off in Details')
     case 'guard-request': return t('the review guard waits for the reviewer\'s verdict on a new plan, because another Bot sent a new request; you can turn it off in Details')
     case 'guard-launch': return t('the review guard is on and prevents starting tasks; you can turn it off in Details')
+    case 'limit': return t('the Solver reached an attempt limit and is waiting for your answer')
     default: return t('a rule here refused it')
   }
 }

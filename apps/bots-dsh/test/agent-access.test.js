@@ -750,6 +750,18 @@ test('agent access cannot change a guarded Bot\'s model; other fields and unguar
   assert.equal(rt.botOf('c').model, 'provider/model')
 })
 
+test('agent access audits and refuses Solver Auto on create and update', async t => {
+  const { rt, tool, view } = await fixture(t)
+  for (const [name, args] of [['create_bot', { name: 'Solver', role: 'Solver' }], ['update_bot', { id: 'b' }]]) {
+    const refused = await tool(name, { ...args, solverAuto: true })
+    assert.equal(refused.isError, true)
+    assert.deepEqual(refused.value, { error: 'Action refused', code: 'bot/solver-auto' })
+    assert.ok((await view()).audit.some(entry => entry.action === name && entry.outcome === 'refused'))
+  }
+  assert.equal(rt.botOf('b').solverAuto, undefined)
+  assert.equal(Object.keys(rt.state.bots).length, 3)
+})
+
 test('a Bot an agent token deletes is listed for the page\'s composer sweep; a reading host cannot clear it', async t => {
   const { rt, tool, call } = await fixture(t)
   const bot = (await tool('create_bot', { name: 'Scratch', instructions: 'Temporary' })).value

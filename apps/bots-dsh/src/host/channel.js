@@ -119,7 +119,10 @@ export function install(rt) {
   // Photos staged by `stage-image`, kept until the message that names them is sent.
   const staged = new Map()
   const ok = value => ({ ok: true, value })
-  const okBot = bot => ok(publicBot(bot))
+  const okBot = bot => {
+    const { reviewTrack, ...view } = publicBot(bot)
+    return ok(view)
+  }
   const fail = (message, code = 'bot/error', reason) => ({
     ok: false,
     error: { code, message, details: {},
@@ -272,6 +275,7 @@ export function install(rt) {
         ...rt.reviewMarkOf?.(bot, reviewTrack),
         // A guarded Solver waiting for its plan's verdict: since when (review-guard.js).
         ...rt.reviewGuardViewOf?.(bot, reviewTrack),
+        ...rt.solverStatusOf?.(bot, reviewTrack),
         ...(tail ? { lastAt: tail.lastAt, preview: tail.preview } : {}),
       }
     }),
@@ -850,7 +854,8 @@ export function install(rt) {
           // `private` and `shell` are the user's own create fields (no acting Bot here):
           // a Bot created private starts without a shell unless `shell` says otherwise.
           const options = { name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId, reviewGuard: body.reviewGuard,
-            waitingRole: body.waitingRole === SOLVER_ROLE_ID ? SOLVER_ROLE_ID : undefined, reviewerMade: body.reviewerMade === true }
+            waitingRole: body.waitingRole === SOLVER_ROLE_ID ? SOLVER_ROLE_ID : undefined, reviewerMade: body.reviewerMade === true,
+            solverAuto: body.solverAuto === true }
           await rt.load()
           rt.checkCreateLook(options)
           await rt.bootstrap()
