@@ -967,6 +967,9 @@ export function install(rt) {
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
     selectSessionModel, reselectOwnRoute, keepsCarriedRoute, assertReadableRoute, storedRouteOf: storedRoute,
     applyModel, waitForModel, syncModels, routeRefused,
-    dropCatalog: () => { catalogCache = { at: 0, value: [] } },
+    dropCatalog: () => {
+      invalidate()
+      catalogCache = { at: 0, value: [] }
+    },
   })
 }

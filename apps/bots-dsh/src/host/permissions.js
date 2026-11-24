@@ -326,6 +326,7 @@ export function install(rt) {
   const taskOf = sessionId => rt.state?.tasks?.[sessionId]
   const taskLevel = (task, service) => taskRun(task, service).level
   function taskRun(task, service, depth = 0) {
+    if (task.botBound === true) return botBoundRun(task, service, depth)
     const linked = task.levelTaskId !== undefined
     if (task.from === undefined) {
       if (!linked) return {}
@@ -336,13 +337,7 @@ export function install(rt) {
     }
     const bot = task.from === undefined ? undefined : rt.botOf(task.from)
     const room = task.roomId ? rt.roomOf(task.roomId) : undefined
-    let base = bot === undefined ? service.catalog().defaultPreset : room?.permission ?? bot.permission ?? service.catalog().defaultPreset
-    if (task.botBound === true && bot !== undefined) {
-      const own = bot.permission ?? service.catalog().defaultPreset
-      if (runRank(service, own) === undefined || task.permissionCap === undefined) return { unproven: true }
-      base = narrowerLevel(service, base, own)
-      if (base === undefined) return { unproven: true }
-    }
+    const base = bot === undefined ? service.catalog().defaultPreset : room?.permission ?? bot.permission ?? service.catalog().defaultPreset
     const level = base === undefined ? base : narrowedByCaller(task, task.permissionCap === undefined ? base : narrowerLevel(service, base, task.permissionCap), service)
     if (!linked) return { level }
     if (level === undefined) return { unproven: true }
@@ -350,6 +345,39 @@ export function install(rt) {
   }
   // A level ranked as what it runs as: a saved Auto DSH does not offer runs as workspace-write.
   const runRank = (service, name) => rankOf(service, name === AUTO && !autoOffered(service) ? AUTO_FALLBACK : name)
+
+  // The opener's proven rank belongs to the task, even when its old preset name
+  // changes meaning. Bot and room levels still narrow that ceiling live.
+  function botBoundRun(task, service, depth) {
+    if (service === undefined || !Number.isInteger(task.openerRank) || task.openerRank < 0 || task.openerRank > 5) return { unproven: true }
+    const { options, defaultPreset } = service.catalog()
+    const own = rt.botOf(task.from)?.permission ?? defaultPreset
+    const room = task.roomId ? rt.roomOf(task.roomId)?.permission : undefined
+    const callerRoom = task.levelRoomId ? rt.roomOf(task.levelRoomId)?.permission : undefined
+    const ownRank = runRank(service, own)
+    if (!Number.isInteger(ownRank)) return { unproven: true }
+    let ceiling = Math.min(task.openerRank, task.detachedRank ?? task.openerRank, ownRank)
+    if (!Number.isInteger(ceiling)) return { unproven: true }
+    for (const name of [room, callerRoom]) {
+      if (name === undefined) continue
+      const rank = runRank(service, name)
+      if (!Number.isInteger(rank)) return { unproven: true }
+      ceiling = Math.min(ceiling, rank)
+    }
+    let level
+    let best = -1
+    for (const { value } of options) {
+      const rank = rankOf(service, value)
+      if (!Number.isInteger(rank) || rank > ceiling || rank < best) continue
+      if (rank > best || value === (room ?? callerRoom ?? own)) [level, best] = [value, rank]
+    }
+    if (level === undefined) return { unproven: true }
+    if (task.levelTaskId === undefined) return { level }
+    const bounded = boundedByParent(task, level, service, depth)
+    const rank = rankOf(service, bounded.level)
+    return !bounded.unproven && options.some(option => option.value === bounded.level) && rank !== undefined && rank <= ceiling
+      ? bounded : { unproven: true }
+  }
   const PARENT_DEPTH = 32
   // What bounds the children of a task with no level of its own (no Bot asked for it, or
   // none could be ranked): the level DSH reports for its Session while that one is loaded.
@@ -510,6 +538,7 @@ export function install(rt) {
     if (run.unproven || rank === undefined) return undefined
     return { level: run.level, rank, wide: wideLevel(service, run.level), defaultLevel: service.catalog().defaultPreset }
   }
+  rt.taskOpenerRank = level => rankOf(presets(), level)
   rt.sessionLevel = session => presets()?.current(session)
   // Save only a narrowing: an opener at the same or a wider level adds no lasting cap.
   function capTaskByOpener(task, opener) {
@@ -574,7 +603,9 @@ export function install(rt) {
     for (const task of Object.values(rt.state?.tasks ?? {})) {
       if (!match(task)) continue
       const level = taskLevel(task, service)
-      if (level !== undefined) task.permissionCap = level
+      if (level === undefined) continue
+      if (task.botBound === true) task.detachedRank = rankOf(service, level)
+      else task.permissionCap = level
     }
   }
   // The level a remembered task runs at, read before startTask forgets it.
@@ -596,8 +627,28 @@ export function install(rt) {
     sessionId, session, { start = false, starts = false } = {},
   ) {
     if (start) return startTaskPermission(sessionId, session)
-    if (taskOf(sessionId) === undefined) return false
+    const task = taskOf(sessionId)
+    if (task === undefined) return false
     const service = presets()
+    if (task.botBound === true) {
+      await serial(sessionId, async () => {
+        let level
+        try {
+          const target = session ?? (await rt.resolveAgent(sessionId)).session
+          const current = taskOf(sessionId)
+          if (current !== task) throw refusal(OPENER_UNPROVEN)
+          level = botBoundRun(task, service, 0).level
+          if (level === undefined) throw refusal(OPENER_UNPROVEN)
+          if (rt.readOnly() === undefined) service.set(target, level)
+          if (service.current(target) !== level || botBoundRun(task, presets(), 0).level !== level) throw refusal(OPENER_UNPROVEN)
+          unapplied.delete(sessionId)
+        } catch (error) {
+          mark(sessionId, level ?? task.permissionCap ?? AUTO_FALLBACK)
+          throw error
+        }
+      })
+      return true
+    }
     if (rt.readOnly() !== undefined || service === undefined) return true
     await serial(sessionId, async () => {
       const task = taskOf(sessionId)
@@ -616,6 +667,7 @@ export function install(rt) {
     return true
   }
   const UNPROVEN = 'The permission level of this task cannot be compared with the level of the task that started it, so nothing runs here.'
+  const OPENER_UNPROVEN = "The permission level could not be proven within this task's bounds, so no work runs here."
   // Where work starts by itself (a task's first turn, a new Bot's greeting, a member's
   // first turn in a group) nothing runs on a Session whose level did not hold: the start
   // is refused, never left on DSH's default, which may be wider than the level chosen. A
@@ -653,6 +705,7 @@ export function install(rt) {
     } catch (error) {
       rt.warn('ds-bot: permission for the task %s not applied: %s', sessionId, error)
       const task = taskOf(sessionId)
+      if (task?.botBound === true) throw Object.assign(refusal(OPENER_UNPROVEN, { cause: error }), { levelNotSet: true })
       const service = presets()
       throw startRefusal(task === undefined || service === undefined ? undefined : taskLevel(task, service), error)
     }
@@ -721,7 +774,7 @@ export function install(rt) {
   // A Session of a Bot's own chat, of a group or of a task, as DSH opens it or as the
   // presets change.
   async function reapply(session) {
-    if (rt.readOnly() !== undefined) return
+    if (rt.readOnly() !== undefined && taskOf(session.id)?.botBound !== true) return
     // Not awaited first: the first preset must still land within DSH's announce.
     if (taskOf(session.id) !== undefined) return applyTaskPermission(session.id, session)
     const group = rt.groupOwners.get(session.id)
@@ -772,8 +825,8 @@ export function install(rt) {
   // group's, a Bot's. No `level` when the owner has none of its own, or is gone.
   function wantedBy(sessionId) {
     const service = presets()
-    if (service === undefined) return {}
     const task = taskOf(sessionId)
+    if (service === undefined) return task?.botBound === true ? { task, unproven: true } : {}
     if (task !== undefined) return { ...taskRun(task, service), task }
     const group = rt.groupOwners.get(sessionId)
     const bot = rt.botOf(group?.botId ?? rt.chatOwners.get(sessionId))
@@ -811,7 +864,9 @@ export function install(rt) {
   async function levelHolds(exec) {
     if (unapplied.size === 0) return
     // No presets service any more: no level is set anywhere, so none is missed.
-    if (presets() === undefined) return unapplied.clear()
+    if (presets() === undefined) {
+      for (const id of unapplied.keys()) if (taskOf(id)?.botBound !== true) unapplied.delete(id)
+    }
     const sessionId = markedFor(exec?.agent)
     if (sessionId === undefined) return
     const own = sessionId === (exec.agent?.id ?? exec.agent?.session?.id) ? exec.agent?.session : undefined
@@ -865,7 +920,7 @@ export function install(rt) {
   // first preset is set within DSH's announce, before the Session is published; the
   // rest is async, and DSH only logs a rejection.
   ctx.on('session/created', (session) => {
-    if (presets() === undefined) return undefined
+    if (presets() === undefined && taskOf(session.id)?.botBound !== true) return undefined
     const run = () => reapply(session).catch(warnNotApplied(session.id))
     return rt.chatOwners.has(session.id) || rt.groupOwners.has(session.id) || taskOf(session.id) !== undefined ? run() : rt.load().then(run)
   })
@@ -873,9 +928,9 @@ export function install(rt) {
   // in one tick, so one DSH moved off Auto runs as workspace-write, not full access. An
   // idle Session is left closed.
   ctx.on('permission-presets/catalog-changed', async () => {
-    if (presets() === undefined) return
     await rt.load()
-    await Promise.all(ctx.sessions.list().map(session => reapply(session).catch(warnNotApplied(session.id))))
+    await Promise.all((ctx.sessions?.list?.() ?? []).filter(session => presets() !== undefined || taskOf(session.id)?.botBound === true)
+      .map(session => reapply(session).catch(warnNotApplied(session.id))))
   })
 
   // DSH will not reopen a Session whose log holds Auto while Auto review's layer is off

@@ -32,7 +32,7 @@ const OLD_TASK_GATE = 'Only a Main Bot or the Omni Bot starts tasks. Ask one of 
 const TASK_GRANT = "Starting tasks is not allowed for this Bot yet. The person can allow it in this Bot's Details, under Role."
 const MODEL_GRANT = 'Naming a model for a task is not allowed for this Bot, so it can name no model now. Leave out model to run the task on your own model, or ask the person to allow it in your Details, under Role.'
 const OFF_CLI = "This Bot has Full access on its coding CLI, so its task cannot run on another agent's model. Name a model of the same agent, or leave out model."
-const START_CHANGED = 'The start changed while it was being prepared (a grant, the role, the review guard, the permission level or the Bot), so no turn was sent. Ask again.'
+const START_CHANGED = 'The start changed while it was being prepared (a grant, the role, the review guard, the permission level, the Bot or the model catalog), so no turn was sent. Ask again.'
 const LEVEL_UNPROVEN = "The task's permission level could not be proven no wider than this Bot's and this conversation's, so it did not start."
 const modelUnavailable = model => `The model ${model} cannot run a task now.`
 const unknownModel = model => `The model ${model} is not in the list of models.`
@@ -202,7 +202,8 @@ export function install(rt) {
   // A Session of a DSH bot starts in its folder with its preset; a task's comes from the caller.
   function createAgentSession(agentId, workspaceId, options, creation) {
     const launch = state.agents?.[agentId]?.kind === TASKS ? taskLaunch(options?.botId) : undefined
-    return allocateAgentSession(agentId, workspaceId, options, creation, launch)
+    const allocate = () => allocateAgentSession(agentId, workspaceId, options, creation, launch)
+    return launch === undefined ? allocate() : settleTaskAllocation(launch, allocate)
   }
 
   async function allocateAgentSession(agentId, workspaceId, options = {}, creation, launch) {
@@ -210,6 +211,7 @@ export function install(rt) {
     try {
       writeCheck()
       let agent = record(agentId)
+      if (launch !== undefined) launch.agent = agent
       if (agent.kind === DSH_BOT) {
         if (agent.workDir !== undefined && !(await rt.isFolder(agent.workDir))) throw refusal(`The folder ${agent.workDir} of ${agent.name} is gone. Pick another in its settings.`)
         options = { cwd: agent.workDir, agentPreset: agent.profile }
@@ -226,24 +228,22 @@ export function install(rt) {
         : { workspaceId: typeof workspaceId === 'string' && ctx.workspaceRegistry.get(workspaceId) ? workspaceId : await rt.ensureWorkspace() }
       const preset = await servedPreset(agentPreset)
       const scopeReservation = readScopeSource === undefined ? undefined : await rt.reserveReadScope(readScopeSource)
+      if (launch !== undefined) launch.scopeId = scopeReservation
       const reserved = scopeReservation ?? creation?.reservedSessionId
       rt.assertShellChoice?.(undefined, botId)
       let sessionId
-      try { launch?.check() } catch (error) {
-        if (scopeReservation !== undefined) await rt.forgetReadScopes([scopeReservation]).catch(() => {})
-        throw error
-      }
+      launch?.check()
       try {
         if (creation !== undefined) creation.started = true
         const created = await ctx.sessionController.create({ ...place, ...(preset ? { agentPreset: preset } : {}), ...(reserved === undefined ? {} : { sessionId: reserved }) })
         sessionId = created.sessionId
+        if (launch !== undefined) launch.sessionId = sessionId
         if (scopeReservation !== undefined && sessionId !== scopeReservation) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
       } catch (error) {
-        if (creation !== undefined) {
-          // Native creation can allocate and then fail workspace attachment.
-          const actual = error?.code === 'session/workspace-attach-failed' ? error.details?.sessionId : undefined
-          await publishCreation(creation, 'failed', actual)
-        }
+        // Native creation can allocate and then fail workspace attachment.
+        const actual = error?.code === 'session/workspace-attach-failed' ? error.details?.sessionId : undefined
+        if (launch !== undefined && typeof actual === 'string') launch.sessionId = actual
+        if (creation !== undefined) await publishCreation(creation, 'failed', actual)
         throw error
       }
       if (creation === undefined) agent.sessions.push(sessionId)
@@ -261,7 +261,7 @@ export function install(rt) {
       await rt.save({ required: creation !== undefined })
       // agent/created fired before the session joined the index, so restrict again now.
       await restrictTeamTools(await rt.resolveAgent(sessionId))
-      if (launch !== undefined) await checkAllocatedTask(sessionId, launch)
+      launch?.check()
       return sessionId
     } finally { leave() }
   }
@@ -422,10 +422,10 @@ export function install(rt) {
       try { await recovering } finally { recovering = undefined }
     } finally { leave() }
   }
-  rt.load = async () => { await load(); await recoverCreations() }
+  rt.load = async () => { await load(); await recoverCreations(); await recoverTaskStarts() }
   // Some later modules memoize load for their own startup. Refresh remains the
   // request lifecycle retry point after writer authority or archival recovers.
-  rt.refresh = async () => { await refresh(); await recoverCreations() }
+  rt.refresh = async () => { await refresh(); await recoverCreations(); await recoverTaskStarts() }
 
   async function addAgent(fields) {
     const leave = rt.enterOwnership?.() ?? (() => {})
@@ -494,9 +494,10 @@ export function install(rt) {
     return agent
   }
 
-  async function archiveRecordedSession(sessionId) {
+  async function archiveRecordedSession(sessionId, options) {
     try {
-      await ctx.workspaceRegistry.archiveSession(sessionId)
+      if (options === undefined) await ctx.workspaceRegistry.archiveSession(sessionId)
+      else await ctx.workspaceRegistry.archiveSession(sessionId, options)
     } catch (error) {
       // An owned reference can outlive its DSH Session. Only DSH's explicit absence
       // error for this exact Session permits dropping it; storage and active-Session
@@ -893,7 +894,8 @@ export function install(rt) {
   // A fresh task Session with a title; automations that run "a new DSH session" use it too.
   // Another plugin may give it a folder (`cwd`) and a DSH agent preset of its own.
   function createTaskSession(title, options) {
-    return allocateTaskSession(title, options, taskLaunch(options?.botId))
+    const launch = taskLaunch(options?.botId)
+    return settleTaskAllocation(launch, () => allocateTaskSession(title, options, launch))
   }
 
   function taskLaunch(from, admission) {
@@ -902,6 +904,7 @@ export function install(rt) {
     const callerSessionId = rt.callerSessionId?.()
     const callerBotId = rt.callerBotId?.()
     return {
+      admission,
       check() {
         const current = callerSessionId === undefined ? undefined : rt.botOfSession?.(callerSessionId)?.id
         assertTaskGuard(callerBotId, current, from)
@@ -918,14 +921,77 @@ export function install(rt) {
     }
   }
 
-  async function archiveFailedStart(sessionId) {
-    await ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true })
-      .catch(failure => rt.warn('ds-bot: the task %s that did not start was not archived: %s', sessionId, failure))
+  const cleaningTaskStarts = new Set()
+  async function cleanTaskStart(agent, pending, { persist = false } = {}) {
+    const { sessionId, scopeId } = pending
+    const key = sessionId ?? scopeId
+    if (cleaningTaskStarts.has(key)) return
+    cleaningTaskStarts.add(key)
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    const current = () => rt.canWriteTeam() && rt.readOnly() === undefined && state.agents[agent.id] === agent
+      && agent.refusedStarts?.includes(pending)
+    try {
+      if (!current()) return
+      if (persist) {
+        // Keep the allocation owned and the cleanup retryable even if archival fails.
+        await rt.save({ required: true }).catch(error => rt.warn('ds-bot: saving refused task cleanup failed: %s', error))
+        if (!current()) return
+      }
+      if (sessionId !== undefined) await archiveRecordedSession(sessionId, { stopActivity: true })
+      if (!current()) return
+      if (scopeId !== undefined) await rt.forgetReadScopes([scopeId])
+      if (!current()) return
+      const index = agent.sessions.indexOf(sessionId)
+      if (index >= 0) agent.sessions.splice(index, 1)
+      agent.refusedStarts = agent.refusedStarts.filter(record => record !== pending)
+      if (agent.refusedStarts.length === 0) delete agent.refusedStarts
+      try {
+        await rt.save({ required: true })
+      } catch (error) {
+        if (state.agents[agent.id] === agent) {
+          (agent.refusedStarts ??= []).push(pending)
+          if (index >= 0 && !agent.sessions.includes(sessionId)) agent.sessions.splice(index, 0, sessionId)
+          rt.indexSessions()
+        }
+        throw error
+      }
+      restrictionLifts.delete(sessionId)
+    } catch (error) {
+      rt.warn('ds-bot: cleanup pending for refused task %s: %s', key, error)
+    } finally {
+      leave()
+      cleaningTaskStarts.delete(key)
+    }
   }
 
-  async function checkAllocatedTask(sessionId, launch) {
-    try { launch.check() } catch (error) {
-      await archiveFailedStart(sessionId)
+  async function recoverTaskStarts() {
+    if (rt.readOnly() !== undefined) return
+    for (const agent of Object.values(state.agents)) {
+      if (agent.kind !== TASKS || !Array.isArray(agent.refusedStarts)) continue
+      for (const pending of agent.refusedStarts) await cleanTaskStart(agent, pending)
+    }
+  }
+
+  async function settleTaskAllocation(launch, start) {
+    try {
+      return await start()
+    } catch (error) {
+      const { agent, sessionId, scopeId } = launch
+      if (agent !== undefined && state.agents[agent.id] === agent && (sessionId !== undefined || scopeId !== undefined)) {
+        const task = state.tasks?.[sessionId]
+        if (task !== undefined) {
+          const reason = String(error?.message ?? error)
+          const summary = (launch.admission === undefined ? reason : reason.split('\n')[0]).slice(0, TASK_SUMMARY_MAX)
+          Object.assign(task, { status: 'failed', endedAt: Date.now(), summary })
+          rt.endGrants?.(sessionId, 'task')
+        }
+        if (sessionId !== undefined && !agent.sessions.includes(sessionId)) agent.sessions.push(sessionId)
+        const pending = { sessionId, scopeId }
+        agent.refusedStarts ??= []
+        agent.refusedStarts.push(pending)
+        await cleanTaskStart(agent, pending, { persist: true })
+      }
+      launch.check()
       throw error
     }
   }
@@ -936,7 +1002,7 @@ export function install(rt) {
     const sessionId = await allocateAgentSession(agent.id, undefined, { cwd, agentPreset, botId, readScopeSource }, undefined, launch)
     const clean = String(title ?? '').trim().slice(0, AGENT_SESSION_TITLE_MAX)
     if (clean !== '') await renameAgentSession(agent.id, sessionId, clean).catch(error => rt.warn('ds-bot: task title not set: %s', error?.message ?? error))
-    await checkAllocatedTask(sessionId, launch)
+    launch.check()
     return sessionId
   }
 
@@ -968,13 +1034,15 @@ export function install(rt) {
         || rt.callerSessionId?.() !== sessionId || rt.groupOwners.get(sessionId)?.roomId !== roomId
         || roles?.heldOf(botId) !== held) return undefined
       const opener = rt.callerLevel({ proven: true })
+      const openerRank = rt.taskOpenerRank(opener)
       const parent = rt.callerTask?.()
-      const bound = rt.taskBound({ from: botId, roomId, levelTaskId: parent, botBound: true, permissionCap: opener })
+      const bound = rt.taskBound({ from: botId, roomId, levelTaskId: parent, botBound: true, permissionCap: opener, openerRank })
       if (bound === undefined) return undefined
       return {
         permission: bot.permission, roomPermission: roomId ? rt.roomOf(roomId)?.permission : undefined,
-        opener, ...bound, parent, ...rt.taskAskerState(bot), kind: bot.kind, name: bot.name,
+        opener, openerRank, ...bound, parent, ...rt.taskAskerState(bot), kind: bot.kind, name: bot.name,
         routes: taskRoutes(bot, rt.taskRoutePolicy).join(','),
+        catalogEpoch: rt.modelsEpoch(),
         taskGrant: roles?.grantOf(botId, 'task-start'), routeGrant: roles?.grantOf(botId, 'route-policy'),
         verdict: bot.reviewTrack?.planVerdictAt,
       }
@@ -987,7 +1055,7 @@ export function install(rt) {
       if (now === undefined || Object.keys(snapshot).some(key => snapshot[key] !== now[key])) throw refusal(START_CHANGED)
     }
     return {
-      snapshot, check, named, opener: snapshot.opener,
+      snapshot, check, named,
       applied(sessionId, session) {
         try {
           return rt.taskLevelOf(sessionId) === snapshot.level && rt.sessionLevel(session) === snapshot.level
@@ -1002,6 +1070,7 @@ export function install(rt) {
     const reasons = new Map()
     const eligible = []
     const entries = await rt.catalog({ fresh: true, remember: false })
+    admission.check()
     const remote = routeOfRef(snapshot.model ?? snapshot.appliedModel).route === 'hermes-remote'
     const model = named ? requested : remote ? (snapshot.model ?? snapshot.appliedModel) : rt.taskAskerModel(snapshot, entries)
     const routes = snapshot.routes.split(',')
@@ -1052,17 +1121,36 @@ export function install(rt) {
   // falls back to the Bot's own chat.
   // The task's Session is flagged as starting from the moment it is a task until this
   // returns or throws, whatever fails on the way (permissions.js startingSession).
-  const startTask = args => startTaskWithAdmission(args)
+  const startTask = async args => {
+    const result = await startTaskWithAdmission(args)
+    if (Object.hasOwn(result, 'flushError')) throw result.flushError
+    return result.sessionId
+  }
   async function startTaskWithAdmission(args, admission) {
+    const launch = taskLaunch(args.from, admission)
     let started
     try {
-      return await startFlagged(args, (sessionId) => { started = rt.startingSession?.(sessionId) }, admission)
+      const live = await settleTaskAllocation(launch, async () => {
+        const child = await prepareTask(args, (sessionId) => { started = rt.startingSession?.(sessionId) }, launch, admission)
+        launch.check()
+        if (admission !== undefined && !admission.applied(launch.sessionId, child.session)) throw refusal(LEVEL_UNPROVEN)
+        // DSH's turn loop reads every input's source: the instructions arrive as the user's.
+        child.followup(createUserMessage({ content: [{ type: 'text', text: args.text }], source: { kind: 'user' } }))
+        return child
+      })
+      const { sessionId } = launch
+      try {
+        const flushed = await ctx.sessions.flush(live.session)
+        return { sessionId, persistenceUncertain: flushed === false }
+      } catch (flushError) {
+        rt.warn('ds-bot: the queued turn for task %s could not be saved: %s', sessionId, flushError)
+        return { sessionId, persistenceUncertain: true, flushError }
+      }
     } finally {
       started?.()
     }
   }
-  async function startFlagged({ title, text, from, cwd, agentPreset, roomId, reportRoomId, readScopeSource = rt.callerSessionId?.() }, starting, admission) {
-    const launch = taskLaunch(from, admission)
+  async function prepareTask({ title, from, cwd, agentPreset, roomId, reportRoomId, readScopeSource = rt.callerSessionId?.() }, starting, launch, admission) {
     launch.check()
     // Read before the first await: the tool call this runs in may return before the rest.
     const opener = from === undefined ? undefined : rt.callerLevel?.()
@@ -1092,7 +1180,7 @@ export function install(rt) {
     starting(sessionId)
     tasks()[sessionId] = { title: String(title).slice(0, AGENT_SESSION_TITLE_MAX), from, at: Date.now(), status: 'working', ...(roomId ? { roomId } : {}), ...(reportRoom !== undefined && !roomId ? { reportRoomId: reportRoom.id } : {}), ...(levelRoomId ? { levelRoomId } : {}), ...(levelTaskId ? { levelTaskId } : {}) }
     if (admission === undefined) rt.capTaskByOpener?.(tasks()[sessionId], opener)
-    else Object.assign(tasks()[sessionId], { botBound: true, permissionCap: admission.opener })
+    else Object.assign(tasks()[sessionId], { botBound: true, permissionCap: admission.snapshot.opener, openerRank: admission.snapshot.openerRank })
     if (autoOpener !== undefined && autoOpener.botId === from && !roomId && !levelRoomId && !levelTaskId) Object.assign(tasks()[sessionId], { auto: autoOpener.route, autoRev: autoOpener.rev })
     // Only TASKS_KEPT ended tasks are remembered for their reports. The ended ones go first,
     // the one that ended longest ago first: a long task that just ended is fresh news.
@@ -1101,7 +1189,8 @@ export function install(rt) {
     // dropping it would lift the tools/execute guard for that Session (#584, L4). The cap
     // is a bound on ended history; working records are bounded by what the host can run.
     const all = Object.entries(tasks())
-    const ended = all.filter(([, task]) => task.status !== 'working').sort(([, a], [, b]) => endOf(a) - endOf(b))
+    const ended = all.filter(([id, task]) => task.status !== 'working'
+      && !launch.agent.refusedStarts?.some(pending => pending.sessionId === id)).sort(([, a], [, b]) => endOf(a) - endOf(b))
     // The level each forgotten task ran at is read while it is still a task.
     // An ended task a working task descends from is kept past the cap while that one works:
     // its level bounds the working one, read live. The next oldest go in its place. At most
@@ -1141,51 +1230,33 @@ export function install(rt) {
     // A task whose level did not hold takes no turn: the default it would run at may be
     // wider. It ends as failed, so nothing resumes it, and its Session is archived, so
     // nothing is typed into it at that default either.
-    try {
-      if (admission !== undefined) {
-        launch.check()
-        const { model, eligible, entry } = admission
-        const target = splitRef(model)
-        let actual
-        try {
-          const effort = await rt.desiredEffort(caller, model, entry)
-          launch.check()
-          actual = (await rt.selectSessionModel(sessionId, { ...target, ...(effort === undefined ? {} : { reasoningEffort: effort }) }))?.selected
-        } catch {
-          launch.check()
-          throw modelRefusal(`${model} could not be selected for the task.`, eligible, model)
-        }
-        launch.check()
-        if (actual?.provider !== target.provider || actual?.model !== target.model) {
-          throw modelRefusal(`${model} could not be selected for the task.`, eligible, model)
-        }
-        live = await rt.resolveAgent(sessionId)
-      }
-      await rt.applyTaskPermission(sessionId, live.session, { start: true })
-      // At Full access with its Bot's coding CLI not served, or not selected just above: not
-      // started on another model.
-      if (admission === undefined) await rt.assertNotOffCli(state.bots?.[from], sessionId, live.session, { unselected: !selected })
-      // The Session existed before the task record did. Bind its tool deny list before its first turn.
-      await rt.applyToolDeny?.(caller, [sessionId])
-        .catch(error => rt.warn('ds-bot: the task keeps tools %s denies: %s', caller?.name ?? from, error?.message ?? error))
+    if (admission !== undefined) {
       launch.check()
-      if (admission !== undefined && !admission.applied(sessionId, live.session)) throw refusal(LEVEL_UNPROVEN)
-    } catch (error) {
-      // A concurrent guard change takes precedence over a stale model/permission failure.
-      let refused = error
-      try { launch.check() } catch (changed) { refused = changed }
-      const reason = String(refused?.message ?? refused)
-      const summary = (admission === undefined ? reason : reason.split('\n')[0]).slice(0, TASK_SUMMARY_MAX)
-      Object.assign(tasks()[sessionId] ?? {}, { status: 'failed', endedAt: Date.now(), summary })
-      rt.endGrants?.(sessionId, 'task')
-      await rt.save().catch(failure => rt.warn('ds-bot: saving a task failed: %s', failure))
-      await archiveFailedStart(sessionId)
-      throw refused
+      const { model, eligible, entry } = admission
+      const target = splitRef(model)
+      let actual
+      try {
+        const effort = await rt.desiredEffort(caller, model, entry)
+        launch.check()
+        actual = (await rt.selectSessionModel(sessionId, { ...target, ...(effort === undefined ? {} : { reasoningEffort: effort }) }))?.selected
+      } catch {
+        launch.check()
+        throw modelRefusal(`${model} could not be selected for the task.`, eligible, model)
+      }
+      launch.check()
+      if (actual?.provider !== target.provider || actual?.model !== target.model) {
+        throw modelRefusal(`${model} could not be selected for the task.`, eligible, model)
+      }
+      live = await rt.resolveAgent(sessionId)
     }
-    // DSH's turn loop reads every input's source: the instructions arrive as the user's.
-    live.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
-    await ctx.sessions.flush(live.session)
-    return sessionId
+    await rt.applyTaskPermission(sessionId, live.session, { start: true })
+    // At Full access with its Bot's coding CLI not served, or not selected just above: not
+    // started on another model.
+    if (admission === undefined) await rt.assertNotOffCli(state.bots?.[from], sessionId, live.session, { unselected: !selected })
+    // The Session existed before the task record did. Bind its tool deny list before its first turn.
+    await rt.applyToolDeny?.(caller, [sessionId])
+      .catch(error => rt.warn('ds-bot: the task keeps tools %s denies: %s', caller?.name ?? from, error?.message ?? error))
+    return live
   }
 
   // A task's first turn ends: its last words go to the Bot that asked, once.
@@ -1319,6 +1390,7 @@ export function install(rt) {
       const legacy = !named && self !== undefined && (rt.isMain(self) || rt.botOf(self)?.kind === OMNI_KIND)
       const title = String(args.title ?? '').trim()
       const text = String(args.instructions ?? '').trim()
+      let admission
       // Called in a group, the task belongs to that group: its report goes back there.
       try {
         assertTaskGuard(rt.botOfSession?.(callerSession, exec.agent)?.id, self)
@@ -1333,13 +1405,24 @@ export function install(rt) {
         }
         if (title === '' || text === '') return 'A task needs a title and instructions.'
         const roomId = rt.groupOwners.get(callerSession)?.roomId
-        const admission = legacy ? undefined : await taskModels(taskAdmission(self, callerSession, roomId, named), args.model)
+        if (!legacy) {
+          admission = taskAdmission(self, callerSession, roomId, named)
+          admission = await taskModels(admission, args.model)
+        }
         const readScopeSource = exec.agent?.session?.id ?? rt.callerSessionId?.() ?? callerSession
-        const sessionId = await startTaskWithAdmission({ title, text, from: self, roomId, readScopeSource }, admission)
+        const { sessionId, persistenceUncertain } = await startTaskWithAdmission({ title, text, from: self, roomId, readScopeSource }, admission)
+        if (persistenceUncertain) return `The first turn was queued for task "${title.slice(0, AGENT_SESSION_TITLE_MAX)}" in Session ${sessionId}. DeepSeek Harness could not confirm that it saved the turn.`
         const cap = state.tasks?.[sessionId]?.permissionCap
         const level = admission === undefined ? cap : admission.snapshot.level
         return `Started task "${title.slice(0, AGENT_SESSION_TITLE_MAX)}" (${sessionId}) under your row.${named ? ` It runs on ${admission.model}.` : ''}${level ? ` It runs at the ${level} permission level, no wider than this conversation.` : ''} Its result comes back to you as a message; do not wait or poll.`
-      } catch (error) {
+      } catch (failure) {
+        let error = failure
+        // Allocation cleanup can await storage and archival. Check live authority
+        // at the response boundary before revealing the model choices.
+        try {
+          assertTaskGuard(rt.botOfSession?.(callerSession, exec.agent)?.id, self)
+          admission?.check()
+        } catch (changed) { error = changed }
         if (error?.taskStop) rt.noteStop?.(callerSession, { why: error.taskStop, tool: 'start_task', callId: exec.callId, text: error.message }, exec.agent)
         return `The task did not start: ${error?.message ?? error}`
       }

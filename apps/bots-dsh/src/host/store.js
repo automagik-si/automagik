@@ -590,12 +590,15 @@ export function install(rt) {
     // Unnamed groups from before names followed their members may still list old names.
     const stale = Object.values(state.rooms).filter(room => !room.named && room.name !== rt.autoRoomName(room.members))
     for (const room of stale) room.name = rt.autoRoomName(room.members)
+    // An explicit policy permanently supersedes a fresh team's install seed.
+    const retiredSeed = writer && !aside && rt.config?.routePolicy !== undefined && Object.hasOwn(state, 'taskRoutePolicySeed')
+    if (retiredSeed) delete state.taskRoutePolicySeed
     indexSessions()
     rt.solverSettle?.adopted()
     rt.hostAuthority?.restore()
     teamRead = valid
     if (lockEpoch > 1) rt.connectorStateChanged?.()
-    return { migrated: migrated || stale.length > 0, stale }
+    return { migrated: migrated || stale.length > 0, stale, retiredSeed }
   }
 
   const load = () => loaded ??= (async () => {
@@ -603,28 +606,21 @@ export function install(rt) {
     if (holder !== undefined) warn('ds-bot: %s', readOnly())
     const parsed = readFileState()
     teamPresentAtLoad = parsed !== undefined ? true : stuck === undefined && !aside ? false : null
-    const { migrated, stale } = adopt(parsed)
+    const { migrated, stale, retiredSeed } = adopt(parsed)
     if (holder !== undefined) return
-    // Install defaults belong to a new team's saved configuration. Once an
-    // explicit policy takes over, removing it must not restore the seed.
-    const explicitTaskPolicy = rt.config?.routePolicy !== undefined
-    if (teamPresentAtLoad === false && !explicitTaskPolicy) state.taskRoutePolicySeed = TASK_ROUTE_DEFAULT
-    const retiredSeed = explicitTaskPolicy && Object.hasOwn(state, 'taskRoutePolicySeed')
-    if (retiredSeed) delete state.taskRoutePolicySeed
+    if (teamPresentAtLoad === false && rt.config?.routePolicy === undefined) state.taskRoutePolicySeed = TASK_ROUTE_DEFAULT
     // A file set aside just now stays where it is: the person's bytes were copied, and the
     // fresh team reaches the disk on the next real save rather than within this read.
     if ((migrated || retiredSeed) && stuck === undefined && !aside) {
       // A failed write must not poison `loaded`: the migrated state stays in
       // memory and the next save() writes it.
-      try {
-        await save()
-      } catch (error) {
-        warn('omni-ui: saving the migrated Bot team failed: %s', error)
-      }
+      await saveAdoption(retiredSeed)
     }
     // Not awaited: renaming a session must not hold up the first roster read.
     for (const room of stale) void rt.retitleRoom(room)
   })()
+
+  const saveAdoption = required => save({ required }).catch(error => warn('omni-ui: saving the migrated Bot team failed: %s', error))
 
   // An outside edit of state.json while this host held the lock, found at a
   // reclaim or by a queued write that saw the file change: this host's in-memory
@@ -654,11 +650,13 @@ export function install(rt) {
           warn('ds-bot: %s changed while no host held the team; it is adopted, and this host\'s state is lost because it could not be kept aside: %s', statePath, error)
         }
       }
-      adopt(readFileState())
+      const { retiredSeed } = adopt(readFileState())
       recoveryPending = false
+      return retiredSeed
     })
     writing = run.catch(() => {})
-    const tracked = run.finally(() => { if (adopting === tracked) adopting = undefined })
+    const tracked = run.then(retiredSeed => retiredSeed ? saveAdoption(true) : undefined)
+      .finally(() => { if (adopting === tracked) adopting = undefined })
     adopting = tracked
     return tracked
   }
@@ -682,7 +680,8 @@ export function install(rt) {
       if (holder === undefined) {
         warn('omni-ui: the other dsh has closed; this one now saves the Bot team')
         warnedReadOnly = false
-        adopt(readFileState())
+        const { retiredSeed } = adopt(readFileState())
+        if (retiredSeed) await saveAdoption(true)
         lockGained()
         return
       }

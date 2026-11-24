@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -158,7 +158,7 @@ async function fixture(t, { routePolicy, fresh = false, catalogSolver = false, r
     await rt.installRole(roleId)
     for (const id of ids) await rt.attachRole(id, roleId)
   }
-  return { ...h, agentOf, created, dispatched, archived, stops, selected, level, permissions,
+  return { ...h, agentOf, created, dispatched, archived, stops, selected, level, permissions, spec,
     execute, hostTool, grant, attach, launchHost, stateFile }
 }
 
@@ -430,4 +430,170 @@ test('verified bundled Solver can grant task-start through Details while a catal
   assert.equal(runner.rt.roleRuntime.heldOf('solver').runtime, undefined)
   assert.deepEqual(runner.rt.roleRuntime.view().solver.capabilities, grants)
   await runner.grant('solver', 'task-start')
+})
+
+test('D3 correction: the original opener ceiling survives renamed and widened presets and holds with no safe offer', async t => {
+  const h = await fixture(t)
+  await h.attach()
+  await h.grant('solver', 'task-start')
+  const original = { ...h.spec[READ] }
+  h.spec.opener = original
+  h.level.set('solver', 'opener')
+  assert.match(await h.execute('solver'), /^Started task/)
+  const [id] = h.created
+
+  // Reopen the saved team with the original name redefined and an equally narrow replacement.
+  await h.ctx.dispose()
+  h.spec.opener = h.spec[FULL]
+  delete h.spec[READ]
+  h.spec.renamed = original
+  const reopened = h.launchHost({})
+  await reopened.rt.load()
+  const session = h.agentOf(id).session
+  await reopened.rt.applyTaskPermission(id, session)
+  assert.equal(h.level.get(id), 'renamed')
+
+  // A removed preset cannot let even the narrowest remaining offer exceed the original cap.
+  delete h.spec.opener
+  delete h.spec.renamed
+  await assert.rejects(reopened.rt.applyTaskPermission(id, session))
+  assert.equal(h.level.get(id), 'renamed')
+  assert.equal(reopened.rt.levelHeldFor(id), true)
+  await assert.rejects(reopened.rt.levelHolds({ agent: h.agentOf(id) }), /no tool runs here/)
+
+  h.spec.renamed = original
+  await reopened.rt.applyTaskPermission(id, session)
+  assert.equal(h.level.get(id), 'renamed')
+  assert.equal(reopened.rt.levelHeldFor(id), false)
+})
+
+test('D3 correction: cleanup can revoke retry-list authority or engage the guard before the response', async t => {
+  for (const guarded of [false, true]) {
+    const h = await fixture(t, { routePolicy: { default: ['native', 'acp'] } })
+    await h.attach()
+    for (const capability of grants) await h.grant('solver', capability)
+    h.ctx.sessionController.selectModel = async () => ({ selected: { provider: 'native-a', model: 'one' } })
+    const archive = h.ctx.workspaceRegistry.archiveSession
+    h.ctx.workspaceRegistry.archiveSession = async (...args) => {
+      await archive(...args)
+      await h.grant('solver', guarded ? 'route-policy' : 'task-start', false)
+      if (guarded) h.rt.botOf('solver').reviewGuard = true
+    }
+    const result = await h.execute('solver', { ...task, model: 'acp-codex/two' })
+    assert.match(result, guarded ? guard : changed)
+    assert.doesNotMatch(result, /Models you may name|acp-codex\/two/)
+    if (guarded) assert.equal(h.stops.at(-1).why, 'guard-launch')
+    assert.deepEqual(h.dispatched, [])
+  }
+})
+
+test('D3 correction: a read-only host retires the explicit policy seed durably when it takes over', async t => {
+  const h = await fixture(t, { fresh: true })
+  const seeded = JSON.parse(await readFile(h.stateFile, 'utf8'))
+  assert.ok(seeded.taskRoutePolicySeed)
+  await h.ctx.dispose()
+  const lock = join(h.rt.home, 'state.lock')
+  await writeFile(lock, JSON.stringify({ token: 'fixture-writer', host: 'fixture-remote', pid: 1 }))
+  const successor = h.launchHost({ routePolicy: {} })
+  await successor.rt.load()
+  assert.ok(successor.rt.readOnly())
+  assert.deepEqual(JSON.parse(await readFile(h.stateFile, 'utf8')), seeded)
+
+  await unlink(lock)
+  await successor.rt.refresh()
+  assert.equal(successor.rt.readOnly(), undefined)
+  assert.equal(Object.hasOwn(JSON.parse(await readFile(h.stateFile, 'utf8')), 'taskRoutePolicySeed'), false)
+  await successor.ctx.dispose()
+  const missing = h.launchHost({})
+  await missing.rt.load()
+  assert.equal(missing.rt.taskRoutePolicy, undefined)
+})
+
+test('D3 correction: a changed catalog generation invalidates choices, allocation and first dispatch', async t => {
+  const h = await fixture(t, { routePolicy: { default: ['native', 'acp'] } })
+  await h.attach()
+  for (const capability of grants) await h.grant('solver', capability)
+  const invalidate = async () => {
+    for (const fn of h.ctx.listeners.get('llm/adapters-updated')) await fn()
+  }
+  h.rt.catalog = async () => { await invalidate(); return models }
+  const result = await h.execute('solver', { ...task, model: 'missing' })
+  assert.match(result, changed)
+  assert.doesNotMatch(result, /Models you may name/)
+  assert.deepEqual(h.created, [])
+
+  h.rt.catalog = async () => models
+  const folder = h.rt.isFolder
+  h.rt.isFolder = async dir => { await invalidate(); return folder(dir) }
+  assert.match(await h.execute('solver'), changed)
+  assert.deepEqual(h.created, [])
+
+  h.rt.isFolder = folder
+  const select = h.ctx.sessionController.selectModel
+  h.ctx.sessionController.selectModel = async args => { await invalidate(); return select(args) }
+  assert.match(await h.execute('solver'), changed)
+  assert.equal(h.created.length, 1)
+  assert.deepEqual(h.archived, [[h.created[0], { stopActivity: true }]])
+  assert.deepEqual(h.dispatched, [])
+})
+
+test('D3 correction: an allocation failure retains the actual Session for retry, then removes just its Tasks membership and scope', async t => {
+  const h = await fixture(t)
+  await h.attach()
+  await h.grant('solver', 'task-start')
+  assert.match(await h.execute('solver'), /^Started task/)
+  const [kept] = h.created
+  const scopeDir = join(h.rt.home, 'session-read-scopes')
+  const scopedIds = async () => (await Promise.all((await readdir(scopeDir)).map(async file =>
+    JSON.parse(await readFile(join(scopeDir, file), 'utf8')).id))).sort()
+  const baseline = await scopedIds()
+  assert.ok(baseline.includes(kept))
+  let reserved
+  const actual = 'session-allocated-before-attach-failed'
+  h.ctx.sessionController.create = async ({ sessionId }) => {
+    reserved = sessionId
+    h.created.push(actual)
+    h.agentOf(actual, FULL)
+    throw Object.assign(new Error('workspace attachment failed'), {
+      code: 'session/workspace-attach-failed', details: { sessionId: actual },
+    })
+  }
+  const attempts = []
+  h.ctx.workspaceRegistry.archiveSession = async (id, options) => {
+    attempts.push([id, options])
+    throw new Error('archive unavailable')
+  }
+  assert.match(await h.execute('solver'), /workspace attachment failed/)
+  assert.deepEqual(attempts, [[actual, { stopActivity: true }]])
+  const members = rt => Object.values(rt.state.agents).find(agent => agent.kind === 'tasks').sessions
+  assert.deepEqual(members(h.rt), [kept, actual])
+  assert.ok((await scopedIds()).includes(reserved))
+  assert.deepEqual(h.dispatched, [kept])
+
+  await h.ctx.dispose()
+  const reopened = h.launchHost({})
+  await reopened.rt.load()
+  assert.deepEqual(h.archived, [[actual, { stopActivity: true }]])
+  assert.deepEqual(members(reopened.rt), [kept])
+  assert.deepEqual(await scopedIds(), baseline)
+  const saved = JSON.parse(await readFile(h.stateFile, 'utf8'))
+  assert.deepEqual(members({ state: saved }), [kept])
+})
+
+test('D3 correction: either uncertain flush result acknowledges the queued turn and existing Session', async t => {
+  const h = await fixture(t)
+  await h.attach()
+  await h.grant('solver', 'task-start')
+  for (const flush of [async () => false, async () => { throw new Error('disk unavailable') }]) {
+    h.ctx.sessions.flush = flush
+    const result = await h.execute('solver')
+    const id = h.created.at(-1)
+    assert.ok(result.includes(id), result)
+    assert.match(result, /turn was queued.*could not confirm.*saved/i)
+    assert.doesNotMatch(result, /did not start|ask again|try again|retry/i)
+    assert.equal(h.rt.state.tasks[id].status, 'working')
+  }
+  assert.equal(h.created.length, 2)
+  assert.deepEqual(h.dispatched, h.created)
+  assert.deepEqual(h.archived, [])
 })
