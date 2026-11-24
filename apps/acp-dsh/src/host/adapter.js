@@ -129,6 +129,7 @@ const STOPPED = () => finish('aborted', 'Stopped', 'ABORTED')
 // Thrown out of a Codex start to run the turn again as a kept one from the start's catch, never
 // inside its `try`: an error of that turn is never a connector failure (no rollback, no repair).
 const KEPT_RELAUNCH = Symbol('acp-dsh kept relaunch')
+const ARCHIVED = Symbol('archived Session')
 
 /**
  * What the person reads when the agent did not answer in time. A start that hangs is usually a
@@ -725,6 +726,12 @@ export class AcpAdapter extends LlmAdapter {
     this.offResult = this.ctx.on?.('tools/result', exec => this.refusedFirst(exec))
     // No prepend: this must run after Auto review's prepended gate lets the call through.
     this.offReviewed = this.ctx.on?.('tools/pre-execute', (exec, next) => this.reviewedGate(exec, next))
+    // DSH emits this after each new durable archive, whether from the UI (with or without
+    // Stop), Bot Delete, group delete or bulk removal. Retire only that Session's run,
+    // cutting off any reply in flight. Idle unarchived Sessions keep their runs.
+    this.offArchived = this.ctx.on?.('workspace/session-archived', ({ sessionId } = {}) => {
+      if (sessionId !== undefined) this.archiveSession(sessionId)
+    })
   }
 
   /**
@@ -1044,14 +1051,15 @@ export class AcpAdapter extends LlmAdapter {
 
   /**
    * End one agent session now: its process, its bridge credential and its place in `live`. The
-   * DSH Session keeps its transcript, so the next turn starts a new agent session and the
-   * replay carries the chat to it.
+   * DSH Session keeps its transcript. The next turn starts a new agent session and
+   * replays the chat if replay is enabled and the history is eligible.
    */
   end(sessionId, live, { preserveFiles = false } = {}) {
+    const owner = this.live.get(sessionId) === live ? this.sessionFiles.owners.get(sessionId) : live.fileOwner
     const upload = this.starting.get(sessionId)?.upload
-    if (upload && upload.run === live.run) upload.controller.abort()
-    if (!preserveFiles) this.sessionFiles.clear(sessionId, { retire: false })
-    const bridge = live.bridge
+    const { bridge, run } = live
+    if (upload && upload.live === live && upload.run === run) upload.controller.abort()
+    if (!preserveFiles && owner !== undefined) this.sessionFiles.clear(sessionId, { owner, retire: false })
     if (bridge !== undefined && bridge.calls > 0 && bridge.drained === undefined) {
       const hold = guardSession(live.dshAgent?.session ?? bridge.agent?.session)
       bridge.drained = () => hold?.release()
@@ -1061,9 +1069,37 @@ export class AcpAdapter extends LlmAdapter {
     live.reaping = undefined
     live.open = false
     live.substitution = undefined
-    live.run?.dispose()
-    if (live.bridge !== undefined) this.backchannel?.revoke(live.bridge)
+    run?.dispose()
+    if (bridge !== undefined) this.backchannel?.revoke(bridge)
     if (this.live.get(sessionId) === live) this.live.delete(sessionId)
+  }
+
+  isArchived(sessionId) {
+    try {
+      return this.ctx.get?.('workspaceRegistry')?.archivedSessionIds?.includes(sessionId) === true
+    } catch {
+      // The registry can be unavailable while the workspace service is activating.
+      return false
+    }
+  }
+
+  archiveSession(sessionId) {
+    const entry = this.starting.get(sessionId)
+    const live = this.live.get(sessionId)
+    const run = live?.run
+    const owner = this.sessionFiles.owners.get(sessionId)
+    if (entry !== undefined) {
+      entry.archived = true
+      this.starting.delete(sessionId)
+    }
+    if (live !== undefined) live.archived = true
+    entry?.upload?.controller.abort()
+    if (owner !== undefined) this.sessionFiles.clear(sessionId, { owner, retire: false })
+    if (live !== undefined) {
+      this.end(sessionId, live, { preserveFiles: true })
+      // A reader can finish before the child exits.
+      run?.push({ type: 'aborted' })
+    }
   }
 
   /**
@@ -1308,7 +1344,7 @@ export class AcpAdapter extends LlmAdapter {
    * Stop, ends the wait for all of them.
    */
   async refork(agent, live, dshAgent, signal) {
-    const previous = live.bridge
+    const { bridge: previous, run } = live
     const next = this.backchannel.mint({
       sessionId: dshAgent?.session?.id,
       agent: dshAgent,
@@ -1320,7 +1356,7 @@ export class AcpAdapter extends LlmAdapter {
     // The source is done running tools before the fork starts.
     this.backchannel.revoke(previous)
     try {
-      await live.run.held(() => live.run.fork({
+      await run.held(() => run.fork({
         // An OFF Codex forks where its tools were checked.
         cwd: live.nativeOff === true && typeof live.checkedCwd === 'string' ? live.checkedCwd
           : dshAgent?.session?.header?.cwd ?? homedir(),
@@ -1333,8 +1369,9 @@ export class AcpAdapter extends LlmAdapter {
       live.bridge = previous
       this.backchannel.revoke(next)
       this.timers.clearTimeout(live.reaper)
-      live.run.dispose()
-      this.live.delete(dshAgent?.session?.id ?? '')
+      run.dispose()
+      const sessionId = dshAgent?.session?.id
+      if (this.live.get(sessionId) === live) this.live.delete(sessionId)
       if (previous !== undefined) this.backchannel.revoke(previous)
       throw error
     }
@@ -1471,29 +1508,46 @@ export class AcpAdapter extends LlmAdapter {
   // One model step. The turn that is starting there is tracked from here to the step's last
   // exit (`starting`), whichever way it leaves: a refusal, a failure, a stop, its end.
   async *stream(options) {
-    if (this.sessionFiles.owners.get(options.sessionId)?.grant && this.starting.has(options.sessionId)) {
+    const { sessionId, signal } = options
+    const fileOwner = this.sessionFiles.owners.get(sessionId)
+    // Latch durable membership at admission, before the first await. Undo can remove
+    // the id before this step resumes, but only a fresh entry may start afterward.
+    const entry = { held: undefined, archived: this.isArchived(sessionId), fileOwner, fileLive: this.live.get(sessionId) }
+    if (!entry.archived && fileOwner?.grant && this.starting.has(sessionId)) {
       return yield finish('error', 'The image session is already starting. Wait for that message to finish.')
     }
-    const entry = { held: undefined }
     const stopFiles = () => {
-      if (this.sessionFiles.owners.has(options.sessionId)) this.endSession(options.sessionId, 'The image session was stopped.')
+      // Stop and archive can abort the turn after persisting the archive, before the event.
+      entry.archived ||= this.isArchived(sessionId)
+      if (entry.archived) return
+      if (entry.fileOwner === undefined || this.sessionFiles.owners.get(sessionId) !== entry.fileOwner) return
+      const current = this.live.get(sessionId)
+      const starting = this.starting.get(sessionId)
+      if (current !== undefined && current !== entry.fileLive) return
+      if (starting !== undefined && starting !== entry) return
+      const why = 'The image session was stopped.'
+      entry.held ??= why
+      this.endSession(sessionId, why, undefined, candidate => candidate === entry || candidate === entry.fileLive)
     }
-    options.signal?.addEventListener('abort', stopFiles, { once: true })
-    if (options.signal?.aborted) stopFiles()
+    signal?.addEventListener('abort', stopFiles, { once: true })
+    if (signal?.aborted) stopFiles()
     try {
       yield* this.step(options, entry)
     } finally {
-      options.signal?.removeEventListener('abort', stopFiles)
-      if (entry.fileStartup && this.starting.get(options.sessionId) === entry && this.sessionFiles.owners.get(options.sessionId)?.grant
-          && (entry.upload === undefined || (this.live.get(options.sessionId) === entry.upload.live
-            && entry.upload.live.run === entry.upload.run))) this.endSession(options.sessionId)
-      if (this.starting.get(options.sessionId) === entry) this.starting.delete(options.sessionId)
+      signal?.removeEventListener('abort', stopFiles)
+      if (!entry.archived && entry.fileStartup && this.starting.get(sessionId) === entry
+          && entry.fileOwner?.grant && this.sessionFiles.owners.get(sessionId) === entry.fileOwner
+          && (entry.upload === undefined || (this.live.get(sessionId) === entry.upload.live
+            && entry.upload.live.run === entry.upload.run))) this.endSession(sessionId)
+      if (this.starting.get(sessionId) === entry) this.starting.delete(sessionId)
     }
   }
 
   async *step(options, entry) {
     const agent = this.agents.get(options.provider)
-    if (agent === undefined) return yield finish('error', `No ACP agent is set up as ${options.provider}`, 'NO_ADAPTER')
+    if (agent === undefined) {
+      return yield entry.archived ? finish('stop') : finish('error', `No ACP agent is set up as ${options.provider}`, 'NO_ADAPTER')
+    }
     // A title or summary DSH asks for on the side is refused at the llm/stream waterfall (aside).
     if (options.sessionId === undefined) return yield finish('error', `${agent.name} answers only in its own chat`, 'UNSUPPORTED')
     const sessionId = options.sessionId
@@ -1501,10 +1555,12 @@ export class AcpAdapter extends LlmAdapter {
     try {
       dshAgent = this.scope(sessionId)
     } catch (error) {
+      if (entry.archived) return yield finish('stop')
       return yield finish('error', `${agent.name} cannot show its tools here: ${error?.message ?? error}`, error?.code)
     }
     const blocks = new Blocks()
     let live = this.live.get(sessionId)
+    const archived = () => entry.archived || live?.archived === true
     // The agent's links to the images it saved locally leave its text before DSH writes it
     // (agent-image.js): the chat shows the image in its own card instead.
     const links = new ImageLinks(() => savedPathsOf(live?.run?.tools?.values()))
@@ -1525,15 +1581,16 @@ export class AcpAdapter extends LlmAdapter {
     // agent session there ends with the refusal.
     // The turn is starting from here: an `endSession` that lands before its prompt refuses it.
     entry.provider = options.provider
-    this.starting.set(sessionId, entry)
+    if (!entry.archived) this.starting.set(sessionId, entry)
     const started = () => { if (this.starting.get(sessionId) === entry) this.starting.delete(sessionId) }
     const held = await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
+    if (archived()) return yield finish('stop')
     if (held !== undefined) {
       started()
       this.endSession(sessionId, held)
       return yield* stopped(held)
     }
-    live = this.live.get(sessionId)
+    live = entry.fileLive = this.live.get(sessionId)
     const last = options.messages.at(-1)
     // The step after a mirror call's result continues the agent's turn. The bridge writes result
     // rows of its own (a DSH tool call's result, or the row that closes a call still open when
@@ -1605,6 +1662,7 @@ export class AcpAdapter extends LlmAdapter {
         if (strictChat && level.sandbox === 'workspace-write' && agent.ownMode !== undefined) {
           strictChat = await this.ownAnswer(sessionId, dshAgent, options.provider) !== 'yes'
         }
+        if (archived()) return yield finish('stop')
         if (options.signal?.aborted || entry.held !== undefined) return yield* stopped(entry.held ?? 'The image session was stopped.')
         const currentLevel = levelOf(this.ctx.get?.('approval'), dshAgent.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
         if (strictChat && (!restrictedLevel(currentLevel) || currentLevel.sandbox !== level.sandbox)) {
@@ -1612,16 +1670,18 @@ export class AcpAdapter extends LlmAdapter {
           return yield* stopped('Image session permission changed. Send a new message to continue.')
         }
         if (strictChat) {
-          fileOwner = this.sessionFiles.owner(dshAgent, options.provider)
+          fileOwner = entry.fileOwner = this.sessionFiles.owner(dshAgent, options.provider)
           entry.fileStartup = true
           try {
             const fileGrant = fileOwner.grant
             const files = await this.sessionFiles.activate(fileOwner, last, options.signal)
+            if (archived()) return yield finish('stop')
             if (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined) throw new Error('Image permission changed before startup.')
             fileContext = { sandbox: level.sandbox, files }
             keepsFiles = () => fileOwner !== undefined && this.sessionFiles.valid(fileOwner)
               && fileOwner.grant === fileGrant && entry.held === undefined
           } catch (error) {
+            if (archived()) return yield finish('stop')
             this.endSession(sessionId)
             return yield finish('error', error.message)
           }
@@ -1681,6 +1741,7 @@ export class AcpAdapter extends LlmAdapter {
         unconfirmed = 'The Bot account could not be checked. Sign in again in the app.'
       }
       // Ended while the consent was read: nothing starts for this turn.
+      if (archived()) return yield finish('stop')
       if (entry.held !== undefined) {
         started()
         return yield* stopped(entry.held)
@@ -1693,6 +1754,7 @@ export class AcpAdapter extends LlmAdapter {
       if (live !== undefined && live.run.busy) {
         const ended = await this.stopping(live, options.signal)
         // Ended while the old prompt was given its time (endSession): nothing starts here.
+        if (archived()) return yield finish('stop')
         if (entry.held !== undefined) {
           started()
           return yield* stopped(entry.held)
@@ -1762,6 +1824,10 @@ export class AcpAdapter extends LlmAdapter {
           if (options.model !== DEFAULT_MODEL) return false
           try { return (this.startModels.get(agent) ?? agent.catalog?.ownModel?.()) === undefined } catch { return true }
         }
+        const checkArchive = () => {
+          entry.archived ||= this.isArchived(sessionId)
+          if (entry.archived) throw ARCHIVED
+        }
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
         // session start is tried once more on that one: the turn is not lost to a bad release.
@@ -1802,6 +1868,7 @@ export class AcpAdapter extends LlmAdapter {
             // omp's launch spec is synchronous and it has no bridge to prepare.
             // Keep its policy decision and actual spawn in the same event-loop turn.
             const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, offRecheck, ...spec } = omp ? launch : await launch
+            checkArchive()
             if (spawnOmpManaged && entry.held !== undefined) return yield* stopped(entry.held)
             // The check measured these models with no tool block: kept from now on (B1-4 (b)). When
             // this turn's model is one of them it runs as today, in this same turn.
@@ -1840,7 +1907,10 @@ export class AcpAdapter extends LlmAdapter {
             const decision = this.bridgeDecision(agent, sessionId, codexOff)
             const bridged = decision.on
             state.bridgeDefault = decision.setting === undefined ? bridged : undefined
-            if (bridged) await this.backchannel.listen()
+            if (bridged) {
+              await this.backchannel.listen()
+              checkArchive()
+            }
             const spawnManaged = ['acp-claude', 'acp-codex'].includes(options.provider) && this.teamManaged() && !kept
             if (spawnManaged && entry.held !== undefined) return yield* stopped(entry.held)
             if (bridged && fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined || options.signal?.aborted)) throw new Error('Image permission changed while the bridge started.')
@@ -1909,7 +1979,11 @@ export class AcpAdapter extends LlmAdapter {
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
               // In native-tools mode a built-in call is the point, not drift: it gets its mirror
               // card and DSH's approval like any call of an agent without the bridge.
-              onToolCall: tool => { if (!spawnNative) this.checkDrift(sessionId, agent, tool) },
+              onToolCall: tool => {
+                if (!spawnNative && this.live.get(sessionId) === state && state.run === run) {
+                  this.checkDrift(sessionId, agent, tool)
+                }
+              },
               onIgnored: message => this.warn(message),
               onRefusedMcp: tool => this.warn(`${agent.name} asked to run an MCP tool of ${typeof tool.mcpServer === 'string' ? `server "${tool.mcpServer.slice(0, 80)}"` : 'an unnamed server'}: refused, only the ${BRIDGE_NAME} bridge's tools run with DSH's tools on`),
               onMode: seen => this.diagnostics?.mode(sessionId, state, seen),
@@ -1917,14 +1991,17 @@ export class AcpAdapter extends LlmAdapter {
               ...(agent.requestMs === undefined ? {} : { requestMs: agent.requestMs }),
               timers: this.timers,
             })
+            checkArchive()
             state.run = run
             this.live.set(sessionId, state)
+            entry.fileLive = state
             const starting = run.start({ signal: options.signal })
             run.gone?.catch(() => {
               // A fork can replace the bridge on this run. A startup retry can replace the run.
               if (state.run === run && state.bridge !== undefined) this.backchannel.revoke(state.bridge)
             })
             await starting
+            if (entry.archived || state.archived) return yield finish('stop')
             // DSH's `default` for Codex is the model a process with its own tools started on. An
             // OFF process reads a catalog without the kept models, so it never says.
             if (codexRow && !codexOff && typeof run.startModel === 'string') this.startModels.set(agent, run.startModel)
@@ -1932,6 +2009,11 @@ export class AcpAdapter extends LlmAdapter {
             try { agent.proven?.() } catch {}
             break
           } catch (error) {
+            if (error === ARCHIVED || entry.archived || state.archived || this.isArchived(sessionId)) {
+              entry.archived = true
+              this.end(sessionId, state)
+              return yield finish('stop')
+            }
             // Not a failed start: the turn runs again as a kept one, outside the start's `try`.
             if (error === KEPT_RELAUNCH) return yield* relaunchKept()
             // Nothing is left of a start that failed: the process is gone with its bridge.
@@ -2055,6 +2137,7 @@ export class AcpAdapter extends LlmAdapter {
           try {
             await this.refork(agent, live, dshAgent, options.signal)
           } catch (error) {
+            if (archived()) return yield finish('stop')
             if (live.held !== undefined) return yield* stopped(live.held)
             const left = this.unanswered(agent, error, 'refreshing its DSH tools')
             if (left !== undefined) return yield left
@@ -2065,6 +2148,7 @@ export class AcpAdapter extends LlmAdapter {
       // A refused model can leave the run alive with no prompt yet. Revalidate when its
       // eventual first prompt is ready, too. AgentRun sets promptEnded during its first prompt.
       // A Codex process on a kept model holds its own tools by that rule, not by the switch.
+      if (archived()) return yield finish('stop')
       const firstNativePrompt = (options.provider === 'acp-claude' || codexRow) && live.native === true
         && live.nativeKept !== true && live.run.promptEnded === undefined
       const startingNative = firstNativePrompt && live.nativeManaged === true
@@ -2087,6 +2171,7 @@ export class AcpAdapter extends LlmAdapter {
           { signal: options.signal, standIns },
         )
       } catch (error) {
+        if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
         const left = this.abandoned(sessionId, live, agent, error, `taking ${options.model}`)
         if (left !== undefined) return yield left
@@ -2095,6 +2180,7 @@ export class AcpAdapter extends LlmAdapter {
         const why = `${agent.name} would not take ${options.model}${at}: ${reason}`
         return yield finish('error', why)
       }
+      if (archived()) return yield finish('stop')
       // The model now on a Codex process decides which launch it needed. Every branch that ends
       // here sends no prompt.
       if (codexRow) {
@@ -2138,6 +2224,7 @@ export class AcpAdapter extends LlmAdapter {
       let own = 'none'
       if (candidate) {
         own = await this.ownAnswer(sessionId, dshAgent, options.provider)
+        if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
         if (own === 'yes' && live.sessionFileEnabled) {
           this.endSession(sessionId)
@@ -2146,11 +2233,13 @@ export class AcpAdapter extends LlmAdapter {
         if (own === 'yes') {
           live.ownSent = true
           try { await live.run.setMode([agent.ownMode], { signal: options.signal }) } catch (error) {
+            if (archived()) return yield finish('stop')
             if (live.held !== undefined) return yield* stopped(live.held)
             const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
             if (left !== undefined) return yield left
             own = 'refused'
           }
+          if (archived()) return yield finish('stop')
           if (live.held !== undefined) return yield* stopped(live.held)
         }
       }
@@ -2159,8 +2248,10 @@ export class AcpAdapter extends LlmAdapter {
           if (live.ownSent === true || live.sessionFileMode) await live.run.setMode(strict, { signal: options.signal, force: true })
           else await live.run.setMode(modes, { signal: options.signal })
         } else if (!possible) await live.run.setMode(modes, { signal: options.signal, force: Boolean(live.sessionFileMode) || offModes !== undefined })
+        if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
       } catch (error) {
+        if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
         const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
         if (left !== undefined) return yield left
@@ -2174,7 +2265,7 @@ export class AcpAdapter extends LlmAdapter {
       // Only the asynchronous upload path uses this stricter ownership check. Never
       // endSession on a failed check: the live map may already contain a replacement.
       const uploadValid = () => uploads === undefined || (
-        !options.signal?.aborted && entry.held === undefined && live.held === undefined &&
+        !archived() && !options.signal?.aborted && entry.held === undefined && live.held === undefined &&
         this.starting.get(sessionId) === entry && this.live.get(sessionId) === live &&
         live.run === uploadRun && uploadRun.alive && uploadRun.sessionId === uploadSession &&
         live.dshAgent === dshAgent && this.ctx.agents?.get(sessionId) === dshAgent &&
@@ -2197,6 +2288,7 @@ export class AcpAdapter extends LlmAdapter {
             valid: () => { if (!uploadValid()) throw new Error('Uploaded image turn changed before the prompt. Send again.') },
           })
         } catch (error) {
+          if (archived()) return yield finish('stop')
           if (!uploadValid()) return yield uploadStopped()
           return yield finish('error', `Uploaded image input failed: ${error?.message ?? error}`, 'acp_upload_content')
         }
@@ -2206,19 +2298,22 @@ export class AcpAdapter extends LlmAdapter {
       // the step's entry is refused whatever the gate says now: its mode above was read from a
       // level that has changed, and a gate that lets go here must not let this turn through.
       const late = entry.held ?? live.held ?? await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
+      if (archived()) return yield finish('stop')
       if (!uploadValid()) return yield uploadStopped()
       if (uploads === undefined && !startingNative && !startingOmp) started()
       if (late !== undefined) {
-        this.endSession(sessionId, late)
+        if (this.live.get(sessionId) === live) this.endSession(sessionId, late)
         return yield* stopped(late)
       }
       if (own === 'yes') {
         const again = await this.ownAnswer(sessionId, dshAgent, options.provider)
+        if (archived()) return yield finish('stop')
         if (!uploadValid()) return yield uploadStopped()
         if (live.held !== undefined) return yield* stopped(live.held)
         if (again !== 'yes') {
           own = 'changed'
           try { await live.run.setMode(strict, { signal: options.signal, force: true }) } catch (error) {
+            if (archived()) return yield finish('stop')
             if (!uploadValid()) return yield uploadStopped()
             if (live.held !== undefined) return yield* stopped(live.held)
             const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
@@ -2226,6 +2321,7 @@ export class AcpAdapter extends LlmAdapter {
             this.end(sessionId, live)
             return yield finish('error', `${agent.name} would not take DSH's permission level: ${error?.message ?? error}`)
           }
+          if (archived()) return yield finish('stop')
           if (!uploadValid()) return yield uploadStopped()
           if (live.held !== undefined) return yield* stopped(live.held)
         }
@@ -2251,15 +2347,18 @@ export class AcpAdapter extends LlmAdapter {
       if (live.fileOwner) {
         try {
           await this.sessionFiles.activate(live.fileOwner, last, options.signal)
+          if (archived()) return yield finish('stop')
           if (!uploadValid()) return yield uploadStopped()
           if (!this.sessionFiles.valid(live.fileOwner) || this.live.get(sessionId) !== live ||
               (live.sessionFileMode && live.run.modes?.currentModeId !== live.sessionFileMode) || own === 'yes') throw new Error('Image permission changed before the prompt.')
         } catch (error) {
+          if (archived()) return yield finish('stop')
           if (!uploadValid()) return yield uploadStopped()
           this.endSession(sessionId)
           return yield finish('error', error.message)
         }
       }
+      if (archived() || this.isArchived(sessionId)) return yield finish('stop')
       if (!uploadValid()) return yield uploadStopped()
       const cutRows = prepared === undefined && fresh && (live.replay === undefined || live.owed?.handoff === true)
         ? cutUserRows(options.messages, dshAgent?.session) : []
@@ -2321,6 +2420,10 @@ export class AcpAdapter extends LlmAdapter {
     // asks for the step after a tool result.
     for (;;) {
       const event = await live.run.next(options.signal)
+      if (archived()) {
+        yield* blocks.close()
+        return yield finish('stop')
+      }
       // Its agent session was ended under it (endSession): whatever came is not shown.
       if (live.held !== undefined) {
         yield* shown()
@@ -2373,6 +2476,10 @@ export class AcpAdapter extends LlmAdapter {
         }
         yield* shown()
         await settle(tool, DETAIL_WAIT_MS)
+        if (archived()) {
+          yield* blocks.close()
+          return yield finish('stop')
+        }
         const id = `acp_${randomUUID()}`
         live.calls.add(id)
         live.pendingMirrors?.add(id)
@@ -2474,6 +2581,8 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   dispose() {
+    try { this.offArchived?.() } catch {}
+    this.offArchived = undefined
     try { this.offResult?.() } catch {}
     try { this.offReviewed?.() } catch {}
     for (const entry of this.starting.values()) entry.upload?.controller.abort()
