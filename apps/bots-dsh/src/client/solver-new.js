@@ -4,6 +4,7 @@
 // failure leaves behind is named (solver-draft.js createSolver).
 import { createElement as h, useEffect, useRef, useState } from 'react'
 import { BotMark } from './mark.js'
+import { CharacterGrid } from './bot-settings.js'
 import { FolderMenu } from './folder-menu.js'
 import { ModelMenu } from './model-menu.js'
 import { ChevronLeftIcon, CloseIcon } from './icons.js'
@@ -20,7 +21,7 @@ import {
   reviewerPayload, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
 } from './solver-draft.js'
 import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
-import { DEFAULT_COLORS, DEFAULT_SHAPES } from './characters.js'
+import { DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from './characters.js'
 
 addStrings(nativeToolsZh)
 
@@ -138,6 +139,11 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
         h('div', { className: 'bt-create-preview' },
           h('span', { className: 'bt-create-pop' }, h(BotMark, { look, bot: { id: 'new-solver' }, size: 88, live: true, gaze: true, pokeable: true })),
           h('span', { className: 'bt-create-name' }, finalName)),
+        h('div', { className: 'bt-create-looks' }, h(CharacterGrid, {
+          look, shapes: SOLVER_SHAPES,
+          onShape: shape => setLook(current => ({ ...current, shape })),
+          onColor: color => setLook(current => ({ ...current, color })),
+        })),
         h('label', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Name')),
           h('input', {

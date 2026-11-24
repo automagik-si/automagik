@@ -27,7 +27,7 @@ runInNewContext(outputFiles[0].text, {
   module, exports: module.exports, document: { body: {} },
   require: name => (name === 'react' ? react : name === 'react-dom' ? { createPortal: node => node } : {}),
 })
-const { ComposerPlus } = module.exports
+const { ComposerPlus, menuIcons } = module.exports
 
 // Renders the "+" for a chat whose Bot is in the roster as `roster` says, and counts its hook calls.
 function render(roster) {
@@ -94,4 +94,27 @@ test('the "+" is drawn for a group chat the roster knows as a room', () => {
   assert.equal(none.tree, null)
   assert.equal(room.tree.type, 'fragment')
   assert.equal(room.hooks, none.hooks)
+})
+
+test('mention marks resolve the current Bot and keep the look in a cached row after it leaves', () => {
+  const cached = { id: 'b', avatar: { shape: 'frog' }, color: 'red' }
+  const full = { ...cached, role: 'Solver' }
+  const snapshot = { byId: { b: full } }
+  const iconFor = menuIcons({ getSnapshot: () => snapshot })
+  const Icon = iconFor({ bot: cached })
+  const drawn = () => {
+    const mark = Icon({})
+    const face = mark.type(mark.props)
+    return face.type(face.props)
+  }
+  assert.notEqual(drawn().props['data-shape'], 'frog')
+  delete snapshot.byId.b
+  assert.equal(drawn().props['data-shape'], 'frog')
+
+  snapshot.byId.b = full
+  const later = { ...cached, avatar: { shape: 'cactus' } }
+  assert.equal(iconFor({ bot: later }), Icon)
+  assert.notEqual(drawn().props['data-shape'], 'cactus')
+  delete snapshot.byId.b
+  assert.equal(drawn().props['data-shape'], 'cactus')
 })

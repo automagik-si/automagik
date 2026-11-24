@@ -182,11 +182,11 @@ export function bakedFit(bake) {
   const { body, middle } = bake?.clay === 'omni' ? OMNI_BOX : PET_BOX
   return { fit: (CELL.height / body) * ART_TRIM, lift: (middle - CELL.height / 2) / CELL.height }
 }
-function BotArt({ bot, size, state }) {
-  const wants = petOf(bot, lookOf(bot), { live: true, size })
+function BotArt({ bot, size, state, look = lookOf(bot) }) {
+  const wants = petOf(bot, look, { live: true, size })
   const baked = useBaked(wants?.bake)
-  if (!wants?.bake) return h(BotMark, { bot, size, state, live: true })
-  if (!baked) return h(BotMark, { bot, size, state })
+  if (!wants?.bake) return h(BotMark, { bot, look, size, state, live: true })
+  if (!baked) return h(BotMark, { bot, look, size, state })
   const { fit, lift } = bakedFit(wants.bake)
   const margin = Math.round((size * fit - size) / 2)
   const drawn = size + 2 * margin
@@ -195,7 +195,7 @@ function BotArt({ bot, size, state }) {
       h(PetSprite, { pet: baked, size: drawn, state, live: true })))
 }
 /** A Bot's character for a row, as the bar draws it by default. */
-export const drawBot = (bot, size, state) => h(BotArt, { bot, size, state })
+export const drawBot = (bot, size, state, look) => h(BotArt, { bot, size, state, look })
 const Chevron = ({ open = false }) => h('svg', { className: open ? 'lb-chev lb-chev-open' : 'lb-chev', width: 13, height: 13, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'M7.5 4.5L13 10l-5.5 5.5' }))
 const classes = (...names) => names.filter(Boolean).join(' ')
 // A name the row cuts shows in full on hover. Only the laid-out row can tell, so it is

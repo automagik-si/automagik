@@ -156,3 +156,62 @@ test('a Solver wears its fur at the smallest marks too, and the bar\'s live pet 
     assert.deepEqual(JSON.parse(JSON.stringify(petOf({ id: 'b' }, look, { live: true, size: 28 }))), { bake: { shape, color: 'red' } })
   }
 })
+
+test('useBaked clears the old sprite while a different look is baking', async () => {
+  const code = await build({
+    stdin: {
+      contents: "export { useBaked } from './src/client/mark.js'",
+      resolveDir: dirname(dirname(fileURLToPath(import.meta.url))),
+    },
+    bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
+    external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
+    plugins: [{
+      name: 'held-bake',
+      setup(plugin) {
+        plugin.onResolve({ filter: /^\.\/pet-bake\.js$/ }, () => ({ path: 'pet-bake', namespace: 'fixture' }))
+        plugin.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({
+          contents: 'export const canBake = () => true; export const bakedPet = globalThis.heldBake',
+        }))
+      },
+    }],
+  })
+  const pending = new Map()
+  const module = { exports: {} }
+  let state = null
+  let key
+  let cleanup
+  let effect
+  const hooks = {
+    ...react,
+    useState: () => [state, next => { state = next }],
+    useEffect(run, [next]) {
+      if (key === next) return
+      key = next
+      effect = run
+    },
+  }
+  runInNewContext(code.outputFiles[0].text, {
+    module, exports: module.exports,
+    require: name => (name === 'react' ? hooks : {}),
+    heldBake: ({ color }) => new Promise(resolve => pending.set(color, resolve)),
+  })
+  const draw = (color) => {
+    const shown = module.exports.useBaked({ shape: 'frog', color })
+    if (effect) {
+      cleanup?.()
+      cleanup = effect()
+      effect = undefined
+    }
+    return shown
+  }
+  assert.equal(draw('red'), null)
+  const red = { sheet: 'fixture-red' }
+  pending.get('red')(red)
+  await Promise.resolve()
+  assert.equal(draw('red'), red)
+  assert.equal(draw('blue'), null)
+  const blue = { sheet: 'fixture-blue' }
+  pending.get('blue')(blue)
+  await Promise.resolve()
+  assert.equal(draw('blue'), blue)
+})

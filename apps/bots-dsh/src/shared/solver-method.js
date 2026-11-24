@@ -3,15 +3,9 @@
 // instruction: the Bot answers in the person's own language. Pure, so the client imports it.
 // From delivery 2 the `solver` role's prompt part carries the method instead.
 
-import { packageAttachment } from './roles.js'
+export { SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isSolverBot } from './roles.js'
 
 export const SOLVER_METHOD_VERSION = 1
-
-// Solver identity is cosmetic or bookkeeping: the D1 description or the D2 pin.
-// Never gate a permission or capability on it: delivery 3's task-start reads the `solver` role pin, not this.
-export const SOLVER_DESCRIPTION = 'Solver'
-export const SOLVER_ROLE_ID = 'solver'
-export const isSolverBot = bot => bot?.role === SOLVER_DESCRIPTION || packageAttachment(bot)?.id === SOLVER_ROLE_ID
 
 // The Solver's notes file, one exact path in its folder (#2056 SR4-2). The review mark does not count a
 // write to exactly this file as work (review-mark.js), so notes never read as "plan unreviewed".

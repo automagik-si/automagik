@@ -96,11 +96,13 @@ function ShapeRing({ shape, size }) {
 }
 
 // Every character shape, six to a row, then the color swatches.
-export function CharacterGrid({ look, hasPhoto = false, onShape, onColor }) {
-  const shapes = [...PICKER_SHAPES, ...Object.keys(SHAPES).filter(id => !Object.hasOwn(CHARACTERS, id))]
-  if (!shapes.includes(look.shape)) shapes.push(look.shape)
+export function CharacterGrid({ look, shapes, hasPhoto = false, onShape, onColor }) {
+  const options = shapes === undefined
+    ? [...PICKER_SHAPES, ...Object.keys(SHAPES).filter(id => !Object.hasOwn(CHARACTERS, id))]
+    : [...shapes]
+  if (shapes === undefined && !options.includes(look.shape)) options.push(look.shape)
   const rows = []
-  for (let index = 0; index < shapes.length; index += PICKER_COLUMNS) rows.push(shapes.slice(index, index + PICKER_COLUMNS))
+  for (let index = 0; index < options.length; index += PICKER_COLUMNS) rows.push(options.slice(index, index + PICKER_COLUMNS))
   return h(Fragment, null,
     h('div', { className: 'bt-shapes', role: 'group', 'aria-label': t('Character shape') }, rows.map((row, index) => h('div', { key: index, className: 'bt-shape-row' }, row.map(id => h('button', {
       key: id, type: 'button', className: 'bt-shape', 'aria-label': t(shapeOf(id).label), title: t(shapeOf(id).label), 'aria-pressed': !hasPhoto && look.shape === id,

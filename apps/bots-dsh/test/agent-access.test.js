@@ -16,11 +16,12 @@ import { createRuntime } from '../index.js'
 import { createAgentAccess, agentBindAddress, AGENT_TOOLS } from '../src/host/agent-access.js'
 import { createDraftSweep } from '../src/client/draft-sweep.js'
 import { fakeContext } from './fake-ctx.js'
+import { solverInstructions } from '../src/shared/solver-method.js'
 
-async function fixture(t, { bots = {}, rooms = {} } = {}) {
+async function fixture(t, { bots = {}, rooms = {}, empty = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'agent-access-'))
   await writeFile(join(home, 'state.json'), JSON.stringify({ version: 1, revision: 1,
-    mainBotIds: ['a'], workspaceId: 'w', bots: {
+    mainBotIds: empty ? [] : ['a'], workspaceId: 'w', bots: empty ? {} : {
       a: { id: 'a', name: 'Alpha', instructions: 'Help', capabilities: [] },
       b: { id: 'b', name: 'Beta', instructions: '', capabilities: [] },
       c: { id: 'c', name: 'Gamma', instructions: '', capabilities: [] },
@@ -795,4 +796,60 @@ test('a group an agent token deletes has its composer keys swept by the page', a
   const left = await pageSweep(call, ['dsh.conversation.r1', 'dsh.conversation.r1-next', 'dsh.conversation.gb', 'dsh.conversation.c'])
   assert.deepEqual(left, ['dsh.conversation.c'])
   assert.equal(Object.hasOwn((await call('state')).value, 'draftSweep'), false)
+})
+
+const solverProfile = () => ({ role: 'Solver', instructions: solverInstructions() })
+
+test('an authenticated agent cannot create a Solver or bootstrap an empty team through it', async t => {
+  const { rt, home, ctx, tool } = await fixture(t, { empty: true })
+  const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'))
+  const create = t.mock.method(ctx.sessionController, 'create')
+  await rt.save()
+  const disk = await state()
+  const live = structuredClone(rt.state.bots)
+  const result = await tool('create_bot', { name: 'Candidate', ...solverProfile() })
+  await rt.save()
+  assert.deepEqual((await state()).bots, disk.bots)
+  assert.deepEqual((await state()).mainBotIds, [])
+  assert.deepEqual(rt.state.bots, live)
+  assert.equal(create.mock.callCount(), 0)
+  assert.equal(result.isError, true)
+  assert.equal(result.value.code, 'bot/refused')
+})
+
+test('an explicit null avatar is refused by the MCP create schema', async t => {
+  const { rt, home, ctx, tool } = await fixture(t, { empty: true })
+  const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'))
+  const create = t.mock.method(ctx.sessionController, 'create')
+  await rt.save()
+  const disk = (await state()).bots
+  const live = structuredClone(rt.state.bots)
+  const result = await tool('create_bot', { name: 'Candidate', avatar: null })
+  await rt.save()
+  assert.deepEqual((await state()).bots, disk)
+  assert.deepEqual(rt.state.bots, live)
+  assert.equal(create.mock.callCount(), 0)
+  assert.equal(result.error?.code, -32602)
+})
+
+test('an authenticated agent cannot turn an ordinary Bot into a Solver through an update', async t => {
+  const { rt, home, tool } = await fixture(t)
+  const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'))
+  await rt.save()
+  const disk = (await state()).bots.b
+  const live = structuredClone(rt.botOf('b'))
+  const result = await tool('update_bot', { id: 'b', name: 'Changed', ...solverProfile() })
+  await rt.save()
+  assert.deepEqual((await state()).bots.b, disk)
+  assert.deepEqual(rt.botOf('b'), live)
+  assert.equal(result.isError, true)
+  assert.equal(result.value.code, 'bot/refused')
+})
+
+test('an authenticated agent can rename a Solver', async t => {
+  const { rt, tool } = await fixture(t, { bots: { b: { id: 'b', name: 'Candidate', ...solverProfile() } } })
+  const result = await tool('update_bot', { id: 'b', name: 'Changed' })
+  assert.equal(result.isError, false)
+  assert.equal(rt.botOf('b').name, 'Changed')
+  assert.equal(rt.botOf('b').instructions, solverInstructions())
 })

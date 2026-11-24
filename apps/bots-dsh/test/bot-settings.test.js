@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
+import { SOLVER_SHAPES } from '../src/client/characters.js'
 import { build } from 'esbuild'
 
 const { outputFiles } = await build({
@@ -250,4 +251,12 @@ test('the new-Bot card\'s character grid offers the 21 characters and no Solver'
   assert.equal(walk(tree).filter(node => node.props?.className === 'bt-shape').length, 21)
   // A stored shape the grid does not list still gets its tile, the 22nd.
   assert.deepEqual(rowsOf(draw('nope')).map(row => row.length), [6, 6, 6, 4])
+})
+
+test('an explicit grid list is authoritative and the worn shape stays outside it', () => {
+  const shapes = Object.freeze([...SOLVER_SHAPES])
+  const grid = module.exports.CharacterGrid({ shapes, look: { shape: 'moon', color: 'red' } })
+  const tiles = walk(grid).filter(node => node.props?.className === 'bt-shape')
+  assert.deepEqual(tiles.map(tile => tile.props.key), SOLVER_SHAPES)
+  assert.deepEqual(shapes, SOLVER_SHAPES)
 })

@@ -34,6 +34,13 @@ export function packageAttachment(bot) {
   }
 }
 
+export const SOLVER_DESCRIPTION = 'Solver'
+export const SOLVER_ROLE_ID = 'solver'
+export const hasSolverRole = bot => packageAttachment(bot)?.id === SOLVER_ROLE_ID
+
+// This identity is cosmetic or bookkeeping. Task-start checks the actual role pin.
+export const isSolverBot = bot => bot?.role === SOLVER_DESCRIPTION || hasSolverRole(bot)
+
 export const sameRolePin = (a, b) => Boolean(a && b && a.id === b.id && a.version === b.version && a.attachedAt === b.attachedAt)
 
 export const packageRecoveryId = bot => singlePackageRole(bot)?.id

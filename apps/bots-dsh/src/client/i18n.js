@@ -5,11 +5,16 @@
 import { MACHINE_MESSAGES } from '../shared/machine-reservations.js'
 import { GUARD_GROUP_COPY, guardGroupZh } from '../shared/guard-groups.js'
 import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_DENY_TEXT, OWN_TOOLS_MENU_HINT, OWN_TOOLS_MODEL_TEXT, OWN_TOOLS_NOTICE } from '../shared/own-tools.js'
+import { LOOK_INVALID, SOLVER_BY_PERSON, SOLVER_ONLY, SOLVER_WEARS } from '../shared/solver-looks.js'
 
 export const NAMESPACE = 'omni-ui'
 
 const ZH = {
   ...guardGroupZh,
+  [SOLVER_ONLY]: '只有 Solver 才能使用 Solver 角色。请选择其他角色。',
+  [SOLVER_WEARS]: 'Solver 只能使用 Solver 角色。请从这些角色中选择一个。',
+  [SOLVER_BY_PERSON]: '只有本人才能把 Bot 设为 Solver。',
+  [LOOK_INVALID]: '这个形象无效。请选择其他角色。',
   'File-tool folder': '文件工具的文件夹',
   'Folder for these four file tools': '这四个文件工具使用的文件夹',
   'Clear folder': '清除文件夹',

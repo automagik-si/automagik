@@ -6,7 +6,7 @@ import { inkText } from './inks.js'
 import { linkMentions, mentionTarget, dayLabel, contentText, stripHeader, isHiddenTurn, isRelayContext, relaysBefore, relayPart, commRunOf, toolName, toolArgs, reminderPrompts, elapsedLabel, clockLabel, messageClock } from './text.js'
 import { SmileIcon, ReplyIcon, DotsIcon, CheckIcon, DownloadIcon, CopyIcon, GoalIcon, MemoryIcon, TasksIcon } from './icons.js'
 import { goalEventText } from './goal.js'
-import { colorOf, toolState, BotMark, RoomAvatar } from './mark.js'
+import { catalogueLookOf, colorOf, toolState, BotMark, RoomAvatar } from './mark.js'
 import { CellEmpty } from './cell-empty.js'
 import { sendsOnEnter } from './enter-key.js'
 import { SettledQuestion, PendingQuestion } from './questions.js'
@@ -319,6 +319,7 @@ export function AssistantCell({ node, groupPart, sessionId, openFile, fileMentio
         key: relay.seq,
         prefix: source.role === 'stopped' ? t('Stopped by') : source.role === 'reply' ? t('Reply from') : t('Message from'),
         bots: [sender],
+        roster,
         onOpen: () => { if (sender.id) actions.openExchange(selfId, sender.id) },
         whole: true,
       })
@@ -337,18 +338,22 @@ export function AssistantCell({ node, groupPart, sessionId, openFile, fileMentio
 // `code` in an activity line is the command or path the agent works on.
 const activityParts = line => line.split('`').map((part, index) => (index % 2 === 1 ? h('code', { key: index }, part) : part))
 
-function EventLine({ prefix, bots, joiner = t('and'), onOpen, whole = false }) {
+// Only current owner records carry the identity needed to resolve Solver looks.
+const snapshotLook = (bot, roster) => roster.byId[bot.id] === bot ? undefined : catalogueLookOf(bot)
+
+function EventLine({ prefix, bots, roster, joiner = t('and'), onOpen, whole = false }) {
   if (whole && bots.length === 1) {
+    const [bot] = bots
     return h('div', { className: 'bt-event' },
-      h('button', { type: 'button', className: 'bt-event-whole', title: bots[0].name, onClick: () => onOpen?.(bots[0]) },
-        h('span', null, prefix), h(BotMark, { bot: bots[0], size: 16 }), h('span', { className: 'bt-event-name' }, bots[0].name)))
+      h('button', { type: 'button', className: 'bt-event-whole', title: bot.name, onClick: () => onOpen?.(bot) },
+        h('span', null, prefix), h(BotMark, { bot, look: snapshotLook(bot, roster), size: 16 }), h('span', { className: 'bt-event-name' }, bot.name)))
   }
   const parts = []
   parts.push(h('span', { key: 'p' }, prefix))
   bots.forEach((bot, index) => {
     if (index > 0) parts.push(h('span', { key: `j${index}` }, joiner))
     parts.push(h('button', { key: bot.id ?? index, type: 'button', onClick: () => onOpen?.(bot) },
-      h(BotMark, { bot, size: 16 }), bot.name))
+      h(BotMark, { bot, look: snapshotLook(bot, roster), size: 16 }), bot.name))
   })
   return h('div', { className: 'bt-event' }, parts)
 }
@@ -405,7 +410,7 @@ function GroupMessage({ bot, text, texts = [text], room, roster, actions, msgKey
     return () => scheduleGroupChains(flow)
   }, [bot.id])
   const lead = h('button', { type: 'button', className: 'bt-lead', 'aria-label': t("Open {name}'s chat", { name: bot.name }), onClick: () => actions.openSession(bot.id) },
-    h(BotMark, { bot, size: 22 }))
+    h(BotMark, { bot, look: snapshotLook(bot, roster), size: 22 }))
   const flat = layoutOf(roster.prefs) === 'flat'
   const took = Number.isFinite(duration) && duration >= 1000 ? elapsedLabel(duration) : undefined
   return h('div', { ref, className: 'bt-group-msg', 'data-bot-id': bot.id },
@@ -666,13 +671,13 @@ function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDel
       // live chat draws for it.
       const reply = row.reply
       const speaker = roster.byId[reply.botId] ?? { id: reply.botId, name: reply.name ?? t('a Bot'), color: reply.color ?? 'gray' }
-      return h(RelayEvent, { key, reply, bot: speaker, sessionId, actions })
+      return h(RelayEvent, { key, reply, bot: speaker, roster, sessionId, actions })
     }
     case 'event': {
       if (row.role === 'report') return h(GroupEvent, { key, prefix: t('Replies from'), room: roster.roomsById[row.roomId], name: t('a group chat'), roster, actions })
       const other = roster.byId[row.botId] ?? { id: row.botId, name: row.name ?? t('a Bot'), color: 'gray' }
       const prefix = { stopped: t('Stopped by'), reply: t('Reply from') }[row.role] ?? t('Message from')
-      return h(EventLine, { key, prefix, bots: [other], onOpen: () => { if (selfId && other.id) actions.openExchange(selfId, other.id) }, whole: true })
+      return h(EventLine, { key, prefix, bots: [other], roster, onOpen: () => { if (selfId && other.id) actions.openExchange(selfId, other.id) }, whole: true })
     }
     default: return null
   }
@@ -820,6 +825,7 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
       return h(EventLine, {
         prefix: source.role === 'stopped' ? t('Stopped by') : count > 1 ? t('{count} messages with', { count }) : t('Message from'),
         bots,
+        roster,
         onOpen: bot => actions.openExchange(selfId, bot.id),
         whole: true,
       })
@@ -1043,7 +1049,7 @@ function useLiveNote(actions, sessionId, id, entry) {
 // One non-message row of a group round: the same event line the live view draws
 // for a reply that is not a member's message or the user's own line. `bot` is the
 // resolved member the reply names.
-function RelayEvent({ reply, bot, sessionId, actions }) {
+function RelayEvent({ reply, bot, roster, sessionId, actions }) {
   if (reply.kind === 'permission-stop') {
     return h('div', { className: 'bt-event bt-event-error', role: 'status', title: reply.why },
       t('{name} stopped on a permission: {why}', { name: bot.name, why: whyText(reply.why) }))
@@ -1085,7 +1091,7 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
   if (reply.kind === 'approval' || reply.kind === 'working') {
     return h('div', { className: 'bt-event' },
       h('button', { type: 'button', className: 'bt-event-whole', onClick: () => actions.showDetails(sessionId) },
-        h(BotMark, { bot, size: 16 }), h('span', { className: 'bt-event-name' }, t(reply.kind === 'working' ? '{name} started on it' : '{name} paused for your approval', { name: bot.name }))))
+        h(BotMark, { bot, look: snapshotLook(bot, roster), size: 16 }), h('span', { className: 'bt-event-name' }, t(reply.kind === 'working' ? '{name} started on it' : '{name} paused for your approval', { name: bot.name }))))
   }
   if (reply.kind === 'folder') {
     return h('div', { className: 'bt-event' }, reply.text)
@@ -1194,7 +1200,7 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
           h('span', { className: 'bt-event-ico', 'aria-hidden': true }, h(GoalIcon)), goalEventText(reply))
       }
       if (reply.kind !== undefined) {
-        return h(RelayEvent, { key: `${reply.botId ?? reply.kind}-${index}`, reply, bot, sessionId, actions })
+        return h(RelayEvent, { key: `${reply.botId ?? reply.kind}-${index}`, reply, bot, roster, sessionId, actions })
       }
       return h(GroupMessage, { key: `${reply.botId}-${index}`, bot, texts, room, roster, actions, msgKey: callId ? `${sessionId}:${callId}:${index}` : undefined, useUi, time, duration })
     }),
@@ -1279,21 +1285,21 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
         // The refusal stands without a reason or content: never fall through to "Messaged".
         if (call.isError || call.meta?.sent === false) return h('div', { className: 'bt-event' }, t("Couldn't message {name}", { name: target.name }))
       }
-      return h(EventLine, { prefix: t('Messaged'), bots: [target], onOpen: bot => bot.id && actions.openExchange(self?.id ?? sessionId, bot.id), whole: true })
+      return h(EventLine, { prefix: t('Messaged'), bots: [target], roster, onOpen: bot => bot.id && actions.openExchange(self?.id ?? sessionId, bot.id), whole: true })
     }
     case 'stop_bot': {
       const target = findBot(arg('bot')) ?? { name: arg('bot') ?? '…', color: 'gray' }
       if (done && call.isError) return h('div', { className: 'bt-event' }, t("Couldn't stop {name}", { name: target.name }))
-      return h(EventLine, { prefix: t('Stopped'), bots: [target], onOpen: bot => bot.id && actions.openExchange(self?.id ?? sessionId, bot.id), whole: true })
+      return h(EventLine, { prefix: t('Stopped'), bots: [target], roster, onOpen: bot => bot.id && actions.openExchange(self?.id ?? sessionId, bot.id), whole: true })
     }
     case 'create_bot': {
       const created = findBot(arg('name'))
       if (!done || created === undefined) return h(CellEmpty)
-      return h(EventLine, { prefix: t('Created'), bots: [created], onOpen: bot => actions.openSession(bot.id) })
+      return h(EventLine, { prefix: t('Created'), bots: [created], roster, onOpen: bot => actions.openSession(bot.id) })
     }
     case 'update_bot': {
       const target = findBot(arg('name')) ?? findBot(arg('bot')) ?? (arg('bot') ? undefined : self)
-      return done && target ? h(EventLine, { prefix: t('Updated'), bots: [target], onOpen: bot => actions.openSession(bot.id) }) : h(CellEmpty)
+      return done && target ? h(EventLine, { prefix: t('Updated'), bots: [target], roster, onOpen: bot => actions.openSession(bot.id) }) : h(CellEmpty)
     }
     case 'delete_bot': {
       // The Bot is gone from the roster once the call settles, so its name comes from the call,

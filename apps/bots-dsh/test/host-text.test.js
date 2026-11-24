@@ -149,3 +149,20 @@ test('route policy refusals translate the route and preserve the Bot name in zh 
     } finally { off() }
   }
 })
+
+test('hostText words all four Solver look refusals in Chinese', () => {
+  const dicts = new Map()
+  const off = installLocale({
+    register: (namespace, language, words) => { dicts.set(`${namespace}:${language}`, words); return () => {} },
+    bind: namespace => key => dicts.get(`${namespace}:zh`)?.[key] ?? key,
+    getLocale: () => ({ active: 'zh-CN' }),
+  })
+  try {
+    for (const [message, translated] of [
+      ['Only a Solver wears the Solver characters. Choose another character.', '只有 Solver 才能使用 Solver 角色。请选择其他角色。'],
+      ['A Solver wears one of the Solver characters. Choose one of those characters.', 'Solver 只能使用 Solver 角色。请从这些角色中选择一个。'],
+      ['Only the person can make a Bot a Solver.', '只有本人才能把 Bot 设为 Solver。'],
+      ['That look is not valid. Choose another character.', '这个形象无效。请选择其他角色。'],
+    ]) assert.equal(hostText(message), translated)
+  } finally { off() }
+})

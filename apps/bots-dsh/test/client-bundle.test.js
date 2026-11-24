@@ -87,3 +87,20 @@ test('client.js survives a refused registration of its former name', () => {
   assert.doesNotThrow(() => runInNewContext(committed(), { window: { __ModuleLoader__: { load: registration => registration.id === '@automagik/omni-dsh' ? load(registration) : undefined } } }))
   assert.deepEqual(ids, ['@automagik/bots-dsh', '@automagik/omni-dsh'])
 })
+
+test('the browser bundles contain no node specifiers', () => {
+  for (const name of ['client.js', 'client.gated.js', 'client.pane.js']) {
+    const source = readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
+    assert.doesNotMatch(source, /["'\x60]node:[a-z]/, name)
+  }
+})
+
+test('client.js carries each Solver look refusal once', () => {
+  const source = committed()
+  for (const message of [
+    'Only a Solver wears the Solver characters. Choose another character.',
+    'A Solver wears one of the Solver characters. Choose one of those characters.',
+    'Only the person can make a Bot a Solver.',
+    'That look is not valid. Choose another character.',
+  ]) assert.equal(source.split(message).length - 1, 1, message)
+})

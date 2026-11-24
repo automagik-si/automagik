@@ -125,7 +125,7 @@ function botLabels(bots) {
 }
 
 // src/client/member-root.js
-var mark = (bot) => (0, import_react.createElement)(import_gated_shared.BotMark, { bot, look: { ...(0, import_gated_shared.lookOf)(bot), pet: void 0 }, live: false, size: 28 });
+var mark = (bot) => (0, import_react.createElement)(import_gated_shared.BotMark, { bot, look: { ...(0, import_gated_shared.catalogueLookOf)(bot), pet: void 0 }, live: false, size: 28 });
 var plain = (text) => (text ?? "").split("\n").flatMap((line, index) => index === 0 ? [line] : [(0, import_react.createElement)("br", { key: index }), line]);
 function MemberRows({ pages, roster, botId }) {
   const bot = Object.hasOwn(roster.byId, botId) ? roster.byId[botId] : void 0;

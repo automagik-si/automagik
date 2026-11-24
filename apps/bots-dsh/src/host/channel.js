@@ -30,7 +30,9 @@ import { callerJson } from './caller-routes.js'
 import { peopleOf } from './people.js'
 import { claimGrant } from './approvals.js'
 import { bindTicketDesk, createTicketDesk } from './grant-ticket.js'
-import { isGuardGroupRefusal } from './refusal.js'
+import { isSolverLooks } from '../shared/solver-look-policy.js'
+import { SOLVER_WEARS } from '../shared/solver-looks.js'
+import { isGuardGroupRefusal, refusal } from './refusal.js'
 
 const publicBot = bot => {
   if (!bot || (!Object.hasOwn(bot, 'waitingRole') && !Object.hasOwn(bot, 'reviewerMade'))) return bot
@@ -539,11 +541,12 @@ export function install(rt) {
   // UI edits retain their existing concurrency. An MCP audit excludes UI config edits
   // for its entire before/handler/after interval, so attribution cannot absorb an owner edit.
   const adminContext = new AsyncLocalStorage()
-  const inTransaction = async fn => {
-    const scope = { active: true }
+  const inTransaction = async (fn, agent = false) => {
+    const scope = { active: true, agent }
     try { return await adminContext.run(scope, fn) }
     finally { scope.active = false }
   }
+  rt.agentCaller = () => adminContext.getStore()?.active === true && adminContext.getStore()?.agent === true
   let adminQueue = Promise.resolve()
   let pendingAgents = 0
   let activeOwners = 0
@@ -552,7 +555,7 @@ export function install(rt) {
     pendingAgents += 1
     const job = adminQueue.then(async () => {
       if (activeOwners > 0) await new Promise(resolve => { ownersIdle = resolve })
-      return inTransaction(fn)
+      return inTransaction(fn, true)
     }).finally(() => { pendingAgents -= 1 })
     adminQueue = job.catch(() => {})
     return job
@@ -826,11 +829,14 @@ export function install(rt) {
           return ok({ ...view, active, speaking })
         }
         case 'create-bot': {
-          await rt.bootstrap()
           // `private` and `shell` are the user's own create fields (no acting Bot here):
           // a Bot created private starts without a shell unless `shell` says otherwise.
-          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId, reviewGuard: body.reviewGuard,
-            waitingRole: body.waitingRole === SOLVER_ROLE_ID ? SOLVER_ROLE_ID : undefined, reviewerMade: body.reviewerMade === true })
+          const options = { name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId, reviewGuard: body.reviewGuard,
+            waitingRole: body.waitingRole === SOLVER_ROLE_ID ? SOLVER_ROLE_ID : undefined, reviewerMade: body.reviewerMade === true }
+          await rt.load()
+          rt.checkCreateLook(options)
+          await rt.bootstrap()
+          const bot = await rt.createBot(options)
           return okBot(bot)
         }
         case 'set-bot-auto':
@@ -1280,9 +1286,10 @@ export function install(rt) {
           return ok(await pets.browse({ query: body.query, page: body.page, sort: body.sort }))
         case 'pet-use': {
           await rt.load()
-          const pet = await pets.adopt(String(body.source ?? ''), String(body.id ?? ''))
           const bot = rt.botOf(body.botId)
           if (!bot) return fail('Unknown Bot', 'bot/not-found')
+          if (isSolverLooks(bot)) throw refusal(SOLVER_WEARS)
+          const pet = await pets.adopt(String(body.source ?? ''), String(body.id ?? ''))
           return okBot(await rt.updateBot(bot.id, { avatar: { ...bot.avatar, image: undefined, pet: { source: pet.source, id: pet.id, version: pet.version, ...(pet.sleep ? { sleep: true } : {}) } } }))
         }
         case 'privacy':

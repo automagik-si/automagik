@@ -697,7 +697,7 @@ test('a plugin upgrade keeps unchanged role pins attachable and flags byte-chang
         'host/role-voice.js', 'host/roles.js', 'host/role-keys.json', 'host/refusal.js', 'host/bounded-get.js', 'host/no-runner.js',
         'host/bundled-roles.js', 'host/bundled-roles.json', 'host/lane-verify.js', 'host/session-route.js',
         'shared/roles.js', 'shared/solver-method.js', 'shared/routes.js', 'shared/machine-reservations.js', 'shared/own-tools.js', 'client/role-shop.js', 'client/i18n.js',
-        'shared/guard-groups.js',
+        'shared/guard-groups.js', 'shared/solver-looks.js',
       ]) {
         put(plugin, 'src/' + file, readFileSync(join(ROOT, PLUGIN, 'src', file)));
       }

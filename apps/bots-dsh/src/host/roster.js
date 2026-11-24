@@ -21,6 +21,8 @@ import { cleanPetId, shippedPet } from './pets.js'
 import { cleanDenyTools, cleanShell } from './tool-deny.js'
 import { peopleOf } from './people.js'
 import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_MODEL_TEXT, addsAcpToolDeny, deniesAcpTool } from '../shared/own-tools.js'
+import { avatarProblem, isSolverLooks } from '../shared/solver-look-policy.js'
+import { LOOK_INVALID, SOLVER_BY_PERSON, SOLVER_WEARS, solverDefaultShape } from '../shared/solver-looks.js'
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -96,19 +98,30 @@ export function install(rt) {
     return team
   }
 
-  async function ensureWorkspace() {
-    if (state.workspaceId && ctx.workspaceRegistry.get(state.workspaceId)) {
+  async function publishWorkspace(id) {
+    state.workspaceId = id
+    rt.dropAllShellGrants?.()
+    await rt.save()
+  }
+
+  async function ensureWorkspace(guard, allocation) {
+    const workspaceId = state.workspaceId
+    if (workspaceId && ctx.workspaceRegistry.get?.(workspaceId)) {
       await keepTeamFolder()
-      return state.workspaceId
+      return workspaceId
     }
     const path = rt.defaultTeamFolder()
     let blocked
     await mkdir(path, { recursive: true }).catch(error => { if (!osBlocked(error)) throw error; blocked = error })
     await rt.checkFolderAccess?.(path, blocked, { cached: true })
-    const workspace = await ctx.workspaceRegistry.resolveByPath(path) ?? await ctx.workspaceRegistry.create(path, 'Omni')
-    state.workspaceId = workspace.id
-    rt.dropAllShellGrants?.()
-    await rt.save()
+    let workspace = await ctx.workspaceRegistry.resolveByPath(path)
+    if (workspace == null) {
+      guard?.()
+      workspace = await ctx.workspaceRegistry.create(path, 'Omni')
+    }
+    guard?.()
+    if (allocation === undefined) await publishWorkspace(workspace.id)
+    else allocation.pendingWorkspace = { id: workspace.id, previousId: workspaceId }
     return workspace.id
   }
 
@@ -156,7 +169,8 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false } = {}) {
+  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false, guard, allocation } = {}) {
+    guard?.()
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
     const readOnly = rt.readOnly()
@@ -164,10 +178,11 @@ export function install(rt) {
     const usable = dir !== undefined && await sessionFolderUsable(dir)
     if (dir !== undefined && !usable) rt.warn('ds-bot: the working folder %s is unavailable; %s starts in the team workspace', dir, title)
     const known = usable ? await ctx.workspaceRegistry.resolveByPath(dir) : undefined
-    let place = known !== undefined ? { workspaceId: known.id } : usable ? { cwd: dir } : { workspaceId: await ensureWorkspace() }
+    const workspaceId = usable ? undefined : await ensureWorkspace(guard, allocation)
+    let place = known !== undefined ? { workspaceId: known.id } : usable ? { cwd: dir } : { workspaceId }
     let blockedFolder = !usable && rt.folderWarning?.(dir) ? dir : undefined
     if (!usable) {
-      const team = rt.teamFolder()
+      const team = ctx.workspaceRegistry.get?.(workspaceId)?.path
       if (team !== undefined && !await sessionFolderUsable(team)) {
         blockedFolder ??= rt.folderWarning?.(team) ? team : undefined
         const fallback = rt.defaultTeamFolder()
@@ -180,12 +195,22 @@ export function install(rt) {
     }
     const preset = await botPreset(profile, { group })
     const reserved = readScopeSource === undefined ? undefined
-      : await rt.reserveReadScope(readScopeSource, { continuation: continueReadScope })
+      : await rt.reserveReadScope(readScopeSource, { continuation: continueReadScope, guard })
+    if (allocation !== undefined) allocation.reserved = reserved
     rt.assertShellChoice?.(undefined, botId)
+    guard?.()
     const { sessionId } = await ctx.sessionController.create({
       ...place, ...preset, ...(reserved === undefined ? {} : { sessionId: reserved }),
     })
+    if (allocation !== undefined) allocation.id = sessionId
     if (reserved !== undefined && sessionId !== reserved) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
+    // A guarded create can use a new workspace before the team takes it. Keep a
+    // workspace chosen by another action while this Session was being allocated.
+    const pendingWorkspace = allocation?.pendingWorkspace
+    if (pendingWorkspace !== undefined && state.workspaceId === pendingWorkspace.previousId) {
+      guard?.()
+      await publishWorkspace(pendingWorkspace.id)
+    }
     if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
@@ -323,10 +348,37 @@ export function install(rt) {
     return state.prefs.permission ?? (personDefault !== rt.permissionCatalog?.()?.defaultPreset ? personDefault : undefined)
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy }, readScopeSource) {
+  const keptReviewer = (reviewerId, id) => typeof reviewerId === 'string' && reviewerId !== '' && reviewerId !== id
+    && rt.botOf(reviewerId) !== undefined
+
+  function createLook({ role = '', instructions = '', kind: requestedKind, reviewerId, createdBy, copyOf, solverCopy, ...rest }, id) {
+    const kind = BOT_KINDS.includes(requestedKind) ? requestedKind : undefined
+    const next = { role: cleanRole(role), instructions: String(instructions).trim(),
+      ...(kind === undefined ? {} : { kind }), ...(keptReviewer(reviewerId, id) ? { reviewerId } : {}),
+      ...(solverCopy ? { roles: [solverCopy.pin] } : {}) }
+    if ((createdBy !== undefined || rt.agentCaller?.()) && isSolverLooks(next)) throw refusal(SOLVER_BY_PERSON)
+    if (copyOf !== undefined || !Object.hasOwn(rest, 'avatar') || rest.avatar === undefined) return { next }
+    const avatar = cleanAvatar(rest.avatar)
+    if (avatar === undefined) throw refusal(isSolverLooks(next) ? SOLVER_WEARS : LOOK_INVALID)
+    const problem = avatarProblem(next, avatar, undefined)
+    if (problem) throw refusal(problem)
+    return { next, avatar }
+  }
+
+  function assertCaller(createdBy) {
+    if (createdBy !== undefined && (rt.botOf(createdBy) === undefined || !rt.isMain(createdBy))) {
+      throw refusal('Only the Main Bot can create Bots. Ask the Main Bot instead.')
+    }
+  }
+
+  async function buildBot(cleanName, options, readScopeSource) {
+    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy } = options
+    if (existingSessionId !== undefined && (createdBy !== undefined || reviewerId !== undefined || reviewGuard !== undefined)) {
+      throw refusal('An adopted Session takes no creator or reviewer.')
+    }
+    const { next: { kind } } = createLook(options)
+    const copyAvatar = copyOf === undefined ? undefined : cleanAvatar(avatar)
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
-    const cleanAvatarValue = cleanAvatar(avatar)
-    const roleText = cleanRole(role)
     // Checked before the Session exists, so a bad list or shell choice creates no Bot and
     // leaves no orphan.
     const denyTools = cleanDenyTools(denyToolsInput)
@@ -335,7 +387,6 @@ export function install(rt) {
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
     // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
     // its Session exists.
-    const kind = BOT_KINDS.includes(requestedKind) ? requestedKind : undefined
     const modelRef = model ? await rt.resolveModel(model, { remember: false }) : pickModel ? undefined : await rt.defaultBotModel()
     if (model) {
       rt.assertRouteAllowed({ name: cleanName, kind }, modelRef, 'create-bot')
@@ -388,31 +439,46 @@ export function install(rt) {
     if (existingSessionId === undefined && createdBy !== undefined && readScopeSource === undefined) rt.assertNoConfiguredReadScope()
     // A host adapter may already own a configured root Session. Adopt it without creating
     // another Session or moving its workspace; this option is internal, not a user payload.
-    const id = existingSessionId ?? await createSession(cleanName, { dir, readScopeSource })
-    // Checked against the Session's own tool surface, before the Bot record exists: a name
-    // this DSH does not serve refuses the create (the catch below archives the Session).
-    if (denyTools) await rt.assertDenyTools(id, denyTools)
+    let id = existingSessionId
     if (existingSessionId !== undefined) {
+      if (denyTools) await rt.assertDenyTools(id, denyTools)
       const agent = await rt.resolveAgent(id)
       if (agent?.session?.id !== id) throw refusal('The existing Session could not be resolved')
+      createLook(options, id)
+      resolveSectionInput({ section, sectionId }, { allowCreate: false })
       await ctx.sessionTitle.rename(agent.session, cleanName)
     }
     let bot
     let copyPublished = false
+    const allocation = {}
+    let sectionsBefore
+    let resolvedSecId
     try {
-      const resolvedSecId = !main ? resolveSectionInput({ section, sectionId }) : undefined
-      const instructionsText = String(instructions).trim()
-      const waitForSolver = instructionsText !== '' && ((waitingRole === SOLVER_ROLE_ID && roleText === SOLVER_DESCRIPTION)
+      if (id === undefined) {
+        const guard = () => {
+          assertCaller(createdBy)
+          createLook(options)
+        }
+        id = await createSession(cleanName, { dir, readScopeSource, guard, allocation })
+        // Check the new Session's own tool surface before publishing its Bot.
+        if (denyTools) await rt.assertDenyTools(id, denyTools)
+      }
+      sectionsBefore = new Set((state.sections ?? []).map(sec => sec.id))
+      assertCaller(createdBy)
+      const { next, avatar: checkedAvatar } = createLook(options, id)
+      const savedAvatar = copyOf !== undefined ? copyAvatar
+        : checkedAvatar ?? (isSolverLooks(next) ? { shape: solverDefaultShape(id) } : undefined)
+      resolvedSecId = !main ? resolveSectionInput({ section, sectionId }) : undefined
+      const waitForSolver = next.instructions !== '' && ((waitingRole === SOLVER_ROLE_ID && next.role === SOLVER_DESCRIPTION)
         || waitingRole?.hostCopy === true)
-      const keptReviewer = typeof reviewerId === 'string' && reviewerId !== id && rt.botOf(reviewerId) !== undefined
       bot = {
         id,
         name: cleanName,
-        role: roleText,
+        role: next.role,
         advanced: false,
         // A color is only stored when the user picks one; otherwise the id picks it.
         ...(isColor(currentColor(color)) ? { color: currentColor(color) } : {}),
-        ...(cleanAvatarValue ? { avatar: cleanAvatarValue } : {}),
+        ...(savedAvatar ? { avatar: savedAvatar } : {}),
         ...(modelRef ? { model: modelRef } : {}),
         ...(effortId ? { effort: effortId } : {}),
         ...(dir ? { workDir: dir } : {}),
@@ -432,14 +498,14 @@ export function install(rt) {
         ...(resolvedSecId ? { sectionId: resolvedSecId } : {}),
         // The Bot that reviews a Solver's work (the New Solver dialog's choice). Cosmetic: only
         // the "unreviewed" mark reads it (review-mark.js); it grants and refuses nothing.
-        ...(keptReviewer ? { reviewerId, ...(reviewerMade === true ? { reviewerMade: true } : {}) } : {}),
+        ...(next.reviewerId === undefined ? {} : { reviewerId: next.reviewerId, ...(reviewerMade === true ? { reviewerMade: true } : {}) }),
         // The person's review guard (review-guard.js): only with that reviewer kept, and only from the
         // person's create-bot (the New Solver tick) or a copy of a guarded Solver.
-        ...(reviewGuard === true && keptReviewer ? { reviewGuard: true } : {}),
-        instructions: instructionsText,
-        ...(solverCopy ? { roles: [solverCopy.pin] } : {}),
+        ...(reviewGuard === true && next.reviewerId !== undefined ? { reviewGuard: true } : {}),
+        instructions: next.instructions,
+        ...(next.roles ? { roles: next.roles } : {}),
         ...(waitForSolver ? { waitingRole: {
-          id: SOLVER_ROLE_ID, instructions: instructionsDigest(instructionsText), role: roleText,
+          id: SOLVER_ROLE_ID, instructions: instructionsDigest(next.instructions), role: next.role,
         } } : {}),
         createdAt: Date.now(),
         createdBy: createdBy ?? null,
@@ -534,19 +600,41 @@ export function install(rt) {
         .then(() => sendKickoff(bot, greeting), error => rt.warn('ds-bot: %s does not greet: %s', cleanName, error?.message ?? error))
       return bot
     } catch (error) {
+      id ??= allocation.id
       // Once a copy is published, its Session must survive an unconfirmed directory sync.
       if (copyPublished || (solverCopy && rt.botOf(id) !== undefined)) throw error
+      const { reserved } = allocation
+      if (id === undefined) {
+        if (reserved !== undefined) await forgetReadScopes([reserved], cleanName)
+        throw error
+      }
       // The Bot's Session was already made: archive it instead of leaving an orphan.
       delete state.bots[id]
       rt.dropGrantsForBot?.(id)
       rt.dropGrantsForSession?.(id)
       state.mainBotIds = state.mainBotIds.filter(other => other !== id)
       rt.chatOwners.delete(id)
+      if (resolvedSecId !== undefined && !sectionsBefore.has(resolvedSecId)
+        && !Object.values(state.bots).some(bot => bot.sectionId === resolvedSecId)
+        && !Object.values(state.rooms).some(room => room.sectionId === resolvedSecId)
+        && !Object.values(state.agents).some(agent => agent.sectionId === resolvedSecId)) {
+        state.sections = state.sections.filter(sec => sec.id !== resolvedSecId)
+      }
       // A save that another change queued meanwhile still carries this Bot; a later
       // one writes the team without it.
       if (!solverCopy) void rt.save().catch(() => {})
-      if (existingSessionId === undefined) await ctx.workspaceRegistry.archiveSession(id)
-        .catch(archiveError => rt.warn('ds-bot: archiving the Session for %s failed: %s', cleanName, archiveError))
+      if (existingSessionId === undefined) {
+        let archived = false
+        try {
+          await ctx.workspaceRegistry.archiveSession(id)
+          archived = true
+        } catch (archiveError) {
+          rt.warn('ds-bot: archiving the Session for %s failed: %s', cleanName, archiveError)
+        }
+        rt.sessionFolderWarnings?.delete(id)
+        // If the Session survived a failed archive, keep the scope it uses.
+        if (reserved !== undefined && (archived || reserved !== id)) await forgetReadScopes([reserved], cleanName)
+      }
       throw error
     }
   }
@@ -705,6 +793,44 @@ export function install(rt) {
     return nextName === bot.name ? undefined : nameProblem(nextName)
   }
 
+  // Owner admission precedes the model slot, the look hold, then the grant hold.
+  // Create has no Bot to hold; a competing name fails immediately in holdName.
+  // Pet selection checks identity before I/O and takes the hold through updateBot at commit.
+  const lookChanges = new Map()
+  const lookChange = new AsyncLocalStorage()
+  async function withLookHold(id, run) {
+    const parent = lookChange.getStore()
+    if (parent?.id === id && parent.active) return run()
+    const waiting = lookChanges.get(id)
+    const { promise, resolve } = Promise.withResolvers()
+    lookChanges.set(id, promise)
+    const scope = { id, active: true }
+    try {
+      if (waiting !== undefined) await waiting
+      return await lookChange.run(scope, run)
+    } finally {
+      scope.active = false
+      if (lookChanges.get(id) === promise) lookChanges.delete(id)
+      resolve()
+    }
+  }
+
+  function checkUpdateLook(id, patch, actorId) {
+    const bot = rt.botOf(id)
+    if (bot === undefined) return
+    const next = { ...bot, role: patch.role === undefined ? bot.role : cleanRole(patch.role),
+      instructions: patch.instructions === undefined ? bot.instructions : String(patch.instructions).trim() }
+    if ((actorId !== undefined || rt.agentCaller?.()) && !isSolverLooks(bot) && isSolverLooks(next)) {
+      throw refusal(SOLVER_BY_PERSON)
+    }
+    if (patch.avatar === undefined && patch.color === undefined) return
+    const avatar = patch.avatar === undefined ? bot.avatar : cleanAvatar(patch.avatar)
+    // A colour save chooses a look. Only an explicit avatar patch can carry a legacy shape.
+    const problem = avatarProblem(next, avatar, patch.avatar === undefined ? undefined : bot.avatar)
+    if (problem) throw refusal(problem)
+    return { avatar }
+  }
+
   async function updateBot(id, patch, actorId, fromSessionId, options) {
     if (Object.hasOwn(patch, 'nativeTools')) return rt.setNativeTools(id, patch, actorId)
     if (Object.hasOwn(patch, 'reviewGuard')) return rt.setReviewGuard(id, patch, actorId)
@@ -713,8 +839,15 @@ export function install(rt) {
       throw refusal(`Only the person can move ${rt.botOf(id).name} to another model while its review guard is on.`)
     }
     if (Object.hasOwn(patch, 'people')) throw refusal('Only the user can choose who may talk to ' + (rt.botOf(id)?.name ?? 'this Bot'))
-    const run = () => updateBotRecord(id, patch, actorId, fromSessionId, options)
-    return patch.model !== undefined || patch.effort !== undefined ? withModelChange(id, run, options?.admit !== undefined) : run()
+    const model = patch.model !== undefined || patch.effort !== undefined
+    const look = lookChange.getStore()
+    if (model && look?.id === id && look.active) {
+      throw new Error('lock order: model change inside a look hold')
+    }
+    const identity = ['role', 'instructions', 'avatar', 'color'].some(key => patch[key] !== undefined)
+    const record = checkedAvatar => updateBotRecord(id, patch, actorId, fromSessionId, { ...options, checkedAvatar })
+    const run = identity ? () => withLookHold(id, () => record(checkUpdateLook(id, patch, actorId))) : () => record()
+    return model ? withModelChange(id, run, options?.admit !== undefined) : run()
   }
 
   function updateBotRecord(id, patch, actorId, fromSessionId, options) {
@@ -731,7 +864,7 @@ export function install(rt) {
   }
 
   // `stopReply`: the person agreed to stop a running reply for an agent switch (parts.js).
-  async function updateBotHeld(id, patch, actorId, fromSessionId, { admit, modelEntry, stopReply = false } = {}) {
+  async function updateBotHeld(id, patch, actorId, fromSessionId, { admit, modelEntry, stopReply = false, checkedAvatar } = {}) {
     if (['permissionAuto', 'permissionRev', 'autoStamp'].some(key => Object.hasOwn(patch, key))) throw refusal('Only the person turns Auto on, from the Bot\'s permission choice.')
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
@@ -981,7 +1114,7 @@ export function install(rt) {
           else if (isColor(currentColor(patch.color))) bot.color = currentColor(patch.color)
         }
         if (patch.avatar !== undefined) {
-          const avatar = cleanAvatar(patch.avatar)
+          const { avatar } = checkedAvatar
           if (avatar) bot.avatar = avatar
           else delete bot.avatar
         }
@@ -2007,12 +2140,13 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    pickingModel: id => picking.has(id), settlingModel: id => settling.get(id) ?? 0, whilePicking, withModelChange,
+    pickingModel: id => picking.has(id), settlingModel: id => settling.get(id) ?? 0, whilePicking, withModelChange, withLookHold,
     botNameRefusal: (id, name) => {
       const bot = rt.botOf(id)
       return bot === undefined ? 'Unknown Bot' : nameRefusal(bot, String(name).trim().slice(0, 40))
     },
-    ensureWorkspace, keepTeamFolder, createSession, createBot, newBotStoredPermission, duplicateBot, updateBot, setFlags,
+    ensureWorkspace, keepTeamFolder, createSession, createBot, checkCreateLook: options => createLook(options),
+    newBotStoredPermission, duplicateBot, updateBot, setFlags,
     saveSection, reorderSections, deleteSection,
     roomBusy, autoRoomName, retitleRoom, createRoom, updateRoom, deleteRoom,
     setMain, deleteBot, beforeBotDelete, unlistDraftSweep, draftsSwept, bootstrap, releaseKickoff, greetingOut, holdKickoffAgain, userWrote, userAnswered,

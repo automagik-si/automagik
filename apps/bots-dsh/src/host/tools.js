@@ -420,7 +420,7 @@ export function install(rt) {
     },
   }))
 
-  rt.teamTools.push(defineTool({
+  const createBotTool = defineTool({
     name: 'create_bot',
     description: 'Main Bot only. Create a new Bot on the user\'s team. It appears in the sidebar and greets the user.',
     parameters: {
@@ -439,16 +439,18 @@ export function install(rt) {
     output,
     async execute(args, exec) {
       await rt.load()
-      if (!rt.isMain(rt.selfOf(exec.agent?.id))) return 'Only the Main Bot can create Bots. Ask the Main Bot instead.'
+      const self = rt.selfOf(exec.agent?.id)
+      if (!rt.isMain(self)) return 'Only the Main Bot can create Bots. Ask the Main Bot instead.'
       try {
-        const avatar = args.avatar ? await readAvatar(String(args.avatar), { baseDir: rt.sessionFolder?.(exec.agent?.session ?? exec.agent), isData: rt.inData }) : undefined
+        const supplied = Object.hasOwn(args, 'avatar') && args.avatar !== undefined
+        const avatar = supplied ? await readAvatar(args.avatar, { baseDir: rt.sessionFolder?.(exec.agent?.session ?? exec.agent), isData: rt.inData }) : undefined
         const workDir = args.work_dir ? await rt.cleanWorkDir(args.work_dir) : undefined
         const name = String(args.name ?? '').trim()
         await rt.approveFolder(exec, { path: workDir, who: { en: `the new Bot ${name}`, zh: `新 Bot ${name} ` } })
         // Without a named model the team's default applies; without one the new Bot
         // takes its creator's: the DSH default may be a provider that has no key, and
         // then the new Bot fails on its first reply.
-        const creator = callerBot(exec)
+        const creator = rt.botOf(self)
         const served = new Set((await rt.catalog()).filter(entry => entry.needsKey !== true && rt.isLocalAgentRef?.(entry.ref) !== true).map(entry => entry.ref))
         const denyTools = args.deny_tools ?? args.denyTools
         // A new Bot that will deny acp_tool skips a fallback that runs its own tools (#2026).
@@ -472,7 +474,7 @@ export function install(rt) {
           workDir,
           section: args.section,
           avatar: avatar === undefined ? undefined : { image: avatar },
-          createdBy: creator?.id,
+          createdBy: self,
           ...(inheritAuto === undefined ? {} : { inheritAuto }),
           // Only when asked: an older call keeps the exact payload it had.
           ...(denyTools === undefined ? {} : { denyTools }),
@@ -487,7 +489,17 @@ export function install(rt) {
         return `Could not create the Bot: ${error.message}`
       }
     },
-  }))
+  })
+  rt.teamTools.push({
+    ...createBotTool,
+    execute(args, exec) {
+      // Some model providers send null for omitted arguments. Normalize it before DSH validates the string.
+      if (args?.avatar !== null || !Object.hasOwn(args, 'avatar')) return createBotTool.execute(args, exec)
+      const normalized = { ...args }
+      delete normalized.avatar
+      return createBotTool.execute(normalized, exec)
+    },
+  })
 
   rt.teamTools.push(defineTool({
     name: 'update_bot',

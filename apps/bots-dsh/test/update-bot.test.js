@@ -7,6 +7,8 @@ import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { allowlist, code, fixture, member, owners, stranger, workspace } from './caller-fixture.js'
+import { bench as grantBench } from './grants-fixture.js'
+import { solverInstructions } from '../src/shared/solver-method.js'
 
 const TEAM = {
   version: 1,
@@ -240,4 +242,158 @@ test('the review guard: only the person turns it on or off, on its own, with a r
   const none = await call('update-bot', { id: 'm1', reviewGuard: true })
   assert.match(none.error.message, /Omni has no reviewer Bot on the team, so there is no verdict to wait for\./)
   assert.equal(state().bots.m1.reviewGuard, undefined)
+})
+
+const SOLVER_ONLY = 'Only a Solver wears the Solver characters. Choose another character.'
+const SOLVER_WEARS = 'A Solver wears one of the Solver characters. Choose one of those characters.'
+const solverProfile = () => ({ role: 'Solver', instructions: solverInstructions() })
+const lookImage = 'data:image/png;base64,AA=='
+const lookPet = { source: 'team', id: 'fixture', version: 1 }
+const lookTeam = fields => ({ ...structuredClone(TEAM), bots: { ...structuredClone(TEAM.bots),
+  b2: { ...TEAM.bots.b2, ...fields } } })
+
+async function refuseLook(host, id, patch, message) {
+  await rt.load()
+  await rt.save()
+  const disk = host.state().bots[id]
+  const live = structuredClone(rt.botOf(id))
+  const result = await host.call('update-bot', { id, ...patch })
+  await rt.save()
+  assert.deepEqual(host.state().bots[id], disk)
+  assert.deepEqual(rt.botOf(id), live)
+  assert.equal(result.error?.code, 'bot/refused')
+  assert.equal(result.error.message, message)
+}
+
+test('an ordinary Bot refuses a mixed name, colour and Solver shape update', async t => {
+  const host = start()
+  t.after(host.stop)
+  await refuseLook(host, 'b2', { name: 'Changed', color: 'red', avatar: { shape: 'frog' } }, SOLVER_ONLY)
+})
+
+for (const [name, look] of [['photo', { image: lookImage }], ['pet', { pet: lookPet }]]) {
+  test(`a Solver refuses a mixed update keeping a ${name} alongside a Solver shape`, async t => {
+    const host = start(lookTeam({ ...solverProfile(), avatar: look }))
+    t.after(host.stop)
+    await refuseLook(host, 'b2', { name: 'Changed', color: 'red', avatar: { shape: 'frog', ...look } }, SOLVER_WEARS)
+  })
+}
+
+test('a Solver refuses both kinds of Default look removal', async t => {
+  const host = start(lookTeam({ ...solverProfile(), avatar: { shape: 'cactus' } }))
+  t.after(host.stop)
+  for (const avatar of [null, {}]) await refuseLook(host, 'b2', { avatar }, SOLVER_WEARS)
+})
+
+test('an ordinary Bot can still clear its avatar', async t => {
+  const host = start(lookTeam({ avatar: { shape: 'star' } }))
+  t.after(host.stop)
+  assert.equal((await host.call('update-bot', { id: 'b2', avatar: null })).ok, true)
+  assert.equal(host.state().bots.b2.avatar, undefined)
+})
+
+test('a Solver can choose a Solver shape and colour together', async t => {
+  const host = start(lookTeam({ ...solverProfile(), avatar: { shape: 'cactus' } }))
+  t.after(host.stop)
+  assert.equal((await host.call('update-bot', { id: 'b2', avatar: { shape: 'frog' }, color: 'red' })).ok, true)
+  assert.deepEqual(host.state().bots.b2.avatar, { shape: 'frog' })
+  assert.equal(host.state().bots.b2.color, 'red')
+})
+
+test('an ordinary Bot can carry its stored Solver shape but cannot choose a different one', async t => {
+  const host = start(lookTeam({ avatar: { shape: 'frog' } }))
+  t.after(host.stop)
+  assert.equal((await host.call('update-bot', { id: 'b2', name: 'Changed' })).ok, true)
+  assert.deepEqual(host.state().bots.b2.avatar, { shape: 'frog' })
+  assert.equal((await host.call('update-bot', { id: 'b2', avatar: { shape: 'frog', image: lookImage } })).ok, true)
+  assert.deepEqual(host.state().bots.b2.avatar, { shape: 'frog', image: lookImage })
+  await refuseLook(host, 'b2', { avatar: { shape: 'cactus' } }, SOLVER_ONLY)
+})
+
+test('an unrelated edit preserves a Solver’s grandfathered ordinary shape', async t => {
+  const host = start(lookTeam({ ...solverProfile(), avatar: { shape: 'star' } }))
+  t.after(host.stop)
+  assert.equal((await host.call('update-bot', { id: 'b2', name: 'Changed' })).ok, true)
+  assert.deepEqual(host.state().bots.b2.avatar, { shape: 'star' })
+})
+
+test('a queued model and avatar edit checks the identity after the model slot opens', async t => {
+  const host = start(lookTeam({ ...solverProfile(), avatar: { shape: 'cactus' } }))
+  t.after(host.stop)
+  await rt.load()
+  const gate = Promise.withResolvers()
+  const held = rt.withModelChange('b2', () => gate.promise, true)
+  const queued = rt.updateBot('b2', { model: 'deepseek/v4', avatar: { shape: 'frog' } })
+  const refused = queued.then(value => ({ value }), error => ({ error }))
+  let disk
+  let live
+  try {
+    assert.equal((await host.call('update-bot', { id: 'b2', instructions: '' })).ok, true)
+    await rt.save()
+    disk = host.state().bots.b2
+    live = structuredClone(rt.botOf('b2'))
+  } finally {
+    gate.resolve()
+    await held
+  }
+  const { error } = await refused
+  await rt.save()
+  assert.deepEqual(host.state().bots.b2, disk)
+  assert.deepEqual(rt.botOf('b2'), live)
+  assert.equal(error?.message, SOLVER_ONLY)
+})
+
+test('a mixed look refusal precedes the grant hold and keeps the scoped grant', async t => {
+  const host = await grantBench(t, { models: [{ id: 'v4' }] })
+  const id = await host.grant()
+  const hold = t.mock.method(host.rt, 'holdGrants')
+  await host.rt.save()
+  const state = () => JSON.parse(readFileSync(join(host.home, 'state.json'), 'utf8'))
+  const disk = state().bots.a
+  const live = structuredClone(host.rt.botOf('a'))
+  const response = await host.request('update-bot', { id: 'a', model: 'deepseek/v4', avatar: { shape: 'frog' } })
+  await host.rt.save()
+  assert.deepEqual(state().bots.a, disk)
+  assert.deepEqual(host.rt.botOf('a'), live)
+  assert.equal(response.error?.message, SOLVER_ONLY)
+  assert.equal(hold.mock.callCount(), 0)
+  assert.ok(host.rt.grantsView().some(grant => grant.id === id && grant.botId === 'a'))
+})
+
+test('the person can make a Bot a Solver in Settings', async t => {
+  const host = start()
+  t.after(host.stop)
+  const profile = solverProfile()
+  assert.equal((await host.call('update-bot', { id: 'b2', ...profile })).ok, true)
+  assert.equal(host.state().bots.b2.role, profile.role)
+  assert.equal(host.state().bots.b2.instructions, profile.instructions)
+})
+
+test('a model update refuses to acquire the slot from inside the look hold', async t => {
+  const host = start()
+  t.after(host.stop)
+  await rt.load()
+  await rt.save()
+  const disk = host.state().bots.b2
+  const live = structuredClone(rt.botOf('b2'))
+  assert.equal(typeof rt.withLookHold, 'function')
+  await assert.rejects(rt.withLookHold('b2', () => rt.updateBot('b2', { model: 'deepseek/v4' })),
+    /lock order: model change inside a look hold/)
+  await rt.save()
+  assert.deepEqual(host.state().bots.b2, disk)
+  assert.deepEqual(rt.botOf('b2'), live)
+})
+
+test('a Solver’s colour-only save keeps the current Solver shape', async t => {
+  const host = start(lookTeam({ ...solverProfile(), avatar: { shape: 'frog' }, color: 'blue' }))
+  t.after(host.stop)
+  assert.equal((await host.call('update-bot', { id: 'b2', color: 'red' })).ok, true)
+  assert.deepEqual(host.state().bots.b2.avatar, { shape: 'frog' })
+  assert.equal(host.state().bots.b2.color, 'red')
+})
+
+test('a colour-only save refuses an ordinary Bot’s stored Solver shape', async t => {
+  const host = start(lookTeam({ avatar: { shape: 'frog' }, color: 'blue' }))
+  t.after(host.stop)
+  await refuseLook(host, 'b2', { color: 'red' }, SOLVER_ONLY)
 })
