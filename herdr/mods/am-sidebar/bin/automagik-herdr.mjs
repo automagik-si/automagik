@@ -83,7 +83,8 @@ import { exceptionWarning, routeManaged } from "../accountsLaunch.js";
 import { paneLogin } from "../loginProbe.js";
 import { DIRECT_LOGIN_PROBLEM, VENDORS, botLoginWords, directLoginVendor, loginLaunchHome, loginLaunchProblem, loginPolicyActive, loginPolicyEnv, loginPolicyForward, loginReadIo, resolveLogin } from "../loginRecord.js";
 import { DocError, docGet } from "../docGet.mjs";
-import { isGuardFolder, SHARED_ROLES, SHARED_SEND_RANKS } from "../hcGuard.mjs";
+import { isGuardFolder } from "../hcGuard.mjs";
+import { SHARED_ROLES, SHARED_SEND_RANKS } from "../hcGuard.mjs";
 import { isInstalledGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
