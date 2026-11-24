@@ -168,8 +168,8 @@ test("a second click switches the tab's preview in place instead of splitting ag
   await until(() => herdr.ui.closed === 1, "the popup to close");
 });
 
-const open = async (dir, answer) => {
-  const pane = { pane: "p1", tab: "t1", terminal: "t1", focused: true, cwd: dir };
+const open = async (dir, answer, terminal = "t1") => {
+  const pane = { pane: "p1", tab: "t1", terminal, focused: true, cwd: dir };
   await reset({ props: { tab: "pane", target: { pane: "p1" } }, panes: [pane] });
   state.hcAnswer = answer;
   state.focused = { tab: "t1", pane: "p1" };
@@ -199,6 +199,28 @@ test("a pane that is working lists the screen's paths and says so; the read asks
   await until(() => bare.note === "Pane is working: only paths on screen", "the working note");
 });
 
+// hc's `why` for a read that is the screen alone: every one is a partial read, never "no files".
+for (const [why, says] of [
+  ["blocked", /Pane is blocked: only paths on screen/],
+  ["error", /Pane has an error: only paths on screen/],
+  [null, /Pane was not fully read: only paths on screen/],
+]) {
+  test(`a pane read with complete:false and why ${why} is a partial read, with its own note`, async () => {
+    const dir = folder();
+    const json = JSON.stringify({ text: `see ${dir}/NOTES.md\n`, how: "screen", complete: false, why });
+    const view = await open(dir, () => ({ code: 0, stdout: json, stderr: "" }));
+    await until(() => view.marks.length === 1, "the row");
+    assert.match(textOf(view.render(cxFor())), says);
+
+    // No path on screen: the note says the read was partial, not that the terminal has no files.
+    const none = JSON.stringify({ text: "nothing here", how: "screen", complete: false, why });
+    const bare = await open(dir, () => ({ code: 0, stdout: none, stderr: "" }));
+    await until(() => !bare.searching, "find to end");
+    assert.match(bare.note, says);
+    assert.doesNotMatch(textOf(bare.render(cxFor())), /No Markdown files/);
+  });
+}
+
 test("a failed hc read shows its stderr instead of an empty list", async () => {
   const view = await open(folder(), () => ({ code: 1, stdout: "", stderr: "no such terminal" }));
   await until(() => view.note !== null && view.note !== undefined && !view.searching, "the error note");
@@ -226,6 +248,27 @@ test("~/ is expanded by the terminal's own $HOME and the row shows the resolved 
     const view = await open(folder(), () => ({ code: 0, stdout: "wrote ~/todo.md\n", stderr: "" }));
     await until(() => view.marks.length === 1, "the home file");
     assert.equal(view.marks[0].path, join(home, "todo.md"));
+  } finally {
+    process.env.HOME = saved;
+  }
+});
+
+test("~/ printed by another machine's terminal is expanded and checked on that machine", async () => {
+  const home = mkdtempSync(join(tmpdir(), "am-markdown-home-"));
+  writeFileSync(join(home, "todo.md"), "# t\n");
+  const saved = process.env.HOME;
+  process.env.HOME = home;
+  state.calls.length = 0;
+  try {
+    const view = await open(folder(), () => ({ code: 0, stdout: "wrote ~/todo.md\n", stderr: "" }), "box/t1");
+    await until(() => view.marks.length === 1, "the home file");
+    assert.deepEqual(state.hcCalls.find((a) => a[0] === "read")?.[1], "box/t1", "the read names the machine's terminal");
+    const checks = state.calls.filter((c) => c.kind === "exec" && c.command === "sh");
+    assert.equal(checks.length, 1, "one existence check");
+    assert.equal(checks[0].on, "box", "the check runs on the terminal's machine");
+    assert.ok(checks[0].args.includes("~/todo.md"), "~/ goes to that machine as printed, for its own $HOME");
+    assert.deepEqual(view.marks[0], { path: join(home, "todo.md"), rel: view.marks[0].rel, on: "box" });
+    assert.match(textOf(view.render(cxFor())), /box/, "the row names the machine");
   } finally {
     process.env.HOME = saved;
   }
