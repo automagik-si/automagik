@@ -243,7 +243,7 @@ test('the Review guard line in Details: per route, gone, no reviewer Bot, waitin
   const roster = { byId: { r1: { id: 'r1', name: 'Ada reviewer' } } }
   const bot = extra => ({ id: 's1', name: 'Sol', role: 'Solver', reviewerId: 'r1', model: FLASH, ...extra })
   const hard = "Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers."
-  const scope = "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation, its Omni automation runs that open their own conversation, and its group conversations are not held."
+  const scope = "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held."
   assert.equal(reviewGuardText(bot({ reviewGuard: true }), roster, 'ask'), `${hard} ${scope}`)
   assert.equal(reviewGuardText(bot({ reviewGuard: true, model: CLAUDE, nativeTools: true, nativeToolsAgent: 'acp-claude' }), roster, 'ask'), `${REVIEW_GUARD_COPY.asks} ${scope}`)
   assert.equal(REVIEW_GUARD_COPY.asks, 'Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.')

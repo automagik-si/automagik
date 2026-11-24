@@ -32,7 +32,7 @@ const render = (bot, extra = {}) => ReviewGuardRow({
 })
 const switchOf = row => row?.children?.[0]?.props
 const hard = "Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers."
-const scope = "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation, its Omni automation runs that open their own conversation, and its group conversations are not held."
+const scope = "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held."
 
 test('the row: shown with a reviewer id, the guard on, or the marker; its line follows the route; toggling sends it alone', () => {
   const on = switchOf(render({ reviewGuard: true }))
@@ -69,7 +69,7 @@ test('a Solver with no reviewer Bot shows the row off and disabled with the reas
   assert.equal(gone.hint, 'Its reviewer is no longer on the team: work stays held until you turn this off.')
   // A migrated Solver waiting for its verdict says since when (K13).
   const waiting = switchOf(render({ reviewGuard: true, reviewGuardWaitingSince: Date.now() }))
-  assert.match(waiting.hint, /^Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers\. Waiting for Ada reviewer's verdict on the plan since .+\. Held only in this Bot's own chat and the subagents it starts there\. Its scheduled tasks that open a new conversation, its Omni automation runs that open their own conversation, and its group conversations are not held\.$/)
+  assert.match(waiting.hint, /^Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers\. Waiting for Ada reviewer's verdict on the plan since .+\. Held only in this Bot's own chat and the subagents it starts there\. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held\.$/)
 })
 
 test('the upgrade line: only in the part it names, after the last turn ended at or before it, once', () => {

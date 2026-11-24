@@ -8997,6 +8997,41 @@ function machineRefusal({ state, why }) {
   if (state === "unreadable") return MACHINE_MESSAGES["unreadable-file"];
 }
 
+// src/shared/guard-groups.js
+var WAY_OUT = "{name} from its groups (for a group of two, delete the group or add another Bot first), then turn the guard on";
+var GUARD_GROUP_COPY = {
+  join: "{name} has the review guard on, so it cannot join a group. To add it, turn the review guard off in {name}'s Details first.",
+  inGroup: `{name} is in a group ({groups}), so its review guard cannot be turned on. Remove ${WAY_OUT}.`,
+  off: `The review guard of {name} was turned off because {name} is in a group, and a Bot with the guard on cannot be in one. To turn it back on, remove ${WAY_OUT} in its Details.`,
+  more: "{groups} and {count} more"
+};
+var PT = {
+  join: "{name} está com a trava de revisão ligada e, por isso, não pode entrar em um grupo. Para adicionar ao grupo, primeiro desligue a trava de revisão em Detalhes de {name}.",
+  inGroup: "{name} está em um grupo ({groups}) e, por isso, a trava de revisão não pode ser ligada. Remova {name} dos grupos (em um grupo de dois, exclua o grupo ou adicione outro Bot primeiro) e depois ligue a trava.",
+  off: "A trava de revisão de {name} foi desligada porque {name} está em um grupo, e um Bot com a trava ligada não pode participar de grupos. Para ligar a trava de novo, remova {name} dos grupos (em um grupo de dois, exclua o grupo ou adicione outro Bot primeiro) e depois ligue a trava em Detalhes.",
+  more: "{groups} e mais {count}"
+};
+var ZH = {
+  join: "{name} 的审阅守卫已开启，因此无法加入群组。若要加入群组，请先在 {name} 的详情中关闭审阅守卫。",
+  inGroup: "{name} 已加入群组（{groups}），因此无法开启审阅守卫。请将 {name} 移出所在群组（如果群组只有两个 Bot，请先删除群组或添加另一个 Bot），然后开启审阅守卫。",
+  off: "{name} 的审阅守卫已关闭，因为 {name} 已加入群组，而开启了守卫的 Bot 无法加入群组。若要重新开启，请将 {name} 移出所在群组（如果群组只有两个 Bot，请先删除群组或添加另一个 Bot），然后在详情中开启审阅守卫。",
+  more: "{groups}，另有 {count} 个"
+};
+var guardGroupZh = Object.fromEntries(
+  Object.entries(GUARD_GROUP_COPY).map(([key, text]) => [text, ZH[key]])
+);
+function guardGroupText(key, args, locale) {
+  const language2 = locale?.toLowerCase().split("-")[0];
+  const copy = language2 === "pt" ? PT : language2 === "zh" ? ZH : GUARD_GROUP_COPY;
+  return copy[key].replace(/\{(\w+)\}/g, (_, name) => args[name]);
+}
+var GUARD_OFF_NOTICE = "review-guard-off";
+function guardOffNoticeOf(bot, sessionId) {
+  const notice = bot?.guardOffNotice;
+  if (notice?.kind !== GUARD_OFF_NOTICE || notice.id !== GUARD_OFF_NOTICE || !Number.isFinite(notice.at) || typeof sessionId !== "string" || notice.sessionId !== sessionId) return;
+  return notice;
+}
+
 // src/shared/own-tools.js
 var OWN_TOOLS_AGENTS = Object.freeze(["acp-antigravity"]);
 var OWN_TOOLS_MODEL_TEXT = "This Bot denies acp_tool, and this model runs its own tools anyway. Remove acp_tool from Denied tools first, or pick another model.";
@@ -9011,7 +9046,8 @@ var ownToolsNotice = (bot) => bot?.ownTools === true && deniesAcpTool(bot.denyTo
 
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
-var ZH = {
+var ZH2 = {
+  ...guardGroupZh,
   "File-tool folder": "文件工具的文件夹",
   "Folder for these four file tools": "这四个文件工具使用的文件夹",
   "Clear folder": "清除文件夹",
@@ -12362,7 +12398,7 @@ var ZH = {
   "Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.": "只拦住 Claude Code 会先询问的步骤。它自己的允许规则、钩子和已保存的批准可能让某个步骤在守卫看到之前就运行，而该步骤仍可能显示为已拒绝。",
   "Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.": "在此级别不拦截：没有任何步骤会先询问。只有交付标记会显示未审阅的工作。",
   "Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.": "在此代理上不拦截：它自己的工具无需询问即可运行。只有交付标记会显示未审阅的工作。",
-  "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation, its Omni automation runs that open their own conversation, and its group conversations are not held.": "仅在此 Bot 自己的聊天及其在其中启动的子代理中生效。它开启新对话的计划任务、开启独立对话的 Omni 自动化运行以及群组对话不受约束。",
+  "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held.": "仅在此 Bot 自己的聊天及其在其中启动的子代理中生效。它开启新对话的计划任务和开启独立对话的 Omni 自动化运行不受约束。",
   "Its reviewer is no longer on the team: work stays held until you turn this off.": "它的审阅者已不在团队中：在你关闭此项之前，工作会一直被拦住。",
   "Off: {name} has no reviewer Bot on the team, so there is no verdict to wait for.": "已关闭：{name} 在团队中没有审阅 Bot，因此没有可等待的结论。",
   "the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details": "审阅守卫正在等待审阅者对计划的结论；你可以在详情中关闭它",
@@ -12701,7 +12737,7 @@ var HOST_ZH = {
   "The first frame arrives in a moment.": "第一帧马上就到。",
   "The Bot’s browser": "Bot 的浏览器"
 };
-Object.assign(ZH, {
+Object.assign(ZH2, {
   "This step is hard to undo: {step}. Allow it once?": "这一步难以撤销：{step}。允许这一次吗？",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?": "{name} 在本轮被拒绝了 {count} 次，最近一次是 {tool}。让它继续工作吗？",
   "Let it keep working?": "让它继续工作吗？",
@@ -12717,7 +12753,7 @@ Object.assign(ZH, {
   "Steps (latest {n})": "步骤（最近 {n} 个）",
   "No steps yet.": "还没有步骤。"
 });
-Object.assign(ZH, {
+Object.assign(ZH2, {
   "Automagik official": "Automagik 官方",
   "Official": "官方",
   "Install": "安装",
@@ -12733,8 +12769,8 @@ Object.assign(ZH, {
   "Claude Code through the Agent Client Protocol": "通过 Agent Client Protocol 使用 Claude Code",
   "OpenAI Codex through the Agent Client Protocol": "通过 Agent Client Protocol 使用 OpenAI Codex"
 });
-Object.assign(ZH, HOST_ZH);
-Object.assign(ZH, {
+Object.assign(ZH2, HOST_ZH);
+Object.assign(ZH2, {
   "Checking the signed release": "正在检查已签名的版本",
   "Verifying the downloaded packages": "正在验证已下载的软件包",
   "Restarting and checking health": "正在重启并检查是否正常",
@@ -12806,7 +12842,7 @@ var publish = () => {
   const off = unregister;
   unregister = null;
   if (typeof off === "function") off();
-  unregister = service.register(NAMESPACE, "zh", ZH);
+  unregister = service.register(NAMESPACE, "zh", ZH2);
 };
 function installLocale(locale) {
   if (!locale || typeof locale.register !== "function" || typeof locale.bind !== "function") return () => {
@@ -12824,15 +12860,15 @@ function installLocale(locale) {
   };
 }
 function addStrings(zh2) {
-  const added = Object.keys(zh2 ?? {}).filter((key) => !Object.hasOwn(ZH, key));
-  for (const key of added) ZH[key] = zh2[key];
+  const added = Object.keys(zh2 ?? {}).filter((key) => !Object.hasOwn(ZH2, key));
+  for (const key of added) ZH2[key] = zh2[key];
   if (added.length > 0) publish();
   return () => {
-    for (const key of added) delete ZH[key];
+    for (const key of added) delete ZH2[key];
     if (added.length > 0) publish();
   };
 }
-Object.assign(ZH, {
+Object.assign(ZH2, {
   "No Bots are shared with you yet.": "还没有任何 Bot 与你共享。",
   "Nothing to read here yet.": "这里还没有可阅读的消息。",
   "You can read this chat, but not send messages.": "你可以阅读这段对话，但不能发送消息。",
@@ -12875,6 +12911,8 @@ function t(key, params) {
   return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
+  GUARD_GROUP_COPY.join,
+  GUARD_GROUP_COPY.inGroup,
   "Detach {name} first.",
   "{name} is already moving to a new conversation.",
   "{name} is still handing on earlier messages; try again shortly.",
@@ -12947,7 +12985,7 @@ function hostText(message) {
     if (worded !== message) return worded;
   }
   if (!language().startsWith("zh")) return message;
-  if (Object.hasOwn(ZH, message)) return t(message);
+  if (Object.hasOwn(ZH2, message)) return t(message);
   for (const [pattern, template] of HOST_ERRORS) {
     if (pattern.test(message)) return message.replace(pattern, template);
   }
@@ -12958,7 +12996,7 @@ function language() {
   return typeof active === "string" ? active : "en";
 }
 var dateLocale = () => language().startsWith("zh") ? "zh-CN" : "en-US";
-var DICTIONARY = { zh: ZH };
+var DICTIONARY = { zh: ZH2 };
 
 // src/client/inks.js
 var INKS = {

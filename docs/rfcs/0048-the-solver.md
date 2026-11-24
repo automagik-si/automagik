@@ -101,9 +101,9 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   on the team (a later OFF stays off). While it is on, the Solver's work calls in its own chat (and
   its subagents) are refused at the tool executor until its reviewer's reply to the current request
   carries a verdict (SHIP, FIX-FIRST or BLOCKED). It holds nothing outside that chat: a scheduled task
-  that opens a new conversation, the Solver's Omni automation runs that open their own conversation
-  (event and test runs; chat-mode runs use its own chat and are held) and its group conversations are
-  not held, and Details says so. The person turns it off in Details. It holds on
+  that opens a new conversation and the Solver's Omni automation runs that open their own conversation
+  (event and test runs; chat-mode runs use its own chat and are held) are not held, and Details says so.
+  The person turns it off in Details. It holds on
   routes whose calls are DSH tools. On Claude Code with native tools at Workspace it holds only for
   calls that ask first. It does not hold on Codex or omp native tools, or at Full access or Auto,
   and Details says so. The 'unreviewed' mark stays on every route.
@@ -214,8 +214,8 @@ host's upgrade (`reviewGuardMigrated`) for a Solver whose reviewer Bot is on the
 person clears it. Within its scope it fails closed: no verdict, an unreadable review track or a gone
 reviewer keep work refused. Its scope is the Solver's own chat and the subagents it starts there;
 scheduled tasks that open a new conversation, Omni automation runs that open their own conversation,
-group conversations, and routes whose own tools never ask (Codex or omp native tools, Full access,
-Auto, Claude Code native calls that do not ask) are outside it.
+and routes whose own tools never ask (Codex or omp native tools, Full access, Auto, Claude Code native
+calls that do not ask) are outside it.
 
 ## Deliveries
 
@@ -252,7 +252,7 @@ None for D1. D4's time-cap value is decided with D4.
 ## Changelog
 
 - 2026-11-24: the review guard's scope stated (own chat and its subagents; scheduled new-conversation
-  tasks, Omni automation runs in their own conversation and group conversations are not held).
+  tasks and Omni automation runs in their own conversation are not held).
 
 ## Links
 

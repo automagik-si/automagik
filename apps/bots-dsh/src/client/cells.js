@@ -17,6 +17,7 @@ import { ConnectorToolCell, MailToolCell } from './connectors.js'
 import { HandoffCall } from './handoff-card.js'
 import { AppAccessCall, ComputerCallRow, ComputerHandoffCall } from './computer.js'
 import { dateLocale, t } from './i18n.js'
+import { GUARD_GROUP_COPY, GUARD_OFF_NOTICE, guardOffNoticeOf } from '../shared/guard-groups.js'
 import { call } from './api.js'
 import { failureClause } from './diagnostics.js'
 import { turnReasoning, thinkingStep, opensReply, stepActivity } from './turn-reasoning.js'
@@ -588,7 +589,12 @@ function EarlierParts({ sessionId, roster, actions }) {
     pages: current.pages.map(page => ({ ...page, btw: page.btw.filter(card => card?.id !== cardId) })),
   }))
   const items = []
-  for (const page of view.pages) items.push(...withBtwRows(page.items, page.btw))
+  const bot = roster.byId[sessionId]
+  for (const page of view.pages) {
+    items.push(...withBtwRows(page.items, page.btw))
+    const notice = guardOffNoticeOf(bot, bot?.parts?.[page.partIndex])
+    if (notice !== undefined) items.push({ ...notice, name: bot.name, time: notice.at })
+  }
   return h('div', { className: 'bt-earlier', role: 'feed', 'aria-label': t('Earlier messages'), 'aria-busy': view.loading },
     h('div', { ref: top, className: 'bt-earlier-top' },
       view.loading ? h(Shimmer, null, t('Loading earlier messages…'))
@@ -631,6 +637,7 @@ export function ChatRows({ items, sessionId, roster, actions, useUi, clock = fal
 function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDelete }) {
   switch (row.kind) {
     case 'divider': return h(PartLine, { key, time: row.time, switchedTo: row.switchedTo, roster })
+    case GUARD_OFF_NOTICE: return h(UpgradeLine, { key: row.id, name: row.name, off: row.kind })
     case 'user': return h(EarlierUser, { key, row, actions })
     case 'answer': return h(AnsweredReply, { key, node: { data: row } })
     // A question or view card closed without an answer on it.
@@ -696,9 +703,17 @@ const noticeOfKey = (key) => {
 export const noticeAfterTurn = (at, end, nextStart) => typeof end === 'number' && end <= at && (nextStart === undefined || nextStart > at)
 /** Whether it goes above a turn: the part's first, begun after it. */
 export const noticeBeforeTurn = (at, first, start) => first === true && typeof start === 'number' && start > at
-function UpgradeLine({ name }) {
-  return h('div', { className: 'bt-event', 'data-review-guard-notice': '' },
-    t('The review guard is now on for {name}: its work waits for its reviewer\'s verdict on the plan. You can turn it off in Details.', { name }))
+function UpgradeLine({ name, off }) {
+  const text = off ? GUARD_GROUP_COPY.off
+    : 'The review guard is now on for {name}: its work waits for its reviewer\'s verdict on the plan. You can turn it off in Details.'
+  return h('div', { className: 'bt-event', 'data-review-guard-notice': off ?? '' }, t(text, { name }))
+}
+
+// A saved OFF belongs to this part even when it has no turns to attach to.
+export function GuardOffLine({ sessionId, useRoster }) {
+  const bot = useRoster(roster => roster.bots?.find(bot => guardOffNoticeOf(bot, sessionId)))
+  const notice = guardOffNoticeOf(bot, sessionId)
+  return notice === undefined ? null : h(UpgradeLine, { name: bot.name, off: notice.kind })
 }
 
 export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, useUi, actions }) {

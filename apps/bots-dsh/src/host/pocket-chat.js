@@ -40,6 +40,7 @@
 //   and one fresh home registry snapshot.
 import { randomUUID } from 'node:crypto'
 import { isBotId } from '../shared/registry.js'
+import { guardGroupText, guardOffNoticeOf } from '../shared/guard-groups.js'
 import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
 import { ATTACH_REQUEST_PREFIX, THUMBNAILS, attachmentCode, effectiveAttachments, positiveInt, sanitizeAttachmentName, validId } from './pocket-attach.js'
 import { startPocketSocket } from './pocket-socket.js'
@@ -269,9 +270,9 @@ export function pendingRowOf(state, sessionId, turn = 0) {
 }
 
 /** The newest rows that fit one page. */
-export function pageOf(rows, limit = PAGE_ROWS) {
+export function pageOf(rows, limit = PAGE_ROWS, reservedBytes = 0) {
   const out = []
-  let bytes = 0
+  let bytes = reservedBytes
   for (let i = rows.length - 1; i >= 0 && out.length < limit; i--) {
     const size = Buffer.byteLength(JSON.stringify(rows[i]))
     if (bytes + size > PAGE_BYTES) break
@@ -308,11 +309,12 @@ const globalOnly = bot => bot?.project == null
  *   fileUploads?: () => any, attachmentStore?: () => any,
  *   groups?: import('./pocket-groups.js').GroupSource,
  *   stopOf?: (sessionId: string, turn: number) => string | undefined,
+ *   guardOffOf?: (botId: string, sessionId: string) => { id: string, at: number, text: string } | undefined,
  *   carriesSignInCode?: (text: string) => boolean, switching?: (botId: string) => boolean }} options
  */
 export class DshChatSource {
-  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules, settings, fileUploads, attachmentStore, groups, switching = () => false }) {
-    Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf, fileUploads, attachmentStore })
+  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, guardOffOf = () => undefined, management, schedules, settings, fileUploads, attachmentStore, groups, switching = () => false }) {
+    Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf, guardOffOf, fileUploads, attachmentStore })
     /** Whether a Bot's own chat is switching agents (parts.js): a send then waits, as queued. Never throws. */
     this.switching = (botId) => { try { return switching(botId) === true } catch { return false } }
     /** Whether a text carries a Claude sign-in code the computer showed (cli-login.js). Never throws. */
@@ -629,11 +631,21 @@ export class DshChatSource {
     const base = { type: 'snapshot', screen: [], status: entry.status, approval: entry.approval, held: [] }
     const retained = rowsFor(entry.rows, attachments)
     const floor = attachments ? entry.mediaFloorSeq : entry.floorSeq
-    const latest = { ...base, reset: Boolean(after), rows: pageOf(retained) }
-    if (!after) return { ...latest, reset: false }
+    const notice = this.guardOffRow(entry)
+    const page = (rows) => {
+      if (notice === undefined) return pageOf(rows)
+      const result = pageOf(rows, PAGE_ROWS - 1, bytes(JSON.stringify(notice)))
+      const next = result.findIndex(row => row.at > notice.at)
+      result.splice(next === -1 ? result.length : next, 0, notice)
+      return result
+    }
+    const latest = { ...base, reset: Boolean(after), rows: page(retained) }
+    // A roster notice has no event seq. Resume with the latest page and let the stable
+    // row ids merge into the phone's existing history.
+    if (!after || after === notice?.id) return { ...latest, reset: false }
     const cursor = cursorOf(after)
     if (!cursor || cursor.sessionId !== entry.sessionId || cursor.seq > entry.cursor) return latest
-    if (cursor.seq >= floor - 1) return { ...base, reset: false, rows: pageOf(retained.filter(row => seqOf(row) > cursor.seq)) }
+    if (cursor.seq >= floor - 1) return { ...base, reset: false, rows: page(retained.filter(row => seqOf(row) > cursor.seq)) }
     let older
     try { older = await this.adapter.events(entry.sessionId, { beforeSeq: floor, maxMessages: PAGE_ROWS }, entry.controller.signal) } catch { return latest }
     const records = Array.isArray(older?.records) ? older.records : []
@@ -643,7 +655,14 @@ export class DshChatSource {
     const current = rowsFor(entry.rows, attachments)
     const rows = [...rowsFor(missed, attachments), ...(attachments ? current.filter(row => seqOf(row) >= floor) : current)]
     // Everything missed must fit one page; otherwise the phone starts over from the latest page.
-    return rows.length > PAGE_ROWS ? latest : { ...base, reset: false, rows: pageOf(rows) }
+    return rows.length + Number(notice !== undefined) > PAGE_ROWS ? latest : { ...base, reset: false, rows: page(rows) }
+  }
+
+  guardOffRow(entry) {
+    const notice = this.guardOffOf(entry.botId, entry.sessionId)
+    if (notice === undefined) return
+    return { id: rowIdOf(entry.sessionId, 0, notice.id), at: notice.at, turn: 0,
+      source: 'session', kind: 'status', state: 'idle', msg: cut(notice.text, PREVIEW_MAX) }
   }
 
   /** Rows before a row id, newest last: at most `limit`, read from the log (cold-safe). */
@@ -651,9 +670,14 @@ export class DshChatSource {
     const cursor = cursorOf(before)
     if (!cursor || cursor.sessionId !== entry.sessionId || entry.gone) return []
     const max = Math.min(Math.max(1, Number.isInteger(limit) ? limit : 50), PAGE_ROWS)
-    const page = await this.adapter.events(entry.sessionId, { beforeSeq: cursor.seq, maxMessages: max }, entry.controller.signal)
+    const notice = this.guardOffRow(entry)
+    const beforeSeq = before === notice?.id
+      ? seqOf(pageOf(rowsFor(entry.rows, attachments), PAGE_ROWS - 1, bytes(JSON.stringify(notice)))[0])
+      : cursor.seq
+    if (beforeSeq < 0) return []
+    const page = await this.adapter.events(entry.sessionId, { beforeSeq, maxMessages: max }, entry.controller.signal)
     const scope = { sessionId: entry.sessionId, turn: 0, calls: new Map(), stopOf: turn => this.stopOf(entry.sessionId, turn) }
-    const rows = (page?.records ?? []).filter(record => record.event.seq < cursor.seq).flatMap(record => rowsOf(record.event, scope))
+    const rows = (page?.records ?? []).filter(record => record.event.seq < beforeSeq).flatMap(record => rowsOf(record.event, scope))
     return pageOf(rowsFor(rows, attachments), max)
   }
 
@@ -1091,6 +1115,15 @@ export function placedBot(_rt, places, bot) {
   return { ...own, project: typeof bot.project === 'string' ? bot.project : null }
 }
 
+export function pocketGuardOffOf(rt, botId, sessionId) {
+  if (rt.chatOf(botId) !== sessionId) return
+  const bot = rt.botOf(botId)
+  const notice = guardOffNoticeOf(bot, sessionId)
+  if (notice !== undefined) {
+    return { ...notice, text: guardGroupText('off', { name: bot.name }, rt.uiLocale?.()) }
+  }
+}
+
 // The team's live Bots with their current own-chat Sessions.
 export function ownBots(rt, reader) {
   return async () => {
@@ -1209,6 +1242,7 @@ export function install(rt) {
         schedules: ownSchedules(rt, reader), settings: ownSettings(rt, reader),
         fileUploads: () => ctx.get?.('fileUploads'), attachmentStore: () => ctx.get?.('attachments'),
         stopOf: (id, turn) => rt.stopLineOfTurn?.(id, turn),
+        guardOffOf: (botId, sessionId) => pocketGuardOffOf(rt, botId, sessionId),
         carriesSignInCode,
         switching: botId => Boolean(rt.switchingChat?.(botId, { crossing: true })),
       })

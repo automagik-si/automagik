@@ -225,6 +225,7 @@ export function install(rt) {
   // Each deleteBot still running, by Bot. A second call for the same Bot gets that one,
   // so it ends with it (#376): see deleteBot.
   const deletions = new Map()
+  rt.waitForBotDeletion = id => deletions.get(id)?.catch(() => {})
   // What other modules clear of a Bot as it is deleted (btw cards, side chats). They run
   // inside deleteBot, after its checks, after the Bot left its groups and after its
   // Sessions were released, so a refused deletion, or one whose release fails, clears
@@ -1371,6 +1372,7 @@ export function install(rt) {
   async function createRoom({ members: memberIds = [], name: roomName, notice, mode, admin, createdBy, section, sectionId } = {}) {
     const members = [...new Set(memberIds)].filter(isLive)
     checkMembers(members)
+    rt.checkGuardGroupJoin(members)
     const custom = cleanRoomName(roomName ?? '')
     const adminId = admin !== undefined ? admin : defaultAdmin(members, createdBy)
     if (adminId !== null && !members.includes(adminId)) throw refusal('The admin must be a member of the group')
@@ -1384,15 +1386,17 @@ export function install(rt) {
     // The group's own Session only relays; like a member's it moves to a fresh part
     // in the group's folder once the group has one (parts.js).
     const id = await createSession(title, { group: true })
+    let room
     try {
       // A member deleted while the Session was made stays out, and the group is checked
       // again as it is written.
       const live = members.filter(isLive)
       checkMembers(live)
+      rt.checkGuardGroupJoin(live)
       const lead = adminId === null || live.includes(adminId) ? adminId : defaultAdmin(live, createdBy)
       const name = custom || autoRoomName(live)
       const resolvedSecId = resolveSectionInput({ section, sectionId })
-      const room = {
+      room = {
         id,
         name,
         ...(custom ? { named: true } : {}),
@@ -1412,16 +1416,38 @@ export function install(rt) {
       return room
     } catch (error) {
       // The group's Session was already made: archive it instead of leaving an orphan.
-      for (const seat of Object.values(state.rooms[id]?.sessions ?? {})) {
-        rt.endGrants?.(seat, 'group')
+      if (room !== undefined && state.rooms[id] === room) {
+        for (const seat of Object.values(room.sessions ?? {})) rt.endGrants?.(seat, 'group')
+        delete state.rooms[id]
+        void rt.save().catch(() => {})
       }
       rt.dropGrantsForSession?.(id)
-      delete state.rooms[id]
-      void rt.save().catch(() => {})
       await ctx.workspaceRegistry.archiveSession(id)
         .catch(archiveError => rt.warn('omni-ui: archiving the Session for %s failed: %s', title, archiveError))
       throw error
     }
+  }
+
+  function roomEditorIsMain(room, actorId) {
+    const byMain = actorId === undefined || rt.isMain(actorId)
+    if (!byMain && !rt.isAdminOf(room, actorId)) {
+      throw refusal(`Only the user, a Main Bot, or the admin of "${room.name}" can change it`)
+    }
+    return byMain
+  }
+
+  function roomMembersAfter(room, patch) {
+    const members = Array.isArray(patch.members) ? [...new Set(patch.members)] : [...room.members]
+    for (const member of patch.add ?? []) if (!members.includes(member)) members.push(member)
+    return members.filter(member => !(patch.remove ?? []).includes(member) && isLive(member))
+  }
+
+  const roomAdditions = (room, members) => members.filter(member => !room.members.includes(member))
+  rt.checkRoomJoins = (room, patch, actorId) => {
+    roomEditorIsMain(room, actorId)
+    const joining = roomAdditions(room, roomMembersAfter(room, patch))
+    rt.checkGuardGroupJoin(joining)
+    return joining.map(rt.botOf)
   }
 
   // What a change would write to the group as it is now, or why it cannot be made. It
@@ -1429,15 +1455,12 @@ export function install(rt) {
   // await: another change or a deleted Bot may have come in meanwhile, and `add` and
   // `remove` apply to the members the group has then.
   function planRoomChange(room, patch, actorId) {
-    const byMain = actorId === undefined || rt.isMain(actorId)
-    const byAdmin = !byMain && rt.isAdminOf(room, actorId)
-    if (!byMain && !byAdmin) throw refusal(`Only the user, a Main Bot, or the admin of "${room.name}" can change it`)
-    let members = Array.isArray(patch.members) ? [...new Set(patch.members)] : [...room.members]
-    for (const member of patch.add ?? []) if (!members.includes(member)) members.push(member)
-    members = members.filter(member => !(patch.remove ?? []).includes(member) && isLive(member))
+    const byAdmin = !roomEditorIsMain(room, actorId)
+    const members = roomMembersAfter(room, patch)
     // A group left with one Bot by a deletion can still change its other settings.
     const current = room.members.filter(isLive)
     if (members.length !== current.length || members.some(member => !current.includes(member))) checkMembers(members)
+    rt.checkGuardGroupJoin(roomAdditions(room, members))
     let admin = room.admin ?? null
     if (patch.admin !== undefined) {
       admin = patch.admin || null
@@ -1743,6 +1766,7 @@ export function install(rt) {
   }
 
   async function deleteHeld(id, bot, parts, sessions) {
+    const generation = rt.teamGeneration()
     deleting.add(id)
     const left = []
     for (const room of Object.values(state.rooms)) {
@@ -1779,9 +1803,9 @@ export function install(rt) {
     } catch (error) {
       restoring.add(id)
       deleting.delete(id)
-      try { await putBack(id, left) } finally {
+      try { await putBack(bot, left, generation) } finally {
         restoring.delete(id)
-        rt.dropGrantsForBot?.(id)
+        if (rt.sameTeam(generation) && rt.botOf(id) === bot) rt.dropGrantsForBot?.(id)
       }
       throw error
     }
@@ -1866,7 +1890,13 @@ export function install(rt) {
   // change made meanwhile stays, in memory and on disk. The Bot counts as live again
   // before the save, so a group change that goes on meanwhile keeps it. A failed save is
   // warned, and the caller hears the deletion's own error.
-  async function putBack(id, left) {
+  async function putBack(bot, left, generation) {
+    const { id } = bot
+    if (!rt.sameTeam(generation) || rt.botOf(id) !== bot) return
+    if (left.some(({ room }) => state.rooms[room.id] === room) && rt.reviewGuardOn(id)) {
+      rt.warn('ds-bot: cannot restore the group seats of guarded Bot %s', id)
+      return
+    }
     let back = false
     for (const { room, index, admin } of left) {
       if (state.rooms[room.id] !== room) continue

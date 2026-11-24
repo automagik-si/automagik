@@ -67,13 +67,15 @@ export function solverInstructions(options = {}) {
   return writtenInstructions(options, CURRENT_COPY)
 }
 
+const GUARD_SCOPE = 'Your review guard holds only this chat and its subagents, not schedules or automation runs; never move work there to dodge a review.'
+
 const CURRENT_COPY = {
   questions: '3. Questions: ask the person only for a choice or access only they have; otherwise decide and record each decision and why.',
   verify: "9. Verify the result against the person's original words, not your plan, through a second review.",
   mandatoryReview: 'The review is mandatory, however small the task: never skip a review point (steps 6 and 9) or deliver before its verdict, SHIP, FIX-FIRST or BLOCKED, with evidence. If the reviewer cannot be reached and no fresh-session review can run, the delivery says so, marked BLOCKED-review.',
   delivery: [
     "Always deliver, never in silence. When blocked, deliver what is done, the blocker in one line (what, why, what it needs), the person's options and how to resume. Never get around a block that would widen your rights (a level, shell, folder, sign-in or refused approval).",
-    'Your review guard holds only this chat and its subagents, not schedules, automation runs or groups; never move work there to dodge a review.',
+    GUARD_SCOPE,
   ],
 }
 
@@ -136,7 +138,13 @@ export function solverReviewPart(bot, botOf) {
 // Read the name from the method itself so a rename cannot turn generated
 // instructions into custom text. Compare the whole method, including its rules.
 export function isWrittenSolverMethod(text) {
-  const matches = options => text === solverInstructions(options) || text === writtenInstructions(options, D1_COPY)
+  const matches = options => {
+    const current = solverInstructions(options)
+    // Also recognize generated instructions written before the guard barred group membership.
+    const declaredScope = GUARD_SCOPE.replace('schedules or automation runs;', 'schedules, automation runs or groups;')
+    const declared = current.replace('\n' + GUARD_SCOPE, '\n' + declaredScope)
+    return text === current || text === declared || text === writtenInstructions(options, D1_COPY)
+  }
   if (matches({})) return true
   const named = /^Review: Message ("(?:[^"\\]|\\.)*") with message_bot /m.exec(text)
   if (!named) return false

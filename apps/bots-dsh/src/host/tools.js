@@ -15,7 +15,7 @@ import { checkShownView, showViewDescription, showViewParameters } from 'deep-vi
 import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
 import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
-import { refusal } from './refusal.js'
+import { isGuardGroupRefusal, refusal } from './refusal.js'
 import { registerTrustedTool } from './tool-registrations.js'
 import { deniesAcpTool } from '../shared/own-tools.js'
 
@@ -705,6 +705,7 @@ export function install(rt) {
         const room = await rt.createRoom({ members, name: args.name, notice: args.notice, mode: args.mode, admin: admin.id, section: args.section, createdBy: self })
         return `Created group "${room.name}" with ${room.members.map(id => rt.botOf(id).name).join(', ')}. ${admin.id === self ? 'You are' : `${admin.name} is`} its admin. It is in the user's sidebar; use post_to_group to start a discussion there.`
       } catch (error) {
+        if (isGuardGroupRefusal(error)) return error.message
         return `Could not create the group: ${error.message}`
       }
     },
@@ -749,28 +750,32 @@ export function install(rt) {
           }
         }
         try {
+          const seats = { add: add.bots.map(bot => bot.id), remove: remove.bots.map(bot => bot.id) }
+          if (moving) rt.checkRoomJoins(room, seats, self)
           const workDir = moving ? await rt.cleanWorkDir(args.work_dir) : undefined
+          const live = rt.roomOf(room.id)
+          if (live === undefined) throw refusal('Unknown group chat')
           // A Bot that joins a group with a folder works there from its first turn.
-          const joining = add.bots.filter(bot => !room.members.includes(bot.id))
-          if (moving && workDir !== room.workDir) {
-            const members = [...room.members, ...joining.map(bot => bot.id)]
-            await rt.approveFolder(exec, { path: workDir, sessions: members.map(id => room.sessions?.[id]).filter(Boolean), who: { en: `every member of "${room.name}"`, zh: `群聊「${room.name}」的成员` } })
+          const joining = rt.checkRoomJoins(live, seats, self)
+          if (moving && workDir !== live.workDir) {
+            const members = [...live.members, ...joining.map(bot => bot.id)]
+            await rt.approveFolder(exec, { path: workDir, sessions: members.map(id => live.sessions?.[id]).filter(Boolean), who: { en: `every member of "${live.name}"`, zh: `群聊「${live.name}」的成员` } })
           } else if (joining.length > 0) {
             const names = joining.map(bot => bot.name)
-            await rt.approveFolder(exec, { path: room.workDir, sessions: joining.map(bot => room.sessions?.[bot.id]).filter(Boolean), who: { en: names.join(', '), zh: ` ${names.join('、')} ` } })
+            await rt.approveFolder(exec, { path: live.workDir, sessions: joining.map(bot => live.sessions?.[bot.id]).filter(Boolean), who: { en: names.join(', '), zh: ` ${names.join('、')} ` } })
           }
           const { room: next, changes } = await rt.updateRoom(room.id, {
             name: args.name,
             notice: args.notice,
             mode: args.mode,
             admin,
-            add: add.bots.map(bot => bot.id),
-            remove: remove.bots.map(bot => bot.id),
+            ...seats,
             ...(args.section === undefined ? {} : { section: args.section }),
             ...(moving ? { workDir: workDir ?? '' } : {}),
           }, self)
           return changes.length === 0 ? `Nothing changed in "${next.name}".` : `Updated "${next.name}": ${changes.join('; ')}.`
         } catch (failure) {
+          if (isGuardGroupRefusal(failure)) return failure.message
           return `Could not update "${room.name}": ${failure.message}`
         }
       } finally { leave() }

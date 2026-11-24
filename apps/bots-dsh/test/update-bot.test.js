@@ -217,7 +217,7 @@ test('U1 the off-mode agent route rejects a people argument at the schema bounda
 // #2056 D1.5: the review guard is the person's alone, set or cleared on its own; a Bot's update_bot
 // never carries it, and a Bot's own change is refused.
 test('the review guard: only the person turns it on or off, on its own, with a reviewer Bot on the team', async (t) => {
-  const team = structuredClone(TEAM)
+  const team = structuredClone({ ...TEAM, rooms: { r1: { ...TEAM.rooms.r1, members: ['b3'] } } })
   team.bots.b2 = { ...team.bots.b2, role: 'Solver', reviewerId: 'b3', reviewGuard: true }
   team.bots.m1 = { ...team.bots.m1, role: 'Solver' }
   team.reviewGuardMigrated = true

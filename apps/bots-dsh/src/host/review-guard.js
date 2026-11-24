@@ -6,7 +6,8 @@
 // messages to the reviewer), so a tool nobody taught this file about is held. It never reads the
 // cosmetic Solver marker, and only the person sets or clears the field (setReviewGuard), or the
 // one-time upgrade turns it on (store.js).
-import { refusal } from './refusal.js'
+import { guardGroupRefusal, refusal } from './refusal.js'
+import { guardGroupText } from '../shared/guard-groups.js'
 import { teamToolOf } from './approvals.js'
 import { cleanTrack, isNotesWrite } from './review-mark.js'
 
@@ -81,6 +82,16 @@ export function heldCall(rt, bot, name, args, definition, base) {
 }
 
 export function install(rt) {
+  const guardChanges = new Map()
+  const reviewGuardOn = id => rt.botOf(id)?.reviewGuard === true
+  const groupsOf = id => Object.values(rt.state.rooms).filter(room => room.members.includes(id))
+  const groupText = (key, args) => guardGroupText(key, args, rt.uiLocale?.())
+  function checkGuardGroupJoin(members) {
+    const id = members.find(reviewGuardOn)
+    if (id !== undefined) {
+      throw guardGroupRefusal(groupText('join', { name: rt.botOf(id).name }), 'group-join')
+    }
+  }
   const reviewerOf = bot => (typeof bot.reviewerId === 'string' && bot.reviewerId !== '' && bot.reviewerId !== bot.id
     ? rt.botOf(bot.reviewerId) : undefined)
   const waiting = text => `${text} A fresh-session review does not open this guard: deliver the plan as BLOCKED-review.`
@@ -165,7 +176,7 @@ export function install(rt) {
   /**
    * The person's switch (Details), on its own: refused for any Bot, with other settings, for a
    * value that is not a boolean, an unknown Bot, or ON with no reviewer Bot on the team. Saved
-   * before it answers; a failed save puts the earlier value back.
+   * before it answers. Keep ON live until an OFF write commits.
    */
   async function setReviewGuard(id, patch, actorId) {
     const bot = rt.botOf(id)
@@ -175,16 +186,54 @@ export function install(rt) {
     }
     const on = patch.reviewGuard
     if (typeof on !== 'boolean') throw Object.assign(new Error('The review guard is true or false.'), { code: 'bot/invalid' })
+    const pending = guardChanges.get(id)
+    const change = (pending ?? Promise.resolve()).then(
+      () => changeReviewGuard(id, on),
+      () => changeReviewGuard(id, on),
+    )
+    guardChanges.set(id, change)
+    try {
+      return await change
+    } finally {
+      if (guardChanges.get(id) === change) guardChanges.delete(id)
+    }
+  }
+
+  async function changeReviewGuard(id, on) {
+    // A deletion can still restore the Bot and the seats it took out of the live rooms.
+    while (on && rt.botDeleting(id)) await rt.waitForBotDeletion(id)
+    const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
-    if (on && reviewerOf(bot) === undefined) throw refusal(`${bot.name} has no reviewer Bot on the team, so there is no verdict to wait for.`)
+    const generation = rt.teamGeneration()
+    const current = () => rt.sameTeam(generation) && rt.botOf(id) === bot
+    if (!on) {
+      const check = () => { if (!current()) throw refusal('The Bot team changed. Try again.') }
+      await rt.saveCopy(copy => {
+        check()
+        delete copy.bots[id].reviewGuard
+      }, {
+        beforeCommit: check,
+        afterWrite: () => { if (current()) delete bot.reviewGuard },
+      })
+      check()
+      return bot
+    }
+    const rooms = groupsOf(id)
+    if (rooms.length > 0) {
+      let groups = rooms.slice(0, 3).map(room => room.name).join(', ')
+      if (rooms.length > 3) groups = groupText('more', { groups, count: rooms.length - 3 })
+      throw guardGroupRefusal(groupText('inGroup', { name: bot.name, groups }), 'in-group')
+    }
+    if (reviewerOf(bot) === undefined) throw refusal(`${bot.name} has no reviewer Bot on the team, so there is no verdict to wait for.`)
     const before = bot.reviewGuard
-    if (on) bot.reviewGuard = true
-    else delete bot.reviewGuard
+    bot.reviewGuard = true
     try {
       await rt.save({ required: true })
     } catch (error) {
-      if (before === undefined) delete bot.reviewGuard
-      else bot.reviewGuard = before
+      if (current()) {
+        if (before === undefined) delete bot.reviewGuard
+        else bot.reviewGuard = before
+      }
       throw error
     }
     return bot
@@ -198,7 +247,10 @@ export function install(rt) {
     return { reviewGuardWaitingSince: clean.requestAt }
   }
 
-  Object.assign(rt, { reviewGuardHolds, reviewGuardAsk, setReviewGuard, reviewGuardViewOf })
+  Object.assign(rt, {
+    reviewGuardHolds, reviewGuardAsk, setReviewGuard, reviewGuardViewOf,
+    reviewGuardOn, groupsOf, checkGuardGroupJoin,
+  })
 }
 
 /**

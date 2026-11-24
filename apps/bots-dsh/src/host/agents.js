@@ -592,7 +592,7 @@ export function install(rt) {
       delete state.bots[chatId].sessions
       // A Solver's review fields are the New Solver dialog's and the person's: an adopted record
       // carries none of them, so no adopted Bot is held with no reviewer (RFC 0048 delivery 1.5).
-      for (const key of ['reviewGuard', 'reviewerId', 'reviewGuardNotice', 'reviewTrack', 'waitingRole', 'reviewerMade']) delete state.bots[chatId][key]
+      for (const key of ['reviewGuard', 'reviewerId', 'reviewGuardNotice', 'guardOffNotice', 'reviewTrack', 'waitingRole', 'reviewerMade']) delete state.bots[chatId][key]
       const creationFields = {}
       for (const key of ['pendingCreation', 'creationToken', 'creationSessionId', 'creationCleanup']) {
         delete state.bots[chatId][key]
@@ -811,12 +811,15 @@ export function install(rt) {
         || Object.values(state.tasks ?? {}).some(task => task.from === bot.id)) {
         throw refusal('Remove Main Bot/group roles and resolve new team history before rolling back adoption')
       }
+      const generation = rt.teamGeneration()
       delete state.bots[bot.id]
       rt.dropGrantsForBot?.(bot.id)
       delete original.adoptedBotId
       try {
         await rt.save({ required: true })
       } catch (error) {
+        if (!rt.sameTeam(generation) || rt.own(state.agents, agentId) !== original
+          || rt.botOf(bot.id) !== undefined || (bot.reviewGuard === true && rt.groupsOf(bot.id).length > 0)) throw error
         state.bots[bot.id] = bot
         rt.dropGrantsForBot?.(bot.id)
         original.adoptedBotId = bot.id

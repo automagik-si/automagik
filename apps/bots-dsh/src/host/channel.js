@@ -30,6 +30,7 @@ import { callerJson } from './caller-routes.js'
 import { peopleOf } from './people.js'
 import { claimGrant } from './approvals.js'
 import { bindTicketDesk, createTicketDesk } from './grant-ticket.js'
+import { isGuardGroupRefusal } from './refusal.js'
 
 const publicBot = bot => {
   if (!bot || (!Object.hasOwn(bot, 'waitingRole') && !Object.hasOwn(bot, 'reviewerMade'))) return bot
@@ -94,6 +95,7 @@ export function install(rt) {
 
   // The DSH interface language of the last browser that asked for the team.
   let uiLocale
+  rt.uiLocale = () => uiLocale
   rt.uiLanguage = () => {
     if (uiLocale === undefined) return undefined
     const lower = uiLocale.toLowerCase()
@@ -119,7 +121,9 @@ export function install(rt) {
   const fail = (message, code = 'bot/error', reason) => ({
     ok: false,
     error: { code, message, details: {},
-      ...(code === 'bot/refused' && ['needs-new-conversation', 'reply-running', ROLES_OFF_REASON].includes(reason) ? { reason } : {}) },
+      ...(isGuardGroupRefusal({ code, reason })
+        || (code === 'bot/refused' && ['needs-new-conversation', 'reply-running', ROLES_OFF_REASON].includes(reason))
+        ? { reason } : {}) },
   })
   // Keep native holds and releases for one Bot in order across all browser controls.
   const browserChanges = new Set()

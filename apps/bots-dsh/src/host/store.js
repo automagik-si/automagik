@@ -18,6 +18,7 @@ import { currentColor, headOf, normalize, unquote } from './text.js'
 import { markOf } from '../shared/permission-levels.js'
 import { effectiveMarkOf, nativeToolsOn, restrictedBot } from '../shared/native-tools.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
+import { GUARD_OFF_NOTICE } from '../shared/guard-groups.js'
 import updateContract from './update-contract.json' with { type: 'json' }
 
 // The saved team's format. A file may carry an older version this build still reads and
@@ -258,6 +259,62 @@ export function install(rt) {
     return undefined
   }
 
+  const ownPart = bot => typeof bot.sessionId === 'string' && bot.sessionId !== '' ? bot.sessionId : bot.id
+  function legacyGuard(bot, team) {
+    const on = bot.reviewGuardNotice
+    return team.guardGroupMigrated !== true && team.reviewGuardMigrated === true
+      && bot.guardOffNotice === undefined && typeof bot.reviewerId === 'string'
+      && bot.reviewerId !== '' && bot.reviewerId !== bot.id && Number.isFinite(on?.at)
+      && typeof on.sessionId === 'string'
+      && (on.sessionId === ownPart(bot) || on.sessionId === bot.id
+        || (Array.isArray(bot.segments) && bot.segments.some(part => part?.sessionId === on.sessionId)))
+  }
+
+  function guardImportProblem(team) {
+    const { bots = {}, rooms = {} } = team
+    if (!plain(bots) || Object.entries(bots).some(([id, bot]) => !plain(bot) || bot.id !== id)) {
+      return 'the saved Bot map is invalid. Restore a valid team backup'
+    }
+    if (!plain(rooms) || Object.entries(rooms).some(([id, room]) => !plain(room) || room.id !== id
+      || !Array.isArray(room.members) || room.members.some(id => typeof id !== 'string'))) {
+      return 'the saved group map is invalid. Restore a valid team backup'
+    }
+    for (const room of Object.values(rooms)) {
+      for (const id of room.members) {
+        const bot = own(bots, id)
+        if (bot?.reviewGuard !== true || legacyGuard(bot, team)) continue
+        return `${diagnosticLabel(bot.name ?? id)} has the review guard on in ${diagnosticLabel(room.name ?? room.id)}. `
+          + 'Restore a valid team backup or turn off that Bot\'s review guard in the saved file before reloading'
+      }
+    }
+  }
+
+  function migrateReviewGuard() {
+    const members = new Set(Object.values(state.rooms).flatMap(room => room.members))
+    const at = Date.now()
+    let turnedOn = false
+    let repaired = false
+    for (const bot of Object.values(state.bots)) {
+      const reviewer = bot.reviewerId
+      const turnsOn = state.reviewGuardMigrated !== true && bot.reviewGuard !== true
+        && typeof reviewer === 'string' && reviewer !== '' && reviewer !== bot.id
+        && plain(own(state.bots, reviewer))
+      if (members.has(bot.id) && (turnsOn || bot.reviewGuard === true)) {
+        delete bot.reviewGuard
+        bot.guardOffNotice = { id: GUARD_OFF_NOTICE, kind: GUARD_OFF_NOTICE, at, sessionId: ownPart(bot) }
+        // A Solver upgraded straight from D1 gets only OFF. An older stored ON remains.
+        repaired = true
+      } else if (turnsOn) {
+        bot.reviewGuard = true
+        bot.reviewGuardNotice = { at, sessionId: ownPart(bot) }
+        turnedOn = true
+      }
+    }
+    state.reviewGuardMigrated = true
+    state.guardGroupMigrated = true
+    return { repaired, turnedOn }
+  }
+
   // Fill `state` from the saved file and bring an older team up to date. Returns the
   // groups whose Session titles still need the new name.
   const adopt = (parsed) => {
@@ -266,6 +323,14 @@ export function install(rt) {
     // leaves an empty team in memory that is not the saved one.
     rt.hostAuthority?.capture()
     teamRead = false
+    if (parsed !== undefined) {
+      const problem = guardImportProblem(parsed)
+      if (problem !== undefined) {
+        stuck = problem
+        warn('ds-bot: cannot activate the saved Bot team: %s', problem)
+        parsed = undefined
+      }
+    }
     const valid = parsed !== null && parsed !== undefined ? true : stuck === undefined && !aside
     const hadCapabilities = parsed !== null && parsed !== undefined && Object.hasOwn(parsed, 'capabilities')
     credentials.decode(parsed)
@@ -451,21 +516,8 @@ export function install(rt) {
     // reviewer Bot stays off. The cosmetic Solver marker is not read. Nothing to change writes
     // nothing: the flag rides the next real save, which encodes the whole state, so a Solver made
     // or copied later keeps what its own create gave it, and an OFF the person chose stays off.
-    if (state.reviewGuardMigrated !== true) {
-      const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
-      const at = Date.now()
-      let turned = 0
-      for (const bot of Object.values(state.bots)) {
-        const reviewer = bot?.reviewerId
-        if (!isRecord(bot) || typeof reviewer !== 'string' || reviewer === '' || reviewer === bot.id) continue
-        if (!isRecord(own(state.bots, reviewer)) || bot.reviewGuard === true) continue
-        bot.reviewGuard = true
-        bot.reviewGuardNotice = { at, sessionId: typeof bot.sessionId === 'string' && bot.sessionId !== '' ? bot.sessionId : bot.id }
-        turned += 1
-      }
-      state.reviewGuardMigrated = true
-      if (turned > 0) migrated = true
-    }
+    const { repaired, turnedOn } = migrateReviewGuard()
+    if (repaired || turnedOn) migrated = true
     // #1564: Antigravity got the switch too, off by default. Before it, every Antigravity Bot ran
     // agy's own tools: once, each keeps them (RFC 0003, Amendment: Antigravity native tools), with
     // the Codex block's rule: an ON saved for another agent moves to Antigravity, a Bot with shell
@@ -594,7 +646,15 @@ export function install(rt) {
     rt.hostAuthority?.restore()
     teamRead = valid
     if (lockEpoch > 1) rt.connectorStateChanged?.()
-    return { migrated: migrated || stale.length > 0, stale }
+    return { migrated: migrated || stale.length > 0, stale, repaired }
+  }
+
+  const saveMigration = async required => {
+    try {
+      await save({ required })
+    } catch (error) {
+      warn('omni-ui: saving the migrated Bot team failed: %s', error)
+    }
   }
 
   const load = () => loaded ??= (async () => {
@@ -602,18 +662,14 @@ export function install(rt) {
     if (holder !== undefined) warn('ds-bot: %s', readOnly())
     const parsed = readFileState()
     teamPresentAtLoad = parsed !== undefined ? true : stuck === undefined && !aside ? false : null
-    const { migrated, stale } = adopt(parsed)
+    const { migrated, stale, repaired } = adopt(parsed)
     if (holder !== undefined) return
     // A file set aside just now stays where it is: the person's bytes were copied, and the
     // fresh team reaches the disk on the next real save rather than within this read.
     if (migrated && stuck === undefined && !aside) {
       // A failed write must not poison `loaded`: the migrated state stays in
       // memory and the next save() writes it.
-      try {
-        await save()
-      } catch (error) {
-        warn('omni-ui: saving the migrated Bot team failed: %s', error)
-      }
+      await saveMigration(repaired)
     }
     // Not awaited: renaming a session must not hold up the first roster read.
     for (const room of stale) void rt.retitleRoom(room)
@@ -647,11 +703,13 @@ export function install(rt) {
           warn('ds-bot: %s changed while no host held the team; it is adopted, and this host\'s state is lost because it could not be kept aside: %s', statePath, error)
         }
       }
-      adopt(readFileState())
+      const { repaired } = adopt(readFileState())
       recoveryPending = false
+      return repaired
     })
     writing = run.catch(() => {})
-    const tracked = run.finally(() => { if (adopting === tracked) adopting = undefined })
+    const tracked = run.then(repaired => repaired ? saveMigration(true) : undefined)
+      .finally(() => { if (adopting === tracked) adopting = undefined })
     adopting = tracked
     return tracked
   }
@@ -675,7 +733,8 @@ export function install(rt) {
       if (holder === undefined) {
         warn('omni-ui: the other dsh has closed; this one now saves the Bot team')
         warnedReadOnly = false
-        adopt(readFileState())
+        const { repaired } = adopt(readFileState())
+        if (repaired) await saveMigration(true)
         lockGained()
         return
       }
@@ -699,7 +758,10 @@ export function install(rt) {
       lockGained()
       return
     }
-    if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) adopt(readFileState())
+    if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) {
+      const { repaired } = adopt(readFileState())
+      if (repaired && holder === undefined) await saveMigration(true)
+    }
   }
 
   // Admission reads the adopted team without refreshing an unchanged writer.

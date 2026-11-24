@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { replaceFile } from './files.js'
 import { createAgentRedactor } from './agent-redaction.js'
 import { multiuserMode } from './multiuser.js'
+import { isGuardGroupRefusal } from './refusal.js'
 
 export const MCP_PATH = '/api/omni-mcp'
 const VERSION = '2025-11-25'
@@ -364,7 +365,7 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
           ? definition.endpoint.endsWith('bot') || definition.endpoint === 'set-main'
             ? after.bots.find(bot => bot.id === target) ?? null
             : after.groups.find(group => group.id === target) ?? null
-          : { error: 'Action refused', code: result.error.code })
+          : { error: isGuardGroupRefusal(result.error) ? result.error.message : 'Action refused', code: result.error.code })
         return reply({ isError: !result.ok, content: [
           { type: 'text', text: JSON.stringify(value) },
         ] })
