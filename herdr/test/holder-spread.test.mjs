@@ -4,7 +4,7 @@
 // local holder (today's behaviour), and the limit's default is documented in README.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { CUT_OFF_EXE, fixtureProcStat, writeFixtureProc, writeFixtureProcRoot } from "./fake-core.mjs";
@@ -456,13 +456,13 @@ test("U7b cut-off: every core needs a comparable namespace and a reported PID mu
   assertUnchecked(await holderCutOffs(f.input), "a core socket could not be determined");
   f.answers.set(DEFAULT_SOCKET, status());
   const fd = join(f.roots[0], "400/fd/3");
-  rmSync(fd);
+  unlinkSync(fd);
   symlinkSync("socket:[901]", fd);
   assertUnchecked(await holderCutOffs(f.input), "a core socket could not be determined");
-  rmSync(fd);
+  unlinkSync(fd);
   symlinkSync("socket:[900]", fd);
   const ns = join(f.roots[0], "400/ns/pid");
-  rmSync(ns);
+  unlinkSync(ns);
   symlinkSync("pid:[405]", ns);
   assertUnchecked(await holderCutOffs(f.input), "process table could not be read");
 
@@ -502,6 +502,7 @@ test("U7d cut-off: fixture process directories, followed files and readlink pare
     renameSync(from, from + ".bak");
     symlinkSync(to, from);
     assertUnchecked(await holderCutOffs(f.input), "process table could not be read");
+    unlinkSync(from);
     renameSync(from + ".bak", from);
   }
 });
