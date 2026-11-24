@@ -12,6 +12,7 @@ import { promisify } from 'node:util'
 import sharp from 'sharp'
 import { createPets, sheetVersion, webpSize } from '../../bots-dsh/src/host/pets.js'
 import { ROWS, SLEEP } from '../../bots-dsh/src/client/pet-poses.js'
+import { CHARACTERS } from '../../bots-dsh/src/client/characters.js'
 import { CHARACTER_IDS, COLOUR_IDS, allLookIds, cellPlan, lookParts, mixSrgb, parseLookId, resolveInks } from '../src/art.js'
 import { VERSION, bakePet, botsHomeOf, isCompletePet, moveIntoPlace, renderCell, sweepStale } from '../src/bake.js'
 
@@ -112,6 +113,14 @@ describe('bake', () => {
     assert.equal(listed.length, FRAME_COUNT)
     assert.deepEqual((await readdir(join(dir, 'frames'))).map(name => `frames/${name}`).sort(), listed)
     assert.deepEqual((await readdir(dir)).sort(), ['frames', 'pet.json', 'sleep.webp', 'spritesheet.webp'])
+  })
+
+  test('a Solver\'s headless pet is drawn from its fur: the body and the lock layer', () => {
+    const { body } = lookParts({ character: 'cap', colour: 'red' })
+    assert.ok(body.includes(CHARACTERS.cap.body))
+    const lock = CHARACTERS.cap.paints.at(-1)
+    assert.deepEqual(lock.slice(1), ['#000', 0.15])
+    assert.ok(body.includes(lock[0]))
   })
 
   test('a Solver bakes into the same v2 pet folder as any other character', async () => {
