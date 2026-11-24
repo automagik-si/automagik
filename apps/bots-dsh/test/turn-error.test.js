@@ -565,3 +565,18 @@ test('switching opens sign-in when refresh is unavailable, and a settled card ne
     assert.deepEqual(labels(settled.buttons(settled.render())), [])
   }
 })
+
+// #2064: the chat card hands the switch's own attempt to the sign-in row, so a switch that
+// failed fast still shows why; a host that names none opens it as before.
+test('the chat card opens the sign-in row on the switch\'s own attempt (B14)', async () => {
+  const attemptId = 'attempt_000000000000000000000002'
+  for (const [answer, opened] of [[{ id: 'acp-codex', attemptId, status: 'failed', signedIn: false }, ['open', 'bot-1', 'acp-codex', undefined, attemptId]],
+    [{ id: 'acp-codex', signedIn: false }, ['open', 'bot-1', 'acp-codex']]]) {
+    const side = withAccountSwitch(cell({ code: 'ACP_CODEX_USAGE_LIMIT', model: 'acp-claude/default', bot: { id: 'bot-1' } }))
+    side.actions.cliLoginSwitch = async (...args) => { side.calls.push(['switch', ...args]); return answer }
+    side.buttons(side.render()).find(entry => entry.label === 'Switch account').node.props.onClick()
+    side.buttons(side.render()).find(entry => entry.label === 'Continue').node.props.onClick()
+    await tick()
+    assert.deepEqual(side.calls, [['switch', 'bot-1', 'acp-codex'], ['refresh'], opened])
+  }
+})

@@ -601,6 +601,8 @@ const ZH = {
   "Not now": "暂不",
   "Done: signed in to {name}.": "完成：已登录 {name}。",
   "Done: signed in to {name} as {account}.": "完成：已使用 {account} 登录 {name}。",
+  "The account did not change: {name} is still signed in as {account}.": "账号没有变化：仍使用 {account} 登录 {name}。",
+  "The account did not change: {name} is still signed in to the same account.": "账号没有变化：仍使用同一个账号登录 {name}。",
   "Done: {name} uses an API key.": "完成：{name} 使用 API 密钥。",
   "Signed in, but {model} could not be used: {reason} This Bot stays on {kept}.": "已登录，但无法使用 {model}：{reason} 此 Bot 仍使用 {kept}。",
   "its model": "原来的模型",
@@ -646,6 +648,7 @@ const ZH = {
   "Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.": "Codex 设备登录不可用。请在 ChatGPT 安全设置或工作区权限中启用设备代码登录后重试。",
   "Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.": "Codex 无法启动设备登录。请检查网络连接和 ChatGPT 中的设备代码登录权限后重试。",
   "Sign-in did not finish. Try again.": "登录未完成，请重试。",
+  "The account did not change. Try again.": "账号没有变化，请重试。",
   "This sign-in expired. Start again.": "本次登录已过期，请重新开始。",
   "Sign-in cancelled.": "登录已取消。",
   // The account step of that row (#869): a CLI already signed in on this computer.

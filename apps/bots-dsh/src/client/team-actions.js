@@ -80,12 +80,14 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
       .then((value) => { pick.end(true); return value }, (error) => { pick.end(false); throw error }))
   // The sign-in row of a Bot's chat (cli-login.js): an explicit entry opens that Bot's chat and
   // its row; `ref` is the model the person chose, applied by the host once signed in.
-  const openCliLogin = (botId, provider, ref) => {
+  // `attemptId` is a Switch account's own attempt (#2064): the row reads that one.
+  const openCliLogin = (botId, provider, ref, attemptId) => {
     const bot = cliLoginBotOf(roster.getSnapshot(), botId)
     const manager = loginState?.()
     if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false
     openSession?.(bot.id)
-    void manager.open({ botId: bot.id, provider, ref: signInProviderOf(ref) === provider ? ref : undefined })
+    void manager.open({ botId: bot.id, provider, ref: signInProviderOf(ref) === provider ? ref : undefined,
+      ...(typeof attemptId === 'string' ? { attemptId } : {}) })
     return true
   }
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra })

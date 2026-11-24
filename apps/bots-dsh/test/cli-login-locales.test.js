@@ -196,3 +196,24 @@ test('Antigravity\'s chat sentences read in pt-BR and zh; the old Claude-and-Cod
   assert.equal(ptBR['The sign-in expired. Try again.'], undefined)
   assert.equal(DICTIONARY.zh['The sign-in expired. Try again.'], undefined)
 })
+
+// #2064: Switch account's sentences, worded in both languages with the placeholders kept.
+test('the Switch account sentences are translated in zh and in pt-BR, placeholders kept (B4)', () => {
+  for (const sentence of [
+    'The account did not change. Try again.',
+    'The account did not change: {name} is still signed in as {account}.',
+    'The account did not change: {name} is still signed in to the same account.',
+  ]) {
+    const holes = text => (text.match(/\{\w+\}/g) ?? []).sort()
+    for (const [language, words] of [['zh', DICTIONARY.zh[sentence]], ['pt-BR', ptBR[sentence]]]) {
+      assert.equal(typeof words, 'string', `${language}: ${sentence}`)
+      assert.notEqual(words, '', `${language}: ${sentence}`)
+      assert.notEqual(words, sentence, `${language} still English: ${sentence}`)
+      assert.deepEqual(holes(words), holes(sentence), `${language} placeholders: ${sentence}`)
+    }
+  }
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(hostText('The account did not change. Try again.'), '账号没有变化，请重试。')
+  } finally { off() }
+})

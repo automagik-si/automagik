@@ -12666,10 +12666,10 @@ var isolatedSignIn = (agent) => agent.authScope === "isolated" && !isNative(agen
 var signInCommand = (agent) => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key;
 var SIGN_IN_OF = { "acp-claude": "claude auth login", "acp-codex": "codex login" };
 var CHAT_LOGIN = /* @__PURE__ */ Symbol.for("automagik.cli-login");
-function openChatLogin(provider, scope = globalThis) {
+function openChatLogin(provider, scope = globalThis, { attemptId } = {}) {
   if (!Object.hasOwn(SIGN_IN_OF, provider)) return false;
   try {
-    return scope[CHAT_LOGIN]?.open?.(provider) === true;
+    return scope[CHAT_LOGIN]?.open?.(provider, attemptId === void 0 ? void 0 : { attemptId }) === true;
   } catch {
     return false;
   }
@@ -12923,10 +12923,11 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
     reload: () => load(false),
-    // Opens the sign-in row in a Bot's chat. An isolated sign-in needs that chat.
-    login: (agent) => {
+    // Opens the sign-in row in a Bot's chat. An isolated sign-in needs that chat. A switch
+    // passes its own attempt (#2064); a plain Sign in passes none.
+    login: (agent, { attemptId } = {}) => {
       say(agent.id, null);
-      if (!open(agent.id)) {
+      if (!open(agent.id, void 0, { attemptId })) {
         say(agent.id, isolatedSignIn(agent) ? t("Sign-in needs a Bot chat. If you have no Bot yet, set one up first.") : t("No Bot chat to sign in from here. Run {command} in a terminal instead.", { command: signInCommand(agent) }));
         return false;
       }
@@ -13091,9 +13092,9 @@ function AcpSettingsSection({ close, load = loadBots } = {}) {
         acp.setProblem(agent.id, t("Sign-in needs a Bot chat. If you have no Bot yet, set one up first."));
         return;
       }
-      await face.actions.cliLoginSwitch(main, agent.id);
+      const switched = await face.actions.cliLoginSwitch(main, agent.id);
       await face.actions.refreshModels?.();
-      acp.login(agent);
+      acp.login(agent, { attemptId: typeof switched?.attemptId === "string" ? switched.attemptId : void 0 });
     } catch (error) {
       const message = error?.message ?? String(error);
       acp.setProblem(agent.id, accountView.hostText?.(message) ?? message);
