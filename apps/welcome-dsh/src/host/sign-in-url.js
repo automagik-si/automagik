@@ -2,8 +2,7 @@
 // only Google's own OAuth entry points, over https, asking for a code for a named client, with
 // a loopback return address on port 1024 or above (agy's own listener on this computer) and one
 // printable state of 8-512 characters (the one a pasted-back address carries, #2048). The host checks it before
-// the page sees it, and the page again before it opens it (acp-agents.js openSignInLinks). No
-// imports, so the client bundle can carry it.
+// the page sees it. No imports.
 const GOOGLE_SIGN_IN = new Set(['accounts.google.com/o/oauth2/v2/auth', 'accounts.google.com/o/oauth2/auth'])
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]'])
 

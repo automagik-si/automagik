@@ -366,8 +366,8 @@ differs from Claude Code and Codex:
   (`src/host/sign-in-opener.js`): it opens nothing and hands the link over in an owner-only
   folder under `acp/sign-in`. A link reaches the status as `signInUrl` only when it is one of
   Google's own OAuth entry points with a loopback return address (`isSignInUrl`), and the app
-  opens it. On Linux, no link 15 seconds after `authenticate` ends the attempt as
-  `no-browser`. agy's D-Bus session bus address is one that never connects
+  shows it as a link with Copy. On Linux, no link 15 seconds after `authenticate` ends the
+  attempt as `no-browser`. agy's D-Bus session bus address is one that never connects
   (`NO_BUS_ADDRESS`), because agy finds the bus by the user id when the address is unset.
 - **Models.** Antigravity offers its models and efforts as config options, as the adapters do.
   Hermes offers them only as the session's own list (`models` in the `session/new` answer,

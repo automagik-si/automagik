@@ -1463,10 +1463,11 @@ export function apply(ctx, config = {}, {
   // fresh one, as Reset does, so no old sign-in is reused.
   // agy never opens the browser itself on Linux and macOS: a stand-in for its opener, first on
   // the sign-in run's PATH only, hands the link over (sign-in-opener.js), the status carries it
-  // once it passes isSignInUrl, and the app opens it in the person's own browser. The person
-  // may also sign in on another computer and paste back the address the browser ends on
-  // (signInCallback). On Linux an attempt with no link nativeSignInLinkMs after `authenticate`
-  // ends as `no-browser`; a link is good for nativeSignInWindowMs after `authenticate`.
+  // once it passes isSignInUrl, and the app shows it as a link with Copy; a person's click
+  // opens it. The person may also sign in on another computer and paste back the address the
+  // browser ends on (signInCallback). On Linux an attempt with no link nativeSignInLinkMs after
+  // `authenticate` ends as `no-browser`; a link is good for nativeSignInWindowMs after
+  // `authenticate`.
   async function signInNative(id, { label } = {}) {
     restartGuard()
     const spec = AGENTS[id]
@@ -1517,7 +1518,7 @@ export function apply(ctx, config = {}, {
     announceLogins()
     const current = () => !disposed && nativeSignIns.get(id) === attempt && !controller.signal.aborted
     attempt.current = current
-    // Ends this attempt as `no-browser`: the browser cannot open from it. `why` goes to the log.
+    // Ends this attempt as `no-browser`: there is no link to show. `why` goes to the log.
     const noBrowser = (why) => {
       if (!current()) return
       attempt.noBrowser = why
@@ -1582,7 +1583,7 @@ export function apply(ctx, config = {}, {
         }
         // From `authenticate`, on every platform, a link is good for nativeSignInWindowMs: the
         // app ends the attempt as `expired` before agy ends its own wait (G6-2). On Linux the
-        // link comes right after `authenticate`, or the browser will not open.
+        // link comes right after `authenticate`, or there is no link to show.
         const onAuthenticate = () => {
           attempt.authenticateAt = Date.now()
           attempt.expiresAt = attempt.authenticateAt + nativeSignInWindowMs

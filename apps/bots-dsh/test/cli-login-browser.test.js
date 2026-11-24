@@ -687,12 +687,16 @@ test('Antigravity: the row shows Google\'s link, Copy link, the address field an
   await seed(page)
   const link = await page.evaluate(() => window.AGY_LINK)
   const callback = await page.evaluate(() => window.AGY_CALLBACK)
+  // Nothing opens the link by itself (#2048, r9): only a person's click does.
+  await page.evaluate(() => { window.OPENED = 0; window.open = () => { window.OPENED += 1; return null } })
   await antigravityStep(page)
   const shown = row(page)
   assert.equal(await shown.locator('a').getAttribute('href'), link)
   await shown.getByRole('button', { name: 'Copy link' }).waitFor()
   await shown.filter({ hasText: 'Paste here the address your browser ends on after you sign in:' }).waitFor()
   await shown.filter({ hasText: 'Expires at' }).waitFor()
+  assert.equal(await page.evaluate(() => window.OPENED), 0)
+  assert.equal(await shown.locator('a').getAttribute('target'), '_blank')
   assert.equal(await field(page).getAttribute('aria-label'), 'Sign-in address')
   assert.equal(await field(page).getAttribute('type'), 'password')
   // While the paste step shows, the native editor takes no edit (D18).

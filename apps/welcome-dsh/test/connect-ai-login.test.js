@@ -358,6 +358,14 @@ test('Y2: the setup by state: Install, Retry, Sign in, the link with Copy and th
       }
     } finally { step.done() }
   }
+  // No link from agy (r9, lead): the chat's own sentence, never the old browser one.
+  const noLink = await agyStep(agy({ on: true, signInError: 'no-browser' }))
+  try {
+    const text = textOf(noLink.tree())
+    assert.match(text, /The CLI did not offer a sign-in link in time\. Try again\./)
+    assert.doesNotMatch(text, /The browser did not open/)
+    noCommand(text, 'no-browser')
+  } finally { noLink.done() }
   // Signing in with a link: the link, Copy, the field and Send; Send empties the field first.
   const step = await agyStep(agy(PASTING))
   try {

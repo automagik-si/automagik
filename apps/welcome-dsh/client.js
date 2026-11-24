@@ -9275,7 +9275,7 @@ var PT_BR = {
   "Sign in": "Entrar",
   // Antigravity in its own home (#2048): its sign-in in the app, and Windows's shared account
   "Not signed in to {name}.": "Sem login no {name}.",
-  "The browser did not open. Try again.": "O navegador não abriu. Tente de novo.",
+  "The CLI did not offer a sign-in link in time. Try again.": "O CLI não ofereceu um link de login a tempo. Tente de novo.",
   "Finish the sign-in to {name} in your browser…": "Conclua o login no {name} pelo navegador…",
   "{name} did not offer a Google sign-in. Try again.": "O {name} não ofereceu login com Google. Tente de novo.",
   "The sign-in to {name} took too long. Try again.": "O login no {name} demorou demais. Tente de novo.",
@@ -9542,7 +9542,7 @@ var PT_BR = {
 var EN = Object.fromEntries(Object.keys(PT_BR).map((key) => [key, key]));
 var ZH = {
   "Not signed in to {name}.": "未登录 {name}。",
-  "The browser did not open. Try again.": "浏览器没有打开。请重试。",
+  "The CLI did not offer a sign-in link in time. Try again.": "CLI 没有及时给出登录链接，请重试。",
   "Finish the sign-in to {name} in your browser…": "请在浏览器中完成 {name} 的登录…",
   "{name} did not offer a Google sign-in. Try again.": "{name} 没有提供 Google 登录。请重试。",
   "The sign-in to {name} took too long. Try again.": "{name} 的登录用时过长。请重试。",
@@ -12560,34 +12560,6 @@ function SubscriptionSignIn({ tile, onBack, onSaved, glitch }) {
   );
 }
 
-// src/host/sign-in-url.js
-var GOOGLE_SIGN_IN = /* @__PURE__ */ new Set(["accounts.google.com/o/oauth2/v2/auth", "accounts.google.com/o/oauth2/auth"]);
-var LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
-function isLoopbackReturn(value) {
-  if (typeof value !== "string") return false;
-  try {
-    const back = new URL(value);
-    return back.protocol === "http:" && LOOPBACK.has(back.hostname) && /^\d+$/.test(back.port) && Number(back.port) >= 1024 && !back.username && !back.password && !back.hash;
-  } catch {
-    return false;
-  }
-}
-var stateOf = (url) => {
-  const states2 = url.searchParams.getAll("state");
-  return states2.length === 1 && /^[^\p{Cc}\s]{8,512}$/u.test(states2[0]);
-};
-function isSignInUrl(value) {
-  if (typeof value !== "string" || value.length > 8192 || /[\p{Cc}\s]/u.test(value)) return false;
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return false;
-    if (!GOOGLE_SIGN_IN.has(`${url.hostname}${url.pathname}`)) return false;
-    return url.searchParams.get("response_type") === "code" && /^[\w.-]{1,256}$/.test(url.searchParams.get("client_id") ?? "") && isLoopbackReturn(url.searchParams.get("redirect_uri")) && stateOf(url);
-  } catch {
-    return false;
-  }
-}
-
 // src/client/redact.js
 var CREDENTIAL_MARK = "[hidden]";
 function basicCredential(match, scheme, token) {
@@ -12674,10 +12646,9 @@ var import_react9 = require("react");
 var CLI_OF = { "acp-claude": "claude", "acp-codex": "codex", "acp-hermes": "hermes", "acp-antigravity": "agy", "acp-omp": "omp" };
 var LOGO_OF = { "acp-claude": "CC", "acp-codex": "CX", "acp-hermes": "HM", "acp-antigravity": "AG", "acp-omp": "OM" };
 var isNative = (agent) => agent?.connector?.native === true;
-var BROWSER_DID_NOT_OPEN = "The browser did not open. Try again.";
 var NOT_THIS_SIGN_IN = "This link is not from this sign-in.";
 var EXPIRED_SIGN_IN = "This sign-in expired. Start again.";
-var signInWords = (message) => message === BROWSER_DID_NOT_OPEN ? t("The browser did not open. Try again.") : message === NOT_THIS_SIGN_IN ? t("This link is not from this sign-in.") : message === EXPIRED_SIGN_IN ? t("This sign-in expired. Start again.") : message;
+var signInWords = (message) => message === NOT_THIS_SIGN_IN ? t("This link is not from this sign-in.") : message === EXPIRED_SIGN_IN ? t("This sign-in expired. Start again.") : message;
 var isolatedSignIn = (agent) => agent.authScope === "isolated" && !isNative(agent);
 var signInCommand = (agent) => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key;
 var SIGN_IN_OF = { "acp-claude": "claude auth login", "acp-codex": "codex login" };
@@ -12694,7 +12665,7 @@ var POLL_MS2 = 2e3;
 var UNREACHABLE_POLL_MS = 15e3;
 var SETTINGS_SECTION = "acp-agents";
 var cliBusy = (agent) => agent.cli.state === "installing" || agent.cli.updating === true;
-function stateOf2(agent) {
+function stateOf(agent) {
   if (agent.cli.state === "installing") return "installing";
   if (agent.cli.updating === true) return "updating";
   if (agent.cli.state === "failed" || !agent.cli.found && agent.cli.error) return "failed";
@@ -12708,7 +12679,7 @@ function stateOf2(agent) {
   return "ready";
 }
 function badgeOf(agent) {
-  const state = stateOf2(agent);
+  const state = stateOf(agent);
   if (state === "no-cli") return t("Not installed");
   if (state === "off") return t("Off");
   if (state === "installing") return agent.cli.state === "installing" ? t("Installing") : t("Setting up");
@@ -12815,7 +12786,7 @@ function agentLines(agent, entry) {
   if (state === "ready") {
     if (!isNative(agent)) lines.push({ tone: "ok", text: version ? t("Connector ready (version {version}).", { version }) : t("Connector ready.") });
     if (agent.restartNeeded) lines.push({ tone: "bad", text: t("Restart DSH to see {name} in the model picker.", { name }) });
-    else if (stateOf2(agent) === "ready") lines.push({ tone: "ok", text: t("Ready: pick {name} in the model picker.", { name }), ready: true });
+    else if (stateOf(agent) === "ready") lines.push({ tone: "ok", text: t("Ready: pick {name} in the model picker.", { name }), ready: true });
   }
   return lines;
 }
@@ -12840,31 +12811,10 @@ function appSignInLines(agent, name) {
   if (agent.signInError === "unsupported") lines.push({ tone: "bad", text: t("{name} did not offer a Google sign-in. Try again.", { name }) });
   if (agent.signInError === "timeout") lines.push({ tone: "bad", text: t("The sign-in to {name} took too long. Try again.", { name }) });
   if (agent.signInError === "failed") lines.push({ tone: "bad", text: t("The sign-in to {name} did not finish. Try again.", { name }) });
-  if (agent.signInError === "no-browser") lines.push({ tone: "bad", text: t("The browser did not open. Try again.") });
+  if (agent.signInError === "no-browser") lines.push({ tone: "bad", text: t("The CLI did not offer a sign-in link in time. Try again.") });
   if (agent.signedIn !== false) return lines;
   lines.push({ tone: "bad", text: t("Not signed in to {name}.", { name }), action: "native-login" });
   return lines;
-}
-var OPENED_SIGN_IN_LINKS = /* @__PURE__ */ new Set();
-var OPENED_KEPT = 8;
-function openSignInLinks(agents, seen = OPENED_SIGN_IN_LINKS, {
-  desktop = globalThis.omniDesktop,
-  open = (url) => globalThis.window?.open?.(url, "_blank", "noreferrer")
-} = {}) {
-  if (desktop === void 0 || !Array.isArray(agents)) return 0;
-  let opened = 0;
-  for (const agent of agents) {
-    const url = agent?.signInUrl;
-    if (agent?.appSignIn !== true || agent.signingIn !== true || !isSignInUrl(url) || seen.has(url)) continue;
-    seen.add(url);
-    while (seen.size > OPENED_KEPT) seen.delete(seen.values().next().value);
-    try {
-      open(url);
-    } catch {
-    }
-    opened++;
-  }
-  return opened;
 }
 function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
   const [view, setView] = (0, import_react9.useState)(null);
@@ -12900,9 +12850,6 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     }, pollMs);
     return () => clearInterval(timer);
   }, [pollMs, load]);
-  (0, import_react9.useEffect)(() => {
-    openSignInLinks(view?.agents);
-  }, [view]);
   const [signingOut, setSigningOut] = (0, import_react9.useState)(null);
   const say = (id, message) => setProblems((previous) => ({ ...previous, [id]: message }));
   const act = async (id, endpoint, payload, words = (message) => message) => {
@@ -13055,7 +13002,7 @@ function AcpAgentRow({ agent, acp, accountControls }) {
   const lines = agentLines({ ...agent, on: on2 }, accountControls?.accounts[agent.id]);
   return (0, import_react9.createElement)(
     "div",
-    { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf2({ ...agent, on: on2 }) },
+    { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf({ ...agent, on: on2 }) },
     (0, import_react9.createElement)(
       "div",
       { className: "oai-ai-row" },

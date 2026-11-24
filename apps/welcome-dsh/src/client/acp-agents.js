@@ -1,6 +1,5 @@
 import { createElement as h, useCallback, useEffect, useRef, useState } from 'react'
 import { call } from './api.js'
-import { isSignInUrl } from '../host/sign-in-url.js'
 import { t } from './i18n.js'
 import { raised } from './clay.js'
 
@@ -20,8 +19,8 @@ import { raised } from './clay.js'
 // Antigravity runs in this installation's own home (#2048, `appSignIn`): its row signs in here,
 // over ACP (Sign in), as Claude Code's and Codex's rows read, never with a terminal command or
 // a path, and signs out by retiring the home (Sign out). Its sign-in link shows with a Copy
-// button and, in the desktop app, opens in the person's own browser; signed in on another
-// computer, the person pastes back the address the browser ended on (`acp-sign-in-callback`).
+// button; nothing opens it by itself: a person's click opens it. Signed in on another computer,
+// the person pastes back the address the browser ended on (`acp-sign-in-callback`).
 // The same lines draw in Connect AI (AcpLine). On Windows its account is shared with the
 // person's own agy (`sharedAccount`): every state of the row says so, and there is no Sign out.
 
@@ -32,14 +31,11 @@ export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'H
 // command that signs in (`cli.signInHint`). They are off until the person turns one on, which
 // is their word that the app may use the sign-in that CLI already has on this computer.
 export const isNative = agent => agent?.connector?.native === true
-// acp-dsh's refusal of a sign-in with no browser on this computer (an older acp-dsh's
-// `no-display`), and the two refusals of a pasted address (#2048): read in the page's language.
-const BROWSER_DID_NOT_OPEN = 'The browser did not open. Try again.'
+// acp-dsh's two refusals of a pasted address (#2048): read in the page's language.
 const NOT_THIS_SIGN_IN = 'This link is not from this sign-in.'
 const EXPIRED_SIGN_IN = 'This sign-in expired. Start again.'
-const signInWords = message => (message === BROWSER_DID_NOT_OPEN ? t('The browser did not open. Try again.')
-  : message === NOT_THIS_SIGN_IN ? t('This link is not from this sign-in.')
-    : message === EXPIRED_SIGN_IN ? t('This sign-in expired. Start again.') : message)
+const signInWords = message => (message === NOT_THIS_SIGN_IN ? t('This link is not from this sign-in.')
+  : message === EXPIRED_SIGN_IN ? t('This sign-in expired. Start again.') : message)
 const isolatedSignIn = agent => agent.authScope === 'isolated' && !isNative(agent)
 const signInCommand = agent => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key
 // How the person signs in to the CLI in a terminal, the other way to the chat's row.
@@ -250,38 +246,10 @@ function appSignInLines(agent, name) {
   if (agent.signInError === 'unsupported') lines.push({ tone: 'bad', text: t('{name} did not offer a Google sign-in. Try again.', { name }) })
   if (agent.signInError === 'timeout') lines.push({ tone: 'bad', text: t('The sign-in to {name} took too long. Try again.', { name }) })
   if (agent.signInError === 'failed') lines.push({ tone: 'bad', text: t('The sign-in to {name} did not finish. Try again.', { name }) })
-  if (agent.signInError === 'no-browser') lines.push({ tone: 'bad', text: t('The browser did not open. Try again.') })
+  if (agent.signInError === 'no-browser') lines.push({ tone: 'bad', text: t('The CLI did not offer a sign-in link in time. Try again.') })
   if (agent.signedIn !== false) return lines
   lines.push({ tone: 'bad', text: t('Not signed in to {name}.', { name }), action: 'native-login' })
   return lines
-}
-
-// The sign-in links already opened, shared by every useAcp (Settings, Connect AI, a remount), so
-// one link opens one browser tab. Each link carries its attempt's own `state`; the last few do.
-const OPENED_SIGN_IN_LINKS = new Set()
-const OPENED_KEPT = 8
-
-/**
- * Opens, once each, the sign-in link of an agent that signs in here and is signing in
- * (Antigravity, #2048): only in the desktop app (`desktop`, its preload), where Electron hands a
- * `window.open` to the person's default browser (shell.openExternal); and only a link that
- * passes isSignInUrl here too. Elsewhere the row's link needs a click. Answers how many it opened.
- */
-export function openSignInLinks(agents, seen = OPENED_SIGN_IN_LINKS, {
-  desktop = globalThis.omniDesktop,
-  open = url => globalThis.window?.open?.(url, '_blank', 'noreferrer'),
-} = {}) {
-  if (desktop === undefined || !Array.isArray(agents)) return 0
-  let opened = 0
-  for (const agent of agents) {
-    const url = agent?.signInUrl
-    if (agent?.appSignIn !== true || agent.signingIn !== true || !isSignInUrl(url) || seen.has(url)) continue
-    seen.add(url)
-    while (seen.size > OPENED_KEPT) seen.delete(seen.values().next().value)
-    try { open(url) } catch {}
-    opened++
-  }
-  return opened
 }
 
 // The agents' state from the host, refreshed (CLI search, sign-in) when the page opens and
@@ -319,9 +287,6 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     const timer = setInterval(() => { void load(false) }, pollMs)
     return () => clearInterval(timer)
   }, [pollMs, load])
-  // In the desktop app, a sign-in link handed over opens in the person's own browser at once.
-  useEffect(() => { openSignInLinks(view?.agents) }, [view])
-
   // The agent whose Sign out waits for the person's Continue.
   const [signingOut, setSigningOut] = useState(null)
   const say = (id, message) => setProblems(previous => ({ ...previous, [id]: message }))

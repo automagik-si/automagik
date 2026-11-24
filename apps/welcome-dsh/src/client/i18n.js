@@ -330,7 +330,7 @@ export const PT_BR = {
   'Sign in': 'Entrar',
   // Antigravity in its own home (#2048): its sign-in in the app, and Windows's shared account
   'Not signed in to {name}.': 'Sem login no {name}.',
-  'The browser did not open. Try again.': 'O navegador não abriu. Tente de novo.',
+  'The CLI did not offer a sign-in link in time. Try again.': 'O CLI não ofereceu um link de login a tempo. Tente de novo.',
   'Finish the sign-in to {name} in your browser…': 'Conclua o login no {name} pelo navegador…',
   '{name} did not offer a Google sign-in. Try again.': 'O {name} não ofereceu login com Google. Tente de novo.',
   'The sign-in to {name} took too long. Try again.': 'O login no {name} demorou demais. Tente de novo.',
@@ -610,7 +610,7 @@ const EN = Object.fromEntries(Object.keys(PT_BR).map(key => [key, key]))
 // `zh` and `en`; `zh-CN` is only the page's lang attribute).
 export const ZH = {
   'Not signed in to {name}.': '未登录 {name}。',
-  'The browser did not open. Try again.': '浏览器没有打开。请重试。',
+  'The CLI did not offer a sign-in link in time. Try again.': 'CLI 没有及时给出登录链接，请重试。',
   'Finish the sign-in to {name} in your browser…': '请在浏览器中完成 {name} 的登录…',
   '{name} did not offer a Google sign-in. Try again.': '{name} 没有提供 Google 登录。请重试。',
   'The sign-in to {name} took too long. Try again.': '{name} 的登录用时过长。请重试。',

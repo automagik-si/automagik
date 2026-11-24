@@ -86,7 +86,7 @@ export function isSignInHint(hint) {
   return isolated !== null && !TRAVERSAL.test(isolated[1]) && !TRAVERSAL.test(isolated[2])
 }
 // The one word that says why an in-app sign-in failed (acp-dsh `signInError`); `no-browser`:
-// agy handed no sign-in link the app could open.
+// agy handed no sign-in link the app could show.
 const SIGN_IN_ERRORS = new Set(['unsupported', 'timeout', 'failed', 'no-browser', 'expired'])
 // How the last in-app attempt ended (acp-dsh `signInEnd`), for acceptance only: the page draws none.
 const SIGN_IN_ENDS = new Set(['agent-error', 'agent-exit', 'deadline', 'window', 'checking', 'unreachable'])

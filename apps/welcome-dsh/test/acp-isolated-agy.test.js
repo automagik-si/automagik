@@ -179,7 +179,7 @@ const react = {
   useEffect: () => {}, useRef: current => ({ current }), useCallback: fn => fn,
 }
 const client = { exports: {} }
-// The page's globals: the W3 wiring test sets `omniDesktop` and `window` on it.
+// The page's globals: W3 (r9) sets `omniDesktop`, `open`, `location` and `window` on it.
 const sandbox = { module: client, exports: client.exports, setTimeout, clearTimeout, setInterval, clearInterval, URL, require: name => ({ react, 'react-dom': {} })[name] }
 runInNewContext(bundle.outputFiles[0].text, sandbox)
 const ui = client.exports
@@ -289,24 +289,14 @@ test('signing in, with agy\'s sign-in link as a link; each failure; and no brows
     assert.equal(buttons(tree, 'Sign in').length, 1)
     noCommand(textOf(tree), word)
   }
-  // No browser on this computer: the same row, and Sign in answers that the browser did not open.
+  // No browser on this computer: the same row.
   for (const row of [agy({ signInWhere: 'terminal' }), agy({ signInWhere: 'terminal' }, { signInHint: undefined })]) {
     const terminal = rowOf(row)
     assert.equal(textOf(SIGNED_OUT_LINE(terminal)[0]), 'Not signed in to Antigravity.Sign in')
     assert.deepEqual(buttons(terminal, 'Check again'), [])
     noCommand(textOf(terminal), 'no browser')
   }
-  const said = []
-  const refusing = async () => { throw new Error('The browser did not open. Try again.') }
-  const acp = withHooks(() => ui.useAcp(refusing), said)
-  assert.equal(await acp.nativeLogin(agy({ signInWhere: 'terminal' })), false)
-  assert.equal(said.at(-1)?.['acp-antigravity'], 'The browser did not open. Try again.')
-  const ptSaid = []
-  const ptAcp = withHooks(() => ui.useAcp(refusing), ptSaid)
-  locale.setLocale('pt-BR')
-  try { await ptAcp.nativeLogin(agy({ signInWhere: 'terminal' })) } finally { locale.setLocale('en') }
-  assert.equal(ptSaid.at(-1)?.['acp-antigravity'], 'O navegador não abriu. Tente de novo.')
-  // Any other refusal keeps acp-dsh's words.
+  // A refusal keeps acp-dsh's words.
   const other = []
   const busyAcp = withHooks(() => ui.useAcp(async () => { throw new Error('The Bot account is changing.') }), other)
   await busyAcp.nativeLogin(agy())
@@ -353,7 +343,7 @@ test('Windows: the shared-account warning in every state, and never a Sign out',
 // Antigravity's own sign-in lines, in Chinese too (#2048, owner).
 const ZH_KEYS = [
   'Not signed in to {name}.',
-  'The browser did not open. Try again.',
+  'The CLI did not offer a sign-in link in time. Try again.',
   'Finish the sign-in to {name} in your browser…',
   '{name} did not offer a Google sign-in. Try again.',
   'The sign-in to {name} took too long. Try again.',
@@ -386,11 +376,16 @@ const GONE_KEYS = [
   '{name} did not offer a Google sign-in. Use the terminal command below.',
   'Not signed in to {name}. This computer has no browser for the sign-in: run {command} in a new terminal window, then check again.',
   'Not signed in to {name}. This computer has no browser for the sign-in.',
+  // r9: the no-link end reads the chat's sentence instead (#2048, lead).
+  'The browser did not open. Try again.',
 ]
 
 test('every new line reads in pt-BR; Antigravity\'s sign-in lines and the Windows warning in Chinese', () => {
   for (const key of NEW_KEYS) assert.equal(typeof ui.PT_BR[key], 'string', key)
-  for (const key of GONE_KEYS) assert.equal(ui.PT_BR[key], undefined, key)
+  for (const key of GONE_KEYS) {
+    assert.equal(ui.PT_BR[key], undefined, key)
+    assert.equal(ui.ZH[key], undefined, key)
+  }
   assert.deepEqual(Object.keys(ui.ZH), [...ZH_KEYS, NEW_KEYS.at(-1), ...R6_ZH_KEYS])
   for (const text of [...NEW_KEYS.map(key => ui.PT_BR[key]), ...Object.values(ui.ZH)]) noCommand(text.replace(/\{(?:name|cli|version|time)\}/g, ''), text)
   for (const key of ZH_KEYS) for (const text of [key, ui.PT_BR[key], ui.ZH[key]]) assert.doesNotMatch(text, /terminal|终端|command|comando|命令/i, text)
@@ -419,7 +414,7 @@ test('every new line reads in pt-BR; Antigravity\'s sign-in lines and the Window
   assert.doesNotMatch(zh, /\{/)
 })
 
-// ---- r5: the app opens the sign-in link (#2048, owner) ---------------------------------------
+// ---- r5, r9: the sign-in link shows, and nothing opens it without a click (#2048) ------------
 
 const withReturn = (back) => {
   const url = new URL(GOOGLE)
@@ -431,7 +426,6 @@ const withReturn = (back) => {
 test('W1: a sign-in link needs agy\'s loopback return address, with a port', () => {
   for (const back of ['http://localhost:43117/auth/callback', 'http://127.0.0.1:4242/cb', 'http://[::1]:5000/cb']) {
     assert.equal(isSignInUrl(withReturn(back)), true, back)
-    assert.equal(ui.openSignInLinks([{ appSignIn: true, signingIn: true, signInUrl: withReturn(back) }], new Set(), { desktop: {}, open: () => {} }), 1, back)
   }
   for (const back of [undefined, 'https://localhost:43117/cb', 'http://evil.example:41234/cb', 'http://localhost/cb', 'http://127.0.0.1/cb',
     'http://localhost:1023/cb', 'http://localhost:80/cb',
@@ -441,11 +435,11 @@ test('W1: a sign-in link needs agy\'s loopback return address, with a port', () 
   }
 })
 
-test('W2: no browser: "The browser did not open. Try again.", then the signed-out line and Sign in', () => {
+test('W2: no link: the chat\'s "The CLI did not offer a sign-in link in time. Try again.", then the signed-out line and Sign in', () => {
   for (const [id, bad, out, signIn] of [
-    ['en', 'The browser did not open. Try again.', 'Not signed in to Antigravity.', 'Sign in'],
-    ['pt-BR', 'O navegador não abriu. Tente de novo.', 'Sem login no Antigravity.', 'Entrar'],
-    ['zh', '浏览器没有打开。请重试。', '未登录 Antigravity。', 'Sign in'],
+    ['en', 'The CLI did not offer a sign-in link in time. Try again.', 'Not signed in to Antigravity.', 'Sign in'],
+    ['pt-BR', 'O CLI não ofereceu um link de login a tempo. Tente de novo.', 'Sem login no Antigravity.', 'Entrar'],
+    ['zh', 'CLI 没有及时给出登录链接，请重试。', '未登录 Antigravity。', 'Sign in'],
   ]) {
     const tree = inLocale(id, () => rowOf(agy({ signInError: 'no-browser' })))
     const lines = findAll(tree, node => node.type === 'p' && /oai-acp-line/.test(node.props.className ?? '')).map(textOf)
@@ -459,76 +453,58 @@ test('W2: no browser: "The browser did not open. Try again.", then the signed-ou
   assert.equal(agentView(agy({ signInError: 'no-display' })).signInError, undefined)
 })
 
-test('W3: a handed-over link opens once, only in the desktop app, only while signing in', () => {
-  const row = url => agentView(agy({ signingIn: true, signInUrl: url }))
-  const opened = []
-  const seen = new Set()
-  const open = url => opened.push(url)
-  for (let i = 0; i < 3; i++) ui.openSignInLinks([row(GOOGLE)], seen, { desktop: {}, open })
-  assert.deepEqual(opened, [GOOGLE])
+test('W3 (r9): nothing opens without a click', () => {
   const second = GOOGLE.replace('state=s1', 'state=s2')
-  assert.equal(ui.openSignInLinks([row(GOOGLE), row(second)], seen, { desktop: {}, open }), 1)
-  assert.deepEqual(opened, [GOOGLE, second])
-  // Not in the desktop app, not signing in, not a row that signs in here, or a link that fails
-  // the check here too: nothing opens.
-  const never = []
-  const other = GOOGLE.replace('state=s1', 'state=s3')
-  const refuse = (agents, inDesktop = true) => assert.equal(ui.openSignInLinks(agents, new Set(), { desktop: inDesktop ? {} : undefined, open: url => never.push(url) }), 0)
-  refuse([row(other)], false)
-  refuse([{ ...row(other), signingIn: undefined }])
-  refuse([{ ...row(other), appSignIn: undefined }])
-  for (const bad of [other.replace('accounts.google.com', 'evil.example'), withReturn('https://evil.example/cb'), 'javascript:alert(1)']) {
-    refuse([{ id: 'acp-antigravity', appSignIn: true, signingIn: true, signInUrl: bad }])
-  }
-  refuse(undefined)
-  assert.deepEqual(never, [])
-  // Settings and Connect AI share the opened links: one tab for one link (G5-3).
-  const shared = new Set()
-  const settings = []
-  const connect = []
-  const third = GOOGLE.replace('state=s1', 'state=s4')
-  ui.openSignInLinks([row(third)], shared, { desktop: {}, open: url => settings.push(url) })
-  ui.openSignInLinks([row(third)], shared, { desktop: {}, open: url => connect.push(url) })
-  assert.deepEqual([...settings, ...connect], [third])
-  // Only the last eight are kept; an opener that throws stops nothing.
-  const capped = new Set()
-  for (let i = 0; i < 12; i++) {
-    ui.openSignInLinks([row(GOOGLE.replace('state=s1', `state=c${i}`))], capped, { desktop: {}, open: () => { throw new Error('x') } })
-  }
-  assert.equal(capped.size, 8)
-  assert.equal(capped.has(GOOGLE.replace('state=s1', 'state=c11')), true)
-  assert.equal(capped.has(GOOGLE.replace('state=s1', 'state=c0')), false)
-})
-
-test('W3: useAcp opens a handed-over link in the desktop app, once across Settings, Connect AI and a remount', () => {
-  const url = GOOGLE.replace('state=s1', 'state=wired')
-  const view = { available: true, agents: [agentView(agy({ signingIn: true, signInUrl: url }))] }
-  const calls = []
+  const views = [GOOGLE, GOOGLE, GOOGLE, second]
+    .map(url => ({ available: true, agents: [agentView(agy({ ...PASTING, signInUrl: url }))] }))
+  const opened = []
   const cleanups = []
   const saved = { useState: react.useState, useEffect: react.useEffect }
-  let first
+  let pending
+  // The first useState of each mount (useAcp's view) takes that mount's own view.
   react.useState = (initial) => {
-    if (first) { first = false; return [view, () => {}] }
+    if (pending !== undefined) { const view = pending; pending = undefined; return [view, () => {}] }
     return [typeof initial === 'function' ? initial() : initial, () => {}]
   }
   react.useEffect = (fn) => { const done = fn(); if (typeof done === 'function') cleanups.push(done) }
-  const mount = () => { first = true; ui.useAcp(async () => view) }
+  const location = {
+    assign: url => opened.push(['location.assign', url]),
+    replace: url => opened.push(['location.replace', url]),
+    set href(url) { opened.push(['location.href', url]) },
+    get href() { return 'http://localhost/' },
+  }
+  let tree
   try {
-    // Not in the desktop app: nothing opens.
-    sandbox.window = { open: (...args) => calls.push(args) }
-    mount()
-    assert.deepEqual(calls, [])
     sandbox.omniDesktop = {}
-    mount()
-    mount()
-    mount()
+    sandbox.open = (...args) => opened.push(['open', ...args])
+    sandbox.location = location
+    sandbox.window = { open: (...args) => opened.push(['window.open', ...args]), location }
+    // Settings, Connect AI, a remount, and a poll that brings a second link.
+    for (const view of views) {
+      pending = view
+      ui.useAcp(async () => view)
+      assert.equal(pending, undefined, 'the mount took its view')
+    }
+    assert.deepEqual(opened, [])
+    assert.equal(ui.openSignInLinks, undefined)
+    // The row: the link, Copy and the paste field, still with nothing opened.
+    tree = rowOf(agy(PASTING))
   } finally {
     Object.assign(react, saved)
     for (const done of cleanups) done()
     delete sandbox.omniDesktop
+    delete sandbox.open
+    delete sandbox.location
     delete sandbox.window
   }
-  assert.deepEqual(calls, [[url, '_blank', 'noreferrer']])
+  assert.deepEqual(opened, [])
+  const links = findAll(tree, node => node.type === 'a')
+  assert.equal(links.length, 1)
+  assert.equal(links[0].props.href, GOOGLE)
+  assert.equal(links[0].props.target, '_blank')
+  assert.equal(links[0].props.rel, 'noreferrer')
+  assert.equal(buttons(tree, 'Copy').length, 1)
+  assert.equal(findAll(tree, node => node.type === 'form').length, 1)
 })
 
 test('W4: the two sign-out words pass only as exact words, only with appSignIn, and draw nothing', () => {
@@ -702,23 +678,26 @@ test('W7: signing in shows the link, Copy, the paste field and the expiry; Send 
 })
 
 // Kept last: it installs the module's own locale binding and resets it (G8-1).
-test('the expired sentence is the chat\'s, byte for byte', () => {
-  const KEY = 'This sign-in expired. Start again.'
+test('the expired and the no-link sentences are the chat\'s, byte for byte', () => {
   const source = readFileSync(new URL('../../bots-dsh/src/client/i18n.js', import.meta.url), 'utf8')
-  const found = source.split('\n').filter(line => line.trimStart().startsWith(`${JSON.stringify(KEY)}:`))
-  assert.equal(found.length, 1)
-  const zh = JSON.parse(found[0].trimStart().slice(JSON.stringify(KEY).length + 1).trim().replace(/,$/, ''))
-  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))[KEY]
-  assert.equal(typeof zh, 'string')
-  assert.ok(zh.length > 0)
-  assert.equal(typeof pt, 'string')
-  assert.ok(pt.length > 0)
-  assert.equal(OWN_ZH[KEY], zh)
-  assert.equal(OWN_PT_BR[KEY], pt)
+  const omniUi = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const KEYS = ['This sign-in expired. Start again.', 'The CLI did not offer a sign-in link in time. Try again.']
+  for (const KEY of KEYS) {
+    const found = source.split('\n').filter(line => line.trimStart().startsWith(`${JSON.stringify(KEY)}:`))
+    assert.equal(found.length, 1, KEY)
+    const zh = JSON.parse(found[0].trimStart().slice(JSON.stringify(KEY).length + 1).trim().replace(/,$/, ''))
+    const pt = omniUi[KEY]
+    assert.equal(typeof zh, 'string', KEY)
+    assert.ok(zh.length > 0, KEY)
+    assert.equal(typeof pt, 'string', KEY)
+    assert.ok(pt.length > 0, KEY)
+    assert.equal(OWN_ZH[KEY], zh, KEY)
+    assert.equal(OWN_PT_BR[KEY], pt, KEY)
+  }
   let seen
   const dispose = installOwnLocale({ register(ns, tables) { seen = { ns, tables }; return () => {} }, bind() { return key => key } })
   try {
     assert.equal(seen.ns, 'welcome.team')
-    assert.equal(seen.tables.en[KEY], KEY)
+    for (const KEY of KEYS) assert.equal(seen.tables.en[KEY], KEY)
   } finally { dispose() }
 })
