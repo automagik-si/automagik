@@ -395,3 +395,115 @@ test('install and check carry --pack-root through the managed row', () => {
   assert.equal(checkRow({ profile: fixture.profile, wrapper: fixture.wrapper, packRoot: pack }).ok, true);
   assert.equal(checkRow({ profile: fixture.profile, wrapper: fixture.wrapper }).ok, false);
 });
+
+// #631 (the #642 review low 1): the DSH template's [] with a trailing comment, accepted only when
+// every other line is blank or a full-line comment. Anything else keeps base's refusal (low 3,
+// an indented [] inside a block array, included). Each row names the inputs it covers.
+
+const COMMENTED_TEMPLATE = DSH_TEMPLATE.replace('[]\n', '[] # empty for now\n');
+
+/** Refused before any write: the error matches, the bytes survive and no backup is taken. */
+function assertRefused(text, error) {
+  assert.throws(() => layerShape(text), error);
+  const fixture = makeFixture();
+  writeFileSync(fixture.profile, text);
+  assert.throws(() => installRow({ profile: fixture.profile, wrapper: fixture.wrapper }), error);
+  assert.equal(readFileSync(fixture.profile, 'utf8'), text);
+  assert.deepEqual(backupsOf(fixture.profile), []);
+}
+
+test('631: install keeps the template [] trailing comment on its own line above the block', () => {
+  const fixture = makeFixture();
+  writeFileSync(fixture.profile, COMMENTED_TEMPLATE);
+  assert.deepEqual(layerShape(COMMENTED_TEMPLATE), { shape: 'empty-flow', line: 3 });
+  assert.deepEqual(layerShape('[]\t# c\n'), { shape: 'empty-flow', line: 0 });
+  const installed = installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(1) });
+  assert.equal(installed.changed, true);
+  assert.equal(readFileSync(fixture.profile, 'utf8'), COMMENTED_TEMPLATE.replace(
+    '[] # empty for now\n', `# empty for now\n${sandboxBlock(fixture.wrapper)}\n`));
+  assert.equal(checkRow({ profile: fixture.profile, wrapper: fixture.wrapper }).ok, true);
+  const again = installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(2) });
+  assert.equal(again.changed, false);
+  assert.equal(again.backup, null);
+  assert.equal(backupsOf(fixture.profile).length, 1);
+});
+
+test('631: a template comment that reads as a marker stays a plain comment', () => {
+  for (const marker of [BEGIN, END]) {
+    const fixture = makeFixture();
+    const text = `# Your patch layer\n[] ${marker}\n`;
+    writeFileSync(fixture.profile, text);
+    installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(1) });
+    const written = readFileSync(fixture.profile, 'utf8');
+    assert.equal(written, `# Your patch layer\n ${marker}\n${sandboxBlock(fixture.wrapper)}\n`);
+    const { begins, ends } = findManaged(written);
+    assert.equal(begins.length, 1);
+    assert.equal(ends.length, 1);
+    assert.equal(checkRow({ profile: fixture.profile, wrapper: fixture.wrapper }).ok, true);
+    const again = installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(2) });
+    assert.equal(again.changed, false);
+    assert.equal(again.backup, null);
+    assert.equal(backupsOf(fixture.profile).length, 1);
+  }
+});
+
+test('631: the template comment runs to the line end (U+2028 and U+2029 inside it)', () => {
+  for (const separator of ['\u2028', '\u2029']) {
+    const fixture = makeFixture();
+    const text = `[] # x${separator}y\n`;
+    assert.deepEqual(layerShape(text), { shape: 'empty-flow', line: 0 });
+    writeFileSync(fixture.profile, text);
+    installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(1) });
+    assert.equal(readFileSync(fixture.profile, 'utf8'),
+      `# x${separator}y\n${sandboxBlock(fixture.wrapper)}\n`);
+    assert.equal(checkRow({ profile: fixture.profile, wrapper: fixture.wrapper }).ok, true);
+  }
+});
+
+test('631: a commented [] beside anything but blank lines and full-line comments keeps base', () => {
+  const entries = /flow array with entries/;
+  assertRefused('\u00a0[] # c\n', entries);
+  assertRefused('\u00a0# kept\n[] # c\n', entries);
+  assertRefused('[] # c\n- id: a\n', entries);
+  assertRefused('[] # c\n[] # d\n', entries);
+  assertRefused('# h\r\n[] # c\r\n', entries);
+  assertRefused('"x\n[] # c\n"\n', /top-level mapping or scalar/);
+  assertRefused('---\n[] # c\n', /top-level content that is not a list item/);
+  assertRefused('  [] # c\n', /not a top-level list/);
+  assertRefused('[]#x\n', entries);
+  assertRefused(`${BEGIN}\n# keep me\n[] # c\n${END}\n`, /flow array with entries at line 3/);
+
+  const fixture = makeFixture();
+  const invalidUtf8 = Buffer.from([0x5b, 0x5d, 0x20, 0x23, 0x20, 0xff, 0x0a]);
+  writeFileSync(fixture.profile, invalidUtf8);
+  assert.throws(
+    () => installRow({ profile: fixture.profile, wrapper: fixture.wrapper }),
+    /flow array with entries at line 1/,
+  );
+  assert.deepEqual(readFileSync(fixture.profile), invalidUtf8);
+  assert.deepEqual(backupsOf(fixture.profile), []);
+});
+
+test('631: an indented [] beside other content keeps base refusal (low 3 is not in this PR)', () => {
+  const mixed = /top-level \[\] with other content/;
+  for (const text of [
+    '- id: a\n  config:\n    list:\n      []\n',
+    '---\n- id: a\n  config:\n    list:\n      []\n',
+    '- id: a\n  config:\n    note: |\n      []\n',
+    '- note: |+\n    []\n',
+    '--- "\n- a\n  []\n-"\n',
+    '- id: a\n---\n- note: |\n    []\n',
+    '---\n  []\n',
+    '---\n[]\n',
+    '- id: a\n---\n  []\n',
+    '- id: a\n\t[]\n',
+  ]) assertRefused(text, mixed);
+});
+
+test('631: a lone space-indented [] is still the template', () => {
+  assert.deepEqual(layerShape('  []\n'), { shape: 'empty-flow', line: 0 });
+  const fixture = makeFixture();
+  writeFileSync(fixture.profile, '  []\n');
+  installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(1) });
+  assert.equal(readFileSync(fixture.profile, 'utf8'), `${sandboxBlock(fixture.wrapper)}\n`);
+});
