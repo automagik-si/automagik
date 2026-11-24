@@ -784,6 +784,45 @@ test('a save cannot slip between a reclaim and the adopt it waits on', async (t)
   }
 })
 
+test('repeated detection of an outside edit keeps the team write queue ordered', async (t) => {
+  const { rt, statePath } = runtime(t)
+  await rt.load()
+  await rt.save()
+  fs.writeFileSync(statePath, JSON.stringify({ version: 2, revision: 900, prefs: { marker: 'outside edit' } }))
+
+  const temp = `${statePath}.${process.pid}.tmp`
+  const order = []
+  const writes = []
+  let cleanups = 0
+  const restore = patch('unlink', originalUnlink => (path, ...args) => {
+    if (path !== temp) return originalUnlink(path, ...args)
+    cleanups += 1
+    if (cleanups === 1) {
+      // The first rejected save has queued adoption. Leave a write behind it.
+      writes.push(rt.queueTeamWrite(async () => {
+        await new Promise(resolve => setImmediate(resolve))
+        order.push('first')
+      }))
+    } else if (cleanups === 2) {
+      // The second rejected save has also seen the edit. Its cleanup must not
+      // have replaced the queue tail and let this write pass the first one.
+      writes.push(rt.queueTeamWrite(() => { order.push('second') }))
+    }
+    return originalUnlink(path, ...args)
+  })
+  try {
+    await Promise.all([
+      assert.rejects(rt.save(), { code: 'ELOCKLOST' }),
+      assert.rejects(rt.save(), { code: 'ELOCKLOST' }),
+    ])
+    await Promise.all(writes)
+    assert.deepEqual(order, ['first', 'second'])
+    assert.equal(rt.state.prefs.marker, 'outside edit')
+  } finally {
+    restore()
+  }
+})
+
 test('a save writes the unsaved change when the lock went away but the file did not', async (t) => {
   const { rt, home, statePath } = runtime(t)
   await rt.load()

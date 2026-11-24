@@ -589,15 +589,16 @@ export function install(rt) {
   // An outside edit of state.json while this host held the lock, found at a
   // reclaim or by a queued write that saw the file change: this host's in-memory
   // state goes aside first, then the file on disk is adopted. Queued behind
-  // `writing` — and behind any adopt already queued — so no save or second
-  // refresh slips between finding the change and the adopt.
+  // `writing` so no save slips between finding the change and the adopt.
+  // Repeated detections share the pending adopt and leave the queue tail intact.
   let adopting
   let recoveryPending = false
   const mayInitializeRecoveryKey = () => {
     try { return JSON.parse(readFileSync(statePath))?.version !== ENCRYPTED_STATE_VERSION } catch { return false }
   }
   const adoptAfterReclaim = () => {
-    const run = (adopting ?? writing).then(async () => {
+    if (adopting !== undefined) return adopting
+    const run = queueTeamWrite(async () => {
       if (stamp() !== seen) {
         const aside = `${statePath}.replaced-${Date.now()}`
         const snapshot = credentials.encode(state, { initializeKey: mayInitializeRecoveryKey() })
@@ -617,7 +618,6 @@ export function install(rt) {
       adopt(readFileState())
       recoveryPending = false
     })
-    writing = run.catch(() => {})
     const tracked = run.finally(() => { if (adopting === tracked) adopting = undefined })
     adopting = tracked
     return tracked
