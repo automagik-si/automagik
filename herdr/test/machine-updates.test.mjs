@@ -9,12 +9,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { accessSync, chmodSync, constants, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync,
+  symlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { MACHINES_EVERY_MS, MACHINES_KEY, START, UPDATE, entryLine, failureNotice, meterFollows, parseProbe, parseState, readUpdate, startCycle,
-  stateAfter, stateLines } from "../mods/am-sidebar/machineUpdates.js";
+import { LINKED_UPDATE_ENV, MACHINES_EVERY_MS, MACHINES_KEY, START, UPDATE, entryLine, failureNotice, meterFollows, parseProbe, parseState,
+  readUpdate, startCycle, stateAfter, stateLines, updateOn } from "../mods/am-sidebar/machineUpdates.js";
+import { classify, installState } from "../mods/am-sidebar/amInstallState.js";
 import { PACK_MODS } from "../mods/am-sidebar/release.js";
 import { POINTER_SIG_URL, POINTER_URL } from "../mods/am-sidebar/update.mjs";
 import { keys as packKeys, pointerBytes, signatureOf } from "./pointer.mjs";
@@ -34,6 +36,9 @@ const amKey = (keyId) => {
   return { keyId, privateKey, trusted: JSON.stringify({ keys: [{ keyId, publicKey: publicKey.export({ type: "spki", format: "pem" }).toString() }] }) };
 };
 const sequenceOf = (version) => { const [, n, p] = version.split(".").map(Number); return n * 10_000 + p; };
+/** The pieces amInstallState.js reads a home with, for the fixture's own classification. */
+const FSP = { accessSync, constants, lstatSync, readFileSync, readlinkSync, realpathSync };
+const PATHS = { basename, dirname, join, resolve };
 
 /**
  * A scratch Herdr: this computer (`here`: its am version, or null for none) and `machines`
@@ -348,6 +353,138 @@ function packFleet(t, { machines = ["off", "skipped", "diverge"], settings = {} 
     },
   };
 }
+
+/**
+ * #1874's host: no am part, and install.sh's `~/.local/bin/am` (and `automagik-herdr`) link to the
+ * pack's own command under a scratch app home. The wrapper logs what it was asked and the automatic
+ * mark (`calls`), moves its VERSION like a real install, and `PACK_MODE=fail` makes it refuse with a
+ * real stderr line. `install`/`uninstall` run the checkout's own am, so the retained store and the
+ * links' handback are the real ones, never simulated.
+ */
+function packOnly(t, { version = "3.169.0", latest = "3.170.1" } = {}) {
+  const root = scratchRoot(t, "am-machines-1874-");
+  const home = join(root, "home");
+  const app = join(home, ".config", "herdr-app");
+  const packDir = join(app, "mods", "am-sidebar");
+  const cli = join(packDir, "bin", "automagik-herdr");
+  const versionFile = join(packDir, "VERSION");
+  const calls = join(root, "calls");
+  const amHome = join(home, ".automagik");
+  const release = join(root, "release");
+  for (const dir of [join(packDir, "bin"), join(home, ".local", "bin"), amHome, release, join(root, "tmp")]) mkdirSync(dir, { recursive: true });
+  writeFileSync(versionFile, `${version}\n`);
+  writeFileSync(calls, "");
+  exe(cli, [
+    "#!/bin/sh",
+    'printf "%s:%s\\n" "$' + LINKED_UPDATE_ENV + '" "$*" >> "$PACK_CALLS"',
+    'case ${PACK_MODE:-ok} in fail) echo "the pack lane refused it" >&2; exit 1 ;; esac',
+    `printf '%s\\n' "${latest}" > "$PACK_VERSION"`,
+    `printf '%s\\n' '${JSON.stringify({ current: version, latest, installed: { version: latest } })}'`,
+    "",
+  ].join("\n"));
+  for (const name of ["am", "automagik-herdr"]) symlinkSync(cli, join(home, ".local", "bin", name));
+  const env = {
+    HOME: home, HERDR_APP_HOME: app, PATH: `${NODE_DIR}:/usr/bin:/bin`, TMPDIR: join(root, "tmp"),
+    PACK_CALLS: calls, PACK_VERSION: versionFile, AM_RELEASE_URL: `file://${release}`, AUTOMAGIK_HERDR_NO_UPDATE: "1",
+  };
+  const run = async (argv) => {
+    const r = spawnSync(argv[0], argv.slice(1), { cwd: root, env, encoding: "utf8" });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+  const lifecycle = (program, action) => {
+    const r = spawnSync("sh", [program, "self", action], { cwd: root, env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr || r.stdout);
+  };
+  return {
+    root, env, run,
+    install: () => lifecycle(join(AM, "bin", "am"), "install"),
+    uninstall: () => lifecycle(join(home, ".local", "bin", "am"), "uninstall"),
+    calls: () => readFileSync(calls, "utf8").trim(),
+    packVersion: () => readFileSync(versionFile, "utf8").trim(),
+    retained: () => readFileSync(join(amHome, "parts", "automagik.am", "current", "VERSION"), "utf8").trim(),
+    inspect: () => {
+      const installation = installState({ home, amHome, appHome: app }, FSP, PATHS);
+      return { command: installation.am.state, installation: classify(installation).state };
+    },
+  };
+}
+
+test("#1874: a pack-only host reads the pack's own answer, and this computer runs nothing", async (t) => {
+  const f = packOnly(t);
+  const now = () => new Date("2026-11-22T00:00:00Z");
+  assert.deepEqual(f.inspect(), { command: "pack", installation: "pack" });
+
+  // This computer (amOnly): no am part, so nothing runs; the pack is the sidebar updater's.
+  const here = await updateOn(f.run, null, { now });
+  assert.deepEqual(here.steps, [{ part: "am", state: "absent" }]);
+  assert.equal(here.result, "current");
+  assert.deepEqual(here.versions, { am: null, pack: "3.169.0", meter: null });
+  assert.equal(f.calls(), "", "am update automagik.am never reaches the pack's command");
+
+  // A linked machine there is pack-only: its own pack update runs, with the automatic mark.
+  const there = await updateOn(f.run, "vm", { now });
+  assert.deepEqual(there.steps, [{ part: "am", state: "absent" }, { part: "pack", state: "updated", from: "3.169.0", to: "3.170.1" }]);
+  assert.equal(there.result, "updated");
+  assert.deepEqual(there.why, []);
+  assert.deepEqual(there.versions, { am: null, pack: "3.170.1", meter: null });
+  assert.equal(f.calls(), "1:update --json");
+});
+
+test("#1874: after am self uninstall the retained store is not the active am", async (t) => {
+  const f = packOnly(t);
+  const now = () => new Date("2026-11-22T00:00:00Z");
+  f.install();
+  assert.deepEqual(f.inspect(), { command: "am", installation: "installed" });
+  f.uninstall();
+  assert.ok(f.retained().length, "the uninstall keeps the store");
+  assert.deepEqual(f.inspect(), { command: "pack", installation: "pack" });
+
+  const here = await updateOn(f.run, null, { now });
+  assert.deepEqual(here.steps, [{ part: "am", state: "absent" }]);
+  assert.equal(here.versions.am, null, "the retained am is not the active am");
+  assert.equal(f.calls(), "");
+
+  const there = await updateOn(f.run, "vm", { now });
+  assert.deepEqual(there.steps, [{ part: "am", state: "absent" }, { part: "pack", state: "updated", from: "3.169.0", to: "3.170.1" }]);
+  assert.deepEqual(there.versions, { am: null, pack: "3.170.1", meter: null });
+  assert.deepEqual(there.why, []);
+  assert.equal(f.calls(), "1:update --json");
+});
+
+test("#1874: am self install takes the pack's links back; the linked pack stays the machine's", async (t) => {
+  const f = packOnly(t);
+  const now = () => new Date("2026-11-22T00:00:00Z");
+  f.install();
+  const version = readFileSync(join(AM, "VERSION"), "utf8").trim();
+  const here = await updateOn(f.run, null, { now });
+  assert.deepEqual(here.steps, [{ part: "am", state: "current", to: version }]);
+  assert.equal(f.calls(), "");
+  const there = await updateOn(f.run, "vm", { now });
+  assert.deepEqual(there.steps.map(({ part, state }) => [part, state]), [["am", "current"], ["pack", "off"]]);
+  assert.equal(there.why.length, 0);
+  assert.equal(f.calls(), "", "the machine's own pack update is the automatic path here");
+});
+
+test("#1874: a pack-only host with linked updates off runs nothing", async (t) => {
+  const f = packOnly(t);
+  writeFileSync(join(f.root, "home", ".automagik", "linked-update"), "off\n");
+  const here = await updateOn(f.run, null, { now: () => new Date("2026-11-22T00:00:00Z") });
+  assert.equal(here.result, "off");
+  assert.equal(here.auto, false);
+  assert.deepEqual(here.steps, []);
+  assert.equal(f.calls(), "");
+});
+
+test("#1874: a real pack failure is the pack's failure, with its own line", async (t) => {
+  const f = packOnly(t);
+  f.env.PACK_MODE = "fail";
+  const there = await updateOn(f.run, "vm", { now: () => new Date("2026-11-22T00:00:00Z") });
+  assert.deepEqual(there.steps, [{ part: "am", state: "absent" }, { part: "pack", state: "failed", why: "the pack lane refused it" }]);
+  assert.equal(there.result, "failed");
+  assert.deepEqual(there.why, ["the pack: the pack lane refused it"]);
+  assert.equal(f.packVersion(), "3.169.0");
+  assert.equal(f.calls(), "1:update --json");
+});
 
 test("#1505 (a): the target's own am update --auto off holds the linked pack: the cycle installs nothing", (t) => {
   const f = packFleet(t, { machines: ["off"], settings: { off: { auto: false } } });
