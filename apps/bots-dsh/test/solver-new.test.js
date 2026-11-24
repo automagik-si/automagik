@@ -186,7 +186,7 @@ test('Create makes the reviewer, then the Solver with its real name, then native
   assert.equal(solver.brief, undefined)
   // The name the reviewer's create-bot returned, not the one the dialog asked for.
   assert.ok(solver.instructions.includes('Message "Solver reviewer 7" with message_bot FIRST for every review, plan and result alike (reply_to "me").'))
-  assert.ok(solver.instructions.includes('ONLY when message_bot to "Solver reviewer 7" fails'))
+  assert.ok(solver.instructions.includes('ONLY when message_bot to your reviewer fails'))
   assert.doesNotMatch(solver.instructions, /no reviewer/i)
   assert.deepEqual(calls[2], ['updateBot', 's-new', { nativeTools: true }])
   assert.deepEqual(calls[3], ['send', 's-new', 'Compare two libraries'])
@@ -228,7 +228,7 @@ test('(1) an existing Bot as reviewer is never deleted, whichever step fails', a
     const solver = ui.actions.calls.find(call => call[0] === 'createBot')[1]
     // An existing shared reviewer is named too, and asked first.
     assert.ok(solver.instructions.includes('Message "Ann" with message_bot FIRST for every review, plan and result alike (reply_to "me", when "queue").'))
-    assert.ok(solver.instructions.includes('ONLY when message_bot to "Ann" fails'))
+    assert.ok(solver.instructions.includes('ONLY when message_bot to your reviewer fails'))
     assert.doesNotMatch(solver.instructions, /no reviewer/i)
     assert.match(ui.alert(), /nothing was created/i)
   }

@@ -113,7 +113,7 @@ test('the Solver and reviewer payloads', () => {
   assert.deepEqual(solverPayload({ name: 'S', look, model: 'local-claude-code/sonnet' }).payload.avatar, { shape: 'moon' })
   // The dialog writes the reviewer's real name: asked first, a fresh session only after its failure.
   assert.ok(plain.payload.instructions.includes('Message "Solver reviewer" with message_bot FIRST for every review, plan and result alike (reply_to "me").'))
-  assert.ok(plain.payload.instructions.includes('ONLY when message_bot to "Solver reviewer" fails, and the delivery quotes that failure.'))
+  assert.ok(plain.payload.instructions.includes('ONLY when message_bot to your reviewer fails, and the delivery quotes that failure.'))
   assert.doesNotMatch(plain.payload.instructions, /no reviewer/i)
   const native = solverPayload({ name: 'Solver', look, model: CLAUDE, brief: 'Compare two libraries', native: true })
   assert.equal(native.payload.brief, undefined)

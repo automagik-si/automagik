@@ -11,6 +11,8 @@ const RULES = "Review this as a reviewer. Check it against the request's own wor
   + ' no files; review only.'
 // The longest name the create and Details fields take (maxLength 40).
 const LONG = 'A'.repeat(40)
+// The same length at its longest once JSON-quoted: every `"` becomes `\"`.
+const QUOTES = '"'.repeat(40)
 
 test('every rule of the method is in both forms', () => {
   assert.equal(SOLVER_METHOD_VERSION, 1)
@@ -70,18 +72,31 @@ test('a named reviewer is asked first for the plan and the result; a fresh sessi
     const quoted = JSON.stringify(name)
     const first = `Message ${quoted} with message_bot FIRST for every review, plan and result alike ${how}.`
     assert.ok(text.includes(`Review: ${first}`), name)
-    assert.ok(text.includes(`A fresh-session review is allowed ONLY when message_bot to ${quoted} fails, and the delivery quotes that failure.`), name)
+    assert.ok(text.includes('A fresh-session review is allowed ONLY when message_bot to your reviewer fails, and the delivery quotes that failure.'), name)
     assert.ok(text.includes('You have a reviewer on another model or agent: never say otherwise, and never replace it with a subagent or your own review.'), name)
-    assert.ok(text.includes(`If ${quoted} has not answered after your other work is done, deliver marked BLOCKED-review.`), name)
+    // The name is written once; after it, "your reviewer".
+    assert.equal(text.split(quoted).length - 1, 1, name)
     // The named reviewer comes before the fresh-session text, which is only its fallback.
     assert.ok(text.indexOf(first) < text.indexOf('Fresh-session review: Run each review'), name)
     // The plan review is mandatory too, under the same rule.
     assert.ok(text.includes('6. Review the plan (mandatory, see Review); implement only after its verdict.'), name)
-    assert.ok(text.includes('Both review points, the plan (step 6) and the result (step 9), are mandatory.'), name)
+    assert.ok(text.includes('Both review points (steps 6 and 9) are mandatory.'), name)
     // Never the "no reviewer" claim, and never the old fallback on any error or silence.
     assert.doesNotMatch(text, /no reviewer/i)
     assert.doesNotMatch(text, /If the reviewer errors/)
     assert.doesNotMatch(text, /run the review in a fresh session and say so/)
+  }
+})
+
+// #2056 SN-1: message_bot's reply only ever arrives later, as a new message, so the Solver ends its
+// turn to wait for the verdict instead of delivering BLOCKED-review in the same turn.
+test('a named reviewer\'s verdict comes later as a new message, and the turn ends to wait for it', () => {
+  for (const [name, dedicated] of [['Ada reviewer', true], ['Ben', false], [QUOTES, false]]) {
+    const text = solverInstructions({ reviewer: name, dedicated })
+    const wait = 'Its verdict comes later as a new message: end your turn to wait for it.'
+    const early = 'If the person asks for the delivery first, deliver marked BLOCKED-review.'
+    assert.ok(text.includes(`and the delivery quotes that failure. ${wait} ${early} Fresh-session review:`), name)
+    assert.doesNotMatch(text, /has not answered|after your other work is done/, name)
   }
 })
 
@@ -95,13 +110,17 @@ test('with no reviewer Bot every review runs in a fresh session, and the deliver
   // It names no reviewer, and its plan review is mandatory too.
   assert.doesNotMatch(text, /You have a reviewer|Message "|FIRST for every review/)
   assert.ok(text.includes('6. Review the plan (mandatory, see Review); implement only after its verdict.'))
-  assert.ok(text.includes('Both review points, the plan (step 6) and the result (step 9), are mandatory.'))
+  assert.ok(text.includes('Both review points (steps 6 and 9) are mandatory.'))
+  // Nothing to wait for: no reviewer's verdict arrives as a message.
+  assert.doesNotMatch(text, /new message|end your turn/)
 })
 
 test('the instructions stay under the instructions limit with the longest reviewer name', () => {
-  for (const dedicated of [true, false]) {
-    const text = solverInstructions({ reviewer: LONG, dedicated })
-    assert.ok(text.length <= MAX_INSTRUCTIONS, `${text.length}`)
+  for (const reviewer of [LONG, QUOTES]) {
+    for (const dedicated of [true, false]) {
+      const text = solverInstructions({ reviewer, dedicated })
+      assert.ok(text.length <= MAX_INSTRUCTIONS, `${reviewer[0]} ${dedicated} ${text.length}`)
+    }
   }
   assert.ok(solverInstructions({ reviewer: null }).length <= MAX_INSTRUCTIONS)
 })
