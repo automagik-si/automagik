@@ -1573,7 +1573,8 @@ export function install(rt) {
     // the deleted group; the session-stop that stopActivity runs removes them.
     await ctx.workspaceRegistry.archiveSession(rt.sessionOfRoom(room), { stopActivity: true })
       .catch(error => rt.warn('omni-ui: group chat %s not archived: %s', room.name, error))
-    await forgetReadScopes(sweep, room.name)
+    // Only once the deletion is saved: a failed save leaves the Bot or group on disk with its records.
+    if (failed === undefined) await forgetReadScopes(sweep, room.name)
     if (failed !== undefined) throw failed
   }
 
@@ -1790,7 +1791,8 @@ export function install(rt) {
       await ctx.workspaceRegistry.archiveSession(part, { stopActivity: true })
         .catch(error => rt.warn('omni-ui: Bot %s not archived: %s', bot.name, error))
     }
-    await forgetReadScopes(sessions, bot.name)
+    // Only once the deletion is saved: a failed save leaves the Bot or group on disk with its records.
+    if (failed === undefined) await forgetReadScopes(sessions, bot.name)
     if (failed !== undefined) throw failed
     // The page removes the composer state of these parts (channel.js `deletedParts`).
     return [...parts]

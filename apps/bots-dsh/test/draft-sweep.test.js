@@ -11,6 +11,8 @@ function storageOf(keys, stuck = []) {
     items,
     getItem: key => (items.has(key) ? items.get(key) : null),
     removeItem: (key) => { if (!stuck.includes(key)) items.delete(key) },
+    get length() { return items.size },
+    key: index => [...items.keys()][index] ?? null,
   }
 }
 
@@ -247,12 +249,13 @@ test('one naming holds at most 200 ids; the rest stay pending for the next run',
 const sidebarKey = id => `dsh.sidebar-right.v1.${id}`
 
 test('the sweep also removes a deleted Session\'s right sidebar layout; other Sessions keep theirs', async () => {
-  const storage = storageOf(['dsh.conversation.a', sidebarKey('a'), sidebarKey('b'), 'dsh.conversation.c', sidebarKey('c')])
+  // 'ab' shares 'a''s key as a prefix: only the exact key goes.
+  const storage = storageOf(['dsh.conversation.a', sidebarKey('a'), sidebarKey('b'), 'dsh.conversation.c', sidebarKey('c'), sidebarKey('ab')])
   const { calls, call } = host()
   const drafts = createDraftSweep({ storage, call })
   drafts.note(['a', 'b'])
   await drafts.run()
-  assert.deepEqual([...storage.items.keys()], ['dsh.conversation.c', sidebarKey('c')])
+  assert.deepEqual([...storage.items.keys()], ['dsh.conversation.c', sidebarKey('c'), sidebarKey('ab')])
   assert.deepEqual(calls, [['drafts-swept', { ids: ['a', 'b'] }]])
 })
 
@@ -288,4 +291,14 @@ test('the sidebar layout of the open chat, of an unarchived Session and before D
   await drafts.run()
   assert.deepEqual([...storage.items.keys()], [sidebarKey('open'), sidebarKey('back')])
   assert.deepEqual(calls, [['drafts-swept', { ids: ['gone'] }]])
+})
+
+test('a live id\'s sidebar layout is never swept', async () => {
+  const storage = storageOf(['dsh.conversation.x', sidebarKey('x'), sidebarKey('y')])
+  const { calls, call } = host()
+  const drafts = createDraftSweep({ storage, call })
+  drafts.note(['x', 'y'], new Set(['x']))
+  await drafts.run()
+  assert.deepEqual([...storage.items.keys()], ['dsh.conversation.x', sidebarKey('x')])
+  assert.deepEqual(calls, [['drafts-swept', { ids: ['y'] }]])
 })

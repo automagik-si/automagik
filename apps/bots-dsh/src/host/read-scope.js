@@ -258,7 +258,8 @@ export function install(rt) {
     || rt.botOf?.(id) !== undefined || rt.roomOf?.(id) !== undefined || rt.own?.(rt.state?.tasks, id) !== undefined
     || !(rt.agentClaims?.(id)?.next().done ?? true)
   async function forgetOrphanReadScopes() {
-    if (rt.readOnly?.() !== undefined || rt.teamLoaded?.() === false) return []
+    // An absent team file loads as an empty team, which would make every archived part unknown.
+    if (rt.readOnly?.() !== undefined || rt.teamHealth?.()?.present !== true) return []
     let archived
     try { archived = new Set(ctx.workspaceRegistry?.archivedSessionIds ?? []) } catch { return [] }
     if (archived.size === 0) return []

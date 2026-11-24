@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -36,10 +36,12 @@ function team() {
 // The services a full apply() needs, recording archived Sessions and the fetch routes it
 // registers. The API route's own handler is counted, so a tool reaching it would show.
 // `scopes` are file-tool folder records (read-scope.js) on disk before the team loads, by
-// Session id; `archivedSessionIds` is DSH's archive set.
-async function start(seed = team(), { scopes = {}, archivedSessionIds } = {}) {
+// Session id; `archivedSessionIds` is DSH's archive set. A `null` seed writes no team file;
+// `lockedBy` writes another host's `state.lock`, so this host only reads.
+async function start(seed = team(), { scopes = {}, archivedSessionIds, lockedBy } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-delete-'))
-  writeFileSync(join(home, 'state.json'), JSON.stringify(seed))
+  if (seed !== null) writeFileSync(join(home, 'state.json'), JSON.stringify(seed))
+  if (lockedBy !== undefined) writeFileSync(join(home, 'state.lock'), JSON.stringify(lockedBy))
   for (const [id, data] of Object.entries(scopes)) writeScope(home, id, data)
   const ctx = fakeContext()
   const archived = []
@@ -236,6 +238,19 @@ test('the page sweeps a Bot another Bot deleted: its composer keys go, the other
   assert.equal(Object.hasOwn((await call('state', {})).value, 'draftSweep'), false)
 })
 
+test('the page sweeps a deleted Bot\'s right sidebar layouts with its composer keys; a live Bot\'s stay', async (t) => {
+  const { call, stop } = await start(moved())
+  t.after(stop)
+  assert.equal((await call('delete-bot', { id: 'b' })).ok, true)
+  const sidebarKey = id => `dsh.sidebar-right.v1.${id}`
+  const storage = storageOf(['dsh.conversation.b-next', sidebarKey('b'), sidebarKey('b-next'), 'dsh.conversation.c', sidebarKey('c')])
+  const drafts = createDraftSweep({ storage, call: pageCall(call), openSession: () => undefined })
+  drafts.note((await call('state', {})).value.draftSweep)
+  await drafts.run()
+  assert.deepEqual([...storage.items.keys()], ['dsh.conversation.c', sidebarKey('c')])
+  assert.equal(Object.hasOwn((await call('state', {})).value, 'draftSweep'), false)
+})
+
 test('a clear takes off only the ids the page names, and ids it does not hold save nothing', async (t) => {
   const { home, tool, call, stop } = await start(moved())
   t.after(stop)
@@ -367,6 +382,59 @@ test('a deleted Bot\'s record a surviving Session or a scheduled task still name
   assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['b', 'b-next', 'c', 'sched-1'])
 })
 
+test('delete_bot forgets the same file-tool records as the person\'s Delete', async (t) => {
+  const scopes = {
+    b: { folder: null },
+    'b-next': { rootId: 'b', continuation: true },
+    gb: { rootId: 'r1', continuation: false },
+    r1: { folder: '/team/ops' },
+    a: { folder: null },
+    c: { rootId: 'a', continuation: false },
+  }
+  const { home, tool, stop } = await start(moved(), { scopes })
+  t.after(stop)
+  assert.match(await tool('delete_bot', { bot: 'Writer' }, 'a'), /^Deleted Writer\./)
+  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['r1', 'a', 'c'])
+})
+
+test('delete_bot keeps a deleted Bot\'s record a surviving Session still names', async (t) => {
+  const scopes = {
+    b: { folder: '/work/b' },
+    'b-next': { rootId: 'b', continuation: true },
+    gb: { rootId: 'r1', continuation: false },
+    c: { rootId: 'b-next', continuation: false },
+  }
+  const { home, tool, stop } = await start(moved(), { scopes })
+  t.after(stop)
+  assert.match(await tool('delete_bot', { bot: 'Writer' }, 'a'), /^Deleted Writer\./)
+  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['b', 'b-next', 'c'])
+})
+
+// A deletion whose save fails leaves the Bot or group on disk: its records stay with it.
+// The home is made read-only after the start; the stop gives it back before removing it.
+function failSaves(t, home, stop) {
+  chmodSync(home, 0o500)
+  t.after(() => { chmodSync(home, 0o700); return stop() })
+}
+
+test('a Bot deletion whose save fails removes no file-tool record', async (t) => {
+  const scopes = { b: { folder: '/work/b' }, 'b-next': { rootId: 'b', continuation: true } }
+  const { home, call, stop } = await start(moved(), { scopes })
+  failSaves(t, home, stop)
+  assert.notEqual((await call('delete-bot', { id: 'b' })).ok, true)
+  assert.equal(JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')).bots.b.name, 'Writer')
+  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['b', 'b-next'])
+})
+
+test('a group deletion whose save fails removes no file-tool record', async (t) => {
+  const scopes = { r1: { folder: '/team/ops' }, 'r1-next': { rootId: 'r1', continuation: true }, gb: { rootId: 'r1-next', continuation: false } }
+  const { home, call, stop } = await start(movedGroup(), { scopes })
+  failSaves(t, home, stop)
+  assert.notEqual((await call('delete-room', { id: 'r1' })).ok, true)
+  assert.equal(JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')).rooms.r1.name, 'Ops')
+  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['r1', 'r1-next', 'gb'])
+})
+
 test('a deleted group\'s file-tool records go: its parts, its members\' Sessions and its own', async (t) => {
   const scopes = {
     r1: { folder: '/team/ops' },
@@ -395,13 +463,34 @@ test('earlier deletions\' records go at start: archived, unknown to the team, un
     // An archived Session a live record names.
     'old-n': { folder: null },
     live: { rootId: 'old-n', continuation: false },
-    // Not archived, and the team's own archived Session.
+    // Not archived, and the team's own archived Sessions: a Bot's and a task's.
     plain: { folder: null },
     b: { folder: null },
+    'task-1': { folder: null },
   }
-  const archivedSessionIds = ['old-0', 'old-1', 'old-g', 'old-f', 'old-fc', 'old-n', 'b']
-  const { ctx, home, stop } = await start(team(), { scopes, archivedSessionIds })
+  const archivedSessionIds = ['old-0', 'old-1', 'old-g', 'old-f', 'old-fc', 'old-n', 'b', 'task-1']
+  const seed = { ...team(), tasks: { 'task-1': { title: 'Done work', from: 'a', status: 'done', at: 1 } } }
+  const { ctx, home, stop } = await start(seed, { scopes, archivedSessionIds })
   t.after(stop)
   assert.deepEqual([...await ctx.provided.get('omniTeam').readScopeOrphansForgotten].sort(), ['old-0', 'old-1', 'old-g'])
-  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['a', 'old-f', 'old-fc', 'old-n', 'live', 'plain', 'b'])
+  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['a', 'old-f', 'old-fc', 'old-n', 'live', 'plain', 'b', 'task-1'])
+})
+
+// The start pass removes nothing it cannot trust: a host that only reads, or a team file
+// that is not there (it loads as an empty team, which knows no Session).
+const orphanScopes = { 'old-0': { folder: null }, 'old-1': { rootId: 'old-0', continuation: true } }
+
+test('a reading host removes no earlier deletion\'s record at start', async (t) => {
+  const lockedBy = { pid: process.pid, host: 'other-test-host', token: 'other-test-writer' }
+  const { ctx, home, stop } = await start(team(), { scopes: orphanScopes, archivedSessionIds: ['old-0', 'old-1'], lockedBy })
+  t.after(stop)
+  assert.deepEqual(await ctx.provided.get('omniTeam').readScopeOrphansForgotten, [])
+  assert.deepEqual(scopesLeft(home, Object.keys(orphanScopes)), ['old-0', 'old-1'])
+})
+
+test('with no team file the start pass removes no record', async (t) => {
+  const { ctx, home, stop } = await start(null, { scopes: orphanScopes, archivedSessionIds: ['old-0', 'old-1'] })
+  t.after(stop)
+  assert.deepEqual(await ctx.provided.get('omniTeam').readScopeOrphansForgotten, [])
+  assert.deepEqual(scopesLeft(home, Object.keys(orphanScopes)), ['old-0', 'old-1'])
 })
