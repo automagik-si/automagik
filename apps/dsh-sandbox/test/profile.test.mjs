@@ -433,7 +433,9 @@ test('631: a template comment that reads as a marker stays a plain comment', () 
     const fixture = makeFixture();
     const text = `# Your patch layer\n[] ${marker}\n`;
     writeFileSync(fixture.profile, text);
-    installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(1) });
+    assert.doesNotThrow(() => {
+      installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(1) });
+    });
     const written = readFileSync(fixture.profile, 'utf8');
     assert.equal(written, `# Your patch layer\n ${marker}\n${sandboxBlock(fixture.wrapper)}\n`);
     const { begins, ends } = findManaged(written);
@@ -451,7 +453,11 @@ test('631: the template comment runs to the line end (U+2028 and U+2029 inside i
   for (const separator of ['\u2028', '\u2029']) {
     const fixture = makeFixture();
     const text = `[] # x${separator}y\n`;
-    assert.deepEqual(layerShape(text), { shape: 'empty-flow', line: 0 });
+    let shape;
+    assert.doesNotThrow(() => {
+      shape = layerShape(text);
+    });
+    assert.deepEqual(shape, { shape: 'empty-flow', line: 0 });
     writeFileSync(fixture.profile, text);
     installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(1) });
     assert.equal(readFileSync(fixture.profile, 'utf8'),
@@ -501,7 +507,11 @@ test('631: an indented [] beside other content keeps base refusal (low 3 is not 
 });
 
 test('631: a lone space-indented [] is still the template', () => {
-  assert.deepEqual(layerShape('  []\n'), { shape: 'empty-flow', line: 0 });
+  let shape;
+  assert.doesNotThrow(() => {
+    shape = layerShape('  []\n');
+  });
+  assert.deepEqual(shape, { shape: 'empty-flow', line: 0 });
   const fixture = makeFixture();
   writeFileSync(fixture.profile, '  []\n');
   installRow({ profile: fixture.profile, wrapper: fixture.wrapper, now: new Date(1) });
