@@ -19,6 +19,7 @@ import { isHex, inkText, paintCss } from './inks.js'
 import { CHARACTERS, DEFAULT_MASK, MAIN_LOOK, SHAPES, markupCache, maskOf } from './characters.js'
 import { createSource, EMPTY_ROSTER, indexRoster, isAgentSession } from './sources.js'
 import { teamActions } from './team-actions.js'
+import { createDraftSweep, liveSessionIds } from './draft-sweep.js'
 import { themeCss, shellTokens, registry, registerShape, registerTheme, allThemes, layoutOf, widthOf, flatWidthOf } from './themes.js'
 import { markConversation } from './stage.js'
 import { MENTION_ORIGIN, currentPart, relativeShort } from './text.js'
@@ -300,12 +301,15 @@ function applyOwner(ctx, { gated = false } = {}) {
   // Pulls can overlap (the poll and a navigation); an older answer never wins.
   let pulls = 0
   let applied = 0
+  // Deleted Sessions' composer state, removed as the host lists them (draft-sweep.js).
+  const drafts = createDraftSweep({ call, openSession: () => mainView() })
   const pull = async () => {
     const order = ++pulls
     const known = roster.getSnapshot()
     const value = await call('state', { since: known.revision, models: known.modelsKey ?? '', live: liveKey, locale: language(), allowPlace: allowPlace() })
     if (order < applied || (gated && isRetired())) return
     applied = order
+    if (!value.unchanged) drafts.note(value.draftSweep, liveSessionIds(value))
     if (value.liveKey !== undefined) liveKey = value.liveKey
     if (value.activity !== undefined) {
       const nextActivity = JSON.stringify(value.activity)
@@ -343,10 +347,14 @@ function applyOwner(ctx, { gated = false } = {}) {
     if (value.sideChats !== undefined && JSON.stringify(value.sideChats) !== JSON.stringify(current.sideChats ?? {})) live.sideChats = value.sideChats
     if (value.browserHolds !== undefined && JSON.stringify(value.browserHolds) !== JSON.stringify(hostHolds.getSnapshot())) hostHolds.set(value.browserHolds)
     if (Object.keys(live).length > 0 && current.ready) roster.set({ ...current, ...live })
-    if (value.unchanged || (value.revision === current.revision && value.modelsKey === current.modelsKey)) return
+    if (value.unchanged || (value.revision === current.revision && value.modelsKey === current.modelsKey)) {
+      void drafts.run()
+      return
+    }
     // On a browser with no visit record yet, everything already there counts as seen.
     if (Object.keys(seenAt).length === 0) leaveVisits([...value.bots, ...value.rooms].map(entry => entry.id))
     roster.set(indexRoster(value))
+    void drafts.run()
     try {
       const ids = (value.agents ?? []).flatMap(agent => agent.sessions ?? [])
       localStorage.setItem(STORAGE.agentSessions, JSON.stringify(ids))

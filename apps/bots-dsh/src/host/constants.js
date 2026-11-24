@@ -83,6 +83,11 @@ export const ROOM_MAX_MEMBERS = 12
 export const SECTION_NAME_MAX = 32
 export const SECTION_COLORS = ['blue', 'orange', 'green', 'violet', 'rose']
 
+// The Session ids of deleted Bots and groups whose composer state the owner's page still
+// has to remove (`draftSweep` in the team file). Oldest dropped first: a dropped id only
+// leaves a composer key behind, as before the list existed.
+export const DRAFT_SWEEP_MAX = 200
+
 // DSH bots: plain dsh entries in the sidebar, not Bots, and the one record that keeps the
 // Sessions of the tasks Bots start (agents.js). Their Sessions are ordinary root Sessions,
 // so the team tools must not be offered to them.

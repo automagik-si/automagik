@@ -23078,7 +23078,38 @@ function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, clo
 }
 
 // src/client/team-actions.js
-function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession, loginState, panelFolded, work }) {
+function teamActions({
+  call: call2,
+  after,
+  partFor,
+  roster,
+  ui: ui2,
+  live,
+  cards: cards2,
+  heldCards,
+  turnClock,
+  openSession,
+  loginState,
+  panelFolded,
+  work,
+  storage = (() => {
+    try {
+      return globalThis.localStorage;
+    } catch {
+      return null;
+    }
+  })()
+}) {
+  const forgetDrafts = (ids) => {
+    if (!Array.isArray(ids)) return;
+    for (const id of ids) {
+      if (typeof id !== "string" || id === "") continue;
+      try {
+        storage?.removeItem(`dsh.conversation.${id}`);
+      } catch {
+      }
+    }
+  };
   const picks = createSource({});
   const pickEntries = /* @__PURE__ */ new Map();
   let unwatchPicks;
@@ -23385,7 +23416,10 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     folderPick: () => call2("folder-pick"),
     folderList: (path2) => call2("folder-list", { path: path2 ?? "" }),
     setTeamWorkspace: (path2) => after(call2("team-workspace", { path: path2 })),
-    deleteBot: (id) => after(call2("delete-bot", { id })),
+    deleteBot: (id) => after(call2("delete-bot", { id })).then((value) => {
+      forgetDrafts(value?.deletedParts);
+      return value;
+    }),
     rollbackAdoption: (agentId) => after(call2("agent-bot-rollback", { agentId })),
     releasePrivate: (id) => after(call2("private-release", { id })),
     duplicateBot: (id) => after(call2("duplicate-bot", { id })),
@@ -23585,6 +23619,84 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
       return next;
     })
   };
+}
+
+// src/client/draft-sweep.js
+var draftKey = (id) => `dsh.conversation.${id}`;
+var defaultStorage = () => {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return null;
+  }
+};
+function liveSessionIds(view) {
+  const ids = /* @__PURE__ */ new Set();
+  const add = (id) => {
+    if (typeof id === "string" && id !== "") ids.add(id);
+  };
+  const addAll = (list) => {
+    if (Array.isArray(list)) for (const id of list) add(id);
+  };
+  for (const bot of Array.isArray(view?.bots) ? view.bots : []) {
+    add(bot?.id);
+    add(bot?.sessionId);
+    addAll(bot?.parts);
+  }
+  for (const room2 of Array.isArray(view?.rooms) ? view.rooms : []) {
+    add(room2?.id);
+    add(room2?.sessionId);
+    addAll(room2?.ownParts);
+    addAll(room2?.parts);
+  }
+  for (const agent of Array.isArray(view?.agents) ? view.agents : []) addAll(agent?.sessions);
+  return ids;
+}
+function createDraftSweep({ storage = defaultStorage(), call: call2, openSession = () => void 0 }) {
+  const pending = /* @__PURE__ */ new Set();
+  const naming = /* @__PURE__ */ new Set();
+  let waiting = false;
+  const note = (list, live) => {
+    if (Array.isArray(list)) {
+      for (const id of list) if (typeof id === "string" && id !== "") pending.add(id);
+    }
+    if (live !== void 0) for (const id of live) pending.delete(id);
+    waiting = false;
+  };
+  const run3 = async () => {
+    if (storage == null || waiting || pending.size === 0) return;
+    let open;
+    try {
+      open = openSession();
+    } catch {
+      return;
+    }
+    const swept = [];
+    for (const id of pending) {
+      if (naming.has(id) || id === open) continue;
+      try {
+        storage.removeItem(draftKey(id));
+      } catch {
+      }
+      let gone = false;
+      try {
+        gone = storage.getItem(draftKey(id)) === null;
+      } catch {
+      }
+      if (gone) swept.push(id);
+    }
+    if (swept.length === 0) return;
+    for (const id of swept) naming.add(id);
+    try {
+      await call2("drafts-swept", { ids: swept });
+      for (const id of swept) pending.delete(id);
+    } catch {
+      waiting = true;
+    } finally {
+      for (const id of swept) naming.delete(id);
+    }
+  };
+  return { note, run: run3 };
 }
 
 // src/client/styles.js
@@ -47221,12 +47333,14 @@ function applyOwner(ctx, { gated = false } = {}) {
   const refreshed = /* @__PURE__ */ new Set();
   let pulls = 0;
   let applied = 0;
+  const drafts = createDraftSweep({ call, openSession: () => mainView() });
   const pull = async () => {
     const order = ++pulls;
     const known2 = roster.getSnapshot();
     const value = await call("state", { since: known2.revision, models: known2.modelsKey ?? "", live: liveKey, locale: language(), allowPlace: allowPlace() });
     if (order < applied || gated && isRetired()) return;
     applied = order;
+    if (!value.unchanged) drafts.note(value.draftSweep, liveSessionIds(value));
     if (value.liveKey !== void 0) liveKey = value.liveKey;
     if (value.activity !== void 0) {
       const nextActivity = JSON.stringify(value.activity);
@@ -47269,9 +47383,13 @@ function applyOwner(ctx, { gated = false } = {}) {
     if (value.sideChats !== void 0 && JSON.stringify(value.sideChats) !== JSON.stringify(current.sideChats ?? {})) live2.sideChats = value.sideChats;
     if (value.browserHolds !== void 0 && JSON.stringify(value.browserHolds) !== JSON.stringify(hostHolds.getSnapshot())) hostHolds.set(value.browserHolds);
     if (Object.keys(live2).length > 0 && current.ready) roster.set({ ...current, ...live2 });
-    if (value.unchanged || value.revision === current.revision && value.modelsKey === current.modelsKey) return;
+    if (value.unchanged || value.revision === current.revision && value.modelsKey === current.modelsKey) {
+      void drafts.run();
+      return;
+    }
     if (Object.keys(seenAt).length === 0) leaveVisits([...value.bots, ...value.rooms].map((entry) => entry.id));
     roster.set(indexRoster(value));
+    void drafts.run();
     try {
       const ids = (value.agents ?? []).flatMap((agent) => agent.sessions ?? []);
       localStorage.setItem(STORAGE.agentSessions, JSON.stringify(ids));

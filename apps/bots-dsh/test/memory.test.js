@@ -3119,3 +3119,213 @@ test('a marker in a topic, an entry or a provider failure reaches no log line or
   ])
   assert.deepEqual([...warnings, ...failures.map(item => item.text)].filter(text => text.includes(MARKER)), [])
 })
+
+// ---------------------------------------------------------------------------
+// A deleted Bot's or group's place in the memory review leaves reviewed.json.
+
+// A home whose memory review already keeps these places.
+function reviewedHome(places, team = TEAM) {
+  const home = mkdtempSync(join(tmpdir(), 'ds-bot-memory-'))
+  writeFileSync(join(home, 'state.json'), JSON.stringify(team))
+  mkdirSync(join(home, 'memory'), { recursive: true })
+  writeFileSync(join(home, 'memory', 'reviewed.json'), JSON.stringify(places))
+  return home
+}
+
+// A promise the test releases, and whether the code under test is waiting on it.
+function hold() {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const held = { waiting: false, release, wait: async () => { held.waiting = true; await gate } }
+  return held
+}
+
+test('a deleted Bot\'s review place leaves reviewed.json', async (t) => {
+  const history = { b2: [{ event: { seq: 20, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'I like it plain.' }] } } }] }
+  const { ctx, call, read, stop } = start({ replies: [JSON.stringify({ changes: [] })], history, config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  await call('state', {})
+  ctx.emit('agent/status', { agent: { id: 'b2' }, status: 'idle' })
+  await reviewed(call)
+  assert.ok(Object.hasOwn(JSON.parse(read('reviewed.json')), 'chat:b2'))
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), {})
+})
+
+test('a deleted Bot forgets every part\'s place and keeps the other keys', async (t) => {
+  const team = { ...TEAM, bots: { ...TEAM.bots, b2: { ...TEAM.bots.b2, sessionId: 'b2-next', segments: [{ sessionId: 'b2', endedAt: Date.now() }] } } }
+  const home = reviewedHome({ 'chat:b2': 19, 'chat:b2-next': 3, 'chat:b3': 4, 'group:r1': 2 }, team)
+  const { call, read, stop } = start({ home })
+  t.after(() => stop())
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4, 'group:r1': 2 })
+})
+
+test('a deleted group\'s review place leaves reviewed.json', async (t) => {
+  const home = reviewedHome({ 'group:r1': 3, 'chat:b3': 4 })
+  const { call, read, stop } = start({ home })
+  t.after(() => stop())
+  assert.equal((await call('delete-room', { id: 'r1' })).ok, true)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a Bot review that read its chat before the delete does not write its place back', async (t) => {
+  const home = reviewedHome({ 'chat:b3': 4 })
+  const { ctx, call, read, stop } = start({ home, config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  // Only the review's read (rt.partLines, which bounds it by `throughSeq`) is held; the
+  // view's preview reads the same Session without it.
+  const reading = hold()
+  const page = ctx.sessionController.page
+  let first = true
+  ctx.sessionController.page = async (options) => {
+    if (first && options.address.sessionId === 'b2' && options.throughSeq !== undefined) {
+      first = false
+      await reading.wait()
+    }
+    return page(options)
+  }
+  await call('state', {})
+  ctx.emit('agent/status', { agent: { id: 'b2' }, status: 'idle' })
+  await until(() => reading.waiting)
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  reading.release()
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a Bot review of Bot lines only, read before the delete, does not move its place back in', async (t) => {
+  const history = { b2: [
+    { event: { seq: 10, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Please remember this' }] } } },
+    { event: { seq: 11, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Saved.' }] } } } },
+    { event: { seq: 12, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Anything else?' }] } } } },
+  ] }
+  const home = reviewedHome({ 'chat:b2': 10, 'chat:b3': 4 })
+  const { ctx, call, read, requests, stop } = start({ home, history, config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  // Only the review's read (rt.partLines, which bounds it by `throughSeq`) is held; the
+  // view's preview reads the same Session without it.
+  const reading = hold()
+  const page = ctx.sessionController.page
+  let first = true
+  ctx.sessionController.page = async (options) => {
+    if (first && options.address.sessionId === 'b2' && options.throughSeq !== undefined) {
+      first = false
+      await reading.wait()
+    }
+    return page(options)
+  }
+  await call('state', {})
+  ctx.emit('agent/status', { agent: { id: 'b2' }, status: 'idle' })
+  await until(() => reading.waiting)
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  reading.release()
+  await reviewed(call)
+  assert.equal(requests.length, 0)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a group review that read its log before the delete does not write its place back', async (t) => {
+  const home = reviewedHome({ 'chat:b3': 4 })
+  const { ctx, call, read, stop } = start({ home, config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  await call('state', {})
+  const reading = hold()
+  const linesAfter = rt.groupLinesAfter
+  let first = true
+  rt.groupLinesAfter = async (roomId, since) => {
+    if (first && roomId === 'r1') {
+      first = false
+      await reading.wait()
+    }
+    return linesAfter(roomId, since)
+  }
+  ctx.emit('agent/status', { agent: { id: 'g3' }, status: 'idle' })
+  await until(() => reading.waiting)
+  assert.equal((await call('delete-room', { id: 'r1' })).ok, true)
+  reading.release()
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a Bot never reviewed is deleted with no reviewed.json written', async (t) => {
+  const { home, call, stop } = start()
+  t.after(() => stop())
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  assert.equal(existsSync(join(home, 'memory', 'reviewed.json')), false)
+})
+
+test('a review that starts while its Bot is being deleted writes no place', async (t) => {
+  const home = reviewedHome({ 'chat:b3': 4 })
+  const { ctx, call, read, stop } = start({ home, replies: [JSON.stringify({ changes: [] })], config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  await call('state', {})
+  const step = hold()
+  rt.beforeBotDelete(() => step.wait())
+  const deleting = call('delete-bot', { id: 'b2' })
+  await until(() => step.waiting)
+  ctx.emit('agent/status', { agent: { id: 'b2' }, status: 'idle' })
+  await reviewed(call)
+  step.release()
+  assert.equal((await deleting).ok, true)
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a group review that starts while its group is being deleted writes no place', async (t) => {
+  const home = reviewedHome({ 'chat:b3': 4 })
+  const { ctx, call, read, stop } = start({ home, replies: [JSON.stringify({ changes: [] })], config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  await call('state', {})
+  const pausing = hold()
+  const revoke = rt.revokeNewSchedules
+  let first = true
+  rt.revokeNewSchedules = async (...args) => {
+    if (first) {
+      first = false
+      await pausing.wait()
+    }
+    return revoke?.(...args)
+  }
+  const deleting = call('delete-room', { id: 'r1' })
+  await until(() => pausing.waiting)
+  ctx.emit('agent/status', { agent: { id: 'g3' }, status: 'idle' })
+  await reviewed(call)
+  pausing.release()
+  assert.equal((await deleting).ok, true)
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a delete on a reading host lists no composer sweep', async (t) => {
+  const { call, tool, stop } = start()
+  t.after(() => stop())
+  await call('state', {})
+  const readOnly = rt.readOnly
+  rt.readOnly = () => 'read-only'
+  try {
+    await tool('delete_bot', { bot: 'Coder' }, 'm1').catch(() => {})
+  } finally {
+    rt.readOnly = readOnly
+  }
+  assert.equal(rt.botOf('b3'), undefined)
+  assert.equal(rt.state.draftSweep, undefined)
+})
+
+test('a delete whose save is lost to another host takes its ids off the sweep list', async (t) => {
+  const { call, tool, stop } = start()
+  t.after(() => stop())
+  await call('state', {})
+  const save = rt.save
+  rt.save = async (...args) => {
+    if (rt.state.draftSweep !== undefined) throw Object.assign(new Error('lost'), { code: 'ELOCKLOST' })
+    return save(...args)
+  }
+  try {
+    await assert.rejects(tool('delete_bot', { bot: 'Coder' }, 'm1'), error => error.code === 'ELOCKLOST')
+  } finally {
+    rt.save = save
+  }
+  assert.equal(rt.state.draftSweep, undefined)
+})

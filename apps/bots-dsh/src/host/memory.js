@@ -773,7 +773,12 @@ export function install(rt) {
     for (const sessionId of [botId, rt.chatOf(botId), ...(bot?.segments ?? []).map(segment => segment.sessionId), ...rt.groupSessionsOf(botId)]) renewMemory(sessionId)
     summaries.delete(botId)
     news.delete(botId)
+    // The memory review's place in each part of its own chat goes with it; its group
+    // Sessions' places are their groups'. Saved before the archive answers.
+    const parts = new Set([botId, rt.chatOf(botId), ...(bot?.segments ?? []).map(segment => segment.sessionId)])
+    const forgetting = forgetCursors([...parts].map(id => `chat:${id}`))
     return queued(async () => {
+      await forgetting
       if (rt.readOnly() !== undefined) return
       // A change that was interrupted is finished first, so the archive holds it.
       await recoverPending()
@@ -798,7 +803,9 @@ export function install(rt) {
     summaries.delete(room.id)
     summaryFailures.delete(room.id)
     news.delete(room.id)
+    const forgetting = forgetCursors([`group:${room.id}`])
     return queued(async () => {
+      await forgetting
       if (rt.readOnly() !== undefined) return
       // A change that was interrupted is finished first, so the archive holds it.
       await recoverPending()
@@ -2009,7 +2016,7 @@ export function install(rt) {
     return await memoryView(panelBody(panel))
   }
 
-  const { memoryReviews, memoryReviewStatus } = installReview(rt, { root, reviewOn, mainLimit, TEAM, ownScope, groupScope, keeperOf, writesTeam, labelOf, today, writeText, settled, loadScope, addEntry, replaceEntry, removeEntry, entryProblem, secretEntry, botShot, languageNow })
+  const { memoryReviews, memoryReviewStatus, forgetCursors } = installReview(rt, { root, reviewOn, mainLimit, TEAM, ownScope, groupScope, keeperOf, writesTeam, labelOf, today, writeText, settled, loadScope, addEntry, replaceEntry, removeEntry, entryProblem, secretEntry, botShot, languageNow })
 
   const { tidyView, undoTidy, tidyNow, memoryTidyStatus } = installTidy(rt, { TEAM, ownScope, groupScope, keeperOf, scopeKey, dirOf, today, queued, recoverPending, writable, settled, loadScope, publish, writeStep, removeStep, writeText, botShot, languageNow, allEntries, entryProblem, USER, changedSince })
 

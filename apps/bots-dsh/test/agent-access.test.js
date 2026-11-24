@@ -746,3 +746,15 @@ test('agent access cannot change a guarded Bot\'s model; other fields and unguar
   assert.equal(free.isError, false)
   assert.equal(rt.botOf('c').model, 'provider/model')
 })
+
+test('a Bot an agent token deletes is listed for the page\'s composer sweep; a reading host cannot clear it', async t => {
+  const { rt, tool, call } = await fixture(t)
+  const bot = (await tool('create_bot', { name: 'Scratch', instructions: 'Temporary' })).value
+  assert.equal((await tool('delete_bot', { id: bot.id })).isError, false)
+  assert.equal((await call('state')).value.draftSweep.includes(bot.id), true)
+  rt.readOnly = () => 'Owner has read-only access'
+  const refused = await call('drafts-swept', { ids: [bot.id] })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.error.code, 'bot/read-only')
+  assert.equal(rt.state.draftSweep.includes(bot.id), true)
+})
