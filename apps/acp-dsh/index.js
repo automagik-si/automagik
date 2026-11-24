@@ -531,6 +531,17 @@ export function apply(ctx, config = {}, {
       warn(ctx, `Antigravity ${version} runs with native tools off; native tools off was checked on agy ${AGY_OFF_CHECKED} only`)
     }
   }
+  // The pids of this host's live Antigravity OFF children, from their start until they exit: an
+  // OFF start's prune (agy-off.js pruneAgyLog) keeps their logs however old, so a kept child idle
+  // for a day is still checked at its next turn (#1564 AK-1).
+  const agyOffLive = new Set()
+  const trackAgyOff = run => {
+    const child = run?.child
+    const pid = child?.pid
+    if (!Number.isInteger(pid) || agyOffLive.has(pid) || child.exitCode !== null || child.signalCode !== null) return
+    agyOffLive.add(pid)
+    child.once('exit', () => { agyOffLive.delete(pid) })
+  }
   // Auto-repairs started in this run, one per connector release: a reinstall that did not help
   // is not started again by every failed turn (Retry still is). And the connectors whose last
   // start failed: Retry reinstalls those, while a Retry pressed for a CLI error leaves a
@@ -642,11 +653,11 @@ export function apply(ctx, config = {}, {
         if (typeof home !== 'string' || env.HOME !== home) throw new Error(`${spec.defaultName} could not start with its tools off: its home did not match.`)
         const refused = agyExtensionRefusal(home, { platform })
         if (refused !== undefined) throw new Error(refused)
-        writeAgyOff(home, { platform })
+        writeAgyOff(home, { platform, live: agyOffLive })
         const check = agyOffCheck(home, { spawnedAt: Date.now(), warn: line => warn(ctx, line) })
         return {
           command, args: [...args, ...spec.offArgs], env,
-          agyReady: async run => { recordAgyVersion(run, true); check.start(run) },
+          agyReady: async run => { trackAgyOff(run); recordAgyVersion(run, true); check.start(run) },
           offRecheck: run => check.again(run),
         }
       }

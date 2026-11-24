@@ -27,7 +27,7 @@ export const AGY_OFF_NAME = 'automagik-native-off'
 // The agy version native tools off was checked on (stage 6 of #1564). It moves only by a
 // reviewed commit after a stage 6 on the new version; another version still starts OFF and
 // warns (the host log, and Details).
-export const AGY_OFF_CHECKED = '1.5.15'
+export const AGY_OFF_CHECKED = '1.5.16'
 
 export const AGY_OFF_AGENT = `---
 name: ${AGY_OFF_NAME}
@@ -98,14 +98,15 @@ function writeVerified(dir, file, text, posix) {
 
 /**
  * Writes both OFF files into `home` (rewritten at every OFF start); throws on any mismatch. Then
- * removes our own log folder's old files (pruneAgyLog), which never fails the start.
+ * removes our own log folder's old files (pruneAgyLog), keeping those of the live OFF children
+ * whose pids are in `live`; this never fails the start.
  */
-export function writeAgyOff(home, { platform = process.platform, now = Date.now() } = {}) {
+export function writeAgyOff(home, { platform = process.platform, now = Date.now(), live = [] } = {}) {
   const posix = platform !== 'win32'
   const paths = agyOffPaths(home)
   writeVerified(paths.agentDir, paths.agentFile, AGY_OFF_AGENT, posix)
   writeVerified(paths.settingsDir, paths.settingsFile, AGY_OFF_SETTINGS, posix)
-  pruneAgyLog(home, now)
+  pruneAgyLog(home, now, live)
   return paths
 }
 
@@ -113,17 +114,23 @@ export function writeAgyOff(home, { platform = process.platform, now = Date.now(
  * Every OFF agy process writes one log into our own settings folder's `log/` and nothing removes
  * it, so past starts would fill readAgyLog's 4096-entry bound. Removes, from that folder only, the
  * regular files with agy's log name whose time is more than 24 hours before `now`: `lstat`, never
- * through a link, each by its own name. Reads at most 4096 entries; any error is ignored.
+ * through a link, each by its own name. A file whose pid is in `live` (this host's live OFF
+ * children) is kept however old, so a kept child idle for a day still has its log for its next
+ * turn's check (#1564 AK-1). A `log` that is not a real folder (a link) is left alone (AK-2).
+ * Reads at most 4096 entries; any error is ignored.
  */
-export function pruneAgyLog(home, now = Date.now()) {
+export function pruneAgyLog(home, now = Date.now(), live = []) {
   let dir
   try {
     const folder = agyOffPaths(home).logDir
+    if (!lstatSync(folder).isDirectory()) return
+    const kept = new Set(Array.from(live, String))
     dir = opendirSync(folder)
     for (let count = 0; count < MAX_ENTRIES; count += 1) {
       const entry = dir.readSync()
       if (entry === null) break
-      if (!NAME.test(entry.name)) continue
+      const pid = NAME.exec(entry.name)?.[1]
+      if (pid === undefined || kept.has(pid)) continue
       const file = join(folder, entry.name)
       try {
         const stat = lstatSync(file)
@@ -166,14 +173,19 @@ const NAME = /^acp-server-\d{8}_\d{6}-(\d+)\.log$/
 /**
  * What agy's own log for the process `pid` says of its OFF settings: 'failed' (it did not load
  * them, or the log cannot be read safely), 'clean' (a fresh log of that process with no failure
- * line) or 'unchecked' (no such log). Bounded: at most 4096 folder entries and 256 KiB of the one
- * file, a regular file only, never through a link, never blocking on a FIFO. `open` is for tests:
- * the file opened must be the one `lstat` saw (same device and inode).
+ * line) or 'unchecked' (no such log, or a `log` that is not a real folder, such as a link).
+ * Bounded: at most 4096 folder entries and 256 KiB of the one file, a regular file only, never
+ * through a link, never blocking on a FIFO. `open` is for tests: the file opened must be the one
+ * `lstat` saw (same device and inode).
  */
 export function readAgyLog(home, pid, spawnedAt, { open = openSync } = {}) {
   const own = String(pid)
   if (!/^\d+$/.test(own)) return 'unchecked'
   const folder = agyOffPaths(home).logDir
+  let folderStat
+  try { folderStat = lstatSync(folder) } catch (error) { return error?.code === 'ENOENT' ? 'unchecked' : 'failed' }
+  // Never through a link (#1564 AK-2): a `log` that is not a real folder could not be checked.
+  if (!folderStat.isDirectory()) return 'unchecked'
   let dir
   try { dir = opendirSync(folder) } catch (error) { return error?.code === 'ENOENT' ? 'unchecked' : 'failed' }
   let chosen

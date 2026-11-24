@@ -1278,7 +1278,10 @@ this amendment" lines.
   failed to load the OFF settings (a missing or malformed file). With no such log it warns once.
   Before each OFF start acp-dsh removes, from that folder only, the regular files with agy's log
   name that are more than 24 hours old (`lstat`, never through a link; any error is ignored and
-  never stops the start), so its own past starts do not fill the 4096-entry bound.
+  never stops the start), so its own past starts do not fill the 4096-entry bound. It keeps the
+  logs of this host's live OFF processes however old, so a kept OFF Session idle for a day is
+  still checked at its next turn. A `log` that is not a real folder (a link) is neither read nor
+  pruned: the check counts it as no log and warns.
   Each later turn of a kept OFF Session checks again and ends the Session if the failure appeared.
   agy writes no line after it loads its settings (one unsigned run set on agy 1.5.16, 2026-11-24),
   so the first turn is not covered against a failure line written after its `session/new` answer;

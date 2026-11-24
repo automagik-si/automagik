@@ -238,7 +238,8 @@ export const AGENTS = Object.freeze({
     // The Bot team's native-tools switch (#1564), by launch args as omp's: OFF adds our own main
     // agent with no tools (`--agent`, "Agent for the ACP session") and our own settings folder
     // denying every tool action (`--cli_dir_name`, "Subdirectory under app_data_dir for CLI
-    // settings and logs": listed by `agy acp --help` 1.5.15, not on agy's documentation pages).
+    // settings and logs": listed by `agy acp --help` 1.5.15 and 1.5.16, the same text, not on
+    // agy's documentation pages).
     // Both files are written at each OFF start (agy-off.js). agy updates itself, so a later agy
     // may drop or ignore either: acp-dsh's own guard (`refuseTools`) stays the last line.
     nativeSwitch: 'args',

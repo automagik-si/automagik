@@ -340,6 +340,91 @@ test('8: the prune removes only old regular files with agy\'s log name, and neve
   assert.equal(existsSync(at('acp-server-20261124_000000-12.log')), false)
 })
 
+// A kept OFF child can sit idle for more than a day: its log must still be there for its next
+// turn's check, however old (#1564 AK-1). Once it has ended, its old log goes like any other.
+test('8: the prune keeps the day-old log of a live kept OFF child, and its next turn still checks it', unixOnly, async t => {
+  const h = agyWorld(t)
+  h.service.botIdentity(offBot)
+  const idle = h.chat('idle')
+  await idle.turn('plain idle-first')
+  const first = h.conversation('idle-first')
+  assert.deepEqual(first.args, AGY_OFF_ARGS)
+  const run = h.adapter.live.get('idle').run
+  const file = h.logOf(first.pid)
+  utimesSync(file, TWO_DAYS_AGO, TWO_DAYS_AGO)
+  // Another OFF start in the same home prunes first: the live child's old log stays as it was.
+  const other = await h.chat('other').turn('plain idle-other')
+  assert.equal(other.at(-1).reason.kind, 'stop')
+  assert.notEqual(h.conversation('idle-other').pid, first.pid)
+  assert.equal(h.logOf(first.pid), file)
+  assert.equal(readFileSync(file, 'utf8'), `${BOOT}\n`)
+  // agy logs the failure late: the idle child's next turn finds it and ends that child.
+  writeFileSync(file, `${FAILED}\n`, { flag: 'a' })
+  const chunks = await idle.turn('plain idle-second')
+  assert.equal(failure(chunks), AGY_NOT_LOADED_TEXT)
+  assert.equal(h.events('prompt').filter(row => row.text.includes('idle-second')).length, 0)
+  await run.gone.catch(() => {})
+  assert.equal(run.alive, false)
+  // That child has ended: the next OFF start removes its old log.
+  utimesSync(file, TWO_DAYS_AGO, TWO_DAYS_AGO)
+  await h.chat('third').turn('plain idle-third')
+  assert.equal(h.logOf(first.pid), undefined)
+})
+
+test('8: the prune keeps old files whose pid is live (unit)', unixOnly, async t => {
+  const h = agyWorld(t)
+  const home = join(h.dir, 'live-home')
+  const folder = agyOffPaths(home).logDir
+  mkdirSync(folder, { recursive: true })
+  for (const pid of [21, 22, 23]) {
+    writeFileSync(join(folder, `acp-server-20261120_000000-${pid}.log`), 'old\n')
+    utimesSync(join(folder, `acp-server-20261120_000000-${pid}.log`), TWO_DAYS_AGO, TWO_DAYS_AGO)
+  }
+  pruneAgyLog(home, Date.now(), new Set([21, '23']))
+  assert.deepEqual(readdirSync(folder).sort(), ['acp-server-20261120_000000-21.log', 'acp-server-20261120_000000-23.log'])
+})
+
+// A `log` that is a link is never followed, by the prune or by the read (#1564 AK-2): the read
+// counts it as no log (a warning), the prune removes nothing through it.
+test('8: a log folder that is a link is neither pruned nor read (unit)', unixOnly, async t => {
+  const h = agyWorld(t)
+  const home = join(h.dir, 'linked-home')
+  const target = join(h.dir, 'elsewhere')
+  mkdirSync(target)
+  writeFileSync(join(target, 'acp-server-20261120_000000-31.log'), 'old\n')
+  utimesSync(join(target, 'acp-server-20261120_000000-31.log'), TWO_DAYS_AGO, TWO_DAYS_AGO)
+  writeFileSync(join(target, 'acp-server-20261124_022134-32.log'), `${BOOT}\n${FAILED}\n`)
+  const folder = agyOffPaths(home).logDir
+  mkdirSync(join(folder, '..'), { recursive: true })
+  symlinkSync(target, folder)
+  pruneAgyLog(home)
+  assert.deepEqual(readdirSync(target).sort(), ['acp-server-20261120_000000-31.log', 'acp-server-20261124_022134-32.log'])
+  assert.equal(readAgyLog(home, 32, Date.now()), 'unchecked')
+  // A file in the log folder's place: no log either.
+  const plain = join(h.dir, 'file-home')
+  mkdirSync(join(agyOffPaths(plain).logDir, '..'), { recursive: true })
+  writeFileSync(agyOffPaths(plain).logDir, `${FAILED}\n`)
+  assert.equal(readAgyLog(plain, 32, Date.now()), 'unchecked')
+  pruneAgyLog(plain)
+  assert.equal(readFileSync(agyOffPaths(plain).logDir, 'utf8'), `${FAILED}\n`)
+})
+
+test('8: an OFF start whose log folder is a link warns once and answers, never reading through it', unixOnly, async t => {
+  const { h, chunks } = await offTurn(t, 'plain linked-folder', {
+    log: { lines: [BOOT, FAILED] },
+    before: h => {
+      const target = join(h.dir, 'linked-log')
+      mkdirSync(target)
+      mkdirSync(join(h.logDir(), '..'), { recursive: true })
+      symlinkSync(target, h.logDir())
+    },
+  })
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  assert.equal(unchecked(h.logs).length, 1)
+  // agy itself wrote its failure line through the link: only the check refused to follow it.
+  assert.ok(readdirSync(join(h.dir, 'linked-log')).some(name => name.endsWith(`-${h.conversation('linked-folder').pid}.log`)))
+})
+
 test('8: a failure line written after the first answer is not caught at the start (no marker)', unixOnly, async t => {
   const { h, chunks } = await offTurn(t, 'plain late-line', { log: { lines: [BOOT], late: { ms: 300, lines: [FAILED] } } })
   assert.equal(chunks.at(-1).reason.kind, 'stop')

@@ -246,11 +246,12 @@ that makes your harness lose all your power."
   such log it warns once. agy writes no line after loading its settings, so the first turn of each
   OFF agy process is not covered by this check: a failure agy logs after the session opens is
   caught only at the next turn. acp-dsh removes its own log files there (regular files with agy's
-  log name) once they are more than 24 hours old. Native tools off was checked on the agy version in
-  `AGY_OFF_CHECKED`; another version starts OFF, warns in the host log and in Details, and rests on
-  agy honouring the two options and on acp-dsh's guard. If an agy version creates
-  `config/plugins` by itself, every OFF start refuses until Automagik changes; Switch account does
-  not help then. The Bot team shows the switch only when `nativeArgsAgents` lists
+  log name) once they are more than 24 hours old, except those of its live OFF processes; a `log`
+  that is a link is neither read nor pruned (no log: a warning). Native tools off was checked on
+  the agy version in `AGY_OFF_CHECKED`; another version starts OFF, warns in the host log and in
+  Details, and rests on agy honouring the two options and on acp-dsh's guard. If an agy version
+  creates `config/plugins` by itself, every OFF start refuses until Automagik changes; Switch
+  account does not help then. The Bot team shows the switch only when `nativeArgsAgents` lists
   `acp-antigravity`. Existing Antigravity Bots keep their own tools once (Bots with shell access
   off or denied tools excepted).
 - **Upgrade (#1564).** Once, a Bot that sat in the lock this version removes (shared with
