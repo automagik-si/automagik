@@ -18151,13 +18151,14 @@ function Switch({ on, label, disabled, onChange }) {
     (0, import_react42.createElement)("span", { className: "bt-switch-knob", "aria-hidden": true })
   );
 }
-function SwitchRow({ label, hint: hint3, on, disabled, onChange, details = false }) {
+function SwitchRow({ label, hint: hint3, notes, on, disabled, onChange, details = false }) {
   const toggle = (0, import_react42.createElement)(Switch, { on, label, disabled, onChange });
   if (details) return (0, import_react42.createElement)(
     "div",
     null,
     (0, import_react42.createElement)("div", { className: "bt-drawer-switch-head" }, (0, import_react42.createElement)("span", null, label), toggle),
-    hint3 ? (0, import_react42.createElement)("div", { className: "bt-note" }, hint3) : null
+    hint3 ? (0, import_react42.createElement)("div", { className: "bt-note" }, hint3) : null,
+    ...(notes ?? []).map((note, index) => (0, import_react42.createElement)("div", { key: `note-${index}`, className: "bt-note" }, note))
   );
   return (0, import_react42.createElement)(
     "div",
@@ -21073,7 +21074,7 @@ function markOf(ref) {
 var judgeOf = (mark2) => mark2 === "acp-codex" ? "codex" : mark2 === "acp-claude" ? "claude" : TEAM_MARKS.includes(mark2) ? "team" : typeof mark2 === "string" && mark2.startsWith("api:") ? "own" : void 0;
 
 // src/shared/native-tools.js
-var NATIVE_AGENTS = Object.freeze(["acp-claude", "acp-codex", "acp-omp"]);
+var NATIVE_AGENTS = Object.freeze(["acp-claude", "acp-codex", "acp-omp", "acp-antigravity"]);
 var effectiveMarkOf = (bot) => markOf(bot?.model ?? bot?.appliedModel);
 var nativeAgentOf = (bot) => bot?.nativeTools === true ? bot.nativeToolsAgent ?? bot.nativeToolsKept ?? "acp-claude" : void 0;
 var nativeToolsOn = (bot) => {
@@ -32850,6 +32851,16 @@ var ompNativeToolsCopy = {
   off: "With this off, omp has no tools at all in any of this Bot's chats, so this Bot can only chat. Turning this on applies from the next message in each chat.",
   blocked: "Here omp has no tools, so this Bot can only chat."
 };
+var antigravityNativeToolsCopy = {
+  on: "Antigravity uses its own tools in all of this Bot's chats: its direct chat, groups, tasks and scheduled runs, with anyone who can talk to it. They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running sessions at once.",
+  off: "With this off, Antigravity has no tools at all in any of this Bot's chats, so this Bot can only chat. Turning this on applies from the next message in each chat.",
+  blocked: "Here Antigravity has no tools, so this Bot can only chat.",
+  unchecked: "Native tools off is checked on agy {version}; this version was not checked.",
+  firstTurn: "The check that Antigravity loaded its native-tools-off settings does not cover the first message after Antigravity starts, only the messages after it.",
+  hooks: "Antigravity can't start with native tools off while its settings hold a hooks.json file. Remove hooks.json to use it with native tools off.",
+  plugins: "Antigravity can't start with native tools off while its settings hold plugins.",
+  fresh: "Switch account on Antigravity in Settings starts it with empty settings; it also signs it out."
+};
 var NATIVE_TOOLS_HINTS = {
   "model-kept": nativeToolsCopy.modelKept,
   managed: "Not available for a Bot that operates Omni or that another plugin manages.",
@@ -32858,16 +32869,43 @@ var NATIVE_TOOLS_HINTS = {
   "read-only": "Not available at the Read only level.",
   "level-unknown": "Not available: the permission level of this Bot's chat could not be read."
 };
+function antigravityNotes(bot, on) {
+  const notes = [];
+  const copy2 = antigravityNativeToolsCopy;
+  if (typeof bot.nativeToolsUnchecked === "string") notes.push({ key: copy2.unchecked, values: { version: bot.nativeToolsUnchecked } });
+  if (on) return notes;
+  notes.push({ key: copy2.firstTurn });
+  if (bot.nativeToolsHooks === true) notes.push({ key: copy2.hooks });
+  if (bot.nativeToolsPlugins === true) notes.push({ key: copy2.plugins });
+  if (bot.nativeToolsFresh === true && (bot.nativeToolsHooks === true || bot.nativeToolsPlugins === true)) notes.push({ key: copy2.fresh });
+  return notes;
+}
 function nativeSwitchView(bot, roster) {
   const mark2 = effectiveMarkOf(bot);
-  if (!NATIVE_AGENTS.includes(mark2) || bot.nativeToolsBlock === "multiuser") return null;
-  const copy2 = mark2 === "acp-omp" ? ompNativeToolsCopy : mark2 === "acp-codex" ? { on: nativeToolsCopy.codexOn, off: nativeToolsCopy.codexOff } : nativeToolsCopy;
+  if (!NATIVE_AGENTS.includes(mark2) || bot.nativeToolsBlock === "multiuser" || bot.nativeToolsBlock === "unoffered") return null;
+  const copy2 = mark2 === "acp-omp" ? ompNativeToolsCopy : mark2 === "acp-antigravity" ? antigravityNativeToolsCopy : mark2 === "acp-codex" ? { on: nativeToolsCopy.codexOn, off: nativeToolsCopy.codexOff } : nativeToolsCopy;
   const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock];
   const on = blocked === void 0 && nativeToolsOn(bot);
-  const hint3 = blocked === void 0 ? [on ? copy2.on : copy2.off] : mark2 === "acp-omp" ? [blocked, ompNativeToolsCopy.blocked] : [blocked];
-  return { mark: mark2, on, disabled: blocked !== void 0 || Boolean(roster?.readOnly), blocked, hint: hint3 };
+  const hint3 = blocked === void 0 ? [on ? copy2.on : copy2.off] : copy2.blocked !== void 0 ? [blocked, copy2.blocked] : [blocked];
+  const notes = mark2 === "acp-antigravity" ? antigravityNotes(bot, on) : [];
+  return {
+    mark: mark2,
+    on,
+    disabled: blocked !== void 0 || Boolean(roster?.readOnly),
+    blocked,
+    hint: hint3,
+    ...notes.length === 0 ? {} : { notes }
+  };
 }
 var nativeToolsZh = {
+  [antigravityNativeToolsCopy.on]: "Antigravity 在此 Bot 的所有对话中使用它自己的工具：单独对话、群组、任务和定时运行，无论是谁在与它对话。这些工具在 Automagik 的文件沙盒之外运行；哪些操作会先询问你取决于权限级别。关闭后会立即停止它正在运行的会话。",
+  [antigravityNativeToolsCopy.off]: "关闭后，Antigravity 在此 Bot 的所有对话中都没有任何工具，此 Bot 只能聊天。开启后，从每个对话的下一条消息起生效。",
+  [antigravityNativeToolsCopy.blocked]: "在这里 Antigravity 没有任何工具，此 Bot 只能聊天。",
+  [antigravityNativeToolsCopy.unchecked]: "关闭原生工具已在 agy {version} 上验证；此版本尚未验证。",
+  [antigravityNativeToolsCopy.firstTurn]: "关于 Antigravity 是否已加载关闭原生工具设置的检查，不涵盖 Antigravity 启动后的第一条消息，只涵盖之后的消息。",
+  [antigravityNativeToolsCopy.hooks]: "Antigravity 的设置中有 hooks.json 文件时，无法在关闭原生工具的情况下启动。删除 hooks.json 后即可在关闭原生工具时使用。",
+  [antigravityNativeToolsCopy.plugins]: "Antigravity 的设置中有插件时，无法在关闭原生工具的情况下启动。",
+  [antigravityNativeToolsCopy.fresh]: "在设置中对 Antigravity 使用“切换账号”，会以空白设置重新开始，同时也会退出它的登录。",
   [ompNativeToolsCopy.on]: "omp 在此 Bot 的所有对话中使用它自己的工具：单独对话、群组、任务和定时运行，无论是谁在与它对话。这些工具在 Automagik 的文件沙盒之外运行。关闭后会立即停止它正在运行的会话。",
   [ompNativeToolsCopy.off]: "关闭后，omp 在此 Bot 的所有对话中都没有任何工具，此 Bot 只能聊天。开启后，从每个对话的下一条消息起生效。",
   [ompNativeToolsCopy.blocked]: "在这里 omp 没有任何工具，此 Bot 只能聊天。",
@@ -40444,12 +40482,14 @@ addStrings(nativeToolsZh);
 function NativeToolsRow({ bot, roster, run: run3, actions }) {
   const view = nativeSwitchView(bot, roster);
   if (view === null) return null;
+  const notes = (view.notes ?? []).map((note) => t(note.key, note.values));
   return (0, import_react99.createElement)(SwitchRow, {
     details: true,
     label: t(nativeToolsCopy.label),
     hint: view.hint.map((key) => t(key)).join(" "),
     on: view.on,
     disabled: view.disabled,
+    ...notes.length === 0 ? {} : { notes },
     onChange: (value) => void run3(actions.updateBot(bot.id, { nativeTools: value }))
   });
 }
@@ -40903,7 +40943,8 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
           (0, import_react99.createElement)(ModelMenu, { bot, roster, actions, run: run3, wide: true }),
           needsModelPick(bot, roster) ? (0, import_react99.createElement)("div", { className: "bt-note" }, t("Pick a model and {name} can start.", { name: bot.name })) : null,
           // A Bot already denying acp_tool on a model that runs its own tools keeps running (#2026).
-          ownToolsNotice(bot) ? (0, import_react99.createElement)("div", { className: "bt-note", "data-own-tools": "" }, t(OWN_TOOLS_NOTICE)) : null
+          // Not on Antigravity with its switch: denied tools lock it OFF, so nothing runs there.
+          ownToolsNotice(bot) && !(effectiveMarkOf(bot) === "acp-antigravity" && bot.nativeToolsBlock !== "unoffered") ? (0, import_react99.createElement)("div", { className: "bt-note", "data-own-tools": "" }, t(OWN_TOOLS_NOTICE)) : null
         ),
         bot.engine ? (0, import_react99.createElement)(AgentSessions, { key: "sessions", bot, part, run: run3, useSessions }) : null,
         (0, import_react99.createElement)(PermissionRow, { key: "permission", bot, roster, actions, run: run3 }),

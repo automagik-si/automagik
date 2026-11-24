@@ -379,10 +379,18 @@ test('(6) the tick: hidden where Details has no switch, locked where it is locke
   assert.ok(ui.tick())
   assert.equal(ui.tick().props.checked, false)
   assert.match(ui.text(), /Off by default\. The Solver also works without them, with its reviewer\./)
-  for (const ref of [FLASH, AGY]) {
+  for (const ref of [FLASH]) {
     ui.pickModel(ref)
     assert.equal(ui.tick(), undefined, ref)
   }
+  ui.pickModel(AGY)
+  assert.ok(ui.tick())
+  assert.equal(ui.tick().props.disabled, false)
+  assert.equal(ui.tick().props.checked, false)
+  assert.match(ui.text(), /With this off, Antigravity has no tools at all in any of this Bot's chats, so this Bot can only chat\./)
+  const unoffered = dialog({ roster: rosterOf({ nativeToolsNew: plain({ ...rosterOf().nativeToolsNew, [AGY]: 'unoffered' }) }) })
+  unoffered.pickModel(AGY)
+  assert.equal(unoffered.tick(), undefined)
   const multi = dialog({ roster: rosterOf({ bots: [], nativeToolsNew: plain({ [CLAUDE]: 'multiuser', [FLASH]: 'multiuser' }) }) })
   assert.equal(multi.tick(), undefined)
   ui.pickModel(KEPT)

@@ -14,6 +14,7 @@ import { install as installSide } from './side.js'
 import { handoffReply, questionReply, viewReply } from './parts.js'
 import { validateViewAnswer } from 'deep-view/core'
 import { previewText } from '../shared/plain-text.js'
+import { effectiveMarkOf } from '../shared/native-tools.js'
 import { normalizeAddressList } from './browser/address-policy.js'
 import { revokeWindowProof, windowProof } from './desktop-window.js'
 import { isWindowEndpoint } from './extend.js'
@@ -149,6 +150,32 @@ export function install(rt) {
   }
   rt.runningOf = runningOf
   const ownTools = ref => rt.ownToolsRoute?.(ref) === true
+  // Antigravity's Details lines (#1564), from acp-dsh's `nativeOffNotes`: the agy version native
+  // tools off was checked on when another runs, and whether its home holds hooks or plugins (an
+  // OFF start refuses) with the Switch account way out. Read once per view build (a build is
+  // synchronous: the read is kept until the next microtask); a failure, an older acp-dsh, another
+  // agent or a hidden row (`unoffered`, `multiuser`) has none.
+  let agyNotesRead
+  const agyNotes = () => {
+    if (agyNotesRead === undefined) {
+      let notes
+      try { notes = ctx.get?.('acpAgents')?.nativeOffNotes?.('acp-antigravity') } catch { notes = undefined }
+      agyNotesRead = { notes }
+      queueMicrotask(() => { agyNotesRead = undefined })
+    }
+    return agyNotesRead.notes
+  }
+  const antigravityNotes = (bot, block = rt.nativeToolsBlock(bot)) => {
+    if (effectiveMarkOf(bot) !== 'acp-antigravity' || block === 'unoffered' || block === 'multiuser') return {}
+    const notes = agyNotes()
+    if (notes === null || typeof notes !== 'object') return {}
+    return {
+      ...(typeof notes.unchecked === 'string' ? { nativeToolsUnchecked: notes.unchecked } : {}),
+      ...(notes.hooks === true ? { nativeToolsHooks: true } : {}),
+      ...(notes.plugins === true ? { nativeToolsPlugins: true } : {}),
+      ...(notes.fresh === true ? { nativeToolsFresh: true } : {}),
+    }
+  }
   // Models come from DSH, not state.json, so a provider added in Harness settings
   // changes the view without a new revision. So do the permission presets DSH offers and
   // the Bots and groups whose Auto runs as workspace-write (permissions.js).
@@ -166,6 +193,11 @@ export function install(rt) {
     rt.cachedDefault() ?? '', rt.cachedBackground?.() ?? '', rt.permissionKey?.() ?? '',
     rt.modelsEpoch?.() ?? 0,
     Object.values(state.bots).map(bot => [bot.nativeTools === true, rt.nativeToolsBlock(bot) ?? ''].join('/')).join(','),
+    // Antigravity's Details lines (the checked agy version, hooks, plugins, Switch account).
+    Object.values(state.bots).map(bot => {
+      const notes = antigravityNotes(bot)
+      return [notes.nativeToolsUnchecked ?? '', notes.nativeToolsHooks ? 1 : 0, notes.nativeToolsPlugins ? 1 : 0, notes.nativeToolsFresh ? 1 : 0].join('')
+    }).join(','),
     // Which models run their own tools whatever the Denied tools say (#2026): Codex can measure
     // a model as kept with no new revision.
     rt.cachedCatalog().map(entry => ownTools(entry.ref) ? 1 : 0).join(''),
@@ -196,6 +228,7 @@ export function install(rt) {
     bots: Object.values(state.bots).map(({ segments, kickoff, reviewTrack, ...bot }) => {
       const tail = rt.chatTail(rt.chatOf(bot.id))
       const nativeToolsBlock = rt.nativeToolsBlock(bot)
+      const agyNotes = antigravityNotes(bot, nativeToolsBlock)
       return {
         ...bot, sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
         ...(bot.dshAgentId === undefined ? {} : { adoptionHistoryMatches: rt.adoptionHistoryMatches(bot.id) }),
@@ -203,6 +236,7 @@ export function install(rt) {
         ...rt.autoViewOf?.(bot),
         ...runningOf(bot),
         ...(nativeToolsBlock === undefined ? {} : { nativeToolsBlock }),
+        ...agyNotes,
         ...(ownTools(bot.model ?? bot.appliedModel) ? { ownTools: true } : {}),
         // A Solver's last delivery: which review the host saw (review-mark.js).
         ...rt.reviewMarkOf?.(bot, reviewTrack),

@@ -25,6 +25,7 @@ import { addStrings, t } from './i18n.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
+import { effectiveMarkOf } from '../shared/native-tools.js'
 import { OWN_TOOLS_NOTICE, ownToolsNotice } from '../shared/own-tools.js'
 import { guardLevelOf, reviewGuardView, reviewMarkText } from './solver-draft.js'
 import { REVIEW_GUARD_COPY } from '../shared/review-guard.js'
@@ -34,8 +35,10 @@ addStrings(nativeToolsZh)
 export function NativeToolsRow({ bot, roster, run, actions }) {
   const view = nativeSwitchView(bot, roster)
   if (view === null) return null
+  const notes = (view.notes ?? []).map(note => t(note.key, note.values))
   return h(SwitchRow, {
     details: true, label: t(nativeToolsCopy.label), hint: view.hint.map(key => t(key)).join(' '), on: view.on, disabled: view.disabled,
+    ...(notes.length === 0 ? {} : { notes }),
     onChange: value => void run(actions.updateBot(bot.id, { nativeTools: value })),
   })
 }
@@ -384,7 +387,9 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
           h(ModelMenu, { bot, roster, actions, run, wide: true }),
           needsModelPick(bot, roster) ? h('div', { className: 'bt-note' }, t('Pick a model and {name} can start.', { name: bot.name })) : null,
           // A Bot already denying acp_tool on a model that runs its own tools keeps running (#2026).
-          ownToolsNotice(bot) ? h('div', { className: 'bt-note', 'data-own-tools': '' }, t(OWN_TOOLS_NOTICE)) : null),
+          // Not on Antigravity with its switch: denied tools lock it OFF, so nothing runs there.
+          ownToolsNotice(bot) && !(effectiveMarkOf(bot) === 'acp-antigravity' && bot.nativeToolsBlock !== 'unoffered')
+            ? h('div', { className: 'bt-note', 'data-own-tools': '' }, t(OWN_TOOLS_NOTICE)) : null),
         bot.engine ? h(AgentSessions, { key: 'sessions', bot, part, run, useSessions }) : null,
         h(PermissionRow, { key: 'permission', bot, roster, actions, run }),
         h(GrantList, { key: 'grants', bot, roster, actions, useWork }),

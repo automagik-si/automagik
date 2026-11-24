@@ -73,11 +73,13 @@ export function Switch({ on, label, disabled, onChange }) {
 }
 
 // A row with a switch. Not a label: a click on the copy must not flip it twice.
-export function SwitchRow({ label, hint, on, disabled, onChange, details = false }) {
+export function SwitchRow({ label, hint, notes, on, disabled, onChange, details = false }) {
   const toggle = h(Switch, { on, label, disabled, onChange })
+  // `notes`: more lines under the hint, with the hint's own class (Details only).
   if (details) return h('div', null,
     h('div', { className: 'bt-drawer-switch-head' }, h('span', null, label), toggle),
-    hint ? h('div', { className: 'bt-note' }, hint) : null)
+    hint ? h('div', { className: 'bt-note' }, hint) : null,
+    ...(notes ?? []).map((note, index) => h('div', { key: `note-${index}`, className: 'bt-note' }, note)))
   return h('div', { className: 'bt-set-row bt-bs-row' },
     h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, label), hint ? h('span', { className: 'bt-set-hint' }, hint) : null),
     toggle)

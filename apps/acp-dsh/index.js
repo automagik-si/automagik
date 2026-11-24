@@ -38,6 +38,7 @@ import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNA
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
 import { writeOmpOverlay } from './src/host/omp-overlay.js'
+import { AGY_OFF_CHECKED, agyExtensions, agyExtensionRefusal, agyOffCheck, writeAgyOff } from './src/host/agy-off.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
 import { retiredLine } from './src/host/retired-home.js'
 import { callbackOf, checkCallback, deliverCallback } from './src/host/sign-in-callback.js'
@@ -516,6 +517,31 @@ export function apply(ctx, config = {}, {
   // How `spec` starts now (agents.js launchOf): the adapter installed at this moment, or the
   // CLI itself for a native agent.
   const launch = (spec, cli, id = idOf(spec)) => launchOf(spec, cli, { store, node: nodeCommand(), cliEnv: cliEnvironment(spec, cliDetails.get(id)), stamp: cliStamp })
+  // The agy version the last Antigravity start answered in this host run (`initialize`'s
+  // agentInfo), for the version native tools off was checked on (agy-off.js AGY_OFF_CHECKED). An
+  // OFF start on another version warns once per version and goes on (#1564, AG-2 (a)).
+  let agyVersionSeen
+  const agyWarned = new Set()
+  const recordAgyVersion = (run, off = false) => {
+    const version = run?.init?.agentInfo?.version
+    if (typeof version !== 'string' || !/^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(version)) return
+    agyVersionSeen = version
+    if (off && version !== AGY_OFF_CHECKED && !agyWarned.has(version)) {
+      agyWarned.add(version)
+      warn(ctx, `Antigravity ${version} runs with native tools off; native tools off was checked on agy ${AGY_OFF_CHECKED} only`)
+    }
+  }
+  // The pids of this host's live Antigravity OFF children, from their start until they exit: an
+  // OFF start's prune (agy-off.js pruneAgyLog) keeps their logs however old, so a kept child idle
+  // for a day is still checked at its next turn (#1564 AK-1).
+  const agyOffLive = new Set()
+  const trackAgyOff = run => {
+    const child = run?.child
+    const pid = child?.pid
+    if (!Number.isInteger(pid) || agyOffLive.has(pid) || child.exitCode !== null || child.signalCode !== null) return
+    agyOffLive.add(pid)
+    child.once('exit', () => { agyOffLive.delete(pid) })
+  }
   // Auto-repairs started in this run, one per connector release: a reinstall that did not help
   // is not started again by every failed turn (Retry still is). And the connectors whose last
   // start failed: Retry reinstalls those, while a Retry pressed for a CLI error leaves a
@@ -615,6 +641,25 @@ export function apply(ctx, config = {}, {
         throw new Error(failed
           ? `its ACP adapter (${spec.adapter}) is still being installed; the last install failed: ${failed}`
           : `its ACP adapter (${spec.adapter}) is still being installed; send this again in a minute`)
+      }
+      // Antigravity's switch (#1564): every start records the version agy answered; an OFF start
+      // writes and checks its files in the home this child runs in, before any child exists.
+      if (spec.nativeSwitch === 'args' && spec.key === 'antigravity') {
+        if (context?.nativeOff !== true) return { command, args, env, agyReady: run => { recordAgyVersion(run) } }
+        if (!homedNative(spec)) throw new Error(`${spec.defaultName} could not start with its tools off: it has no settings folder.`)
+        // The home `environment()` fixed for this start (cli-homes.js): a Reset or sign-out since
+        // cannot split the files from the child.
+        const home = env?.[HOME_ENV]
+        if (typeof home !== 'string' || env.HOME !== home) throw new Error(`${spec.defaultName} could not start with its tools off: its home did not match.`)
+        const refused = agyExtensionRefusal(home, { platform })
+        if (refused !== undefined) throw new Error(refused)
+        writeAgyOff(home, { platform, live: agyOffLive })
+        const check = agyOffCheck(home, { spawnedAt: Date.now(), warn: line => warn(ctx, line) })
+        return {
+          command, args: [...args, ...spec.offArgs], env,
+          agyReady: async run => { trackAgyOff(run); recordAgyVersion(run, true); check.start(run) },
+          offRecheck: run => check.again(run),
+        }
       }
       if (spec.nativeSwitch === 'args' && context?.nativeOff === true) {
         if (ompOverlayDir === undefined) throw new Error(`${spec.defaultName} could not start with its tools off: it has no settings folder.`)
@@ -2266,6 +2311,34 @@ export function apply(ctx, config = {}, {
      * any age). Anything else, or a failure, is false.
      */
     nativeModelKept: route => adapter.nativeKeptRoute(route),
+    /**
+     * The agents whose native-tools switch is their launch args (omp, Antigravity): the Bot team
+     * offers Antigravity's switch only when it is listed here.
+     */
+    nativeArgsAgents: Object.freeze(Object.keys(AGENTS).filter(id => AGENTS[id].nativeSwitch === 'args')),
+    /**
+     * What Details says under Antigravity's switch, or undefined (another agent, or a failure):
+     * `unchecked` (the version native tools off was checked on) when the agy version seen differs
+     * from it, `hooks` / `plugins` while the current Antigravity home holds them (an OFF start
+     * refuses then), and `fresh` with either off Windows (Switch account starts a new home).
+     * Before any agy start in this host run the version is the installed folder's.
+     */
+    nativeOffNotes: provider => {
+      if (provider !== 'acp-antigravity') return undefined
+      try {
+        const spec = AGENTS[provider]
+        const notes = {}
+        const version = agyVersionSeen ?? cliDetails.get(provider)?.version
+        if (typeof version === 'string' && version !== AGY_OFF_CHECKED) notes.unchecked = AGY_OFF_CHECKED
+        if (homedNative(spec)) {
+          const found = agyExtensions(homes.home(spec.key))
+          if (found.hooks) notes.hooks = true
+          if (found.plugins) notes.plugins = true
+          if ((found.hooks || found.plugins) && platform !== 'win32') notes.fresh = true
+        }
+        return notes
+      } catch { return undefined }
+    },
     /**
      * What acted on one Session's permissions, for a diagnostics view (read-only, a fresh plain
      * copy, undefined for a Session that ran no agent here): { version, agent, startedAt, active,

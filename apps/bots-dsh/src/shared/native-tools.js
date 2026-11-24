@@ -3,7 +3,8 @@
 import { markOf } from './permission-levels.js'
 
 /** The agents whose own tools the switch keeps or turns off. */
-export const NATIVE_AGENTS = Object.freeze(['acp-claude', 'acp-codex', 'acp-omp'])
+// Antigravity's is offered only with an acp-dsh that lists it (host/native-tools.js `unoffered`).
+export const NATIVE_AGENTS = Object.freeze(['acp-claude', 'acp-codex', 'acp-omp', 'acp-antigravity'])
 
 /** The agent a Bot runs on now: its own model, else the team default it was given. */
 export const effectiveMarkOf = bot => markOf(bot?.model ?? bot?.appliedModel)

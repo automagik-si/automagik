@@ -448,6 +448,31 @@ export function install(rt) {
       state.reviewGuardMigrated = true
       if (turned > 0) migrated = true
     }
+    // #1564: Antigravity got the switch too, off by default. Before it, every Antigravity Bot ran
+    // agy's own tools: once, each keeps them (RFC 0003, Amendment: Antigravity native tools), with
+    // the Codex block's rule: an ON saved for another agent moves to Antigravity, a Bot with shell
+    // access off or denied tools stays off, an explicit `nativeTools: false` is left as it is, and
+    // the marker rides the next real save when nothing was kept. A Bot made or moved to
+    // Antigravity after this starts OFF.
+    if (state.nativeToolsAntigravityKept !== true) {
+      let restricted = 0
+      let kept = 0
+      for (const bot of Object.values(state.bots)) {
+        if (bot === null || typeof bot !== 'object' || effectiveMarkOf(bot) !== 'acp-antigravity') continue
+        if (bot.nativeTools === false || nativeToolsOn(bot)) continue
+        if (restrictedBot(bot)) {
+          restricted += 1
+          continue
+        }
+        bot.nativeTools = true
+        bot.nativeToolsAgent = 'acp-antigravity'
+        delete bot.nativeToolsKept
+        kept += 1
+      }
+      if (restricted > 0) warn('omni-ui: %d Antigravity Bot(s) kept off native tools: shell access off or denied tools', restricted)
+      state.nativeToolsAntigravityKept = true
+      if (kept > 0) migrated = true
+    }
     // A builtin pet the plugin no longer ships would draw nothing: its Bot wears Genie instead.
     // Genie kept from before its approved figure names the old atlas's version: it reads as
     // the Genie shipped now (pets.js shippedPet), whatever the file says, every time.
