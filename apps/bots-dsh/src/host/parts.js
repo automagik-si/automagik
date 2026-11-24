@@ -1361,16 +1361,25 @@ export function install(rt) {
         const current = currentOf(owner)
         // The same order as the switch itself: the part's capabilities before anything wakes it.
         await rt.ensureCapabilities(current)
-        const sent = await forward(owner, held, sessionId)
-        quietly(() => { for (const message of held) agent.inbox.remove(message.id) })
+        const fresh = await rt.resolveAgent(current).catch(() => undefined)
+        const waiting = [...(fresh?.inbox?.nextStep ?? []), ...(fresh?.inbox?.nextTurn ?? [])]
+        const handoff = fresh !== undefined && waiting.some(message => message.source?.handoff === true)
+        const handOn = async () => {
+          const sent = await forward(owner, held, sessionId)
+          quietly(() => { for (const message of held) agent.inbox.remove(message.id) })
+          return sent
+        }
         // A move committed before its part's first turn: DSH draws a part with no turn as a
-        // blank home, with no composer for a Bot outside every workspace. Nothing forwarded
-        // woke it, so it starts now: a stopped reply is answered at once, a bare handoff is
-        // acknowledged by Omni with no model call (F1, which reverses MY-7's "bare stays inert").
-        if (sent === 0) {
-          const fresh = await rt.resolveAgent(current).catch(() => undefined)
-          const waiting = [...(fresh?.inbox?.nextStep ?? []), ...(fresh?.inbox?.nextTurn ?? [])]
-          if (fresh !== undefined && waiting.some(message => message.source?.handoff === true)) {
+        // blank home, with no composer for a Bot outside every workspace. It starts now: a
+        // stopped reply is answered at once, a bare handoff is acknowledged by Omni with no
+        // model call (F1, which reverses MY-7's "bare stays inert"). Forwarding what the old
+        // part held is that start when there is any, so it is a counted try too (MI-5).
+        if (handoff && !switches.has(current) && !awaiting.has(current)) {
+          const send = async () => { if (await handOn() === 0) wakeKept(fresh) }
+          if (await wakeHandoff(sessionId, owner, fresh, current, canRecover, { expire, send, held }) !== true) return
+        } else {
+          const sent = await handOn()
+          if (sent === 0 && handoff) {
             if (await wakeHandoff(sessionId, owner, fresh, current, canRecover, { expire }) !== true) return
           }
         }
@@ -1419,7 +1428,8 @@ export function install(rt) {
     const started = Number.isFinite(owner.wakeFailedAt) ? owner.wakeFailedAt : now()
     const timer = setTimeout(() => {
       wakeTimers.delete(oldId)
-      void retryWake(oldId, term)
+      // A retry that meets the unload cannot log through rt.warn; it never rejects unhandled (MI-4).
+      void retryWake(oldId, term).catch(error => noteInfo('omni-ui: part %s could not be woken for its handoff: %s', oldId, error))
     }, Math.max(atLeast, started + wakeRetryWindowMs() - now(), 0))
     timer.unref?.()
     wakeTimers.set(oldId, timer)
@@ -1435,13 +1445,16 @@ export function install(rt) {
       if (!canRecover() || owner === null || typeof owner !== 'object' || switches.has(oldId)) return
       await handOnPart(oldId, owner, canRecover, { expire: true })
     } catch (error) {
-      rt.warn('omni-ui: part %s could not be woken for its handoff: %s', oldId, error)
+      if (unloaded(error)) noteInfo('omni-ui: part %s could not be woken for its handoff: %s', oldId, error)
+      else rt.warn('omni-ui: part %s could not be woken for its handoff: %s', oldId, error)
     } finally { leave() }
   }
 
   // Answers true when the fresh part started (the pass goes on: tasks, the old part archived,
   // the marker gone); anything else ends the pass with the marker as it decided.
-  async function wakeHandoff(oldId, owner, fresh, freshId, canRecover, { expire = false } = {}) {
+  // `send` starts the fresh part: by default its own inbox wakes it; with `held`, the input the
+  // old part held is forwarded first (MI-5), and a go-back carries `held` to where the Bot ends.
+  async function wakeHandoff(oldId, owner, fresh, freshId, canRecover, { expire = false, send = () => wakeKept(fresh), held = [] } = {}) {
     const term = rt.lockTerm?.()
     // A live move of the fresh part decides first; this pass waits for it (MH-8).
     if (switches.has(freshId) || awaiting.has(freshId)) {
@@ -1451,20 +1464,28 @@ export function install(rt) {
     let failure
     if (!expire && !wakeExpired(owner)) {
       const before = { wakeTries: owner.wakeTries, wakeFailedAt: owner.wakeFailedAt }
+      const putBack = () => {
+        for (const [key, value] of Object.entries(before)) {
+          if (value === undefined) delete owner[key]
+          else owner[key] = value
+        }
+      }
       owner.wakeTries = (owner.wakeTries ?? 0) + 1
       owner.wakeFailedAt ??= now()
       await rt.save().catch(error => rt.warn('omni-ui: part %s could not be saved: %s', oldId, error))
+      // The lock may have gone during the save: another process owns the part now (MI-6).
+      if (!canRecover()) {
+        putBack()
+        return false
+      }
       try {
-        wakeKept(fresh)
+        await send()
         clearWakeCount(owner)
         return true
       } catch (error) {
         if (unloaded(error)) {
           // Not a try: the plugin went away.
-          for (const [key, value] of Object.entries(before)) {
-            if (value === undefined) delete owner[key]
-            else owner[key] = value
-          }
+          putBack()
           void rt.save().catch(failed => noteInfo('omni-ui: part %s could not be saved: %s', oldId, failed))
           noteInfo('omni-ui: plugin unloaded while part %s woke for its handoff; it is tried again at the next start', freshId)
           return false
@@ -1485,21 +1506,22 @@ export function install(rt) {
     if (!canRecover()) return false
     // A group's own part has no Bot and no way back: one more try, then it stays (MH-5).
     if (owner.botId === undefined) {
-      try { wakeKept(fresh) } catch (error) { rt.warn('omni-ui: part %s could not be woken for its handoff: %s', freshId, error) }
+      try { await send() } catch (error) { rt.warn('omni-ui: part %s could not be woken for its handoff: %s', freshId, error) }
       clearWakeCount(owner)
       return true
     }
-    await goBackAfterRestart(oldId, owner, freshId, failure, canRecover)
+    await goBackAfterRestart(oldId, owner, freshId, failure, canRecover, held)
     return false
   }
 
   // The go-back of a part a restart could not start (MG-8): the switch's own go-back, from
   // what the marker saved, with the existing failure line (MH-6: a code the chat says).
-  async function goBackAfterRestart(oldId, owner, freshId, lastError, canRecover) {
+  // `held`: what the old part still holds; it goes where the Bot ends, once (by id).
+  async function goBackAfterRestart(oldId, owner, freshId, lastError, canRecover, held = []) {
     const entry = {
       oldId, botId: owner.botId, ...(owner.roomId === undefined ? {} : { roomId: owner.roomId }), expected: owner.target,
       job: {
-        carry: [],
+        carry: held.filter(message => message.source?.kind !== 'working-directory'),
         crossing: owner.back === undefined ? undefined : { previous: owner.back, note: () => {} },
         resume: owner.cut !== undefined, info: owner.cut?.info, joined: owner.cut?.joined,
       },
@@ -1514,17 +1536,28 @@ export function install(rt) {
         return false
       })
     } finally { reverting.delete(freshId) }
-    await drainRevert(entry.job, outcome, oldId, freshId)
-    if (outcome !== false || entry.job.commitFailed === true || !canRecover() || readOnly()) return
     // Nothing went back: the marker stays only while there is something to go back to (MH-2).
-    const bot = rt.botOf(owner.botId)
-    const gone = bot === undefined || (owner.roomId !== undefined && rt.roomOf(owner.roomId) === undefined)
-    if (gone || currentOf(owner) !== freshId || segmentsOf(owner)?.at(-1)?.sessionId !== oldId) {
-      if (state.switching?.[oldId] !== owner) return
-      delete state.switching[oldId]
-      await rt.save().catch(error => rt.warn('omni-ui: part %s could not be saved: %s', oldId, error))
-      rt.warn('omni-ui: part %s could not start and there is no part to go back to; its marker is dropped', freshId)
+    const drop = () => {
+      if (outcome !== false || entry.job.commitFailed === true || !canRecover() || readOnly()) return false
+      if (state.switching?.[oldId] !== owner) return false
+      const gone = rt.botOf(owner.botId) === undefined || (owner.roomId !== undefined && rt.roomOf(owner.roomId) === undefined)
+      return gone || currentOf(owner) !== freshId || segmentsOf(owner)?.at(-1)?.sessionId !== oldId
     }
+    if (!drop()) {
+      await drainRevert(entry.job, outcome, oldId, freshId)
+      return
+    }
+    delete state.switching[oldId]
+    await rt.save().catch(error => rt.warn('omni-ui: part %s could not be saved: %s', oldId, error))
+    rt.warn('omni-ui: part %s could not start and there is no part to go back to; its marker is dropped', freshId)
+    // No pass hands on the old part any more: what waited goes where the Bot is now (MI-7).
+    const late = entry.job.carry.splice(0)
+    if (late.length === 0) return
+    try {
+      await forward(owner, late, oldId)
+      const old = await rt.resolveAgent(oldId).catch(() => undefined)
+      if (old !== undefined) quietly(() => { for (const message of late) old.inbox.remove(message.id) })
+    } catch (error) { rt.warn('omni-ui: input for %s was not handed on: %s', oldId, error) }
   }
 
   // What waited during a go-back ends where the Bot is: the part it came from ('back', which

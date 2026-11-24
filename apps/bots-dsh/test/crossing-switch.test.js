@@ -1479,6 +1479,190 @@ test('T22e MH-3 a wake whose first send went out is no failed try: the pass fini
   assert.equal(once(queuedOf(fresh), 'e-user'), 1)
 })
 
+// The `n`th call of rt.load from now waits for `open()`; `reached` settles when it is made.
+const holdLoad = (b, n, onReach = () => {}) => {
+  const load = b.rt.load
+  const gate = Promise.withResolvers()
+  const reached = Promise.withResolvers()
+  let calls = 0
+  b.rt.load = async (...args) => {
+    calls += 1
+    if (calls === n) {
+      onReach()
+      reached.resolve()
+      await gate.promise
+    }
+    return load(...args)
+  }
+  return { reached: reached.promise, open: () => gate.resolve() }
+}
+
+test('T22e MH-8 a live move of the fresh part: the pass sends nothing, counts nothing, goes back never, re-arms', async t => {
+  const { b, fresh, at } = await afterRestart(t, { window: 30 })
+  fresh.session.deriveMessages = () => b.messages
+  fresh.whenIdle = () => new Promise(() => {})
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  assert.equal([...b.rt.switchJobs()].length, 1)
+  Object.assign(b.rt.state.switching.s1, { wakeTries: 1, wakeFailedAt: at })
+  const failed = failSend(b, 's2')
+  const sends = b.calls.sends.length
+  // The pass re-arms its timer at least 1 s out, past the 30 ms window: no go-back meanwhile.
+  const delays = []
+  const setTimer = globalThis.setTimeout
+  globalThis.setTimeout = (fn, ms, ...args) => { delays.push(ms); return setTimer(fn, ms, ...args) }
+  try { await b.rt.heldBack() } finally { globalThis.setTimeout = setTimer }
+  assert.ok(delays.some(ms => ms >= 1000), `${delays}`)
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(failed.length, 0)
+  assert.equal(b.calls.sends.length, sends)
+  assert.equal(b.rt.state.switching.s1.wakeTries, 1)
+  assert.equal(b.bot.sessionId, 's2')
+  assert.equal(b.calls.archived.includes('s1'), false)
+})
+
+test('T22e MH-5 a group part with no Bot: one more try past the window, then it stays and the old part is archived', async t => {
+  const { b } = await afterRestart(t, { window: 30 })
+  const room = { id: 'r1', sessionId: 's2' }
+  b.rt.roomOf = id => (id === 'r1' ? room : undefined)
+  b.rt.sessionOfRoom = place => place?.sessionId
+  b.rt.state.switching.s1 = { roomId: 'r1' }
+  const failed = failSend(b, 's2')
+  await b.rt.heldBack()
+  assert.equal(failed.length, 1)
+  await waitFor(() => b.rt.state.switching.s1 === undefined)
+  assert.equal(failed.length, 2)
+  assert.equal(b.calls.archived.includes('s1'), true)
+  assert.equal(b.calls.archived.includes('s2'), false)
+  assert.equal((await b.rt.modelStateOf('b1')).lastFailure, undefined)
+})
+
+test('T22e MH-2 the Bot is gone during the restart go-back: the marker is dropped and saved, nothing archived', async t => {
+  const { b, at } = await afterRestart(t)
+  Object.assign(b.rt.state.switching.s1, { wakeTries: 3, wakeFailedAt: at })
+  const failed = failSend(b, 's2')
+  // The pass's own load, then the go-back's: the Bot is deleted before the go-back reads it.
+  const loads = holdLoad(b, 2, () => { delete b.rt.state.bots.b1 })
+  loads.open()
+  const saves = b.calls.saves
+  await b.rt.heldBack()
+  assert.equal(failed.length, 0)
+  assert.equal(b.rt.state.switching.s1, undefined)
+  assert.ok(b.calls.saves > saves)
+  assert.equal(b.calls.warnings.filter(line => /there is no part to go back to/.test(line)).length, 1)
+  assert.deepEqual(b.calls.archived, [])
+})
+
+test('T22e MH-6 a non-crossing marker past its tries goes back with SWITCH_FAILED, the Bot\'s model on both sides', async t => {
+  {
+    const { b, at } = await afterRestart(t)
+    delete b.bot.previousModel
+    b.rt.state.switching.s1 = { botId: 'b1', wakeTries: 3, wakeFailedAt: at }
+    await b.rt.heldBack()
+    assert.equal(b.bot.sessionId, 's1')
+    assert.equal(b.rt.state.switching.s1, undefined)
+    const failure = (await b.rt.modelStateOf('b1')).lastFailure
+    assert.deepEqual({ code: failure.code, ref: failure.ref, kept: failure.kept }, { code: SWITCH_FAILED, ref: 'deepseek/v4', kept: 'deepseek/v4' })
+  }
+  {
+    // A model switch still pending: the Bot goes back to its previous model, with the same code.
+    const { b, at } = await afterRestart(t)
+    b.bot.previousModel = 'acp-claude/default'
+    b.rt.state.switching.s1 = { botId: 'b1', target: 'deepseek/v4', wakeTries: 3, wakeFailedAt: at }
+    await b.rt.heldBack()
+    assert.equal(b.bot.sessionId, 's1')
+    assert.equal(b.bot.model, 'acp-claude/default')
+    const failure = (await b.rt.modelStateOf('b1')).lastFailure
+    assert.deepEqual({ code: failure.code, ref: failure.ref, kept: failure.kept }, { code: SWITCH_FAILED, ref: 'deepseek/v4', kept: 'acp-claude/default' })
+  }
+})
+
+test('T22e fence during the restart go-back: a step on the fresh part runs nothing and is answered once on the old part', async t => {
+  const { b, fresh, at } = await afterRestart(t)
+  Object.assign(b.rt.state.switching.s1, { wakeTries: 3, wakeFailedAt: at })
+  const reached = Promise.withResolvers()
+  const gate = Promise.withResolvers()
+  b.rt.moveSchedules = async (from, to) => {
+    if (from !== 's2' || to !== 's1') return
+    reached.resolve()
+    await gate.promise
+  }
+  const pass = b.rt.heldBack()
+  await reached.promise
+  const late = message('user', 'sent during the go-back', { exchangeId: 'e-fence' })
+  const { passed } = await b.preStep('s2', { messages: [late] })
+  assert.equal(passed, false)
+  gate.resolve()
+  await pass
+  assert.equal(b.bot.sessionId, 's1')
+  assert.equal(b.calls.sends.filter(send => send.id === 's1' && send.item.source?.exchangeId === 'e-fence').length, 1)
+  assert.equal(once(queuedOf(fresh), 'e-fence'), 0)
+})
+
+test('T22e MI-5 a forward of held input that throws is a counted try; the third goes back and the input is answered once on the old part', async t => {
+  const { b, fresh, at } = await afterRestart(t)
+  b.agent.inbox.nextTurn.push(message('user', 'held by the old part', { exchangeId: 'e-held' }))
+  fresh.followup = () => { throw new Error('the driver could not start') }
+  for (const tries of [1, 2]) {
+    await b.rt.heldBack()
+    assert.deepEqual({ wakeTries: b.rt.state.switching.s1?.wakeTries, wakeFailedAt: b.rt.state.switching.s1?.wakeFailedAt }, { wakeTries: tries, wakeFailedAt: at })
+    assert.equal(b.calls.warnings.filter(wokenFor).length, tries)
+    assert.deepEqual(b.rt.switchingChat('b1', { crossing: true }), { to: 'deepseek/v4', since: at })
+    assert.equal(once(queuedOf(b.agent), 'e-held'), 1)
+    assert.equal(b.calls.archived.includes('s1'), false)
+    b.nextTerm()
+  }
+  await b.rt.heldBack()
+  assert.equal(b.bot.sessionId, 's1')
+  assert.equal(b.rt.state.switching.s1, undefined)
+  assert.equal((await b.rt.modelStateOf('b1')).lastFailure.code, SWITCH_FAILED)
+  assert.equal(b.calls.sends.filter(send => send.id === 's1' && send.item.source?.exchangeId === 'e-held').length, 1)
+  assert.equal(once(queuedOf(fresh), 'e-held'), 0)
+})
+
+test('T22e MI-6 a lock lost during the count\'s save: no send, the count is put back', async t => {
+  const { b } = await afterRestart(t)
+  const failed = failSend(b, 's2')
+  const save = b.rt.save
+  b.rt.save = async () => { b.nextTerm(); b.rt.save = save; return save() }
+  await b.rt.heldBack()
+  assert.equal(failed.length, 0)
+  assert.equal(b.calls.sends.filter(send => send.id === 's2').length, 0)
+  assert.equal(b.rt.state.switching.s1.wakeTries, undefined)
+  assert.equal(b.rt.state.switching.s1.wakeFailedAt, undefined)
+})
+
+test('T22e MI-7 a go-back that finds the Bot moved on drops the marker; input fenced meanwhile goes to the current part', async t => {
+  const { b, at } = await afterRestart(t)
+  Object.assign(b.rt.state.switching.s1, { wakeTries: 3, wakeFailedAt: at })
+  const third = b.freshAgent(await b.rt.createSession())
+  const loads = holdLoad(b, 2)
+  const pass = b.rt.heldBack()
+  await loads.reached
+  const late = message('user', 'sent while it went back', { exchangeId: 'e-late' })
+  const { passed } = await b.preStep('s2', { messages: [late] })
+  assert.equal(passed, false)
+  b.bot.sessionId = third.id
+  loads.open()
+  await pass
+  assert.equal(b.rt.state.switching.s1, undefined)
+  assert.equal(b.calls.warnings.filter(line => /there is no part to go back to/.test(line)).length, 1)
+  assert.equal(once(queuedOf(third), 'e-late'), 1)
+  assert.equal(once(queuedOf(b.agent), 'e-late'), 0)
+})
+
+test('T22e MH-9 the stopped reply goes on in the old part after a restart go-back; a send that throws loses nothing', async t => {
+  const { b, at } = await afterRestart(t, { user: true })
+  const info = { kind: SOURCE_KIND, form: 'relay', role: 'request', exchangeId: 'e-cut', senderSessionId: 'other' }
+  Object.assign(b.rt.state.switching.s1, { cut: { info, joined: [] }, wakeTries: 3, wakeFailedAt: at })
+  claiming(b.agent)
+  const failed = failSend(b, 's1', { when: (item, _wake, list) => item.source?.exchangeId === 'e-user' && list.length === 0 })
+  await b.rt.heldBack()
+  assert.equal(b.bot.sessionId, 's1')
+  assert.equal(failed.length, 1)
+  assert.equal(b.calls.sends.filter(send => send.id === 's1' && send.item.source?.exchangeId === 'e-cut').length, 1)
+  assert.equal(b.calls.sends.filter(send => send.id === 's1' && send.item.source?.exchangeId === 'e-user').length, 1)
+})
+
 // MY-7b: a restart wake that fails keeps the marker; a later pass wakes the part once.
 test('MY-7b a restart wake that throws keeps the marker; the next pass wakes the part once', async t => {
   for (const mode of ['before', 'after']) {
