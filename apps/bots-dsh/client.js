@@ -23622,7 +23622,7 @@ function teamActions({
 }
 
 // src/client/draft-sweep.js
-var draftKey = (id) => `dsh.conversation.${id}`;
+var sessionKeys = (id) => [`dsh.conversation.${id}`, `dsh.sidebar-right.v1.${id}`];
 var NAMING_MAX = 200;
 var defaultStorage = () => {
   try {
@@ -23692,14 +23692,17 @@ function createDraftSweep({ storage = defaultStorage(), call: call2, openSession
     const found = [];
     for (const id of pending) {
       if (naming.has(id) || id === open) continue;
-      try {
-        storage.removeItem(draftKey(id));
-      } catch {
-      }
-      let gone = false;
-      try {
-        gone = storage.getItem(draftKey(id)) === null;
-      } catch {
+      let gone = true;
+      for (const key of sessionKeys(id)) {
+        try {
+          storage.removeItem(key);
+        } catch {
+        }
+        try {
+          gone = storage.getItem(key) === null && gone;
+        } catch {
+          gone = false;
+        }
       }
       if (gone) found.push(id);
     }

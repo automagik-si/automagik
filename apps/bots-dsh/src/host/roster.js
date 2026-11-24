@@ -1573,7 +1573,19 @@ export function install(rt) {
     // the deleted group; the session-stop that stopActivity runs removes them.
     await ctx.workspaceRegistry.archiveSession(rt.sessionOfRoom(room), { stopActivity: true })
       .catch(error => rt.warn('omni-ui: group chat %s not archived: %s', room.name, error))
+    await forgetReadScopes(sweep, room.name)
     if (failed !== undefined) throw failed
+  }
+
+  // A deleted Bot's or group's Sessions leave their file-tool folder records, except one a
+  // surviving Session's lineage still names (read-scope.js). A failure is warned and never
+  // stops the deletion.
+  async function forgetReadScopes(ids, name) {
+    try {
+      await rt.forgetReadScopes?.(ids)
+    } catch (error) {
+      rt.warn('ds-bot: the file-tool folder records of %s were not removed: %s', name, error)
+    }
   }
 
   // The first Main Bot is the sidebar tile. `replace` gives a Main Bot's place to
@@ -1778,6 +1790,7 @@ export function install(rt) {
       await ctx.workspaceRegistry.archiveSession(part, { stopActivity: true })
         .catch(error => rt.warn('omni-ui: Bot %s not archived: %s', bot.name, error))
     }
+    await forgetReadScopes(sessions, bot.name)
     if (failed !== undefined) throw failed
     // The page removes the composer state of these parts (channel.js `deletedParts`).
     return [...parts]

@@ -241,3 +241,51 @@ test('one naming holds at most 200 ids; the rest stay pending for the next run',
   await drafts.run()
   assert.equal(calls.length, 2)
 })
+
+// R2: the right sidebar's per-Session layout (DSH's `dsh.sidebar-right.v1.<id>`) leaves with
+// the composer state, under the same rules.
+const sidebarKey = id => `dsh.sidebar-right.v1.${id}`
+
+test('the sweep also removes a deleted Session\'s right sidebar layout; other Sessions keep theirs', async () => {
+  const storage = storageOf(['dsh.conversation.a', sidebarKey('a'), sidebarKey('b'), 'dsh.conversation.c', sidebarKey('c')])
+  const { calls, call } = host()
+  const drafts = createDraftSweep({ storage, call })
+  drafts.note(['a', 'b'])
+  await drafts.run()
+  assert.deepEqual([...storage.items.keys()], ['dsh.conversation.c', sidebarKey('c')])
+  assert.deepEqual(calls, [['drafts-swept', { ids: ['a', 'b'] }]])
+})
+
+test('an id whose sidebar layout stays is not named, and it is swept on a later run', async () => {
+  const stuck = [sidebarKey('a')]
+  const storage = storageOf(['dsh.conversation.a', sidebarKey('a')], stuck)
+  const { calls, call } = host()
+  const drafts = createDraftSweep({ storage, call })
+  drafts.note(['a'])
+  await drafts.run()
+  assert.equal(storage.getItem('dsh.conversation.a'), null)
+  assert.equal(storage.getItem(sidebarKey('a')), '{"draft":"x"}')
+  assert.deepEqual(calls, [])
+  stuck.length = 0
+  await drafts.run()
+  assert.equal(storage.getItem(sidebarKey('a')), null)
+  assert.deepEqual(calls, [['drafts-swept', { ids: ['a'] }]])
+})
+
+test('the sidebar layout of the open chat, of an unarchived Session and before DSH\'s lists arrive stays', async () => {
+  const storage = storageOf([sidebarKey('open'), sidebarKey('back'), sidebarKey('gone')])
+  const { calls, call } = host()
+  let workspaces = { phase: 'pending', archivedSessionIds: [] }
+  const sessions = { phase: 'ready', byId: { open: {}, back: {}, gone: {} } }
+  const drafts = createDraftSweep({
+    storage, call, openSession: () => 'open', unarchived: () => unarchivedSessionIds(sessions, workspaces),
+  })
+  drafts.note(['open', 'back', 'gone'])
+  await drafts.run()
+  assert.deepEqual([...storage.items.keys()], [sidebarKey('open'), sidebarKey('back'), sidebarKey('gone')])
+  assert.deepEqual(calls, [])
+  workspaces = { phase: 'ready', archivedSessionIds: ['open', 'gone'] }
+  await drafts.run()
+  assert.deepEqual([...storage.items.keys()], [sidebarKey('open'), sidebarKey('back')])
+  assert.deepEqual(calls, [['drafts-swept', { ids: ['gone'] }]])
+})

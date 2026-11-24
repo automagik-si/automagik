@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -34,9 +35,12 @@ function team() {
 
 // The services a full apply() needs, recording archived Sessions and the fetch routes it
 // registers. The API route's own handler is counted, so a tool reaching it would show.
-async function start(seed = team()) {
+// `scopes` are file-tool folder records (read-scope.js) on disk before the team loads, by
+// Session id; `archivedSessionIds` is DSH's archive set.
+async function start(seed = team(), { scopes = {}, archivedSessionIds } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-delete-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify(seed))
+  for (const [id, data] of Object.entries(scopes)) writeScope(home, id, data)
   const ctx = fakeContext()
   const archived = []
   const routes = []
@@ -66,6 +70,7 @@ async function start(seed = team()) {
       resolveByPath: async () => undefined,
       create: async path => ({ id: 'w1', path }),
       archiveSession: async (sessionId, options) => { archived.push([sessionId, options]) },
+      ...(archivedSessionIds === undefined ? {} : { archivedSessionIds }),
     },
     sessionController: {
       create: async () => ({ sessionId: 's1' }),
@@ -97,6 +102,14 @@ async function start(seed = team()) {
   await tool('list_bots', {}, 'a')
   return { ctx, home, tool, call, routes, archived, routeCalls: () => routeCalls, stop }
 }
+
+const scopeFile = (home, id) => join(home, 'session-read-scopes', `${createHash('sha256').update(id).digest('hex')}.json`)
+function writeScope(home, id, data) {
+  mkdirSync(join(home, 'session-read-scopes'), { recursive: true })
+  writeFileSync(scopeFile(home, id), `${JSON.stringify({ version: 1, id, ...data })}\n`)
+}
+// The Session ids among `ids` whose record is still on disk.
+const scopesLeft = (home, ids) => ids.filter(id => existsSync(scopeFile(home, id)))
 
 test('delete_bot is a host tool that requires the target and says what it destroys', async (t) => {
   const { ctx, stop } = await start()
@@ -318,4 +331,77 @@ test('the page sweeps a deleted group\'s composer key and the list clears', asyn
   await drafts.run()
   assert.deepEqual([...storage.items.keys()], ['dsh.conversation.c'])
   assert.equal(Object.hasOwn((await call('state', {})).value, 'draftSweep'), false)
+})
+
+// R1: a deleted Bot's or group's file-tool folder records (`session-read-scopes`) leave with
+// it, except a record a remaining record names, which a surviving Session reads its folder
+// through.
+test('a deleted Bot\'s file-tool records go: its parts and its group Session, the others stay', async (t) => {
+  const scopes = {
+    b: { folder: null },
+    'b-next': { rootId: 'b', continuation: true },
+    gb: { rootId: 'r1', continuation: false },
+    r1: { folder: '/team/ops' },
+    a: { folder: null },
+    c: { rootId: 'a', continuation: false },
+  }
+  const { home, call, stop } = await start(moved(), { scopes })
+  t.after(stop)
+  assert.equal((await call('delete-bot', { id: 'b' })).ok, true)
+  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['r1', 'a', 'c'])
+})
+
+test('a deleted Bot\'s record a surviving Session or a scheduled task still names stays', async (t) => {
+  const scopes = {
+    b: { folder: '/work/b' },
+    'b-next': { rootId: 'b', continuation: true },
+    gb: { rootId: 'r1', continuation: false },
+    // Reader was made by Writer and reads in Writer's folder; a scheduled Session may bind
+    // to Writer's current part.
+    c: { rootId: 'b-next', continuation: false },
+    'sched-1': { candidateRoots: ['b-next', 'a'] },
+  }
+  const { home, call, stop } = await start(moved(), { scopes })
+  t.after(stop)
+  assert.equal((await call('delete-bot', { id: 'b' })).ok, true)
+  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['b', 'b-next', 'c', 'sched-1'])
+})
+
+test('a deleted group\'s file-tool records go: its parts, its members\' Sessions and its own', async (t) => {
+  const scopes = {
+    r1: { folder: '/team/ops' },
+    'r1-next': { rootId: 'r1', continuation: true },
+    gb: { rootId: 'r1-next', continuation: false },
+    'gb-0': { rootId: 'r1', continuation: false },
+    b: { folder: null },
+  }
+  const { home, call, stop } = await start(movedGroup(), { scopes })
+  t.after(stop)
+  assert.equal((await call('delete-room', { id: 'r1' })).ok, true)
+  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['b'])
+})
+
+test('earlier deletions\' records go at start: archived, unknown to the team, unnamed and bound to no folder', async (t) => {
+  const scopes = {
+    // A Bot deleted before this rule: its first part and its second.
+    'old-0': { folder: null },
+    'old-1': { rootId: 'old-0', continuation: true },
+    // A deleted group member's Session whose root was a live Bot.
+    'old-g': { rootId: 'a', continuation: false },
+    a: { folder: null },
+    // An archived Session bound to a folder, itself or through its root: no Session's limit changes.
+    'old-f': { folder: '/work/f' },
+    'old-fc': { rootId: 'old-f', continuation: false },
+    // An archived Session a live record names.
+    'old-n': { folder: null },
+    live: { rootId: 'old-n', continuation: false },
+    // Not archived, and the team's own archived Session.
+    plain: { folder: null },
+    b: { folder: null },
+  }
+  const archivedSessionIds = ['old-0', 'old-1', 'old-g', 'old-f', 'old-fc', 'old-n', 'b']
+  const { ctx, home, stop } = await start(team(), { scopes, archivedSessionIds })
+  t.after(stop)
+  assert.deepEqual([...await ctx.provided.get('omniTeam').readScopeOrphansForgotten].sort(), ['old-0', 'old-1', 'old-g'])
+  assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['a', 'old-f', 'old-fc', 'old-n', 'live', 'plain', 'b'])
 })
