@@ -370,6 +370,10 @@ process, and this RFC does not claim they do. That is why community roles wait f
    `role-detach` (one Bot), on the existing `POST /api/omni-ui` route, with the same person-only
    admission as the other admin actions and refused in read-only mode. The host resolves the
    version and sha256 from its signed catalog; a payload cannot name its own sha256 or source.
+   Exception (RFC 0048 delivery 2): a role whose package ships inside the Bot team plugin
+   (`solver`) installs from that copy when no install exists, recorded with `source: 'bundled'`.
+   It declares no tools, settings or capabilities. The host authenticates its content against the
+   plugin-owned digest for its installing version on every load.
 7. **The state answer.** The existing `state` answer adds the catalog plus the installed
    records, and each Bot's `roles`. A client that does not know the fields ignores them; the
    Bot's own fields do not change shape.
@@ -385,6 +389,9 @@ process, and this RFC does not claim they do. That is why community roles wait f
     Its `<version>` is the release in which the package's bytes last changed; a later release
     attaches the same bytes under its own tag, so an unchanged role keeps its version and its sha256.
     Nothing is published to npm.
+    A `bundled` install uses the version of the plugin that installed it. Identical content can
+    have different installed versions. The shop's update badge uses the signed catalog version
+    comparison.
 
     **Alternative considered.** Stamping every release's version would show an update on every
     plugin release and block fresh attachments after a plugin upgrade and restart.

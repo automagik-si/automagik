@@ -76,6 +76,24 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   The cap of 2 FIX-FIRST rounds per review point is enforced by this text only; delivery 4's
   `group_goal` stages can enforce it. Stored descriptions (`Solver`, `Reviewer`) and the method are
   English in every locale; the Bot answers in the person's language.
+- **The `solver` role** (delivery 2): an official role package, `apps/bots-dsh/roles/solver/` (name
+  `Solver`, a prompt part, no tools, settings or capabilities). It ships inside the Bot team
+  plugin and in every plugin cut's signed catalog. Create asks the host to install it. The host
+  keeps an installed copy it can authenticate offline using retained signed catalog evidence or
+  the plugin's expected content digest for that installing version. Otherwise it installs the
+  plugin's own copy, then tries the catalog when that copy is missing or invalid. A damaged
+  install stays in place for the person to uninstall. Create makes the reviewer and the Solver
+  (description `Solver`, the written method of delivery 1 and a waiting mark), then attaches the
+  role. The host clears the generated text only after the prompt part is served for that exact
+  pin and the text still matches what the host wrote. With roles turned off or an incomplete
+  install or attachment, the Solver keeps the written method and the dialog says so. The host
+  tries again after loading the team, when roles come on, after an install, and every ten minutes
+  while a Solver waits. A changed description or an unpinned change to the instructions drops
+  the waiting mark. An explicit detach also drops it. Inside the role's part the host adds review
+  lines built on each turn from `reviewerId`, using the reviewer's ID. A role with no tools and no
+  settings serves its prompt part without evaluating a module, including in task Sessions that
+  speak as its Bot. A copy keeps the role or a proven written method. A delivery 1 Solver keeps
+  its own instructions.
 - **Review guard** (delivery 1.5): a per-Solver switch, on by default in the dialog when the
   reviewer is a Bot, and turned on once at the upgrade for an existing Solver whose reviewer Bot is
   on the team (a later OFF stays off). While it is on, the Solver's work calls in its own chat (and
@@ -96,7 +114,8 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   Solver Bot's character chooser shows them, and the new-Solver dialog defaults to one of them; a
   regular Bot's character chooser, its new-Bot card and the welcome picker show none of them. The
   characters' colours are the catalogue's existing ones, unchanged.
-- Renaming the reviewer later breaks the Solver's reviews until its instructions are edited.
+- Renaming the reviewer breaks a Solver's written review instructions until the name is edited.
+  The ID-based Solver role part continues to address the same reviewer after a rename.
 
 ## Contracts introduced
 
@@ -114,8 +133,10 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   `SOLVER_DESCRIPTION` (`'Solver'`), which the dialog also writes; the character chooser imports
   the predicate and never repeats the literal. The marker is cosmetic (it only chooses which
   characters are offered), so a person who renames a description to `Solver` gains nothing.
-  Delivery 2's official `solver` role replaces it, and `isSolverBot` then reads both (the role tag
-  or the description), so a delivery 1 Solver keeps its characters. The marker adds no stored field.
+  From delivery 2 `isSolverBot` reads both markers: the description, or a well-formed
+  `solver` role pin (`packageAttachment`, `shared/roles.js`). Both stay cosmetic or bookkeeping
+  (the characters offered, the review mark). Delivery 3's `task-start` reads the pin and its grant.
+  The marker adds no stored field.
 - **Solver review mark** (delivery 1): two cosmetic stored fields. `reviewerId` is the id of the
   Solver's reviewer Bot: the New Solver dialog sends it once with the person's `create-bot`, the
   host keeps it only when it names another Bot on the team, a copy of the Solver keeps it, and no
@@ -165,7 +186,14 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   - The owner view's `reviewGuardWaitingSince` (never stored): since when the plan waits.
   - Stop line reasons `guard` and `guard-request`. In a Bot-request turn, whose calls the chat
     hides, the Solver's chat still draws a guard stop line, without the call's row.
-- Delivery 2 adds the official role id `solver`.
+- **The `solver` role** (delivery 2): the official role ID `solver`, its package under
+  `apps/bots-dsh/roles/solver/` shipped in the plugin, the plugin's append-only mapping from release
+  versions to content digests (`BUNDLED_ROLE_HISTORY`), and the host-built review lines. Two stored
+  fields grant nothing. `waitingRole: { id: 'solver', instructions: <sha256>, role: <description> }`
+  is derived by the host during the person's create or copy, consumed by attachment, detachment
+  and settlement. `reviewerMade: true` is written by the person's create with a new reviewer and
+  read by the role's review lines. Both fields stay internal. Create uses the existing owner
+  actions and views.
 
 ## Threat model
 
@@ -190,10 +218,14 @@ work refused.
 1.5. **D1.5 (#2056):** the review guard. Plugin lane. Acceptance: the installed-app rows in its
    PR. Rollback: reverting the release removes the switch; the stored field is ignored.
 
-2. **D2:** `roles/solver/` official role (tag, prompt part, pinned version); the dialog attaches it
-   and stops writing instructions; existing D1 Solvers keep theirs. Plugin lane, with a cut that
-   carries the role. Check: a new Solver carries the `solver` tag and no written instructions; a
-   D1 Solver keeps its own. Rollback: the dialog writes instructions again; attached roles stay.
+2. **D2 (#2056):** the official `solver` role (tag, prompt part, pinned version). The dialog installs
+   and attaches it. Existing D1 Solvers keep their instructions. Plugin lane. On a candidate with
+   roles turned off, Create makes a Solver with the written method and waiting mark and shows the
+   roles-off status. On the first installed release carrying D2, the new Solver carries the role
+   at that version with empty instructions, and its review message reaches its reviewer. Reverting
+   the release makes the dialog write instructions again. A Bot whose written method was cleared
+   still has its attachment and needs written instructions or a runtime that serves the part.
+   A waiting Bot keeps its written method.
 3. **D3:** RFC 0037's `task-start` capability for the Solver, at the narrower of its own and the
    caller's level; tasks may name an allowed route for model diversity. Plugin lane; acceptance
    and rollback set in its own issue.
