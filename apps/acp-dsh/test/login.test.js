@@ -1154,6 +1154,7 @@ test('L10: a fresh attempt that fails or is cancelled before resolve still settl
 
 test('L10: a settling attempt holds the busy signal, confirming included, until onSettled decided', async t => {
   const order = []
+  const activities = []
   const read = deferred()
   let reads = 0
   const h = harness({
@@ -1161,6 +1162,7 @@ test('L10: a settling attempt holds the busy signal, confirming included, until 
     signedIn: () => (++reads === 1 ? Promise.resolve(false) : read.promise),
     onSettled: () => { order.push('settled') },
     onChange: count => order.push(`change ${count}`),
+    onActivity: activity => activities.push(activity),
   })
   t.after(() => h.logins.dispose())
   const started = h.logins.start(CLAUDE, { fresh: true })
@@ -1177,6 +1179,13 @@ test('L10: a settling attempt holds the busy signal, confirming included, until 
   assert.equal(h.logins.activeAttempts(), 0)
   assert.deepEqual(h.logins.activity(), { active: 0, confirming: 0 })
   assert.deepEqual(order, ['change 1', 'settled', 'change 0'])
+  // onActivity saw both: the settling activity, then the idle one (SC2-1.4).
+  const same = value => activity => JSON.stringify(activity) === JSON.stringify(value)
+  const busy = activities.findIndex(same({ active: 1, confirming: 1, confirmingUntil: at + 30_000 }))
+  assert.ok(busy >= 0, 'onActivity saw the settling activity')
+  assert.deepEqual(activities[busy], { active: 1, confirming: 1, confirmingUntil: at + 30_000 })
+  assert.ok(activities.slice(busy + 1).some(same({ active: 0, confirming: 0 })), 'then the idle one')
+  assert.deepEqual(activities.at(-1), { active: 0, confirming: 0 })
 
   // Disposal during a settle: never told, and nothing counts.
   const told = []

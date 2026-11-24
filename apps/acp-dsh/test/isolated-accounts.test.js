@@ -1333,6 +1333,48 @@ for (const id of ['acp-claude', 'acp-codex']) {
     assert.equal(h.service.loginActive(), 0)
   })
 
+  test(`S5e ${id}: two switches settle in turn: the first ends no lock of the second, which resumes`, async t => {
+    // The first switch settles; the second signs out, starts and is cancelled, so it settles too:
+    // it holds the lock and nothing is current when the first one's `onSettled` arrives.
+    const h = switchFixture(t)
+    await h.login(id)
+    const mark = h.status.reads.length
+    const start = Promise.withResolvers()
+    const after = Promise.withResolvers()
+    const nextStart = Promise.withResolvers()
+    const nextAfter = Promise.withResolvers()
+    h.status.answer(read => (read.n === mark + 2 ? start.promise : read.n === mark + 3 ? after.promise
+      : read.n === mark + 6 ? nextStart.promise : read.n === mark + 7 ? nextAfter.promise : undefined))
+    const first = await h.service.accountSwitch(id)
+    await until(() => h.status.reads.length > mark + 2)
+    h.service.loginCancel(id, first.attemptId)
+    await until(() => h.status.reads.length > mark + 3)
+    assert.equal(h.service.loginStatus(id, first.attemptId).settling, true)
+    const next = await h.service.accountSwitch(id)
+    assert.notEqual(next.attemptId, first.attemptId)
+    await until(() => h.status.reads.length > mark + 6)
+    h.service.loginCancel(id, next.attemptId)
+    await until(() => h.status.reads.length > mark + 7)
+    assert.equal(h.service.loginStatus(id, next.attemptId).settling, true)
+    assert.equal(h.service.loginCurrent(id), undefined)
+    const paused = join(homeOf(h, id), 'paused')
+    h.auth.set(h.status.reads[mark + 6].home, 'personal@example.test')
+    start.resolve(true)
+    after.resolve(true)
+    for (let i = 0; i < 10; i++) await tick()
+    assert.equal(existsSync(paused), true, 'the first settle leaves the second\'s home paused')
+    assert.equal(h.service.loginActive(), 1, 'the second still settles')
+    assert.equal(h.service.loginStatus(id, next.attemptId).settling, true)
+    nextStart.resolve(true)
+    nextAfter.resolve(true)
+    await until(() => h.service.loginActive() === 0 && !existsSync(paused))
+    assert.equal(existsSync(paused), false, 'the second settle resumes the home')
+    assert.equal((await h.service.inspect(id)).signedIn, true)
+    await admitted(h, id)
+    assert.equal(h.service.loginStatus(id, next.attemptId).signedInAfter, true)
+    assert.equal(h.service.loginActive(), 0)
+  })
+
   test(`S6 ${id}: a plain Sign in after a failed switch is never fresh and never settles`, async t => {
     const h = switchFixture(t)
     await h.login(id)
@@ -1428,4 +1470,42 @@ test('S3b: a plain Claude sign-in that ends without its link is still confirmed 
   h.silentLogin(true)
   await h.login('acp-claude')
   assert.equal((await h.service.inspect('acp-claude')).signedIn, true)
+})
+
+test('SD2-1: a Claude switch that settles keeps its lock while the Codex count changes, then resumes', async t => {
+  // The Claude switch is cancelled and its settle read is held; a Codex sign-in starts meanwhile,
+  // so the active count changes and `onChange` runs while Claude settles (#2064).
+  const id = 'acp-claude'
+  const h = switchFixture(t)
+  await h.login(id)
+  const mark = h.status.reads.length
+  const start = Promise.withResolvers()
+  const after = Promise.withResolvers()
+  h.status.answer(read => {
+    if (read.vendor === 'codex') return false
+    return read.n === mark + 2 ? start.promise : read.n === mark + 3 ? after.promise : undefined
+  })
+  const attempt = await h.service.accountSwitch(id)
+  await until(() => h.status.reads.length > mark + 2)
+  h.service.loginCancel(id, attempt.attemptId)
+  await until(() => h.status.reads.length > mark + 3)
+  assert.equal(h.service.loginStatus(id, attempt.attemptId).settling, true)
+  assert.equal(h.service.loginActive(), 1)
+  const changes = () => h.events.filter(name => name === 'acp-dsh/login-active').length
+  const before = changes()
+  const codex = await h.service.loginStart('acp-codex', { label: 'bot' })
+  assert.ok(codex.attemptId)
+  await until(() => changes() > before)
+  assert.ok(changes() > before, 'the active count changed while Claude settles')
+  const paused = join(homeOf(h, id), 'paused')
+  assert.equal(existsSync(paused), true)
+  assert.equal(h.service.loginStatus(id, attempt.attemptId).settling, true)
+  h.auth.set(h.status.reads[mark + 2].home, 'personal@example.test')
+  start.resolve(true)
+  after.resolve(true)
+  await until(() => !existsSync(paused))
+  assert.equal(existsSync(paused), false, 'the settle resumed the Claude home')
+  assert.equal((await h.service.inspect(id)).signedIn, true)
+  await admitted(h, id)
+  assert.equal(h.service.loginStatus(id, attempt.attemptId).signedInAfter, true)
 })

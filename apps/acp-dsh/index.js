@@ -2071,7 +2071,7 @@ export function apply(ctx, config = {}, {
     loginCancel: (id, attemptId) => (isHomedNative(id) ? nativeLogins.cancel(id, attemptId) : logins.cancel(id, attemptId)),
     /** Whether a text carries a sign-in state shown in the last day (Claude, Antigravity). Only a boolean. */
     loginTextMatches: text => logins.textMatches(text),
-    /** How many sign-in attempts are starting or waiting (the busy signal). */
+    /** How many sign-in attempts are starting, waiting or settling (the busy signal). */
     loginActive: () => loginActive(),
     loginActivity: () => loginActivity(),
     prepareRestart,
