@@ -9252,6 +9252,11 @@ var PT_BR = {
   "Found the {cli} CLI on this computer.": "A CLI {cli} está neste computador.",
   "Found the {cli} CLI on this computer (version {version}).": "A CLI {cli} está neste computador (versão {version}).",
   "Installing {name} automatically…": "Instalando o {name} automaticamente…",
+  "Installing {name}…": "Instalando o {name}…",
+  "Install it yourself instead": "Ou instale por conta própria",
+  "The {cli} CLI is not on this computer. Automagik can install it for you.": "A CLI {cli} não está neste computador. O Automagik pode instalar para você.",
+  "The {cli} CLI is not on this computer. Turn {name} on to install it.": "A CLI {cli} não está neste computador. Ligue o {name} para instalar.",
+  "Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).": "A CLI {cli} está neste computador (o Automagik instalou a versão {version}; a CLI se atualiza por conta própria).",
   "Updating {name} automatically…": "Atualizando o {name} automaticamente…",
   "The {name} installation or update failed: {error}": "A instalação ou atualização do {name} falhou: {error}",
   "The {name} installation or update failed.": "A instalação ou atualização do {name} falhou.",
@@ -9268,6 +9273,16 @@ var PT_BR = {
   "Could not check the sign-in to {name}: {cli} took too long to answer.": "Não foi possível verificar o login no {name}: o {cli} demorou demais para responder.",
   "Could not tell whether you are signed in to {name}.": "Não foi possível saber se há login no {name}.",
   "Sign in": "Entrar",
+  // Antigravity in its own home (#2048): its sign-in in the app, and Windows's shared account
+  "Not signed in to {name}.": "Sem login no {name}.",
+  "The CLI did not offer a sign-in link in time. Try again.": "O CLI não ofereceu um link de login a tempo. Tente de novo.",
+  "Finish the sign-in to {name} in your browser…": "Conclua o login no {name} pelo navegador…",
+  "{name} did not offer a Google sign-in. Try again.": "O {name} não ofereceu login com Google. Tente de novo.",
+  "The sign-in to {name} took too long. Try again.": "O login no {name} demorou demais. Tente de novo.",
+  "The sign-in to {name} did not finish. Try again.": "O login no {name} não terminou. Tente de novo.",
+  "Automagik keeps its own {name} sign-in, apart from the one in your terminal.": "O Automagik mantém um login próprio do {name}, separado do login do seu terminal.",
+  "Sign out": "Sair",
+  "On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.": "No Windows, a conta do {name} é compartilhada: o Automagik e o seu próprio {name} neste computador usam o mesmo login, guardado no Gerenciador de Credenciais do Windows. Sair não está disponível aqui: saia pelo próprio {name}.",
   "No Bot chat to sign in from here. Run {command} in a terminal instead.": "Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.",
   "Sign-in needs a Bot chat. If you have no Bot yet, set one up first.": "Para entrar, você precisa de um chat de Bot. Se ainda não tiver um Bot, configure um primeiro.",
   "Sign in from the Bot's chat, then come back to finish setting up.": "Entre pelo chat do Bot e volte para terminar a configuração.",
@@ -9513,15 +9528,45 @@ var PT_BR = {
   "Sign in on their page, then paste the address it ends on here.": "Faça login na página do provedor e cole aqui o endereço da página final.",
   "Copy your {what} from ": "Copie o valor “{what}” em ",
   " and paste it here. It stays in DSH's credential store on this computer.": " e cole aqui. Fica no cofre de credenciais do DSH, neste computador.",
-  "The address you landed on": "O endereço da página final"
+  "The address you landed on": "O endereço da página final",
+  // Antigravity's sign-in from any computer (#2048, paste-back). The expired sentence and the
+  // expiry are the Bot chat's own (bots-dsh omni-ui), byte for byte.
+  "Your Google account, through Antigravity": "Sua conta Google, pelo Antigravity",
+  "This link is not from this sign-in.": "Este link não é deste login.",
+  "Signed in on another computer? Paste the address the browser ends on:": "Entrou em outro computador? Cole o endereço em que o navegador parou:",
+  "Finishing the sign-in to {name}…": "Concluindo o login em {name}…",
+  "This sign-in expired. Start again.": "Este login expirou. Comece de novo.",
+  "Send": "Enviar",
+  "Expires at {time}": "Expira às {time}"
 };
 var EN = Object.fromEntries(Object.keys(PT_BR).map((key) => [key, key]));
+var ZH = {
+  "Not signed in to {name}.": "未登录 {name}。",
+  "The CLI did not offer a sign-in link in time. Try again.": "CLI 没有及时给出登录链接，请重试。",
+  "Finish the sign-in to {name} in your browser…": "请在浏览器中完成 {name} 的登录…",
+  "{name} did not offer a Google sign-in. Try again.": "{name} 没有提供 Google 登录。请重试。",
+  "The sign-in to {name} took too long. Try again.": "{name} 的登录用时过长。请重试。",
+  "The sign-in to {name} did not finish. Try again.": "{name} 的登录没有完成。请重试。",
+  "On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.": "在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。",
+  // Its row in Connect AI and its sign-in from any computer (#2048, paste-back). The expired
+  // sentence and the expiry are the Bot chat's own (bots-dsh i18n.js), byte for byte.
+  "Your Google account, through Antigravity": "你的 Google 账号，通过 Antigravity",
+  "Installing {name}…": "正在安装 {name}…",
+  "The {cli} CLI is not on this computer. Automagik can install it for you.": "这台电脑上没有 {cli} CLI。Automagik 可以为你安装。",
+  "The {cli} CLI is not on this computer. Turn {name} on to install it.": "这台电脑上没有 {cli} CLI。开启 {name} 即可安装。",
+  "Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).": "已找到 {cli} CLI（由 Automagik 安装，版本 {version}；它会自行更新）。",
+  "This link is not from this sign-in.": "此链接不属于本次登录。",
+  "Signed in on another computer? Paste the address the browser ends on:": "在另一台电脑上登录了？请粘贴浏览器最后停留的地址：",
+  "Finishing the sign-in to {name}…": "正在完成 {name} 的登录…",
+  "This sign-in expired. Start again.": "本次登录已过期，请重新开始。",
+  "Expires at {time}": "{time} 过期"
+};
 var fill = (text, params) => params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text;
 var bound = null;
 function installLocale(locale) {
   if (!locale || typeof locale.register !== "function" || typeof locale.bind !== "function") return () => {
   };
-  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, "pt-BR": PT_BR });
+  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, "pt-BR": PT_BR, zh: ZH });
   const mine = locale.bind(NAMESPACE);
   bound = mine;
   return () => {
@@ -12601,6 +12646,9 @@ var import_react9 = require("react");
 var CLI_OF = { "acp-claude": "claude", "acp-codex": "codex", "acp-hermes": "hermes", "acp-antigravity": "agy", "acp-omp": "omp" };
 var LOGO_OF = { "acp-claude": "CC", "acp-codex": "CX", "acp-hermes": "HM", "acp-antigravity": "AG", "acp-omp": "OM" };
 var isNative = (agent) => agent?.connector?.native === true;
+var NOT_THIS_SIGN_IN = "This link is not from this sign-in.";
+var EXPIRED_SIGN_IN = "This sign-in expired. Start again.";
+var signInWords = (message) => message === NOT_THIS_SIGN_IN ? t("This link is not from this sign-in.") : message === EXPIRED_SIGN_IN ? t("This sign-in expired. Start again.") : message;
 var isolatedSignIn = (agent) => agent.authScope === "isolated" && !isNative(agent);
 var signInCommand = (agent) => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key;
 var SIGN_IN_OF = { "acp-claude": "claude auth login", "acp-codex": "codex login" };
@@ -12644,10 +12692,30 @@ function badgeOf(agent) {
   if (state === "ready") return t("Ready");
   return null;
 }
-function agentLines(agent, entry) {
+function agentLines(agent, entry, { settings = false } = {}) {
   const name = agent.name;
   const cli = CLI_OF[agent.id] ?? agent.key;
   const lines = [];
+  const manual = agent.cli.install === "manual";
+  if (manual && !agent.cli.found) {
+    if (cliBusy(agent)) lines.push({ tone: "wait", text: t("Installing {name}…", { name }) });
+    else if (agent.cli.state === "failed" || agent.cli.error) {
+      lines.push({
+        tone: "bad",
+        text: agent.cli.error ? t("The {name} installation or update failed: {error}", { name, error: redactText(agent.cli.error) }) : t("The {name} installation or update failed.", { name }),
+        // Retry installs, so it shows only while the agent is on; off keeps the text and the link.
+        ...agent.on ? { action: "install", label: t("Retry") } : {},
+        ...agent.cli.installUrl ? { link: { href: agent.cli.installUrl, text: t("Install it yourself instead") } } : {},
+        ...agent.cli.diagnostic ? { details: { diagnostic: redactText(agent.cli.diagnostic), ...agent.cli.logPath ? { logPath: agent.cli.logPath } : {} } } : {}
+      });
+    } else if (agent.on) {
+      lines.push({ tone: "muted", text: t("The {cli} CLI is not on this computer. Automagik can install it for you.", { cli }), action: "install" });
+    } else {
+      lines.push({ tone: "muted", text: t("The {cli} CLI is not on this computer. Turn {name} on to install it.", { cli, name }) });
+    }
+    if (agent.sharedAccount === true) lines.push(sharedLine(name));
+    return lines;
+  }
   if (cliBusy(agent)) {
     lines.push({ tone: "wait", text: agent.cli.updating ? t("Updating {name} automatically…", { name }) : t("Installing {name} automatically…", { name }) });
   } else if (agent.cli.state === "failed" || agent.cli.error) {
@@ -12660,10 +12728,18 @@ function agentLines(agent, entry) {
   }
   if (!agent.cli.found) {
     if (lines.length === 0) lines.push({ tone: "muted", text: t("The {cli} CLI is not on this computer. Install it, sign in, then check again.", { cli }), ...agent.cli.installUrl ? { link: { href: agent.cli.installUrl, text: t("Install {name}", { name }) } } : {}, action: "check" });
+    if (agent.sharedAccount === true) lines.push(sharedLine(name));
     return lines;
   }
-  lines.push({ tone: "ok", text: agent.cli.version ? t("Found the {cli} CLI on this computer (version {version}).", { cli, version: agent.cli.version }) : t("Found the {cli} CLI on this computer.", { cli }) });
-  if (agent.signedIn === true && agent.consent !== "needed") {
+  lines.push({
+    tone: "ok",
+    text: manual && agent.cli.managed === true && agent.cli.version ? t("Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).", { cli, version: agent.cli.version }) : agent.cli.version ? t("Found the {cli} CLI on this computer (version {version}).", { cli, version: agent.cli.version }) : t("Found the {cli} CLI on this computer.", { cli })
+  });
+  if (agent.sharedAccount === true) lines.push(sharedLine(name));
+  const app = agent.appSignIn === true;
+  if (agent.signedIn === true && agent.consent !== "needed" && app) {
+    lines.push({ tone: "ok", text: t("Signed in to {name}.", { name }), ...agent.sharedAccount === true ? {} : { action: settings ? "native-switch" : "native-sign-out" } });
+  } else if (agent.signedIn === true && agent.consent !== "needed") {
     const canSwitch = isolatedSignIn(agent) && entry?.authScope === "isolated" && entry.signedIn === true;
     const account = canSwitch && entry.account?.kind === "account" ? entry.account.email ?? entry.account.org : void 0;
     lines.push({
@@ -12674,7 +12750,8 @@ function agentLines(agent, entry) {
     if (canSwitch) lines.push({ tone: "muted", text: t("Bots in this installation share this account. Your terminal sign-in stays as it is.") });
   }
   if (agent.signedIn === true && agent.consent === "needed" && !cliBusy(agent)) lines.push({ tone: "bad", text: t("{name} is signed in on this computer. Confirm its account in a Bot's chat before Bots use it.", { name }), action: "login", label: t("Confirm account") });
-  if (agent.signedIn === false && isNative(agent)) lines.push({ tone: "bad", text: t("Not signed in to {name}. Run {command} in a terminal, then check again.", { name, command: signInCommand(agent) }), action: "check" });
+  if (app && agent.on && !cliBusy(agent)) lines.push(...appSignInLines(agent, name));
+  if (agent.signedIn === false && isNative(agent) && !app) lines.push({ tone: "bad", text: t("Not signed in to {name}. Run {command} in a terminal, then check again.", { name, command: signInCommand(agent) }), action: "check" });
   if (agent.signedIn === false && !isNative(agent) && !cliBusy(agent)) {
     lines.push({ tone: "bad", text: t("Not signed in to {name}. Sign in from a Bot's chat.", { name }), action: "login" });
     if (!isolatedSignIn(agent)) lines.push({ tone: "muted", text: t("Or run {command} in a terminal, then check again.", { command: SIGN_IN_OF[agent.id] ?? cli }), action: "check" });
@@ -12685,7 +12762,8 @@ function agentLines(agent, entry) {
   }
   if (!agent.on) {
     lines.push({ tone: "muted", text: t("Off. Turn it on to use {name} as a model in DSH.", { name }) });
-    if (isNative(agent)) lines.push({ tone: "muted", text: t("Turning it on lets Automagik use the sign-in {name} already has on this computer.", { name }) });
+    if (app && agent.sharedAccount !== true) lines.push({ tone: "muted", text: t("Automagik keeps its own {name} sign-in, apart from the one in your terminal.", { name }) });
+    else if (isNative(agent)) lines.push({ tone: "muted", text: t("Turning it on lets Automagik use the sign-in {name} already has on this computer.", { name }) });
     return lines;
   }
   const { state, version, error, diagnostic, logPath, unreachable } = agent.connector;
@@ -12712,6 +12790,32 @@ function agentLines(agent, entry) {
   }
   return lines;
 }
+var sharedLine = (name) => ({ tone: "muted", text: t("On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.", { name }) });
+var timeOf = (at2) => new Date(at2).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+function appSignInLines(agent, name) {
+  const lines = [];
+  if (agent.signingIn === true) {
+    if (agent.signInChecking === true) return [{ tone: "wait", text: t("Finishing the sign-in to {name}…", { name }) }];
+    lines.push({
+      tone: "wait",
+      text: t("Finish the sign-in to {name} in your browser…", { name }),
+      ...agent.signInUrl ? { link: { href: agent.signInUrl, text: t("Sign in with {name}", { name }) }, copy: agent.signInUrl } : {}
+    });
+    if (agent.signInPaste === true && agent.signInUrl && typeof agent.signInAttempt === "string") {
+      lines.push({ tone: "muted", text: t("Signed in on another computer? Paste the address the browser ends on:"), action: "callback" });
+    }
+    if (Number.isFinite(agent.signInExpiresAt)) lines.push({ tone: "muted", text: t("Expires at {time}", { time: timeOf(agent.signInExpiresAt) }) });
+    return lines;
+  }
+  if (agent.signInError === "expired") lines.push({ tone: "bad", text: t("This sign-in expired. Start again.") });
+  if (agent.signInError === "unsupported") lines.push({ tone: "bad", text: t("{name} did not offer a Google sign-in. Try again.", { name }) });
+  if (agent.signInError === "timeout") lines.push({ tone: "bad", text: t("The sign-in to {name} took too long. Try again.", { name }) });
+  if (agent.signInError === "failed") lines.push({ tone: "bad", text: t("The sign-in to {name} did not finish. Try again.", { name }) });
+  if (agent.signInError === "no-browser") lines.push({ tone: "bad", text: t("The CLI did not offer a sign-in link in time. Try again.") });
+  if (agent.signedIn !== false) return lines;
+  lines.push({ tone: "bad", text: t("Not signed in to {name}.", { name }), action: "native-login" });
+  return lines;
+}
 function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
   const [view, setView] = (0, import_react9.useState)(null);
   const [busy, setBusy] = (0, import_react9.useState)(null);
@@ -12736,7 +12840,7 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
   (0, import_react9.useEffect)(() => {
     void load(true);
   }, [load]);
-  const settling = view?.agents?.some((agent) => cliBusy(agent) || agent.on && agent.cli.found && agent.connector.state === "installing" || wanted[agent.id] !== void 0 && wanted[agent.id] !== agent.on) === true;
+  const settling = view?.agents?.some((agent) => cliBusy(agent) || agent.signingIn === true || agent.on && agent.cli.found && agent.connector.state === "installing" || wanted[agent.id] !== void 0 && wanted[agent.id] !== agent.on) === true;
   const unreachable = view?.agents?.some((agent) => agent.on && agent.cli.found && agent.connector.state === "failed" && agent.connector.unreachable === true) === true;
   const pollMs = settling ? POLL_MS2 : unreachable ? UNREACHABLE_POLL_MS : void 0;
   (0, import_react9.useEffect)(() => {
@@ -12746,8 +12850,9 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     }, pollMs);
     return () => clearInterval(timer);
   }, [pollMs, load]);
+  const [signingOut, setSigningOut] = (0, import_react9.useState)(null);
   const say = (id, message) => setProblems((previous) => ({ ...previous, [id]: message }));
-  const act = async (id, endpoint, payload) => {
+  const act = async (id, endpoint, payload, words = (message) => message) => {
     say(id, null);
     setBusy(id);
     let ok = true;
@@ -12755,7 +12860,7 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
       show(await request2(endpoint, payload));
     } catch (error) {
       ok = false;
-      say(id, error.message);
+      say(id, words(error.message));
     }
     if (live.current) setBusy(null);
     return ok;
@@ -12769,12 +12874,39 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     flip: async (agent) => {
       const on2 = !(wanted[agent.id] ?? agent.on);
       setWanted((previous) => ({ ...previous, [agent.id]: on2 }));
-      if (!await act(agent.id, "acp-switch", { id: agent.id, on: on2 }) && live.current) {
+      const ok = await act(agent.id, "acp-switch", { id: agent.id, on: on2 });
+      if (!ok && live.current) {
         setWanted((previous) => previous[agent.id] === on2 ? Object.fromEntries(Object.entries(previous).filter(([id]) => id !== agent.id)) : previous);
       }
+      return ok;
     },
     retry: (agent) => act(agent.id, "acp-retry", { id: agent.id }),
+    // The person's click on Install (a CLI the app installs only then).
+    install: (agent) => act(agent.id, "acp-install", { id: agent.id }),
     check: (agent) => act(agent.id, "acp", { refresh: true }),
+    // An agent that signs in here: Sign in starts it (its link shows; a person's click opens it),
+    // and Sign out and Switch account ask first, with the account switch's words.
+    // acp-dsh's fixed refusals read in the page's language.
+    nativeLogin: (agent) => act(agent.id, "acp-sign-in", { id: agent.id }, signInWords),
+    // The address the browser ended on, for the attempt the row shows (#2048, paste-back).
+    callback: (agent, url) => act(agent.id, "acp-sign-in-callback", { id: agent.id, attempt: agent.signInAttempt, url }, signInWords),
+    signOutPending: signingOut,
+    askSignOut: (agent) => {
+      say(agent.id, null);
+      setSigningOut(agent.id);
+    },
+    cancelSignOut: () => setSigningOut(null),
+    nativeSignOut: (agent) => {
+      setSigningOut(null);
+      return act(agent.id, "acp-sign-out", { id: agent.id });
+    },
+    // Switch account (Settings), one action as Claude Code's and Codex's: sign out, then a new
+    // sign-in at once. A refused sign-out starts none.
+    switchAccount: async (agent) => {
+      setSigningOut(null);
+      if (!await act(agent.id, "acp-sign-out", { id: agent.id })) return false;
+      return act(agent.id, "acp-sign-in", { id: agent.id }, signInWords);
+    },
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
     reload: () => load(false),
@@ -12790,9 +12922,57 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     }
   };
 }
+function rememberSignInLink(url, scope = globalThis) {
+  try {
+    scope[CHAT_LOGIN]?.remember?.(url);
+  } catch {
+  }
+}
+function CopyLink({ url }) {
+  const [copied, setCopied] = (0, import_react9.useState)(false);
+  return (0, import_react9.createElement)("button", {
+    type: "button",
+    className: "oai-copy oai-acp-act",
+    onClick: () => globalThis.navigator?.clipboard?.writeText(url).then(() => setCopied(true), () => {
+    })
+  }, copied ? t("Copied") : t("Copy"));
+}
+function CallbackField({ agent, acp, busy }) {
+  const send = (event) => {
+    event.preventDefault();
+    const input = event.currentTarget?.elements?.namedItem?.("sign-in-address");
+    if (!input) return;
+    const value = input.value;
+    input.value = "";
+    if (typeof value === "string" && value.trim() !== "") void acp.callback(agent, value);
+  };
+  return (0, import_react9.createElement)(
+    "form",
+    { className: "oai-setup-form", onSubmit: send },
+    (0, import_react9.createElement)(
+      "div",
+      { className: "oai-field" },
+      (0, import_react9.createElement)("input", {
+        type: "password",
+        name: "sign-in-address",
+        autoComplete: "off",
+        spellCheck: false,
+        "aria-label": t("Signed in on another computer? Paste the address the browser ends on:"),
+        "data-1p-ignore": "true",
+        "data-lpignore": "true",
+        "data-bwignore": "true"
+      }),
+      (0, import_react9.createElement)("button", { type: "submit", className: "oai-ghost oai-acp-act", disabled: busy }, t("Send"))
+    )
+  );
+}
 function AcpLine({ line, agent, acp, busy, accountControls }) {
+  if (line.copy) rememberSignInLink(line.copy);
   const canSwitch = line.action === "switch" && accountControls !== void 0;
-  const confirming = canSwitch && accountControls.pending === agent.id;
+  const signOut = line.action === "native-sign-out";
+  const nativeSwitch = line.action === "native-switch";
+  const confirmingOut = (signOut || nativeSwitch) && acp.signOutPending === agent.id;
+  const confirming = canSwitch && accountControls.pending === agent.id || confirmingOut;
   const accountButton = (label, onClick) => (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick }, label);
   return (0, import_react9.createElement)(
     "div",
@@ -12802,13 +12982,19 @@ function AcpLine({ line, agent, acp, busy, accountControls }) {
       { className: `oai-acp-line oai-acp-${line.tone}${line.tone === "wait" ? " oai-waiting" : ""}`, ...line.tone === "bad" ? { role: "status" } : {} },
       confirming ? t("This stops running Bot work for this account. Continue?") : line.text,
       line.link ? [" ", (0, import_react9.createElement)("a", { key: "link", className: "oai-link", href: line.link.href, target: "_blank", rel: "noreferrer" }, line.link.text)] : null,
+      line.copy ? (0, import_react9.createElement)(CopyLink, { url: line.copy }) : null,
       line.action === "retry" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.retry(agent) }, t("Retry")) : null,
+      line.action === "install" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.install(agent) }, line.label ?? t("Install")) : null,
       line.action === "login" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.login(agent) }, line.label ?? t("Sign in")) : null,
       line.action === "check" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.check(agent) }, t("Check again")) : null,
+      line.action === "native-login" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.nativeLogin(agent) }, t("Sign in")) : null,
       canSwitch && !confirming ? accountButton(t("Switch account"), () => accountControls.ask(agent)) : null,
-      confirming ? accountButton(t("Continue"), () => accountControls.confirm(agent)) : null,
-      confirming ? accountButton(t("Cancel"), accountControls.cancel) : null
+      nativeSwitch && !confirming ? accountButton(t("Switch account"), () => acp.askSignOut(agent)) : null,
+      signOut && !confirming ? accountButton(t("Sign out"), () => acp.askSignOut(agent)) : null,
+      confirming ? accountButton(t("Continue"), () => !confirmingOut ? accountControls.confirm(agent) : nativeSwitch ? acp.switchAccount(agent) : acp.nativeSignOut(agent)) : null,
+      confirming ? accountButton(t("Cancel"), confirmingOut ? acp.cancelSignOut : accountControls.cancel) : null
     ),
+    line.action === "callback" ? (0, import_react9.createElement)(CallbackField, { agent, acp, busy }) : null,
     line.details ? (0, import_react9.createElement)(
       "details",
       { className: "oai-acp-details" },
@@ -12822,7 +13008,7 @@ function AcpAgentRow({ agent, acp, accountControls }) {
   const on2 = acp.isOn(agent);
   const busy = acp.busy !== null || accountControls?.busy === true;
   const badge = badgeOf({ ...agent, on: on2 });
-  const lines = agentLines(agent, accountControls?.accounts[agent.id]);
+  const lines = agentLines({ ...agent, on: on2 }, accountControls?.accounts[agent.id], { settings: true });
   return (0, import_react9.createElement)(
     "div",
     { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf({ ...agent, on: on2 }) },
@@ -12981,7 +13167,7 @@ var ACP_CSS = `
 var import_react10 = require("react");
 var VENDOR_TERMS = "Personal use under the vendor's terms";
 var FIRST_OTHERS = 4;
-var LOGOS = { claude: "C", chatgpt: "G", deepseek: "D", kimi: "K", copilot: "P", grok: "X", openai: "O", openrouter: "R", zai: "Z", moonshot: "M", opencode: "OC", cliproxy: "⇄", ollama: "L" };
+var LOGOS = { claude: "C", chatgpt: "G", antigravity: LOGO_OF["acp-antigravity"], deepseek: "D", kimi: "K", copilot: "P", grok: "X", openai: "O", openrouter: "R", zai: "Z", moonshot: "M", opencode: "OC", cliproxy: "⇄", ollama: "L" };
 function subscriptionRows(subscriptions) {
   if (!subscriptions) return [];
   return SUBSCRIPTION_TILES.map((tile) => {
@@ -13169,7 +13355,7 @@ function SignInOrKey({ row, provider, onSaved, onClose }) {
     (0, import_react10.createElement)("button", { type: "button", onClick: () => setWay("key") }, (0, import_react10.createElement)("strong", null, t("Use an API key")), (0, import_react10.createElement)("span", null, t("Billed per use")))
   );
 }
-var CLI_ROWS = { claude: "acp-claude", chatgpt: "acp-codex" };
+var CLI_ROWS = { claude: "acp-claude", chatgpt: "acp-codex", antigravity: "acp-antigravity" };
 function cliAgentOf(row, acp) {
   const id = CLI_ROWS[row.id];
   if (id === void 0) return void 0;
@@ -13177,8 +13363,25 @@ function cliAgentOf(row, acp) {
 }
 var acpBusy = (acp) => acp ? acp.busy !== null : false;
 var canSignIn = (agent) => agent.cli.found === true && agent.cli.state !== "installing" && agent.cli.state !== "failed" && agent.cli.updating !== true;
+var appRow = (agent) => agent?.appSignIn === true;
+function AppAgentSetup({ agent, acp, onClose }) {
+  const busy = acpBusy(acp);
+  const problem = acp?.problems?.[agent.id];
+  const cancel = async () => {
+    if (agent.signedIn !== true && acp.isOn(agent)) await acp.flip(agent);
+    onClose();
+  };
+  return (0, import_react10.createElement)(
+    "div",
+    { className: "oai-signin" },
+    (0, import_react10.createElement)("div", { className: "oai-acp-lines" }, agentLines(agent).map((line, i) => (0, import_react10.createElement)(AcpLine, { key: i, line, agent, acp, busy }))),
+    problem ? (0, import_react10.createElement)("p", { className: "oai-error", role: "alert" }, problem) : null,
+    (0, import_react10.createElement)("button", { type: "button", className: "oai-quiet", onClick: cancel }, t("Cancel"))
+  );
+}
 function CliSetup({ row, agent, acp, onSaved, onClose }) {
   const [way, setWay] = (0, import_react10.useState)(null);
+  if (appRow(agent) && acp) return (0, import_react10.createElement)(AppAgentSetup, { agent, acp, onClose });
   if (way === "key" || agent === void 0 && row.keyUrl) return (0, import_react10.createElement)(KeyForm, { row, provider: providerOf(row), onSaved });
   if (agent === void 0) return (0, import_react10.createElement)("p", null, t("This DSH offers no {name} sign-in.", { name: row.name }));
   const busy = acpBusy(acp);
@@ -13233,7 +13436,8 @@ function Duplicates({ row, onDedupe }) {
 function Row({ row, acp, open, busy, problem, onFlip, onSaved, onClose, onDedupe }) {
   const logo = LOGOS[row.id] ?? row.name.slice(0, 1);
   const agent = cliAgentOf(row, acp);
-  const settling = !row.on && !open && agent?.on === true && agent.signedIn === true && agent.cli.found === true;
+  const settling = !row.on && !open && agent?.on === true && (agent.signedIn === true && agent.cli.found === true || appRow(agent));
+  const agentProblem = appRow(agent) && !open ? acp?.problems?.[agent.id] : null;
   return (0, import_react10.createElement)(
     "div",
     { className: `oai-ai${row.on ? " oai-ai-on" : ""}` },
@@ -13253,6 +13457,7 @@ function Row({ row, acp, open, busy, problem, onFlip, onSaved, onClose, onDedupe
     open && !row.on ? (0, import_react10.createElement)("div", { className: "oai-ai-setup" }, (0, import_react10.createElement)(Setup, { row, acp, onSaved, onClose })) : null,
     settling ? (0, import_react10.createElement)("div", { className: "oai-acp-lines" }, agentLines(agent).map((line, i) => (0, import_react10.createElement)(AcpLine, { key: i, line, agent, acp, busy: busy || acpBusy(acp) }))) : null,
     problem ? (0, import_react10.createElement)("p", { className: "oai-error oai-ai-problem", role: "alert" }, problem) : null,
+    agentProblem ? (0, import_react10.createElement)("p", { className: "oai-error oai-ai-problem", role: "alert" }, agentProblem) : null,
     (0, import_react10.createElement)(Duplicates, { row, onDedupe })
   );
 }
@@ -13274,9 +13479,10 @@ function ConnectAiStep(props) {
     setRows(reply.rows ?? []);
     setSubs(reply.subscriptions ?? null);
   }, []);
+  const agentsDigest = agentsDigestOf(acp.view);
   (0, import_react10.useEffect)(() => {
     void refresh();
-  }, [refresh, acp.view]);
+  }, [refresh, agentsDigest]);
   (0, import_react10.useEffect)(() => {
     if (state) glitch();
   }, [state, glitch]);
@@ -13295,6 +13501,16 @@ function ConnectAiStep(props) {
   const flip = async (row) => {
     const action = flipAction(row);
     say(row.id, null);
+    const agent = cliAgentOf(row, acp);
+    if (action === "setup" && appRow(agent)) {
+      if (!acp.isOn(agent)) {
+        if (await acp.flip(agent)) setOpen(row.id);
+      } else if (open === row.id) {
+        await acp.flip(agent);
+        setOpen(null);
+      } else setOpen(row.id);
+      return;
+    }
     if (action === "setup") {
       setOpen((current) => current === row.id ? null : row.id);
       return;
@@ -13340,6 +13556,17 @@ function ConnectAiStep(props) {
     onModels: () => finish2("models"),
     onContinue: () => proceed()
   });
+}
+function agentsDigestOf(view) {
+  return JSON.stringify((view?.agents ?? []).map((agent) => [
+    agent.id,
+    agent.on,
+    agent.signedIn,
+    agent.cli?.found,
+    agent.cli?.state,
+    agent.connector?.state,
+    agent.restartNeeded
+  ]));
 }
 function ConnectAiView({ state, rows, subscriptions, open, showAll, glitching, rowProps, onShowAll, onSkip, onModels, onContinue }) {
   const all = rows === null ? null : [...rows, ...subscriptionRows(subscriptions)];

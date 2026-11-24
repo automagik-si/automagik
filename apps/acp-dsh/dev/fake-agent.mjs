@@ -53,8 +53,37 @@
 // "codex-edit-ask" is its patch call (an edit `tool_call`, then a permission request; the patch
 // runs only when allowed); "codex-subagent" starts one of its own sub-agents (no permission);
 // "codex-reader <server> <tool>" is one of its MCP resource readers.
-import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync } from 'node:fs'
+//
+// As an agent with its own home that signs in over ACP (Antigravity, #2048):
+// FAKE_ACP_AUTH_METHODS=a,b offers those `authMethods` ids in `initialize`. FAKE_ACP_AUTH=file
+// refuses `session/new` with auth_required unless `$HOME/.gemini/fake-signed-in` exists, and
+// `authenticate` with an offered id writes that file (the sign-in lives in its HOME only);
+// FAKE_ACP_AUTH_FAIL=1 makes `authenticate` fail instead. FAKE_ACP_AUTH_STDERR is printed on
+// stderr when `authenticate` starts (a sign-in link, as agy may print one), and
+// FAKE_ACP_AUTH_HOLD=1 then keeps `authenticate` waiting, as for a person in the browser.
+// FAKE_ACP_ENV_FILE appends, at start, the names of the variables it was given and the values
+// of its home variables only (HOME, USERPROFILE, the XDG folders, CODEX_HOME and the Claude
+// folders), of the D-Bus address, and its PATH (`path`) with its first entry (`pathHead`).
+// FAKE_ACP_LOGOUT=1 advertises `agentCapabilities.auth.logout` and answers `logout`
+// (traced as `logout` with its HOME).
+// FAKE_ACP_AUTH_OPEN=<url> stands for agy's browser opener call during `authenticate`: it runs
+// the opener named FAKE_ACP_OPENER (default `xdg-open`) with that URL, only from the first PATH
+// entry and only when that entry is an attempt's stand-in folder (`/sign-in/<uuid>/bin`), so a
+// test never starts a real browser, and traces `opener` with whether it found one.
+// FAKE_ACP_AUTH_LISTEN=1 stands for agy's own sign-in listener (#2048, paste-back): during
+// `authenticate` it listens on 127.0.0.1 (a free port), builds Google's link with
+// `redirect_uri=http://localhost:<port>/auth/callback` and a random state, hands it to the
+// opener as FAKE_ACP_AUTH_OPEN does, and traces `listen` with the port. A GET of that path with
+// the right state and one code answers 200 and signs in; any other answers 400 and it keeps
+// waiting (FAKE_ACP_AUTH_ANSWER=400 answers 400 to every GET). Each GET is traced as `callback`
+// with whether it was right, never its code. The listener closes when `authenticate` ends.
+// FAKE_ACP_AUTH_WINDOW_MS=<n> rejects `authenticate` after n ms (agy ending its own wait), and
+// FAKE_ACP_AUTH_EXIT=1 exits with 1 right after printing FAKE_ACP_AUTH_STDERR.
+import { spawn, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { createServer } from 'node:http'
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { delimiter, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { serveAgent } from './serve-agent.mjs'
@@ -79,6 +108,20 @@ const trace = (entry) => {
 const MODES = (process.env.FAKE_ACP_MODES ?? '').split(',').filter(Boolean)
 const SESSION_MODELS = process.env.FAKE_ACP_SESSION_MODELS === '1'
 trace({ event: 'start', args: process.argv.slice(2) })
+const AUTH_METHODS = (process.env.FAKE_ACP_AUTH_METHODS ?? '').split(',').filter(Boolean)
+const SIGNED_IN = () => join(process.env.HOME ?? '', '.gemini', 'fake-signed-in')
+if (process.env.FAKE_ACP_ENV_FILE !== undefined) {
+  const shown = ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME',
+    'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR', 'DBUS_SESSION_BUS_ADDRESS']
+  const names = Object.keys(process.env).filter(name => !name.startsWith('FAKE_ACP_') && name !== 'ACP_TRACE_FILE').sort()
+  try {
+    appendFileSync(process.env.FAKE_ACP_ENV_FILE, `${JSON.stringify({
+      pid: process.pid, cwd: process.cwd(), names,
+      path: process.env.PATH ?? null, pathHead: (process.env.PATH ?? '').split(delimiter)[0],
+      values: Object.fromEntries(shown.filter(name => name in process.env).map(name => [name, process.env[name]])),
+    })}\n`)
+  } catch {}
+}
 const modesOf = session => (MODES.length === 0 ? {} : { modes: { currentModeId: session.mode, availableModes: MODES.map(id => ({ id, name: id })) } })
 // What a `session/new` answer says of models and modes, in either shape.
 const offersOf = session => ({
@@ -227,10 +270,73 @@ const implementation = {
       ...(process.env.FAKE_ACP_SYSTEM_PROMPT === '1'
         ? { sessionCapabilities: { systemPrompt: {} } } : {}),
     }
-    return { protocolVersion, agentCapabilities, authMethods: [] }
+    if (process.env.FAKE_ACP_LOGOUT === '1') agentCapabilities.auth = { logout: {} }
+    return { protocolVersion, agentCapabilities, authMethods: AUTH_METHODS.map(id => ({ id, name: id })) }
+  },
+  async authenticate(params) {
+    trace({ event: 'authenticate', methodId: params?.methodId })
+    // With no methods offered it answers as it always did; with some, only those.
+    if (AUTH_METHODS.length > 0 && !AUTH_METHODS.includes(params?.methodId)) throw RequestError.invalidParams(undefined, `Unknown auth method: ${params?.methodId}`)
+    if (process.env.FAKE_ACP_AUTH_STDERR) process.stderr.write(`${process.env.FAKE_ACP_AUTH_STDERR}\n`)
+    if (process.env.FAKE_ACP_AUTH_EXIT === '1') setTimeout(() => process.exit(1), 50)
+    const open = (url) => {
+      const head = (process.env.PATH ?? '').split(delimiter)[0]
+      const opener = join(head, process.env.FAKE_ACP_OPENER ?? 'xdg-open')
+      const found = /\/sign-in\/[0-9a-f-]{36}\/bin$/.test(head) && existsSync(opener)
+      if (found) spawnSync(opener, [url], { stdio: 'ignore', timeout: 5000 })
+      trace({ event: 'opener', found })
+    }
+    if (process.env.FAKE_ACP_AUTH_OPEN) open(process.env.FAKE_ACP_AUTH_OPEN)
+    const windowMs = Number(process.env.FAKE_ACP_AUTH_WINDOW_MS)
+    const ownEnd = Number.isFinite(windowMs) && windowMs > 0
+      ? new Promise((resolve, reject) => setTimeout(() => reject(RequestError.internalError(undefined, 'the sign-in wait ended')), windowMs))
+      : undefined
+    if (process.env.FAKE_ACP_AUTH_LISTEN === '1') {
+      const state = randomBytes(16).toString('hex')
+      let server
+      const signedIn = new Promise((resolve) => {
+        server = createServer((req, res) => {
+          let right = false
+          try {
+            const url = new URL(req.url ?? '/', 'http://localhost')
+            right = process.env.FAKE_ACP_AUTH_ANSWER !== '400' && url.pathname === '/auth/callback'
+              && url.searchParams.getAll('state').length === 1 && url.searchParams.get('state') === state
+              && url.searchParams.getAll('code').length === 1 && url.searchParams.get('code') !== ''
+          } catch {}
+          trace({ event: 'callback', right })
+          res.writeHead(right ? 200 : 400, { 'content-type': 'text/plain', connection: 'close' })
+          res.end(right ? 'signed in' : 'no')
+          if (right) resolve()
+        })
+      })
+      const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
+      trace({ event: 'listen', port })
+      const redirect = encodeURIComponent(`http://localhost:${port}/auth/callback`)
+      open(`https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com&redirect_uri=${redirect}`
+        + `&response_type=code&state=${state}`)
+      try {
+        await (ownEnd === undefined ? signedIn : Promise.race([signedIn, ownEnd]))
+      } finally {
+        server.closeAllConnections?.()
+        server.close()
+      }
+    } else if (ownEnd !== undefined) await ownEnd
+    if (process.env.FAKE_ACP_AUTH_HOLD === '1') await new Promise(() => {})
+    if (process.env.FAKE_ACP_AUTH_FAIL === '1') throw RequestError.internalError(undefined, 'the browser sign-in did not finish')
+    if (AUTH === 'file') {
+      mkdirSync(join(process.env.HOME ?? '', '.gemini'), { recursive: true })
+      writeFileSync(SIGNED_IN(), 'yes')
+    }
+    return {}
+  },
+  async logout() {
+    trace({ event: 'logout', home: process.env.HOME })
+    if (process.env.FAKE_ACP_LOGOUT !== '1') throw RequestError.methodNotFound('logout')
+    return {}
   },
   async newSession(params) {
     if (AUTH === 'session') throw RequestError.authRequired(undefined, 'run the CLI\'s login first')
+    if (AUTH === 'file' && !existsSync(SIGNED_IN())) throw RequestError.authRequired(undefined, 'sign in first')
     const sessionId = `fake-${++created}`
     trace({
       event: 'new-session', sessionId,
@@ -307,7 +413,6 @@ const implementation = {
     }
     return { configOptions: configOptions(session) }
   },
-  async authenticate() { return {} },
   async cancel({ sessionId }) {
     trace({ event: 'cancel', sessionId })
     // FAKE_ACP_IGNORE_CANCEL=1: an agent that goes on working after a cancel.

@@ -40,3 +40,14 @@ test('the account card renders the installation it is in', () => {
   assert.match(source, /ACCOUNT_SHARING_HINT/)
   assert.match(source, /accountChangeFailure/)
 })
+
+// #2048 (G6-1, guard): the Bot accounts card lists only the agents with an account read; an
+// `acp-antigravity` entry never shows, even when the host sends one.
+test('the Bot accounts card never lists Antigravity', async () => {
+  const { CLI_NAMES, SIGN_IN_NAMES } = await import('../src/client/cli-login-model.js')
+  assert.equal(Object.hasOwn(CLI_NAMES, 'acp-antigravity'), false)
+  assert.equal(SIGN_IN_NAMES['acp-antigravity'], 'Antigravity')
+  const source = readFileSync(join(here, '..', 'src', 'client', 'cli-accounts.js'), 'utf8')
+  assert.match(source, /Object\.hasOwn\(CLI_NAMES, id\) && \(entry\.authScope === 'isolated' \|\| consented\(entry\)\)/)
+  assert.doesNotMatch(source, /SIGN_IN_NAMES|signInProviderOf/)
+})

@@ -1,6 +1,6 @@
 import { countCards, detailsSubject, heldCardKey } from './sources.js'
 import { noteClientError } from './diagnostics.js'
-import { CLI_NAMES, cliLoginBotOf, cliProviderOf } from './cli-login-model.js'
+import { SIGN_IN_NAMES, cliLoginBotOf, signInProviderOf } from './cli-login-model.js'
 
 // The actions every window that draws the Bot views shares: dialogs and panels (the `ui`
 // source), requests to the host, and the notes the transcript keeps. The shell around the
@@ -12,9 +12,9 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
   const openCliLogin = (botId, provider, ref) => {
     const bot = cliLoginBotOf(roster.getSnapshot(), botId)
     const manager = loginState?.()
-    if (!bot || !manager || !Object.hasOwn(CLI_NAMES, provider)) return false
+    if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false
     openSession?.(bot.id)
-    void manager.open({ botId: bot.id, provider, ref: cliProviderOf(ref) === provider ? ref : undefined })
+    void manager.open({ botId: bot.id, provider, ref: signInProviderOf(ref) === provider ? ref : undefined })
     return true
   }
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra })
@@ -138,7 +138,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     switchRouteInChat: async (id, ref, patch = {}) => {
       try { return await after(call('switch-route', { id, ...patch, model: ref })) } catch (error) {
         // A signed-out agent opens its sign-in row; the pick is made again after it.
-        const provider = cliProviderOf(ref)
+        const provider = signInProviderOf(ref)
         if (error?.code === 'bot/sign-in-required' && provider && openCliLogin(id, provider)) return undefined
         if (error?.code === 'bot/account-confirm-required' && provider && openCliLogin(id, provider)) return undefined
         throw error
@@ -149,7 +149,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     // `patch` goes with the model in the same update (its thinking level).
     chooseModelInChat: async (id, ref, patch = {}) => {
       try { return await after(call('update-bot', { id, ...patch, model: ref })) } catch (error) {
-        const provider = cliProviderOf(ref)
+        const provider = signInProviderOf(ref)
         if (error?.code === 'bot/sign-in-required' && provider && openCliLogin(id, provider, ref)) return undefined
         // An agent already signed in on this computer, to an account the person has not
         // confirmed for Bots (#869): the same row, at its account step.
@@ -161,7 +161,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     async recoverCliLogin(botId, provider) {
       const bot = cliLoginBotOf(roster.getSnapshot(), botId)
       const manager = loginState?.()
-      if (!bot || !manager || !Object.hasOwn(CLI_NAMES, provider)) return false
+      if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false
       const recovered = await manager.recover({ botId: bot.id, provider })
       if (recovered && cliLoginBotOf(roster.getSnapshot(), bot.id)) openSession?.(bot.id)
       return recovered

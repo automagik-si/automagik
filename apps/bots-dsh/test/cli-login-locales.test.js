@@ -170,3 +170,29 @@ test('machine refusal copy is translated and interpolates project labels only on
     }
   } finally { off() }
 })
+
+// Antigravity in a Bot's chat (#2048, r6): its refusals, its row and the reworded /login notices.
+const ANTIGRAVITY = {
+  'This link is not from this sign-in.': ['Este link não é deste login.', '此链接不属于本次登录。'],
+  'Paste here the address your browser ends on after you sign in:': ['Depois de entrar, cole aqui o endereço em que o navegador parou:', '登录后，请将浏览器最后停留的地址粘贴到这里：'],
+  'Sign-in address': ['Endereço do login', '登录地址'],
+  'Finishing the sign-in to {name}…': ['Concluindo o login em {name}…', '正在完成 {name} 的登录…'],
+  'Turn this coding agent on in Settings, under Coding agents, then try again.': ['Ative este agente de código em Configurações, em Agentes de código, e tente de novo.', '请先在设置 → 编程助手中开启此编程助手，然后重试。'],
+  'Install this coding agent in Settings, under Coding agents, then try again.': ['Instale este agente de código em Configurações, em Agentes de código, e tente de novo.', '请先在设置 → 编程助手中安装此编程助手，然后重试。'],
+  'Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up {provider} in Settings.': ['O login pelo chat é para Claude Code, Codex e Antigravity. Configure {provider} em Configurações.', '聊天内登录仅支持 Claude Code、Codex 和 Antigravity。请在设置中配置 {provider}。'],
+  'Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up this AI in Settings.': ['O login pelo chat é para Claude Code, Codex e Antigravity. Configure esta IA em Configurações.', '聊天内登录仅支持 Claude Code、Codex 和 Antigravity。请在设置中配置此 AI。'],
+}
+
+test('Antigravity\'s chat sentences read in pt-BR and zh; the old Claude-and-Codex notices are gone', () => {
+  for (const [key, [pt, zh]] of Object.entries(ANTIGRAVITY)) {
+    assert.equal(ptBR[key], pt, key)
+    assert.equal(DICTIONARY.zh[key], zh, key)
+  }
+  for (const gone of ['Sign-in from the chat is for Claude Code and Codex. Set up {provider} in Settings.', 'Sign-in from the chat is for Claude Code and Codex. Set up this AI in Settings.']) {
+    assert.equal(ptBR[gone], undefined, gone)
+    assert.equal(DICTIONARY.zh[gone], undefined, gone)
+  }
+  // The expired sentence is the existing one, for Antigravity too: no new key.
+  assert.equal(ptBR['The sign-in expired. Try again.'], undefined)
+  assert.equal(DICTIONARY.zh['The sign-in expired. Try again.'], undefined)
+})

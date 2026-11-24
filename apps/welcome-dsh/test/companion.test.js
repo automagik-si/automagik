@@ -408,6 +408,23 @@ test('Connect AI finished with an AI on gives the companion, the Omni Bot and th
   assert.equal(team.state.bots.other.model, undefined)
 })
 
+// G6-18 (#2048): with only Antigravity on, the first model that can run is an Antigravity one
+// (bots-dsh pickDefault), and the first Bots start on it, as with Claude or Codex alone.
+test('Connect AI finished with only Antigravity on gives the first Bots its model; none yet sets nothing', async () => {
+  const team = withModels(fakeTeam({ mainName: 'Pip' }), ['acp-antigravity/x'])
+  team.state.bots.omni = { id: 'omni', name: 'Omni', kind: 'omni' }
+  team.state.bots.genie = { id: 'genie', name: 'Genie', kind: 'genie' }
+  const fake = host({ team })
+  assert.deepEqual((await fake.handle('done', { stepId: 'omni-connect-ai', connected: true })).value, { connectAiDone: true })
+  assert.deepEqual(team.calls, [['updateBot', 'main', { model: 'acp-antigravity/x' }], ['updateBot', 'omni', { model: 'acp-antigravity/x' }], ['updateBot', 'genie', { model: 'acp-antigravity/x' }]])
+  const none = withModels(fakeTeam(), [undefined])
+  none.state.bots.omni = { id: 'omni', name: 'Omni', kind: 'omni' }
+  const { install: installAgain } = await import('../src/host/endpoint.js')
+  const quick = installAgain(host({ team: none }).ctx, { assignWaitMs: 0 })
+  assert.equal((await quick.handle('done', { stepId: 'omni-connect-ai', connected: true })).ok, true)
+  assert.deepEqual(none.calls, [])
+})
+
 test('a skipped Connect AI, a Bot with a model, or no model that can run sets nothing', async () => {
   const skipped = withModels(fakeTeam(), ['anthropic/claude-opus-5-5'])
   await host({ team: skipped }).handle('done', { stepId: 'omni-connect-ai' })

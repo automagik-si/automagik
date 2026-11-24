@@ -49,3 +49,29 @@ test('openModels opens Omni settings on the Models page and closes the menus', (
   actions.openSettings()
   assert.deepEqual(ui.getSnapshot().settings, { page: 'general', id: null })
 })
+
+// #2048 (parity): Antigravity's sign-in row opens from every sign-in surface; the gates read
+// SIGN_IN_NAMES (G6-1), so a refused pick, a refused route switch and the menu all reach it.
+test('a refused Antigravity pick or route switch opens its sign-in row; openCliLogin takes it', async () => {
+  const roster = createSource({ ready: true, byId: { a: { id: 'a', name: 'A', model: 'deepseek/flash' } } })
+  const opened = []
+  const sessions = []
+  let refusal = 'bot/sign-in-required'
+  const call = async () => { throw Object.assign(new Error('Sign in'), { code: refusal }) }
+  const manager = { open: (options) => { opened.push(options); return Promise.resolve(true) } }
+  const actions = teamActions({ call, after: value => value, partFor: id => id, roster, ui: createSource({}), openSession: id => sessions.push(id), loginState: () => manager })
+  assert.equal(await actions.chooseModelInChat('a', 'acp-antigravity/default'), undefined)
+  assert.equal(await actions.switchRouteInChat('a', 'acp-antigravity/other'), undefined)
+  assert.equal(actions.openCliLogin('a', 'acp-antigravity'), true)
+  assert.deepEqual(opened, [
+    { botId: 'a', provider: 'acp-antigravity', ref: 'acp-antigravity/default' },
+    { botId: 'a', provider: 'acp-antigravity', ref: undefined },
+    { botId: 'a', provider: 'acp-antigravity', ref: undefined },
+  ])
+  assert.deepEqual(sessions, ['a', 'a', 'a'])
+  // Another refusal still throws; an unknown agent opens nothing.
+  refusal = 'bot/refused'
+  await assert.rejects(actions.chooseModelInChat('a', 'acp-antigravity/default'), { code: 'bot/refused' })
+  assert.equal(actions.openCliLogin('a', 'acp-hermes'), false)
+  assert.equal(opened.length, 3)
+})

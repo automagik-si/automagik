@@ -1,9 +1,10 @@
 // The welcome's copy follows the DSH language: the companion step, the team step, Connect AI with
 // its sign-ins and the Claude Code and Codex rows (acp-agents.js), the step rail. Keys are the
-// English text; welcome.team is registered in English and in Brazilian Portuguese, and a key with
-// no text in the active language reads in English. Copy is looked up at render time, so nothing
-// caches a translated string. Names stay as written (products, providers, plans, the companion's
-// name ideas), and so do the host's error messages and what a provider's sign-in says.
+// English text; welcome.team is registered in English, in Brazilian Portuguese and in Chinese
+// (only Antigravity's Windows warning so far), and a key with no text in the active language
+// reads in English. Copy is looked up at render time, so nothing caches a translated string.
+// Names stay as written (products, providers, plans, the companion's name ideas), and so do the
+// host's error messages and what a provider's sign-in says.
 
 export const NAMESPACE = 'welcome.team'
 
@@ -306,6 +307,11 @@ export const PT_BR = {
   'Found the {cli} CLI on this computer.': 'A CLI {cli} está neste computador.',
   'Found the {cli} CLI on this computer (version {version}).': 'A CLI {cli} está neste computador (versão {version}).',
   'Installing {name} automatically…': 'Instalando o {name} automaticamente…',
+  'Installing {name}…': 'Instalando o {name}…',
+  'Install it yourself instead': 'Ou instale por conta própria',
+  'The {cli} CLI is not on this computer. Automagik can install it for you.': 'A CLI {cli} não está neste computador. O Automagik pode instalar para você.',
+  'The {cli} CLI is not on this computer. Turn {name} on to install it.': 'A CLI {cli} não está neste computador. Ligue o {name} para instalar.',
+  'Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).': 'A CLI {cli} está neste computador (o Automagik instalou a versão {version}; a CLI se atualiza por conta própria).',
   'Updating {name} automatically…': 'Atualizando o {name} automaticamente…',
   'The {name} installation or update failed: {error}': 'A instalação ou atualização do {name} falhou: {error}',
   'The {name} installation or update failed.': 'A instalação ou atualização do {name} falhou.',
@@ -322,6 +328,16 @@ export const PT_BR = {
   'Could not check the sign-in to {name}: {cli} took too long to answer.': 'Não foi possível verificar o login no {name}: o {cli} demorou demais para responder.',
   'Could not tell whether you are signed in to {name}.': 'Não foi possível saber se há login no {name}.',
   'Sign in': 'Entrar',
+  // Antigravity in its own home (#2048): its sign-in in the app, and Windows's shared account
+  'Not signed in to {name}.': 'Sem login no {name}.',
+  'The CLI did not offer a sign-in link in time. Try again.': 'O CLI não ofereceu um link de login a tempo. Tente de novo.',
+  'Finish the sign-in to {name} in your browser…': 'Conclua o login no {name} pelo navegador…',
+  '{name} did not offer a Google sign-in. Try again.': 'O {name} não ofereceu login com Google. Tente de novo.',
+  'The sign-in to {name} took too long. Try again.': 'O login no {name} demorou demais. Tente de novo.',
+  'The sign-in to {name} did not finish. Try again.': 'O login no {name} não terminou. Tente de novo.',
+  'Automagik keeps its own {name} sign-in, apart from the one in your terminal.': 'O Automagik mantém um login próprio do {name}, separado do login do seu terminal.',
+  'Sign out': 'Sair',
+  'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.': 'No Windows, a conta do {name} é compartilhada: o Automagik e o seu próprio {name} neste computador usam o mesmo login, guardado no Gerenciador de Credenciais do Windows. Sair não está disponível aqui: saia pelo próprio {name}.',
   'No Bot chat to sign in from here. Run {command} in a terminal instead.': 'Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.',
   'Sign-in needs a Bot chat. If you have no Bot yet, set one up first.': 'Para entrar, você precisa de um chat de Bot. Se ainda não tiver um Bot, configure um primeiro.',
   'Sign in from the Bot\'s chat, then come back to finish setting up.': 'Entre pelo chat do Bot e volte para terminar a configuração.',
@@ -574,10 +590,45 @@ export const PT_BR = {
   'Copy your {what} from ': 'Copie o valor “{what}” em ',
   ' and paste it here. It stays in DSH\'s credential store on this computer.': ' e cole aqui. Fica no cofre de credenciais do DSH, neste computador.',
   'The address you landed on': 'O endereço da página final',
+  // Antigravity's sign-in from any computer (#2048, paste-back). The expired sentence and the
+  // expiry are the Bot chat's own (bots-dsh omni-ui), byte for byte.
+  'Your Google account, through Antigravity': 'Sua conta Google, pelo Antigravity',
+  'This link is not from this sign-in.': 'Este link não é deste login.',
+  'Signed in on another computer? Paste the address the browser ends on:': 'Entrou em outro computador? Cole o endereço em que o navegador parou:',
+  'Finishing the sign-in to {name}…': 'Concluindo o login em {name}…',
+  'This sign-in expired. Start again.': 'Este login expirou. Comece de novo.',
+  'Send': 'Enviar',
+  'Expires at {time}': 'Expira às {time}',
 }
 
 // English is the key itself; registering it keeps the namespace whole in both languages.
 const EN = Object.fromEntries(Object.keys(PT_BR).map(key => [key, key]))
+
+// Chinese: Antigravity's own lines (#2048): its sign-in in the app, its Connect AI row and the
+// Windows warning.
+// Every other key reads in English, the buttons and the link label shared with other rows too. `zh` is the Chinese id of DSH's locale service (dsh-client-locale 0.2.2-rc.2 lists
+// `zh` and `en`; `zh-CN` is only the page's lang attribute).
+export const ZH = {
+  'Not signed in to {name}.': '未登录 {name}。',
+  'The CLI did not offer a sign-in link in time. Try again.': 'CLI 没有及时给出登录链接，请重试。',
+  'Finish the sign-in to {name} in your browser…': '请在浏览器中完成 {name} 的登录…',
+  '{name} did not offer a Google sign-in. Try again.': '{name} 没有提供 Google 登录。请重试。',
+  'The sign-in to {name} took too long. Try again.': '{name} 的登录用时过长。请重试。',
+  'The sign-in to {name} did not finish. Try again.': '{name} 的登录没有完成。请重试。',
+  'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.': '在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。',
+  // Its row in Connect AI and its sign-in from any computer (#2048, paste-back). The expired
+  // sentence and the expiry are the Bot chat's own (bots-dsh i18n.js), byte for byte.
+  'Your Google account, through Antigravity': '你的 Google 账号，通过 Antigravity',
+  'Installing {name}…': '正在安装 {name}…',
+  'The {cli} CLI is not on this computer. Automagik can install it for you.': '这台电脑上没有 {cli} CLI。Automagik 可以为你安装。',
+  'The {cli} CLI is not on this computer. Turn {name} on to install it.': '这台电脑上没有 {cli} CLI。开启 {name} 即可安装。',
+  'Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).': '已找到 {cli} CLI（由 Automagik 安装，版本 {version}；它会自行更新）。',
+  'This link is not from this sign-in.': '此链接不属于本次登录。',
+  'Signed in on another computer? Paste the address the browser ends on:': '在另一台电脑上登录了？请粘贴浏览器最后停留的地址：',
+  'Finishing the sign-in to {name}…': '正在完成 {name} 的登录…',
+  'This sign-in expired. Start again.': '本次登录已过期，请重新开始。',
+  'Expires at {time}': '{time} 过期',
+}
 
 const fill = (text, params) => (params
   ? text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
@@ -590,7 +641,7 @@ export function installLocale(locale) {
   if (!locale || typeof locale.register !== 'function' || typeof locale.bind !== 'function') return () => {}
   // DSH 0.2.2 lists both `pt` (its own entry) and the locale pack's `pt-BR`; the same copy
   // must answer for either, or a reader moved onto DSH's `pt` falls back to English here.
-  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, 'pt-BR': PT_BR })
+  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, 'pt-BR': PT_BR, zh: ZH })
   const mine = locale.bind(NAMESPACE)
   bound = mine
   return () => {

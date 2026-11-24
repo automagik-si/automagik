@@ -16,7 +16,9 @@
 //
 // Secrets: the Claude `state` (the part after # in the pasted code) is kept only while the
 // attempt waits. A keyed hash of every state shown is kept in memory for STATE_TTL_MS, so the
-// Bot team can refuse a message that carries one (`textMatches`) without ever holding it.
+// Bot team can refuse a message that carries one (`textMatches`) without ever holding it. The
+// same holds for the state of an Antigravity sign-in link (#2048, `rememberCallbackState`): a
+// message carrying the address the browser ends on (`…state=<s>…`) is refused the same way.
 /* eslint-disable no-control-regex -- Reject control characters in input and strip terminal decoration. */
 import { spawn as spawnProcess } from 'node:child_process'
 import { createHmac, randomBytes, randomUUID } from 'node:crypto'
@@ -45,6 +47,49 @@ export const STATE_TTL_MS = 24 * 60 * 60 * 1000
 const OUTPUT_LIMIT = 64 * 1024
 const ACTIVE = new Set(['starting', 'waiting'])
 const STATE = /^[A-Za-z0-9_-]{8,512}$/
+// The Antigravity guard (#2048, paste-back), the same words as the Bot team's client copy
+// (bots-dsh cli-login-model.js): at most this many `state=` / `state%3d` occurrences per
+// reading, and the text after each one, cut at a 512-character state fully percent-encoded.
+const CALLBACK_OCCURRENCES = 64
+const CALLBACK_TOKEN = 3 * 512
+const CALLBACK_STATE = /^[^\p{Cc}\s]{8,512}$/u
+
+// The authority after the last literal `://` before `at`, up to the first `/`, `?`, `#`, `\`,
+// whitespace or the end of the reading, lowercased. Nothing is decoded first, so a Google
+// link's percent-encoded `redirect_uri` holds no `://` of its own.
+function authorityBefore(reading, at) {
+  const scheme = reading.lastIndexOf('://', at - 3)
+  if (scheme < 0) return undefined
+  const rest = reading.slice(scheme + 3, scheme + 3 + 64)
+  const end = rest.search(/[/?#\\\s]/u)
+  return (end < 0 ? rest : rest.slice(0, end)).toLowerCase()
+}
+
+// One decode of a token, run by run: a malformed escape stays as it is and never throws.
+const decodeRuns = token => token.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+  try { return decodeURIComponent(run) } catch { return run }
+})
+
+/**
+ * The texts that may start with an Antigravity state in one reading: for each `state=` or
+ * `state%3d` (any case, at most CALLBACK_OCCURRENCES), the text after it and its decoded copy,
+ * unless the occurrence belongs to Google's own sign-in link (the authority after the last
+ * literal `://` before it is `accounts.google.com`). No URL is parsed.
+ * @param {string} reading
+ * @returns {string[]}
+ */
+export function callbackTokens(reading) {
+  const tokens = []
+  let count = 0
+  for (const match of reading.matchAll(/state(?:=|%3d)/giu)) {
+    if (++count > CALLBACK_OCCURRENCES) break
+    if (authorityBefore(reading, match.index) === 'accounts.google.com') continue
+    const start = match.index + match[0].length
+    const token = reading.slice(start, start + CALLBACK_TOKEN)
+    tokens.push(token, decodeRuns(token))
+  }
+  return tokens
+}
 const URL_PATHS = {
   'acp-codex': new Set(['auth.openai.com/codex/device']),
   'acp-claude': new Set(['claude.com/cai/oauth/authorize', 'claude.ai/oauth/authorize', 'platform.claude.com/oauth/authorize', 'console.anthropic.com/oauth/authorize']),
@@ -124,7 +169,7 @@ function isShortClaudeLoginUrl(value) {
 // agent of the table signs in in a terminal with its own command (`signInHint`, agents.js).
 const known = id => Object.hasOwn(AGENTS, id) && Object.hasOwn(URL_PATHS, id)
 const CHOOSE = `Choose ${Object.keys(URL_PATHS).map(id => AGENTS[id]?.defaultName).filter(Boolean).sort().join(' or ')}.`
-const terminalOnly = id => (Object.hasOwn(AGENTS, id) && typeof AGENTS[id].signInHint === 'string' ? failure('terminal', `Sign in to ${AGENTS[id].defaultName} in a terminal: run ${AGENTS[id].signInHint}, then check again.`) : undefined)
+const terminalOnly = (id, hint = AGENTS[id]?.signInHint) => (Object.hasOwn(AGENTS, id) && typeof hint === 'string' ? failure('terminal', `Sign in to ${AGENTS[id].defaultName} in a terminal: run ${hint}, then check again.`) : undefined)
 // A name for the view that opened the attempt; never an access check.
 const labelOf = value => (typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value) ? value : undefined)
 
@@ -165,8 +210,10 @@ function blockBrowser() {
  * record lets tests exercise ownership proof with a fake process.
  */
 export class CliLogins {
-  constructor({ resolve, signedIn = signedInOf, onReady = () => {}, onChange = () => {}, onActivity = () => {}, onFail = () => {}, spawn = spawnProcess, record = spawn === spawnProcess ? recordLogin : () => undefined, now = Date.now, linkTtlMs = LINK_TTL_MS, startupMs = STARTUP_MS, answerMs = ANSWER_TIMEOUT_MS, retainMs = RETAIN_MS, stateTtlMs = STATE_TTL_MS, timers = globalThis } = {}) {
+  constructor({ resolve, hintOf = id => AGENTS[id]?.signInHint, signedIn = signedInOf, onReady = () => {}, onChange = () => {}, onActivity = () => {}, onFail = () => {}, spawn = spawnProcess, record = spawn === spawnProcess ? recordLogin : () => undefined, now = Date.now, linkTtlMs = LINK_TTL_MS, startupMs = STARTUP_MS, answerMs = ANSWER_TIMEOUT_MS, retainMs = RETAIN_MS, stateTtlMs = STATE_TTL_MS, timers = globalThis } = {}) {
     this.resolve = resolve
+    // The terminal command a CLI with no sign-in here names (a managed copy's by its path).
+    this.hintOf = hintOf
     this.signedIn = signedIn
     this.onReady = onReady
     this.onChange = onChange
@@ -188,6 +235,10 @@ export class CliLogins {
     this.stateKey = randomBytes(32)
     this.states = new Map()
     this.stateLengths = new Set()
+    // The same for the states of Antigravity sign-in links (#2048): hash -> { until, length },
+    // and how many remembered states have each length.
+    this.callbackStates = new Map()
+    this.callbackLengths = new Map()
     this.disposed = false
     this.activeCount = 0
   }
@@ -301,7 +352,7 @@ export class CliLogins {
    */
   start(id, { label } = {}) {
     if (this.disposed) throw failure('disposed', 'Sign-in is unavailable while Automagik restarts.')
-    if (!known(id)) throw terminalOnly(id) ?? failure('invalid', CHOOSE)
+    if (!known(id)) throw terminalOnly(id, this.hintOf(id)) ?? failure('invalid', CHOOSE)
     const previous = this.flows.get(id)
     if (previous) this.lapse(previous)
     if (previous && this.active(previous)) return this.view(previous)
@@ -349,18 +400,20 @@ export class CliLogins {
 
   /**
    * Whether a text carries a Claude state shown in the last STATE_TTL_MS (`#<state>`, spaces
-   * and invisible characters ignored). Only a boolean: the states themselves are not kept.
+   * and invisible characters ignored), or an Antigravity link's state after `state=` (#2048,
+   * callbackTokens). Only a boolean: the states themselves are not kept.
    */
   textMatches(text) {
-    if (typeof text !== 'string' || text === '' || this.states.size === 0) return false
+    if (typeof text !== 'string' || text === '' || (this.states.size === 0 && this.callbackStates.size === 0)) return false
     this.pruneStates()
-    if (this.states.size === 0) return false
+    if (this.states.size === 0 && this.callbackStates.size === 0) return false
     const cleaned = text.slice(0, 1_000_000).replace(/[\p{Cf}]/gu, '')
     // The cost of one call (#871): a token's prefix is hashed once however often the text
     // repeats it, in either reading. So a call costs at most one HMAC per distinct prefix, and
     // never more than 2 x 1,000,000 / (length + 1) of them for each state length shown (the
     // lengths add up; Claude's states have one).
     const tried = new Set()
+    const triedCallback = new Set()
     for (const candidate of new Set([cleaned, cleaned.replace(/\s+/gu, '')])) {
       for (const match of candidate.matchAll(/#([A-Za-z0-9_-]+)/g)) {
         const token = match[1]
@@ -372,8 +425,37 @@ export class CliLogins {
           if (this.states.has(this.hashState(prefix))) return true
         }
       }
+      // An Antigravity state after `state=` (or `state%3d`), raw or decoded once (#2048).
+      if (this.callbackStates.size > 0 && this.callbackIn(candidate, triedCallback)) return true
     }
     return false
+  }
+
+  callbackIn(reading, tried) {
+    for (const token of callbackTokens(reading)) {
+      for (const length of this.callbackLengths.keys()) {
+        if (token.length < length) continue
+        const prefix = token.slice(0, length)
+        if (tried.has(prefix)) continue
+        tried.add(prefix)
+        if (this.callbackStates.has(this.hashState(prefix))) return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * Remembers the state of an Antigravity sign-in link for STATE_TTL_MS (#2048): a message that
+   * carries it after `state=` is refused (textMatches). Only its keyed hash and length are kept.
+   * @param {string} state a printable state of 8-512 characters
+   */
+  rememberCallbackState(state) {
+    if (typeof state !== 'string' || !CALLBACK_STATE.test(state)) return
+    this.pruneStates()
+    const hash = this.hashState(state)
+    const known = this.callbackStates.get(hash)
+    if (known === undefined) this.callbackLengths.set(state.length, (this.callbackLengths.get(state.length) ?? 0) + 1)
+    this.callbackStates.set(hash, { until: this.now() + this.stateTtlMs, length: state.length })
   }
 
   hashState(state) { return createHmac('sha256', this.stateKey).update(state).digest('base64url') }
@@ -388,6 +470,13 @@ export class CliLogins {
     const now = this.now()
     for (const [hash, until] of this.states) if (until <= now) this.states.delete(hash)
     if (this.states.size === 0) this.stateLengths.clear()
+    for (const [hash, { until, length }] of this.callbackStates) {
+      if (until > now) continue
+      this.callbackStates.delete(hash)
+      const left = (this.callbackLengths.get(length) ?? 1) - 1
+      if (left > 0) this.callbackLengths.set(length, left)
+      else this.callbackLengths.delete(length)
+    }
   }
 
   async begin(flow) {

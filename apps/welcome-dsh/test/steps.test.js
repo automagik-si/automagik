@@ -109,7 +109,9 @@ test('every row that signs in names its own provider; Claude\'s key is pi-ai\'s 
   assert.deepEqual([providers.claude, providers.kimi, providers.copilot, providers.grok], ['anthropic', 'kimi-coding', 'github-copilot', 'xai'])
   // ChatGPT signs in only through Codex, Claude through Claude Code (or its key): no DSH sign-in.
   assert.equal(providers.chatgpt, undefined)
-  assert.deepEqual(plain(CLI_ROWS), { claude: 'acp-claude', chatgpt: 'acp-codex' })
+  // Antigravity is a third CLI row (#2048, Connect AI).
+  assert.deepEqual(plain(CLI_ROWS), { claude: 'acp-claude', chatgpt: 'acp-codex', antigravity: 'acp-antigravity' })
+  assert.equal(plain(LOGOS).antigravity, 'AG')
   assert.equal(Object.values(providers).filter(provider => provider === 'anthropic').length, 1)
   assert.ok(!Object.values(providers).includes('claude'))
   assert.equal(typeof plain(LOGOS).claude, 'string')

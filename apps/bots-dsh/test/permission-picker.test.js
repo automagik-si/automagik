@@ -190,3 +190,16 @@ test('Auto rows accept exact API and team marks and name their model', () => {
     assert.match(levelsOf(catalog, bot).options.find(row => row.value === 'workspace-write:auto').description, /x/)
   }
 })
+
+// #2048 (G6-1, guard): an Antigravity Bot is not a CLI with an own mode here: no "undefined"
+// mode and no "decides by itself" in the Full-access confirmation.
+test('an Antigravity Bot gets no CLI own-mode wording in the Full-access confirmation', () => {
+  const { cliOfBot, presetText, cliAuto } = module.exports
+  const bot = { model: 'acp-antigravity/x', appliedModel: 'acp-antigravity/x' }
+  assert.equal(cliOfBot(bot), undefined)
+  assert.equal(cliAuto('danger-full-access', cliOfBot(bot)), false)
+  const text = presetText('danger-full-access', { options: OPTIONS }, cliOfBot(bot))
+  assert.doesNotMatch(text, /undefined|decides by itself/)
+  // Claude Code still has its own mode.
+  assert.equal(cliOfBot({ model: 'acp-claude/default', appliedModel: 'acp-claude/default' }).id, 'acp-claude')
+})
