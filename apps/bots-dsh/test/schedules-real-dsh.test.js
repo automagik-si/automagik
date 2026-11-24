@@ -5,6 +5,8 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import ScheduleService from '@deepseek-ai/dsh-schedule'
+import { textOf } from '../src/host/text.js'
+import * as turns from '../src/host/turns.js'
 
 // The storage-domain face ScheduleService opens: table(name) with entries/get/put/deleteMany.
 function memoryDomain() {
@@ -29,11 +31,11 @@ function memoryDomain() {
   }
 }
 
-async function service() {
+async function service(agents = { get: () => undefined }) {
   const ctx = new Context()
   ctx.provide('storageDomain', { open: async () => memoryDomain() })
   ctx.provide('logger', { warn() {}, info() {}, error() {}, debug() {} })
-  ctx.provide('agents', { get: () => undefined })
+  ctx.provide('agents', agents)
   ctx.provide('sessionPersistence', { stat: async () => ({ header: {} }) })
   const schedule = new ScheduleService(ctx, {})
   await schedule.ready
@@ -87,4 +89,25 @@ test('the old session-scoped create shape is refused by DSH 0.2.2', async () => 
     prompt: 'x',
     every_seconds: 3600,
   }), error => error?.name === 'ScheduleInputError')
+})
+
+test("DSH's real schedule-change notice does not open a turn", async () => {
+  const seen = []
+  const schedule = await service({
+    get: id => id === 's1' ? { status: 'running', options: {}, session: { header: {} }, inject: m => seen.push(m) } : undefined,
+  })
+  const created = await schedule.create({
+    title: 'x', prompt: 'p',
+    timing: { kind: 'daily', daily: { time: '09:00:00', time_zone: 'UTC' } },
+    target: { kind: 'session', sessionId: 's1' },
+  }, 's1')
+  await schedule.notifications
+  assert.equal(seen.length, 0)
+  const edited = await schedule.edit({ id: created.id, action: 'update', patch: { title: 'y' } }, undefined)
+  assert.equal(edited.code, undefined)
+  await schedule.notifications
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].source.kind, 'schedule')
+  assert.equal(textOf(seen[0].content).split('\n')[3], 'change: updated')
+  assert.equal(turns.opensTurn(seen[0]), false)
 })
