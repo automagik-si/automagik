@@ -749,14 +749,19 @@ export function install(rt) {
   }
   const storedRoutes = new Map()
   let watchingRoutes = false
+  // Settlement reads the watcher's last route synchronously just before publishing.
+  const cachedStoredRoute = sessionId => storedRoutes.get(sessionId)?.route
   async function storedRoute(sessionId) {
-    if (storedRoutes.has(sessionId)) return storedRoutes.get(sessionId)
+    const current = storedRoutes.get(sessionId)
+    // A missing or unreadable log can become readable on the next lookup.
+    if (current && !current.route?.missing && !current.route?.unreadable) return current.route ?? current.pending
     // bots-dsh does not inject sessionPersistence: in real cordis a sibling plugin's
     // service throws on a property read but is readable through ctx.get.
     let persistence
     try { persistence = ctx.get?.('sessionPersistence') } catch { return undefined }
     if (typeof persistence?.open !== 'function') return undefined
-    const pending = (async () => {
+    const entry = { events: [] }
+    entry.pending = (async () => {
       let handle
       try {
         handle = await persistence.open(sessionId, 'read')
@@ -768,27 +773,30 @@ export function install(rt) {
       } finally {
         try { await handle?.close?.() } catch {}
       }
-    })()
+    })().then(route => {
+      entry.route = entry.events.reduce(updateStoredRoute, route)
+      delete entry.events
+      delete entry.pending
+      return entry.route
+    })
     watchRoutes()
-    storedRoutes.set(sessionId, pending)
+    storedRoutes.set(sessionId, entry)
     if (storedRoutes.size > 500) storedRoutes.delete(storedRoutes.keys().next().value)
-    const stored = await pending
-    const current = storedRoutes.get(sessionId)
-    if (current && current !== pending) return current
-    if ((stored.missing || stored.unreadable) && current === pending) storedRoutes.delete(sessionId)
-    return stored
+    return entry.pending
   }
+  const updateStoredRoute = (route, event) => storedRouteEvent(
+    route.missing || route.unreadable ? { provider: undefined } : route, event,
+  )
   // Registered on first use, so nothing is listened to until a stored route is read.
   function watchRoutes() {
     if (watchingRoutes) return
     watchingRoutes = true
     ctx.on?.('session/event', (session, event) => {
       if ((event?.type !== 'request/header' && event?.type !== 'model/selection') || typeof session?.id !== 'string') return
-      const current = storedRoutes.get(session.id)
-      if (!current) return
-      storedRoutes.set(session.id, current.then(route => storedRouteEvent(
-        route.missing || route.unreadable ? { provider: undefined } : route, event,
-      )))
+      const entry = storedRoutes.get(session.id)
+      if (!entry) return
+      if (entry.events) entry.events.push(event)
+      else entry.route = updateStoredRoute(entry.route, event)
     })
   }
 
@@ -977,7 +985,8 @@ export function install(rt) {
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
     defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
-    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, storedRouteOf: storedRoute, applyModel, waitForModel, syncModels, routeRefused,
+    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, storedRouteOf: storedRoute, cachedStoredRouteOf: cachedStoredRoute,
+    applyModel, waitForModel, syncModels, routeRefused,
     dropCatalog: () => { catalogCache = { at: 0, value: [] } },
   })
 }

@@ -67,7 +67,9 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false, role
   }
 
   async function start() {
-    const ctx = fakeContext()
+    const ctx = fakeContext({ services: {
+      sessionPersistence: { open: async () => ({ read: async () => ({ events: [] }) }) },
+    } })
     contexts.add(ctx)
     const routes = new Map()
     const registrations = new Set(['schedule_create', 'schedule_edit'])

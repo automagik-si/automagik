@@ -80,7 +80,10 @@ async function fixture(t, {
     await fs.writeFile(join(home, 'state.lock'), JSON.stringify({ pid: process.ppid, host: hostname(), token: 'fixture-lock' }))
   }
 
-  async function start({ acpAgents } = {}) {
+  async function start({
+    acpAgents,
+    sessionPersistence = { open: async () => ({ read: async () => ({ events: [] }) }) },
+  } = {}) {
     const harness = new Context()
     await harness.plugin(SystemPrompt)
     await harness.plugin(ToolRuntime)
@@ -89,7 +92,7 @@ async function fixture(t, {
     await harness.inject(['tools'], ctx => { scopeParent = ctx })
     const agents = new Map()
     const host = fakeContext({ services: {
-      agents: { list: () => [...agents.values()], get: id => agents.get(id) }, acpAgents,
+      agents: { list: () => [...agents.values()], get: id => agents.get(id) }, acpAgents, sessionPersistence,
     } })
     let disposeIdentity
     const effect = host.effect
@@ -168,6 +171,7 @@ async function fixture(t, {
       return batch.results[0].result
     }
     const context = { rt, host, harness, fetched, warnings, agentOf, events, call, ok, has, pin, prompt, execute,
+      unload: id => agents.delete(id),
       disposeIdentity: () => { disposeIdentity?.(); disposeIdentity = undefined },
       async close() { closed = true; contexts.delete(context); await host.dispose(); await harness.fiber.dispose() } }
     contexts.add(context)
@@ -1079,6 +1083,71 @@ test('D2T-1 settlement and the public view follow the owning and retained group 
       assert.equal(h.rt.roleRuntime.instructionsFor(sessionId, bot), '')
     }
   })
+})
+
+test('D2U-1 an unloaded ACP Session keeps the method and waiter when persistence is unavailable', async t => {
+  const f = await solverFixture(t)
+  const h = await f.start({ sessionPersistence: null })
+  const native = { provider: 'test-provider', model: 'fixture' }
+  h.agentOf(FIRST).model = { current: () => native }
+  let selection = native
+  h.agentOf(GROUP).model = { current: () => selection }
+  await h.ok('role-install', { id: 'solver' })
+  const bot = h.rt.state.bots[FIRST]
+  const text = bot.instructions
+  const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+  bot.waitingRole = waiting
+  selection = { provider: 'acp-fixture', model: 'fixture' }
+  h.events(GROUP, 'model/selection', selection)
+  h.unload(GROUP)
+
+  const result = await h.ok('role-attach', { id: FIRST, role: 'solver' })
+  const saved = (await f.disk()).bots[FIRST]
+  assert.equal(saved.instructions, text)
+  assert.deepEqual(saved.waitingRole, waiting)
+  assert.deepEqual(result, { pending: true })
+})
+
+test('D2U-2 a retained Session that moves to ACP while Phase B is queued keeps the written method', async t => {
+  const native = { provider: 'test-provider', model: 'fixture' }
+  const header = { type: 'request/header', data: { header: { config: native } } }
+  const f = await solverFixture(t)
+  const h = await f.start({ sessionPersistence: {
+    open: async id => ({ read: async () => ({ events: id === GROUP ? [header] : [] }) }),
+  } })
+  await h.ok('role-install', { id: 'solver' })
+  const bot = h.rt.state.bots[FIRST]
+  const text = bot.instructions
+  const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+  bot.waitingRole = waiting
+  h.agentOf(GROUP).model = { current: () => native }
+  await h.rt.storedRouteOf(GROUP)
+
+  const saveCopy = h.rt.saveCopy
+  let writes = 0
+  let queuedAhead
+  t.mock.method(h.rt, 'saveCopy', (change, options) => {
+    if (++writes === 2) queuedAhead = saveCopy(() => {}, {
+      beforeCommit() {
+        const selection = { provider: 'acp-fixture', model: 'fixture' }
+        h.agentOf(GROUP).model = { current: () => selection }
+        h.events(GROUP, 'model/selection', selection)
+        h.unload(GROUP)
+      },
+      afterWrite() {},
+    })
+    return saveCopy(change, options)
+  })
+
+  const result = await h.call('role-attach', { id: FIRST, role: 'solver' })
+  assert.ok(queuedAhead)
+  await queuedAhead
+  const saved = (await f.disk()).bots[FIRST]
+  assert.equal(saved.instructions, text)
+  assert.deepEqual(saved.waitingRole, waiting)
+  assert.equal(saved.roles[0].id, 'solver')
+  assert.equal(result.ok, false)
+  assert.match(result.error.message, /role changed/)
 })
 
 test('D2T-2 settlement retains the written method and identifies the Remote Hermes route', async t => {
