@@ -1186,6 +1186,38 @@ for (const config of [{ provider: ' ' }, { provider: 'deepseek' }]) {
   })
 }
 
+for (const source of ['current()', 'projected next']) {
+  test(`D2Y-1 settlement retains the method for a header-derived ${source} with a blank model`, async t => {
+    const f = await solverFixture(t)
+    const h = await f.start()
+    h.agentOf(FIRST).model = { current: () => ({ provider: 'test-provider', model: 'fixture' }) }
+    const group = h.agentOf(GROUP)
+    const config = { provider: 'deepseek', model: ' ' }
+    t.mock.method(group.session, 'requestHeader', () => ({ config }))
+    if (source === 'current()') {
+      group.model = { current: () => group.session.requestHeader().config }
+    } else {
+      const get = h.host.get
+      t.mock.method(h.host, 'get', name => name === 'sessionProjections' ? {
+        snapshot: session => session === group.session
+          ? { values: { modelSelection: { next: session.requestHeader().config } } }
+          : undefined,
+      } : get(name))
+    }
+    await h.ok('role-install', { id: 'solver' })
+    const bot = h.rt.state.bots[FIRST]
+    const text = bot.instructions
+    const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+    bot.waitingRole = waiting
+
+    const result = await h.ok('role-attach', { id: FIRST, role: 'solver' })
+    const saved = (await f.disk()).bots[FIRST]
+    assert.equal(saved.instructions, text)
+    assert.deepEqual(saved.waitingRole, waiting)
+    assert.deepEqual(result, { pending: true })
+  })
+}
+
 test('D2W-3 idle roster polls read no stored routes', async t => {
   const config = { provider: 'test-provider', model: 'fixture' }
   const header = { type: 'request/header', data: { header: { config } } }

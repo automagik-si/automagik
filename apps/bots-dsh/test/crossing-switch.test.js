@@ -764,6 +764,16 @@ test('T12 a group part that moves on keeps its own route: no crossing, no record
   assert.equal(await b.rt.crossingHistory('g9', b.bot.model), false)
 })
 
+test('D2Y-1 crossing history keeps the route when the live header has a blank model', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  assert.equal(await b.rt.crossingHistory('s1', b.bot.model), false)
+
+  b.session.requestHeader = () => ({ config: { provider: 'deepseek', model: ' ' } })
+
+  assert.equal(await b.rt.crossingHistory('s1', b.bot.model), true)
+})
+
 // T15b (MD-1): a reply cut for an agent switch whose fresh part's first call fails is never lost.
 // Back on the old part, the cut request goes on there, once; the failed turn answers nobody
 // (turns.js reads switchResumes), so a relay sender gets only the resumed answer.

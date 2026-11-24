@@ -6,7 +6,7 @@ import { createRoleSettings } from './role-settings.js'
 import { createRoleVoice } from './role-voice.js'
 import { NO_BOT_RUNNER_REASON } from './no-runner.js'
 import { refusal } from './refusal.js'
-import { readableRoute, routeFields } from './session-route.js'
+import { readableRoute } from './session-route.js'
 import { output } from './tools.js'
 
 const START_MS = 5_000
@@ -275,18 +275,20 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   function liveProvider(sessionId, session) {
     try {
       const agent = ctx.get?.('agents')?.get?.(sessionId)
-      const provider = agent?.model?.current?.()?.provider
-      if (provider) return provider
+      const current = agent?.model?.current?.()
+      const currentRoute = readableRoute(current)
+      if (current != null) return currentRoute?.provider ?? null
       const live = session ?? agent?.session ?? ctx.sessions?.get?.(sessionId)
       if (!live) return undefined
-      let selection
-      try { selection = ctx.get?.('sessionProjections')?.snapshot?.(live, ['modelSelection'])?.values?.modelSelection } catch {}
-      if (selection?.next?.provider != null) return selection.next.provider
+      let projection
+      try { projection = ctx.get?.('sessionProjections')?.snapshot?.(live, ['modelSelection']) } catch {}
+      const next = projection?.values?.modelSelection?.next
+      const nextRoute = readableRoute(next)
+      if (next != null) return nextRoute?.provider ?? null
       const header = live.requestHeader?.()
-      if (header == null) return undefined
-      const route = routeFields(header.config)
+      const route = readableRoute(header?.config)
       // An unreadable live route cannot be replaced by an older stored route.
-      return readableRoute(route) ? route.provider : null
+      return header == null ? undefined : route?.provider ?? null
     } catch { return null }
   }
   async function readDeliveryRoutes(bots, limit = Infinity) {
@@ -294,8 +296,12 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     const needStoredRoute = [...sessions].filter(id => liveProvider(id) === undefined)
     const routes = new Map()
     for (let at = 0; at < needStoredRoute.length; at += limit) {
-      const batch = await Promise.all(needStoredRoute.slice(at, at + limit).map(async id => [id, await rt.storedRouteOf?.(id)]))
-      for (const [id, route] of batch) routes.set(id, route)
+      const batch = await Promise.all(needStoredRoute.slice(at, at + limit).map(async id => {
+        const stored = await rt.storedRouteOf?.(id)
+        const route = readableRoute(stored?.pendingSelection ?? stored)
+        return [id, route?.provider]
+      }))
+      for (const [id, provider] of batch) routes.set(id, provider)
     }
     return routes
   }
@@ -303,10 +309,9 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     const sessions = sessionsOf(bot)
     if (!sessions.length) return routeUnavailable
     for (const id of sessions) {
-      const stored = routes?.get(id)
       const live = liveProvider(id)
-      const provider = live === undefined ? (stored?.pendingSelection ?? stored)?.provider : live
-      if (typeof provider !== 'string' || !provider) return routeUnavailable
+      const provider = live === undefined ? routes?.get(id) : live
+      if (provider == null) return routeUnavailable
       const warning = providerWarning(provider)
       if (warning) return warning
     }
@@ -325,7 +330,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     if (id === undefined) return undefined
     const bot = ownBot(id)
     if (!bot) return undefined
-    const provider = agent?.model?.current?.()?.provider ?? liveProvider(sessionId, agent?.session)
+    const provider = readableRoute(agent?.model?.current?.())?.provider ?? liveProvider(sessionId, agent?.session)
       ?? providerOf(bot.appliedModel ?? bot.model)
     if (['acp', 'hermes-remote'].includes(connectionOf(provider))) return undefined
     return partFor(sessionId, id)

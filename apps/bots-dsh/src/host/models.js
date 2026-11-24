@@ -10,7 +10,7 @@ import { normalize, splitRef } from './text.js'
 import { install as installHostModels } from './host-models.js'
 import { PI_AI_CLAUDE, claudeFamilyOf, supersededClaude } from './claude-models.js'
 import { SettingsSelectionRejected } from './pocket-settings.js'
-import { readableRoute, routeFields } from './session-route.js'
+import { readableRoute } from './session-route.js'
 
 const CATALOG_TTL_MS = 10_000
 const quiet = new AsyncLocalStorage()
@@ -657,7 +657,7 @@ export function install(rt) {
   function selectSessionModel(sessionId, { provider, model, reasoningEffort }, pocket) {
     const release = rt.holdGrants?.({ sessionIds: [sessionId] }, () => {
       const selected = sessionSelections.get(sessionId)
-        ?? ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config
+        ?? readableRoute(ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config)
       return [selected?.provider, selected?.model]
     })
     const run = selecting.then(async () => {
@@ -729,34 +729,32 @@ export function install(rt) {
   const sameSelection = (a, b) => a.provider === b.provider && a.model === b.model && a.reasoningEffort === b.reasoningEffort
 
   function storedRouteEvent(route, event) {
-    if (event?.type === 'model/selection') return { ...route, pendingSelection: routeFields(event.data) }
+    if (event?.type === 'model/selection') return { ...route, pendingSelection: readableRoute(event.data) }
     if (event?.type !== 'request/header') return route
     const header = event.data?.header
-    const used = routeFields(header?.config)
-    const selected = header?.adapterDefaults?.reasoningEffort === true ? { ...used, reasoningEffort: undefined } : used
+    const used = readableRoute(header?.config)
+    const selected = used && header?.adapterDefaults?.reasoningEffort === true ? { ...used, reasoningEffort: undefined } : used
     // History callers read the last request. Prompt delivery follows DSH's pending choice
     // until a request uses that choice.
-    if (route.pendingSelection && !sameSelection(route.pendingSelection, selected)) {
-      return { ...used, pendingSelection: route.pendingSelection }
-    }
-    return used
+    const pending = route.pendingSelection
+    if (pending === undefined || (pending && selected && sameSelection(pending, selected))) return { used }
+    return { used, pendingSelection: pending }
   }
-  const unreadableRoute = Object.freeze({ unreadable: true })
   async function storedRoute(sessionId) {
     // bots-dsh does not inject sessionPersistence: in real cordis a sibling plugin's
     // service throws on a property read but is readable through ctx.get.
     let handle
     try {
       const persistence = ctx.get?.('sessionPersistence')
-      if (typeof persistence?.open !== 'function') return unreadableRoute
+      if (typeof persistence?.open !== 'function') return null
       handle = await persistence.open(sessionId, 'read')
-      if (typeof handle?.read !== 'function') return unreadableRoute
+      if (typeof handle?.read !== 'function') return null
       const { events } = await handle.read()
-      const route = events.reduce(storedRouteEvent, {})
-      if (Object.hasOwn(route, 'provider') && !readableRoute(route)) return unreadableRoute
-      return readableRoute(route.pendingSelection ?? route) ? route : unreadableRoute
+      const { used, pendingSelection } = events.reduce(storedRouteEvent, {})
+      if (used === null || pendingSelection === null || (used === undefined && pendingSelection === undefined)) return null
+      return pendingSelection === undefined ? used : { ...used, pendingSelection }
     } catch {
-      return unreadableRoute
+      return null
     } finally {
       try { await handle?.close?.() } catch {}
     }
@@ -774,13 +772,12 @@ export function install(rt) {
     if (ref !== 'hermes-remote/attach') return false
     try {
       const header = ctx.sessions?.get?.(sessionId)?.requestHeader?.()
-      if (header != null) {
-        const route = routeFields(header.config)
-        return readableRoute(route) ? route.provider === 'hermes-remote' : 'unreadable'
-      }
+      const route = readableRoute(header?.config)
+      if (header != null) return route ? route.provider === 'hermes-remote' : 'unreadable'
     } catch { return 'unreadable' }
     const stored = await storedRoute(sessionId)
-    return stored.unreadable === true ? 'unreadable' : stored.provider === 'hermes-remote'
+    const route = readableRoute(stored)
+    return stored === null ? 'unreadable' : route?.provider === 'hermes-remote'
   }
 
   const unreadableRouteMessage = bot => `${bot.name} could not switch because its current Session route could not be read.`
