@@ -197,3 +197,45 @@ test('a group Session at Read only reads OFF while the direct chat is ON', () =>
   assert.equal(rt.nativeToolsEligible('group-a'), false)
   assert.equal(rt.nativeToolsFor('task-a'), true)
 })
+
+// #1564 Antigravity: its switch is offered only with an acp-dsh that lists it in `nativeArgsAgents`.
+const AGY = 'acp-antigravity/default'
+const ARGS_AGENTS = { nativeArgsAgents: ['acp-antigravity', 'acp-omp'] }
+for (const [label, acpAgents] of [
+  ['no acp-dsh', undefined],
+  ['an older acp-dsh without nativeArgsAgents', { endNative() {} }],
+  ['an acp-dsh listing only omp', { nativeArgsAgents: ['acp-omp'] }],
+  ['an unreadable list', { get nativeArgsAgents() { throw new Error('unreadable') } }],
+]) {
+  test(`an Antigravity Bot with ${label} is unoffered: no row, and ON is refused`, async () => {
+    const rt = runtime({ a: { model: AGY, nativeTools: undefined }, services: acpAgents === undefined ? {} : { acpAgents }, ...RETIRED })
+    assert.equal(rt.nativeToolsBlock(rt.botOf('a')), 'unoffered')
+    assert.equal(rt.nativeToolsFor('direct-a'), false)
+    await assert.rejects(() => rt.setNativeTools('a', { nativeTools: true }), error => error.message === "Native tools are not offered for this Bot's agent.")
+    assert.equal(rt.botOf('a').nativeTools, undefined)
+  })
+}
+
+test('with an acp-dsh that offers it, an Antigravity Bot saves ON tagged for Antigravity and reads it in every chat', async () => {
+  const rt = runtime({ a: { model: AGY, nativeTools: undefined }, session: {}, services: { acpAgents: ARGS_AGENTS }, ...RETIRED })
+  assert.equal(rt.nativeToolsBlock(rt.botOf('a')), undefined)
+  await rt.setNativeTools('a', { nativeTools: true })
+  assert.equal(rt.botOf('a').nativeTools, true)
+  assert.equal(rt.botOf('a').nativeToolsAgent, 'acp-antigravity')
+  for (const id of ['direct-a', 'group-a', 'task-a']) assert.equal(rt.nativeToolsFor(id), true, id)
+  // omp is not gated by the list.
+  const omp = runtime({ a: { model: 'acp-omp/default', nativeTools: undefined }, ...RETIRED })
+  assert.equal(omp.nativeToolsBlock(omp.botOf('a')), undefined)
+})
+
+test('an Antigravity Bot at Read only, or with denied tools, is refused with the existing sentences', async () => {
+  const readOnly = runtime({
+    a: { model: AGY, nativeTools: undefined }, session: {},
+    services: { acpAgents: ARGS_AGENTS, sandboxPolicy: { resolve: () => ({ mode: 'read-only' }) } }, ...RETIRED,
+  })
+  assert.equal(readOnly.nativeToolsBlock(readOnly.botOf('a')), 'read-only')
+  await assert.rejects(() => readOnly.setNativeTools('a', { nativeTools: true }), error => error.message === 'Not available at the Read only level.')
+  const denied = runtime({ a: { model: AGY, nativeTools: undefined, denyTools: ['acp_tool'] }, session: {}, services: { acpAgents: ARGS_AGENTS }, ...RETIRED })
+  assert.equal(denied.nativeToolsBlock(denied.botOf('a')), 'restricted')
+  await assert.rejects(() => denied.setNativeTools('a', { nativeTools: true }), error => error.message === 'Not available while this Bot has shell access off or denied tools.')
+})

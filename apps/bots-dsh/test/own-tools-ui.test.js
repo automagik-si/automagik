@@ -196,6 +196,16 @@ test('Details names what to change for a Bot already denying acp_tool on such a 
   assert.equal(noticeOf(drawer({ id: 'c', name: 'C', sessionId: 'c', model: SOL, denyTools: ['acp_tool'] })).length, 0)
 })
 
+// #1564 Antigravity: with its switch, denied tools lock it OFF, so nothing runs and Details drops
+// the notice; an acp-dsh that does not offer the switch (`unoffered`) still runs agy's tools.
+test('Details drops the own-tools notice for an Antigravity Bot with its switch, and keeps it while unoffered', () => {
+  const agy = { id: 'g', name: 'G', sessionId: 'g', model: AGY, ownTools: true, denyTools: ['acp_tool'], nativeToolsBlock: 'restricted' }
+  assert.equal(noticeOf(drawer(agy)).length, 0)
+  const unoffered = noticeOf(drawer({ ...agy, nativeToolsBlock: 'unoffered' }))
+  assert.equal(unoffered.length, 1)
+  assert.equal(textOf(unoffered[0]), OWN_TOOLS_NOTICE)
+})
+
 test('every own-tools text reads in Chinese and in Brazilian Portuguese, host refusals included', () => {
   const texts = [OWN_TOOLS_MODEL_TEXT, OWN_TOOLS_MENU_HINT, OWN_TOOLS_DENY_TEXT, OWN_TOOLS_NOTICE, OWN_TOOLS_CREATE_TEXT]
   const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))

@@ -5,8 +5,11 @@
 // are (host/own-tools.js) and marks them `ownTools` in the view; the client only reads that.
 
 // Agents whose own tools always run: no bridge and no native-tools switch. Hermes is left out
-// by the owner's decision on #2026. Revisit if acp-dsh gives Antigravity a bridge or a native
-// switch (#2048). A Codex model is one when acp-dsh knows it keeps its own tools.
+// by the owner's decision on #2026. Antigravity has the native-tools switch now (#1564), and the
+// rule is kept on purpose (the lead's decision 4): a Bot that denies acp_tool still cannot move to
+// it. Only Details drops the notice for it (details-drawer.js): denied tools lock its switch OFF,
+// so nothing runs, unless acp-dsh does not offer the switch (`unoffered`). A Codex model is one
+// when acp-dsh knows it keeps its own tools.
 export const OWN_TOOLS_AGENTS = Object.freeze(['acp-antigravity'])
 
 export const OWN_TOOLS_MODEL_TEXT = 'This Bot denies acp_tool, and this model runs its own tools anyway. '
