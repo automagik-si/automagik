@@ -124,11 +124,11 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   `.solver/notes.md` in its folder, never dates the plan side), at most 4 verdicts (the last
   whole-word SHIP, FIX-FIRST or BLOCKED in a reply from `reviewerId` that starts a line, follows
   `Verdict:` or ends a line after a sentence, never asked, one of a list of options or inside a
-  fenced code block), the last delivery's mark, and the first guard verdict's time. No view
-  carries `reviewTrack`: the owner's view shows only `reviewMark`, the last mark (plan and result
-  reviewed, plan unreviewed, result unreviewed, delivered before the reviewer answered, fresh
-  session not checked, or no reviewer), and neither field is ever a caller-view field. Like the Solver marker it grants and refuses
-  nothing; delivery 1.5's hard guard keys on its own user-only field.
+  fenced code block), the last delivery's mark, and the first guard verdict's time. No view carries
+  `reviewTrack`: the owner's view shows only `reviewMark`, the last mark (plan and result reviewed,
+  plan unreviewed, result unreviewed, delivered before the reviewer answered, fresh session not
+  checked, or no reviewer), and neither field is ever a caller-view field. Like the Solver marker it
+  grants and refuses nothing; delivery 1.5's hard guard keys on its own user-only field.
 - **Solver review guard** (delivery 1.5): the stored field `reviewGuard` (`true` or absent). It is
   set by the person (the New Solver tick through `create-bot`, with a kept `reviewerId`; the
   Details switch through `update-bot`, carrying it on its own), or once by the host's upgrade for
@@ -175,6 +175,7 @@ work refused.
    view field, i18n (en, zh, pt-BR). Plugin lane. Acceptance: the issue's "Done when" on the
    installed app. Rollback: reverting the release removes the line and the dialog; Bots made by it
    stay ordinary Bots.
+
 1.5. **D1.5 (#2056):** the review guard. Plugin lane. Acceptance: the installed-app rows in its
    PR. Rollback: reverting the release removes the switch; the stored field is ignored.
 2. **D2:** `roles/solver/` official role (tag, prompt part, pinned version); the dialog attaches it

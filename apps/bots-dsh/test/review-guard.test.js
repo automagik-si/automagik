@@ -694,6 +694,36 @@ test('G16/G16b: a held native subagent question is rejected first in the approva
     answer = await ask(req)
     assert.ok(answer.reached.length > 1, JSON.stringify(answer))
   }
+  // The guarded Solver's group Session and task run are not its own chat (G6): their nested
+  // native questions go on to the rest of the chain, never refused by the guard (DG-1).
+  rt.groupOwners.set('group-1', { botId: bot.id, roomId: 'room-1' })
+  rt.state.tasks = { ...rt.state.tasks, 'task-1': { from: bot.id, title: 'side' } }
+  stops.length = 0
+  for (const sessionId of ['group-1', 'task-1']) {
+    assert.equal(rt.botOfSession(sessionId, { id: sessionId }), rt.botOf(bot.id), sessionId)
+    // The team's card waits for the person: the question is cancelled once it got past the guard.
+    const controller = new AbortController()
+    const pending = ask(request(sessionId, edit, { signal: controller.signal }))
+    await step()
+    controller.abort()
+    answer = await pending
+    assert.ok(answer.reached.length > 1, `${sessionId}: ${JSON.stringify(answer)}`)
+    assert.notEqual(answer.outcome, 'rejected', sessionId)
+  }
+  assert.equal(stops.length, 0)
+  // An error inside the guard's check holds the guarded Solver's own question (fails closed,
+  // DG-3) and leaves another Bot's question to the rest of the chain.
+  const botOf = rt.botOf
+  rt.botOf = id => { if (id === ada.id) throw new Error('guard check failed'); return botOf(id) }
+  try {
+    answer = await ask(request(bot.id, edit))
+    assert.equal(answer.outcome, 'rejected')
+    assert.deepEqual(answer.reached, [0], 'an error in the check holds the guarded Solver\'s question')
+    answer = await ask(request(plainSolver.id, edit))
+    assert.ok(answer.reached.length > 1, JSON.stringify(answer))
+  } finally {
+    rt.botOf = botOf
+  }
   await step()
   reply(ada.id, bot.id, 'SHIP')
   answer = await ask(request(bot.id, edit))

@@ -117,13 +117,19 @@ export function install(rt) {
     const bot = rt.botOfSession?.(sessionId, agent)
     if (bot?.reviewGuard !== true) return undefined
     if (rt.ownChatLineage?.(sessionId, agent, bot) !== true) return undefined
-    const mirror = request.mirrorCall
-    let base
-    try { base = agent?.session === undefined ? undefined : rt.sessionFolder?.(agent.session) } catch {}
-    const held = reviewGuardHolds(bot, true, 'acp_tool', isRecord(mirror) ? mirror : undefined, undefined, base)
-    if (held === undefined) return undefined
-    rt.noteStop?.(sessionId, { why: held.why, ...(typeof mirror?.title === 'string' ? { tool: mirror.title } : {}), callId: request.callId, text: held.text, child: true }, agent)
-    return held
+    // From here the question is the guarded Bot's own: an error holds it (fails closed, as the
+    // executor's path does), and only this Bot's question is refused (DG-3).
+    try {
+      const mirror = request.mirrorCall
+      let base
+      try { base = agent?.session === undefined ? undefined : rt.sessionFolder?.(agent.session) } catch {}
+      const held = reviewGuardHolds(bot, true, 'acp_tool', isRecord(mirror) ? mirror : undefined, undefined, base)
+      if (held === undefined) return undefined
+      rt.noteStop?.(sessionId, { why: held.why, ...(typeof mirror?.title === 'string' ? { tool: mirror.title } : {}), callId: request.callId, text: held.text, child: true }, agent)
+      return held
+    } catch {
+      return { why: 'guard', text: 'held' }
+    }
   }
 
   /**

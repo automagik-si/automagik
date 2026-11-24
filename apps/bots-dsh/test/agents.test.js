@@ -507,6 +507,29 @@ test('adoption is additive, retains registration, and rollback restores the orig
   assert.equal(restricted.length, count + 2)
 })
 
+// RFC 0048 delivery 1.5: the review fields are the New Solver dialog's and the person's, so an
+// adopted record carries none of them, whatever the DSH bot's record held (agents.js adoption).
+test('adoption drops the review guard fields from the adopted Bot', async (t) => {
+  const { call, stop, ctx } = start(TEAM)
+  t.after(stop)
+  await call('state', {})
+  ctx.provided.set('agentPresets', { serviceFor: () => undefined, list: async () => [{ id: 'standard' }, { id: 'cordis' }] })
+  const rt = ctx.provided.get('omniTeam')
+  const entry = (await call('add-agent', { name: 'Guarded', profile: 'cordis' })).value
+  const fields = ['reviewGuard', 'reviewerId', 'reviewGuardNotice', 'reviewTrack']
+  Object.assign(rt.state.agents[entry.id], {
+    reviewGuard: true,
+    reviewerId: 'reviewer-bot',
+    reviewGuardNotice: { sessionId: 'notice-session' },
+    reviewTrack: { requested: true, requestAt: 1, openedBy: 'person' },
+  })
+  const adopted = await call('agent-bot-adopt', { agentId: entry.id })
+  assert.equal(adopted.ok, true, adopted.error?.message)
+  const bot = rt.state.bots[adopted.value.botId]
+  assert.equal(bot.kind, 'dsh')
+  for (const key of fields) assert.equal(Object.hasOwn(bot, key), false, key)
+})
+
 test('adoption and rollback save failures restore both records without archiving', async (t) => {
   const { call, stop, ctx, archived } = start(TEAM)
   t.after(stop)
