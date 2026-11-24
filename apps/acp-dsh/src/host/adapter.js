@@ -1979,7 +1979,11 @@ export class AcpAdapter extends LlmAdapter {
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
               // In native-tools mode a built-in call is the point, not drift: it gets its mirror
               // card and DSH's approval like any call of an agent without the bridge.
-              onToolCall: tool => { if (!spawnNative) this.checkDrift(sessionId, agent, tool) },
+              onToolCall: tool => {
+                if (!spawnNative && this.live.get(sessionId) === state && state.run === run) {
+                  this.checkDrift(sessionId, agent, tool)
+                }
+              },
               onIgnored: message => this.warn(message),
               onRefusedMcp: tool => this.warn(`${agent.name} asked to run an MCP tool of ${typeof tool.mcpServer === 'string' ? `server "${tool.mcpServer.slice(0, 80)}"` : 'an unnamed server'}: refused, only the ${BRIDGE_NAME} bridge's tools run with DSH's tools on`),
               onMode: seen => this.diagnostics?.mode(sessionId, state, seen),

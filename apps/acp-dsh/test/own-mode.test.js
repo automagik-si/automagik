@@ -701,11 +701,20 @@ const archiveChild = (w, chat) => {
   return child
 }
 
-const archiveExited = child => within(
-  child.exitCode !== null || child.signalCode !== null ? Promise.resolve()
-    : new Promise(resolve => child.once('exit', resolve)),
-  'the archived child exit', KILL_AFTER_MS + 3000,
-)
+const archiveExited = child => {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true)
+  return new Promise(resolve => {
+    const exited = () => {
+      clearTimeout(timer)
+      resolve(true)
+    }
+    const timer = setTimeout(() => {
+      child.off('exit', exited)
+      resolve(false)
+    }, KILL_AFTER_MS + 3000)
+    child.once('exit', exited)
+  })
+}
 const quietArchive = rows => assert.deepEqual(rows, [{ type: 'finish', reason: { kind: 'stop' } }])
 
 test('acp archive 1 ends an idle ordinary run', async t => {
@@ -714,7 +723,7 @@ test('acp archive 1 ends an idle ordinary run', async t => {
   await archiveReply(a, 'plain first answer')
   const child = archiveChild(w, a)
   await w.archive(a.id)
-  await archiveExited(child)
+  assert.ok(await archiveExited(child), `Archived child PID ${child.pid} survived the exit deadline`)
   assert.equal(w.adapter.live.has(a.id), false)
 })
 
@@ -727,7 +736,7 @@ test('acp archive 2 leaves the other run on its original child', async t => {
   await archiveReply(b, 'plain control')
   const control = archiveChild(w, b)
   await w.archive(a.id)
-  await archiveExited(target)
+  assert.ok(await archiveExited(target), `Archived child PID ${target.pid} survived the exit deadline`)
   await archiveReply(b, 'plain control again')
   assert.equal(archiveChild(w, b), control)
   assert.equal(w.events('prompt').at(-1).pid, control.pid)
@@ -743,7 +752,7 @@ test('acp archive 3 ignores an unknown id and ends the known run', async t => {
   await archiveReply(a, 'plain after unknown id')
   assert.equal(archiveChild(w, a), child)
   await w.archive(a.id)
-  await archiveExited(child)
+  assert.ok(await archiveExited(child), `Archived child PID ${child.pid} survived the exit deadline`)
 })
 
 test('acp archive 4 suppresses a late start and connector recovery', async t => {
@@ -874,7 +883,7 @@ test('acp archive 5 keeps an undone replacement through old cleanup', async t =>
     assert.ok(replacement.fileOwner !== originalOwner, 'Undo reused the original file owner')
     assert.ok(replacement.fileOwner, 'Undo did not create a replacement file owner')
     assert.equal(w.events('new-session').at(-1).pid, child.pid)
-    await archiveExited(original)
+    assert.ok(await archiveExited(original), `Archived child PID ${original.pid} survived the exit deadline`)
 
     // Keep Cordis objects out of the assertion diagnostics.
     const assertReplacement = after => {
@@ -928,4 +937,52 @@ test('acp archive 6 revokes a staged image grant without a run', async t => {
   assert.deepEqual(prepare.mock.calls[0].arguments[0].sessionFiles.files, [])
   assert.notEqual(w.adapter.live.get(a.id).fileOwner, owner)
   assert.ok(w.adapter.live.get(a.id).fileOwner)
+})
+
+test('acp archive 7 ignores a late tool update from the archived run', async t => {
+  const bridge = archiveBarrier()
+  const w = await world(t, {
+    bridge: true,
+    spec: { drift: true },
+    bash: () => {
+      bridge.enter()
+      return bridge.released
+    },
+  })
+  const a = w.chat('archive-a')
+  await archiveReply(a, 'plain original')
+  const original = archiveChild(w, a)
+  const oldRun = w.adapter.live.get(a.id).run
+  const oldSessionId = oldRun.sessionId
+
+  await w.archive(a.id)
+  w.undo(a.id)
+  await archiveReply(a, 'plain fresh after Undo')
+  const child = archiveChild(w, a)
+  const replacement = w.adapter.live.get(a.id).run
+  assert.ok(child !== original, 'Undo reused the original child')
+
+  const answering = a.step({ input: [said('bridge bash')] })
+  const settled = Promise.allSettled([answering])
+  try {
+    await within(bridge.entered, 'the replacement bridge call')
+    assert.equal(replacement.busy, true)
+    // Deliver the buffered update at the same entry point as the old child's stdout.
+    await oldRun.onUpdate({
+      sessionUpdate: 'tool_call_update', toolCallId: 'late-archived-call',
+      name: 'Bash', title: 'Run echo archived', kind: 'execute', status: 'in_progress',
+    }, oldSessionId)
+    assert.equal(replacement.cancelled, false, 'Late tool update cancelled the replacement')
+  } finally {
+    bridge.release()
+    await settled
+  }
+
+  const rows = await answering
+  assert.equal(rows.at(-1)?.reason?.kind, 'stop', JSON.stringify(rows))
+  assert.ok(rows.some(row =>
+    row.type === 'block-end' && row.block.type === 'text' && row.block.text.includes('The bridge said: ran bash'),
+  ), JSON.stringify(rows))
+  assert.ok(archiveChild(w, a) === child, 'The replacement reply changed its child')
+  assert.equal(w.events('prompt').at(-1).pid, child.pid)
 })
