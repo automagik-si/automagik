@@ -1050,6 +1050,58 @@ test('KG8 a stale pick cannot reset a newer pick\'s retry count in the next grou
   assert.equal(secondRoom.sessions.b1, 'g2')
 })
 
+test('KG9 returning to the same target leaves the newer pick with only two attempts', async t => {
+  const target = 'acp-claude/default'
+  const originalRoute = 'deepseek/v4'
+  const b = bench({ model: target, groupRoute: originalRoute })
+  const resolving = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  t.after(() => { release.resolve(); b.ctx.dispose() })
+  const secondRoom = { id: 'r2', name: 'Release room', members: ['b1'], sessions: { b1: 'g2' }, segments: {} }
+  b.rt.state.rooms.r2 = secondRoom
+  b.logOf.set('g2', b.logOf.get('g1'))
+  const secondGroup = b.makeAgent('g2', { ...b.gSession, id: 'g2' })
+  b.ctx.emit('agent/created', { agent: secondGroup })
+  b.group.status = 'running'
+
+  const resolve = b.rt.resolveAgent
+  b.rt.resolveAgent = async id => {
+    if (id === 'g1') {
+      b.rt.resolveAgent = resolve
+      resolving.resolve()
+      await release.promise
+    }
+    return resolve(id)
+  }
+  const oldest = b.rt.followGroups(b.bot)
+  await resolving.promise
+
+  const attempts = []
+  b.rt.selectSessionModel = async (id, selection) => {
+    attempts.push([id, `${selection.provider}/${selection.model}`])
+    throw new Error('not signed in')
+  }
+  b.bot.model = b.bot.appliedModel = originalRoute
+  await b.rt.followGroups(b.bot)
+  assert.deepEqual(b.jobs(), [])
+
+  b.bot.model = b.bot.appliedModel = target
+  await b.rt.followGroups(b.bot)
+  await b.settled()
+  assert.deepEqual(attempts, [['s2', target]])
+
+  const retry = message(SOURCE_KIND, '[Group chat] can you retry?', ROOM_CALL)
+  assert.equal((await b.preStep('g2', { messages: [retry] })).passed, false)
+  await b.settled()
+  assert.deepEqual(attempts, [['s2', target], ['s3', target]])
+
+  release.resolve()
+  await oldest
+  await b.settled()
+  assert.deepEqual(attempts, [['s2', target], ['s3', target]])
+  assert.equal(secondRoom.sessions.b1, 'g2')
+})
+
 // GX-3: another member's part never moves on this Bot's pick, even when a list names it.
 test('G9 another member\'s group part stays on its route and gets no job', async t => {
   const b = bench()

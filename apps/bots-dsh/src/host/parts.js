@@ -1938,6 +1938,8 @@ export function install(rt) {
   // Session waits for the Bot's next pick.
   /** @type {Map<string, {target:string, count:number}>} */
   const followFailures = new Map()
+  // The latest follow dispatch for each Bot, even if it picked the same model again.
+  const followDispatches = new WeakMap()
   // A pick, removal or part move can supersede a follow while it awaits a route or agent.
   function currentGroupFollow(sessionId, bot, target) {
     const place = placeOf(sessionId)
@@ -1981,8 +1983,11 @@ export function install(rt) {
   // route (applyModelHeld keeps such a Session's route; models.js). Only a pick starts it: a
   // model applied at start or by failover moves nothing.
   async function followGroups(bot) {
-    const target = bot?.model ?? bot?.appliedModel
+    const target = bot.model ?? bot.appliedModel
+    const dispatch = Symbol()
+    followDispatches.set(bot, dispatch)
     for (const sessionId of rt.groupSessionsOf?.(bot.id) ?? []) {
+      if (followDispatches.get(bot) !== dispatch) return
       await followGroup(sessionId, bot, target, { pick: true })
         .catch(error => rt.warn('ds-bot: the group Session %s of %s did not follow its agent switch: %s', sessionId, bot.name, error?.message ?? error))
     }
@@ -2696,7 +2701,7 @@ export function install(rt) {
       await abandon('conversation changed')
       return
     }
-    // S3: the handoff into the fresh part while nothing can reach it.
+    // S3: queue the handoff before the Bot or group pointer moves to the fresh part.
     const resume = job.resume === true
     let fresh
     let folder
@@ -2720,7 +2725,7 @@ export function install(rt) {
       }))
       const text = routeOfRef(job.target).route === 'acp' ? capForAcp(build, carried) : build(carried)
       freshParts.set(freshId, estimateTokens(text))
-      // Durable, and it wakes nothing: the part starts only after the commit below.
+      // Prepending the handoff does not wake the fresh part.
       fresh.inbox.prepend('next-turn', createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
       await ctx.sessions.flush(fresh.session)
       // Watched from here, before anything can start the fresh part's first turn.
