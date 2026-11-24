@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { inTestRoots } from "../mods/am-sidebar/coreSocket.mjs";
 import { isGuardFolder } from "../mods/am-sidebar/hcGuard.mjs";
+import { appendLine } from "./log-lines.mjs";
 
 const [socket, ready, control] = process.argv.slice(2);
 const server = createServer((client) => {
@@ -20,6 +21,14 @@ const server = createServer((client) => {
       input = input.slice(newline + 1);
       const env = JSON.parse(readFileSync(control, "utf8"));
       if (env.HC_FAKE_RPC_LOG) appendFileSync(env.HC_FAKE_RPC_LOG, JSON.stringify({ socket, ...request }) + "\n");
+      if (env.HC_FAKE_CUTOFF_LOG) appendLine(env.HC_FAKE_CUTOFF_LOG, JSON.stringify({ kind: "rpc", socket, method: request.method }));
+      if (request.method === "server.status" && env.HC_FAKE_CUTOFF_STATUS) {
+        const { statusMode, ...result } = env.HC_FAKE_CUTOFF_STATUS;
+        if (statusMode === "hang") return;
+        if (statusMode === "malformed") { client.end("not JSON\n"); return; }
+        client.end(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`);
+        return;
+      }
       if (request.method === "proxy.workerTransport" && env.HC_FAKE_PROXY_TERMINAL) {
         const { core } = JSON.parse(readFileSync(env.HC_FAKE_STATE, "utf8"));
         client.end(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { v: 1, terminal: env.HC_FAKE_PROXY_TERMINAL, core } })}\n`);

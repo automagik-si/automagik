@@ -946,6 +946,15 @@ host, and a bot started there runs the pack's normal linked-machine launch.
   machine names. The log and JSON output omit paths, sockets and commands. The loss report reads
   the attach ledger to say whether each seat was attached again. Only a pool holder's dropped line
   produces a `holder_unreachable` record.
+- `am holders` also checks, on Linux, for a holder process cut off from its core. It looks for
+  a live holder process on a pool core's holder socket that no pool core lists in two reads.
+  The second read happens only when the first finds a candidate. Set
+  `AUTOMAGIK_HERDR_CUTOFF_RECHECK_MS` to change the delay (5000 ms by default). The check gives
+  the holder name, process ID and number of same-user live direct child processes at the second
+  read. With `--json`, the result is in `cutOff`. The check uses herdr-core's internal process
+  arguments and socket names. An incomplete check or an unsupported platform such as macOS
+  reports `not checked`. The check itself starts nothing, stops nothing, records no loss and writes no
+  file. It does not change what `am revive` does.
 - A `holders.json` that isn't JSON, or whose limit or holder entries are bad, is said on stderr
   (so `--json` still parses) and the run keeps the one-holder default instead of silently
   turning spreading off; fix it with `am holders limit N` / `am holders add` / `remove`.
