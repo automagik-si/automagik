@@ -1985,8 +1985,9 @@ export function install(rt) {
     const failed = followFailures.get(sessionId)
     const count = failed?.target === target ? failed.count + 1 : 1
     followFailures.set(sessionId, { target, count })
-    if (count < 2) pendingFollows.set(sessionId, target)
-    else pendingFollows.delete(sessionId)
+    // A newer pick's pending follow stays: a stale target never replaces it.
+    if (count < 2) { if (!pendingFollows.has(sessionId)) pendingFollows.set(sessionId, target) }
+    else if (pendingFollows.get(sessionId) === target) pendingFollows.delete(sessionId)
   }
   // A step about to run a Bot's own chat with history on another harness than the Bot's model
   // (a selection DSH's /model made on the Session): it is not the person's switch.
@@ -2400,6 +2401,17 @@ export function install(rt) {
       rt.warn('ds-bot: the first call in the fresh part of %s failed before any answer; it is back on the part it came from, which was not archived', bot.name)
       await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
         .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', bot.name, error))
+      if (crossing !== undefined && !group) {
+        // The agent switch goes back with its groups: a group follow of the same pick still
+        // awaiting its first answer goes back too, and one that already answered on the new
+        // agent follows the Bot back with a handoff of its own.
+        for (const [groupFresh, groupEntry] of [...awaiting]) {
+          if (groupEntry.botId === bot.id && groupEntry.job?.crossing?.group === true && groupEntry.expected === entry.expected) {
+            void revertSwitch(groupFresh, groupEntry, failure).catch(error => rt.warn('ds-bot: group part %s not taken back: %s', groupFresh, error))
+          }
+        }
+        void followGroups(bot)
+      }
       return 'back'
     } finally { leave() }
   }

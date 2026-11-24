@@ -200,7 +200,7 @@ function bench({ model = 'deepseek/v4', groupRoute = 'deepseek/v4', ownEmpty = f
   const jobs = () => [...rt.switchJobs()]
   const followed = id => waitFor(() => room.sessions.b1 === id && jobs().length === 0)
   const settled = () => waitFor(() => jobs().length === 0)
-  return { rt, ctx, agent, group, bot, room, calls, session, gSession, groupMessages, messages, logOf, agents, handoffOf, sessionEvent, preStep, listener, jobs, followed, settled }
+  return { rt, ctx, agent, group, bot, room, calls, session, gSession, groupMessages, messages, logOf, agents, makeAgent, handoffOf, sessionEvent, preStep, listener, jobs, followed, settled }
 }
 
 // rt.warn's arguments, joined: the template, then its values.
@@ -712,4 +712,162 @@ test('ME-1 with no way back, a handoff rerun that cannot run answers the cut sen
   assert.equal(b.bot.sessionId, 's2')
   assert.equal(cutAnswers(b).length, 1)
   assert.match(cutAnswers(b)[0].text, /^Ops could not answer your message: its model call failed \(MODEL_ACCESS_REQUIRED: Sign in\)/)
+})
+
+// GX-1: the own chat's switch goes back whole, its groups with it. A group follow of the same
+// pick still waiting for its first answer goes back to its old part; one that already answered
+// on the new agent follows the Bot back with a handoff of its own.
+const overloaded = { kind: 'error', error: { code: 'OVERLOADED', message: 'busy' } }
+test('G10 own chat goes back after its groups followed: the group part is g1 again, nothing left on the new agent', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  const before = JSON.stringify(b.bot)
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.followed('s3')
+  b.sessionEvent('s2', { type: 'turn/end', data: { turn: 1, reason: overloaded } })
+  await waitFor(() => b.calls.archived.includes('s2') && b.calls.archived.includes('s3'))
+  await tick()
+  await b.settled()
+  assert.equal(b.bot.sessionId, 's1')
+  assert.equal(b.room.sessions.b1, 'g1')
+  assert.deepEqual(b.room.segments.b1, [])
+  assert.equal(JSON.stringify({ ...b.bot, segments: b.bot.segments?.length ? b.bot.segments : undefined }), before)
+  // Nothing more moves: no third part, nothing selected on the old group part, which stays.
+  assert.deepEqual(b.calls.created, ['s2', 's3'])
+  assert.deepEqual(selectedOn(b, 'g1'), [])
+  assert.equal(b.calls.archived.includes('g1'), false)
+  assert.equal(b.rt.state.switching.g1, undefined)
+  // The group went back with the Bot: no follow of its own toward either agent, no failure.
+  assert.deepEqual(b.calls.warnings.filter(line => /keeps its route in group Session|not taken back|did not follow/.test(line)), [])
+})
+
+test('G10 a group part that already answered on the new agent follows the Bot back with its own handoff', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.followed('s3')
+  // The group part answers on Claude Code: its switch settles and the old group part goes.
+  const s3 = b.agents.get('s3').session
+  s3.requestHeader = () => ({ config: { provider: 'acp-claude', model: 'default', maxTokens: 1000 } })
+  s3.deriveMessages = () => [b.handoffOf('s3'), { role: 'assistant', content: [{ type: 'text', text: 'noted' }] }]
+  b.sessionEvent('s3', { type: 'turn/start', data: { turn: 1 } })
+  b.sessionEvent('s3', { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'noted' }], source: { provider: 'acp-claude', model: 'default' } } } })
+  b.sessionEvent('s3', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  await waitFor(() => b.calls.archived.includes('g1'))
+  b.rt.config.crossingNoteTimeoutMs = 20
+  b.sessionEvent('s2', { type: 'turn/end', data: { turn: 1, reason: overloaded } })
+  await waitFor(() => b.bot.sessionId === 's1')
+  await b.followed('s4')
+  assert.deepEqual({ model: b.bot.model, appliedModel: b.bot.appliedModel }, { model: 'deepseek/v4', appliedModel: 'deepseek/v4' })
+  assert.deepEqual(selectedOn(b, 's4'), [['s4', 'deepseek/v4']])
+  assert.match(textOf(b.handoffOf('s4').content), /from Claude Code to DeepSeek V4; in this group you are DeepSeek V4 now/)
+  assert.deepEqual(b.room.segments.b1.map(segment => [segment.sessionId, segment.switchedTo]), [['g1', 'acp-claude/default'], ['s3', 'deepseek/v4']])
+})
+
+// GX-2: a follow toward an older pick that fails after a newer pick never replaces the newer
+// pick's pending follow: the group follows the newer pick at its next step.
+test('G5 a stale follow that fails never overrides the newer pick\'s follow', async t => {
+  const b = bench({ model: 'acp-claude/default' })
+  t.after(() => b.ctx.dispose())
+  const gate = Promise.withResolvers()
+  b.ctx.llm.stream = (options) => {
+    b.calls.notes.push(options)
+    return (async function* () {
+      await gate.promise
+      yield { type: 'text-delta', index: 0, text: NOTE }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })()
+  }
+  await b.rt.followGroups(b.bot)
+  await waitFor(() => b.calls.notes.length === 1)
+  // The person picks Codex while the follow toward Claude Code is still in its note.
+  b.bot.model = b.bot.appliedModel = 'acp-codex/default'
+  await b.rt.followGroups(b.bot)
+  gate.resolve()
+  await b.settled()
+  assert.equal(b.room.sessions.b1, 'g1')
+  const step = await b.preStep('g1', { messages: [message(SOURCE_KIND, '[Group chat] which agent?', { role: 'room', exchangeId: 'e-which' })] })
+  assert.equal(step.passed, false)
+  await waitFor(() => b.room.sessions.b1 !== 'g1' && b.jobs().length === 0)
+  const part = b.room.sessions.b1
+  assert.deepEqual(selectedOn(b, part), [[part, 'acp-codex/default']])
+  assert.deepEqual(b.room.segments.b1.map(segment => [segment.sessionId, segment.switchedTo]), [['g1', 'acp-codex/default']])
+  assert.deepEqual(selectedOn(b, 'g1'), [])
+})
+
+// GX-3: another member's part never moves on this Bot's pick, even when a list names it.
+test('G9 another member\'s group part stays on its route and gets no job', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  b.rt.state.bots.b2 = { id: 'b2', name: 'Writer', createdAt: 2, sessionId: 'w1', model: 'acp-codex/default', appliedModel: 'acp-codex/default' }
+  b.room.members.push('b2')
+  b.room.sessions.b2 = 'gb2'
+  b.makeAgent('gb2', { ...b.gSession, id: 'gb2', requestHeader: () => ({ config: { provider: 'acp-codex', model: 'default', maxTokens: 1000 } }) })
+  const owners = b.rt.groupOwners
+  b.rt.groupOwners = { get: id => (id === 'gb2' ? { botId: 'b2', roomId: 'r1' } : owners.get(id)), has: id => id === 'gb2' || owners.has(id) }
+  // A list that names every part of the Bot's rooms, the other member's too.
+  b.rt.groupSessionsOf = botId => (b.room.members.includes(botId) ? Object.values(b.room.sessions) : [])
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.followed('s3')
+  await tick()
+  await b.settled()
+  assert.equal(b.room.sessions.b2, 'gb2')
+  assert.deepEqual(b.calls.created, ['s2', 's3'])
+  assert.deepEqual(selectedOn(b, 'gb2'), [])
+  assert.equal(b.rt.state.switching.gb2, undefined)
+  assert.equal(b.calls.archived.includes('gb2'), false)
+  assert.deepEqual(b.calls.warnings.filter(line => line.includes('gb2')), [])
+})
+
+// GX-3: a Bot removed from the group before its follow starts, or between the note and the
+// commit, leaves the group as it is: abandoned, any fresh part archived, the pointer unchanged.
+test('G9 a Bot removed from the group before or during its follow: abandoned, the pointer unchanged', async t => {
+  {
+    const b = bench({ model: 'acp-claude/default' })
+    t.after(() => b.ctx.dispose())
+    b.room.members = []
+    await b.rt.followGroups(b.bot)
+    await tick()
+    await b.settled()
+    assert.equal(b.room.sessions.b1, 'g1')
+    assert.deepEqual(b.calls.created, [])
+    assert.deepEqual(b.room.segments, {})
+    assert.deepEqual(selectedOn(b, 'g1'), [])
+  }
+  {
+    const b = bench({ model: 'acp-claude/default' })
+    t.after(() => b.ctx.dispose())
+    const gate = Promise.withResolvers()
+    b.ctx.llm.stream = (options) => {
+      b.calls.notes.push(options)
+      return (async function* () {
+        await gate.promise
+        yield { type: 'text-delta', index: 0, text: NOTE }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })()
+    }
+    await b.rt.followGroups(b.bot)
+    await waitFor(() => b.calls.notes.length === 1)
+    b.room.members = []
+    gate.resolve()
+    await b.settled()
+    assert.equal(b.room.sessions.b1, 'g1')
+    assert.deepEqual(b.calls.created, ['s2'])
+    assert.equal(b.calls.archived.includes('s2'), true)
+    assert.equal(b.calls.archived.includes('g1'), false)
+    assert.deepEqual(b.room.segments.b1 ?? [], [])
+    assert.equal(b.rt.state.switching.g1, undefined)
+  }
+})
+
+// GX-3: a message waiting in the old group part at the commit goes to the fresh part, once.
+test('G9 a message waiting in the old group part at the commit is in the fresh part once, none left behind', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  b.group.inbox.nextTurn.push(message(SOURCE_KIND, '[Group chat] one more thing', { role: 'room', exchangeId: 'e-wait' }))
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.followed('s3')
+  const waiting = id => [...b.agents.get(id).inbox.nextStep, ...b.agents.get(id).inbox.nextTurn].filter(item => item.source?.exchangeId === 'e-wait').length
+  assert.equal(waiting('s3'), 1)
+  assert.equal(waiting('g1'), 0)
 })
