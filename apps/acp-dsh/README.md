@@ -228,6 +228,29 @@ that makes your harness lose all your power."
   tools, in every Session; its switch shows OFF and locked. With no Bot team ever registered,
   Codex runs as before. Existing Codex Bots keep their own tools once (Bots with shell access off
   or denied tools excepted).
+- **Antigravity Bot teams (#1564).** The **Native tools** switch keeps agy's own tools, as omp's
+  does: the same Sessions, locks and Read only rule, and, with a Bot team registered, every
+  Antigravity Session without a Bot identity (Workspace chats, the Code pane, DSH subagents, Omni
+  threads and answer children, a scheduled run with no single owner) runs OFF. ON keeps `agy acp`.
+  OFF is chat only (agy has no DSH bridge): it starts `agy acp --agent automagik-native-off
+  --cli_dir_name automagik-native-off`, with our main agent with no tools
+  (`.gemini/config/agents/automagik-native-off.md`) and our settings folder denying every tool
+  action (`.gemini/antigravity-cli/automagik-native-off/settings.json`), both written 0600 into
+  the home the child runs in at each OFF start (`src/host/agy-off.js`). `--cli_dir_name` is listed
+  by `agy acp --help` but not on agy's documentation pages. Under both, acp-dsh ends the answer at
+  the first tool call agy reports and refuses every ask. An OFF start refuses while that home
+  holds `.gemini/config/hooks.json` or `.gemini/config/plugins` (agy runs hooks outside every
+  tool layer); Switch account on Antigravity in Settings starts a new home. At each OFF start, and
+  again before each later prompt of a kept OFF process, acp-dsh reads agy's own log for that
+  process (bounded, no links) and refuses when agy says it did not load the OFF settings; with no
+  such log it warns once. agy writes no line after loading its settings, so a failure written after
+  the first answer is caught at the next turn. Native tools off was checked on the agy version in
+  `AGY_OFF_CHECKED`; another version starts OFF, warns in the host log and in Details, and rests on
+  agy honouring the two options and on acp-dsh's guard. If an agy version creates
+  `config/plugins` by itself, every OFF start refuses until Automagik changes; Switch account does
+  not help then. The Bot team shows the switch only when `nativeArgsAgents` lists
+  `acp-antigravity`. Existing Antigravity Bots keep their own tools once (Bots with shell access
+  off or denied tools excepted).
 - **Upgrade (#1564).** Once, a Bot that sat in the lock this version removes (shared with
   people, bound to an IM connection, or an active LiveShare share) with the switch on gets it
   turned off, so nothing gains native tools until the person turns it on again. A Main Bot with

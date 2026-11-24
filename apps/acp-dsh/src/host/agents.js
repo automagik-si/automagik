@@ -5,6 +5,7 @@ import { accessSync, constants, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { delimiter, dirname, join } from 'node:path'
+import { AGY_OFF_NAME } from './agy-off.js'
 import { batchSafe } from './batch-spawn.js'
 
 // Efforts as DSH lists them, from least to most.
@@ -234,6 +235,14 @@ export const AGENTS = Object.freeze({
     cliInstall: Object.freeze({ kind: 'manifest', id: 'agy', manual: true }),
     // `agy acp` (its help: "Start the Agent Client Protocol (ACP) stdio server").
     launch: Object.freeze({ kind: 'native', args: Object.freeze(['acp']) }),
+    // The Bot team's native-tools switch (#1564), by launch args as omp's: OFF adds our own main
+    // agent with no tools (`--agent`, "Agent for the ACP session") and our own settings folder
+    // denying every tool action (`--cli_dir_name`, "Subdirectory under app_data_dir for CLI
+    // settings and logs": listed by `agy acp --help` 1.5.15, not on agy's documentation pages).
+    // Both files are written at each OFF start (agy-off.js). agy updates itself, so a later agy
+    // may drop or ignore either: acp-dsh's own guard (`refuseTools`) stays the last line.
+    nativeSwitch: 'args',
+    offArgs: Object.freeze(['--agent', AGY_OFF_NAME, '--cli_dir_name', AGY_OFF_NAME]),
     // `agy acp --login`: "Log in with Google interactively, then exit (ACP terminal auth)".
     signInHint: 'agy acp --login',
     // Its own home in this installation (#2048), and its sign-in in the app: ACP `authenticate`

@@ -15,6 +15,7 @@ import {
   isAgentLoopRequest, offloadedImageText,
 } from '@deepseek-ai/dsh-llm'
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
+import { AGY_NOT_LOADED_TEXT, AGY_TOOLS_OFF_TEXT } from './agy-off.js'
 import { ACP_USAGE_LIMIT_CODES } from './usage-limit.js'
 import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
@@ -82,6 +83,10 @@ const bridgeRow = message => (
 
 const permitsNative = level => level?.sandbox === 'workspace-write' || level?.sandbox === 'danger-full-access'
 const OMP_TOOLS_OFF_TEXT = 'omp tried to use a tool while native tools are off, so this answer stopped.'
+// The agents whose switch is their launch args (agents.js `nativeSwitch: 'args'`): OFF is a
+// child with no tools of its own and no bridge, ended at the first tool call it reports.
+const ARGS_SWITCH = new Set(['acp-omp', 'acp-antigravity'])
+const toolsOffText = provider => (provider === 'acp-antigravity' ? AGY_TOOLS_OFF_TEXT : OMP_TOOLS_OFF_TEXT)
 
 const detailed = tool => (tool.rawInput !== undefined && tool.rawInput !== null && Object.keys(tool.rawInput).length > 0) || tool.permission !== undefined || tool.status !== 'pending'
 function settle(tool, ms) {
@@ -1216,12 +1221,14 @@ export class AcpAdapter extends LlmAdapter {
     return this.endClaudeSession(sessionId, why, startupWhy)
   }
 
+  // An args-switch child (omp, Antigravity) holding its own tools; the name stays for the Bot
+  // team, which calls it for every agent.
   endOmpSession(sessionId, why, startupWhy) {
     const live = this.live.get(sessionId)
-    if (!this.teamManaged() || live?.provider !== 'acp-omp' || live.nativeOff === true) return false
-    const startingNative = startupWhy !== undefined && this.starting.get(sessionId)?.provider === 'acp-omp'
+    if (!this.teamManaged() || !ARGS_SWITCH.has(live?.provider) || live.nativeOff === true) return false
+    const startingNative = startupWhy !== undefined && this.starting.get(sessionId)?.provider === live.provider
       && live.run?.promptEnded === undefined
-    return this.endSession(sessionId, startingNative ? startupWhy : why, 'acp-omp', state => state.nativeOff !== true)
+    return this.endSession(sessionId, startingNative ? startupWhy : why, live.provider, state => state.nativeOff !== true)
   }
 
   endSession(sessionId, why, provider, matches = () => true) {
@@ -1384,7 +1391,7 @@ export class AcpAdapter extends LlmAdapter {
       const claudeOn = live?.provider === 'acp-claude' && live.nativeManaged === true && live.native === true
       // A Codex process on a kept model keeps today's behaviour at Read only (Codex's own mode).
       const codexOn = live?.provider === 'acp-codex' && live.nativeManaged === true && live.native === true && live.nativeKept !== true
-      const ompOn = live?.provider === 'acp-omp' && live.nativeOff !== true
+      const ompOn = ARGS_SWITCH.has(live?.provider) && live.nativeOff !== true
       if ((claudeOn || codexOn || ompOn)
         && ((event.type === 'sandbox/mode' && event.data?.mode === 'read-only') || !permitsNative(this.readLevel(session, true)))) {
         const readOnly = 'This conversation is now Read only. Send a new message to continue.'
@@ -1794,7 +1801,7 @@ export class AcpAdapter extends LlmAdapter {
             const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
             // omp's launch spec is synchronous and it has no bridge to prepare.
             // Keep its policy decision and actual spawn in the same event-loop turn.
-            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, ...spec } = omp ? launch : await launch
+            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, offRecheck, ...spec } = omp ? launch : await launch
             if (spawnOmpManaged && entry.held !== undefined) return yield* stopped(entry.held)
             // The check measured these models with no tool block: kept from now on (B1-4 (b)). When
             // this turn's model is one of them it runs as today, in this same turn.
@@ -1819,6 +1826,8 @@ export class AcpAdapter extends LlmAdapter {
             state.offCatalog = codexOff ? offCatalog : undefined
             state.checkedCwd = codexOff ? checkedCwd : undefined
             state.nativeKept = kept
+            // Antigravity OFF: its settings check before each later prompt (agy-off.js).
+            state.offRecheck = offRecheck
             state.profileModes = profileModes
             state.sessionFileMode = sessionFileMode
             state.sessionFileEnabled = sessionFileEnabled === true
@@ -1881,7 +1890,7 @@ export class AcpAdapter extends LlmAdapter {
                 refuseTools: true,
                 onForbiddenTool: () => {
                   if (this.live.get(sessionId) === state && state.run === run) {
-                    this.endSession(sessionId, OMP_TOOLS_OFF_TEXT, options.provider,
+                    this.endSession(sessionId, toolsOffText(options.provider), options.provider,
                       candidate => candidate === state || candidate === entry)
                   }
                 },
@@ -1894,7 +1903,9 @@ export class AcpAdapter extends LlmAdapter {
                 },
               } : {}),
               refresh: agent.refresh,
-              onReady: state.bridge === undefined ? undefined : () => this.ready(agent, state),
+              // Antigravity has no bridge: its start records agy's version and, OFF, checks that it
+              // loaded its settings, after session/new and before the first prompt.
+              onReady: agyReady ?? (state.bridge === undefined ? undefined : () => this.ready(agent, state)),
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
               // In native-tools mode a built-in call is the point, not drift: it gets its mirror
               // card and DSH's approval like any call of an agent without the bridge.
@@ -2280,6 +2291,14 @@ export class AcpAdapter extends LlmAdapter {
           : startingNative && managedNativeNow && permitsNative(this.readLevel(dshAgent?.session, true))
             && this.nativeOn(agent, sessionId, options.provider)
         if (!allowed) return yield* stopForNativeChange()
+      }
+      // A kept Antigravity OFF child checks again that agy loaded its settings before each later
+      // prompt (its first prompt was checked at the start): a failure ends it, nothing is sent.
+      if (live.offRecheck !== undefined && live.run.promptEnded !== undefined) {
+        try { live.offRecheck(live.run) } catch {
+          this.end(sessionId, live)
+          return yield finish('error', AGY_NOT_LOADED_TEXT)
+        }
       }
       started()
       live.replay = undefined
