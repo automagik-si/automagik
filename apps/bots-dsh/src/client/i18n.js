@@ -1656,7 +1656,8 @@ const ZH = {
   Whale: '鲸鱼', Star: '星星', Moon: '月亮', Wave: '声波', Squircle: '圆角方', Bull: '牛角', Blossom: '花朵',
   Gumdrop: '软糖', Peanut: '花生', Bubbles: '泡泡', Saucer: '飞碟', Sprout: '嫩芽', Bunny: '兔子',
   Kitty: '小猫', Beacon: '灯塔', Plus: '加号', Magnet: '磁铁', Acorn: '橡果', Pebbles: '石子', Cushion: '靠垫',
-  Ring: '圆环', Gem: '宝石',
+  Ring: '圆环', Gem: '宝石', Puff: '绒球', Cap: '蘑菇', Bell: '铃铛', Cloud: '云朵', Spike: '刺球', Floppy: '垂耳',
+  Antenna: '天线', Cactus: '仙人掌', Bulb: '灯泡', Chick: '小鸡', Frog: '青蛙',
 
   // Colors
   Black: '黑', Brown: '棕', Red: '红', Orange: '橙', Yellow: '黄', Green: '绿', Cyan: '青', Blue: '蓝',
@@ -2963,6 +2964,8 @@ const ZH = {
   '{count} photos added to Yours.': '已有 {count} 张照片加入“你的”。',
   'Not added: {names}': '未添加：{names}',
   'Your pets': '你的宠物',
+  // A product name, kept as it is.
+  'Solvers': 'Solvers',
   'Browse codex-pets.net': '浏览 codex-pets.net',
   'Thousands of pets shared by the Codex community, in the same format. Opening it asks codex-pets.net; a pet you pick is kept on this computer.': '成千上万个由 Codex 社区分享的宠物，格式相同。打开时会访问 codex-pets.net；你选中的宠物会保存在这台电脑上。',
   'Automagik character': 'Automagik 角色',

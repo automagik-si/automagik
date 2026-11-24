@@ -108,4 +108,33 @@ test("the neutral cell's fill matches the browser bake", { skip }, async (t) => 
   }
 })
 
+// A Solver goes through the same two bakes with no path of its own: Cap, whose spots are a
+// decal over the body, so the feet, the big eyes and a paint layer are all in the cells.
+test('a Solver bakes the same headless as in the browser', { skip }, async (t) => {
+  const solver = { character: 'cap', colour: 'red' }
+  const page = await pageWithBake()
+  t.after(() => page.close())
+  const sheet = Buffer.from(await page.evaluate(async (look) => {
+    const { sheet } = await globalThis.PetBake.bakeBlobs({ shape: look.character, color: look.colour }, 1)
+    const bytes = new Uint8Array(await sheet.arrayBuffer())
+    let text = ''
+    for (let index = 0; index < bytes.length; index += 0x8000) text += String.fromCharCode(...bytes.subarray(index, index + 0x8000))
+    return btoa(text)
+  }, solver), 'base64')
+  const parts = lookParts(solver)
+  for (const name of ['neutral-0', 'jumping-2', 'waving-1', 'look-12', 'failed-3', 'running-right-1']) {
+    const cell = cellPlan().find(entry => entry.name === name)
+    const browserPixels = await sharp(sheet).extract({ left: cell.column * 192, top: cell.row * 208, width: 192, height: 208 }).ensureAlpha().raw().toBuffer()
+    const ourPixels = await renderCell(cellSvg(parts, cell.pose))
+    let total = 0
+    let painted = 0
+    for (let index = 0; index < browserPixels.length; index += 1) total += Math.abs(browserPixels[index] - ourPixels[index])
+    for (let index = 3; index < ourPixels.length; index += 4) painted += ourPixels[index] === 255 ? 1 : 0
+    const mean = total / browserPixels.length
+    t.diagnostic(`${name}: mean channel difference ${mean.toFixed(2)}`)
+    assert.ok(painted > 3000, `${name}: the cell holds the character (${painted} opaque pixels)`)
+    assert.ok(mean < 3, `${name}: mean channel difference ${mean.toFixed(2)}`)
+  }
+})
+
 test.after(() => browser?.close())

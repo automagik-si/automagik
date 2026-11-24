@@ -613,7 +613,8 @@ export const ES = {
   Whale: 'Ballena', Star: 'Estrella', Moon: 'Luna', Wave: 'Onda', Squircle: 'Cuadrículo', Bull: 'Toro', Blossom: 'Flor',
   Gumdrop: 'Gominola', Peanut: 'Cacahuete', Bubbles: 'Burbujas', Saucer: 'Platillo', Sprout: 'Brote', Bunny: 'Conejo',
   Kitty: 'Gatito', Beacon: 'Faro', Plus: 'Más', Magnet: 'Imán', Acorn: 'Bellota', Pebbles: 'Guijarros', Cushion: 'Cojín',
-  Ring: 'Anillo', Gem: 'Gema',
+  Ring: 'Anillo', Gem: 'Gema', Puff: 'Pompón', Cap: 'Seta', Bell: 'Campana', Cloud: 'Nube', Spike: 'Púas', Floppy: 'Orejas caídas',
+  Antenna: 'Antena', Cactus: 'Cactus', Bulb: 'Bombilla', Chick: 'Pollito', Frog: 'Rana',
 
   // Colors
   Black: 'Negro', Brown: 'Marrón', Red: 'Rojo', Orange: 'Naranja', Yellow: 'Amarillo', Green: 'Verde', Cyan: 'Cian', Blue: 'Azul',

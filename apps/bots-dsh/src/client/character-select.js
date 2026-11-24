@@ -1,6 +1,6 @@
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CHARACTER_COLORS, MAIN_LOOK, PICKER_SHAPES, shapeOf } from './characters.js'
+import { CHARACTERS, CHARACTER_COLORS, MAIN_LOOK, PICKER_SHAPES, SOLVER_SHAPES, shapeOf } from './characters.js'
 import { paintCss } from './inks.js'
 import { BotMark, GENIE_PET, lookOf, petOf, servedPet, UNFOLD_PET, useBaked } from './mark.js'
 import { PetSprite } from './pet.js'
@@ -9,14 +9,16 @@ import { CloseIcon } from './icons.js'
 import { t } from './i18n.js'
 import { importPhotos, loadLibrary } from './avatar-library.js'
 import { checkViewer, requestViewer, viewerChanged, viewerRefused, viewerResponse } from './viewer.js'
+import { isSolverBot } from '../shared/solver-method.js'
 
 // -------------------------------------------------------------------------
 // The character select: where a Bot's look is chosen, as a fighting game's select screen. The
 // stage on the left plays the highlighted character big, under a spotlight, with its name; the
 // roster on the right lists Automagik's own first (Genie, Omni and every character, in the
-// color picked on the stage), then the person's (pets the team keeps and Codex's own), then
-// codex-pets.net, which is asked only once that section is opened. Arrow keys move the cursor,
-// Enter picks, Escape leaves. The pick plays a jump before the select closes.
+// color picked on the stage), then the Solvers in a section of their own (a Solver Bot's chooser
+// only), then the person's (pets the team keeps and Codex's own), then codex-pets.net, which is
+// asked only once that section is opened. Arrow keys move the cursor, Enter picks, Escape leaves.
+// The pick plays a jump before the select closes.
 
 const SORTS = [['popular', 'Most liked'], ['new', 'Newest'], ['views', 'Most viewed'], ['random', 'Surprise me']]
 const sourceLine = { builtin: 'Automagik', team: 'Kept by this team', codex: 'From Codex' }
@@ -24,8 +26,11 @@ const capitalize = word => word[0].toUpperCase() + word.slice(1)
 const slug = text => String(text ?? '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'bot'
 const PICK_MS = 900
 
+const shapeEntry = shape => ({ key: `shape:${shape}`, kind: 'shape', shape, name: shapeOf(shape).label, line: 'Automagik character' })
+
 /**
- * The roster's Automagik section: Genie, Omni, the logo pet, Unfold, Wisp, then the characters.
+ * The roster's Automagik section: Genie, Omni, the logo pet, Unfold, Wisp, then the characters
+ * any Bot may pick (the Solvers have their own section: solversFor).
  * Unfold is there only where the host lists its pet (Unfold's own instance).
  */
 export function automagikRoster({ unfold = false } = {}) {
@@ -35,8 +40,29 @@ export function automagikRoster({ unfold = false } = {}) {
     { key: 'pet:builtin:automagik', kind: 'pet', pet: { source: 'builtin', id: 'automagik', name: 'Automagik', version: 2, sleep: true }, name: 'Automagik', line: 'Automagik' },
     ...(unfold ? [{ key: 'pet:builtin:unfold', kind: 'pet', pet: { ...UNFOLD_PET, name: 'Unfold' }, name: 'Unfold', line: 'Automagik' }] : []),
     { key: 'pet:builtin:wisp', kind: 'pet', pet: { source: 'builtin', id: 'wisp', name: 'Wisp', version: 2, sleep: false }, name: 'Wisp', line: 'Automagik' },
-    ...PICKER_SHAPES.filter(shape => shape !== 'octopus').map(shape => ({ key: `shape:${shape}`, kind: 'shape', shape, name: shapeOf(shape).label, line: 'Automagik character' })),
+    ...PICKER_SHAPES.filter(shape => shape !== 'octopus').map(shapeEntry),
   ]
+}
+
+/** The roster's Solvers section: the twelve, in the catalogue's order. */
+export const solverRoster = () => SOLVER_SHAPES.map(shapeEntry)
+/** The Solvers a Bot's chooser offers: all of them to a Solver Bot, none to any other. */
+export const solversFor = bot => (isSolverBot(bot) ? solverRoster() : [])
+
+/**
+ * The tile an Arrow Down (`down` 1) or Arrow Up (-1) reaches from tile `at`, given every tile's
+ * { top, left } in roster order: in the nearest row beyond, whatever section it is in, the tile
+ * nearest this one's column. A section's last row may be short and the next section starts a
+ * row, so counting tiles would drift. -1 when there is no row beyond.
+ */
+export function tileBeyond(boxes, at, down) {
+  const here = boxes[at]
+  if (!here) return -1
+  const beyond = boxes.map((box, index) => ({ box, index })).filter(({ box }) => (box.top - here.top) * down > 1)
+  if (beyond.length === 0) return -1
+  const rowTop = beyond.reduce((best, { box }) => ((box.top - best) * down < 0 ? box.top : best), beyond[0].box.top)
+  const row = beyond.filter(({ box }) => Math.abs(box.top - rowTop) <= 1)
+  return row.reduce((best, entry) => (Math.abs(entry.box.left - here.left) < Math.abs(best.box.left - here.left) ? entry : best), row[0]).index
 }
 
 /** Which roster entry a Bot wears now, by its key. */
@@ -163,13 +189,17 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   useEffect(() => { void loadPhotos() }, [])
 
   const ours = useMemo(() => automagikRoster({ unfold }), [unfold])
+  const solvers = useMemo(() => solversFor(bot), [bot.role])
   const yours = local.map(pet => ({ key: `pet:${pet.source}:${pet.id}`, kind: 'pet', pet, name: pet.name, line: sourceLine[pet.source] ?? pet.source }))
   const theirs = market.market.pets.map(pet => ({ key: `market:${pet.id}`, kind: 'market', pet, name: pet.name, line: pet.by ? t('by {name}', { name: pet.by }) : 'codex-pets.net' }))
   const photo = look.image ? [{ key: 'photo', kind: 'photo', image: look.image, name: t('Photo'), line: t('Uploaded') }] : []
   const photos = library.filter(entry => entry.image !== look.image).map(entry => ({ key: `library:${entry.id}`, kind: 'library', image: entry.image, name: entry.name || t('Photo'), line: t('Your photos') }))
-  const all = [...photo, ...photos, ...ours, ...yours, ...theirs]
-  const item = all.find(entry => entry.key === focus) ?? ours[0]
+  const all = [...photo, ...photos, ...ours, ...solvers, ...yours, ...theirs]
   const worn = currentKey(bot, look)
+  // A worn character the roster does not offer (a Solver on a Bot that is not a Solver Bot, the
+  // octopus in another color) stays on the stage, with no tile: Choose keeps it, in the picked color.
+  const wornShape = worn === `shape:${look.shape}` && Object.hasOwn(CHARACTERS, look.shape) ? shapeEntry(look.shape) : null
+  const item = all.find(entry => entry.key === focus) ?? wornShape ?? ours[0]
 
   // A new highlight greets: the fighter waves once, then stands.
   const move = (key) => { if (key !== focus) { setFocus(key); setStage('poked') } }
@@ -214,13 +244,15 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
     const tiles = [...(gridRef.current?.querySelectorAll('.bt-cs-tile') ?? [])]
     const at = tiles.findIndex(tile => tile.dataset.key === focus)
     if (event.key === 'Enter') { event.preventDefault(); pick(); return }
-    const top = tiles[at]?.offsetTop
-    const columns = Math.max(1, tiles.filter(tile => tile.offsetTop === tiles[0]?.offsetTop).length)
-    const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: columns, ArrowUp: -columns }[event.key]
-    if (step === undefined || at < 0) return
+    const across = { ArrowRight: 1, ArrowLeft: -1 }[event.key]
+    const down = { ArrowDown: 1, ArrowUp: -1 }[event.key]
+    if ((across === undefined && down === undefined) || at < 0) return
     event.preventDefault()
-    const next = tiles[Math.max(0, Math.min(tiles.length - 1, at + step))]
-    if (next && (step === 1 || step === -1 || next.offsetTop !== top)) { move(next.dataset.key); next.focus() }
+    const next = across !== undefined
+      ? tiles[Math.max(0, Math.min(tiles.length - 1, at + across))]
+      // Layout offsets, not the drawn box: the tile under the cursor is drawn lifted.
+      : tiles[tileBeyond(tiles.map(tile => ({ top: tile.offsetTop, left: tile.offsetLeft })), at, down)]
+    if (next && next !== tiles[at]) { move(next.dataset.key); next.focus() }
   }
   useLayoutEffect(() => { gridRef.current?.querySelector(`[data-key="${CSS.escape(focus)}"]`)?.focus({ preventScroll: false }) }, [])
 
@@ -270,6 +302,7 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
         h('div', { ref: gridRef, className: 'bt-cs-scroll' },
           photo.length + photos.length > 0 ? section(t('Yours'), [...photo, ...photos]) : null,
           section('Automagik', ours),
+          solvers.length > 0 ? section(t('Solvers'), solvers) : null,
           yours.length > 0 ? section(t('Your pets'), yours) : null,
           h('section', { className: 'bt-cs-sec' },
             h('h3', { className: 'bt-cs-label' }, 'codex-pets.net',

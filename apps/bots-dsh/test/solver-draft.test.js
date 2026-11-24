@@ -1,7 +1,7 @@
 // The New Solver dialog's plain helpers (RFC 0048, delivery 1).
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { CHARACTERS, DEFAULT_COLORS, DEFAULT_SHAPES } from '../src/client/characters.js'
+import { CHARACTERS, DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from '../src/client/characters.js'
 import { createPayload } from '../src/client/bot-draft.js'
 import {
   SOLVER_LOOKS, avatarOfLook, mayHaveBeenCreated, newBotBlock, reviewerChoices, reviewerName, reviewerPayload,
@@ -71,9 +71,20 @@ test('the host map decides the new Bot\'s block: null is none, a missing ref fai
   assert.deepEqual(solverCandidate({ nativeToolsNew: map }, CODEX, false), { model: CODEX, nativeToolsBlock: 'model-kept' })
 })
 
-test('the character slot: empty wears today\'s random look, unknown entries fall back, known ones are worn', () => {
-  assert.deepEqual(SOLVER_LOOKS, [])
-  const plain = solverLook({ random: () => 0 })
+test('the character slot holds the twelve Solvers: a new Solver wears one; an empty or unknown slot falls back', () => {
+  assert.deepEqual(SOLVER_LOOKS, ['puff', 'sprout', 'cap', 'bell', 'cloud', 'spike', 'floppy', 'antenna', 'cactus', 'bulb', 'chick', 'frog'].map(shape => ({ shape })))
+  assert.deepEqual(solverLook({ random: () => 0 }), { shape: 'puff', color: DEFAULT_COLORS[0] })
+  // Whatever the draw, a new Solver wears a Solver character in a default color.
+  let seed = 7
+  const random = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646 }
+  for (let index = 0; index < 50; index += 1) {
+    const look = solverLook({ random })
+    assert.ok(SOLVER_SHAPES.includes(look.shape), look.shape)
+    assert.ok(DEFAULT_COLORS.includes(look.color), look.color)
+    assert.equal(look.pet, undefined)
+  }
+  // With no look to wear, today's random look.
+  const plain = solverLook({ looks: [], random: () => 0 })
   assert.deepEqual(plain, { shape: DEFAULT_SHAPES[0], color: DEFAULT_COLORS[0] })
   assert.deepEqual(solverLook({ looks: [{ shape: 'no-such-shape' }, null, 7, { pet: { source: 'builtin', id: 'gone', version: 1 } }], random: () => 0 }), plain)
   const known = Object.keys(CHARACTERS)[3]

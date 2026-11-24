@@ -73,6 +73,21 @@ test('the vendored characters and inks are still the team plugin\'s own', () => 
   }
 })
 
+test('the companion picker lists the 21 characters any Bot may pick, and no Solver', async () => {
+  // The vendored catalogue itself (pure): companion-art.js draws React, so it is read as text.
+  const { PICKER_SHAPES, SOLVER_SHAPES } = await import('../src/client/vendor/characters.js')
+  assert.deepEqual(PICKER_SHAPES, ['whale', 'octopus', 'star', 'moon', 'wave', 'squircle', 'zed', 'hex', 'gumdrop', 'peanut', 'saucer', 'bunny', 'kitty', 'beacon', 'plus', 'magnet', 'acorn', 'pebbles', 'cushion', 'ring', 'gem'])
+  assert.equal(SOLVER_SHAPES.length, 12)
+  assert.deepEqual(PICKER_SHAPES.filter(id => SOLVER_SHAPES.includes(id)), [])
+  // The picker draws exactly that list, as one grid.
+  const art = readFileSync(new URL('../src/client/companion-art.js', import.meta.url), 'utf8')
+  assert.ok(art.includes('export const SHAPES = PICKER_SHAPES\n'))
+  assert.ok(!art.includes('SOLVER_SHAPES'))
+  const step = readFileSync(new URL('../src/client/companion.js', import.meta.url), 'utf8')
+  assert.ok(step.includes('SHAPES.map(id => h(\'button\', {'))
+  assert.ok(!step.includes('Solvers') && !step.includes('SOLVER_SHAPES'))
+})
+
 test('companion says which image source is ready, and never what it holds', async () => {
   assert.equal((await host().handle('companion')).value.generate, null)
 
