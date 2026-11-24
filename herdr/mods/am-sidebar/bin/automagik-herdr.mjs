@@ -4154,10 +4154,17 @@ function writePrivateStateFile(path, text) {
   chmodSync(path, 0o600);
 }
 
-/** Writes the pool 0600 in a 0700 folder, never through a symlink. */
-function writeHolders(config) {
+function checkHolderPoolSize(text) {
+  if (Buffer.byteLength(text) > MAX_HOLDER_POOL_BYTES) {
+    throw new CliError(`holders: the setting was not saved: the pool would exceed ${MAX_HOLDER_POOL_BYTES / 1024} KiB.`);
+  }
+}
+
+/** Writes the serialized pool 0600 in a 0700 folder, never through a symlink. */
+function writeHolders(text) {
+  checkHolderPoolSize(text);
   try {
-    writePrivateStateFile(holdersPath(), holdersText(config));
+    writePrivateStateFile(holdersPath(), text);
   } catch (e) {
     throw new CliError(`holders: the setting was not saved: ${e?.message ?? e}`);
   }
@@ -4878,7 +4885,7 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
     if (!Number.isSafeInteger(n) || n < 1 || n > MAX_HOLDER_LIMIT) throw new CliError(`the limit is a whole number from 1 to ${MAX_HOLDER_LIMIT}.`, 2);
     const config = readHolders();
     config.limit = n;
-    writeHolders(config);
+    writeHolders(holdersText(config));
     return opts.json ? { limit: n } : `holders: limit ${n} agents each`;
   }
   if (verb === "up") {
@@ -4895,13 +4902,15 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
     if (why) throw new CliError(why, 2);
     if (!HOLDER_NAME.test(arg)) throw new CliError(`"${arg}" isn't a holder name.`, 2);
     const session = `am-holder-${arg}`;
+    config.holders = [...config.holders, { name: arg, machine: arg, session }];
+    const text = holdersText(config);
+    checkHolderPoolSize(text);
     const machines = await machinesNow();
     for (const m of machines.values()) if (m?.name === arg) throw new CliError(`the hc machine name "${arg}" is taken; pick another holder name.`);
     const via = `sh -c 'exec hc connect --session ${session}'`;
     const r = await hc(["machine", "add", "--name", arg, "--via", via, "--json"]);
     if (r.code !== 0) throw new CliError(`holder "${arg}" wasn't added: ${hcSaid((r.stderr || r.stdout).trim())}`);
-    config.holders = [...config.holders, { name: arg, machine: arg, session }];
-    writeHolders(config);
+    writeHolders(text);
     // The line answers in a second or two; say when it hasn't, but keep the holder: a start
     // falls back to a connected holder until it does.
     let connected = false;
@@ -4926,6 +4935,9 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
       throw new CliError(`holder "${h.name}" holds ${held.length} ${held.length === 1 ? "agent" : "agents"} `
         + `(${held.join(", ")}); move them off before removing it.`, 1, { holder: h.name, agents: held });
     }
+    config.holders = config.holders.filter((x) => x.name !== h.name);
+    const text = holdersText(config);
+    checkHolderPoolSize(text);
     const r = await hc(["machine", "rm", h.machine, "--json"]);
     if (r.code !== 0) throw new CliError(`holder "${h.name}" wasn't removed: ${hcSaid((r.stderr || r.stdout).trim())}`);
     let stopped = null;
@@ -4938,8 +4950,7 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
         stopped = stop.code === 0;
       }
     }
-    config.holders = config.holders.filter((x) => x.name !== h.name);
-    writeHolders(config);
+    writeHolders(text);
     return opts.json ? { removed: h.name, stopped } : `holder ${h.name} removed${stopped ? " (its core stopped)" : ""}`;
   }
   throw new CliError(usage, 2);

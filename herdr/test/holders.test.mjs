@@ -10,6 +10,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync,
 import { dirname, join } from "node:path";
 
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
+import { holdersText } from "../mods/am-sidebar/holderSpread.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { scratchProject, scratchRoot, shortSocketDir } from "./scratch-project.mjs";
 
@@ -204,6 +205,30 @@ test("holders add --local makes a second holder; remove refuses while it holds a
   assert.equal(gone.code, 0, gone.err);
   assert.equal(gone.json().removed, "h2");
   assert.deepEqual(s.cli(["holders", "--json"]).json().holders.map((h) => h.name), ["local"]);
+});
+
+test("D1432C-1 holders add refuses an oversized pool before registering the machine", (t) => {
+  const s = scene(t);
+  const maxBytes = 64 * 1024, limit = 6;
+  const existing = { name: "h1", machine: "h1", session: "am-holder-h1" };
+  const added = { name: "h2", machine: "h2", session: "am-holder-h2" };
+  const proposed = () => holdersText({ limit, holders: [existing, added] });
+  existing.session += "x".repeat(maxBytes + 1 - Buffer.byteLength(proposed()));
+  const before = Buffer.from(holdersText({ limit, holders: [existing] }));
+  assert.ok(before.length <= maxBytes);
+  assert.equal(Buffer.byteLength(proposed()), maxBytes + 1);
+  mkdirSync(dirname(s.holdersFile), { recursive: true });
+  writeFileSync(s.holdersFile, before);
+  const machinesBefore = s.state().machines;
+
+  const result = s.cli(["holders", "add", "--local", added.name]);
+
+  assert.equal(result.code, 1, result.err);
+  assert.match(result.err, /pool would exceed 64 KiB/);
+  assert.ok(readFileSync(s.holdersFile).equals(before), "the pool bytes stay unchanged");
+  assert.deepEqual(s.state().machines, machinesBefore, "the machine registration stays unchanged");
+  assert.ok(!s.calls().some(([command, verb]) => command === "machine" && verb === "add"),
+    "hc machine add was never called");
 });
 
 test("remove refuses a holder whose line is down while it still holds an agent", (t) => {
