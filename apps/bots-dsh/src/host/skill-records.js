@@ -15,8 +15,22 @@ const FORM = Symbol('skill text form')
 const WRITERS = ['settings-form', 'learning-card', 'preview', 'bot']
 export const skillMirror = item => createHash('sha256')
   .update(JSON.stringify([item.description ?? '', item.content ?? ''])).digest('hex')
+
+function canonicalRecordJSON(value) {
+  if (Array.isArray(value)) return `[${Array.from(value, entry => canonicalRecordJSON(entry) ?? 'null').join(',')}]`
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  const fields = []
+  for (const key of Object.keys(value).sort()) {
+    const encoded = canonicalRecordJSON(value[key])
+    if (encoded !== undefined) fields.push(`${JSON.stringify(key)}:${encoded}`)
+  }
+  return `{${fields.join(',')}}`
+}
+
+export const skillRecordId = item => createHash('sha256').update(canonicalRecordJSON(item)).digest('hex')
+
 const textEntries = item => [{ path: 'SKILL.md', bytes: textSkillMd(item) }]
-const oneBody = files => files?.length === 1 && files[0]?.path === 'SKILL.md'
+const oneBody = files => Array.isArray(files) && files.length === 1 && files[0]?.path === 'SKILL.md'
 const textMatches = (entries, hash) => skillHash(entries) === hash
 const validSource = source => source && SOURCE_KINDS.includes(source.kind)
   && (source.moved === undefined || source.moved === true)
@@ -24,6 +38,7 @@ const validSource = source => source && SOURCE_KINDS.includes(source.kind)
   && Object.keys(source).every(key => ['kind', 'moved', 'fileName'].includes(key))
 const optionalString = value => value === undefined || typeof value === 'string'
 const movedLegacy = generation => generation?.via === 'move' ? generation.legacy : undefined
+const deletionHash = item => skillHashId(item.hash) ? item.hash : null
 const changes = () => skillRefusal('changed-elsewhere')
 const badStore = error => skillRefusal('store-failed', { code: storeCode(error) })
 
@@ -328,7 +343,7 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
   async function reconcileName(held, name, team, marker) {
     const item = itemOf(name)
     let row = own(getStore().readLedger().names, name)
-    if (row?.deleting && item && (item.hash ?? null) !== row.deleting.hash) return setFailure(name, 'changed')
+    if (row?.deleting && item && deletionHash(item) !== row.deleting.hash) return setFailure(name, 'changed')
     if (row?.deleting) {
       await skillLedger(ledger => {
         if (item) delete ledger.names[name].deleting
@@ -340,15 +355,18 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
       if (row?.pending) await skillLedger(ledger => { delete ledger.names[name].pending }, team)
       return
     }
+    const gen = own(row?.generations ?? {}, item.hash)
+    const importing = marker && !(gen?.state === 'committed' && ['move', 'import'].includes(gen.via) && row.committed === item.hash)
+    if (importing && (item.name !== name || (item.skillFormat !== 1 && !preRfc(item))
+      || !optionalString(item.description) || !optionalString(item.content))) return setFailure(name, 'changed', 'import')
     if (item.skillFormat > 1) return setFailure(name, 'newer-format')
     if (item.name !== name) return setFailure(name, 'malformed')
-    const gen = own(row?.generations ?? {}, item.hash)
     const mirror = skillMirror(item)
     const entries = textEntries(item)
     const host = { name, team, writer: { host: true }, description: item.description, content: item.content }
     const moved = { ...host, entries, op: 'migrate', via: 'move', source: { kind: provenance(item), moved: true } }
 
-    if (marker && !(gen?.state === 'committed' && ['move', 'import'].includes(gen.via) && row.committed === item.hash)) {
+    if (importing) {
       if (preRfc(item) && !marker.sourceHadStore && !row) await commitLocked(held, moved)
       else if (preRfc(item) || (item.skillFormat === 1 && oneBody(item.files) && textMatches(entries, item.hash))) {
         await commitLocked(held, { ...host, entries, op: 'restore', imported: true, via: 'import', source: { kind: 'text' } })
@@ -356,6 +374,7 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
       return
     }
 
+    if (preRfc(item) && row && !row.committed) return setFailure(name, 'changed', 'older-edit')
     if (row?.pending) {
       await skillLedger(ledger => {
         const entry = ledger.names[name]
@@ -460,7 +479,10 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
         const all = [...new Set([...names, ...Object.keys(ledger.names)])].sort()
         for (const name of all) {
           assertTeam(team)
-          if (!skillName(name)) { setFailure(name, 'malformed'); continue }
+          if (!skillName(name)) {
+            setFailure(name, marker ? 'changed' : 'malformed', marker ? 'import' : undefined)
+            continue
+          }
           try { await skillQueue(name, held => reconcileName(held, name, team, marker)) } catch (error) {
             if (!rt.sameTeam(team)) return
             const code = storeCode(error)
@@ -503,15 +525,15 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
     ...(reservedCommandOf(name) ? { reservedName: true } : {}), ...extra,
   })
   function loadGeneration(name) {
-    if (!skillName(name)) return { status: status(name, 'malformed') }
-    const item = itemOf(name)
-    if (!item || item.kind !== 'skill') return { status: status(name, 'unchecked') }
-    if (item.name !== name) return { status: status(name, 'malformed') }
-    if (item.skillFormat > 1) return { status: status(name, 'newer-format') }
+    const validName = skillName(name)
+    const item = typeof name === 'string' ? itemOf(name) : undefined
+    if (item?.kind !== 'skill') return { status: status(name, validName ? 'unchecked' : 'malformed') }
     const failed = failures.get(name)
     if (failed) return { status: status(name, failed.state, { why: failed.why }) }
     try {
       if (importedState()) return { status: status(name, 'unchecked') }
+      if (!validName || item.name !== name) return { status: status(name, 'malformed') }
+      if (item.skillFormat > 1) return { status: status(name, 'newer-format') }
       const storage = getStore()
       if (!storage.bound().ok && storage.bound().code === 'root-absent') return { status: status(name, 'unchecked') }
       if (!storage.bound().ok) return { status: status(name, 'store-failed', { why: storage.bound().code }) }
@@ -561,20 +583,34 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
   Object.defineProperty(rt, 'skillStore', { get: getStore, configurable: true })
   return {
     saveText,
-    deleteSkill(name, authorize) {
+    deleteSkill(name, authorize, expect) {
       const team = rt.teamGeneration()
+      const current = () => {
+        const item = itemOf(name)
+        if (expect !== undefined && (!expect?.team || !rt.sameTeam(expect.team)
+          || item?.kind !== 'skill' || item.kind !== expect.kind || skillRecordId(item) !== expect.id)) throw changes()
+        return item
+      }
       return skillQueue(name, async () => {
         assertTeam(team)
-        const item = itemOf(name)
+        const item = current()
         authorize(item)
-        await skillLedger(ledger => {
-          const entry = own(ledger.names, name) ?? (ledger.names[name] = { generations: {} })
-          entry.deleting = { at: Date.now(), hash: skillHashId(item.hash) ? item.hash : null }
-        }, team)
-        await saveRecord(name, () => {
+        const beforeCommit = () => {
           assertTeam(team)
-          if (itemOf(name) !== item) throw changes()
-        })
+          const latest = current()
+          if (expect === undefined && latest !== item) throw changes()
+        }
+        // A future format can be dismissed from the library without interpreting its files.
+        if (expect !== undefined && item.skillFormat > 1) {
+          await saveRecord(name, beforeCommit)
+          return true
+        }
+        await skillLedger(ledger => {
+          if (expect !== undefined) current()
+          const entry = own(ledger.names, name) ?? (ledger.names[name] = { generations: {} })
+          entry.deleting = { at: Date.now(), hash: deletionHash(item) }
+        }, team)
+        await saveRecord(name, beforeCommit)
         await skillLedger(ledger => { finishDelete(ledger.names[name]) }, team)
         failures.delete(name)
         try { await collectName(name, team, true) } catch (error) {

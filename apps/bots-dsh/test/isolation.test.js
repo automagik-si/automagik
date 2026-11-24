@@ -143,3 +143,42 @@ test('skill import: refuses aliases that collide before copying either source', 
   assert.throws(() => createRuntime(fakeContext(), { home: target, importHome: source }), /conflicting skill store names/)
   assert.equal(existsSync(target), false)
 })
+
+test('skill import: holds invalid and newer-format imported records without rebuilding them', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'omni-skill-import-held-'))
+  const source = join(root, 'source')
+  const target = join(root, 'target')
+  const ctx = fakeContext()
+  t.after(async () => {
+    await ctx.dispose()
+    makeSkillFixtureWritable(target)
+    rmSync(root, { recursive: true, force: true })
+  })
+  mkdirSync(source)
+  const items = {
+    'invalid-guide': { kind: 'skill', name: 'different-guide', description: 'Keep notes', content: 'Body.' },
+    'Invalid key': { kind: 'skill', name: 'Invalid key', description: 'Keep notes', content: 'Body.' },
+    'newer-guide': { kind: 'skill', name: 'newer-guide', skillFormat: 2 },
+    'field-guide': {
+      kind: 'skill', name: 'field-guide', skillFormat: 1, description: 'Keep notes', content: 'Write a short note.',
+      hash: 'b9b358086a46b5258de7d18d14ed7d8e692874155873e351d8abde3fed0c5697',
+      files: { 0: { path: 'SKILL.md' }, length: 1 },
+    },
+  }
+  writeFileSync(join(source, 'state.json'), JSON.stringify({
+    version: 2, mainBotIds: [], bots: {}, rooms: {}, agents: {}, exchanges: [], revision: 1, capabilities: { items },
+  }))
+  const rt = createRuntime(ctx, { home: target, importHome: source, github: false, diagnosticsFile: false })
+  const gate = t.mock.fn()
+  rt.skillGate = gate
+  await rt.load()
+  await rt.skillsReady()
+  for (const [name, item] of Object.entries(items)) {
+    assert.deepEqual(rt.state.capabilities.items[name], item)
+    assert.equal(rt.skillDelivery(name).status.state, 'changed')
+    assert.equal(rt.skillDelivery(name).snapshot, undefined)
+    assert.equal(existsSync(join(target, 'skills', name)), false)
+  }
+  assert.equal(gate.mock.callCount(), 0)
+  assert.equal(existsSync(join(target, '.skills-import.json')), false)
+})

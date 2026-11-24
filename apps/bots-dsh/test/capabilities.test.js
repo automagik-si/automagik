@@ -1,7 +1,7 @@
 import { makeSkillFixtureWritable } from './fixtures/skill-home-cleanup.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -1048,4 +1048,180 @@ test('skill store: move registers the same four fields and delete releases the n
   assert.equal(existsSync(folder), false)
   assert.deepEqual(env.rt.state.bots.chief.capabilities, [])
   assert.deepEqual(readdirSync(join(env.home, 'skills')).filter(name => !name.startsWith('.')), [])
+})
+
+test('skill records: exports a canonical id for the full stored record', async () => {
+  const { skillRecordId } = await import('../src/host/capabilities.js')
+  const record = {
+    name: 'guide', kind: 'skill', source: { kind: 'text', moved: true },
+    files: [{ path: 'SKILL.md', size: 7 }, { size: 8, path: 'notes.md' }],
+    extra: { 2: 'two', 10: 'ten', ignored: undefined },
+  }
+  const canonical = '{"extra":{"10":"ten","2":"two"},"files":[{"path":"SKILL.md","size":7},{"path":"notes.md","size":8}],"kind":"skill","name":"guide","source":{"kind":"text","moved":true}}'
+  const expected = createHash('sha256').update(canonical).digest('hex')
+  assert.equal(skillRecordId?.(record), expected)
+  const reordered = { ...record, source: { moved: true, kind: 'text' } }
+  assert.equal(skillRecordId(reordered), expected)
+  assert.notEqual(skillRecordId({ ...record, files: [...record.files].reverse() }), expected)
+  assert.notEqual(skillRecordId({ ...record, updatedAt: 2 }), expected)
+})
+
+test('skill records: a stale delete checks inside the name queue and preserves the replacement', async t => {
+  const fixture = skillFixture()
+  const { name } = fixture
+  const env = await setup({ beforeLoad({ rt }) {
+    mkdirSync(join(rt.home, 'learning'))
+    writeFileSync(join(rt.home, 'learning', 'state.json'), JSON.stringify({ learned: { chief: [name] } }))
+  } })
+  t.after(() => env.dispose())
+  const { rt } = env
+  const previous = await rt.capabilitySave(fixture, { ui: true })
+  await rt.capabilitySave({ name: 'field-pack', kind: 'pack', items: [name] }, { ui: true })
+  await rt.capabilityEndpoint('bot-capability', { botId: 'chief', name, attached: true })
+  const { skillRecordId } = await import('../src/host/capabilities.js')
+  const expect = { kind: 'skill', id: skillRecordId?.(previous), team: rt.teamGeneration() }
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  rt.skillGate = () => { entered.resolve(); return release.promise }
+  const edit = rt.capabilitySave(skillFixture(name, 'Replacement instructions.'), { ui: true })
+  await entered.promise
+  const ledgerWrites = t.mock.method(rt.skillStore, 'writeLedger')
+  const refused = assert.rejects(rt.capabilityDelete(name, { ui: true, expect }), { key: 'skill.changed-elsewhere' })
+  await new Promise(resolve => setImmediate(resolve))
+  release.resolve()
+  const [replacement] = await Promise.all([edit, refused])
+  assert.notEqual(replacement.hash, previous.hash)
+  assert.deepEqual(rt.state.capabilities.items[name], replacement)
+  assert.deepEqual(rt.state.bots.chief.capabilities, [name])
+  assert.deepEqual(rt.state.capabilities.items['field-pack'].items, [name])
+  assert.equal(readFileSync(join(rt.skillStore.pathOf(name, replacement.hash), 'SKILL.md'), 'utf8').includes('Replacement instructions.'), true)
+  assert.deepEqual(JSON.parse(readFileSync(join(env.home, 'learning', 'state.json'), 'utf8')).learned, { chief: [name] })
+  assert.equal(rt.skillStore.readLedger().names[name].committed, replacement.hash)
+  assert.equal(ledgerWrites.mock.callCount(), 2)
+})
+
+test('skill records: a bound delete refuses a different team, kind, or absent own key before journaling', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const item = await rt.capabilitySave(skillFixture(), { ui: true })
+  const server = await rt.capabilitySave(mcp('replacement'), { ui: true })
+  const { skillRecordId } = await import('../src/host/capabilities.js')
+  const expect = { kind: 'skill', id: skillRecordId?.(item), team: rt.teamGeneration() }
+  const items = rt.state.capabilities.items
+  const prototype = Object.getPrototypeOf(items)
+  Object.setPrototypeOf(items, { 'inherited-guide': item })
+  try {
+    const journal = t.mock.method(rt.skillStore, 'writeLedger')
+    const before = readFileSync(join(env.home, 'state.json'), 'utf8')
+    for (const [name, binding] of [
+      [item.name, { ...expect, team: { ...expect.team, term: expect.team.term + 1 } }],
+      [item.name, { ...expect, kind: 'mcp' }],
+      [server.name, { ...expect, id: skillRecordId?.(server) }],
+      ['inherited-guide', expect],
+    ]) {
+      await assert.rejects(rt.capabilityDelete(name, { ui: true, expect: binding }), { key: 'skill.changed-elsewhere' })
+    }
+    assert.equal(journal.mock.callCount(), 0)
+    assert.equal(readFileSync(join(env.home, 'state.json'), 'utf8'), before)
+  } finally {
+    Object.setPrototypeOf(items, prototype)
+  }
+})
+
+test('skill records: the displayed id can delete a malformed skill and its attachments', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const item = await rt.capabilitySave(skillFixture(), { ui: true })
+  await rt.capabilityEndpoint('bot-capability', { botId: 'chief', name: item.name, attached: true })
+  item.files[0].path = '../outside'
+  const row = rt.capabilityLibraryView().find(row => row.name === item.name)
+  assert.equal(row.status.state, 'malformed')
+  assert.match(row.recordId ?? '', /^[a-f0-9]{64}$/)
+  item.items = { invalid: true }
+  const recovery = rt.capabilityLibraryView().find(row => row.name === item.name)
+  assert.notEqual(recovery.recordId, row.recordId)
+  assert.equal(await rt.capabilityDelete(item.name, {
+    ui: true, expect: { kind: 'skill', id: recovery.recordId, team: rt.teamGeneration() },
+  }), true)
+  assert.equal(rt.state.capabilities.items[item.name], undefined)
+  assert.deepEqual(rt.state.bots.chief.capabilities, [])
+  assert.equal(existsSync(rt.skillStore.pathOf(item.name, item.hash)), false)
+})
+
+test('skill records: a bound delete of a newer format preserves its unknown generation', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const item = await rt.capabilitySave(skillFixture(), { ui: true })
+  item.skillFormat = 2
+  const { recordId } = rt.capabilityLibraryView().find(row => row.name === item.name)
+  assert.match(recordId ?? '', /^[a-f0-9]{64}$/)
+  const before = rt.skillStore.readLedger()
+  assert.equal(await rt.capabilityDelete(item.name, {
+    ui: true, expect: { kind: 'skill', id: recordId, team: rt.teamGeneration() },
+  }), true)
+  assert.equal(rt.state.capabilities.items[item.name], undefined)
+  assert.deepEqual(rt.skillStore.readLedger(), before)
+  assert.equal(existsSync(rt.skillStore.pathOf(item.name, item.hash)), true)
+})
+
+test('skill store: a hashless item with only a prepared generation leaves the journal untouched', async t => {
+  const initial = await setup()
+  let reopened
+  t.after(async () => {
+    await reopened?.dispose()
+    await initial.dispose()
+  })
+  const fixture = skillFixture()
+  const { name } = fixture
+  t.mock.method(initial.rt, 'saveCopy', async () => { throw new Error('fixture crash before state commit') })
+  await assert.rejects(initial.rt.capabilitySave(fixture, { ui: true }), { key: 'skill.store-failed' })
+  const ledgerPath = join(initial.home, 'skills', '.ledger.json')
+  const before = readFileSync(ledgerPath, 'utf8')
+  const hash = initial.rt.skillStore.readLedger().names[name].pending.hash
+  const folder = initial.rt.skillStore.pathOf(name, hash)
+  const statePath = join(initial.home, 'state.json')
+  const state = JSON.parse(readFileSync(statePath, 'utf8'))
+  state.capabilities ??= { items: {} }
+  state.capabilities.items[name] = fixture
+  await initial.ctx.dispose()
+  writeFileSync(statePath, JSON.stringify(state))
+  const ctx = fakeContext()
+  reopened = ctx
+  const rt = createRuntime(ctx, { home: initial.home, github: false, diagnosticsFile: false })
+  await rt.load()
+  await rt.skillsReady()
+  assert.deepEqual([rt.skillDelivery(name).status.state, rt.skillDelivery(name).status.why], ['changed', 'older-edit'])
+  assert.equal(existsSync(folder), true)
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before)
+})
+
+test('skill store: restart cancels an unlanded delete of a malformed hash', async t => {
+  const initial = await setup()
+  let reopened
+  t.after(async () => {
+    await reopened?.dispose()
+    await initial.dispose()
+  })
+  const item = await initial.rt.capabilitySave(skillFixture(), { ui: true })
+  const { name, hash } = item
+  item.hash = 'invalid-hash'
+  await initial.rt.save()
+  const folder = initial.rt.skillStore.pathOf(name, hash)
+  t.mock.method(initial.rt, 'saveCopy', async () => { throw new Error('fixture crash after delete intent') })
+  await assert.rejects(initial.rt.capabilityDelete(name, { ui: true }), { key: 'skill.store-failed' })
+  assert.equal(initial.rt.skillStore.readLedger().names[name].deleting.hash, null)
+  await initial.ctx.dispose()
+  const ctx = fakeContext()
+  reopened = ctx
+  const rt = createRuntime(ctx, { home: initial.home, github: false, diagnosticsFile: false })
+  await rt.load()
+  await rt.skillsReady()
+  const journal = rt.skillStore.readLedger().names[name]
+  assert.equal(journal.deleting, undefined)
+  assert.equal(journal.committed, hash)
+  assert.equal(rt.state.capabilities.items[name].hash, 'invalid-hash')
+  assert.equal(existsSync(folder), true)
 })

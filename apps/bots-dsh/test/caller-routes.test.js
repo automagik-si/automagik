@@ -242,3 +242,25 @@ test('CR9 adapter teardown keeps the configured owner boot gated and closes call
   assert.equal((await f.call('queued-owner-action', null, { headers: headers('first'), viewer })).ok, true)
   assert.equal(dispatched, 1)
 })
+
+test('the owner state includes skill record ids and caller state omits them', async t => {
+  const skill = { name: 'held-skill', kind: 'skill', skillFormat: 2, description: 'A future skill' }
+  const server = { name: 'test-mcp', kind: 'mcp' }
+  const f = fixture(t, { seed: team => { team.capabilities.items = { [skill.name]: skill, [server.name]: server } } })
+  await f.start()
+  await f.open('a', allowlist)
+  const owner = await f.call('state')
+  assert.equal(owner.ok, true)
+  const skillRow = owner.value.capabilities.find(item => item.name === skill.name)
+  const serverRow = owner.value.capabilities.find(item => item.name === server.name)
+  for (const field of inventory.ownerStateSkillFields) {
+    assert.match(skillRow[field] ?? '', /^[a-f0-9]{64}$/)
+    assert.equal(Object.hasOwn(serverRow, field), false)
+    for (const principal of [member, guest]) {
+      const caller = await read(f, principal, 'state')
+      assert.equal(caller.ok, true)
+      assert.equal(Object.hasOwn(caller.value, 'capabilities'), false)
+      assert.equal(JSON.stringify(caller.value).includes(field), false)
+    }
+  }
+})

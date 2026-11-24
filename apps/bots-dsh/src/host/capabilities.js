@@ -5,11 +5,11 @@ import { refusal } from './refusal.js'
 import { encodeUrlComponent } from './secrets.js'
 import { own } from './store.js'
 import { skillRefusal } from './skill-keys.js'
-import { installSkillRecords } from './skill-records.js'
+import { installSkillRecords, skillRecordId } from './skill-records.js'
 import { isPortableDeviceName, skillName } from './skill-store.js'
 
 export { RESERVED_COMMAND_NAMES, RESERVED_COMMANDS_VERSION, reservedCommandOf } from '../shared/reserved-commands.js'
-export { validSkillRecord } from './skill-records.js'
+export { skillRecordId, validSkillRecord } from './skill-records.js'
 
 const MCP_CLIENT = '@deepseek-ai/dsh-mcp-client'
 const SECRET_REFERENCE = /\$DSH_SECRET_([A-Z][A-Z0-9_]*)/g
@@ -229,21 +229,28 @@ export function install(rt) {
     await rt.save()
     return item
   }
-  const capabilityDelete = async (name, { botId, ui } = {}) => {
+  const capabilityDelete = async (name, { botId, ui, expect } = {}) => {
     await rt.load()
-    writeCheck()
-    const items = ensureLibrary()
-    const item = own(items, String(name ?? ''))
-    if (!item) throw refusal(`No capability named ${name}.`)
-    const authorize = current => {
-      if (!current || current.kind !== item.kind) throw refusal(`No capability named ${name}.`)
-      if (!ui) editCheck(current, botId, 'delete')
+    const key = String(name ?? '')
+    const authorize = current => { if (!ui) editCheck(current, botId, 'delete') }
+    if (expect !== undefined) {
+      if (!skillName(name)) throw skillRefusal('changed-elsewhere')
+      return skills.deleteSkill(name, current => {
+        writeCheck()
+        authorize(current)
+      }, expect)
     }
+    writeCheck()
+    const item = own(ensureLibrary(), key)
+    if (!item) throw refusal(`No capability named ${name}.`)
     if (item.kind === 'skill' && skillName(name) && !(item.skillFormat > 1)) {
-      return skills.deleteSkill(name, authorize)
+      return skills.deleteSkill(name, current => {
+        if (current?.kind !== 'skill') throw refusal(`No capability named ${name}.`)
+        authorize(current)
+      })
     }
     authorize(item)
-    deleteFrom(state, String(name ?? ''))
+    deleteFrom(state, key)
     await rt.save()
     return true
   }
@@ -354,8 +361,9 @@ export function install(rt) {
     ...item,
     ...(item.env ? { env: { ...item.env } } : {}),
     ...(item.headers ? { headers: { ...item.headers } } : {}),
-    ...(item.items ? { items: [...item.items] } : {}),
+    ...(Array.isArray(item.items) ? { items: [...item.items] } : {}),
     ...(item.kind === 'skill' ? {
+      recordId: skillRecordId(item),
       ...(Array.isArray(item.files) ? { files: item.files.map(file => ({ ...file })) } : {}),
       ...(item.source ? { source: { ...item.source } } : {}),
       status: rt.skillDelivery(name).status,
