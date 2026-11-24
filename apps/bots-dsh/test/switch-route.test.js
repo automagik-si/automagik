@@ -8,6 +8,7 @@ import { test } from 'node:test'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import * as instructions from '@deepseek-ai/dsh-agent-instructions'
 import * as skill from '@deepseek-ai/dsh-tool-skill'
+import { DICTIONARY, hostText, installLocale } from '../src/client/i18n.js'
 import { install as installFallback } from '../src/host/fallback.js'
 import { install as installMemory } from '../src/host/memory.js'
 import { install, saidSomething } from '../src/host/parts.js'
@@ -376,6 +377,42 @@ test('a populated crossing refuses before clearing Auto, saving, or selecting an
   assert.deepEqual(b.calls.diagnostics.map(({ level, where, text }) => [level, where, text]), [
     ['warn', 'switch-route', `Route change ${ROUTE_A} → ${ROUTE_B} refused (needs-new-conversation)`],
   ])
+})
+
+// Between two ACP agents the destination is the agent, by the name the model menu shows: the
+// catalog's brand, else the name of an agent the owner names. A provider id is not a UI word.
+test('a cross-agent refusal names the agent, never its provider id, in en, pt-BR and zh', async t => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  for (const [from, to, catalog, name] of [
+    ['acp-codex/gpt-6.2-sol', 'acp-claude/default', [{ ref: 'acp-claude/default', provider: 'acp-claude', providerName: 'Claude Code' }], 'Claude Code'],
+    // No catalog row for the agent: the menu's own names answer.
+    ['acp-claude/default', 'acp-codex/gpt-6.2-sol', [], 'Codex'],
+    ['acp-claude/default', 'acp-omp/default', [{ ref: 'acp-omp/default', provider: 'acp-omp', providerName: 'omp' }], 'omp'],
+  ]) {
+    const b = bench()
+    t.after(() => b.ctx.dispose())
+    Object.assign(b.bot, { model: from, appliedModel: from })
+    b.rt.cachedCatalog = () => catalog
+    const refusal = await b.rt.switchRoute('b1', to).then(() => undefined, error => error)
+    assert.equal(refusal?.reason, 'needs-new-conversation', to)
+    assert.equal(refusal.message,
+      `Ops's conversation has history, so changing to ${name} needs a new conversation. Use New conversation, then pick ${name}.`)
+    for (const [active, dictionary] of [['en', {}], ['pt-BR', pt], ['zh', DICTIONARY.zh]]) {
+      const dispose = installLocale({
+        register: () => () => {},
+        getLocale: () => ({ active }),
+        bind: () => (key, params) => (dictionary[key] ?? key).replace(/\{(\w+)\}/g, (_, param) => params?.[param] ?? _),
+      })
+      try {
+        const worded = hostText(refusal.message)
+        assert.equal(worded.split(name).length - 1, 2, `${active}: ${worded}`)
+        assert.doesNotMatch(worded, /acp-/, active)
+        if (active !== 'en') assert.notEqual(worded, refusal.message, active)
+      } finally {
+        dispose()
+      }
+    }
+  }
 })
 
 test('a crossing refusal tells the person to pause an active goal before New conversation', async t => {

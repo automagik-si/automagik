@@ -5013,6 +5013,13 @@ var HARNESSES = Object.freeze(["dsh", "claude-code", "codex", "gemini"]);
 var PI_AI_NS = "llm-pi-ai";
 var SUBSCRIPTION_ROUTES = Object.freeze(["grok", "antigravity"]);
 var ACP_HARNESS = Object.freeze({ claude: "claude-code", codex: "codex", gemini: "gemini" });
+var ACP_NAME = Object.freeze({
+  "acp-claude": "Claude Code",
+  "acp-codex": "Codex",
+  "acp-hermes": "Hermes",
+  "acp-antigravity": "Antigravity",
+  "acp-omp": "omp"
+});
 var piAiRoutes = (directory) => /* @__PURE__ */ new Set([
   ...SUBSCRIPTION_ROUTES,
   ...(directory ?? []).filter((entry) => entry?.settingsNs === PI_AI_NS).map((entry) => entry.provider)
@@ -9109,13 +9116,6 @@ var routeDetail = (route) => {
   }
 };
 var ACP_ORDER = Object.freeze(["acp-claude", "acp-codex", "acp-hermes", "acp-antigravity", "acp-omp"]);
-var ACP_NAME = Object.freeze({
-  "acp-claude": "Claude Code",
-  "acp-codex": "Codex",
-  "acp-hermes": "Hermes",
-  "acp-antigravity": "Antigravity",
-  "acp-omp": "omp"
-});
 var providerOf = (model) => model?.provider ?? String(model?.ref ?? "").split("/")[0];
 var routeOfProvider = (provider) => selectorRouteOf(provider);
 function modelRoute(roster, ref) {
