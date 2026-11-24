@@ -353,6 +353,8 @@ async function observationOf({ pool, discover, rpc, proc, clock, index, readPool
     if (entry.exe !== core.exe || namespace !== table.namespace) unknownCutOff(CUT_OFF_REASONS.proc);
     if (listed.has(entry.pid)) continue;
     if (listenersByStem.get(endpointStem(endpoint)) !== endpoint) unknownCutOff(CUT_OFF_REASONS.ambiguous);
+    const ownsListener = readCutOff(check, CUT_OFF_REASONS.proc, () => table.holderOwnsListener(entry, socket));
+    if (!ownsListener) unknownCutOff(CUT_OFF_REASONS.ambiguous);
     candidates.set(entry.pid, { holder: core.member.name, socket, ...entry });
   }
   check();

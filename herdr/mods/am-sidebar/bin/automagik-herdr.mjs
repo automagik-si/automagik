@@ -4104,6 +4104,7 @@ async function windowDo(command, args) {
 
 const holdersPath = () => join(appHome(), HOLDERS_FILE);
 const holderLossPath = () => join(appHome(), "automagik-herdr", "holder-loss.log");
+const MAX_HOLDER_POOL_BYTES = 64 * 1024;
 const HOLDER_LOSSES_KEPT = 50;
 /** How long one delegated start on a holder may take: a linked-machine start's own worst case. */
 const HOLDER_START_MS = 15 * 60 * 1000;
@@ -4116,12 +4117,18 @@ const holdersLock = () => `${holdersPath()}.lock`;
 
 let holdersWarned = false;
 /** The pool from its file, or the conservative default when there is none; bad input says so. */
-function readHolders({ strict = false } = {}) {
-  let text = null;
-  try { text = readFileSync(holdersPath(), "utf8"); } catch (e) {
-    if (e?.code !== "ENOENT") throw new CliError(`holders: ${HOLDERS_FILE} can't be read: ${e?.message ?? e}`);
+function readHolders({ strict = false, listing = false } = {}) {
+  let text = null, warning;
+  try { text = readBoundedFile(holdersPath(), MAX_HOLDER_POOL_BYTES).toString("utf8"); } catch (e) {
+    if (e?.code !== "ENOENT") {
+      const message = `holders: ${HOLDERS_FILE} can't be read: ${e?.message ?? e}`;
+      // Keep the listing available when the reader rejects the pool's type or size.
+      if (!listing || e?.code !== "INVALID_BOUNDED_FILE") throw new CliError(message);
+      warning = `${message} Using one local holder.`;
+    }
   }
   const config = parseHolders(text, { strict });
+  if (warning) config.warnings.push(warning);
   // #1881: a corrupt file used to fall back to one holder in silence, quietly turning spreading
   // off. Say it once per run (on stderr, so --json still parses) and keep the safe default.
   if (config.warnings.length && !holdersWarned) {
@@ -4246,8 +4253,8 @@ function holderMachineNames(config = readHolders()) {
  * names the holder. Counting only `liveAt` let `holders remove` drop a holder that still held
  * an agent, stranding the pane unlinked (#1881).
  */
-async function holderView({ readOnly = false } = {}) {
-  const config = readHolders();
+async function holderView({ readOnly = false, listing = false } = {}) {
+  const config = readHolders({ listing });
   const view = await attachView({ readOnly });
   const counts = new Map(config.holders.map((h) => [h.name, 0]));
   const agents = new Map(config.holders.map((h) => [h.name, []]));
@@ -4407,8 +4414,6 @@ async function holdersUp() {
 }
 
 // The diagnostic owns its readers. None consults the view's routing, caches or ledger.
-const MAX_CUTOFF_POOL_BYTES = 64 * 1024;
-
 function cutOffMembers() {
   const path = holdersPath();
   try { lstatSync(path); }
@@ -4416,7 +4421,7 @@ function cutOffMembers() {
     if (error?.code === "ENOENT") return parseHolders(null, { strict: true });
     throw error;
   }
-  return parseHolders(readBoundedFile(path, MAX_CUTOFF_POOL_BYTES).toString("utf8"), { strict: true });
+  return parseHolders(readBoundedFile(path, MAX_HOLDER_POOL_BYTES).toString("utf8"), { strict: true });
 }
 
 function cutOffMemberEnv(env, { session }) {
@@ -4454,6 +4459,7 @@ function procPathInside(root, path) {
 
 const PID_NAMESPACE = /^pid:\[\d+\]$/;
 const MOUNT_NAMESPACE = /^mnt:\[\d+\]$/;
+const NETWORK_NAMESPACE = /^net:\[\d+\]$/;
 const MAX_PROC_FIELDS_BYTES = 64 * 1024;
 const MAX_PROC_CMDLINE_BYTES = 2 * 1024 * 1024;
 const MAX_PROC_UNIX_BYTES = 4 * 1024 * 1024;
@@ -4489,6 +4495,11 @@ export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
     if (!PID_NAMESPACE.test(value)) throw new Error("Unreadable PID namespace.");
     return value;
   };
+  const networkNamespace = (dir) => {
+    const value = link(join(dir, "ns/net"));
+    if (!NETWORK_NAMESPACE.test(value)) throw new Error("Unreadable network namespace.");
+    return value;
+  };
   const filesystem = (dir) => {
     const mount = link(join(dir, "ns/mnt"));
     const rootStat = statSync(follow(join(dir, "root")), { bigint: true });
@@ -4505,7 +4516,8 @@ export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
     if (!value) throw new Error("Unreadable process stat.");
     return value;
   };
-  const self = namespace(join(root, "self"));
+  const reader = join(root, "self");
+  const self = namespace(reader);
   const pids = readdirSync(follow(root)).filter((name) => /^[1-9]\d*$/.test(name));
   if (pids.length > 32768) throw new Error("Process table exceeds its entry limit.");
   const entries = new Map();
@@ -4535,19 +4547,42 @@ export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
     return liveProc(current) && current.starttime === entry.starttime &&
       parseProcStatus(read(join(dir, "status"))) === uid && executable(dir) === entry.exe;
   };
-  let listeners, selfFilesystem;
-  const readerFilesystem = () => selfFilesystem ??= filesystem(join(root, "self"));
+  let listeners, selfFilesystem, selfNetwork;
+  const readerFilesystem = () => selfFilesystem ??= filesystem(reader);
+  const requireReaderNetwork = (dir) => {
+    selfNetwork ??= networkNamespace(reader);
+    if (networkNamespace(dir) !== selfNetwork) throw new Error("Process network namespace differs from the reader's.");
+  };
+  const holderNamespace = (entry) => {
+    const dir = join(root, String(entry.pid));
+    // Absolute socket names are comparable only in the same mount namespace and root.
+    if (filesystem(dir) !== readerFilesystem()) throw new Error("Holder filesystem context differs from the reader's.");
+    requireReaderNetwork(dir);
+    if (!sameProcess(dir, entry)) throw new Error("Holder process identity changed.");
+    return namespace(dir);
+  };
+  const ownsListeners = (dir, sockets) => {
+    listeners ??= procUnixListeners(read(join(root, "net/unix"), MAX_PROC_UNIX_BYTES), check);
+    const inodes = new Set();
+    for (const socket of sockets) {
+      const matches = listeners.get(socket);
+      if (matches?.length !== 1) return false;
+      inodes.add(matches[0]);
+    }
+    const fds = join(dir, "fd");
+    for (const fd of readdirSync(follow(fds))) {
+      const target = link(join(fds, fd));
+      inodes.delete(/^socket:\[(\d+)\]$/.exec(target)?.[1]);
+      if (!inodes.size) return true;
+    }
+    return false;
+  };
   return {
     entries: [...entries.values()],
     namespace: self,
     listeningPaths: () => listeners.keys(),
-    namespaceOf: (entry) => {
-      const dir = join(root, String(entry.pid));
-      // Absolute socket names are comparable only in the same mount namespace and root.
-      if (filesystem(dir) !== readerFilesystem()) throw new Error("Holder filesystem context differs from the reader's.");
-      if (!sameProcess(dir, entry)) throw new Error("Holder process identity changed.");
-      return namespace(dir);
-    },
+    namespaceOf: holderNamespace,
+    holderOwnsListener: (entry, socket) => ownsListeners(join(root, String(entry.pid)), [socket]) && holderNamespace(entry) === self,
     coreProof: (pid, sockets) => {
       const entry = entries.get(pid), dir = join(root, String(pid));
       if (!entry || !liveProc(entry) || !sameProcess(dir, entry)) return null;
@@ -4555,23 +4590,12 @@ export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
       if (coreNamespace !== self) return { namespace: coreNamespace };
       const coreFilesystem = filesystem(dir);
       if (coreFilesystem !== readerFilesystem()) throw new Error("Core filesystem context differs from the reader's.");
+      requireReaderNetwork(dir);
       // The path in /proc/net/unix and the listening socket inode held by this PID
       // tie the reply to a local process. A PID number from a reply alone is insufficient.
-      listeners ??= procUnixListeners(read(join(root, "net/unix"), MAX_PROC_UNIX_BYTES), check);
-      const inodes = new Set();
-      for (const socket of sockets) {
-        const matches = listeners.get(socket);
-        if (matches?.length !== 1) return null;
-        inodes.add(matches[0]);
-      }
-      const fds = join(dir, "fd");
-      for (const fd of readdirSync(follow(fds))) {
-        const target = link(join(fds, fd));
-        inodes.delete(/^socket:\[(\d+)\]$/.exec(target)?.[1]);
-        if (!inodes.size) break;
-      }
-      if (inodes.size || !sameProcess(dir, entry) || namespace(dir) !== coreNamespace) return null;
+      if (!ownsListeners(dir, sockets) || !sameProcess(dir, entry) || namespace(dir) !== coreNamespace) return null;
       if (filesystem(dir) !== coreFilesystem) throw new Error("Core filesystem context changed.");
+      requireReaderNetwork(dir);
       return { namespace: coreNamespace, exe: entry.exe, starttime: entry.starttime };
     },
   };
@@ -4810,7 +4834,7 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
   if (verb === undefined) {
     if (arg !== undefined) throw new CliError(usage, 2);
     const cutOff = await checkHolderCutOffs();
-    const { config, counts, connected, view } = await holderView().catch((error) => {
+    const { config, counts, connected, view } = await holderView({ listing: true }).catch((error) => {
       const lines = cutOffLines(cutOff);
       if (!opts.json && lines.length) process.stderr.write(unprinted(lines.join("\n") + "\n"));
       throw error;

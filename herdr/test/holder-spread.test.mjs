@@ -4,7 +4,7 @@
 // local holder (today's behaviour), and the limit's default is documented in README.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { CUT_OFF_EXE, fixtureProcStat, writeFixtureProc, writeFixtureProcRoot } from "./fake-core.mjs";
@@ -186,7 +186,8 @@ function fakeCutOff({ names = ["local"], tables = [[hold()], [hold()]] } = {}) {
       read = index;
       processes.push(index);
       return { entries: tables[index], namespace: NAMESPACE, namespaceOf: () => NAMESPACE,
-        coreProof: () => ({ exe: EXE, namespace: NAMESPACE }), listeningPaths: () => answers.keys() };
+        coreProof: () => ({ exe: EXE, namespace: NAMESPACE }), listeningPaths: () => answers.keys(),
+        holderOwnsListener: () => true };
     },
     clock: { now: () => now, sleep: async (delay) => { waits.push(delay); now += delay; } },
     recheckMs: 0,
@@ -433,10 +434,11 @@ async function procFixture(t) {
   const root = scratchRoot(t, "cut1432-proc-");
   const roots = [join(root, "first"), join(root, "second")];
   const env = { AUTOMAGIK_HERDR_TEST_ROOTS: root, AUTOMAGIK_HERDR_PROC_ROOT: JSON.stringify(roots) };
+  const holder = hold();
   for (const dir of roots) {
-    writeFixtureProcRoot(dir, [[DEFAULT_SOCKET, 900]]);
+    writeFixtureProcRoot(dir, [[DEFAULT_SOCKET, 900], [holder.argv[3], 910]]);
     writeFixtureProc(dir, 400, { fd: { 3: 900 } });
-    writeFixtureProc(dir, 222, { argv: hold().argv });
+    writeFixtureProc(dir, 222, { argv: holder.argv, fd: { 3: 910 } });
     writeFixtureProc(dir, 223, { ppid: 222, state: "Z" });
     writeFixtureProc(dir, 224, { ppid: 222, uid: process.getuid() + 1 });
   }
@@ -545,6 +547,45 @@ test("D1432-2 cut-off: matching PID namespaces still require comparable mount na
   unlinkSync(coreRoot);
   symlinkSync("../222", coreRoot);
   assertUnchecked(await holderCutOffs(f.input), "process table could not be read");
+});
+
+test("D1432B-1 cut-off: the exact holder path and its listening inode must belong to the holder in both reads", async (t) => {
+  const { holderCutOffs } = await spread();
+  const f = await procFixture(t);
+  assert.deepEqual(await holderCutOffs(f.input), positive);
+  const socket = hold().argv[3];
+  for (const root of f.roots) {
+    const table = join(root, "net/unix"), fd = join(root, "222/fd/3");
+    const original = readFileSync(table, "utf8");
+    // The candidate still owns inode 910, but the listener is absent at its exact argv path.
+    writeFileSync(table, original.replace(`${socket}\n`, `${socket}.other\n`));
+    assertUnchecked(await holderCutOffs(f.input), "pool membership is ambiguous");
+    writeFileSync(table, original);
+    unlinkSync(fd);
+    symlinkSync("socket:[911]", fd);
+    assertUnchecked(await holderCutOffs(f.input), "pool membership is ambiguous");
+    unlinkSync(fd);
+    symlinkSync("socket:[910]", fd);
+    const listener = original.split("\n").find((line) => line.endsWith(` ${socket}`));
+    appendFileSync(table, listener.replace(" 910 ", " 911 ") + "\n");
+    assertUnchecked(await holderCutOffs(f.input), "pool membership is ambiguous");
+    writeFileSync(table, original);
+  }
+});
+
+test("D1432B-2 cut-off: a verified core needs the reader network namespace in both reads", async (t) => {
+  const { holderCutOffs } = await spread();
+  const f = await procFixture(t);
+  assert.deepEqual(await holderCutOffs(f.input), positive);
+  for (const root of f.roots) {
+    const ns = join(root, "400/ns/net");
+    const original = readlinkSync(ns);
+    unlinkSync(ns);
+    symlinkSync("net:[999]", ns);
+    assertUnchecked(await holderCutOffs(f.input), "process table could not be read");
+    unlinkSync(ns);
+    symlinkSync(original, ns);
+  }
 });
 
 test("D1432-3 cut-off: a valid but oversized process file leaves the table unchecked", async (t) => {

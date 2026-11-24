@@ -83,10 +83,12 @@ function configValue(token) {
 
 /** Read at most maxBytes plus one byte to detect overflow, including for size-zero proc files. */
 export function readBoundedFile(path, maxBytes) {
+  const invalid = (message) => Object.assign(new Error(message), { code: "INVALID_BOUNDED_FILE" });
   const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const st = fstatSync(fd);
-    if (!st.isFile() || st.size > maxBytes) throw new Error("Invalid bounded file.");
+    if (!st.isFile()) throw invalid("Expected a regular file.");
+    if (st.size > maxBytes) throw invalid("Bounded file exceeds its size limit.");
     const chunks = [];
     let size = 0;
     while (size <= maxBytes) {
@@ -96,7 +98,7 @@ export function readBoundedFile(path, maxBytes) {
       size += count;
       chunks.push(bytes.subarray(0, count));
     }
-    if (size > maxBytes) throw new Error("Bounded file exceeds its size limit.");
+    if (size > maxBytes) throw invalid("Bounded file exceeds its size limit.");
     return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, size);
   } finally { closeSync(fd); }
 }

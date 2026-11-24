@@ -46,7 +46,7 @@ function diagnosticTraceSource() {
         const loaded = nextLoad(url, context);
         if (!url.endsWith("/bin/automagik-herdr.mjs")) return loaded;
         const source = typeof loaded.source === "string" ? loaded.source : Buffer.from(loaded.source).toString("utf8");
-        const boundary = "const { config, counts, connected, view } = await holderView()";
+        const boundary = "const { config, counts, connected, view } = await holderView(";
         if (source.split(boundary).length !== 2) throw new Error("Missing or ambiguous holder view boundary");
         // Only the diagnostic sees the FIFO. The ordinary view reads a regular fixture file.
         const beforeView = 'const poolFifo = process.env.HC_FAKE_CUTOFF_POOL_FIFO; ' +
@@ -103,11 +103,12 @@ function scene(t, { folder = "proj", diagnostic = false } = {}) {
     Object.assign(env, core.env);
   }
   const cli = (args, extraEnv) => {
-    const fifoTimeout = extraEnv?.HC_FAKE_CUTOFF_POOL_FIFO ? { timeout: 5000, killSignal: "SIGKILL" } : {};
+    const checksFifo = extraEnv?.HC_FAKE_CUTOFF_POOL_FIFO || extraEnv?.HC_FAKE_CUTOFF_VIEW_FIFO;
+    const fifoTimeout = checksFifo ? { timeout: 5000, killSignal: "SIGKILL" } : {};
     const r = spawnSync(process.execPath, [...nodeFlags, CLI, ...args], {
       cwd: project, env: { ...env, ...extraEnv }, encoding: "utf8", ...fifoTimeout,
     });
-    if (extraEnv?.HC_FAKE_CUTOFF_POOL_FIFO) assert.ifError(r.error);
+    if (checksFifo) assert.ifError(r.error);
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   // A start that must be launched beside another one: no sleep, the promises settle on close.
@@ -817,14 +818,13 @@ function cutoffScene(t, { two = false } = {}) {
   writeFileSync(ledger, "");
   writeFileSync(s.lossesFile, '{"v":1,"at":"2026-11-24T00:00:00.000Z","holder":"local","reason":"holder_lost","agents":["b-aaaaaaaaaa"]}\n');
   const roots = [join(s.root, "proc-first"), join(s.root, "proc-second")];
+  const holderSocket = s.sockets.local.replace(/\.sock$/, ".holder.1a2b3c4d.sock");
   for (const root of roots) {
-    const listeners = [[s.sockets.local, 900], [s.sockets.h2, 901], [s.sockets.other, 902]];
+    const listeners = [[s.sockets.local, 900], [s.sockets.h2, 901], [s.sockets.other, 902], [holderSocket, 910]];
     writeFixtureProcRoot(root, listeners);
     for (const [i, pid] of [400, 401, 402].entries()) writeFixtureProc(root, pid, { fd: { 3: listeners[i][1] } });
-    const hold = (pid, suffix) => writeFixtureProc(root, pid, { argv: [CUT_OFF_EXE, "hold", "--socket",
-      s.sockets.local.replace(/\.sock$/, `.holder${suffix}.sock`)] });
-    hold(111, "");
-    hold(222, ".1a2b3c4d");
+    writeFixtureProc(root, 111, { argv: [CUT_OFF_EXE, "hold", "--socket", s.sockets.local.replace(/\.sock$/, ".holder.sock")] });
+    writeFixtureProc(root, 222, { argv: [CUT_OFF_EXE, "hold", "--socket", holderSocket], fd: { 3: 910 } });
     for (const pid of [300, 301, 302]) writeFixtureProc(root, pid, { ppid: 222 });
     writeFixtureProc(root, 303, { ppid: 222, state: "Z" });
     writeFixtureProc(root, 304, { ppid: 222, uid: process.getuid() + 1 });
@@ -1019,6 +1019,26 @@ test("D1432-2 cut-off: an unrelated listener with the same stem makes holder own
   assert.equal(json.events.some(({ socket }) => socket === control), false);
 });
 
+test("D1432B-2 cut-off: a holder in a same-stem core's other network namespace is unchecked", (t) => {
+  const s = cutoffScene(t);
+  const control = s.sockets.local.replace(/\.sock$/, ".control");
+  startFakeCore(t, s.env, { socket: control, status: { core: { id: "core-control" }, pid: 403, holders: [{ pid: 222 }] } });
+  for (const root of s.roots) {
+    writeFixtureProc(root, 403, { network: "net:[999]", fd: { 3: 903 } });
+    mkdirSync(join(root, "403/net"));
+    const header = readFileSync(join(root, "net/unix"), "utf8").split("\n", 1)[0];
+    writeFileSync(join(root, "403/net/unix"), `${header}\n0000000000000000: 00000002 00000000 00010000 0001 01 903 ${control}\n`);
+    // A process can retain a socket FD from the reader's namespace after moving to another one.
+    const ns = join(root, "222/ns/net");
+    rmSync(ns);
+    symlinkSync("net:[999]", ns);
+  }
+  const json = s.view();
+  uncheckedCutOff(json, "process table could not be read");
+  checkTrace(json, [s.sockets.local]);
+  assert.equal(json.events.some(({ socket }) => socket === control), false);
+});
+
 test("C11 cut-off: a set custom override makes the check explicitly unchecked", (t) => {
   const s = cutoffScene(t);
   const json = s.view(["--json"], { AUTOMAGIK_HERDR_CORE_SOCKET: s.sockets.local });
@@ -1066,5 +1086,17 @@ test("D1432-3 cut-off: a valid but oversized pool file is unchecked", (t) => {
   writeFileSync(s.holdersFile, `{}${" ".repeat(128 * 1024)}`);
   const json = s.view();
   uncheckedCutOff(json, "the pool file could not be read");
+  checkTrace(json, []);
+});
+
+test("D1432B-3 holders: the legacy view returns promptly with a pool FIFO and no writer", (t) => {
+  const s = cutoffScene(t);
+  const fifo = spawnSync("mkfifo", ["-m", "600", s.holdersFile], { env: s.env, encoding: "utf8" });
+  assert.equal(fifo.status, 0, fifo.stderr ?? String(fifo.error));
+  const json = s.view(["--json"], { HC_FAKE_CUTOFF_VIEW_FIFO: "1" });
+  uncheckedCutOff(json, "the pool file could not be read");
+  assert.match(json.err, /holders: .*can't be read/);
+  assert.deepEqual(json.json().holders.map(({ name }) => name), ["local"]);
+  assert.equal(statSync(s.holdersFile).isFIFO(), true);
   checkTrace(json, []);
 });
