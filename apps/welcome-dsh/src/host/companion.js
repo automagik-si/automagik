@@ -77,6 +77,8 @@ export function companionPrompt(description) {
 
 const refused = message => Object.assign(new Error(message), { code: 'omni-ai/refused' })
 const invalid = message => Object.assign(new Error(message), { code: 'omni-ai/invalid' })
+// Matches SOLVER_WEARS from the Bot team's look guard.
+const SOLVER_LOOK_REFUSAL = 'A Solver wears one of the Solver characters. Choose one of those characters.'
 
 /** The ChatGPT account id inside an access token, or undefined. */
 export function accountIdOf(token) {
@@ -360,7 +362,10 @@ export function createCompanionActions(ctx, { fetch: fetchImpl = globalThis.fetc
       await ctx.settings.update(ENTRY, { teamOmni: omni, teamGenie: genie, ...(omniAbilities ? { teamOmniAbilities: JSON.stringify(omniAbilities) } : {}), ...(omni ? {} : { connectOmniSkipped: true }) })
       const rt = team()
       let omniBot = null
-      if (rt !== undefined) await applyCompanion(rt).catch(error => { throw refused(String(error?.message ?? error)) })
+      if (rt !== undefined) await applyCompanion(rt).catch(error => {
+        if (error?.code === 'bot/refused' && error.message === SOLVER_LOOK_REFUSAL) throw refused(error.message)
+        ctx.logger?.warn?.('omni-ai: the companion was not applied: %s', error?.message ?? error)
+      })
       if (omni && rt !== undefined) {
         const bot = await joinOmni(rt).catch((error) => { throw refused(String(error?.message ?? error)) })
         omniBot = { id: bot.id, name: bot.name }

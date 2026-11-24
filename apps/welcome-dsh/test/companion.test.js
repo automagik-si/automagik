@@ -372,6 +372,19 @@ test('the Welcome team step reports the same look refusal as companion save', as
   assert.deepEqual(team.calls, [])
 })
 
+test('the Welcome team step saves the choice and joins Omni after a non-look refusal', async () => {
+  const team = fakeTeam({ mainName: 'Mochi' })
+  team.updateBot = async () => { throw Object.assign(new Error('Unknown Bot'), { code: 'bot/refused' }) }
+  const fake = host({ team, entries: { 'omni-ai': { companionName: 'Pip', companionShape: 'octopus' } } })
+
+  const result = await fake.handle('team-save', { omni: true, genie: true })
+
+  assert.deepEqual(fake.valueOf('omni-ai'), { companionName: 'Pip', companionShape: 'octopus', teamOmni: true, teamGenie: true })
+  assert.equal(result.error, undefined)
+  assert.equal(team.botOf(result.value.omniBot.id).kind, 'omni')
+  assert.deepEqual(fake.logs, [['omni-ai: the companion was not applied: %s', 'Unknown Bot']])
+})
+
 test('a deleted Omni Bot comes back from the Bot team\'s Add Omni, made as the team step makes it', async () => {
   const folder = mkdtempSync(join(tmpdir(), 'omni-ai-add-'))
   try {
