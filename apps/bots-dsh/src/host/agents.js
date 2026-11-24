@@ -246,8 +246,10 @@ export function install(rt) {
         if (creation !== undefined) await publishCreation(creation, 'failed', actual)
         throw error
       }
-      if (creation === undefined) agent.sessions.push(sessionId)
-      else {
+      if (creation === undefined) {
+        if (launch !== undefined) launch.joined = !agent.sessions.includes(sessionId)
+        agent.sessions.push(sessionId)
+      } else {
         await publishCreation(creation, 'created', sessionId)
         // A terminal allocation is not permission to finish adoption. A successor
         // may already have consumed this operation or durably claimed its cleanup.
@@ -922,14 +924,23 @@ export function install(rt) {
   }
 
   const cleaningTaskStarts = new Set()
+  const deferredTaskStarts = new Map()
+  const canCleanTaskStarts = () => rt.canWriteTeam() && rt.readOnly() === undefined && rt.teamCurrent()
+  const claimedSession = (id, agent) => rt.botOf(id) !== undefined || rt.selfOf(id) !== undefined
+    || rt.roomOf(id) !== undefined || rt.pastOwners.has(id) || [...rt.agentClaims(id)].some(key => key !== agent?.id)
+
   async function cleanTaskStart(agent, pending, { persist = false } = {}) {
     const { sessionId, scopeId } = pending
     const key = sessionId ?? scopeId
     if (cleaningTaskStarts.has(key)) return
     cleaningTaskStarts.add(key)
     const leave = rt.enterOwnership?.() ?? (() => {})
-    const current = () => rt.canWriteTeam() && rt.readOnly() === undefined && state.agents[agent.id] === agent
+    const current = () => canCleanTaskStarts() && state.agents[agent.id] === agent
       && agent.refusedStarts?.includes(pending)
+      && (sessionId === undefined || (!claimedSession(sessionId, agent)
+        && (state.tasks?.[sessionId] === undefined || state.tasks[sessionId].status === 'failed')))
+      && (scopeId === undefined || scopeId === sessionId
+        || (!claimedSession(scopeId) && state.tasks?.[scopeId] === undefined))
     try {
       if (!current()) return
       if (persist) {
@@ -970,6 +981,36 @@ export function install(rt) {
       if (agent.kind !== TASKS || !Array.isArray(agent.refusedStarts)) continue
       for (const pending of agent.refusedStarts) await cleanTaskStart(agent, pending)
     }
+    for (const [launch, summary] of deferredTaskStarts) await recordRefusedTaskStart(launch, summary)
+  }
+
+  async function recordRefusedTaskStart(launch, summary) {
+    if (!canCleanTaskStarts()) return
+    deferredTaskStarts.delete(launch)
+    const { agent: original, sessionId, scopeId } = launch
+    const agent = rt.own(state.agents, original.id)
+    // The persisted Tasks identity survives a same-team adoption. A different
+    // record or a Session already claimed by a successor gives no authority.
+    if (agent?.kind !== TASKS || agent.createdAt !== original.createdAt
+      || (agent !== original && !rt.holdsLock())) return
+    const task = state.tasks?.[sessionId]
+    const keepSession = sessionId !== undefined && (claimedSession(sessionId, agent)
+      || (task !== undefined && task !== launch.task)
+      || (agent.sessions.includes(sessionId) && (agent !== original || !launch.joined)))
+    const keepScope = scopeId !== undefined && (scopeId === sessionId ? keepSession
+      : claimedSession(scopeId) || state.tasks?.[scopeId] !== undefined)
+    const pending = { sessionId: keepSession ? undefined : sessionId, scopeId: keepScope ? undefined : scopeId }
+    if (pending.sessionId === undefined && pending.scopeId === undefined) return
+    if (pending.sessionId !== undefined) {
+      if (task !== undefined) {
+        Object.assign(task, { status: 'failed', endedAt: Date.now(), summary })
+        rt.endGrants?.(sessionId, 'task')
+      }
+      if (!agent.sessions.includes(sessionId)) agent.sessions.push(sessionId)
+    }
+    agent.refusedStarts ??= []
+    agent.refusedStarts.push(pending)
+    await cleanTaskStart(agent, pending, { persist: true })
   }
 
   async function settleTaskAllocation(launch, start) {
@@ -977,19 +1018,11 @@ export function install(rt) {
       return await start()
     } catch (error) {
       const { agent, sessionId, scopeId } = launch
-      if (agent !== undefined && state.agents[agent.id] === agent && (sessionId !== undefined || scopeId !== undefined)) {
-        const task = state.tasks?.[sessionId]
-        if (task !== undefined) {
-          const reason = String(error?.message ?? error)
-          const summary = (launch.admission === undefined ? reason : reason.split('\n')[0]).slice(0, TASK_SUMMARY_MAX)
-          Object.assign(task, { status: 'failed', endedAt: Date.now(), summary })
-          rt.endGrants?.(sessionId, 'task')
-        }
-        if (sessionId !== undefined && !agent.sessions.includes(sessionId)) agent.sessions.push(sessionId)
-        const pending = { sessionId, scopeId }
-        agent.refusedStarts ??= []
-        agent.refusedStarts.push(pending)
-        await cleanTaskStart(agent, pending, { persist: true })
+      if (agent !== undefined && (sessionId !== undefined || scopeId !== undefined)) {
+        const reason = String(error?.message ?? error)
+        const summary = (launch.admission === undefined ? reason : reason.split('\n')[0]).slice(0, TASK_SUMMARY_MAX)
+        deferredTaskStarts.set(launch, summary)
+        await recordRefusedTaskStart(launch, summary)
       }
       launch.check()
       throw error
@@ -1178,10 +1211,11 @@ export function install(rt) {
     // Until its start is decided: a re-apply DSH asks for meanwhile must not lower the task
     // in place of the refusal a saved level that is no longer offered gets (permissions.js).
     starting(sessionId)
-    tasks()[sessionId] = { title: String(title).slice(0, AGENT_SESSION_TITLE_MAX), from, at: Date.now(), status: 'working', ...(roomId ? { roomId } : {}), ...(reportRoom !== undefined && !roomId ? { reportRoomId: reportRoom.id } : {}), ...(levelRoomId ? { levelRoomId } : {}), ...(levelTaskId ? { levelTaskId } : {}) }
-    if (admission === undefined) rt.capTaskByOpener?.(tasks()[sessionId], opener)
-    else Object.assign(tasks()[sessionId], { botBound: true, permissionCap: admission.snapshot.opener, openerRank: admission.snapshot.openerRank })
-    if (autoOpener !== undefined && autoOpener.botId === from && !roomId && !levelRoomId && !levelTaskId) Object.assign(tasks()[sessionId], { auto: autoOpener.route, autoRev: autoOpener.rev })
+    const task = tasks()[sessionId] = { title: String(title).slice(0, AGENT_SESSION_TITLE_MAX), from, at: Date.now(), status: 'working', ...(roomId ? { roomId } : {}), ...(reportRoom !== undefined && !roomId ? { reportRoomId: reportRoom.id } : {}), ...(levelRoomId ? { levelRoomId } : {}), ...(levelTaskId ? { levelTaskId } : {}) }
+    launch.task = task
+    if (admission === undefined) rt.capTaskByOpener?.(task, opener)
+    else Object.assign(task, { botBound: true, permissionCap: admission.snapshot.opener, openerRank: admission.snapshot.openerRank })
+    if (autoOpener !== undefined && autoOpener.botId === from && !roomId && !levelRoomId && !levelTaskId) Object.assign(task, { auto: autoOpener.route, autoRev: autoOpener.rev })
     // Only TASKS_KEPT ended tasks are remembered for their reports. The ended ones go first,
     // the one that ended longest ago first: a long task that just ended is fresh news.
     // A working record is never evicted, whatever its age or whether DSH still holds its
@@ -1212,10 +1246,22 @@ export function install(rt) {
         rt.warn('ds-bot: the fresh-Session tasks of %s were not paused: %s', bot.name, error)
       }
     }
+    // A Bot-bound record holds the proven ceiling until its Session can take
+    // and save an eligible level. Leave it for reapply and a later prune on failure.
+    for (const id of picked) {
+      const task = tasks()[id]
+      if (task?.botBound !== true || task.status === 'working' || rt.taskForebears?.().has(id)) continue
+      const safe = await rt.applyTaskPermission(id, undefined, { forget: true }).catch(error => {
+        rt.warn('ds-bot: keeping the permission bound of the old task %s: %s', id, error?.message ?? error)
+        return false
+      })
+      if (safe && tasks()[id] === task && task.status !== 'working' && !rt.taskForebears?.().has(id)) delete tasks()[id]
+    }
     // Looked at again after the waits above, with nothing awaited before the delete: a task
     // started meanwhile from one of them keeps it.
     const needed = rt.taskForebears?.() ?? new Set()
-    const forgotten = picked.filter(id => tasks()[id] !== undefined && tasks()[id].status !== 'working' && !needed.has(id))
+    const forgotten = picked.filter(id => tasks()[id] !== undefined && tasks()[id].botBound !== true
+      && tasks()[id].status !== 'working' && !needed.has(id))
       .map(id => [id, rt.taskLevelOf(id)])
     for (const [id] of forgotten) delete tasks()[id]
     await rt.save()

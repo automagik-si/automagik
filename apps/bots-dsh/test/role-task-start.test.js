@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, rmdir, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -596,4 +596,143 @@ test('D3 correction: either uncertain flush result acknowledges the queued turn 
   assert.equal(h.created.length, 2)
   assert.deepEqual(h.dispatched, h.created)
   assert.deepEqual(h.archived, [])
+})
+
+test('D3 final: history pruning holds an ended task with no safe permission offer', async t => {
+  const h = await fixture(t)
+  await h.attach()
+  await h.grant('solver', 'task-start')
+  h.level.set('solver', READ)
+  assert.match(await h.execute('solver'), /^Started task/)
+  const [id] = h.created
+  const session = h.agentOf(id).session
+  const bound = h.rt.state.tasks[id].openerRank
+  Object.assign(h.rt.state.tasks[id], { status: 'done', endedAt: 1 })
+  for (let i = 0; i < 59; i += 1) h.rt.state.tasks[`history-${i}`] = { status: 'done', endedAt: i + 2 }
+
+  const safe = h.spec[READ]
+  delete h.spec[READ]
+  h.level.set('solver', WRITE)
+  assert.match(await h.execute('solver'), /^Started task/)
+  assert.equal(h.level.get(id), READ)
+  assert.equal(h.rt.levelHeldFor(id), true)
+  assert.equal(JSON.parse(await readFile(h.stateFile, 'utf8')).tasks[id].openerRank, bound)
+
+  await h.ctx.dispose()
+  const reopened = h.launchHost({})
+  await reopened.rt.load()
+  await reopened.ctx.emitAsync('session/created', session)
+  await assert.rejects(reopened.rt.levelHolds({ agent: h.agentOf(id) }), /no tool runs here/)
+  h.spec.renamed = safe
+  await reopened.ctx.emitAsync('permission-presets/catalog-changed')
+  assert.equal(h.level.get(id), 'renamed')
+  assert.equal(reopened.rt.levelHeldFor(id), false)
+  await reopened.rt.startTask({ title: 'Prune history', text: 'Return fixture output.', from: 'main' })
+  assert.equal(JSON.parse(await readFile(h.stateFile, 'utf8')).tasks[id], undefined)
+  assert.equal(h.level.get(id), 'renamed')
+})
+
+test('D3 final: repaired-state refresh persists seed retirement and exposes a failed save', async t => {
+  for (const failSave of [false, true]) {
+    const h = await fixture(t, { fresh: true })
+    const seeded = JSON.parse(await readFile(h.stateFile, 'utf8'))
+    assert.ok(seeded.taskRoutePolicySeed)
+    await h.ctx.dispose()
+
+    await writeFile(h.stateFile, JSON.stringify({ version: 999 }))
+    const repaired = h.launchHost({ routePolicy: {} })
+    await repaired.rt.load()
+    assert.match(repaired.rt.readOnly(), /saved by a newer Omni/)
+    await writeFile(h.stateFile, JSON.stringify(seeded))
+    if (failSave) {
+      const blockedTemp = `${h.stateFile}.${process.pid}.tmp`
+      await mkdir(blockedTemp)
+      await assert.rejects(repaired.rt.refresh(), { code: 'EISDIR' })
+      assert.deepEqual(JSON.parse(await readFile(h.stateFile, 'utf8')), seeded)
+      await rmdir(blockedTemp)
+      continue
+    }
+    await repaired.rt.refresh()
+    assert.equal(repaired.rt.readOnly(), undefined)
+    assert.equal(Object.hasOwn(JSON.parse(await readFile(h.stateFile, 'utf8')), 'taskRoutePolicySeed'), false)
+    await repaired.ctx.dispose()
+    const missing = h.launchHost({})
+    await missing.rt.load()
+    assert.equal(missing.rt.taskRoutePolicy, undefined)
+  }
+})
+
+test('D3 final: refused allocation cleanup survives same-team writer adoption', async t => {
+  const h = await fixture(t)
+  await h.attach()
+  await h.grant('solver', 'task-start')
+  assert.match(await h.execute('solver'), /^Started task/)
+  const [kept] = h.created
+  const members = state => Object.values(state.agents).find(agent => agent.kind === 'tasks')
+  const scopeDir = join(h.rt.home, 'session-read-scopes')
+  const scopedIds = async () => (await Promise.all((await readdir(scopeDir)).map(async file =>
+    JSON.parse(await readFile(join(scopeDir, file), 'utf8')).id))).sort()
+  const lock = join(h.rt.home, 'state.lock')
+  const actual = 'session-allocated-during-handoff'
+  let reserved
+  const refuseAfterAdoption = async (allocatedId, replacementId) => {
+    const original = members(h.rt.state)
+    let readOnlyDuringHandoff
+    h.ctx.sessionController.create = async ({ sessionId }) => {
+      reserved = sessionId
+      h.agentOf(allocatedId, FULL)
+      await unlink(lock)
+      await writeFile(lock, JSON.stringify({ token: 'fixture-writer', host: 'fixture-remote', pid: 1 }))
+      if (replacementId !== undefined) {
+        const replacement = JSON.parse(await readFile(h.stateFile, 'utf8'))
+        delete replacement.agents[original.id]
+        replacement.agents[replacementId] = { ...original, id: replacementId }
+        await writeFile(h.stateFile, JSON.stringify(replacement))
+      }
+      await h.rt.refresh()
+      readOnlyDuringHandoff = h.rt.readOnly()
+      await unlink(lock)
+      await h.rt.refresh()
+      throw Object.assign(new Error('workspace attachment failed'), {
+        code: 'session/workspace-attach-failed', details: { sessionId: allocatedId },
+      })
+    }
+    assert.match(await h.execute('solver'), changed)
+    assert.ok(readOnlyDuringHandoff)
+    assert.equal(h.rt.readOnly(), undefined)
+    assert.notEqual(members(h.rt.state), original)
+    assert.equal(members(h.rt.state).id, replacementId ?? original.id)
+  }
+  const attempts = []
+  h.ctx.workspaceRegistry.archiveSession = async id => {
+    attempts.push(id)
+    throw new Error('archive unavailable')
+  }
+  const originalScopes = await scopedIds()
+  await refuseAfterAdoption(kept)
+  assert.deepEqual(attempts, [])
+  assert.equal(h.rt.state.tasks[kept].status, 'working')
+  const scopesAfterCollision = await scopedIds()
+
+  await refuseAfterAdoption('session-from-replaced-team', 'fixture-replacement-tasks')
+  assert.deepEqual(attempts, [])
+  assert.equal(members(h.rt.state).refusedStarts, undefined)
+  const baseline = await scopedIds()
+  assert.ok(baseline.includes(reserved))
+
+  await refuseAfterAdoption(actual)
+  assert.deepEqual(attempts, [actual])
+  assert.deepEqual(scopesAfterCollision, originalScopes)
+  const saved = JSON.parse(await readFile(h.stateFile, 'utf8'))
+  assert.deepEqual(members(saved).refusedStarts, [{ sessionId: actual, scopeId: reserved }])
+  assert.ok((await scopedIds()).includes(reserved))
+
+  await h.ctx.dispose()
+  const reopened = h.launchHost({})
+  await reopened.rt.load()
+  assert.deepEqual(h.archived, [[actual, { stopActivity: true }]])
+  assert.deepEqual(members(reopened.rt.state).sessions, [kept])
+  assert.equal(reopened.rt.state.tasks[kept].status, 'working')
+  assert.deepEqual(h.dispatched, [kept])
+  assert.deepEqual(await scopedIds(), baseline)
 })

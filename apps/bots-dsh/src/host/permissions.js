@@ -624,23 +624,29 @@ export function install(rt) {
   }
 
   async function applyTaskPermissionHeld(
-    sessionId, session, { start = false, starts = false } = {},
+    sessionId, session, { start = false, starts = false, forget = false } = {},
   ) {
     if (start) return startTaskPermission(sessionId, session)
     const task = taskOf(sessionId)
     if (task === undefined) return false
     const service = presets()
     if (task.botBound === true) {
+      const offeredLevel = service => {
+        const { level } = botBoundRun(task, service, 0)
+        if (!forget || level === undefined) return level
+        const { options, defaultPreset } = service.catalog()
+        return options.some(({ value }) => value === defaultPreset) ? narrowerLevel(service, level, defaultPreset) : level
+      }
       await serial(sessionId, async () => {
         let level
         try {
           const target = session ?? (await rt.resolveAgent(sessionId)).session
-          const current = taskOf(sessionId)
-          if (current !== task) throw refusal(OPENER_UNPROVEN)
-          level = botBoundRun(task, service, 0).level
+          if (taskOf(sessionId) !== task || (forget && !rt.canWriteTeam())) throw refusal(OPENER_UNPROVEN)
+          level = offeredLevel(service)
           if (level === undefined) throw refusal(OPENER_UNPROVEN)
           if (rt.readOnly() === undefined) service.set(target, level)
-          if (service.current(target) !== level || botBoundRun(task, presets(), 0).level !== level) throw refusal(OPENER_UNPROVEN)
+          if (forget && await ctx.sessions.flush(target) === false) throw refusal(OPENER_UNPROVEN)
+          if (taskOf(sessionId) !== task || service.current(target) !== level || offeredLevel(presets()) !== level) throw refusal(OPENER_UNPROVEN)
           unapplied.delete(sessionId)
         } catch (error) {
           mark(sessionId, level ?? task.permissionCap ?? AUTO_FALLBACK)

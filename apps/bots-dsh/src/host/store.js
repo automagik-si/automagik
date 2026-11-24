@@ -705,7 +705,10 @@ export function install(rt) {
       lockGained()
       return
     }
-    if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) adopt(readFileState())
+    if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) {
+      const { retiredSeed } = adopt(readFileState())
+      if (retiredSeed) await save({ required: true })
+    }
   }
 
   // Admission reads the adopted team without refreshing an unchanged writer.
