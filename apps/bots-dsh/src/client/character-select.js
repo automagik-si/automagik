@@ -15,11 +15,10 @@ import { isSolverBot } from '../shared/solver-method.js'
 // The character select: where a Bot's look is chosen, as a fighting game's select screen. The
 // stage on the left plays the highlighted character big, under a spotlight, with its name; the
 // roster on the right lists Automagik's own first (Genie, Omni and every character, in the
-// color picked on the stage), then the Solvers in a section of their own (a Solver Bot's
-// chooser only), then the person's
-// (pets the team keeps and Codex's own), then
-// codex-pets.net, which is asked only once that section is opened. Arrow keys move the cursor,
-// Enter picks, Escape leaves. The pick plays a jump before the select closes.
+// color picked on the stage), then the Solvers in a section of their own (a Solver Bot's chooser
+// only), then the person's (pets the team keeps and Codex's own), then codex-pets.net, which is
+// asked only once that section is opened. Arrow keys move the cursor, Enter picks, Escape leaves.
+// The pick plays a jump before the select closes.
 
 const SORTS = [['popular', 'Most liked'], ['new', 'Newest'], ['views', 'Most viewed'], ['random', 'Surprise me']]
 const sourceLine = { builtin: 'Automagik', team: 'Kept by this team', codex: 'From Codex' }
@@ -196,11 +195,11 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   const photo = look.image ? [{ key: 'photo', kind: 'photo', image: look.image, name: t('Photo'), line: t('Uploaded') }] : []
   const photos = library.filter(entry => entry.image !== look.image).map(entry => ({ key: `library:${entry.id}`, kind: 'library', image: entry.image, name: entry.name || t('Photo'), line: t('Your photos') }))
   const all = [...photo, ...photos, ...ours, ...solvers, ...yours, ...theirs]
+  const worn = currentKey(bot, look)
   // A worn character the roster does not offer (a Solver on a Bot that is not a Solver Bot, the
   // octopus in another color) stays on the stage, with no tile: Choose keeps it, in the picked color.
-  const wornShape = !look.image && !look.pet && Object.hasOwn(CHARACTERS, look.shape) ? shapeEntry(look.shape) : null
+  const wornShape = worn === `shape:${look.shape}` && Object.hasOwn(CHARACTERS, look.shape) ? shapeEntry(look.shape) : null
   const item = all.find(entry => entry.key === focus) ?? wornShape ?? ours[0]
-  const worn = currentKey(bot, look)
 
   // A new highlight greets: the fighter waves once, then stands.
   const move = (key) => { if (key !== focus) { setFocus(key); setStage('poked') } }

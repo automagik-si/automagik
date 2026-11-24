@@ -137,8 +137,13 @@ function chooser(bot) {
   const module = { exports: {} }
   runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, URLSearchParams, document: { body: {} }, setTimeout: () => 0, require: name => (name === 'react' ? stub : { createPortal: node => node }) })
   const saved = []
+  const used = []
   const never = () => new Promise(() => {})
-  const actions = { pets: never, avatarLibrary: never, petsBrowse: never, updateBot: (id, patch) => { saved.push(JSON.parse(JSON.stringify([id, patch]))); return never() } }
+  const actions = {
+    pets: never, avatarLibrary: never, petsBrowse: never,
+    updateBot: (id, patch) => { saved.push(JSON.parse(JSON.stringify([id, patch]))); return never() },
+    petUse: (...args) => { used.push(JSON.parse(JSON.stringify(args))); return never() },
+  }
   const walk = (node, found = []) => {
     if (Array.isArray(node)) { for (const child of node) walk(child, found); return found }
     if (node === null || node === undefined || typeof node !== 'object') return found
@@ -147,7 +152,7 @@ function chooser(bot) {
     return found
   }
   const draw = () => { at = 0; return walk(module.exports.CharacterSelect({ bot, actions, run: promise => promise, onClose() {}, avatarImage: async () => '' })) }
-  return { draw, saved }
+  return { draw, saved, used }
 }
 const headings = nodes => nodes.filter(node => node.type === 'h3').map(node => node.props.children[0])
 const tiles = nodes => nodes.filter(node => node.type === 'button' && node.props.className === 'bt-cs-tile')
@@ -206,4 +211,31 @@ test('a regular Bot that wears a Solver opens on it, and Choose keeps the shape 
   choose.props.onClick()
   // Same shape, new color: the look is kept, the color change is saved.
   assert.deepEqual(saved, [['b', { avatar: { shape: 'cactus' }, color: 'blue' }]])
+})
+
+test('an Unfold Bot wears no character: while its pet list loads the stage is not given its id\'s shape', () => {
+  // The Unfold pet joins the roster only once the pet list answers; here it never does.
+  const { draw, saved, used } = chooser({ id: 'u', name: 'U', kind: 'unfold' })
+  const nodes = draw()
+  assert.equal(stageName(nodes), 'Genie')
+  assert.deepEqual(nodes.filter(node => node.type === 'button' && node.props.className === 'bt-cs-color'), [])
+  assert.deepEqual(tiles(nodes).filter(tile => tile.props['aria-pressed'] === true), [])
+  nodes.find(node => node.type === 'button' && node.props.className === 'bt-cs-go').props.onClick()
+  // Choose picks the staged entry, a pet: it never saves a shape over the Unfold look.
+  assert.deepEqual(saved, [])
+  assert.deepEqual(used, [['u', 'builtin', 'genie-clay']])
+  // The same with a shape stored under it.
+  const stored = chooser({ id: 'u', name: 'U', kind: 'unfold', avatar: { shape: 'moon' } })
+  assert.equal(stageName(stored.draw()), 'Genie')
+})
+
+test('the octopus in a color other than Omni\'s is kept: on the stage, no tile, and Choose saves it again', () => {
+  const { draw, saved, used } = chooser({ id: 'b', name: 'O', avatar: { shape: 'octopus' }, color: 'red' })
+  const nodes = draw()
+  assert.equal(stageName(nodes), 'Octopus')
+  assert.deepEqual(tiles(nodes).filter(tile => tile.props['aria-pressed'] === true), [])
+  assert.ok(!keysOf(nodes).includes('shape:octopus'))
+  nodes.find(node => node.type === 'button' && node.props.className === 'bt-cs-go').props.onClick()
+  assert.deepEqual(saved, [['b', { avatar: { shape: 'octopus' }, color: 'red' }]])
+  assert.deepEqual(used, [])
 })
