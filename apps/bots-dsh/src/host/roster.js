@@ -94,10 +94,17 @@ export function install(rt) {
     return team
   }
 
-  async function ensureWorkspace(guard) {
-    if (state.workspaceId && ctx.workspaceRegistry.get(state.workspaceId)) {
+  async function publishWorkspace(id) {
+    state.workspaceId = id
+    rt.dropAllShellGrants?.()
+    await rt.save()
+  }
+
+  async function ensureWorkspace(guard, allocation) {
+    const workspaceId = state.workspaceId
+    if (workspaceId && ctx.workspaceRegistry.get?.(workspaceId)) {
       await keepTeamFolder()
-      return state.workspaceId
+      return workspaceId
     }
     const path = rt.defaultTeamFolder()
     let blocked
@@ -109,9 +116,8 @@ export function install(rt) {
       workspace = await ctx.workspaceRegistry.create(path, 'Omni')
     }
     guard?.()
-    state.workspaceId = workspace.id
-    rt.dropAllShellGrants?.()
-    await rt.save()
+    if (allocation === undefined) await publishWorkspace(workspace.id)
+    else allocation.pendingWorkspace = { id: workspace.id, previousId: workspaceId }
     return workspace.id
   }
 
@@ -159,7 +165,7 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false, guard } = {}) {
+  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false, guard, allocation } = {}) {
     guard?.()
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
@@ -168,10 +174,11 @@ export function install(rt) {
     const usable = dir !== undefined && await sessionFolderUsable(dir)
     if (dir !== undefined && !usable) rt.warn('ds-bot: the working folder %s is unavailable; %s starts in the team workspace', dir, title)
     const known = usable ? await ctx.workspaceRegistry.resolveByPath(dir) : undefined
-    let place = known !== undefined ? { workspaceId: known.id } : usable ? { cwd: dir } : { workspaceId: await ensureWorkspace(guard) }
+    const workspaceId = usable ? undefined : await ensureWorkspace(guard, allocation)
+    let place = known !== undefined ? { workspaceId: known.id } : usable ? { cwd: dir } : { workspaceId }
     let blockedFolder = !usable && rt.folderWarning?.(dir) ? dir : undefined
     if (!usable) {
-      const team = rt.teamFolder()
+      const team = ctx.workspaceRegistry.get?.(workspaceId)?.path
       if (team !== undefined && !await sessionFolderUsable(team)) {
         blockedFolder ??= rt.folderWarning?.(team) ? team : undefined
         const fallback = rt.defaultTeamFolder()
@@ -184,21 +191,22 @@ export function install(rt) {
     }
     const preset = await botPreset(profile, { group })
     const reserved = readScopeSource === undefined ? undefined
-      : await rt.reserveReadScope(readScopeSource, { continuation: continueReadScope })
-    let allocation
-    try {
-      rt.assertShellChoice?.(undefined, botId)
-      guard?.()
-      allocation = await ctx.sessionController.create({
-        ...place, ...preset, ...(reserved === undefined ? {} : { sessionId: reserved }),
-      })
-    } catch (error) {
-      if (guard !== undefined && reserved !== undefined) await rt.forgetReadScopes?.([reserved])
-        .catch(cleanupError => rt.warn('ds-bot: the reserved file-tool record for %s was not removed: %s', title, cleanupError))
-      throw error
-    }
-    const { sessionId } = allocation
+      : await rt.reserveReadScope(readScopeSource, { continuation: continueReadScope, guard })
+    if (allocation !== undefined) allocation.reserved = reserved
+    rt.assertShellChoice?.(undefined, botId)
+    guard?.()
+    const { sessionId } = await ctx.sessionController.create({
+      ...place, ...preset, ...(reserved === undefined ? {} : { sessionId: reserved }),
+    })
+    if (allocation !== undefined) allocation.id = sessionId
     if (reserved !== undefined && sessionId !== reserved) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
+    // A guarded create can use a new workspace before the team takes it. Keep a
+    // workspace chosen by another action while this Session was being allocated.
+    const pendingWorkspace = allocation?.pendingWorkspace
+    if (pendingWorkspace !== undefined && state.workspaceId === pendingWorkspace.previousId) {
+      guard?.()
+      await publishWorkspace(pendingWorkspace.id)
+    }
     if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
@@ -434,6 +442,7 @@ export function install(rt) {
       resolveSectionInput({ section, sectionId }, { allowCreate: false })
       await ctx.sessionTitle.rename(agent.session, cleanName)
     }
+    const allocation = {}
     let sectionsBefore
     let resolvedSecId
     try {
@@ -442,7 +451,7 @@ export function install(rt) {
           assertCaller(createdBy)
           createLook(options)
         }
-        id = await createSession(cleanName, { dir, readScopeSource, guard })
+        id = await createSession(cleanName, { dir, readScopeSource, guard, allocation })
         // Check the new Session's own tool surface before publishing its Bot.
         if (denyTools) await rt.assertDenyTools(id, denyTools)
       }
@@ -554,7 +563,12 @@ export function install(rt) {
         .then(() => sendKickoff(bot, greeting), error => rt.warn('ds-bot: %s does not greet: %s', cleanName, error?.message ?? error))
       return bot
     } catch (error) {
-      if (id === undefined) throw error
+      id ??= allocation.id
+      const { reserved } = allocation
+      if (id === undefined) {
+        if (reserved !== undefined) await forgetReadScopes([reserved], cleanName)
+        throw error
+      }
       // The Bot's Session was already made: archive it instead of leaving an orphan.
       delete state.bots[id]
       rt.dropGrantsForBot?.(id)
@@ -563,14 +577,25 @@ export function install(rt) {
       rt.chatOwners.delete(id)
       if (resolvedSecId !== undefined && !sectionsBefore.has(resolvedSecId)
         && !Object.values(state.bots).some(bot => bot.sectionId === resolvedSecId)
-        && !Object.values(state.rooms).some(room => room.sectionId === resolvedSecId)) {
+        && !Object.values(state.rooms).some(room => room.sectionId === resolvedSecId)
+        && !Object.values(state.agents).some(agent => agent.sectionId === resolvedSecId)) {
         state.sections = state.sections.filter(sec => sec.id !== resolvedSecId)
       }
       // A save that another change queued meanwhile still carries this Bot; a later
       // one writes the team without it.
       void rt.save().catch(() => {})
-      if (existingSessionId === undefined) await ctx.workspaceRegistry.archiveSession(id)
-        .catch(archiveError => rt.warn('ds-bot: archiving the Session for %s failed: %s', cleanName, archiveError))
+      if (existingSessionId === undefined) {
+        let archived = false
+        try {
+          await ctx.workspaceRegistry.archiveSession(id)
+          archived = true
+        } catch (archiveError) {
+          rt.warn('ds-bot: archiving the Session for %s failed: %s', cleanName, archiveError)
+        }
+        rt.sessionFolderWarnings?.delete(id)
+        // If the Session survived a failed archive, keep the scope it uses.
+        if (reserved !== undefined && (archived || reserved !== id)) await forgetReadScopes([reserved], cleanName)
+      }
       throw error
     }
   }

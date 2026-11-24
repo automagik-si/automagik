@@ -360,7 +360,7 @@ export function createCompanionActions(ctx, { fetch: fetchImpl = globalThis.fetc
       await ctx.settings.update(ENTRY, { teamOmni: omni, teamGenie: genie, ...(omniAbilities ? { teamOmniAbilities: JSON.stringify(omniAbilities) } : {}), ...(omni ? {} : { connectOmniSkipped: true }) })
       const rt = team()
       let omniBot = null
-      if (rt !== undefined) await applyCompanion(rt).catch(error => ctx.logger?.warn?.('omni-ai: the companion was not applied: %s', error?.message ?? error))
+      if (rt !== undefined) await applyCompanion(rt).catch(error => { throw refused(String(error?.message ?? error)) })
       if (omni && rt !== undefined) {
         const bot = await joinOmni(rt).catch((error) => { throw refused(String(error?.message ?? error)) })
         omniBot = { id: bot.id, name: bot.name }

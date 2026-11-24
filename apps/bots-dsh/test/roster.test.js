@@ -33,7 +33,7 @@ function keyed(ctx, stored, records) {
 // Enough of the dsh services for the roster to make Sessions; kickoff messages are dropped.
 // With `keys`, the models' route takes an API key and these are the ones set.
 let rt
-function start(team, { models = [], reasoning = {}, archiveError, config = {}, keys, selection } = {}) {
+function start(team, { models = [], reasoning = {}, archiveError, renameError, config = {}, keys, selection } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-roster-'))
   if (team !== undefined) writeFileSync(join(home, 'state.json'), JSON.stringify(team))
   const services = {}
@@ -48,6 +48,7 @@ function start(team, { models = [], reasoning = {}, archiveError, config = {}, k
   const sent = []
   const selected = []
   const archived = []
+  const titles = new Map()
   const warnings = []
   let sessions = 0
   ctx.logger.warn = (...args) => warnings.push(format(...args))
@@ -76,7 +77,10 @@ function start(team, { models = [], reasoning = {}, archiveError, config = {}, k
       resolveAgent: async sessionId => ({ agent: { session: { id: sessionId }, followup: message => sent.push({ sessionId, message }) } }),
       selectModel: async (request) => { selected.push(request) },
     },
-    sessionTitle: { rename: async () => {} },
+    sessionTitle: { rename: async (session, title) => {
+      if (renameError !== undefined) throw renameError
+      titles.set(session.id, title)
+    } },
     sessions: { flush: async () => {} },
   })
   let route
@@ -94,7 +98,7 @@ function start(team, { models = [], reasoning = {}, archiveError, config = {}, k
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { call, stop, home, sent, selected, ctx, archived, warnings, records }
+  return { call, stop, home, sent, selected, ctx, archived, titles, warnings, records }
 }
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 20))
@@ -1582,6 +1586,14 @@ function pause() {
   }
 }
 
+function seedReadScope(host) {
+  const directory = join(host.home, 'session-read-scopes')
+  const file = id => join(directory, `${createHash('sha256').update(id).digest('hex')}.json`)
+  mkdirSync(directory)
+  writeFileSync(file('m1'), JSON.stringify({ version: 1, id: 'm1', folder: host.home }))
+  return { directory, file }
+}
+
 test('native update refuses to make a Solver from either an ordinary caller or a Main Bot', async t => {
   const host = lookRoster(t, { ...OLD_TEAM, mainBotIds: ['m1'], whaleStored: true })
   await rt.load()
@@ -1690,6 +1702,96 @@ for (const phase of ['folder approval', 'folder approval and deletion', 'read-sc
     }
   })
 }
+
+for (const hasWorkspace of [true, false]) {
+  const scenario = hasWorkspace ? 'writes no reservation' : 'leaves the workspace and grants unchanged'
+  test(`native create ${scenario} when the caller is lost during lineage lookup`, { timeout: 10000 }, async t => {
+    const host = lookRoster(t, { ...OLD_TEAM, whaleStored: true, ...(hasWorkspace ? { workspaceId: 'w-test' } : {}) })
+    if (hasWorkspace) host.ctx.workspaceRegistry.get = () => ({ id: 'w-test', path: host.home })
+    const scope = seedReadScope(host)
+    const gate = pause()
+    const get = host.ctx.get
+    host.ctx.get = name => name === 'sessionPersistence' ? { stat: async id => {
+      if (id !== 'm1') return undefined
+      await gate.wait()
+      return { header: { id } }
+    } } : get(name)
+    await rt.load()
+    await rt.save()
+    const workspaceId = host.state().workspaceId
+    const dropGrants = rt.dropAllShellGrants = t.mock.fn()
+    const register = t.mock.method(host.ctx.workspaceRegistry, 'create')
+    const open = fsp.open
+    const scopeOpens = []
+    fsp.open = (...args) => {
+      if (String(args[0]).startsWith(`${scope.directory}/`) && args[1] === 'wx') scopeOpens.push(args[0])
+      return open(...args)
+    }
+    syncBuiltinESMExports()
+    t.after(() => { fsp.open = open; syncBuiltinESMExports() })
+    const args = { name: 'Candidate', role: 'Writer', instructions: 'Write notes.' }
+    const creating = host.tool('create_bot', args)
+    let before
+    let saves
+    try {
+      await Promise.race([gate.entered, creating.then(answer => assert.fail(answer))])
+      assert.equal((await host.call('set-main', { id: 'm1', main: false })).ok, true)
+      await rt.save()
+      before = botSnapshot(host)
+      saves = t.mock.method(rt, 'save')
+    } finally {
+      gate.release()
+    }
+    assert.equal(await creating, MAIN_ONLY)
+    assert.equal(host.create.mock.callCount(), 0)
+    assert.deepEqual(host.archived, [])
+    assert.equal(saves.mock.callCount(), 0)
+    if (!hasWorkspace) {
+      assert.equal(rt.state.workspaceId, workspaceId, 'keep the live team workspace')
+      assert.equal(host.state().workspaceId, workspaceId, 'keep the saved team workspace')
+      assert.equal(dropGrants.mock.callCount(), 0)
+      assert.equal(register.mock.callCount(), 1)
+      const workspace = await host.ctx.workspaceRegistry.resolveByPath(rt.defaultTeamFolder())
+      assert.equal(workspace?.path, rt.defaultTeamFolder())
+      assert.ok(existsSync(workspace.path))
+    }
+    assert.deepEqual(scopeOpens, [], 'never open a reservation for writing')
+    assert.deepEqual(readdirSync(scope.directory).map(name => join(scope.directory, name)), [scope.file('m1')])
+    await assertSameBots(host, before)
+  })
+}
+
+test('native create publishes the resolved workspace after Session allocation', { timeout: 10000 }, async t => {
+  const host = lookRoster(t, { ...OLD_TEAM, whaleStored: true })
+  await rt.load()
+  await rt.save()
+  const workspaceId = host.state().workspaceId
+  const dropGrants = rt.dropAllShellGrants = t.mock.fn()
+  const gate = pause()
+  let place
+  host.ctx.sessionController.create = async options => {
+    place = options
+    await gate.wait()
+    return { sessionId: 'allocated' }
+  }
+  const creating = host.tool('create_bot', { name: 'Candidate', role: 'Writer', instructions: 'Write notes.' })
+  let workspace
+  try {
+    await Promise.race([gate.entered, creating.then(answer => assert.fail(answer))])
+    workspace = await host.ctx.workspaceRegistry.resolveByPath(rt.defaultTeamFolder())
+    assert.equal(place.workspaceId, workspace.id)
+    assert.equal(rt.state.workspaceId, workspaceId)
+    assert.equal(host.state().workspaceId, workspaceId)
+    assert.equal(dropGrants.mock.callCount(), 0)
+  } finally {
+    gate.release()
+    await creating
+  }
+  assert.equal(host.state().bots.allocated.name, 'Candidate')
+  assert.equal(rt.state.workspaceId, workspace.id)
+  assert.equal(host.state().workspaceId, workspace.id)
+  assert.equal(dropGrants.mock.callCount(), 1)
+})
 
 test('native create refuses empty, whitespace and non-string supplied photos before approval', async t => {
   const host = lookRoster(t)
@@ -1811,17 +1913,19 @@ test('create rechecks a reviewer lost during Session allocation before publishin
 })
 
 test('a rejected existing-Session rename publishes neither the Bot nor its new section', async t => {
-  const host = lookRoster(t)
+  const host = lookRoster(t, OLD_TEAM, { renameError: new Error('Rename refused') })
   await rt.load()
   await rt.save()
   const before = botSnapshot(host)
-  const titles = new Map([['existing', 'Original']])
+  const { titles } = host
+  titles.set('existing', 'Original')
+  const rename = host.ctx.sessionTitle.rename
   host.ctx.sessionTitle.rename = async (session, title) => {
     assert.equal(session.id, 'existing')
     assert.equal(title, 'Candidate')
     assert.equal(rt.botOf(session.id), undefined)
     assert.ok(!rt.state.sections?.some(section => section.name === 'Brand new'))
-    throw new Error('Rename refused')
+    await rename(session, title)
   }
   await assert.rejects(rt.createBot({ name: 'Candidate', existingSessionId: 'existing', section: 'Brand new' }), /Rename refused/)
   await assertSameBots(host, before)
@@ -1832,7 +1936,7 @@ test('a rejected existing-Session rename publishes neither the Bot nor its new s
 })
 
 test('a failed create rolls back its newly appended section and archives the Session', async t => {
-  const host = lookRoster(t, OLD_TEAM, { models: ['v4'] })
+  const host = lookRoster(t, { ...OLD_TEAM, agents: { standalone: { id: 'standalone', name: 'DSH agent' } } }, { models: ['v4'] })
   await rt.load()
   await rt.save()
   const before = botSnapshot(host)
@@ -1841,7 +1945,62 @@ test('a failed create rolls back its newly appended section and archives the Ses
   await assertSameBots(host, before)
   assert.ok(!host.state().sections?.some(section => section.name === 'Brand new'))
   assert.deepEqual(host.archived.map(([id]) => id), ['s1'])
+
+  const gate = pause()
+  t.mock.method(rt, 'applyPermission', async () => {
+    await gate.wait()
+    throw new Error('Permission refused')
+  }, { times: 1 })
+  const creating = assert.rejects(rt.createBot({ name: 'Candidate', model: 'deepseek/v4', section: 'Brand new' }), /Permission refused/)
+  let section
+  try {
+    await Promise.race([gate.entered, creating.then(() => assert.fail('Create ended before applying permission'))])
+    section = rt.state.sections.find(entry => entry.name === 'Brand new')
+    assert.equal((await host.call('set-flags', { id: 'standalone', sectionId: section.id })).ok, true)
+  } finally {
+    gate.release()
+  }
+  await creating
+  await assertSameBots(host, before)
+  assert.deepEqual(rt.state.sections.find(entry => entry.id === section.id), section)
+  assert.deepEqual(host.state().sections.find(entry => entry.id === section.id), section)
+  assert.equal(rt.state.agents.standalone.sectionId, section.id)
+  assert.equal(host.state().agents.standalone.sectionId, section.id)
+  assert.deepEqual(host.archived.map(([id]) => id), ['s1', 's2'])
 })
+
+for (const setup of ['reservation mismatch', 'agent resolution', 'title rename']) {
+  test(`native create archives its Session and removes its reservation after ${setup} fails`, async t => {
+    const host = lookRoster(t, { ...OLD_TEAM, whaleStored: true, workspaceId: 'w-test' })
+    host.ctx.workspaceRegistry.get = () => ({ id: 'w-test', path: host.home })
+    host.ctx.sessions.get = id => id === 'm1' ? { id, header: { id } } : undefined
+    const scope = seedReadScope(host)
+    let reserved
+    let allocated
+    host.ctx.sessionController.create = async ({ sessionId }) => {
+      reserved = sessionId
+      allocated = setup === 'reservation mismatch' ? 'different-session' : reserved
+      return { sessionId: allocated }
+    }
+    const setupError = `${setup} failed`
+    const resolveAgent = rt.resolveAgent
+    if (setup === 'agent resolution') t.mock.method(rt, 'resolveAgent', async id => {
+      if (id === allocated) throw new Error(setupError)
+      return resolveAgent(id)
+    })
+    if (setup === 'title rename') t.mock.method(host.ctx.sessionTitle, 'rename', async () => { throw new Error(setupError) })
+    await rt.load()
+    await rt.save()
+    const before = botSnapshot(host)
+    const answer = await host.tool('create_bot', { name: 'Candidate', role: 'Writer', instructions: 'Write notes.' })
+    assert.match(answer, setup === 'reservation mismatch' ? /DSH did not use the Session reserved/ : new RegExp(setupError))
+    assert.equal(typeof reserved, 'string')
+    assert.deepEqual(host.archived.map(([id]) => id), [allocated])
+    assert.equal(existsSync(scope.file(reserved)), false)
+    assert.ok(existsSync(scope.file('m1')))
+    await assertSameBots(host, before)
+  })
+}
 
 test('an adopted Session refuses a creator, reviewer or review guard before rename', async t => {
   const host = lookRoster(t)
