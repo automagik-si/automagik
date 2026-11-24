@@ -8861,6 +8861,22 @@ test("#628 D628B-2 linked attach checks the target machine's approved names", (t
   }
 });
 
+test("#628 D628C-1 linked attach refuses an unknown approval location before either write", (t) => {
+  const s = scene(t, { terminals: [term("vm/t8", { argv: ["codex"], app: "codex" })] });
+  s.seed(grantRoster());
+  // The fake uses no HOME when the machine has no home. Keep the old fallback path in scratch.
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(),
+    machines: [{ name: "vm", id: "remote-core", state: "connected",
+      paths: { "/.local/share": join(s.root, "missing-data") } }] }));
+  const r = s.cli(["attach", "Dev", "vm/t8", "--machine", "vm", "--project", s.project, "--json"], {
+    env: { XDG_DATA_HOME: undefined },
+  });
+  assert.equal(r.code, 1, r.err || r.out);
+  assert.match(r.err, /cannot verify the approved roster: .*HOME or XDG_DATA_HOME is required/);
+  assert.equal(existsSync(attachFile(s.app)), false);
+  assert.deepEqual(labelCalls(s.calls()), []);
+});
+
 test("#628 D628B-3 an unreadable approval refuses attach before binding or labeling", (t) => {
   for (const damage of ["digest", "mode", "path"]) {
     const s = scene(t, { terminals: [term("t8", { argv: ["codex"], app: "codex" })] });

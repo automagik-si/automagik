@@ -89,7 +89,7 @@ import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
 import { APPROVAL_REVIEW, approvalProjectWord, approvedGrant, approvedProxyEnabled, approvedProxyState, approvedSettingsDir,
-  approvedWorkerHome, canonicalProject, commitApproval, escapeForTerminal, MissingApprovedRecord, parseApprovedRecord,
+  approvedRootOf, approvedWorkerHome, canonicalProject, commitApproval, escapeForTerminal, MissingApprovedRecord, parseApprovedRecord,
   previewApproval, proxyStateFor, readApprovedRecord, shellWord } from "../approved.js";
 import { hooksNotice } from "../migrateHooks.mjs";
 import { SPACE_LABEL, plan as tidyPlan, planText } from "../tidy.js";
@@ -3387,14 +3387,15 @@ async function readApprovedOn({ key, machine }) {
   let path;
   try {
     const location = await remoteIo.exec("sh", ["-c",
-      'CDPATH= cd -- "$1" || exit 1; pwd -P; '
-      + 'printf "%s\\n" "${XDG_DATA_HOME:-$HOME/.local/share}/automagik-herdr/approved"',
+      'CDPATH= cd -- "$1" && pwd -P && printf "%s\\n" "${XDG_DATA_HOME-}" "${HOME-}"',
       "sh", key], machine, { timeout: AGENT_WAIT_S });
     if (location.code !== 0) throw new Error("cannot locate the target's approved roster");
-    const [canonical, root, extra] = location.stdout.trimEnd().split("\n");
-    if (!canonical?.startsWith("/") || !root?.startsWith("/") || extra !== undefined) {
+    const [canonical, XDG_DATA_HOME, HOME, end, extra] = location.stdout.split("\n");
+    if (!canonical?.startsWith("/") || end !== "" || extra !== undefined) {
       throw new Error("the target's approval location is invalid");
     }
+    const root = approvedRootOf({ XDG_DATA_HOME, HOME });
+    if (!isAbsolute(root)) throw new Error("the target's approval location is invalid");
     const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 32);
     // Same canonical key and suffix as approved.js recordFileOf; fixture test pins both.
     path = `${root}/${hash}.json`;
