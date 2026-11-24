@@ -18,6 +18,7 @@ import { AGY_FIXED_DENY, AGY_SHELL_READ, CLAUDE_PERSON_SETTINGS, agySettingsDir,
 import { WORKER_LINE, amPartHookCommand } from "../mods/am-sidebar/briefingText.mjs";
 import { claudeSlug, restartAnswer } from "../mods/am-sidebar/restart.js";
 import { approveProject, recordFor, recordText } from "../mods/am-sidebar/approved.js";
+import { sharedSendAllowed, teamOf } from "../mods/am-sidebar/hcGuard.mjs";
 import { loginFixture, privateFixtureHome, selectedRootFixture } from "./login-fixture.mjs";
 import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 // Start and Restart put each bot's briefing in its agent's command (models.js withBriefing);
@@ -8675,13 +8676,13 @@ test("#1557 a held restart keeps its operation through helper contention after r
 
 // #628 uses the regular scratch core. This shim observes the fresh get or label after a row
 // reaches disk and lets a case change only the fake evidence at that point.
-function observeGrant(s, { terminal, binding = terminal, reply, replace, core, pane } = {}) {
+function observeGrant(s, { terminal, binding = terminal, reply, replace, core, pane, roleFailure } = {}) {
   const trace = join(s.root, "grant-trace.jsonl");
   const script = join(s.root, "observe-grant.mjs");
   writeFileSync(script, `
     import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
     import { spawnSync } from "node:child_process";
-    const { terminal, binding, reply, replace, core, pane } = ${JSON.stringify({ terminal, binding, reply, replace, core, pane })};
+    const { terminal, binding, reply, replace, core, pane, roleFailure } = ${JSON.stringify({ terminal, binding, reply, replace, core, pane, roleFailure })};
     const [verb, target, ...words] = process.argv.slice(2);
     const rows = (path) => existsSync(path) ? readFileSync(path, "utf8").trim().split("\\n").filter(Boolean).map(JSON.parse) : [];
     const attached = rows(${JSON.stringify(attachFile(s.app))}).some((row) => row.event === "attach" && row.by !== "import" && row.terminal === binding);
@@ -8695,10 +8696,17 @@ function observeGrant(s, { terminal, binding = terminal, reply, replace, core, p
       if (pane) Object.assign(state.terminals.find((row) => row.address === terminal), pane);
       writeFileSync(path, JSON.stringify(state));
     }
-    const r = spawnSync(process.execPath, [${JSON.stringify(FAKE_HC)}, ...process.argv.slice(2)], { encoding: "utf8" });
     if (verb === "label" && target === terminal && words.includes("role=reviewer")) {
       appendFileSync(${JSON.stringify(trace)}, JSON.stringify({ attached, seat }) + "\\n");
+      if (roleFailure) {
+        const path = process.env.HC_FAKE_STATE;
+        const state = JSON.parse(readFileSync(path, "utf8"));
+        state.failLabel = terminal;
+        state.failLabelReasons = { [terminal]: [roleFailure] };
+        writeFileSync(path, JSON.stringify(state));
+      }
     }
+    const r = spawnSync(process.execPath, [${JSON.stringify(FAKE_HC)}, ...process.argv.slice(2)], { encoding: "utf8" });
     const answer = afterBinding && reply && r.status === 0 ? JSON.stringify({ ...JSON.parse(r.stdout), ...reply }) : r.stdout;
     process.stdout.write(answer ?? "");
     process.stderr.write(r.stderr ?? "");
@@ -8721,6 +8729,15 @@ function approveGrantFixture(s) {
 
 const grantWrites = (s) => labelCalls(s.calls()).filter((call) => call.some((word) => ["role=reviewer", "role=fixer"].includes(word)));
 const runHasGrant = (s) => runCall(s.calls()).some((word) => ["role=reviewer", "role=fixer"].includes(word));
+const outsideCaller = bot("b-dddddddddd", "member", { name: "Other Team", rank: "dev" });
+
+function assertNoNamedGrant(s, approved, terminal) {
+  const caller = { bot: outsideCaller.id };
+  assert.equal(teamOf(approved, caller, { projects: new Map() }).has(ID.dev), false);
+  assert.equal(sharedSendAllowed(approved, caller, { bot: ID.dev }), true);
+  assert.equal(sharedSendAllowed(approved, caller, labelsIn(s)[terminal]), false);
+  assert.ok(labelCalls(s.calls()).every((call) => call[1] !== terminal || !call.includes(`bot=${ID.dev}`)));
+}
 
 function assertGrantWithheld(s, r) {
   assert.equal(r.code, 0, r.err);
@@ -8785,21 +8802,24 @@ test("#628 r3 C6 attach grants only after a verified row and agreement on the se
   for (const approval of ["agrees", "absent", "names-differ"]) {
     const s = scene(t, { terminals: [term("t8", { argv: ["codex"], app: "codex" })] });
     const roster = grantRoster();
+    let approved = null;
     if (approval === "agrees") {
       s.seed(roster);
       approveGrantFixture(s);
     } else if (approval === "names-differ") {
-      const approved = grantRoster();
+      approved = grantRoster();
       approved.bots.find((b) => b.id === ID.dev).name = "Previous Dev";
       approved.bots.find((b) => b.id === ID.cap).name = "Dev";
+      approved.bots.push(outsideCaller);
       s.seed(approved);
       approveGrantFixture(s);
     }
     s.seed(roster);
     const trace = observeGrant(s, { terminal: "t8" });
     const r = s.cli(["attach", "Dev", "t8"]);
-    assert.equal(r.code, 0, r.err);
-    assert.equal(foldRows(attachOf(s)).byBot.get(ID.dev)?.terminal, "t8");
+    assert.equal(r.code, approved ? 1 : 0, r.err);
+    assert.equal(foldRows(attachOf(s)).byBot.get(ID.dev)?.terminal, approved ? undefined : "t8");
+    if (approved) assertNoNamedGrant(s, approved, "t8");
     assert.deepEqual(grantWrites(s), approval === "agrees" ? [["label", "t8", "role=reviewer"]] : []);
     assert.deepEqual(trace(), approval === "agrees" ? [{ attached: true, seat: false }] : []);
   }
@@ -8886,8 +8906,8 @@ test("#628 r3 C10 moves verify the old holder and preserve its grant", (t) => {
   assert.equal(r.code, 1, r.err);
   assert.equal(r.json().partial, true);
   assert.deepEqual(r.json().pending.map(({ terminal, words, action }) => [terminal, words, action]),
-    [["t8", ["bot="], "clear-old-holder"]]);
-  assert.ok(labelCalls(moved.calls()).every((call) => call[1] !== "t8"));
+    [["t8", ["bot="], "clear-old-holder"], ["t9", [`bot=${ID.dev}`], "set-bot"]]);
+  assert.ok(labelCalls(moved.calls()).every((call) => call[1] !== "t8" && call[1] !== "t9"));
 
   const refused = scene(t, { terminals: [old, term("t9", { argv: ["codex"], app: "codex" })] });
   refused.seed(team());
@@ -8897,6 +8917,91 @@ test("#628 r3 C10 moves verify the old holder and preserve its grant", (t) => {
   assert.equal(text.code, 1, text.err);
   assert.match(text.out, /saved in the ledger; labels pending: t8 \(clear-old-holder,.*\) bot= \| t9 \(set-bot,.*\) bot=/);
   assert.match(text.out, /Verify each target's current core, address, creation time, bot and role/);
+});
+
+test("#628 D628-2 attach rereads the new holder before setting bot", (t) => {
+  for (const reply of [{ address: "t999" }, { created_ms: 0 }, { state: "finished" }, { labels: { bot: ID.cap } }]) {
+    const s = scene(t, { terminals: [term("t9", { argv: ["codex"], app: "codex" })] });
+    s.seed(team());
+    observeGrant(s, { terminal: "t9", reply });
+    const r = s.cli(["attach", "Dev", "t9", "--json"]);
+    assert.equal(r.code, 1, r.err);
+    assert.equal(r.json().partial, true);
+    assert.deepEqual(r.json().pending.map(({ terminal, words, action }) => [terminal, words, action]),
+      [["t9", [`bot=${ID.dev}`], "set-bot"]]);
+    assert.deepEqual(labelCalls(s.calls()), []);
+  }
+});
+
+function discoverableCodexSession(s, terminal) {
+  const codexHome = join(s.root, "codex-home");
+  const day = join(codexHome, "sessions/2026/01/01");
+  const timestamp = "2026-01-01T12:00:00.000Z";
+  mkdirSync(day, { recursive: true });
+  writeFileSync(join(day, `rollout-2026-01-01T12-00-00-${SID}.jsonl`),
+    `${JSON.stringify({ type: "session_meta", payload: { id: SID, cwd: s.project, timestamp } })}\n`);
+  s.env.CODEX_HOME = codexHome;
+  const state = s.hcState();
+  const pane = state.terminals.find((row) => row.address === terminal);
+  Object.assign(pane, { cwd: s.project, created_ms: Date.parse(timestamp), argv: ["/usr/bin/env", `CODEX_HOME=${codexHome}`, "codex"] });
+  pane.foreground.cwd = s.project;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+}
+
+test("#628 C10 D628-3 a move skips session recording on the unverified old holder", (t) => {
+  const s = scene(t, { terminals: [term("t8", { bot: ID.dev, argv: ["codex"], app: "codex" }),
+    term("t9", { argv: ["codex"], app: "codex" })] });
+  s.seed(team());
+  discoverableCodexSession(s, "t8");
+  observeGrant(s, { terminal: "t8", binding: "t9", reply: { labels: { bot: ID.cap } } });
+  const r = s.cli(["attach", "Dev", "t9", "--move", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().movedFrom, ["t8"]);
+  assert.deepEqual(labelCalls(s.calls()).filter((call) => call[1] === "t8"), []);
+  assert.deepEqual(rowsOf_(s, "session").filter((row) => row.terminal === "t8"), []);
+});
+
+test("#628 D628-4 partial attach skips tidy and session recording in text and JSON", (t) => {
+  for (const json of [false, true]) {
+    const s = scene(t, { terminals: [term("t8", { bot: ID.dev, argv: ["codex"], app: "codex" })] });
+    const file = grantRoster("tester");
+    delete file.bots.find((b) => b.id === ID.cap).category;
+    s.seed(file);
+    discoverableCodexSession(s, "t8");
+    refuseGrantFixtureLabels(s, "t8", proxyEnvelope);
+    const r = s.cli(["attach", "Dev", "t8", ...(json ? ["--json"] : [])]);
+    assert.equal(r.code, 1, r.err);
+    if (json) {
+      assert.equal(r.json().partial, true);
+      assert.deepEqual(r.json().pending.map(({ terminal, words, action }) => [terminal, words, action]),
+        [["t8", ["role=tester"], "update-seat-labels"]]);
+    } else {
+      assert.match(r.out, /saved in the ledger; labels pending: t8 \(update-seat-labels,.*\) role=tester/);
+    }
+    assert.deepEqual(labelCalls(s.calls()), [["label", "t8", "role=tester"]]);
+    assert.deepEqual(rowsOf_(s, "session"), []);
+  }
+});
+
+test("#628 D628-5 final role proxy refusal keeps the verified pending operation", (t) => {
+  const reason = "hc-proxy: terminal.label: only the lead or the pack may set role=reviewer or role=fixer";
+  const envelope = JSON.stringify({ error: { kind: "forbidden", message: reason } });
+  for (const roleFailure of [envelope, "ordinary role write failure"]) {
+    const s = scene(t, { terminals: [term("t8", { argv: ["codex"], app: "codex" })] });
+    s.seed(grantRoster());
+    approveGrantFixture(s);
+    observeGrant(s, { terminal: "t8", roleFailure });
+    const r = s.cli(["attach", "Dev", "t8", "--json"]);
+    const partial = roleFailure === envelope;
+    assert.equal(r.code, partial ? 1 : 0, r.err);
+    assert.equal(r.json().partial, partial ? true : undefined);
+    assert.deepEqual(r.json().pending, partial ? [{ terminal: "t8", words: ["role=reviewer"], reason,
+      action: "set-role", core: "fakecore0000", created_ms: 1, bot: ID.dev }] : undefined);
+    assert.match(r.err, partial ? /only the lead or the pack may set/ : /ordinary role write failure/);
+    assert.equal(foldRows(attachOf(s)).byBot.get(ID.dev)?.terminal, "t8");
+    assert.deepEqual(grantWrites(s), [["label", "t8", "role=reviewer"]]);
+    assert.equal(labelsIn(s).t8.role, undefined);
+  }
 });
 
 test("#628 r3 C11 import adds no grant even for an approved existing bot", (t) => {
@@ -8919,6 +9024,20 @@ test("#628 r3 C11 import adds no grant even for an approved existing bot", (t) =
   assert.equal(already.json().seats.find((entry) => entry.terminal === "t8").action, "already");
   assert.equal(labelsIn(s).t8.bot, undefined);
   assert.deepEqual(grantWrites(s), []);
+
+  const disagrees = importScene(t, [term("t1", { bot: ID.main }), seat("t7", "web-cap", "web", { labels: { role: "captain" } }),
+    seat("t8", "web-review", "web")], file);
+  const approved = structuredClone(file);
+  approved.bots.find((b) => b.id === ID.dev).name = "Previous Reviewer";
+  approved.bots.push({ ...outsideCaller, name: "web-review" });
+  disagrees.seed(approved);
+  approveGrantFixture(disagrees);
+  disagrees.seed(file);
+  const refused = disagrees.cli(["import", "--from-hc", "--apply", "--json"]);
+  assert.equal(refused.code, 1, refused.err);
+  assert.equal(refused.json().stopped.terminal, "t8");
+  assert.equal(foldRows(attachOf(disagrees)).byBot.has(ID.dev), false);
+  assertNoNamedGrant(disagrees, approved, "t8");
 });
 
 test("#628 r3 C12 import stops after the first partial attach", (t) => {

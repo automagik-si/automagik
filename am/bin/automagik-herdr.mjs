@@ -3827,7 +3827,7 @@ function seatGrant(project, bot, ref) {
 }
 
 /** Return a warning when the grant cannot be made. Other seat operations have already succeeded. */
-async function grantSeat(bot, grant, { terminal, createdMs, core, late = false, launchSession = null }) {
+async function grantSeat(bot, grant, { terminal, createdMs, core, late = false, launchSession = null, writeRole = relabelPane }) {
   if (!grant) return null;
   const withheld = (reason) => `${bot.name}: role=${grant.role} withheld: ${reason}`;
   if (!grant.approved) return withheld("the approved roster and working roster do not agree on this grant");
@@ -3846,7 +3846,7 @@ async function grantSeat(bot, grant, { terminal, createdMs, core, late = false, 
       return withheld("the approved roster or working roster changed");
     }
     const words = grantWords(current.role, get.labels);
-    return words.length ? await relabelPane(terminal, words, withheld("hc label failed:")) : null;
+    return words.length ? await writeRole(terminal, words, withheld("hc label failed:")) : null;
   } catch {
     return withheld("the pane, core or roster could not be verified");
   }
@@ -7015,7 +7015,7 @@ function discoveredSession(agentKey, get, ledger, panes, seat) {
  * is never looked at again, so nothing found later can replace what it holds. Never fails: what
  * it couldn't do is left for the next run. Resolves how many it recorded.
  */
-async function recordSessions({ localOnly = false } = {}) {
+async function recordSessions({ localOnly = false, skipRelabels } = {}) {
   let recorded = 0;
   resetSessionDiscovery();
   const ledger = workerLedgerRows();
@@ -7025,6 +7025,7 @@ async function recordSessions({ localOnly = false } = {}) {
     const agents = agentTable();
     const gets = await livePanes({ localOnly });
     for (const get of gets ?? []) {
+      if (skipRelabels?.has(get.address)) continue;
       if (!get.labels?.[BOT_LABEL] && !get.labels?.[WORKER_OF_LABEL]) continue;
       const start = ledger.findLast((r) => r?.event === "start" && r.terminal === get.address && r.created_ms === get.created_ms) ?? null;
       // Its agent: the program in front, else its start row's, else its launch command's (a bare shell hc kept).
@@ -10290,14 +10291,28 @@ async function freshCoreFor(machine) {
   return null;
 }
 
+function privilegedSeat(file, id) {
+  const entry = file.bots.find((b) => b.id === id);
+  return entry?.kind === "main" || entry?.rank === "captain" || SHARED_ROLES.includes(entry?.rank) || SHARED_SEND_RANKS.includes(entry?.rank);
+}
+
 function importMayRestoreBot(project, bot) {
-  const privileged = (file) => {
-    const entry = file.bots.find((b) => b.id === bot.id);
-    return entry?.kind === "main" || entry?.rank === "captain" || SHARED_ROLES.includes(entry?.rank) || SHARED_SEND_RANKS.includes(entry?.rank);
-  };
-  if (privileged(project.file)) return false;
-  try { return !privileged(readApprovedRecord({ project: project.key }).file); }
+  if (privilegedSeat(project.file, bot.id)) return false;
+  try { return !privilegedSeat(readApprovedRecord({ project: project.key }).file, bot.id); }
   catch (error) { return error?.code === "ENOENT"; }
+}
+
+/** The bot label itself can confer access from the approved roster. */
+function verifyAttachName(project, bot, name) {
+  if (!name || project.machine) return;
+  let approved;
+  try { approved = readApprovedRecord({ project: project.key }).file; }
+  catch { return; /* no usable approval to confer access */ }
+  if (!privilegedSeat(approved, bot.id)) return;
+  try {
+    if (findBot(approved, name).id === bot.id && findBot(loadProject(project.key).file, name).id === bot.id) return;
+  } catch { /* missing or ambiguous name */ }
+  throw new CliError(`The approved and working rosters do not agree on "${name}" for ${bot.id}.`);
 }
 
 async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed = true, importTarget = null, skipRelabels } = {}) {
@@ -10307,6 +10322,7 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
   const { file, key } = project;
   const at = await terminalPlace(terminal, project);
   const bot = await botIn(project, ref, opts);
+  const selectedName = importTarget ? importTarget.name : ref === bot.id ? null : ref;
   const grant = grantAllowed && !at.machine ? seatGrant(project, bot, ref) : null;
   if (bot.planned) throw new CliError(`${bot.name} is planned (wave ${bot.planned.wave}); clear "planned" before attaching it.`);
   await coreId();
@@ -10364,14 +10380,14 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
     const rows = mine ? [closingRow(mine.binding, "detach", "attach", "moved")] : [];
     rows.push(attachRow({ event: "attach", bot: bot.id, project: key, terminal: bareId, core: writtenCore, created_ms: get.created_ms,
       machine: at.machine, by: "attach" }));
+    verifyAttachName(project, bot, selectedName);
     write(rows);
     return { already: false, movedFrom: mine ? addressOf(mine.binding, machines) : null, old: mine?.binding, core: writtenCore };
   });
   const warnings = [];
   const pending = [];
-  const label = async (t, words, identity, action) => {
+  const label = async (t, words, identity, action, message = `the ledger has it, but hc label ${t} ${words.join(" ")} failed:`) => {
     if (!words.length) return;
-    const message = `the ledger has it, but hc label ${t} ${words.join(" ")} failed:`;
     let result, error;
     try { result = await hc(["label", t, ...words]); }
     catch (e) { error = e; }
@@ -10384,8 +10400,9 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
     if (warning) warnings.push(warning);
   };
   // A moved binding identifies the old pane to check. The live core must confirm it before any cleanup.
+  let targetVerified = true;
   if (decided.movedFrom) {
-    // This move's tidy pass must leave the old address alone, even if it now shows another bot.
+    // Reconciliation must leave the old address alone, even if it now shows another bot.
     skipRelabels?.add(decided.movedFrom);
     const old = await hcGet(decided.movedFrom).catch(() => null);
     const { core, created_ms, bot: oldBot } = decided.old;
@@ -10395,6 +10412,7 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
       if (core && await freshCoreFor(at.machine).catch(() => null) === core) {
         await label(decided.movedFrom, words, identity, "clear-old-holder");
       } else {
+        targetVerified = false;
         pending.push({ terminal: decided.movedFrom, words, reason: "the old holder's core could not be verified",
           action: "clear-old-holder", ...identity });
       }
@@ -10403,14 +10421,12 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
   const have = get.labels ?? {};
   const identity = { core: decided.core, created_ms: get.created_ms, bot: have[BOT_LABEL] ?? null };
   const restoreBot = !importTarget || !decided.already || importMayRestoreBot(project, bot);
-  let targetVerified = true;
   if (have[BOT_LABEL] !== bot.id && restoreBot) {
     const words = [`${BOT_LABEL}=${bot.id}`];
-    // Import and retries must verify the target independently of the writable ledger.
-    const recheck = importTarget || decided.already;
-    const current = recheck ? await hcGet(address).catch(() => null) : get;
-    if (sameLivePane(current, address, get.created_ms) && current.labels?.[BOT_LABEL] === have[BOT_LABEL]
-        && (!recheck || await freshCoreFor(at.machine).catch(() => null) === decided.core)) {
+    const current = await hcGet(address).catch(() => null);
+    if (targetVerified && sameLivePane(current, address, get.created_ms) && current.labels?.[BOT_LABEL] === have[BOT_LABEL]
+        && await freshCoreFor(at.machine).catch(() => null) === decided.core) {
+      verifyAttachName(project, bot, selectedName);
       await label(address, words, identity, "set-bot");
     } else {
       targetVerified = false;
@@ -10428,10 +10444,11 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
       await label(address, displayWords, { ...identity, bot: current.labels?.[BOT_LABEL] ?? null }, "update-seat-labels");
     }
   }
-  if (!decided.already && grantAllowed) {
+  if (targetVerified && !decided.already && grantAllowed) {
     const role = roleOf(file, bot.id);
+    const writeRole = (t, words, message) => label(t, words, { ...identity, bot: bot.id }, "set-role", message);
     const warning = at.machine && isSendGrantRole(role) ? `${bot.name}: role=${role} withheld: the pane is on a linked machine`
-      : await grantSeat(bot, grant, { terminal: bareId, createdMs: get.created_ms, core: decided.core });
+      : await grantSeat(bot, grant, { terminal: bareId, createdMs: get.created_ms, core: decided.core, writeRole });
     if (warning) warnings.push(warning);
   }
   let hook = claude && !at.machine ? await writeBriefingHook(bot, sessionFolder) : { written: false, warnings: [] };
@@ -10465,10 +10482,9 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
   const movedFrom = decided.movedFrom ? [decided.movedFrom] : [];
   if (pending.length) exitAfter.code = 1;
   // A linked machine's terminal goes as its bare id beside `machine`, as the ledger holds it.
-  if (opts.json) return { id: bot.id, terminal: at.machine ? bareId : address, ...(at.machine ? { machine: at.machine } : {}),
+  if (opts.json || pending.length) return { id: bot.id, terminal: at.machine ? bareId : address, ...(at.machine ? { machine: at.machine } : {}),
     already: decided.already, movedFrom, hookWritten: hook.written, warnings: hook.warnings,
     ...(pending.length ? { partial: true, pending } : {}) };
-  if (pending.length) return pendingLabelsText(pending);
   if (decided.already) return `${bot.name} is already ${address}.`;
   return `${bot.name} is now ${address}${movedFrom.length ? ` (moved from ${movedFrom[0]})` : ""}.`;
 }
@@ -10758,7 +10774,7 @@ async function cmdImport(opts) {
     for (const s of todo) {
       try {
         const r = await cmdAttach({ project: opts.project, json: true }, [s.id, s.terminal], undefined,
-          { grantAllowed: false, importTarget: s.get });
+          { grantAllowed: false, importTarget: { address: s.get.address, created_ms: s.get.created_ms, name: s.name } });
         out.attached.push({ id: s.id, name: s.name, terminal: s.terminal, created: s.action === "create", already: r.already, warnings: r.warnings });
         if (r.partial) {
           out.partial = true;
@@ -15221,17 +15237,17 @@ async function dispatch(argv, io) {
       : await run(opts, rest, warnedRelabels, callerAction ? io.repairCliLinks : undefined);
     if (out === PRINTED) return exitAfter.code;
     const tidyBeforeJson = warnedRelabels !== undefined && opts.json && !out?.partial;
-    const locality = { localOnly: opts["local-only"] };
-    const tidyOptions = { ...locality, skipRelabels };
+    const tidyOptions = { localOnly: opts["local-only"], skipRelabels };
     if (tidyBeforeJson) {
       const warnings = await tidyQuietly(warnedRelabels, tidyOptions);
       if (warnings.length && !(opts["local-only"] && out.running)) (out.warnings ??= []).push(...warnings);
     }
     if (opts.json) process.stdout.write(unprinted(`${JSON.stringify(out, null, 2)}\n`));
+    else if (command === "attach" && out?.partial) process.stdout.write(unprinted(`${pendingLabelsText(out.pending)}\n`));
     else if (out) process.stdout.write(unprinted(`${out}\n`));
     if (tidy && !out?.partial) {
       if (!tidyBeforeJson) await tidyQuietly(warnedRelabels, tidyOptions);
-      await recordSessions(locality);
+      await recordSessions(tidyOptions);
     }
     return exitAfter.code;
   } catch (e) {
