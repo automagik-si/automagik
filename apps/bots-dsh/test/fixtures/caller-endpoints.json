@@ -1,5 +1,6 @@
 {
   "ownerStateSkillFields": ["recordId"],
+  "ownerStateFields": ["teamGeneration"],
   "reads": [
     "whoami",
     "state",

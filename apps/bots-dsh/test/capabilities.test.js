@@ -1,12 +1,13 @@
 import { makeSkillFixtureWritable } from './fixtures/skill-home-cleanup.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import fs from 'node:fs'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
-import { expandCapabilityNames, validateCapabilityName } from '../src/host/capabilities.js'
+import { expandCapabilityNames, skillRecordId, validateCapabilityName } from '../src/host/capabilities.js'
 import { fakeContext } from './fake-ctx.js'
 
 let rt
@@ -1223,5 +1224,366 @@ test('skill store: restart cancels an unlanded delete of a malformed hash', asyn
   assert.equal(journal.deleting, undefined)
   assert.equal(journal.committed, hash)
   assert.equal(rt.state.capabilities.items[name].hash, 'invalid-hash')
+  assert.equal(existsSync(folder), true)
+})
+
+test('D2075-1 deletes a mismatched row by its library key and keeps the healthy skill', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const item = await rt.capabilitySave(skillFixture(), { ui: true })
+  const badKey = 'malformed-guide'
+  const malformed = structuredClone(item)
+  rt.state.capabilities.items[badKey] = malformed
+  await rt.capabilitySave({ name: 'field-pack', kind: 'pack', items: [item.name, badKey] }, { ui: true })
+  for (const name of [item.name, badKey]) {
+    await rt.capabilityEndpoint('bot-capability', { botId: 'chief', name, attached: true })
+  }
+  const row = rt.capabilityLibraryView().find(row => row.status?.state === 'malformed')
+  assert.equal(row.recordId, skillRecordId(malformed))
+  assert.equal(await rt.capabilityDelete(row.name, {
+    ui: true, expect: { kind: row.kind, id: row.recordId, team: rt.teamGeneration() },
+  }), true)
+  assert.equal(rt.state.capabilities.items[badKey], undefined)
+  assert.deepEqual(rt.state.capabilities.items[item.name], item)
+  assert.deepEqual(rt.state.bots.chief.capabilities, [item.name])
+  assert.deepEqual(rt.state.capabilities.items['field-pack'].items, [item.name])
+  assert.equal(existsSync(rt.skillStore.pathOf(item.name, item.hash)), true)
+})
+
+test('D2075-2 fsyncs the state file and parent before a delete can retire a generation', {
+  skip: process.platform === 'win32' && 'directory fsync is unavailable on Windows',
+}, async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const item = await rt.capabilitySave(skillFixture(), { ui: true })
+  const folder = rt.skillStore.pathOf(item.name, item.hash)
+  const statePath = join(env.home, 'state.json')
+  const temp = statePath + '.' + process.pid + '.tmp'
+  const open = fs.openSync
+  const sync = fs.fsyncSync
+  let observedPath
+  let observedFd
+  const syncs = []
+  t.mock.method(fs, 'openSync', (path, ...args) => {
+    const fd = open(path, ...args)
+    if (path === temp || path === env.home) {
+      observedPath = path
+      observedFd = fd
+    }
+    return fd
+  })
+  t.mock.method(fs, 'fsyncSync', fd => {
+    if (fd === observedFd) {
+      const path = observedPath
+      observedFd = undefined
+      syncs.push(path)
+      assert.equal(existsSync(folder), true)
+      if (path === env.home) {
+        assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).capabilities.items[item.name], undefined)
+        throw Object.assign(new Error('fixture cannot sync state directory'), { code: 'EIO' })
+      }
+    }
+    return sync(fd)
+  })
+  await assert.rejects(rt.capabilityDelete(item.name, { ui: true }), { key: 'skill.store-failed' })
+  assert.deepEqual(syncs, [temp, env.home])
+  assert.equal(rt.skillStore.readLedger().names[item.name].deleting.hash, item.hash)
+  assert.equal(existsSync(folder), true)
+})
+
+test('D2075-3 readiness preserves changed bytes and unknown siblings with or without a manifest', async t => {
+  const env = await setup()
+  const ctx = fakeContext()
+  t.after(async () => { await ctx.dispose(); await env.dispose() })
+  const cases = []
+  for (const [name, hasManifest] of [['owned-guide', true], ['unproven-guide', false]]) {
+    const item = await env.rt.capabilitySave(skillFixture(name), { ui: true })
+    const folder = env.rt.skillStore.pathOf(name, item.hash)
+    const manifest = join(env.home, 'skills', '.manifests', name, item.hash)
+    cases.push({ item, folder, manifest, hasManifest })
+  }
+  await env.ctx.dispose()
+  for (const { folder, manifest, hasManifest } of cases) {
+    chmodSync(folder, 0o755)
+    chmodSync(join(folder, 'SKILL.md'), 0o644)
+    writeFileSync(join(folder, 'SKILL.md'), 'Only copy of the edited skill.')
+    writeFileSync(join(folder, 'notes.md'), 'Only copy of the notes.')
+    if (!hasManifest) rmSync(manifest)
+  }
+  const next = createRuntime(ctx, { home: env.home, github: false, diagnosticsFile: false })
+  await next.load()
+  await next.skillsReady()
+  for (const { item, folder, manifest, hasManifest } of cases) {
+    assert.deepEqual(readdirSync(folder).sort(), ['SKILL.md', 'notes.md'])
+    assert.equal(readFileSync(join(folder, 'SKILL.md'), 'utf8'), 'Only copy of the edited skill.')
+    assert.equal(readFileSync(join(folder, 'notes.md'), 'utf8'), 'Only copy of the notes.')
+    assert.equal(existsSync(manifest), hasManifest)
+    assert.equal(next.skillDelivery(item.name).status.state, 'changed')
+    assert.equal(next.skillModelText(item.name), undefined)
+  }
+})
+
+test('D2075-4 queued Settings and Bot saves retain the entry operation, base and text', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  await rt.skillsReady()
+  for (const [name, firstIsEdit, options, conflict] of [
+    ['settings-edit', true, { ui: true }, 'skill.changed-elsewhere'],
+    ['settings-create', false, { ui: true }, 'skill.name-taken'],
+    ['bot-edit', true, { botId: 'chief' }, 'skill.changed-elsewhere'],
+    ['bot-create', false, { botId: 'chief' }, 'skill.name-taken'],
+  ]) {
+    if (firstIsEdit) await rt.capabilitySave(skillFixture(name), options)
+    const release = Promise.withResolvers()
+    const held = rt.skillQueue(name, () => release.promise)
+    const input = skillFixture(name, 'The first writer.')
+    const first = rt.capabilitySave(input, options)
+    const second = rt.capabilitySave(skillFixture(name, 'The second writer.'), options)
+    const results = Promise.allSettled([first, second])
+    await new Promise(resolve => setImmediate(resolve))
+    input.content = 'A mutation after submission.'
+    release.resolve()
+    await held
+    const [one, two] = await results
+    assert.equal(one.status, 'fulfilled', one.reason?.message)
+    assert.equal(two.status, 'rejected')
+    assert.equal(two.reason.key, conflict)
+    assert.equal(one.value.content, 'The first writer.')
+    assert.equal(rt.skillModelText(name).body, 'The first writer.')
+  }
+})
+
+test('D2075-5 an HTTP MCP probe cannot replace a skill created under the same name', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const { promise, resolve } = Promise.withResolvers()
+  const entered = Promise.withResolvers()
+  t.mock.method(globalThis, 'fetch', () => { entered.resolve(); return promise })
+  const fixture = skillFixture()
+  const mcpSave = rt.capabilitySave({
+    ...mcp(fixture.name), transport: 'streamable-http', url: 'https://fixture.invalid/mcp',
+  }, { ui: true })
+  const result = Promise.allSettled([mcpSave])
+  await entered.promise
+  let item
+  try {
+    item = await rt.capabilitySave(fixture, { ui: true })
+    await rt.capabilityEndpoint('bot-capability', { botId: 'chief', name: item.name, attached: true })
+  } finally {
+    resolve(new Response(null, { status: 200 }))
+  }
+  const [probe] = await result
+  assert.equal(probe.status, 'rejected')
+  assert.equal(probe.reason.key, 'skill.changed-elsewhere')
+  assert.deepEqual(rt.state.capabilities.items[item.name], item)
+  assert.deepEqual(rt.state.bots.chief.capabilities, [item.name])
+  assert.equal(rt.skillStore.readLedger().names[item.name].committed, item.hash)
+})
+
+test('D2075-8 the next queued turn withholds both direct and pack revocations', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const direct = await rt.capabilitySave(skillFixture('direct-guide'), { ui: true })
+  const packed = await rt.capabilitySave(skillFixture('packed-guide'), { ui: true })
+  const pack = { name: 'field-pack', kind: 'pack', items: [packed.name] }
+  await rt.capabilitySave(pack, { ui: true })
+  for (const name of [direct.name, pack.name]) {
+    await rt.capabilityEndpoint('bot-capability', { botId: 'chief', name, attached: true })
+  }
+  const agent = testAgent('chief', env.mounts, env.skills)
+  rt.resolveAgent = async () => agent
+  await created(env)({ agent })
+  const admit = env.ctx.listeners.get('agent/pre-step').find(listener => listener.name === 'admitSkills')
+  const catalog = () => [...env.skills.get('chief').keys()].sort()
+  agent.status = 'running'
+  try {
+    assert.deepEqual(await admit({ agent, turn: 1 }, catalog), [direct.name, packed.name])
+    await rt.capabilityEndpoint('bot-capability', { botId: 'chief', name: direct.name, attached: false })
+    await rt.capabilitySave({ ...pack, items: [] }, { ui: true })
+    await rt.reconcileCapabilities()
+    assert.deepEqual(await admit({ agent, turn: 1 }, catalog), [direct.name, packed.name])
+    assert.deepEqual(await admit({ agent, turn: 2 }, catalog), [])
+  } finally {
+    agent.status = 'idle'
+  }
+})
+
+test('D2075-9 re-creation waits for learning cleanup and restart replays an interrupted cleanup', async t => {
+  const fixture = skillFixture()
+  const { name } = fixture
+  const env = await setup({ beforeLoad({ rt }) {
+    mkdirSync(join(rt.home, 'learning'))
+    writeFileSync(join(rt.home, 'learning', 'state.json'), JSON.stringify({ learned: { chief: [name] } }))
+  } })
+  const ctx = fakeContext()
+  t.after(async () => { await ctx.dispose(); await env.dispose() })
+  const { rt } = env
+  const item = await rt.capabilitySave(fixture, { ui: true })
+  const sidecar = join(env.home, 'learning', 'state.json')
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const remove = rt.removeSkillLearning
+  rt.removeSkillLearning = async (...args) => {
+    entered.resolve()
+    await release.promise
+    return remove(...args)
+  }
+  const deletion = rt.capabilityDelete(name, { ui: true })
+  let reCreate
+  try {
+    assert.equal(await Promise.race([entered.promise.then(() => true), deletion.then(() => false)]), true)
+    reCreate = rt.capabilitySave(skillFixture(name, 'Replacement after cleanup.'), { ui: true })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(rt.state.capabilities.items[name], undefined)
+    assert.equal(rt.skillStore.readLedger().names[name]?.deleting?.hash, item.hash)
+    assert.deepEqual(JSON.parse(readFileSync(sidecar, 'utf8')).learned, { chief: [name] })
+  } finally {
+    release.resolve()
+    await Promise.allSettled([deletion, reCreate])
+  }
+  const replacement = await reCreate
+  assert.equal(await deletion, true)
+  assert.equal(rt.state.capabilities.items[name].hash, replacement.hash)
+  assert.deepEqual(JSON.parse(readFileSync(sidecar, 'utf8')).learned, { chief: [] })
+
+  writeFileSync(sidecar, JSON.stringify({
+    learned: { chief: [name, 'another-guide'] },
+    pendingAttach: { chief: { [name]: { hash: replacement.hash, at: 1 }, 'another-guide': { hash: item.hash, at: 2 } } },
+  }))
+  rt.removeSkillLearning = async () => { throw new Error('fixture interrupted learning cleanup') }
+  await assert.rejects(rt.capabilityDelete(name, { ui: true }), { key: 'skill.store-failed' })
+  assert.equal(rt.skillStore.readLedger().names[name].deleting.hash, replacement.hash)
+  assert.equal(existsSync(rt.skillStore.pathOf(name, replacement.hash)), true)
+  await env.ctx.dispose()
+  const next = createRuntime(ctx, { home: env.home, github: false, diagnosticsFile: false })
+  await next.load()
+  await next.skillsReady()
+  const learning = JSON.parse(readFileSync(sidecar, 'utf8'))
+  assert.deepEqual(learning.learned, { chief: ['another-guide'] })
+  assert.deepEqual(learning.pendingAttach, { chief: { 'another-guide': { hash: item.hash, at: 2 } } })
+  assert.equal(next.skillStore.readLedger().names[name]?.deleting, undefined)
+  assert.equal(existsSync(next.skillStore.pathOf(name, replacement.hash)), false)
+})
+
+const blockCheck = (hash, legacy = false) => ({
+  hash, legacy, verdict: 'block', version: 1, fingerprint: 'a'.repeat(64), checkedAt: 1, truncated: false,
+  counts: { block: 1, warn: 0 },
+  findings: [{ rule: 'fixture-block', key: 'skill.fixture-block', level: 'block', reason: 'Fixture finding.',
+    area: 'structure', path: 'SKILL.md', line: null }],
+})
+
+test('D2075-11 the fallback enforces stored blocks and validates findings and Bot provenance', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const text = await rt.capabilitySave(skillFixture('text-guide'), { ui: true })
+  const bot = await rt.capabilitySave(skillFixture('bot-guide'), { botId: 'chief' })
+  const claimed = await rt.capabilitySave(skillFixture('claimed-guide'), { ui: true })
+  claimed.source = { kind: 'bot' }
+  assert.equal(rt.skillModelText(text.name).body, text.content)
+  for (const item of [text, bot, claimed]) {
+    await rt.recordSkillCheck(item.name, item.hash, { check: blockCheck(item.hash) })
+  }
+  for (const item of [text, claimed]) {
+    assert.equal(rt.skillDelivery(item.name).status.state, 'suspended')
+    assert.equal(rt.skillModelText(item.name), undefined)
+  }
+  assert.equal(rt.skillDelivery(bot.name).status.reportOnly, true)
+  assert.equal(rt.skillModelText(bot.name).body, bot.content)
+  for (const field of ['area', 'path', 'line']) {
+    const invalid = blockCheck(bot.hash)
+    delete invalid.findings[0][field]
+    await assert.rejects(rt.recordSkillCheck(bot.name, bot.hash, { check: invalid }), { key: 'skill.record-invalid' })
+  }
+})
+
+test('D2075-13 an owner read only streams a suspended oversized generation', async t => {
+  const name = 'oversized-guide'
+  const state = team()
+  state.capabilities = { items: { [name]: skillFixture(name, 'x'.repeat(2 * 65536)) } }
+  const env = await setup({ state })
+  t.after(() => env.dispose())
+  const { rt } = env
+  await rt.skillsReady()
+  const item = rt.state.capabilities.items[name]
+  await rt.recordSkillCheck(name, item.hash, { check: blockCheck(item.hash, true), suspended: true })
+  const concat = t.mock.method(Buffer, 'concat')
+  const allocate = t.mock.method(Buffer, 'allocUnsafe')
+  const row = rt.capabilityLibraryView().find(row => row.name === name)
+  assert.equal(row.status.state, 'suspended')
+  assert.equal(rt.skillModelText(name), undefined)
+  assert.equal(concat.mock.calls.some(call => call.arguments[1] === item.files[0].size), false)
+  assert.equal(allocate.mock.calls.some(call => call.arguments[0] === item.files[0].size), false)
+})
+
+test('D2075-12 the review seam receives verified bytes, the author and each authenticated writer', async t => {
+  const state = team()
+  const moved = skillFixture('moved-guide')
+  state.capabilities = { items: { [moved.name]: moved } }
+  const seen = []
+  const env = await setup({ state, beforeLoad({ rt }) {
+    rt.skillReviewQueue = request => {
+      const { subject, generation, ...metadata } = request
+      const name = subject?.name ?? request.name
+      const item = rt.state.capabilities.items[name]
+      seen.push({ subject, generation, metadata, item, due: rt.skillStore.readLedger().names[name].generations[item.hash].reviewDue })
+    }
+  } })
+  t.after(() => env.dispose())
+  const { rt } = env
+  await rt.skillsReady()
+  const cases = [
+    [moved.name, 'move', { host: true }, undefined, null],
+    ['settings-guide', 'person', { person: true }, undefined, null],
+    ['bot-guide', 'bot', { botId: 'chief' }, 'fixture/bot', 'chief'],
+    ['learned-guide', 'person', { person: true }, 'fixture/learning', 'chief'],
+  ]
+  await rt.capabilitySave(skillFixture('settings-guide'), { ui: true })
+  await rt.capabilitySave(skillFixture('bot-guide'), { botId: 'chief', authorModel: 'fixture/bot' })
+  await rt.capabilitySave(skillFixture('learned-guide'), { botId: 'chief', via: 'learning-card', authorModel: 'fixture/learning' })
+  const { skillHash } = await import('../src/host/skill-store.js')
+  assert.equal(seen.length, cases.length)
+  for (const [index, [name, priority, writer, authorModel, createdBy]] of cases.entries()) {
+    const { subject, generation, metadata, item, due } = seen[index]
+    assert.deepEqual(due, { priority, writer })
+    assert.deepEqual(subject, { name })
+    assert.deepEqual(metadata, { priority, writer, authorModel, team: rt.teamGeneration() })
+    assert.equal(item.createdBy, createdBy)
+    assert.equal(item.authorModel, authorModel)
+    assert.equal(skillHash(generation), item.hash)
+  }
+})
+
+test('D2075-10 losing the lock after checking the displayed binding stops publication', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const item = await rt.capabilitySave(skillFixture(), { ui: true })
+  const row = rt.capabilityLibraryView().find(row => row.name === item.name)
+  const expect = { kind: row.kind, id: row.recordId, team: rt.teamGeneration() }
+  const path = join(env.home, 'state.json')
+  const temp = path + '.' + process.pid + '.tmp'
+  const folder = rt.skillStore.pathOf(item.name, item.hash)
+  const open = fs.openSync
+  const sync = fs.fsyncSync
+  let tempFd
+  t.mock.method(fs, 'openSync', (file, ...args) => {
+    const fd = open(file, ...args)
+    if (file === temp) tempFd = fd
+    return fd
+  })
+  t.mock.method(fs, 'fsyncSync', fd => {
+    sync(fd)
+    if (fd !== tempFd) return
+    tempFd = undefined
+    rmSync(join(env.home, 'state.lock'))
+  })
+  await assert.rejects(rt.capabilityDelete(item.name, { ui: true, expect }), { key: 'skill.store-failed' })
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).capabilities.items[item.name], item)
   assert.equal(existsSync(folder), true)
 })

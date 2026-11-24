@@ -188,3 +188,27 @@ test('skill-store: only the transaction calls the publication primitives and imp
   assert.match(source, /key !== '\.skills-import\.json'/)
   assert.equal(createHash('sha256').update(manifestOf(fileEntries([fake()]))).digest('hex'), GOLDEN.hash)
 })
+
+test('D2075-13 a verified oversized read authenticates the bytes from its capture pass', t => {
+  const { store } = fixture(t)
+  const entries = [fake('SKILL.md', Buffer.alloc(LIMITS.skillMd + 123, 120))]
+  const files = fileEntries(entries)
+  const hash = skillHash(files)
+  const { size, sha256 } = files[0]
+  const legacyBody = { size, sha256 }
+  store.writeManifest('field-guide', hash, manifestOf(files), legacyBody)
+  store.publish('field-guide', entries, { legacyBody })
+  assert.deepEqual(store.read('field-guide', hash, files, { legacyBody })[0].bytes, entries[0].bytes)
+  const original = fs.readSync
+  let changed = false
+  t.mock.method(fs, 'readSync', (fd, bytes, offset, length, position) => {
+    const count = original(fd, bytes, offset, length, position)
+    if (position === 0 && bytes.length === size && count) {
+      bytes[offset] ^= 1
+      changed = true
+    }
+    return count
+  })
+  assert.throws(() => store.read('field-guide', hash, files, { legacyBody }), SkillFilesChanged)
+  assert.equal(changed, true)
+})

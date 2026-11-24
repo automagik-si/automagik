@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { callerEndpoint } from '../src/host/caller-policy.js'
 import { REPLY_KIND } from '../src/host/constants.js'
 import { allowlist, fixture, guest, identity, member, serviceStub, stranger } from './caller-fixture.js'
+import { makeSkillFixtureWritable } from './fixtures/skill-home-cleanup.mjs'
 import inventory from './fixtures/caller-endpoints.json' with { type: 'json' }
 import rolePaths from '../../../server/test/fixtures/caller-role-paths.json' with { type: 'json' }
 
@@ -243,7 +246,7 @@ test('CR9 adapter teardown keeps the configured owner boot gated and closes call
   assert.equal(dispatched, 1)
 })
 
-test('the owner state includes skill record ids and caller state omits them', async t => {
+test('D2075-10 the owner state includes skill record ids and a team generation absent from caller state', async t => {
   const skill = { name: 'held-skill', kind: 'skill', skillFormat: 2, description: 'A future skill' }
   const server = { name: 'test-mcp', kind: 'mcp' }
   const f = fixture(t, { seed: team => { team.capabilities.items = { [skill.name]: skill, [server.name]: server } } })
@@ -262,5 +265,66 @@ test('the owner state includes skill record ids and caller state omits them', as
       assert.equal(Object.hasOwn(caller.value, 'capabilities'), false)
       assert.equal(JSON.stringify(caller.value).includes(field), false)
     }
+  }
+  for (const field of inventory.ownerStateFields) {
+    assert.deepEqual(owner.value[field], f.rt.teamGeneration())
+    assert.equal(Object.hasOwn(skillRow, field), false)
+    assert.equal(Object.hasOwn(serverRow, field), false)
+    for (const principal of [member, guest]) {
+      const caller = await read(f, principal, 'state')
+      assert.equal(caller.ok, true)
+      assert.equal(JSON.stringify(caller.value).includes(field), false)
+    }
+  }
+})
+
+test('D2075-10 a displayed generation cannot delete an identical skill after team adoption', async t => {
+  const name = 'adopted-guide'
+  const f = fixture(t, { beforeLoad(rt) {
+    mkdirSync(join(rt.home, 'learning'))
+    writeFileSync(join(rt.home, 'learning', 'state.json'), JSON.stringify({
+      learned: { a: [name] }, pendingAttach: { a: { [name]: { hash: 'a'.repeat(64), at: 1 } } },
+    }))
+  } })
+  const { rt } = f
+  try {
+    await f.start()
+    const item = await rt.capabilitySave({ name, kind: 'skill', description: 'Keep notes', content: 'Write a short note.' }, { ui: true })
+    await rt.capabilitySave({ name: 'field-pack', kind: 'pack', items: [name] }, { ui: true })
+    await rt.capabilityEndpoint('bot-capability', { botId: 'a', name, attached: true })
+    const path = rt.skillStore.pathOf(name, item.hash)
+    const learning = join(rt.home, 'learning', 'state.json')
+    const owner = async payload => {
+      const reply = await f.call('state', payload)
+      assert.equal(reply.ok, true)
+      const { capabilities, teamGeneration } = reply.value
+      const { kind, recordId: id } = capabilities.find(row => row.name === name)
+      assert.deepEqual(Object.keys(teamGeneration ?? {}).sort(), ['epoch', 'term'])
+      assert.ok(Number.isSafeInteger(teamGeneration.epoch) && Number.isSafeInteger(teamGeneration.term))
+      return { expect: { kind, id, team: teamGeneration }, revision: reply.value.revision, models: reply.value.modelsKey }
+    }
+    const shownA = await owner()
+    await f.edit(state => { state.prefs.marker = 'Adopted team fixture' })
+    const shownB = await owner({ since: shownA.revision, models: shownA.models })
+    assert.equal(shownA.revision, shownB.revision)
+    assert.equal(shownA.expect.id, shownB.expect.id)
+    assert.notDeepEqual(shownA.expect.team, shownB.expect.team)
+    const before = readFileSync(learning, 'utf8')
+    await assert.rejects(rt.capabilityDelete(name, { ui: true, expect: shownA.expect }), { key: 'skill.changed-elsewhere' })
+    assert.deepEqual(rt.state.capabilities.items[name], item)
+    assert.deepEqual(rt.state.bots.a.capabilities, [name])
+    assert.deepEqual(rt.state.capabilities.items['field-pack'].items, [name])
+    assert.equal(existsSync(path), true)
+    assert.equal(readFileSync(learning, 'utf8'), before)
+    assert.equal(await rt.capabilityDelete(name, { ui: true, expect: shownB.expect }), true)
+    assert.equal(rt.state.capabilities.items[name], undefined)
+    assert.deepEqual(rt.state.bots.a.capabilities, [])
+    assert.deepEqual(rt.state.capabilities.items['field-pack'].items, [])
+    assert.equal(existsSync(path), false)
+    const cleared = JSON.parse(readFileSync(learning, 'utf8'))
+    assert.deepEqual(cleared.learned, { a: [] })
+    assert.deepEqual(cleared.pendingAttach, { a: {} })
+  } finally {
+    makeSkillFixtureWritable(rt.home)
   }
 })

@@ -180,7 +180,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
     directory(path)
   }
 
-  function readFile(path, limit, expected, expectedSize, optional = false, capture = true, owned = false) {
+  function readFile(path, limit, { expected, expectedSize, optional = false, capture = true, owned = false, verifyFirst = false } = {}) {
     const parent = dirname(path)
     directory(parent)
     const before = stat(path)
@@ -204,11 +204,25 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
         if (count === 0) break
         size += count
         hash.update(buffer.subarray(0, count))
-        if (capture) chunks.push(Buffer.from(buffer.subarray(0, count)))
+        if (capture && !verifyFirst) chunks.push(Buffer.from(buffer.subarray(0, count)))
       }
       const after = stat(path)
       if (!fileOkay(after, root.dev) || !unchanged(info, after) || size !== info.size || size > limit
         || (expected !== undefined && hash.digest('hex') !== expected)) throw new SkillFilesChanged()
+      if (capture && verifyFirst) {
+        // The first pass authenticated this size without allocating from the manifest or stat.
+        const bytes = Buffer.allocUnsafe(size)
+        let offset = 0
+        while (offset < size) {
+          const count = fs.readSync(fd, bytes, offset, Math.min(buffer.length, size - offset), offset)
+          if (count === 0) throw new SkillFilesChanged()
+          offset += count
+        }
+        if (fs.readSync(fd, buffer, 0, 1, size) !== 0 || digest(bytes) !== expected) throw new SkillFilesChanged()
+        const current = stat(path)
+        if (!fileOkay(current, root.dev) || !unchanged(info, current) || current.size !== size) throw new SkillFilesChanged()
+        return bytes
+      }
       return owned ? info : capture ? Buffer.concat(chunks, size) : undefined
     } finally {
       fs.closeSync(fd)
@@ -306,7 +320,10 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
       if (found.length !== expected.size || found.some(name => !expected.has(name))) throw new SkillFilesChanged()
     }
     const result = entries.map(({ path: relative, size, sha256, script }) => {
-      const bytes = readFile(join(path, relative), size, sha256, size, false, capture)
+      const bytes = readFile(join(path, relative), size, {
+        expected: sha256, expectedSize: size, capture,
+        verifyFirst: relative === 'SKILL.md' && size > LIMITS.skillMd,
+      })
       if (capture && script !== undefined && script !== (relative.startsWith('scripts/') || (bytes[0] === 35 && bytes[1] === 33))) {
         throw new SkillFilesChanged()
       }
@@ -352,7 +369,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
     try { fs.chmodSync(path, permissions) } finally { directory(path) }
   }
 
-  function removeTree(path, entries, { damaged = false } = {}) {
+  function removeTree(path, entries) {
     if (!stat(path)) {
       directory(dirname(path))
       if (pins.has(path)) throw storeError('identity-changed')
@@ -364,11 +381,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
       if (!stat(file)) continue
       let owner
       try {
-        if (damaged) {
-          directory(dirname(file))
-          owner = stat(file)
-          if (!fileOkay(owner, root.dev)) continue
-        } else owner = readFile(file, entry.size, entry.sha256, entry.size, false, false, true)
+        owner = readFile(file, entry.size, { expected: entry.sha256, expectedSize: entry.size, capture: false, owned: true })
       } catch (error) {
         if (error instanceof SkillFilesChanged) continue
         throw error
@@ -446,7 +459,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
   }
 
   function readManifest(name, hash, legacy) {
-    return decodeManifest(readFile(manifestPath(name, hash), MANIFEST_LIMIT, hash), hash, legacy)
+    return decodeManifest(readFile(manifestPath(name, hash), MANIFEST_LIMIT, { expected: hash }), hash, legacy)
   }
 
   function writeManifest(name, hash, text, legacy) {
@@ -457,7 +470,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
     decodeManifest(bytes, hash, legacy)
     mkdir(dirname(dirname(path)))
     mkdir(dirname(path))
-    if (!readFile(path, MANIFEST_LIMIT, hash, undefined, true)) atomic(path, bytes)
+    if (!readFile(path, MANIFEST_LIMIT, { expected: hash, optional: true })) atomic(path, bytes)
   }
 
   function putTree(path, files, staged = false) {
@@ -472,7 +485,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
     }
   }
 
-  function putGeneration(name, entries, legacyBody, repairing = false) {
+  function putGeneration(name, entries, legacyBody) {
     folderOf(name)
     const { entries: files } = skillPreflight(entries, { legacyBody })
     const manifest = fileEntries(files)
@@ -481,13 +494,8 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
     boundRoot(true)
     mkdir(dirname(path), 0o755)
     if (stat(path)) {
-      try {
-        readTree(path, manifest, hash, legacyBody, false)
-        return hash
-      } catch (error) {
-        if (!repairing || !(error instanceof SkillFilesChanged)) throw error
-        if (!removeTree(path, readManifest(name, hash, legacyBody), { damaged: true })) throw error
-      }
+      readTree(path, manifest, hash, legacyBody, false)
+      return hash
     }
     const temp = join(tempRoot(), randomUUID())
     putTree(temp, files)
@@ -497,11 +505,22 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
     return hash
   }
 
+  function checkRepair(name, hash, legacyBody) {
+    const path = pathOf(name, hash)
+    const parent = dirname(path)
+    if (!stat(parent)) return false
+    directory(parent)
+    if (!stat(path)) return false
+    // An unexpected tree stays in place, including any changed bytes.
+    readTree(path, readManifest(name, hash, legacyBody), hash, legacyBody, false)
+    return true
+  }
+
   function repair(name, hash, entries, { legacyBody } = {}) {
-    pathOf(name, hash)
+    checkRepair(name, hash, legacyBody)
     const candidate = skillPreflight(entries, { legacyBody })
     if (skillHash(candidate.entries) !== hash) throw new SkillFilesChanged()
-    return putGeneration(name, candidate.entries, legacyBody, true)
+    return putGeneration(name, candidate.entries, legacyBody)
   }
 
   function remove(name, generations, { retire = false } = {}) {
@@ -525,7 +544,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
 
   function readMetadata(path, limit = META_LIMIT, empty) {
     try {
-      const bytes = readFile(path, limit, undefined, undefined, true)
+      const bytes = readFile(path, limit, { optional: true })
       if (bytes === undefined) return empty
       const value = JSON.parse(bytes.toString())
       if (value?.version !== 1) throw new SkillFilesChanged()
@@ -536,7 +555,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
     }
   }
 
-  const metadata = (name, empty, validate) => ({
+  const metadata = (name, empty, validate, fullCode) => ({
     read() {
       const value = readMetadata(join(boundRoot(), name), META_LIMIT, empty())
       if (!validate(value)) throw storeError('ledger-unreadable')
@@ -547,13 +566,15 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
       this.read()
       if (!validate(value)) throw storeError('ledger-unreadable')
       const bytes = Buffer.from(JSON.stringify(value))
-      if (bytes.length > META_LIMIT) throw storeError(name === '.ledger.json' ? 'ledger-full' : 'reviews-full')
+      if (bytes.length > META_LIMIT) throw storeError(fullCode)
       atomic(path, bytes)
     },
   })
-  const ledger = metadata('.ledger.json', () => ({ version: 1, names: {} }), validLedger)
+  const ledger = metadata('.ledger.json', () => ({ version: 1, names: {} }), validLedger, 'ledger-full')
   const reviews = metadata('.reviews.json', () => ({ version: 1, hashes: {} }),
-    value => keysOf(value, ['version', 'hashes']) && record(value.hashes) && Object.keys(value.hashes).every(skillHashId))
+    value => keysOf(value, ['version', 'hashes']) && record(value.hashes) && Object.keys(value.hashes).every(skillHashId), 'reviews-full')
+  const importHolds = metadata('.import-holds.json', () => ({ version: 1, items: {} }),
+    value => keysOf(value, ['version', 'items']) && record(value.items) && Object.values(value.items).every(skillHashId), 'import-holds-full')
 
   function stage(entries) {
     const { entries: files } = skillPreflight(entries)
@@ -570,14 +591,14 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
   function staged(token, hash) {
     if (!skillHashId(hash)) throw skillRefusal('hash-format')
     const path = stagedPath(token)
-    return readTree(path, decodeManifest(readFile(path + '.manifest', MANIFEST_LIMIT, hash), hash), hash)
+    return readTree(path, decodeManifest(readFile(path + '.manifest', MANIFEST_LIMIT, { expected: hash }), hash), hash)
   }
 
   function unstage(token, hash) {
     const path = stagedPath(token)
     if (hash !== undefined) hashPath(hash)
     boundRoot(true)
-    const bytes = readFile(path + '.manifest', MANIFEST_LIMIT, hash)
+    const bytes = readFile(path + '.manifest', MANIFEST_LIMIT, { expected: hash })
     const entries = decodeManifest(bytes, hash ?? digest(bytes))
     if (removeTree(path, entries)) unlink(path + '.manifest')
   }
@@ -601,7 +622,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
       const path = join(base, id)
       if (Date.now() - stat(path).mtimeMs < olderThanMs) continue
       try {
-        const bytes = readFile(path + '.json', 1024, undefined, undefined, true)
+        const bytes = readFile(path + '.json', 1024, { optional: true })
         if (!bytes) continue
         const journal = JSON.parse(bytes.toString())
         if (!keysOf(journal, ['v', 'file']) || journal.v !== 1 || !/^\.?[a-z0-9][a-z0-9.-]*$/.test(journal.file)) continue
@@ -620,7 +641,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
   }
 
   return {
-    bound: () => ({ ...binding }), pathOf, repair, read, remove, writeManifest, readManifest,
+    bound: () => ({ ...binding }), pathOf, checkRepair, repair, read, remove, writeManifest, readManifest,
     publish(name, entries, { legacyBody } = {}) {
       if (legacyBody === true) throw pathError('legacy proof required')
       return putGeneration(name, entries, legacyBody)
@@ -635,6 +656,7 @@ export function createSkillStore(home, { mode = 'read' } = {}) {
     stage, staged, unstage, sweepStaging, sweepTemps,
     readLedger: ledger.read.bind(ledger), writeLedger: ledger.write.bind(ledger),
     readReviews: reviews.read.bind(reviews), writeReviews: reviews.write.bind(reviews),
+    readImportHolds: importHolds.read.bind(importHolds), writeImportHolds: importHolds.write.bind(importHolds),
   }
 }
 
@@ -649,7 +671,8 @@ function validLedger(ledger) {
     && record(row.generations)
     && (row.committed === undefined || (skillHashId(row.committed) && row.generations[row.committed]?.state === 'committed'))
     && (row.deleted === undefined || timestamp(row.deleted))
-    && (row.deleting === undefined || (keysOf(row.deleting, ['at', 'hash']) && timestamp(row.deleting.at)
+    && (row.deleting === undefined || (keysOf(row.deleting, ['at', 'hash', 'preserve']) && timestamp(row.deleting.at)
+      && (row.deleting.preserve === undefined || row.deleting.preserve === true)
       && (row.deleting.hash === null || skillHashId(row.deleting.hash))))
     && (row.pending === undefined || (keysOf(row.pending, ['hash', 'mirror', 'via', 'at', 'op'])
       && skillHashId(row.pending.hash) && Object.hasOwn(row.generations, row.pending.hash)
@@ -661,7 +684,7 @@ function validLedger(ledger) {
       && ['pending', 'done'].includes(gen.firstCheck) && timestamp(gen.at)
       && Number.isInteger(gen.files) && gen.files >= 1 && gen.files <= LIMITS.files
       && (gen.reviewDue === undefined || (keysOf(gen.reviewDue, ['priority', 'writer'])
-        && ['move', 'save'].includes(gen.reviewDue.priority)
+        && ['person', 'bot', 'move'].includes(gen.reviewDue.priority)
         && (keysOf(gen.reviewDue.writer, ['botId']) && typeof gen.reviewDue.writer.botId === 'string'
           || keysOf(gen.reviewDue.writer, ['person']) && gen.reviewDue.writer.person === true
           || keysOf(gen.reviewDue.writer, ['host']) && gen.reviewDue.writer.host === true)))

@@ -1702,3 +1702,29 @@ test('skill learning: retires an old short base without applying or settling the
   assert.equal(runtime.learningState().settled?.stale, undefined)
   assert.equal(runtime.teamState().capabilities.items[proposal.name], undefined)
 })
+
+test('D2075-12 a learning approval has a person as writer and keeps the authored model', async t => {
+  const runtime = await startRuntime({ replies: [createReply] })
+  t.after(() => runtime.stop())
+  await finishTurn(runtime.ctx)
+  await until(() => Object.keys(runtime.learningState().proposals ?? {}).length === 1)
+  const proposal = Object.values(runtime.learningState().proposals)[0]
+  const gate = t.mock.fn()
+  const queue = t.mock.fn()
+  runtime.rt.skillGate = gate
+  runtime.rt.skillReviewQueue = queue
+  const answer = await runtime.call('learning-answer', { id: proposal.id, approve: true })
+  assert.equal(answer.value.applied, true)
+  assert.equal(gate.mock.callCount(), 1)
+  assert.equal(queue.mock.callCount(), 1)
+  assert.deepEqual(gate.mock.calls[0].arguments[0].writer, { person: true })
+  const review = queue.mock.calls[0].arguments[0]
+  assert.deepEqual(review.writer, { person: true })
+  assert.equal(review.priority, 'person')
+  assert.deepEqual(review.subject, { name: proposal.name })
+  assert.equal(review.authorModel, 'deepseek/v4')
+  const item = runtime.teamState().capabilities.items[proposal.name]
+  assert.equal(item.authorModel, 'deepseek/v4')
+  assert.equal(item.createdBy, proposal.botId)
+  assert.deepEqual(runtime.learningState().learned[proposal.botId], [proposal.name])
+})

@@ -5,7 +5,7 @@ import { refusal } from './refusal.js'
 import { encodeUrlComponent } from './secrets.js'
 import { own } from './store.js'
 import { skillRefusal } from './skill-keys.js'
-import { installSkillRecords, skillRecordId } from './skill-records.js'
+import { installSkillRecords, skillDeleteBinding, skillRecordId } from './skill-records.js'
 import { isPortableDeviceName, skillName } from './skill-store.js'
 
 export { RESERVED_COMMAND_NAMES, RESERVED_COMMANDS_VERSION, reservedCommandOf } from '../shared/reserved-commands.js'
@@ -139,6 +139,12 @@ export function install(rt) {
     if (!allowedToEdit(item, botId)) throw refusal(`Only ${item.createdBy ? 'its creator or a Main Bot' : 'a Main Bot'} can ${verb} ${item.name}.`)
     if (!rt.isMain(botId) && usedByOthers(item.name, botId)) throw refusal(`Another Bot uses ${item.name}, so only a Main Bot can ${verb} it.`)
   }
+  function checkPackItems(names, items) {
+    for (const name of names) {
+      const child = own(items, name)
+      if (!child || !['mcp', 'skill'].includes(child.kind)) throw refusal(`Packs can include only saved MCP servers and skills. ${name} is not one.`)
+    }
+  }
   const itemInput = (body, { botId, ui }) => {
     const kind = body.kind
     if (!['mcp', 'skill', 'pack'].includes(kind)) throw refusal('Choose an MCP server, skill, or pack.')
@@ -190,10 +196,7 @@ export function install(rt) {
       item.content = String(body.content ?? '').trim()
     } else {
       const names = [...new Set(strings(body.items))]
-      for (const childName of names) {
-        const child = own(items, childName)
-        if (!child || !['mcp', 'skill'].includes(child.kind)) throw refusal(`Packs can include only saved MCP servers and skills. ${childName} is not one.`)
-      }
+      checkPackItems(names, items)
       item.items = names
     }
     return item
@@ -205,31 +208,58 @@ export function install(rt) {
     for (const bot of Object.values(team.bots)) bot.capabilities = (bot.capabilities ?? []).filter(attached => attached !== name)
   }
   const skills = installSkillRecords(rt, {
-    library, deleteFrom, input: itemInput,
+    library, deleteFrom, input: itemInput, authorizeEdit: editCheck,
     validateName: (name, options) => validateCapabilityName(name, CONNECTOR_IDS, options),
   })
+  function checkLibraryTarget(name, previous, team) {
+    const { epoch, term } = rt.teamGeneration()
+    if (epoch !== team.epoch || term !== team.term || own(library(), name) !== previous) throw skillRefusal('changed-elsewhere')
+    writeCheck()
+  }
   const capabilitySave = async (body, options = {}) => {
-    await rt.load()
-    const team = options.team ?? rt.teamGeneration()
-    await loadInputs()
-    if (body?.kind === 'skill') {
+    const text = body?.kind === 'skill' ? {
+      kind: 'skill', name: String(body.name ?? ''), description: String(body.description ?? ''), content: String(body.content ?? ''),
+    } : undefined
+    if (text) options = { ...options }
+    const loaded = rt.load()
+    const team = { ...(options.team ?? rt.teamGeneration()) }
+    if (text) {
+      writeCheck()
+      const request = skills.textRequest(text, options, team)
+      await loaded
+      await loadInputs()
       writeCheck()
       await rt.skillsReady()
-      return skills.saveText(body, options, team)
+      const { item } = await rt.skillCommit(request)
+      return item
     }
+    await loaded
+    await loadInputs()
     writeCheck()
     const item = itemInput(body ?? {}, options)
+    const previous = own(library(), item.name)
     if (item.kind === 'mcp' && item.transport === 'streamable-http') {
       item.verification = options.ui && body?.unverified === true
         ? { checkedAt: new Date().toISOString(), status: 'unverified' }
         : await probeHttpCapability(item, options.botId)
     }
-    options.admit?.(item)
-    ensureLibrary()[item.name] = item
-    await rt.save()
-    return item
+    return rt.skillQueue(item.name, async () => {
+      const beforeCommit = () => {
+        checkLibraryTarget(item.name, previous, team)
+        if (previous && !options.ui) editCheck(previous, options.botId, 'change')
+        if (item.kind === 'pack') checkPackItems(item.items, library())
+      }
+      beforeCommit()
+      await skills.recoverDelete(item.name, team)
+      beforeCommit()
+      options.admit?.(item)
+      const change = snapshot => { snapshot.capabilities.items[item.name] = item }
+      await rt.saveCopy(change, { beforeCommit, afterWrite: () => change(state) })
+      return item
+    })
   }
   const capabilityDelete = async (name, { botId, ui, expect } = {}) => {
+    if (expect !== undefined) expect = skillDeleteBinding(expect)
     await rt.load()
     const key = String(name ?? '')
     const authorize = current => { if (!ui) editCheck(current, botId, 'delete') }
@@ -243,16 +273,27 @@ export function install(rt) {
     writeCheck()
     const item = own(ensureLibrary(), key)
     if (!item) throw refusal(`No capability named ${name}.`)
-    if (item.kind === 'skill' && skillName(name) && !(item.skillFormat > 1)) {
+    if (item.kind === 'skill' && skillName(name)) {
       return skills.deleteSkill(name, current => {
         if (current?.kind !== 'skill') throw refusal(`No capability named ${name}.`)
         authorize(current)
       })
     }
-    authorize(item)
-    deleteFrom(state, key)
-    await rt.save()
-    return true
+    const team = rt.teamGeneration()
+    const remove = async () => {
+      const beforeCommit = () => {
+        checkLibraryTarget(key, item, team)
+        authorize(item)
+      }
+      beforeCommit()
+      const change = snapshot => deleteFrom(snapshot, key)
+      await rt.saveCopy(change, { beforeCommit, afterWrite: () => change(state) })
+      if (item.kind === 'skill') await rt.removeSkillLearning?.(key, () => {
+        if (!rt.sameTeam(team) || !rt.teamCurrent() || own(library(), key) !== undefined) throw skillRefusal('changed-elsewhere')
+      })
+      return true
+    }
+    return skillName(key) ? rt.skillQueue(key, remove) : remove()
   }
   // Called after the Bot leaves the team. The shared library belongs to the user:
   // only an attached, unapproved local MCP this Bot verifiably requested goes.
@@ -266,7 +307,7 @@ export function install(rt) {
       if (item === undefined || item.kind !== 'mcp' || item.transport !== 'stdio' || item.approved === true) continue
       if (item.botRequested !== true) continue
       if (item.createdBy !== bot.id || usedByOthers(name, bot.id) || packed(name)) continue
-      delete items[item.name]
+      delete items[name]
     }
   }
   const changeAttachment = async (endpoint, { name, bot: targetRef }, callerId) => {
@@ -363,6 +404,7 @@ export function install(rt) {
     ...(item.headers ? { headers: { ...item.headers } } : {}),
     ...(Array.isArray(item.items) ? { items: [...item.items] } : {}),
     ...(item.kind === 'skill' ? {
+      name,
       recordId: skillRecordId(item),
       ...(Array.isArray(item.files) ? { files: item.files.map(file => ({ ...file })) } : {}),
       ...(item.source ? { source: { ...item.source } } : {}),
@@ -851,18 +893,25 @@ export function install(rt) {
     }
   }
 
-  async function capabilityEndpoint(endpoint, body = {}) {
+  async function capabilityEndpoint(endpoint, body = {}, attachment) {
     if (endpoint === 'capability-save') return capabilitySave(body, { ui: true })
     if (endpoint === 'capability-delete') return capabilityDelete(body.name, { ui: true })
     if (endpoint === 'capability-approve') {
       await rt.load()
       writeCheck()
-      const item = own(library(), String(body.name ?? ''))
+      const name = String(body.name ?? '')
+      const item = own(library(), name)
       if (!item || item.kind !== 'mcp' || item.transport !== 'stdio') throw refusal(`No unapproved stdio MCP named ${body.name}.`)
-      item.approved = true
-      item.updatedAt = Date.now()
-      await rt.save()
-      return item
+      const team = rt.teamGeneration()
+      const approve = async () => {
+        const beforeCommit = () => checkLibraryTarget(name, item, team)
+        beforeCommit()
+        const approved = { ...item, approved: true, updatedAt: Date.now() }
+        const change = snapshot => { snapshot.capabilities.items[name] = approved }
+        await rt.saveCopy(change, { beforeCommit, afterWrite: () => change(state) })
+        return approved
+      }
+      return skillName(name) ? rt.skillQueue(name, approve) : approve()
     }
     if (endpoint === 'bot-capability') {
       await rt.load()
@@ -870,6 +919,7 @@ export function install(rt) {
       const bot = rt.botOf(String(body.botId ?? ''))
       if (!bot) throw refusal('Unknown Bot')
       const name = String(body.name ?? '')
+      if (attachment && (!rt.sameTeam(attachment.team) || own(library(), name) !== attachment.item)) throw skillRefusal('changed-elsewhere')
       if (!own(library(), name)) throw refusal(`No capability named ${name}.`)
       return setAttached(bot, name, body.attached === true)
     }
@@ -900,11 +950,16 @@ export function install(rt) {
     if (turn !== undefined) admittedTurns.set(agent, turn)
     const mounted = mounts.get(agent)
     if (mounted) {
+      let desired
+      try {
+        const bot = botOfSession(agent.session.id)
+        if (bot) desired = expandCapabilityNames(bot.capabilities, library())
+      } catch { /* withhold if current memberships cannot be resolved */ }
       for (const [name, mount] of mounted) {
         if (mount.hash === undefined) continue
         let verified = false
         try {
-          verified = rt.teamCurrent() && rt.skillDelivery(name).snapshot?.hash === mount.hash
+          verified = desired?.has(name) && rt.teamCurrent() && rt.skillDelivery(name).snapshot?.hash === mount.hash
         } catch { /* withhold on failure */ }
         if (verified) continue
         mounted.delete(name)

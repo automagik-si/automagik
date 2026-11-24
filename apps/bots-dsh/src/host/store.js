@@ -10,7 +10,7 @@ import { piAiClaudeOf } from './claude-models.js'
 import { KEY_ERROR } from './connectors/credential-key.js'
 import { connectorState, ENCRYPTED_STATE_VERSION } from './connectors/credential-state.js'
 import { DRAFT_SWEEP_MAX, LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
-import { replaceFile } from './files.js'
+import { replaceFile, syncFile } from './files.js'
 import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { refusal } from './refusal.js'
@@ -727,7 +727,7 @@ export function install(rt) {
     }
     return dropped
   }
-  rt.saveCopy = (change, { beforeCommit, afterWrite } = {}) => {
+  rt.saveCopy = (change, { beforeCommit, afterWrite, durable = false } = {}) => {
     if (missingTeamHeld()) return Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`))
     if (stopped || !writable()) return Promise.reject(new Error('This host cannot save the Bot team.'))
     refreshShellHolds(state.bots)
@@ -748,6 +748,7 @@ export function install(rt) {
         required: true,
         epoch: lockEpoch,
         beforeCommit,
+        durable,
         afterWrite: () => {
           state.revision = state.autoStamp = revision
           state.version = STATE_VERSION
@@ -806,7 +807,7 @@ export function install(rt) {
   }
 
   let warnedCredentialSave = false
-  const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch, beforeCommit, afterWrite } = {}) => {
+  const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch, beforeCommit, afterWrite, durable } = {}) => {
     const run = writing.then(async () => {
       // An adopt ahead of this save may have made the team read-only.
       if (missingTeamHeld()) {
@@ -850,8 +851,8 @@ export function install(rt) {
           beforeCommit?.()
           if (!snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
         }
-        ensureCommit()
-        await replaceFile(temp, statePath, ensureCommit)
+        if (!durable) ensureCommit()
+        await replaceFile(temp, statePath, ensureCommit, { durable })
         seen = stamp()
         snapshot.commit()
         afterWrite?.()
@@ -872,6 +873,12 @@ export function install(rt) {
       warn('omni-ui: state write failed: %s', error)
       throw error
     })
+  }
+
+  rt.syncTeamState = team => {
+    if (!rt.sameTeam(team) || !teamCurrent()) throw refusal('The Bot team changed. Try again.')
+    syncFile(statePath, { parent: true })
+    if (!rt.sameTeam(team) || !teamCurrent()) throw refusal('The Bot team changed. Try again.')
   }
 
   ctx.effect(() => () => {

@@ -157,7 +157,7 @@ export function install(rt) {
   // none), for the New Solver dialog's tick (RFC 0048). Read only, never stored; built once per
   // answer for both the comparison and the view.
   const nativeToolsNewMap = () => Object.fromEntries(rt.cachedCatalog().map(entry => [entry.ref, rt.nativeToolsNewBotBlock(entry.ref) ?? null]))
-  const modelsKey = (newBlocks = nativeToolsNewMap()) => [
+  const modelsKey = (newBlocks = nativeToolsNewMap(), { epoch, term } = rt.teamGeneration()) => [
     rt.cachedCatalog().map(entry => [
       entry.ref, entry.needsKey ? '!' : '', entry.needsSignIn ? '?' : '',
       entry.needsAccount ? '~' : '', entry.covered ? '=' : '',
@@ -166,6 +166,8 @@ export function install(rt) {
     ].join('')).join(','),
     rt.cachedDefault() ?? '', rt.cachedBackground?.() ?? '', rt.permissionKey?.() ?? '',
     rt.modelsEpoch?.() ?? 0,
+    // An adoption or a new lock term can invalidate the displayed library at the same revision.
+    `${epoch}:${term}`,
     Object.values(state.bots).map(bot => [bot.nativeTools === true, rt.nativeToolsBlock(bot) ?? ''].join('/')).join(','),
     // Which models run their own tools whatever the Denied tools say (#2026): Codex can measure
     // a model as kept with no new revision.
@@ -179,7 +181,7 @@ export function install(rt) {
     // Only the blocked refs: a flip between none and a block adds or removes an entry.
     Object.entries(newBlocks).filter(([, block]) => block !== null).map(([ref, block]) => `${ref}=${block}`).join(','),
   ].join('|')
-  const view = (roles, newBlocks = nativeToolsNewMap()) => ({
+  const view = (roles, newBlocks = nativeToolsNewMap(), teamGeneration = rt.teamGeneration()) => ({
     revision: state.revision,
     workspaceId: state.workspaceId ?? null,
     // `mainBotId` is the first Main Bot, which the sidebar shows as its tile.
@@ -246,6 +248,7 @@ export function install(rt) {
     sections: state.sections ?? [],
     // Key names and who may use them; values never leave the host.
     secrets: rt.secretsView(),
+    teamGeneration,
     capabilities: rt.capabilityLibraryView(),
     secretRequests: state.secretRequests ?? {},
     connectorRequests: state.connectorRequests ?? {},
@@ -258,7 +261,7 @@ export function install(rt) {
     permissions: rt.permissionCatalog?.() ?? null,
     newBotPermission: rt.newBotPermission?.() ?? null,
     nativeToolsNew: newBlocks,
-    modelsKey: modelsKey(newBlocks),
+    modelsKey: modelsKey(newBlocks, teamGeneration),
     prefs: state.prefs,
     roles,
     // Whether a Desktop window should serve Bot browser reads (see browser.js).
@@ -655,11 +658,12 @@ export function install(rt) {
           await rt.prepareLearning()
           const answer = liveAnswer(roles)
           const newBlocks = nativeToolsNewMap()
-          if (body.since === state.revision && (body.models === undefined || body.models === modelsKey(newBlocks))) {
+          const teamGeneration = rt.teamGeneration()
+          if (body.since === state.revision && (body.models === undefined || body.models === modelsKey(newBlocks, teamGeneration))) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })
             return ok({ revision: state.revision, unchanged: true, liveKey: answer.key, ...answer.value })
           }
-          return ok({ ...view(roles, newBlocks), liveKey: answer.key, ...answer.value })
+          return ok({ ...view(roles, newBlocks, teamGeneration), liveKey: answer.key, ...answer.value })
         }
         case 'models':
           await rt.refreshHostModels?.()

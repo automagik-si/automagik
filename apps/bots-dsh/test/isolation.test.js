@@ -144,12 +144,14 @@ test('skill import: refuses aliases that collide before copying either source', 
   assert.equal(existsSync(target), false)
 })
 
-test('skill import: holds invalid and newer-format imported records without rebuilding them', async t => {
+test('D2075-6 skill import: holds invalid and newer-format imported records across restart', async t => {
   const root = mkdtempSync(join(tmpdir(), 'omni-skill-import-held-'))
   const source = join(root, 'source')
   const target = join(root, 'target')
   const ctx = fakeContext()
+  const reopened = fakeContext()
   t.after(async () => {
+    await reopened.dispose()
     await ctx.dispose()
     makeSkillFixtureWritable(target)
     rmSync(root, { recursive: true, force: true })
@@ -159,6 +161,7 @@ test('skill import: holds invalid and newer-format imported records without rebu
     'invalid-guide': { kind: 'skill', name: 'different-guide', description: 'Keep notes', content: 'Body.' },
     'Invalid key': { kind: 'skill', name: 'Invalid key', description: 'Keep notes', content: 'Body.' },
     'newer-guide': { kind: 'skill', name: 'newer-guide', skillFormat: 2 },
+    'non-text-guide': { kind: 'skill', name: 'non-text-guide', description: 'Keep notes', content: { invalid: 'Body.' } },
     'field-guide': {
       kind: 'skill', name: 'field-guide', skillFormat: 1, description: 'Keep notes', content: 'Write a short note.',
       hash: 'b9b358086a46b5258de7d18d14ed7d8e692874155873e351d8abde3fed0c5697',
@@ -181,4 +184,76 @@ test('skill import: holds invalid and newer-format imported records without rebu
   }
   assert.equal(gate.mock.callCount(), 0)
   assert.equal(existsSync(join(target, '.skills-import.json')), false)
+  await ctx.dispose()
+  const next = createRuntime(reopened, { home: target, github: false, diagnosticsFile: false })
+  const restartGate = t.mock.fn()
+  next.skillGate = restartGate
+  await next.load()
+  await next.skillsReady()
+  for (const [name, item] of Object.entries(items)) {
+    assert.deepEqual(next.state.capabilities.items[name], item)
+    assert.deepEqual([next.skillDelivery(name).status.state, next.skillDelivery(name).status.why], ['changed', 'import'])
+    assert.equal(next.skillDelivery(name).snapshot, undefined)
+    assert.equal(existsSync(join(target, 'skills', name)), false)
+  }
+  assert.equal(restartGate.mock.callCount(), 0)
+})
+
+test('D2075-7 a landed imported move keeps its oversized proof when readiness restarts', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'omni-skill-import-pending-'))
+  const source = join(root, 'source')
+  const target = join(root, 'target')
+  const ctx = fakeContext()
+  const reopened = fakeContext()
+  t.after(async () => {
+    await reopened.dispose()
+    await ctx.dispose()
+    makeSkillFixtureWritable(target)
+    rmSync(root, { recursive: true, force: true })
+  })
+  mkdirSync(source)
+  const name = 'oversized-guide'
+  const content = 'x'.repeat(65536)
+  const item = { kind: 'skill', name, description: 'Keep notes', content }
+  writeFileSync(join(source, 'state.json'), JSON.stringify({
+    version: 2, mainBotIds: [], bots: {}, rooms: {}, agents: {}, exchanges: [], revision: 1,
+    capabilities: { items: { [name]: item } },
+  }))
+  const rt = createRuntime(ctx, { home: target, importHome: source, github: false, diagnosticsFile: false })
+  const markerPath = join(target, '.skills-import.json')
+  const originalMarker = readFileSync(markerPath, 'utf8')
+  await rt.load()
+  await rt.skillsReady()
+  const saved = rt.state.capabilities.items[name]
+  assert.ok(saved.files[0].size > 65536)
+  const ledger = rt.skillStore.readLedger()
+  const row = ledger.names[name]
+  const generation = row.generations[saved.hash]
+  const proof = generation.legacy
+  const statePath = join(target, 'state.json')
+  const landed = readFileSync(statePath, 'utf8')
+  await ctx.dispose()
+
+  // Restore the disk state of a crash between the durable state commit and ledger completion.
+  generation.state = 'prepared'
+  row.pending = { hash: saved.hash, mirror: saved.mirror, via: 'move', at: generation.at, op: 'migrate' }
+  delete row.committed
+  writeFileSync(join(target, 'skills', '.ledger.json'), JSON.stringify(ledger))
+  writeFileSync(markerPath, originalMarker)
+
+  const next = createRuntime(reopened, { home: target, github: false, diagnosticsFile: false })
+  const gate = t.mock.fn()
+  next.skillGate = gate
+  await next.load()
+  await next.skillsReady()
+  const restored = next.skillStore.readLedger().names[name]
+  assert.equal(restored.committed, saved.hash)
+  assert.equal(restored.pending, undefined)
+  assert.equal(restored.generations[saved.hash].via, 'move')
+  assert.deepEqual(restored.generations[saved.hash].legacy, proof)
+  assert.equal(restored.generations[saved.hash].state, 'committed')
+  assert.equal(existsSync(markerPath), false)
+  assert.equal(readFileSync(statePath, 'utf8'), landed)
+  assert.equal(next.skillModelText(name).body, content)
+  assert.equal(gate.mock.callCount(), 0)
 })

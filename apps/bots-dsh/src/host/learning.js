@@ -411,17 +411,23 @@ export function install(rt) {
   }
   let stopped = false
   let writing = Promise.resolve()
-  const persist = (cleanupOnly = false) => {
-    if (stopped || rt.readOnly() !== undefined) return writing
+  const persist = (cleanupOnly = false, { check, change } = {}) => {
+    if (!check && (stopped || rt.readOnly() !== undefined)) return writing
     const attempt = writing.then(async () => {
-      if (rt.readOnly() !== undefined || (cleanupOnly && !needsCleanup())) return
+      if (!check && (rt.readOnly() !== undefined || (cleanupOnly && !needsCleanup()))) return
+      check?.()
       await mkdir(dirname(path), { recursive: true })
+      check?.()
       const temp = `${path}.${process.pid}.tmp`
-      const contents = JSON.stringify(data(), null, 1)
+      const contents = JSON.stringify(change ? change(data()) : data(), null, 1)
       const revision = cleanupRevision
       try {
         await writeFile(temp, contents, 'utf8')
-        await replaceFile(temp, path)
+        await replaceFile(temp, path, check, { durable: check !== undefined })
+        if (change) {
+          check()
+          Object.assign(data(), change(data()))
+        }
         writtenCleanup = revision
       } finally {
         await unlink(temp).catch(() => {})
@@ -429,8 +435,26 @@ export function install(rt) {
     })
     // Keep the write queue usable after a failure and let cleanup callers see it.
     writing = attempt.catch(error => rt.warn('omni-ui: saving the learning state failed: %s', error?.message ?? error))
-    return cleanupOnly || needsCleanup() ? attempt : writing
+    return check || cleanupOnly || needsCleanup() ? attempt : writing
   }
+
+  rt.removeSkillLearning = (name, check) => persist(false, {
+    check,
+    change(store) {
+      const learned = Object.fromEntries(Object.entries(store.learned).map(([botId, names]) =>
+        [botId, (Array.isArray(names) ? names : []).filter(entry => entry !== name)]))
+      const changed = { ...store, learned }
+      if (store.pendingAttach) {
+        changed.pendingAttach = Object.fromEntries(Object.entries(store.pendingAttach).map(([botId, pending]) => {
+          if (!pending || !Object.hasOwn(pending, name)) return [botId, pending]
+          const remaining = { ...pending }
+          delete remaining[name]
+          return [botId, remaining]
+        }))
+      }
+      return changed
+    },
+  })
 
   let secretChange = 0
   const secretsChanged = rt.secretsChanged
@@ -918,6 +942,7 @@ export function install(rt) {
 
   // The user's answer to a card.
   async function answer({ id, approve }) {
+    const team = rt.teamGeneration()
     const store = data()
     const proposal = Object.hasOwn(store.proposals, id) ? store.proposals[id] : undefined
     const stale = () => Object.assign(new Error('This proposal is no longer open'), { code: 'bot/stale' })
@@ -969,7 +994,7 @@ export function install(rt) {
         await persist()
         throw skillRefusal('proposal-stale')
       }
-      await applySkill(proposal, admit)
+      await applySkill(proposal, admit, team)
     }
     settle('approved')
     await persist()
@@ -1024,55 +1049,51 @@ export function install(rt) {
     }
   }
 
-  async function applySkill(proposal, admit) {
+  async function applySkill(proposal, admit, team) {
     admit()
     const bot = rt.botOf(proposal.botId)
     if (bot === undefined) throw refusal('The Bot that learned this skill is gone')
     const current = skillsOf()[proposal.name]
     const store = data()
     const options = {
-      botId: bot.id, ui: false, admit, via: 'learning-card', authorModel: proposal.authorModel, team: rt.teamGeneration(),
+      botId: bot.id, ui: false, admit, via: 'learning-card', authorModel: proposal.authorModel, team,
     }
+    const body = { name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }
+    let item
+    let savedNow = false
     if (proposal.action === 'create') {
       if (proposal.saved) {
         if (current === undefined || current.hash !== proposal.savedHash) {
           throw refusal(`${proposal.name} changed since this was proposed`)
         }
-        store.learned[bot.id] = [...new Set([...(store.learned[bot.id] ?? []), current.name])]
-        await persist()
+        item = current
       } else {
         if (current !== undefined) throw refusal(`A skill named ${proposal.name} exists now`)
-        const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, { ...options, op: 'create' })
-        admit()
-        proposal.saved = true
-        proposal.savedHash = item.hash
-        store.learned[bot.id] = [...new Set([...(store.learned[bot.id] ?? []), item.name])]
-        await persist()
+        item = await rt.capabilitySave(body, { ...options, op: 'create' })
+        savedNow = true
       }
     } else if (proposal.action === 'update') {
-      const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, { ...options, op: 'edit', base: proposal.skillBase.hash })
+      item = await rt.capabilitySave(body, { ...options, op: 'edit', base: proposal.skillBase.hash })
+    }
+    await rt.skillQueue(proposal.name, async () => {
+      if (!rt.sameTeam(team) || skillsOf()[proposal.name] !== item || rt.botOf(bot.id) !== bot) throw skillRefusal('changed-elsewhere')
       admit()
+      if (savedNow) {
+        proposal.saved = true
+        proposal.savedHash = item.hash
+      }
       store.learned[bot.id] = [...new Set([...(store.learned[bot.id] ?? []), item.name])]
       await persist()
-    }
+    })
     if (!(bot.capabilities ?? []).includes(proposal.name)) {
       admit()
-      await rt.capabilityEndpoint('bot-capability', { botId: bot.id, name: proposal.name, attached: true })
+      await rt.capabilityEndpoint('bot-capability', { botId: bot.id, name: proposal.name, attached: true }, { item, team })
     }
   }
 
   async function learningEndpoint(endpoint, body) {
     if (endpoint === 'learning-answer') return answer({ id: String(body.id ?? ''), approve: body.approve === true })
     throw new Error(`Unknown endpoint ${endpoint}`)
-  }
-
-  async function removeLearned(name) {
-    const learned = data().learned
-    const deleted = String(name ?? '')
-    for (const [botId, names] of Object.entries(learned)) {
-      learned[botId] = (Array.isArray(names) ? names : []).filter(entry => entry !== deleted)
-    }
-    await persist()
   }
 
   // Per Bot, its proposals waiting for the user.
@@ -1088,19 +1109,6 @@ export function install(rt) {
       if (rt.botOf(entry.botId) !== undefined && entry.sessionId === rt.chatOf(entry.botId)) (byBot[entry.botId] ??= []).push(entry)
     }
     return byBot
-  }
-
-  const capabilityDelete = rt.capabilityDelete
-  rt.capabilityDelete = async (...args) => {
-    const result = await capabilityDelete(...args)
-    await removeLearned(args[0])
-    return result
-  }
-  const capabilityEndpoint = rt.capabilityEndpoint
-  rt.capabilityEndpoint = async (endpoint, body, ...args) => {
-    const result = await capabilityEndpoint(endpoint, body, ...args)
-    if (endpoint === 'capability-delete') await removeLearned(body?.name)
-    return result
   }
 
   rt.learnedSkillNames = () => new Set(Object.values(data().learned).flat())
