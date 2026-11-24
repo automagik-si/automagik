@@ -1844,6 +1844,8 @@ test('O2g a note that passes as written is carried as written: no heading of it,
   const { text, unusable } = await noteAnswered(t, [asWritten])
   assert.match(text, carried)
   assert.match(text, /## GOALS/)
+  // The fenced half does not discriminate here: only the ## GOALS line pins the gate; the fence
+  // rule is pinned in note-headings.test.js (N1).
   assert.match(text, /```\n {0,8}# Progress\n {0,8}```/)
   assert.deepEqual(unusable, [])
 })
