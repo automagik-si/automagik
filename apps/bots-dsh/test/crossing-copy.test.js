@@ -11,6 +11,10 @@ test('crossing confirmation and recovery guidance are worded in zh and pt-BR', (
     'Change agent?',
     'Changing the route requires a new conversation if this one has history.',
     'Changing the agent requires a new conversation if this one has history.',
+    // The question a crossing asks while a reply runs (RFC 0030, Handoff note, 2026-11-23).
+    'This stops the current reply and continues on {agent}.',
+    'Switch',
+    'Cancel',
   ]) {
     assert.ok(DICTIONARY.zh[key], key)
     assert.ok(pt[key], key)

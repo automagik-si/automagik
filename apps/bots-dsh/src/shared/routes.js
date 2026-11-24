@@ -122,6 +122,20 @@ export function crossesHarness(fromRef, toRef) {
 }
 
 /**
+ * Whether a model ref is a Hermes route: Remote Hermes, or Hermes over ACP. A crossing to or
+ * from one keeps RFC 0030 Q7a's refusal; every other crossing carries the conversation
+ * (RFC 0030, Handoff note, 2026-11-23).
+ */
+export function isHermesRoute(ref) {
+  const { provider, route } = routeOfRef(ref)
+  return route === 'hermes-remote' || provider === 'acp-hermes'
+}
+
+// How long an agent switch in a Bot's own chat may take before nothing changes: the host
+// rolls back past it, and the chat's composer lock ends a little later even with no word.
+export const CROSSING_DEADLINE_MS = 120_000
+
+/**
  * A per-bot-type route policy, from the plugin's `routePolicy` config: `{ automagik:
  * ['native', 'acp'], dsh: ['native'], default: [...] }`. `default` applies to a kind the
  * map does not name; no map at all offers all three routes. Unknown routes are refused, so

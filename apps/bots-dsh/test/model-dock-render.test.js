@@ -197,7 +197,9 @@ for (const [label, effort] of [['High', 'high'], ['Default', undefined]]) {
   })
 }
 
-const oldRoute = 'acp-example/retired'
+// A Hermes route keeps RFC 0030 Q7a's refusal (every other crossing carries the conversation
+// since 2026-11-23), so the recovery card still meets a refusal from the real host here.
+const oldRoute = 'acp-hermes/retired'
 const historyReason = 'needs-new-conversation'
 
 async function checkHttpCrossingRefusal(t, { rollover = false } = {}) {

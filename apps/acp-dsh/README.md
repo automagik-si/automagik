@@ -453,7 +453,8 @@ A Bot part's handoff package (a relay marked `handoff`) is carried as the record
 part's first turn it stays in the prompt beside the person's words, and once the Bot team has
 answered that turn itself, the next new session gets it in the replay. Both pass the redactor.
 With `false`, an agent sees only its own session, and a new one in a chat with answers writes the
-"does not see this chat's earlier messages" row instead.
+"does not see this chat's earlier messages" row instead, except that a Bot part's handoff package
+the Bot team answered itself goes ahead of the person's words in the part's first prompt, once.
 
 `sideModel` (`{ provider, model }`, default `deepseek-official/deepseek-flash`, live) is the
 model a side request tries after DSH's default model. An explicit value the person chose is tried

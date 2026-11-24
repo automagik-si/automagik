@@ -258,6 +258,27 @@ export function install(rt) {
     return { part, exact: rows.some(row => row.seq === seq), lines: rows.map(row => rowLine(parts, row, [], row.seq === seq ? ANCHOR_LINE_MAX : OWN_CHAT_LINE_MAX)) }
   }
 
+  // The messages just older than an anchor, across parts: the rest of the anchor's part, then
+  // the parts before it, newest first; shown oldest first. `older`: the anchor of the first
+  // line shown when there is more before it, for the next page.
+  async function beforeOwnChat(botId, anchor, { limit = OWN_CHAT_READ } = {}) {
+    const { index, parts } = await indexedParts(botId)
+    if (index === null) return { error: 'Anchors need the chat index, which is unavailable here. Search with words instead.' }
+    const found = /(?:part\s*)?(\d+)?\s*#\s*(\d+)/i.exec(anchor)
+    if (found === null) return { error: `"${anchor}" is not an anchor. Anchors look like "part 2 #1234", or "#1234" in the current part.` }
+    const number = found[1] === undefined ? parts.length : Number(found[1])
+    const part = parts[number - 1]
+    if (part === undefined) return { error: `Your own chat has no part ${number}.` }
+    const rows = []
+    for (let at = number - 1; at >= 0 && rows.length <= limit; at -= 1) {
+      const below = at === number - 1 ? Number(found[2]) : Number.MAX_SAFE_INTEGER
+      rows.push(...index.before.all(parts[at].sessionId, below, limit + 1 - rows.length))
+    }
+    const more = rows.length > limit
+    const shown = rows.slice(0, limit).reverse()
+    return { lines: shown.map(row => rowLine(parts, row)), older: more && shown.length > 0 ? anchorOf(parts, shown[0]) : undefined }
+  }
+
   // Without the index: what the user, other Bots, and the Bot itself said, across all
   // parts, oldest first, by reading the logs.
   async function scanOwnChat(botId, query, limit) {
@@ -289,5 +310,5 @@ export function install(rt) {
     ].join('\n')
   }
 
-  Object.assign(rt, { eventsBackwards, searchOwnChat, latestOwnChat, aroundOwnChat, partIndex, ownChatBrief })
+  Object.assign(rt, { eventsBackwards, searchOwnChat, latestOwnChat, aroundOwnChat, beforeOwnChat, partIndex, ownChatBrief })
 }

@@ -51,6 +51,7 @@ import {
 } from '../shared/cli-account.js'
 import { createAccountReservations } from './account-reservations.js'
 import { isSignInUrl as isAgySignInUrl } from '../shared/agy-sign-in-url.js'
+import { crossesHarness } from '../shared/routes.js'
 
 const PROVIDERS = new Set(['acp-codex', 'acp-claude'])
 // The agents a Bot's chat signs in to (#2048, parity): Claude Code and Codex, plus Antigravity's
@@ -369,30 +370,84 @@ export function install(rt, reservationDeps) {
     const ref = refOf(event.data?.header?.config)
     if (ref === undefined) return
     for (const [key, choice] of choices) if (choice.botId === botId && ref !== choice.baseline) choices.delete(key)
+    // A choice that waits for a running reply is dropped the same way.
+    for (const choice of waiting) if (choice.botId === botId && ref !== choice.baseline) choice.dropped = true
   })
 
+  // Choices waiting for the Bot's running reply to end before they switch its agent.
+  const waiting = new Set()
+  // How long such a choice waits for the reply (a test may set a shorter bound).
+  const crossingWaitMs = () => rt.config?.crossingWaitMs ?? 120_000
+  const stillWanted = (bot, choice) => bot !== undefined && choice.dropped !== true && latest.get(bot.id) === choice.seq
+    && (bot.model ?? null) === choice.baseline && bot.model !== choice.ref
+  const refusedMessage = error => (typeof error?.code === 'string' && error.code.startsWith('bot/') && typeof error.message === 'string' ? error.message.slice(0, 300) : 'The model could not be selected.')
+
+  async function applyChoice(provider, key, choice, bot) {
+    const kept = bot.model ?? null
+    applying.set(key, choice)
+    try {
+      await rt.updateBot(bot.id, { model: choice.ref })
+      outcomes.set(key, { ref: choice.ref, ok: true, at: Date.now() })
+    } catch (error) {
+      // Only a message written for the person (a `bot/` refusal) is shown; anything else is
+      // said by kind, as the rest of the route does.
+      outcomes.set(key, { ref: choice.ref, ok: false, message: refusedMessage(error), kept, at: Date.now() })
+      rt.warn('ds-bot: %s signed in, but %s was not put on %s: %s', provider, bot.name, choice.ref, error?.code ?? 'error')
+    } finally {
+      if (applying.get(key) === choice) applying.delete(key)
+    }
+  }
+
+  // A pick on another harness while the Bot's chat runs a reply: the sign-in never stops that
+  // reply. The choice waits for it to end (at most crossingWaitMs), still reading pending,
+  // then switches like an idle pick; past the bound the person picks again from the menu.
+  async function applyAfterReply(provider, key, choice) {
+    try {
+      const bot = rt.botOf(choice.botId)
+      const agent = await rt.resolveAgent(rt.chatOf(choice.botId)).catch(() => undefined)
+      let timer
+      const idle = await Promise.race([
+        Promise.resolve(agent?.whenIdle?.()).then(() => true, () => true),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(false), crossingWaitMs()); timer.unref?.() }),
+      ]).finally(() => clearTimeout(timer))
+      const now = rt.botOf(choice.botId)
+      if (now !== bot || !stillWanted(now, choice)) return
+      if (!idle || rt.replyRunning?.(now.id)) {
+        const message = `This stops the current reply and continues on ${rt.agentNameOf?.(choice.ref) ?? choice.ref}.`
+        outcomes.set(key, { ref: choice.ref, ok: false, message, kept: now.model ?? null, at: Date.now() })
+        return
+      }
+      await applyChoice(provider, key, choice, now)
+    } finally {
+      waiting.delete(choice)
+      if (applying.get(key) === choice) applying.delete(key)
+    }
+  }
+
   async function applyChoices(provider) {
+    const later = []
     for (const [key, choice] of choices) {
       if (choice.provider !== provider) continue
       choices.delete(key)
       const bot = rt.botOf(choice.botId)
-      if (bot === undefined || latest.get(bot.id) !== choice.seq || (bot.model ?? null) !== choice.baseline) continue
-      if (bot.model === choice.ref) continue
-      const kept = bot.model ?? null
-      applying.set(key, choice)
-      try {
-        await rt.updateBot(bot.id, { model: choice.ref })
-        outcomes.set(key, { ref: choice.ref, ok: true, at: Date.now() })
-      } catch (error) {
-        // Only a message written for the person (a `bot/` refusal) is shown; anything else is
-        // said by kind, as the rest of the route does.
-        const message = typeof error?.code === 'string' && error.code.startsWith('bot/') && typeof error.message === 'string' ? error.message.slice(0, 300) : 'The model could not be selected.'
-        outcomes.set(key, { ref: choice.ref, ok: false, message, kept, at: Date.now() })
-        rt.warn('ds-bot: %s signed in, but %s was not put on %s: %s', provider, bot.name, choice.ref, error?.code ?? 'error')
-      } finally {
-        if (applying.get(key) === choice) applying.delete(key)
+      if (!stillWanted(bot, choice)) continue
+      const from = bot.model ?? bot.appliedModel
+      if (typeof from === 'string' && crossesHarness(from, choice.ref) && rt.replyRunning?.(bot.id) === true) {
+        // The acp_tool rule refuses before any wait (#2026).
+        try {
+          rt.assertOwnToolsModel?.(bot, { next: choice.ref, denyTools: bot.denyTools })
+        } catch (error) {
+          outcomes.set(key, { ref: choice.ref, ok: false, message: refusedMessage(error), kept: bot.model ?? null, at: Date.now() })
+          continue
+        }
+        applying.set(key, choice)
+        waiting.add(choice)
+        later.push([key, choice])
+        continue
       }
+      await applyChoice(provider, key, choice, bot)
     }
+    await Promise.allSettled(later.map(([key, choice]) => applyAfterReply(provider, key, choice)))
   }
   ctx.on('acp-dsh/login-ready', (payload) => {
     if (!SIGN_IN_PROVIDERS.has(payload?.id)) return

@@ -1,12 +1,83 @@
-import { countCards, detailsSubject, heldCardKey } from './sources.js'
+import { countCards, createSource, detailsSubject, heldCardKey } from './sources.js'
 import { noteClientError } from './diagnostics.js'
+import { CROSSING_DEADLINE_MS, crossesHarness, routeOfRef } from '../shared/routes.js'
 import { SIGN_IN_NAMES, cliLoginBotOf, signInProviderOf } from './cli-login-model.js'
 
 // The actions every window that draws the Bot views shares: dialogs and panels (the `ui`
 // source), requests to the host, and the notes the transcript keeps. The shell around the
 // views adds navigation and its own panels. `after` reads the team again once a request
 // is done; `partFor` maps a Bot id, or any part of its chat, to its current part.
-export function teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession, loginState, panelFolded }) {
+export function teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession, loginState, panelFolded, work }) {
+  // The person's own agent switch in this window (F4): from the host's answer on, the part it
+  // leaves draws no activity row for the outgoing agent's note turn, before the state poll
+  // brings the host's `noting`. Only an outgoing agent over ACP writes its note in the chat.
+  // Every refusal is a rejection, so a refused pick never marks.
+  const picks = createSource({})
+  const pickEntries = new Map()
+  let unwatchPicks
+  const dropPick = (part, entry) => {
+    if (pickEntries.get(part) !== entry) return
+    clearTimeout(entry.timer)
+    pickEntries.delete(part)
+    picks.set((state) => {
+      const next = { ...state }
+      delete next[part]
+      return next
+    })
+    if (pickEntries.size === 0 && unwatchPicks !== undefined) {
+      const stop = unwatchPicks
+      unwatchPicks = undefined
+      stop()
+    }
+  }
+  // The host's `noting` takes over; an answered call whose switch is not (or no longer) under
+  // way ends the mark too (a commit, a failure, a go-back, an answer that crossed nothing).
+  const syncPicks = () => {
+    const snapshot = work?.getSnapshot?.()
+    for (const [part, entry] of pickEntries) {
+      const noting = snapshot?.noting?.[part] === true
+      if (noting || (entry.settled && snapshot?.models?.[entry.botId]?.switching === undefined)) dropPick(part, entry)
+    }
+  }
+  const noPick = { mark: () => {}, end: () => {} }
+  // Read at the pick (the Bot the person crosses from); `mark` runs when the host answers,
+  // before the pull, and `end` once the pull is done.
+  const pickFor = (id, ref) => {
+    if (typeof ref !== 'string') return noPick
+    const bot = roster?.getSnapshot?.()?.byId?.[id]
+    const current = bot?.model ?? bot?.appliedModel
+    if (typeof current !== 'string' || ref === current || !crossesHarness(current, ref)) return noPick
+    if (routeOfRef(current).route !== 'acp') return noPick
+    const part = partFor(id)
+    let entry
+    return {
+      mark: () => {
+        const older = pickEntries.get(part)
+        if (older !== undefined) clearTimeout(older.timer)
+        const own = { botId: bot.id, settled: false, timer: undefined }
+        entry = own
+        // The client timer starts at the answer, after the host's `job.since` (parts.js:1630),
+        // so it can outlive the host's deadline by the answer's latency; the poll that shows
+        // `switching` gone drops the mark first.
+        own.timer = setTimeout(() => dropPick(part, own), CROSSING_DEADLINE_MS)
+        own.timer?.unref?.()
+        pickEntries.set(part, own)
+        if (older === undefined && pickEntries.size === 1 && typeof work?.subscribe === 'function') unwatchPicks = work.subscribe(syncPicks)
+        picks.set(state => (state[part] === true ? state : { ...state, [part]: true }))
+      },
+      end: (ok) => {
+        if (entry === undefined) return
+        if (ok === true) {
+          entry.settled = true
+          syncPicks()
+        } else dropPick(part, entry)
+      },
+    }
+  }
+  // A call that crosses nothing goes as it always did.
+  const picked = (pick, request) => (pick === noPick ? after(request)
+    : after(request.then((value) => { pick.mark(); return value }))
+      .then((value) => { pick.end(true); return value }, (error) => { pick.end(false); throw error }))
   // The sign-in row of a Bot's chat (cli-login.js): an explicit entry opens that Bot's chat and
   // its row; `ref` is the model the person chose, applied by the host once signed in.
   const openCliLogin = (botId, provider, ref) => {
@@ -18,6 +89,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     return true
   }
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra })
+  const stopping = options => (options?.stopReply === true ? { stopReply: true } : {})
   // A memory is a Bot's or a group chat's; both are opened by id.
   const memoryOf = id => (roster.getSnapshot().roomsById[id] ? { roomId: id } : { botId: id })
   // An action that shows the panel lands the yield with it: when a folded
@@ -123,7 +195,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     deleteAvatar: id => call('avatar-delete', { id }),
     createRoom: (members, options = {}) => after(call('create-room', { members, ...options })),
     setBotAuto: (id, rev) => after(call('set-bot-auto', { id, rev })),
-    updateBot: (id, patch) => after(call('update-bot', { id, ...patch })),
+    updateBot: (id, patch) => picked(pickFor(id, patch?.model), call('update-bot', { id, ...patch })),
     attachRole: (id, role) => after(call('role-attach', { id, role })),
     detachRole: id => after(call('role-detach', { id })),
     roleCatalog: () => after(call('role-catalog')),
@@ -135,11 +207,14 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     voicePane: (sessionId, paneId, open, active) => call('voice-pane', { sessionId, paneId, open, active }),
     voiceWait: (sessionId, paneId, callId, signal) => call('voice-wait', { sessionId, paneId, callId }, signal),
     voiceSpoken: (sessionId, paneId, callId, outcome) => call('voice-spoken', { sessionId, paneId, callId, outcome }),
-    // A model on another route: the host changes it in place on a chat with nothing said.
-    // `patch` carries the thinking level picked with it.
-    switchRoute: (id, ref, patch = {}) => after(call('switch-route', { id, ...patch, model: ref })),
-    switchRouteInChat: async (id, ref, patch = {}) => {
-      try { return await after(call('switch-route', { id, ...patch, model: ref })) } catch (error) {
+    // A model on another route: the host changes it in place on a chat with nothing said, else
+    // in a new part with a handoff (RFC 0030, Handoff note). `patch` carries the thinking level
+    // picked with it. `options.stopReply`: the person's Switch on "This stops the current reply",
+    // the only consent that lets the host stop a running reply; without it the host answers
+    // reason reply-running while one runs.
+    switchRoute: (id, ref, patch = {}, options) => picked(pickFor(id, ref), call('switch-route', { id, ...patch, model: ref, ...stopping(options) })),
+    switchRouteInChat: async (id, ref, patch = {}, options) => {
+      try { return await picked(pickFor(id, ref), call('switch-route', { id, ...patch, model: ref, ...stopping(options) })) } catch (error) {
         // A signed-out agent opens its sign-in row; the pick is made again after it.
         const provider = signInProviderOf(ref)
         if (error?.code === 'bot/sign-in-required' && provider && openCliLogin(id, provider)) return undefined
@@ -149,9 +224,10 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     },
     // A model chosen in a Bot's chat (rule 2): an agent that is signed out opens the sign-in row
     // in that chat instead of failing; the Bot keeps its model until the sign-in is done.
-    // `patch` goes with the model in the same update (its thinking level).
-    chooseModelInChat: async (id, ref, patch = {}) => {
-      try { return await after(call('update-bot', { id, ...patch, model: ref })) } catch (error) {
+    // `patch` goes with the model in the same update (its thinking level); `options.stopReply`
+    // as for switchRoute.
+    chooseModelInChat: async (id, ref, patch = {}, options) => {
+      try { return await picked(pickFor(id, ref), call('update-bot', { id, ...patch, model: ref, ...stopping(options) })) } catch (error) {
         const provider = signInProviderOf(ref)
         if (error?.code === 'bot/sign-in-required' && provider && openCliLogin(id, provider, ref)) return undefined
         // An agent already signed in on this computer, to an account the person has not
@@ -160,6 +236,9 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
         throw error
       }
     },
+    // The activity row reads the mark like the host's `noting`.
+    subscribePicks: listener => picks.subscribe(listener),
+    picking: part => picks.getSnapshot()[part] === true,
     openCliLogin,
     async recoverCliLogin(botId, provider) {
       const bot = cliLoginBotOf(roster.getSnapshot(), botId)

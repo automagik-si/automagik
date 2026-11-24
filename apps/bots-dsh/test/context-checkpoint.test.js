@@ -6,6 +6,7 @@ import { install as installModelState } from '../src/host/model-state.js'
 import { install as installFallback } from '../src/host/fallback.js'
 import { cutByRestart } from '../src/host/resume.js'
 import { fakeContext } from './fake-ctx.js'
+import { textOf } from '../src/host/text.js'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { Session } from '@deepseek-ai/dsh-session'
 import LlmRuntime, { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
@@ -1435,7 +1436,7 @@ for (const trigger of ['idle', 'pre-step']) {
 
 
 // A crossing refusal leaves the actual Session log and the owner's pending cards intact.
-test('explicit crossings with history keep the real Session, its cards, and its route', async t => {
+test('explicit crossings with history move to a new part with a handoff, their cards with them', async t => {
   for (const target of ['api/small', 'acp-claude/default']) await t.test(target, async t => {
     const b = await switchBench({ perNode: 10, model: 'acp-codex/default' })
     t.after(b.stop)
@@ -1443,25 +1444,38 @@ test('explicit crossings with history keep the real Session, its cards, and its 
     b.state.questions.s1 = { question: 'pending question' }
     b.state.views.s1 = { view: 'pending view' }
     const history = b.session.snapshotEvents()
-    const before = structuredClone(b.state)
     const notes = []
     b.rt.resolveModel = async ref => ref
     b.rt.resolveEffort = async (_ref, effort) => effort
     b.rt.cachedCatalog = () => ['acp-codex/default', target].map(ref => ({ ref }))
     b.rt.noteFailure = entry => notes.push(entry.text)
-    b.rt.save = async () => assert.fail('a route refusal must never save the team')
+    // Codex is the outgoing agent: it writes no summary in this bench, so the switch goes on
+    // with the latest messages once its short wait ends.
+    b.rt.config.crossingNoteTimeoutMs = 20
     assert.ok(b.session.deriveMessages().length > 0)
-    await assert.rejects(b.rt.switchRoute('b1', target, 'low'), {
-      code: 'bot/refused', reason: 'needs-new-conversation',
-    })
-    assert.deepEqual(b.state, before)
-    assert.deepEqual(b.session.snapshotEvents(), history)
+    assert.deepEqual(await b.rt.switchRoute('b1', target, 'low'), { id: 'b1', model: target, effort: 'low', status: 'switching' })
+    assert.equal(b.rt.switchingChat('b1', { crossing: true }).to, target)
+    for (const at = Date.now(); b.bot.sessionId !== 'fresh1' || [...b.rt.switchJobs()].length > 0;) {
+      if (Date.now() - at > 3000) assert.fail('the switch did not finish')
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    // The old part keeps its record and stays until the new agent's first answer.
+    assert.deepEqual(b.session.snapshotEvents().slice(0, history.length), history)
     assert.deepEqual(b.calls.archived, [])
-    assert.deepEqual(b.calls.selected, [])
-    assert.deepEqual(b.streams(), [])
-    assert.equal(b.rt.switchingChat('b1'), false)
-    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
-    assert.deepEqual(notes, [`Route change acp-codex/default → ${target} refused (needs-new-conversation)`])
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
+    assert.deepEqual({ model: b.bot.model, appliedModel: b.bot.appliedModel, effort: b.bot.effort, appliedEffort: b.bot.appliedEffort },
+      { model: target, appliedModel: target, effort: 'low', appliedEffort: 'low' })
+    assert.deepEqual(b.calls.selected, [['fresh1', target]])
+    assert.deepEqual(b.bot.segments.map(segment => [segment.sessionId, segment.switchedTo, segment.archivePending]), [['s1', target, true]])
+    assert.deepEqual(b.state.questions.fresh1, { question: 'pending question' })
+    assert.deepEqual(b.state.views.fresh1, { view: 'pending view' })
+    const handoff = b.agents.get('fresh1').inbox.nextTurn.find(message => message.source?.handoff === true)
+    assert.match(textOf(handoff.content), /the user switched this chat from Codex to .+; you are .+ now/)
+    assert.equal(b.rt.switchingChat('b1', { crossing: true }), false)
+    assert.deepEqual(notes, [
+      `Route change acp-codex/default → ${target} accepted`,
+      `Route change acp-codex/default → ${target} completed (handoff without a summary)`,
+    ])
   })
 })
 

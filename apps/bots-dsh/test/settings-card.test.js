@@ -224,3 +224,55 @@ test('the dialog-only Accounts and Automations pages are unknown to Settings car
   assert.equal(card.settingsTarget({ page: 'accounts' }, roster).known, false)
   assert.equal(card.settingsTarget({ page: 'automations' }, roster).known, false)
 })
+
+// C8 (RFC 0030, Handoff note, 2026-11-23): Apply's model step meets a reply running in the
+// Bot's chat (the host's reason reply-running). The card asks the selector's question in place
+// of its buttons; Switch runs that step again with stopReply and goes on with the rest, Cancel
+// stops there and runs nothing more.
+test('C8: Apply that meets a running reply asks first; Switch resends the model step with stopReply, Cancel runs nothing more', async () => {
+  const useState = react.useState
+  try {
+    for (const answer of ['switch', 'cancel']) {
+      // A small stateful hook store: each render reads the same slots in order.
+      const slots = []
+      let at = 0
+      react.useState = (initial) => {
+        const index = at++
+        if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial
+        return [slots[index], (value) => { slots[index] = typeof value === 'function' ? value(slots[index]) : value }]
+      }
+      const saved = []
+      const actions = {
+        updateBot: async (id, patch) => {
+          saved.push([id, patch])
+          if (patch.model !== undefined && patch.stopReply !== true) {
+            throw Object.assign(new Error('This stops the current reply and continues on Claude Code.'), { code: 'bot/refused', reason: 'reply-running' })
+          }
+        },
+      }
+      const proposal = { bot: 'b2', change: { role: 'Editor', model: 'acp-claude/default' } }
+      const bot = { ...editor, model: 'deepseek/flash' }
+      const draw = () => { at = 0; return card.ProposalCard({ proposal, roster: rosterOf(bot), actions }) }
+      const [apply] = walk(draw(), node => node.type === 'button' && textOf(node) === 'Apply')
+      await apply.props.onClick()
+      const asked = walk(draw(), node => node.type?.name === 'RouteConfirm')[0]
+      assert.ok(asked, `${answer}: the card asks in place of Apply`)
+      const question = asked.type(asked.props)
+      assert.equal(textOf(walk(question, node => node.props?.className === 'bt-model-confirm-text')[0]), 'This stops the current reply and continues on Claude Code.')
+      assert.deepEqual(walk(question, node => node.type === 'button').map(textOf), ['Cancel', 'Switch'])
+      assert.equal(walk(draw(), node => node.type === 'button' && textOf(node) === 'Apply').length, 0)
+      assert.deepEqual(plain(saved), [['b2', { model: 'acp-claude/default' }]])
+      if (answer === 'switch') asked.props.onConfirm()
+      else asked.props.onCancel()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      assert.deepEqual(plain(saved), answer === 'switch'
+        ? [['b2', { model: 'acp-claude/default' }], ['b2', { model: 'acp-claude/default', stopReply: true }], ['b2', { role: 'Editor' }]]
+        : [['b2', { model: 'acp-claude/default' }]])
+      const after = draw()
+      assert.equal(walk(after, node => node.type?.name === 'RouteConfirm').length, 0)
+      assert.equal(walk(after, node => node.type === 'button' && textOf(node) === 'Apply').length, 1)
+    }
+  } finally {
+    react.useState = useState
+  }
+})

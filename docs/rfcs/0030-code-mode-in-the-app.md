@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; delivery 0 met on 2026-11-19, when the owner's delegate approved RFC 0022's revision; amended 2026-11-20: what moves now and what waits, approved by the owner's delegate on 2026-11-20, Q15-Q23 answered with the amendment's recommendations; Q18 narrowed by the owner's delegate on 2026-11-21 (the Code side in a gated browser needs member admission on and RFC 0038 delivery 3); five decisions of the owner's delegate on 2026-11-21, each the recommended option (Q19's Add and Remove login, RFC 0022 delivery B's drawing, 6b moved to RFC 0022 delivery H, Pocket Link as its own part, 6a's Bots with no CLI start path), see Decisions (2026-11-21); what has merged is in that amendment's inventory, see Amendment (2026-11-20); owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10) |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1007; Q1-Q14 answered with this RFC's own recommendations, see Answers; delivery 0 met on 2026-11-19, when the owner's delegate approved RFC 0022's revision; amended 2026-11-20: what moves now and what waits, approved by the owner's delegate on 2026-11-20, Q15-Q23 answered with the amendment's recommendations; Q18 narrowed by the owner's delegate on 2026-11-21 (the Code side in a gated browser needs member admission on and RFC 0038 delivery 3); five decisions of the owner's delegate on 2026-11-21, each the recommended option (Q19's Add and Remove login, RFC 0022 delivery B's drawing, 6b moved to RFC 0022 delivery H, Pocket Link as its own part, 6a's Bots with no CLI start path), see Decisions (2026-11-21); what has merged is in that amendment's inventory, see Amendment (2026-11-20); owner's direction 2026-11-10; replaces RFC 0013's D27; amends RFC 0003's live switching at a harness change; Decided 10 (the route) by the owner 2026-11-10; amended 2026-11-23 by the owner (#2061): switching agents in a Bot's own chat carries the conversation, which supersedes Q7a's refusal and the #2025 decision (a), see Handoff note) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) only if the preload must change; the server image; herdr (3.N.P) for the pack's fix-only period, the `am mailbox send` verb (the pack's CLI is its source; `am/` gets it as a byte copy) and the retirement notice; am (3.N.P) for those copies |
 | Created | 2026-11-10 |
@@ -75,6 +75,13 @@ Copied word for word from issue #1007, "Decided by the owner" (2026-11-10 brains
    **2026-11-20, Q7a B-min amendment.** The host refuses an explicit harness pick in a Bot's
    own chat with history. Use New conversation, then pick the route. Pause an active goal
    first. A chat with nothing said can take the route in place.
+
+   **2026-11-23, the owner's #2061 amendment.** A harness change in a Bot's own chat carries the
+   conversation over in place and is never refused for history. The host opens a new part on the
+   picked route that starts with a handoff (a summary and the latest messages); the new agent reads
+   the rest of the chat through `read_own_chat`; the chat stays one conversation with a
+   "Switched to <agent>" line. History now crosses harnesses, visibly. This supersedes the Q7a
+   paragraph above, except on a Hermes route (Handoff note).
 7. **The model selector is harness first, then model**, so the person sees a cross-harness choice. The
    owner has a mockup for this that was never applied (to be attached).
 8. **One application.** The pack's sidebar and mods move into DSH plugins. herdr-core stays as the
@@ -95,6 +102,12 @@ first level is the route", relayed by the orchestrator):
 
 The [2026-11-20 Q7a B-min amendment](#decided) to Decided 6 supersedes the crossing and
 confirmation described in Decided 10.
+
+The owner's 2026-11-23 amendment to Decided 6 (#2061) brings back the crossing of Decided 10
+with the conversation carried. An idle chat switches at once, with no question. While a reply
+is running the selector asks first, because the pick stops that reply: "This stops the current
+reply and continues on <agent>." (Switch, Cancel); the host asks the same question when the
+selector did not see the reply.
 
 ## Words
 
@@ -263,7 +276,7 @@ described as a model, not a drawing:
 | 1. Route | **Native**, **ACP**, **Herdr**, always in that order | The bot type limits which routes show (Q13). A route with nothing set up says what it needs ("Add an API key", "Sign in", "Set up herdr-core") instead of hiding. |
 | 2. Agent (ACP and Herdr only) | Every supported agent: Claude Code, Codex, Hermes, Antigravity, omp and any added later (RFC 0003, #973), each with its sign-in state | An agent that is not signed in shows "Sign in" (RFC 0003's sign-in from the Bot's chat). Native has no agent step. |
 | 3. Model | The chosen route's, and agent's, models: on Native every model DSH supports, marked "needs an API key" where the key is missing (Decided 2); on ACP the models the agent's own sign-in gives; on Herdr the models the agent's terminal takes at launch, as the pack's worker settings pass them today (`herdr/mods/am-sidebar/models.js`) | A model that cannot run is marked, never picked silently (`model-menu.js`'s rule, kept). |
-| Crossing | A route change | Before confirmation the selector says "Changing the route requires a new conversation if this one has history." A model change inside one harness keeps the conversation. An agent change inside ACP or Herdr is Q14. |
+| Crossing | A route change | On a Hermes route, before confirmation the selector says "Changing the route requires a new conversation if this one has history." Elsewhere an idle chat switches at once. While a reply runs, the selector asks "This stops the current reply and continues on <agent>." (Switch, Cancel). A model change inside one harness keeps the conversation. An agent change inside ACP or Herdr is Q14. |
 
 What each route means for the pane: on Native and ACP the conversation is a DSH Session, so its
 pane is the DSH chat (Decided 4); on Herdr the conversation runs in the agent's native terminal
@@ -280,6 +293,91 @@ then fills in. Until the Herdr route works, the PR says how that route is shown 
 the owner rules on it at approval, so no control ships that does nothing.
 
 ### Handoff note
+
+#### Switching agents carries the conversation (the owner, 2026-11-23, #2061)
+
+An explicit route or agent pick in a Bot's own chat (`switch-route`, or `update-bot` with a model on
+another harness) never refuses because the chat has history. Native, Claude Code, Codex, omp and
+Antigravity, both directions. A part with nothing said still takes the route in place, as before.
+Otherwise:
+
+1. If a reply is running, the host asks first: without `stopReply: true` it answers `bot/refused`
+   with reason `reply-running` and changes nothing; the selector then asks "This stops the current
+   reply and continues on <agent>." (Switch, Cancel), and Switch sends the pick again with
+   `stopReply: true`. The check and the start of the switch run in one step, so a reply cannot start
+   between them unseen.
+2. The host answers at once (`status: 'switching'`) and starts a switch job on the current part.
+   From that moment the chat's composer is locked, and every step the old part starts is taken over
+   before the model is called; its input waits for the new part. Pocket, Bot-to-Bot messages, group
+   relays, schedules, channels and steering all enter through the old part's inbox, so they wait the
+   same way. A reply stopped with `stopReply` continues on the new agent at once, with no new
+   message, also after a restart.
+3. The summary is written by the outgoing agent, which already holds the conversation: a native
+   model on its own route, an agent over ACP in a turn of its own chat that the chat does not show.
+   Never by another model. If it cannot write one within 45 seconds, the new agent gets no summary:
+   the latest messages and the history tool only. A summary never blocks or refuses the switch.
+4. A fresh part is created, the picked route is selected on it and checked, and the handoff package
+   (the summary, the latest messages word for word, where the rest is) is put into it before
+   anything can reach it. Only then does it become the Bot's chat, in one save with the Bot's new
+   model. The input that waited follows the package.
+5. The chat shows the earlier parts above the new one as one conversation; the line between them
+   reads "Switched to <agent>".
+6. The new agent reads any earlier message with `read_own_chat` (this Bot's own chat only,
+   read-only, paged). Claude Code and Codex reach it over the `dsh` bridge, a native model as a DSH
+   tool, omp and Antigravity over a one-tool `dsh-history` bridge (RFC 0003).
+7. If the switch cannot finish within 120 seconds, or the new route is not served, not signed in or
+   not allowed, the Bot stays on its part and model, its input goes back in order, the lock ends,
+   and the model line says "<model> could not take over this conversation. This Bot stays on
+   <kept>." Until the new part's first real answer the old part is kept, so a first call that fails
+   goes back the same way. A time-boxed Auto grant ends at the pick and stays ended. A Bot that
+   denies `acp_tool` is not moved onto, or back to, an agent that runs its own tools (#2026): the
+   switch, or its way back, stops with that reason.
+8. The new part starts its first turn at the commit, so the chat never shows a part with no turn
+   (DSH draws one as a blank home, whose composer is disabled for a Bot outside every workspace). A
+   handoff with nothing to answer is acknowledged by the Bot team itself, with no model call and no
+   row beyond the "Switched to" line; a stopped reply is answered at once. If that turn cannot
+   start, the switch goes back as in 7. After a restart, a part that cannot start is tried again at
+   most 3 times or for 2 minutes from the first try, whichever comes first, with the composer locked
+   meanwhile; then the Bot goes back to the agent it came from with the line of 7. Where there is no
+   way back, it stays on the new agent, the handoff runs once more, and the line names the new
+   agent on both sides.
+9. A handoff package for an agent over ACP is at most 58,000 characters, under acp-dsh's
+   60,000-character replay clip, on every path that opens a part on one: the oldest carried lines
+   are left out first, so the newest messages and the closing line arrive, and a summary too long
+   for it is not carried. With acp-dsh's kill switch (`dshTools: false`) the package still reaches
+   the agent, as plain text ahead of the person's words in the part's first prompt, once;
+   `read_own_chat` does not, because the kill switch turns DSH's tool bridge off.
+
+Only the person moves a Bot to another agent when its chat has history. `update_bot` from a Bot is
+refused ("Only the person moves <name> to another agent. Use propose_bot_change so the person can
+apply it."); the person's Apply on that proposal is a pick like any other.
+
+A Bot's group conversations follow its switch, each with its own fenced switch and handoff: an idle
+one at once, a busy one at its next step, never by stopping a group reply. Each group shows "<name>
+switched to <agent>". The group's own Session does not move. (Delivery 4b, second PR; until it
+ships, a group conversation with history keeps its agent and is never changed in place.)
+
+Why a plugin fence is enough here (Q7a's two gaps): the new route is selected only on a Session no
+surface can reach yet, its handoff is in it before it becomes reachable, and the old Session's steps
+are taken over whatever DSH admits; the moved input uses the path every part move already uses
+(`forward`, `restore`, the `switching` marker). The in-place change on a populated Session,
+automatic moves, the rest of Q7b, the rest of Q7c and durable receipts for every part move still
+wait on DSH (RFC 0045 section 5).
+
+Permissions do not change with the switch. The part takes the Bot's level, deny list and shell rule;
+Full access means the new harness's own mode; the per-Bot native tools switch and Read only apply to
+the new agent as to any part.
+
+This supersedes the #2025 decision (a) (2026-11-22). That decision kept a Session whose history a
+failover had moved across harnesses on that harness, because history did not cross harnesses.
+History now crosses harnesses, visibly, through the handoff and `read_own_chat`. The person's next
+pick of a model on another harness takes the switch above. Failover still never crosses a harness,
+and still makes no automatic move.
+
+Hermes routes (Remote Hermes, and Hermes over ACP) are excluded: a crossing to or from one keeps the
+Q7a refusal below and its copy, pending the owner's word (Hermes work is paused).
+
+#### Q7a (2026-11-20), superseded on 2026-11-23 except on a Hermes route
 
 Q7a replaces the explicit own-chat route change that opened a new part with a handoff and
 transcript. For picks that reach the history decision, a crossing pick with history returns
@@ -319,7 +417,8 @@ The ask is section 5 of RFC 0045, a proposal not yet merged.
 
 The turn after a fallback turn is back on the Bot's own route, also after a restart. A Session
 that a fallback moved to another harness before 2026-11-21 keeps its route until the person
-picks a model or starts a New conversation.
+picks a model or starts a New conversation. Since 2026-11-23 (#2061) that pick carries the
+conversation (above).
 
 ### Mod by mod
 
@@ -420,7 +519,17 @@ about where it runs:
 - `am mailbox send` and `<app home>/automagik-herdr/mailbox.jsonl` (rows: `v`, `id`, `kind`
   `answer` or `question`, `bot`, `request` for an answer, `text`, `terminal` and `core` stamped by
   the verb, `at`). New.
-- The own-chat crossing refusal returns `needs-new-conversation` in the Bot error response.
+- `switch-route` and `update-bot` take `stopReply`; for a populated own chat `switch-route`
+  answers `status: 'switching'` and moves it to a new part with a handoff (2026-11-23, #2061);
+  without `stopReply` while a reply runs it returns `bot/refused` with reason `reply-running` and
+  changes nothing; a crossing to or from a Hermes route still returns reason
+  `needs-new-conversation`; `update_bot` from a Bot refuses a crossing with history. A Bot's model
+  state (`work.models[botId]`) carries `switching: { to, since }` while it runs and reports a
+  failed switch as `MODEL_SWITCH_COMPACTION_FAILED` with `ref` and `kept` (as
+  `MODEL_OWN_TOOLS_DENIED` when the Bot denies `acp_tool` and the switch, or its way back, would
+  run an agent's own tools); a part segment carries `switchedTo`; an earlier page and its divider
+  carry `switchedTo`; `read_own_chat` takes `before`; acp-dsh's one-tool `dsh-history` bridge
+  (D2).
 - RFC 0028's worker kind `lead`, if Q8 is yes. An amendment to RFC 0028.
 - No new plugin id or storage prefix; `<app home>/automagik-herdr/` is kept.
 
@@ -433,7 +542,11 @@ about where it runs:
 | The orchestrator floods or steers the person through the Genie | Only `answer` (to a request the Genie made) and `question` rows cross; a row is data, tags quoted |
 | Another local process posts to the mailbox as the orchestrator | `am` stamps the posting terminal; the follower accepts only the Genie's lead terminal; the per-start token if delivery 3 finds it possible, else the residual is recorded |
 | The Genie types into the team behind the orchestrator | The grant reaches only the orchestrator's terminal; its children carry no Genie label |
-| A populated own chat crosses through the model picker | Q7a refuses the pick before selecting a route or starting a switch |
+| A populated own chat crosses through the model picker | Q7a refuses the pick before selecting a route or starting a switch (2026-11-20; since 2026-11-23 only on a Hermes route) |
+| A prompt reaches the old agent while a switch runs | The switch job takes over every step of the old part before the model is called and moves its input behind the handoff; the composer is locked; the new route is selected, and the handoff put in, only on a part no surface can reach yet; a running reply is stopped only with the person's consent (`stopReply`) (Handoff note, 2026-11-23) |
+| The new agent reads beyond its own chat | `read_own_chat` reads only the asking Session's Bot's own chat; `dsh-history` (D2, not in D1) will list and run that one tool; secrets and credential shapes are masked in its output and in the handoff |
+| A Bot moves its chat's history to another vendor without the person | `update_bot` refuses a crossing with history; only the person's pick or Apply on `propose_bot_change` switches (Handoff note, 2026-11-23) |
+| The summary reaches a model the person did not pick | the outgoing agent writes it (its own route, or a hidden turn in its own chat); no background model; none at all past 45 seconds |
 | A watching view reflows a terminal someone is using | The app never resizes a terminal, watching or typing (Q15, 2026-11-20) |
 | A terminal on a linked machine is reached before its link is scoped | Linked machines are view-only and unlisted until delivery H (RFC 0022 (k)) |
 
@@ -501,6 +614,14 @@ Herdr install.
    change keeps the conversation. The DSH tool bridge and same-harness replay follow
    RFC 0003. Pending input and the other writers are later deliveries.
    *Rollback:* revert the selector and refusal to the preceding release.
+
+   Delivery 4b (2026-11-23, #2061, the owner): a populated own chat crosses with its
+   conversation (Handoff note). *Check:* Claude Code -> Codex, Codex -> a native model, native
+   -> Claude Code, and omp and Antigravity where available, each keep one conversation with the
+   composer locked during the switch, the "Switched to" line, an answer from the handoff and an
+   earlier message read through `read_own_chat`; no switch is refused for history. A Bot's group
+   conversation with history follows the switch with its own handoff and shows '<name> switched
+   to <agent>' (second PR).
 5. **Automations and Accounts as pages** (plugin; any shared code it needs moves through the
    pack's source and `am-copies`, as in 3a). *Check:* the page lists, adds and
    removes an automation through the `herdr-automations` CLI's `--json`, and a quota switch
@@ -577,7 +698,7 @@ Q16 (a), Q17 (a) and Q18 (a) are the answers given, so delivery 3 keeps its orde
 | 1 | the desktop half: #1391, #1779, #1788 (the flip, the window marker, no core spawn) | the browser half (1b) |
 | 2 | typing #1394; the watching-size rule and four panes #1810 | "Typing elsewhere" with a click to take over (no resize while typing, as shipped, is Q15's answer) |
 | 3a, 3b | nothing (RFC 0028's durable wake log, its 0b, is merged: #1827) | all |
-| 4 | the selector #1025; Q13's route policy #1822; Q7a #1863; failover never crosses a harness (Q7c's first writer, Handoff note) | Q7b, the note-only rule for a Bot's turns as a group member; the rest of Q7c, the other route writers (migrations, a pinned route, reopen) with the in-place path's races, effort, rollback, default fallbacks and automatic moves (Handoff note); the pending-input delivery with its managed history-free move. All three wait on DSH (What waits) |
+| 4 | the selector #1025; Q13's route policy #1822; Q7a #1863; failover never crosses a harness (Q7c's first writer, Handoff note) | Q7b, the note-only rule for a Bot's turns as a group member; the rest of Q7c, the other route writers (migrations, a pinned route, reopen) with the in-place path's races, effort, rollback, default fallbacks and automatic moves (Handoff note); the pending-input delivery for the in-place and automatic moves (the explicit own-chat crossing with history ships as 4b, #2061). All three wait on DSH (What waits) |
 | 5 | 5a, the Automations page: #1817 | run now, history, edit, pause and resume on that page; 5b (the Claude login); 5c (Codex and the account proxy) |
 | 6 | nothing | all |
 | 7 | the image half of the base: #1869 carries herdr-core 0.1.18 pinned by version and sha256, `am` pinned to the release's content and checked against its `.sha256`, and DSH's CLI store installing Claude Code and Codex in the background (`server/README.md`) | 1b; the end-to-end check, which also needs delivery 3's orchestrator (#1869's provisioning is kept: Q21, Q22) |
@@ -649,7 +770,7 @@ Each needs nothing from another repository. In this order:
 
 | Item | Waits on | Whose |
 |---|---|---|
-| Delivery 4's remainder: Q7b, Q7c beyond failover, the pending-input delivery | A DSH fence that records a model selection only if no input was admitted and no turn started since the host read the Session (a revision checked inside DSH's admission lock), and input that keeps the part it was meant for and moves with a durable receipt. Three plugin-only review rounds (2026-11-21) found both missing: DSH's `selectModel` awaits before it records the selection, and text prompts are admitted outside that lock. Asked in section 5 of RFC 0045, a proposal not yet merged | DSH (another repository) |
+| Delivery 4's remainder: Q7c beyond failover, the in-place and automatic moves' pending input, and the rest of Q7b (not 4b's explicit crossing, which a plugin fence covers for the own chat and its group conversations, Handoff note) | A DSH fence that records a model selection only if no input was admitted and no turn started since the host read the Session (a revision checked inside DSH's admission lock), and input that keeps the part it was meant for and moves with a durable receipt. Three plugin-only review rounds (2026-11-21) found both missing: DSH's `selectModel` awaits before it records the selection, and text prompts are admitted outside that lock. Asked in section 5 of RFC 0045, a proposal not yet merged | DSH (another repository) |
 | 3b, the Genie's two seats and the follower | RFC 0028's delivery 0, the grant, then its delivery 1 (the worker tools); the lead kind (above). The grant is herdr-core's, filed from #628 and #631 (both open) | herdr-core (another repository) |
 | 3a, `am mailbox send` | 3b (Q16) | herdr-core, through 3b |
 | The mailbox for a DSH Bot that runs in a terminal | RFC 0023's session terminal field (The Genie's two seats and the mailbox); until DSH ships it, the mailbox reaches app-hosted Sessions only | DSH (another repository) |
@@ -870,7 +991,10 @@ Q7a amends the crossing rule in Q7 and Q14.
    **New conversation**, then pick the route again. Pause an active goal before New conversation.
    An own chat with nothing said can change in place as defined under Handoff note.
    `dshTools` and same-harness replay follow RFC 0003. The limitations and later work
-   listed under Handoff note remain owed.
+   listed under Handoff note remain owed. Amended 2026-11-23 (#2061): the managed
+   history-carrying switch is back for an explicit pick, with a handoff and `read_own_chat`
+   (Handoff note); Hermes routes keep the refusal. A Bot's group conversations follow that pick
+   (Handoff note).
 8. **Q8:** yes. RFC 0028 gains a worker kind `lead`: long-lived, outside the cap, woken only by
    the mailbox, and a send to it while it works is held until its turn ends, then sent, rather
    than refused. It is an amendment to RFC 0028 in its own PR. Owed: that amendment.
@@ -893,7 +1017,8 @@ Q7a amends the crossing rule in Q7 and Q14.
     human-facing bot from its team seats; which bots may take RFC 0003's fourth route (Remote
     Hermes, 2026-11-11) is outside Q13.
 14. **Q14:** an agent change inside ACP or Herdr counts as a route change under Decided 6.
-    A model change inside one agent keeps the conversation.
+    A model change inside one agent keeps the conversation. Since 2026-11-23 (#2061) an agent
+    change keeps the conversation through a handoff (Handoff note).
 
 From this acceptance the pack is fix-only (The pack after the move, 1): security and breakage
 fixes on the herdr lane as today, no new features in its UI, until deliveries 1 and 2 are in a

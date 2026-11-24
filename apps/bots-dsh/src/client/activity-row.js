@@ -1,4 +1,4 @@
-import { createElement as h, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createElement as h, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { BotMark, RoomAvatar } from './mark.js'
 import { Elapsed, Shimmer, PHRASES } from './cells.js'
@@ -16,9 +16,18 @@ const drawPhrase = pool => t(pool[Math.min(pool.length - 1, Math.floor(Math.rand
 export { reducedMotion }
 
 // A turn that streams text first and runs a tool after keeps its row once the
-// tool starts: streaming alone hides it, but running work must not.
-export const rowVisible = ({ running, streaming, tools, relaying, bot, room }) =>
-  running && (!streaming || tools.length > 0) && !relaying && (bot !== undefined || room !== undefined)
+// tool starts: streaming alone hides it, but running work must not. An agent switch's
+// note turn (`noting`) shows no row: the composer lock names the switch. Nor does it from
+// the person's own crossing pick in this window (`picking`), until the host's `noting` arrives.
+export const rowVisible = ({ running, streaming, tools, relaying, bot, room, noting = false, picking = false }) =>
+  !noting && !picking && running && (!streaming || tools.length > 0) && !relaying && (bot !== undefined || room !== undefined)
+
+// This window's crossing pick, read like `noting`: React always gets an unsubscribe back, also
+// from actions that do not keep the mark.
+const picksSubscriber = actions => (listener) => {
+  const stop = actions?.subscribePicks?.(listener)
+  return typeof stop === 'function' ? stop : () => {}
+}
 
 // A queued message waits for the next turn, so only a transcript or steering
 // send counts as fresh input; a steer the host saw counts from when it landed.
@@ -114,6 +123,9 @@ export function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useL
   else if (runAt.current === 0) runAt.current = Date.now()
   const liveKey = useLive(state => JSON.stringify(state[sessionId] ?? {}))
   const steeredAt = useWork?.(work => work.steered?.[sessionId])
+  const noting = useWork?.(work => work.noting?.[sessionId] === true) === true
+  const subscribePicks = useMemo(() => picksSubscriber(actions), [actions])
+  const picking = useSyncExternalStore(subscribePicks, () => actions?.picking?.(sessionId) === true)
   const pendingInput = useSession(snapshot => freshInputAt(snapshot?.pendingSubmissions, steeredAt))
   const bot = roster.byId[sessionId]
   const room = roster.roomsById[sessionId]
@@ -129,7 +141,7 @@ export function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useL
   const tools = entries.filter(entry => !entry.text).sort((a, b) => a.at - b.at)
   // Group chats show who is typing on their own while members speak.
   const relaying = tools.some(entry => entry.relay)
-  const visible = moveAt !== 0 || rowVisible({ running, streaming, tools, relaying, bot, room })
+  const visible = moveAt !== 0 || rowVisible({ running, streaming, tools, relaying, bot, room, noting, picking })
   const tool = tools.at(-1)
   const inputRef = useRef(0)
   // A steer keeps the run going, so nothing else resets the row: fresh input is

@@ -16,7 +16,7 @@ import { closeSync, fsyncSync, openSync, readFileSync, renameSync } from 'node:f
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate } from './constants.js'
+import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { answerSender, cutOffText, failureLine, handBackRequests, turnFailure } from './turns.js'
 import { textOf } from './text.js'
 import { startUpdateRecovery } from './self-update-recovery.js'
@@ -1103,6 +1103,9 @@ export function install(rt) {
     const reason = turn.reason
     // A turn that went on to a fresh part goes on there; it is not settled here.
     if (reason?.kind === 'blocked') return void settled()
+    // A turn cut for an agent switch goes on in the next part, or through the switch marker's
+    // resume: the sender gets that turn's answer, never "was stopped before it could answer".
+    if (switchCutBy(reason)) return void settled()
     // The turn was cut off before it finished: the work is picked up again, as after
     // a restart that cut it off.
     if (reason === undefined || reason.kind === 'interrupted' || cutByUpdate(reason)) {

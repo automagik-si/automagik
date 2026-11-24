@@ -160,6 +160,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: cancel explicit checkpoints',
     // A fresh part opened without a note archives its old part on its first answer.
     'on session/event',
+    'on session/event',
     'on agent/pre-step (prepend)',
     'on system-prompt/assemble (prepend)',
     'on agent/request-error (prepend)',

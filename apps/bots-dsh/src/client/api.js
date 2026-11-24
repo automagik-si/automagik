@@ -55,7 +55,9 @@ export const call = async (endpoint, payload, signal) => {
     viewerRefused(active, code)
     const message = hostText(result.error?.message ?? 'Request failed')
     const error = Object.assign(new Error(code === 'bot/internal' ? `${message} ${t('Settings → Feedback has the details.')}` : message), { code })
-    if (code === 'bot/refused' && result.error?.reason === 'needs-new-conversation') error.reason = result.error.reason
+    // The two refusals the selector answers with a question of its own: a Hermes crossing with
+    // history, and a pick that would stop a running reply (RFC 0030, Handoff note).
+    if (code === 'bot/refused' && (result.error?.reason === 'needs-new-conversation' || result.error?.reason === 'reply-running')) error.reason = result.error.reason
     const staleShare = code === 'bot/stale' && endpoint === 'update-bot' && Object.hasOwn(payload ?? {}, 'people')
     if (!vault && !staleShare && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? 'Request failed'), { code }))

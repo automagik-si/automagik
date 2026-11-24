@@ -21,15 +21,17 @@ import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { openTurnAt } from './btw.js'
-import { HANDOFF_ACK, HISTORY_TIMEOUT_MS, REPLY_KIND, SOURCE_KIND } from './constants.js'
+import { HANDOFF_ACK, HISTORY_TIMEOUT_MS, REPLY_KIND, SOURCE_KIND, SWITCH_CUT } from './constants.js'
 import { parseReplies, relayRange, stackReplies } from '../shared/group-replies.js'
 import { CHECKPOINT_PROMPT, STEWARD_SYSTEM, checkpointCount, checkpointTail, checkpointTailNote, checkpointText, linesFor, parseDecision, stewardRequest } from './steward.js'
 import { RESUME_DELAY_MS } from './resume.js'
-import { switchFailure } from './model-state.js'
+import { OWN_TOOLS_SWITCH, SWITCH_FAILED, switchFailure } from './model-state.js'
+import { redactorFor } from './redact.js'
+import { OWN_TOOLS_MODEL_TEXT } from '../shared/own-tools.js'
 import { turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
 import { routeAllowed } from '../shared/route-policy.js'
-import { ACP_NAME, commandCapableAgent, crossesHarness, routeOfRef, shellHoldText } from '../shared/routes.js'
+import { ACP_NAME, CROSSING_DEADLINE_MS, commandCapableAgent, crossesHarness, isHermesRoute, routeOfRef, shellHoldText } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
@@ -37,10 +39,12 @@ import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, 
 // Whether a Bot's part has something a handoff note must carry. The team's own setup kickoff
 // is not a conversation; anything else a person or another Bot put in the part is: a typed
 // message, a question-card or view reply, a bot-to-bot message, a schedule. DSH's own context
-// (runtime context, a working-directory notice) and an earlier handoff package are not.
+// (runtime context, a working-directory notice), an earlier handoff package and the request
+// for a handoff note an agent switch sends the outgoing agent are not.
 export function saidSomething(messages) {
   return (messages ?? []).some(message => message?.role === 'user'
     && message.source?.handoff !== true
+    && message.source?.role !== 'handoff-note'
     && message.source?.role !== 'kickoff'
     && message.source?.kind !== 'runtime-context'
     && message.source?.kind !== 'working-directory')
@@ -59,6 +63,7 @@ function saidForCrossing(messages, freshText) {
   return (messages ?? []).some(message => {
     if (message?.role !== 'user') return false
     const { source, content } = message
+    if (source?.role === 'handoff-note') return false
     if (source?.handoff !== true && (source?.role === 'kickoff' || CROSSING_CONTEXT.has(source?.kind))) return false
     const block = Array.isArray(content) && content.length === 1 ? content[0] : undefined
     const text = block?.type === 'text' ? block.text : undefined
@@ -191,7 +196,8 @@ export function historyEntry(event, group) {
   if (event.type !== 'user/message' || (source?.kind !== 'user' && source?.kind !== SOURCE_KIND)) return undefined
   const text = textOf(event.data.content)
   const ours = source.kind === SOURCE_KIND
-  const skipped = (ours && (source.handoff === true || source.role === 'kickoff' || source.role === 'goal')) || (!group && text.startsWith('[Group chat'))
+  // The outgoing agent's handoff-note request (an agent switch) is Omni's, and so is its answer.
+  const skipped = (ours && (source.handoff === true || source.role === 'kickoff' || source.role === 'goal' || source.role === 'handoff-note')) || (!group && text.startsWith('[Group chat'))
   // A turn that went on after a handoff did real work, so its answers stay.
   return { answer: false, who: ours ? 'bot' : 'user', text: skipped ? '' : text, keepAnswers: !skipped || (ours && source.resume === true) }
 }
@@ -209,6 +215,108 @@ export function canonicalHeadings(note, names) {
   return lines.join('\n')
 }
 
+// The names a note lacks: a heading of one to four `#` with the name alone, a `:` allowed
+// after it. One pattern with no two adjacent quantifiers over the same characters, so a long
+// line costs linear time (the note is model output).
+export function missingHeadings(note, names) {
+  return names.filter(name => !new RegExp(`^#{1,4}\\s*${escapeRegExp(name)}(?:\\s*:)?\\s*$`, 'mi').test(note))
+}
+
+// One line of a note read as a heading: `{ rank, name }` (rank 1-6 for `#`..`######`, 7 for a
+// whole bold line, which ranks below every `#` level), else undefined. A per-line parse, no
+// backtracking pattern.
+function headingOf(line) {
+  const trimmed = line.trimEnd()
+  let lead = 0
+  while (lead < 3 && trimmed[lead] === ' ') lead += 1
+  const rest = trimmed.slice(lead)
+  let text
+  let rank
+  let hashes = 0
+  while (hashes < 7 && rest[hashes] === '#') hashes += 1
+  if (hashes >= 1 && hashes <= 6 && rest[hashes] === ' ') {
+    rank = hashes
+    text = rest.slice(hashes + 1).replace(/ #+$/, '')
+  } else {
+    const marker = rest.startsWith('**') ? '**' : rest.startsWith('__') ? '__' : undefined
+    if (marker === undefined) return undefined
+    const closed = rest.endsWith(':') ? rest.slice(0, -1) : rest
+    if (closed.length <= marker.length * 2 || !closed.endsWith(marker)) return undefined
+    const inner = closed.slice(marker.length, -marker.length)
+    if (inner.includes(marker)) return undefined
+    rank = 7
+    text = inner
+  }
+  let name = text.trim()
+  if (name.endsWith(':')) name = name.slice(0, -1).trim()
+  name = name.replace(/^\d+[.)]/, '').trim()
+  if (name.endsWith(':')) name = name.slice(0, -1).trim()
+  return name === '' ? undefined : { rank, name }
+}
+
+// A note whose headings are written another way: bold, numbered, at another level, with a
+// title or a closing line, or translated. A heading named in English (any case) becomes
+// `## <name>`; translated headings are rewritten in order only when one group of the same
+// kind is clearly the sections. Lines inside a fenced block are never headings and never
+// rewritten; no other line changes. Any other shape comes back with only its English names
+// rewritten, so the caller still finds the sections it lacks.
+export function tolerantHeadings(note, names) {
+  const canonical = canonicalHeadings(note, names)
+  if (missingHeadings(canonical, names).length === 0) return canonical
+  const lines = note.split('\n')
+  const headings = []
+  let fence
+  for (let index = 0; index < lines.length; index += 1) {
+    const start = lines[index].trimStart()
+    if (fence !== undefined) {
+      if (start.startsWith(fence)) fence = undefined
+      continue
+    }
+    if (start.startsWith('```') || start.startsWith('~~~')) {
+      fence = start.slice(0, 3)
+      continue
+    }
+    const heading = headingOf(lines[index])
+    if (heading !== undefined) headings.push({ index, ...heading })
+  }
+  const known = name => names.findIndex(each => each.toLowerCase() === name.toLowerCase())
+  // Step 1: the English names, wherever they stand.
+  for (const heading of headings) {
+    const at = known(heading.name)
+    if (at < 0) continue
+    lines[heading.index] = `## ${names[at]}`
+    Object.assign(heading, { rank: 2, name: names[at] })
+  }
+  const stepOne = lines.join('\n')
+  if (missingHeadings(stepOne, names).length === 0) return stepOne
+  // Step 2: translated headings. A group of `names.length + 1` passes only with a title: the
+  // note's first non-empty line, with no body before the group's second heading.
+  const firstLine = lines.findIndex(line => line.trim() !== '')
+  const groups = new Map()
+  for (const heading of headings) {
+    if (!groups.has(heading.rank)) groups.set(heading.rank, [])
+    groups.get(heading.rank).push(heading)
+  }
+  const candidates = []
+  for (const [rank, group] of groups) {
+    let chosen
+    if (group.length === names.length) chosen = group
+    else if (group.length === names.length + 1 && group[0].index === firstLine) {
+      const next = lines.findIndex((line, index) => index > firstLine && line.trim() !== '')
+      if (next === group[1].index) chosen = group.slice(1)
+    }
+    if (chosen === undefined) continue
+    // Every other heading outside fences, the note's first line aside, ranks below it.
+    const outranked = headings.some(heading => heading.rank !== rank && heading.index !== firstLine && heading.rank <= rank)
+    if (!outranked) candidates.push(chosen)
+  }
+  if (candidates.length !== 1) return stepOne
+  const [chosen] = candidates
+  if (chosen.some((heading, n) => known(heading.name) >= 0 && known(heading.name) !== n)) return stepOne
+  chosen.forEach((heading, n) => { lines[heading.index] = `## ${names[n]}` })
+  return lines.join('\n')
+}
+
 export function install(rt) {
   const { ctx, config, state } = rt
   const agents = new Map()
@@ -223,6 +331,16 @@ export function install(rt) {
   const LIST_TOKENS = config.handoffListTokens ?? 4_096
   const LIST_LINE_MAX = 400
   const HANDOFF_READ_MS = 60_000
+  // acp-dsh replays a handoff clipped at 60,000 characters, keeping its head
+  // (apps/acp-dsh/src/host/switch.js): a package for an ACP agent stays under it, so its
+  // newest messages and its closing line arrive.
+  const ACP_HANDOFF_MAX = 58_000
+  // A part a move committed to that cannot start after a restart is tried at most this many
+  // times, or for this long from the first try, whichever comes first (MG-8).
+  const WAKE_TRIES = 3
+  const WAKE_RETRY_WINDOW_MS = 120_000
+  const wakeRetryWindowMs = () => config.wakeRetryWindowMs ?? WAKE_RETRY_WINDOW_MS
+  const now = () => config.now?.() ?? Date.now()
   const NOTE_MAX_TOKENS = 8_192
   // A note cut off at the output limit is asked again with more room, up to what
   // the route allows.
@@ -460,8 +578,11 @@ export function install(rt) {
     if (bot === undefined) return []
     const earlier = (room ? room.segments?.[botId] : bot.segments) ?? []
     const current = room ? room.sessions?.[botId] : rt.chatOf(botId)
-    const parts = earlier.map((segment, index) => ({ ...segment, number: index + 1, startedAt: earlier[index - 1]?.endedAt ?? bot.createdAt }))
-    if (current !== undefined) parts.push({ sessionId: current, number: parts.length + 1, startedAt: earlier.at(-1)?.endedAt ?? bot.createdAt })
+    // `switchedIn`: the agent an agent switch moved the chat to where this part began (the
+    // segment that ended just before it carries `switchedTo`).
+    const switchedIn = index => (typeof earlier[index - 1]?.switchedTo === 'string' ? { switchedIn: earlier[index - 1].switchedTo } : {})
+    const parts = earlier.map((segment, index) => ({ ...segment, number: index + 1, startedAt: earlier[index - 1]?.endedAt ?? bot.createdAt, ...switchedIn(index) }))
+    if (current !== undefined) parts.push({ sessionId: current, number: parts.length + 1, startedAt: earlier.at(-1)?.endedAt ?? bot.createdAt, ...switchedIn(earlier.length) })
     return parts
   }
 
@@ -496,13 +617,16 @@ export function install(rt) {
     let unlisted = 0
     let complete = true
     const stamp = line => (group ? `[${clock(line.time)}]` : `[part ${number} #${line.seq} · ${clock(line.time)}]`)
+    // A carried line's own line breaks are indented, so no text in it starts at column 0 and
+    // reads as the package's own structure (a heading, a stamp, a closing line).
+    const indent = text => text.replace(/\r?\n/g, '\n  ')
     try {
       for await (const line of partLines(sessionId, AbortSignal.timeout(HANDOFF_READ_MS), { group, pages: Infinity })) {
         if (!full) {
           const text = clip(line.text, RECENT_LINE_MAX, group ? 'the full text is in the saved record' : `read_own_chat around "part ${number} #${line.seq}" shows all of it`)
           const cost = estimateTokens(text)
           if (recent.length === 0 || used + cost <= budget) {
-            recent.push(`${stamp(line)} ${text}`)
+            recent.push(`${stamp(line)} ${indent(text)}`)
             used += cost
             continue
           }
@@ -516,7 +640,7 @@ export function install(rt) {
           unlisted += 1
           continue
         }
-        earlier.push(`${stamp(line)} ${text}`)
+        earlier.push(`${stamp(line)} ${indent(text)}`)
         listed += cost
       }
     } catch (error) {
@@ -559,8 +683,7 @@ export function install(rt) {
   const FOLDER_PROMPT = handoffPrompt('Your working folder changed')
   const NOTE_RETRY_SHORTER = 'Your last note was cut off at the output limit, so it was not used. Write the whole note again, shorter: at most about 1,000 words. Keep every heading; drop detail before you drop facts.'
   const noteRetryMissing = missing => `Your last note lacked these headings, so it was not used: ${missing.map(name => `"## ${name}"`).join(', ')}. Write the whole note again with every heading exactly as given, in English.`
-  const missingSections = note => NOTE_SECTIONS.map(([name]) => name)
-    .filter(name => !new RegExp(`^#{1,4}\\s*${escapeRegExp(name)}\\s*:?\\s*$`, 'mi').test(note))
+  const missingSections = note => missingHeadings(note, NOTE_SECTIONS.map(([name]) => name))
 
   // A part's own calls run on the conversation's route, so the provider serves its prefix
   // from cache. A chat on an agent over ACP cannot take a request beside its turn (the agent
@@ -752,16 +875,20 @@ export function install(rt) {
   // A note is written on the Session's own route — the provider the user chose for this
   // conversation — or, for a chat on an agent over ACP, on the team's background model
   // (asideRoute). No other route is tried. Anything unusable is dropped, never used as a note.
-  async function writeNote(agent, signal, { folder = false } = {}) {
+  // `own`: an agent switch's note, written by the outgoing route itself and never by the
+  // team's background model (RFC 0030, Handoff note, 2026-11-23): the route the conversation
+  // ran on, as its request header names it.
+  async function writeNote(agent, signal, { folder = false, own = false } = {}) {
     const session = agent.session
-    if (!await asideReady(session, 'handoff note')) throw noAside()
+    if (!own && !await asideReady(session, 'handoff note')) throw noAside()
     const header = session.requestHeader()
-    const route = await asideRoute(header?.config, session.id)
+    const route = own ? header?.config : await asideRoute(header?.config, session.id)
+    if (own && route?.provider) rt.assertBotRunnerProvider?.(route.provider, session.id)
     if (!route?.provider || !route?.model) throw new Error('the Session has not called a model yet')
     const messages = session.deriveMessages()
     const base = folder ? FOLDER_PROMPT : HANDOFF_PROMPT
-    const own = { provider: route.provider, model: route.model, ...(route.maxTokens === undefined ? {} : { maxTokens: route.maxTokens }) }
-    const written = await noteThrough(session, header, messages, own, base, signal)
+    const asked = { provider: route.provider, model: route.model, ...(route.maxTokens === undefined ? {} : { maxTokens: route.maxTokens }) }
+    const written = await noteThrough(session, header, messages, asked, base, signal)
     if (written.note !== undefined) return { note: written.note, attempts: written.attempts }
     throw new Error(`no usable note in ${NOTE_ATTEMPTS} attempts on ${route.provider}/${route.model}; the last one: ${written.problem}`)
   }
@@ -974,12 +1101,16 @@ export function install(rt) {
     if (segment?.fallback === undefined) return segment?.note
     if (segment.fallback === 'fresh') return '(No note: the user started a fresh conversation, so nothing of this part was carried over.)'
     if (segment.fallback === 'recent') {
-      const why = segment.target !== undefined ? `the conversation moved to ${segment.target}, which takes less of it than the previous part held` : 'no model can write a note beside the agent this conversation runs on'
+      const why = segment.switchedTo !== undefined ? 'the agent of the previous part wrote no summary in time for the switch'
+        : segment.target !== undefined ? `the conversation moved to ${segment.target}, which takes less of it than the previous part held` : 'no model can write a note beside the agent this conversation runs on'
       const head = `(No note, on purpose: ${why}. Omni carried the latest messages that fit word for word, without a model call; the earlier ones are not summarized, and read_own_chat finds them.`
       return segment.note === undefined ? `${head})` : `${head} Below is the note written at the end of part ${segment.noteFrom}, carried over unchanged.)\n\n${segment.note}`
     }
     if (segment.fallback === 'whole') {
-      const head = '(No new note: every message of the part was carried over word for word.'
+      // `capped`: a package for an agent over ACP that left its oldest lines out (capForAcp).
+      const head = segment.capped === true
+        ? '(No new note: the part was carried over word for word except its oldest messages, which did not fit; read_own_chat finds them.'
+        : '(No new note: every message of the part was carried over word for word.'
       return segment.note === undefined ? `${head})` : `${head} Below is the note written at the end of part ${segment.noteFrom}, carried over unchanged.)\n\n${segment.note}`
     }
     const why = segment.fallback === 'overflow' ? 'the part overflowed the model\'s window'
@@ -1004,14 +1135,16 @@ export function install(rt) {
     ].join('\n')
   }
 
-  function handoffPackage({ room, self = false, segment, lines, number, resume, overflow, cutoff, failed, bare, folder, manual, target }) {
+  // `crossing`: an agent switch the person picked, `{ from, to }` by the names the chat shows.
+  function handoffPackage({ room, self = false, segment, lines, number, resume, overflow, cutoff, failed, bare, folder, manual, target, crossing }) {
     const where = room === undefined ? 'your own chat with the user'
       : self ? `the group chat "${room.name}"` : `your conversation in the group chat "${room.name}"`
     const lookup = room === undefined
       ? 'read_own_chat searches every part, reads around an anchor such as [part 2 #1234 · …], and shows the note that closed any earlier part.'
       : self ? 'the earlier part stays in the group\'s saved record.'
         : 'read_group_chat shows the group\'s latest messages, and read_own_chat your own chat.'
-    const reason = failed !== undefined ? `a request in the previous part kept failing (${failed})`
+    const reason = crossing !== undefined ? `the user switched this chat from ${crossing.from} to ${crossing.to}; you are ${crossing.to} now`
+      : failed !== undefined ? `a request in the previous part kept failing (${failed})`
       : overflow ? 'the previous part overflowed the model\'s window'
         : cutoff ? 'the previous part kept being cut off at the output limit'
         : folder !== undefined ? `${self ? 'the group\'s' : 'your'} working folder changed to ${folder}`
@@ -1050,6 +1183,22 @@ export function install(rt) {
           : room ? 'You were in the middle of your turn in the group. Go on with it now and write your reply to the group.'
             : 'You were in the middle of a turn. Go on with it now from where you stopped.',
     ].join('\n')
+  }
+
+  // A package for an agent over ACP, at most ACP_HANDOFF_MAX characters (MF-4, MG-7): the
+  // oldest carried lines go first (the earlier ones, then the latest while one is left), each
+  // counted as not listed. `build(lines, capped)` gives the text as it is delivered.
+  function capForAcp(build, lines) {
+    let current = lines
+    let text = build(current, false)
+    while (text.length > ACP_HANDOFF_MAX && (current.earlier.length > 0 || current.recent.length > 1)) {
+      current = current.earlier.length > 0
+        ? { ...current, earlier: current.earlier.slice(1) }
+        : { ...current, recent: current.recent.slice(1) }
+      current = { ...current, unlisted: (current.unlisted ?? 0) + 1, whole: false }
+      text = build(current, true)
+    }
+    return text
   }
 
   // A turn stopped for a switch goes on with its own source, so its reply still
@@ -1117,33 +1266,46 @@ export function install(rt) {
   }
 
   // Input for an earlier part goes on in the current one: a browser may still show the
-  // old part, and a turn stopped for a switch hands on what it claimed.
-  async function forward(owner, messages, from) {
+  // old part, and a turn stopped for a switch hands on what it claimed. Answers how many
+  // messages it sent with followup, the sends that wake the part. `handed` collects the ids
+  // of what now waits on the target. A throw after a followup went out carries `started`:
+  // the part's turn began (MJ-2).
+  async function forward(owner, messages, from, handed) {
     const target = currentOf(owner)
-    if (target === undefined || messages.length === 0) return
+    if (target === undefined || messages.length === 0) return 0
+    let woke = 0
     await rt.ensureCapabilities(target)
     const agent = await rt.resolveAgent(target)
     rt.assertBotRunnerProvider?.(currentProvider(agent), target, agent)
     // A retry after a forward that stopped halfway must not deliver the same input twice.
     const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
-    for (const message of messages) {
-      const kind = message.source?.kind
-      // DSH's notice of a folder change is about the Session it was queued in; the part
-      // that goes on has its own folder, which its handoff names.
-      if (kind === 'working-directory') continue
-      const exchangeId = message.source?.exchangeId
-      if (exchangeId !== undefined && pending.some(queued => queued.source?.exchangeId === exchangeId)) {
+    try {
+      for (const message of messages) {
+        const kind = message.source?.kind
+        // DSH's notice of a folder change is about the Session it was queued in; the part
+        // that goes on has its own folder, which its handoff names.
+        if (kind === 'working-directory') continue
+        const exchangeId = message.source?.exchangeId
+        if (exchangeId !== undefined && pending.some(queued => queued.source?.exchangeId === exchangeId)) {
+          rt.wakeLog?.retireClaim(from, message)
+          handed?.add(message.id)
+          continue
+        }
+        if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
+        const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
+        if (kind === 'user' || kind === 'retry' || kind === SOURCE_KIND || kind === REPLY_KIND) {
+          agent.followup(copy)
+          woke += 1
+        } else agent.inject(copy)
+        handed?.add(message.id)
         rt.wakeLog?.retireClaim(from, message)
-        continue
+        pending.push(copy)
       }
-      if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
-      const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
-      if (kind === 'user' || kind === 'retry' || kind === SOURCE_KIND || kind === REPLY_KIND) agent.followup(copy)
-      else agent.inject(copy)
-      rt.wakeLog?.retireClaim(from, message)
-      pending.push(copy)
+      await ctx.sessions.flush(agent.session)
+    } catch (error) {
+      throw Object.assign(error, { started: woke > 0 })
     }
-    await ctx.sessions.flush(agent.session)
+    return woke
   }
 
   // The plugin's own fiber is disposed (a reload, or DSH closing): every service
@@ -1183,6 +1345,31 @@ export function install(rt) {
     const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
     quietly(() => { for (const message of pending) agent.inbox.remove(message.id) })
     pending.forEach((message, index) => agent.send(message, inboxTargetOf(message), index === 0))
+  }
+  // Wakes a part and, if a send throws, puts back only what no send took: messages a send
+  // queued or the running driver claimed stay where DSH put them; the rest go back behind
+  // them, in order, once. `started` on the error: an earlier send went out, so a turn began.
+  const wakeKept = (agent) => {
+    const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
+    quietly(() => { for (const message of pending) agent.inbox.remove(message.id) })
+    let at = 0
+    try {
+      for (; at < pending.length; at += 1) agent.send(pending[at], inboxTargetOf(pending[at]), at === 0)
+    } catch (error) {
+      const queued = new Set([...agent.inbox.nextStep, ...agent.inbox.nextTurn].map(message => message.id))
+      quietly(() => { for (const message of pending.slice(at)) if (!queued.has(message.id)) agent.inbox.append(inboxTargetOf(message), message) })
+      throw Object.assign(error, { started: at > 0 })
+    }
+  }
+  // Input that waited while a switch went back goes behind what the part already holds, by
+  // message id, once.
+  const appendById = (agent, messages) => {
+    const queued = new Set([...agent.inbox.nextStep, ...agent.inbox.nextTurn].map(message => message.id))
+    for (const message of messages) {
+      if (queued.has(message.id)) continue
+      agent.inbox.append(inboxTargetOf(message), message)
+      queued.add(message.id)
+    }
   }
 
   // A switch that lost its move or its input to a failure leaves its part marked in
@@ -1259,7 +1446,9 @@ export function install(rt) {
       ]
       for (const owner of owners) {
         for (const segment of segmentsOf(owner) ?? []) {
-          if (segment.archivePending === undefined || switches.has(segment.sessionId) || [...awaiting.values()].some(entry => entry.oldId === segment.sessionId)) continue
+          // A part still marked is the way back of a move whose fresh part has not started.
+          if (segment.archivePending === undefined || switches.has(segment.sessionId) || state.switching?.[segment.sessionId] !== undefined
+            || [...awaiting.values()].some(entry => entry.oldId === segment.sessionId)) continue
           delete segment.archivePending
           await rt.save().catch(error => rt.warn('ds-bot: %s could not be saved: %s', segment.sessionId, error))
           await ctx.workspaceRegistry.archiveSession(segment.sessionId, { stopActivity: true })
@@ -1269,28 +1458,250 @@ export function install(rt) {
     } finally { leave() }
   }
 
-  async function handOnPart(sessionId, owner, canRecover) {
+  async function handOnPart(sessionId, owner, canRecover, { expire = false } = {}) {
     try {
       if (!canRecover() || switches.has(sessionId)) return
       const agent = await rt.resolveAgent(sessionId)
       if (!canRecover() || switches.has(sessionId) || state.switching?.[sessionId] !== owner) return
+      // A handoff-note request an agent switch left behind never runs as a turn.
+      dropNoteRequests(agent)
       const held = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
       if (currentOf(owner) !== sessionId) {
-        await forward(owner, held, sessionId)
-        quietly(() => { for (const message of held) agent.inbox.remove(message.id) })
+        const current = currentOf(owner)
+        // The same order as the switch itself: the part's capabilities before anything wakes it.
+        await rt.ensureCapabilities(current)
+        const fresh = await rt.resolveAgent(current).catch(() => undefined)
+        const waiting = [...(fresh?.inbox?.nextStep ?? []), ...(fresh?.inbox?.nextTurn ?? [])]
+        const handoff = fresh !== undefined && waiting.some(message => message.source?.handoff === true)
+        const handed = new Set()
+        const handOn = async () => {
+          const sent = await forward(owner, held, sessionId, handed)
+          quietly(() => { for (const message of held) agent.inbox.remove(message.id) })
+          return sent
+        }
+        // The pass finishes and archives the old part: what it held and no forward took waits
+        // in the fresh part's durable inbox, once, and leaves the old one (MJ-1, MJ-2).
+        const keepHeld = () => quietly(() => {
+          appendById(fresh, held.filter(message => message.source?.kind !== 'working-directory' && !handed.has(message.id)))
+          for (const message of held) agent.inbox.remove(message.id)
+        })
+        // A move committed before its part's first turn: DSH draws a part with no turn as a
+        // blank home, with no composer for a Bot outside every workspace. It starts now: a
+        // stopped reply is answered at once, a bare handoff is acknowledged by Omni with no
+        // model call (F1, which reverses MY-7's "bare stays inert"). Forwarding what the old
+        // part held is that start when there is any, so it is a counted try too (MI-5).
+        if (handoff && !switches.has(current) && !awaiting.has(current)) {
+          const send = async () => {
+            let sent
+            try { sent = await handOn() } catch (error) {
+              // A followup went out: the pass finishes (MH-3), so the rest waits on the fresh part.
+              if (error?.started === true) keepHeld()
+              throw error
+            }
+            if (sent === 0) wakeKept(fresh)
+          }
+          if (await wakeHandoff(sessionId, owner, fresh, current, canRecover, { expire, send, held, keep: keepHeld }) !== true) return
+        } else {
+          const sent = await handOn()
+          if (sent === 0 && handoff) {
+            if (await wakeHandoff(sessionId, owner, fresh, current, canRecover, { expire }) !== true) return
+          }
+        }
         // An interrupted switch may not have finished moving the tasks over; stop
         // the earlier part only after they sit on the part that replaced it.
         await rt.moveSchedules?.(sessionId, currentOf(owner))
         await ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true })
           .catch(error => rt.warn('omni-ui: earlier part %s not archived: %s', sessionId, error))
       } else {
-        try { wake(agent) } catch (error) { rt.warn('omni-ui: part %s could not be woken for its kept input: %s', sessionId, error) }
+        // An agent switch that stopped a reply and did not move: the reply goes on here, once.
+        if (owner.cut !== undefined) {
+          const cut = owner.cut
+          const exchangeId = cut.info?.exchangeId
+          const queued = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
+          if (exchangeId === undefined || !queued.some(message => message.source?.exchangeId === exchangeId)) {
+            const joined = Array.isArray(cut.joined) && cut.joined.length > 0 ? { joined: cut.joined } : {}
+            agent.inbox.prepend('next-turn', createUserMessage({
+              content: [{ type: 'text', text: PAUSE_NOTE }],
+              source: cut.info ? { ...cut.info, ...joined } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...joined },
+            }))
+          }
+        }
+        try { wakeKept(agent) } catch (error) { rt.warn('omni-ui: part %s could not be woken for its kept input: %s', sessionId, error) }
       }
       delete state.switching[sessionId]
       await rt.save()
     } catch (error) {
       rt.warn('omni-ui: input kept in part %s was not handed on: %s', sessionId, error)
     }
+  }
+
+  // A part a restart could not start is tried again, bounded (MG-8): at most WAKE_TRIES
+  // tries or the retry window from the first one, whichever comes first. Each try is counted
+  // and saved before its send, so a try that takes the process down counts too (MH-4). Then
+  // the Bot goes back to the part it came from, with the existing failure line. One timer per
+  // marker ends the window while the plugin runs (cleared at unload).
+  const wakeTimers = new Map()
+  const wakeExpired = owner => (owner.wakeTries ?? 0) >= WAKE_TRIES
+    || (owner.wakeFailedAt !== undefined && !(Number.isFinite(owner.wakeFailedAt) && now() >= owner.wakeFailedAt && now() - owner.wakeFailedAt < wakeRetryWindowMs()))
+  const clearWakeCount = (owner) => {
+    delete owner.wakeTries
+    delete owner.wakeFailedAt
+  }
+  function armWakeRetry(oldId, owner, term, atLeast = 0) {
+    clearTimeout(wakeTimers.get(oldId))
+    const started = Number.isFinite(owner.wakeFailedAt) ? owner.wakeFailedAt : now()
+    const timer = setTimeout(() => {
+      wakeTimers.delete(oldId)
+      // A retry that meets the unload cannot log through rt.warn; it never rejects unhandled (MI-4).
+      void retryWake(oldId, term).catch(error => noteInfo('omni-ui: part %s could not be woken for its handoff: %s', oldId, error))
+    }, Math.max(atLeast, started + wakeRetryWindowMs() - now(), 0))
+    timer.unref?.()
+    wakeTimers.set(oldId, timer)
+  }
+  // The window is over: the marker's pass goes back without measuring it again (MH-7).
+  async function retryWake(oldId, term) {
+    const leave = rt.enterOwnership?.() ?? (() => {})
+    try {
+      const canRecover = () => !disposed && rt.lockTerm?.() === term && rt.readOnly() === undefined
+      if (!canRecover()) return
+      await rt.load()
+      const owner = state.switching?.[oldId]
+      if (!canRecover() || owner === null || typeof owner !== 'object' || switches.has(oldId)) return
+      await handOnPart(oldId, owner, canRecover, { expire: true })
+    } catch (error) {
+      if (unloaded(error)) noteInfo('omni-ui: part %s could not be woken for its handoff: %s', oldId, error)
+      else rt.warn('omni-ui: part %s could not be woken for its handoff: %s', oldId, error)
+    } finally { leave() }
+  }
+
+  // Answers true when the fresh part started (the pass goes on: tasks, the old part archived,
+  // the marker gone); anything else ends the pass with the marker as it decided.
+  // `send` starts the fresh part: by default its own inbox wakes it; with `held`, the input the
+  // old part held is forwarded first (MI-5), and a go-back carries `held` to where the Bot ends.
+  // `keep` moves `held` into the fresh part's durable inbox when the pass ends there anyway.
+  async function wakeHandoff(oldId, owner, fresh, freshId, canRecover, { expire = false, send = () => wakeKept(fresh), held = [], keep = () => {} } = {}) {
+    const term = rt.lockTerm?.()
+    // A live move of the fresh part decides first; this pass waits for it (MH-8).
+    if (switches.has(freshId) || awaiting.has(freshId)) {
+      if (owner.wakeTries !== undefined) armWakeRetry(oldId, owner, term, 1000)
+      return false
+    }
+    let failure
+    if (!expire && !wakeExpired(owner)) {
+      const before = { wakeTries: owner.wakeTries, wakeFailedAt: owner.wakeFailedAt }
+      const putBack = () => {
+        for (const [key, value] of Object.entries(before)) {
+          if (value === undefined) delete owner[key]
+          else owner[key] = value
+        }
+      }
+      owner.wakeTries = (owner.wakeTries ?? 0) + 1
+      owner.wakeFailedAt ??= now()
+      await rt.save().catch(error => rt.warn('omni-ui: part %s could not be saved: %s', oldId, error))
+      // The lock may have gone during the save: another process owns the part now (MI-6).
+      if (!canRecover()) {
+        putBack()
+        return false
+      }
+      try {
+        await send()
+        clearWakeCount(owner)
+        return true
+      } catch (error) {
+        if (unloaded(error)) {
+          // Not a try: the plugin went away.
+          putBack()
+          void rt.save().catch(failed => noteInfo('omni-ui: part %s could not be saved: %s', oldId, failed))
+          noteInfo('omni-ui: plugin unloaded while part %s woke for its handoff; it is tried again at the next start', freshId)
+          return false
+        }
+        rt.warn('omni-ui: part %s could not be woken for its handoff: %s', freshId, error)
+        // A send went out, so the part's turn began: it decides itself (MH-3).
+        if (error?.started === true) {
+          clearWakeCount(owner)
+          return true
+        }
+        failure = error
+      }
+      if (!wakeExpired(owner)) {
+        armWakeRetry(oldId, owner, term)
+        return false
+      }
+    }
+    if (!canRecover()) return false
+    // A group's own part has no Bot and no way back: one more try, then it stays (MH-5).
+    if (owner.botId === undefined) {
+      try { await send() } catch (error) {
+        rt.warn('omni-ui: part %s could not be woken for its handoff: %s', freshId, error)
+        // The old part is archived next: the person's input waits in the fresh part (MJ-1).
+        if (error?.started !== true) keep()
+      }
+      clearWakeCount(owner)
+      return true
+    }
+    await goBackAfterRestart(oldId, owner, freshId, failure, canRecover, held)
+    return false
+  }
+
+  // The go-back of a part a restart could not start (MG-8): the switch's own go-back, from
+  // what the marker saved, with the existing failure line (MH-6: a code the chat says).
+  // `held`: what the old part still holds; it goes where the Bot ends, once (by id).
+  async function goBackAfterRestart(oldId, owner, freshId, lastError, canRecover, held = []) {
+    const entry = {
+      oldId, botId: owner.botId, ...(owner.roomId === undefined ? {} : { roomId: owner.roomId }), expected: owner.target,
+      job: {
+        carry: held.filter(message => message.source?.kind !== 'working-directory'),
+        crossing: owner.back === undefined ? undefined : { previous: owner.back, note: () => {} },
+        resume: owner.cut !== undefined, info: owner.cut?.info, joined: owner.cut?.joined,
+      },
+    }
+    if (reverting.has(freshId)) return
+    reverting.set(freshId, entry.job)
+    const failure = Object.assign(new Error(lastError?.message ?? 'the fresh part could not start'), { code: SWITCH_FAILED })
+    let outcome = false
+    try {
+      outcome = await revertSwitch(freshId, entry, failure, { restart: true }).catch((error) => {
+        rt.warn('ds-bot: going back from the fresh part %s failed: %s', freshId, error)
+        return false
+      })
+    } finally { reverting.delete(freshId) }
+    // Nothing went back: the marker stays only while there is something to go back to (MH-2).
+    const drop = () => {
+      if (outcome !== false || entry.job.commitFailed === true || !canRecover() || readOnly()) return false
+      if (state.switching?.[oldId] !== owner) return false
+      const gone = rt.botOf(owner.botId) === undefined || (owner.roomId !== undefined && rt.roomOf(owner.roomId) === undefined)
+      return gone || currentOf(owner) !== freshId || segmentsOf(owner)?.at(-1)?.sessionId !== oldId
+    }
+    if (!drop()) {
+      await drainRevert(entry.job, outcome, oldId, freshId)
+      return
+    }
+    delete state.switching[oldId]
+    await rt.save().catch(error => rt.warn('omni-ui: part %s could not be saved: %s', oldId, error))
+    rt.warn('omni-ui: part %s could not start and there is no part to go back to; its marker is dropped', freshId)
+    // No pass hands on the old part any more: what waited goes where the Bot is now (MI-7).
+    const late = entry.job.carry.splice(0)
+    if (late.length === 0) return
+    try {
+      await forward(owner, late, oldId)
+      const old = await rt.resolveAgent(oldId).catch(() => undefined)
+      if (old !== undefined) quietly(() => { for (const message of late) old.inbox.remove(message.id) })
+    } catch (error) { rt.warn('omni-ui: input for %s was not handed on: %s', oldId, error) }
+  }
+
+  // What waited during a go-back ends where the Bot is: the part it came from ('back', which
+  // then wakes), the fresh part that stays ('stayed', running its handoff), or, when nothing
+  // moved, the part it came from, for the restart pass to forward.
+  async function drainRevert(job, outcome, oldId, freshId) {
+    const late = job.carry.splice(0)
+    const target = await rt.resolveAgent(outcome === 'stayed' ? freshId : oldId).catch(() => undefined)
+    if (target === undefined) {
+      if (late.length > 0) rt.warn('omni-ui: input for %s was not handed on: the part could not be loaded', outcome === 'stayed' ? freshId : oldId)
+      return
+    }
+    if (late.length > 0) quietly(() => appendById(target, late))
+    if (outcome !== 'back' || target.inbox.nextStep.length + target.inbox.nextTurn.length === 0) return
+    try { wakeKept(target) } catch (error) { rt.warn('ds-bot: the part %s could not be woken after its switch went back: %s', oldId, error) }
   }
 
   // `hard`: past the hard line or the window, the part moves on even without a note
@@ -1303,7 +1714,11 @@ export function install(rt) {
   // `threshold` the part is over; 'aside': no route answers beside the agent). The fresh
   // part carries the latest messages that fit, and the old part is archived only once the
   // fresh part's first answer comes from its route.
-  function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, cutoff = false, failed, bare = false, folder = false, fresh = false, manual = false, noNote, target, threshold, shareId, hard = overflow || folder || fresh || cutoff || manual } = {}) {
+  // `crossing`: the person's pick of a model on another harness in a Bot's own chat with
+  // history (RFC 0030, Handoff note, 2026-11-23): `{ from, to, effort, effortGiven, previous,
+  // note, entry }`. The fresh part opens on `target` with a handoff, the Bot's record moves to
+  // it only once it holds that handoff, and the old part stays until the first real answer.
+  function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, cutoff = false, failed, bare = false, folder = false, fresh = false, manual = false, noNote, target, threshold, shareId, crossing, hard = overflow || folder || fresh || cutoff || manual } = {}) {
     const leave = rt.enterOwnership?.() ?? (() => {})
     let handedOff = false
     try {
@@ -1314,6 +1729,12 @@ export function install(rt) {
       const place = placeOf(agentId)
       if (place === undefined || switches.has(agentId) || checkpoints.has(agentId) || readOnly() || pinned(agentId)) return false
       const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
+      if (crossing !== undefined) {
+        // Only a Bot's own chat crosses; the deadline counts from the pick.
+        if (place.roomId !== undefined || place.botId === undefined) return false
+        job.crossing = crossing
+        job.deadline = job.since + (config.crossingDeadlineMs ?? CROSSING_DEADLINE_MS)
+      }
       if (job.roomId === undefined && job.botId !== undefined && rt.hostAuthority !== undefined) {
         job.isShare = shareId !== undefined
         job.shareId = shareId ?? rt.shareIdOf(job.botId)
@@ -1335,6 +1756,7 @@ export function install(rt) {
         })
         .finally(async () => {
           try {
+            if (job.crossing !== undefined) endCrossing(agent, job)
             switches.delete(agentId)
             if (job.moved) {
               // A move that had to put input back keeps the part marked for the restart pass.
@@ -1361,8 +1783,10 @@ export function install(rt) {
             }
             // The stopped turn goes on where it was. A retry finds the note among the
             // input this part kept, so it is added once.
+            // `job.resume`: an agent switch that stopped a reply that then ended with its own
+            // answer has nothing to resume (the cut listener below clears it).
             const noted = [...agent.inbox.nextStep, ...agent.inbox.nextTurn].some(message => textOf(message.content) === PAUSE_NOTE)
-            if (resume && !back.some(message => textOf(message.content) === PAUSE_NOTE) && !noted) {
+            if (job.resume && !back.some(message => textOf(message.content) === PAUSE_NOTE) && !noted) {
               const carried = job.joined?.length ? { joined: job.joined } : {}
               back.unshift(createUserMessage({
                 content: [{ type: 'text', text: PAUSE_NOTE }],
@@ -1411,16 +1835,244 @@ export function install(rt) {
     }
   }
 
+  // ---- Agent switches in a Bot's own chat (RFC 0030, Handoff note, 2026-11-23) ----
+  // 45 seconds for the outgoing agent's summary (a test may set a shorter one).
+  const noteTimeoutMs = () => config.crossingNoteTimeoutMs ?? 45_000
+  const crossingDeadline = () => Object.assign(new Error('the agent switch did not finish in time'), { code: 'bot/switch-deadline' })
+  // The turns the outgoing agent writes its handoff note in, per Session: `turns` every one
+  // marked (turns.js claimTrigger), `running` the one under way. Gone when its switch ends.
+  /** @type {Map<string, {turns: Set<number>, running?: number}>} */
+  const noteTurns = new Map()
+  // A note turn's end, awaited by noteInChat.
+  const noteWaits = new Map()
+  const isNoteRequest = (message, job) => message?.source?.role === 'handoff-note' && (job === undefined || message.source.exchangeId === job.noteRequest)
+  rt.markNoteTurn = (sessionId, turn) => {
+    if (!Number.isInteger(turn)) return
+    const entry = noteTurns.get(sessionId) ?? { turns: new Set() }
+    entry.turns.add(turn)
+    entry.running = turn
+    noteTurns.set(sessionId, entry)
+  }
+  // With `turn`: whether that turn of the Session was a handoff-note turn. Without: whether
+  // one runs now. A note turn is never a reply: nothing is answered, failed or fallen back.
+  rt.handoffNoteTurn = (sessionId, turn) => {
+    const entry = noteTurns.get(sessionId)
+    if (entry === undefined) return false
+    return turn === undefined ? entry.running !== undefined : entry.turns.has(turn)
+  }
+  // Waits for the agent to be idle, at most until the switch's deadline.
+  async function idleFor(agent, job) {
+    if (job.deadline === undefined) return agent.whenIdle()
+    const left = job.deadline - Date.now()
+    if (left <= 0) throw crossingDeadline()
+    let timer
+    try {
+      await Promise.race([agent.whenIdle(), new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(crossingDeadline()), left)
+        timer.unref?.()
+      })])
+    } finally { clearTimeout(timer) }
+  }
+  // The route the old part's conversation runs on, as its last request named it.
+  const routeRefOf = (session, fallback) => {
+    const config = session?.requestHeader?.()?.config
+    return config?.provider && config?.model ? `${config.provider}/${config.model}` : fallback
+  }
+  // A Session's own route, `{ ref, effort }`: its last request's, else its saved log's.
+  async function ownRouteOf(session) {
+    const config = session?.requestHeader?.()?.config
+    const route = config?.provider && config?.model ? config : await rt.storedRouteOf?.(session?.id).catch?.(() => undefined)
+    if (!route?.provider || !route?.model) return undefined
+    return { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort }
+  }
+  // Whether a Session's history ran on another harness than `ref`, so a model change would
+  // carry that history across (RFC 0030, Handoff note). A carried handoff package counts as
+  // history, a fresh opening does not. A route that crosses but a log that cannot be read
+  // counts as history: the Session keeps its route (the safe side).
+  // A group part opened on the route its conversation kept: before its first request the
+  // route is the one selected on it.
+  const keptRoutes = new Map()
+  async function crossingHistory(sessionId, ref) {
+    if (typeof sessionId !== 'string' || typeof ref !== 'string') return false
+    let session
+    let selection
+    try {
+      session = agents.get(sessionId)?.session ?? ctx.sessions?.get?.(sessionId)
+      selection = agents.get(sessionId)?.model?.current?.()
+    } catch {}
+    const config = session?.requestHeader?.()?.config
+    const kept = splitRef(keptRoutes.get(sessionId))
+    const route = config?.provider ? config : selection?.provider ? selection : kept?.provider ? kept
+      : await Promise.resolve(rt.storedRouteOf?.(sessionId)).catch(() => undefined)
+    if (!route?.provider || !crossesHarness(`${route.provider}/${route.model ?? 'default'}`, ref)) return false
+    // A group part opened on its kept route holds that history in its handoff package, even
+    // before its first turn reads it.
+    if (session === undefined || keptRoutes.has(sessionId)) return true
+    try { return saidForCrossing(session.deriveMessages(), undefined) } catch { return true }
+  }
+  rt.crossingHistory = crossingHistory
+  // A step about to run a Bot's own chat with history on another harness than the Bot's model
+  // (a selection DSH's /model made on the Session): it is not the person's switch.
+  async function crossedInPlace(agent, place, selection) {
+    if (place?.roomId !== undefined || place?.botId === undefined || !selection?.provider || !selection?.model) return false
+    const bot = rt.botOf(place.botId)
+    const model = bot?.model ?? bot?.appliedModel
+    if (typeof model !== 'string' || rt.chatOf(bot.id) !== agent.id || awaiting.has(agent.id)) return false
+    const ref = `${selection.provider}/${selection.model}`
+    if (!crossesHarness(model, ref) || await rt.keepsCarriedRoute?.(agent.id, ref) === true) return false
+    if (!await crossingHistory(agent.id, ref)) return false
+    rt.warn('ds-bot: %s: a step on %s with this chat\'s history was not run; the chat stays on %s (an agent switch goes through the model menu)', bot.name, ref, model)
+    return true
+  }
+
+  // Whether the picked model is still served, before anything is spent on the switch.
+  async function stillServed(job) {
+    if (typeof rt.catalog !== 'function') return true
+    const rows = await rt.catalog({ fresh: true, remember: false }).catch(() => undefined)
+    return Array.isArray(rows) && rows.some(entry => entry?.ref === job.target)
+  }
+  // An agent over ACP answers only in its own chat, so it writes its handoff note in a turn
+  // of that chat, which the chat does not show (the outgoing agent writes the summary, never
+  // another model: the lead's MW-14 rule). Within 45 seconds, else there is no summary.
+  async function noteInChat(agent, job) {
+    const left = Math.min(noteTimeoutMs(), job.deadline - Date.now())
+    if (left <= 0) return
+    const exchangeId = randomUUID()
+    job.noteRequest = exchangeId
+    const request = createUserMessage({
+      // The agent runs this turn with its own tools; the note needs none (MD-5).
+      content: [{ type: 'text', text: `${handoffPrompt(`This chat is switching to ${agentNameOf(job.target)}`)}\nUse no tools; answer with the note only.` }],
+      source: { kind: SOURCE_KIND, form: 'relay', role: 'handoff-note', noteFor: job.since, exchangeId, senderName: 'Omni' },
+    })
+    const ended = Promise.withResolvers()
+    noteWaits.set(agent.id, ended)
+    let timer
+    let timedOut = false
+    try {
+      agent.send(request, 'next-turn', true)
+      timedOut = await Promise.race([ended.promise.then(() => false), new Promise((resolve) => {
+        timer = setTimeout(() => resolve(true), left)
+        timer.unref?.()
+      })])
+    } finally {
+      clearTimeout(timer)
+      noteWaits.delete(agent.id)
+    }
+    if (timedOut) {
+      rt.warn('ds-bot: %s wrote no handoff note in time for its agent switch; it moves on with its latest messages', rt.botOf(job.botId)?.name ?? agent.id)
+      if (rt.handoffNoteTurn(agent.id)) agent.cancel({ kind: 'hook', reason: SWITCH_CUT }, { keepInbox: true })
+      dropNoteRequests(agent)
+      return
+    }
+    let messages = []
+    try { messages = agent.session.deriveMessages() } catch { return }
+    const at = messages.findLastIndex(message => message?.role === 'user' && message.source?.exchangeId === exchangeId)
+    if (at < 0) return
+    // The last assistant text with every heading: a closing line after the note, or a later
+    // partial note, does not throw the note away. A text that passes as written is kept as is.
+    const names = NOTE_SECTIONS.map(([name]) => name)
+    const texts = messages.slice(at + 1).filter(message => message?.role === 'assistant')
+      .map(message => textOf(message.content).trim()).filter(Boolean)
+    const note = texts.map(text => (missingSections(text).length === 0 ? text : tolerantHeadings(text, names)))
+      .findLast(text => missingSections(text).length === 0)
+    if (note === undefined) {
+      // Why, and the counts; never the note's text.
+      const last = texts.at(-1) ?? ''
+      const reason = last === '' ? 'it was empty' : `it lacked ${missingSections(tolerantHeadings(last, names)).join(', ')}`
+      rt.warn('ds-bot: the handoff note written for the agent switch of %s was not usable: %s (%d assistant texts after the request, the last one %d characters long)', rt.botOf(job.botId)?.name ?? agent.id, reason, texts.length, last.length)
+      return
+    }
+    // The same bound as a note written on a native route: a longer one is not carried.
+    if (estimateTokens(note) > NOTE_MAX_TOKENS) {
+      rt.warn('ds-bot: the handoff note written for the agent switch of %s is over %d tokens; it moves on with no summary', rt.botOf(job.botId)?.name ?? agent.id, NOTE_MAX_TOKENS)
+      return
+    }
+    job.inChatNote = { note, attempts: 1 }
+  }
+  // Parts whose outgoing agent writes its handoff note now: the chat draws no activity row for
+  // that turn (F4).
+  rt.notingView = () => Object.fromEntries([...switches]
+    .filter(([, job]) => job.crossing !== undefined && job.noteRequest !== undefined && job.moved !== true)
+    .map(([id]) => [id, true]))
+  // A handoff-note request still waiting in a part's inbox never runs as a turn later.
+  function dropNoteRequests(agent) {
+    const stale = [...(agent?.inbox?.nextStep ?? []), ...(agent?.inbox?.nextTurn ?? [])].filter(message => isNoteRequest(message))
+    if (stale.length > 0) quietly(() => { for (const message of stale) agent.inbox.remove(message.id) })
+  }
+  // The end of an agent switch, either way, in the same tick the lock ends: a switch that
+  // did not move leaves the Bot on its part and model, with the reason in its model state.
+  function endCrossing(agent, job) {
+    noteTurns.delete(agent.id)
+    noteWaits.delete(agent.id)
+    try { dropNoteRequests(agent) } catch {}
+    if (job.moved) return
+    const id = job.awaitingId
+    if (id !== undefined && awaiting.get(id)?.job === job) {
+      awaiting.delete(id)
+      acked.delete(id)
+    }
+    if (id !== undefined) freshParts.delete(id)
+    const bot = rt.botOf(job.botId)
+    if (bot === undefined) return
+    job.crossing.note('rolled back', job.rollback ?? 'not moved')
+    rt.noteSwitchFailed?.(bot, job.target, bot.model ?? bot.appliedModel, job.failure)
+  }
+  // The person's reply stopped by the switch (stopReply) is resumed by the new agent unless
+  // it ended with its own answer first. The first turn/end on the old part after the pick is
+  // that reply's (turns on one Session run one at a time); a note turn is not it (MY-1).
+  ctx.on('session/event', (session, event) => {
+    if (event?.type !== 'turn/end') return
+    const id = session?.id
+    const notes = noteTurns.get(id)
+    const noteTurn = notes?.turns.has(event.data?.turn) === true
+    if (noteTurn) {
+      notes.running = undefined
+      noteWaits.get(id)?.resolve()
+    }
+    const job = switches.get(id)
+    if (job?.crossing === undefined || !job.cutPending || noteTurn) return
+    job.cutPending = false
+    job.cutEnd = event.data?.reason?.kind
+    if (job.cutEnd !== 'completed') return
+    job.resume = false
+    job.info = job.joined = undefined
+    const marker = state.switching?.[id]
+    if (marker?.cut !== undefined) {
+      delete marker.cut
+      void rt.save().catch(error => rt.warn('ds-bot: %s could not be saved: %s', id, error))
+    }
+  })
+
   async function runSwitch(agent, job) {
-    if (job.noCommands) job.admittedRoute = await freshRoute(rt.botOf(job.botId), agent.session, job.target, true)
+    if (job.noCommands && job.crossing === undefined) job.admittedRoute = await freshRoute(rt.botOf(job.botId), agent.session, job.target, true)
     // Marks the part while the switch runs; it stays marked whenever input was put
-    // back, so a restart knows where to look without resolving every earlier part.
-    state.switching[agent.id] = job.roomId === undefined ? { botId: job.botId } : { botId: job.botId, roomId: job.roomId }
+    // back, so a restart knows where to look without resolving every earlier part. An
+    // agent switch that stopped a reply keeps its `cut` there for a restart.
+    const cut = job.crossing === undefined ? undefined : state.switching[agent.id]?.cut
+    // An agent switch also keeps where it goes and what it would go back to, so a restart can
+    // go back with no live job (MG-8).
+    const way = job.crossing === undefined ? {} : {
+      target: job.target,
+      back: Object.fromEntries(Object.entries(job.crossing.previous ?? {}).filter(([, value]) => value !== undefined)),
+    }
+    state.switching[agent.id] = { ...(job.roomId === undefined ? { botId: job.botId } : { botId: job.botId, roomId: job.roomId }), ...(cut === undefined ? {} : { cut }), ...way }
     job.marked = true
     await rt.save()
     try {
       for (let attempt = 1; ; attempt += 1) {
-        await agent.whenIdle()
+        await idleFor(agent, job)
+        if (job.crossing !== undefined && !job.prepared) {
+          job.prepared = true
+          // A model no longer served costs no note turn and leaves no request in the chat.
+          if (!await stillServed(job)) {
+            job.rollback = 'not served'
+            return
+          }
+          if (rt.answersAside?.(routeRefOf(agent.session, job.crossing.from)) === false) {
+            await noteInChat(agent, job)
+            await idleFor(agent, job)
+          }
+        }
         try {
           // Input that arrives meanwhile waits in the old part's inbox.
           await agent.runMaintenance(signal => moveOn(agent, job, signal))
@@ -1444,11 +2096,13 @@ export function install(rt) {
     } catch (error) {
       // A move that failed halfway leaves its earlier part to the restart pass, as a
       // switch always did: the fresh part's first answer no longer decides it.
-      const entry = job.freshId === undefined ? undefined : awaiting.get(job.freshId)
+      const id = job.freshId ?? job.awaitingId
+      const entry = id === undefined ? undefined : awaiting.get(id)
       if (entry?.job === job) {
-        awaiting.delete(job.freshId)
-        acked.delete(job.freshId)
+        awaiting.delete(id)
+        acked.delete(id)
       }
+      if (error?.code === 'bot/switch-deadline') job.rollback = 'deadline'
       throw error
     }
     if (job.moved) {
@@ -1458,7 +2112,8 @@ export function install(rt) {
       if (before !== undefined) await settleSwitch(agent.id, before)
       // A part opened without a note waits for its first answer (see `awaiting`, set in
       // moveOn before the fresh part's first turn could start).
-      if (job.freshId !== undefined && job.noNote !== undefined) return
+      // So does a part an agent switch opened: until the new agent's first real answer.
+      if (job.freshId !== undefined && (job.noNote !== undefined || job.crossing !== undefined)) return
       await ctx.workspaceRegistry.archiveSession(agent.id, { stopActivity: true })
         .catch(error => rt.warn('omni-ui: earlier part %s not archived: %s', agent.id, error))
     }
@@ -1475,6 +2130,10 @@ export function install(rt) {
   // Fresh parts whose handoff turn Omni answered itself (HANDOFF_ACK): that reply is not
   // an answer of the route.
   const acked = new Set()
+  // Fresh parts going back to the part they came from because they could not start, with the
+  // job whose `carry` takes their input meanwhile: nothing runs on them (the pre-step fence).
+  /** @type {Map<string, {carry:any[]}>} */
+  const reverting = new Map()
   const segmentsOf = entry => (entry.roomId === undefined ? rt.botOf(entry.botId)?.segments : rt.roomOf(entry.roomId)?.segments?.[entry.botId])
 
   async function settleSwitch(freshId, entry) {
@@ -1503,33 +2162,90 @@ export function install(rt) {
   // `failure`: how the first call ended. A switch onto a new model goes back to the model the old
   // part ran on too (model-state.js, plan A-3), so the old part is not re-selected onto the
   // model that just failed.
-  function revertSwitch(freshId, entry, failure) {
+  // `inJob`: the switch's own job goes back, from inside it, because its fresh part could not
+  // be woken; `restart`: a restart pass goes back from the marker, with no live job (MG-8).
+  // Both clear the marker only in the save that commits the way back, and put it back if that
+  // save fails. Answers 'back' once the Bot is back, 'stayed' when it stays with no way back,
+  // false otherwise.
+  function revertSwitch(freshId, entry, failure, options = {}) {
     return withGrantHold(rt, { botId: entry.botId },
       () => grantModelFields(rt.botOf(entry.botId)),
-      () => revertSwitchHeld(freshId, entry, failure))
+      () => revertSwitchHeld(freshId, entry, failure, options))
   }
 
-  async function revertSwitchHeld(freshId, entry, failure) {
+  async function revertSwitchHeld(freshId, entry, failure, { inJob = false, restart = false } = {}) {
     const leave = rt.enterOwnership?.() ?? (() => {})
     try {
-      if (awaiting.get(freshId) !== entry) return
-      // A first call that failed while the move still ran: everything the move hands on
-      // lands in the fresh part first, so all of it is taken back.
-      await entry.job?.done
-      if (awaiting.get(freshId) !== entry) return
+      if (!restart) {
+        if (awaiting.get(freshId) !== entry) return false
+        // A first call that failed while the move still ran: everything the move hands on
+        // lands in the fresh part first, so all of it is taken back.
+        if (!inJob) await entry.job?.done
+        if (awaiting.get(freshId) !== entry) return false
+      }
       awaiting.delete(freshId)
       acked.delete(freshId)
       await rt.load()
       const bot = rt.botOf(entry.botId)
       const room = entry.roomId === undefined ? undefined : rt.roomOf(entry.roomId)
-      if (bot === undefined || (entry.roomId !== undefined && room === undefined) || readOnly()) return
+      if (bot === undefined || (entry.roomId !== undefined && room === undefined) || readOnly()) return false
       const current = room !== undefined ? room.sessions?.[bot.id] : rt.chatOf(bot.id)
       const segments = segmentsOf(entry) ?? []
-      if (current !== freshId || segments.at(-1)?.sessionId !== entry.oldId) return
+      if (current !== freshId || segments.at(-1)?.sessionId !== entry.oldId) return false
+      const crossing = entry.job?.crossing
+      if (crossing !== undefined) {
+        // A Bot that denies acp_tool is not put back on an agent that runs its own tools
+        // (#2026): with no way back left, the switch settles where it is.
+        const back = crossing.previous.model ?? crossing.previous.appliedModel
+        try {
+          rt.assertOwnToolsModel?.(bot, { next: back, denyTools: bot.denyTools })
+        } catch {
+          rt.warn('ds-bot: %s stays on %s: going back to %s would run its own tools with acp_tool denied', bot.name, bot.model, back)
+          // After a restart the line names the new agent on both sides: it stays (MH-5).
+          if (restart) rt.noteSwitchFailed?.(bot, entry.expected, entry.expected)
+          const segment = segments.at(-1)
+          if (segment?.archivePending !== undefined) {
+            delete segment.archivePending
+            await rt.save().catch(error => rt.warn('ds-bot: %s could not be saved: %s', entry.oldId, error))
+          }
+          if (inJob || restart) {
+            // The fresh part could not start: it runs its handoff once more, whatever it
+            // resumes, with what waited meanwhile behind it (MG-4).
+            reverting.delete(freshId)
+            const fresh = await rt.resolveAgent(freshId).catch(() => undefined)
+            const late = entry.job.carry.splice(0)
+            if (fresh !== undefined && late.length > 0) quietly(() => appendById(fresh, late))
+            const ran = await rerunHandoff(freshId, bot.name)
+            // In the job a rerun that failed leaves the marker to the restart pass; after a
+            // restart this is the last try: the handoff waits for the next message (MH-5).
+            if (ran !== true && !restart) return false
+            delete state.switching[entry.oldId]
+            await rt.save()
+            await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
+              .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
+            return 'stayed'
+          }
+          await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
+            .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
+          // The reply the switch stopped still goes on: here, once more, from its handoff.
+          if (entry.job?.resume === true) await rerunHandoff(freshId, bot.name)
+          return false
+        }
+      }
       rt.endGrants?.([freshId, entry.oldId], 'part')
       segments.pop()
-      if (room === undefined && (entry.expected === undefined || bot.model === entry.expected)) {
-        rt.revertModel?.(bot, failure)
+      if (crossing !== undefined) {
+        // The agent switch goes back whole: the Bot's own fields as they were before the pick.
+        for (const key of ['model', 'effort', 'appliedModel', 'appliedEffort', 'previousModel', 'shellHeld']) {
+          if (crossing.previous[key] === undefined) delete bot[key]
+          else bot[key] = crossing.previous[key]
+        }
+        rt.noteSwitchFailed?.(bot, entry.expected, bot.model ?? bot.appliedModel)
+        crossing.note('rolled back', 'first call failed')
+      } else {
+        const reverted = room === undefined && (entry.expected === undefined || bot.model === entry.expected) && rt.revertModel?.(bot, failure) === true
+        // After a restart the chat still says it once, with the Bot's model on both sides.
+        if (restart && !reverted) rt.noteSwitchFailed?.(bot, bot.model ?? bot.appliedModel, bot.model ?? bot.appliedModel)
       }
       if (room !== undefined) room.sessions[bot.id] = entry.oldId
       else {
@@ -1544,7 +2260,22 @@ export function install(rt) {
           delete state.views[freshId]
         }
       }
-      await rt.save()
+      const marker = inJob || restart ? state.switching[entry.oldId] : undefined
+      if (inJob || restart) {
+        // From here the old part runs as it is: its input is no switch's to carry (MG-3).
+        entry.job.wentBack = true
+        delete state.switching[entry.oldId]
+      }
+      try {
+        await rt.save()
+      } catch (error) {
+        if (inJob || restart) {
+          if (marker !== undefined) state.switching[entry.oldId] = marker
+          delete entry.job.wentBack
+          entry.job.commitFailed = true
+        }
+        throw error
+      }
       await rt.moveSchedules?.(freshId, entry.oldId)
         ?.catch?.(error => rt.warn('ds-bot: tasks of the fresh part of %s not moved back: %s', bot.name, error))
       const old = await rt.resolveAgent(entry.oldId).catch(() => undefined)
@@ -1561,9 +2292,13 @@ export function install(rt) {
       } else if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
       if (old !== undefined) partBase.set(entry.oldId, tokensOf(old.session) ?? 0)
       rt.renewMemory(entry.oldId)
+      // A reply the agent switch stopped goes on in the part it came from, once: the handoff
+      // that carried it stays behind in the fresh part (takeBack).
+      if (crossing !== undefined && old !== undefined && entry.job?.resume === true) resumeCut(old, entry.job, bot.name)
       rt.warn('ds-bot: the first call in the fresh part of %s failed before any answer; it is back on the part it came from, which was not archived', bot.name)
       await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
         .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', bot.name, error))
+      return 'back'
     } finally { leave() }
   }
 
@@ -1585,6 +2320,50 @@ export function install(rt) {
     quietly(() => { for (const message of queued) fresh.inbox.remove(message.id) })
   }
 
+  // The stopped reply of an agent switch that went back: its resume line goes into the old
+  // part, as handOnPart's not-moved branch builds it, unless its request already waits
+  // there; then the part wakes once.
+  function resumeCut(agent, { info, joined }, name) {
+    try {
+      const exchangeId = info?.exchangeId
+      const queued = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
+      if (exchangeId === undefined || !queued.some(message => message.source?.exchangeId === exchangeId)) {
+        const carried = Array.isArray(joined) && joined.length > 0 ? { joined } : {}
+        agent.inbox.prepend('next-turn', createUserMessage({
+          content: [{ type: 'text', text: PAUSE_NOTE }],
+          source: info ? { ...info, ...carried } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...carried },
+        }))
+      }
+      wakeKept(agent)
+    } catch (error) { rt.warn('ds-bot: the stopped reply of %s could not go on in the part it came from: %s', name, error) }
+  }
+
+  // A fresh part that stays after its first call failed (no way back) runs its handoff once
+  // more, so the reply the switch stopped goes on there. Its first failure no longer takes
+  // the switch back (the part is no longer awaited).
+  // Answers true when its wake ran.
+  async function rerunHandoff(freshId, name) {
+    const fresh = await rt.resolveAgent(freshId).catch(() => undefined)
+    if (fresh === undefined) return false
+    try {
+      if (![...fresh.inbox.nextStep, ...fresh.inbox.nextTurn].some(message => message.source?.handoff === true)) {
+        let recorded = []
+        try { recorded = fresh.session.deriveMessages() } catch {}
+        const handoff = recorded.findLast(message => message?.role === 'user' && message.source?.handoff === true)
+        if (handoff === undefined) {
+          rt.warn('ds-bot: the handoff of the fresh part of %s was not found; its stopped reply does not go on', name)
+          return false
+        }
+        fresh.inbox.prepend('next-turn', createUserMessage({ content: handoff.content, ...(handoff.source ? { source: handoff.source } : {}) }))
+      }
+      wakeKept(fresh)
+      return true
+    } catch (error) {
+      rt.warn('ds-bot: the fresh part of %s could not run its handoff again: %s', name, error)
+      return false
+    }
+  }
+
   // The fresh part's answers decide its switch. One on the route it opened on settles it at
   // once. One on another route (the person picked another model before the first answer, or
   // the fallback answered) still shows the part works: the switch settles when that turn ends,
@@ -1598,6 +2377,21 @@ export function install(rt) {
   // a provider down, a timeout) leaves the switch to that turn: an answer settles it, and only a
   // fallback turn that fails too goes back.
   const settleLater = (freshId, entry) => void settleSwitch(freshId, entry).catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
+  // Whether a turn's end in a fresh part takes its switch back: the same reading as the
+  // listener below, made before it runs (turns.js asks while the same turn ends).
+  const goesBackOn = (id, entry, reason) => {
+    if (entry.ackTurn === true || entry.answered === true || entry.spoke === true) return false
+    if (rt.cutByRestart?.(reason) || reason?.kind !== 'error') return false
+    const failure = turnFailure(reason.error)
+    if (failure.code === NO_BOT_RUNNER) return false
+    return entry.fellBack === true || switchFailure(failure) || rt.fallbackArmed?.(id) !== true
+  }
+  // An agent switch that stopped a reply and whose fresh part's first turn fails goes back,
+  // and the stopped reply goes on (revertSwitchHeld): that failed turn answers no sender.
+  rt.switchResumes = (id, reason) => {
+    const entry = awaiting.get(id)
+    return entry?.job?.crossing !== undefined && entry.job.resume === true && goesBackOn(id, entry, reason)
+  }
   ctx.on('session/event', (session, event) => {
     const entry = awaiting.get(session?.id)
     if (entry === undefined) return
@@ -1661,9 +2455,11 @@ export function install(rt) {
 
   // It answers whether the route was selected, and records what the fresh part then runs on.
   // The group's own Session has no Bot: `name` is the group's then, and nothing is recorded.
-  const selectRoute = (bot, sessionId, { ref, effort }, name = bot?.name) => rt.selectSessionModel(sessionId, { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) })
+  // `record: false`: nothing is recorded either (an agent switch writes the Bot's record only
+  // at its commit; a group part that keeps its own route is not the Bot's own chat).
+  const selectRoute = (bot, sessionId, { ref, effort }, name = bot?.name, { record = true } = {}) => rt.selectSessionModel(sessionId, { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) })
     .then(async () => {
-      if (bot === undefined) return true
+      if (bot === undefined || !record) return true
       bot.appliedModel = ref
       if (effort === undefined) delete bot.appliedEffort
       else bot.appliedEffort = effort
@@ -1674,14 +2470,259 @@ export function install(rt) {
       return false
     })
 
+  // An agent switch in a Bot's own chat (RFC 0030, Handoff note, 2026-11-23). The fresh
+  // part is made and selected on the picked route, the handoff is put in it while no surface
+  // can reach it, and only then does the Bot's record point to it, in one save with its new
+  // model. Anything that fails before that leaves the Bot on its part and model.
+  async function crossOver(agent, job, signal) {
+    const bot = rt.botOf(job.botId)
+    if (bot === undefined) return
+    const name = bot.name
+    const session = agent.session
+    const tokens = tokensOf(session)
+    const lines = await contextLines(session).catch(() => undefined)
+    const number = partsOf(bot.id).length
+    const recentTokens = policyOf(session.id).recentTokens
+    const budget = Math.min(recentTokens, Math.floor((job.threshold ?? lines?.check ?? 4 * recentTokens) / 4))
+    const left = () => job.deadline - Date.now()
+    // S2: the summary, by the outgoing agent only: a model the person did not pick never reads
+    // the conversation. An agent over ACP wrote it in its own chat (noteInChat); a native
+    // route writes it on its own route. None within 45 seconds: the latest messages only.
+    let written = job.inChatNote
+    if (written === undefined && rt.answersAside?.(routeRefOf(session, job.crossing.from)) !== false && left() > 0) {
+      try {
+        written = await writeNote(agent, AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.min(noteTimeoutMs(), left())))]), { own: true })
+      } catch (error) {
+        if (signal.aborted || error?.code === NO_BOT_RUNNER) throw error
+        rt.warn('ds-bot: the handoff note for the agent switch of %s failed; it moves on with its latest messages: %s', name, error?.message ?? error)
+      }
+    }
+    // An agent over ACP reads the package through acp-dsh's replay, clipped at 60,000
+    // characters: a note over the in-chat note's bound is not carried (MG-5).
+    if (written !== undefined && routeOfRef(job.target).route === 'acp' && estimateTokens(written.note) > NOTE_MAX_TOKENS) {
+      rt.warn('ds-bot: the handoff note written for the agent switch of %s is over %d tokens; it moves on with no summary', name, NOTE_MAX_TOKENS)
+      written = undefined
+    }
+    const noted = written !== undefined ? { note: written.note } : { fallback: 'recent' }
+    const carried = await handoffLines(agent.id, { budget, group: false, number })
+    if (signal.aborted) throw signal.reason
+    const noCommands = job.noCommands || rt.botRunnerRequired?.(session.id, agent) === true
+    if (noCommands && commandCapableAgent(job.target)) throw noBotRunner()
+    const dir = rt.workDirOf(job)
+    const intended = dir !== undefined && await rt.isFolder(dir) ? dir : rt.teamFolder()
+    const effort = job.crossing.effort === null ? undefined
+      : job.crossing.effortGiven ? job.crossing.effort : await rt.desiredEffort(bot, job.target)
+    const picked = { ref: job.target, effort }
+    const freshId = await rt.createSession(name, {
+      dir, group: false, botId: job.botId, ...(bot.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
+      readScopeSource: session.id, continueReadScope: true,
+    })
+    const abandon = async (why) => {
+      job.rollback = why
+      if (awaiting.get(freshId)?.job === job) {
+        awaiting.delete(freshId)
+        acked.delete(freshId)
+      }
+      freshParts.delete(freshId)
+      await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
+        .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', name, error))
+    }
+    const selected = await selectRoute(bot, freshId, picked, name, { record: false })
+    // The fresh part never takes a time-boxed Auto level the pick ended.
+    await job.autoCleared
+    await rt.applyPermission(bot, freshId, undefined)
+      .catch(error => rt.warn('ds-bot: permission for the fresh part of %s not applied: %s', name, error))
+    try {
+      if (!selected) throw new Error(`${job.target} was not selected on the fresh part`)
+      await rt.assertNotOffCli?.(bot, freshId, undefined, { owner: { bot }, unselected: false })
+    } catch (error) {
+      rt.warn('ds-bot: no fresh part for the agent switch of %s: %s', name, error?.message ?? error)
+      await abandon('selection failed')
+      return
+    }
+    // The Bot or its chat may have changed during the awaits above.
+    const unchanged = () => rt.botOf(bot.id) === bot && rt.chatOf(bot.id) === agent.id
+    if (!unchanged()) {
+      await abandon('conversation changed')
+      return
+    }
+    // S3: the handoff into the fresh part while nothing can reach it.
+    const resume = job.resume === true
+    let fresh
+    let folder
+    try {
+      fresh = await rt.resolveAgent(freshId)
+      if (noCommands && commandCapableAgent(currentProvider(fresh))) throw noBotRunner()
+      const cwd = fresh.session.header?.cwd
+      folder = cwd !== undefined && cwd !== session.header?.cwd ? cwd : undefined
+      if (intended !== undefined && cwd !== undefined && cwd !== intended) {
+        folderRetry.set(freshId, Date.now() + FOLDER_RETRY_MS)
+        rt.warn('omni-ui: the fresh part of %s did not start in %s; it works in %s', name, intended, cwd)
+      }
+      // The deny list lands before the part can be reached; it reads the Bot it is given.
+      await rt.applyToolDeny(bot, [freshId])
+        .catch(error => rt.warn('ds-bot: tool deny for the fresh part of %s not applied: %s', name, error?.message ?? error))
+      const segment = { ...noted, switchedTo: job.target }
+      const redact = redactorFor(ctx)
+      const build = lines => redact(handoffPackage({
+        segment, lines, number: number + 1, resume, folder,
+        crossing: { from: agentNameOf(job.crossing.from), to: agentNameOf(job.target) },
+      }))
+      const text = routeOfRef(job.target).route === 'acp' ? capForAcp(build, carried) : build(carried)
+      freshParts.set(freshId, estimateTokens(text))
+      // Durable, and it wakes nothing: the part starts only after the commit below.
+      fresh.inbox.prepend('next-turn', createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
+      await ctx.sessions.flush(fresh.session)
+      // Watched from here, before anything can start the fresh part's first turn.
+      awaiting.set(freshId, { oldId: agent.id, botId: job.botId, expected: job.target, job })
+      job.awaitingId = freshId
+    } catch (error) {
+      rt.warn('ds-bot: the handoff of the agent switch of %s failed: %s', name, error?.message ?? error)
+      await abandon('handoff failed')
+      if (error?.code === NO_BOT_RUNNER) throw error
+      return
+    }
+    // S4: the commit, one synchronous stretch from the checks to the save.
+    if (!unchanged()) { await abandon('conversation changed'); return }
+    if (Date.now() > job.deadline) { await abandon('deadline'); return }
+    if ((bot.model ?? bot.appliedModel) !== job.crossing.from) { await abandon('model changed'); return }
+    try {
+      rt.assertOwnToolsModel?.(bot, { next: job.target, denyTools: bot.denyTools })
+    } catch {
+      job.failure = { code: OWN_TOOLS_SWITCH, text: OWN_TOOLS_MODEL_TEXT }
+      await abandon('acp_tool denied')
+      return
+    }
+    const segment = { sessionId: agent.id, endedAt: Date.now(), ...(tokens !== undefined ? { tokens } : {}), ...noted, switchedTo: job.target, archivePending: true }
+    rt.endGrants?.(agent.id, 'part')
+    ;(bot.segments ??= []).push(segment)
+    bot.sessionId = freshId
+    if (bot.permissionAuto) rt.endAuto?.(bot, [agent.id])
+    // The card's call stays in the old part: the fresh part raises it in the composer dock.
+    if (state.questions[agent.id] !== undefined) {
+      if (job.isShare) job.cardMoved = true
+      const pending = state.questions[agent.id]
+      state.questions[freshId] = pending.callId && !pending.callSessionId ? { ...pending, callSessionId: agent.id } : pending
+      delete state.questions[agent.id]
+    }
+    if (state.views?.[agent.id] !== undefined) {
+      if (job.isShare) job.cardMoved = true
+      const pending = state.views[agent.id]
+      state.views[freshId] = pending.callId && !pending.callSessionId ? { ...pending, callSessionId: agent.id } : pending
+      delete state.views[agent.id]
+    }
+    // The model it leaves is the way back only if it answered (model-state.js).
+    rt.noteModelChoice?.(bot, job.target)
+    bot.model = job.target
+    if (job.crossing.effort === null) delete bot.effort
+    else if (job.crossing.effortGiven && job.crossing.effort !== undefined) bot.effort = job.crossing.effort
+    bot.appliedModel = job.target
+    if (effort === undefined) delete bot.appliedEffort
+    else bot.appliedEffort = effort
+    // A route change to a model that uses DSH's tools lifts a load-time shell hold.
+    if (bot.shellHeld !== undefined && (bot.shell === true || !commandCapableAgent(job.target))) delete bot.shellHeld
+    job.freshId = freshId
+    job.expected = job.target
+    job.moved = true
+    await rt.save()
+    // S5: before anything can start the fresh part's first turn.
+    const held = [...agent.inbox.nextStep, ...agent.inbox.nextTurn].filter(message => !isNoteRequest(message))
+    const carry = []
+    let sent = 0
+    try {
+      await rt.ensureCapabilities(freshId)
+      // An active goal moves with the conversation; its record is written with its part.
+      if (job.isShare) job.goalMoved = ctx.get('goals')?.get?.(agent)?.phase === 'active'
+      carryGoal(agent, fresh, undefined, name)
+      await ctx.sessions.flush(fresh.session)
+      // S6: what the old part held follows the handoff: the stopped turn's input, then
+      // whatever waited. It moves first; only then does the old inbox give it up.
+      carry.push(...job.carry.splice(0))
+      sent += await forward(job, [...carry, ...held], agent.session.id)
+      if (job.isShare) job.movedIn = carry.length + held.length
+    } catch (error) {
+      job.kept = true
+      try { restore(agent, [...carry, ...job.carry.splice(0)]) } catch {}
+      throw error
+    }
+    quietly(() => { for (const message of held) agent.inbox.remove(message.id) })
+    dropNoteRequests(agent)
+    for (let late = job.carry.splice(0); late.length > 0; late = job.carry.splice(0)) {
+      sent += await forward(job, late, agent.session.id).catch((error) => {
+        job.kept = true
+        try { restore(agent, late) } catch {}
+        throw error
+      })
+      if (job.isShare) job.movedIn += late.length
+    }
+    // Nothing woke the fresh part: it starts now, so the chat shows the conversation at once
+    // (DSH draws a part with no turn as a blank home). A stopped reply is answered at once; a
+    // bare handoff is acknowledged by Omni with no model call and joins the next message's
+    // context.
+    if (sent === 0) {
+      try { wakeKept(fresh) } catch (error) {
+        if (unloaded(error)) {
+          // The marker stays: the next start's restart pass wakes the part. Nothing here
+          // watches its first answer any more.
+          job.kept = true
+          if (awaiting.get(freshId)?.job === job) {
+            awaiting.delete(freshId)
+            acked.delete(freshId)
+          }
+          noteInfo('omni-ui: plugin unloaded while the fresh part of %s woke; its handoff waits in part %s', name, freshId)
+          return
+        }
+        rt.warn('ds-bot: the fresh part of %s could not be woken: %s', name, error)
+        // A send went out, so its turn began: the first answer settles or takes it back.
+        if (error?.started !== true && awaiting.get(freshId)?.job === job) {
+          // The part cannot start: the switch goes back whole, from inside its own job, and
+          // the marker is cleared only by the save that commits that (MF-3).
+          job.kept = true
+          reverting.set(freshId, job)
+          let outcome = false
+          try {
+            outcome = await revertSwitch(freshId, awaiting.get(freshId), error, { inJob: true }).catch((failure) => {
+              rt.warn('ds-bot: going back from the fresh part %s failed: %s', freshId, failure)
+              return false
+            })
+          } finally { reverting.delete(freshId) }
+          await drainRevert(job, outcome, agent.id, freshId)
+          return
+        }
+      }
+    }
+    if (job.shareId !== undefined && rt.hostAuthority !== undefined) {
+      void rt.publishPart?.({
+        botId: job.botId, fromPart: agent.id, freshId, shareId: job.shareId,
+        kind: job.isShare ? 'share' : 'move',
+        carried: (job.movedIn ?? 0) > 0 || job.goalMoved === true || job.cardMoved === true,
+      })?.catch(() => rt.warn('omni-ui: publishing a fresh part for caller sharing failed'))
+    }
+    job.crossing.note('completed', written !== undefined ? 'handoff with a summary' : 'handoff without a summary')
+    ctx.logger.info('ds-bot: %s switched from %s to %s in part %d; %s; %d latest and %d earlier messages carried', name, job.crossing.from, job.target, number + 1,
+      written !== undefined ? 'summary written by the outgoing agent' : 'no summary', carried.recent.length, carried.earlier.length)
+  }
+
   async function moveOn(agent, job, signal) {
     job.started = true
+    if (job.crossing !== undefined) return crossOver(agent, job, signal)
     const bot = job.botId === undefined ? undefined : rt.botOf(job.botId)
     const room = rt.roomOf(job.roomId)
     if (bot === undefined ? room === undefined
       : job.roomId !== undefined && (room === undefined || !room.members.includes(bot.id))) return
     const name = bot?.name ?? room?.name ?? agent.id
     const session = agent.session
+    // A Bot's group conversation whose history ran on another agent than the Bot's model now
+    // keeps its own route when it moves on: the group follows an agent switch only with its
+    // own fenced switch and handoff (RFC 0030, Handoff note; a later delivery), never by a
+    // fresh part on the new agent.
+    if (room !== undefined && bot !== undefined && job.target === undefined && await rt.crossingHistory?.(session.id, bot.model ?? bot.appliedModel)) {
+      job.keepRoute = await ownRouteOf(session)
+      if (job.keepRoute === undefined) {
+        job.noteFailed = true
+        return
+      }
+    }
     const tokens = tokensOf(session)
     const lines = await contextLines(session).catch(() => undefined)
     const parts = bot === undefined ? partsOf(undefined, room.id) : partsOf(bot.id, room?.id)
@@ -1736,15 +2777,25 @@ export function install(rt) {
     const noCommands = job.noCommands || rt.botRunnerRequired?.(session.id, agent) === true
     // Restricted work needs an admitted route before creating a Session, and
     // must select that route successfully before forwarding anything to it.
-    let picked = job.admittedRoute
+    let picked = job.keepRoute ?? job.admittedRoute
     if (picked === undefined && noCommands) picked = await freshRoute(bot, session, job.target, noCommands)
     const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, {
       dir, group: room !== undefined, botId: job.botId, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
       ...(job.fresh ? {} : { readScopeSource: session.id, continueReadScope: true }),
     })
     // The catalog can change while the Session is being made.
-    if (!noCommands) picked = await freshRoute(bot, session, job.target)
-    const selected = picked === undefined || await selectRoute(bot, freshId, picked, name)
+    if (!noCommands && job.keepRoute === undefined) picked = await freshRoute(bot, session, job.target)
+    const selected = picked === undefined || await selectRoute(bot, freshId, picked, name, { record: job.keepRoute === undefined })
+    if (job.keepRoute !== undefined && !selected) {
+      await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
+        .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', name, error))
+      job.noteFailed = true
+      return
+    }
+    if (job.keepRoute !== undefined) {
+      keptRoutes.set(freshId, job.keepRoute.ref)
+      if (keptRoutes.size > 500) keptRoutes.delete(keptRoutes.keys().next().value)
+    }
     if (bot !== undefined) await rt.applyPermission(bot, freshId, room)
       .catch(error => rt.warn('ds-bot: permission for the fresh part of %s not applied: %s', name, error))
     // At Full access with the Bot's coding CLI model not served, or not selected just above,
@@ -1807,8 +2858,8 @@ export function install(rt) {
     await rt.save()
     // A model the user picked until now went to the earlier part, which was still the
     // Bot's; from here on a change goes to the fresh one.
-    const now = noCommands ? picked : await freshRoute(bot, session, job.target)
-    if (now !== undefined && (now.ref !== picked?.ref || now.effort !== picked?.effort)) await selectRoute(bot, freshId, now, name)
+    const now = job.keepRoute !== undefined || noCommands ? picked : await freshRoute(bot, session, job.target)
+    if (now !== undefined && (now.ref !== picked?.ref || now.effort !== picked?.effort)) await selectRoute(bot, freshId, now, name, { record: job.keepRoute === undefined })
     if (job.failed !== undefined) rescued.set(freshId, job.bare ? 'bare' : 'carried')
     job.freshId = freshId
     job.expected = (now ?? picked)?.ref
@@ -1832,7 +2883,13 @@ export function install(rt) {
         folderRetry.set(freshId, Date.now() + FOLDER_RETRY_MS)
         rt.warn('omni-ui: the fresh part of %s did not start in %s; it works in %s', name, intended, cwd)
       }
-      const text = job.fresh ? freshPackage({ room, number: number + 1 }) : handoffPackage({ room, self: bot === undefined, segment, lines: carried, number: number + 1, resume, overflow: job.overflow, cutoff: job.cutoff, failed: job.failed, bare: job.bare, folder, manual: job.manual, target: job.target })
+      // A part on an agent over ACP gets a package under acp-dsh's clip; a note too long for it
+      // is not carried (the stored segment keeps it), and a 'whole' package that lost lines
+      // says so (MG-7, MH-12).
+      const acp = !job.fresh && routeOfRef(job.expected).route === 'acp'
+      const packed = acp && estimateTokens(segment.note ?? '') > NOTE_MAX_TOKENS ? { ...segment, note: undefined, noteFrom: undefined } : segment
+      const build = (lines, capped = false) => handoffPackage({ room, self: bot === undefined, segment: capped && packed.fallback === 'whole' ? { ...packed, capped: true } : packed, lines, number: number + 1, resume, overflow: job.overflow, cutoff: job.cutoff, failed: job.failed, bare: job.bare, folder, manual: job.manual, target: job.target })
+      const text = job.fresh ? freshPackage({ room, number: number + 1 }) : acp ? capForAcp(build, carried) : build(carried)
       freshParts.set(freshId, estimateTokens(text))
       fresh.followup(createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
       // Before the flush, so the goal's own record is written with the part it belongs to.
@@ -1902,6 +2959,13 @@ export function install(rt) {
         rt.assertShellChoice?.(agent.session?.header?.parentSession)
       } catch { return { kind: 'reject' } }
       agents.set(agent.id, agent)
+      // A fresh part going back to the part it came from runs nothing; its input goes where the
+      // Bot ends up (MG-2). Before the owner lookups: the Bot no longer points at it.
+      const revert = reverting.get(agent.id)
+      if (revert !== undefined) {
+        revert.carry.push(...payload.messages)
+        return takeOverStep(agent, payload)
+      }
       const checkpoint = checkpoints.get(agent.id)
       if (checkpoint !== undefined) {
         checkpoint.carry.push(...payload.messages)
@@ -1916,8 +2980,30 @@ export function install(rt) {
       if (place === undefined) return pass()
       adoptCompaction(agent)
       const job = switches.get(agent.id)
-      if (job !== undefined) {
+      // A switch that went back from inside its job leaves the old part to run as it is (MG-3).
+      if (job !== undefined && job.wentBack !== true) {
+        // The outgoing agent's handoff-note request runs alone: everything else in the batch
+        // waits for the new part, and the rest of the chain (memory, the backend) runs on the
+        // narrowed batch.
+        if (job.noteRequest !== undefined && (payload.messages.some(message => isNoteRequest(message, job)) || rt.handoffNoteTurn(agent.id))) {
+          job.carry.push(...payload.messages.filter(message => !isNoteRequest(message, job)))
+          for (let at = payload.messages.length - 1; at >= 0; at -= 1) {
+            if (!isNoteRequest(payload.messages[at], job)) payload.messages.splice(at, 1)
+          }
+          return pass()
+        }
         job.carry.push(...payload.messages)
+        return takeOverStep(agent, payload)
+      }
+      // DSH's own /model selects on the shown Session directly. In a Bot's own chat with
+      // history a model on another harness than the Bot's would carry that history across in
+      // place, without a handoff: the step does not run, the Session goes back on the Bot's
+      // route, and the input waits for it (RFC 0030, Handoff note; the switch is the menu's).
+      if (await crossedInPlace(agent, place, payload.modelSelection)) {
+        restore(agent, payload.messages)
+        void rt.reselectOwnRoute?.(agent, () => true)
+          .then(selected => { if (selected === true) wake(agent) })
+          .catch(error => rt.warn('ds-bot: %s was not put back on its route: %s', agent.id, error?.message ?? error))
         return takeOverStep(agent, payload)
       }
       const fresh = freshParts.get(agent.id)
@@ -2176,6 +3262,8 @@ export function install(rt) {
     return () => {
       clearTimeout(timer)
       offGained?.()
+      for (const retry of wakeTimers.values()) clearTimeout(retry)
+      wakeTimers.clear()
     }
   }, 'omni-ui: hand on input kept in earlier parts')
 
@@ -2213,8 +3301,12 @@ export function install(rt) {
     if (options.sessionId === undefined || options.purpose !== undefined || rt.ownRequest(options)) return next()
     const messages = options.messages ?? []
     const since = messages.findLastIndex(message => message.role === 'assistant' || message.role === 'tool') + 1
-    const opened = messages.slice(since).filter(message => message.role === 'user' && (message.source?.kind === 'user' || message.source?.kind === 'retry' || message.source?.kind === SOURCE_KIND))
-    const bare = opened.length > 0 && opened.every(message => message.source.kind === SOURCE_KIND && message.source.handoff === true && message.source.resume !== true)
+    const batch = messages.slice(since).filter(message => message.role === 'user')
+    // The outgoing agent's handoff-note request is answered by the agent itself, and a batch
+    // that holds one is never acknowledged in its place.
+    const noting = batch.some(message => message.source?.role === 'handoff-note')
+    const opened = batch.filter(message => message.source?.role !== 'handoff-note' && (message.source?.kind === 'user' || message.source?.kind === 'retry' || message.source?.kind === SOURCE_KIND))
+    const bare = !noting && opened.length > 0 && opened.every(message => message.source.kind === SOURCE_KIND && message.source.handoff === true && message.source.resume !== true)
     if (!bare) return next()
     if (awaiting.has(options.sessionId)) acked.add(options.sessionId)
     return (async function* acknowledge() {
@@ -2377,8 +3469,9 @@ export function install(rt) {
     }
     const items = displayItems(part.sessionId, events, agent?.session, seedTurn)
     const more = page.hasMore && events.length > 0
-    // The line above a part's first message marks where it began.
-    if (!more && index > 0) items.unshift({ kind: 'divider', time: part.startedAt })
+    // The line above a part's first message marks where it began, and names the agent an
+    // agent switch moved the chat to (the segment of the part before it carries `switchedTo`).
+    if (!more && index > 0) items.unshift({ kind: 'divider', time: part.startedAt, ...(part.switchedIn === undefined ? {} : { switchedTo: part.switchedIn }) })
     if (steps === true) await applySteps(items, events, part.sessionId)
     return { items,
       // The MCP text subpages need the event boundary, including hidden trailing events.
@@ -2780,6 +3873,17 @@ export function install(rt) {
     })
   }
 
+  // An agent or model by the name the chat shows (the model menu's rule): an agent over ACP
+  // by the published catalog's brand, else the name the owner gives it, else its id; any
+  // other model by its catalog name, else its ref. Product names are never translated.
+  function agentNameOf(ref) {
+    const { provider, route } = routeOfRef(ref)
+    let rows = []
+    try { rows = rt.cachedCatalog?.() ?? [] } catch {}
+    if (route === 'acp') return rows.find(entry => entry?.provider === provider && typeof entry.providerName === 'string')?.providerName ?? ACP_NAME[provider] ?? provider
+    return rows.find(entry => entry?.ref === ref && typeof entry.name === 'string')?.name ?? ref
+  }
+
   function assertRouteAllowed(bot, target, entry) {
     if (routeAllowed(bot, target, rt.routePolicy)) return
     routeAttempt(bot, bot.model ?? bot.appliedModel, target, entry)('refused', 'route policy')
@@ -2816,13 +3920,16 @@ export function install(rt) {
   }
 
   // An own chat can change harness in place before anyone has said anything (RFC 0030 Q7a).
-  // A chat with history needs a separate New conversation action before the pick.
+  // A chat with history moves to a new part with a handoff (RFC 0030, Handoff note,
+  // 2026-11-23); a crossing to or from a Hermes route still needs New conversation first.
   function switchRoute(botId, model, effort, options) {
     return withGrantHold(rt, { botId }, () => grantModelFields(rt.botOf(botId)),
       () => switchRouteHeld(botId, model, effort, options))
   }
 
-  async function switchRouteHeld(botId, model, effort, { entry = 'switch-route' } = {}) {
+  // `stopReply`: the person agreed to stop the reply running in the chat (the selector's
+  // question); without it a running reply refuses the crossing with reason 'reply-running'.
+  async function switchRouteHeld(botId, model, effort, { entry = 'switch-route', stopReply = false } = {}) {
     const bot = rt.botOf(botId)
     if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
     if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
@@ -2887,10 +3994,11 @@ export function install(rt) {
       legacySaid = saidSomething(messages)
       said = saidForCrossing(messages, freshPackage({ number: partsOf(botId).length }))
     } catch {}
-    // Keep the hook refusal for the messages it covered before Q7a.
+    // A host agent that cannot run maintenance (a test double, an adopted Session, which is
+    // pinned and refused above) cannot move its conversation to a new part.
     if (legacySaid && (typeof agent.whenIdle !== 'function' || typeof agent.runMaintenance !== 'function')) {
       note('refused', 'handoff unavailable')
-      throw refused('refused', `${bot.name}'s current conversation cannot hand off to a new route.`)
+      throw refused('refused', `${bot.name}'s conversation is run by a host that cannot move it.`)
     }
     const checkCurrent = () => {
       if (bot.sessionPinned === true) refusePinned()
@@ -2902,13 +4010,12 @@ export function install(rt) {
       throw refused('busy', `${bot.name}'s conversation changed or is busy. Look again before changing routes.`)
     }
     checkCurrent()
-    if (said) {
-      const { route, provider } = routeOfRef(target)
+    if (said && (isHermesRoute(current) || isHermesRoute(target))) {
+      // A Hermes route keeps Q7a's refusal (the owner's #2061 amendment leaves it out).
+      const { route } = routeOfRef(target)
       // Inside ACP the destination is the agent, named as the model menu names it: the
       // published catalog's brand, else the name of an agent the owner names. Never its id.
-      const agentName = () => rt.cachedCatalog?.()?.find(entry => entry.provider === provider)?.providerName
-        ?? ACP_NAME[provider] ?? provider
-      const destination = route === 'acp' && routeOfRef(current).route === 'acp' ? agentName()
+      const destination = route === 'acp' && routeOfRef(current).route === 'acp' ? agentNameOf(target)
         : { native: 'Native', acp: 'ACP', herdr: 'Herdr', 'hermes-remote': 'Remote Hermes' }[route]
       note('refused', 'needs-new-conversation')
       let goal = ' (pause an active goal first)'
@@ -2919,6 +4026,52 @@ export function install(rt) {
       } catch {} // Unreadable goal state keeps the pause hint.
       throw Object.assign(refused('refused', `${bot.name}'s conversation has history, so changing to ${destination} needs a new conversation. Use New conversation, then pick ${destination}${goal}.`),
         { reason: 'needs-new-conversation' })
+    }
+    if (said) {
+      // Only the person moves a Bot's conversation to another agent: a Bot's own update_bot
+      // would send its history to another vendor without the person (RFC 0030, Handoff note).
+      if (entry === 'update_bot') {
+        note('refused', 'bot actor')
+        throw refused('refused', `Only the person moves ${bot.name} to another agent. Use propose_bot_change so the person can apply it.`)
+      }
+      // The guard threshold the destination prices the part at (A-2), read before the
+      // reply check: from that check to the job there is no await, so no reply can start
+      // between them unseen.
+      const threshold = (await destinationThreshold(agent, splitRef(target)).catch(() => undefined))?.threshold
+      checkCurrent()
+      const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort, previousModel: bot.previousModel, shellHeld: bot.shellHeld }
+      // `rt.live.get`, never liveOf, which would make an entry. A turn DSH started that the
+      // tracker has not seen yet counts too (the agent's own status).
+      const live = rt.live?.get(sessionId)
+      const replying = live?.turn !== undefined || agent.status === 'running'
+      if (replying && !stopReply) {
+        note('refused', 'reply running')
+        throw Object.assign(refused('refused', `This stops the current reply and continues on ${agentNameOf(target)}.`), { reason: 'reply-running' })
+      }
+      const job = startSwitch(agent, { hard: true, target, threshold, crossing: { from: current, to: target, effort: effortId, effortGiven: effort !== undefined, previous, note, entry } })
+      if (!job) {
+        note('refused', 'conversation busy')
+        throw refused('busy', `${bot.name} is already changing models.`)
+      }
+      if (replying) {
+        // The stopped turn's state, in the same tick as the job: a step that reaches the
+        // pre-step during the awaits below is carried, and the job already holds what
+        // resumes it. The marker keeps it for a restart.
+        job.resume = true
+        job.cutPending = true
+        job.info = live?.info
+        job.joined = [...(live?.joined ?? [])]
+        state.switching[sessionId] = { ...(state.switching[sessionId] ?? { botId }), cut: { exchangeId: live?.info?.exchangeId, info: live?.info, joined: job.joined } }
+      }
+      // A time-boxed Auto grant ends at the pick and stays ended if the switch rolls back;
+      // the fresh part waits for it before it takes the Bot's level.
+      job.autoCleared = Promise.resolve(rt.clearAuto?.(bot)).catch(error => rt.warn('ds-bot: Auto of %s did not end at its agent switch: %s', bot.name, error?.message ?? error))
+      if (replying) {
+        await rt.save()
+        if (agent.status === 'running') agent.cancel({ kind: 'hook', reason: SWITCH_CUT }, { keepInbox: true })
+      }
+      note('accepted')
+      return { id: botId, model: target, ...(effortId == null ? {} : { effort: effortId }), status: 'switching' }
     }
     await rt.clearAuto?.(bot)
     checkCurrent()
@@ -3035,11 +4188,11 @@ export function install(rt) {
     const parts = roomId === undefined ? (botId === undefined ? [] : partsOf(botId)) : partsOf(undefined, roomId)
     const at = parts.findIndex(part => part.sessionId === sessionId)
     const index = Number.isInteger(cursor?.part) ? cursor.part : at - 1
-    if (at <= 0 || index < 0 || index >= at) return { items: [], cursor: null, startedAt: parts[at]?.startedAt ?? null }
+    if (at <= 0 || index < 0 || index >= at) return { items: [], cursor: null, startedAt: parts[at]?.startedAt ?? null, switchedTo: parts[at]?.switchedIn ?? null }
     // Aside cards belong to the part that was current when they were asked, so
     // they ride along with that part's history instead of the team view.
     const btw = botId === undefined ? [] : (await rt.btwPartCards?.(botId, parts[index].sessionId)) ?? []
-    return { ...(await partPage(parts, index, cursor)), btw, startedAt: parts[at].startedAt }
+    return { ...(await partPage(parts, index, cursor)), btw, startedAt: parts[at].startedAt, switchedTo: parts[at].switchedIn ?? null }
   }
 
   // A Bot's whole own chat, newest page first: the current part, then the earlier
@@ -3216,7 +4369,34 @@ export function install(rt) {
     } finally { leave() }
   }
 
-  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, freshPinnedText: bot => pinnedText(bot, 'fresh'), switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
+  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, freshPinnedText: bot => pinnedText(bot, 'fresh'), switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(),
+    // A Bot's own chat moving to another route. `crossing: true` asks only about an agent
+    // switch the person picked and answers its `{ to, since }` (the chat's lock), else false.
+    switchingChat: (id, { crossing = false } = {}) => {
+      if (!crossing) return [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined)
+      const job = [...switches.values()].find(item => item.botId === id && item.roomId === undefined && item.crossing !== undefined)
+      if (job !== undefined) return { to: job.target, since: job.since }
+      // A part a restart is still trying to start (MG-8): the chat stays locked meanwhile.
+      const held = Object.values(state.switching ?? {}).find(owner => owner?.botId === id && owner.roomId === undefined && owner.wakeTries !== undefined)
+      if (held === undefined) return false
+      const bot = rt.botOf(id)
+      return { to: held.target ?? bot?.model ?? bot?.appliedModel, since: held.wakeFailedAt }
+    },
+    // The model an agent switch that moved but has no first answer yet would go back to.
+    crossingWayBack: (botId) => {
+      for (const entry of awaiting.values()) {
+        if (entry.botId !== botId || entry.roomId !== undefined || entry.job?.crossing === undefined || !entry.job.moved) continue
+        return entry.job.crossing.previous.model ?? entry.job.crossing.previous.appliedModel
+      }
+      return undefined
+    },
+    // Whether a reply runs in the Bot's own chat now (the same test as an agent switch's).
+    replyRunning: (botId) => {
+      const sessionId = rt.chatOf(botId)
+      if (sessionId === undefined) return false
+      return rt.live?.get(sessionId)?.turn !== undefined || agents.get(sessionId)?.status === 'running'
+    },
+    agentNameOf,
     // A fresh part still waiting for its first answer: its failure goes back with the part.
     // A no-note move may still have to go back to the part it left.
     returnsTo: id => [...awaiting.values()].some(entry => entry.oldId === id),

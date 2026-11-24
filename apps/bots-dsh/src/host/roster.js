@@ -661,7 +661,8 @@ export function install(rt) {
     }, run)
   }
 
-  async function updateBotHeld(id, patch, actorId, fromSessionId, { admit, modelEntry } = {}) {
+  // `stopReply`: the person agreed to stop a running reply for an agent switch (parts.js).
+  async function updateBotHeld(id, patch, actorId, fromSessionId, { admit, modelEntry, stopReply = false } = {}) {
     if (['permissionAuto', 'permissionRev', 'autoStamp'].some(key => Object.hasOwn(patch, key))) throw refusal('Only the person turns Auto on, from the Bot\'s permission choice.')
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
@@ -672,6 +673,10 @@ export function install(rt) {
     const checkHeldChoice = () => {
       if (bot.shellHeld !== undefined && rt.pickingModel?.(id)
         && ['shell', 'model', 'effort', 'workDir'].some(key => patch[key] !== undefined)) {
+        throw refusal(`${bot.name} is already changing models.`)
+      }
+      // An agent switch under way in the Bot's chat: a model or level waits for its end.
+      if (rt.switchingChat?.(id, { crossing: true }) && (patch.model !== undefined || patch.effort !== undefined)) {
         throw refusal(`${bot.name} is already changing models.`)
       }
     }
@@ -733,7 +738,7 @@ export function install(rt) {
       const extra = Object.keys(patch).filter(key => !['id', 'model', 'effort'].includes(key))
       if (extra.length > 0) throw refusal(`${bot.name} needs a new route, so change only its model in this step.`)
       commit(patch.model)
-      await rt.switchRoute(bot.id, patch.model, patch.effort, { entry })
+      await rt.switchRoute(bot.id, patch.model, patch.effort, { entry, stopReply })
       return bot
     }
     let modelRef = patch.model === '' ? null : patch.model
@@ -795,11 +800,11 @@ export function install(rt) {
         : `${bot.name} has no shell, so it cannot run on ${provider}, whose own tools can run `
           + 'commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
     }
-    // A model on another route, or another ACP agent, is a new conversation with a handoff
-    // note (RFC 0030, Decided 6 and 10). The menu uses switchRoute for it; a direct update-bot
-    // is the same person's pick, so it takes that path too rather than silently carrying the
-    // old conversation across the harness. Other fields cannot ride along: the switch is its
-    // own step, and the caller can update them after it.
+    // A model on another route, or another ACP agent, moves the chat to a new part with a
+    // handoff (RFC 0030, Handoff note, 2026-11-23). The menu uses switchRoute for it; a direct
+    // update-bot is the same person's pick, so it takes that path too rather than silently
+    // carrying the old conversation across the harness. Other fields cannot ride along: the
+    // switch is its own step, and the caller can update them after it.
     const currentModel = bot.model ?? bot.appliedModel
     const crossing = modelRef != null && crossesHarness(currentModel, modelRef)
     // Another pick may finish while the connection is checked.
@@ -813,11 +818,11 @@ export function install(rt) {
         const extra = Object.keys(patch).filter(key => !['id', 'model', 'effort'].includes(key))
         if (extra.length > 0) {
           rt.routeAttempt(bot, currentModel, modelRef, entry)('refused', 'mixed edit')
-          throw refusal(`${bot.name} needs a new conversation for that route, so change only its model in this step.`)
+          throw refusal(`${bot.name} changes agent in a step of its own, so change only its model in this step.`)
         }
       }
       commit(modelRef)
-      await rt.switchRoute(bot.id, modelRef, patch.effort, { entry })
+      await rt.switchRoute(bot.id, modelRef, patch.effort, { entry, stopReply })
       return bot
     }
     // Deny-list validation can open the Session; only do it after crossing eligibility.

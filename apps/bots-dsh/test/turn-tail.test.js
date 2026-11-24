@@ -348,3 +348,28 @@ test('the thinking row shows only with its switch on, and the activity row is ne
     assert.ok(noted.every(id => id.startsWith('text:')))
   }
 })
+
+// PLAN-F1 F4 (#2061): an agent switch's note request is the switch's own work, not a message
+// from a Bot: hidden or not, its trigger draws no "Message from" / "N messages with" line.
+test('F4a: an agent switch\'s note request draws no event line, hidden or not', () => {
+  for (const hidden of [false, true]) {
+    const team = { ...roster, exchangeTurns: hidden ? { b: [3] } : {} }
+    const node = {
+      key: 'turn-trigger:12', kind: 'turn-trigger', location: { turn: { turn: 3 } },
+      data: {
+        seq: 12, content: [{ type: 'text', text: 'Write the handoff note.' }],
+        source: { kind: 'bot', role: 'handoff-note', senderName: 'Omni' },
+      },
+    }
+    const out = expand(TriggerCell({
+      node, sessionId: 'b', actions: {},
+      useRoster: select => select(team),
+      useSessions: select => select({ byId: { b: { projectionValues: { turnOutline: [{ turn: 3 }] } } } }),
+      useTurnClock: select => select({ b: { 3: { first: 1_000 } } }),
+      useUi: select => select({ visits: {} }),
+    }), ['EventLine'])
+    assert.equal(find(out, entry => entry.type?.name === 'EventLine').length, 0, `hidden: ${hidden}`)
+    assert.equal(find(out, entry => entry.props?.className === 'bt-event-whole').length, 0, `hidden: ${hidden}`)
+    assert.doesNotMatch(textOf(out), /Message from|messages with|Omni/, `hidden: ${hidden}`)
+  }
+})

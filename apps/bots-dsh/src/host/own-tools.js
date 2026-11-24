@@ -49,13 +49,15 @@ export function install(rt) {
   function assertOwnToolsDeny(bot, options) {
     const { next, self = false } = options
     if (!addsAcpToolDeny(bot.denyTools, next)) return
-    if (rt.pickingModel?.(bot.id) || (rt.settlingModel?.(bot.id) ?? 0) > (self ? 1 : 0)) {
+    // An agent switch under way is a model change too (RFC 0030, Handoff note).
+    if (rt.pickingModel?.(bot.id) || rt.switchingChat?.(bot.id, { crossing: true }) || (rt.settlingModel?.(bot.id) ?? 0) > (self ? 1 : 0)) {
       throw refusal(`${bot.name} is already changing models.`)
     }
     const runsOn = Object.hasOwn(options, 'runsOn') ? options.runsOn : bot.model ?? bot.appliedModel
     const wayBack = Object.hasOwn(options, 'wayBack') ? options.wayBack
       : switchPending(bot) ? bot.previousModel : undefined
-    if (ownToolsRoute(runsOn) || ownToolsRoute(wayBack)) throw ownToolsRefusal(OWN_TOOLS_DENY_TEXT)
+    // An agent switch that moved but has not answered yet can still go back to its old model.
+    if (ownToolsRoute(runsOn) || ownToolsRoute(wayBack) || ownToolsRoute(rt.crossingWayBack?.(bot.id))) throw ownToolsRefusal(OWN_TOOLS_DENY_TEXT)
   }
 
   Object.assign(rt, { ownToolsRoute, assertOwnToolsModel, assertOwnToolsDeny })

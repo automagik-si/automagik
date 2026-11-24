@@ -1650,6 +1650,10 @@ const ZH = {
   'Keep this conversation': '保留当前对话',
   'Change route': '更改路线',
   'Change agent': '更改代理',
+  // An agent switch in a Bot's own chat (RFC 0030, Handoff note, 2026-11-23).
+  'This stops the current reply and continues on {agent}.': '这会停止当前回复，并在 {agent} 上继续。',
+  'Switched to {agent}': '已切换到 {agent}',
+  'Switching to {agent}…': '正在切换到 {agent}…',
   'Using {model} · {route} · {provider}': '使用 {model} · {route} · {provider}',
 
   // Shapes
@@ -3891,6 +3895,8 @@ const HOST_TEMPLATES = [
   MACHINE_MESSAGES['unknown-plan'],
   MACHINE_MESSAGES.conflict,
   '{name} could not switch to {model}. It stays on {kept}.',
+  // A pick that would stop a running reply (reason reply-running): the selector asks first.
+  { template: 'This stops the current reply and continues on {agent}.', host: ['agent'] },
   { template: '{name} cannot use the {route} route.', host: ['route'] },
   { template: "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route} (pause an active goal first).", host: ['route'] },
   { template: "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route}.", host: ['route'] },

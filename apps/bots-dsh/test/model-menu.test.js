@@ -654,39 +654,50 @@ test('in a Bot\'s chat the level goes with the model through the chat pick, and 
   assert.deepEqual(fresh.updates, [])
 })
 
-test('crossing a route asks first and only then switches; crossing an ACP agent does too', () => {
+test('crossing a route while a reply runs asks first with Cancel and Switch; a Hermes crossing keeps its new-conversation question', () => {
   const { RouteConfirm } = module.exports
   const bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default' }
   const roster = { models: cascade, byId: { b1: bot } }
   const asked = []
   const route = RouteConfirm({
-    bot, roster, current: 'acp-codex/default', target: { ref: 'deepseek/flash' },
+    bot, roster, current: 'acp-codex/default', target: { ref: 'deepseek/flash' }, ask: 'running',
     onCancel: () => asked.push('cancel'), onConfirm: () => asked.push('confirm'),
   })
   const text = node => nodes(node, n => n.props.className?.startsWith('bt-model-confirm'))[0]
   assert.equal(text(route).children[0], 'Change route?')
   assert.equal(nodes(route, node => node.props.className === 'bt-model-confirm-move')[0].children.join(''), 'ACP · Codex → Native · DeepSeek')
   assert.equal(nodes(route, node => node.props.className === 'bt-model-confirm-text')[0].children[0],
-    'Changing the route requires a new conversation if this one has history.')
+    'This stops the current reply and continues on DeepSeek Flash.')
   const buttons = nodes(route, node => node.type === 'button')
-  assert.deepEqual(buttons.map(button => button.children[0]), ['Keep this conversation', 'Change route'])
+  assert.deepEqual(buttons.map(button => button.children[0]), ['Cancel', 'Switch'])
   buttons[0].props.onClick()
   buttons[1].props.onClick()
   assert.deepEqual(asked, ['cancel', 'confirm'])
-  // Another agent inside ACP is another harness: same warning, different word.
-  const agent = RouteConfirm({ bot, roster, current: 'acp-codex/default', target: { ref: 'acp-claude/default' }, onCancel: () => {}, onConfirm: () => {} })
+  // To or from a Hermes route the question is the one it always was (RFC 0030 Q7a).
+  const hermes = RouteConfirm({
+    bot: { ...bot, model: 'hermes-remote/attach' }, roster, current: 'hermes-remote/attach', target: { ref: 'deepseek/flash' }, ask: 'hermes',
+    onCancel: () => {}, onConfirm: () => {},
+  })
+  assert.equal(text(hermes).children[0], 'Change route?')
+  assert.equal(nodes(hermes, node => node.props.className === 'bt-model-confirm-text')[0].children[0],
+    'Changing the route requires a new conversation if this one has history.')
+  assert.deepEqual(nodes(hermes, node => node.type === 'button').map(button => button.children[0]), ['Keep this conversation', 'Change route'])
+  // Another agent inside ACP is another harness: the same running question, a different title.
+  const agent = RouteConfirm({ bot, roster, current: 'acp-codex/default', target: { ref: 'acp-claude/default' }, ask: 'running', onCancel: () => {}, onConfirm: () => {} })
+  assert.equal(text(agent).children[0], 'Change agent?')
   assert.equal(nodes(agent, node => node.props.className === 'bt-model-confirm-text')[0].children[0],
-    'Changing the agent requires a new conversation if this one has history.')
-  assert.deepEqual(nodes(agent, node => node.type === 'button').map(button => button.children[0]), ['Keep this conversation', 'Change agent'])
+    'This stops the current reply and continues on Claude Code.')
+  assert.deepEqual(nodes(agent, node => node.type === 'button').map(button => button.children[0]), ['Cancel', 'Switch'])
 })
 
-test('a route crossing reaches the host switch, not the in-place model update', async () => {
-  const { steps, updates, switched } = openMenu()
+test('a route crossing in an idle chat reaches the host switch at once, with no question and no in-place update', async () => {
+  const { steps, open, updates, switched } = openMenu()
   steps.props.onModel(cascade[0], 'native')
   await new Promise(resolve => setTimeout(resolve, 0))
-  // The menu asks before it applies: with the confirmation still open, nothing was saved.
+  // Nothing runs in the chat: no confirmation, and the host's switch is asked once.
+  assert.equal(nodes(open, node => node.type?.name === 'RouteConfirm').length, 0)
+  assert.deepEqual(switched, [['b1', 'deepseek/flash', {}]])
   assert.deepEqual(updates, [])
-  assert.deepEqual(switched, [])
 })
 
 test('Herdr is offered, named unavailable, and lists its agents and models until #1007 wires it', () => {
@@ -848,4 +859,27 @@ test('in a Bot\'s chat, an Antigravity model that needs a sign-in opens its sign
   menu.steps.props.onModel(agy, 'acp')
   assert.deepEqual(opened, [['b1', 'acp-antigravity', undefined]])
   assert.deepEqual([menu.updates, menu.chosen, menu.switched], [[], [], []])
+})
+
+// RFC 0030, Handoff note (2026-11-23): while an agent switch runs in the Bot's own chat the
+// model line says where it goes; a switch the own-tools rule stopped says that rule's words.
+test('the model line says an agent switch is running, and why an own-tools switch stopped', () => {
+  const { modelStateLine, askFirst, OWN_TOOLS_SWITCH } = module.exports
+  const models = [
+    { ref: 'deepseek/v4', provider: 'deepseek', providerName: 'DeepSeek', name: 'DeepSeek V4' },
+    { ref: 'acp-codex/default', provider: 'acp-codex', providerName: 'Codex', name: 'Default' },
+  ]
+  const roster = { ready: true, byId: {}, models }
+  assert.equal(modelStateLine({ selected: 'deepseek/v4', pending: false, switching: { to: 'acp-codex/default', since: 1 } }, roster), 'Switching to Codex…')
+  // An agent the catalog does not list yet: the menu's own name for it.
+  assert.equal(modelStateLine({ selected: 'deepseek/v4', switching: { to: 'acp-claude/default', since: 1 } }, roster), 'Switching to Claude Code…')
+  // A native model by its own name.
+  assert.equal(modelStateLine({ selected: 'acp-codex/default', switching: { to: 'deepseek/v4', since: 1 } }, roster), 'Switching to DeepSeek V4…')
+  assert.equal(OWN_TOOLS_SWITCH, 'MODEL_OWN_TOOLS_DENIED')
+  assert.match(modelStateLine({ selected: 'acp-claude/default', lastFailure: { code: OWN_TOOLS_SWITCH, ref: 'acp-antigravity/default', kept: 'acp-claude/default' } }, roster), /acp_tool/)
+  // What a crossing pick asks first.
+  assert.equal(askFirst('deepseek/v4', 'acp-codex/default', false), null)
+  assert.equal(askFirst('deepseek/v4', 'acp-codex/default', true), 'running')
+  assert.equal(askFirst('deepseek/v4', 'hermes-remote/attach', false), 'hermes')
+  assert.equal(askFirst('acp-hermes/default', 'deepseek/v4', true), 'hermes')
 })

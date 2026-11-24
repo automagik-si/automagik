@@ -108,7 +108,7 @@ export function install(rt) {
   const ok = value => ({ ok: true, value })
   const fail = (message, code = 'bot/error', reason) => ({
     ok: false,
-    error: { code, message, details: {}, ...(code === 'bot/refused' && reason === 'needs-new-conversation' ? { reason } : {}) },
+    error: { code, message, details: {}, ...(code === 'bot/refused' && (reason === 'needs-new-conversation' || reason === 'reply-running') ? { reason } : {}) },
   })
   // Keep native holds and releases for one Bot in order across all browser controls.
   const browserChanges = new Set()
@@ -290,7 +290,7 @@ export function install(rt) {
     activity: rt.activityView(),
     // The web self-update holds new work (update-hold.js): the composer says so.
     updateHold: rt.updateHoldView?.() === true,
-    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), grants: rt.grantsView?.() ?? [], withdrawn: rt.withdrawnView?.() ?? [], unanswered: rt.unansweredView?.() ?? [], stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
+    work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), grants: rt.grantsView?.() ?? [], withdrawn: rt.withdrawnView?.() ?? [], unanswered: rt.unansweredView?.() ?? [], stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, noting: rt.notingView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
     memoryNews: rt.memoryNews(),
     memoryReviews: rt.memoryReviews(),
     learning: rt.learningView(),
@@ -800,6 +800,12 @@ export function install(rt) {
           }
           if (Object.hasOwn(body, 'roles')) throw invalid("A Bot's role changes with role-attach and role-detach")
           await rt.load()
+          // `stopReply` is the person's answer to the running-reply question of an agent switch,
+          // not a field of the Bot: it never reaches the patch.
+          if (Object.hasOwn(body, 'stopReply')) {
+            const { stopReply, ...patch } = body
+            return ok(await rt.updateBot(patch.id, patch, undefined, undefined, { stopReply: stopReply === true }))
+          }
           return ok(await rt.updateBot(body.id, body))
         case 'role-attach':
           if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
@@ -821,10 +827,11 @@ export function install(rt) {
           return ok(await rt.roleSettings(body))
         case 'role-settings-set':
           return ok(await rt.setRoleSettings(body))
-        // A model on another route (parts.js): a chat with history needs New conversation first.
+        // A model on another route (parts.js): a chat with history moves to a new part with a
+        // handoff; while a reply runs, only with `stopReply` (the person's answer).
         case 'switch-route':
           await rt.load()
-          return ok(await rt.switchRoute(String(body?.id ?? ''), String(body?.model ?? ''), body?.effort))
+          return ok(await rt.switchRoute(String(body?.id ?? ''), String(body?.model ?? ''), body?.effort, ...(body?.stopReply === true ? [{ stopReply: true }] : [])))
         // Give up one wait for a hand-off that will not come back: only that sub-work
         // closes, with an explicit result for the work above it.
         case 'abandon-work':

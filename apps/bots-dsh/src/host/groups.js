@@ -26,6 +26,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { GROUP_LINE_READ, LATE_ANSWER, ROOM_IDLE_RELAY_LIMIT, ROOM_REPLY_TIMEOUT_MS, ROOM_STEP_GAP_MS, ROOM_WORK_GRACE_MS, SLOW_TEAM_TOOLS, SOURCE_KIND, TEAM_TOOLS, TEXT_KEPT } from './constants.js'
 import { escapeRegExp, headOf, splitRef, textOf } from './text.js'
+import { credentialShapes } from './redact.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { mentionSpans, speakerOf } from '../shared/mentions.js'
 import { GROUP_REF, output } from './tools.js'
@@ -1658,54 +1659,70 @@ export function install(rt) {
   // Private context enters a group only through this tool, and the group sees each use.
   rt.teamTools.push(defineTool({
     name: 'read_own_chat',
-    description: 'Read or search your own chat with the user, across all its parts, including earlier parts that left your working context. Each line starts with its anchor, such as [part 2 #1234 · 10-08 14:22]; long messages are cut. Pass the anchor as around to read that message in full, with what was said just before and after it. In a group chat the group sees that you looked, so share only what the group needs.',
+    description: 'Read or search your own chat with the user, across all its parts, including earlier parts that left your working context (also parts another agent ran before a switch). Each line starts with its anchor, such as [part 2 #1234 · 10-08 14:22]; long messages are cut. Pass the anchor as around to read that message in full, with what was said just before and after it, or as before to page further back. In a group chat the group sees that you looked, so share only what the group needs.',
     parameters: {
       query: { type: 'string', description: 'Words to look for in every part, separated by spaces. A message must have all of them; when none has, those with the most are shown. Omit for the latest messages' },
       around: { type: 'string', description: 'An anchor from an earlier result, such as "part 2 #1234": shows that message in full and the messages just before and after it' },
       part: { type: 'integer', description: 'Number of an earlier part: shows the handoff note you wrote when it ended' },
+      before: { type: 'string', description: 'An anchor from an earlier result, such as "part 2 #1234": shows the messages just older than it, across parts, so you can read the whole chat back to its first message' },
     },
     output,
+    // Lines from a part another harness ran cross a provider boundary: credential shapes are
+    // masked here as well as by the team's saved secrets on every tool result.
     async execute(args, exec) {
-      await rt.load()
-      const id = exec.agent?.id
-      const owner = rt.groupOwners.get(id)
-      const botId = owner?.botId ?? rt.chatOwners.get(id)
-      if (botId === undefined) return 'Only Bots on the team can use read_own_chat.'
-      const member = rt.botOf(botId)
-      const room = rt.roomOf(owner?.roomId)
-      const query = String(args.query ?? '').trim().slice(0, 80)
-      const around = String(args.around ?? '').trim().slice(0, 40)
-      const parts = rt.partsOf(botId)
-      const number = Number.isInteger(args.part) ? args.part : undefined
-      if (room !== undefined && member !== undefined) {
-        const text = query !== '' ? query : around !== '' ? `around ${around}` : number !== undefined ? `part ${number}` : ''
-        say(room, { who: member.name, botId: member.id, kind: 'lookup', text })
-        void rt.save().catch(() => {})
-      }
-      const partsNote = parts.length > 1 ? `\n\nYour own chat has ${parts.length} parts: ${rt.partIndex(parts)}. Call read_own_chat with part N for the note that closed an earlier part, or with words to search all parts.` : ''
-      if (query === '' && around !== '') {
-        const found = await rt.aroundOwnChat(botId, around)
-        if (found.error) return `${found.error}${partsNote}`
-        if (found.lines.length === 0) return `Nothing was said around ${around}.${partsNote}`
-        const heading = found.exact ? `around ${around}` : `with no message at ${around}; the nearest ones`
-        return `Your own chat ${heading} (oldest first):\n${found.lines.join('\n')}${partsNote}`
-      }
-      if (query === '' && number !== undefined) {
-        const part = parts[number - 1]
-        if (part === undefined) return `Your own chat has no part ${number}.${partsNote}`
-        if (part.endedAt === undefined) return `Part ${number} is the current one; it is in your context.${partsNote}`
-        return `Part ${number} of your own chat (${rt.clock(part.startedAt)} – ${rt.clock(part.endedAt)}). The handoff note that closed it:\n${rt.noteText(part) ?? '(none: the part ended on a context overflow)'}${partsNote}`
-      }
-      if (query === '') {
-        const lines = await rt.latestOwnChat(botId, { askingId: id })
-        return lines.length === 0 ? `Your own chat is empty.${partsNote}` : `Your own chat (oldest first):\n${lines.join('\n')}${partsNote}`
-      }
-      const { lines, every } = await rt.searchOwnChat(botId, query, { askingId: id })
-      if (lines.length === 0) return `Nothing in your own chat mentions "${query}".${partsNote}`
-      const heading = every ? `messages mentioning "${query}"` : `no message has all of "${query}"; messages with the most of these words`
-      return `Your own chat, ${heading} (oldest first):\n${lines.join('\n')}${partsNote}`
+      const text = await readOwnChat(args, exec)
+      return credentialShapes(text)
     },
   }))
+
+  async function readOwnChat(args, exec) {
+    await rt.load()
+    const id = exec.agent?.id
+    const owner = rt.groupOwners.get(id)
+    const botId = owner?.botId ?? rt.chatOwners.get(id)
+    if (botId === undefined) return 'Only Bots on the team can use read_own_chat.'
+    const member = rt.botOf(botId)
+    const room = rt.roomOf(owner?.roomId)
+    const query = String(args.query ?? '').trim().slice(0, 80)
+    const around = String(args.around ?? '').trim().slice(0, 40)
+    const before = String(args.before ?? '').trim().slice(0, 40)
+    const parts = rt.partsOf(botId)
+    const number = Number.isInteger(args.part) ? args.part : undefined
+    if (room !== undefined && member !== undefined) {
+      const text = query !== '' ? query : before !== '' ? `before ${before}` : around !== '' ? `around ${around}` : number !== undefined ? `part ${number}` : ''
+      say(room, { who: member.name, botId: member.id, kind: 'lookup', text })
+      void rt.save().catch(() => {})
+    }
+    const partsNote = parts.length > 1 ? `\n\nYour own chat has ${parts.length} parts: ${rt.partIndex(parts)}. Call read_own_chat with part N for the note that closed an earlier part, or with words to search all parts.` : ''
+    if (query === '' && before !== '') {
+      const found = await rt.beforeOwnChat(botId, before)
+      if (found.error) return `${found.error}${partsNote}`
+      if (found.lines.length === 0) return `Nothing was said before ${before}.${partsNote}`
+      const older = found.older === undefined ? '' : `\n(Older: read_own_chat before "${found.older}")`
+      return `Your own chat before ${before} (oldest first):\n${found.lines.join('\n')}${older}${partsNote}`
+    }
+    if (query === '' && around !== '') {
+      const found = await rt.aroundOwnChat(botId, around)
+      if (found.error) return `${found.error}${partsNote}`
+      if (found.lines.length === 0) return `Nothing was said around ${around}.${partsNote}`
+      const heading = found.exact ? `around ${around}` : `with no message at ${around}; the nearest ones`
+      return `Your own chat ${heading} (oldest first):\n${found.lines.join('\n')}${partsNote}`
+    }
+    if (query === '' && number !== undefined) {
+      const part = parts[number - 1]
+      if (part === undefined) return `Your own chat has no part ${number}.${partsNote}`
+      if (part.endedAt === undefined) return `Part ${number} is the current one; it is in your context.${partsNote}`
+      return `Part ${number} of your own chat (${rt.clock(part.startedAt)} – ${rt.clock(part.endedAt)}). The handoff note that closed it:\n${rt.noteText(part) ?? '(none: the part ended on a context overflow)'}${partsNote}`
+    }
+    if (query === '') {
+      const lines = await rt.latestOwnChat(botId, { askingId: id })
+      return lines.length === 0 ? `Your own chat is empty.${partsNote}` : `Your own chat (oldest first):\n${lines.join('\n')}${partsNote}`
+    }
+    const { lines, every } = await rt.searchOwnChat(botId, query, { askingId: id })
+    if (lines.length === 0) return `Nothing in your own chat mentions "${query}".${partsNote}`
+    const heading = every ? `messages mentioning "${query}"` : `no message has all of "${query}"; messages with the most of these words`
+    return `Your own chat, ${heading} (oldest first):\n${lines.join('\n')}${partsNote}`
+  }
 
   rt.teamTools.push(defineTool({
     name: 'read_group_chat',
