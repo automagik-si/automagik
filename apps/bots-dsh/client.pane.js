@@ -12318,7 +12318,16 @@ var ZH = {
   "{name} could not be removed after the failure. Delete it in its Details.": "失败后无法移除 {name}。请在其详情中删除。",
   "{name} may have been created. Check the sidebar and delete it in its Details if you do not want it.": "{name} 可能已被创建。请查看侧边栏，如不需要，请在其详情中删除。",
   "{name} was created, but your request was not sent: {error}": "{name} 已创建，但你的请求没有发送：{error}",
-  "{name} was created, but your request may not have been sent: {error}": "{name} 已创建，但你的请求可能没有发送：{error}"
+  "{name} was created, but your request may not have been sent: {error}": "{name} 已创建，但你的请求可能没有发送：{error}",
+  // The Solver's review mark (#2056).
+  "Last delivery": "上次交付",
+  "its reviewer": "它的审阅者",
+  "Reviewed in a fresh session, which the app cannot check.": "已在全新会话中审阅，应用无法核实。",
+  "Unreviewed: its reviewer is no longer on the team.": "未审阅：它的审阅者已不在团队中。",
+  "Plan and result reviewed by {name}.": "计划和结果已由 {name} 审阅。",
+  "Plan unreviewed: {name} gave no verdict before the work started.": "计划未审阅：{name} 在工作开始前没有给出结论。",
+  "Result unreviewed: {name} gave no verdict on the finished work.": "结果未审阅：{name} 没有对完成的工作给出结论。",
+  "Plan and result unreviewed: no verdict from {name} came in time.": "计划和结果都未审阅：没有及时收到 {name} 的结论。"
 };
 var HOST_ERRORS = [
   [/^Could not reach the mail server at (.+)\. Check the server address\.$/, "连不上邮件服务器 $1，请检查服务器地址。"],

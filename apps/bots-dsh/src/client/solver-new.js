@@ -68,14 +68,14 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
     setBusy(true)
     const before = new Set(roster.bots.map(bot => bot.id))
     const workDir = folder || undefined
-    const reviewer = choice.kind === 'new' ? { kind: 'new' } : choice.kind === 'bot' ? { kind: 'bot', name: choice.name } : { kind: 'fresh' }
+    const reviewer = choice.kind === 'new' ? { kind: 'new' } : choice.kind === 'bot' ? { kind: 'bot', name: choice.name, botId: choice.botId } : { kind: 'fresh' }
     const result = await createSolver({
       actions, before, reviewer, native,
       reviewerPayload: choice.kind === 'new' ? reviewerPayload({
         name: reviewerName(roster, finalName), look: { shape: pick(DEFAULT_SHAPES), color: pick(DEFAULT_COLORS) }, model: newModel, workDir,
       }) : undefined,
-      solverPayloadFor: ({ reviewer: reviewerBot, dedicated }) => solverPayload({
-        name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, native,
+      solverPayloadFor: ({ reviewer: reviewerBot, dedicated, reviewerId }) => solverPayload({
+        name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, native,
       }),
     })
     setBusy(false)

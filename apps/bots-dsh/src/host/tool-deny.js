@@ -350,6 +350,21 @@ export function install(rt) {
     return undefined
   }
 
+  // Whether a Session is `bot`'s own chat (a part of it included) or a subagent under it, by the
+  // same durable parent lineage as botOfSession; a group Session or a task run is not.
+  const ownChatLineage = (sessionId, agent, bot) => {
+    let current = sessionId
+    let header = agent?.session?.header ?? headerOf(current)
+    for (let depth = 0; typeof current === 'string' && depth < 32; depth += 1) {
+      if (current === bot.id || rt.chatOwners?.get(current) === bot.id || current === rt.chatOf?.(bot.id)) return true
+      if (rt.botOf(current) !== undefined || rt.selfOf(current) !== undefined || rt.state?.tasks?.[current] !== undefined) return false
+      if (header?.origin !== 'subagent' || header.parentSession === undefined) return false
+      current = header.parentSession
+      header = headerOf(current)
+    }
+    return false
+  }
+
   /**
    * Set (or refresh, or lift) the restriction on one Session against the Bot's current list.
    * @param {string} sessionId - the Session being resolved.
@@ -512,7 +527,11 @@ export function install(rt) {
     // A tool registered after the last apply is caught here from its definition, so a
     // renamed or aliased shell tool never needs this plugin to know its name first.
     const shell = noShell(bot) && shellCall(name, exec.arguments, definitionOf(exec))
-    if (!denied.includes(name) && !shell) return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
+    if (!denied.includes(name) && !shell) {
+      // A Solver's work call in its own chat dates its review mark (review-mark.js); it refuses nothing.
+      rt.reviewWork?.(bot, ownChatLineage(exec.agent?.id ?? exec.agent?.session?.id, exec.agent, bot), name, exec.arguments, definitionOf(exec))
+      return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
+    }
     rt.noteStop?.(exec.agent?.id ?? exec.agent?.session?.id, { why: 'tool', tool: name, callId: exec.callId }, exec.agent)
     if (noShell(bot) && (shell || reachesShell(name) || SHELL_LAUNCHERS.has(name))) {
       throw refusal(`${bot.name} has no shell, so it cannot use the ${name} tool`)

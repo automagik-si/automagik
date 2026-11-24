@@ -186,11 +186,28 @@ test('Create makes the reviewer, then the Solver with its real name, then native
   assert.equal(solver.brief, undefined)
   // The name the reviewer's create-bot returned, not the one the dialog asked for.
   assert.ok(solver.instructions.includes('Message "Solver reviewer 7" with message_bot FIRST for every review, plan and result alike (reply_to "me").'))
-  assert.ok(solver.instructions.includes('ONLY when message_bot to your reviewer fails'))
+  assert.ok(solver.instructions.includes('ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'))
   assert.doesNotMatch(solver.instructions, /no reviewer/i)
   assert.deepEqual(calls[2], ['updateBot', 's-new', { nativeTools: true }])
   assert.deepEqual(calls[3], ['send', 's-new', 'Compare two libraries'])
   assert.deepEqual(ui.created.map(bot => bot.id), ['s-new'])
+})
+
+// #2056: the host's "unreviewed" mark reads the reviewer's id, which only the dialog knows.
+test('the Solver carries its reviewer Bot\'s id: the new reviewer\'s, an existing Bot\'s, none for a fresh session', async () => {
+  const made = dialog()
+  await made.create()
+  assert.equal(made.actions.calls[1][1].reviewerId, 'r-new')
+  const existing = dialog()
+  existing.choose('bot:ann')
+  await existing.create()
+  assert.equal(existing.actions.calls.find(call => call[0] === 'createBot')[1].reviewerId, 'ann')
+  const fresh = dialog()
+  fresh.choose('fresh')
+  await fresh.create()
+  const solver = fresh.actions.calls.find(call => call[0] === 'createBot')[1]
+  assert.equal(Object.hasOwn(solver, 'reviewerId'), false)
+  assert.match(solver.instructions, /There is no reviewer Bot/)
 })
 
 test('unticked, the brief goes with the Solver and native tools are not touched', async () => {
@@ -228,7 +245,7 @@ test('(1) an existing Bot as reviewer is never deleted, whichever step fails', a
     const solver = ui.actions.calls.find(call => call[0] === 'createBot')[1]
     // An existing shared reviewer is named too, and asked first.
     assert.ok(solver.instructions.includes('Message "Ann" with message_bot FIRST for every review, plan and result alike (reply_to "me", when "queue").'))
-    assert.ok(solver.instructions.includes('ONLY when message_bot to your reviewer fails'))
+    assert.ok(solver.instructions.includes('ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'))
     assert.doesNotMatch(solver.instructions, /no reviewer/i)
     assert.match(ui.alert(), /nothing was created/i)
   }

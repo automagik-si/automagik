@@ -72,7 +72,7 @@ test('a named reviewer is asked first for the plan and the result; a fresh sessi
     const quoted = JSON.stringify(name)
     const first = `Message ${quoted} with message_bot FIRST for every review, plan and result alike ${how}.`
     assert.ok(text.includes(`Review: ${first}`), name)
-    assert.ok(text.includes('A fresh-session review is allowed ONLY when message_bot to your reviewer fails, and the delivery quotes that failure.'), name)
+    assert.ok(text.includes('A fresh-session review is allowed ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'), name)
     assert.ok(text.includes('You have a reviewer on another model or agent: never say otherwise, and never replace it with a subagent or your own review.'), name)
     // The name is written once; after it, "your reviewer".
     assert.equal(text.split(quoted).length - 1, 1, name)
@@ -98,6 +98,32 @@ test('a named reviewer\'s verdict comes later as a new message, and the turn end
     assert.ok(text.includes(`and the delivery quotes that failure. ${wait} ${early} Fresh-session review:`), name)
     assert.doesNotMatch(text, /has not answered|after your other work is done/, name)
   }
+})
+
+// #2056 (the owner's rule): a reviewer Bot that fails or hangs is replaced by a fresh, unbiased session,
+// never the Solver's own check; the delivery quotes the failure and its first line names the review that ran.
+test('a failed or hung reviewer falls back to a fresh unbiased session, never the Solver\'s own check, and the delivery names the review that ran', () => {
+  const mark = 'Its first line names the review that ran: reviewer Bot, fresh session or none.'
+  for (const [name, dedicated] of [['Ada reviewer', true], ['Ben', false], [QUOTES, false]]) {
+    const text = solverInstructions({ reviewer: name, dedicated })
+    // Fails or hangs: an error from message_bot, or a reply that it could not answer (a failed model
+    // call, stopped, deleted); the delivery quotes it.
+    assert.ok(text.includes('ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'), name)
+    // The fallback is a fresh session that shares nothing with the Solver: never its own check.
+    assert.ok(text.includes('never replace it with a subagent or your own review.'), name)
+    assert.ok(text.includes("Fresh-session review: Run each review in a fresh session that shares nothing with you: a subagent (Agent, Task or another subagent tool) given only the person's request word for word and the plan or deliverable, never your notes, reasoning or earlier reviews."), name)
+    assert.ok(text.includes('With no subagent tool, never review your own work and call it independent: deliver with the missing review named as the blocker.'), name)
+    // Every SN rule stays: named reviewer first, the verdict as a new message, the turn ends to wait,
+    // BLOCKED-review when the person asks first.
+    assert.ok(text.includes(`Message ${JSON.stringify(name)} with message_bot FIRST for every review`), name)
+    assert.ok(text.includes('Its verdict comes later as a new message: end your turn to wait for it. If the person asks for the delivery first, deliver marked BLOCKED-review.'), name)
+    assert.ok(text.includes(mark), name)
+    // The mark is part of step 10, the delivery.
+    assert.ok(text.split('\n').find(line => line.startsWith('10. Deliver:')).endsWith(mark), name)
+  }
+  const fresh = solverInstructions({ reviewer: null })
+  assert.ok(fresh.includes(mark))
+  assert.ok(fresh.includes('never review your own work and call it independent'))
 })
 
 test('with no reviewer Bot every review runs in a fresh session, and the delivery says so and names the model', () => {

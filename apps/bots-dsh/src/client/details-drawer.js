@@ -26,6 +26,7 @@ import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
 import { OWN_TOOLS_NOTICE, ownToolsNotice } from '../shared/own-tools.js'
+import { reviewMarkText } from './solver-draft.js'
 
 addStrings(nativeToolsZh)
 
@@ -379,6 +380,10 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
           h('div', { className: 'bt-section-title' }, t('Working folder')),
           h(FolderMenu, { value: bot.workDir, actions, run, wide: true, onPick: workDir => run(actions.updateBot(bot.id, { workDir })) })),
         h(NativeToolsRow, { key: 'native-tools', bot, roster, actions, run }),
+        // A Solver's last delivery: which review the host saw (#2056).
+        reviewMarkText(bot, roster) ? h('div', { key: 'review-mark', className: 'bt-drawer-model', 'data-review-mark': bot.reviewMark.review },
+          h('div', { className: 'bt-section-title' }, t('Last delivery')),
+          h('div', { className: 'bt-note' }, reviewMarkText(bot, roster))) : null,
         bot.instructions
           ? h(About, { key: 'about', text: bot.instructions })
           : h('button', { key: 'about', type: 'button', className: 'bt-more', onClick: () => setView('settings') }, t('Add instructions in Bot settings')),

@@ -6,7 +6,7 @@ import { createPayload, freshBotName, setUp, startModel } from './bot-draft.js'
 import { isRefusal } from './api.js'
 import { t } from './i18n.js'
 import { markOf } from '../shared/permission-levels.js'
-import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, solverInstructions } from '../shared/solver-method.js'
+import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, isSolverBot, solverInstructions } from '../shared/solver-method.js'
 
 // The Solver's character slot: avatar objects as the host's cleanAvatar keeps them, `{ shape }`
 // of a CHARACTERS key or `{ pet: { source: 'builtin', id, version } }`. Empty until the Solver
@@ -121,17 +121,36 @@ export function reviewerPayload({ name, look, model, workDir }) {
 
 /**
  * The Solver's create-bot payload, written once its reviewer's real name is known (`reviewer`:
- * that name, or null for fresh-session reviews; `dedicated`: made by this dialog). With native
+ * that name, or null for fresh-session reviews; `dedicated`: made by this dialog; `reviewerId`:
+ * its id, which the host's "unreviewed" mark reads, review-mark.js). With native
  * tools ticked the brief is not in the payload: it is sent after the switch (`sendBrief`), so
  * the task's first turn already runs with them.
  */
-export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, native = false }) {
+export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, native = false }) {
   const payload = createPayload({
     name, look, model, effort, sectionId, ownLook: true, avatar: avatarOfLook(look),
     brief: native ? '' : brief, role: SOLVER_DESCRIPTION, instructions: solverInstructions({ reviewer, dedicated }),
   })
   if (workDir) payload.workDir = workDir
+  if (typeof reviewer === 'string' && reviewer !== '' && typeof reviewerId === 'string' && reviewerId !== '') payload.reviewerId = reviewerId
   return { payload, ...(native && brief ? { sendBrief: brief } : {}) }
+}
+
+/**
+ * The line Details shows for a Solver's last delivery, from the host's mark (review-mark.js):
+ * which review the host saw, "plan unreviewed" or "result unreviewed" when a verdict was
+ * missing. Null for a Bot that is not a Solver or has delivered nothing yet.
+ */
+export function reviewMarkText(bot, roster) {
+  const mark = bot?.reviewMark
+  if (!isSolverBot(bot) || mark === null || typeof mark !== 'object') return null
+  if (mark.review === 'fresh') return t('Reviewed in a fresh session, which the app cannot check.')
+  if (mark.review !== 'bot') return t('Unreviewed: its reviewer is no longer on the team.')
+  const name = roster?.byId?.[bot.reviewerId]?.name ?? t('its reviewer')
+  if (mark.plan === true && mark.result === true) return t('Plan and result reviewed by {name}.', { name })
+  if (mark.result === true) return t('Plan unreviewed: {name} gave no verdict before the work started.', { name })
+  if (mark.plan === true) return t('Result unreviewed: {name} gave no verdict on the finished work.', { name })
+  return t('Plan and result unreviewed: no verdict from {name} came in time.', { name })
 }
 
 /**
@@ -172,15 +191,19 @@ export async function createSolver({ actions, before, reviewer, reviewerPayload:
   try {
     let name = null
     let dedicated = false
+    let reviewerId
     if (reviewer?.kind === 'new') {
       step = 1
-      name = (await make(firstPayload)).name ?? firstPayload.name
+      const first = await make(firstPayload)
+      name = first.name ?? firstPayload.name
+      reviewerId = first.id
       dedicated = true
     } else if (reviewer?.kind === 'bot') {
       name = reviewer.name
+      reviewerId = reviewer.botId
     }
     step = 2
-    const { payload, sendBrief } = solverPayloadFor({ reviewer: name, dedicated })
+    const { payload, sendBrief } = solverPayloadFor({ reviewer: name, dedicated, reviewerId })
     solver = await make(payload)
     if (native) {
       step = 3

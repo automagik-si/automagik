@@ -193,7 +193,7 @@ export function install(rt) {
     // what failed it. `blocked`: the facts of a failure only the user can fix (turns.js).
     // `adoptionHistoryMatches` (adopted originals only): rollback's history guard
     // (agents.js rollbackAdoption) would pass, so the menu offers rollback only then.
-    bots: Object.values(state.bots).map(({ segments, kickoff, ...bot }) => {
+    bots: Object.values(state.bots).map(({ segments, kickoff, reviewTrack, ...bot }) => {
       const tail = rt.chatTail(rt.chatOf(bot.id))
       const nativeToolsBlock = rt.nativeToolsBlock(bot)
       return {
@@ -204,6 +204,8 @@ export function install(rt) {
         ...runningOf(bot),
         ...(nativeToolsBlock === undefined ? {} : { nativeToolsBlock }),
         ...(ownTools(bot.model ?? bot.appliedModel) ? { ownTools: true } : {}),
+        // A Solver's last delivery: which review the host saw (review-mark.js).
+        ...rt.reviewMarkOf?.(bot, reviewTrack),
         ...(tail ? { lastAt: tail.lastAt, preview: tail.preview } : {}),
       }
     }),
@@ -773,7 +775,7 @@ export function install(rt) {
           await rt.bootstrap()
           // `private` and `shell` are the user's own create fields (no acting Bot here):
           // a Bot created private starts without a shell unless `shell` says otherwise.
-          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell })
+          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId })
           return ok(bot)
         }
         case 'set-bot-auto':

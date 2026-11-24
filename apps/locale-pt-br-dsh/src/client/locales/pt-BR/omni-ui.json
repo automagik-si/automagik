@@ -3676,5 +3676,13 @@
   "{name} could not be removed after the failure. Delete it in its Details.": "Não foi possível remover {name} após a falha. Exclua em Detalhes.",
   "{name} may have been created. Check the sidebar and delete it in its Details if you do not want it.": "{name} pode ter sido criado. Confira a barra lateral e exclua em Detalhes se não quiser.",
   "{name} was created, but your request was not sent: {error}": "{name} foi criado, mas o seu pedido não foi enviado: {error}",
-  "{name} was created, but your request may not have been sent: {error}": "{name} foi criado, mas o seu pedido pode não ter sido enviado: {error}"
+  "{name} was created, but your request may not have been sent: {error}": "{name} foi criado, mas o seu pedido pode não ter sido enviado: {error}",
+  "Last delivery": "Última entrega",
+  "its reviewer": "o revisor",
+  "Reviewed in a fresh session, which the app cannot check.": "Revisão em uma sessão nova, que o app não consegue verificar.",
+  "Unreviewed: its reviewer is no longer on the team.": "Sem revisão: o revisor não está mais na equipe.",
+  "Plan and result reviewed by {name}.": "Plano e resultado revisados por {name}.",
+  "Plan unreviewed: {name} gave no verdict before the work started.": "Plano sem revisão: {name} não deu veredito antes de o trabalho começar.",
+  "Result unreviewed: {name} gave no verdict on the finished work.": "Resultado sem revisão: {name} não deu veredito sobre o trabalho pronto.",
+  "Plan and result unreviewed: no verdict from {name} came in time.": "Plano e resultado sem revisão: nenhum veredito de {name} chegou a tempo."
 }

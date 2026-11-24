@@ -5,7 +5,7 @@ import { CHARACTERS, DEFAULT_COLORS, DEFAULT_SHAPES } from '../src/client/charac
 import { createPayload } from '../src/client/bot-draft.js'
 import {
   SOLVER_LOOKS, avatarOfLook, mayHaveBeenCreated, newBotBlock, reviewerChoices, reviewerName, reviewerPayload,
-  solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
+  reviewMarkText, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
 } from '../src/client/solver-draft.js'
 import { REVIEWER_INSTRUCTIONS } from '../src/shared/solver-method.js'
 
@@ -113,7 +113,7 @@ test('the Solver and reviewer payloads', () => {
   assert.deepEqual(solverPayload({ name: 'S', look, model: 'local-claude-code/sonnet' }).payload.avatar, { shape: 'moon' })
   // The dialog writes the reviewer's real name: asked first, a fresh session only after its failure.
   assert.ok(plain.payload.instructions.includes('Message "Solver reviewer" with message_bot FIRST for every review, plan and result alike (reply_to "me").'))
-  assert.ok(plain.payload.instructions.includes('ONLY when message_bot to your reviewer fails, and the delivery quotes that failure.'))
+  assert.ok(plain.payload.instructions.includes('ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'))
   assert.doesNotMatch(plain.payload.instructions, /no reviewer/i)
   const native = solverPayload({ name: 'Solver', look, model: CLAUDE, brief: 'Compare two libraries', native: true })
   assert.equal(native.payload.brief, undefined)
@@ -150,4 +150,31 @@ test('what counts as an unknown outcome, and what may have been made', () => {
   assert.deepEqual(mayHaveBeenCreated(before, fresh, ['r1']), ['Solver'])
   // By id, never by name: a Bot named like the plan that was there before is not listed.
   assert.deepEqual(mayHaveBeenCreated(new Set(['x']), { bots: [{ id: 'x', name: 'Solver' }] }), [])
+})
+
+// #2056: the reviewer's id goes with the Solver only when it has a reviewer Bot.
+test('the Solver payload carries its reviewer Bot\'s id, never for a fresh session', () => {
+  const look = { shape: 'moon', color: 'red' }
+  assert.equal(solverPayload({ name: 'S', look, model: CLAUDE, reviewer: 'Ada reviewer', dedicated: true, reviewerId: 'r1' }).payload.reviewerId, 'r1')
+  for (const extra of [{ reviewer: null, reviewerId: 'r1' }, { reviewer: 'Ada reviewer' }, { reviewer: 'Ada reviewer', reviewerId: '' }]) {
+    assert.equal(Object.hasOwn(solverPayload({ name: 'S', look, model: CLAUDE, ...extra }).payload, 'reviewerId'), false, JSON.stringify(extra))
+  }
+})
+
+// #2056: Details names which review the host saw for a Solver's last delivery.
+test('the review mark line: plan missing, result missing, both present, both missing, fresh session, none', () => {
+  const roster = { byId: { r1: { id: 'r1', name: 'Ada reviewer' } } }
+  const solver = reviewMark => ({ id: 's1', role: 'Solver', reviewerId: 'r1', reviewMark })
+  const line = mark => reviewMarkText(solver(mark), roster)
+  assert.equal(line({ review: 'bot', plan: false, result: true }), 'Plan unreviewed: Ada reviewer gave no verdict before the work started.')
+  assert.equal(line({ review: 'bot', plan: true, result: false }), 'Result unreviewed: Ada reviewer gave no verdict on the finished work.')
+  assert.equal(line({ review: 'bot', plan: true, result: true }), 'Plan and result reviewed by Ada reviewer.')
+  assert.equal(line({ review: 'bot', plan: false, result: false }), 'Plan and result unreviewed: no verdict from Ada reviewer came in time.')
+  assert.equal(line({ review: 'fresh' }), 'Reviewed in a fresh session, which the app cannot check.')
+  assert.equal(line({ review: 'none' }), 'Unreviewed: its reviewer is no longer on the team.')
+  // A reviewer renamed or gone since is "its reviewer".
+  assert.equal(reviewMarkText(solver({ review: 'bot', plan: true, result: true }), { byId: {} }), 'Plan and result reviewed by its reviewer.')
+  // Nothing before a first delivery, and nothing for a Bot that is not a Solver.
+  assert.equal(line(undefined), null)
+  assert.equal(reviewMarkText({ role: 'Helper', reviewMark: { review: 'bot', plan: true, result: true } }, roster), null)
 })

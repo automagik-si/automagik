@@ -319,7 +319,7 @@ export function install(rt) {
     return state.prefs.permission ?? (personDefault !== rt.permissionCatalog?.()?.defaultPreset ? personDefault : undefined)
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }, readScopeSource) {
+  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId }, readScopeSource) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
@@ -420,6 +420,9 @@ export function install(rt) {
         // The tools this Bot never gets, enforced on every Session it speaks from.
         ...(denied ? { denyTools: denied } : {}),
         ...(resolvedSecId ? { sectionId: resolvedSecId } : {}),
+        // The Bot that reviews a Solver's work (the New Solver dialog's choice). Cosmetic: only
+        // the "unreviewed" mark reads it (review-mark.js); it grants and refuses nothing.
+        ...(typeof reviewerId === 'string' && reviewerId !== id && rt.botOf(reviewerId) !== undefined ? { reviewerId } : {}),
         instructions: String(instructions).trim(),
         createdAt: Date.now(),
         createdBy: createdBy ?? null,
@@ -442,6 +445,7 @@ export function install(rt) {
       const opening = `${kickoff}\n${OWN_RULES}`
       const text = !main && language ? `${opening}\nWrite in ${language}.` : opening
       const bot = state.bots[id]
+      rt.reviewCreated?.(bot, Boolean(brief) && !main && !original && creator === undefined)
       const greeting = { text, from: createdBy ?? null, ...(main ? { main: true } : {}) }
       // The Bot is saved by now; a failure here must not archive it in the catch below.
       const scopeTools = () => rt.resolveAgent(id)
