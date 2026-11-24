@@ -2,10 +2,12 @@
 // rule (DESIGN Decision 3), which terminal counts among duplicates, the labels of a pane and
 // the attach refusal message. Pure: no `herdr`, so `node --test` runs it. Apache-2.0.
 
-import { BOT_LABEL, effectiveCategory, effectiveLead, isSendGrantRole, mainBotOf, projectEntriesOf } from "./model.js";
+import { BOT_LABEL, effectiveCategory, effectiveLead, isSendGrantRole, mainBotOf, roleOf } from "./model.js";
 import { ENV, guardPathWith, paneArgs, paneGuardOf, stableGuardDir, stableRootOf } from "./workers.js";
 import { envWords } from "./logins.js";
 import { hermesPairProblem, hermesPairConflict } from "./hermesPair.js";
+
+export { roleOf } from "./model.js";
 
 const SHELLS = new Set(["sh", "zsh", "bash", "fish", "dash", "ksh", "tcsh", "csh", "nu", "login"]);
 const base = (p) => String(p ?? "").split("/").pop().replace(/^-/, "");
@@ -150,33 +152,6 @@ export function leadIdOf(file, botOrId, opts = {}) {
   const botId = typeof botOrId === "string" ? botOrId : botOrId?.id;
   const bot = file?.bots?.find((b) => b.id === botId);
   return bot && (bot.kind === "member" || bot.leadProject) ? effectiveLead(file, botId, opts).lead : "";
-}
-
-/**
- * A bot pane's `role=` (A16): the main bot is `main`; a member that leads another bot (by
- * effective lead) is `captain`; else its rank. No rank: null (no label).
- */
-export function roleOf(file, botOrId, opts = {}) {
-  const botId = typeof botOrId === "string" ? botOrId : botOrId?.id;
-  const bot = file.bots.find((b) => b.id === botId);
-  if (!bot) return null;
-  if (bot === mainBotOf(file)) return "main";
-  if (file.bots.some((b) => {
-    if (b.id === botId || b.kind !== "member") return false;
-    const eff = effectiveLead(file, b.id, opts);
-    return !eff.leadProject && eff.lead === botId;
-  })) return "captain";
-  if (opts?.projects) {
-    for (const [otherKey, otherFile] of projectEntriesOf(opts.projects)) {
-      if (opts.project && otherKey === opts.project) continue;
-      for (const b of otherFile?.bots ?? []) {
-        if (!b?.leadProject) continue;
-        const eff = effectiveLead(otherFile, b.id, { project: otherKey, projects: opts.projects });
-        if (eff.lead === botId && (!opts.project || eff.leadProject === opts.project)) return "captain";
-      }
-    }
-  }
-  return bot.rank || null;
 }
 
 /**

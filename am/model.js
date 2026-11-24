@@ -723,6 +723,33 @@ export function effectiveLead(file, botId, { project = null, projects = null } =
 }
 
 /**
+ * A bot pane's `role=` (A16): the main bot is `main`; a member that leads another bot (by
+ * effective lead) is `captain`; else its rank. No rank: null (no label).
+ */
+export function roleOf(file, botOrId, opts = {}) {
+  const botId = typeof botOrId === "string" ? botOrId : botOrId?.id;
+  const bot = file.bots.find((b) => b.id === botId);
+  if (!bot) return null;
+  if (bot === mainBotOf(file)) return "main";
+  if (file.bots.some((b) => {
+    if (b.id === botId || b.kind !== "member") return false;
+    const eff = effectiveLead(file, b.id, opts);
+    return !eff.leadProject && eff.lead === botId;
+  })) return "captain";
+  if (opts?.projects) {
+    for (const [otherKey, otherFile] of projectEntriesOf(opts.projects)) {
+      if (opts.project && otherKey === opts.project) continue;
+      for (const b of otherFile?.bots ?? []) {
+        if (!b?.leadProject) continue;
+        const eff = effectiveLead(otherFile, b.id, { project: otherKey, projects: opts.projects });
+        if (eff.lead === botId && (!opts.project || eff.leadProject === opts.project)) return "captain";
+      }
+    }
+  }
+  return bot.rank || null;
+}
+
+/**
  * A bot's squad (RFC 0021 (e)): the id of the bot heading its chain of effective leads, the
  * last one before the main bot. A bot that reports to the main bot directly is its own squad,
  * whether it leads others or not. Null for the main bot, an unknown id, a file with no main bot,

@@ -20,8 +20,7 @@ import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdi
   readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { isSendGrantRole, parseBots, workerHomeOf } from "./model.js";
-import { roleOf } from "./launchArgs.js";
+import { isSendGrantRole, parseBots, roleOf, workerHomeOf } from "./model.js";
 import { dataRootOf } from "./workers.js";
 
 /** The record shape this pack writes and reads. */
