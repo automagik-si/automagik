@@ -498,7 +498,9 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
         if (marker && !retry) unlinkSync(importPath)
         if (retry || !rt.teamHealth()?.present || !rt.capabilitiesIntact()
           || [...failures.values()].some(({ state }) => ['store-failed', 'malformed', 'newer-format'].includes(state))) return
-        for (const name of all) await skillQueue(name, () => collectName(name, team))
+        for (const name of all.filter(skillName)) {
+          await skillQueue(name, () => collectName(name, team))
+        }
         writeStore(team, storage => {
           storage.sweepStaging({ olderThanMs: 30 * 60_000 })
           storage.sweepTemps(60 * 60_000)
