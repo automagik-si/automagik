@@ -12446,6 +12446,7 @@ var HOST_ZH = {
   "The skill has more than 256 files.": "技能包含的文件超过 256 个。",
   "Could not store the skill's files ({code}). Nothing was saved.": "无法存储技能文件（{code}）。未保存任何更改。",
   "This skill changed in another window. Open it again.": "此技能已在另一个窗口中更改。请重新打开。",
+  "This preview expired. Preview the skill again.": "这个预览已过期。请重新预览技能。",
   "This skill's record cannot be read by this version. Delete it, or update the app.": "此版本无法读取技能记录。请删除技能或更新应用。",
   "This proposal was made by an older version. It will be proposed again if it still applies.": "这条提案由旧版本创建。如果提案仍然适用，将再次提出。",
   "This skill is held until it passes the skill check.": "此技能暂停使用，直到通过检查。",

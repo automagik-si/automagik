@@ -15,6 +15,7 @@ export const SKILL_KEYS = Object.freeze({
   'skill.too-many-files': 'The skill has more than 256 files.',
   'skill.store-failed': "Could not store the skill's files ({code}). Nothing was saved.",
   'skill.changed-elsewhere': 'This skill changed in another window. Open it again.',
+  'skill.preview-expired': 'This preview expired. Preview the skill again.',
   'skill.record-invalid': "This skill's record cannot be read by this version. Delete it, or update the app.",
   'skill.proposal-stale': 'This proposal was made by an older version. It will be proposed again if it still applies.',
 })

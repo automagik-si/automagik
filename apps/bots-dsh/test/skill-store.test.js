@@ -161,7 +161,7 @@ test('skill-store: verifies the claimed staging hash and leaves unknown temporar
   assert.deepEqual(store.staged(token, hash)[0].bytes, fake().bytes)
   store.unstage(token, hash)
   assert.equal(fs.existsSync(join(root, '.staging', token)), false)
-  fs.mkdirSync(join(root, '.tmp', token), { recursive: true })
+  fs.mkdirSync(join(root, '.tmp', token), { recursive: true, mode: 0o700 })
   fs.writeFileSync(join(root, '.tmp', token, 'unknown'), 'keep')
   store.sweepTemps(0)
   assert.equal(fs.readFileSync(join(root, '.tmp', token, 'unknown'), 'utf8'), 'keep')
