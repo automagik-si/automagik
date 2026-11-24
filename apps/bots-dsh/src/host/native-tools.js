@@ -125,6 +125,18 @@ export function install(rt) {
     return policyBlock(bot) ?? sandboxBlock(bot)
   }
 
+  // The block a Bot the person makes now on `model` reads right after it is made (the New
+  // Solver dialog's native tick, RFC 0048): the Bot createBot builds for the user (no id, no
+  // kind, no people, shell on, no denied tools, the level it stores), read through the same
+  // policy and level as a Bot with no live Session. Read only; any throw is `level-unknown`.
+  function nativeToolsNewBotBlock(model) {
+    try {
+      const stored = rt.newBotStoredPermission()
+      const bot = { model, ...(stored === undefined ? {} : { permission: stored }) }
+      return policyBlock(bot) ?? levelBlock(defaultMode(bot))
+    } catch { return 'level-unknown' }
+  }
+
   async function saveBlock(bot) {
     const block = policyBlock(bot)
     if (block !== undefined) return block
@@ -249,7 +261,7 @@ export function install(rt) {
 
   Object.assign(rt, {
     setNativeTools, endNativeTools, endNativeSession, nativeToolsBlock, nativeToolsEligible,
-    nativeToolsBotOn,
+    nativeToolsBotOn, nativeToolsNewBotBlock,
     nativeToolsFor: sessionId =>
       nativeToolsEligible(sessionId) && nativeToolsOn(sessionBot(sessionId)),
   })

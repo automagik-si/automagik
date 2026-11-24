@@ -36,7 +36,8 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   `update-bot { nativeTools: true }` on its own when ticked (RFC 0003: the switch changes only
   through `update-bot` on its own), then, when ticked, the brief the person typed goes through
   `send` after the switch, so the task's first turn already runs with native tools (unticked, it
-  goes with `create-bot`). No endpoint is added and nothing new is stored.
+  goes with `create-bot`). No endpoint is added; the only new stored fields are the Solver review
+  mark's `reviewerId` and `reviewTrack` (under "Contracts introduced").
 - **Best-effort rollback.** A failure at the reviewer, the Solver or the switch deletes,
   newest first, only the Bots this run created (never an existing Bot chosen as reviewer, never by
   name). "Nothing was created" is said only when every failed step was a host refusal and every
@@ -105,7 +106,21 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   the predicate and never repeats the literal. The marker is cosmetic (it only chooses which
   characters are offered), so a person who renames a description to `Solver` gains nothing.
   Delivery 2's official `solver` role replaces it, and `isSolverBot` then reads both (the role tag
-  or the description), so a delivery 1 Solver keeps its characters. No new stored field.
+  or the description), so a delivery 1 Solver keeps its characters. The marker adds no stored field.
+- **Solver review mark** (delivery 1): two cosmetic stored fields. `reviewerId` is the id of the
+  Solver's reviewer Bot: the New Solver dialog sends it once with the person's `create-bot`, the
+  host keeps it only when it names another Bot on the team, a copy of the Solver keeps it, and no
+  endpoint or Bot tool changes it later. `reviewTrack` is written only by the host, per request in
+  the Solver's own chat (and the subagents under it): when the request opened, the person's last
+  message in it, its first and last work calls (a write to exactly its notes file,
+  `.solver/notes.md` in its folder, never dates the plan side), at most 4 verdicts (the last
+  whole-word SHIP, FIX-FIRST or BLOCKED in a reply from `reviewerId` that starts a line, follows
+  `Verdict:` or ends a line after a sentence, never asked, one of a list of options or inside a
+  fenced code block) and the last delivery's mark. No view carries `reviewTrack`: the owner's
+  view shows only `reviewMark`, the last mark (plan and result reviewed, plan unreviewed, result
+  unreviewed, delivered before the reviewer answered, fresh session not checked, or no reviewer),
+  and neither field is ever a caller-view field. Like the Solver marker it grants and refuses
+  nothing; delivery 1.5's hard guard keys on its own user-only field.
 - Delivery 2 adds the official role id `solver`.
 
 ## Threat model
