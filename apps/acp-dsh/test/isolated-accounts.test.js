@@ -126,7 +126,7 @@ function fixture(t, { cold, root: sharedRoot, installation, deps, onEffect } = {
   if (cold) {
     const privateRoot = join(root, 'cli-homes')
     const home = join(privateRoot, 'codex')
-    mkdirSync(home, { recursive: true })
+    mkdirSync(home, { recursive: true, mode: 0o700 })
     if (cold === 'windows') {
       windowsRecord = plantWindowsRecord(privateRoot, home, { changing: true })
     } else if (cold === 'pending' || cold === 'damaged') {
