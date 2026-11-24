@@ -233,30 +233,43 @@ test("user scan includes another session's extensionless lock and only runtime .
 
 const modulePath = (file) => new URL(`../mods/am-sidebar/${file}`, import.meta.url).pathname;
 const botId = "b-aaaaaaaaaa";
-function cliScene(t) {
+const startBotId = "b-bbbbbbbbbb";
+function cliScene(t, { writeRoutes = false } = {}) {
   const root = shortSocketDir(t, "hc-cli-");
   const env = discoveryEnv(root);
   const cwd = scratchProject(root, "team", { isGit: false, bots: { version: 1, categories: [], bots: [
     { id: botId, name: "Lead", kind: "main", agent: "claude", look: { character: "star", colour: "blue" }, role: "", instructions: "" },
+    ...(writeRoutes ? [{ id: startBotId, name: "Builder", kind: "member", agent: "claude", look: { character: "star", colour: "blue" }, role: "", instructions: "" }] : []),
   ] } });
   const bin = join(root, "bin"), log = join(root, "calls.jsonl");
   mkdirSync(bin);
   Object.assign(env, { PATH: `${bin}:${process.env.PATH}`, GIT_CEILING_DIRECTORIES: root,
     AUTOMAGIK_HERDR_NO_UPDATE: "1", HC_CALLS: log, HC_FOLDER: cwd });
   mkdirSync(env.HOME);
+  if (writeRoutes) {
+    env.HC_TEST_WRITE_ROUTES = "1";
+    for (const name of ["claude", "herdr-app"]) {
+      writeFileSync(join(bin, name), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    }
+  }
   writeFileSync(join(bin, "hc"), "#!/bin/sh\n" + `exec "${process.execPath}" "${join(bin, "hc.mjs")}" "$@"\n`, { mode: 0o755 });
   writeFileSync(join(bin, "hc.mjs"), `
 import { appendFileSync } from 'node:fs';
-const [verb] = process.argv.slice(2);
-const socket = process.env.HC_SOCKET || "";
-appendFileSync(process.env.HC_CALLS, JSON.stringify({ verb, socket }) + "\\n");
+const [verb, terminal, ...words] = process.argv.slice(2);
+const socket = process.env.HC_SOCKET ?? null;
+const writeRoutes = Boolean(process.env.HC_TEST_WRITE_ROUTES);
+appendFileSync(process.env.HC_CALLS, JSON.stringify({ verb, socket, ...(writeRoutes && verb === "label" ? { terminal, words } : {}) }) + "\\n");
 if (process.env.EXPECT_HC_SOCKET !== undefined && socket !== process.env.EXPECT_HC_SOCKET) process.exit(86);
 const pane = { address: "t1", state: "live", created_ms: 17, cwd: process.env.HC_FOLDER,
   foreground: { argv: ["claude"], cwd: process.env.HC_FOLDER }, labels: { bot: ${JSON.stringify(botId)} } };
+if (writeRoutes) pane.labels = {};
 const json = (value) => process.stdout.write(JSON.stringify(value));
-if (verb === "get") json(pane);
+if (verb === "get") json(writeRoutes && terminal === "t2"
+  ? { ...pane, address: terminal, created_ms: 18, labels: { bot: ${JSON.stringify(startBotId)} } } : pane);
 else if (verb === "ls") json({ terminals: [pane], machines: [] });
 else if (verb === "machine") json({ machines: [] });
+else if (writeRoutes && verb === "label") json({});
+else if (writeRoutes && verb === "run") json({ address: "t2" });
 else process.exit(1);
 `);
   const run = (file, args, extra) => new Promise((resolve) => {
@@ -396,6 +409,27 @@ test("explicit HC_SOCKET and the runtime default keep their own routing when a l
   assert.equal(recorded.connections(), 0);
   assert.equal(standard.connections(), 1);
   assert.equal(explicit.connections(), 1);
+});
+
+test("an empty HC_SOCKET pins attach labels to the verified core and keeps a plain start on the runtime default route", async (t) => {
+  const s = cliScene(t, { writeRoutes: true }), { env } = s;
+  const recorded = await serving(t, coreReply("lock-core"), join(s.root, "recorded"));
+  const standard = await serving(t, coreReply("default-core"), defaultSocket(env));
+  writeLock(env, recorded.path);
+
+  const attach = await s.cli(["attach", botId, "t1"], { HC_SOCKET: "" });
+  assert.equal(attach.code, 0, attach.stderr);
+  const attachCalls = s.calls();
+  const labels = attachCalls.filter(({ verb }) => verb === "label");
+  assert.ok(labels.some(({ terminal, words }) => terminal === "t1" && words.includes(`bot=${botId}`)));
+  assert.ok(labels.every(({ socket }) => socket === standard.path));
+  assert.equal(JSON.parse(readFileSync(attachPath(env.HERDR_APP_HOME), "utf8").trim()).core, "default-core");
+
+  const start = await s.cli(["start", startBotId], { HC_SOCKET: "" });
+  assert.equal(start.code, 0, start.stderr);
+  assert.deepEqual(s.calls().slice(attachCalls.length).filter(({ verb }) => verb === "run"), [{ verb: "run", socket: "" }]);
+  assert.ok(attachCalls.every(({ socket }) => socket === standard.path));
+  assert.equal(recorded.connections(), 0);
 });
 
 test("briefing keeps an explicit HC_SOCKET when an extensionless lock also answers", async (t) => {

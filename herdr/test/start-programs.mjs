@@ -9,6 +9,7 @@ import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { attachPath } from "../mods/am-sidebar/attach.js";
+import { recordFileOf } from "../mods/am-sidebar/approved.js";
 import { loginFixture, loginPointerFixture, privateFixtureHome } from "./login-fixture.mjs";
 import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 
@@ -149,8 +150,22 @@ export function startProgramsTests(cli) {
       assert.equal(r.stderr.trim(), "am: A linked machine can't carry this computer's Bot login; start the bot on that machine. (linked-machine)");
       assert.deepEqual(s.calls().filter((c) => ["run", "kill"].includes(c[0])), []);
       // Identifying the launch agent requires reading the project on the linked machine.
-      const probes = s.calls().filter((c) => c[0] === "exec").map((c) => c.slice(c.indexOf("--") + 1, c.indexOf("--") + 3).join(" "));
-      assert.ok(probes.every((p) => p === `test -d` || p === "git rev-parse"), JSON.stringify(probes));
+      const remoteExec = ["exec", "--json", "--on", "vm"];
+      const projectProbes = [
+        [...remoteExec, "--", "test", "-d", s.project],
+        [...remoteExec, "--cwd", s.project, "--", "git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+      ];
+      // The setup attach looks up the project, then checks the approval path and mode twice.
+      const approvalExec = ["exec", "--json", "--timeout", "10", "--on", "vm", "--", "sh", "-c"];
+      const approvalProbes = [
+        [...approvalExec, 'CDPATH= cd -- "$1" && pwd -P && printf "%s\\n" "${XDG_DATA_HOME-}" "${HOME-}"', "sh", s.project],
+        [...approvalExec, 'if ! entry=$(LC_ALL=C ls -d -- "$1" 2>&1); then '
+          + 'case "$entry" in *": No such file or directory") exit 3;; *) exit 1;; esac; fi; '
+          + '[ -f "$1" ] && [ ! -L "$1" ] || exit 1; stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1"',
+        "sh", recordFileOf(s.project, { HOME: join(s.root, "remote") })],
+      ];
+      const setupProbes = action === "start" ? [] : [...projectProbes, ...approvalProbes, ...approvalProbes];
+      assert.deepEqual(s.calls().filter((c) => c[0] === "exec"), [...setupProbes, ...projectProbes]);
     });
   }
 
