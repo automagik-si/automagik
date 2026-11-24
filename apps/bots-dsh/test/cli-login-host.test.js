@@ -729,3 +729,84 @@ test('Antigravity signed in: the model chosen with the entry is applied, as for 
   await h.ready(AGY)
   assert.deepEqual(h.updates, [['a', { model: `${AGY}/gemini` }]])
 })
+
+// MY-3 (#2061, RFC 0030 Handoff note): a pick on another harness signed in while the Bot's chat
+// runs a reply never stops that reply. It waits for the reply to end, still reading pending,
+// beside the choices that apply at once, and the subscription move still comes after them all.
+function replying(h, running) {
+  const idle = Promise.withResolvers()
+  h.rt.config = { crossingWaitMs: 2000 }
+  h.rt.chatOf = id => `chat-${id}`
+  h.rt.replyRunning = id => running.has(id)
+  h.rt.agentNameOf = ref => ({ 'acp-codex/default': 'Codex' })[ref] ?? ref
+  h.rt.resolveAgent = async () => ({ whenIdle: () => idle.promise })
+  const moved = []
+  h.rt.moveSubscriptionBots = () => moved.push([...h.updates])
+  return { idle, moved }
+}
+
+test('MY-3 a crossing pick waits for the running reply while the idle Bot\'s pick applies at once', async () => {
+  const h = fixture()
+  const running = new Set(['a'])
+  const { idle, moved } = replying(h, running)
+  await h.actions['cli-login-start']({ botId: 'a', provider: 'acp-codex', model: 'acp-codex/default' })
+  await h.actions['cli-login-start']({ botId: 'b', provider: 'acp-codex', model: 'acp-codex/default' })
+  h.emit('acp-dsh/login-ready', { id: 'acp-codex' })
+  await settle()
+  await settle()
+  assert.deepEqual(h.updates, [['b', { model: 'acp-codex/default' }]])
+  assert.deepEqual((await h.actions['cli-login-current']({ botId: 'a', provider: 'acp-codex' })).attempt.choice, { ref: 'acp-codex/default', state: 'pending' })
+  assert.deepEqual(moved, [], 'the subscription move waits for every choice')
+  running.delete('a')
+  idle.resolve()
+  for (let at = Date.now(); moved.length === 0 && Date.now() - at < 2000;) await settle()
+  // Applied as an idle pick: no stopReply, the reply was never cut.
+  assert.deepEqual(h.updates, [['b', { model: 'acp-codex/default' }], ['a', { model: 'acp-codex/default' }]])
+  assert.deepEqual((await h.actions['cli-login-current']({ botId: 'a', provider: 'acp-codex' })).attempt.choice, { ref: 'acp-codex/default', state: 'applied' })
+  assert.deepEqual(moved, [[['b', { model: 'acp-codex/default' }], ['a', { model: 'acp-codex/default' }]]])
+})
+
+test('MY-3 a reply that outlasts the bound leaves the pick to the menu, with the reply-running sentence', async () => {
+  const h = fixture()
+  const { moved } = replying(h, new Set(['a']))
+  h.rt.config = { crossingWaitMs: 20 }
+  await h.actions['cli-login-start']({ botId: 'a', provider: 'acp-codex', model: 'acp-codex/default' })
+  h.emit('acp-dsh/login-ready', { id: 'acp-codex' })
+  for (let at = Date.now(); moved.length === 0 && Date.now() - at < 2000;) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(h.updates, [])
+  assert.deepEqual((await h.actions['cli-login-current']({ botId: 'a', provider: 'acp-codex' })).attempt.choice, {
+    ref: 'acp-codex/default', state: 'failed', message: 'This stops the current reply and continues on Codex.', kept: 'deepseek/v4',
+  })
+})
+
+test('MY-3 Antigravity: a crossing pick waits for the reply; with acp_tool denied it is refused before any wait', async () => {
+  {
+    const h = agyFixture()
+    const running = new Set(['a'])
+    const { idle, moved } = replying(h, running)
+    await h.actions['cli-login-start']({ botId: 'a', provider: AGY, model: `${AGY}/gemini` })
+    h.emit('acp-dsh/login-ready', { id: AGY })
+    await settle()
+    assert.deepEqual(h.updates, [])
+    assert.equal(h.rt.cliLoginChoice('a', AGY).state, 'pending')
+    running.delete('a')
+    idle.resolve()
+    for (let at = Date.now(); moved.length === 0 && Date.now() - at < 2000;) await settle()
+    assert.deepEqual(h.updates, [['a', { model: `${AGY}/gemini` }]])
+  }
+  {
+    const h = agyFixture()
+    replying(h, new Set(['a']))
+    h.bots.a.denyTools = ['acp_tool']
+    h.rt.resolveAgent = async () => assert.fail('a refused choice never waits')
+    h.rt.assertOwnToolsModel = (bot, { next, denyTools }) => {
+      if (denyTools?.includes('acp_tool') && next.startsWith(`${AGY}/`)) throw Object.assign(new Error('This Bot denies acp_tool, and this model runs its own tools anyway.'), { code: 'bot/refused' })
+    }
+    await h.actions['cli-login-start']({ botId: 'a', provider: AGY, model: `${AGY}/gemini` })
+    await h.ready(AGY)
+    assert.deepEqual(h.updates, [])
+    const choice = h.rt.cliLoginChoice('a', AGY)
+    assert.equal(choice.state, 'failed')
+    assert.match(choice.message, /denies acp_tool/)
+  }
+})

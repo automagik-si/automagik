@@ -22,9 +22,13 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // Only the Bot's own chat counts: a group seat or a task runs the same model, but its turns say
 // nothing about the switch made in the chat.
 import { turnFailure } from './turns.js'
+import { OWN_TOOLS_MODEL_TEXT } from '../shared/own-tools.js'
 
 export const MODEL_ACCESS_REQUIRED = 'MODEL_ACCESS_REQUIRED'
 export const SWITCH_FAILED = 'MODEL_SWITCH_COMPACTION_FAILED'
+// An agent switch, or its way back, stopped because the Bot denies acp_tool and the model it
+// would run on runs its own tools (#2026).
+export const OWN_TOOLS_SWITCH = 'MODEL_OWN_TOOLS_DENIED'
 // The failures that say the model a Bot was just switched to cannot run its conversation.
 // Any other failure (a provider down, a timeout) keeps the pick: the fallback answers it.
 export const SWITCH_CODES = new Set([SWITCH_FAILED, MODEL_ACCESS_REQUIRED])
@@ -90,10 +94,20 @@ export function install(rt) {
   // words the same codes in the interface language; this is the English and the log's.
   function failureText(code, failed, kept, failure) {
     const stays = kept ? ` It stays on ${kept}.` : ''
+    if (code === OWN_TOOLS_SWITCH) return OWN_TOOLS_MODEL_TEXT
     if (code === SWITCH_FAILED) return `${failed} could not take over this conversation.${stays}`
     if (code === MODEL_ACCESS_REQUIRED) return `${failed} needs a sign-in before it can answer.${stays}`
     const message = typeof failure?.message === 'string' && failure.message !== '' ? `: ${failure.message.slice(0, 200)}` : ''
     return `${failed ?? 'The model'} did not answer (${code}${message}).${stays}`
+  }
+
+  // An agent switch in the Bot's own chat that did not take over (parts.js): the Bot never
+  // left its model, so nothing is reverted; the person reads why. `code` and `text` name
+  // another reason than the generic one (the acp_tool rule).
+  function noteSwitchFailed(bot, target, kept, { code = SWITCH_FAILED, text } = {}) {
+    if (bot === undefined) return
+    stateOf(bot.id).lastFailure = { code, text: text ?? failureText(code, target, kept), ...(target ? { ref: target } : {}), ...(kept ? { kept } : {}), at: Date.now() }
+    rt.warn('ds-bot: %s did not switch to %s (%s); it stays on %s', bot.name, target, code, kept)
   }
 
   function restore(bot, failure) {
@@ -139,6 +153,8 @@ export function install(rt) {
       case 'turn/end': {
         const reason = event.data?.reason
         if (reason?.kind !== 'error') break
+        // The outgoing agent's handoff-note turn is never the Bot's reply (parts.js).
+        if (rt.handoffNoteTurn?.(session.id, event.data?.turn)) break
         const failure = turnFailure(reason.error)
         const entry = stateOf(botId)
         entry.lastFailure = { code: failure.code, text: failureText(failure.code, bot.model, undefined, failure), ...(bot.model ? { ref: bot.model } : {}), at: event.time ?? Date.now() }
@@ -160,6 +176,7 @@ export function install(rt) {
 
   const viewOf = (bot) => {
     const entry = states.get(bot.id) ?? {}
+    const switching = rt.switchingChat?.(bot.id, { crossing: true })
     return {
       selected: bot.model ?? null,
       previousModel: bot.previousModel ?? null,
@@ -169,6 +186,8 @@ export function install(rt) {
       // Derived: an answer on the model the Bot is on now.
       answered: entry.lastAnswer !== undefined && entry.lastAnswer.ref === bot.model,
       pending: switchPending(bot),
+      // An agent switch in the Bot's own chat under way: the chat's composer is locked.
+      ...(switching ? { switching } : {}),
     }
   }
   // Per Bot, for every state answer: no sign-in check here (that spawns a CLI).
@@ -181,5 +200,5 @@ export function install(rt) {
     return { ...viewOf(bot), ...(access === undefined ? {} : { access }) }
   }
 
-  Object.assign(rt, { noteModelChoice, revertModel, modelStateView, modelStateOf })
+  Object.assign(rt, { noteModelChoice, revertModel, noteSwitchFailed, modelStateView, modelStateOf })
 }

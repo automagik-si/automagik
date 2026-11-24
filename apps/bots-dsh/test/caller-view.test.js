@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { CALLER_BOT_KEYS } from '../src/host/caller-view.js'
-import { REPLY_KIND } from '../src/host/constants.js'
+import { CALLER_BOT_KEYS, closesPart } from '../src/host/caller-view.js'
+import { REPLY_KIND, SOURCE_KIND } from '../src/host/constants.js'
 import { allowlist, code, fixture, guest, member, owners, stranger } from './caller-fixture.js'
 
 const page = value => Buffer.from(JSON.stringify(value)).toString('base64url')
@@ -150,4 +150,12 @@ test('V8 no turn is inferred farther back than twenty pages', async t => {
   assert.deepEqual((await f.rt.callerChat(member, 'b')).items, [])
   assert.equal(f.reads.length, 21)
   assert.deepEqual(f.verificationReads, [part])
+})
+
+// #2061: the outgoing agent's handoff-note request before an agent switch is Omni's own, hidden
+// turn; it never closes a shared Bot's caller part.
+test('a handoff-note request closes no caller part', () => {
+  const request = role => ({ type: 'user/message', data: { source: { kind: SOURCE_KIND, form: 'relay', role, exchangeId: 'e1' } } })
+  assert.equal(closesPart(request('handoff-note')), false)
+  assert.equal(closesPart(request('request')), true)
 })

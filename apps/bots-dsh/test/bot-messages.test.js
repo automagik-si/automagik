@@ -11,7 +11,7 @@ import { apply } from '../index.js'
 import { fakeAttachments, fakeContext } from './fake-ctx.js'
 import { install as installTurns } from '../src/host/turns.js'
 import { install as installParts } from '../src/host/parts.js'
-import { HANDOFF_ACK, SOURCE_KIND } from '../src/host/constants.js'
+import { HANDOFF_ACK, SOURCE_KIND, SWITCH_CUT } from '../src/host/constants.js'
 import { estimateTokens } from '../src/host/text.js'
 
 let rt
@@ -1654,4 +1654,40 @@ test('a turn opened by a no-reply message is hidden from the user', () => {
   emit('b', 'user/message', { content: textBlock('[Message from Omni · the user sees your reply here]\nsay hi'), source: replySource('request', { exchangeId: 'n2', noReply: true, audience: 'user' }) })
   emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
   assert.deepEqual(rt.state.exchangeTurns.b, [1])
+})
+
+// T13 (#2061, MX-10): a turn the person's agent switch cut (SWITCH_CUT) goes on with the new
+// agent, so its sender is never told it was stopped, and the requests that joined it go back.
+test('a request in a turn cut for an agent switch is not told "stopped"; what joined is handed back', () => {
+  const { rt, emit, delivered } = turnsHost()
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni]\ntask'), source: replySource('request', { exchangeId: 'e0' }) })
+  emit('b', 'assistant/message', assistantText('half'))
+  emit('b', 'user/message', { content: textBlock('[Message from Omni]\nlater'), source: replySource('reply', { exchangeId: 'e9', work: 'w-other', replyTo: 'r1' }) })
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook', reason: SWITCH_CUT } } })
+  assert.equal(delivered.some(job => /was stopped before it could answer/.test(job.text ?? '')), false)
+  assert.equal(delivered.some(job => job.replyTo === 'e0'), false)
+  assert.deepEqual(delivered.filter(job => job.exchangeId === 'e9').map(job => [job.toId, job.deferred]), [['b', true]])
+  void rt
+})
+
+// T4 (MX-2, MX-11): the outgoing agent's handoff-note turn is hidden and is never a reply: no
+// answer, no failure row, even when it fails.
+test('a handoff-note turn is hidden and answers nobody, even when it fails', () => {
+  for (const reason of [{ kind: 'completed' }, { kind: 'error', error: { code: 'SERVER', message: 'down' } }]) {
+    const { rt, emit, delivered } = turnsHost()
+    const noted = []
+    const failures = []
+    rt.markNoteTurn = (id, turn) => noted.push([id, turn])
+    rt.handoffNoteTurn = (id, turn) => noted.some(([seen, at]) => seen === id && (turn === undefined || at === turn))
+    rt.noteFailure = entry => failures.push(entry)
+    emit('b', 'turn/start', { turn: 4 })
+    emit('b', 'user/message', { content: textBlock('write a handoff note'), source: { kind: SOURCE_KIND, form: 'relay', role: 'handoff-note', exchangeId: 'e-note', senderName: 'Omni' } })
+    emit('b', 'assistant/message', assistantText('## Goals\n- carry on'))
+    emit('b', 'turn/end', { turn: 4, reason })
+    assert.deepEqual(noted, [['b', 4]], reason.kind)
+    assert.deepEqual(rt.state.exchangeTurns.b, [4], reason.kind)
+    assert.deepEqual(delivered, [], reason.kind)
+    assert.deepEqual(failures, [], reason.kind)
+  }
 })

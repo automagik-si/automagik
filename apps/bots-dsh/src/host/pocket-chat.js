@@ -308,11 +308,13 @@ const globalOnly = bot => bot?.project == null
  *   fileUploads?: () => any, attachmentStore?: () => any,
  *   groups?: import('./pocket-groups.js').GroupSource,
  *   stopOf?: (sessionId: string, turn: number) => string | undefined,
- *   carriesSignInCode?: (text: string) => boolean }} options
+ *   carriesSignInCode?: (text: string) => boolean, switching?: (botId: string) => boolean }} options
  */
 export class DshChatSource {
-  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules, settings, fileUploads, attachmentStore, groups }) {
+  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, management, schedules, settings, fileUploads, attachmentStore, groups, switching = () => false }) {
     Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf, fileUploads, attachmentStore })
+    /** Whether a Bot's own chat is switching agents (parts.js): a send then waits, as queued. Never throws. */
+    this.switching = (botId) => { try { return switching(botId) === true } catch { return false } }
     /** Whether a text carries a Claude sign-in code the computer showed (cli-login.js). Never throws. */
     this.carriesSignInCode = (text) => { try { return carriesSignInCode(text) === true } catch { return false } }
     /** Writes need the adapter's prompt and cancel, and the answerer listeners wired (install). */
@@ -851,6 +853,8 @@ export class DshChatSource {
     if (!live() || signal.aborted) return refused('not-watching', { id })
     let running = entry.running === true
     try { running = (await this.adapter.state(entry.sessionId, signal))?.running === true } catch {}
+    // During an agent switch the message waits for the new agent, behind the handoff.
+    if (entry.botId !== undefined && this.switching(entry.botId)) running = true
     if (!live() || signal.aborted) return refused('not-watching', { id })
     try {
       await this.adapter.prompt(entry.sessionId, { requestId, text: cleaned.text }, signal)
@@ -1206,6 +1210,7 @@ export function install(rt) {
         fileUploads: () => ctx.get?.('fileUploads'), attachmentStore: () => ctx.get?.('attachments'),
         stopOf: (id, turn) => rt.stopLineOfTurn?.(id, turn),
         carriesSignInCode,
+        switching: botId => Boolean(rt.switchingChat?.(botId, { crossing: true })),
       })
       socket = await startPocketSocket({ home: rt.home, source, log })
     })().catch((error) => {

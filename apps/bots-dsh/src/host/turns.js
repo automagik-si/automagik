@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import { closesPart } from './caller-view.js'
-import { HANDOFF_ACK, LATE_ANSWER, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, STEER_CUT, cutByUpdate } from './constants.js'
+import { HANDOFF_ACK, LATE_ANSWER, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
 import { splitRef, textOf } from './text.js'
@@ -565,6 +565,13 @@ export function install(rt) {
   // package that only opens a part is acknowledged with a fixed line, also hidden.
   const claimTrigger = (sessionId, entry, info) => {
     entry.info = info
+    // The outgoing agent's handoff note before an agent switch (parts.js): a turn of its own,
+    // hidden, that is never a reply. It closes no caller part.
+    if (info.role === 'handoff-note') {
+      rt.markNoteTurn?.(sessionId, entry.turn)
+      markExchangeTurn(sessionId, entry.turn, { close: false })
+      return
+    }
     // A turn that was stopped for a part switch brings its joined requests along.
     if (Array.isArray(info.joined) && info.joined.length > 0) {
       entry.joined = info.joined.filter(item => item?.info !== undefined && item.info !== null)
@@ -1122,6 +1129,11 @@ export function install(rt) {
         entry.cut = undefined
         const steerCut = cut !== undefined && event.data?.reason?.kind === 'aborted'
           && event.data.reason.reason?.kind === 'hook' && event.data.reason.reason.reason === STEER_CUT
+        // A reply the person's agent switch stopped (SWITCH_CUT) goes on with the new agent: like
+        // a turn stopped for a part switch, nothing is answered, delivered or failed for it.
+        const switchCut = switchCutBy(event.data?.reason)
+        // Read before the turn is cleared below: the outgoing agent's handoff-note turn.
+        const noteTurn = rt.handoffNoteTurn?.(id, entry.turn ?? event.data?.turn) === true
         if (steerCut) {
           entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0 }
         }
@@ -1136,7 +1148,7 @@ export function install(rt) {
         const toolCount = entry.toolCount ?? 0
         const suppressedSubagent = entry.suppressedSubagent === true
         // A turn stopped for a switch goes on in the next part, which answers instead.
-        const switched = entry.switched === true
+        const switched = entry.switched === true || switchCut
         // A turn the plugin watched start. A turn/end replayed after a restart, whose
         // turn is settled from the Session's log, is not one (resume.js does that).
         const watched = entry.turn !== undefined
@@ -1161,6 +1173,7 @@ export function install(rt) {
         const later = entry.later ?? []
         entry.later = []
         if (steerCut || suppressedSubagent) break
+        // A handoff-note turn hands back what joined it, below, and is otherwise no reply.
         // The web self-update stopped this turn at the click (UPDATE_CUT): nothing is answered for it, and resume.js
         // picks it up after the supervisor's verdict. The requests that joined it go with its note.
         const updateCut = cutByUpdate(event.data?.reason)
@@ -1181,6 +1194,8 @@ export function install(rt) {
             deferred: true,
           }).catch(error => rt.warn('omni-ui: handing back a result failed: %s', error))
         }
+        // No failure row, no failed state, no answer to a sender and no Pocket notice for it.
+        if (noteTurn) break
         const reason = event.data?.reason
         const failure = reason?.kind === 'error' && !switched ? turnFailure(reason.error) : undefined
         if (failure !== undefined) noteTurnFailure(id, failure)

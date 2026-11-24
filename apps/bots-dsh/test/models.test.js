@@ -1046,3 +1046,24 @@ test('with only Antigravity on, the default model is its first named model', asy
   install(rt)
   assert.equal(await rt.defaultModel(), 'acp-antigravity/gemini-3-pro')
 })
+
+// T12 (#2061, MW-3): a group conversation whose history ran on another harness keeps its route
+// when the Bot's model moves: no in-place selection, and the fallback's way back refuses it too.
+test('a group Session with history on another harness is not moved across in place', async () => {
+  const { rt, selected } = bench()
+  const bot = { id: 'b1', name: 'Ops', model: 'deepseek/v4-flash' }
+  rt.state.bots.b1 = bot
+  rt.groupSessionsOf = () => ['g-history', 'g-empty']
+  rt.crossingHistory = async (sessionId, ref) => sessionId === 'g-history' && ref === 'deepseek/v4-flash'
+  await rt.applyModel(bot, { force: true })
+  assert.deepEqual(selected, ['b1:deepseek/v4-flash', 'g-empty:deepseek/v4-flash'])
+  Object.assign(rt, {
+    load: async () => {}, isBotSession: () => true, selfOf: () => 'b1', botOf: () => bot,
+    groupOwners: new Map([['g-history', { botId: 'b1', roomId: 'r1' }], ['g-empty', { botId: 'b1', roomId: 'r1' }]]),
+  })
+  const picks = []
+  const agent = id => ({ session: { id, requestHeader: () => undefined }, model: { select: route => picks.push([id, route]) } })
+  assert.equal(await rt.reselectOwnRoute(agent('g-history'), () => true), false)
+  assert.equal(await rt.reselectOwnRoute(agent('g-empty'), () => true), true)
+  assert.deepEqual(picks.map(([id]) => id), ['g-empty'])
+})
