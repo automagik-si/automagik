@@ -23,6 +23,9 @@ import { stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
 import { loginFixture, loginPointerFixture, privateFixtureHome } from "./login-fixture.mjs";
 import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 import { startProxy } from "../mods/am-sidebar/hcProxy.mjs";
+import { OWNER_QUESTION_LABEL } from "../mods/am-sidebar/hcGuard.mjs";
+import { NEEDS_OWNER_LABEL } from "../mods/am-sidebar/tidy.js";
+import { OWNER_QUESTION_LINE } from "../mods/am-sidebar/briefingText.mjs";
 import { startFakeCore } from "./fake-hc-core.mjs";
 import { fixturePaneEdit } from "./fixture-pane-edit.mjs";
 import { readJsonLines } from "./log-lines.mjs";
@@ -244,8 +247,19 @@ const withoutPerson = (words) => {
 };
 const DONE_LINE = "Before you report done: commit or discard every change you made and leave the worktree "
   + "clean (`git status --porcelain` prints nothing).";
-const withoutDone = (words) => words.map((w) => typeof w === "string" && w.endsWith(`\n\n${DONE_LINE}`)
-  ? w.slice(0, -(DONE_LINE.length + 2)) : w);
+// #2057: the needs-owner rule every non-Hermes worker task carries before the done line,
+// written out (never imported), so a wording change shows here.
+const OWNER_LINE = "Waiting on the person: when you end your turn because only the person can unblock you (a "
+  + "question or a choice, not a permission prompt), ask it in your reply and also mark your own "
+  + "pane so the Herdr sidebar shows a Question, with a short paraphrase in single quotes and no "
+  + "apostrophe, e.g. `hc label \"$HC_TERMINAL_ID\" 'automagik-herdr.needs-owner=Which release should "
+  + "ship?'`. For each new question, set it again with the new paraphrase. Clear it with `hc label "
+  + "\"$HC_TERMINAL_ID\" automagik-herdr.needs-owner=` as soon as you work again or the question is "
+  + "withdrawn. A question your lead bot can answer: ask it in your reply, without the label. If "
+  + "HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
+const TAIL = `${OWNER_LINE}\n\n${DONE_LINE}`;
+const withoutDone = (words) => words.map((w) => typeof w === "string" && w.endsWith(`\n\n${TAIL}`)
+  ? w.slice(0, -(TAIL.length + 2)) : w);
 const after = (args) => {
   const argv = runArgv(args);
   assert.equal(argv[0], "/usr/bin/env", `an agent worker runs under /usr/bin/env PATH=…: ${JSON.stringify(argv)}`);
@@ -1079,11 +1093,11 @@ test("worker #1032: a Kimi worker starts bare and gets its task as its first mes
   assert.deepEqual(out.argv.slice(-1), ["kimi"]);
   // The task goes in once, as a message to the new pane; hc wait comes first (a send to a
   // booting agent can be dropped), both after hc run.
-  assert.deepEqual(s.hcState().sent, [{ to: out.terminal, text: `${TASK}\n\n${DONE_LINE}` }]);
+  assert.deepEqual(s.hcState().sent, [{ to: out.terminal, text: `${TASK}\n\n${TAIL}` }]);
   const order = s.calls().filter((c) => ["run", "wait", "send"].includes(c[0])).map((c) => c[0]);
   assert.deepEqual(order, ["run", "wait", "send"]);
   assert.deepEqual(s.calls().find((c) => c[0] === "wait").slice(0, 2), ["wait", out.terminal]);
-  assert.deepEqual(s.calls().find((c) => c[0] === "send"), ["send", out.terminal, `${TASK}\n\n${DONE_LINE}`]);
+  assert.deepEqual(s.calls().find((c) => c[0] === "send"), ["send", out.terminal, `${TASK}\n\n${TAIL}`]);
   assert.deepEqual(out.warnings, [], r.err);
 
   // A send hc refuses (the pane waits for a sign-in or a trust answer, or has ended): the worker
@@ -2913,6 +2927,162 @@ test("worker #1278 cause 5: a worker's task prompt sends it back with a clean wo
   assert.match(words.at(-1), /git status --porcelain/);
 });
 
+// ---- #2057: the needs-owner Question chip in every worker's task ----
+
+/** The tail a worker task ends with (#2057): the owner line, then the done line, last. */
+const OWNER_TAIL = `\n\n${OWNER_LINE}\n\n${DONE_LINE}`;
+/** A Hermes worker's tail (#1747, the lead's ruling Q-1): the done line only. */
+const DONE_TAIL = `\n\n${DONE_LINE}`;
+
+test("worker #2057: every worker's task teaches the needs-owner Question chip, before the clean-worktree line", (t) => {
+  // The worker line is the bot line (briefingText.mjs) with exactly the two added sentences.
+  const S1 = "For each new question, set it again with the new paraphrase. ";
+  const S2 = "A question your lead bot can answer: ask it in your reply, without the label. ";
+  assert.equal(OWNER_QUESTION_LINE.split("ship?'`. ").length, 2);
+  assert.equal(OWNER_QUESTION_LINE.split("withdrawn. ").length, 2);
+  assert.equal(OWNER_QUESTION_LINE.replace("ship?'`. ", `ship?'\`. ${S1}`).replace("withdrawn. ", `withdrawn. ${S2}`),
+    OWNER_LINE, "the worker line is the bot line plus the two sentences");
+  assert.equal(OWNER_LINE.includes("\n"), false, "one line");
+  // Its only two apostrophes are the single quotes around the example's text.
+  assert.equal(OWNER_LINE.split("'").length - 1, 2);
+  assert.equal(/'([^']*)'/.exec(OWNER_LINE)[1], `${NEEDS_OWNER_LABEL}=Which release should ship?`);
+  const keys = [...OWNER_LINE.matchAll(/hc label "\$HC_TERMINAL_ID" '?([^='\s]+)=/g)].map((m) => m[1]);
+  assert.equal(keys.length, 2, "one set, one clear");
+  for (const key of keys) {
+    assert.equal(key, NEEDS_OWNER_LABEL, "the key the sidebar reads (tidy.js)");
+    assert.equal(key, OWNER_QUESTION_LABEL, "the one key the hc guard lets a caller set on its own pane");
+  }
+  const s = scene(t);
+  for (const [args, what] of [[[], "the default agent"], [["--template", "dev-sol"], "a codex template"],
+    [["--template", "opus-rev"], "a Claude template"]]) {
+    const r = s.cli(["worker", "do it", "--branch", `fix/owner-${s.runs().length}`, ...args, "--json"]);
+    assert.equal(r.code, 0, `${what}: ${r.err}`);
+    const word = s.runs().at(-1).at(-1);
+    assert.equal(word, `do it${OWNER_TAIL}`, what);
+    assert.equal(word.endsWith(`\n\n${DONE_LINE}`), true, `${what}: the done line stays last`);
+  }
+});
+
+test("worker #2057: every agent's worker task carries the SAME tail", async (t) => {
+  const TASK = "review the login form";
+  const stub = (s, ...names) => { for (const n of names) exe(join(s.root, "bin", n), "#!/bin/sh\nexit 0\n"); };
+  const withWorker = (worker, extra = {}) => {
+    const file = team();
+    Object.assign(file.bots[2], extra);
+    if (worker === null) delete file.bots[2].worker;
+    else if (worker !== undefined) file.bots[2].worker = worker;
+    return file;
+  };
+  /** An hc run started by the CLI: its words, and the sends hc saw (none for an argv route). */
+  const started = (s, args, { env = {} } = {}) => {
+    const r = s.cli(["worker", TASK, ...args, "--json"], { env });
+    assert.equal(r.code, 0, r.err);
+    return { words: s.runs().at(-1), sends: (s.hcState().sent ?? []).map((m) => m.text) };
+  };
+  // One table: every route that hands a task to an agent. `before` is the word the prompt
+  // follows on its route; `hermes` rows carry the done line only (#1747, ruling Q-1).
+  const ROUTES = [
+    { row: "1a plain claude, fresh with --session-id", run: (s) => started(s, ["--branch", "r/1a", "--agent", "claude"]) },
+    { row: "1b plain codex, with grants", run: (s) => started(s, ["--branch", "r/1b", "--agent", "codex"]) },
+    { row: "1c plain omp", run: (s) => { stub(s, "omp"); return started(s, ["--branch", "r/1c", "--agent", "omp"]); } },
+    { row: "1d plain hermes", hermes: true,
+      run: (s) => { stub(s, "hermes"); return started(s, ["--branch", "r/1d", "--agent", "hermes"]); } },
+    { row: "1e template form, a template running hermes in a shell", hermes: true, templateForm: true,
+      templates: [...TEMPLATES, { name: "herm", command: "bash -lc 'hermes'" }],
+      run: (s) => started(s, ["--branch", "r/1e", "--template", "herm"]) },
+    { row: "1f plain, a programs.json agent running hermes", hermes: true,
+      run: (s) => {
+        stub(s, "hermes");
+        writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { "my-hermes": { run: ["hermes"] } } }));
+        return started(s, ["--branch", "r/1f", "--agent", "my-hermes"]);
+      } },
+    { row: "1g plain, a programs.json agent running hermes-agent through uvx (QS-1)", hermes: true,
+      run: (s) => {
+        stub(s, "uvx");
+        writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { "my-hermes": { run: ["uvx", "hermes-agent"] } } }));
+        return started(s, ["--branch", "r/1g", "--agent", "my-hermes"]);
+      } },
+    { row: "2 plain antigravity", before: "-i", run: (s) => started(s, ["--branch", "r/2", "--agent", "antigravity"]) },
+    { row: "3 plain dsh-tui", before: "--",
+      run: (s) => { stub(s, "dsh-tui"); return started(s, ["--branch", "r/3", "--agent", "dsh-tui"]); } },
+    { row: "4 dsh-tui, proxy off (paneArgs)", before: "--", file: withWorker(null, { agent: "dsh-tui", hcProxy: false }),
+      run: (s) => {
+        stub(s, "dsh-tui");
+        return started(s, ["--branch", "r/4"], { env: { PATH: `${s.root}/bin:/usr/bin:/bin`, AM_HC_PROXY: "1" } });
+      } },
+    { row: "5 template form, a codex template", templateForm: true, run: (s) => started(s, ["--branch", "r/5", "--template", "dev-sol"]) },
+    { row: "5b template form, a template whose agent can't be told", templateForm: true,
+      templates: [...TEMPLATES, { name: "shell-codex", command: "bash -lc 'codex'" }],
+      run: (s) => started(s, ["--branch", "r/5b", "--template", "shell-codex"]) },
+    { row: "6 template form, an agy template that can't take words", templateForm: true,
+      file: withWorker({ template: "agy-stuck" }), templates: [...TEMPLATES, { name: "agy-stuck", command: "agy --mode auto; # no words" }],
+      run: (s) => started(s, ["--branch", "r/6"]) },
+    { row: "7 Claude template", before: "sh", run: (s) => started(s, ["--branch", "r/7", "--template", "opus-rev"]) },
+    { row: "8 agy template, after its --settings", file: withWorker({ template: "agy-work" }),
+      templates: [...TEMPLATES, { name: "agy-work", command: "agy --mode auto" }],
+      run: (s) => {
+        const got = started(s, ["--branch", "r/8"]);
+        assert.equal(got.words.at(-3), "--settings", "the task follows the permission list");
+        return got;
+      } },
+    { row: "9 plain kimi, its first message", send: true,
+      run: (s) => { stub(s, "kimi"); return started(s, ["--branch", "r/9", "--agent", "kimi"]); } },
+    { row: "10 proxied kimi, its first message through the proxy", send: true, proxied: true,
+      run: async (t2) => {
+        const { s, env, fake, proxy, closeAll } = await proxyWorkerCli(t2, { file: withWorker({ agent: "kimi" }) });
+        try {
+          stub(s, "kimi");
+          const r = await s.cliAsync(["worker", TASK, "--branch", "r/10", "--json"], { env: { ...env, HC_SOCKET: proxy.socket } });
+          assert.equal(r.code, 0, r.err);
+          return { words: fake.calls("terminal.run")[0].params.argv, sends: fake.calls("terminal.send").map(({ params }) => params.text) };
+        } finally {
+          await closeAll();
+        }
+      } },
+    { row: "10b proxied Claude template", before: "sh", proxied: true,
+      run: async (t2) => {
+        // The proxy starts only the bot's approved worker, so the roster names the template.
+        const { s, env, fake, proxy, closeAll } = await proxyWorkerCli(t2, { file: withWorker({ template: "opus-rev" }) });
+        try {
+          const r = await s.cliAsync(["worker", TASK, "--branch", "r/10b", "--json"],
+            { env: { ...env, HC_SOCKET: proxy.socket } });
+          assert.equal(r.code, 0, r.err);
+          return { words: fake.calls("terminal.run")[0].params.argv, sends: fake.calls("terminal.send").map(({ params }) => params.text) };
+        } finally {
+          await closeAll();
+        }
+      } },
+  ];
+  const tails = [];
+  // One subtest per route: each scene's fake core ends with its row, and every row reports.
+  for (const route of ROUTES) await t.test(route.row, async (t2) => {
+    const got = route.proxied ? await route.run(t2)
+      : route.run(scene(t2, { ...(route.file ? { file: route.file } : {}), ...(route.templates ? { templates: route.templates } : {}) }));
+    const { words, sends } = got;
+    let text;
+    if (route.send) {
+      // (a) one delivery: no word of the start carries the task; exactly one message does.
+      assert.equal(words.some((w) => String(w).includes(TASK)), false, `no task word in ${JSON.stringify(words)}`);
+      assert.equal(sends.length, 1, "one first message");
+      text = sends[0];
+    } else {
+      // (a) one delivery: exactly one word carries the done line, and it is the prompt's place.
+      assert.equal(words.filter((w) => String(w).includes(DONE_LINE)).length, 1, JSON.stringify(words));
+      assert.deepEqual(sends, [], "no message sent");
+      text = words.at(-1);
+      if (route.before) assert.equal(words.at(-2), route.before);
+      if (route.templateForm) assert.equal(words.includes("--"), false, "hc's template form");
+    }
+    // (b) the task as given, then exactly the route's tail.
+    assert.equal(text.startsWith(TASK), true);
+    assert.equal(text.slice(TASK.length), route.hermes ? DONE_TAIL : OWNER_TAIL);
+    if (!route.hermes) tails.push([route.row, text.slice(TASK.length)]);
+  });
+  // (c) every non-Hermes route's tail is the same.
+  assert.equal(tails.length, ROUTES.filter((r) => !r.hermes).length);
+  assert.deepEqual([...new Set(tails.map(([, tail]) => tail))], [OWNER_TAIL], JSON.stringify(tails.map(([row]) => row)));
+});
+
 test("worker #1135: launch never removes or prunes another repository's ended worktree", (t) => {
   const s = scene(t);
   withOrigin(s);
@@ -3998,7 +4168,7 @@ test("proxied worker CLI #1032: an approved Kimi worker starts bare through the 
     assert.equal(argv.at(-1), "kimi", `the proxy approved an argv with no task word: ${JSON.stringify(argv)}`);
     assert.equal(argv.includes(TASK), false);
     assert.deepEqual(fake.calls("terminal.send").map(({ params }) => [params.terminal, params.text]),
-      [["t200", `${TASK}\n\n${DONE_LINE}`]], r.err);
+      [["t200", `${TASK}\n\n${TAIL}`]], r.err);
     assert.ok(fake.calls("terminal.get").some(({ params }) => params.terminal === "t200"));
     assert.deepEqual(fake.log.filter(({ method }) => ["terminal.wait", "terminal.read", "terminal.send"].includes(method))
       .map(({ method }) => method), ["terminal.wait", "terminal.read", "terminal.send"]);
@@ -4546,7 +4716,7 @@ process.stdout.write(JSON.stringify({
   const checkWorker = (launch, signedIn, account, task) => {
     assert.equal(identity([identityCli], signedIn).account, account);
     assert.deepEqual(identity(launch, paneEnv), { account, storage: signedIn.CLAUDE_CONFIG_DIR,
-      inherited: "preserved", authOverride: null, settings: CLAUDE_PERSON_SETTINGS, task: `identity task ${task}\n\n${DONE_LINE}` });
+      inherited: "preserved", authOverride: null, settings: CLAUDE_PERSON_SETTINGS, task: `identity task ${task}\n\n${TAIL}` });
   };
 
   // Before any switch: the panel's first sign-in, a login from before any generation.
