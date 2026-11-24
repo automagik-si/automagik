@@ -1294,7 +1294,7 @@ export function install(rt) {
         }
         if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
         const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
-        if (kind === 'user' || kind === 'retry' || kind === SOURCE_KIND || kind === REPLY_KIND) {
+        if (opensTurn(message)) {
           agent.followup(copy)
           woke += 1
         } else agent.inject(copy)
@@ -1317,7 +1317,7 @@ export function install(rt) {
   const currentProvider = agent => agent.model?.current?.()?.provider ?? agent.session.requestHeader?.()?.config?.provider
 
   // A message's inbox boundary, the same one forward() delivers it to.
-  const inboxTargetOf = message => (message.source?.kind === 'user' || message.source?.kind === 'retry' || message.source?.kind === SOURCE_KIND || message.source?.kind === REPLY_KIND ? 'next-turn' : 'next-step')
+  const inboxTargetOf = message => (opensTurn(message) ? 'next-turn' : 'next-step')
 
   // Input a switch could not hand on goes back into the part's own durable inbox, in
   // order: input followup would deliver waits for the next turn, the rest waits for

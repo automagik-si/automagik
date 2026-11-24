@@ -4,6 +4,7 @@
 // part no surface can reach yet, and only then moves the Bot's record to it, in one save.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { reminderPrompts } from '../src/client/text.js'
 import { install } from '../src/host/parts.js'
 import { install as installModelState, OWN_TOOLS_SWITCH, SWITCH_FAILED } from '../src/host/model-state.js'
 import { install as installOwnTools } from '../src/host/own-tools.js'
@@ -1873,6 +1874,48 @@ const throughHook = (b, messages) => {
   let reached = false
   const out = b.listener('llm/stream')({ sessionId: 's2', messages }, () => { reached = true; return 'model' })
   return { reached, acked: typeof out?.[Symbol.asyncIterator] === 'function' }
+}
+
+const scheduledPrompt = 'Reply with TASK-3556CF0-R2 only.'
+const scheduleReminder = message('schedule', `[SCHEDULE REMINDER]\nreminder_prompt_json: ${JSON.stringify(scheduledPrompt)}`)
+const endedNotice = message('schedule', SCHEDULE_CHANGE.replace('change: updated', 'change: ended'))
+const goalRound = message('goal', '<goal_round>Continue the goal.</goal_round>', { goalId: 'g1', revision: 1, round: 2 })
+
+for (const [label, opener, notice] of [['a scheduled reminder', scheduleReminder, endedNotice], ['a goal round', goalRound]]) {
+  test(`A8-5 ${label} opens the turn after the resumed handoff`, async t => {
+    const b = cutBench()
+    t.after(() => b.ctx.dispose())
+    // The outgoing reply belongs to the person, so there is no Bot exchange to resume.
+    b.rt.live.set('s1', { turn: 3, joined: [] })
+
+    // DSH delivers the due reminder while the old reply runs, then injects the ended notice.
+    b.agent.followup(opener)
+    if (notice) b.agent.inject(notice)
+    onFresh(b, agent => {
+      claiming(agent)
+      agent.followup = item => agent.send(item, 'next-turn', true)
+    })
+    await b.rt.switchRoute('b1', 'acp-claude/default', undefined, { stopReply: true })
+    await b.moved()
+
+    const fresh = b.freshAgent('s2')
+    // DSH claims synchronously on the waking send. In the captured regression only the
+    // notice was claimed then, leaving the reminder for the next step of that same turn.
+    assert.deepEqual(fresh.claimed.map(item => item.source.handoff ? 'handoff' : textOf(item.content)),
+      [...(notice ? [textOf(notice.content)] : []), 'handoff'])
+    assert.equal(fresh.claimed.at(-1).source.resume, true)
+    assert.deepEqual(throughHook(b, fresh.claimed), { reached: true, acked: false })
+    assert.deepEqual(fresh.inbox.nextStep, [])
+
+    // The next-turn claim makes the queued input the trigger, just as on the old part.
+    assert.equal(fresh.inbox.nextTurn.length, 1)
+    const [nextOpener] = fresh.inbox.nextTurn
+    assert.deepEqual(nextOpener.source, opener.source)
+    assert.deepEqual(nextOpener.content, opener.content)
+    assert.deepEqual(throughHook(b, [nextOpener]), { reached: true, acked: false })
+    if (notice) assert.deepEqual(reminderPrompts(textOf(nextOpener.content)), [scheduledPrompt])
+    assert.deepEqual(queuedOf(b.agent), [])
+  })
 }
 
 const freshPart = async t => {
