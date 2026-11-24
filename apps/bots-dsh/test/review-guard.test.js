@@ -540,8 +540,19 @@ test('G15 case 6 (H7-3): a handed-back or resumed request does not reopen', asyn
   assert.equal(await run(bot, 'write', { file_path: 'b.md' }), 'ran')
 })
 
-test('G15 cases 7-9 (H7-2): a no-reply note, the opener\'s follow-up and the reviewer\'s own request only date the track', async (t) => {
-  const { run, person, botMessage, reply, solver, reviewer, plain, stops } = bench(t)
+// Counts the saves reviewBotRequest itself makes (turns.js may save for the message on its own).
+function botRequestSaves(rt) {
+  let inside = false
+  let count = 0
+  const request = rt.reviewBotRequest
+  rt.reviewBotRequest = (...args) => { inside = true; try { return request(...args) } finally { inside = false } }
+  const save = rt.save
+  rt.save = (...args) => { if (inside) count++; return save.apply(rt, args) }
+  return () => count
+}
+
+test('G15 cases 7-9 (H7-2, A1): a no-reply note, the opener\'s follow-up and the reviewer\'s own request leave the track unchanged', async (t) => {
+  const { rt, run, person, botMessage, reply, solver, reviewer, plain, stops } = bench(t)
   const ada = await reviewer()
   const x = await plain('Bot X')
   const y = await plain('Bot Y')
@@ -550,44 +561,101 @@ test('G15 cases 7-9 (H7-2): a no-reply note, the opener\'s follow-up and the rev
   let clock = realNow()
   Date.now = () => clock
   t.after(() => { Date.now = realNow })
+  const saves = botRequestSaves(rt)
   person(bot.id, 'Task A.')
   clock += 10
   reply(ada.id, bot.id, 'SHIP')
-  const keep = () => ({ requestAt: bot.reviewTrack.requestAt, planVerdictAt: bot.reviewTrack.planVerdictAt, openedBy: bot.reviewTrack.openedBy })
+  // The message must reach the guard (it is the first arrival) and leave the track as it was.
+  const unchanged = (send) => {
+    const track = bot.reviewTrack
+    const before = JSON.stringify(track)
+    const count = saves()
+    clock += 10
+    send()
+    assert.equal(bot.reviewTrack, track)
+    assert.equal(JSON.stringify(bot.reviewTrack), before)
+    assert.equal(saves(), count)
+  }
   // Case 7: a reply_to "none" note from another Bot.
-  let before = keep()
-  clock += 10
-  botMessage(bot.id, y.id, 'Thanks!', { noReply: true })
-  assert.deepEqual(keep(), before)
-  assert.equal(bot.reviewTrack.personAt, clock)
+  unchanged(() => botMessage(bot.id, y.id, 'Thanks!', { noReply: true }))
   assert.equal(await run(bot, 'write', { file_path: 'a.md' }), 'ran')
   // Case 9: the reviewer's own request.
-  clock += 10
-  botMessage(bot.id, ada.id, 'Which file did you mean?')
-  assert.deepEqual(keep(), before)
-  assert.equal(bot.reviewTrack.personAt, clock)
+  unchanged(() => botMessage(bot.id, ada.id, 'Which file did you mean?'))
   stops.length = 0
   assert.equal(await run(bot, 'write', { file_path: 'a.md' }), 'ran')
   assert.equal(stops.length, 0)
-  // Case 8: X reopens; after X's new plan verdict X's follow-up only dates; Y reopens.
+  // Case 8: X reopens; after X's new plan verdict X's follow-up leaves it unchanged; Y reopens.
   clock += 10
+  const reopened = saves()
   botMessage(bot.id, x.id, 'Do task B.')
+  assert.equal(saves(), reopened + 1)
   assert.equal(bot.reviewTrack.openerId, x.id)
   assert.equal(bot.reviewTrack.requestAt, clock)
   await assert.rejects(run(bot, 'write', { file_path: 'b.md' }), HELD)
   assert.equal(stops.at(-1).why, 'guard-request')
   clock += 10
   reply(ada.id, bot.id, 'SHIP')
-  before = keep()
-  clock += 10
-  botMessage(bot.id, x.id, 'Any update?')
-  assert.deepEqual(keep(), before)
+  unchanged(() => botMessage(bot.id, x.id, 'Any update?'))
   assert.equal(await run(bot, 'write', { file_path: 'b.md' }), 'ran')
   clock += 10
   botMessage(bot.id, y.id, 'Do task C.')
   assert.equal(bot.reviewTrack.openerId, y.id)
   assert.equal(bot.reviewTrack.planVerdictAt, undefined)
   await assert.rejects(run(bot, 'write', { file_path: 'c.md' }), HELD)
+  // A person's own message mid-request still dates it (D1, SR3-3 (b)).
+  clock += 10
+  person(bot.id, 'Where is it?')
+  assert.equal(bot.reviewTrack.personAt, clock)
+})
+
+test('G15 case 10 (A1): after such a message the Solver cannot deliver without the reviewer\'s result verdict', async (t) => {
+  const { rt, run, person, botMessage, reply, endTurn, solver, reviewer, plain } = bench(t)
+  const ada = await reviewer()
+  const x = await plain('Bot X2')
+  const y = await plain('Bot Y2')
+  const realNow = Date.now
+  let clock = realNow()
+  Date.now = () => clock
+  t.after(() => { Date.now = realNow })
+  const kinds = {
+    'a: no-reply note': { send: bot => botMessage(bot.id, y.id, 'Thanks!', { noReply: true }) },
+    'b: the reviewer\'s own request': { send: bot => botMessage(bot.id, ada.id, 'Which file did you mean?') },
+    'c: the opener\'s follow-up': { opener: true, send: bot => botMessage(bot.id, x.id, 'Any update?') },
+  }
+  for (const [kind, { opener, send }] of Object.entries(kinds)) {
+    const bot = await solver({ reviewerId: ada.id })
+    clock += 10
+    person(bot.id, 'Task A.')
+    clock += 10
+    reply(ada.id, bot.id, 'SHIP')
+    if (opener) {
+      // X opens the current track and gets its own plan verdict.
+      clock += 10
+      botMessage(bot.id, x.id, 'Do task B.')
+      assert.equal(bot.reviewTrack.openerId, x.id, kind)
+      clock += 10
+      reply(ada.id, bot.id, 'SHIP')
+    }
+    clock += 10
+    assert.equal(await run(bot, 'write', { file_path: 'a.md' }), 'ran', kind)
+    clock += 10
+    rt.openWork('w-result', { from: bot.id, to: ada.id })
+    clock += 10
+    send(bot)
+    const last = JSON.stringify(bot.reviewTrack.last)
+    endTurn(bot.id, 'Here is the result.')
+    // Not a delivery: the reviewer still holds the result (never a mark with `pending`).
+    assert.equal(bot.reviewTrack.delivered, undefined, kind)
+    assert.equal(JSON.stringify(bot.reviewTrack.last), last, kind)
+    assert.equal(bot.reviewTrack.verdicts.length, 1, kind)
+    clock += 10
+    reply(ada.id, bot.id, 'SHIP', { exchangeId: 'w-result' })
+    assert.equal(bot.reviewTrack.verdicts.length, 2, kind)
+    clock += 10
+    endTurn(bot.id, 'Delivered.')
+    assert.equal(bot.reviewTrack.delivered, true, kind)
+    assert.deepEqual(bot.reviewTrack.last, { at: clock, review: 'bot', plan: true, result: true }, kind)
+  }
 })
 
 test('G16/G16b: a held native subagent question is rejected first in the approval chain; others go on', async (t) => {

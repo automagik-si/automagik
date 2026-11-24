@@ -212,7 +212,8 @@ export function install(rt) {
   // only). Before the plan's verdict it joins the review still to come. After it, and before the
   // delivery, it opens a new track that needs its own plan verdict (H6-2 (b)), keeping the person's
   // last message (H7-1); a message that asks no reply, a follow-up from the Bot that opened the
-  // current track, and the reviewer's own message only date it, as a person's message does (H7-2).
+  // current track, and the reviewer's own message leave the track unchanged (H7-2 (a), A1): dating
+  // `personAt` would let a turn end deliver past the reviewer (H7-1).
   // After a delivery (or with none asked yet) a request opens the next track; a no-reply message
   // and the reviewer's own message open nothing.
   function reviewBotRequest(botId, senderId, { noReply = false } = {}) {
@@ -222,12 +223,7 @@ export function install(rt) {
     const dates = noReply || senderId === bot.reviewerId
     if (track?.requested === true && track.delivered !== true) {
       if (!isTime(track.planVerdictAt)) return
-      if (dates || senderId === track.openerId) {
-        track.personAt = Date.now()
-        bot.reviewTrack = track
-        save()
-        return
-      }
+      if (dates || senderId === track.openerId) return
       open(bot, Date.now())
       if (isTime(track.personAt)) bot.reviewTrack.personAt = track.personAt
       else delete bot.reviewTrack.personAt
