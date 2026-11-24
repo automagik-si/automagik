@@ -18,7 +18,7 @@ function picker() {
   return { props, updated, switched }
 }
 
-test('Settings > Bot is a saved-Bot picker, so a crossing asks first', () => {
+test('Settings > Bot is a saved-Bot picker: an idle crossing switches at once', () => {
   const { props } = picker()
   assert.equal(props.saved, true)
   assert.equal(typeof props.onPick, 'function')

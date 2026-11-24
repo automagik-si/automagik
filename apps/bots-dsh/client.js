@@ -1725,6 +1725,10 @@ var ZH = {
   "Keep this conversation": "保留当前对话",
   "Change route": "更改路线",
   "Change agent": "更改代理",
+  // An agent switch in a Bot's own chat (RFC 0030, Handoff note, 2026-11-23).
+  "This stops the current reply and continues on {agent}.": "这会停止当前回复，并在 {agent} 上继续。",
+  "Switched to {agent}": "已切换到 {agent}",
+  "Switching to {agent}…": "正在切换到 {agent}…",
   "Using {model} · {route} · {provider}": "使用 {model} · {route} · {provider}",
   // Shapes
   Whale: "鲸鱼",
@@ -3969,6 +3973,8 @@ var HOST_TEMPLATES = [
   MACHINE_MESSAGES["unknown-plan"],
   MACHINE_MESSAGES.conflict,
   "{name} could not switch to {model}. It stays on {kept}.",
+  // A pick that would stop a running reply (reason reply-running): the selector asks first.
+  { template: "This stops the current reply and continues on {agent}.", host: ["agent"] },
   { template: "{name} cannot use the {route} route.", host: ["route"] },
   { template: "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route} (pause an active goal first).", host: ["route"] },
   { template: "{name}'s conversation has history, so changing to {route} needs a new conversation. Use New conversation, then pick {route}.", host: ["route"] },
@@ -4549,7 +4555,7 @@ var call = async (endpoint, payload, signal) => {
     viewerRefused(active2, code);
     const message = hostText(result.error?.message ?? "Request failed");
     const error = Object.assign(new Error(code === "bot/internal" ? `${message} ${t("Settings → Feedback has the details.")}` : message), { code });
-    if (code === "bot/refused" && result.error?.reason === "needs-new-conversation") error.reason = result.error.reason;
+    if (code === "bot/refused" && (result.error?.reason === "needs-new-conversation" || result.error?.reason === "reply-running")) error.reason = result.error.reason;
     const staleShare = code === "bot/stale" && endpoint === "update-bot" && Object.hasOwn(payload ?? {}, "people");
     if (!vault && !staleShare && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? "Request failed"), { code }));
@@ -5113,6 +5119,11 @@ function crossesHarness(fromRef, toRef) {
   if (from.provider === "" || to.provider === "") return false;
   return from.route !== to.route || from.harness !== to.harness;
 }
+function isHermesRoute(ref) {
+  const { provider, route } = routeOfRef(ref);
+  return route === "hermes-remote" || provider === "acp-hermes";
+}
+var CROSSING_DEADLINE_MS = 12e4;
 function selectorRoutePolicy(input) {
   if (input === void 0 || input === null) return void 0;
   if (typeof input !== "object" || Array.isArray(input)) throw new TypeError("routePolicy must be an object");
@@ -9020,6 +9031,8 @@ var HERMES_REMOTE_CSS = `${HERMES_MARK_CSS}
 var import_react16 = require("react");
 var import_react_dom3 = require("react-dom");
 var MENU_EXIT_MS = 120;
+var noWork = () => () => {
+};
 function connectionOf(model) {
   const provider = model?.providerName ?? model?.provider ?? String(model?.ref ?? "").split("/")[0];
   if (model?.via === "key") return t("{provider} · API key", { provider });
@@ -9056,12 +9069,22 @@ function modelOf(bot, roster) {
 }
 var SWITCH_FAILED = "MODEL_SWITCH_COMPACTION_FAILED";
 var MODEL_ACCESS_REQUIRED = "MODEL_ACCESS_REQUIRED";
+var OWN_TOOLS_SWITCH = "MODEL_OWN_TOOLS_DENIED";
 var labelOf = (roster, ref) => typeof ref === "string" ? servedOf(roster, ref)?.name ?? (ref.split("/").slice(1).join("/") || ref) : t("the new model");
+function agentNameOf(roster, ref) {
+  if (typeof ref !== "string" || ref === "") return "";
+  const served = servedOf(roster ?? {}, ref);
+  const provider = providerOf(served ?? { ref });
+  if (routeOf(provider).connectedBy === "acp") return served?.providerName ?? ACP_NAME[provider] ?? ref;
+  return served?.name ?? ref;
+}
 function modelStateLine(state2, roster) {
   if (state2 === void 0 || state2 === null) return void 0;
+  if (typeof state2.switching?.to === "string") return t("Switching to {agent}…", { agent: agentNameOf(roster, state2.switching.to) });
   const failure = state2.lastFailure;
   if (failure?.kept) {
     const params = { model: labelOf(roster, failure.ref), kept: labelOf(roster, failure.kept) };
+    if (failure.code === OWN_TOOLS_SWITCH) return t(OWN_TOOLS_MODEL_TEXT);
     if (failure.code === SWITCH_FAILED) return t("{model} could not take over this conversation. This Bot stays on {kept}.", params);
     if (failure.code === MODEL_ACCESS_REQUIRED) return t("{model} needs a sign-in before it can answer. This Bot stays on {kept}.", params);
     return t("{model} did not answer. This Bot stays on {kept}.", params);
@@ -9513,13 +9536,15 @@ function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
 function ModelMenu(props) {
   return (0, import_react16.createElement)(props.roster?.hostModels?.[props.bot?.id] === void 0 ? DshModelMenu : HostModelMenu, props);
 }
-function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm }) {
+var askFirst = (current, ref, replying) => isHermesRoute(current) || isHermesRoute(ref) ? "hermes" : replying ? "running" : null;
+function RouteConfirm({ bot, roster, current, target, ask, onCancel, onConfirm }) {
   const from = current === void 0 ? void 0 : modelRoute(roster, current);
   const to = modelRoute(roster, target.ref);
   const routeChanged = from?.route !== to.route;
   const fullAccess = bot.permission === "danger-full-access";
   const fullAccessLine = !fullAccess ? void 0 : to.route === "native" ? t("Full access: DSH's own tools run without asking.") : to.route === "hermes-remote" ? t("Full access: Hermes still asks you in the chat when it wants an approval. Its own rules apply there.") : to.provider === "acp-claude" || to.provider === "acp-codex" ? t("Full access: the CLI's own no-ask mode.") : t("Full access: the agent's actions run without asking.");
   const title = routeChanged ? t("Change route?") : t("Change agent?");
+  const running2 = ask === "running";
   return (0, import_react16.createElement)(
     "div",
     { className: "bt-model-step bt-model-confirm", role: "group", "aria-label": title },
@@ -9530,13 +9555,13 @@ function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm }) {
       from ? `${routeName(from.route)} · ${from.connection} → ` : "",
       `${routeName(to.route)} · ${to.connection}`
     ),
-    (0, import_react16.createElement)("div", { className: "bt-model-confirm-text" }, routeChanged ? t("Changing the route requires a new conversation if this one has history.") : t("Changing the agent requires a new conversation if this one has history.")),
+    (0, import_react16.createElement)("div", { className: "bt-model-confirm-text" }, running2 ? t("This stops the current reply and continues on {agent}.", { agent: agentNameOf(roster, target.ref) }) : routeChanged ? t("Changing the route requires a new conversation if this one has history.") : t("Changing the agent requires a new conversation if this one has history.")),
     fullAccessLine === void 0 ? null : (0, import_react16.createElement)("div", { className: "bt-model-confirm-access", role: "note" }, fullAccessLine),
     (0, import_react16.createElement)(
       "div",
       { className: "bt-model-confirm-actions" },
-      (0, import_react16.createElement)("button", { type: "button", className: "bt-model-confirm-cancel", onClick: onCancel }, t("Keep this conversation")),
-      (0, import_react16.createElement)("button", { type: "button", className: "bt-model-confirm-go", onClick: onConfirm }, routeChanged ? t("Change route") : t("Change agent"))
+      (0, import_react16.createElement)("button", { type: "button", className: "bt-model-confirm-cancel", onClick: onCancel }, running2 ? t("Cancel") : t("Keep this conversation")),
+      (0, import_react16.createElement)("button", { type: "button", className: "bt-model-confirm-go", onClick: onConfirm }, running2 ? t("Switch") : routeChanged ? t("Change route") : t("Change agent"))
     )
   );
 }
@@ -9574,6 +9599,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
   const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300 });
   const live = (0, import_react16.useRef)(false);
   live.current = isOpen;
+  const switching = (0, import_react16.useSyncExternalStore)(actions?.subscribeWork ?? noWork, () => typeof actions?.modelStateOf?.(bot.id)?.switching?.to === "string");
   const shown2 = modelOf(bot, roster);
   const current = bot.model ?? bot.appliedModel;
   const currentRef = (0, import_react16.useRef)(current);
@@ -9639,8 +9665,23 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
   const same = (ref) => !onPick && ref === current && Boolean(bot.model);
   const crossing = (ref) => Boolean(current) && saved && ref !== current && crossesHarness(current, ref);
   const recovery = (ref) => saved && bot.shellHeld !== void 0 && !commandCapableAgent(ref);
-  const pickModel = (ref, effort, { routeChange = false, level = false } = {}) => {
-    if (routeChange && typeof onPick === "function") return onPick(ref, { routeChange: true, effort });
+  const askFor = (ref) => askFirst(current, ref, actions?.turnRunning?.(currentPart(bot)) === true);
+  const askAgain = (ref, effort) => (error) => {
+    if (error?.reason !== "reply-running" || owner.current !== bot.id) throw error;
+    keys.current = true;
+    setView(MENU_ROOT);
+    setConfirm({ ref, effort, ask: "running" });
+    open();
+    return void 0;
+  };
+  const pickModel = (ref, effort, { routeChange = false, level = false, stopReply = false } = {}) => {
+    if (switching) return void 0;
+    const sending = stopReply ? [{ stopReply: true }] : [];
+    if (routeChange && typeof onPick === "function") {
+      return Promise.resolve(onPick(ref, { routeChange: true, effort }, ...sending)).catch(stopReply ? (error) => {
+        throw error;
+      } : askAgain(ref, effort));
+    }
     if (onPick) {
       const pickedIt = Promise.resolve(onPick(ref));
       if (onPickEffort === void 0 && effort === void 0) return pickedIt;
@@ -9657,16 +9698,24 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     }
     if (routeChange) {
       const pick4 = chat && actions.switchRouteInChat ? actions.switchRouteInChat : actions.switchRoute;
-      if (typeof pick4 === "function") return run3(pick4(bot.id, ref, level || effort !== void 0 ? { effort: effort ?? null } : {}));
+      if (typeof pick4 === "function") {
+        const sent = Promise.resolve(pick4(bot.id, ref, level || effort !== void 0 ? { effort: effort ?? null } : {}, ...sending));
+        return run3(stopReply ? sent : sent.catch(askAgain(ref, effort)));
+      }
     }
     if (chat && actions.chooseModelInChat) return run3(actions.chooseModelInChat(bot.id, ref, level || effort !== void 0 ? { effort: effort ?? null } : {}));
     return run3(actions.updateBot(bot.id, { model: ref, ...level || effort !== void 0 ? { effort: effort ?? null } : {} }));
   };
   const commit = (model, effort) => {
-    const routeChange = model.ref !== void 0 && recovery(model.ref);
+    if (switching) return;
+    let routeChange = model.ref !== void 0 && recovery(model.ref);
     if (!routeChange && model.ref !== void 0 && crossing(model.ref)) {
-      setConfirm({ ref: model.ref, effort });
-      return;
+      const ask = askFor(model.ref);
+      if (ask !== null) {
+        setConfirm({ ref: model.ref, effort, ask });
+        return;
+      }
+      routeChange = true;
     }
     finish();
     void Promise.resolve(pickModel(model.ref, effort, { routeChange })).catch(() => {
@@ -9709,10 +9758,15 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     else void askEfforts(model.ref, actions).then(decide);
   };
   const onLevel = (model, effort) => {
-    const routeChange = recovery(model.ref);
+    if (switching) return;
+    let routeChange = recovery(model.ref);
     if (!routeChange && crossing(model.ref)) {
-      setConfirm({ ref: model.ref, effort });
-      return;
+      const ask = askFor(model.ref);
+      if (ask !== null) {
+        setConfirm({ ref: model.ref, effort, ask });
+        return;
+      }
+      routeChange = true;
     }
     finish();
     void Promise.resolve(pickModel(model.ref, effort, { routeChange, level: true })).catch(() => {
@@ -9757,12 +9811,13 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     roster,
     current,
     target: confirm,
+    ask: confirm.ask,
     onCancel: () => setConfirm(void 0),
     onConfirm: () => {
       const next = confirm;
       setConfirm(void 0);
       finish();
-      void Promise.resolve(pickModel(next.ref, next.effort, { routeChange: true })).catch(() => {
+      void Promise.resolve(pickModel(next.ref, next.effort, { routeChange: true, stopReply: next.ask === "running" })).catch(() => {
       });
     }
   });
@@ -9798,7 +9853,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     if (crossing(next.modelRef)) {
       keys.current = true;
       setView(MENU_ROOT);
-      setConfirm({ ref: next.modelRef, effort: void 0 });
+      setConfirm({ ref: next.modelRef, effort: void 0, ask: askFor(next.modelRef) ?? "hermes" });
       open();
     } else {
       finish();
@@ -9816,6 +9871,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
       className: "bt-model-change",
       "aria-haspopup": "menu",
       "aria-expanded": isOpen,
+      "aria-busy": switching || void 0,
       "aria-label": t("Change the model of {name}", { name: bot.name }),
       onClick: toggle
     }, t("change")) : (0, import_react16.createElement)(
@@ -9825,6 +9881,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
         type: "button",
         className: `bt-model-trigger${bar ? " bt-model-bar-trigger" : ""}`,
         "data-wide": wide || void 0,
+        "aria-busy": switching || void 0,
         "data-bar": bar || void 0,
         "data-route": triggerRoute?.route,
         "aria-haspopup": "menu",
@@ -9851,7 +9908,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     ),
     shownPlace ? (0, import_react_dom3.createPortal)((0, import_react16.createElement)(
       "div",
-      { ref: menu, className: `bt-menu bt-model-menu${shownPlace.bottom !== void 0 ? " bt-menu-up" : ""}`, role: "menu", "aria-label": t("Model for {name}", { name: bot.name }), style: shownPlace, "data-leaving": leaving || void 0, onKeyDown },
+      { ref: menu, className: `bt-menu bt-model-menu${shownPlace.bottom !== void 0 ? " bt-menu-up" : ""}`, role: "menu", "aria-label": t("Model for {name}", { name: bot.name }), "aria-disabled": switching || void 0, style: shownPlace, "data-leaving": leaving || void 0, onKeyDown },
       confirmView ?? (0, import_react16.createElement)(ModelSteps, {
         roster,
         bot,
@@ -9939,6 +9996,7 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
   const bot = roster.byId[sessionId];
   const [busy, setBusy] = (0, import_react16.useState)("");
   const [error, setError] = (0, import_react16.useState)("");
+  const [asking, setAsking] = (0, import_react16.useState)("");
   const hosted = roster.hostModels?.[bot?.id] !== void 0;
   const shown2 = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && !hosted && !idle;
   (0, import_react16.useEffect)(() => {
@@ -9959,12 +10017,22 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
   if (bot.model && (!lost || models.length === 0)) return null;
   const keyFor = usable.length === 0 && actions.setProviderKey ? models.find((model) => model.needsKey) : void 0;
   const manage = manageModels(actions);
-  const pick4 = (ref) => {
+  const pick4 = (ref, switchNow) => {
+    const stopReply = switchNow === true;
+    if (!stopReply && bot.model && crossesHarness(bot.model, ref) && actions.turnRunning?.(currentPart(bot)) === true) {
+      setAsking(ref);
+      return Promise.resolve(false);
+    }
     setBusy(ref);
     setError("");
-    return Promise.resolve(actions.chooseModelInChat ? actions.chooseModelInChat(bot.id, ref) : actions.updateBot(bot.id, { model: ref })).then(() => true, (failure) => {
+    const sent = !stopReply ? actions.chooseModelInChat ? actions.chooseModelInChat(bot.id, ref) : actions.updateBot(bot.id, { model: ref }) : actions.chooseModelInChat ? actions.chooseModelInChat(bot.id, ref, {}, { stopReply: true }) : actions.updateBot(bot.id, { model: ref, stopReply: true });
+    return Promise.resolve(sent).then(() => true, (failure) => {
+      if (failure?.reason === "reply-running" && !stopReply) {
+        setAsking(ref);
+        return false;
+      }
       setError(failure?.message ?? String(failure));
-      if (failure?.reason !== "needs-new-conversation") void actions.refreshModels?.();
+      if (failure?.reason !== "needs-new-conversation" && failure?.reason !== "reply-running") void actions.refreshModels?.();
       return false;
     }).finally(() => setBusy(""));
   };
@@ -10038,7 +10106,19 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
         )
       )
     ),
-    keyFor ? (0, import_react16.createElement)(ModelKeyCard, { key: keyFor.provider, model: keyFor, actions }) : (0, import_react16.createElement)("div", { className: "bt-model-chips", role: "group", "aria-label": t("Choose a model") }, choices),
+    keyFor ? (0, import_react16.createElement)(ModelKeyCard, { key: keyFor.provider, model: keyFor, actions }) : asking !== "" ? (0, import_react16.createElement)(RouteConfirm, {
+      bot,
+      roster,
+      current: bot.model,
+      target: { ref: asking },
+      ask: "running",
+      onCancel: () => setAsking(""),
+      onConfirm: () => {
+        const ref = asking;
+        setAsking("");
+        void pick4(ref, true);
+      }
+    }) : (0, import_react16.createElement)("div", { className: "bt-model-chips", role: "group", "aria-label": t("Choose a model") }, choices),
     error ? (0, import_react16.createElement)("div", { className: "bt-secret-error bt-model-error", role: "alert" }, error) : null
   );
 }
@@ -15721,8 +15801,11 @@ body[data-bt-motion=quiet] :is(.bt-cs-spot,.bt-cs-tile[data-focus]){animation:no
 function settingsModelPicker({ bot, roster, actions, run: run3, onFailure = () => () => {
 } }) {
   const pickModel = (ref) => run3(actions.updateBot(bot.id, { model: ref }).catch(onFailure(ref)));
-  const pickRoute = (ref, patch = {}) => run3(actions.switchRoute(bot.id, ref, patch).catch(onFailure(ref)));
-  const pick4 = (ref, { routeChange = false, effort } = {}) => routeChange ? pickRoute(ref, effort === void 0 ? {} : { effort }) : ref !== (bot.model ?? bot.appliedModel) || !bot.model ? pickModel(ref) : void 0;
+  const pickRoute = (ref, patch = {}, sending) => Promise.resolve(sending === void 0 ? actions.switchRoute(bot.id, ref, patch) : actions.switchRoute(bot.id, ref, patch, sending)).then((value) => run3(Promise.resolve(value)), (error) => {
+    if (error?.reason === "reply-running" && sending?.stopReply !== true) throw error;
+    return run3(Promise.reject(error).catch(onFailure(ref)));
+  });
+  const pick4 = (ref, { routeChange = false, effort } = {}, sending) => routeChange ? pickRoute(ref, effort === void 0 ? {} : { effort }, sending) : ref !== (bot.model ?? bot.appliedModel) || !bot.model ? pickModel(ref) : void 0;
   return { bot, roster, actions, run: run3, saved: true, onPick: pick4 };
 }
 
@@ -20997,22 +21080,57 @@ var patchOf = (step2) => Object.fromEntries(Object.entries(step2).map(([key, val
 function ProposalCard({ proposal, roster, actions }) {
   const [state2, setState] = (0, import_react48.useState)("open");
   const [error, setError] = (0, import_react48.useState)("");
+  const [asking, setAsking] = (0, import_react48.useState)(void 0);
   const bot = roster.byId?.[proposal.bot];
   if (bot === void 0) return (0, import_react48.createElement)("div", { className: "bt-event" }, t("That Bot is no longer on the team."));
   const rows2 = Object.entries(proposal.change).map(([key, value]) => ({ key, value, now: currentOf(bot, key) }));
   const done = rows2.every((row2) => row2.now === row2.value);
-  const apply2 = async () => {
-    if (state2 === "busy" || !actions.updateBot) return;
+  const runSteps = async (from, stopReply = false) => {
+    const steps = applySteps(proposal.change);
+    for (let index = from; index < steps.length; index += 1) {
+      const consented2 = stopReply && index === from;
+      try {
+        await actions.updateBot(bot.id, consented2 ? { ...patchOf(steps[index]), stopReply: true } : patchOf(steps[index]));
+      } catch (failure) {
+        if (failure?.reason !== "reply-running" || consented2) throw failure;
+        setAsking(index);
+        setState("asking");
+        return true;
+      }
+    }
+    return false;
+  };
+  const go = async (from, stopReply) => {
     setState("busy");
     setError("");
     try {
-      for (const step2 of applySteps(proposal.change)) await actions.updateBot(bot.id, patchOf(step2));
+      if (await runSteps(from, stopReply)) return;
       setState("open");
     } catch (failure) {
       setError(failure?.message ?? String(failure));
       setState("open");
     }
   };
+  const apply2 = async () => {
+    if (state2 === "busy" || state2 === "asking" || !actions.updateBot) return;
+    await go(0, false);
+  };
+  const question = state2 === "asking" && asking !== void 0 && typeof proposal.change.model === "string" ? (0, import_react48.createElement)(RouteConfirm, {
+    bot,
+    roster,
+    current: currentOf(bot, "model"),
+    target: { ref: proposal.change.model },
+    ask: "running",
+    onCancel: () => {
+      setAsking(void 0);
+      setState("open");
+    },
+    onConfirm: () => {
+      const from = asking;
+      setAsking(void 0);
+      void go(from, true);
+    }
+  }) : null;
   const status = done ? t("Applied") : state2 === "dismissed" ? t("Dismissed") : null;
   return (0, import_react48.createElement)(
     "section",
@@ -21043,7 +21161,7 @@ function ProposalCard({ proposal, roster, actions }) {
       ))
     ),
     error ? (0, import_react48.createElement)("div", { className: "bt-error bt-propcard-error", role: "alert" }, error) : null,
-    done || state2 === "dismissed" ? null : (0, import_react48.createElement)(
+    done || state2 === "dismissed" ? null : question ?? (0, import_react48.createElement)(
       "div",
       { className: "bt-q-foot bt-propcard-actions" },
       actions.openSettings ? (0, import_react48.createElement)("button", { type: "button", className: "bt-q-btn", onClick: () => actions.openSettings("bots", bot.id) }, t("Open in Settings")) : null,
@@ -21568,8 +21686,14 @@ function MemoryEvent({ sessionId, scope, tool, result, failed, code, roster, act
     panel === void 0 ? null : (0, import_react49.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => actions.openMemory(panel) }, t("Manage"))
   );
 }
-function PartLine({ time }) {
-  return (0, import_react49.createElement)("div", { className: "bt-part-line", role: "separator" }, Number.isFinite(time) ? (0, import_react49.createElement)("span", null, dayLabel(time)) : null);
+function PartLine({ time, switchedTo, roster }) {
+  const switched = typeof switchedTo === "string" && switchedTo !== "" ? t("Switched to {agent}", { agent: agentNameOf(roster, switchedTo) }) : void 0;
+  const day2 = Number.isFinite(time) ? dayLabel(time) : void 0;
+  return (0, import_react49.createElement)(
+    "div",
+    { className: "bt-part-line", role: "separator" },
+    switched === void 0 && day2 === void 0 ? null : (0, import_react49.createElement)("span", null, [switched, day2].filter((part) => part !== void 0).join(" · "))
+  );
 }
 var scrollParent = (node) => {
   for (let at = node.parentElement; at; at = at.parentElement) {
@@ -21595,7 +21719,7 @@ function EarlierUser({ row: row2, actions }) {
   );
 }
 function EarlierParts({ sessionId, roster, actions }) {
-  const [view, setView] = (0, import_react49.useState)({ pages: [], cursor: void 0, loading: true, failed: false, startedAt: null });
+  const [view, setView] = (0, import_react49.useState)({ pages: [], cursor: void 0, loading: true, failed: false, startedAt: null, switchedTo: null });
   const top = (0, import_react49.useRef)(null);
   const busy = (0, import_react49.useRef)(false);
   const generation = (0, import_react49.useRef)(0);
@@ -21621,7 +21745,7 @@ function EarlierParts({ sessionId, roster, actions }) {
         if (at >= 0) pages2[at] = { partIndex, items: [...incoming, ...pages2[at].items], btw };
         else pages2.push({ partIndex, items: incoming, btw });
         pages2.sort((a, b) => a.partIndex - b.partIndex);
-        return { pages: pages2, cursor: page.cursor, loading: false, failed: false, startedAt: page.startedAt ?? current.startedAt };
+        return { pages: pages2, cursor: page.cursor, loading: false, failed: false, startedAt: page.startedAt ?? current.startedAt, switchedTo: page.switchedTo ?? current.switchedTo };
       });
     }, () => {
       if (mine !== generation.current) return;
@@ -21633,7 +21757,7 @@ function EarlierParts({ sessionId, roster, actions }) {
   (0, import_react49.useEffect)(() => {
     generation.current += 1;
     busy.current = false;
-    setView({ pages: [], cursor: void 0, loading: true, failed: false, startedAt: null });
+    setView({ pages: [], cursor: void 0, loading: true, failed: false, startedAt: null, switchedTo: null });
     load(void 0);
     return () => {
       generation.current += 1;
@@ -21668,7 +21792,7 @@ function EarlierParts({ sessionId, roster, actions }) {
       view.loading ? (0, import_react49.createElement)(Shimmer, null, t("Loading earlier messages…")) : view.failed ? (0, import_react49.createElement)("button", { type: "button", className: "bt-soft", onClick: () => load(view.cursor) }, t("Couldn’t load earlier messages · Retry")) : view.cursor ? (0, import_react49.createElement)("button", { type: "button", className: "bt-soft", onClick: () => load(view.cursor) }, t("Load earlier")) : null
     ),
     (0, import_react49.createElement)(ChatRows, { items, sessionId, roster, actions, onBtwDelete: removeBtw }),
-    (0, import_react49.createElement)(PartLine, { time: view.startedAt })
+    (0, import_react49.createElement)(PartLine, { time: view.startedAt, switchedTo: view.switchedTo, roster })
   );
 }
 function ChatRows({ items, sessionId, roster, actions, useUi, clock: clock4 = false, onBtwDelete }) {
@@ -21697,7 +21821,7 @@ function ChatRows({ items, sessionId, roster, actions, useUi, clock: clock4 = fa
 function chatRow(row2, key, { sessionId, selfId, roster, actions, useUi, onBtwDelete }) {
   switch (row2.kind) {
     case "divider":
-      return (0, import_react49.createElement)(PartLine, { key, time: row2.time });
+      return (0, import_react49.createElement)(PartLine, { key, time: row2.time, switchedTo: row2.switchedTo, roster });
     case "user":
       return (0, import_react49.createElement)(EarlierUser, { key, row: row2, actions });
     case "answer":
@@ -22755,6 +22879,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     return true;
   };
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra });
+  const stopping = (options) => options?.stopReply === true ? { stopReply: true } : {};
   const memoryOf = (id) => roster.getSnapshot().roomsById[id] ? { roomId: id } : { botId: id };
   const yieldTo = (state2, view) => state2.panelYield === true || panelFolded?.(view) === true;
   const openSideChat = (sessionId, chatId) => {
@@ -22894,12 +23019,15 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     voicePane: (sessionId, paneId, open, active2) => call2("voice-pane", { sessionId, paneId, open, active: active2 }),
     voiceWait: (sessionId, paneId, callId, signal) => call2("voice-wait", { sessionId, paneId, callId }, signal),
     voiceSpoken: (sessionId, paneId, callId, outcome) => call2("voice-spoken", { sessionId, paneId, callId, outcome }),
-    // A model on another route: the host changes it in place on a chat with nothing said.
-    // `patch` carries the thinking level picked with it.
-    switchRoute: (id, ref, patch = {}) => after(call2("switch-route", { id, ...patch, model: ref })),
-    switchRouteInChat: async (id, ref, patch = {}) => {
+    // A model on another route: the host changes it in place on a chat with nothing said, else
+    // in a new part with a handoff (RFC 0030, Handoff note). `patch` carries the thinking level
+    // picked with it. `options.stopReply`: the person's Switch on "This stops the current reply",
+    // the only consent that lets the host stop a running reply; without it the host answers
+    // reason reply-running while one runs.
+    switchRoute: (id, ref, patch = {}, options) => after(call2("switch-route", { id, ...patch, model: ref, ...stopping(options) })),
+    switchRouteInChat: async (id, ref, patch = {}, options) => {
       try {
-        return await after(call2("switch-route", { id, ...patch, model: ref }));
+        return await after(call2("switch-route", { id, ...patch, model: ref, ...stopping(options) }));
       } catch (error) {
         const provider = signInProviderOf(ref);
         if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider)) return void 0;
@@ -22909,10 +23037,11 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     },
     // A model chosen in a Bot's chat (rule 2): an agent that is signed out opens the sign-in row
     // in that chat instead of failing; the Bot keeps its model until the sign-in is done.
-    // `patch` goes with the model in the same update (its thinking level).
-    chooseModelInChat: async (id, ref, patch = {}) => {
+    // `patch` goes with the model in the same update (its thinking level); `options.stopReply`
+    // as for switchRoute.
+    chooseModelInChat: async (id, ref, patch = {}, options) => {
       try {
-        return await after(call2("update-bot", { id, ...patch, model: ref }));
+        return await after(call2("update-bot", { id, ...patch, model: ref, ...stopping(options) }));
       } catch (error) {
         const provider = signInProviderOf(ref);
         if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider, ref)) return void 0;
@@ -28461,6 +28590,81 @@ function MemoryNotice({ shown: shown2 }) {
     (0, import_react64.createElement)("span", { className: "bt-pill-mem-in", ref: inner }, (0, import_react64.createElement)("span", { className: "bt-pill-mem-ico" }, (0, import_react64.createElement)(MemoryIcon)), label)
   );
 }
+var LOCK_GRACE_MS = 15e3;
+function paneOf(node, sessionId) {
+  for (let at = node?.parentElement; at; at = at.parentElement) {
+    const content = [...at.querySelectorAll("[data-conversation-content][data-conversation-session]")].find((item) => item.dataset.conversationSession === sessionId);
+    if (content !== void 0) return content;
+  }
+  return void 0;
+}
+function lockComposer(pane, placeholder2) {
+  const apply2 = () => {
+    for (const card of pane.querySelectorAll("[data-composer-card]")) {
+      if (card.getAttribute("inert") !== "") card.setAttribute("inert", "");
+      if (card.getAttribute("aria-busy") !== "true") card.setAttribute("aria-busy", "true");
+    }
+  };
+  apply2();
+  if (placeholder2 !== void 0) pane.style.setProperty("--bt-placeholder", JSON.stringify(placeholder2));
+  const Observer = pane.ownerDocument?.defaultView?.MutationObserver ?? globalThis.MutationObserver;
+  const observer = typeof Observer === "function" ? new Observer(apply2) : void 0;
+  observer?.observe(pane, { childList: true, subtree: true });
+  return () => {
+    observer?.disconnect();
+    for (const card of pane.querySelectorAll("[data-composer-card]")) {
+      card.removeAttribute("inert");
+      card.removeAttribute("aria-busy");
+    }
+    if (placeholder2 !== void 0) pane.style.removeProperty("--bt-placeholder");
+  };
+}
+var ownChatPart = (bot, sessionId) => bot !== void 0 && (currentPart(bot) === sessionId || (bot.parts ?? []).includes(sessionId));
+function useSwitchLock({ bot, roster, sessionId, useWork, actions, updateHold, anchor }) {
+  const own2 = ownChatPart(bot, sessionId);
+  const key = useWork?.((work) => {
+    const switching = own2 ? work?.models?.[bot.id]?.switching : void 0;
+    return typeof switching?.to === "string" && Number.isFinite(switching.since) ? `${switching.since}
+${switching.to}` : "";
+  }) ?? "";
+  const [since2, to] = key === "" ? [void 0, void 0] : [Number(key.slice(0, key.indexOf("\n"))), key.slice(key.indexOf("\n") + 1)];
+  const [expired2, setExpired] = (0, import_react64.useState)("");
+  const locked = key !== "" && expired2 !== key;
+  (0, import_react64.useEffect)(() => {
+    if (key === "") return void 0;
+    const left = since2 + CROSSING_DEADLINE_MS + LOCK_GRACE_MS - Date.now();
+    if (left <= 0) {
+      setExpired(key);
+      return void 0;
+    }
+    const timer = setTimeout(() => setExpired(key), left);
+    return () => clearTimeout(timer);
+  }, [key]);
+  const agent = to === void 0 ? "" : agentNameOf(roster, to);
+  const placeholder2 = locked && !updateHold ? t("Switching to {agent}…", { agent }) : void 0;
+  (0, import_react64.useLayoutEffect)(() => {
+    if (!locked) return void 0;
+    const pane = paneOf(anchor?.current, sessionId);
+    return pane === void 0 ? void 0 : lockComposer(pane, placeholder2);
+  }, [locked, sessionId, placeholder2]);
+  const began = (0, import_react64.useRef)(void 0);
+  (0, import_react64.useEffect)(() => {
+    if (key !== "") {
+      began.current = since2;
+      return;
+    }
+    const from = began.current;
+    began.current = void 0;
+    if (from === void 0 || bot === void 0) return;
+    const state2 = actions?.modelStateOf?.(bot.id);
+    const failure = state2?.lastFailure;
+    if ((failure?.code === SWITCH_FAILED || failure?.code === OWN_TOOLS_SWITCH) && failure.at >= from) {
+      const line = modelStateLine(state2, roster);
+      if (line !== void 0) actions.reportError?.(new Error(line), "switch-route");
+    }
+  }, [key]);
+  return locked;
+}
 function HeaderButtons(props) {
   const entries2 = useEntries(headerButtons);
   return entries2.map((entry) => (0, import_react64.createElement)(entry.Component, { key: entry.id, ...props }));
@@ -28532,6 +28736,8 @@ function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus, useSe
   const changed = useNews((map) => latestMemoryChange(map, memoryIds));
   const updateHold = useRoster((value) => value.updateHold === true);
   const holdText = t("An update is running. Your message waits until it is done.");
+  const anchor = (0, import_react64.useRef)(null);
+  useSwitchLock({ bot, roster, sessionId, useWork, actions, updateHold, anchor });
   (0, import_react64.useEffect)(() => {
     document.body.style.setProperty("--bt-placeholder", JSON.stringify(updateHold ? holdText : name ? t("Message {name}", { name }) : t("Message")));
   }, [name, t("Message"), updateHold, holdText]);
@@ -28617,7 +28823,7 @@ function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus, useSe
   ) : null;
   return (0, import_react64.createElement)(
     "div",
-    { className: native ? "bt-native-head" : "bt-head" },
+    { ref: anchor, className: native ? "bt-native-head" : "bt-head" },
     showGoal ? (0, import_react64.createElement)(GoalIsland, { room: room2, goal, view, open: goalOpen, composing: goalCompose, roomWork, roster, actions, pill }) : pill,
     (0, import_react64.createElement)("span", { className: "bt-sr", role: "status" }, memoryNotice ? t("Memory updated") : ""),
     // A seat can have a Terminal face. A DSH conversation stays in Chat.
@@ -47327,6 +47533,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   actions.freshConversation = (botId) => after(call("bot-fresh", { id: botId }));
   actions.subscribeWork = (listener) => work.subscribe(listener);
   actions.modelStateOf = (botId) => work.getSnapshot().models?.[botId];
+  actions.turnRunning = (sessionId) => work.getSnapshot().turns?.[sessionId] !== void 0;
   const browserPages = browsers?.pages ?? createSource({});
   const browserTabs = browsers?.tabs ?? createSource({});
   const browserHolds = browsers?.holds ?? hostHolds;

@@ -46,6 +46,31 @@ module.exports = __toCommonJS(gated_client_exports);
 var import_react = require("react");
 var import_gated_shared = require("./gated-shared.js");
 
+// src/shared/routes.js
+var CODING_CLIS = Object.freeze(["acp-claude", "acp-codex"]);
+var CONNECTED_BY = Object.freeze(["native", "pi-ai", "claude-code-plugin", "acp", "hermes-remote"]);
+var HARNESSES = Object.freeze(["dsh", "claude-code", "codex", "gemini"]);
+var SUBSCRIPTION_ROUTES = Object.freeze(["grok", "antigravity"]);
+var ACP_HARNESS = Object.freeze({ claude: "claude-code", codex: "codex", gemini: "gemini" });
+var ACP_NAME = Object.freeze({
+  "acp-claude": "Claude Code",
+  "acp-codex": "Codex",
+  "acp-hermes": "Hermes",
+  "acp-antigravity": "Antigravity",
+  "acp-omp": "omp"
+});
+var LEGACY_LOCAL_CLIS = Object.freeze([
+  "codex-cli",
+  "devin-cli",
+  "gemini-cli",
+  "grok-cli",
+  "cursor-cli",
+  "cline",
+  "qwen-code",
+  "goose"
+]);
+var SELECTOR_ROUTES = Object.freeze(["native", "acp", "herdr", "hermes-remote"]);
+
 // src/client/member-model.js
 var initialMember = {
   bots: [],
@@ -106,10 +131,12 @@ function MemberRows({ pages, roster, botId }) {
   const bot = Object.hasOwn(roster.byId, botId) ? roster.byId[botId] : void 0;
   return pageRows(pages).map(({ row, key }) => {
     if (row.kind === "divider") {
+      const switched = typeof row.switchedTo === "string" && row.switchedTo !== "" ? (0, import_gated_shared.t)("Switched to {agent}", { agent: ACP_NAME[row.switchedTo.split("/")[0]] ?? row.switchedTo }) : void 0;
+      const day = Number.isFinite(row.time) ? (0, import_gated_shared.dayLabel)(row.time) : void 0;
       return (0, import_react.createElement)(
         "div",
         { key, className: "bt-part-line", role: "separator" },
-        Number.isFinite(row.time) ? (0, import_react.createElement)("span", null, (0, import_gated_shared.dayLabel)(row.time)) : null
+        switched === void 0 && day === void 0 ? null : (0, import_react.createElement)("span", null, [switched, day].filter((part) => part !== void 0).join(" · "))
       );
     }
     if (row.kind === "user") {

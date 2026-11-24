@@ -18,6 +18,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     return true
   }
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra })
+  const stopping = options => (options?.stopReply === true ? { stopReply: true } : {})
   // A memory is a Bot's or a group chat's; both are opened by id.
   const memoryOf = id => (roster.getSnapshot().roomsById[id] ? { roomId: id } : { botId: id })
   // An action that shows the panel lands the yield with it: when a folded
@@ -135,11 +136,14 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     voicePane: (sessionId, paneId, open, active) => call('voice-pane', { sessionId, paneId, open, active }),
     voiceWait: (sessionId, paneId, callId, signal) => call('voice-wait', { sessionId, paneId, callId }, signal),
     voiceSpoken: (sessionId, paneId, callId, outcome) => call('voice-spoken', { sessionId, paneId, callId, outcome }),
-    // A model on another route: the host changes it in place on a chat with nothing said.
-    // `patch` carries the thinking level picked with it.
-    switchRoute: (id, ref, patch = {}) => after(call('switch-route', { id, ...patch, model: ref })),
-    switchRouteInChat: async (id, ref, patch = {}) => {
-      try { return await after(call('switch-route', { id, ...patch, model: ref })) } catch (error) {
+    // A model on another route: the host changes it in place on a chat with nothing said, else
+    // in a new part with a handoff (RFC 0030, Handoff note). `patch` carries the thinking level
+    // picked with it. `options.stopReply`: the person's Switch on "This stops the current reply",
+    // the only consent that lets the host stop a running reply; without it the host answers
+    // reason reply-running while one runs.
+    switchRoute: (id, ref, patch = {}, options) => after(call('switch-route', { id, ...patch, model: ref, ...stopping(options) })),
+    switchRouteInChat: async (id, ref, patch = {}, options) => {
+      try { return await after(call('switch-route', { id, ...patch, model: ref, ...stopping(options) })) } catch (error) {
         // A signed-out agent opens its sign-in row; the pick is made again after it.
         const provider = signInProviderOf(ref)
         if (error?.code === 'bot/sign-in-required' && provider && openCliLogin(id, provider)) return undefined
@@ -149,9 +153,10 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     },
     // A model chosen in a Bot's chat (rule 2): an agent that is signed out opens the sign-in row
     // in that chat instead of failing; the Bot keeps its model until the sign-in is done.
-    // `patch` goes with the model in the same update (its thinking level).
-    chooseModelInChat: async (id, ref, patch = {}) => {
-      try { return await after(call('update-bot', { id, ...patch, model: ref })) } catch (error) {
+    // `patch` goes with the model in the same update (its thinking level); `options.stopReply`
+    // as for switchRoute.
+    chooseModelInChat: async (id, ref, patch = {}, options) => {
+      try { return await after(call('update-bot', { id, ...patch, model: ref, ...stopping(options) })) } catch (error) {
         const provider = signInProviderOf(ref)
         if (error?.code === 'bot/sign-in-required' && provider && openCliLogin(id, provider, ref)) return undefined
         // An agent already signed in on this computer, to an account the person has not

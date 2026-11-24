@@ -931,6 +931,9 @@ function applyOwner(ctx, { gated = false } = {}) {
   // Each Bot's model state (the host's model-state.js), as the last state answer carried it.
   actions.subscribeWork = listener => work.subscribe(listener)
   actions.modelStateOf = botId => work.getSnapshot().models?.[botId]
+  // Whether a Session runs a turn now (the host's live `turns`), read at the moment of a model
+  // pick: a crossing that would stop a running reply asks first (RFC 0030, Handoff note).
+  actions.turnRunning = sessionId => work.getSnapshot().turns?.[sessionId] !== undefined
   const browserPages = browsers?.pages ?? createSource({})
   const browserTabs = browsers?.tabs ?? createSource({})
   const browserHolds = browsers?.holds ?? hostHolds

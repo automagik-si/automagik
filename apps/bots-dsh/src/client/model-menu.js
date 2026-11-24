@@ -8,12 +8,13 @@ import { SPRING_POP, SPRING_SHAPE, spring, stepMenuFocus, useLinger, useViewport
 import { hostText, t } from './i18n.js'
 import { HostModelMenu } from './host-model-menu.js'
 import { AgentMark, DshMarkIcon, HerdrMarkIcon } from './marks.js'
-import { ACP_NAME, commandCapableAgent, crossesHarness, routeOf, selectorRouteOf } from '../shared/routes.js'
+import { ACP_NAME, commandCapableAgent, crossesHarness, isHermesRoute, routeOf, selectorRouteOf } from '../shared/routes.js'
 import { OWN_TOOLS_MENU_HINT, OWN_TOOLS_MODEL_TEXT, ownToolsRefused } from '../shared/own-tools.js'
 import { HermesMark, HERMES_MARK_CSS } from './hermes-mark.js'
 import { HermesRemoteConnect } from './hermes-remote.js'
 
 const MENU_EXIT_MS = 120
+const noWork = () => () => {}
 
 // -------------------------------------------------------------------------
 // A Bot's model: the picker in its details panel and settings, and the message its
@@ -74,12 +75,27 @@ export function modelOf(bot, roster) {
 // is never claimed from a pick or a started request. Undefined when there is nothing to say.
 export const SWITCH_FAILED = 'MODEL_SWITCH_COMPACTION_FAILED'
 export const MODEL_ACCESS_REQUIRED = 'MODEL_ACCESS_REQUIRED'
+// An agent switch the Bot's own-tools rule stopped at its commit (#2026, host model-state.js).
+export const OWN_TOOLS_SWITCH = 'MODEL_OWN_TOOLS_DENIED'
 const labelOf = (roster, ref) => (typeof ref === 'string' ? servedOf(roster, ref)?.name ?? (ref.split('/').slice(1).join('/') || ref) : t('the new model'))
+// The agent a ref names, as the menu names it (RFC 0030, Handoff note): an agent over ACP by
+// the catalog's brand, else the menu's own name for it; a native model by its catalog name;
+// else the ref. Product names are never translated.
+export function agentNameOf(roster, ref) {
+  if (typeof ref !== 'string' || ref === '') return ''
+  const served = servedOf(roster ?? {}, ref)
+  const provider = providerOf(served ?? { ref })
+  if (routeOf(provider).connectedBy === 'acp') return served?.providerName ?? ACP_NAME[provider] ?? ref
+  return served?.name ?? ref
+}
 export function modelStateLine(state, roster) {
   if (state === undefined || state === null) return undefined
+  // An agent switch is running in the Bot's own chat (its chat's composer is locked).
+  if (typeof state.switching?.to === 'string') return t('Switching to {agent}…', { agent: agentNameOf(roster, state.switching.to) })
   const failure = state.lastFailure
   if (failure?.kept) {
     const params = { model: labelOf(roster, failure.ref), kept: labelOf(roster, failure.kept) }
+    if (failure.code === OWN_TOOLS_SWITCH) return t(OWN_TOOLS_MODEL_TEXT)
     if (failure.code === SWITCH_FAILED) return t('{model} could not take over this conversation. This Bot stays on {kept}.', params)
     if (failure.code === MODEL_ACCESS_REQUIRED) return t('{model} needs a sign-in before it can answer. This Bot stays on {kept}.', params)
     return t('{model} did not answer. This Bot stays on {kept}.', params)
@@ -601,8 +617,14 @@ export function ModelMenu(props) {
   return h(props.roster?.hostModels?.[props.bot?.id] === undefined ? DshModelMenu : HostModelMenu, props)
 }
 
-// Confirm a route or agent change. A conversation with history needs New conversation first.
-export function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm }) {
+// What a crossing pick asks first: 'hermes' (the new-conversation question a Hermes route keeps,
+// RFC 0030 Q7a), 'running' (the pick stops the reply that runs), or null (switch at once).
+export const askFirst = (current, ref, replying) =>
+  isHermesRoute(current) || isHermesRoute(ref) ? 'hermes' : replying ? 'running' : null
+
+// Confirm a route or agent change while a reply runs (it stops that reply); a Hermes route
+// keeps its new-conversation question.
+export function RouteConfirm({ bot, roster, current, target, ask, onCancel, onConfirm }) {
   const from = current === undefined ? undefined : modelRoute(roster, current)
   const to = modelRoute(roster, target.ref)
   const routeChanged = from?.route !== to.route
@@ -614,18 +636,21 @@ export function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm
       : to.provider === 'acp-claude' || to.provider === 'acp-codex' ? t("Full access: the CLI's own no-ask mode.")
         : t("Full access: the agent's actions run without asking.")
   const title = routeChanged ? t('Change route?') : t('Change agent?')
+  const running = ask === 'running'
   return h('div', { className: 'bt-model-step bt-model-confirm', role: 'group', 'aria-label': title },
     h('div', { className: 'bt-model-confirm-title' }, title),
     h('div', { className: 'bt-model-confirm-move' },
       from ? `${routeName(from.route)} · ${from.connection} → ` : '',
       `${routeName(to.route)} · ${to.connection}`),
-    h('div', { className: 'bt-model-confirm-text' }, routeChanged
-      ? t('Changing the route requires a new conversation if this one has history.')
-      : t('Changing the agent requires a new conversation if this one has history.')),
+    h('div', { className: 'bt-model-confirm-text' }, running
+      ? t('This stops the current reply and continues on {agent}.', { agent: agentNameOf(roster, target.ref) })
+      : routeChanged
+        ? t('Changing the route requires a new conversation if this one has history.')
+        : t('Changing the agent requires a new conversation if this one has history.')),
     fullAccessLine === undefined ? null : h('div', { className: 'bt-model-confirm-access', role: 'note' }, fullAccessLine),
     h('div', { className: 'bt-model-confirm-actions' },
-      h('button', { type: 'button', className: 'bt-model-confirm-cancel', onClick: onCancel }, t('Keep this conversation')),
-      h('button', { type: 'button', className: 'bt-model-confirm-go', onClick: onConfirm }, routeChanged ? t('Change route') : t('Change agent'))))
+      h('button', { type: 'button', className: 'bt-model-confirm-cancel', onClick: onCancel }, running ? t('Cancel') : t('Keep this conversation')),
+      h('button', { type: 'button', className: 'bt-model-confirm-go', onClick: onConfirm }, running ? t('Switch') : routeChanged ? t('Change route') : t('Change agent'))))
 }
 
 function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, chat = false, bar = false, running = false, onPick, onPickEffort, saved = onPick === undefined, withEfforts = true }) {
@@ -638,7 +663,8 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     remote.current.mounted = true
     return () => { remote.current.mounted = false; remote.current.active = false; remote.current.generation++ }
   }, [])
-  // A route change waits for the person's confirmation.
+  // A crossing while a reply runs, or to or from Hermes, waits for the person's confirmation;
+  // an idle crossing goes at once.
   const [confirm, setConfirm] = useState(undefined)
   // The provider's key, for a model that needs one, is asked for inside the menu when the
   // window can save it; elsewhere the row leads to the models page.
@@ -661,6 +687,9 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300 })
   const live = useRef(false)
   live.current = isOpen
+  // An agent switch is running in this Bot's own chat (the host's model state): no pick
+  // until it ends, and the trigger shows its busy state.
+  const switching = useSyncExternalStore(actions?.subscribeWork ?? noWork, () => typeof actions?.modelStateOf?.(bot.id)?.switching?.to === 'string')
   const shown = modelOf(bot, roster)
   const current = bot.model ?? bot.appliedModel
   const currentRef = useRef(current)
@@ -740,10 +769,28 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // not: `onPick` alone says nothing about whether the conversation exists yet.
   const crossing = ref => Boolean(current) && saved && ref !== current && crossesHarness(current, ref)
   const recovery = ref => saved && bot.shellHeld !== undefined && !commandCapableAgent(ref)
-  const pickModel = (ref, effort, { routeChange = false, level = false } = {}) => {
+  // The question the pick needs now: a crossing asks only while a reply runs in the Bot's own
+  // chat (that pick stops it), or to or from Hermes.
+  const askFor = ref => askFirst(current, ref, actions?.turnRunning?.(currentPart(bot)) === true)
+  // The host saw a reply the menu did not (reason reply-running): the same question opens, and
+  // nothing changed. Switch sends the pick again with stopReply.
+  const askAgain = (ref, effort) => (error) => {
+    if (error?.reason !== 'reply-running' || owner.current !== bot.id) throw error
+    keys.current = true
+    setView(MENU_ROOT)
+    setConfirm({ ref, effort, ask: 'running' })
+    open()
+    return undefined
+  }
+  const pickModel = (ref, effort, { routeChange = false, level = false, stopReply = false } = {}) => {
+    if (switching) return undefined
+    // Only the person's Switch on the running question stops a reply (RFC 0030, Handoff note).
+    const sending = stopReply ? [{ stopReply: true }] : []
     // A crossing started from a saved Bot's settings still goes through the picker's own
     // action: the settings wrapper needs to keep its sign-in/account handling.
-    if (routeChange && typeof onPick === 'function') return onPick(ref, { routeChange: true, effort })
+    if (routeChange && typeof onPick === 'function') {
+      return Promise.resolve(onPick(ref, { routeChange: true, effort }, ...sending)).catch(stopReply ? (error) => { throw error } : askAgain(ref, effort))
+    }
     if (onPick) {
       const pickedIt = Promise.resolve(onPick(ref))
       if (onPickEffort === undefined && effort === undefined) return pickedIt
@@ -759,18 +806,26 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       return undefined
     }
     if (routeChange) {
-      // The host can apply the crossing in place on a chat with nothing said. A history
-      // refusal guides the person to New conversation before picking the route again.
+      // The host moves a chat with history to a new part with a handoff; a Hermes route still
+      // refuses. A reply the menu did not see running comes back as the running question.
       const pick = chat && actions.switchRouteInChat ? actions.switchRouteInChat : actions.switchRoute
-      if (typeof pick === 'function') return run(pick(bot.id, ref, level || effort !== undefined ? { effort: effort ?? null } : {}))
+      if (typeof pick === 'function') {
+        const sent = Promise.resolve(pick(bot.id, ref, level || effort !== undefined ? { effort: effort ?? null } : {}, ...sending))
+        return run(stopReply ? sent : sent.catch(askAgain(ref, effort)))
+      }
     }
     // In a Bot's chat a signed-out agent opens the sign-in row there (cli-login.js, rule 2).
     if (chat && actions.chooseModelInChat) return run(actions.chooseModelInChat(bot.id, ref, level || effort !== undefined ? { effort: effort ?? null } : {}))
     return run(actions.updateBot(bot.id, { model: ref, ...(level || effort !== undefined ? { effort: effort ?? null } : {}) }))
   }
   const commit = (model, effort) => {
-    const routeChange = model.ref !== undefined && recovery(model.ref)
-    if (!routeChange && model.ref !== undefined && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
+    if (switching) return
+    let routeChange = model.ref !== undefined && recovery(model.ref)
+    if (!routeChange && model.ref !== undefined && crossing(model.ref)) {
+      const ask = askFor(model.ref)
+      if (ask !== null) { setConfirm({ ref: model.ref, effort, ask }); return }
+      routeChange = true
+    }
     finish()
     void Promise.resolve(pickModel(model.ref, effort, { routeChange })).catch(() => {})
   }
@@ -804,8 +859,13 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // A level of the current model changes the level only; on another model, the model and its
   // level go together, and a crossing asks first.
   const onLevel = (model, effort) => {
-    const routeChange = recovery(model.ref)
-    if (!routeChange && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
+    if (switching) return
+    let routeChange = recovery(model.ref)
+    if (!routeChange && crossing(model.ref)) {
+      const ask = askFor(model.ref)
+      if (ask !== null) { setConfirm({ ref: model.ref, effort, ask }); return }
+      routeChange = true
+    }
     finish()
     void Promise.resolve(pickModel(model.ref, effort, { routeChange, level: true })).catch(() => {})
   }
@@ -836,8 +896,8 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   else if (effortLabel !== undefined) bits.push(effortLabel)
   const second = bits.length > 0 ? bits.join(' · ') : null
   const confirmView = confirm === undefined ? null : h(RouteConfirm, {
-    bot, roster, current, target: confirm, onCancel: () => setConfirm(undefined),
-    onConfirm: () => { const next = confirm; setConfirm(undefined); finish(); void Promise.resolve(pickModel(next.ref, next.effort, { routeChange: true })).catch(() => {}) },
+    bot, roster, current, target: confirm, ask: confirm.ask, onCancel: () => setConfirm(undefined),
+    onConfirm: () => { const next = confirm; setConfirm(undefined); finish(); void Promise.resolve(pickModel(next.ref, next.effort, { routeChange: true, stopReply: next.ask === 'running' })).catch(() => {}) },
   })
   const openRemote = (manage = false) => {
     const generation = ++remote.current.generation
@@ -873,7 +933,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     if (crossing(next.modelRef)) {
       keys.current = true
       setView(MENU_ROOT)
-      setConfirm({ ref: next.modelRef, effort: undefined })
+      setConfirm({ ref: next.modelRef, effort: undefined, ask: askFor(next.modelRef) ?? 'hermes' })
       open()
     } else {
       finish()
@@ -883,10 +943,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   return h(Fragment, null,
     hermes ? h(HermesRemoteConnect, { key: hermes, edit: remote.current.edit === true, more: remote.current.edit === true, onClose: () => closeRemote(hermes), onConnected: next => remoteConnected(next, hermes) }) : null,
     link ? h('button', {
-      ref: button, type: 'button', className: 'bt-model-change', 'aria-haspopup': 'menu', 'aria-expanded': isOpen,
+      ref: button, type: 'button', className: 'bt-model-change', 'aria-haspopup': 'menu', 'aria-expanded': isOpen, 'aria-busy': switching || undefined,
       'aria-label': t('Change the model of {name}', { name: bot.name }), onClick: toggle,
     }, t('change')) : h('button', {
-      ref: button, type: 'button', className: `bt-model-trigger${bar ? ' bt-model-bar-trigger' : ''}`, 'data-wide': wide || undefined,
+      ref: button, type: 'button', className: `bt-model-trigger${bar ? ' bt-model-bar-trigger' : ''}`, 'data-wide': wide || undefined, 'aria-busy': switching || undefined,
       'data-bar': bar || undefined, 'data-route': triggerRoute?.route, 'aria-haspopup': 'menu', 'aria-expanded': isOpen,
       'aria-label': t('Model: {model}', { model: shownRunning?.name ?? shown?.name ?? t('none') }) + (runningTitle === undefined ? '' : `. ${runningTitle}`),
       title: runningTitle,
@@ -902,7 +962,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
         h('span', { className: 'bt-model-name' }, shown?.name ?? t('Choose a model')),
         second === null ? null : h('span', { className: 'bt-model-provider' }, second)),
     h(Caret)),
-    shownPlace ? createPortal(h('div', { ref: menu, className: `bt-menu bt-model-menu${shownPlace.bottom !== undefined ? ' bt-menu-up' : ''}`, role: 'menu', 'aria-label': t('Model for {name}', { name: bot.name }), style: shownPlace, 'data-leaving': leaving || undefined, onKeyDown },
+    shownPlace ? createPortal(h('div', { ref: menu, className: `bt-menu bt-model-menu${shownPlace.bottom !== undefined ? ' bt-menu-up' : ''}`, role: 'menu', 'aria-label': t('Model for {name}', { name: bot.name }), 'aria-disabled': switching || undefined, style: shownPlace, 'data-leaving': leaving || undefined, onKeyDown },
       confirmView ?? h(ModelSteps, {
         roster, bot, view, current, picked, levelName: effortLabel, go, onModel, onLevel, folds, levels: withEfforts,
         onRemote: openRemote,
@@ -999,6 +1059,8 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
   const bot = roster.byId[sessionId]
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  // A crossing pick while a reply runs in the chat: the running question, in place of the chips.
+  const [asking, setAsking] = useState('')
   // A Bot whose model its plugin picks never waits for a DSH model.
   const hosted = roster.hostModels?.[bot?.id] !== undefined
   const shown = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && !hosted && !idle
@@ -1017,13 +1079,29 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
   const keyFor = usable.length === 0 && actions.setProviderKey ? models.find(model => model.needsKey) : undefined
   const manage = manageModels(actions)
   // Settles true once the model is saved, so a level picked with it follows (ModelMenu).
-  const pick = (ref) => {
+  // A crossing while a reply runs in the chat asks first, as the model menu does; only the
+  // person's Switch stops the reply (`stopReply`), and the host asks too when it saw a reply
+  // the card did not (reason reply-running).
+  const pick = (ref, switchNow) => {
+    // Only the running question's Switch passes `true` (the menu's onPick passes no second value).
+    const stopReply = switchNow === true
+    if (!stopReply && bot.model && crossesHarness(bot.model, ref) && actions.turnRunning?.(currentPart(bot)) === true) {
+      setAsking(ref)
+      return Promise.resolve(false)
+    }
     setBusy(ref)
     setError('')
-    return Promise.resolve(actions.chooseModelInChat ? actions.chooseModelInChat(bot.id, ref) : actions.updateBot(bot.id, { model: ref }))
+    const sent = !stopReply
+      ? (actions.chooseModelInChat ? actions.chooseModelInChat(bot.id, ref) : actions.updateBot(bot.id, { model: ref }))
+      : (actions.chooseModelInChat ? actions.chooseModelInChat(bot.id, ref, {}, { stopReply: true }) : actions.updateBot(bot.id, { model: ref, stopReply: true }))
+    return Promise.resolve(sent)
       .then(() => true, (failure) => {
+        if (failure?.reason === 'reply-running' && !stopReply) {
+          setAsking(ref)
+          return false
+        }
         setError(failure?.message ?? String(failure))
-        if (failure?.reason !== 'needs-new-conversation') void actions.refreshModels?.()
+        if (failure?.reason !== 'needs-new-conversation' && failure?.reason !== 'reply-running') void actions.refreshModels?.()
         return false
       })
       .finally(() => setBusy(''))
@@ -1075,7 +1153,13 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
           h('div', { className: 'bt-bubble' }, text)))),
     keyFor
       ? h(ModelKeyCard, { key: keyFor.provider, model: keyFor, actions })
-      : h('div', { className: 'bt-model-chips', role: 'group', 'aria-label': t('Choose a model') }, choices),
+      : asking !== ''
+        ? h(RouteConfirm, {
+          bot, roster, current: bot.model, target: { ref: asking }, ask: 'running',
+          onCancel: () => setAsking(''),
+          onConfirm: () => { const ref = asking; setAsking(''); void pick(ref, true) },
+        })
+        : h('div', { className: 'bt-model-chips', role: 'group', 'aria-label': t('Choose a model') }, choices),
     error ? h('div', { className: 'bt-secret-error bt-model-error', role: 'alert' }, error) : null)
 }
 

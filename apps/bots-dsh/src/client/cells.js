@@ -32,6 +32,7 @@ import { hasCanvas, splitCanvases } from './canvas-text.js'
 import { CanvasSlot } from './canvas-slot.js'
 import { TaskCard, endLabel } from './task-card.js'
 import { ProposalCall, SettingsCall } from './settings-card.js'
+import { agentNameOf } from './model-menu.js'
 import { toolCards } from './extend.js'
 import { READ_SCOPE_CODE } from '../shared/read-scope.js'
 
@@ -490,8 +491,13 @@ function MemoryEvent({ sessionId, scope, tool, result, failed, code, roster, act
     panel === undefined ? null : h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => actions.openMemory(panel) }, t('Manage')))
 }
 
-function PartLine({ time }) {
-  return h('div', { className: 'bt-part-line', role: 'separator' }, Number.isFinite(time) ? h('span', null, dayLabel(time)) : null)
+// The line where a part begins. `switchedTo`: the agent an agent switch moved the chat to
+// there (RFC 0030, Handoff note), named as the model menu names it, in the same span.
+export function PartLine({ time, switchedTo, roster }) {
+  const switched = typeof switchedTo === 'string' && switchedTo !== '' ? t('Switched to {agent}', { agent: agentNameOf(roster, switchedTo) }) : undefined
+  const day = Number.isFinite(time) ? dayLabel(time) : undefined
+  return h('div', { className: 'bt-part-line', role: 'separator' },
+    switched === undefined && day === undefined ? null : h('span', null, [switched, day].filter(part => part !== undefined).join(' · ')))
 }
 
 const scrollParent = (node) => {
@@ -516,7 +522,7 @@ function EarlierUser({ row, actions }) {
 // Pages load from the host as the user scrolls up; a thin line marks where each
 // part begins, the last one where the current part begins.
 function EarlierParts({ sessionId, roster, actions }) {
-  const [view, setView] = useState({ pages: [], cursor: undefined, loading: true, failed: false, startedAt: null })
+  const [view, setView] = useState({ pages: [], cursor: undefined, loading: true, failed: false, startedAt: null, switchedTo: null })
   const top = useRef(null)
   const busy = useRef(false)
   const generation = useRef(0)
@@ -547,7 +553,7 @@ function EarlierParts({ sessionId, roster, actions }) {
         if (at >= 0) pages[at] = { partIndex, items: [...incoming, ...pages[at].items], btw }
         else pages.push({ partIndex, items: incoming, btw })
         pages.sort((a, b) => a.partIndex - b.partIndex)
-        return { pages, cursor: page.cursor, loading: false, failed: false, startedAt: page.startedAt ?? current.startedAt }
+        return { pages, cursor: page.cursor, loading: false, failed: false, startedAt: page.startedAt ?? current.startedAt, switchedTo: page.switchedTo ?? current.switchedTo }
       })
     }, () => {
       if (mine !== generation.current) return
@@ -559,7 +565,7 @@ function EarlierParts({ sessionId, roster, actions }) {
   useEffect(() => {
     generation.current += 1
     busy.current = false
-    setView({ pages: [], cursor: undefined, loading: true, failed: false, startedAt: null })
+    setView({ pages: [], cursor: undefined, loading: true, failed: false, startedAt: null, switchedTo: null })
     load(undefined)
     return () => { generation.current += 1 }
   }, [sessionId, closedEarlier])
@@ -589,7 +595,7 @@ function EarlierParts({ sessionId, roster, actions }) {
         : view.failed ? h('button', { type: 'button', className: 'bt-soft', onClick: () => load(view.cursor) }, t('Couldn’t load earlier messages · Retry'))
           : view.cursor ? h('button', { type: 'button', className: 'bt-soft', onClick: () => load(view.cursor) }, t('Load earlier')) : null),
     h(ChatRows, { items, sessionId, roster, actions, onBtwDelete: removeBtw }),
-    h(PartLine, { time: view.startedAt }))
+    h(PartLine, { time: view.startedAt, switchedTo: view.switchedTo, roster }))
 }
 
 // A Bot chat's entries as the host lists them (the `earlier` and `chat` endpoints): the
@@ -624,7 +630,7 @@ export function ChatRows({ items, sessionId, roster, actions, useUi, clock = fal
 // `useUi` gives a block its reactions and its Reply tool.
 function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDelete }) {
   switch (row.kind) {
-    case 'divider': return h(PartLine, { key, time: row.time })
+    case 'divider': return h(PartLine, { key, time: row.time, switchedTo: row.switchedTo, roster })
     case 'user': return h(EarlierUser, { key, row, actions })
     case 'answer': return h(AnsweredReply, { key, node: { data: row } })
     // A question or view card closed without an answer on it.

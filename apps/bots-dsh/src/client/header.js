@@ -13,6 +13,8 @@ import { viewBottom } from './motion.js'
 import { t } from './i18n.js'
 import { detailsSubject } from './sources.js'
 import { useNarrow } from './narrow.js'
+import { OWN_TOOLS_SWITCH, SWITCH_FAILED, agentNameOf, modelStateLine } from './model-menu.js'
+import { CROSSING_DEADLINE_MS } from '../shared/routes.js'
 
 // -------------------------------------------------------------------------
 // Conversation header
@@ -47,6 +49,95 @@ function MemoryNotice({ shown }) {
   useLayoutEffect(() => { if (shown) setWidth(inner.current?.scrollWidth ?? 0) }, [label, shown])
   return h('span', { className: 'bt-pill-mem', 'aria-hidden': true, style: { '--bt-mem-w': `${width}px` } },
     h('span', { className: 'bt-pill-mem-in', ref: inner }, h('span', { className: 'bt-pill-mem-ico' }, h(MemoryIcon)), label))
+}
+
+// --- The composer lock while an agent switch runs (RFC 0030, Handoff note, 2026-11-23) ------
+// From the host's `switching` (the Bot's model state) until it goes, the composer of a pane that
+// shows any part of that Bot's own chat takes no input: `inert` blocks focus, typing, paste,
+// Enter, send, the mic and the packs, with no new style. The host holds whatever still lands.
+// The lock ends a little after the host's own deadline even with no word from it.
+export const LOCK_GRACE_MS = 15_000
+
+// The conversation pane a header node belongs to: the nearest ancestor holding the content of
+// this Session, never the whole document, so a split pane on another chat stays usable.
+export function paneOf(node, sessionId) {
+  for (let at = node?.parentElement; at; at = at.parentElement) {
+    const content = [...at.querySelectorAll('[data-conversation-content][data-conversation-session]')]
+      .find(item => item.dataset.conversationSession === sessionId)
+    if (content !== undefined) return content
+  }
+  return undefined
+}
+
+// Locks the composer cards in `pane`, again whenever DSH draws one anew, and puts `placeholder`
+// (when given) on the pane alone. Returns the release.
+export function lockComposer(pane, placeholder) {
+  const apply = () => {
+    for (const card of pane.querySelectorAll('[data-composer-card]')) {
+      // React drops a boolean inert; the empty string sets the attribute (browser-pane.js).
+      if (card.getAttribute('inert') !== '') card.setAttribute('inert', '')
+      if (card.getAttribute('aria-busy') !== 'true') card.setAttribute('aria-busy', 'true')
+    }
+  }
+  apply()
+  if (placeholder !== undefined) pane.style.setProperty('--bt-placeholder', JSON.stringify(placeholder))
+  const Observer = pane.ownerDocument?.defaultView?.MutationObserver ?? globalThis.MutationObserver
+  const observer = typeof Observer === 'function' ? new Observer(apply) : undefined
+  observer?.observe(pane, { childList: true, subtree: true })
+  return () => {
+    observer?.disconnect()
+    for (const card of pane.querySelectorAll('[data-composer-card]')) {
+      card.removeAttribute('inert')
+      card.removeAttribute('aria-busy')
+    }
+    if (placeholder !== undefined) pane.style.removeProperty('--bt-placeholder')
+  }
+}
+
+// Whether the shown Session is a part of the Bot's own chat: the current one, or an earlier one
+// a pane still shows after the move.
+export const ownChatPart = (bot, sessionId) => bot !== undefined && (currentPart(bot) === sessionId || (bot.parts ?? []).includes(sessionId))
+
+// The lock for one header: on while `switching` is on for a part of this Bot's own chat. When it
+// goes and the host recorded the switch failing since it began, the failure is said once.
+export function useSwitchLock({ bot, roster, sessionId, useWork, actions, updateHold, anchor }) {
+  const own = ownChatPart(bot, sessionId)
+  const key = useWork?.((work) => {
+    const switching = own ? work?.models?.[bot.id]?.switching : undefined
+    return typeof switching?.to === 'string' && Number.isFinite(switching.since) ? `${switching.since}\n${switching.to}` : ''
+  }) ?? ''
+  const [since, to] = key === '' ? [undefined, undefined] : [Number(key.slice(0, key.indexOf('\n'))), key.slice(key.indexOf('\n') + 1)]
+  const [expired, setExpired] = useState('')
+  const locked = key !== '' && expired !== key
+  useEffect(() => {
+    if (key === '') return undefined
+    const left = since + CROSSING_DEADLINE_MS + LOCK_GRACE_MS - Date.now()
+    if (left <= 0) { setExpired(key); return undefined }
+    const timer = setTimeout(() => setExpired(key), left)
+    return () => clearTimeout(timer)
+  }, [key])
+  const agent = to === undefined ? '' : agentNameOf(roster, to)
+  // The update hold's own words win; they stay on the window as they are.
+  const placeholder = locked && !updateHold ? t('Switching to {agent}…', { agent }) : undefined
+  useLayoutEffect(() => {
+    if (!locked) return undefined
+    const pane = paneOf(anchor?.current, sessionId)
+    return pane === undefined ? undefined : lockComposer(pane, placeholder)
+  }, [locked, sessionId, placeholder])
+  const began = useRef(undefined)
+  useEffect(() => {
+    if (key !== '') { began.current = since; return }
+    const from = began.current
+    began.current = undefined
+    if (from === undefined || bot === undefined) return
+    const state = actions?.modelStateOf?.(bot.id)
+    const failure = state?.lastFailure
+    if ((failure?.code === SWITCH_FAILED || failure?.code === OWN_TOOLS_SWITCH) && failure.at >= from) {
+      const line = modelStateLine(state, roster)
+      if (line !== undefined) actions.reportError?.(new Error(line), 'switch-route')
+    }
+  }, [key])
+  return locked
 }
 
 // Buttons other Omni plugins add to a Bot's chat header (extend.js), such as the automations board.
@@ -124,6 +215,8 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
   // While the web self-update holds new work, a message waits until the update is done (RFC 0041).
   const updateHold = useRoster(value => value.updateHold === true)
   const holdText = t('An update is running. Your message waits until it is done.')
+  const anchor = useRef(null)
+  useSwitchLock({ bot, roster, sessionId, useWork, actions, updateHold, anchor })
   // The composer placeholder is not localizable per Session, so CSS reads it from here.
   useEffect(() => {
     document.body.style.setProperty('--bt-placeholder', JSON.stringify(updateHold ? holdText
@@ -190,7 +283,7 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
     h('summary', { className: 'bt-head-details bt-head-more-btn', 'aria-label': t('More'), title: t('More') }, h(DotsIcon)),
     h('div', { className: 'bt-head-more-pop', role: 'group', 'aria-label': t('More'), onClick: event => event.currentTarget.closest('details')?.removeAttribute('open') },
       headButtons, liveButtons, details)) : null
-  return h('div', { className: native ? 'bt-native-head' : 'bt-head' },
+  return h('div', { ref: anchor, className: native ? 'bt-native-head' : 'bt-head' },
     showGoal ? h(GoalIsland, { room, goal, view, open: goalOpen, composing: goalCompose, roomWork, roster, actions, pill }) : pill,
     h('span', { className: 'bt-sr', role: 'status' }, memoryNotice ? t('Memory updated') : ''),
     // A seat can have a Terminal face. A DSH conversation stays in Chat.
