@@ -34,7 +34,7 @@ import { actionError } from "./actionError.js";
 import { parseCommand } from "./launchArgs.js";
 import { characterSvg, characterFile, inkOf, isDark } from "./characters.js";
 import { workerClick, rowWorker, openWorkerTab } from "./workerTab.js";
-import { liveFrom, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, heldClickOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED, rateLimitObservation } from "./rows.js";
+import { liveFrom, liveOf, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, liveBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED, rateLimitObservation } from "./rows.js";
 import { rateLimitDialog } from "./restart.js";
 
 // The pack itself as a dialog: the bot form (create.js), or the attach picker, the Bots list
@@ -308,6 +308,10 @@ export default class Spaces extends View {
     // discovery: the rows follow the ledger, never a pane's bot= label. Null until the CLI
     // answers (an older CLI has no --all), and then the labels draw the rows.
     this.ledger = null;
+    // The same map from the ledger alone (no label fallback): Start, Attach, Detach and the
+    // spaceless project's Start follow this, never a label (#1875). Null when the ledger can't
+    // answer: the labels are then the only answer, as before.
+    this.bound = null;
     this.ledgerSeen = null;
     this.ledgerBusy = false;
     this.pets = new Set();
@@ -620,17 +624,27 @@ export default class Spaces extends View {
   // here: terminals() carries program.agent, status, status_ms and created_ms on this host;
   // a command line it lacks comes from readBotArgv, read off the drawing path, and counts
   // for liveness too: the program table can say shell while the agent runs). The attach
-  // ledger's bindings, when readLedger has them, name each bot's pane; its labels otherwise.
+  // ledger's bindings, when readLedger has them, name the panes they bind at their current
+  // generation; the labels name every other pane (#1875), and `this.bots` lets a binding that
+  // kept the bare terminal meet the snapshot's `<machine>/<terminal>` address. `drawable` leaves
+  // planned bots out: their node never draws a pane, so a label on one is a plain agent row.
   prepareBots() {
     const now = this.now ?? Date.now();
     const known = knownBots(this.bots);
+    const drawable = liveBots(this.bots);
     this.keyOf = listedKeyOf(this.bots, this.paneKeyReader());
-    const live = liveFrom(this.all, known, argvReader(this.argvOf), this.keyOf, this.ledger);
+    const readArgv = argvReader(this.argvOf);
+    const live = liveFrom(this.all, drawable, readArgv, this.keyOf, this.ledger, this.bots);
+    // The ledger alone, for the actions the ledger owns: a live label that no row names is a
+    // status and a focus, never an attachment (Start, Attach, Detach, persistence). When the
+    // CLI can't answer at all there is no ledger to own them, and the labels stand, as before.
+    this.bound = this.ledger == null ? null
+      : liveFrom(this.all, drawable, readArgv, this.keyOf, this.ledger, this.bots, { labels: false });
     // The bot panes as readPaneKeys asks for them: a new one, or one in another folder, is
     // read on the next tick (botTick), not only after the next discovery.
     this.paneSig = JSON.stringify(this.all.filter((k) => k.state === "live" && !String(k.address).includes("/") && known.has(k.labels?.[BOT_LABEL]))
       .map((k) => [k.address, k.created_ms ?? null, paneFolder(k)]));
-    this.botOf = botTerminals(this.all, known, this.ledger);
+    this.botOf = botTerminals(this.all, drawable, this.ledger, this.bots, this.keyOf);
     this.trees = buildTree({ projects: this.bots, live, terminals: this.all, now, rateLimited: this.rateLimited });
     this.wakeAt = nextWake(live, now);
   }
@@ -875,7 +889,20 @@ export default class Spaces extends View {
   botTerminal(n, tree) {
     if (n.live) return n.live.terminal;
     if (n.planned) return null;
-    return heldTerminalOf(n.bot.id, this.all, [], { key: n.project ?? tree.key, machine: tree.machine }, this.keyOf, this.ledger);
+    return heldTerminalOf(n.bot.id, this.all, [], { key: n.project ?? tree.key, machine: tree.machine }, this.keyOf, this.ledger, this.bots);
+  }
+
+  // The session a bot row was drawn with (#1875): its terminal address and generation
+  // (created_ms). A click re-reads terminals(), never this render's snapshot, and runs only
+  // while that same pane, in the same generation, is still live. A reused address is another
+  // session: the action is unavailable (the next render corrects the row). An unknown
+  // generation on either side is not evidence of reuse, as in rows.js.
+  sessionStill(session) {
+    if (!session?.terminal) return false;
+    const t = terminals().find((k) => k?.address === session.terminal);
+    if (!t || t.state !== "live") return false;
+    if (!Number.isSafeInteger(session.created_ms) || !Number.isSafeInteger(t.created_ms)) return true;
+    return session.created_ms === t.created_ms;
   }
 
   // A bot row (A4): fold slot, character, name in its ink over `role · model`, the agent's
@@ -890,21 +917,36 @@ export default class Spaces extends View {
     const second = secondLine(r, tree, { texts: this.modelTexts, defaults: this.modelDefaults, argvOf: (a) => this.argvOf.get(a)?.argv ?? null });
     const project = { key: n.project ?? tree.key, machine: tree.machine };
     // Not counted live but holding a live terminal (no agent seen in front yet): its pane, or
-    // a peek, rather than nothing; read again at click time (panes() too), nothing if it is gone.
-    const held = live || planned ? null : heldTerminalOf(b.id, this.all, [], project, this.keyOf, this.ledger);
+    // a peek, rather than nothing. Its generation is this render's; the click revalidates it.
+    const held = live || planned ? null : heldTerminalOf(b.id, this.all, [], project, this.keyOf, this.ledger, this.bots);
+    const heldCreated = held ? (this.all.find((k) => k?.address === held)?.created_ms ?? null) : null;
     const promptHold = planned ? null : this.heldOf(live ? live.terminal : held);
     const s = promptHold ? "blocked" : n.rateLimited ? "rate-limited" : n.status === "error" ? "blocked" : n.status;
     const pose = promptHold ? "needs-you" : n.pose;
     const onClick = live
-      ? (cx) => this.openWorker(r, cx)
-      : held ? () => { const a = heldClickOf(b.id, terminals(), panes(), project, this.keyOf, this.ledger); if (a) run(a.command, a.args); }
+      ? (cx) => { if (this.sessionStill(live)) this.openWorker(r, cx); }
+      : held ? () => {
+          if (!this.sessionStill({ terminal: held, created_ms: heldCreated })) return;
+          const a = clickActionOf(held, panes());
+          if (a) run(a.command, a.args);
+        }
         : r.foldable ? (cx) => this.toggle(r.id, r.open, cx) : null;
     // live: its own pane, or the terminal it holds before an agent shows (Focus goes where the
     // row's click goes; Detach); worker: what the row's own click opens (Focus, as openWorker);
-    // terminal: the pane focused at the click (Attach).
+    // terminal: the pane focused at the click (Attach). The Run section follows the ledger, not
+    // a label (#1875): a label-only live pane is Focus (the card's click) plus Start, never
+    // Detach or a fresh restart. With no ledger answer, the labels own it, as before.
+    const auth = this.ledger == null ? live : liveOf(this.bound, project, b.id);
+    const authHeld = this.ledger == null ? held
+      : heldTerminalOf(b.id, this.all, [], project, this.keyOf, this.ledger, this.bots, { labels: false });
+    const attached = auth?.terminal ?? authHeld ?? null;
+    const attachedCreated = auth?.created_ms ?? (authHeld ? (this.all.find((k) => k?.address === authHeld)?.created_ms ?? null) : null);
+    const focus = live?.terminal ?? held ?? null;
+    const focusCreated = live?.created_ms ?? heldCreated ?? null;
     const onMenu = () => openBotForm({ form: "menu", bot: b.id, name: b.name, planned: planned, project: project.key,
       machine: project.machine, stale: Boolean(tree.stale), hermes: b.hermes ?? null, agent: b.agent ?? null,
-      terminal: focused()?.terminal ?? null, live: live?.terminal ?? held ?? null, worker: rowWorker(r),
+      terminal: focused()?.terminal ?? null, live: attached, liveCreated: attachedCreated,
+      focus, focusCreated, worker: rowWorker(r),
       helpers: (n.helpers ?? []).map((h) => ({ terminal: h.terminal, name: h.name ?? null })) }, "popup");
     const size = main ? 30 : 26;
     let row = h_flex().flex_1().min_w(0).gap(8).items_center()
@@ -964,10 +1006,17 @@ export default class Spaces extends View {
       .child(main ? this.pet(main.bot, held ? "needs-you" : main.pose, 18, dark) : svg("mods/workspace-chrome/folder.svg").size(13).flex_none());
   }
 
-  // The bot a spaceless project's Start starts: its main bot, on this computer, not live.
+  // The bot a spaceless project's Start starts: its main bot, on this computer, not attached in
+  // the ledger. A live label alone is not an attachment (#1875); a ledger-confirmed pane that is
+  // held (no agent in front yet: the `sh -c` wrapper or a shell) is, as on the bot's card, whose
+  // menu offers Detach. With no ledger answer at all, the label still says it runs, as before.
   startable(tree) {
     const n = tree.main;
-    return !tree.machine && n && !n.planned && !n.live ? n.bot : null;
+    const project = { key: tree.key, machine: tree.machine };
+    const attached = this.ledger == null ? n?.live
+      : (n ? liveOf(this.bound, project, n.bot.id)
+        ?? heldTerminalOf(n.bot.id, this.all, [], project, this.keyOf, this.ledger, this.bots, { labels: false }) : null);
+    return !tree.machine && n && !n.planned && !attached ? n.bot : null;
   }
 
   startFromRow(bot, cx) {
