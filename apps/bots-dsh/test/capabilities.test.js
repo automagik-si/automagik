@@ -1583,7 +1583,28 @@ test('D2075-10 losing the lock after checking the displayed binding stops public
     tempFd = undefined
     rmSync(join(env.home, 'state.lock'))
   })
-  await assert.rejects(rt.capabilityDelete(item.name, { ui: true, expect }), { key: 'skill.store-failed' })
+  await assert.rejects(rt.capabilityDelete(item.name, { ui: true, expect }), { key: 'skill.changed-elsewhere' })
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).capabilities.items[item.name], item)
+  assert.equal(existsSync(folder), true)
+})
+
+test('D2075-10 a storage error after checking the displayed binding stops publication', async t => {
+  const env = await setup()
+  t.after(() => env.dispose())
+  const { rt } = env
+  const item = await rt.capabilitySave(skillFixture(), { ui: true })
+  const row = rt.capabilityLibraryView().find(row => row.name === item.name)
+  const expect = { kind: row.kind, id: row.recordId, team: rt.teamGeneration() }
+  const path = join(env.home, 'state.json')
+  const folder = rt.skillStore.pathOf(item.name, item.hash)
+  const rename = fs.renameSync
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === path) throw Object.assign(new Error('fixture cannot replace state'), { code: 'EIO' })
+    return rename(from, to)
+  })
+  await assert.rejects(rt.capabilityDelete(item.name, { ui: true, expect }), {
+    key: 'skill.store-failed', params: { code: 'EIO' },
+  })
   assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).capabilities.items[item.name], item)
   assert.equal(existsSync(folder), true)
 })

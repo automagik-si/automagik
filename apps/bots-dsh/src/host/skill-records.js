@@ -152,12 +152,13 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
     ledgerChain = run.catch(() => {})
     return run
   }
-  async function saveRecord(name, beforeCommit, item) {
+  async function saveRecord(name, beforeCommit, item, displayedTeam) {
     const change = item ? state => { state.capabilities.items[name] = item } : state => deleteFrom(state, name)
     try {
       await rt.saveCopy(change, { beforeCommit, afterWrite: () => change(rt.state), durable: true })
     } catch (error) {
       if (error.key) throw error
+      if (displayedTeam && (error.code === 'ELOCKLOST' || (!error.code && !rt.sameTeam(displayedTeam)))) throw changes()
       throw badStore(error)
     }
   }
@@ -735,7 +736,7 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
           entry.deleting = { at: Date.now(), hash: deletionHash(item), ...(item.skillFormat > 1 ? { preserve: true } : {}) }
         }, team)
         try {
-          await saveRecord(name, beforeCommit)
+          await saveRecord(name, beforeCommit, undefined, expect?.team)
           await finishDelete(name, team)
         } catch (error) {
           retry = true
