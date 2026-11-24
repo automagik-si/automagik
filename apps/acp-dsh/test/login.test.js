@@ -768,7 +768,7 @@ test('L1: a remembered Antigravity state is recognised after state= for a day; C
   ]) assert.equal(h.logins.textMatches(text), false, text)
   // G8-4: only the authority accounts.google.com itself is skipped (a port or userinfo is not).
   assert.equal(h.logins.textMatches(`https://accounts.google.com:443/o/oauth2/auth?state=${AGY_STATE}`), true)
-  assert.equal(h.logins.textMatches(`https://u@accounts.google.com/o/oauth2/auth?state=${AGY_STATE}`), true)
+  assert.equal(h.logins.textMatches(`https://u!@accounts.google.com/o/oauth2/auth?state=${AGY_STATE}`), true)
   assert.equal(h.logins.textMatches(`https://ACCOUNTS.GOOGLE.COM/o/oauth2/auth?state=${AGY_STATE}`), false)
   // Claude's #state path is unchanged beside it.
   assert.equal(h.logins.textMatches(`code#${STATE}`), false)

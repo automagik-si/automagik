@@ -436,7 +436,7 @@ test('Antigravity guard, client copy: run-wise decode, authority end and the cap
   for (const text of [
     `${cb.replace('~', '%7E')} worked 100% done`,
     first.replace('accounts.google.com', 'accounts.google.com:443'),
-    first.replace('accounts.google.com', 'x@accounts.google.com'),
+    first.replace('accounts.google.com', 'x!@accounts.google.com'),
     `${first} then ${cb}`,
     `${'state=x '.repeat(63)}${cb}`,
   ]) assert.equal(carriesKnownState(text), true, text)

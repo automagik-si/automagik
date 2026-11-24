@@ -104,7 +104,7 @@ test('a sign-in link reaches the row only while signing in, and only Google\'s o
     GOOGLE.replace('https:', 'http:'),
     GOOGLE.replace('accounts.google.com', 'accounts.google.com.evil.example'),
     GOOGLE.replace('accounts.google.com', 'evil.example'),
-    GOOGLE.replace('accounts.google.com', 'a@accounts.google.com'),
+    GOOGLE.replace('accounts.google.com', 'a!@accounts.google.com'),
     GOOGLE.replace('accounts.google.com', 'accounts.google.com:8443'),
     GOOGLE.replace('/o/oauth2/v2/auth', '/o/oauth2/v2/other'),
     GOOGLE.replace('response_type=code', 'response_type=token'),
