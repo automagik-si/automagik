@@ -1,6 +1,6 @@
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CHARACTERS, CHARACTER_COLORS, MAIN_LOOK, PICKER_SHAPES, SOLVER_SHAPES, shapeOf } from './characters.js'
+import { CHARACTER_COLORS, hasShape, MAIN_LOOK, PICKER_SHAPES, SOLVER_SHAPES, shapeOf } from './characters.js'
 import { paintCss } from './inks.js'
 import { BotMark, catalogueLookOf, GENIE_PET, lookOf, petOf, servedPet, UNFOLD_PET, useBaked } from './mark.js'
 import { PetSprite } from './pet.js'
@@ -167,7 +167,8 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   const solver = isSolverLooks(bot)
   const look = lookOf(bot)
   const stored = catalogueLookOf(bot)
-  const [color, setColor] = useState(look.color)
+  const [swatch, setSwatch] = useState(null)
+  const color = swatch ?? look.color
   const [local, setLocal] = useState([])
   const [unfold, setUnfold] = useState(false)
   const [browse, setBrowse] = useState(false)
@@ -181,6 +182,18 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   const [library, setLibrary] = useState([])
   const fileRef = useRef(null)
   const gridRef = useRef(null)
+  const colorsRef = useRef(null)
+  const ordinaryChooser = useRef(null)
+  // An upload belongs to this opening for this ordinary Bot. Keep the avatar fresh
+  // without carrying an upload across unmounts, Bot changes or identity changes.
+  useLayoutEffect(() => {
+    if (solver) return undefined
+    ordinaryChooser.current = {}
+    return () => { ordinaryChooser.current = null }
+  }, [bot.id, solver])
+  useLayoutEffect(() => {
+    if (ordinaryChooser.current) ordinaryChooser.current.avatar = bot.avatar
+  })
   useEffect(() => {
     if (solver) return
     void actions.pets().then((list) => {
@@ -201,7 +214,7 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   const pressed = currentKey(bot, stored)
   const worn = currentKey(bot, look)
   // An eligible worn character can still preview without a tile, such as a recolored octopus.
-  const wornShape = worn === `shape:${look.shape}` && Object.hasOwn(CHARACTERS, look.shape)
+  const wornShape = worn === `shape:${look.shape}` && hasShape(look.shape)
     && SOLVER_SHAPES.includes(look.shape) === solver ? shapeEntry(look.shape) : null
   const defaultKey = solver ? `shape:${solverDefaultShape(bot.id)}` : currentKey(bot, catalogueLookOf({ ...bot, avatar: undefined }))
   const item = all.find(entry => entry.key === focus) ?? all.find(entry => entry.key === worn) ?? wornShape
@@ -241,14 +254,16 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   // One photo is worn at once, as before; every photo also goes into the library, so a
   // later character does not lose it, and several at once only fill the library.
   const upload = async (files) => {
-    if (files.length === 0) return
+    const chooser = ordinaryChooser.current
+    if (!chooser || files.length === 0) return
     const read = await Promise.all(files.map(file => avatarImage(file).then(image => ({ name: file.name, image }), failure => ({ name: file.name, failure }))))
     const unread = read.filter(photo => photo.failure)
     const result = await importPhotos(read.filter(photo => !photo.failure), actions)
+    if (ordinaryChooser.current !== chooser) return
     const failed = [...unread.map(photo => photo.name), ...result.failed.map(photo => photo.name)]
     if (files.length === 1 && unread.length === 0) {
-      await actions.updateBot(bot.id, { avatar: { ...(bot.avatar ?? {}), image: read[0].image } })
-      onClose()
+      await actions.updateBot(bot.id, { avatar: { ...chooser.avatar, image: read[0].image } })
+      if (ordinaryChooser.current === chooser) onClose()
       return
     }
     await loadPhotos()
@@ -261,6 +276,12 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   // The cursor moves through the tiles in their grid: across a row, and a row up or down.
   const onKeyDown = (event) => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); return }
+    // Ordinary rosters start with pets. Go directly back to the colors so those
+    // tiles do not take over the stage and remove the swatches along the way.
+    if (!solver && event.key === 'Tab' && event.shiftKey && event.target?.dataset?.key === focused) {
+      const lastSwatch = colorsRef.current?.lastElementChild
+      if (lastSwatch) { event.preventDefault(); lastSwatch.focus(); return }
+    }
     if (event.key === 'Enter' || event.key === ' ') {
       const entry = all.find(item => item.key === event.target?.dataset?.key)
       if (event.key === 'Enter') {
@@ -314,11 +335,11 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
         h('div', { className: 'bt-cs-plate' },
           h('div', { className: 'bt-cs-name' }, item?.name ?? ''),
           h('div', { className: 'bt-cs-line' }, t(item?.line ?? ''))),
-        showsColor ? h('div', { className: 'bt-cs-colors', role: 'group', 'aria-label': t('Character color') }, CHARACTER_COLORS.map(ink => h('button', {
+        showsColor ? h('div', { ref: colorsRef, className: 'bt-cs-colors', role: 'group', 'aria-label': t('Character color') }, CHARACTER_COLORS.map(ink => h('button', {
           key: ink, type: 'button', className: 'bt-cs-color', 'aria-label': t(capitalize(ink)), title: t(capitalize(ink)), 'aria-pressed': color === ink,
-          onClick: () => setColor(ink),
+          onClick: () => setSwatch(ink),
         }, h('span', { style: { background: paintCss(ink) } })))) : null,
-        h('button', { type: 'button', className: 'bt-cs-go', disabled: picking || (item.kind === 'photo' && !selected), onClick: commit }, picking ? t('Chosen!') : t('Choose')),
+        h('button', { type: 'button', className: 'bt-cs-go', disabled: picking, onClick: commit }, picking ? t('Chosen!') : t('Choose')),
         h('div', { className: 'bt-cs-links' },
           solver ? null : h('button', { type: 'button', className: 'bt-cs-link', onClick: () => fileRef.current?.click() }, t('Add photos')),
           canBake() ? h('button', { type: 'button', className: 'bt-cs-link', onClick: () => { setNote('…'); toCodex(bot, look).then(id => setNote(t('In Codex as {id}. Pick it in Codex\'s pet menu.', { id })), error => setNote(error?.message ?? String(error))) } }, t('Use in Codex')) : null,

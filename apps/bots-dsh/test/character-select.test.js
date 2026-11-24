@@ -8,7 +8,7 @@ import { defaultShape, shapeOf } from '../src/client/characters.js'
 import { SOLVER_DESCRIPTION, solverInstructions } from '../src/shared/solver-method.js'
 
 const bundle = await build({
-  stdin: { contents: "export * from './src/client/character-select.js'\nexport { lookOf } from './src/client/mark.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
+  stdin: { contents: "export * from './src/client/character-select.js'\nexport { lookOf } from './src/client/mark.js'\nexport { registerShape } from './src/client/themes.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
   bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent', external: ['react', 'react-dom'],
 })
 const select = { exports: {} }
@@ -123,11 +123,13 @@ test("only a Solver Bot is offered the Solvers: the marker is the Description pl
 })
 
 // Keep hook state between draws and connect tile focus to the chooser's DOM handlers.
-function chooser(bot) {
+function chooser(bot, { importAvatars, avatarImage = async () => '' } = {}) {
   const slots = []
   let at = 0
-  let layoutEffect
-  let mounted = false
+  const layoutEffects = []
+  const focusedSwatches = []
+  let pending
+  let closed = 0
   const slot = (make) => { const index = at; at += 1; if (!(index in slots)) slots[index] = make(); return index }
   const stub = {
     createElement: (type, props, ...children) => ({ type, props: { ...props, children: children.flat(Infinity) } }),
@@ -136,7 +138,18 @@ function chooser(bot) {
       return [slots[index], (next) => { slots[index] = typeof next === 'function' ? next(slots[index]) : next }]
     },
     useRef: current => slots[slot(() => ({ current }))],
-    useMemo: make => make(), useEffect() {}, useLayoutEffect: effect => { layoutEffect = effect }, Fragment: 'fragment',
+    useMemo: make => make(), useEffect() {},
+    useLayoutEffect: (effect, deps) => {
+      const index = slot(() => ({}))
+      const previous = slots[index]
+      if (!deps || !previous.deps || deps.some((value, i) => !Object.is(value, previous.deps[i]))) {
+        layoutEffects.push(() => {
+          previous.cleanup?.()
+          slots[index] = { deps, cleanup: effect() }
+        })
+      }
+    },
+    Fragment: 'fragment',
   }
   const module = { exports: {} }
   runInNewContext(bundle.outputFiles[0].text, {
@@ -148,8 +161,8 @@ function chooser(bot) {
   const used = []
   const never = () => new Promise(() => {})
   const actions = {
-    pets: never, avatarLibrary: never, petsBrowse: never,
-    updateBot: (id, patch) => { saved.push(JSON.parse(JSON.stringify([id, patch]))); return never() },
+    pets: never, avatarLibrary: never, petsBrowse: never, importAvatars,
+    updateBot: async (id, patch) => { saved.push(JSON.parse(JSON.stringify([id, patch]))) },
     petUse: (...args) => { used.push(JSON.parse(JSON.stringify(args))); return never() },
   }
   const walk = (node, found = []) => {
@@ -162,7 +175,9 @@ function chooser(bot) {
   const draw = (next = bot) => {
     bot = next
     at = 0
-    const nodes = walk(module.exports.CharacterSelect({ bot, actions, run: promise => promise, onClose() {}, avatarImage: async () => '' }))
+    const nodes = walk(module.exports.CharacterSelect({
+      bot, actions, avatarImage, run: promise => (pending = promise), onClose: () => { closed += 1 },
+    }))
     const renderedTiles = tiles(nodes).map(tile => ({
       dataset: { key: tile.props['data-key'] },
       focus: () => tile.props.onFocus({ currentTarget: { matches: selector => selector === ':focus-visible' } }),
@@ -171,14 +186,26 @@ function chooser(bot) {
       querySelectorAll: () => renderedTiles,
       querySelector: selector => renderedTiles.find(tile => selector === `[data-key="${tile.dataset.key}"]`),
     }
-    if (!mounted) {
-      mounted = true
-      layoutEffect()
+    const colors = nodes.find(node => node.props.className === 'bt-cs-colors')
+    if (colors?.props.ref) {
+      colors.props.ref.current = {
+        lastElementChild: { focus: () => focusedSwatches.push(colors.props.children.at(-1).props['aria-label']) },
+      }
     }
+    for (const effect of layoutEffects.splice(0)) effect()
     return nodes
   }
-  const key = (nodes, key, target = {}, modifiers = {}) => nodes[0].props.onKeyDown({ key, target, ...modifiers, preventDefault() {}, stopPropagation() {} })
-  return { draw, key, saved, used }
+  const key = (nodes, key, target = {}, modifiers = {}) => {
+    let prevented = false
+    nodes[0].props.onKeyDown({ key, target, ...modifiers, preventDefault() { prevented = true }, stopPropagation() {} })
+    return prevented
+  }
+  const upload = (nodes) => {
+    const file = nodes.find(node => node.type === 'input' && node.props.type === 'file')
+    file.props.onChange({ target: { files: [{ name: 'avatar.png' }] } })
+    return pending
+  }
+  return { draw, key, saved, used, upload, focusedSwatches, registerShape: module.exports.registerShape, get closed() { return closed } }
 }
 const headings = nodes => nodes.filter(node => node.type === 'h3').map(node => node.props.children[0])
 const tiles = nodes => nodes.filter(node => node.type === 'button' && node.props.className === 'bt-cs-tile')
@@ -347,4 +374,86 @@ test('the chooser stages the ordinary default and restores the stored character 
   const restored = ui.draw(solverBot)
   assert.equal(stageName(restored), 'Frog')
   assert.equal(tileOf(restored, 'frog').props['aria-pressed'], true)
+})
+
+test('untouched Choose and Enter keep the color from the latest roster snapshot', () => {
+  for (const commit of [(ui, nodes) => chooseButton(nodes).props.onClick(), (ui, nodes) => ui.key(nodes, 'Enter')]) {
+    const ui = chooser(solverBot)
+    ui.draw()
+    const nodes = ui.draw({ ...solverBot, color: 'blue' })
+    commit(ui, nodes)
+    assert.deepEqual(ui.saved, [])
+    assert.equal(ui.closed, 1)
+    assert.equal(nodes.find(node => node.props.className === 'bt-cs-color' && node.props['aria-label'] === 'Blue').props['aria-pressed'], true)
+  }
+})
+
+test('Shift+Tab from a former Solver default reaches the swatches without choosing a tile', () => {
+  const ui = chooser({ ...solverBot, instructions: '' })
+  const nodes = ui.draw()
+  assert.equal(stageName(nodes), ordinaryDefault)
+  const key = tileOf(nodes, defaultShape('b')).props['data-key']
+  assert.equal(ui.key(nodes, 'Tab', { dataset: { key } }, { shiftKey: true }), true)
+  assert.deepEqual(ui.focusedSwatches, ['Aurora'])
+  const stage = ui.draw()
+  assert.equal(stageName(stage), ordinaryDefault)
+  stage.find(node => node.props.className === 'bt-cs-color' && node.props['aria-label'] === 'Blue').props.onClick()
+  chooseButton(ui.draw()).props.onClick()
+  assert.deepEqual(ui.saved, [['b', { color: 'blue' }]])
+})
+
+test('a registered ordinary shape stays on stage without a chooser tile', () => {
+  const ui = chooser({ id: 'b', name: 'Fixture', avatar: { shape: 'plugin-shape' } })
+  const unregister = ui.registerShape('plugin-shape', {
+    label: 'Plugin shape', body: paint => `<circle fill="${paint}" r="10"/>`, eyes: { at: [[36, 50], [64, 50]] },
+  })
+  try {
+    const nodes = ui.draw()
+    assert.equal(stageName(nodes), 'Plugin shape')
+    assert.ok(!tileOf(nodes, 'plugin-shape'))
+  } finally {
+    unregister()
+  }
+})
+
+const uploadedImage = 'data:image/png;base64,AA=='
+function pendingUpload() {
+  const started = Promise.withResolvers()
+  const imported = Promise.withResolvers()
+  const ordinary = { ...solverBot, instructions: '', avatar: { shape: 'star' } }
+  const ui = chooser(ordinary, {
+    avatarImage: async () => uploadedImage,
+    importAvatars: () => { started.resolve(); return imported.promise },
+  })
+  const done = ui.upload(ui.draw())
+  return { ui, ordinary, started: started.promise, finish: () => { imported.resolve({}); return done } }
+}
+
+test('a photo import in flight cannot change a Bot that became a Solver', async () => {
+  const { ui, started, finish } = pendingUpload()
+  await started
+  assert.deepEqual(headings(ui.draw(solverBot)), ['Solvers'])
+  await finish()
+  assert.deepEqual(ui.saved, [])
+  assert.equal(ui.closed, 0)
+})
+
+test('a photo import in flight uses the latest avatar of the same ordinary Bot', async () => {
+  const { ui, ordinary, started, finish } = pendingUpload()
+  await started
+  ui.draw({ ...ordinary, avatar: { shape: 'moon' } })
+  await finish()
+  assert.deepEqual(ui.saved, [['b', { avatar: { shape: 'moon', image: uploadedImage } }]])
+  assert.equal(ui.closed, 1)
+})
+
+test('untouched Choose closes an ordinary photo chooser with zero writes', () => {
+  const ui = chooser({ id: 'b', name: 'Fixture', avatar: { image: uploadedImage } })
+  const nodes = ui.draw()
+  assert.equal(stageName(nodes), 'Photo')
+  const button = chooseButton(nodes)
+  assert.equal(button.props.disabled, false)
+  button.props.onClick()
+  assert.deepEqual(ui.saved, [])
+  assert.equal(ui.closed, 1)
 })

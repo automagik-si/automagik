@@ -100,7 +100,8 @@ test('mention marks resolve the current Bot and keep the look in a cached row af
   const cached = { id: 'b', avatar: { shape: 'frog' }, color: 'red' }
   const full = { ...cached, role: 'Solver' }
   const snapshot = { byId: { b: full } }
-  const Icon = menuIcons({ getSnapshot: () => snapshot })({ bot: cached })
+  const iconFor = menuIcons({ getSnapshot: () => snapshot })
+  const Icon = iconFor({ bot: cached })
   const drawn = () => {
     const mark = Icon({})
     const face = mark.type(mark.props)
@@ -109,4 +110,11 @@ test('mention marks resolve the current Bot and keep the look in a cached row af
   assert.notEqual(drawn().props['data-shape'], 'frog')
   delete snapshot.byId.b
   assert.equal(drawn().props['data-shape'], 'frog')
+
+  snapshot.byId.b = full
+  const later = { ...cached, avatar: { shape: 'cactus' } }
+  assert.equal(iconFor({ bot: later }), Icon)
+  assert.notEqual(drawn().props['data-shape'], 'cactus')
+  delete snapshot.byId.b
+  assert.equal(drawn().props['data-shape'], 'cactus')
 })

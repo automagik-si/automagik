@@ -220,12 +220,12 @@ function Crown() {
 }
 
 // `crown`: the team's first Main Bot, which wears the crown in place of the Main Bot star.
-export function BotAvatar({ bot, size, state = 'idle', count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
+export function BotAvatar({ bot, look, size, state = 'idle', count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state)
   if (bot === undefined) return h(BotMark, { size })
   const badgeKind = !badge ? null : state === 'alert' ? 'alert' : WORK.includes(state) ? 'working' : admin ? 'admin' : main && !crown ? 'main' : null
   return h('span', { className: 'bt-mark', style: { width: size, height: size, '--bt-size': `${size}px` } },
-    h(BotMark, { bot, size, state: settled ? 'done' : state, live, gaze, pokeable }),
+    h(BotMark, { bot, look, size, state: settled ? 'done' : state, live, gaze, pokeable }),
     crown ? h(Crown) : null,
     badgeKind === 'working' ? h('span', { className: 'bt-badge bt-badge-working', 'aria-label': t('Working'), role: 'img' }) : null,
     badgeKind === 'alert' ? h('span', { className: 'bt-badge bt-badge-alert', 'aria-label': count > 0 ? (count === 1 ? t('1 approval waiting') : t('{count} approvals waiting', { count })) : t('Waiting for your answer'), role: 'img' }, count > 0 ? (count > 9 ? '9+' : String(count)) : '?') : null,

@@ -6575,14 +6575,14 @@ function Crown() {
     )
   );
 }
-function BotAvatar({ bot, size, state: state2 = "idle", count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
+function BotAvatar({ bot, look, size, state: state2 = "idle", count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state2);
   if (bot === void 0) return (0, import_react7.createElement)(BotMark, { size });
   const badgeKind = !badge ? null : state2 === "alert" ? "alert" : WORK.includes(state2) ? "working" : admin ? "admin" : main && !crown ? "main" : null;
   return (0, import_react7.createElement)(
     "span",
     { className: "bt-mark", style: { width: size, height: size, "--bt-size": `${size}px` } },
-    (0, import_react7.createElement)(BotMark, { bot, size, state: settled ? "done" : state2, live, gaze, pokeable }),
+    (0, import_react7.createElement)(BotMark, { bot, look, size, state: settled ? "done" : state2, live, gaze, pokeable }),
     crown ? (0, import_react7.createElement)(Crown) : null,
     badgeKind === "working" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-working", "aria-label": t("Working"), role: "img" }) : null,
     badgeKind === "alert" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-alert", "aria-label": count > 0 ? count === 1 ? t("1 approval waiting") : t("{count} approvals waiting", { count }) : t("Waiting for your answer"), role: "img" }, count > 0 ? count > 9 ? "9+" : String(count) : "?") : null,
@@ -15562,7 +15562,8 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
   const solver = isSolverLooks(bot);
   const look = botLookOf(bot);
   const stored = lookOf(bot);
-  const [color, setColor] = (0, import_react33.useState)(look.color);
+  const [swatch, setSwatch] = (0, import_react33.useState)(null);
+  const color = swatch ?? look.color;
   const [local, setLocal] = (0, import_react33.useState)([]);
   const [unfold, setUnfold] = (0, import_react33.useState)(false);
   const [browse, setBrowse] = (0, import_react33.useState)(false);
@@ -15575,6 +15576,18 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
   const [library, setLibrary] = (0, import_react33.useState)([]);
   const fileRef = (0, import_react33.useRef)(null);
   const gridRef = (0, import_react33.useRef)(null);
+  const colorsRef = (0, import_react33.useRef)(null);
+  const ordinaryChooser = (0, import_react33.useRef)(null);
+  (0, import_react33.useLayoutEffect)(() => {
+    if (solver) return void 0;
+    ordinaryChooser.current = {};
+    return () => {
+      ordinaryChooser.current = null;
+    };
+  }, [bot.id, solver]);
+  (0, import_react33.useLayoutEffect)(() => {
+    if (ordinaryChooser.current) ordinaryChooser.current.avatar = bot.avatar;
+  });
   (0, import_react33.useEffect)(() => {
     if (solver) return;
     void actions.pets().then((list) => {
@@ -15595,7 +15608,7 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
   const all = solver ? solvers : [...photo, ...photos, ...ours, ...yours, ...theirs];
   const pressed2 = currentKey(bot, stored);
   const worn = currentKey(bot, look);
-  const wornShape = worn === `shape:${look.shape}` && Object.hasOwn(CHARACTERS, look.shape) && SOLVER_SHAPES.includes(look.shape) === solver ? shapeEntry(look.shape) : null;
+  const wornShape = worn === `shape:${look.shape}` && hasShape(look.shape) && SOLVER_SHAPES.includes(look.shape) === solver ? shapeEntry(look.shape) : null;
   const defaultKey = solver ? `shape:${solverDefaultShape(bot.id)}` : currentKey(bot, lookOf({ ...bot, avatar: void 0 }));
   const item = all.find((entry) => entry.key === focus) ?? all.find((entry) => entry.key === worn) ?? wornShape ?? all.find((entry) => entry.key === defaultKey) ?? ours[0];
   const focused = item.key;
@@ -15642,14 +15655,16 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
     }));
   };
   const upload = async (files) => {
-    if (files.length === 0) return;
+    const chooser = ordinaryChooser.current;
+    if (!chooser || files.length === 0) return;
     const read = await Promise.all(files.map((file) => avatarImage2(file).then((image) => ({ name: file.name, image }), (failure) => ({ name: file.name, failure }))));
     const unread = read.filter((photo2) => photo2.failure);
     const result = await importPhotos(read.filter((photo2) => !photo2.failure), actions);
+    if (ordinaryChooser.current !== chooser) return;
     const failed = [...unread.map((photo2) => photo2.name), ...result.failed.map((photo2) => photo2.name)];
     if (files.length === 1 && unread.length === 0) {
-      await actions.updateBot(bot.id, { avatar: { ...bot.avatar ?? {}, image: read[0].image } });
-      onClose();
+      await actions.updateBot(bot.id, { avatar: { ...chooser.avatar, image: read[0].image } });
+      if (ordinaryChooser.current === chooser) onClose();
       return;
     }
     await loadPhotos();
@@ -15664,6 +15679,14 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
       event.stopPropagation();
       onClose();
       return;
+    }
+    if (!solver && event.key === "Tab" && event.shiftKey && event.target?.dataset?.key === focused) {
+      const lastSwatch = colorsRef.current?.lastElementChild;
+      if (lastSwatch) {
+        event.preventDefault();
+        lastSwatch.focus();
+        return;
+      }
     }
     if (event.key === "Enter" || event.key === " ") {
       const entry = all.find((item2) => item2.key === event.target?.dataset?.key);
@@ -15745,16 +15768,16 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
           (0, import_react33.createElement)("div", { className: "bt-cs-name" }, item?.name ?? ""),
           (0, import_react33.createElement)("div", { className: "bt-cs-line" }, t(item?.line ?? ""))
         ),
-        showsColor ? (0, import_react33.createElement)("div", { className: "bt-cs-colors", role: "group", "aria-label": t("Character color") }, CHARACTER_COLORS.map((ink) => (0, import_react33.createElement)("button", {
+        showsColor ? (0, import_react33.createElement)("div", { ref: colorsRef, className: "bt-cs-colors", role: "group", "aria-label": t("Character color") }, CHARACTER_COLORS.map((ink) => (0, import_react33.createElement)("button", {
           key: ink,
           type: "button",
           className: "bt-cs-color",
           "aria-label": t(capitalize(ink)),
           title: t(capitalize(ink)),
           "aria-pressed": color === ink,
-          onClick: () => setColor(ink)
+          onClick: () => setSwatch(ink)
         }, (0, import_react33.createElement)("span", { style: { background: paintCss(ink) } })))) : null,
-        (0, import_react33.createElement)("button", { type: "button", className: "bt-cs-go", disabled: picking || item.kind === "photo" && !selected, onClick: commit }, picking ? t("Chosen!") : t("Choose")),
+        (0, import_react33.createElement)("button", { type: "button", className: "bt-cs-go", disabled: picking, onClick: commit }, picking ? t("Chosen!") : t("Choose")),
         (0, import_react33.createElement)(
           "div",
           { className: "bt-cs-links" },
@@ -29963,11 +29986,18 @@ function menuIcons(roster) {
   return (row2) => {
     if (!row2.bot) return PeopleIcon;
     const id = row2.bot.id;
-    if (!marks.has(id)) marks.set(id, ({ size = 14 }) => {
-      const bot = roster.getSnapshot().byId[id];
-      return bot ? (0, import_react66.createElement)(BotMark, { bot, size }) : (0, import_react66.createElement)(BotMark, { bot: row2.bot, look: lookOf(row2.bot), size });
-    });
-    return marks.get(id);
+    let mark2 = marks.get(id);
+    if (!mark2) {
+      mark2 = {
+        Icon: ({ size = 14 }) => {
+          const bot = roster.getSnapshot().byId[id];
+          return bot ? (0, import_react66.createElement)(BotMark, { bot, size }) : (0, import_react66.createElement)(BotMark, { bot: mark2.bot, look: lookOf(mark2.bot), size });
+        }
+      };
+      marks.set(id, mark2);
+    }
+    mark2.bot = row2.bot;
+    return mark2.Icon;
   };
 }
 function ComposerPermission({ sessionId, useRoster, actions }) {
@@ -35029,7 +35059,9 @@ function ModelGlyph({ name, paint, size }) {
 }
 function ownerFace(owner, roster) {
   if (owner.kind === "bot") {
-    const bot = roster.byId[owner.id] ?? { id: owner.id, name: owner.name };
+    const current = roster.byId[owner.id];
+    const bot = current ?? { id: owner.id, name: owner.name };
+    const look = current ? void 0 : lookOf(bot);
     const name = bot.name || owner.name || t("Deleted Bot");
     const role = bot.role?.trim() ?? "";
     return {
@@ -35038,7 +35070,7 @@ function ownerFace(owner, roster) {
       sub: owner.deleted ? t("Deleted") : role.toLowerCase() === name.toLowerCase() ? "" : role,
       paint: paintCss(colorOf(bot)),
       stops: GRADIENTS[colorOf(bot)],
-      glyph: (size) => (0, import_react85.createElement)(BotAvatar, { bot, size, badge: false, live: false })
+      glyph: (size) => (0, import_react85.createElement)(BotAvatar, { bot, look, size, badge: false, live: false })
     };
   }
   if (owner.kind === "room") {
