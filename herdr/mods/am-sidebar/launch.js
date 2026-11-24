@@ -8,6 +8,7 @@ import { keyOf, rememberProject } from "./bots.js";
 import { installHook, runnerPath } from "./briefingText.mjs";
 import { spareTab } from "./launchArgs.js";
 import { configPaths } from "./models.js";
+import { MODEL_PROBE, parseModelProbe } from "./modelsRemote.js";
 import { PACK_NAME } from "./release.js";
 import { actionError } from "./actionError.js";
 
@@ -185,6 +186,12 @@ export async function modelTexts() {
     try { out[name] = await readTextFile(path); } catch { out[name] = null; }
   }
   return out;
+}
+
+// The same defaults' files on a linked machine (#2097): null when it can't be read (away, no
+// shell), else the texts modelsRemote.js parses.
+export async function remoteModelTexts(machine) {
+  try { return parseModelProbe(await exec("sh", ["-c", MODEL_PROBE], { on: machine })); } catch { return null; }
 }
 
 /** A sleep from a mod context's timer (mods have no setTimeout), for startBot; null without one. */

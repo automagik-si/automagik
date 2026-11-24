@@ -29,12 +29,12 @@ import { METER_EVERY_MS, METER_FIRST_MS, meterBin, syncMeter, syncTargets, write
 import { parseMarker } from "./release.js";
 import { fleetPlan, meterScope } from "./meterFleet.js";
 import { MACHINES_FIRST_MS, MACHINES_SHOWN_KEY, MACHINES_TICK_MS, STATE_FILE as MACHINES_STATE, failureNotice, parseState as parseMachines, startAccountsRetry, startCycle } from "./machineUpdates.js";
-import { startBot, attachBot, botOfTerminal, ledgerBindings, modelTexts, sleepOf } from "./launch.js";
+import { startBot, attachBot, botOfTerminal, ledgerBindings, modelTexts, remoteModelTexts, sleepOf } from "./launch.js";
 import { actionError } from "./actionError.js";
 import { parseCommand } from "./launchArgs.js";
 import { characterSvg, characterFile, inkOf, isDark } from "./characters.js";
 import { workerClick, rowWorker, openWorkerTab } from "./workerTab.js";
-import { liveFrom, liveOf, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, liveBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED, rateLimitObservation } from "./rows.js";
+import { liveFrom, liveOf, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, liveBots, nextWake, projectId, secondLine, modelTextsUpdate, modelAgent, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED, rateLimitObservation } from "./rows.js";
 import { rateLimitDialog } from "./restart.js";
 
 // The pack itself as a dialog: the bot form (create.js), or the attach picker, the Bots list
@@ -331,6 +331,9 @@ export default class Spaces extends View {
     this.modelTexts = {};
     this.modelDefaults = {}; // rows.js modelDefaultsFrom(this.modelTexts), parsed once per change
     this.argvOf = new Map();
+    this.remoteDefaults = {}; // machine -> its agents' default models ({}: none read there), #2097
+    this.remoteSeen = new Map(); // machine -> the texts last read there, as modelTextsUpdate's `seen`
+    this.remoteBusy = new Set();
     // Each live bot pane's project key on this computer (automagik#227: by project and id), by
     // address ({ cwd, created, key }), read after each bot discovery and when the bot panes
     // change (readPaneKeys).
@@ -914,7 +917,7 @@ export default class Spaces extends View {
     const ink = inkOf(b.look?.colour, dark);
     const live = n.live;
     if (live) this.order.push(live.terminal);
-    const second = secondLine(r, tree, { texts: this.modelTexts, defaults: this.modelDefaults, argvOf: (a) => this.argvOf.get(a)?.argv ?? null });
+    const second = secondLine(r, tree, { texts: this.modelTexts, defaults: this.modelDefaults, remoteDefaults: this.remoteDefaults, argvOf: (a) => this.argvOf.get(a)?.argv ?? null });
     const project = { key: n.project ?? tree.key, machine: tree.machine };
     // Not counted live but holding a live terminal (no agent seen in front yet): its pane, or
     // a peek, rather than nothing. Its generation is this render's; the click revalidates it.
@@ -1390,6 +1393,37 @@ export default class Spaces extends View {
       this.modelDefaults = next.defaults;
       cx.notify();
     });
+    this.loadRemoteModels(cx);
+  }
+
+  // #2097: the same files on each connected linked machine that has a bot of an agent with a
+  // file default (rows.js DEFAULTED), read there with one exec, parsed once per change. An
+  // unreadable machine is kept as "no default" ({}), so its rows show no model rather than this
+  // computer's. Never while drawing; a machine is read once at a time; redraw on a change only.
+  loadRemoteModels(cx) {
+    const want = new Set();
+    for (const q of this.bots ?? []) {
+      if (!q.machine || q.stale || !(q.file?.bots ?? []).some((b) => modelAgent(b.agent))) continue;
+      if (this.machines.some((m) => m.name === q.machine && m.state === "connected")) want.add(q.machine);
+    }
+    for (const m of Object.keys(this.remoteDefaults)) {
+      if (want.has(m) || this.machines.some((k) => k.name === m)) continue;
+      delete this.remoteDefaults[m]; this.remoteSeen.delete(m);
+    }
+    for (const machine of want) {
+      if (this.remoteBusy.has(machine)) continue;
+      this.remoteBusy.add(machine);
+      cx.spawn(async (cx) => {
+        try {
+          const texts = await remoteModelTexts(machine);
+          const next = modelTextsUpdate(this.remoteSeen.get(machine), texts ?? {});
+          if (!next) return;
+          this.remoteSeen.set(machine, next.seen);
+          this.remoteDefaults = { ...this.remoteDefaults, [machine]: texts ? next.defaults : {} };
+          cx.notify();
+        } finally { this.remoteBusy.delete(machine); }
+      });
+    }
   }
 
   // A12: each live bot pane's foreground command line, for the model it runs. rows.js
