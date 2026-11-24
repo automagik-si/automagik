@@ -6,7 +6,7 @@ import { CUT_OFF_EXE, fixtureProcStat, startFakeCore, writeFixtureProc, writeFix
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
@@ -1030,7 +1030,7 @@ test("D1432B-2 cut-off: a holder in a same-stem core's other network namespace i
     writeFileSync(join(root, "403/net/unix"), `${header}\n0000000000000000: 00000002 00000000 00010000 0001 01 903 ${control}\n`);
     // A process can retain a socket FD from the reader's namespace after moving to another one.
     const ns = join(root, "222/ns/net");
-    rmSync(ns);
+    unlinkSync(ns);
     symlinkSync("net:[999]", ns);
   }
   const json = s.view();
