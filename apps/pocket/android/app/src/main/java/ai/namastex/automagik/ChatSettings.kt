@@ -216,7 +216,7 @@ object ChatSettings {
                     "invalid" -> message ?: REFUSED
                     "unknown-model" -> "The computer doesn't have that model."
                     "model-not-allowed" -> "This Bot can't use that model from the phone."
-                    "not-applied" -> NOT_APPLIED
+                    "not-applied" -> message?.takeIf { it.isNotBlank() } ?: NOT_APPLIED
                     else -> REFUSED
                 }
             }

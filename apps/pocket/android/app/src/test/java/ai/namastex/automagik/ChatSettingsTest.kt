@@ -118,6 +118,14 @@ class ChatSettingsTest {
         assertFalse(rename.autoOff)
     }
 
+    @Test fun anUnreadableRouteRefusalShowsThePickerMessage() {
+        val message = "$SETTINGS_NAME could not switch because its current Session route could not be read."
+        val reply = settingsReply("refused", "not-applied").put("message", message)
+        val updated = ChatSettings.afterWrite(writing(), reply)
+        assertEquals(message, updated.outcome)
+        assertEquals(SETTINGS_MODEL, updated.snapshot?.settings?.model?.saved)
+    }
+
     @Test fun definiteRefusalsKeepTheSnapshotAndOnlyUnansweredWritesReconcile() {
         val current = writing()
         assertNotNull(current.snapshot)

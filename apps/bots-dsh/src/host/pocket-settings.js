@@ -195,7 +195,7 @@ export function pocketSettingsOf(rt) {
           : refusedWrite(error.modelUnavailable === true ? 'unknown-model' : 'model-not-allowed'))
       }
       if (modelEntry && error instanceof SettingsSelectionRejected) {
-        return withSettings(refusedWrite('not-applied', { message: NOT_APPLIED }), true)
+        return withSettings(refusedWrite('not-applied', { message: error.message || NOT_APPLIED }), true)
       }
       rt.warn('pocket settings: unavailable')
       return admitted ? withSettings(PENDING, true) : refusedWrite('unavailable')

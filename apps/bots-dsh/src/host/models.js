@@ -10,6 +10,7 @@ import { normalize, splitRef } from './text.js'
 import { install as installHostModels } from './host-models.js'
 import { PI_AI_CLAUDE, claudeFamilyOf, supersededClaude } from './claude-models.js'
 import { SettingsSelectionRejected } from './pocket-settings.js'
+import { readableRoute, routeFields } from './session-route.js'
 
 const CATALOG_TTL_MS = 10_000
 const quiet = new AsyncLocalStorage()
@@ -727,13 +728,6 @@ export function install(rt) {
 
   const sameSelection = (a, b) => a.provider === b.provider && a.model === b.model && a.reasoningEffort === b.reasoningEffort
 
-  // `model` and `reasoningEffort` name the whole route for a part that keeps it (parts.js).
-  const routeFields = config => ({
-    provider: typeof config?.provider === 'string' ? config.provider.trim() : undefined,
-    ...(typeof config?.model === 'string' ? { model: config.model.trim() } : {}),
-    ...(config?.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
-  })
-  const readableRoute = route => Boolean(route.provider && route.model)
   function storedRouteEvent(route, event) {
     if (event?.type === 'model/selection') return { ...route, pendingSelection: routeFields(event.data) }
     if (event?.type !== 'request/header') return route

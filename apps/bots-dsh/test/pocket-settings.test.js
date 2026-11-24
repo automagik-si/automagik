@@ -1084,6 +1084,7 @@ test('D2W-1 Pocket refuses attach with an unreadable live header', async t => {
   const rev = await revision(c)
 
   const result = withReason(await c.model(rev, 'hermes-remote/attach'), 'not-applied')
+  assert.match(result.message, /current Session route could not be read/)
   assert.equal(result.settings.model.saved, model)
   assert.equal(result.settings.model.applied, model)
   assert.equal(result.settings.rev, rev)

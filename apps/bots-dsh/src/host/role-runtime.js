@@ -6,6 +6,7 @@ import { createRoleSettings } from './role-settings.js'
 import { createRoleVoice } from './role-voice.js'
 import { NO_BOT_RUNNER_REASON } from './no-runner.js'
 import { refusal } from './refusal.js'
+import { readableRoute, routeFields } from './session-route.js'
 import { output } from './tools.js'
 
 const START_MS = 5_000
@@ -270,6 +271,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
   const savedWarning = bot => [bot.appliedModel, bot.model].map(providerOf).map(providerWarning).find(Boolean)
   const sessionsOf = bot => [rt.chatOf?.(bot.id), ...(rt.groupSessionsOf?.(bot.id) ?? [])].filter(Boolean)
+  const isWaitingSolver = held => held.pin.id === SOLVER_ROLE_ID && held.bot.waitingRole?.id === SOLVER_ROLE_ID
   function liveProvider(sessionId, session) {
     try {
       const agent = ctx.get?.('agents')?.get?.(sessionId)
@@ -279,12 +281,17 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       if (!live) return undefined
       let selection
       try { selection = ctx.get?.('sessionProjections')?.snapshot?.(live, ['modelSelection'])?.values?.modelSelection } catch {}
-      return selection?.next?.provider ?? live.requestHeader?.()?.config?.provider
-    } catch { return undefined }
+      if (selection?.next?.provider != null) return selection.next.provider
+      const header = live.requestHeader?.()
+      if (header == null) return undefined
+      const route = routeFields(header.config)
+      // An unreadable live route cannot be replaced by an older stored route.
+      return readableRoute(route) ? route.provider : null
+    } catch { return null }
   }
   async function readDeliveryRoutes(bots, limit = Infinity) {
     const sessions = new Set(bots.flatMap(sessionsOf))
-    const needStoredRoute = [...sessions].filter(id => !liveProvider(id))
+    const needStoredRoute = [...sessions].filter(id => liveProvider(id) === undefined)
     const routes = new Map()
     for (let at = 0; at < needStoredRoute.length; at += limit) {
       const batch = await Promise.all(needStoredRoute.slice(at, at + limit).map(async id => [id, await rt.storedRouteOf?.(id)]))
@@ -297,7 +304,8 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     if (!sessions.length) return routeUnavailable
     for (const id of sessions) {
       const stored = routes?.get(id)
-      const provider = liveProvider(id) ?? (stored?.pendingSelection ?? stored)?.provider
+      const live = liveProvider(id)
+      const provider = live === undefined ? (stored?.pendingSelection ?? stored)?.provider : live
       if (typeof provider !== 'string' || !provider) return routeUnavailable
       const warning = providerWarning(provider)
       if (warning) return warning
@@ -365,11 +373,13 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     return Object.fromEntries([...attachments].flatMap(([id, held]) => {
       if (!current(id, held) || !held.manifest
         || (held.pin.id === SOLVER_ROLE_ID && !held.runtime?.prompt?.trim())) return []
-      const warning = deliveryWarning(held.bot, routes)
+      const warning = isWaitingSolver(held) ? deliveryWarning(held.bot, routes) : undefined
+      const acp = warning === acpWarning || (held.pin.id !== SOLVER_ROLE_ID
+        && providerWarning(providerOf(held.bot.appliedModel ?? held.bot.model)) === acpWarning)
       return [[id, {
         pin: held.pin, settings: held.manifest.settings,
         capabilities: held.manifest.capabilities,
-        tools: held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp: warning === acpWarning,
+        tools: held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp,
         ...(warning && warning !== acpWarning ? { promptWarning: warning } : {}),
       }]]
     }))
@@ -381,8 +391,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     copyWarning: bot => savedWarning(bot) ?? providerWarning(liveProvider(bot.sessionId ?? bot.id)),
     async publicView() {
       const waitingSolvers = () => [...attachments].flatMap(([id, held]) =>
-        held.manifest && held.pin.id === SOLVER_ROLE_ID && held.bot.waitingRole?.id === SOLVER_ROLE_ID
-          && current(id, held) ? [held.bot] : [])
+        held.manifest && isWaitingSolver(held) && current(id, held) ? [held.bot] : [])
       if (waitingSolvers().length === 0) return view()
       // Roster windows can poll at the same time. Share the read limit across their polls.
       const read = displayReads.then(() => readDeliveryRoutes(waitingSolvers(), DISPLAY_READ_LIMIT))

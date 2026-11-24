@@ -1166,6 +1166,26 @@ for (const [name, config] of [
   })
 }
 
+for (const config of [{ provider: ' ' }, { provider: 'deepseek' }]) {
+  test(`D2X-1 settlement retains the method for a loaded header with provider ${JSON.stringify(config.provider)} and no model`, async t => {
+    const f = await solverFixture(t)
+    const h = await f.start()
+    h.agentOf(FIRST).model = { current: () => ({ provider: 'test-provider', model: 'fixture' }) }
+    t.mock.method(h.agentOf(GROUP).session, 'requestHeader', () => ({ config }))
+    await h.ok('role-install', { id: 'solver' })
+    const bot = h.rt.state.bots[FIRST]
+    const text = bot.instructions
+    const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+    bot.waitingRole = waiting
+
+    const result = await h.ok('role-attach', { id: FIRST, role: 'solver' })
+    const saved = (await f.disk()).bots[FIRST]
+    assert.equal(saved.instructions, text)
+    assert.deepEqual(saved.waitingRole, waiting)
+    assert.deepEqual(result, { pending: true })
+  })
+}
+
 test('D2W-3 idle roster polls read no stored routes', async t => {
   const config = { provider: 'test-provider', model: 'fixture' }
   const header = { type: 'request/header', data: { header: { config } } }
@@ -1182,9 +1202,15 @@ test('D2W-3 idle roster polls read no stored routes', async t => {
   const first = await h.ok('state')
   assert.equal(first.roleRuntime[FIRST].pin.id, 'solver')
   assert.deepEqual(reads, [])
+  assert.equal(first.roleRuntime[FIRST].promptWarning, undefined)
+  assert.equal(first.roleRuntime[FIRST].acp, false)
   const next = await h.ok('state', { since: first.revision, live: first.liveKey })
   assert.equal(next.unchanged, true)
   assert.deepEqual(reads, [])
+
+  const liveProbe = t.mock.method(h.host.sessions, 'get')
+  await h.rt.roleRuntime.publicView()
+  assert.equal(liveProbe.mock.callCount(), 0)
 })
 
 test('D2W-3 overlapping roster polls read at most four waiting Solver routes at once', async t => {
