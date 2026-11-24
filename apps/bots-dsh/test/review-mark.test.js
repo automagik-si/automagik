@@ -3,13 +3,13 @@
 // grants and refuses nothing.
 import { Session, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
-import { isWorkCall } from '../src/host/review-mark.js'
+import { isNotesPath, isNotesWrite, isWorkCall } from '../src/host/review-mark.js'
 import { answerSender } from '../src/host/turns.js'
 import { deliveryMark, verdictOf } from '../src/shared/review-mark.js'
 import { CALLER_BOT_KEYS } from '../src/host/caller-view.js'
@@ -91,14 +91,36 @@ function bench(t) {
   return { ctx, rt, home, call, guard, person, endTurn, reply, solver, reviewer, sessions }
 }
 
-test('verdictOf reads only a verdict that opens the reply', () => {
+// F9 (APP-TEST "Recheck on 262488524"): a Codex reviewer's replies, word for word with every name
+// taken out. Its progress sentence and its verdict arrive run together on the first line.
+const CODEX_REPLIES = [
+  ["I'll check the delivered file against the request and the supplied evidence. SHIP", 'SHIP'],
+  ['I\u2019ll check the note\u2019s line count and accuracy against the original request, and review whether the plan covers it. FIX-FIRST\n\n'
+    + 'The plan covers the requested file, three-line format, and accuracy check. The result has three lines, but [note.md:2] makes an absolute claim that any input change produces a completely different checksum. SHA-256 outputs can collide, and a changed input does not guarantee that every output bit changes.\n\n'
+    + 'Replace that claim with \u201cA change to the input will almost certainly produce a different checksum.\u201d Then deliver the file.', 'FIX-FIRST'],
+  ['I\u2019ll read the note and check its three lines against the request and the plan.FIX-FIRST\n\n'
+    + 'The plan matches the request, and note.md contains three lines. However, line 2 claims that any change produces a different checksum and reveals tampering. SHA-256 collisions are possible, so this is not guaranteed. Change it to say that a change will almost certainly produce a different checksum.\n\n'
+    + 'Line 3 should also say that the published checksum must come from a trusted source; otherwise, an attacker could replace both the download and its checksum.', 'FIX-FIRST'],
+  ['I\u2019ll re-read the revised file and check its wording and line count.SHIP\n\n'
+    + 'Unsaved note contains three lines explaining a SHA-256 checksum and how to use it. The revised wording addresses the earlier concerns.', 'SHIP'],
+]
+
+test('verdictOf reads a whole-word verdict at the start of any line, after "Verdict:", or ending a sentence\'s line; the last one wins', () => {
   for (const [value, verdict] of [
     ['SHIP', 'SHIP'], ['SHIP\nAll checks hold.', 'SHIP'], ['FIX-FIRST (plan)\n1. ...', 'FIX-FIRST'], ['BLOCKED: no access', 'BLOCKED'],
     ['**SHIP**', 'SHIP'], ['# FIX-FIRST', 'FIX-FIRST'], ['> BLOCKED', 'BLOCKED'], ['`SHIP`', 'SHIP'], ['\n\n  SHIP', 'SHIP'], ['_SHIP_', 'SHIP'],
+    // F9: after a lead-in line, after "Verdict:", and the last such line.
+    ['Looks good.\nSHIP', 'SHIP'], ['I read the file and ran the checks.\n\nFIX-FIRST\n1. Line 2 overclaims.', 'FIX-FIRST'],
+    ['Verdict: SHIP', 'SHIP'], ['**Verdict:** BLOCKED (no access)', 'BLOCKED'], ['Final verdict: FIX-FIRST', 'FIX-FIRST'],
+    ['FIX-FIRST\n1. Fix line 2.\nRe-checked after the fix:\nSHIP', 'SHIP'], ['SHIP\nVerdict: BLOCKED', 'BLOCKED'], ['SHIP\r\nAll good.', 'SHIP'],
+    ...CODEX_REPLIES,
   ]) assert.equal(verdictOf(value), verdict, value)
-  for (const value of ['SHIPPED', 'ship', 'Verdict: SHIP', '', '   ', 'Looks good.\nSHIP', 'FIX-FIRSTLY', 'SHIP-IT', undefined, null, 7]) {
-    assert.equal(verdictOf(value), undefined, String(value))
-  }
+  for (const value of [
+    'SHIPPED', 'SHIPPING', 'ship', '', '   ', 'FIX-FIRSTLY', 'SHIP-IT', 'SHIP2', undefined, null, 7,
+    // Mid-line, or inside a word, never counts.
+    'This is not a SHIP yet.', 'not a SHIP yet', 'Looks fine to me, a SHIP from me.', 'Answer first with one verdict, SHIP, FIX-FIRST or BLOCKED, then the evidence.',
+    'It is a SHIP', 'Is this a SHIP?', 'The plan is fine. SHIPPING it later.', 'Done. SHIP it once the tests pass.', 'verdict: ship', 'NOTSHIP', 'reSHIP',
+  ]) assert.equal(verdictOf(value), undefined, String(value))
 })
 
 test('a work call on every route: DSH tools, the dsh bridge, and an ACP agent\'s own tools', () => {
@@ -133,6 +155,9 @@ test('deliveryMark: plan missing, result missing, both present, both missing, fr
   // A work call at the same moment as a verdict is not ordered: neither side counts it.
   assert.deepEqual(deliveryMark({ firstWorkAt: 10, lastWorkAt: 10, verdicts: [verdict(10)] }, 'bot', 40), { at: 40, review: 'bot', plan: false, result: false })
   assert.deepEqual(deliveryMark({ verdicts: [verdict(5)] }, 'fresh', 40), { at: 40, review: 'fresh' })
+  // Delivered while the reviewer still had the work (Run 3): the same mark, said pending; never for fresh or none.
+  assert.deepEqual(deliveryMark({ firstWorkAt: 10, lastWorkAt: 20, verdicts: [verdict(5)] }, 'bot', 40, { pending: true }), { at: 40, review: 'bot', plan: true, result: false, pending: true })
+  assert.deepEqual(deliveryMark({ verdicts: [] }, 'fresh', 40, { pending: true }), { at: 40, review: 'fresh' })
   assert.deepEqual(deliveryMark({ verdicts: [verdict(5)] }, 'none', 40), { at: 40, review: 'none' })
 })
 
@@ -210,14 +235,15 @@ test('a turn that ends with its review still out is not a delivery; a person ask
   rt.closeWork('w-plan', ada.name, 'SHIP')
   reply(ada.id, bot.id, 'SHIP')
   rt.openWork('w-result', { from: bot.id, to: ada.id })
-  // The person asks for the delivery while the result review is out: it is not a new request.
+  endTurn(bot.id, 'Waiting for the result review.')
+  assert.equal(bot.reviewTrack.last, undefined)
+  await step()
+  // The person asks for the delivery while the result review is out: it is not a new request, and
+  // the turn that answers it is the delivery (SR3-3 (b), SR4-1), the plan review kept.
   person(bot.id, 'Deliver now, please.')
   assert.equal(bot.reviewTrack.verdicts.length, 1)
-  endTurn(bot.id, 'Still waiting.')
-  assert.equal(bot.reviewTrack.last, undefined)
-  rt.dropWork('w-result')
-  endTurn(bot.id, 'BLOCKED-review: the result review did not come back.')
-  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
+  endTurn(bot.id, 'Fresh-session review ran; no verdict came from the reviewer. Delivered.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false, pending: true })
   // A failed or empty turn is never a delivery, and a later turn of the same request adds nothing.
   person(bot.id, 'Again.')
   endTurn(bot.id, '', { kind: 'completed' })
@@ -232,7 +258,7 @@ test('only the Solver\'s own reviewer, answering its own chat with a verdict fir
   const bot = await solver({ reviewerId: ada.id })
   person(bot.id, 'Plan a migration.')
   reply(ben.id, bot.id, 'SHIP')
-  reply(ada.id, bot.id, 'Looks fine to me.\nSHIP')
+  reply(ada.id, bot.id, 'Looks fine to me, a SHIP from me.')
   reply(ada.id, bot.id, 'SHIP', { senderRoomId: 'room-1' })
   reply(bot.id, bot.id, 'SHIP')
   assert.deepEqual(bot.reviewTrack.verdicts, [])
@@ -437,4 +463,224 @@ test('the last mark stays shown after the Solver\'s description changes', async 
   assert.equal(rt.botOf(bot.id).role, 'Helper')
   const view = (await call('state', {})).value.bots.find(entry => entry.id === bot.id)
   assert.deepEqual({ ...view.reviewMark, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
+})
+
+// SR4-1: the person asks for the delivery while the result review is out (SR3-3 (b)), the work still
+// open. That delivery is marked, the next message opens a new request, and request 1's late SHIP on
+// the work it left open never reviews request 2.
+test('a delivery the person asked for first is marked; the late verdict never marks the next request', async (t) => {
+  const { rt, guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  person(bot.id, 'Request 1.')
+  await step()
+  await guard({ name: 'write', arguments: { file_path: 'a.js' }, agent: { id: bot.id } })
+  await step()
+  rt.openWork('w1', { from: bot.id, to: ada.id })
+  endTurn(bot.id, 'Sent my result for review.')
+  assert.equal(bot.reviewTrack.last, undefined)
+  await step()
+  person(bot.id, 'Deliver now, please.')
+  endTurn(bot.id, 'Fresh-session review ran; no verdict came from Ada. Delivered.')
+  assert.equal(bot.reviewTrack.delivered, true)
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: false, result: false, pending: true })
+  assert.notEqual(rt.state.works.w1, undefined, 'the reviewer work is still open')
+  await step()
+  const before = bot.reviewTrack.requestAt
+  person(bot.id, 'Request 2.')
+  assert.notEqual(bot.reviewTrack.requestAt, before, 'request 2 opens a new request')
+  assert.equal(bot.reviewTrack.delivered, undefined)
+  await step()
+  await guard({ name: 'write', arguments: { file_path: 'b.js' }, agent: { id: bot.id } })
+  await step()
+  reply(ada.id, bot.id, 'SHIP', { exchangeId: 'w1' })
+  assert.deepEqual(bot.reviewTrack.verdicts, [])
+  endTurn(bot.id, 'Request 2 done.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: false, result: false })
+})
+
+// SR4-1: only reviewer work opened before the person's last message stops holding the delivery.
+test('a person\'s message before the Solver opens its review work still waits for the verdict', async (t) => {
+  const { rt, person, endTurn, reply, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  person(bot.id, 'Request 1.')
+  await step()
+  person(bot.id, 'Also cover the edge case.')
+  assert.equal(typeof bot.reviewTrack.personAt, 'number')
+  await step()
+  rt.openWork('w-plan', { from: bot.id, to: ada.id })
+  endTurn(bot.id, 'Sent my plan for review.')
+  assert.equal(bot.reviewTrack.last, undefined)
+  assert.equal(bot.reviewTrack.delivered, undefined)
+  rt.closeWork('w-plan', ada.name, 'SHIP')
+  reply(ada.id, bot.id, 'SHIP')
+  endTurn(bot.id, 'Delivered.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
+})
+
+// SR4-2 (the lead's ruling): the Solver's notes file, one exact path in its folder, is not work.
+function notesFolder(t) {
+  const root = mkdtempSync(join(tmpdir(), 'ds-bot-notes-'))
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }))
+  const folder = join(root, 'solver')
+  const outside = join(root, 'outside')
+  mkdirSync(folder)
+  mkdirSync(outside)
+  return { root, folder, outside }
+}
+
+test('a write to exactly the notes file before the plan verdict keeps the plan reviewed, on every route', async (t) => {
+  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { folder } = notesFolder(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  bot.workDir = folder
+  person(bot.id, 'Compare two libraries.')
+  await step()
+  for (const exec of [
+    { name: 'write', arguments: { file_path: '.solver/notes.md' } },
+    { name: 'mcp__dsh__write', arguments: { file_path: join(folder, '.solver', 'notes.md') } },
+    { name: 'edit', arguments: { file_path: './.solver/notes.md' } },
+    { name: 'str_replace_editor', arguments: { path: '.solver/notes.md' } },
+    { name: 'acp_tool', arguments: { kind: 'edit', title: 'Write notes', input: { file_path: join(folder, '.solver/notes.md') }, locations: [{ path: join(folder, '.solver/notes.md') }] } },
+  ]) assert.equal(await guard({ ...exec, agent: { id: bot.id } }), 'ran', exec.name)
+  // The file exists now, as a plain file: still the notes file.
+  mkdirSync(join(folder, '.solver'), { recursive: true })
+  writeFileSync(join(folder, '.solver', 'notes.md'), 'notes')
+  await guard({ name: 'write', arguments: { file_path: '.solver/notes.md' }, agent: { id: bot.id } })
+  assert.equal(bot.reviewTrack.firstWorkAt, undefined)
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  await step()
+  await guard({ name: 'write', arguments: { file_path: 'compare.md' }, agent: { id: bot.id } })
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  await step()
+  await guard({ name: 'write', arguments: { file_path: '.solver/notes.md' }, agent: { id: bot.id } })
+  endTurn(bot.id, 'Delivered: compare.md.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+})
+
+test('any other write before the plan verdict marks the plan unreviewed: lookalikes, .., another folder, a symlink, a link', async (t) => {
+  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { root, folder, outside } = notesFolder(t)
+  // A second folder whose notes path leads out through a symlink, one whose notes file is a symlink, and
+  // one whose notes file is a hard link to a file outside.
+  const linkedDir = join(root, 'linked-dir')
+  mkdirSync(linkedDir)
+  symlinkSync(outside, join(linkedDir, '.solver'))
+  const linkedFile = join(root, 'linked-file')
+  mkdirSync(join(linkedFile, '.solver'), { recursive: true })
+  writeFileSync(join(outside, 'target.md'), 'x')
+  symlinkSync(join(outside, 'target.md'), join(linkedFile, '.solver', 'notes.md'))
+  const hardFile = join(root, 'hard-file')
+  mkdirSync(join(hardFile, '.solver'), { recursive: true })
+  linkSync(join(outside, 'target.md'), join(hardFile, '.solver', 'notes.md'))
+  const ada = await reviewer()
+  const cases = [
+    [folder, { name: 'write', arguments: { file_path: '.solver/notes.md.bak' } }],
+    [folder, { name: 'write', arguments: { file_path: '.solver/notes.mdx' } }],
+    [folder, { name: 'write', arguments: { file_path: '.solver/../.solver/notes.md' } }],
+    [folder, { name: 'write', arguments: { file_path: '../solver/.solver/notes.md' } }],
+    [folder, { name: 'write', arguments: { file_path: 'notes.md' } }],
+    [folder, { name: 'write', arguments: { file_path: 'sub/.solver/notes.md' } }],
+    [folder, { name: 'write', arguments: { file_path: join(outside, '.solver', 'notes.md') } }],
+    [folder, { name: 'apply_patch', arguments: { input: '*** Begin Patch\n*** Add File: .solver/notes.md\n+x\n*** End Patch' } }],
+    [folder, { name: 'bash', arguments: { command: 'echo x > .solver/notes.md' } }],
+    [folder, { name: 'acp_tool', arguments: { kind: 'edit', input: { file_path: join(folder, '.solver/notes.md') }, locations: [{ path: join(folder, 'a.js') }] } }],
+    [linkedDir, { name: 'write', arguments: { file_path: '.solver/notes.md' } }],
+    [linkedFile, { name: 'write', arguments: { file_path: '.solver/notes.md' } }],
+    [hardFile, { name: 'write', arguments: { file_path: '.solver/notes.md' } }],
+  ]
+  for (const [workDir, exec] of cases) {
+    const label = `${workDir} ${JSON.stringify(exec)}`
+    const bot = await solver({ reviewerId: ada.id })
+    bot.workDir = workDir
+    person(bot.id, 'Compare two libraries.')
+    await step()
+    assert.equal(await guard({ ...exec, agent: { id: bot.id } }), 'ran', label)
+    assert.equal(typeof bot.reviewTrack.firstWorkAt, 'number', label)
+    await step()
+    reply(ada.id, bot.id, 'SHIP')
+    await step()
+    reply(ada.id, bot.id, 'SHIP')
+    endTurn(bot.id, 'Delivered.')
+    assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: false, result: true }, label)
+  }
+})
+
+test('isNotesPath and isNotesWrite: exact path only, relative to the call\'s folder', (t) => {
+  const { folder, outside } = notesFolder(t)
+  const notes = join(folder, '.solver', 'notes.md')
+  assert.equal(isNotesPath(notes, folder), true)
+  assert.equal(isNotesPath('.solver/notes.md', folder, folder), true)
+  // A relative path lands in the call's folder, not the Bot's.
+  assert.equal(isNotesPath('.solver/notes.md', folder, outside), false)
+  for (const path of ['', '.solver', '.solver/', '.solver/notes', '.solver/notes.md/', '.solver//../.solver/notes.md', 'x\0/.solver/notes.md', 7, undefined]) {
+    assert.equal(isNotesPath(path, folder, folder), false, String(path))
+  }
+  assert.equal(isNotesPath('.solver/notes.md', undefined, folder), false)
+  assert.equal(isNotesPath('.solver/notes.md', folder, ''), false)
+  // Reads never come here (isWorkCall), and a write tool's other argument names are not its target.
+  assert.equal(isNotesWrite('write', { path: notes }, folder, folder), false)
+  assert.equal(isNotesWrite('str_replace_editor', { path: notes }, folder, folder), true)
+  assert.equal(isNotesWrite('acp_tool', { kind: 'edit', input: {} }, folder, folder), false)
+  assert.equal(isNotesWrite('acp_tool', { kind: 'execute', input: { file_path: notes } }, folder, folder), false)
+  assert.equal(isNotesWrite('acp_tool', { kind: 'edit', input: { file_path: notes, command: 'x' } }, folder, folder), false)
+  assert.equal(isNotesWrite('acp_tool', { kind: 'edit', input: { file_path: notes } }, folder, folder), true)
+})
+
+// F9: a reviewer whose verdict follows its progress sentence (the Codex replies above) is counted,
+// so a Solver that followed the method is marked plan and result reviewed.
+test('a reviewer that opens with a progress sentence still reviews the plan and the result', async (t) => {
+  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  person(bot.id, 'Write a three-line note.')
+  await step()
+  reply(ada.id, bot.id, CODEX_REPLIES[2][0])
+  await step()
+  reply(ada.id, bot.id, CODEX_REPLIES[0][0])
+  await step()
+  await guard({ name: 'write', arguments: { file_path: 'note.md' }, agent: { id: bot.id } })
+  await step()
+  reply(ada.id, bot.id, CODEX_REPLIES[3][0])
+  assert.deepEqual(bot.reviewTrack.verdicts.map(entry => entry.verdict), ['FIX-FIRST', 'SHIP', 'SHIP'])
+  endTurn(bot.id, 'Delivered: note.md.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+})
+
+// Run 3 (APP-TEST "Recheck on 262488524"): the person asks for the delivery while the reviewer still
+// has the work. That delivery carries a mark that says so; a Solver with a reviewer Bot is never
+// marked "fresh" (the no-reviewer line).
+test('a delivery made while the reviewer still has the work is marked pending, never fresh, in the view', async (t) => {
+  const { rt, call, guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  person(bot.id, 'Write a three-line note.')
+  await step()
+  await guard({ name: 'write', arguments: { file_path: 'note.md' }, agent: { id: bot.id } })
+  await step()
+  rt.openWork('w-review', { from: bot.id, to: ada.id })
+  endTurn(bot.id, 'Waiting for the verdict.')
+  assert.equal(bot.reviewTrack.last, undefined)
+  await step()
+  person(bot.id, 'Please deliver now.')
+  endTurn(bot.id, 'Review that ran: fresh session. The reviewer Bot gave no verdict. Delivered.')
+  const view = (await call('state', {})).value.bots.find(entry => entry.id === bot.id)
+  assert.deepEqual({ ...view.reviewMark, at: 0 }, { at: 0, review: 'bot', plan: false, result: false, pending: true })
+  // The late verdict and the later round of the same request change nothing.
+  reply(ada.id, bot.id, CODEX_REPLIES[2][0], { exchangeId: 'w-review' })
+  endTurn(bot.id, 'Final delivery after the reviewer\'s SHIP.')
+  assert.equal(bot.reviewTrack.last.pending, true)
+  assert.equal(bot.reviewTrack.last.review, 'bot')
+  // A work left open by an earlier request does not make the next delivery pending.
+  person(bot.id, 'Next request.')
+  await step()
+  rt.openWork('w-stale', { from: bot.id, to: ada.id })
+  rt.state.works['w-stale'].at = bot.reviewTrack.requestAt - 1
+  reply(ada.id, bot.id, 'SHIP')
+  endTurn(bot.id, 'Done.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
 })

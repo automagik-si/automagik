@@ -11,6 +11,10 @@ export const SOLVER_METHOD_VERSION = 1
 export const SOLVER_DESCRIPTION = 'Solver'
 export const isSolverBot = bot => bot?.role === SOLVER_DESCRIPTION
 
+// The Solver's notes file, one exact path in its folder (#2056 SR4-2). The review mark does not count a
+// write to exactly this file as work (review-mark.js), so notes never read as "plan unreviewed".
+export const SOLVER_NOTES = '.solver/notes.md'
+
 // The reviewer's rules. A reviewer the dialog makes keeps them as its instructions; an existing
 // Bot gets them at the start of every review message.
 export const REVIEWER_RULES = "Check it against the request's own words, not against the plan's"
@@ -37,9 +41,13 @@ const FRESH_REVIEW = 'Run each review in a fresh session that shares nothing wit
 // a new message, so the Solver ends its turn to wait. The delivery's first line names the review
 // that ran; the host marks it too, from what it saw (review-mark.js). The name is written once: a long or
 // quote-heavy name grows the text only once.
+// A C0 control or a lone surrogate in the name escapes to six characters in JSON (SR4-3): they are
+// dropped first, so a 40-character name grows the text by at most 80.
+const plainName = reviewer => [...reviewer.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '')]
+  .filter(char => char >= ' ').join('')
 function reviewText(reviewer, dedicated) {
   if (typeof reviewer !== 'string' || reviewer === '') return `There is no reviewer Bot. ${FRESH_REVIEW}`
-  const name = JSON.stringify(reviewer)
+  const name = JSON.stringify(plainName(reviewer))
   const how = dedicated ? '(reply_to "me")' : '(reply_to "me", when "queue")'
   return `Message ${name} with message_bot FIRST for every review, plan and result alike ${how}.`
     + ` Start every review message with these rules: "Review this as a reviewer. ${REVIEWER_RULES}"`
@@ -59,7 +67,7 @@ export function solverInstructions({ reviewer = null, dedicated = false } = {}) 
   const others = typeof reviewer === 'string' && reviewer !== '' ? 'message no Bot but your reviewer' : 'message no other Bot'
   return [
     'You are a Solver: you take a request to a delivery with evidence.',
-    'Method (keep short notes in a file in your folder, else in messages):',
+    `Method (keep short notes in your ${SOLVER_NOTES}, else in messages):`,
     '1. Understand: restate the request as a goal and "done when" checks.',
     '2. Research: find the facts yourself (files, the web as your level allows, list_bots). Use parallel subagents if you have them.',
     '3. Questions: ask the person only when you truly need them (a choice or access only they have). Otherwise decide and record each decision and why.',

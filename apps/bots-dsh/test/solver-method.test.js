@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { MAX_INSTRUCTIONS } from '../src/shared/registry.js'
-import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_METHOD_VERSION, isSolverBot, solverInstructions } from '../src/shared/solver-method.js'
+import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_METHOD_VERSION, SOLVER_NOTES, isSolverBot, solverInstructions } from '../src/shared/solver-method.js'
 import { reviewerPayload, solverPayload } from '../src/client/solver-draft.js'
 
 const RULES = "Review this as a reviewer. Check it against the request's own words, not against the plan's claims."
@@ -29,7 +29,11 @@ test('every rule of the method is in both forms', () => {
       'Never get around a block that would widen your rights',
       "Verify the result against the person's original words",
       'Never put a secret in a review message or a delivery.',
+      // SR4-2: the notes file is one exact path in the Solver's folder, which the review mark skips.
+      'Method (keep short notes in your .solver/notes.md, else in messages):',
     ]) assert.ok(text.includes(rule), rule)
+    assert.equal(SOLVER_NOTES, '.solver/notes.md')
+    assert.doesNotMatch(text, /in a file in your folder/)
     assert.doesNotMatch(text, /\bNone\b/)
     assert.doesNotMatch(text, /same model/)
   }
@@ -143,13 +147,18 @@ test('with no reviewer Bot every review runs in a fresh session, and the deliver
 })
 
 test('the instructions stay under the instructions limit with the longest reviewer name', () => {
-  // SR3-3: the longer "asks for the delivery first" sentence still fits with 40 quotes or backslashes.
-  for (const reviewer of [LONG, QUOTES, '\\'.repeat(40)]) {
+  // SR3-3: the longer "asks for the delivery first" sentence still fits with 40 quotes or backslashes
+  // (3997 with the notes path, SR4-2). SR4-3: C0 controls and lone surrogates, six characters each in
+  // JSON, are dropped from the name first.
+  for (const reviewer of [LONG, QUOTES, '\\'.repeat(40), '\u0001'.repeat(40), 'a\u0001'.repeat(20), '\ud800'.repeat(40), '\udc00'.repeat(40)]) {
     for (const dedicated of [true, false]) {
       const text = solverInstructions({ reviewer, dedicated })
-      assert.ok(text.length <= MAX_INSTRUCTIONS, `${reviewer[0]} ${dedicated} ${text.length}`)
+      assert.ok(text.length <= MAX_INSTRUCTIONS, `${JSON.stringify(reviewer[0])} ${dedicated} ${text.length}`)
+      assert.doesNotMatch(text, /\\u00|\\ud[89a-f]/i, JSON.stringify(reviewer[0]))
     }
   }
+  // A pair is kept whole.
+  assert.ok(solverInstructions({ reviewer: 'Ada \u{1F600}' }).includes('Message "Ada \u{1F600}" with message_bot FIRST'))
   assert.ok(solverInstructions({ reviewer: null }).length <= MAX_INSTRUCTIONS)
 })
 

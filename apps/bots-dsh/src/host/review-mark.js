@@ -5,7 +5,9 @@
 // see, or no reviewer. It grants and refuses nothing, so it reads the cosmetic marker and the
 // reviewer id the New Solver dialog stores (`reviewerId`). Groups, tasks and scheduled runs of a
 // Solver are not marked: only its own chat (and the subagents under it).
-import { isSolverBot } from '../shared/solver-method.js'
+import { lstatSync, realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
+import { SOLVER_NOTES, isSolverBot } from '../shared/solver-method.js'
 import { VERDICTS_KEPT, deliveryMark, verdictOf } from '../shared/review-mark.js'
 import { teamToolOf } from './approvals.js'
 import { reachesShell } from './tool-deny.js'
@@ -39,6 +41,55 @@ export function isWorkCall(name, args, definition) {
   return reachesShell(name, definition)
 }
 
+// The tools that write one file, and the argument naming it (private-bots.js).
+const ONE_FILE = { write: 'file_path', edit: 'file_path', str_replace_editor: 'path' }
+const PATH_KEYS = /^(file_path|filePath|file|path|paths)$/
+const pathsIn = (value, depth = 0) => depth > 4 || value === null || typeof value !== 'object' ? []
+  : Object.entries(value).flatMap(([key, item]) => PATH_KEYS.test(key)
+    ? (typeof item === 'string' ? [item] : Array.isArray(item) ? item.map(entry => (typeof entry === 'string' ? entry : '')) : [''])
+    : pathsIn(item, depth + 1))
+
+/**
+ * Whether `path` is exactly the Solver's notes file (SOLVER_NOTES) in `folder`, the Bot's folder:
+ * relative paths resolve against `base`, the call's folder. No `..` segment, no prefix match, and no
+ * symlink (or hard link) on the way: anything else is not the notes file (#2056 SR4-2).
+ */
+export function isNotesPath(path, folder, base = folder) {
+  if (typeof path !== 'string' || path === '' || path.includes('\0') || typeof folder !== 'string' || folder === '') return false
+  if (path.split(/[\\/]/).includes('..') || /[\\/]$/.test(path)) return false
+  if (!isAbsolute(path) && (typeof base !== 'string' || base === '')) return false
+  const target = isAbsolute(path) ? resolve(path) : resolve(base, path)
+  const [dir, file] = SOLVER_NOTES.split('/')
+  if (basename(target) !== file || basename(dirname(target)) !== dir) return false
+  const kind = (at) => {
+    try { return lstatSync(at) } catch (error) { return error?.code === 'ENOENT' ? null : undefined }
+  }
+  try {
+    if (realpathSync(dirname(dirname(target))) !== realpathSync(folder)) return false
+  } catch { return false }
+  const notesDir = kind(dirname(target))
+  if (notesDir === undefined || (notesDir !== null && (notesDir.isSymbolicLink() || !notesDir.isDirectory()))) return false
+  const notes = kind(target)
+  if (notes === undefined || (notes !== null && (notesDir === null || !notes.isFile() || notes.nlink > 1))) return false
+  return true
+}
+
+/**
+ * Whether one call writes only the Solver's notes file: a one-file write tool (through the `dsh`
+ * bridge too), or an ACP agent's own edit whose every path is that file.
+ */
+export function isNotesWrite(name, args, folder, base) {
+  if (typeof name !== 'string' || args === null || typeof args !== 'object') return false
+  const key = ONE_FILE[teamToolOf(name)]
+  if (key !== undefined) return isNotesPath(args[key], folder, base)
+  if (name !== 'acp_tool' || args.kind !== 'edit' || args.image === true) return false
+  const input = args.input
+  if (input !== null && typeof input === 'object' && (Object.hasOwn(input, 'command') || Object.hasOwn(input, 'cmd'))) return false
+  const locations = Array.isArray(args.locations) ? args.locations.map(entry => (typeof entry?.path === 'string' ? entry.path : '')) : []
+  const paths = [...pathsIn(input), ...locations]
+  return paths.length > 0 && paths.every(path => isNotesPath(path, folder, base))
+}
+
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isTime = value => typeof value === 'number' && Number.isFinite(value)
 
@@ -55,6 +106,7 @@ export function cleanTrack(track) {
   return {
     requested: track.requested === true,
     requestAt: isTime(track.requestAt) ? track.requestAt : 0,
+    ...(isTime(track.personAt) ? { personAt: track.personAt } : {}),
     ...(isTime(track.firstWorkAt) ? { firstWorkAt: track.firstWorkAt } : {}),
     ...(isTime(track.lastWorkAt) ? { lastWorkAt: track.lastWorkAt } : {}),
     verdicts,
@@ -66,10 +118,11 @@ export function cleanTrack(track) {
 export function install(rt) {
   const save = () => void rt.save?.().catch?.(() => {})
   const tracked = bot => bot !== undefined && isSolverBot(bot)
-  // The record of the request in progress: { requested, requestAt, firstWorkAt, lastWorkAt,
-  // verdicts, delivered, last }. `requested`: a person asked for something (a message in its
-  // own chat, or the brief it was made with), so the next delivery answers it; a greeting does
-  // not. `last` is the last delivery's mark, which the view shows.
+  // The record of the request in progress: { requested, requestAt, personAt, firstWorkAt,
+  // lastWorkAt, verdicts, delivered, last }. `requested`: a person asked for something (a message
+  // in its own chat, or the brief it was made with), so the next delivery answers it; a greeting
+  // does not. `personAt`: the person's last message in it. `last` is the last delivery's mark,
+  // which the view shows.
   // A stored track is read as the host wrote it, or repaired: a corrupted state.json must not
   // throw on a reply, a tool call or a turn's end (SR3-6).
   const trackOf = (bot) => {
@@ -79,7 +132,7 @@ export function install(rt) {
   }
   const open = (bot, at) => {
     const last = cleanTrack(bot.reviewTrack)?.last
-    bot.reviewTrack = { requested: true, requestAt: at, verdicts: [], ...(last ? { last } : {}) }
+    bot.reviewTrack = { requested: true, requestAt: at, personAt: at, verdicts: [], ...(last ? { last } : {}) }
   }
   const reviewOf = (bot) => {
     if (typeof bot.reviewerId !== 'string' || bot.reviewerId === '') return 'fresh'
@@ -94,20 +147,29 @@ export function install(rt) {
   }
 
   // A person's message in the Solver's own chat. After a delivery, or with no request open, it
-  // opens the next request; while one is open (the Solver waits for its reviewer) it changes nothing.
+  // opens the next request; while one is open (the Solver waits for its reviewer) it only dates the
+  // person's last message, so reviewer work opened before it no longer holds the delivery (SR4-1).
   function reviewRequest(botId) {
     const bot = rt.botOf(botId)
     if (!tracked(bot)) return
     const track = cleanTrack(bot.reviewTrack)
-    if (track?.requested === true && track.delivered !== true) return
+    if (track?.requested === true && track.delivered !== true) {
+      track.personAt = Date.now()
+      bot.reviewTrack = track
+      save()
+      return
+    }
     open(bot, Date.now())
     save()
   }
 
   // A call the executor let through, on a Session of `bot`; `own`: the Session is its own
-  // chat or a subagent under it.
-  function reviewWork(bot, own, name, args, definition) {
+  // chat or a subagent under it; `base`: the Session's folder. A write to exactly the Solver's
+  // notes file in its folder is not work (SR4-2).
+  function reviewWork(bot, own, name, args, definition, base) {
     if (!own || !tracked(bot) || !isWorkCall(name, args, definition)) return
+    const folder = bot.workDir ?? rt.teamFolder?.()
+    if (isNotesWrite(name, args, folder, base ?? folder)) return
     const track = trackOf(bot)
     if (track.delivered === true) return
     const at = Date.now()
@@ -132,7 +194,9 @@ export function install(rt) {
   }
 
   // A turn of the Solver's own chat ended. A completed turn that wrote text, for an open request,
-  // with nothing out to its reviewer, is a delivery: it is marked once per request.
+  // with nothing out to its reviewer, is a delivery: it is marked once per request. Reviewer work
+  // opened before the person's last message does not hold it: a person who asks for the delivery
+  // first gets it (SR3-3 (b)), and the late verdict on that work is dropped (SR4-1).
   function reviewTurnEnd(botId, { completed, wroteText }) {
     const bot = rt.botOf(botId)
     if (!tracked(bot) || !completed || !wroteText) return
@@ -140,8 +204,12 @@ export function install(rt) {
     if (track?.requested !== true || track.delivered === true) return
     bot.reviewTrack = track
     const review = reviewOf(bot)
-    if (review === 'bot' && Object.values(rt.state?.works ?? {}).some(work => work?.from === bot.id && work?.to === bot.reviewerId)) return
-    track.last = deliveryMark(track, review, Date.now())
+    const works = Object.values(rt.state?.works ?? {})
+    if (review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && !(typeof track.personAt === 'number' && typeof work.at === 'number' && work.at < track.personAt))) return
+    // Reviewer work this request opened, still out when the person asked: delivered before its
+    // verdict (Run 3). Work left from an earlier request is not this one's.
+    const pending = review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && typeof work.at === 'number' && work.at >= track.requestAt)
+    track.last = deliveryMark(track, review, Date.now(), { pending })
     track.delivered = true
     save()
   }

@@ -3736,7 +3736,8 @@ const pack = createPack({
     "Plan and result reviewed by {name}.": "Plano e resultado revisados por {name}.",
     "Plan unreviewed: {name} gave no verdict before the work started.": "Plano sem revisão: {name} não deu veredito antes de o trabalho começar.",
     "Result unreviewed: {name} gave no verdict on the finished work.": "Resultado sem revisão: {name} não deu veredito sobre o trabalho pronto.",
-    "Plan and result unreviewed: no verdict from {name} came in time.": "Plano e resultado sem revisão: nenhum veredito de {name} chegou a tempo."
+    "Plan and result unreviewed: no verdict from {name} came in time.": "Plano e resultado sem revisão: nenhum veredito de {name} chegou a tempo.",
+    "{name} had not answered when this was delivered; the app cannot see a fresh-session review.": "{name} ainda não tinha respondido quando isto foi entregue; o app não consegue ver uma revisão em sessão nova."
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

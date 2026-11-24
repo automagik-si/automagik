@@ -530,8 +530,12 @@ export function install(rt) {
     const shell = noShell(bot) && shellCall(name, exec.arguments, definitionOf(exec))
     if (!denied.includes(name) && !shell) {
       // A Solver's work call in its own chat dates its review mark (review-mark.js); it refuses nothing.
-      // Only a Solver walks the lineage: every other Bot's call skips it.
-      if (isSolverBot(bot)) rt.reviewWork?.(bot, ownChatLineage(exec.agent?.id ?? exec.agent?.session?.id, exec.agent, bot), name, exec.arguments, definitionOf(exec))
+      // Only a Solver walks the lineage: every other Bot's call skips it. The Session's folder is where a
+      // relative path lands (a write to the Solver's notes file is not work).
+      if (isSolverBot(bot)) {
+        const base = exec.agent?.session === undefined ? undefined : rt.sessionFolder?.(exec.agent.session)
+        rt.reviewWork?.(bot, ownChatLineage(exec.agent?.id ?? exec.agent?.session?.id, exec.agent, bot), name, exec.arguments, definitionOf(exec), base)
+      }
       return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
     }
     rt.noteStop?.(exec.agent?.id ?? exec.agent?.session?.id, { why: 'tool', tool: name, callId: exec.callId }, exec.agent)

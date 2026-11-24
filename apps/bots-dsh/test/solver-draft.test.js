@@ -170,6 +170,16 @@ test('the review mark line: plan missing, result missing, both present, both mis
   assert.equal(line({ review: 'bot', plan: true, result: false }), 'Result unreviewed: Ada reviewer gave no verdict on the finished work.')
   assert.equal(line({ review: 'bot', plan: true, result: true }), 'Plan and result reviewed by Ada reviewer.')
   assert.equal(line({ review: 'bot', plan: false, result: false }), 'Plan and result unreviewed: no verdict from Ada reviewer came in time.')
+  // Run 3: delivered while the reviewer still had the work; never blank, never "reviewed".
+  const pending = 'Ada reviewer had not answered when this was delivered; the app cannot see a fresh-session review.'
+  for (const [plan, result] of [[false, false], [true, false], [false, true], [true, true]]) {
+    assert.equal(line({ review: 'bot', plan, result, pending: true }), pending)
+  }
+  assert.doesNotMatch(pending, /\breviewed\b/i)
+  // A Solver with a reviewer Bot never shows the no-reviewer fresh-session line.
+  for (const mark of [{ plan: false, result: false }, { plan: true, result: false }, { plan: false, result: true }, { plan: true, result: true }, { plan: false, result: false, pending: true }]) {
+    assert.doesNotMatch(line({ review: 'bot', ...mark }), /no reviewer Bot/)
+  }
   // SR3-1: with no reviewer Bot the line claims no review: the host cannot see one.
   assert.equal(line({ review: 'fresh' }), 'Review not checked: this Solver has no reviewer Bot, and the app cannot see a fresh-session review.')
   assert.doesNotMatch(line({ review: 'fresh' }), /^Reviewed/)

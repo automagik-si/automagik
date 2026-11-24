@@ -111,13 +111,15 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   Solver's reviewer Bot: the New Solver dialog sends it once with the person's `create-bot`, the
   host keeps it only when it names another Bot on the team, a copy of the Solver keeps it, and no
   endpoint or Bot tool changes it later. `reviewTrack` is written only by the host, per request in
-  the Solver's own chat (and the subagents under it): when the request opened, its first and last
-  work calls, at most 4 verdicts (SHIP, FIX-FIRST or BLOCKED opening a reply from `reviewerId`) and
-  the last delivery's mark. No view carries `reviewTrack`: the owner's view shows only
-  `reviewMark`, the last mark (plan and result reviewed, plan unreviewed, result unreviewed, fresh
-  session not checked, or no reviewer), and neither field is ever a caller-view field. Like the
-  Solver marker it grants and refuses nothing; delivery 1.5's hard guard keys on its own user-only
-  field.
+  the Solver's own chat (and the subagents under it): when the request opened, the person's last
+  message in it, its first and last work calls (a write to exactly its notes file,
+  `.solver/notes.md` in its folder, is not one), at most 4 verdicts (the last whole-word SHIP,
+  FIX-FIRST or BLOCKED in a reply from `reviewerId` that starts a line, follows `Verdict:` or ends a
+  line after a sentence) and the last delivery's mark. No view carries `reviewTrack`: the owner's
+  view shows only `reviewMark`, the last mark (plan and result reviewed, plan unreviewed, result
+  unreviewed, delivered before the reviewer answered, fresh session not checked, or no reviewer),
+  and neither field is ever a caller-view field. Like the Solver marker it grants and refuses
+  nothing; delivery 1.5's hard guard keys on its own user-only field.
 - Delivery 2 adds the official role id `solver`.
 
 ## Threat model

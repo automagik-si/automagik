@@ -3334,6 +3334,7 @@ const ZH = {
   'Plan unreviewed: {name} gave no verdict before the work started.': '计划未审阅：{name} 在工作开始前没有给出结论。',
   'Result unreviewed: {name} gave no verdict on the finished work.': '结果未审阅：{name} 没有对完成的工作给出结论。',
   'Plan and result unreviewed: no verdict from {name} came in time.': '计划和结果都未审阅：没有及时收到 {name} 的结论。',
+  '{name} had not answered when this was delivered; the app cannot see a fresh-session review.': '交付时 {name} 尚未回复；应用无法看到全新会话中的审阅。',
 }
 
 // Host errors stay English, since Bots read them too; they are translated where the

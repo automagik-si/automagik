@@ -148,6 +148,7 @@ export function reviewMarkText(bot, roster) {
   if (mark.review === 'fresh') return t('Review not checked: this Solver has no reviewer Bot, and the app cannot see a fresh-session review.')
   if (mark.review !== 'bot') return t('Unreviewed: its reviewer is no longer on the team.')
   const name = roster?.byId?.[bot.reviewerId]?.name ?? t('its reviewer')
+  if (mark.pending === true) return t('{name} had not answered when this was delivered; the app cannot see a fresh-session review.', { name })
   if (mark.plan === true && mark.result === true) return t('Plan and result reviewed by {name}.', { name })
   if (mark.result === true) return t('Plan unreviewed: {name} gave no verdict before the work started.', { name })
   if (mark.plan === true) return t('Result unreviewed: {name} gave no verdict on the finished work.', { name })
