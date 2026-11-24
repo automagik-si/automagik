@@ -852,39 +852,57 @@ test('acp archive 5 keeps an undone replacement through old cleanup', async t =>
     await oldFork.released
     throw new Error('old fork failed')
   })
-  const forking = a.step({ signal: oldStop.signal, input: [said('plain old fork')] })
-  await within(oldFork.entered, 'old refork')
-  await w.archive(a.id)
-  holdAdmission = true
-  const admitted = a.step({ input: [said('plain admitted while archived')] })
-  await within(oldAdmission.entered, 'old archived admission')
-  w.undo(a.id)
-  await archiveReply(a, 'plain fresh after Undo')
-  const replacement = w.adapter.live.get(a.id)
-  const child = archiveChild(w, a)
-  assert.notEqual(child, original)
-  assert.notEqual(replacement.fileOwner, originalOwner)
-  assert.ok(replacement.fileOwner)
-  assert.equal(w.events('new-session').at(-1).pid, child.pid)
-  await archiveExited(original)
+  const assertQuietStep = async (settled, name) => {
+    const [result] = await settled
+    assert.equal(result.status, 'fulfilled', `${name} did not complete: ${result.reason?.message}`)
+    quietArchive(result.value)
+  }
+  // Observe both bounded steps from launch so an early assertion can still drain them.
+  const forking = Promise.allSettled([a.step({ signal: oldStop.signal, input: [said('plain old fork')] })])
+  let admitted
+  try {
+    await within(oldFork.entered, 'old refork')
+    await w.archive(a.id)
+    holdAdmission = true
+    admitted = Promise.allSettled([a.step({ input: [said('plain admitted while archived')] })])
+    await within(oldAdmission.entered, 'old archived admission')
+    w.undo(a.id)
+    await archiveReply(a, 'plain fresh after Undo')
+    const replacement = w.adapter.live.get(a.id)
+    const child = archiveChild(w, a)
+    assert.ok(child !== original, 'Undo reused the original child')
+    assert.ok(replacement.fileOwner !== originalOwner, 'Undo reused the original file owner')
+    assert.ok(replacement.fileOwner, 'Undo did not create a replacement file owner')
+    assert.equal(w.events('new-session').at(-1).pid, child.pid)
+    await archiveExited(original)
 
-  oldStop.abort()
-  assert.equal(w.adapter.live.get(a.id), replacement)
-  assert.equal(w.adapter.sessionFiles.owners.get(a.id), replacement.fileOwner)
-  oldFork.release()
-  oldAdmission.release()
-  quietArchive(await forking)
-  quietArchive(await admitted)
-  assert.equal(prepare.mock.callCount(), 2)
-  assert.equal(w.adapter.live.get(a.id), replacement)
-  assert.equal(w.adapter.sessionFiles.owners.get(a.id), replacement.fileOwner)
-  assert.equal(w.events('prompt').length, 2)
+    // Keep Cordis objects out of the assertion diagnostics.
+    const assertReplacement = after => {
+      const current = w.adapter.live.get(a.id)
+      assert.ok(w.adapter.sessionFiles.owners.get(a.id) === replacement.fileOwner, `${after} lost the replacement file owner`)
+      assert.equal(current?.run?.child?.pid, child.pid, `${after} lost the replacement child`)
+      assert.ok(current === replacement, `${after} changed the replacement live entry`)
+    }
+    oldStop.abort()
+    assertReplacement('Old Stop')
+    oldFork.release()
+    oldAdmission.release()
+    await assertQuietStep(forking, 'Old refork')
+    await assertQuietStep(admitted, 'Old archived admission')
+    assert.equal(prepare.mock.callCount(), 2)
+    assertReplacement('Old refork cleanup')
+    assert.equal(w.events('prompt').length, 2)
 
-  await new Promise(resolve => setTimeout(resolve, KILL_AFTER_MS))
-  await archiveReply(a, 'plain after old cleanup')
-  assert.equal(w.adapter.live.get(a.id), replacement)
-  assert.equal(archiveChild(w, a), child)
-  assert.equal(w.events('prompt').at(-1).pid, child.pid)
+    await new Promise(resolve => setTimeout(resolve, KILL_AFTER_MS))
+    await archiveReply(a, 'plain after old cleanup')
+    assert.ok(w.adapter.live.get(a.id) === replacement, 'The next reply changed the replacement live entry')
+    assert.ok(archiveChild(w, a) === child, 'The next reply changed the replacement child')
+    assert.equal(w.events('prompt').at(-1).pid, child.pid)
+  } finally {
+    oldFork.release()
+    oldAdmission.release()
+    await Promise.all([forking, admitted])
+  }
 })
 
 test('acp archive 6 revokes a staged image grant without a run', async t => {
