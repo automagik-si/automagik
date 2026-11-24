@@ -2,9 +2,10 @@
 // opener by name from PATH with the sign-in link as its only argument. For the sign-in run only,
 // a folder of this attempt's own leads that PATH with a script that opens nothing and appends
 // the link to `links` in the attempt's folder. acp-dsh reads it from there, checks it
-// (isSignInUrl) and hands it to the app, which opens it in the person's own browser. No
-// environment variable, socket or listener carries anything: the folder is the channel, owner
-// only, inside this installation's `acp` folder (the same file system agy already runs from).
+// (isSignInUrl) and hands it to the app, which shows it as a link with Copy; a person's click
+// opens it. No environment variable, socket or listener carries anything: the folder is the
+// channel, owner only, inside this installation's `acp` folder (the same file system agy already
+// runs from).
 import { randomUUID } from 'node:crypto'
 import {
   chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, rmSync,
