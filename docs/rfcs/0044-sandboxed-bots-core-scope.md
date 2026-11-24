@@ -373,6 +373,18 @@ chooses that form for R3, become an Automagik contract in the delivery that writ
 
 Order: 1 and 2, then 3; 4 any time; 5-7 follow upstream; 8 and 9 need the hardware.
 
+### Status of deliveries 3-9
+
+| Delivery | Status | Waits on |
+|---|---|---|
+| 3. The canary | Parked | An owner step: the owner names the Bot and its computer, runs the runbook and delivery 3's checks. No agent opts a Bot in. |
+| 4. The upstream request | Parked | herdr-core (upstream; work outside this repository waits under the owner's external-repository rule). |
+| 5. Identity from the endpoint | Parked | herdr-core releasing R1 and R6 (upstream; the external-repository rule). |
+| 6. `keys` team-scoped | Moved | Tracked on #628. |
+| 7. Team Bots on linked machines | Parked | herdr-core releasing R1-R6 on both cores (upstream; the external-repository rule). |
+| 8. macOS mask | Parked | After the canary (Q7a), then a Mac for the feasibility study. |
+| 9. Windows (WSL) mask | Parked | RFC 0016's WSL container, and verification in a Windows/WSL guest. |
+
 ## Open questions (recommended answer first)
 
 1. **Enable on Linux before upstream?** (a) Yes: after deliveries 1 and 2, one canary by the runbook.
