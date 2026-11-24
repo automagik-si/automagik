@@ -1156,3 +1156,20 @@ test('T16 a same-harness model change during an agent switch is refused as busy'
   }
   assert.equal(host.saved().bots.m1.effort, 'high')
 })
+
+// MY-8 (#2061): the host's running-reply refusal keeps its reason over HTTP, from both
+// endpoints, so the selector asks its question instead of showing an error.
+test('MY-8 a reply-running refusal reaches the caller with its reason, from switch-route and update-bot', async (t) => {
+  const message = 'This stops the current reply and continues on DeepSeek V4 Flash.'
+  const host = await start(seed(), {
+    onRuntime: (rt) => {
+      rt.switchRoute = async () => { throw Object.assign(new Error(message), { code: 'bot/refused', reason: 'reply-running' }) }
+    },
+  })
+  t.after(host.stop)
+  await host.moved()
+  for (const endpoint of ['switch-route', 'update-bot']) {
+    assert.deepEqual(await host.call(endpoint, { id: 'm1', model: 'deepseek/deepseek-v4-flash' }),
+      { ok: false, error: { code: 'bot/refused', message, details: {}, reason: 'reply-running' } }, endpoint)
+  }
+})

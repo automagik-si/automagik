@@ -1691,3 +1691,24 @@ test('a handoff-note turn is hidden and answers nobody, even when it fails', () 
     assert.deepEqual(failures, [], reason.kind)
   }
 })
+
+// MD-1 (#2061): a fresh part's failed first turn that its agent switch takes back, with the
+// stopped reply going on in the old part (parts.js switchResumes), answers no sender: the
+// resumed turn does. Any other failure still tells the sender.
+test('a failed first turn that an agent switch takes back and resumes answers no sender', () => {
+  for (const resumes of [true, false]) {
+    const { rt, emit, delivered } = turnsHost()
+    const asked = []
+    rt.switchResumes = (id, reason) => { asked.push([id, reason.kind]); return resumes }
+    emit('b', 'turn/start', { turn: 1 })
+    emit('b', 'user/message', { content: textBlock('[Handoff · part 2]'), source: replySource('request', { exchangeId: 'e-cut', handoff: true, resume: true }) })
+    emit('b', 'turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'MODEL_ACCESS_REQUIRED', message: 'Sign in' } } })
+    assert.deepEqual(asked, [['b', 'error']], String(resumes))
+    if (resumes) assert.deepEqual(delivered, [])
+    else {
+      assert.equal(delivered.length, 1)
+      assert.equal(delivered[0].replyTo, 'e-cut')
+      assert.match(delivered[0].text, /^Writer could not answer your message: its model call failed/)
+    }
+  }
+})

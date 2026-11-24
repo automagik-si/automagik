@@ -1198,6 +1198,9 @@ export function install(rt) {
         if (noteTurn) break
         const reason = event.data?.reason
         const failure = reason?.kind === 'error' && !switched ? turnFailure(reason.error) : undefined
+        // A fresh part's failed first turn after an agent switch that stopped a reply: the switch
+        // goes back and the stopped reply goes on (parts.js), which answers the sender instead.
+        const goesOn = failure !== undefined && rt.switchResumes?.(id, reason) === true
         if (failure !== undefined) noteTurnFailure(id, failure)
         if (failure !== undefined) setFailed(id, failure)
         // A route that is not a model endpoint refuses every generation; the failed
@@ -1260,7 +1263,7 @@ export function install(rt) {
         // the turn's text (or a stopped-before-answer line), or nothing.
         const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
         const answer = (source, reply) => {
-          if (!expectsReply(source) || answersUser(source)) return
+          if (!expectsReply(source) || answersUser(source) || goesOn) return
           if (failure !== undefined) {
             // The sender was told a reply comes later; without this it would wait forever.
             tellSender(id, source, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`)

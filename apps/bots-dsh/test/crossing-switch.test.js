@@ -708,3 +708,159 @@ test('T12 a group part that moves on keeps its own route: no crossing, no record
   b.agents.set('g9', { ...g1, id: 'g9', session: { ...gSession, id: 'g9', deriveMessages: () => [] } })
   assert.equal(await b.rt.crossingHistory('g9', b.bot.model), false)
 })
+
+// T15b (MD-1): a reply cut for an agent switch whose fresh part's first call fails is never lost.
+// Back on the old part, the cut request goes on there, once; the failed turn answers nobody
+// (turns.js reads switchResumes), so a relay sender gets only the resumed answer.
+const cutBench = (options) => {
+  const b = bench(options)
+  running(b)
+  b.agent.cancel = (reason) => {
+    b.calls.cancels.push({ reason })
+    b.agent.status = 'idle'
+    b.rt.live.delete('s1')
+    b.sessionEvent('s1', { type: 'turn/end', data: { turn: 3, reason: { kind: 'aborted', reason } } })
+  }
+  return b
+}
+const signInFailure = { kind: 'error', error: { code: 'MODEL_ACCESS_REQUIRED', message: 'Sign in' } }
+
+test('T15b MD-1 a cut reply whose fresh part fails its first call goes on in the old part, once', async t => {
+  const b = cutBench()
+  t.after(() => b.ctx.dispose())
+  await b.rt.switchRoute('b1', 'acp-claude/default', undefined, { stopReply: true })
+  await b.moved()
+  assert.equal(b.handoffOf('s2').source.resume, true)
+  assert.equal(b.rt.switchResumes('s2', { kind: 'completed' }), false)
+  assert.equal(b.rt.switchResumes('s2', signInFailure), true)
+  b.calls.sends.length = 0
+  b.sessionEvent('s2', { type: 'turn/end', data: { turn: 1, reason: signInFailure } })
+  await waitFor(() => b.calls.archived.includes('s2'))
+  assert.equal(b.bot.sessionId, 's1')
+  assert.equal(b.bot.model, 'deepseek/v4')
+  const resumed = [...b.agent.inbox.nextStep, ...b.agent.inbox.nextTurn].filter(item => item.source?.exchangeId === 'e-cut')
+  assert.equal(resumed.length, 1)
+  assert.match(textOf(resumed[0].content), /Go on with it now from where you stopped\./)
+  assert.equal(resumed[0].source.senderSessionId, 'other')
+  assert.equal(resumed[0].source.handoff, undefined)
+  // One waking send, on the old part, for the cut request.
+  assert.deepEqual(b.calls.sends.filter(send => send.wake).map(send => [send.id, send.item.source.exchangeId]), [['s1', 'e-cut']])
+  // Back on the old part, a later failure there is no switch's: the sender hears it.
+  assert.equal(b.rt.switchResumes('s2', signInFailure), false)
+})
+
+test('T15b MD-1 with no way back (acp_tool denied), the fresh part runs its handoff once more', async t => {
+  const b = cutBench({ model: 'acp-antigravity/default' })
+  t.after(() => b.ctx.dispose())
+  b.rt.config.crossingNoteTimeoutMs = 20
+  await b.rt.switchRoute('b1', 'acp-claude/default', undefined, { stopReply: true })
+  await b.moved()
+  const fresh = b.freshAgent('s2')
+  const handoff = b.handoffOf('s2')
+  assert.equal(handoff.source.resume, true)
+  // The failed first turn took the handoff: it is in the part's log, no longer in its inbox.
+  fresh.inbox.nextTurn.length = 0
+  fresh.inbox.nextStep.length = 0
+  fresh.session.deriveMessages = () => [handoff]
+  b.bot.denyTools = ['acp_tool']
+  assert.equal(b.rt.switchResumes('s2', signInFailure), true)
+  b.calls.sends.length = 0
+  b.sessionEvent('s2', { type: 'turn/end', data: { turn: 1, reason: signInFailure } })
+  await waitFor(() => b.calls.archived.includes('s1'))
+  await waitFor(() => b.calls.sends.length > 0)
+  assert.equal(b.bot.sessionId, 's2')
+  assert.equal(b.bot.model, 'acp-claude/default')
+  assert.deepEqual(b.calls.sends.map(send => [send.id, send.item.source.exchangeId, send.item.source.resume, send.wake]), [['s2', 'e-cut', true, true]])
+  assert.equal(textOf(b.calls.sends[0].item.content), textOf(handoff.content))
+  // Once: the part is no longer awaited, so its next failure answers its sender.
+  assert.equal(b.rt.switchResumes('s2', signInFailure), false)
+})
+
+// MY-6 (MD-3, M12): only followup sends count as a wake; a carry of only injected messages
+// leaves a resumed handoff to be woken, once.
+test('MY-6 a resumed handoff with only injected messages behind it is still woken, once', async t => {
+  const b = cutBench()
+  t.after(() => b.ctx.dispose())
+  b.agent.inbox.nextStep.push(message('notice', 'a background notice', { exchangeId: 'e-inject' }))
+  await b.rt.switchRoute('b1', 'acp-claude/default', undefined, { stopReply: true })
+  await b.moved()
+  const fresh = b.freshAgent('s2')
+  assert.deepEqual(fresh.inbox.nextStep.map(item => item.source.exchangeId), ['e-inject'])
+  assert.equal(b.handoffOf('s2').source.resume, true)
+  const onFresh = b.calls.sends.filter(send => send.id === 's2')
+  assert.equal(onFresh.filter(send => send.wake).length, 1)
+  assert.deepEqual(onFresh.map(send => send.item.source.exchangeId).sort(), ['e-cut', 'e-inject'])
+})
+
+// MY-7 (MD-3, M9): after a restart, a bare handoff that resumes nothing, with nothing behind
+// it, stays inert until the next message.
+test('MY-7 a restart after the commit leaves a bare non-resume handoff inert', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  const freshId = await b.rt.createSession()
+  const fresh = b.freshAgent(freshId)
+  fresh.inbox.nextTurn.push(message(SOURCE_KIND, '[Handoff · part 2] …', { handoff: true, exchangeId: 'e-bare' }))
+  Object.assign(b.bot, { sessionId: freshId, model: 'acp-claude/default', segments: [{ sessionId: 's1', switchedTo: 'acp-claude/default', archivePending: true }] })
+  b.rt.pastOwners.set('s1', { botId: 'b1' })
+  b.rt.state.switching.s1 = { botId: 'b1' }
+  await b.rt.heldBack()
+  assert.equal(b.rt.state.switching.s1, undefined)
+  assert.deepEqual(b.calls.sends, [])
+  assert.deepEqual(fresh.inbox.nextTurn.map(item => item.source.exchangeId), ['e-bare'])
+  assert.deepEqual(fresh.inbox.nextStep, [])
+})
+
+// T7e case 5 (MD-3, M1): a live turn while the agent is idle (no cancel, so no cut turn/end):
+// the ACP note turn completing is not the cut reply's end, so the cut is kept.
+test('T7e MY-1 case 5 an idle agent with a live turn: the note turn completing keeps the cut', async t => {
+  const b = bench({ model: 'acp-codex/default' })
+  t.after(() => b.ctx.dispose())
+  b.rt.live.set('s1', { turn: 3, info: { kind: SOURCE_KIND, form: 'relay', role: 'request', exchangeId: 'e-cut', senderSessionId: 'other' }, joined: [] })
+  b.agent.cancel = (reason) => { b.calls.cancels.push({ reason }) }
+  let cutAtNote
+  b.agent.send = (item) => {
+    b.calls.sends.push({ id: 's1', item })
+    if (item.source?.role !== 'handoff-note') return
+    b.rt.markNoteTurn('s1', 4)
+    b.messages.push(item, { role: 'assistant', content: [{ type: 'text', text: IN_CHAT_NOTE }] })
+    setTimeout(() => {
+      b.sessionEvent('s1', { type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } })
+      cutAtNote = b.rt.state.switching.s1?.cut
+    }, 5)
+  }
+  await b.rt.switchRoute('b1', 'deepseek/v4', undefined, { stopReply: true })
+  await b.moved()
+  assert.deepEqual(b.calls.cancels, [])
+  assert.equal(cutAtNote?.exchangeId, 'e-cut')
+  const handoff = b.handoffOf('s2')
+  assert.equal(handoff.source.resume, true)
+  assert.equal(handoff.source.exchangeId, 'e-cut')
+  assert.match(textOf(handoff.content), /You were in the middle of a turn/)
+})
+
+// MD-2, MD-5: the in-chat note asks for no tools, and one over the native note's bound is not
+// carried: the switch goes on with no summary.
+test('T4 MD-2 an ACP in-chat note over the note bound is not carried; the request asks for no tools', async t => {
+  const b = bench({ model: 'acp-codex/default' })
+  t.after(() => b.ctx.dispose())
+  const oversized = IN_CHAT_NOTE.replace('- none', `- ${'oversized-note-text '.repeat(1400)}`)
+  let request
+  b.agent.send = (item) => {
+    b.calls.sends.push({ id: 's1', item })
+    if (item.source?.role !== 'handoff-note') return
+    request = item
+    b.rt.markNoteTurn('s1', 4)
+    b.messages.push(item, { role: 'assistant', content: [{ type: 'text', text: oversized }] })
+    setTimeout(() => b.sessionEvent('s1', { type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } }), 5)
+  }
+  await b.rt.switchRoute('b1', 'deepseek/v4')
+  await b.moved()
+  assert.match(textOf(request.content), /\nUse no tools; answer with the note only\.$/)
+  const text = textOf(b.handoffOf('s2').content)
+  assert.doesNotMatch(text, /oversized-note-text/)
+  assert.doesNotMatch(text, /carry on, from the agent itself/)
+  assert.match(text, /the agent of the previous part wrote no summary in time for the switch/)
+  assert.equal(b.calls.background, 0)
+  assert.equal(b.calls.notes.length, 0)
+  assert.equal(b.calls.warnings.filter(line => /handoff note written for the agent switch of %s is over %d tokens/.test(line)).length, 1)
+})

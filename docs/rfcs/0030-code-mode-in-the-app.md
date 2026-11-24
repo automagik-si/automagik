@@ -529,7 +529,7 @@ about where it runs:
 | The Genie types into the team behind the orchestrator | The grant reaches only the orchestrator's terminal; its children carry no Genie label |
 | A populated own chat crosses through the model picker | Q7a refuses the pick before selecting a route or starting a switch (2026-11-20; since 2026-11-23 only on a Hermes route) |
 | A prompt reaches the old agent while a switch runs | The switch job takes over every step of the old part before the model is called and moves its input behind the handoff; the composer is locked; the new route is selected, and the handoff put in, only on a part no surface can reach yet; a running reply is stopped only with the person's consent (`stopReply`) (Handoff note, 2026-11-23) |
-| The new agent reads beyond its own chat | `read_own_chat` reads only the asking Session's Bot's own chat; `dsh-history` lists and runs that one tool; secrets and credential shapes are masked in its output and in the handoff |
+| The new agent reads beyond its own chat | `read_own_chat` reads only the asking Session's Bot's own chat; `dsh-history` (D2, not in D1) will list and run that one tool; secrets and credential shapes are masked in its output and in the handoff |
 | A Bot moves its chat's history to another vendor without the person | `update_bot` refuses a crossing with history; only the person's pick or Apply on `propose_bot_change` switches (Handoff note, 2026-11-23) |
 | The summary reaches a model the person did not pick | the outgoing agent writes it (its own route, or a hidden turn in its own chat); no background model; none at all past 45 seconds |
 | A watching view reflows a terminal someone is using | The app never resizes a terminal, watching or typing (Q15, 2026-11-20) |

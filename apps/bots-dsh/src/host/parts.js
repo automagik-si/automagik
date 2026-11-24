@@ -1581,7 +1581,8 @@ export function install(rt) {
     const exchangeId = randomUUID()
     job.noteRequest = exchangeId
     const request = createUserMessage({
-      content: [{ type: 'text', text: handoffPrompt(`This chat is switching to ${agentNameOf(job.target)}`) }],
+      // The agent runs this turn with its own tools; the note needs none (MD-5).
+      content: [{ type: 'text', text: `${handoffPrompt(`This chat is switching to ${agentNameOf(job.target)}`)}\nUse no tools; answer with the note only.` }],
       source: { kind: SOURCE_KIND, form: 'relay', role: 'handoff-note', noteFor: job.since, exchangeId, senderName: 'Omni' },
     })
     const ended = Promise.withResolvers()
@@ -1613,6 +1614,11 @@ export function install(rt) {
     const note = missingSections(text).length > 0 ? canonicalHeadings(text, NOTE_SECTIONS.map(([name]) => name)) : text
     if (note === '' || missingSections(note).length > 0) {
       rt.warn('ds-bot: the handoff note written for the agent switch of %s was not usable', rt.botOf(job.botId)?.name ?? agent.id)
+      return
+    }
+    // The same bound as a note written on a native route: a longer one is not carried.
+    if (estimateTokens(note) > NOTE_MAX_TOKENS) {
+      rt.warn('ds-bot: the handoff note written for the agent switch of %s is over %d tokens; it moves on with no summary', rt.botOf(job.botId)?.name ?? agent.id, NOTE_MAX_TOKENS)
       return
     }
     job.inChatNote = { note, attempts: 1 }
@@ -1814,6 +1820,8 @@ export function install(rt) {
           }
           await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
             .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
+          // The reply the switch stopped still goes on: here, once more, from its handoff.
+          if (entry.job?.resume === true) await rerunHandoff(freshId, bot.name)
           return
         }
       }
@@ -1860,6 +1868,9 @@ export function install(rt) {
       } else if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
       if (old !== undefined) partBase.set(entry.oldId, tokensOf(old.session) ?? 0)
       rt.renewMemory(entry.oldId)
+      // A reply the agent switch stopped goes on in the part it came from, once: the handoff
+      // that carried it stays behind in the fresh part (takeBack).
+      if (crossing !== undefined && old !== undefined && entry.job?.resume === true) resumeCut(old, entry.job, bot.name)
       rt.warn('ds-bot: the first call in the fresh part of %s failed before any answer; it is back on the part it came from, which was not archived', bot.name)
       await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
         .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', bot.name, error))
@@ -1884,6 +1895,45 @@ export function install(rt) {
     quietly(() => { for (const message of queued) fresh.inbox.remove(message.id) })
   }
 
+  // The stopped reply of an agent switch that went back: its resume line goes into the old
+  // part, as handOnPart's not-moved branch builds it, unless its request already waits
+  // there; then the part wakes once.
+  function resumeCut(agent, { info, joined }, name) {
+    try {
+      const exchangeId = info?.exchangeId
+      const queued = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
+      if (exchangeId === undefined || !queued.some(message => message.source?.exchangeId === exchangeId)) {
+        const carried = Array.isArray(joined) && joined.length > 0 ? { joined } : {}
+        agent.inbox.prepend('next-turn', createUserMessage({
+          content: [{ type: 'text', text: PAUSE_NOTE }],
+          source: info ? { ...info, ...carried } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...carried },
+        }))
+      }
+      wake(agent)
+    } catch (error) { rt.warn('ds-bot: the stopped reply of %s could not go on in the part it came from: %s', name, error) }
+  }
+
+  // A fresh part that stays after its first call failed (no way back) runs its handoff once
+  // more, so the reply the switch stopped goes on there. Its first failure no longer takes
+  // the switch back (the part is no longer awaited).
+  async function rerunHandoff(freshId, name) {
+    const fresh = await rt.resolveAgent(freshId).catch(() => undefined)
+    if (fresh === undefined) return
+    try {
+      if (![...fresh.inbox.nextStep, ...fresh.inbox.nextTurn].some(message => message.source?.handoff === true)) {
+        let recorded = []
+        try { recorded = fresh.session.deriveMessages() } catch {}
+        const handoff = recorded.findLast(message => message?.role === 'user' && message.source?.handoff === true)
+        if (handoff === undefined) {
+          rt.warn('ds-bot: the handoff of the fresh part of %s was not found; its stopped reply does not go on', name)
+          return
+        }
+        fresh.inbox.prepend('next-turn', createUserMessage({ content: handoff.content, ...(handoff.source ? { source: handoff.source } : {}) }))
+      }
+      wake(fresh)
+    } catch (error) { rt.warn('ds-bot: the fresh part of %s could not run its handoff again: %s', name, error) }
+  }
+
   // The fresh part's answers decide its switch. One on the route it opened on settles it at
   // once. One on another route (the person picked another model before the first answer, or
   // the fallback answered) still shows the part works: the switch settles when that turn ends,
@@ -1897,6 +1947,21 @@ export function install(rt) {
   // a provider down, a timeout) leaves the switch to that turn: an answer settles it, and only a
   // fallback turn that fails too goes back.
   const settleLater = (freshId, entry) => void settleSwitch(freshId, entry).catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
+  // Whether a turn's end in a fresh part takes its switch back: the same reading as the
+  // listener below, made before it runs (turns.js asks while the same turn ends).
+  const goesBackOn = (id, entry, reason) => {
+    if (entry.ackTurn === true || entry.answered === true || entry.spoke === true) return false
+    if (rt.cutByRestart?.(reason) || reason?.kind !== 'error') return false
+    const failure = turnFailure(reason.error)
+    if (failure.code === NO_BOT_RUNNER) return false
+    return entry.fellBack === true || switchFailure(failure) || rt.fallbackArmed?.(id) !== true
+  }
+  // An agent switch that stopped a reply and whose fresh part's first turn fails goes back,
+  // and the stopped reply goes on (revertSwitchHeld): that failed turn answers no sender.
+  rt.switchResumes = (id, reason) => {
+    const entry = awaiting.get(id)
+    return entry?.job?.crossing !== undefined && entry.job.resume === true && goesBackOn(id, entry, reason)
+  }
   ctx.on('session/event', (session, event) => {
     const entry = awaiting.get(session?.id)
     if (entry === undefined) return
