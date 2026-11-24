@@ -9,6 +9,12 @@ const ROUTE = 'api/omni-ui'
 const REFUSALS = new Set(['bot/refused', 'bot/sign-in-required', 'bot/account-confirm-required', 'bot/account-changed', 'bot/account-signed-out', 'bot/invalid', 'bot/read-only', 'bot/viewer-changed', 'bot/not-found', 'bot/browser-off', 'bot/login-ended', 'bot/login-restarted'])
 export const isRefusal = code => REFUSALS.has(code) || code.startsWith('bot/adopt-') || code.startsWith('bot/reservation-')
 
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === null || Object.getPrototypeOf(prototype) === null
+}
+
 export const call = async (endpoint, payload, signal) => {
   const active = requestViewer(endpoint)
   const viewer = active?.viewer?.id
@@ -61,7 +67,7 @@ export const call = async (endpoint, payload, signal) => {
     if (code === 'bot/refused') {
       const { key, params } = result.error ?? {}
       if (typeof key === 'string' && /^skill\.[a-z-]{1,40}$/.test(key)) error.key = key
-      if (params && Object.getPrototypeOf(params) === Object.prototype) {
+      if (isPlainObject(params)) {
         const entries = Object.entries(params)
         if (entries.length <= 8 && entries.every(([, value]) => (
           typeof value === 'string' ? value.length <= 200 : Number.isFinite(value)

@@ -4556,6 +4556,11 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
 var ROUTE = "api/omni-ui";
 var REFUSALS = /* @__PURE__ */ new Set(["bot/refused", "bot/sign-in-required", "bot/account-confirm-required", "bot/account-changed", "bot/account-signed-out", "bot/invalid", "bot/read-only", "bot/viewer-changed", "bot/not-found", "bot/browser-off", "bot/login-ended", "bot/login-restarted"]);
 var isRefusal = (code) => REFUSALS.has(code) || code.startsWith("bot/adopt-") || code.startsWith("bot/reservation-");
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === null || Object.getPrototypeOf(prototype) === null;
+}
 var call = async (endpoint, payload, signal) => {
   const active2 = requestViewer(endpoint);
   const viewer = active2?.viewer?.id;
@@ -4603,7 +4608,7 @@ var call = async (endpoint, payload, signal) => {
     if (code === "bot/refused") {
       const { key, params } = result.error ?? {};
       if (typeof key === "string" && /^skill\.[a-z-]{1,40}$/.test(key)) error.key = key;
-      if (params && Object.getPrototypeOf(params) === Object.prototype) {
+      if (isPlainObject(params)) {
         const entries2 = Object.entries(params);
         if (entries2.length <= 8 && entries2.every(([, value]) => typeof value === "string" ? value.length <= 200 : Number.isFinite(value))) error.params = params;
       }
