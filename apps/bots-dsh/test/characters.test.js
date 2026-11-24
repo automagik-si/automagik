@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CHARACTERS, DEFAULT_SHAPES, FALLBACK_SHAPE, PICKER_SHAPES, SOLVER_SHAPES, bakeMarkup, characterMarkup, defaultShape, hasShape, lookOf, maskOf, shapeOf } from '../src/client/characters.js'
+import { CHARACTERS, DEFAULT_SHAPES, FALLBACK_SHAPE, PICKER_SHAPES, SOLVER_SHAPES, bakeMarkup, bodyOf, characterMarkup, defaultShape, hasShape, lookOf, maskOf, shapeOf } from '../src/client/characters.js'
 
 // The ids are saved with Bots, so the table only ever grows at its end.
 const FIRST = ['whale', 'octopus', 'star', 'moon', 'wave', 'squircle', 'zed', 'hex', 'gumdrop', 'peanut', 'saucer', 'bunny', 'kitty', 'beacon', 'plus', 'magnet', 'acorn', 'pebbles', 'cushion', 'ring', 'gem']
@@ -43,7 +43,16 @@ test('a Solver is a table entry like any other: body, shade, light and two eyes,
       assert.ok(opacity > 0 && opacity < 1, id)
     }
   }
-  assert.deepEqual(SOLVERS.filter(id => CHARACTERS[id].paints), ['cap', 'bulb', 'chick'])
+  // Every Solver wears fur: its last decal is the lock layer, black at .15.
+  for (const id of SOLVERS) {
+    const lock = CHARACTERS[id].paints.at(-1)
+    assert.match(lock[0], /^M/, id)
+    assert.deepEqual(lock.slice(1), ['#000', 0.15], id)
+  }
+  // Only Cap, Bulb and Chick have a decal of their own, first, in the tones they had.
+  assert.deepEqual(SOLVERS.filter(id => CHARACTERS[id].paints.length > 1), ['cap', 'bulb', 'chick'])
+  assert.deepEqual(SOLVERS.map(id => CHARACTERS[id].paints.length), [1, 1, 2, 1, 1, 1, 1, 1, 1, 2, 2, 1])
+  assert.deepEqual(['cap', 'bulb', 'chick'].map(id => CHARACTERS[id].paints[0].slice(1)), [['#fff', 0.5], ['#000', 0.22], ['#000', 0.2]])
 })
 
 test('a Solver draws as a mark and bakes into a pet through the same code as the others', () => {
@@ -55,6 +64,14 @@ test('a Solver draws as a mark and bakes into a pet through the same code as the
     assert.equal(parts.box, 100, id)
     assert.deepEqual(Object.keys(parts.faces), Object.keys(bakeMarkup('gumdrop', 'red').faces), id)
     for (const svg of [parts.body, ...Object.values(parts.faces)]) assert.ok(svg.startsWith('<svg ') && !svg.includes('undefined') && !svg.includes('NaN'), id)
+    // One drawing, the fur, in every place: the mark, the mask, the ring's flat silhouette and the pet.
+    const { body } = CHARACTERS[id]
+    const lock = CHARACTERS[id].paints.at(-1)[0]
+    assert.ok(markup.includes(lock), `${id}: the mark holds the lock layer`)
+    assert.ok(maskOf(id).includes(encodeURIComponent(body)), `${id}: the mask is the fur's outline`)
+    const flat = bodyOf(shapeOf(id), '#000', true)
+    assert.ok(flat.includes(body) && !flat.includes(lock), `${id}: the flat silhouette is the body alone`)
+    assert.ok(parts.body.includes(body) && parts.body.includes(lock), `${id}: the pet bakes the fur`)
   }
 })
 
