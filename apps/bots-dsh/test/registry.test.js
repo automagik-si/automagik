@@ -343,6 +343,18 @@ test('v1 reader: this repo\'s own .herdr/bots.json reads as a version 2 repo fil
   assert.deepEqual(checkRegistry(file, { kind: 'repo' }), [])
 })
 
+test('v1 reader: a Solver look is kept like any other character, with its team pet', () => {
+  const v1 = JSON.parse(fixture('herdr-v1-automagik.json'))
+  v1.bots[0].look = { character: 'frog', colour: 'green' }
+  const { file, warnings } = fromHerdrV1(JSON.stringify(v1))
+  assert.deepEqual(warnings, [])
+  assert.deepEqual(file.bots[0].look, { character: 'frog', colour: 'green' })
+  assert.deepEqual(file.bots[0].pet, { source: 'team', id: 'frog-green' })
+  assert.deepEqual(checkRegistry(file, { kind: 'repo' }), [])
+  // The default look of an id never names one: no Bot without a stored look changes.
+  assert.deepEqual(defaultLook('b-aaaaaaaaaa'), { character: 'peanut', colour: 'blue' })
+})
+
 test('v1 reader: a team keeps its seat and team fields; what v2 cannot use is left out', () => {
   const { file, warnings } = fromHerdrV1(fixture('herdr-v1-team.json'))
   assert.deepEqual(file.bots.map(b => b.id), ['b-aaaaaaaaaa', 'b-cccccccccc', 'b-dddddddddd', 'b-ffffffffff'])

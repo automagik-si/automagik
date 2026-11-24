@@ -725,6 +725,30 @@ export function codexTemplateWarning(template, command, agents = AGENTS) {
   return lines.length ? lines.join(" ") : null;
 }
 
+/** The label key the sidebar reads for a pane's Question chip (rows.js `ownerQuestionOf`). */
+const NEEDS_OWNER_KEY = "automagik-herdr.needs-owner";
+
+/**
+ * The bot's needs-owner rule (#2057; briefingText.mjs `OWNER_QUESTION_LINE`) for workers, who get
+ * no briefing: when only the person can unblock it, a worker asks in its reply and marks its own
+ * pane so the sidebar shows a Question. Two sentences beyond the bot line: set it again for each
+ * new question, and a question the lead bot can answer is asked without the label. One line.
+ */
+export const WORKER_OWNER_QUESTION_LINE = "Waiting on the person: when you end your turn because only the person can unblock you "
+  + "(a question or a choice, not a permission prompt), ask it in your reply and also mark your own pane so the Herdr "
+  + "sidebar shows a Question, with a short paraphrase in single quotes and no apostrophe, e.g. "
+  + `\`hc label "$HC_TERMINAL_ID" '${NEEDS_OWNER_KEY}=Which release should ship?'\`. For each new question, `
+  + "set it again with the new paraphrase. Clear it "
+  + `with \`hc label "$HC_TERMINAL_ID" ${NEEDS_OWNER_KEY}=\` as soon as you work again or the `
+  + "question is withdrawn. A question your lead bot can answer: ask it in your reply, without the label. "
+  + "If HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
+
+/**
+ * The agents whose workers are not taught the owner line (#2057): Hermes is left out on purpose
+ * (#1747, the standing rule), as for the bot line in briefingText.mjs. They keep the done line.
+ */
+export const WORKER_OWNER_QUESTION_SKIP = Object.freeze(["hermes"]);
+
 /**
  * The instruction every worker task ends with (#1278 cause 5): before it reports done it commits
  * or discards everything it changed, so the sweep never finds an uncommitted worktree to keep.
@@ -734,9 +758,13 @@ export function codexTemplateWarning(template, command, agents = AGENTS) {
 export const WORKER_DONE_LINE = "Before you report done: commit or discard every change you made "
   + "and leave the worktree clean (`git status --porcelain` prints nothing).";
 
-/** A worker's task text: the task as given, then the worktree-clean instruction (#1278 cause 5). */
-export function workerTaskText(task) {
-  return `${task}\n\n${WORKER_DONE_LINE}`;
+/**
+ * A worker's task text: the task as given, then the needs-owner rule (#2057; not for an agent in
+ * WORKER_OWNER_QUESTION_SKIP, #1747), then the worktree-clean instruction last (#1278 cause 5).
+ */
+export function workerTaskText(task, agentKey = null) {
+  const owner = WORKER_OWNER_QUESTION_SKIP.includes(agentKey) ? "" : `\n\n${WORKER_OWNER_QUESTION_LINE}`;
+  return `${task}${owner}\n\n${WORKER_DONE_LINE}`;
 }
 
 /**

@@ -151,7 +151,8 @@ test('an owner turn replaces the running OFF child and replays the same DSH Sess
   assert.match(second.prompt, /flip-first[\s\S]*Reply to the first owner turn\.[\s\S]*flip-second/)
 })
 
-test('a turn without owner input cannot inherit a running ON child', async t => {
+// #1564 follow-up (E7-c): every turn of an ON Bot follows the switch, whoever sends it.
+test('a scheduled turn reuses the running ON child of an ON Bot', async t => {
   const h = ompWorld(t)
   h.service.botIdentity(nativeOn)
   const chat = h.chat()
@@ -160,18 +161,52 @@ test('a turn without owner input cannot inherit a running ON child', async t => 
   await chat.turn(createUserMessage({ content: [{ type: 'text', text: 'plain scheduled-only' }], source: { kind: 'schedule' } }))
   const schedule = h.conversation('scheduled-only')
   assert.deepEqual(owner.args, ['acp'])
-  assert.deepEqual(schedule.args, offArgs(h.overlayPath))
-  assert.notEqual(schedule.pid, owner.pid)
+  assert.deepEqual(schedule.args, ['acp'])
+  assert.equal(schedule.pid, owner.pid)
 })
 
-test('a handoff with a user source does not count as owner input', async t => {
+test('a handoff with a user source opens ON for an ON Bot', async t => {
   const h = ompWorld(t)
   h.service.botIdentity(nativeOn)
   await h.chat().turn(createUserMessage({
     content: [{ type: 'text', text: 'plain resumed-relay' }],
     source: { kind: 'user', handoff: true, resume: true },
   }))
-  assert.deepEqual(h.conversation('resumed-relay').args, offArgs(h.overlayPath))
+  assert.deepEqual(h.conversation('resumed-relay').args, ['acp'])
+})
+
+test('a member turn (a principal) opens ON for an ON Bot', async t => {
+  const h = ompWorld(t)
+  h.service.botIdentity(nativeOn)
+  await h.chat().turn(createUserMessage({
+    content: [{ type: 'text', text: 'plain member-turn' }],
+    source: { kind: 'user', principal: { kind: 'person', id: 'member' } },
+  }))
+  assert.deepEqual(h.conversation('member-turn').args, ['acp'])
+})
+
+// E3-b: a live ON child whose identity now reads OFF (still eligible) is remade OFF, not reused.
+test('a live ON child is remade OFF when the identity turns the switch off while still eligible', async t => {
+  const h = ompWorld(t)
+  let on = true
+  h.service.botIdentity(() => ({ ...nativeOn(), nativeTools: on, nativeToolsBlocked: false }))
+  const chat = h.chat()
+  await chat.turn('plain live-on')
+  const first = h.conversation('live-on')
+  on = false
+  await chat.turn('plain now-off')
+  const second = h.conversation('now-off')
+  assert.deepEqual(first.args, ['acp'])
+  assert.deepEqual(second.args, offArgs(h.overlayPath))
+  assert.notEqual(second.pid, first.pid)
+})
+
+// Its OFF meaning is kept through the identity: a Bot saved OFF opens every turn OFF.
+test('a scheduled turn of a Bot saved OFF opens OFF', async t => {
+  const h = ompWorld(t)
+  h.service.botIdentity(() => ({ ...nativeOn(), nativeTools: false }))
+  await h.chat().turn(createUserMessage({ content: [{ type: 'text', text: 'plain scheduled-off' }], source: { kind: 'schedule' } }))
+  assert.deepEqual(h.conversation('scheduled-off').args, offArgs(h.overlayPath))
 })
 
 for (const change of ['Read only', 'inherited preset', 'unknown level', 'throwing reader', 'late eligibility loss']) {
@@ -416,7 +451,6 @@ for (const [label, identity, input, options] of [
   ['Workspace without a Bot identity', () => undefined],
   ['Bot default OFF', () => ({ name: 'Sofia' })],
   ['Bot saved OFF', () => ({ ...nativeOn(), nativeTools: false })],
-  ['Bot saved ON with no owner input', nativeOn, { kind: 'schedule' }],
   ['Bot saved ON with another provider tag', () => ({ ...nativeOn(), nativeToolsAgent: 'acp-claude' })],
   ['Bot saved ON with unknown level', nativeOn, undefined, { sandbox: false }],
 ]) {
@@ -450,9 +484,8 @@ for (const [label, identity, input, options] of [
     assert.equal(h.adapter.live.has(chat.session.id), false)
     assert.deepEqual(hold.runs, [run])
 
-    // The scheduled turn was denied because it lacked owner input. A genuine owner
-    // message with the saved ON choice should now be eligible, unlike the other cases.
-    const nextOn = input?.kind === 'schedule'
+    // #1564 follow-up: no case here saves an eligible ON for omp, so the next turn opens OFF.
+    const nextOn = false
     const next = await chat.turn('plain owner-after-registration')
     const child = h.conversation('owner-after-registration')
     const replacement = h.adapter.live.get(chat.session.id)
@@ -466,6 +499,28 @@ for (const [label, identity, input, options] of [
     assert.equal(replacement.run.spec.refuseTools === true, !nextOn)
   })
 }
+
+// #1564 follow-up: a scheduled turn of a Bot saved ON for omp is eligible, so late registration
+// lets the held start go on (it was stopped while the switch needed owner input).
+test('late team registration lets a held omp start go on for a Bot saved ON on a scheduled turn', async t => {
+  const h = ompWorld(t)
+  const chat = h.chat()
+  const hold = holdOmpStart(t, h, chat.session.id)
+  const turn = chat.turn(createUserMessage({ content: [{ type: 'text', text: 'plain late-team-scheduled' }], source: { kind: 'schedule' } }))
+  let run
+  try {
+    run = await hold.run(turn)
+    assert.deepEqual(h.events('prompt'), [])
+    h.service.botIdentity(nativeOn)
+  } finally {
+    hold.release()
+  }
+  const chunks = await turn
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  assert.notDeepEqual(textBlocks(chunks), [toolsChanged])
+  assert.deepEqual(h.events('prompt').map(row => row.pid), [run.child.pid])
+  assert.deepEqual(run.spec.args, ['acp'])
+})
 
 for (const [label, register, stop] of [
   ['standalone without registration', undefined, false],

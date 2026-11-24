@@ -158,7 +158,7 @@ test('client.js registers its three onboarding steps on settings.onboarding, in 
   ])
   // The team step's copy goes to DSH's locale service as welcome.team.
   runs.get('omni-ai: team step copy')()
-  assert.deepEqual(registers, [['welcome.team', ['en', 'pt', 'pt-BR']]])
+  assert.deepEqual(registers, [['welcome.team', ['en', 'pt', 'pt-BR', 'zh']]])
   assert.deepEqual(injected, ['settings.onboarding', 'settings.onboarding', 'settings.onboarding', 'settings.onboarding'])
   assert.deepEqual(registered, [
     { name: 'settings.onboarding', id: 'omni-companion', order: -300, component: 'function' },

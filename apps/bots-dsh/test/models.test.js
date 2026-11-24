@@ -1031,3 +1031,39 @@ test('a passive catalog miss leaves enumeration, saves and unblocking to the des
   assert.equal(rt.save.mock.callCount(), 1)
   assert.equal(rt.unblockBots.mock.callCount(), 1)
 })
+
+// G6-18 (#2048): with only Antigravity's models running and DSH's default needing a key nobody
+// set, the first model that can run is Antigravity's named one, never its `default` alias, as
+// a Claude-only or Codex-only setup gives theirs (parity).
+test('with only Antigravity on, the default model is its first named model', async () => {
+  const providers = { deepseek: [{ id: 'deepseek-v4-pro' }], 'acp-antigravity': [{ id: 'default', name: 'Default' }, { id: 'gemini-3-pro', name: 'Gemini 3 Pro' }] }
+  const acp = { status: async () => ({ agents: [{ id: 'acp-antigravity', signedIn: true, on: true, cli: { found: true }, connector: { state: 'ready' } }] }) }
+  const ctx = {
+    llm: { listProviders: () => Object.keys(providers).map(id => ({ id })), listModels: async id => providers[id] },
+    get: name => (name === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-v4-pro' }) } : name === 'acpAgents' ? acp : undefined),
+  }
+  const rt = { ctx, state: { bots: {} }, missingKeys: async () => new Set(['deepseek']) }
+  install(rt)
+  assert.equal(await rt.defaultModel(), 'acp-antigravity/gemini-3-pro')
+})
+
+// T12 (#2061, MW-3): a group conversation whose history ran on another harness keeps its route
+// when the Bot's model moves: no in-place selection, and the fallback's way back refuses it too.
+test('a group Session with history on another harness is not moved across in place', async () => {
+  const { rt, selected } = bench()
+  const bot = { id: 'b1', name: 'Ops', model: 'deepseek/v4-flash' }
+  rt.state.bots.b1 = bot
+  rt.groupSessionsOf = () => ['g-history', 'g-empty']
+  rt.crossingHistory = async (sessionId, ref) => sessionId === 'g-history' && ref === 'deepseek/v4-flash'
+  await rt.applyModel(bot, { force: true })
+  assert.deepEqual(selected, ['b1:deepseek/v4-flash', 'g-empty:deepseek/v4-flash'])
+  Object.assign(rt, {
+    load: async () => {}, isBotSession: () => true, selfOf: () => 'b1', botOf: () => bot,
+    groupOwners: new Map([['g-history', { botId: 'b1', roomId: 'r1' }], ['g-empty', { botId: 'b1', roomId: 'r1' }]]),
+  })
+  const picks = []
+  const agent = id => ({ session: { id, requestHeader: () => undefined }, model: { select: route => picks.push([id, route]) } })
+  assert.equal(await rt.reselectOwnRoute(agent('g-history'), () => true), false)
+  assert.equal(await rt.reselectOwnRoute(agent('g-empty'), () => true), true)
+  assert.deepEqual(picks.map(([id]) => id), ['g-empty'])
+})

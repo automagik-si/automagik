@@ -195,30 +195,44 @@ Claude Code keeps its own tools and Automagik adds its extras. The owner's words
 is to use claude code + automagik extras, not replace claude code native`s with automagik`s,
 that makes your harness lose all your power."
 
-- **Bot teams.** Turn on **Claude Code native tools** in the Bot's Details. The saved
-  switch applies to a new Claude Code process on the first owner turn in a fresh direct
-  conversation. Groups, shared chats, IM, schedules, tasks, subagents and history replay
-  use the DSH tool path. Read only blocks the switch and the launch. Turning it off ends
-  the Bot's Claude Code processes. The Bot team's switch supersedes hidden config for
-  the entire host once the team has registered.
-- **omp Bot teams.** The **omp native tools** switch applies on the next owner message in the
-  Bot's direct chat, subject to the permission checks. ON keeps `omp acp`. OFF is chat only,
-  with no DSH bridge. Turning it off stops that Bot's starting and live ON omp processes.
+- **Bot teams.** Turn on **Native tools** in the Bot's Details: Claude Code uses its own tools.
+  The switch applies in every Session the Bot runs as itself (direct chat, groups, tasks,
+  scheduled runs, relays, LiveShare, IM) from the next process start. Read only and an unreadable
+  level keep it off per Session. A kept model keeps its own tools. Sessions with no Bot identity
+  on a team host (subagents, Omni chat threads) run without native tools. Turning it off ends the
+  Bot's processes. A new Claude Code process takes the saved switch; history replay uses the DSH
+  tool path. The Bot team's switch supersedes hidden config for the entire host once the team has
+  registered.
+- **omp Bot teams.** The **Native tools** switch keeps omp's own tools. The switch applies in
+  every Session the Bot runs as itself (direct chat, groups, tasks, scheduled runs, relays,
+  LiveShare, IM) from the next process start. Read only and an unreadable level keep it off per
+  Session. A kept model keeps its own tools. Sessions with no Bot identity on a team host
+  (subagents, Omni chat threads) run without native tools. Turning it off ends the Bot's
+  processes. ON keeps `omp acp`. OFF launches it with `--no-tools`: chat only, with no DSH bridge.
   If native tools become unavailable before an ON process receives its first prompt, the turn
-  stops and the owner can send again. Existing eligible omp Bots keep their ON choice
-  for omp in a one-time migration.
-- **Codex Bot teams (#1564 PR B).** The **Native tools** switch keeps Codex's own tools for the
-  owner's turns in the Bot's direct chat. Every other turn, and every Codex Session without a Bot
-  identity once a team is registered, runs with Codex's own tools off: Codex works with DSH's
-  tools through the bridge and has none of its own (`src/host/codex-native.js`). Off is not Read
-  only: DSH's tools keep the Session's level and DSH's approvals. A config checked on every spawn
-  leaves only the bridge's transport (`exec`, `wait`, the three MCP resource readers), through a
-  generated model catalog without the patch tool, written to the ACP folder's `codex-native-off/`;
-  a failed check refuses the turn. Codex's own mode is set to its `read-only` id only as a backstop
-  against its own tools. A model on `nativeKeptModels` (today `gpt-5.5`) launches as before, with
-  Codex's own tools, in every Session; its switch shows OFF and locked. With no Bot team ever
-  registered, Codex runs as before. Existing Codex Bots keep their own tools once, in their own
-  chat (Bots with shell access off or denied tools excepted).
+  stops and the sender can send again. Existing eligible omp Bots keep their ON choice for omp in
+  a one-time migration.
+- **Codex Bot teams (#1564).** The **Native tools** switch keeps Codex's own tools. The switch
+  applies in every Session the Bot runs as itself (direct chat, groups, tasks, scheduled runs,
+  relays, LiveShare, IM) from the next process start. Read only and an unreadable level keep it
+  off per Session. A kept model keeps its own tools. Sessions with no Bot identity on a team host
+  (subagents, Omni chat threads) run without native tools. Turning it off ends the Bot's
+  processes. With it off, and in every Codex Session without a Bot identity once a team is
+  registered, Codex runs with its own tools off: it works with DSH's tools through the bridge and
+  has none of its own (`src/host/codex-native.js`). Off is not Read only: DSH's tools keep the
+  Session's level and DSH's approvals. A config checked on every spawn leaves only the bridge's
+  transport (`exec`, `wait`, the three MCP resource readers), through a generated model catalog
+  without the patch tool, written to the ACP folder's `codex-native-off/`; a failed check refuses
+  the turn. Codex's own mode is set to its `read-only` id only as a backstop against its own
+  tools. A model on `nativeKeptModels` (today `gpt-5.5`) launches as before, with Codex's own
+  tools, in every Session; its switch shows OFF and locked. With no Bot team ever registered,
+  Codex runs as before. Existing Codex Bots keep their own tools once (Bots with shell access off
+  or denied tools excepted).
+- **Upgrade (#1564).** Once, a Bot that sat in the lock this version removes (shared with
+  people, bound to an IM connection, or an active LiveShare share) with the switch on gets it
+  turned off, so nothing gains native tools until the person turns it on again. A Main Bot with
+  Omni configured is turned off once the same way. A Bot that operates Omni or that another
+  plugin manages stays locked, as before: Omni's plugin takes its tools.
 - **Standalone ACP.** `nativeTools` in this plugin's config (the `acpAgents` service's plugin,
   `acp-dsh`), hidden from settings forms like `dshTools`. Absent (the default) or `false` is
   today's behaviour for everyone. `true` turns it on for every Claude Code Session; an object
@@ -344,7 +358,17 @@ differs from Claude Code and Codex:
   and again when the person asks (`refresh()`) while it is not signed in; no other check opens
   a session, because each of these agents keeps every session it opens in its own history.
   A session that opens does not prove a provider key works: a turn that then answers
-  `auth_required` reads as signed out at once.
+  `auth_required` reads as signed out at once. Antigravity is the exception: it runs in this
+  installation's own home and signs in in the app only (`signInNative`, ACP `authenticate`);
+  its status carries no command, `loginStart` refuses it with `acp-login/app`, a signed-out
+  turn names Settings, and its terminal command in that home goes only to the log. On Linux
+  and macOS the sign-in run alone gets a stand-in for agy's browser opener first on its PATH
+  (`src/host/sign-in-opener.js`): it opens nothing and hands the link over in an owner-only
+  folder under `acp/sign-in`. A link reaches the status as `signInUrl` only when it is one of
+  Google's own OAuth entry points with a loopback return address (`isSignInUrl`), and the app
+  shows it as a link with Copy. On Linux, no link 15 seconds after `authenticate` ends the
+  attempt as `no-browser`. agy's D-Bus session bus address is one that never connects
+  (`NO_BUS_ADDRESS`), because agy finds the bus by the user id when the address is unset.
 - **Models.** Antigravity offers its models and efforts as config options, as the adapters do.
   Hermes offers them only as the session's own list (`models` in the `session/new` answer,
   switched with `session/set_model`); the plugin reads that list when the agent has no model
@@ -429,7 +453,8 @@ A Bot part's handoff package (a relay marked `handoff`) is carried as the record
 part's first turn it stays in the prompt beside the person's words, and once the Bot team has
 answered that turn itself, the next new session gets it in the replay. Both pass the redactor.
 With `false`, an agent sees only its own session, and a new one in a chat with answers writes the
-"does not see this chat's earlier messages" row instead.
+"does not see this chat's earlier messages" row instead, except that a Bot part's handoff package
+the Bot team answered itself goes ahead of the person's words in the part's first prompt, once.
 
 `sideModel` (`{ provider, model }`, default `deepseek-official/deepseek-flash`, live) is the
 model a side request tries after DSH's default model. An explicit value the person chose is tried

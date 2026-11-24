@@ -16,8 +16,13 @@
 // latest: the Bot's model has not changed since, no newer choice for that Bot was made, and no
 // turn ran on another model. A view that only attaches registers nothing.
 //
-// A pasted code: acp-dsh keeps keyed hashes of the Claude states it showed (24 h) and answers
-// only whether a text carries one (`loginTextMatches`). The team's send endpoints, its
+// Antigravity (#2048, parity): its app sign-in in acp-dsh answers the same five sign-in calls,
+// with Google's link and a field for the address the browser ends on after the person signs in
+// on any computer (`prompt.id` `agy-callback`). It has no account step and no account controls.
+//
+// A pasted code: acp-dsh keeps keyed hashes of the Claude states it showed, and of the states of
+// the Antigravity links it took (24 h), and answers only whether a text carries one
+// (`loginTextMatches`). The team's send endpoints, its
 // deliveries (rt.deliver), a group's running round (groups.js drainRoomInbox) and Pocket
 // (pocket-chat.js send) refuse such a text before anything records it, and a Bot's or a group's
 // step drops such a message before it reaches a model or a transcript row (`dropLoginCodes`, from
@@ -45,8 +50,18 @@ import {
   ACCOUNT_RECOVERY_CODE, ACCOUNT_RECOVERY_HINT, installationNameOf,
 } from '../shared/cli-account.js'
 import { createAccountReservations } from './account-reservations.js'
+import { isSignInUrl as isAgySignInUrl } from '../shared/agy-sign-in-url.js'
+import { crossesHarness } from '../shared/routes.js'
 
 const PROVIDERS = new Set(['acp-codex', 'acp-claude'])
+// The agents a Bot's chat signs in to (#2048, parity): Claude Code and Codex, plus Antigravity's
+// app sign-in in acp-dsh. Only the five sign-in calls and the ready listener take it; the account
+// controls (switch, sign out, reset, confirm, accounts, noticed) stay Claude Code's and Codex's:
+// acp-dsh has no account read for Antigravity.
+const SIGN_IN_PROVIDERS = new Set([...PROVIDERS, 'acp-antigravity'])
+const SIGN_IN_ACTIONS = new Set(['start', 'current', 'status', 'answer', 'cancel'])
+// The address the browser ended on, pasted for Antigravity, that is not printable text.
+export const CALLBACK_REFUSED = 'This link is not from this sign-in.'
 const STATUS = new Set(['starting', 'waiting', 'ready', 'failed', 'cancelled', 'expired'])
 const BOT_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
 const ATTEMPT = /^[A-Za-z0-9_-]{24,128}$/
@@ -94,6 +109,12 @@ const ERRORS = {
   // This agent signs in from its own terminal; acp-dsh says which command, but the row says
   // the shape of it without naming a path a person has to paste anywhere.
   'acp-login/terminal': 'This coding agent signs in from its own terminal. Run its sign-in command there, then try again.',
+  // Antigravity's app sign-in (#2048): a pasted address that is not this attempt's, one for an
+  // attempt that ended (the chat's own sentence), and an agent that is off or not installed.
+  'acp-sign-in/not-this-sign-in': CALLBACK_REFUSED,
+  'acp-sign-in/expired': 'This sign-in expired. Start again.',
+  'acp-sign-in/off': 'Turn this coding agent on in Settings, under Coding agents, then try again.',
+  'acp-sign-in/missing': 'Install this coding agent in Settings, under Coding agents, then try again.',
 }
 // acp-dsh refuses the sign-in with its own fixed sentences: an account change another live
 // instance holds, a home that is changing, a Bot account reset, a CLI that is not there. Its
@@ -168,10 +189,12 @@ const accountSentence = (error) => {
 const invalid = () => failed('This sign-in request is not valid.', 'bot/invalid')
 
 // Keep the browser link on a provider's official authorization page: Claude's must ask for
-// the manual code (`code=true`); Codex uses one fixed device page, usable from any device.
+// the manual code (`code=true`); Codex uses one fixed device page, usable from any device;
+// Antigravity's is Google's own, with agy's loopback return address and its state.
 export function cliLoginUrl(value, provider) {
   if (typeof value !== 'string' || value.length > 16384 || /\s/u.test(value)
     || [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return undefined
+  if (provider === 'acp-antigravity') return isAgySignInUrl(value) ? value : undefined
   let url
   try { url = new URL(value) } catch { return undefined }
   if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) return undefined
@@ -207,6 +230,10 @@ export function cliLoginView(value, provider, attemptId) {
     if (provider === 'acp-codex' && typeof value.userCode === 'string' && /^[A-Za-z0-9-]{4,64}$/.test(value.userCode)) view.userCode = value.userCode
     if (provider === 'acp-claude' && value.status === 'waiting' && value.prompt?.secret === true && typeof value.prompt.id === 'string' && PROMPT.test(value.prompt.id)) {
       view.prompt = { id: value.prompt.id, label: 'Authorization code', secret: true }
+    }
+    // Antigravity: the field for the address the browser ends on (#2048, paste-back).
+    if (provider === 'acp-antigravity' && value.status === 'waiting' && value.prompt?.secret === true && value.prompt.id === 'agy-callback') {
+      view.prompt = { id: 'agy-callback', label: 'Sign-in address', secret: true }
     }
     if (value.checking === true) view.checking = true
   }
@@ -255,11 +282,17 @@ function fields(payload, action) {
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw invalid()
   const allowed = new Set(ACTIONS[action])
   if (Object.keys(payload).some(key => !allowed.has(key)) || typeof payload.botId !== 'string' || !BOT_ID.test(payload.botId)
-    || !PROVIDERS.has(payload.provider)
+    || !(SIGN_IN_ACTIONS.has(action) ? SIGN_IN_PROVIDERS : PROVIDERS).has(payload.provider)
     || (allowed.has('attemptId') && (typeof payload.attemptId !== 'string' || !ATTEMPT.test(payload.attemptId)))) throw invalid()
   // The model the entry is for: one of this agent's, or none (a view that only attaches).
   if (payload.model !== undefined && (typeof payload.model !== 'string' || !MODEL_REF.test(payload.model) || payload.model.split('/')[0] !== payload.provider)) throw invalid()
   if (payload.ref !== undefined && (typeof payload.ref !== 'string' || !ACCOUNT_REF.test(payload.ref))) throw invalid()
+  // Antigravity's pasted address: the spaces around a paste go, then the same printable check.
+  if (action === 'answer' && payload.provider === 'acp-antigravity') {
+    const value = typeof payload.value === 'string' ? payload.value.trim() : undefined
+    if (value === undefined || value.length > 8192 || !/^[\x21-\x7e]+$/.test(value)) throw failed(CALLBACK_REFUSED, 'bot/invalid')
+    return { ...payload, value }
+  }
   if (action === 'answer' && (typeof payload.value !== 'string' || payload.value.length > 8192 || !/^[\x21-\x7e]+$/.test(payload.value))) {
     throw payload.provider === 'acp-claude' ? failed(CODE_HINT, 'bot/invalid') : invalid()
   }
@@ -337,33 +370,87 @@ export function install(rt, reservationDeps) {
     const ref = refOf(event.data?.header?.config)
     if (ref === undefined) return
     for (const [key, choice] of choices) if (choice.botId === botId && ref !== choice.baseline) choices.delete(key)
+    // A choice that waits for a running reply is dropped the same way.
+    for (const choice of waiting) if (choice.botId === botId && ref !== choice.baseline) choice.dropped = true
   })
 
+  // Choices waiting for the Bot's running reply to end before they switch its agent.
+  const waiting = new Set()
+  // How long such a choice waits for the reply (a test may set a shorter bound).
+  const crossingWaitMs = () => rt.config?.crossingWaitMs ?? 120_000
+  const stillWanted = (bot, choice) => bot !== undefined && choice.dropped !== true && latest.get(bot.id) === choice.seq
+    && (bot.model ?? null) === choice.baseline && bot.model !== choice.ref
+  const refusedMessage = error => (typeof error?.code === 'string' && error.code.startsWith('bot/') && typeof error.message === 'string' ? error.message.slice(0, 300) : 'The model could not be selected.')
+
+  async function applyChoice(provider, key, choice, bot) {
+    const kept = bot.model ?? null
+    applying.set(key, choice)
+    try {
+      await rt.updateBot(bot.id, { model: choice.ref })
+      outcomes.set(key, { ref: choice.ref, ok: true, at: Date.now() })
+    } catch (error) {
+      // Only a message written for the person (a `bot/` refusal) is shown; anything else is
+      // said by kind, as the rest of the route does.
+      outcomes.set(key, { ref: choice.ref, ok: false, message: refusedMessage(error), kept, at: Date.now() })
+      rt.warn('ds-bot: %s signed in, but %s was not put on %s: %s', provider, bot.name, choice.ref, error?.code ?? 'error')
+    } finally {
+      if (applying.get(key) === choice) applying.delete(key)
+    }
+  }
+
+  // A pick on another harness while the Bot's chat runs a reply: the sign-in never stops that
+  // reply. The choice waits for it to end (at most crossingWaitMs), still reading pending,
+  // then switches like an idle pick; past the bound the person picks again from the menu.
+  async function applyAfterReply(provider, key, choice) {
+    try {
+      const bot = rt.botOf(choice.botId)
+      const agent = await rt.resolveAgent(rt.chatOf(choice.botId)).catch(() => undefined)
+      let timer
+      const idle = await Promise.race([
+        Promise.resolve(agent?.whenIdle?.()).then(() => true, () => true),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(false), crossingWaitMs()); timer.unref?.() }),
+      ]).finally(() => clearTimeout(timer))
+      const now = rt.botOf(choice.botId)
+      if (now !== bot || !stillWanted(now, choice)) return
+      if (!idle || rt.replyRunning?.(now.id)) {
+        const message = `This stops the current reply and continues on ${rt.agentNameOf?.(choice.ref) ?? choice.ref}.`
+        outcomes.set(key, { ref: choice.ref, ok: false, message, kept: now.model ?? null, at: Date.now() })
+        return
+      }
+      await applyChoice(provider, key, choice, now)
+    } finally {
+      waiting.delete(choice)
+      if (applying.get(key) === choice) applying.delete(key)
+    }
+  }
+
   async function applyChoices(provider) {
+    const later = []
     for (const [key, choice] of choices) {
       if (choice.provider !== provider) continue
       choices.delete(key)
       const bot = rt.botOf(choice.botId)
-      if (bot === undefined || latest.get(bot.id) !== choice.seq || (bot.model ?? null) !== choice.baseline) continue
-      if (bot.model === choice.ref) continue
-      const kept = bot.model ?? null
-      applying.set(key, choice)
-      try {
-        await rt.updateBot(bot.id, { model: choice.ref })
-        outcomes.set(key, { ref: choice.ref, ok: true, at: Date.now() })
-      } catch (error) {
-        // Only a message written for the person (a `bot/` refusal) is shown; anything else is
-        // said by kind, as the rest of the route does.
-        const message = typeof error?.code === 'string' && error.code.startsWith('bot/') && typeof error.message === 'string' ? error.message.slice(0, 300) : 'The model could not be selected.'
-        outcomes.set(key, { ref: choice.ref, ok: false, message, kept, at: Date.now() })
-        rt.warn('ds-bot: %s signed in, but %s was not put on %s: %s', provider, bot.name, choice.ref, error?.code ?? 'error')
-      } finally {
-        if (applying.get(key) === choice) applying.delete(key)
+      if (!stillWanted(bot, choice)) continue
+      const from = bot.model ?? bot.appliedModel
+      if (typeof from === 'string' && crossesHarness(from, choice.ref) && rt.replyRunning?.(bot.id) === true) {
+        // The acp_tool rule refuses before any wait (#2026).
+        try {
+          rt.assertOwnToolsModel?.(bot, { next: choice.ref, denyTools: bot.denyTools })
+        } catch (error) {
+          outcomes.set(key, { ref: choice.ref, ok: false, message: refusedMessage(error), kept: bot.model ?? null, at: Date.now() })
+          continue
+        }
+        applying.set(key, choice)
+        waiting.add(choice)
+        later.push([key, choice])
+        continue
       }
+      await applyChoice(provider, key, choice, bot)
     }
+    await Promise.allSettled(later.map(([key, choice]) => applyAfterReply(provider, key, choice)))
   }
   ctx.on('acp-dsh/login-ready', (payload) => {
-    if (!PROVIDERS.has(payload?.id)) return
+    if (!SIGN_IN_PROVIDERS.has(payload?.id)) return
     void applyChoices(payload.id).catch(error => rt.warn('ds-bot: the model chosen for %s was not applied: %s', payload.id, error?.message ?? error))
       // Then the Bots that waited on this CLI's sign-in move to it (subscription-move.js, #868):
       // after the choices, so a model the person picked with the sign-in is theirs.
@@ -393,7 +480,8 @@ export function install(rt, reservationDeps) {
   // nothing is spawned unless that answer already says the account waits.
   async function pendingAccount(provider, { probe }) {
     const service = acp()
-    if (typeof service?.account !== 'function') return undefined
+    // Antigravity has no account read and no consent step (#2048): nothing to confirm.
+    if (provider === 'acp-antigravity' || typeof service?.account !== 'function') return undefined
     try {
       if (!probe) {
         const rows = typeof service.status === 'function' ? (await service.status())?.agents : undefined
@@ -603,7 +691,7 @@ export function install(rt, reservationDeps) {
     // above): the same confirm step, never "done".
     if (view.status === 'ready') {
       let account = await pendingAccount(body.provider, { probe: false })
-      if (account === undefined && (action === 'start' || action === 'status')) {
+      if (account === undefined && (action === 'start' || action === 'status') && body.provider !== 'acp-antigravity') {
         try {
           const seen = await service.account?.(body.provider)
           if (seen?.id === body.provider && seen.signedIn === true) {

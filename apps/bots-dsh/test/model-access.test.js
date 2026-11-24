@@ -194,7 +194,7 @@ test('mixed route crossings refuse atomically before selection or permission app
     const response = await h.call('update-bot', { id: 'chief', model: 'acp-codex/default', ...patch })
     assert.equal(response.ok, false)
     assert.equal(response.error.code, 'bot/refused')
-    assert.equal(response.error.message, 'Omni needs a new conversation for that route, so change only its model in this step.')
+    assert.equal(response.error.message, 'Omni changes agent in a step of its own, so change only its model in this step.')
     assert.deepEqual(h.rt().state.bots.chief, before)
     assert.equal(h.disk(), diskBefore)
     assert.deepEqual(h.selected, selectedBefore)

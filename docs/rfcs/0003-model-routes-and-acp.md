@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22)) |
+| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22); RFC 0030's 2026-11-23 amendment (#2061) carries a Bot's own chat across a harness change with a handoff and read_own_chat, and adds the one-tool dsh-history bridge for agents without the bridge) |
 | Milestone | 2. One message box (route descriptor); 3. Other agents in the same chat (ACP) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-10-30 |
@@ -149,6 +149,8 @@ and D17). Claude runs on pi-ai's `anthropic` route until `acp-claude` ships.
   message in the Bot's direct chat (decided by the owner's delegate, 2026-11-22, #1564). The Bot's
   `nativeTools` switch defaults to OFF.
   See [Amendment: native tools per Bot](#amendment-native-tools-per-bot-2026-11-22-1564).
+  **Superseded 2026-11-23** by [native tools in every chat][everywhere]. The switch applies in
+  every chat of the Bot, not only the owner's direct chat.
 
 ### Per-teammate models (status note)
 
@@ -517,14 +519,19 @@ wrapper delegates to whatever is below it at call time and, on dispose, unwinds 
 top. The method is private to `compaction-basic`, so a guard test pins it. An agent gets the chat
 as the bounded, redacted replay above instead.
 
-**Explicit harness changes in a Bot's own chat (RFC 0030 Q7a).** `switchRoute` refuses a
-pick for a chat with history and keeps the old route and Session. Start New conversation,
-then pick the route. If the Bot has an active goal, pause it before New conversation.
-A crossing on a part with nothing said can apply in place, including a move between ACP
-agents. RFC 0030 defines what counts as history for that decision. The earlier managed
-path could open a new part with the latest messages. Automatic moves, effort, rollback
-and default fallbacks, the in-place path's races, and other writers remain owed under
-RFC 0030.
+**Explicit harness changes in a Bot's own chat (RFC 0030 Q7a).** Until 2026-11-23,
+`switchRoute` refuses a pick for a chat with history and keeps the old route and Session.
+Start New conversation, then pick the route. If the Bot has an active goal, pause it before
+New conversation. A crossing on a part with nothing said can apply in place, including a
+move between ACP agents. RFC 0030 defines what counts as history for that decision. The
+earlier managed path could open a new part with the latest messages. Automatic moves,
+effort, rollback and default fallbacks, the in-place path's races, and other writers remain
+owed under RFC 0030.
+
+Since 2026-11-23 (RFC 0030 Handoff note, #2061) the pick opens a new part with a handoff on the
+picked route; the new agent reads the chat with `read_own_chat`, over the `dsh` bridge or, for an
+agent whose bridge is off (omp, Antigravity), over `dsh-history`, a bridge that lists and runs only
+that tool.
 
 **Off an agent, onto an API model (the Bot team).** For route writers that remain, including
 the native Session picker and fallback selection, the Bot team measures the chat against
@@ -1006,7 +1013,8 @@ Codex preserves the reference picture's distinctive shapes and text before this 
   cannot set it, and members and guests cannot reach `update-bot`. The normal Bot save must
   succeed before ON can apply or appear in Details. The switch description reads
   "Applies from your next message in this Bot's direct chat. Turning it off ends the running session."
-- **Eligibility and launch.** Once the owner saves ON, it applies from the owner's next message
+- **Eligibility and launch.** **Superseded 2026-11-23** by [native tools in every chat][everywhere].
+  Once the owner saves ON, it applies from the owner's next message
   in the eligible Bot's direct chat. A turn there can request ON if it contains at least one
   valid input from the owner. The transcript, ACK, relay or system context, and regular replay
   have no bearing on that input check. A turn without valid owner input runs OFF even when the
@@ -1058,7 +1066,8 @@ this amendment" lines.
   and Full DSH's `edit` and `bash` write with DSH's approvals, as for any bridged agent. Codex's
   internal sandbox mode is set to its `read-only` id before every prompt (a fork included) only
   as a backstop against Codex's own tools; it does not limit DSH's tools, which run in DSH.
-- **Eligibility.** The same as Claude's: ON only on an owner turn in the Bot's own direct chat,
+- **Eligibility.** **Superseded 2026-11-23** by [native tools in every chat][everywhere].
+  The same as Claude's: ON only on an owner turn in the Bot's own direct chat,
   with the saved switch ON for `acp-codex`, at Workspace or Full, for a Bot no block applies
   to. Every other turn opens OFF: scheduled deliveries, relays (`handoff`, `request`, resumed),
   tasks, groups, IM, LiveShare, DSH subagent Sessions. ON is never inherited: a turn without
@@ -1083,7 +1092,9 @@ this amendment" lines.
   opens unchecked. Before the check, the spawn writes the chat permission profiles into the
   Bot's isolated Codex home (`cli-homes`, a new empty home included) and runs one command under
   them (`codex sandbox -P`) with that home; when Codex cannot, the turn is refused with "its
-  permission profiles are unavailable". That refusal, and the one with DSH's tools turned off,
+  permission profiles are unavailable". (**Superseded 2026-11-23** by [native tools in every
+  chat][everywhere]: these texts point to the Details switch in any Session of a Bot it is not
+  blocked for.) That refusal, and the one with DSH's tools turned off,
   point to the Details switch only on the owner's own turn in the direct chat of a Bot it is not
   blocked for; in a group, task or scheduled run (one in that direct chat included), or for a
   blocked Bot, they say to switch its model, or to update Automagik (to turn Automagik's tools
@@ -1152,6 +1163,19 @@ this amendment" lines.
     lapses: a day, or a Codex or connector update) runs without the Session's staged image grant
     (the OFF attempt cleared it); the person asks for the image again. Later turns on that model
     are kept from their start.
+- **Denied `acp_tool` (#2026, owner's option A, 2026-11-23).** A kept or measured kept model and
+  Antigravity run their own tools whatever the Bot's Denied tools say, so a call denied as
+  `acp_tool` runs and is only recorded as refused after it ran. A Bot whose Denied tools hold
+  `acp_tool` therefore cannot be put on a Codex model known to keep its own tools at save time,
+  or on Antigravity (model menu, Pocket, update, switch-route, create), and `acp_tool` cannot be
+  added to its Denied tools while it runs on one or while its pending way back is one. Only a
+  save that makes the pair is refused: a Bot already there keeps running (no turn is refused),
+  may still edit its other denied tools and re-pick its current model, and Details names what to
+  change. Removing `acp_tool` and moving to such a model in one patch is refused; two steps work.
+  The check fails open on an unknown model (Codex's `default` before its start model is known, a
+  model measured kept later, a measured record from another Codex release), and automatic moves
+  (a subscription move, a refused route) stay allowed; both are covered by the Details notice.
+  Hermes is not covered.
 - **DSH's `default`** is the model Codex itself starts on (the last process with its own tools,
   else the catalog's recorded start model); a wrong guess is caught after the model is set and
   that turn ends with "The tools setting changed; send again." and no prompt, including the first
@@ -1170,10 +1194,58 @@ this amendment" lines.
   OFF. A Codex Bot whose ON was saved for another agent (a Claude ON from before the tag, omp's
   migrated one) has it moved to Codex. The app stores an OFF as no value, so such a Bot is
   migrated like any other Codex Bot; only an explicit `nativeTools: false` stays OFF. Moved back
-  to Claude or omp afterwards, it reads OFF there (its ON names Codex). Groups, tasks, scheduled
+  to Claude or omp afterwards, it reads OFF there (its ON names Codex). (**Superseded
+  2026-11-23** by [native tools in every chat][everywhere] for groups, tasks, scheduled runs,
+  relays and shared Bots; managed Bots stay locked.) Groups, tasks, scheduled
   runs, relays, sub-agents, Read only, multi-user, managed and restricted Bots move to DSH's
   tools, as do identity-less Sessions on a team host, except Bots on a kept or measured kept
   model.
 - **Rollback.** Revert PR B. Older builds ignore `nativeToolsAgent`, the marker and the
   `codex-native-off` folder. A migrated Codex Bot keeps `nativeTools: true`, which a PR A build
   applies only to Claude, so a rolled-back Bot later moved to Claude or omp would read ON.
+
+## Amendment: native tools in every chat of the Bot (2026-11-23, #1564)
+
+[everywhere]: #amendment-native-tools-in-every-chat-of-the-bot-2026-11-23-1564
+
+- **Decision.** Decided by the owner, 2026-11-23. The `nativeTools` switch belongs to the Bot and
+  applies to Claude Code, Codex and omp in every Session the Bot runs as itself: direct chat,
+  groups, tasks, scheduled runs, relays, LiveShare, IM, whoever sends the turn. ON = the agent's
+  own tools; OFF = none. It is read at process start. Default OFF.
+- **Fresh scheduled Sessions.** A fresh scheduled Session (a `new`/`new_once` target) follows the
+  one Bot behind its task. Each firing of a recurring `new` is a new Session and is ON only while
+  every `new` task on the host belongs to that single Bot with the switch ON. Two Bots, no Bot, or
+  a failed lookup = OFF. If it is reopened after a restart, or after it closed, it reads OFF until
+  it is driven again. Such a Session gets no Bot name, role or instructions: only the switch.
+- **Removed.** Owner-input eligibility, and the `shared`/IM-bound and own-chat-only locks.
+  **Kept:** `managed`: the Bots that operate Omni (the Omni Bot, and a Main Bot while Omni is
+  linked) and Bots another plugin manages (Genie and Unfold-managed Bots). Omni's plugin takes the
+  tools of a Bot that operates it, so its switch stays off and locked. Read only and an
+  unreadable level (per Session), `restricted` (shell access off or denied tools), multi-user
+  server mode (the switch stays hidden and native tools stay off until
+  [RFC 0038](0038-cloud-multiuser-caller-principal.md) delivery 3), and identity-less Sessions
+  (OFF): DSH subagent Sessions and Omni chat threads and answer children. A kept model runs as
+  today, with its own tools, at every level (Read only and shell-off included).
+- **Turning it off.** OFF ends the Bot's chat, group, past and task Sessions and its fresh
+  scheduled Sessions. A live process is reused only while the saved switch still reads ON.
+- **Upgrade.** Once, a Bot that sat in the removed lock with the switch ON gets `nativeTools: false`
+  (marker `nativeToolsLocksRetired`). The removed lock covers Bots shared with people, an active
+  LiveShare share at upgrade, and Bots bound to an IM connection. A Main Bot with Omni configured
+  (linked, or a saved link not read yet at host start) is turned off once the same way. Other
+  `managed` Bots are not part of the upgrade: their saved value is not written, and the lock
+  keeps them off. Bots already
+  off are not written; other Bots do not change. Nothing gains native tools without the person.
+  The check runs on the host that writes the team; until it has run there, an affected Bot shows
+  its old lock reason and runs without native tools.
+- **Omni.** A Bot that operates Omni stays locked (`managed`): Omni's plugin takes its tools, so
+  this amendment gives it no native tools and needs no change in Omni. Omni chat threads and
+  answer children have no Bot identity and run without native tools.
+- **Threat model.** Group members, IM/WhatsApp senders, LiveShare guests and scheduled prompts can
+  drive commands and edits outside DSH's file sandbox on a Bot whose owner turned it ON. This is
+  the owner's decision.
+- **Superseded** (marked in place): the summary line in "Decisions" (owner's direct chat), "native
+  tools per Bot" Eligibility and launch, the Codex amendment's Eligibility (including "ON is never
+  inherited…"), its refusal texts' "owner's own turn in the direct chat", and its migration's
+  "Groups, tasks, scheduled runs … move to DSH's tools".
+- **Rollback.** Revert the change: the removed locks return, a saved `false` stays `false`, and
+  older builds ignore the marker.

@@ -34,7 +34,7 @@ import { isHcTerminalId } from "../hcProxy.mjs";
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { amPartEntryPath, amPartRunnerPath, briefingFilePath, briefingPath, installHook, launchBriefingText, runnerPath, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingFileOf, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
+import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentArgv, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingFileOf, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -46,7 +46,7 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   taskIdProblem, taskWorkerName, TEMPLATE_SHAPE, codexTemplateRefusal, codexTemplateWarning, templateAgent, workerArgs, workerBranch, workerKillRefusal, workerPlan, workerRole, worktreeFolder,
   workLeft, writesWorktree } from "../workers.js";
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, contextTokensOf, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
-  isPaneIdle, pendingDialog, paneCommand, planText as restartText, rateLimitDialog, rateLimitLine, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders, wakeWait } from "../restart.js";
+  isPaneIdle, keptLaunch, pendingDialog, paneCommand, planText as restartText, rateLimitDialog, rateLimitLine, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders, wakeWait } from "../restart.js";
 import { screenLines } from "../dialog.js";
 import { automaticDelivery, hasRateLimitHold } from "../delivery.mjs";
 export { hasRateLimitHold } from "../delivery.mjs";
@@ -6919,7 +6919,9 @@ function discoveredSession(agentKey, get, ledger, panes, seat) {
     if (p.address === get.address) continue;
     for (const k of [SESSION_LABEL, "revive.session"]) if (typeof p.labels?.[k] === "string" && p.labels[k]) claimed.add(p.labels[k]);
     if (!(inFolder(p.cwd) || inFolder(p.foreground?.cwd))) continue;
-    if (agentKeyOfArgv(unwrapKeep(p.foreground?.argv), agents) !== agentKey && agentKeyOfArgv(paneCommand(p)?.argv, agents) !== agentKey) continue;
+    // #1418: a launch in hc's keep wrapper is read through it (keptLaunch); an extra rival only fails closed.
+    if (agentKeyOfArgv(unwrapKeep(p.foreground?.argv), agents) !== agentKey
+      && agentKeyOfArgv(keptLaunch(p, agents, { launchAgent: true }).command?.argv, agents) !== agentKey) continue;
     rivals.push({ terminal: p.address, created_ms: Number.isSafeInteger(p.created_ms) ? p.created_ms : null });
   }
   const id = sessionFor(agentKey, pickSession({ createdMs: get.created_ms, candidates, claimed, rivals }));
@@ -7168,7 +7170,7 @@ function byHand(p, parent) {
   }
   const loginWarnings = [];
   const args = helperArgs({ name: p.name, cwd: p.cwd, labels: p.labels, parent, ...helperCommand(p),
-    login: claudeLogin(p.argv, loginWarnings), env: p.env });
+    login: claudeLogin(p.argv, loginWarnings), env: p.env, keep: p.keep });
   const notes = [p.session ? `# resumes its session by id: put the id where *** stands; hc get ${p.replaced} shows it (its agent.session `
     + "or revive.session label), and so does the workers ledger"
     : "# no session id known: it resumes its folder's latest conversation"];
@@ -7261,7 +7263,7 @@ async function rerunHelpers(plans, parent, say) {
       catch (e) { failed(e.message); continue; }
     }
     const env = p.agent === "dsh-tui" && loginPolicyActive(process.env) ? { ...p.env, ...loginPolicyForward(process.env) } : p.env;
-    const helperRun = helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login, env });
+    const helperRun = helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login, env, keep: p.keep });
     const guardWhy = launchGuardProblem(helperRun, name ?? p.name);
     if (guardWhy) { failed(guardWhy); continue; }
     const r = await hc(helperRun);
@@ -7369,10 +7371,13 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
   }
   const planOf = (h, fresh = null) => {
     const worker = workerRowOf(ledger, h.address);
+    // #1418: hc's keep wrapper around the helper's own command, read as helperPlan reads it.
+    const kept = keptLaunch(h, agents, { keepAware: !loginPolicyActive(process.env), launchAgent: revive && isBareShell(h),
+      workerAgent: worker?.agent ?? null });
     // #939, revive only: a helper hc kept as a bare shell names its agent by its launch command.
-    const launch = revive && isBareShell(h) ? paneCommand(h) : null;
+    const launch = revive && isBareShell(h) ? kept.command : null;
     const shellAgent = launch?.shell ? templateAgent(launch.shell, agents) : null;
-    const agentKey = agentKeyOfArgv(h.foreground?.argv, agents) ?? worker?.agent
+    const agentKey = agentKeyOfArgv(kept.foreground, agents) ?? worker?.agent
       ?? agentKeyOfArgv(launch?.argv, agents) ?? (shellAgent === "codex" || shellAgent === "kimi" ? shellAgent : null);
     // A helper that is itself a bot (attached by hand): its binding moves with it.
     const binding = view.byTerminal.get(h.address)?.binding ?? null;
@@ -7414,7 +7419,7 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     // worker runs its own command as written and gets nothing of the pack's.
     const templateWorker = Boolean(worker?.template || h.labels?.[WORKER_TEMPLATE_LABEL]);
     const codexWithheld = agentKey === "codex" && !planned.error && !templateWorker && grantPlan
-      ? localCodexWarning(worker || h.labels?.[WORKER_OF_LABEL] ? agents.codex?.run : paneCommand(h)?.argv, grantPlan) : null;
+      ? localCodexWarning(worker || h.labels?.[WORKER_OF_LABEL] ? agents.codex?.run : kept.command?.argv, grantPlan) : null;
     return { ...planned, codexWithheld,
       worker, binding, proxyIdentity, env: homeEnv,
       createdMs: Number.isSafeInteger(h.created_ms) ? h.created_ms : null };
@@ -12216,9 +12221,6 @@ async function cmdWorker(opts, rest) {
   if (rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined) return cmdWorkerKill(opts, rest.slice(1));
   const task = rest.join(" ").trim();
   if (!task) throw new CliError('worker needs the task text: am worker "<task>" --branch <name>.', 2);
-  // #1278 cause 5: the worker is sent back with a clean worktree, so the sweep never has to
-  // keep its worktree for uncommitted changes.
-  const prompt = workerTaskText(task);
   if (optionLike(task)) throw new CliError("The task text can't start with a dash; the agent would read it as an option.", 2);
   if ((opts.branch === undefined) === (opts.worktree === undefined)) throw new CliError("Give --branch or --worktree (one of them).", 2);
   if (opts.base !== undefined && opts.branch === undefined) throw new CliError("--base goes with --branch.", 2);
@@ -12292,16 +12294,23 @@ async function cmdWorker(opts, rest) {
   // no environment. One that can't take its task as a last argument is refused, as unrunnable.
   let templateArgv = null;
   let templateCommand = null;
-  if (plan.template) {
-    const t = await templateRuns(plan.template, agents);
-    templateCommand = t.command?.trim() ? t.command : null;
-    runs = t.runs;
-    if (runs === "claude") {
-      templateArgv = t.command?.trim() ? commandArgv({ shell: t.command }, [task]) : null;
-      if (!templateArgv) {
-        throw new CliError(`Template ${plan.template} runs Claude, but ${t.command?.trim() ? "its command ends in a separator or a comment, so it can't take the task"
-          : "hc gave no command for it"}; it can't be started on the chosen Claude login. Not started.`);
-      }
+  const t = plan.template ? await templateRuns(plan.template, agents) : null;
+  if (t) { templateCommand = t.command?.trim() ? t.command : null; runs = t.runs; }
+  // #1278 cause 5: the worker is sent back with a clean worktree, so the sweep never has to
+  // keep its worktree for uncommitted changes. #2057: it is also taught the needs-owner Question
+  // chip, except a Hermes worker (#1747), told by its key, its program or a template command
+  // naming hermes when the template's agent can't be told. Every route reads this one text.
+  const hermes = runs === "hermes"
+    || agentKeyOfArgv(plan.argv ?? [], agents) === "hermes"
+    || /^hermes(-agent)?$/.test(agentArgv(plan.argv ?? []).program)
+    || (Boolean(plan.template) && runs === undefined
+      && /(^|[\s'"`/;&|(=])hermes(-agent)?([\s'"`;&|)<>]|$)/.test(templateCommand ?? ""));
+  const prompt = workerTaskText(task, hermes ? "hermes" : runs);
+  if (t && runs === "claude") {
+    templateArgv = t.command?.trim() ? commandArgv({ shell: t.command }, [prompt]) : null;
+    if (!templateArgv) {
+      throw new CliError(`Template ${plan.template} runs Claude, but ${t.command?.trim() ? "its command ends in a separator or a comment, so it can't take the task"
+        : "hc gave no command for it"}; it can't be started on the chosen Claude login. Not started.`);
     }
   }
   // The pointer record (#1509) rules when the entrypoint set it; otherwise the launch is exactly
@@ -12430,7 +12439,7 @@ async function cmdWorker(opts, rest) {
       if (modeWarning) warnings.push(modeWarning);
       if (plan.template && runs === "antigravity") {
         const built = templateCommand
-          ? commandArgv({ shell: templateCommand }, [...agySettingsArgs("antigravity", agySettings?.path), task]) : null;
+          ? commandArgv({ shell: templateCommand }, [...agySettingsArgs("antigravity", agySettings?.path), prompt]) : null;
         if (built) templateArgv = built;
         else warnings.push(`${bot.name}'s template ${plan.template} ${templateCommand
           ? "ends in a separator or a comment, so its Antigravity permission list can't be added" : "gave no command, so its Antigravity permission list can't be added"}; it runs without one.`);

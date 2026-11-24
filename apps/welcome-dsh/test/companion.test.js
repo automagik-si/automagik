@@ -73,6 +73,21 @@ test('the vendored characters and inks are still the team plugin\'s own', () => 
   }
 })
 
+test('the companion picker lists the 21 characters any Bot may pick, and no Solver', async () => {
+  // The vendored catalogue itself (pure): companion-art.js draws React, so it is read as text.
+  const { PICKER_SHAPES, SOLVER_SHAPES } = await import('../src/client/vendor/characters.js')
+  assert.deepEqual(PICKER_SHAPES, ['whale', 'octopus', 'star', 'moon', 'wave', 'squircle', 'zed', 'hex', 'gumdrop', 'peanut', 'saucer', 'bunny', 'kitty', 'beacon', 'plus', 'magnet', 'acorn', 'pebbles', 'cushion', 'ring', 'gem'])
+  assert.equal(SOLVER_SHAPES.length, 12)
+  assert.deepEqual(PICKER_SHAPES.filter(id => SOLVER_SHAPES.includes(id)), [])
+  // The picker draws exactly that list, as one grid.
+  const art = readFileSync(new URL('../src/client/companion-art.js', import.meta.url), 'utf8')
+  assert.ok(art.includes('export const SHAPES = PICKER_SHAPES\n'))
+  assert.ok(!art.includes('SOLVER_SHAPES'))
+  const step = readFileSync(new URL('../src/client/companion.js', import.meta.url), 'utf8')
+  assert.ok(step.includes('SHAPES.map(id => h(\'button\', {'))
+  assert.ok(!step.includes('Solvers') && !step.includes('SOLVER_SHAPES'))
+})
+
 test('companion says which image source is ready, and never what it holds', async () => {
   assert.equal((await host().handle('companion')).value.generate, null)
 
@@ -406,6 +421,23 @@ test('Connect AI finished with an AI on gives the companion, the Omni Bot and th
   assert.deepEqual(reply.value, { connectAiDone: true })
   assert.deepEqual(team.calls, [['updateBot', 'main', { model: 'anthropic/claude-opus-5-5' }], ['updateBot', 'omni', { model: 'anthropic/claude-opus-5-5' }], ['updateBot', 'genie', { model: 'anthropic/claude-opus-5-5' }]])
   assert.equal(team.state.bots.other.model, undefined)
+})
+
+// G6-18 (#2048): with only Antigravity on, the first model that can run is an Antigravity one
+// (bots-dsh pickDefault), and the first Bots start on it, as with Claude or Codex alone.
+test('Connect AI finished with only Antigravity on gives the first Bots its model; none yet sets nothing', async () => {
+  const team = withModels(fakeTeam({ mainName: 'Pip' }), ['acp-antigravity/x'])
+  team.state.bots.omni = { id: 'omni', name: 'Omni', kind: 'omni' }
+  team.state.bots.genie = { id: 'genie', name: 'Genie', kind: 'genie' }
+  const fake = host({ team })
+  assert.deepEqual((await fake.handle('done', { stepId: 'omni-connect-ai', connected: true })).value, { connectAiDone: true })
+  assert.deepEqual(team.calls, [['updateBot', 'main', { model: 'acp-antigravity/x' }], ['updateBot', 'omni', { model: 'acp-antigravity/x' }], ['updateBot', 'genie', { model: 'acp-antigravity/x' }]])
+  const none = withModels(fakeTeam(), [undefined])
+  none.state.bots.omni = { id: 'omni', name: 'Omni', kind: 'omni' }
+  const { install: installAgain } = await import('../src/host/endpoint.js')
+  const quick = installAgain(host({ team: none }).ctx, { assignWaitMs: 0 })
+  assert.equal((await quick.handle('done', { stepId: 'omni-connect-ai', connected: true })).ok, true)
+  assert.deepEqual(none.calls, [])
 })
 
 test('a skipped Connect AI, a Bot with a model, or no model that can run sets nothing', async () => {

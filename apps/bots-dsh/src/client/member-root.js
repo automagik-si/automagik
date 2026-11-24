@@ -4,6 +4,7 @@ import {
   installCompiledStyles, installStyles, isRetired, LEFT_BAR_CSS, lookOf, mountedViewer, Nothing, onRetire,
   requestViewer, SHELL_CSS, Shimmer, SIDEBAR_CSS, t, themeCss,
 } from './gated-shared.js'
+import { ACP_NAME } from '../shared/routes.js'
 import { applyPage, botLabels, changedBot, feedEnded, initialMember, isCurrent, pageRows, requestView, selectBot, updateRoster } from './member-model.js'
 
 const mark = bot => h(BotMark, { bot, look: { ...lookOf(bot), pet: undefined }, live: false, size: 28 })
@@ -13,8 +14,13 @@ export function MemberRows({ pages, roster, botId }) {
   const bot = Object.hasOwn(roster.byId, botId) ? roster.byId[botId] : undefined
   return pageRows(pages).map(({ row, key }) => {
     if (row.kind === 'divider') {
+      // Where an agent switch moved the chat (RFC 0030, Handoff note): the agent by the menu's
+      // own name for it, else its ref; never translated.
+      const switched = typeof row.switchedTo === 'string' && row.switchedTo !== ''
+        ? t('Switched to {agent}', { agent: ACP_NAME[row.switchedTo.split('/')[0]] ?? row.switchedTo }) : undefined
+      const day = Number.isFinite(row.time) ? dayLabel(row.time) : undefined
       return h('div', { key, className: 'bt-part-line', role: 'separator' },
-        Number.isFinite(row.time) ? h('span', null, dayLabel(row.time)) : null)
+        switched === undefined && day === undefined ? null : h('span', null, [switched, day].filter(part => part !== undefined).join(' · ')))
     }
     if (row.kind === 'user') {
       return h('div', { key, className: 'bt-urow' }, h('div', { className: 'bt-ububble' }, plain(row.text),

@@ -130,6 +130,11 @@ export const HISTORY_TIMEOUT_MS = 20_000
 export const ASIDE_LIMIT = 'Answer cut off at the output limit.'
 
 export const STEER_CUT = 'ds-bot/steer'
+// The hook reason a person's agent switch stops the running reply with (RFC 0030, Handoff
+// note, 2026-11-23): nothing is answered for the cut turn; the new agent goes on with it.
+export const SWITCH_CUT = 'ds-bot/switch'
+export const switchCutBy = reason => reason?.kind === 'aborted' && reason.reason?.kind === 'hook'
+  && reason.reason.reason === SWITCH_CUT
 // The hook reason the web self-update stops running turns with at the click (RFC 0041): resume.js reads it as a
 // restart cut, so the stopped work comes back after the supervisor's verdict.
 export const UPDATE_CUT = 'ds-bot/update'

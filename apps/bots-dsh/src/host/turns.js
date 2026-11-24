@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import { closesPart } from './caller-view.js'
-import { HANDOFF_ACK, LATE_ANSWER, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, STEER_CUT, cutByUpdate } from './constants.js'
+import { HANDOFF_ACK, LATE_ANSWER, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
 import { splitRef, textOf } from './text.js'
@@ -92,7 +92,12 @@ export const failureLine = failure => `${failure.code}${failure.status ? ` ${fai
 export function answerSender(rt, id, source, text, long, shouldSend) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
+  // When the work this answers was opened, read before closeWork deletes it: a Solver's review
+  // mark counts a verdict only for work its current request opened (review-mark.js).
+  const workAt = rt.state?.works?.[source.exchangeId]?.at
   const work = rt.closeWork?.(source.exchangeId, name, text)
+  // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
+  rt.reviewVerdict?.(rt.selfOf(id), source.senderSessionId, source.senderRoomId, text, workAt)
   // A reply that arrives after the user gave up the wait is a late answer: it closes
   // nothing, opens nothing, and says on it that the wait was already over.
   const late = work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
@@ -560,6 +565,13 @@ export function install(rt) {
   // package that only opens a part is acknowledged with a fixed line, also hidden.
   const claimTrigger = (sessionId, entry, info) => {
     entry.info = info
+    // The outgoing agent's handoff note before an agent switch (parts.js): a turn of its own,
+    // hidden, that is never a reply. It closes no caller part.
+    if (info.role === 'handoff-note') {
+      rt.markNoteTurn?.(sessionId, entry.turn)
+      markExchangeTurn(sessionId, entry.turn, { close: false })
+      return
+    }
     // A turn that was stopped for a part switch brings its joined requests along.
     if (Array.isArray(info.joined) && info.joined.length > 0) {
       entry.joined = info.joined.filter(item => item?.info !== undefined && item.info !== null)
@@ -1060,6 +1072,8 @@ export function install(rt) {
           }
           const own = rt.chatOwners.get(id)
           if (own !== undefined) rt.userWrote(own)
+          // A person's request to a Solver opens the review its delivery is marked with (review-mark.js).
+          if (own !== undefined && source.kind === 'user' && source.handoff !== true) rt.reviewRequest?.(own)
           // Any user message answers or supersedes the open question card and view card.
           let dropped = false
           if (state.questions[id] !== undefined) {
@@ -1115,6 +1129,11 @@ export function install(rt) {
         entry.cut = undefined
         const steerCut = cut !== undefined && event.data?.reason?.kind === 'aborted'
           && event.data.reason.reason?.kind === 'hook' && event.data.reason.reason.reason === STEER_CUT
+        // A reply the person's agent switch stopped (SWITCH_CUT) goes on with the new agent: like
+        // a turn stopped for a part switch, nothing is answered, delivered or failed for it.
+        const switchCut = switchCutBy(event.data?.reason)
+        // Read before the turn is cleared below: the outgoing agent's handoff-note turn.
+        const noteTurn = rt.handoffNoteTurn?.(id, entry.turn ?? event.data?.turn) === true
         if (steerCut) {
           entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0 }
         }
@@ -1129,7 +1148,7 @@ export function install(rt) {
         const toolCount = entry.toolCount ?? 0
         const suppressedSubagent = entry.suppressedSubagent === true
         // A turn stopped for a switch goes on in the next part, which answers instead.
-        const switched = entry.switched === true
+        const switched = entry.switched === true || switchCut
         // A turn the plugin watched start. A turn/end replayed after a restart, whose
         // turn is settled from the Session's log, is not one (resume.js does that).
         const watched = entry.turn !== undefined
@@ -1154,6 +1173,7 @@ export function install(rt) {
         const later = entry.later ?? []
         entry.later = []
         if (steerCut || suppressedSubagent) break
+        // A handoff-note turn hands back what joined it, below, and is otherwise no reply.
         // The web self-update stopped this turn at the click (UPDATE_CUT): nothing is answered for it, and resume.js
         // picks it up after the supervisor's verdict. The requests that joined it go with its note.
         const updateCut = cutByUpdate(event.data?.reason)
@@ -1174,8 +1194,13 @@ export function install(rt) {
             deferred: true,
           }).catch(error => rt.warn('omni-ui: handing back a result failed: %s', error))
         }
+        // No failure row, no failed state, no answer to a sender and no Pocket notice for it.
+        if (noteTurn) break
         const reason = event.data?.reason
         const failure = reason?.kind === 'error' && !switched ? turnFailure(reason.error) : undefined
+        // A fresh part's failed first turn after an agent switch that stopped a reply: the switch
+        // goes back and the stopped reply goes on (parts.js), which answers the sender instead.
+        const goesOn = failure !== undefined && rt.switchResumes?.(id, reason) === true
         if (failure !== undefined) noteTurnFailure(id, failure)
         if (failure !== undefined) setFailed(id, failure)
         // A route that is not a model endpoint refuses every generation; the failed
@@ -1212,6 +1237,8 @@ export function install(rt) {
           && toolCount === 0 && lastCalled !== true && info?.role === 'room'
           && promisesWork(lastText) && !rt.callsRoomMember?.(id, info, lastText)
         const retry = (wroteCall || promisedOnly) && info?.retried !== true && !(info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))
+        // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
+        if (owner !== undefined && !retry) rt.reviewTurnEnd?.(owner, { completed: failure === undefined && reason?.kind === 'completed', wroteText })
         if (retry) {
           if (promisedOnly) {
             const opening = stripWrittenCalls(lastText ?? '')
@@ -1236,7 +1263,7 @@ export function install(rt) {
         // the turn's text (or a stopped-before-answer line), or nothing.
         const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
         const answer = (source, reply) => {
-          if (!expectsReply(source) || answersUser(source)) return
+          if (!expectsReply(source) || answersUser(source) || goesOn) return
           if (failure !== undefined) {
             // The sender was told a reply comes later; without this it would wait forever.
             tellSender(id, source, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`)

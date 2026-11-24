@@ -17,7 +17,8 @@ import { useMemoryCount } from './memory-panel.js'
 import { SPRING_SHAPE, SPRING_TAP, Segmented, spring } from './motion.js'
 import { hostText, t } from './i18n.js'
 import { useVoices } from './voice-settings.js'
-import { cliProviderOf } from './cli-login-model.js'
+import { cliProviderOf, signInProviderOf } from './cli-login-model.js'
+import { OWN_TOOLS_DENY_TEXT, addsAcpToolDeny } from '../shared/own-tools.js'
 import { CliAccounts } from './cli-accounts.js'
 import { AdvancedSettings, ADVANCED_SETTINGS_CSS } from './advanced-settings.js'
 import {
@@ -317,7 +318,7 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
   const [account, setAccount] = useState(null)
   useEffect(() => { setAccount(null) }, [bot.id, bot.model])
   const pickFailure = ref => (error) => {
-    if (error?.code === 'bot/sign-in-required' && cliProviderOf(ref)) setSignIn(ref)
+    if (error?.code === 'bot/sign-in-required' && signInProviderOf(ref)) setSignIn(ref)
     if (error?.code === 'bot/account-confirm-required' && cliProviderOf(ref)) setAccount(ref)
     throw error
   }
@@ -375,7 +376,7 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
         h(ModelMenu, picker)),
       signIn && actions.openCliLogin ? h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-set-hint' }, t('This model needs a sign-in to its coding agent.'))),
-        h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => { actions.openCliLogin(bot.id, cliProviderOf(signIn), signIn); setSignIn(null) } }, t('Sign in'))) : null,
+        h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => { actions.openCliLogin(bot.id, signInProviderOf(signIn), signIn); setSignIn(null) } }, t('Sign in'))) : null,
       account && actions.openCliLogin ? h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-set-hint' }, t('This model needs you to confirm the account of its coding agent.'))),
         h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => { actions.openCliLogin(bot.id, cliProviderOf(account), account); setAccount(null) } }, t('Confirm account'))) : null),
@@ -419,7 +420,12 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
         placeholder: 'bash, write',
         onSave: (text) => {
           const names = parseDenyTools(text)
-          save({ denyTools: names.length ? names : null })
+          // acp_tool is not added while the Bot runs on a model that runs its own tools
+          // (#2026); the host refuses it too. Keeping or removing it saves.
+          if (bot.ownTools === true && addsAcpToolDeny(bot.denyTools, names)) {
+            return run(Promise.reject(new Error(t(OWN_TOOLS_DENY_TEXT))))
+          }
+          return save({ denyTools: names.length ? names : null })
         },
       }))),
     ...extraCards.map(entry => h(entry.Component, { key: entry.id, bot, roster, actions, run, Card, Row, SwitchRow })),

@@ -188,6 +188,9 @@ export function install(rt) {
     if (decided !== undefined || payload.signal?.aborted) return decided
     const { agent, failure, turn } = payload
     if (!failure || KEEP_CODES.has(failure.code)) return decided
+    // The outgoing agent's handoff note before an agent switch is never answered by another
+    // model: no summary is the rule then (parts.js).
+    if (rt.handoffNoteTurn?.(agent.session?.id ?? agent.id)) return decided
     if (!rt.isBotSession(agent.id)) return decided
     const failedIn = agent.session?.id ?? agent.id
     if (goesBack(failedIn, failure)) return decided

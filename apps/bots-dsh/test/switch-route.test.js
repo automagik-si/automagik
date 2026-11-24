@@ -1,5 +1,6 @@
-// RFC 0030 Q7a: the parts module refuses a crossing on a chat with history. After
-// New conversation, a crossing can apply in place while the fresh part has nothing said.
+// RFC 0030 Q7a, amended 2026-11-23 (#2061): a crossing on a chat with history moves it to a new
+// part with a handoff; only a Hermes route still refuses it. A crossing applies in place while
+// the part has nothing said.
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -8,6 +9,7 @@ import { test } from 'node:test'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import * as instructions from '@deepseek-ai/dsh-agent-instructions'
 import * as skill from '@deepseek-ai/dsh-tool-skill'
+import { DICTIONARY, hostText, installLocale } from '../src/client/i18n.js'
 import { install as installFallback } from '../src/host/fallback.js'
 import { install as installMemory } from '../src/host/memory.js'
 import { install, saidSomething } from '../src/host/parts.js'
@@ -38,8 +40,26 @@ function bench({ goal, withGoals = true } = {}) {
     id: 's1', session, status: 'idle',
     whenIdle: async () => {},
     runMaintenance: async job => job(new AbortController().signal),
-    inbox: { nextStep: [], nextTurn: [], remove() {}, unshift() {} },
+    inbox: { nextStep: [], nextTurn: [], remove() {}, unshift() {}, prepend() {} },
     followup() {}, inject() {}, send() {},
+  }
+  // A fresh part's agent, one per Session, with an inbox that keeps what it is given.
+  const freshAgents = new Map()
+  const freshAgent = (id) => {
+    if (freshAgents.has(id)) return freshAgents.get(id)
+    const inbox = {
+      nextStep: [], nextTurn: [], unshift() {},
+      remove(messageId) { for (const list of [inbox.nextStep, inbox.nextTurn]) { const at = list.findIndex(message => message.id === messageId); if (at >= 0) list.splice(at, 1) } },
+      prepend(target, message) { (target === 'next-step' ? inbox.nextStep : inbox.nextTurn).unshift(message) },
+    }
+    const fresh = {
+      ...agent, id, session: { ...session, id }, inbox,
+      followup(message) { inbox.nextTurn.push(message) },
+      inject(message) { inbox.nextStep.push(message) },
+      send(message, target) { (target === 'next-step' ? inbox.nextStep : inbox.nextTurn).push(message) },
+    }
+    freshAgents.set(id, fresh)
+    return fresh
   }
   // DSH's goal service: the goal belongs to the Session the Agent runs.
   const goals = {
@@ -81,10 +101,7 @@ function bench({ goal, withGoals = true } = {}) {
     renewMemory() {},
     resolveAgent: async id => {
       calls.resolved.push(id)
-      return id === 's1' ? agent : {
-        ...agent, id, session: { ...session, id },
-        inbox: { nextStep: [], nextTurn: [], remove() {}, unshift() {} },
-      }
+      return id === 's1' ? agent : freshAgent(id)
     },
     tagUsage: messages => messages,
     teamFolder: () => '/team',
@@ -99,22 +116,38 @@ function bench({ goal, withGoals = true } = {}) {
     ensureCapabilities: async () => {},
     moveSchedules: async () => {},
     eventsBackwards: async function* () {},
-    cachedCatalog: () => ['deepseek/v4', 'acp-claude/default', 'acp-codex/gpt-6.2-sol', 'deepseek-official/deepseek-flash'].map(ref => ({ ref })),
+    cachedCatalog: () => ['deepseek/v4', 'acp-claude/default', 'acp-codex/gpt-6.2-sol', 'deepseek-official/deepseek-flash', 'acp-hermes/default'].map(ref => ({ ref })),
     resolveModel: async ref => ref,
     noteModelChoice: () => {},
     createSession: async () => { const id = `s${++fresh}`; calls.created.push(id); return id },
   }
   install(rt)
   ctx.emit('agent/created', { agent })
-  return { rt, ctx, agent, bot, calls }
+  return { rt, ctx, agent, bot, calls, freshAgent }
+}
+
+// A crossing on a chat with history (RFC 0030, Handoff note, 2026-11-23): the host answers
+// `switching` at once and the chat is locked while the job runs; the fresh part then holds the
+// handoff package and the Bot's record moves to it with the picked model, the old part's
+// segment naming the switch.
+async function crossesWithHandoff(b, result, { target = 'acp-claude/default', from = 's1', freshId = 's2' } = {}) {
+  assert.equal(result.status, 'switching')
+  assert.equal(result.model, target)
+  await waitFor(() => b.bot.sessionId === freshId && [...b.rt.switchJobs()].length === 0)
+  assert.equal(b.bot.model, target)
+  assert.equal(b.bot.appliedModel, target)
+  assert.deepEqual(b.bot.segments.at(-1).sessionId, from)
+  assert.equal(b.bot.segments.at(-1).switchedTo, target)
+  const handoff = b.freshAgent(freshId).inbox.nextTurn.find(message => message.source?.handoff === true)
+  assert.match(textOf(handoff?.content), /the user switched this chat from .+ to .+; you are .+ now/)
+  return handoff
 }
 
 // A goal is the Session's, so the part that takes over starts with none: an active one moves
 // with the conversation, carrying the rounds it has left, or a long loop ends at the handoff.
 test('an active goal moves to the fresh part with the rounds it has left', async () => {
   const b = bench({ goal: { id: 'goal-1', revision: 4, objective: 'ship the release', phase: 'active', maxGoalRounds: 256, roundsStarted: 6 } })
-  await assert.rejects(b.rt.switchRoute('b1', 'acp-claude/default'), historyRefusal)
-  await b.rt.startFresh('b1')
+  await crossesWithHandoff(b, await b.rt.switchRoute('b1', 'acp-claude/default'))
   await waitFor(() => b.calls.goals.length === 1)
   assert.deepEqual(b.calls.goals, [['s2', { objective: 'ship the release', maxGoalRounds: 250 }]])
 })
@@ -135,8 +168,7 @@ test('a goal that is not active, or a part with no goal, carries nothing', async
     { name: 'none', goal: undefined },
   ]) {
     const b = bench({ goal: scenario.goal })
-    await assert.rejects(b.rt.switchRoute('b1', 'acp-claude/default'), historyRefusal, scenario.name)
-    await b.rt.startFresh('b1')
+    await crossesWithHandoff(b, await b.rt.switchRoute('b1', 'acp-claude/default'))
     await waitFor(() => b.calls.created.length === 1)
     await new Promise(resolve => setTimeout(resolve, 20))
     assert.deepEqual(b.calls.goals, [], scenario.name)
@@ -145,8 +177,7 @@ test('a goal that is not active, or a part with no goal, carries nothing', async
 
 test('a host without the goal service still moves the part', async () => {
   const b = bench({ withGoals: false })
-  await assert.rejects(b.rt.switchRoute('b1', 'acp-claude/default'), historyRefusal)
-  await b.rt.startFresh('b1')
+  await crossesWithHandoff(b, await b.rt.switchRoute('b1', 'acp-claude/default'))
   await waitFor(() => b.calls.created.length === 1)
   assert.deepEqual(b.calls.goals, [])
 })
@@ -196,7 +227,7 @@ test('a conversation with history but no handoff hook refuses before a job start
     const before = { ...b.bot }
     delete b.agent[missing]
     await assert.rejects(b.rt.switchRoute('b1', 'acp-claude/default'), {
-      code: 'bot/refused', message: "Ops's current conversation cannot hand off to a new route.",
+      code: 'bot/refused', message: "Ops's conversation is run by a host that cannot move it.",
     }, missing)
     assertUntouched(b, before)
     assert.deepEqual(b.calls.diagnostics.map(entry => entry.text), [
@@ -277,9 +308,7 @@ test('handoff notes retry transient transport failures without changing route or
       yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'temporary failure' } } }
     } else yield* stream(options)
   }
-  await assert.rejects(b.rt.switchRoute('b1', 'acp-claude/default'), historyRefusal)
-  await b.rt.newPart('s1')
-  await waitFor(() => b.bot.sessionId === 's2' && b.calls.archived.length > 0)
+  await crossesWithHandoff(b, await b.rt.switchRoute('b1', 'acp-claude/default'))
   assert.equal(attempts, 2)
   assert.equal(requests[0], requests[1])
   assert.match(b.bot.segments.at(-1).note, /## Goals/)
@@ -324,7 +353,7 @@ const userMessage = (kind, text, source = {}) => ({
   role: 'user', source: { kind, ...source }, content: [{ type: 'text', text }],
 })
 
-test('a native kickoff answered by the fallback leaves history that blocks an ACP pick', async t => {
+test('a native kickoff answered by the fallback leaves history that an ACP pick carries over with a handoff', async t => {
   const b = bench()
   t.after(() => b.ctx.dispose())
   const messages = [userMessage('bot', 'Team kickoff.', { role: 'kickoff' })]
@@ -353,20 +382,21 @@ test('a native kickoff answered by the fallback leaves history that blocks an AC
   turnEvent(b.agent.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'stop' } } })
   assert.deepEqual(selection, { provider: 'deepseek', model: 'v4' })
 
-  const before = structuredClone(b.bot)
   b.rt.applyModel = async bot => { bot.appliedModel = bot.model }
-  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
-  assertUntouched(b, before)
+  await crossesWithHandoff(b, await b.rt.switchRoute('b1', ROUTE_B))
 })
 
-test('a populated crossing refuses before clearing Auto, saving, or selecting anything', async t => {
+// A Hermes route keeps Q7a's refusal (the #2061 amendment leaves Hermes out).
+const ROUTE_HERMES = 'acp-hermes/default'
+
+test('a populated crossing to a Hermes route refuses before clearing Auto, saving, or selecting anything', async t => {
   const b = bench()
   t.after(() => b.ctx.dispose())
   b.agent.whenIdle = () => new Promise(() => {})
   const before = structuredClone(b.bot)
   const mutations = []
   for (const method of ['clearAuto', 'noteModelChoice', 'save', 'applyModel']) b.rt[method] = () => mutations.push(method)
-  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B, 'high'), {
+  await assert.rejects(b.rt.switchRoute('b1', ROUTE_HERMES, 'high'), {
     ...historyRefusal,
     message: `${b.bot.name}'s conversation has history, so changing to ACP needs a new conversation. Use New conversation, then pick ACP.`,
   })
@@ -374,8 +404,46 @@ test('a populated crossing refuses before clearing Auto, saving, or selecting an
   assertNoConversation(b.calls.diagnostics)
   assert.deepEqual(mutations, [])
   assert.deepEqual(b.calls.diagnostics.map(({ level, where, text }) => [level, where, text]), [
-    ['warn', 'switch-route', `Route change ${ROUTE_A} → ${ROUTE_B} refused (needs-new-conversation)`],
+    ['warn', 'switch-route', `Route change ${ROUTE_A} → ${ROUTE_HERMES} refused (needs-new-conversation)`],
   ])
+})
+
+// Between two ACP agents the destination is the agent, by the name the model menu shows: the
+// catalog's brand, else the name of an agent the owner names. A provider id is not a UI word.
+// Only a crossing to or from Hermes still refuses (#2061), so the pairs touch Hermes.
+test('a cross-agent refusal names the agent, never its provider id, in en, pt-BR and zh', async t => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  for (const [from, to, catalog, name] of [
+    // No catalog row for the agent: the menu's own names answer.
+    ['acp-claude/default', 'acp-hermes/default', [], 'Hermes'],
+    // The catalog's brand wins over the menu's own name for the same agent.
+    ['acp-claude/default', 'acp-hermes/default', [{ ref: 'acp-hermes/default', provider: 'acp-hermes', providerName: 'Hermes Agent' }], 'Hermes Agent'],
+    ['acp-hermes/default', 'acp-codex/gpt-6.2-sol', [], 'Codex'],
+  ]) {
+    const b = bench()
+    t.after(() => b.ctx.dispose())
+    Object.assign(b.bot, { model: from, appliedModel: from })
+    b.rt.cachedCatalog = () => catalog
+    const refusal = await b.rt.switchRoute('b1', to).then(() => undefined, error => error)
+    assert.equal(refusal?.reason, 'needs-new-conversation', to)
+    assert.equal(refusal.message,
+      `Ops's conversation has history, so changing to ${name} needs a new conversation. Use New conversation, then pick ${name}.`)
+    for (const [active, dictionary] of [['en', {}], ['pt-BR', pt], ['zh', DICTIONARY.zh]]) {
+      const dispose = installLocale({
+        register: () => () => {},
+        getLocale: () => ({ active }),
+        bind: () => (key, params) => (dictionary[key] ?? key).replace(/\{(\w+)\}/g, (_, param) => params?.[param] ?? _),
+      })
+      try {
+        const worded = hostText(refusal.message)
+        assert.equal(worded.split(name).length - 1, 2, `${active}: ${worded}`)
+        assert.doesNotMatch(worded, /acp-/, active)
+        if (active !== 'en') assert.notEqual(worded, refusal.message, active)
+      } finally {
+        dispose()
+      }
+    }
+  }
 })
 
 test('a crossing refusal tells the person to pause an active goal before New conversation', async t => {
@@ -383,7 +451,7 @@ test('a crossing refusal tells the person to pause an active goal before New con
   t.after(() => b.ctx.dispose())
   b.agent.whenIdle = () => new Promise(() => {})
   b.agent.session.deriveMessages = () => [userMessage('goal', 'Work on the current goal.')]
-  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), {
+  await assert.rejects(b.rt.switchRoute('b1', ROUTE_HERMES), {
     ...historyRefusal,
     message: `${b.bot.name}'s conversation has history, so changing to ACP needs a new conversation. Use New conversation, then pick ACP (pause an active goal first).`,
   })
@@ -394,18 +462,15 @@ for (const [kind, service] of [
   ['reader unavailable', {}],
   ['state unreadable', { get: () => ({}) }],
 ]) {
-  test(`a crossing still refuses and includes the pause hint when goal ${kind}`, async t => {
+  test(`a crossing still switches with a handoff and moves no goal when goal ${kind}`, async t => {
     const b = bench({ withGoals: false })
     t.after(() => b.ctx.dispose())
     b.ctx.provide('goals', service)
-    const before = structuredClone(b.bot)
-    await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), {
-      ...historyRefusal,
-      message: `${b.bot.name}'s conversation has history, so changing to ACP needs a new conversation. Use New conversation, then pick ACP (pause an active goal first).`,
-    })
-    assertUntouched(b, before)
+    await crossesWithHandoff(b, await b.rt.switchRoute('b1', ROUTE_B))
+    assert.deepEqual(b.calls.goals, [])
     assert.deepEqual(b.calls.diagnostics.map(entry => entry.text), [
-      `Route change ${ROUTE_A} → ${ROUTE_B} refused (needs-new-conversation)`,
+      `Route change ${ROUTE_A} → ${ROUTE_B} accepted`,
+      `Route change ${ROUTE_A} → ${ROUTE_B} completed (handoff with a summary)`,
     ])
   })
 }
@@ -504,10 +569,11 @@ test('a new conversation takes the second pick in place with opening context and
   assert.deepEqual(b.calls.created, ['s2'])
 })
 
-test('a rollover carrying an earlier exchange refuses a crossing', async t => {
+test('a rollover carrying an earlier exchange crosses with a handoff', async t => {
   const b = await freshPart(t, { rollover: true })
   assert.match(textOf(b.messages[0].content), /carry on/)
-  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
+  b.fresh.whenIdle = async () => {}
+  await crossesWithHandoff(b, await b.rt.switchRoute('b1', ROUTE_B), { from: 's2', freshId: 's3' })
 })
 
 for (const [label, edit] of [
@@ -519,14 +585,16 @@ for (const [label, edit] of [
     const b = await freshPart(t)
     const original = b.messages[0]
     b.messages[0] = userMessage(original.source.kind, edit(original.content[0].text), original.source)
-    await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
+    b.fresh.whenIdle = async () => {}
+    await crossesWithHandoff(b, await b.rt.switchRoute('b1', ROUTE_B), { from: 's2', freshId: 's3' })
   })
 }
 
 test('a handoff with a context source still needs to match the exact opening', async t => {
   const b = await freshPart(t)
   b.messages[0] = userMessage('runtime-context', 'Continue the earlier work.', { handoff: true })
-  await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
+  b.fresh.whenIdle = async () => {}
+  await crossesWithHandoff(b, await b.rt.switchRoute('b1', ROUTE_B), { from: 's2', freshId: 's3' })
 })
 
 for (const kind of ['schedule', 'tool-jobs', 'user-approval', 'tool-goal', 'goal', 'repeat-tool-reminder',
@@ -534,6 +602,7 @@ for (const kind of ['schedule', 'tool-jobs', 'user-approval', 'tool-goal', 'goal
   test(`a fresh opening with ${kind} still has crossing history`, async t => {
     const b = await freshPart(t)
     b.messages.push(userMessage(kind, 'Work or conversation content.'))
-    await assert.rejects(b.rt.switchRoute('b1', ROUTE_B), historyRefusal)
+    b.fresh.whenIdle = async () => {}
+    await crossesWithHandoff(b, await b.rt.switchRoute('b1', ROUTE_B), { from: 's2', freshId: 's3' })
   })
 }

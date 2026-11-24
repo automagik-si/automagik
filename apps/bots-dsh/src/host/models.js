@@ -705,6 +705,9 @@ export function install(rt) {
     const noCommands = rt.botRunnerRequired?.(sessionId, agent) === true
     const ref = await desiredModel(bot, { sessionId, session: agent.session, noCommands })
     if (ref === undefined || await keepsCarriedRoute(sessionId, ref)) return false
+    // A group conversation whose history ran on another harness keeps its route: it follows
+    // an agent switch only with a handoff of its own (RFC 0030, Handoff note).
+    if (rt.groupOwners?.has?.(sessionId) && await rt.crossingHistory?.(sessionId, ref)) return false
     const effort = await desiredEffort(bot, ref)
     const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
 
@@ -725,6 +728,12 @@ export function install(rt) {
   const sameSelection = (a, b) => a.provider === b.provider && a.model === b.model && a.reasoningEffort === b.reasoningEffort
 
   // Read a stored route once, not on every forced apply; the live feed keeps it current.
+  // `model` and `reasoningEffort` name the whole route for a part that keeps it (parts.js).
+  const routeFields = config => ({
+    provider: config?.provider,
+    ...(typeof config?.model === 'string' ? { model: config.model } : {}),
+    ...(config?.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
+  })
   const storedRoutes = new Map()
   let watchingRoutes = false
   async function storedRoute(sessionId) {
@@ -741,7 +750,7 @@ export function install(rt) {
         if (typeof handle?.read !== 'function') return { missing: true }
         const { events } = await handle.read()
         for (let index = events.length - 1; index >= 0; index -= 1) {
-          if (events[index]?.type === 'request/header') return { provider: events[index].data?.header?.config?.provider }
+          if (events[index]?.type === 'request/header') return routeFields(events[index].data?.header?.config)
         }
         return { provider: undefined }
       } catch (error) {
@@ -763,7 +772,7 @@ export function install(rt) {
     watchingRoutes = true
     ctx.on?.('session/event', (session, event) => {
       if (event?.type !== 'request/header' || typeof session?.id !== 'string' || !storedRoutes.has(session.id)) return
-      storedRoutes.set(session.id, Promise.resolve({ provider: event.data?.header?.config?.provider }))
+      storedRoutes.set(session.id, Promise.resolve(routeFields(event.data?.header?.config)))
     })
   }
 
@@ -797,6 +806,8 @@ export function install(rt) {
       () => applyModelHeld(bot, options))
   }
 
+  // Group Sessions already logged as keeping their route, so the warning comes once.
+  const keptGroupRoutes = new Set()
   async function applyModelHeld(bot, { force = false, modelEntry, checkChoice, selected } = {}) {
     const pinned = modelEntry !== undefined
     const expectedChat = pinned ? rt.chatOf(bot.id) : undefined
@@ -837,6 +848,16 @@ export function install(rt) {
       const applied = sessionSelections.get(sessionId)
       if (!force && applied !== undefined && sameSelection(applied, route)) continue
       if (await keepsCarriedRoute(sessionId, ref)) continue
+      // A group conversation with history on another harness is never moved across in place:
+      // it keeps its route until it follows with a handoff of its own (RFC 0030, Handoff note).
+      if (await rt.crossingHistory?.(sessionId, ref)) {
+        if (!keptGroupRoutes.has(sessionId)) {
+          keptGroupRoutes.add(sessionId)
+          rt.warn('ds-bot: %s keeps its route in group Session %s: its history ran on another harness than %s', bot.name, sessionId, ref)
+        }
+        continue
+      }
+      keptGroupRoutes.delete(sessionId)
       await selectSessionModel(sessionId, route, pinned ? { check: () => {
         check()
         if (!rt.groupSessionsOf(bot.id).includes(sessionId)) throw new Error('The group Session changed.')
@@ -940,7 +961,7 @@ export function install(rt) {
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
     defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
-    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, applyModel, waitForModel, syncModels, routeRefused,
+    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, storedRouteOf: storedRoute, applyModel, waitForModel, syncModels, routeRefused,
     dropCatalog: () => { catalogCache = { at: 0, value: [] } },
   })
 }

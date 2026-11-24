@@ -11,7 +11,7 @@ import { apply } from '../index.js'
 import { fakeAttachments, fakeContext } from './fake-ctx.js'
 import { install as installTurns } from '../src/host/turns.js'
 import { install as installParts } from '../src/host/parts.js'
-import { HANDOFF_ACK, SOURCE_KIND } from '../src/host/constants.js'
+import { HANDOFF_ACK, SOURCE_KIND, SWITCH_CUT } from '../src/host/constants.js'
 import { estimateTokens } from '../src/host/text.js'
 
 let rt
@@ -1654,4 +1654,61 @@ test('a turn opened by a no-reply message is hidden from the user', () => {
   emit('b', 'user/message', { content: textBlock('[Message from Omni · the user sees your reply here]\nsay hi'), source: replySource('request', { exchangeId: 'n2', noReply: true, audience: 'user' }) })
   emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
   assert.deepEqual(rt.state.exchangeTurns.b, [1])
+})
+
+// T13 (#2061, MX-10): a turn the person's agent switch cut (SWITCH_CUT) goes on with the new
+// agent, so its sender is never told it was stopped, and the requests that joined it go back.
+test('a request in a turn cut for an agent switch is not told "stopped"; what joined is handed back', () => {
+  const { rt, emit, delivered } = turnsHost()
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni]\ntask'), source: replySource('request', { exchangeId: 'e0' }) })
+  emit('b', 'assistant/message', assistantText('half'))
+  emit('b', 'user/message', { content: textBlock('[Message from Omni]\nlater'), source: replySource('reply', { exchangeId: 'e9', work: 'w-other', replyTo: 'r1' }) })
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook', reason: SWITCH_CUT } } })
+  assert.equal(delivered.some(job => /was stopped before it could answer/.test(job.text ?? '')), false)
+  assert.equal(delivered.some(job => job.replyTo === 'e0'), false)
+  assert.deepEqual(delivered.filter(job => job.exchangeId === 'e9').map(job => [job.toId, job.deferred]), [['b', true]])
+  void rt
+})
+
+// T4 (MX-2, MX-11): the outgoing agent's handoff-note turn is hidden and is never a reply: no
+// answer, no failure row, even when it fails.
+test('a handoff-note turn is hidden and answers nobody, even when it fails', () => {
+  for (const reason of [{ kind: 'completed' }, { kind: 'error', error: { code: 'SERVER', message: 'down' } }]) {
+    const { rt, emit, delivered } = turnsHost()
+    const noted = []
+    const failures = []
+    rt.markNoteTurn = (id, turn) => noted.push([id, turn])
+    rt.handoffNoteTurn = (id, turn) => noted.some(([seen, at]) => seen === id && (turn === undefined || at === turn))
+    rt.noteFailure = entry => failures.push(entry)
+    emit('b', 'turn/start', { turn: 4 })
+    emit('b', 'user/message', { content: textBlock('write a handoff note'), source: { kind: SOURCE_KIND, form: 'relay', role: 'handoff-note', exchangeId: 'e-note', senderName: 'Omni' } })
+    emit('b', 'assistant/message', assistantText('## Goals\n- carry on'))
+    emit('b', 'turn/end', { turn: 4, reason })
+    assert.deepEqual(noted, [['b', 4]], reason.kind)
+    assert.deepEqual(rt.state.exchangeTurns.b, [4], reason.kind)
+    assert.deepEqual(delivered, [], reason.kind)
+    assert.deepEqual(failures, [], reason.kind)
+  }
+})
+
+// MD-1 (#2061): a fresh part's failed first turn that its agent switch takes back, with the
+// stopped reply going on in the old part (parts.js switchResumes), answers no sender: the
+// resumed turn does. Any other failure still tells the sender.
+test('a failed first turn that an agent switch takes back and resumes answers no sender', () => {
+  for (const resumes of [true, false]) {
+    const { rt, emit, delivered } = turnsHost()
+    const asked = []
+    rt.switchResumes = (id, reason) => { asked.push([id, reason.kind]); return resumes }
+    emit('b', 'turn/start', { turn: 1 })
+    emit('b', 'user/message', { content: textBlock('[Handoff · part 2]'), source: replySource('request', { exchangeId: 'e-cut', handoff: true, resume: true }) })
+    emit('b', 'turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'MODEL_ACCESS_REQUIRED', message: 'Sign in' } } })
+    assert.deepEqual(asked, [['b', 'error']], String(resumes))
+    if (resumes) assert.deepEqual(delivered, [])
+    else {
+      assert.equal(delivered.length, 1)
+      assert.equal(delivered[0].replyTo, 'e-cut')
+      assert.match(delivered[0].text, /^Writer could not answer your message: its model call failed/)
+    }
+  }
 })

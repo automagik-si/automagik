@@ -17,6 +17,7 @@ import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
 import { refusal } from './refusal.js'
 import { registerTrustedTool } from './tool-registrations.js'
+import { deniesAcpTool } from '../shared/own-tools.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
 // A message_bot call that sent nothing answers with this object rather than a string, so
@@ -448,9 +449,13 @@ export function install(rt) {
         // then the new Bot fails on its first reply.
         const creator = callerBot(exec)
         const served = new Set((await rt.catalog()).filter(entry => entry.needsKey !== true && rt.isLocalAgentRef?.(entry.ref) !== true).map(entry => entry.ref))
-        const fallback = [state.prefs.defaultBotModel, creator?.model].find(ref => ref && served.has(ref))
-        const model = args.model || fallback
         const denyTools = args.deny_tools ?? args.denyTools
+        // A new Bot that will deny acp_tool skips a fallback that runs its own tools (#2026).
+        const deniesAcp = deniesAcpTool([...(Array.isArray(creator?.denyTools) ? creator.denyTools : []),
+          ...(Array.isArray(denyTools) ? denyTools : [])])
+        const fallback = [state.prefs.defaultBotModel, creator?.model]
+          .find(ref => ref && served.has(ref) && !(deniesAcp && rt.ownToolsRoute?.(ref) === true))
+        const model = args.model || fallback
         const inheritAuto = rt.autoOpener?.()
         const readScopeSource = exec.agent?.session?.id ?? rt.callerSessionId?.() ?? exec.agent?.id
         // Only the parameters declared above can come from the model. Other options (an

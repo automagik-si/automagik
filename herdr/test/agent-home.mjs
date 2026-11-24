@@ -542,7 +542,16 @@ export function agentHomeTests(cli) {
     const session = rows[0].session;
     assert.match(session, /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/);
     const path = `PATH=${join(dirname(dirname(cli)), "hc-kill")}:${env.PATH}`;
-    const task = "x\n\nBefore you report done: commit or discard every change you made and leave the worktree clean (`git status --porcelain` prints nothing).";
+    // #2057: the needs-owner rule, written out, before the done line.
+    const owner = "Waiting on the person: when you end your turn because only the person can unblock you (a "
+      + "question or a choice, not a permission prompt), ask it in your reply and also mark your own "
+      + "pane so the Herdr sidebar shows a Question, with a short paraphrase in single quotes and no "
+      + "apostrophe, e.g. `hc label \"$HC_TERMINAL_ID\" 'automagik-herdr.needs-owner=Which release should "
+      + "ship?'`. For each new question, set it again with the new paraphrase. Clear it with `hc label "
+      + "\"$HC_TERMINAL_ID\" automagik-herdr.needs-owner=` as soon as you work again or the question is "
+      + "withdrawn. A question your lead bot can answer: ask it in your reply, without the label. If "
+      + "HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
+    const task = `x\n\n${owner}\n\nBefore you report done: commit or discard every change you made and leave the worktree clean (\`git status --porcelain\` prints nothing).`;
     const worktree = (name) => join(s.project, ".claude/worktrees", name);
     const prefix = (name, branch) => ["run", "--bg", "--json", "--name", name, "--cwd", worktree(name),
       "--label", `worker.of=${BOT}`, "--label", `branch=${branch}`, "--label", "worker.role=dev"];

@@ -20,8 +20,8 @@ const CHANGED_TEXT = 'The tools setting changed; send again.'
 const KEPT_TEXT = "This model can't turn its native tools off."
 const NOT_OFFERED = "Native tools are not offered for this Bot's agent."
 const CHANGED = 'The Bot team changed. Try again.'
-const CODEX_ON = "In its own chat with you, Codex uses its own tools (commands, file edits…). They run in Codex's own sandbox, outside Automagik's. What asks you first depends on the permission level. Turning this off stops its running session at once."
-const CODEX_OFF = "Codex uses Automagik's tools, approved in Automagik. Groups, tasks and scheduled runs always do. Applies from your next message in this Bot's direct chat. Turning it off ends the running session."
+const CODEX_ON = "Codex uses its own tools (commands, file edits…) in all of this Bot's chats: its direct chat, groups, tasks and scheduled runs, with anyone who can talk to it. They run in Codex's own sandbox, outside Automagik's. What asks you first depends on the permission level. Turning this off stops its running sessions at once."
+const CODEX_OFF = "Codex uses Automagik's tools, approved in Automagik, in all of this Bot's chats. Turning this on applies from the next message in each chat."
 const record = (id, model, extra = {}) => ({ id, sessionId: 'chat-' + id, name: 'Bot ' + id, model, createdAt: 1, capabilities: [], ...extra })
 const team = (bots, mainBotIds = ['main']) => ({
   version: 2, revision: 0, mainBotIds,
@@ -132,6 +132,9 @@ function runtime({ bots = {}, services = {} } = {}) {
     chatOf: id => 'direct-' + id,
     isMain: () => false,
   }
+  // store.js: own chat, group Session, task, earlier part.
+  rt.selfOf = id => rt.chatOwners.get(id) ?? rt.groupOwners.get(id)?.botId ?? rt.taskOwners.get(id)?.botId
+    ?? rt.pastOwners.get(id)?.botId
   install(rt)
   return rt
 }

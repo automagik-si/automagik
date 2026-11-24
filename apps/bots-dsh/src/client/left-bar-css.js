@@ -230,10 +230,11 @@ html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]:has(.lb-
 [class*="_root"]:has(.lb-host) [class*="_scrollArea"]:has(.lb-host){grid-template-columns:0 minmax(0,1fr) 0;grid-template-rows:0 max-content 0 minmax(0,1fr);margin:0}
 [class*="_root"]:has(.lb-host) [class*="_scrollFade"]{display:none}
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
-/* Anchor against the card so footer entries and a scrolling list cannot move the toggle. */
-html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.lb-host) .bt-foot-toggle{position:absolute;left:calc(10px - var(--lb-panel-gap));bottom:calc(18px - var(--lb-panel-gap));margin:0}
-/* The rail draws its icons at 18px (DSH's rail spec), so the glyph keeps its size across the fold. */
-.bt-side-collapse.bt-foot-toggle svg{width:18px;height:18px}
+/* Anchor against the card so footer entries and a scrolling list cannot move the toggle. It is
+   centred in the rail column, under the tiles. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.lb-host) .bt-foot-toggle{position:absolute;left:calc((var(--lb-rail-w) - 36px)/2);bottom:calc(18px - var(--lb-panel-gap));margin:0}
+/* The toggle's glyph is 20px here and on the rail (sidebar.js), so it keeps its size across the fold. */
+.bt-side-collapse.bt-foot-toggle svg{width:20px;height:20px}
 /* Keep the drawer's rail control until a footer seat takes over outside the drawer. */
 [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.bt-foot-toggle) .lb-railcol .bt-side-collapse{display:none}
 /* The drawer retains its rail control and its existing placement. */

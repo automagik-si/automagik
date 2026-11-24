@@ -213,3 +213,41 @@ test('settings renders a verified package name literally in its tag', () => {
     .filter(node => node.props?.className === 'bt-tag')
   assert.deepEqual(tags.map(node => node.props.children[0]), ['<Catalog fixture>'])
 })
+
+// #2048 (parity): a refused Antigravity model offers Sign in, which opens its row in this Bot's chat.
+test('Bot settings: Sign in for an Antigravity model opens its sign-in row', () => {
+  const saved = react.useState
+  let given = false
+  // The first null state of the form is the model's pending sign-in (bot-settings.js `signIn`).
+  react.useState = (initial) => {
+    if (initial === null && !given) { given = true; return ['acp-antigravity/default', () => {}] }
+    return saved(initial)
+  }
+  const opened = []
+  let tree
+  try {
+    tree = walk(BotSettingsForm({ bot: { ...bot, model: 'acp-antigravity/default' }, roster: { models: [] }, actions: { openCliLogin: (...args) => opened.push(args) }, run: fn => fn }))
+  } finally { react.useState = saved }
+  const button = tree.find(node => node.type === 'button' && node.props.children.includes('Sign in'))
+  assert.ok(button)
+  button.props.onClick()
+  assert.deepEqual(opened, [['b', 'acp-antigravity', 'acp-antigravity/default']])
+})
+
+test('the new-Bot card\'s character grid offers the 21 characters and no Solver', () => {
+  const { CharacterGrid } = module.exports
+  const SOLVERS = ['Puff', 'Sprout', 'Cap', 'Bell', 'Cloud', 'Spike', 'Floppy', 'Antenna', 'Cactus', 'Bulb', 'Chick', 'Frog']
+  const draw = shape => CharacterGrid({ look: { shape, color: 'red' }, onShape() {}, onColor() {} })
+  const tree = draw('moon')
+  // The characters, then the colors: no heading and no second group.
+  assert.deepEqual(tree.props.children.map(part => part.props.className), ['bt-shapes', 'bt-colors'])
+  const rowsOf = grid => grid.props.children[0].props.children.map(row => row.props.children.map(button => button.props.title))
+  assert.deepEqual(rowsOf(tree).map(row => row.length), [6, 6, 6, 3])
+  const titles = rowsOf(tree).flat()
+  assert.equal(titles.length, 21)
+  assert.deepEqual(titles.filter(title => SOLVERS.includes(title)), [])
+  assert.ok(!walk(tree).some(node => node.props?.children?.includes?.('Solvers')))
+  assert.equal(walk(tree).filter(node => node.props?.className === 'bt-shape').length, 21)
+  // A stored shape the grid does not list still gets its tile, the 22nd.
+  assert.deepEqual(rowsOf(draw('nope')).map(row => row.length), [6, 6, 6, 4])
+})

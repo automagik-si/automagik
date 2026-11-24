@@ -4,9 +4,10 @@ import { runInNewContext } from 'node:vm'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
+import { CHARACTERS, SOLVER_SHAPES } from '../src/client/characters.js'
 
 const bundle = await build({
-  stdin: { contents: "export { botState, BotAvatar, BotMark } from './src/client/mark.js'\nexport { SHELL_CSS } from './src/client/styles.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
+  stdin: { contents: "export { botState, BotAvatar, BotMark, petOf } from './src/client/mark.js'\nexport { SHELL_CSS } from './src/client/styles.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
   bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
@@ -25,7 +26,7 @@ const react = {
   useState: initial => [states.length > 0 ? states.shift() : initial, value => sets.push(value)], useEffect: () => {}, useRef: current => ({ current }), useLayoutEffect: () => {}, Fragment: 'fragment',
 }
 runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, URLSearchParams, require: name => (name === 'react' ? react : {}) })
-const { botState, BotAvatar, BotMark: markOf, SHELL_CSS } = module.exports
+const { botState, BotAvatar, BotMark: markOf, petOf, SHELL_CSS } = module.exports
 // A mark hands over to the mark that draws it (a pet, or the character itself): render through.
 const BotMark = (props) => {
   let element = markOf(props)
@@ -147,4 +148,22 @@ test('a Bot whose last turn failed looks sad, and one whose reply waits to be re
   const badges = state => BotAvatar({ bot: { id: 'b', name: 'Writer' }, size: 36, state }).children.slice(1).filter(Boolean).map(child => child.props.className)
   assert.deepEqual(badges('failed'), [])
   assert.deepEqual(badges('review'), [])
+})
+
+test('a Solver wears its fur at the smallest marks too, and the bar\'s live pet bakes the same entry', () => {
+  for (const shape of SOLVER_SHAPES) {
+    const { body } = CHARACTERS[shape]
+    const lock = CHARACTERS[shape].paints.at(-1)[0]
+    const look = { shape, color: 'red' }
+    // The chat's and the bar's small marks: 16, 24 and 28 px.
+    for (const size of [16, 24, 28]) {
+      const mark = BotMark({ look, size })
+      assert.equal(mark.props['data-shape'], shape, `${shape} ${size}`)
+      const svg = mark.children.find(child => child.type === 'svg')
+      const html = svg.props.dangerouslySetInnerHTML.__html
+      assert.ok(html.includes(body), `${shape} at ${size}: the fur body`)
+      assert.ok(html.includes(lock), `${shape} at ${size}: the lock layer`)
+    }
+    assert.deepEqual(JSON.parse(JSON.stringify(petOf({ id: 'b' }, look, { live: true, size: 28 }))), { bake: { shape, color: 'red' } })
+  }
 })

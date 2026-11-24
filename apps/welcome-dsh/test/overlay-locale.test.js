@@ -128,7 +128,7 @@ test('the welcome overlay follows the page locale, #318 line included', async ()
     const locale = fakeLocale()
     ctx.provide('locale', locale)
     await activated
-    assert.deepEqual(locale.calls, [['welcome.team', ['en', 'pt', 'pt-BR']]])
+    assert.deepEqual(locale.calls, [['welcome.team', ['en', 'pt', 'pt-BR', 'zh']]])
 
     // The page is still English, and the overlay reads the same service.
     assert.equal(title(slots), 'Create your companion')

@@ -34,6 +34,13 @@ export const SUBSCRIPTION_ROUTES = Object.freeze(['grok', 'antigravity'])
 // claude-code: those are the Claude Code plugin's.
 const ACP_HARNESS = Object.freeze({ claude: 'claude-code', codex: 'codex', gemini: 'gemini' })
 
+// The ACP agents the owner names, by provider id: the model menu's names for them, and the
+// host's when it names one in a sentence. A catalog row's own brand (`providerName`) wins.
+export const ACP_NAME = Object.freeze({
+  'acp-claude': 'Claude Code', 'acp-codex': 'Codex', 'acp-hermes': 'Hermes',
+  'acp-antigravity': 'Antigravity', 'acp-omp': 'omp',
+})
+
 // The providers pi-ai connects, from DSH's configurable-provider directory: what a caller
 // passes as `piAi` to routeOf.
 export const piAiRoutes = directory => new Set([
@@ -113,6 +120,20 @@ export function crossesHarness(fromRef, toRef) {
   if (from.provider === '' || to.provider === '') return false
   return from.route !== to.route || from.harness !== to.harness
 }
+
+/**
+ * Whether a model ref is a Hermes route: Remote Hermes, or Hermes over ACP. A crossing to or
+ * from one keeps RFC 0030 Q7a's refusal; every other crossing carries the conversation
+ * (RFC 0030, Handoff note, 2026-11-23).
+ */
+export function isHermesRoute(ref) {
+  const { provider, route } = routeOfRef(ref)
+  return route === 'hermes-remote' || provider === 'acp-hermes'
+}
+
+// How long an agent switch in a Bot's own chat may take before nothing changes: the host
+// rolls back past it, and the chat's composer lock ends a little later even with no word.
+export const CROSSING_DEADLINE_MS = 120_000
 
 /**
  * A per-bot-type route policy, from the plugin's `routePolicy` config: `{ automagik:

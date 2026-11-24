@@ -5,6 +5,7 @@ import { heldText } from '../src/client/stops.js'
 import { HELD_LINES, NATIVE_TOOLS_CHANGED_TEXT } from '../src/shared/held.js'
 import { DICTIONARY, hostText, hostTemplateOf, installLocale, language, t } from '../src/client/i18n.js'
 import { ACCESS_MESSAGES } from '../src/host/models.js'
+import { toTraditional } from '../src/client/locales/zh-tw.js'
 
 function fakeLocale(active) {
   const dicts = new Map()
@@ -223,4 +224,14 @@ test('the Code row Herdr action has a Chinese and Brazilian Portuguese accessibl
   const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
   assert.equal(DICTIONARY.zh['Open in Herdr'], '在 Herdr 中打开')
   assert.equal(pt['Open in Herdr'], 'Abrir no Herdr')
+})
+
+test('zh-TW shows every character label in Traditional Chinese', () => {
+  // The three Solver labels whose characters the conversion table did not have.
+  assert.equal(toTraditional(DICTIONARY.zh.Puff), '絨球')
+  assert.equal(toTraditional(DICTIONARY.zh.Bell), '鈴鐺')
+  assert.equal(toTraditional(DICTIONARY.zh.Chick), '小雞')
+  // All twelve Solvers, as zh-TW reads them.
+  const labels = ['Puff', 'Sprout', 'Cap', 'Bell', 'Cloud', 'Spike', 'Floppy', 'Antenna', 'Cactus', 'Bulb', 'Chick', 'Frog']
+  assert.deepEqual(labels.map(label => toTraditional(DICTIONARY.zh[label])), ['絨球', '嫩芽', '蘑菇', '鈴鐺', '雲朵', '刺球', '垂耳', '天線', '仙人掌', '燈泡', '小雞', '青蛙'])
 })

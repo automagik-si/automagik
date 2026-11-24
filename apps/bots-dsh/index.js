@@ -38,11 +38,13 @@ import * as requests from './src/host/requests.js'
 import * as delivery from './src/host/delivery.js'
 import * as roster from './src/host/roster.js'
 import * as nativeTools from './src/host/native-tools.js'
+import * as ownTools from './src/host/own-tools.js'
 import * as installed from './src/host/installed.js'
 import * as folders from './src/host/folders.js'
 import * as privateBots from './src/host/private-bots.js'
 import * as agents from './src/host/agents.js'
 import * as toolDeny from './src/host/tool-deny.js'
+import * as reviewMark from './src/host/review-mark.js'
 import * as botRunner from './src/host/bot-runner.js'
 import * as botSessions from './src/host/bot-sessions.js'
 import * as readScope from './src/host/read-scope.js'
@@ -125,7 +127,7 @@ const instanceId = () => process.env.AUTOMAGIK_INSTANCE_ID
 // installed: channels are Omni's, and a local CLI runs a Bot through the ACP plugin's routes only.
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
-  turns, steer, handoffs, requests, delivery, roster, nativeTools, installed, folders, agents, toolDeny, botSessions, botRunner, readScope, privateBots, prompt, timeContext,
+  turns, steer, handoffs, requests, delivery, roster, nativeTools, ownTools, installed, folders, agents, toolDeny, reviewMark, botSessions, botRunner, readScope, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory,
   parts, callerAccess, callerView, callerFeed, callerRoutes, fallback, modelState,
   { install: rt => modelAccessHooks.install(rt, { machine: machineOf(rt), instanceId }) },

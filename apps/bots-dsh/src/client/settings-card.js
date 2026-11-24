@@ -10,6 +10,7 @@ import { CheckIcon, ChevronRightIcon, PencilIcon, PlugIcon } from './icons.js'
 import { t } from './i18n.js'
 import { SETTINGS_PAGES } from '../shared/settings-pages.js'
 import { applySteps, parseProposal } from '../shared/proposals.js'
+import { RouteConfirm } from './model-menu.js'
 
 // The Settings pages, registered by index.js (as canvas-slot.js is), so the chat cells load
 // without the whole Settings dialog. Without them (tests, a window before the client is
@@ -104,22 +105,54 @@ const patchOf = step => Object.fromEntries(Object.entries(step).map(([key, value
 export function ProposalCard({ proposal, roster, actions }) {
   const [state, setState] = useState('open')
   const [error, setError] = useState('')
+  // The step a running reply held up: Apply's model step while the Bot's chat is answering
+  // (the host's reason reply-running). The card asks the selector's question in place of its
+  // buttons; Switch runs that step again with stopReply and goes on with the rest, Cancel
+  // stops there and runs nothing more.
+  const [asking, setAsking] = useState(undefined)
   const bot = roster.byId?.[proposal.bot]
   if (bot === undefined) return h('div', { className: 'bt-event' }, t('That Bot is no longer on the team.'))
   const rows = Object.entries(proposal.change).map(([key, value]) => ({ key, value, now: currentOf(bot, key) }))
   const done = rows.every(row => row.now === row.value)
-  const apply = async () => {
-    if (state === 'busy' || !actions.updateBot) return
+  // The steps from `from` on; `stopReply` goes with the first one only. Answers whether the
+  // card now asks.
+  const runSteps = async (from, stopReply = false) => {
+    const steps = applySteps(proposal.change)
+    for (let index = from; index < steps.length; index += 1) {
+      const consented = stopReply && index === from
+      try {
+        await actions.updateBot(bot.id, consented ? { ...patchOf(steps[index]), stopReply: true } : patchOf(steps[index]))
+      } catch (failure) {
+        if (failure?.reason !== 'reply-running' || consented) throw failure
+        setAsking(index)
+        setState('asking')
+        return true
+      }
+    }
+    return false
+  }
+  const go = async (from, stopReply) => {
     setState('busy')
     setError('')
     try {
-      for (const step of applySteps(proposal.change)) await actions.updateBot(bot.id, patchOf(step))
+      if (await runSteps(from, stopReply)) return
       setState('open')
     } catch (failure) {
       setError(failure?.message ?? String(failure))
       setState('open')
     }
   }
+  const apply = async () => {
+    if (state === 'busy' || state === 'asking' || !actions.updateBot) return
+    await go(0, false)
+  }
+  const question = state === 'asking' && asking !== undefined && typeof proposal.change.model === 'string'
+    ? h(RouteConfirm, {
+      bot, roster, current: currentOf(bot, 'model'), target: { ref: proposal.change.model }, ask: 'running',
+      onCancel: () => { setAsking(undefined); setState('open') },
+      onConfirm: () => { const from = asking; setAsking(undefined); void go(from, true) },
+    })
+    : null
   const status = done ? t('Applied') : state === 'dismissed' ? t('Dismissed') : null
   return h('section', { className: 'bt-setcard bt-propcard', 'data-done': done || undefined, 'aria-label': t('Proposed change to {name}', { name: bot.name }) },
     h('div', { className: 'bt-setcard-head' },
@@ -136,7 +169,7 @@ export function ProposalCard({ proposal, roster, actions }) {
         h('span', { className: 'bt-propcard-arrow', 'aria-hidden': true }, '→'),
         h('span', { className: 'bt-propcard-new', role: 'cell' }, shown(row.key, row.value))))),
     error ? h('div', { className: 'bt-error bt-propcard-error', role: 'alert' }, error) : null,
-    done || state === 'dismissed' ? null : h('div', { className: 'bt-q-foot bt-propcard-actions' },
+    done || state === 'dismissed' ? null : question ?? h('div', { className: 'bt-q-foot bt-propcard-actions' },
       actions.openSettings ? h('button', { type: 'button', className: 'bt-q-btn', onClick: () => actions.openSettings('bots', bot.id) }, t('Open in Settings')) : null,
       h('button', { type: 'button', className: 'bt-q-btn', disabled: state === 'busy', onClick: () => setState('dismissed') }, t('Dismiss')),
       h('button', { type: 'button', className: 'bt-q-submit', disabled: state === 'busy' || !actions.updateBot, onClick: apply }, state === 'busy' ? t('Applying…') : t('Apply'))))

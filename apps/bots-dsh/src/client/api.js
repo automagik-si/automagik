@@ -7,7 +7,7 @@ const ROUTE = 'api/omni-ui'
 // flow's refusals are a family (`bot/adopt-*`): each names its reason and the Bot and
 // Session involved, so the toast shows it and reportError records it once.
 const REFUSALS = new Set(['bot/refused', 'bot/sign-in-required', 'bot/account-confirm-required', 'bot/account-changed', 'bot/account-signed-out', 'bot/invalid', 'bot/read-only', 'bot/viewer-changed', 'bot/not-found', 'bot/browser-off', 'bot/login-ended', 'bot/login-restarted'])
-const isRefusal = code => REFUSALS.has(code) || code.startsWith('bot/adopt-') || code.startsWith('bot/reservation-')
+export const isRefusal = code => REFUSALS.has(code) || code.startsWith('bot/adopt-') || code.startsWith('bot/reservation-')
 
 export const call = async (endpoint, payload, signal) => {
   const active = requestViewer(endpoint)
@@ -55,7 +55,9 @@ export const call = async (endpoint, payload, signal) => {
     viewerRefused(active, code)
     const message = hostText(result.error?.message ?? 'Request failed')
     const error = Object.assign(new Error(code === 'bot/internal' ? `${message} ${t('Settings → Feedback has the details.')}` : message), { code })
-    if (code === 'bot/refused' && result.error?.reason === 'needs-new-conversation') error.reason = result.error.reason
+    // The two refusals the selector answers with a question of its own: a Hermes crossing with
+    // history, and a pick that would stop a running reply (RFC 0030, Handoff note).
+    if (code === 'bot/refused' && (result.error?.reason === 'needs-new-conversation' || result.error?.reason === 'reply-running')) error.reason = result.error.reason
     const staleShare = code === 'bot/stale' && endpoint === 'update-bot' && Object.hasOwn(payload ?? {}, 'people')
     if (!vault && !staleShare && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? 'Request failed'), { code }))

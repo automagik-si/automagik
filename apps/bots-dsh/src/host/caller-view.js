@@ -10,7 +10,9 @@ const unknown = () => refusal('Unknown Bot', { code: 'bot/not-found' })
 export function closesPart(event) {
   if (event?.type !== 'user/message') return false
   const source = event.data?.source
-  return source?.kind === SOURCE_KIND &&
+  // The outgoing agent's handoff-note request (an agent switch, parts.js) is Omni's own and
+  // hidden: it closes no caller part.
+  return source?.kind === SOURCE_KIND && source.role !== 'handoff-note' &&
     !(source.handoff === true && source.role === 'handoff' && source.resume !== true && !source.joined)
 }
 
@@ -174,7 +176,8 @@ export function install(rt) {
     }
     const items = callerItems(sessionId, events, seedTurn, state.exchangeTurns)
     const more = hasMore && events.length > 0 && Number.isSafeInteger(events[0].seq)
-    if (!more && index > 0) items.unshift({ kind: 'divider', time: startedAt })
+    const { switchedIn } = parts[index]
+    if (!more && index > 0) items.unshift({ kind: 'divider', time: startedAt, ...(switchedIn === undefined ? {} : { switchedTo: switchedIn }) })
     const cursor = more ? { part: index, beforeSeq: events[0].seq } : index > 0 ? { part: index - 1 } : null
     return { items, cursor: cursor === null ? null : Buffer.from(JSON.stringify(cursor)).toString('base64url') }
   }

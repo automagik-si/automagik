@@ -24,7 +24,10 @@ import { CATALOG_MAX_AGE_MS, ensureCatalog, keptModel, modelPart, NATIVE_OFF_UNA
 import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './identity.js'
 import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
-import { agentRoute, answered, boundaryNotice, CONTEXT_KINDS, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
+import {
+  agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, NOTICE_KIND, renderMessage,
+  replayBlocks, turnStart, unreadHandoff,
+} from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
 import { callArguments, entered, levelOf, mirrorTool, reviewed, TOOL_NAME } from './tool.js'
 import { guardSession } from './write-guard.js'
@@ -53,9 +56,9 @@ export const HELD_TEXT = 'This conversation is on hold while its permission leve
 const NATIVE_TOOLS_CHANGED_TEXT = 'The tools setting changed; send again.'
 // Codex with its own tools off (codex-native.js). Off is not Read only: DSH's tools keep the
 // Session's level.
-// The Details switch applies only in the owner's direct chat of a Bot it is not blocked for: only
-// there do these texts point to it. Elsewhere (groups, tasks, scheduled runs, a blocked Bot) they
-// name what helps there.
+// The Details switch applies in every Session of a Bot it is not blocked for (#1564): there these
+// texts point to it. Elsewhere (a blocked Bot or Session, a Session with no Bot) they name what
+// helps there.
 const noBridgeText = switchHere => "Codex's own tools are off for this Bot and Automagik's tools"
   + ' are turned off in this app, so Codex was not started. ' + (switchHere
   ? "Turn native tools on in the Bot's Details, or turn Automagik's tools back on."
@@ -76,9 +79,6 @@ const bridgeRow = message => (
   (message?.role === 'assistant' && message?.source?.synthetic === SYNTHETIC_KIND)
   || (message?.role === 'developer' && message?.source?.kind === SYNTHETIC_KIND)
 )
-
-const ownerInput = message => message.source?.kind === 'user' && message.source.principal === undefined && !isHandoff(message)
-  && (message.source.rpcId === undefined || (typeof message.source.rpcId === 'string' && !message.source.rpcId.startsWith('im:')))
 
 const permitsNative = level => level?.sandbox === 'workspace-write' || level?.sandbox === 'danger-full-access'
 const OMP_TOOLS_OFF_TEXT = 'omp tried to use a tool while native tools are off, so this answer stopped.'
@@ -113,10 +113,13 @@ export const STAND_IN_LINE = (name, model) => `[${name} does not offer ${model} 
 // An agent whose CLI is not signed in says so with ACP's `auth_required`, at the start of its
 // session or of a prompt. The turn fails with its own code, never ACP_AGENT: a sign-in answers
 // it, another model does not (the Bot team never falls back on it).
-// An agent with no sign-in in the app (`signInHint`, agents.js) names its own terminal command.
-const signInFailure = (agent, error) => finish('error', typeof agent.signInHint === 'string' && agent.signInHint !== ''
-  ? `${agent.name} is not signed in. Run \`${agent.signInHint}\` in a terminal, then send again.`
-  : `${agent.name} is not signed in: ${error?.message ?? error}`, MODEL_ACCESS_REQUIRED)
+// An agent with no sign-in in the app (`signInHint`, agents.js) names its own terminal command;
+// one that signs in only in the app's Settings (`signInWhere`, an agent with its own home) says so.
+const signInFailure = (agent, error) => finish('error', agent.signInWhere === 'settings'
+  ? `${agent.name} is not signed in. Sign in to it in Settings, under Coding agents, then send again.`
+  : typeof agent.signInHint === 'string' && agent.signInHint !== ''
+    ? `${agent.name} is not signed in. Run \`${agent.signInHint}\` in a terminal, then send again.`
+    : `${agent.name} is not signed in: ${error?.message ?? error}`, MODEL_ACCESS_REQUIRED)
 const STOPPED = () => finish('aborted', 'Stopped', 'ABORTED')
 // Thrown out of a Codex start to run the turn again as a kept one from the start's catch, never
 // inside its `try`: an error of that turn is never a connector failure (no rollback, no repair).
@@ -180,8 +183,9 @@ class Blocks {
 
 const textOf = content => (typeof content === 'string' ? content : (content ?? []).filter(block => block?.type === 'text').map(block => block.text).join('\n'))
 
-/** The source kind of the row that says a new agent session does not see the chat before it. */
-export const NOTICE_KIND = 'acp-session'
+// The source kind of the row that says a new agent session does not see the chat before it
+// (switch.js, which reads it too).
+export { NOTICE_KIND }
 
 /**
  * The chat row that says the agent is a new session and has not seen the chat's earlier
@@ -925,14 +929,11 @@ export class AcpAdapter extends LlmAdapter {
     } catch { return undefined }
   }
 
-  savedNativeOn(sessionId, provider, reuse = false) {
+  savedNativeOn(sessionId, provider) {
     try {
       const who = this.botIdentity(sessionId)
-      // The team stops an ON child when the person turns OFF. On reuse it
-      // supplies current eligibility without reading the saved switch again.
-      // Readers that only supply the switch still have to confirm ON.
-      const blocked = who?.nativeToolsBlocked
-      if (blocked === true || (!(reuse && blocked === false) && who?.nativeTools !== true)) return false
+      // A kept child is reused only while the saved switch still reads ON (fail closed).
+      if (who?.nativeToolsBlocked === true || who?.nativeTools !== true) return false
       // An ON always names its agent: an untagged one is not this provider's.
       return who.nativeToolsAgent === provider
     } catch { return false }
@@ -1570,23 +1571,21 @@ export class AcpAdapter extends LlmAdapter {
       const turnLevel = levelAtStart()
       const inputStart = turnStart(options.messages)
       const history = options.messages.slice(0, inputStart)
-      const inputs = managed || omp ? options.messages.slice(inputStart).filter(message => !CONTEXT_KINDS.has(message.source?.kind)) : []
-      const requestedByOwner = dshAgent.session?.header?.origin !== 'subagent' && inputs.some(ownerInput)
-      const ompNativeAllowed = (reuse = false) => requestedByOwner && permitsNative(levelAtStart())
-        && this.savedNativeOn(sessionId, options.provider, reuse)
+      // The switch is the Bot's: every turn of its Sessions follows it, whoever sends it (#1564).
+      const ompNativeAllowed = () => permitsNative(levelAtStart())
+        && this.savedNativeOn(sessionId, options.provider)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
       const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
-      // Whether the Details switch could turn this turn's Codex ON, read when the text is made:
-      // only an owner-requested turn in an eligible direct chat (a scheduled one there never is).
+      // Whether the Details switch could turn this turn's Codex ON, read when the text is made: any
+      // Session of a Bot it is not blocked for.
       const switchHere = () => {
-        if (!requestedByOwner) return false
         try { return identityRead?.nativeToolsBlocked === false } catch { return false }
       }
       const offText = reason => offUnavailableText(reason, switchHere())
       // A Codex turn that will run with its own tools off never asks for own mode or opens an
       // image-file grant: DSH's read_image reaches images through the bridge.
       const codexOffAtStart = codexRow && !kept && this.teamManaged()
-        && !(requestedByOwner && permitsNative(turnLevel) && this.nativeOn(agent, sessionId, options.provider))
+        && !(permitsNative(turnLevel) && this.nativeOn(agent, sessionId, options.provider))
       // Only a genuine user message activates staged file authority. The trailing-tool
       // guard above remains the sole continuation rule; no approval creates a prompt.
       let fileOwner
@@ -1636,12 +1635,14 @@ export class AcpAdapter extends LlmAdapter {
       // person's own allow rules must not silently skip the ask for a hard Bash or file case.
       // For a Codex row, `native` means its process holds Codex's own tools.
       const native = kept ? true : managed
-        ? live?.native === true && live.nativeManaged === true && requestedByOwner && permitsNative(turnLevel)
-          && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && (codexRow || this.bridgeOn(agent, sessionId))
+        ? live?.native === true && live.nativeManaged === true && permitsNative(turnLevel)
+          && identityRead !== undefined && identityRead.nativeToolsBlocked !== true
+          && identityRead.nativeTools === true
+          && (codexRow || this.bridgeOn(agent, sessionId))
         : this.nativeOn(agent, sessionId, options.provider)
-      // An eligible owner turn replaces a managed OFF process when the saved switch is ON.
+      // A turn replaces a managed OFF process when the saved switch is ON.
       const upgrade = managed && live !== undefined && live.native !== true && live.nativeManaged === true
-        && requestedByOwner && permitsNative(turnLevel)
+        && permitsNative(turnLevel)
         && identityRead !== undefined && identityRead.nativeToolsBlocked !== true && this.nativeOn(agent, sessionId, options.provider)
       const hardAsks = (enabled, currentLevel, bridged) => typeof agent.hardAsk === 'function'
         && !((bridged ?? this.bridgeOn(agent, sessionId)) && agent.disableBuiltInTools === true && !enabled)
@@ -1711,7 +1712,7 @@ export class AcpAdapter extends LlmAdapter {
       }
       // omp takes its tools from argv. Replace a child whose launch no longer fits this turn.
       if (omp && live !== undefined && this.teamManaged()) {
-        const keep = live.nativeOff !== undefined && live.nativeOff === !ompNativeAllowed(live.nativeOff === false)
+        const keep = live.nativeOff !== undefined && live.nativeOff === !ompNativeAllowed()
         if (!keep) {
           this.end(sessionId, live, { preserveFiles: keepsFiles() })
           live = undefined
@@ -1764,10 +1765,11 @@ export class AcpAdapter extends LlmAdapter {
             // omp's tool set is launch argv. Decide it after the startup awaits,
             // so a permission change during startup applies to the first process.
             const spawnOmpManaged = omp && this.teamManaged()
-            // Codex keeps its own tools only on an eligible owner turn whose saved switch is ON for
-            // it, or on a kept model, or with no Bot team; anything else starts it OFF.
+            // Codex keeps its own tools only when its saved switch is ON for it, on a kept
+            // model, or with no Bot team; anything else starts it OFF.
             const codexManaged = codexRow && !kept && this.teamManaged()
-            const preOn = !codexManaged || (requestedByOwner && permitsNative(levelAtStart()) && this.nativeOn(agent, sessionId, options.provider))
+            const preOn = !codexManaged || (permitsNative(levelAtStart())
+              && this.nativeOn(agent, sessionId, options.provider))
             const codexOff = codexRow && !preOn
             const nativeOff = spawnOmpManaged ? !ompNativeAllowed() : codexRow ? codexOff : undefined
             entry.nativeOff = state.nativeOff = nativeOff
@@ -1838,7 +1840,7 @@ export class AcpAdapter extends LlmAdapter {
             const spawnLevel = spawnManaged ? levelAtStart() : turnLevel
             // An OFF Codex never turns ON mid-spawn.
             const spawnNative = codexOff ? false : spawnManaged
-              ? requestedByOwner && permitsNative(spawnLevel) && this.nativeOn(agent, sessionId, options.provider)
+              ? permitsNative(spawnLevel) && this.nativeOn(agent, sessionId, options.provider)
               : native
             // ON before the spawn, no longer after it: no process starts, the next turn opens OFF.
             if (codexRow && preOn && spawnManaged && !spawnNative) return yield* stopped(NATIVE_TOOLS_CHANGED_TEXT)
@@ -1993,6 +1995,16 @@ export class AcpAdapter extends LlmAdapter {
             live.owed = { renewed: true }
             live.replay = blocks
           }
+        } else if (!replaying) {
+          // The kill switch carries no chat, but a Bot part's handoff package is not chat: it is the record the
+          // part starts from, which the Bot team acknowledged itself, so the agent has never read it. It goes
+          // ahead of the person's words in this first prompt, once, the way the replay would carry it.
+          const row = unreadHandoff(history)
+          const line = row === undefined ? undefined : renderMessage(row)
+          if (line !== undefined) {
+            live.owed = { renewed: true, handoff: true }
+            live.replay = [{ type: 'text', text: this.redact(line) }]
+          }
         }
       } else if (replaying && live.replay !== undefined) {
         // The last turn never reached its prompt (a refused model, a busy agent): its replay is
@@ -2090,11 +2102,13 @@ export class AcpAdapter extends LlmAdapter {
           return yield finish('error', offText('this model was not checked'), NATIVE_OFF_UNAVAILABLE)
         }
         // Launched as kept, now on a checked model, with a Bot team: its own tools on a turn that
-        // must be OFF (a stale `default` the other way). This ignores owner eligibility on
-        // purpose (a kept turn reads no owner input): at worst one more "send again" on a stale
+        // must be OFF (a stale `default` the other way): at worst one more "send again" on a stale
         // `default`, and it fails closed. The next turn opens by the usual rule.
         if (live.nativeKept === true && !this.keptSlug(agent, slug) && this.teamManaged()
-          && !(requestedByOwner && permitsNative(levelAtStart()) && this.nativeOn(agent, sessionId, options.provider))) return yield* restart()
+          && !(permitsNative(levelAtStart())
+            && this.nativeOn(agent, sessionId, options.provider))) {
+          return yield* restart()
+        }
         live.nativeKept = this.keptSlug(agent, slug)
       }
       const checkLevel = startingNative || ((firstNativePrompt || startingOmp) && this.teamManaged())
@@ -2236,7 +2250,7 @@ export class AcpAdapter extends LlmAdapter {
         }
       }
       if (!uploadValid()) return yield uploadStopped()
-      const cutRows = prepared === undefined && fresh && live.replay === undefined
+      const cutRows = prepared === undefined && fresh && (live.replay === undefined || live.owed?.handoff === true)
         ? cutUserRows(options.messages, dshAgent?.session) : []
       const cutIds = new Set(cutRows.map(row => row.id))
       const current = cutRows.length === 0 ? options.messages : options.messages.filter(row => !cutIds.has(row.id))
@@ -2244,7 +2258,7 @@ export class AcpAdapter extends LlmAdapter {
         ...replayBlocks(cutRows, { redact: this.redact, to: agent.name, renewed: true }),
         { type: 'text', text: 'The previous turn was interrupted. Check any tool outcomes before repeating work.' },
       ]
-      const prompt = prepared ?? [...(live.replay ?? recovered), ...promptOf(current, this.redact)]
+      const prompt = prepared ?? [...(live.replay ?? []), ...recovered, ...promptOf(current, this.redact)]
       if (prepared !== undefined) {
         try { checkUploadSize(uploadRun.sessionId, prompt) } catch (error) {
           return yield finish('error', error.message, 'acp_upload_content')

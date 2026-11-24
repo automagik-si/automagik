@@ -856,7 +856,7 @@ test('a direct update-bot route crossing takes the new-conversation path', async
   assert.deepEqual(switched.at(-1), ['m1', 'acp-claude/opus', undefined])
   // A real mixed edit on a managed crossing still meets the guard, with nothing switched.
   assert.equal(await updateTool({ model: 'deepseek/deepseek-v4-flash', role: 'Chief' }),
-    'Could not update the Bot: Omni needs a new conversation for that route, so change only its model in this step.')
+    'Could not update the Bot: Omni changes agent in a step of its own, so change only its model in this step.')
   assert.equal(switched.length, 2)
   assert.equal(host.saved().bots.m1.role, 'Boss')
 })
@@ -1014,7 +1014,7 @@ test('history-bearing crossings refuse missing capabilities through both host en
         const result = await host.call(endpoint, { id: 'm1', model: 'deepseek/deepseek-v4-flash' })
         assert.deepEqual(result, { ok: false, error: { code: 'bot/refused', details: {}, message: missing === 'lookup'
           ? "Omni's current conversation could not be opened, so its route was kept."
-          : "Omni's current conversation cannot hand off to a new route." } }, `${endpoint}: ${missing}`)
+          : "Omni's conversation is run by a host that cannot move it." } }, `${endpoint}: ${missing}`)
         assert.deepEqual(rt.botOf('m1'), before)
         assert.deepEqual(host.saved().bots.m1, saved)
         assert.equal(host.selected.length, selected)
@@ -1118,4 +1118,58 @@ test('update-bot logs a missing cross-route model for a shell-held Bot', async (
   assert.deepEqual(await host.call('update-bot', { id: 'm1', model }), await catalogRefusal(host, model))
   assert.deepEqual(await routeRecords(rt, 'm1'), [['update-bot', missingRouteLine]])
   assert.deepEqual(host.saved().bots.m1, before)
+})
+
+// #2061 (MW-15): the person's consent to stop a running reply travels with the pick, from both
+// endpoints, and never into the Bot's patch (where the mixed-edit guard would refuse it).
+test('T7c stopReply reaches the agent switch from switch-route and update-bot, never the patch', async (t) => {
+  const switched = []
+  const host = await start(seed(), {
+    onRuntime: (rt) => {
+      rt.switchRoute = async (...args) => {
+        switched.push(args)
+        return { status: 'switching' }
+      }
+    },
+  })
+  t.after(host.stop)
+  await host.moved()
+  assert.equal((await host.call('switch-route', { id: 'm1', model: 'deepseek/deepseek-v4-flash', stopReply: true })).ok, true)
+  assert.deepEqual(switched.at(-1), ['m1', 'deepseek/deepseek-v4-flash', undefined, { stopReply: true }])
+  // The team moved Omni onto Claude Code at load; a native model is a crossing from there.
+  assert.equal((await host.call('update-bot', { id: 'm1', model: 'deepseek/deepseek-v4-flash', stopReply: true })).ok, true)
+  assert.deepEqual(switched.at(-1), ['m1', 'deepseek/deepseek-v4-flash', undefined, { entry: 'update-bot', stopReply: true }])
+  assert.equal(Object.hasOwn(host.saved().bots.m1, 'stopReply'), false)
+})
+
+// #2061 (MW-10): while an agent switch runs in the Bot's chat, a same-harness model or level
+// change waits for it, with the existing busy sentence.
+test('T16 a same-harness model change during an agent switch is refused as busy', async (t) => {
+  const host = await start(seed())
+  t.after(host.stop)
+  await host.moved()
+  host.ctx.provided.get('omniTeam').switchingChat = (id, { crossing = false } = {}) => (crossing ? { to: 'deepseek/deepseek-v4-flash', since: 1 } : true)
+  const model = host.saved().bots.m1.model
+  for (const patch of [{ effort: 'low' }, { model }]) {
+    const refused = await host.call('update-bot', { id: 'm1', ...patch })
+    assert.deepEqual(refused, { ok: false, error: { code: 'bot/refused', details: {}, message: 'Omni is already changing models.' } })
+  }
+  assert.equal(host.saved().bots.m1.effort, 'high')
+})
+
+// MY-8 (#2061): the host's running-reply refusal keeps its reason over HTTP, from both
+// endpoints, so the selector asks its question instead of showing an error.
+test('MY-8 a reply-running refusal reaches the caller with its reason, from switch-route and update-bot', async (t) => {
+  const message = 'This stops the current reply and continues on DeepSeek V4 Flash.'
+  const host = await start(seed(), {
+    onRuntime: (rt) => {
+      rt.switchRoute = async () => { throw Object.assign(new Error(message), { code: 'bot/refused', reason: 'reply-running' }) }
+    },
+  })
+  t.after(host.stop)
+  await host.moved()
+  for (const endpoint of ['switch-route', 'update-bot']) {
+    assert.deepEqual(await host.call(endpoint, { id: 'm1', model: 'deepseek/deepseek-v4-flash' }),
+      { ok: false, error: { code: 'bot/refused', message, details: {}, reason: 'reply-running' } }, endpoint)
+  }
 })
