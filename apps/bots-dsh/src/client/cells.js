@@ -1044,6 +1044,10 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
   if (reply.kind === 'missed') {
     return h('div', { className: 'bt-event' }, t("{name} didn't answer in time", { name: bot.name }))
   }
+  // A member's conversation here followed its agent switch (RFC 0030, Handoff note).
+  if (reply.kind === 'switched') {
+    return h('div', { className: 'bt-event' }, t('{name} switched to {agent}', { name: bot.name, agent: reply.agent }))
+  }
   if (reply.kind === 'admin-passed') {
     return h('div', { className: 'bt-event' },
       t('{name} did not answer or call anyone; call a member with @Name', { name: bot.name }))

@@ -353,9 +353,26 @@ refused ("Only the person moves <name> to another agent. Use propose_bot_change 
 apply it."); the person's Apply on that proposal is a pick like any other.
 
 A Bot's group conversations follow its switch, each with its own fenced switch and handoff: an idle
-one at once, a busy one at its next step, never by stopping a group reply. Each group shows "<name>
-switched to <agent>". The group's own Session does not move. (Delivery 4b, second PR; until it
-ships, a group conversation with history keeps its agent and is never changed in place.)
+one at once, a busy one at its next step (that step's messages go with it and its turn goes on on
+the new agent), never by stopping a group reply. The person's pick starts it: the own chat's switch
+when it moves, or its change in place when nothing was said there; a model applied at start or by
+failover moves no group. A group conversation an earlier pick left on its agent follows the next
+one. The summary is the outgoing agent's, as above, or none; never the team's background model. An
+agent over ACP writes it in a turn of the group conversation that the group never sees: nothing
+of it is posted while it runs or at its end, and it counts in no round. The package is the group
+variant (the latest lines only) with the reason "the user switched you from <old> to <new>; in this
+group you are <new> now", capped for an agent over ACP as in 9. Each group shows "<name> switched
+to <agent>" once, a line members do not read. A follow that does not move, or whose first call
+fails, leaves that conversation on its agent (never changed in place) and writes nothing on the
+Bot's model line; it tries once more at its next step, and after a second failure waits for the
+Bot's next pick. After a restart the bound of 8 applies to a group part too, and its way back is
+the group's own route. The group's own Session does not move, and Hermes routes never follow.
+(Delivery 4b, second PR.)
+
+On the few ways back that cannot run a reply the switch stopped (the chat changed meanwhile, the
+old part cannot be loaded, or the handoff cannot run again where there is no way back), a Bot that
+was waiting for that reply gets one final answer saying the model call failed, as any failed turn
+gives it.
 
 Why a plugin fence is enough here (Q7a's two gaps): the new route is selected only on a Session no
 surface can reach yet, its handoff is in it before it becomes reachable, and the old Session's steps
@@ -621,7 +638,8 @@ Herdr install.
    composer locked during the switch, the "Switched to" line, an answer from the handoff and an
    earlier message read through `read_own_chat`; no switch is refused for history. A Bot's group
    conversation with history follows the switch with its own handoff and shows '<name> switched
-   to <agent>' (second PR).
+   to <agent>' (second PR): its next reply comes from the new agent, which can say the group's
+   last topic, and nothing of the outgoing agent's summary turn shows in the group.
 5. **Automations and Accounts as pages** (plugin; any shared code it needs moves through the
    pack's source and `am-copies`, as in 3a). *Check:* the page lists, adds and
    removes an automation through the `herdr-automations` CLI's `--json`, and a quota switch

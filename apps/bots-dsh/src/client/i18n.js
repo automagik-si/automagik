@@ -1656,6 +1656,7 @@ const ZH = {
   // An agent switch in a Bot's own chat (RFC 0030, Handoff note, 2026-11-23).
   'This stops the current reply and continues on {agent}.': '这会停止当前回复，并在 {agent} 上继续。',
   'Switched to {agent}': '已切换到 {agent}',
+  '{name} switched to {agent}': '{name} 已切换到 {agent}',
   'Switching to {agent}…': '正在切换到 {agent}…',
   'Using {model} · {route} · {provider}': '使用 {model} · {route} · {provider}',
 
