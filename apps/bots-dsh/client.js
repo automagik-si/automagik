@@ -670,14 +670,20 @@ var ZH = {
   "Waiting for {name} to confirm…": "正在等待 {name} 确认…",
   "Checking the code…": "正在检查代码…",
   "Paste here the code shown after you authorize:": "授权后，将显示的代码粘贴到这里：",
+  "This link is not from this sign-in.": "此链接不属于本次登录。",
+  "Paste here the address your browser ends on after you sign in:": "登录后，请将浏览器最后停留的地址粘贴到这里：",
+  "Sign-in address": "登录地址",
+  "Finishing the sign-in to {name}…": "正在完成 {name} 的登录…",
+  "Turn this coding agent on in Settings, under Coding agents, then try again.": "请先在设置 → 编程助手中开启此编程助手，然后重试。",
+  "Install this coding agent in Settings, under Coding agents, then try again.": "请先在设置 → 编程助手中安装此编程助手，然后重试。",
   "Finish the secret requested first.": "请先完成所请求的密钥。",
   "The message field comes back as soon as you send the code or cancel.": "发送代码或取消后，消息框会恢复。",
   "Cancel sign-in": "取消登录",
   "To use {name} in this Bot, sign in to your account.": "要在此 Bot 中使用 {name}，请登录你的账号。",
   "Sign in": "登录",
   "Sign in to this chat's AI provider": "登录此聊天的 AI 提供商",
-  "Sign-in from the chat is for Claude Code and Codex. Set up {provider} in Settings.": "聊天内登录仅支持 Claude Code 和 Codex。请在设置中配置 {provider}。",
-  "Sign-in from the chat is for Claude Code and Codex. Set up this AI in Settings.": "聊天内登录仅支持 Claude Code 和 Codex。请在设置中配置此 AI。",
+  "Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up {provider} in Settings.": "聊天内登录仅支持 Claude Code、Codex 和 Antigravity。请在设置中配置 {provider}。",
+  "Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up this AI in Settings.": "聊天内登录仅支持 Claude Code、Codex 和 Antigravity。请在设置中配置此 AI。",
   "Choose an AI for this Bot first.": "请先为此 Bot 选择一个 AI。",
   "Sign-in runs in a Bot's chat. Open the Bot whose AI you want to sign in.": "请在 Bot 的聊天中登录。打开要登录其 AI 提供商的 Bot 聊天。",
   "Your team is still loading. Try /login again in a moment.": "团队仍在加载。请稍后重试 /login。",
@@ -10662,6 +10668,11 @@ var cliProviderOf = (ref) => {
   const provider = typeof ref === "string" ? ref.split("/")[0] : void 0;
   return Object.hasOwn(CLI_NAMES, provider) ? provider : void 0;
 };
+var SIGN_IN_NAMES = Object.freeze({ ...CLI_NAMES, "acp-antigravity": "Antigravity" });
+var signInProviderOf = (ref) => {
+  const provider = typeof ref === "string" ? ref.split("/")[0] : void 0;
+  return Object.hasOwn(SIGN_IN_NAMES, provider) ? provider : void 0;
+};
 var cliLoginBotOf = (roster, id) => typeof id === "string" ? roster?.byId?.[id] : void 0;
 var KNOWN = /* @__PURE__ */ new Set();
 var STATE = /^[A-Za-z0-9_-]{8,512}$/;
@@ -10676,16 +10687,59 @@ function rememberLinkState(url) {
   KNOWN.add(state2);
   return true;
 }
-var knowsStates = () => KNOWN.size > 0;
+var KNOWN_CALLBACK = /* @__PURE__ */ new Set();
+var CALLBACK_STATE = /^[^\p{Cc}\s]{8,512}$/u;
+function rememberCallbackState(url) {
+  let states2;
+  try {
+    states2 = new URL(url).searchParams.getAll("state");
+  } catch {
+    return false;
+  }
+  if (states2.length !== 1 || !CALLBACK_STATE.test(states2[0])) return false;
+  KNOWN_CALLBACK.add(states2[0]);
+  return true;
+}
+var knowsStates = () => KNOWN.size > 0 || KNOWN_CALLBACK.size > 0;
 var squeeze = (text2) => text2.slice(0, SIGN_IN_TEXT_MAX).replace(/[\s\p{Cf}]+/gu, "");
+var CALLBACK_OCCURRENCES = 64;
+var CALLBACK_TOKEN = 3 * 512;
+function authorityBefore(reading2, at) {
+  const scheme = reading2.lastIndexOf("://", at - 3);
+  if (scheme < 0) return void 0;
+  const rest2 = reading2.slice(scheme + 3, scheme + 3 + 64);
+  const end = rest2.search(/[/?#\\\s]/u);
+  return (end < 0 ? rest2 : rest2.slice(0, end)).toLowerCase();
+}
+var decodeRuns = (token) => token.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run3) => {
+  try {
+    return decodeURIComponent(run3);
+  } catch {
+    return run3;
+  }
+});
+function carriesCallbackState(reading2) {
+  let count = 0;
+  for (const match of reading2.matchAll(/state(?:=|%3d)/giu)) {
+    if (++count > CALLBACK_OCCURRENCES) break;
+    if (authorityBefore(reading2, match.index) === "accounts.google.com") continue;
+    const start2 = match.index + match[0].length;
+    const token = reading2.slice(start2, start2 + CALLBACK_TOKEN);
+    for (const form of [token, decodeRuns(token)]) {
+      for (const state2 of KNOWN_CALLBACK) if (form.startsWith(state2)) return true;
+    }
+  }
+  return false;
+}
 function carriesKnownState(text2) {
-  if (typeof text2 !== "string" || text2 === "" || KNOWN.size === 0) return false;
+  if (typeof text2 !== "string" || text2 === "" || KNOWN.size === 0 && KNOWN_CALLBACK.size === 0) return false;
   const flat = squeeze(text2);
   for (const state2 of KNOWN) if (flat.includes(`#${state2}`)) return true;
-  return false;
+  return KNOWN_CALLBACK.size > 0 && carriesCallbackState(flat);
 }
 function forgetKnownStates() {
   KNOWN.clear();
+  KNOWN_CALLBACK.clear();
 }
 var DONE_MS = 3e3;
 var APPLY_FAILED_MS = 8e3;
@@ -18192,7 +18246,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
     setAccount(null);
   }, [bot.id, bot.model]);
   const pickFailure = (ref) => (error) => {
-    if (error?.code === "bot/sign-in-required" && cliProviderOf(ref)) setSignIn(ref);
+    if (error?.code === "bot/sign-in-required" && signInProviderOf(ref)) setSignIn(ref);
     if (error?.code === "bot/account-confirm-required" && cliProviderOf(ref)) setAccount(ref);
     throw error;
   };
@@ -18312,7 +18366,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         { className: "bt-set-row bt-bs-row" },
         (0, import_react42.createElement)("span", { className: "bt-set-copy" }, (0, import_react42.createElement)("span", { className: "bt-set-hint" }, t("This model needs a sign-in to its coding agent."))),
         (0, import_react42.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => {
-          actions.openCliLogin(bot.id, cliProviderOf(signIn), signIn);
+          actions.openCliLogin(bot.id, signInProviderOf(signIn), signIn);
           setSignIn(null);
         } }, t("Sign in"))
       ) : null,
@@ -22606,9 +22660,9 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
   const openCliLogin = (botId, provider, ref) => {
     const bot = cliLoginBotOf(roster.getSnapshot(), botId);
     const manager = loginState?.();
-    if (!bot || !manager || !Object.hasOwn(CLI_NAMES, provider)) return false;
+    if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
     openSession?.(bot.id);
-    void manager.open({ botId: bot.id, provider, ref: cliProviderOf(ref) === provider ? ref : void 0 });
+    void manager.open({ botId: bot.id, provider, ref: signInProviderOf(ref) === provider ? ref : void 0 });
     return true;
   };
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra });
@@ -22758,7 +22812,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
       try {
         return await after(call2("switch-route", { id, ...patch, model: ref }));
       } catch (error) {
-        const provider = cliProviderOf(ref);
+        const provider = signInProviderOf(ref);
         if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider)) return void 0;
         if (error?.code === "bot/account-confirm-required" && provider && openCliLogin(id, provider)) return void 0;
         throw error;
@@ -22771,7 +22825,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
       try {
         return await after(call2("update-bot", { id, ...patch, model: ref }));
       } catch (error) {
-        const provider = cliProviderOf(ref);
+        const provider = signInProviderOf(ref);
         if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider, ref)) return void 0;
         if (error?.code === "bot/account-confirm-required" && provider && openCliLogin(id, provider, ref)) return void 0;
         throw error;
@@ -22781,7 +22835,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     async recoverCliLogin(botId, provider) {
       const bot = cliLoginBotOf(roster.getSnapshot(), botId);
       const manager = loginState?.();
-      if (!bot || !manager || !Object.hasOwn(CLI_NAMES, provider)) return false;
+      if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
       const recovered = await manager.recover({ botId: bot.id, provider });
       if (recovered && cliLoginBotOf(roster.getSnapshot(), bot.id)) openSession?.(bot.id);
       return recovered;
@@ -42748,14 +42802,18 @@ var safeLink = (value) => {
   }
 };
 var occurrenceOf = (sessionId) => [...document.querySelectorAll("[data-conversation-content][data-conversation-session]")].find((node) => node.dataset.conversationSession === sessionId);
-var codeStep = (row2) => row2?.stage === "attempt" && row2.provider === "acp-claude" && row2.attempt?.status === "waiting" && row2.attempt.prompt !== void 0 && row2.attempt.checking !== true;
+var PASTES = /* @__PURE__ */ new Set(["acp-claude", "acp-antigravity"]);
+var codeStep = (row2) => row2?.stage === "attempt" && PASTES.has(row2.provider) && row2.attempt?.status === "waiting" && row2.attempt.prompt !== void 0 && row2.attempt.checking !== true;
 function installCliLoginBridge({ scope = globalThis, selectedBot, mainBot, openLogin }) {
   const bridge = {
     open(provider) {
-      if (!Object.hasOwn(CLI_NAMES, provider)) return false;
+      if (!Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
       const bot = selectedBot() ?? mainBot();
       if (!bot) return false;
       return openLogin(bot.id, provider);
+    },
+    remember(url) {
+      return rememberCallbackState(url);
     }
   };
   scope[CLI_LOGIN_BRIDGE] = bridge;
@@ -42874,7 +42932,7 @@ var FIELD_EVENTS = [
   "focusout"
 ];
 var BLOCKED2 = /* @__PURE__ */ new Set(["copy", "cut", "drop", "dragover"]);
-function CodeField({ disabled, busy, onSubmit, fieldRef }) {
+function CodeField({ disabled, busy, onSubmit, fieldRef, label = "Authorization code" }) {
   const wrap = (0, import_react104.useRef)(null);
   const input = (0, import_react104.useRef)(null);
   const [filled, setFilled] = (0, import_react104.useState)(false);
@@ -42929,7 +42987,7 @@ function CodeField({ disabled, busy, onSubmit, fieldRef }) {
         "data-lpignore": "true",
         "data-bwignore": "",
         "data-form-type": "other",
-        "aria-label": t("Authorization code")
+        "aria-label": t(label)
       })
     ),
     (0, import_react104.createElement)("button", { type: "button", className: "bt-q-submit", disabled: disabled || busy || !filled, onClick: submit }, t("Send"))
@@ -42952,7 +43010,8 @@ function CopyLink({ url }) {
   );
 }
 function Attempt({ bot, row: row2, roster, manager, secretPending, fieldRef }) {
-  const name = CLI_NAMES[row2.provider];
+  const name = SIGN_IN_NAMES[row2.provider];
+  const agy = row2.provider === "acp-antigravity";
   const attempt = row2.attempt;
   const url = safeLink(attempt?.url);
   const opener = attempt?.openedBy && attempt.openedBy !== bot.id ? roster.byId?.[attempt.openedBy]?.name : void 0;
@@ -42992,11 +43051,18 @@ function Attempt({ bot, row: row2, roster, manager, secretPending, fieldRef }) {
       (0, import_react104.createElement)("p", { className: "bt-cli-subtle" }, t("Waiting for {name} to confirm…", { name }))
     ) : null,
     row2.provider === "acp-claude" && attempt?.checking ? (0, import_react104.createElement)("p", { className: "bt-cli-subtle" }, t("Checking the code…")) : null,
+    agy && attempt?.checking ? (0, import_react104.createElement)("p", { className: "bt-cli-subtle" }, t("Finishing the sign-in to {name}…", { name })) : null,
     step2 ? (0, import_react104.createElement)(
       import_react104.Fragment,
       null,
-      (0, import_react104.createElement)("p", null, t("Paste here the code shown after you authorize:")),
-      (0, import_react104.createElement)(CodeField, { disabled: secretPending, busy: row2.busy, fieldRef, onSubmit: (value) => void manager.answer(bot.id, value) }),
+      (0, import_react104.createElement)("p", null, agy ? t("Paste here the address your browser ends on after you sign in:") : t("Paste here the code shown after you authorize:")),
+      (0, import_react104.createElement)(CodeField, {
+        disabled: secretPending,
+        busy: row2.busy,
+        fieldRef,
+        onSubmit: (value) => void manager.answer(bot.id, value),
+        ...typeof attempt.prompt?.label === "string" ? { label: attempt.prompt.label } : {}
+      }),
       (0, import_react104.createElement)("p", { className: "bt-cli-subtle" }, secretPending ? t("Finish the secret requested first.") : t("The message field comes back as soon as you send the code or cancel."))
     ) : null,
     row2.error ? (0, import_react104.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row2.error)) : null,
@@ -43037,7 +43103,7 @@ async function announceCarried({ actions }) {
 }
 var modelName = (roster, ref) => typeof ref === "string" ? roster.models?.find((model) => model.ref === ref)?.name ?? (ref.split("/").slice(1).join("/") || ref) : "";
 function CliLoginRow({ bot, row: row2, roster, manager, secretPending, seat, fieldRef }) {
-  const name = CLI_NAMES[row2.provider];
+  const name = SIGN_IN_NAMES[row2.provider];
   (0, import_react104.useLayoutEffect)(() => {
     if (row2.reveal === void 0) return;
     seat.scrollIntoView?.({ block: "nearest" });
@@ -43209,7 +43275,8 @@ var RESTARTED = "bot/login-restarted";
 var EXPIRED = "This sign-in expired. Start again.";
 var CHOICE_MS = 500;
 var CHOICE_TRIES = 8;
-var known = (provider) => Object.hasOwn(CLI_NAMES, provider);
+var known = (provider) => Object.hasOwn(SIGN_IN_NAMES, provider);
+var PASTES2 = /* @__PURE__ */ new Set(["acp-claude", "acp-antigravity"]);
 var CLOSES_ON_MOVE = /* @__PURE__ */ new Set(["offer", "account", "failed", "interrupted"]);
 var ACCESS_REQUIRED = "MODEL_ACCESS_REQUIRED";
 var ACCOUNT_CHANGED = "bot/account-changed";
@@ -43292,6 +43359,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     delete attempt.signedInAs;
     attempts[provider] = attempt;
     if (provider === "acp-claude" && typeof view.url === "string") rememberLinkState(view.url);
+    if (provider === "acp-antigravity" && typeof view.url === "string") rememberCallbackState(view.url);
     if (ACTIVE.has(view.status)) {
       for (const row2 of attemptRows(provider)) setRow(row2.botId, { ...row2, attempt });
       armPoll(provider);
@@ -43541,7 +43609,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       nextIntent();
       const row2 = rowOf(botId);
       const attempt = row2?.attempt;
-      if (disposed || row2?.stage !== "attempt" || row2.provider !== "acp-claude" || row2.busy || attempt?.prompt === void 0 || typeof value !== "string" || value.trim() === "") return false;
+      if (disposed || row2?.stage !== "attempt" || !PASTES2.has(row2.provider) || row2.busy || attempt?.prompt === void 0 || typeof value !== "string" || value.trim() === "") return false;
       const seq = row2.seq;
       patchRow(botId, seq, { busy: true, error: null });
       try {
@@ -43673,7 +43741,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     async restore(botId) {
       if (disposed || typeof botId !== "string" || rowOf(botId) !== void 0 || restored.has(botId)) return;
       restored.add(botId);
-      for (const provider of Object.keys(CLI_NAMES)) {
+      for (const provider of Object.keys(SIGN_IN_NAMES)) {
         const epoch = providerEpochs.get(provider);
         let current;
         try {
@@ -43708,8 +43776,8 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
 var LOADING_NOTICE = "Your team is still loading. Try /login again in a moment.";
 var GROUP_NOTICE = "Sign-in runs in a Bot's chat. Open the Bot whose AI you want to sign in.";
 var NO_MODEL_NOTICE = "Choose an AI for this Bot first.";
-var SETUP_AI_NOTICE = "Sign-in from the chat is for Claude Code and Codex. Set up this AI in Settings.";
-var SETUP_PROVIDER_NOTICE = "Sign-in from the chat is for Claude Code and Codex. Set up {provider} in Settings.";
+var SETUP_AI_NOTICE = "Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up this AI in Settings.";
+var SETUP_PROVIDER_NOTICE = "Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up {provider} in Settings.";
 var loginNotice = (key, params) => ({ kind: "notice", key, params });
 var isBotChat = (roster, sessionId) => {
   const bot = roster.byId?.[sessionId];
@@ -43723,7 +43791,7 @@ function loginRoute({ roster, sessionId, actions }) {
   if (!target) return loginNotice(NO_MODEL_NOTICE);
   if (target.host !== void 0) return loginNotice(SETUP_AI_NOTICE);
   const { bot, provider } = target;
-  if (Object.hasOwn(CLI_NAMES, provider)) {
+  if (Object.hasOwn(SIGN_IN_NAMES, provider)) {
     return typeof actions?.openCliLogin === "function" ? { kind: "cli", botId: bot.id, provider } : loginNotice(SETUP_AI_NOTICE);
   }
   const model = roster.models?.find((model2) => (model2.provider ?? providerOfRef(model2.ref)) === provider && model2.providerName);
