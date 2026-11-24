@@ -147,9 +147,11 @@ function mergeHeld(before, after) {
   return [...items.values()]
 }
 
-export const readNotes = (file, { strict = false } = {}) => {
+export const readNotes = (file, { strict = false, onRead } = {}) => {
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    const bytes = readFileSync(file, 'utf8')
+    onRead?.(bytes)
+    const parsed = JSON.parse(bytes)
     const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
     const readable = object(parsed?.turns) && object(parsed?.queued) && Object.values(parsed.queued).every(Array.isArray)
       && (parsed.held === undefined || (object(parsed.held) && Object.values(parsed.held).every(Array.isArray)))
@@ -165,6 +167,7 @@ export const readNotes = (file, { strict = false } = {}) => {
     }
   } catch (error) {
     if (strict && error?.code !== 'ENOENT') throw error
+    if (error?.code === 'ENOENT') onRead?.(undefined)
     return { readable: false, turns: {}, queued: {}, held: {}, cut: [] }
   }
 }
@@ -310,6 +313,7 @@ export function install(rt) {
   let latest = encodeNotes(interrupted)
   let flushLatest = false
   let flushPending = false
+  let unconfirmedNotes
   let due = false
   let reloading
   let noteTerm
@@ -337,27 +341,33 @@ export function install(rt) {
       due = false
       const snapshot = latest
       const changes = new Map(localHeld)
-      // A failed flush still belongs to the next snapshot. Changes arriving
-      // during this write independently set flushLatest for the queued one.
-      flushPending ||= flushLatest
+      const requested = flushLatest
       flushLatest = false
-      await mkdir(home, { recursive: true })
       // Noted before the stop: it still lands, since the store keeps the lock until this write ends.
       const current = () => !notesFenced() && rt.lockTerm() === term
         && (term === 0 || (rt.ownsLockForPendingWrite?.() ?? rt.holdsLock()))
       if (!current()) return false
+      flushPending ||= requested
+      const flush = flushPending || unconfirmedNotes !== undefined
+      await mkdir(home, { recursive: true })
+      if (!current()) return false
       // Windows can refuse to replace the file while another process has it open for reading.
-      if (process.platform === 'win32') await writeFile(file, snapshot, { encoding: 'utf8', flush: flushPending })
+      if (process.platform === 'win32') await writeFile(file, snapshot, { encoding: 'utf8', flush })
       else {
         const temp = join(home, `.inflight-${randomUUID()}.tmp`)
         let renamed = false
         try {
           await writeFile(temp, snapshot, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
-          if (flushPending) await syncFile(temp)
+          if (flush) await syncFile(temp)
           if (!current()) return false
           renameSync(temp, file)
           renamed = true
-          if (flushPending) await syncDirectory(home)
+          if (flush) {
+            flushPending = false
+            unconfirmedNotes = snapshot
+            await syncDirectory(home)
+            unconfirmedNotes = undefined
+          }
         } finally {
           if (!renamed) await rm(temp, { force: true }).catch(() => {})
         }
@@ -392,7 +402,12 @@ export function install(rt) {
     // Wait out any write already issued. Queued snapshots see the adoption fence and skip.
     const reload = writing.then(() => {
       if (stopped || !rt.holdsLock() || rt.lockTerm() !== term) return
-      interrupted = readNotes(file, { strict: true })
+      interrupted = readNotes(file, { strict: true, onRead: bytes => {
+        if (unconfirmedNotes !== bytes) unconfirmedNotes = undefined
+      } })
+      // A queued or pre-rename flush belongs to the previous owner. Only the
+      // published checkpoint can carry unconfirmed durability through adoption.
+      flushLatest = flushPending = false
       latest = encodeNotes(interrupted)
       pendingTurns = {}
       // Startup can still replay the disk snapshot. Local deliveries already have a sender.

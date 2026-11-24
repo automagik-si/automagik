@@ -397,6 +397,7 @@ export function install(rt) {
       await ctx.sessionTitle.rename(agent.session, cleanName)
     }
     let bot
+    let copyPublished = false
     try {
       const resolvedSecId = !main ? resolveSectionInput({ section, sectionId }) : undefined
       const instructionsText = String(instructions).trim()
@@ -474,9 +475,12 @@ export function install(rt) {
           await rt.saveCopy(team => {
             check()
             team.bots[id] = structuredClone(bot)
-          }, { beforeCommit: check, afterWrite: () => {
-            state.bots[id] = bot
-            rt.indexSessions()
+          }, { beforeCommit: check, afterPublish: (current) => {
+            copyPublished = true
+            if (current) {
+              state.bots[id] = bot
+              rt.indexSessions()
+            }
           } })
         } else {
           await rt.save()
@@ -529,8 +533,9 @@ export function install(rt) {
         .then(() => sendKickoff(bot, greeting), error => rt.warn('ds-bot: %s does not greet: %s', cleanName, error?.message ?? error))
       return bot
     } catch (error) {
+      // Once a copy is published, its Session must survive an unconfirmed directory sync.
+      if (copyPublished || (solverCopy && rt.botOf(id) !== undefined)) throw error
       // The Bot's Session was already made: archive it instead of leaving an orphan.
-      if (solverCopy && rt.botOf(id) !== undefined) throw error
       delete state.bots[id]
       rt.dropGrantsForBot?.(id)
       rt.dropGrantsForSession?.(id)

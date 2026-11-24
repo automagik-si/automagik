@@ -56,7 +56,9 @@ export function install(rt) {
     && rt.updateHold?.awaitingBootVerdict !== false
   let writing = Promise.resolve()
   let savedRecovery = recoveryFields(state)
-  let durabilityPending = false
+  // Failed attempts stay with their owner. A published replacement can survive a takeover.
+  let pendingDurability
+  let unconfirmedState
   const { warn } = rt
 
   const diagnosticLabel = value => headOf(String(value).replace(/\s+/g, ' ').trim(), 120)
@@ -213,6 +215,7 @@ export function install(rt) {
       seen = stamp()
       if (error?.code === 'ENOENT') {
         stuck = undefined
+        unconfirmedState = undefined
         return undefined
       }
       stuck = error?.code ?? error?.message ?? String(error)
@@ -220,9 +223,11 @@ export function install(rt) {
       return undefined
     }
     seen = stamp()
+    const bytes = contents.toString('utf8')
+    if (unconfirmedState !== bytes) unconfirmedState = undefined
     let parsed
     try {
-      parsed = JSON.parse(contents.toString('utf8'))
+      parsed = JSON.parse(bytes)
     } catch (error) {
       return setAside(error, contents)
     }
@@ -267,7 +272,7 @@ export function install(rt) {
     for (const key of Object.keys(state)) delete state[key]
     Object.assign(state, JSON.parse(EMPTY), parsed ?? {})
     savedRecovery = recoveryFields(state)
-    durabilityPending = false
+    pendingDurability = undefined
     // The serializer stamps the format of the saved fields.
     state.version = STATE_VERSION
     state.prefs ??= {}
@@ -750,7 +755,8 @@ export function install(rt) {
   // a lost and re-claimed lock ends this host's term (`term`, claimLock). Only a host that holds the team now,
   // in the same epoch and term, may publish an end.
   rt.teamGeneration = () => ({ epoch: lockEpoch, term: lockTerm })
-  rt.sameTeam = gen => gen !== undefined && gen.epoch === lockEpoch && gen.term === lockTerm && rt.holdsLock()
+  const sameGeneration = gen => gen?.epoch === lockEpoch && gen.term === lockTerm
+  rt.sameTeam = gen => sameGeneration(gen) && rt.holdsLock()
   rt.dropAutoMarks = () => {
     let dropped = false
     for (const bot of Object.values(state.bots ?? {})) {
@@ -761,14 +767,22 @@ export function install(rt) {
     }
     return dropped
   }
-  rt.saveCopy = (change, { beforeCommit, afterWrite, durable = false } = {}) => {
+  rt.saveCopy = (change, { beforeCommit, afterPublish, afterWrite, durable = false } = {}) => {
+    const admitted = rt.teamGeneration()
     if (missingTeamHeld()) return Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`))
     if (stopped || !writable()) return Promise.reject(new Error('This host cannot save the Bot team.'))
     refreshShellHolds(state.bots)
     indexSessions()
     rt.sweepAuto?.()
-    if (afterWrite !== undefined) {
+    if (afterWrite !== undefined || afterPublish !== undefined) {
       let revision
+      const applyCopy = callback => {
+        state.revision = state.autoStamp = revision
+        state.version = STATE_VERSION
+        state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
+        callback()
+        refreshShellHolds(state.bots)
+      }
       return writeSnapshot(() => {
         const copy = credentials.clone(state)
         change(copy)
@@ -781,15 +795,14 @@ export function install(rt) {
       }, {
         required: true,
         durable,
+        admitted,
         epoch: lockEpoch,
         beforeCommit,
-        afterWrite: () => {
-          state.revision = state.autoStamp = revision
-          state.version = STATE_VERSION
-          state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
-          afterWrite()
-          refreshShellHolds(state.bots)
-        },
+        afterPublish: afterPublish && (current => {
+          if (current) applyCopy(() => afterPublish(true))
+          else afterPublish(false)
+        }),
+        afterWrite: afterWrite && (() => applyCopy(afterWrite)),
       })
     }
     state.revision += 1
@@ -808,13 +821,14 @@ export function install(rt) {
       else if (useLiveConnectors) delete copy.connectors
       if (copy.revision < state.revision) copy.revision = copy.autoStamp = state.revision + 1
       return copy
-    }, { required: true, durable, epoch: lockEpoch, afterWrite: () => {
+    }, { required: true, durable, admitted, epoch: lockEpoch, afterWrite: () => {
       if (copy.revision > state.revision) state.revision = state.autoStamp = copy.revision
     } })
   }
 
   const save = ({ required = false, durable = false, copy, enableNativeTools, nativeToolsAgent } = {}) => {
     if (copy !== undefined) return rt.saveCopy(copy.change, { durable, ...copy })
+    const admitted = durable ? rt.teamGeneration() : undefined
     if (stopped) return required ? Promise.reject(new Error('The Bot team cannot be saved after this host stopped.')) : writing
     refreshShellHolds(state.bots)
     indexSessions()
@@ -837,11 +851,11 @@ export function install(rt) {
       const enabled = { ...bot, nativeTools: true, nativeToolsAgent }
       delete enabled.nativeToolsKept
       return { ...state, bots: { ...state.bots, [bot.id]: enabled } }
-    }, { required, durable })
+    }, { required, durable, admitted })
   }
 
   let warnedCredentialSave = false
-  const writeSnapshot = (snapshotOf, { required = false, durable = false, epoch: copyEpoch, beforeCommit, afterWrite } = {}) => {
+  const writeSnapshot = (snapshotOf, { required = false, durable = false, admitted, epoch: copyEpoch, beforeCommit, afterPublish, afterWrite } = {}) => {
     const run = writing.then(async () => {
       // An adopt ahead of this save may have made the team read-only.
       if (missingTeamHeld()) {
@@ -855,18 +869,19 @@ export function install(rt) {
       }
       const epoch = copyEpoch ?? lockEpoch
       // Ordinary saves use the adopted state, not a snapshot of the replaced team.
+      const generation = admitted ?? rt.teamGeneration()
       const temp = `${statePath}.${process.pid}.tmp`
-      durabilityPending ||= durable
+      let flush = durable
       try {
+        if (durable && sameGeneration(generation)) pendingDurability = generation
         await mkdir(home, { recursive: true })
         const ensureLock = () => {
-          if (lockBroken) return
-          const owned = lock.owns()
-          const current = stamp()
+          const owned = lockBroken || lock.owns()
+          const current = lockBroken ? '' : stamp()
           // An outside edit is adopted instead of overwritten; deletion can be saved again.
           const changed = owned && current !== '' && current !== seen
           if (changed) void adoptAfterReclaim().catch(() => {})
-          if (!owned || changed || lockEpoch !== epoch) {
+          if (!owned || changed || lockEpoch !== epoch || (flush && !sameGeneration(generation))) {
             const error = new Error(changed ? 'ds-bot: the Bot team file changed under this host\'s lock' : 'ds-bot lost the state lock to another dsh')
             error.code = 'ELOCKLOST'
             rt.dropAllGrants?.()
@@ -876,7 +891,11 @@ export function install(rt) {
         ensureLock()
         const data = snapshotOf()
         const recovery = recoveryFields(data)
-        durabilityPending ||= recovery !== savedRecovery
+        flush ||= recovery !== savedRecovery || unconfirmedState !== undefined || sameGeneration(pendingDurability)
+        if (flush) {
+          ensureLock()
+          pendingDurability = generation
+        }
         const snapshot = credentials.encode(data)
         if (snapshot.refused) throw refusal(KEY_ERROR)
         if (snapshot.pending && !warnedCredentialSave) {
@@ -884,7 +903,7 @@ export function install(rt) {
           warn('ds-bot: %s', KEY_ERROR)
         }
         await writeFile(temp, snapshot.bytes, 'utf8')
-        if (durabilityPending) await syncFile(temp)
+        if (flush) await syncFile(temp)
         const ensureKey = () => {
           if (!snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
         }
@@ -903,12 +922,17 @@ export function install(rt) {
         // Even if the directory sync fails, this rename was ours. A later save
         // can retry durability without mistaking the new stamp for an outside edit.
         seen = stamp()
-        if (durabilityPending) {
+        savedRecovery = recovery
+        if (flush) {
+          pendingDurability = undefined
+          unconfirmedState = snapshot.bytes
+        }
+        afterPublish?.(lockEpoch === epoch)
+        if (flush) {
           await syncDirectory(dirname(statePath))
+          unconfirmedState = undefined
           ensureLock()
         }
-        savedRecovery = recovery
-        durabilityPending = false
         snapshot.commit()
         afterWrite?.()
         // The file now holds this team, a fresh one after a corrupt file included.

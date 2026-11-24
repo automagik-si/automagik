@@ -8,6 +8,7 @@ import { test } from 'node:test'
 import { install as installHandoffs } from '../src/host/handoffs.js'
 import { install as installResume } from '../src/host/resume.js'
 import { install as installReview } from '../src/host/review-mark.js'
+import { install as installRoster } from '../src/host/roster.js'
 import { install as installStore } from '../src/host/store.js'
 import { fakeContext } from './fake-ctx.js'
 
@@ -128,4 +129,192 @@ test('review state and run notes flush in order while an ordinary save only rena
   rt.noteApproval('solver', undefined)
   assert.equal(await noteWrite(), true)
   assert.deepEqual(calls, [...stateFlush, ...noteFlush], 'the next write retries durability after failure')
+})
+
+const posix = { skip: process.platform === 'win32' && 'observes POSIX replacements and directory syncs' }
+
+async function recoveryHost(t, setup) {
+  const home = fs.mkdtempSync(join(tmpdir(), 'omni-recovery-durability-'))
+  const statePath = join(home, 'state.json')
+  const ctx = fakeContext()
+  const rt = { ctx, home, statePath, live: new Map(), warn() {} }
+  const write = (name, data) => fs.writeFileSync(join(home, name), JSON.stringify(data))
+  const read = name => JSON.parse(fs.readFileSync(join(home, name), 'utf8'))
+  write('state.json', {
+    version: 2,
+    workspaceId: 'team',
+    mainBotIds: ['solver'],
+    bots: {
+      solver: { id: 'solver', name: 'Solver', role: 'Solver', sessionId: 'solver' },
+      reviewer: { id: 'reviewer', name: 'Reviewer', sessionId: 'reviewer' },
+    },
+  })
+  installStore(rt)
+  const save = rt.save
+  let stateWrite
+  rt.save = (...args) => (stateWrite = save(...args))
+  const hold = rt.holdLockUntil
+  let noteWrite
+  rt.holdLockUntil = (pending) => { noteWrite = pending; hold(pending) }
+  setup(rt)
+  t.after(async () => {
+    await ctx.dispose()
+    fs.rmSync(home, { recursive: true, force: true })
+  })
+  await rt.load()
+  return { rt, home, write, read, stateWrite: () => stateWrite, noteWrite: () => noteWrite() }
+}
+
+function watchSyncs(t, home, onSync) {
+  const calls = []
+  const open = fsp.open
+  const spy = t.mock.method(fsp, 'open', async (path, ...args) => {
+    const handle = await open(path, ...args)
+    const kind = path === home ? 'directory' : path.startsWith(join(home, '.inflight-')) ? 'inflight'
+      : path.startsWith(join(home, 'state.json.')) ? 'state' : undefined
+    if (kind !== undefined) {
+      const sync = handle.sync.bind(handle)
+      handle.sync = () => {
+        calls.push(kind)
+        onSync?.(kind)
+        return sync()
+      }
+    }
+    return handle
+  })
+  syncBuiltinESMExports()
+  t.after(() => { spy.mock.restore(); syncBuiltinESMExports() })
+  return calls
+}
+
+test('a published Solver copy keeps its Session when directory sync fails', posix, async (t) => {
+  const archived = []
+  const { rt, home, read } = await recoveryHost(t, (rt) => {
+    Object.assign(rt.ctx, {
+      workspaceRegistry: { get: () => true, archiveSession: async id => { archived.push(id) } },
+      sessionController: { create: async () => ({ sessionId: 'copy' }) },
+      sessionTitle: { rename: async () => {} },
+    })
+    Object.assign(rt, {
+      catalog: async () => [],
+      teamFolder: () => undefined,
+      defaultBotModel: async () => undefined,
+      resolveAgent: async id => ({ session: { id } }),
+      applyPermission: async () => {},
+      withSolverCopy: (_, create) => create({ pin: { id: 'solver', source: 'package' }, check() {} }),
+    })
+    installRoster(rt)
+    installReview(rt)
+  })
+  rt.botOf('solver').waitingRole = { id: 'solver' }
+  rt.botOf('solver').instructions = 'Custom instructions'
+  let fail = true
+  const calls = watchSyncs(t, home, (kind) => {
+    if (kind === 'directory' && fail) throw new Error('injected directory sync failure')
+  })
+  let acknowledged = 0
+  rt.onSaved(() => acknowledged++)
+  await assert.rejects(rt.duplicateBot('solver'), /injected directory sync failure/)
+  assert.equal(acknowledged, 0)
+  assert.equal(read('state.json').bots.copy.id, 'copy', 'rename already published the copy')
+  assert.deepEqual(archived, [], 'a published copy retains its Session')
+  assert.equal(rt.selfOf('copy'), 'copy', 'the live roster indexes the published copy')
+  fail = false
+  assert.equal(await rt.save(), true)
+  assert.deepEqual(calls, ['state', 'directory', 'state', 'directory'])
+  assert.equal(acknowledged, 1)
+  assert.equal(read('state.json').bots.copy.id, 'copy')
+})
+
+test('durable work closure is refused across adoption and lock terms', posix, async (t) => {
+  const { rt, home, read, write, stateWrite } = await recoveryHost(t, installHandoffs)
+  const results = join(home, 'handoff-results')
+  fs.mkdirSync(results)
+  for (const name of ['shared.txt', 'old.txt']) fs.writeFileSync(join(results, name), name)
+  rt.state.works.work = { open: [], results: [{ file: 'shared.txt' }, { file: 'old.txt' }] }
+  await rt.save()
+  const outside = read('state.json')
+  outside.prefs.marker = 'adopted'
+  outside.works.work.results.pop()
+  write('state.json', outside)
+  fs.rmSync(join(home, 'state.lock'))
+
+  rt.closeWork('work', 'Solver', 'finished')
+  const closed = stateWrite().then(value => value, error => error.code)
+  const ordinary = rt.save()
+  assert.equal(await closed, 'ELOCKLOST')
+  assert.equal(await ordinary, true)
+  assert.equal(read('state.json').prefs.marker, 'adopted')
+  assert.deepEqual(read('state.json').works.work.results, [{ file: 'shared.txt' }])
+  assert.deepEqual(fs.readdirSync(results).sort(), ['old.txt', 'shared.txt'])
+
+  const { epoch, term } = rt.teamGeneration()
+  fs.rmSync(join(home, 'state.lock'))
+  await assert.rejects(rt.save({ durable: true }), { code: 'ELOCKLOST' })
+  assert.equal(rt.teamGeneration().epoch, epoch)
+  assert.ok(rt.teamGeneration().term > term)
+  assert.equal(await rt.save({ durable: true }), true)
+})
+
+test('only pending durability for the adopted checkpoint survives takeover', posix, async (t) => {
+  const { rt, home, read, write, stateWrite, noteWrite } = await recoveryHost(t, rt => {
+    installReview(rt)
+    installResume(rt)
+  })
+  const foreignLock = () => write('state.lock', { host: 'other-host', pid: 1, token: 'other-owner' })
+  const takeOver = async () => {
+    foreignLock()
+    await rt.refresh()
+    fs.rmSync(join(home, 'state.lock'))
+    await rt.refresh()
+    await rt.reloadDeliveryNotes(() => {})
+  }
+  let failDirectory = true
+  let fenceNote = false
+  const calls = watchSyncs(t, home, (kind) => {
+    if (kind === 'directory' && failDirectory) throw new Error('injected directory sync failure')
+    if (kind === 'inflight' && fenceNote) foreignLock()
+  })
+  const failPublished = async (id, turn) => {
+    rt.reviewRequest('solver')
+    await assert.rejects(stateWrite(), /injected directory sync failure/)
+    for (const listener of rt.ctx.listeners.get('session/event')) {
+      listener({ id }, { type: 'turn/start', time: turn, data: { turn } })
+    }
+    assert.equal(await noteWrite(), false)
+    assert.equal(read('inflight.json').turns[id].since, turn)
+  }
+  const saveOrdinary = async () => {
+    assert.equal(await rt.save(), true)
+    rt.noteApproval('solver', undefined)
+    assert.equal(await noteWrite(), true)
+    return calls.splice(0)
+  }
+
+  await failPublished('solver', 1)
+  await takeOver()
+  failDirectory = false
+  calls.length = 0
+  const same = await saveOrdinary()
+
+  failDirectory = true
+  await failPublished('reviewer', 2)
+  const edited = read('state.json')
+  edited.prefs.marker = 'another checkpoint'
+  write('state.json', edited)
+  failDirectory = false
+  fenceNote = true
+  rt.noteApproval('reviewer', { tool: 'fixture' })
+  assert.equal(await noteWrite(), false)
+  assert.equal(read('inflight.json').turns.reviewer.approval, undefined, 'the fenced note never renamed')
+  const outside = read('inflight.json')
+  outside.turns.solver.since = 3
+  write('inflight.json', outside)
+  await takeOver()
+  fenceNote = false
+  calls.length = 0
+  const superseded = await saveOrdinary()
+  assert.equal(read('state.json').prefs.marker, 'another checkpoint')
+  assert.equal(read('inflight.json').turns.solver.since, 3)
+  assert.deepEqual({ same, superseded }, { same: ['state', 'directory', 'inflight', 'directory'], superseded: [] })
 })

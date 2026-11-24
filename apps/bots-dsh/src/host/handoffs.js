@@ -72,6 +72,14 @@ export function install(rt) {
     } catch {}
   }
 
+  const saveBeforeDroppingResults = (results) => {
+    const generation = rt.teamGeneration?.()
+    void rt.save({ durable: true }).then(written => {
+      if (written !== true || rt.sameTeam?.(generation) === false) return
+      for (const result of results) dropResult(result.file)
+    }).catch(() => {})
+  }
+
   // What came back for a work: the whole result if it is still to be found, else the
   // start of it. A result that a restart cut, or whose file is gone, is reported as
   // such and not passed on as if it were whole.
@@ -123,10 +131,7 @@ export function install(rt) {
     for (const result of work.results ?? []) whole.delete(result.id)
     // Old state can still name these files until the replacement state lands.
     // A failed save must leave them available to the next host.
-    void rt.save({ durable: true }).then(written => {
-      if (written !== true) return
-      for (const result of work.results ?? []) dropResult(result.file)
-    }).catch(() => {})
+    saveBeforeDroppingResults(work.results ?? [])
     return above === undefined ? undefined : work.parent
   }
   // The subagent run a settlement notice names. The notice carries only the
@@ -190,10 +195,7 @@ export function install(rt) {
     const above = works()[parent]
     if (above !== undefined) above.open = above.open.filter(other => other !== id)
     for (const result of work.results ?? []) whole.delete(result.id)
-    void rt.save({ durable: true }).then(written => {
-      if (written !== true) return
-      for (const result of work.results ?? []) dropResult(result.file)
-    }).catch(() => {})
+    saveBeforeDroppingResults(work.results ?? [])
   }
 
   function taken(workId, id) {
