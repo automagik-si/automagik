@@ -144,7 +144,7 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   - `reviewTrack` gains `planVerdictAt`, `openedBy` (`'bot'`) and `openerId`. Another Bot's
     request after the plan verdict opens a new track that needs its own verdict; a message that
     asks no reply, a follow-up from the Bot that opened the track, and the reviewer's own message
-    only date it.
+    leave the request's track unchanged.
   - While it is on, only the person moves the Bot to another model.
   - A gone reviewer keeps work refused until the person turns the guard off.
   - `state.reviewGuardMigrated` (`true` or absent): a top-level team flag; while it is `true` the
