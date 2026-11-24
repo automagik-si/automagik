@@ -34,6 +34,13 @@ export const SUBSCRIPTION_ROUTES = Object.freeze(['grok', 'antigravity'])
 // claude-code: those are the Claude Code plugin's.
 const ACP_HARNESS = Object.freeze({ claude: 'claude-code', codex: 'codex', gemini: 'gemini' })
 
+// The ACP agents the owner names, by provider id: the model menu's names for them, and the
+// host's when it names one in a sentence. A catalog row's own brand (`providerName`) wins.
+export const ACP_NAME = Object.freeze({
+  'acp-claude': 'Claude Code', 'acp-codex': 'Codex', 'acp-hermes': 'Hermes',
+  'acp-antigravity': 'Antigravity', 'acp-omp': 'omp',
+})
+
 // The providers pi-ai connects, from DSH's configurable-provider directory: what a caller
 // passes as `piAi` to routeOf.
 export const piAiRoutes = directory => new Set([

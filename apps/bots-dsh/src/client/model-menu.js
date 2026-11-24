@@ -8,7 +8,7 @@ import { SPRING_POP, SPRING_SHAPE, spring, stepMenuFocus, useLinger, useViewport
 import { hostText, t } from './i18n.js'
 import { HostModelMenu } from './host-model-menu.js'
 import { AgentMark, DshMarkIcon, HerdrMarkIcon } from './marks.js'
-import { commandCapableAgent, crossesHarness, routeOf, selectorRouteOf } from '../shared/routes.js'
+import { ACP_NAME, commandCapableAgent, crossesHarness, routeOf, selectorRouteOf } from '../shared/routes.js'
 import { OWN_TOOLS_MENU_HINT, OWN_TOOLS_MODEL_TEXT, ownToolsRefused } from '../shared/own-tools.js'
 import { HermesMark, HERMES_MARK_CSS } from './hermes-mark.js'
 import { HermesRemoteConnect } from './hermes-remote.js'
@@ -220,10 +220,7 @@ const routeDetail = (route) => {
 // The ACP agents in the order the owner names them; any agent acp-dsh adds later follows,
 // alphabetical, without a change here.
 const ACP_ORDER = Object.freeze(['acp-claude', 'acp-codex', 'acp-hermes', 'acp-antigravity', 'acp-omp'])
-export const ACP_NAME = Object.freeze({
-  'acp-claude': 'Claude Code', 'acp-codex': 'Codex', 'acp-hermes': 'Hermes',
-  'acp-antigravity': 'Antigravity', 'acp-omp': 'omp',
-})
+export { ACP_NAME }
 const providerOf = model => model?.provider ?? String(model?.ref ?? '').split('/')[0]
 const routeOfProvider = provider => selectorRouteOf(provider)
 

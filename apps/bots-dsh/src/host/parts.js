@@ -29,7 +29,7 @@ import { switchFailure } from './model-state.js'
 import { turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
 import { routeAllowed } from '../shared/route-policy.js'
-import { commandCapableAgent, crossesHarness, routeOfRef, shellHoldText } from '../shared/routes.js'
+import { ACP_NAME, commandCapableAgent, crossesHarness, routeOfRef, shellHoldText } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
@@ -2904,7 +2904,11 @@ export function install(rt) {
     checkCurrent()
     if (said) {
       const { route, provider } = routeOfRef(target)
-      const destination = route === 'acp' && routeOfRef(current).route === 'acp' ? provider
+      // Inside ACP the destination is the agent, named as the model menu names it: the
+      // published catalog's brand, else the name of an agent the owner names. Never its id.
+      const agentName = () => rt.cachedCatalog?.()?.find(entry => entry.provider === provider)?.providerName
+        ?? ACP_NAME[provider] ?? provider
+      const destination = route === 'acp' && routeOfRef(current).route === 'acp' ? agentName()
         : { native: 'Native', acp: 'ACP', herdr: 'Herdr', 'hermes-remote': 'Remote Hermes' }[route]
       note('refused', 'needs-new-conversation')
       let goal = ' (pause an active goal first)'
