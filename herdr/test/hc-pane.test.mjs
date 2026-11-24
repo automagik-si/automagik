@@ -504,6 +504,10 @@ function writeProxyRoster(s, hcProxy, project = s.project) {
 
 async function macProxyRow(s, bot = macProxyBot, bindings = new Map(), project = s.project) {
   const args = { bots: [bot], project, bindings, env: s.env };
+  if (process.platform === "darwin") {
+    const [row] = await doctorBotProxies(args);
+    return row;
+  }
   if (process.platform === "linux") {
     assert.deepEqual(await doctorBotProxies({ ...args, platform: "linux" }), await doctorBotProxies(args));
   }
@@ -640,8 +644,9 @@ async function darwinDoctor(s, cwd, preload, args = []) {
   const env = Object.fromEntries(Object.entries(s.env).filter(([key]) => !key.startsWith("HC_")));
   env.XDG_CONFIG_HOME = join(s.home, ".config");
   const cli = join(dirname(HELPER), "bin", "automagik-herdr.mjs");
+  const pre = process.platform === "darwin" ? [] : ["--import", preload];
   return new Promise((resolve, reject) => {
-    execFile(process.execPath, ["--import", preload, cli, "dsh-tui", "doctor", "--project", s.project, ...args],
+    execFile(process.execPath, [...pre, cli, "dsh-tui", "doctor", "--project", s.project, ...args],
       { cwd, env }, (error, stdout, stderr) => {
         const status = error ? error.code : 0;
         if (!Number.isInteger(status)) return reject(error);
