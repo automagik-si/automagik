@@ -32,6 +32,19 @@ test('every rule of the method is in both forms', () => {
   }
 })
 
+test('the review is mandatory: no delivery without the verdict, and an unreachable reviewer is said as BLOCKED-review', () => {
+  for (const text of [
+    solverInstructions({ reviewer: 'Ada reviewer', dedicated: true }),
+    solverInstructions({ reviewer: 'Ben', dedicated: false }),
+    solverInstructions({ reviewer: null }),
+  ]) {
+    assert.ok(text.includes("The review is mandatory: never deliver without the reviewer's verdict, SHIP, FIX-FIRST or BLOCKED, with evidence"))
+    assert.ok(text.includes('never skip a review point or deliver before its verdict, however small the task.'))
+    assert.ok(text.includes('If the reviewer cannot be reached and no fresh-session review can run, the delivery says so explicitly, marked BLOCKED-review, never silently.'))
+    assert.ok(text.includes("10. Deliver: one message with what was done, where it is, each review's verdict,"))
+  }
+})
+
 test('a reviewer Bot gets the review rules at the start of every message, and queued reviews when not dedicated', () => {
   const dedicated = solverInstructions({ reviewer: 'Ada reviewer', dedicated: true })
   assert.ok(dedicated.includes('with message_bot to "Ada reviewer" (reply_to "me").'))
