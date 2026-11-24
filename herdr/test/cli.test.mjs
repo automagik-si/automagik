@@ -8825,6 +8825,90 @@ test("#628 r3 C6 attach grants only after a verified row and agreement on the se
   }
 });
 
+test("#628 D628B-2 linked attach checks the target machine's approved names", (t) => {
+  for (const approval of ["conflict", "agrees", "absent", "blocked"]) {
+    const s = scene(t, { terminals: [term("vm/t8", { argv: ["codex"], app: "codex" })] });
+    const working = grantRoster();
+    s.seed(working);
+    approveGrantFixture(s);
+    const remote = { HOME: join(s.root, "vm"), XDG_DATA_HOME: join(s.root, "vm/data") };
+    mkdirSync(remote.HOME);
+    if (approval !== "absent") {
+      const approved = structuredClone(working);
+      if (approval === "conflict") approved.bots.find((b) => b.id === ID.dev).name = "Previous Dev";
+      s.seed(approved);
+      const { path } = approveProject({ project: s.project, env: remote, approvedBy: "fixture" });
+      if (approval === "blocked") {
+        renameSync(dirname(path), `${dirname(path)}-backup`);
+        writeFileSync(dirname(path), "not a directory");
+      }
+      s.seed(working);
+    }
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(),
+      machines: [{ name: "vm", id: "remote-core", state: "connected", home: remote.HOME, env: remote }] }));
+    const r = s.cli(["attach", "Dev", "vm/t8", "--machine", "vm", "--project", s.project, "--json"]);
+    if (approval === "conflict" || approval === "blocked") {
+      assert.equal(r.code, 1, r.err || r.out);
+      assert.match(r.err, approval === "conflict" ? /approved and working rosters do not agree on "Dev"/
+        : /cannot verify the approved roster/);
+      assert.equal(existsSync(attachFile(s.app)), false);
+      assert.deepEqual(labelCalls(s.calls()), []);
+    } else {
+      assert.equal(r.code, 0, r.err);
+      assert.equal(r.json().terminal, "t8");
+      assert.equal(labelsIn(s)["vm/t8"].bot, ID.dev);
+    }
+  }
+});
+
+test("#628 D628B-3 an unreadable approval refuses attach before binding or labeling", (t) => {
+  for (const damage of ["digest", "mode", "path"]) {
+    const s = scene(t, { terminals: [term("t8", { argv: ["codex"], app: "codex" })] });
+    s.seed(grantRoster());
+    const { path, record } = approveGrantFixture(s);
+    if (damage === "digest") writeFileSync(path, recordText({ ...record, sha256: "invalid" }));
+    if (damage === "mode") chmodSync(path, 0o644);
+    if (damage === "path") {
+      renameSync(dirname(path), `${dirname(path)}-backup`);
+      writeFileSync(dirname(path), "not a directory");
+    }
+    const r = s.cli(["attach", damage === "mode" ? ID.dev : "Dev", "t8", "--json"]);
+    assert.equal(r.code, 1, r.err || r.out);
+    assert.match(r.err, /cannot verify the approved roster/);
+    assert.equal(existsSync(attachFile(s.app)), false);
+    assert.deepEqual(labelCalls(s.calls()), []);
+  }
+});
+
+test("#628 D628B-4 a late name disagreement reports the committed move and stops labels", (t) => {
+  for (const json of [true, false]) {
+    const s = scene(t, { terminals: [term("t8", { bot: ID.dev, argv: ["codex"], app: "codex" }),
+      term("t9", { argv: ["codex"], app: "codex", created: 9 })] });
+    s.seed(grantRoster());
+    const { path, record } = approveGrantFixture(s);
+    const changed = grantRoster();
+    changed.bots.find((b) => b.id === ID.dev).name = "Previous Dev";
+    observeGrant(s, { terminal: "t9", replace: { path, text: recordText(recordFor({ ...record, roster: JSON.stringify(changed) })) } });
+    const r = s.cli(["attach", "Dev", "t9", "--move", ...(json ? ["--json"] : [])]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /approved and working rosters do not agree on "Dev"/);
+    assert.ok(r.out.trim(), "the refusal prints the committed move and pending labels");
+    if (json) {
+      const result = r.json();
+      assert.equal(result.partial, true);
+      assert.deepEqual(result.movedFrom, ["t8"]);
+      assert.deepEqual(result.pending, [{ terminal: "t9", words: [`bot=${ID.dev}`], action: "set-bot",
+        reason: `The approved and working rosters do not agree on "Dev" for ${ID.dev}.`,
+        core: "fakecore0000", created_ms: 9, bot: null }]);
+    } else {
+      assert.match(r.out, /saved in the ledger; labels pending: t9 \(set-bot, core fakecore0000, created_ms 9, bot=\) bot=b-cccccccccc/);
+    }
+    assert.equal(foldRows(attachOf(s)).byBot.get(ID.dev)?.terminal, "t9");
+    assert.deepEqual(labelCalls(s.calls()), [["label", "t8", "bot="]]);
+    assert.deepEqual(rowsOf_(s, "session"), []);
+  }
+});
+
 const proxyRefusal = "hc-proxy: terminal.label: only the lead or the pack may change bot";
 const proxyEnvelope = JSON.stringify({ error: { kind: "forbidden", message: proxyRefusal } });
 
@@ -9038,6 +9122,26 @@ test("#628 r3 C11 import adds no grant even for an approved existing bot", (t) =
   assert.equal(refused.json().stopped.terminal, "t8");
   assert.equal(foldRows(attachOf(disagrees)).byBot.has(ID.dev), false);
   assertNoNamedGrant(disagrees, approved, "t8");
+});
+
+test("#628 D628B-1 import verifies a pane name even when it equals the bot id", (t) => {
+  const approved = { version: 1, categories: [], bots: [
+    bot(ID.main, "main", { name: "Genie" }),
+    bot(ID.cap, "member", { name: "web-cap", rank: "captain" }),
+    bot(ID.dev, "member", { name: "Previous Reviewer", lead: ID.cap, rank: "reviewer" }),
+    outsideCaller,
+  ] };
+  const s = importScene(t, [term("t1", { bot: ID.main }),
+    seat("t7", "web-cap", "web", { labels: { role: "captain" } }), seat("t8", ID.dev, "web")], approved);
+  approveGrantFixture(s);
+  const working = structuredClone(approved);
+  working.bots.find((b) => b.id === ID.dev).name = ID.dev;
+  s.seed(working);
+  const r = s.cli(["import", "--from-hc", "--apply", "--json"]);
+  assert.equal(r.code, 1, r.err || r.out);
+  assert.equal(r.json().stopped.terminal, "t8");
+  assert.equal(foldRows(attachOf(s)).byBot.has(ID.dev), false);
+  assertNoNamedGrant(s, approved, "t8");
 });
 
 test("#628 r3 C12 import stops after the first partial attach", (t) => {

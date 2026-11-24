@@ -89,8 +89,8 @@ import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
 import { APPROVAL_REVIEW, approvalProjectWord, approvedGrant, approvedProxyEnabled, approvedProxyState, approvedSettingsDir,
-  approvedWorkerHome, canonicalProject, commitApproval, escapeForTerminal, parseApprovedRecord, previewApproval, proxyStateFor, readApprovedRecord,
-  shellWord } from "../approved.js";
+  approvedWorkerHome, canonicalProject, commitApproval, escapeForTerminal, MissingApprovedRecord, parseApprovedRecord,
+  previewApproval, proxyStateFor, readApprovedRecord, shellWord } from "../approved.js";
 import { hooksNotice } from "../migrateHooks.mjs";
 import { SPACE_LABEL, plan as tidyPlan, planText } from "../tidy.js";
 import { fixNonVisual, readState, spacesOf } from "./state.mjs";
@@ -1016,7 +1016,10 @@ export function unlistProjects(keys, dir = appHome()) {
 export function findBot(file, ref) {
   if (!ref) throw new CliError("Name a bot (its id or its name).", 2);
   const byId = file.bots.find((b) => b.id === ref);
-  if (byId) return byId;
+  return byId ?? findBotByName(file, ref);
+}
+
+function findBotByName(file, ref) {
   for (const same of [(b) => b.name === ref, (b) => b.name.toLowerCase() === String(ref).toLowerCase()]) {
     const hits = file.bots.filter(same);
     if (hits.length === 1) return hits[0];
@@ -3379,10 +3382,8 @@ function proxyEnabled(state, platform = process.platform, warn = reportProxyWarn
   catch (e) { throw new CliError(e.message); }
 }
 
-// Read approval on the target, never from this computer's data root. Only Linux launches
-// use the switch, so a linked non-Linux launch needs no approval probe.
-async function proxyStateOn(project, bot) {
-  const { key, machine } = project;
+/** Read the approved roster on the target. An absent record returns null. */
+async function readApprovedOn({ key, machine }) {
   let path;
   try {
     const location = await remoteIo.exec("sh", ["-c",
@@ -3398,21 +3399,27 @@ async function proxyStateOn(project, bot) {
     // Same canonical key and suffix as approved.js recordFileOf; fixture test pins both.
     path = `${root}/${hash}.json`;
     const mode = await remoteIo.exec("sh", ["-c",
-      'if [ ! -e "$1" ] && [ ! -L "$1" ]; then exit 3; fi; '
+      'if ! entry=$(LC_ALL=C ls -d -- "$1" 2>&1); then '
+      + 'case "$entry" in *": No such file or directory") exit 3;; *) exit 1;; esac; fi; '
       + '[ -f "$1" ] && [ ! -L "$1" ] || exit 1; stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1"',
       "sh", path], machine, { timeout: AGENT_WAIT_S });
-    if (mode.code === 3) return proxyStateFor(bot);
+    if (mode.code === 3) return null;
     if (mode.code !== 0 || !/^[0-7]{3,4}\s*$/.test(mode.stdout)
       || (parseInt(mode.stdout, 8) & 0o077) !== 0) {
       throw new Error("the target's approved record is unreadable or not private");
     }
     const text = await readRemoteText(remoteIo, machine, path);
     if (text === null) throw new Error("the target's approved record disappeared");
-    return proxyStateFor(bot, parseApprovedRecord(text, canonical).file);
+    return parseApprovedRecord(text, canonical).file;
   } catch (e) {
-    return proxyStateFor(bot, null,
-      `invalid approved record ${path ?? `for project ${key}`}: ${e?.message ?? e}`);
+    throw new Error(`invalid approved record ${path ?? `for project ${key}`}: ${e?.message ?? e}`);
   }
+}
+
+// Only Linux launches use the switch, so a linked non-Linux launch needs no approval probe.
+async function proxyStateOn(project, bot) {
+  try { return proxyStateFor(bot, await readApprovedOn(project)); }
+  catch (e) { return proxyStateFor(bot, null, e.message); }
 }
 
 async function checkLinkedProxy(project, bot, agent, warn = reportProxyWarning) {
@@ -10299,18 +10306,22 @@ function privilegedSeat(file, id) {
 function importMayRestoreBot(project, bot) {
   if (privilegedSeat(project.file, bot.id)) return false;
   try { return !privilegedSeat(readApprovedRecord({ project: project.key }).file, bot.id); }
-  catch (error) { return error?.code === "ENOENT"; }
+  catch (error) { return error instanceof MissingApprovedRecord; }
 }
 
 /** The bot label itself can confer access from the approved roster. */
-function verifyAttachName(project, bot, name) {
-  if (!name || project.machine) return;
+async function verifyAttachName(project, bot, name) {
   let approved;
-  try { approved = readApprovedRecord({ project: project.key }).file; }
-  catch { return; /* no usable approval to confer access */ }
-  if (!privilegedSeat(approved, bot.id)) return;
   try {
-    if (findBot(approved, name).id === bot.id && findBot(loadProject(project.key).file, name).id === bot.id) return;
+    approved = project.machine ? await readApprovedOn(project) : readApprovedRecord({ project: project.key }).file;
+  } catch (e) {
+    if (e instanceof MissingApprovedRecord) return;
+    throw new CliError(`Attach cannot verify the approved roster: ${e.message}`);
+  }
+  if (!name || !approved || !privilegedSeat(approved, bot.id)) return;
+  const working = project.machine ? await loadRemoteProject(project.key, project.machine) : loadProject(project.key);
+  try {
+    if (findBotByName(approved, name).id === bot.id && findBotByName(working.file, name).id === bot.id) return;
   } catch { /* missing or ambiguous name */ }
   throw new CliError(`The approved and working rosters do not agree on "${name}" for ${bot.id}.`);
 }
@@ -10325,6 +10336,8 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
   const selectedName = importTarget ? importTarget.name : ref === bot.id ? null : ref;
   const grant = grantAllowed && !at.machine ? seatGrant(project, bot, ref) : null;
   if (bot.planned) throw new CliError(`${bot.name} is planned (wave ${bot.planned.wave}); clear "planned" before attaching it.`);
+  // Pane and ledger checks can reconcile old rows, so refuse invalid approval first.
+  await verifyAttachName(project, bot, selectedName);
   await coreId();
   const get = await hcGet(at.address);
   if (importTarget && !sameLivePane(get, importTarget.address, importTarget.created_ms)) {
@@ -10380,7 +10393,7 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
     const rows = mine ? [closingRow(mine.binding, "detach", "attach", "moved")] : [];
     rows.push(attachRow({ event: "attach", bot: bot.id, project: key, terminal: bareId, core: writtenCore, created_ms: get.created_ms,
       machine: at.machine, by: "attach" }));
-    verifyAttachName(project, bot, selectedName);
+    await verifyAttachName(project, bot, selectedName);
     write(rows);
     return { already: false, movedFrom: mine ? addressOf(mine.binding, machines) : null, old: mine?.binding, core: writtenCore };
   });
@@ -10424,13 +10437,20 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
   if (have[BOT_LABEL] !== bot.id && restoreBot) {
     const words = [`${BOT_LABEL}=${bot.id}`];
     const current = await hcGet(address).catch(() => null);
+    let reason;
     if (targetVerified && sameLivePane(current, address, get.created_ms) && current.labels?.[BOT_LABEL] === have[BOT_LABEL]
         && await freshCoreFor(at.machine).catch(() => null) === decided.core) {
-      verifyAttachName(project, bot, selectedName);
-      await label(address, words, identity, "set-bot");
+      const refusal = await verifyAttachName(project, bot, selectedName).then(() => null, asCliError);
+      if (refusal) {
+        reason = refusal.message;
+        warnings.push(reason);
+      } else await label(address, words, identity, "set-bot");
     } else {
+      reason = "the attach target could not be verified";
+    }
+    if (reason) {
       targetVerified = false;
-      pending.push({ terminal: address, words, reason: "the attach target could not be verified", action: "set-bot", ...identity });
+      pending.push({ terminal: address, words, reason, action: "set-bot", ...identity });
     }
   }
   const lead = leadIdOf(file, bot.id);

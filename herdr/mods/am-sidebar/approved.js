@@ -105,12 +105,13 @@ export function recordFor({ project, roster, approvedAt, approvedBy }) {
 /** A record as its file bytes: two-space JSON and a final newline. */
 export const recordText = (record) => `${JSON.stringify(record, null, 2)}\n`;
 
-function missingRecord(project) {
-  const error = new Error(`no approved roster for ${project}: run `
-    + `\`am proxy approve --project ${project}\` from an unsandboxed terminal, `
-    + `then restart the pane; ${APPROVAL_REVIEW}`);
-  error.code = "ENOENT";
-  return error;
+export class MissingApprovedRecord extends Error {
+  constructor(project) {
+    super(`no approved roster for ${project}: run `
+      + `\`am proxy approve --project ${project}\` from an unsandboxed terminal, `
+      + `then restart the pane; ${APPROVAL_REVIEW}`);
+    this.code = "ENOENT";
+  }
 }
 
 /** The checked record in `text` for `project`; throws when it is corrupt or for another project. */
@@ -145,15 +146,15 @@ function checkedRecord(text, project) {
 
 /**
  * Read and check one project's approved record. Returns { record, file, path, text } where
- * `file` is the parsed roster. A missing record throws with code ENOENT; a corrupt one throws
- * without it, so the proxy and approve can tell them apart.
+ * `file` is the parsed roster. An absent record throws MissingApprovedRecord (ENOENT).
  */
 export function readApprovedRecord({ project, env = process.env, path = undefined, exactMode = false }) {
   const main = canonicalProject(project);
   const file = path ?? recordFileOf(main, env);
   let text;
   try {
-    const info = lstatSync(file);
+    const info = lstatSync(file, { throwIfNoEntry: false });
+    if (!info) throw new MissingApprovedRecord(main);
     if (!info.isFile()) throw new Error(`the approved record ${file} is not a regular file`);
     if ((info.mode & 0o077) !== 0 || (exactMode && (info.mode & 0o7777) !== 0o600)) {
       throw new Error(`the approved record ${file} is not 0600; run `
@@ -161,7 +162,6 @@ export function readApprovedRecord({ project, env = process.env, path = undefine
     }
     text = readFileSync(file, "utf8");
   } catch (e) {
-    if (e?.code === "ENOENT" || e?.code === "ENOTDIR") throw missingRecord(main);
     if (e?.code === "EACCES")
       throw new Error(`cannot read the approved record ${file}: permission denied`);
     throw e;
