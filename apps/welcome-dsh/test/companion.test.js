@@ -361,6 +361,10 @@ test('Omni joining the team adds the Omni Bot once, in its own project, with its
 })
 
 test('the Welcome team step reports the same look refusal as companion save', async () => {
+  const bots = readFileSync(new URL('../../bots-dsh/src/shared/solver-looks.js', import.meta.url), 'utf8')
+  const welcome = readFileSync(new URL('../src/host/companion.js', import.meta.url), 'utf8')
+  assert.equal(bots.match(/^export const SOLVER_WEARS = '(.+)'$/m)[1], welcome.match(/^const SOLVER_LOOK_REFUSAL = '(.+)'$/m)[1])
+
   const team = fakeTeam({ mainName: 'Mochi' })
   const message = 'A Solver wears one of the Solver characters. Choose one of those characters.'
   team.updateBot = async () => { throw Object.assign(new Error(message), { code: 'bot/refused' }) }
