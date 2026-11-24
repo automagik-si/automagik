@@ -23655,8 +23655,9 @@ function liveSessionIds(view) {
 }
 function unarchivedSessionIds(sessions, workspaces) {
   const ids = /* @__PURE__ */ new Set();
+  if (workspaces === void 0) return ids;
   const archived = workspaces?.archivedSessionIds;
-  if (workspaces?.phase !== "ready" || !Array.isArray(archived)) return ids;
+  if (workspaces?.phase !== "ready" || !Array.isArray(archived) || sessions?.phase !== "ready") return void 0;
   const set2 = new Set(archived);
   for (const id of Object.keys(sessions?.byId ?? {})) if (!set2.has(id)) ids.add(id);
   return ids;
@@ -23680,11 +23681,14 @@ function createDraftSweep({ storage = defaultStorage(), call: call2, openSession
     } catch {
       return;
     }
+    let back;
     try {
-      for (const id of unarchived()) pending.delete(id);
+      back = unarchived();
     } catch {
       return;
     }
+    if (back === void 0) return;
+    for (const id of back) pending.delete(id);
     const found = [];
     for (const id of pending) {
       if (naming.has(id) || id === open) continue;

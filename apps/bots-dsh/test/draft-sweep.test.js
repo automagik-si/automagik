@@ -162,7 +162,7 @@ test('a deleted Session the person took back out of DSH\'s archive keeps its dra
   const { calls, call } = host()
   let open = 'x'
   // DSH's own list: x is back out of the archive, y is still archived.
-  const sessions = { byId: { x: { id: 'x' }, y: { id: 'y' }, z: { id: 'z' } } }
+  const sessions = { phase: 'ready', byId: { x: { id: 'x' }, y: { id: 'y' }, z: { id: 'z' } } }
   const workspaces = { phase: 'ready', archivedSessionIds: ['y'] }
   const drafts = createDraftSweep({ storage, call, openSession: () => open, unarchived: () => unarchivedSessionIds(sessions, workspaces) })
   drafts.note(['x', 'y'])
@@ -177,12 +177,54 @@ test('a deleted Session the person took back out of DSH\'s archive keeps its dra
 })
 
 test('DSH\'s Sessions count as out of the archive only once its archive set arrived', () => {
-  const sessions = { byId: { x: {}, y: {} } }
+  const sessions = { phase: 'ready', byId: { x: {}, y: {} } }
   assert.deepEqual([...unarchivedSessionIds(sessions, { phase: 'ready', archivedSessionIds: ['y'] })], ['x'])
-  assert.deepEqual([...unarchivedSessionIds(sessions, { phase: 'pending', archivedSessionIds: [] })], [])
-  assert.deepEqual([...unarchivedSessionIds(sessions, { phase: 'ready' })], [])
-  assert.deepEqual([...unarchivedSessionIds(sessions, undefined)], [])
-  assert.deepEqual([...unarchivedSessionIds(undefined, { phase: 'ready', archivedSessionIds: [] })], [])
+  assert.equal(unarchivedSessionIds(sessions, { phase: 'pending', archivedSessionIds: [] }), undefined)
+  assert.equal(unarchivedSessionIds(sessions, { phase: 'ready' }), undefined)
+  assert.equal(unarchivedSessionIds(undefined, { phase: 'ready', archivedSessionIds: [] }), undefined)
+  assert.equal(unarchivedSessionIds({ phase: 'pending', byId: {} }, { phase: 'ready', archivedSessionIds: [] }), undefined)
+})
+
+test('an older DSH with no workspaces list counts no Session out of the archive', () => {
+  const back = unarchivedSessionIds({ phase: 'ready', byId: { x: {} } }, undefined)
+  assert.ok(back instanceof Set)
+  assert.equal(back.size, 0)
+})
+
+test('until DSH\'s archive set arrives the page sweeps nothing; then an unarchived id keeps its draft', async () => {
+  const storage = storageOf(['dsh.conversation.x', 'dsh.conversation.y'])
+  const { calls, call } = host()
+  const sessions = { phase: 'ready', byId: { x: { id: 'x' }, y: { id: 'y' } } }
+  let workspaces = { phase: 'pending', archivedSessionIds: [] }
+  const drafts = createDraftSweep({ storage, call, unarchived: () => unarchivedSessionIds(sessions, workspaces) })
+  drafts.note(['x', 'y'])
+  await drafts.run()
+  assert.deepEqual([...storage.items.keys()], ['dsh.conversation.x', 'dsh.conversation.y'])
+  assert.deepEqual(calls, [])
+  // The archive set arrives: x is out of it, y is still archived.
+  workspaces = { phase: 'ready', archivedSessionIds: ['y'] }
+  await drafts.run()
+  assert.equal(storage.getItem('dsh.conversation.x'), '{"draft":"x"}')
+  assert.equal(storage.getItem('dsh.conversation.y'), null)
+  assert.deepEqual(calls, [['drafts-swept', { ids: ['y'] }]])
+  // x is archived again and listed again: now it is swept and named.
+  workspaces = { phase: 'ready', archivedSessionIds: ['x', 'y'] }
+  drafts.note(['x'])
+  await drafts.run()
+  assert.equal(storage.getItem('dsh.conversation.x'), null)
+  assert.deepEqual(calls, [['drafts-swept', { ids: ['y'] }], ['drafts-swept', { ids: ['x'] }]])
+})
+
+test('until DSH\'s Session list arrives the page sweeps nothing, even with the archive set ready', async () => {
+  const storage = storageOf(['dsh.conversation.x'])
+  const { calls, call } = host()
+  const sessions = { phase: 'pending', byId: {} }
+  const workspaces = { phase: 'ready', archivedSessionIds: [] }
+  const drafts = createDraftSweep({ storage, call, unarchived: () => unarchivedSessionIds(sessions, workspaces) })
+  drafts.note(['x'])
+  await drafts.run()
+  assert.equal(storage.getItem('dsh.conversation.x'), '{"draft":"x"}')
+  assert.deepEqual(calls, [])
 })
 
 test('one naming holds at most 200 ids; the rest stay pending for the next run', async () => {

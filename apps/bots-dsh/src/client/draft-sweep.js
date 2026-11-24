@@ -31,11 +31,13 @@ export function liveSessionIds(view) {
 
 // The Sessions DSH's own list holds outside its archive: a deleted Bot's or group's Session
 // the person took back out of the archive is a plain DSH Session again, so its draft stays.
-// Before DSH's archive set has arrived nothing counts, since every Session would look so.
+// An older DSH with no workspaces list has no archive to leave, so none counts. Until DSH's
+// archive set and its Session list have arrived the answer is not known yet (`undefined`).
 export function unarchivedSessionIds(sessions, workspaces) {
   const ids = new Set()
+  if (workspaces === undefined) return ids
   const archived = workspaces?.archivedSessionIds
-  if (workspaces?.phase !== 'ready' || !Array.isArray(archived)) return ids
+  if (workspaces?.phase !== 'ready' || !Array.isArray(archived) || sessions?.phase !== 'ready') return undefined
   const set = new Set(archived)
   for (const id of Object.keys(sessions?.byId ?? {})) if (!set.has(id)) ids.add(id)
   return ids
@@ -46,7 +48,8 @@ export function unarchivedSessionIds(sessions, workspaces) {
 // while it is mounted), and names the ones whose key is really gone, at most NAMING_MAX
 // per call (the rest stay pending for the next run). A pending id DSH shows outside its
 // archive (`unarchived`) leaves pending unswept; a later full view that still lists it
-// notes it again. An id stays pending until this page saw its key gone and the host took
+// notes it again. While `unarchived` is not known yet (`undefined`) nothing is swept, and
+// the next run asks again. An id stays pending until this page saw its key gone and the host took
 // the name, so a chat that closes later is swept then, even when another window cleared
 // the list first. A failed naming waits for the next view.
 export function createDraftSweep({ storage = defaultStorage(), call, openSession = () => undefined, unarchived = () => [] }) {
@@ -62,9 +65,10 @@ export function createDraftSweep({ storage = defaultStorage(), call, openSession
     if (storage == null || waiting || pending.size === 0) return
     let open
     try { open = openSession() } catch { return }
-    try {
-      for (const id of unarchived()) pending.delete(id)
-    } catch { return }
+    let back
+    try { back = unarchived() } catch { return }
+    if (back === undefined) return
+    for (const id of back) pending.delete(id)
     const found = []
     for (const id of pending) {
       if (naming.has(id) || id === open) continue
