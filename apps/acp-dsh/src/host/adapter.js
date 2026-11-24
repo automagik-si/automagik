@@ -1518,7 +1518,8 @@ export class AcpAdapter extends LlmAdapter {
     }
     const stopFiles = () => {
       // Stop and archive can abort the turn after persisting the archive, before the event.
-      if (entry.archived ||= this.isArchived(sessionId)) return
+      entry.archived ||= this.isArchived(sessionId)
+      if (entry.archived) return
       if (entry.fileOwner === undefined || this.sessionFiles.owners.get(sessionId) !== entry.fileOwner) return
       const current = this.live.get(sessionId)
       const starting = this.starting.get(sessionId)
@@ -1824,7 +1825,8 @@ export class AcpAdapter extends LlmAdapter {
           try { return (this.startModels.get(agent) ?? agent.catalog?.ownModel?.()) === undefined } catch { return true }
         }
         const checkArchive = () => {
-          if (entry.archived ||= this.isArchived(sessionId)) throw ARCHIVED
+          entry.archived ||= this.isArchived(sessionId)
+          if (entry.archived) throw ARCHIVED
         }
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
