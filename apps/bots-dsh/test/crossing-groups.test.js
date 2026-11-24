@@ -764,6 +764,45 @@ test('G10 a group part that already answered on the new agent follows the Bot ba
   assert.deepEqual(b.room.segments.b1.map(segment => [segment.sessionId, segment.switchedTo]), [['g1', 'acp-claude/default'], ['s3', 'deepseek/v4']])
 })
 
+// GY-1: the go-back after a restart (MG-8) takes the groups with it as the live one does: a
+// group part already on the new agent follows the Bot back with a handoff of its own.
+test('G10 MG-8 own chat a restart cannot start goes back after three tries: a group already on the new agent follows the Bot back', async t => {
+  const b = bench({ model: 'acp-claude/default', groupRoute: 'acp-claude/default' })
+  t.after(() => b.ctx.dispose())
+  let term = 1
+  b.rt.lockTerm = () => term
+  b.rt.config.now = () => Date.now() - 1000
+  b.rt.config.wakeRetryWindowMs = 600_000
+  // The group part on Claude Code is asked for its note in a turn of its own: no note in time.
+  b.rt.config.crossingNoteTimeoutMs = 20
+  const freshId = await b.rt.createSession()
+  const fresh = b.agents.get(freshId)
+  fresh.inbox.nextTurn.push(message(SOURCE_KIND, '[Handoff · part 2] …', { handoff: true, exchangeId: 'e-bare' }))
+  b.bot.sessionId = freshId
+  b.bot.segments = [{ sessionId: 's1', switchedTo: 'acp-claude/default', archivePending: true }]
+  b.rt.state.switching.s1 = { botId: 'b1', target: 'acp-claude/default', back: { model: 'deepseek/v4', appliedModel: 'deepseek/v4' } }
+  fresh.send = () => { throw new Error('the driver could not start') }
+  b.gSession.deriveMessages = () => [
+    message(SOURCE_KIND, '[Group chat] what ships friday?', ROOM_CALL),
+    { role: 'assistant', content: [{ type: 'text', text: 'the release ships friday' }] },
+  ]
+  for (let tries = 0; tries < 3; tries += 1) {
+    await b.rt.heldBack()
+    term += 1
+  }
+  assert.deepEqual({ sessionId: b.bot.sessionId, model: b.bot.model, appliedModel: b.bot.appliedModel }, { sessionId: 's1', model: 'deepseek/v4', appliedModel: 'deepseek/v4' })
+  assert.equal(b.rt.state.switching.s1, undefined)
+  assert.equal(b.calls.archived.includes(freshId), true)
+  // The group part on Claude Code follows the Bot back to DeepSeek V4 in a fresh part of its own.
+  await waitFor(() => b.room.sessions.b1 !== 'g1' && b.jobs().length === 0)
+  const part = b.room.sessions.b1
+  assert.notEqual(part, freshId)
+  assert.deepEqual(selectedOn(b, part), [[part, 'deepseek/v4']])
+  assert.match(textOf(b.handoffOf(part).content), /from Claude Code to DeepSeek V4; in this group you are DeepSeek V4 now/)
+  assert.deepEqual(b.room.segments.b1.map(segment => [segment.sessionId, segment.switchedTo]), [['g1', 'deepseek/v4']])
+  assert.deepEqual(selectedOn(b, 'g1'), [])
+})
+
 // GX-2: a follow toward an older pick that fails after a newer pick never replaces the newer
 // pick's pending follow: the group follows the newer pick at its next step.
 test('G5 a stale follow that fails never overrides the newer pick\'s follow', async t => {

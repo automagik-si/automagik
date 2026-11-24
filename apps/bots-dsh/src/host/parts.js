@@ -2404,13 +2404,14 @@ export function install(rt) {
       if (crossing !== undefined && !group) {
         // The agent switch goes back with its groups: a group follow of the same pick still
         // awaiting its first answer goes back too, and one that already answered on the new
-        // agent follows the Bot back with a handoff of its own.
+        // agent follows the Bot back with a handoff of its own, once those reverts settled.
+        const reverts = []
         for (const [groupFresh, groupEntry] of [...awaiting]) {
           if (groupEntry.botId === bot.id && groupEntry.job?.crossing?.group === true && groupEntry.expected === entry.expected) {
-            void revertSwitch(groupFresh, groupEntry, failure).catch(error => rt.warn('ds-bot: group part %s not taken back: %s', groupFresh, error))
+            reverts.push(revertSwitch(groupFresh, groupEntry, failure).catch(error => rt.warn('ds-bot: group part %s not taken back: %s', groupFresh, error)))
           }
         }
-        void followGroups(bot)
+        void Promise.allSettled(reverts).then(() => followGroups(bot))
       }
       return 'back'
     } finally { leave() }
