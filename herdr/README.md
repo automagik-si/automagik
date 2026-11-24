@@ -2193,8 +2193,8 @@ or agy under the pack's `hc keep` wrapper, which covers the pack's bots, workers
 an agy typed by hand in a pane. It does not read a pane whose foreground is a script or a shell
 that started agy (`bash run.sh`, `sh -c 'agy; wait'`, an opaque worker template), nor one whose
 record carries no foreground argv. It does read any program the same identity rule names agy:
-past any of the launchers `node`, `bun`, `bunx`, `deno`, `python`, `python3`, `npx`, `pnpm`,
-`yarn`, `uv`, `uvx`, `ruby`, `bundle`, `env`, `sudo`, `nice`, `time`, `watch` and `nodemon` and
+past any of the launchers `node`, `bun`, `bunx`, `deno`, `python`, `python3`, `npx`, `pnpm`, `yarn`,
+`uv`, `uvx`, `ruby`, `bundle`, `env`, a privilege wrapper, `nice`, `time`, `watch` and `nodemon` and
 their flags, a program whose file name, without a leading `-` and without a `.js`, `.mjs` or
 `.cjs` suffix, is `agy` or `antigravity`, such as `node /tools/agy.js`. Such a pane is treated as
 agy: when its screen ends in the exact rows of one of agy's two captured prompts (a quotation of
