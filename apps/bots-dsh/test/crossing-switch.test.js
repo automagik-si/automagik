@@ -1663,7 +1663,6 @@ test('T22e MH-9 the stopped reply goes on in the old part after a restart go-bac
   assert.equal(b.calls.sends.filter(send => send.id === 's1' && send.item.source?.exchangeId === 'e-user').length, 1)
 })
 
-// MY-7b: a restart wake that fails keeps the marker; a later pass wakes the part once.
 test('T22e MJ-1 a group part with no Bot whose held input cannot be forwarded: the input waits once in the fresh part, the old part is archived', async t => {
   const { b, fresh } = await afterRestart(t, { window: 30 })
   const room = { id: 'r1', sessionId: 's2' }
@@ -1710,6 +1709,23 @@ test('T22e MJ-2 a forward that stops after its first followup: the rest waits on
   assert.equal(once(queuedOf(b.agent), 'e-held2'), 0)
 })
 
+test('T22e MK-1 a group part with no Bot whose forward skips an input already waiting, then throws before any followup: each input waits once in the fresh part', async t => {
+  const { b, fresh } = await afterRestart(t, { window: 30 })
+  const room = { id: 'r1', sessionId: 's2' }
+  b.rt.roomOf = id => (id === 'r1' ? room : undefined)
+  b.rt.sessionOfRoom = place => place?.sessionId
+  b.rt.state.switching.s1 = { roomId: 'r1' }
+  fresh.inbox.nextTurn.push(message('user', 'already handed on', { exchangeId: 'e-dup' }))
+  b.agent.inbox.nextTurn.push(message('user', 'already handed on', { exchangeId: 'e-dup' }), message('user', 'held by the old part', { exchangeId: 'e-new' }))
+  fresh.followup = () => { throw new Error('the driver could not start') }
+  await b.rt.heldBack()
+  await waitFor(() => b.rt.state.switching.s1 === undefined)
+  assert.equal(once(queuedOf(fresh), 'e-dup'), 1)
+  assert.equal(once(queuedOf(fresh), 'e-new'), 1)
+  assert.deepEqual(queuedOf(b.agent), [])
+})
+
+// MY-7b: a restart wake that fails keeps the marker; a later pass wakes the part once.
 test('MY-7b a restart wake that throws keeps the marker; the next pass wakes the part once', async t => {
   for (const mode of ['before', 'after']) {
     const { b, fresh, freshId } = await afterRestart(t)
