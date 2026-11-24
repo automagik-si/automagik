@@ -834,6 +834,142 @@ test('G5 a stale follow that fails never overrides the newer pick\'s follow', as
   assert.deepEqual(selectedOn(b, 'g1'), [])
 })
 
+test('KG4 delayed agent resolution cannot overwrite the latest pick queued for a busy group', async t => {
+  const b = bench({ model: 'acp-claude/default' })
+  const resolving = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  t.after(() => { release.resolve(); b.ctx.dispose() })
+  b.group.status = 'running'
+  const resolve = b.rt.resolveAgent
+  b.rt.resolveAgent = async id => {
+    if (id === 'g1') {
+      b.rt.resolveAgent = resolve
+      resolving.resolve()
+      await release.promise
+    }
+    return resolve(id)
+  }
+  const older = b.rt.followGroups(b.bot)
+  await resolving.promise
+  b.bot.model = b.bot.appliedModel = 'acp-codex/default'
+  await b.rt.followGroups(b.bot)
+  release.resolve()
+  await older
+  assert.deepEqual(b.jobs(), [])
+
+  b.group.status = 'idle'
+  const post = message(SOURCE_KIND, '[Group chat] which agent?', ROOM_CALL)
+  assert.equal((await b.preStep('g1', { messages: [post] })).passed, false)
+  await b.followed('s2')
+  assert.deepEqual(b.calls.selected, [['s2', 'acp-codex/default']])
+})
+
+test('KG5 a second failed follow keeps the pending route restored by the own-chat go-back', async t => {
+  const back = 'acp-codex/default'
+  const picked = 'acp-claude/default'
+  const b = bench({ model: back })
+  b.rt.config.crossingNoteTimeoutMs = 20
+  const resolving = Promise.withResolvers()
+  const releaseResolver = Promise.withResolvers()
+  const retrySelecting = Promise.withResolvers()
+  const failRetry = Promise.withResolvers()
+  const rollbackSaving = Promise.withResolvers()
+  const releaseRollback = Promise.withResolvers()
+  t.after(() => {
+    releaseResolver.resolve()
+    failRetry.resolve()
+    releaseRollback.resolve()
+    b.ctx.dispose()
+  })
+  const resolve = b.rt.resolveAgent
+  b.rt.resolveAgent = async id => {
+    if (id === 'g1') {
+      b.rt.resolveAgent = resolve
+      resolving.resolve()
+      await releaseResolver.promise
+    }
+    return resolve(id)
+  }
+  const select = b.rt.selectSessionModel
+  b.rt.selectSessionModel = async (id, selection) => {
+    if (id === 's4') {
+      retrySelecting.resolve()
+      await failRetry.promise
+    }
+    if (id === 's3' || id === 's4') throw new Error('not signed in')
+    return select(id, selection)
+  }
+
+  const delayed = b.rt.followGroups(b.bot)
+  await resolving.promise
+  await b.rt.switchRoute('b1', picked)
+  await waitFor(() => b.calls.warnings.filter(keptLine).length === 1)
+  await b.settled()
+  const post = message(SOURCE_KIND, '[Group chat] can you retry?', ROOM_CALL)
+  assert.equal((await b.preStep('g1', { messages: [post] })).passed, false)
+  await retrySelecting.promise
+
+  const save = b.rt.save
+  let holdRollback = true
+  b.rt.save = async () => {
+    if (holdRollback && b.bot.sessionId === 's1' && b.bot.model === back) {
+      holdRollback = false
+      rollbackSaving.resolve()
+      await releaseRollback.promise
+    }
+    return save()
+  }
+  // Restore Codex before its delayed resolver returns, and hold the save before follow-back.
+  b.sessionEvent('s2', { type: 'turn/end', data: { turn: 1, reason: overloaded } })
+  await rollbackSaving.promise
+  releaseResolver.resolve()
+  await delayed
+  failRetry.resolve()
+  await b.settled()
+  assert.equal(b.calls.warnings.filter(keptLine).length, 2)
+  assert.equal(b.room.sessions.b1, 'g1')
+
+  // A pre-step can reach Codex only through the pending follow that survived Claude's failure.
+  const later = message(SOURCE_KIND, '[Group chat] what are you on now?', ROOM_CALL)
+  assert.equal((await b.preStep('g1', { messages: [later] })).passed, false)
+  await b.followed('s5')
+  assert.deepEqual(selectedOn(b, 's5'), [['s5', back]])
+  releaseRollback.resolve()
+  await waitFor(() => b.calls.archived.includes('s2'))
+})
+
+test('KG6 a pick made while pre-step awaits group eligibility keeps that step with its current part', async t => {
+  const b = bench({ model: 'acp-claude/default' })
+  const reading = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  t.after(() => { release.resolve(); b.ctx.dispose() })
+  b.group.status = 'running'
+  await b.rt.followGroups(b.bot)
+  const header = b.gSession.requestHeader
+  b.gSession.requestHeader = () => {
+    b.gSession.requestHeader = header
+    return undefined
+  }
+  b.rt.storedRouteOf = async () => {
+    reading.resolve()
+    await release.promise
+    return header().config
+  }
+  const post = message(SOURCE_KIND, '[Group chat] keep this step', ROOM_CALL)
+  const step = b.preStep('g1', { messages: [post] })
+  await reading.promise
+  b.bot.model = b.bot.appliedModel = 'acp-codex/default'
+  await b.rt.followGroups(b.bot)
+  release.resolve()
+  assert.deepEqual(await step, { passed: true, decision: { kind: 'enter', messages: [post] } })
+  assert.deepEqual(b.jobs(), [])
+
+  b.group.status = 'idle'
+  assert.equal((await b.preStep('g1', { messages: [post] })).passed, false)
+  await b.followed('s2')
+  assert.deepEqual(b.calls.selected, [['s2', 'acp-codex/default']])
+})
+
 // GX-3: another member's part never moves on this Bot's pick, even when a list names it.
 test('G9 another member\'s group part stays on its route and gets no job', async t => {
   const b = bench()

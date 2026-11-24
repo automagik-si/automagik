@@ -1,7 +1,7 @@
 // RFC 0030, Handoff note (the owner, 2026-11-23, #2061): switching agents in a Bot's own chat
 // carries the conversation. The host answers `switching` at once, takes over every step the old
 // part starts, writes the summary with the outgoing agent only, puts the handoff into a fresh
-// part no surface can reach yet, and only then moves the Bot's record to it, in one save.
+// part, and only then moves the Bot's record to it, in one save.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { install } from '../src/host/parts.js'
@@ -1937,6 +1937,64 @@ test('K2b a handoff built to resume the cut reply is never flagged, even when th
   assert.equal(seen.saves.some(save => save.sessionId === 's2'), true)
   assert.equal([...seen.saves, ...seen.sends].every(probe => probe.acking.s2 === undefined), true)
   assert.deepEqual(b.rt.ackingView(), {})
+})
+
+test('K2c a model call started by input directly to the fresh part during the handoff flush is never flagged', async t => {
+  const b = bench()
+  const finish = Promise.withResolvers()
+  t.after(() => { finish.resolve(); b.ctx.dispose() })
+  const flush = b.ctx.sessions.flush
+  let step
+  let inNext = false
+  b.ctx.sessions.flush = async session => {
+    if (session?.id === 's2' && step === undefined && b.handoffOf('s2') !== undefined) {
+      const fresh = b.freshAgent('s2')
+      const person = message('user', 'sent directly to the fresh part')
+      fresh.inbox.nextStep.push(person)
+      b.sessionEvent('s2', { type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, inserted: [person] } })
+      const handoff = fresh.inbox.nextTurn.shift()
+      fresh.inbox.nextStep.shift()
+      fresh.status = 'running'
+      const stream = b.listener('llm/stream')({ sessionId: 's2', messages: [person, handoff] }, async function* () {
+        inNext = true
+        await finish.promise
+      })
+      step = stream.next()
+    }
+    return flush(session)
+  }
+  const save = b.rt.save
+  const firstSave = []
+  b.rt.save = async () => {
+    if (b.bot.sessionId === 's2' && firstSave.length === 0) {
+      firstSave.push([inNext, b.rt.ackingView().s2, b.rt.ackingPart('s2')])
+    }
+    return save()
+  }
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.moved()
+  assert.deepEqual(firstSave, [[true, undefined, false]])
+  finish.resolve()
+  await step
+})
+
+test('K2d an idle fresh part with input queued beside the handoff at the first save is never flagged', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  const seen = ackProbe(b)
+  const flush = b.ctx.sessions.flush
+  const person = message('user', 'queued directly on the fresh part')
+  b.ctx.sessions.flush = async session => {
+    if (session?.id === 's2' && b.freshAgent('s2').inbox.nextTurn.length === 1 && b.handoffOf('s2') !== undefined) {
+      b.freshAgent('s2').inbox.nextTurn.push(person)
+      b.sessionEvent('s2', { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 1, inserted: [person] } })
+    }
+    return flush(session)
+  }
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.moved()
+  assert.equal(seen.saves.find(save => save.sessionId === 's2').acking.s2, undefined)
+  assert.equal(b.rt.ackingPart('s2'), false)
 })
 
 test('K3 a prompt taken over during the switch: the fresh part is never flagged and the prompt wakes it', async t => {

@@ -1949,12 +1949,18 @@ export function install(rt) {
   // Session waits for the Bot's next pick.
   /** @type {Map<string, {target:string, count:number}>} */
   const followFailures = new Map()
+  // A pick, removal or part move can supersede a follow while it awaits a route or agent.
+  function currentGroupFollow(sessionId, bot, target) {
+    const place = placeOf(sessionId)
+    if (bot === undefined || place?.roomId === undefined || place.botId !== bot.id || typeof target !== 'string') return false
+    if (rt.botOf(bot.id) !== bot || target !== (bot.model ?? bot.appliedModel)) return false
+    const room = rt.roomOf(place.roomId)
+    return room?.sessions?.[bot.id] === sessionId && room.members.includes(bot.id)
+  }
   // The crossing a group Session takes to follow `target`, the Bot's model; none when it does
   // not (another member, no history on another harness, a Hermes route).
   async function groupCrossing(sessionId, bot, target) {
-    const place = placeOf(sessionId)
-    if (place?.roomId === undefined || place.botId !== bot?.id || typeof target !== 'string') return undefined
-    if (rt.botOf(bot.id) !== bot || target !== (bot.model ?? bot.appliedModel)) return undefined
+    if (!currentGroupFollow(sessionId, bot, target)) return undefined
     const { route } = await sessionRoute(sessionId)
     if (!route?.provider || !route.model) return undefined
     const from = `${route.provider}/${route.model}`
@@ -1976,6 +1982,7 @@ export function install(rt) {
     if (running?.crossing?.group === true && running.target === target) return
     const busy = rt.live?.get(sessionId)?.turn !== undefined || agent.status === 'running'
     // A switch under way there (a part move) leaves the follow to the Session's next step too.
+    if (readOnly() || !currentGroupFollow(sessionId, bot, target)) return
     if (busy || switches.has(sessionId) || !startSwitch(agent, { hard: true, target, crossing })) pendingFollows.set(sessionId, target)
   }
   // After the person's pick moved the Bot to another harness, every group conversation of
@@ -2097,8 +2104,12 @@ export function install(rt) {
     return at !== undefined && Date.now() - at <= ackBound()
   }
   // The fresh part's first turn is the hidden acknowledgement when its handoff does not resume
-  // a cut reply and nothing taken over or waiting in the old part will wake it.
-  const acksFirst = (agent, job, resume) => !resume && !job.carry.some(wakesPart)
+  // a cut reply, the fresh agent is idle with only this handoff, and nothing taken over or
+  // waiting in the old part will wake it.
+  const acksFirst = (agent, job, resume, fresh, handoff) => !resume && fresh.status === 'idle'
+    && fresh.inbox.nextStep.length === 0
+    && fresh.inbox.nextTurn.length === 1 && fresh.inbox.nextTurn[0].id === handoff.id
+    && !job.carry.some(wakesPart)
     && ![...agent.inbox.nextStep, ...agent.inbox.nextTurn].some(message => !isNoteRequest(message) && wakesPart(message))
   // A handoff-note request still waiting in a part's inbox never runs as a turn later.
   function dropNoteRequests(agent) {
@@ -2719,9 +2730,10 @@ export function install(rt) {
       await abandon('conversation changed')
       return
     }
-    // S3: the handoff into the fresh part while nothing can reach it.
+    // S3: queue the handoff before the Bot or group points to the fresh part.
     const resume = job.resume === true
     let fresh
+    let handoff
     let folder
     try {
       fresh = await rt.resolveAgent(freshId)
@@ -2743,8 +2755,9 @@ export function install(rt) {
       }))
       const text = routeOfRef(job.target).route === 'acp' ? capForAcp(build, carried) : build(carried)
       freshParts.set(freshId, estimateTokens(text))
-      // Durable, and it wakes nothing: the part starts only after the commit below.
-      fresh.inbox.prepend('next-turn', createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
+      // Queue the handoff durably without waking the part. DSH can already address this Session.
+      handoff = createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) })
+      fresh.inbox.prepend('next-turn', handoff)
       await ctx.sessions.flush(fresh.session)
       // Watched from here, before anything can start the fresh part's first turn.
       awaiting.set(freshId, { oldId: agent.id, botId: job.botId, ...(room === undefined ? {} : { roomId: room.id }), expected: job.target, job })
@@ -2770,7 +2783,7 @@ export function install(rt) {
     const segment = { sessionId: agent.id, endedAt: Date.now(), ...(tokens !== undefined ? { tokens } : {}), ...noted, switchedTo: job.target, archivePending: true }
     // In the same synchronous stretch as the pointer move, so every state answer that names
     // the fresh part says its first turn is the hidden acknowledgement.
-    if (acksFirst(agent, job, resume)) acking.set(freshId, Date.now())
+    if (acksFirst(agent, job, resume, fresh, handoff)) acking.set(freshId, Date.now())
     rt.endGrants?.(agent.id, 'part')
     if (room !== undefined) return commitGroup(agent, job, { bot, room, segment, freshId, fresh, written, carried, number })
     ;(bot.segments ??= []).push(segment)
@@ -3266,8 +3279,11 @@ export function install(rt) {
       const follow = place.roomId === undefined ? undefined : pendingFollows.get(agent.id)
       if (follow !== undefined && !readOnly()) {
         pendingFollows.delete(agent.id)
-        const crossing = await groupCrossing(agent.id, rt.botOf(place.botId), follow)
-        if (crossing !== undefined) return switchBeforeStep(agent, payload, { hard: true, target: follow, crossing })
+        const bot = rt.botOf(place.botId)
+        const crossing = await groupCrossing(agent.id, bot, follow)
+        if (crossing !== undefined && !readOnly() && currentGroupFollow(agent.id, bot, follow)) {
+          return switchBeforeStep(agent, payload, { hard: true, target: follow, crossing })
+        }
       }
       if (!readOnly() && await folderMove(agent, { midTurn: payload.step > 1 }) !== undefined) return switchBeforeStep(agent, payload, { folder: true })
       if (nativeDshSession(agent.id) || pinned(agent.id)) return pass()

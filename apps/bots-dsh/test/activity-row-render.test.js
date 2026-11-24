@@ -89,8 +89,8 @@ test('C11 the activity row stays away while this window marks the part, and show
 
 // PLAN-D15-ACK (#2061, F4-ack): the host's `work.acking` names the fresh part whose first turn is
 // Omni's own handoff acknowledgement: no row for it. The row comes back once this window saw that
-// run end, sent input after the flag arrived, or the host dropped the flag.
-async function ackRow(t, { running = true, acking = { p2: 1000 } } = {}) {
+// run end, observed an accepted local submission, or the host dropped the flag.
+async function ackRow(t, { running = true, acking = { p2: 1000 }, clock = Date } = {}) {
   const dom = new JSDOM('<div id="root"></div><div data-conversation-scroll><div data-chat-flow></div></div>', { url: 'http://localhost', pretendToBeVisual: true })
   const globals = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'MutationObserver']
   const saved = globals.map(key => Object.getOwnPropertyDescriptor(globalThis, key))
@@ -101,7 +101,7 @@ async function ackRow(t, { running = true, acking = { p2: 1000 } } = {}) {
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
     MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
     requestAnimationFrame: fn => setTimeout(fn, 0), cancelAnimationFrame: clearTimeout,
-    console, setTimeout, clearTimeout, Promise, Map, Set, Date, Math, JSON,
+    console, setTimeout, clearTimeout, Promise, Map, Set, Date: clock, Math, JSON,
   })
   // Bot b1 on its fresh part p2.
   const bot = { id: 'b1', name: 'Ops', sessionId: 'p2' }
@@ -154,10 +154,12 @@ test('KR3 once this window saw the ack run end, the next run shows its row thoug
   assert.equal(shown(), true)
 })
 
-test('KR4 input sent from this window after the flag arrived shows the row, and keeps it once sent', async (t) => {
-  const { render, shown, hidden } = await ackRow(t)
+test('KR4 acceptance of a submission stamped at the flag render shows the running row through retirement', async (t) => {
+  const flagRenderAt = 2000
+  const clock = class extends Date { static now() { return flagRenderAt } }
+  const { render, shown, hidden } = await ackRow(t, { clock })
   assert.equal(hidden(), true)
-  await render({ submissions: [{ placement: 'queued', time: Date.now() + 5 }] })
+  await render({ submissions: [{ placement: 'queued', time: flagRenderAt }] })
   assert.equal(shown(), true)
   await render({ submissions: [] })
   assert.equal(shown(), true)
@@ -174,4 +176,14 @@ test('KR6 the host dropping the flag while the part runs shows the row at once',
   assert.equal(hidden(), true)
   await render({ work: { acking: {} } })
   assert.equal(shown(), true)
+})
+
+test('KR7 a new crossing timestamp resets a spent latch while the part is running', async (t) => {
+  const { render, shown, hidden } = await ackRow(t)
+  assert.equal(hidden(), true)
+  await render({ running: false })
+  await render({ running: true })
+  assert.equal(shown(), true)
+  await render({ work: { acking: { p2: 1001 } } })
+  assert.equal(shown(), false)
 })

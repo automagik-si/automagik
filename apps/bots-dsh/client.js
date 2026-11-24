@@ -26118,13 +26118,13 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   const subscribePicks = (0, import_react55.useMemo)(() => picksSubscriber(actions), [actions]);
   const picking = (0, import_react55.useSyncExternalStore)(subscribePicks, () => actions?.picking?.(sessionId) === true);
   const ackAt = useWork?.((work) => work.acking?.[sessionId]);
-  const sentAt = useSession((snapshot2) => Math.max(0, ...(snapshot2?.pendingSubmissions ?? []).map((sub) => sub.time ?? 0)));
-  const ack = (0, import_react55.useRef)({ at: void 0, seen: 0, ran: false, spent: false });
-  if (ack.current.at !== ackAt) ack.current = { at: ackAt, seen: Date.now(), ran: false, spent: false };
+  const submitted = useSession((snapshot2) => (snapshot2?.pendingSubmissions?.length ?? 0) > 0);
+  const ack = (0, import_react55.useRef)({ at: void 0, ran: false, spent: false });
+  if (ack.current.at !== ackAt) ack.current = { at: ackAt, ran: false, spent: false };
   if (ackAt !== void 0) {
     if (running2) ack.current.ran = true;
     else if (ack.current.ran) ack.current.spent = true;
-    if (sentAt > ack.current.seen) ack.current.spent = true;
+    if (submitted) ack.current.spent = true;
   }
   const acking = ackAt !== void 0 && !ack.current.spent;
   const pendingInput = useSession((snapshot2) => freshInputAt(snapshot2?.pendingSubmissions, steeredAt));

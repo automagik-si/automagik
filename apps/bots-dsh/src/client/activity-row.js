@@ -129,16 +129,15 @@ export function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useL
   const subscribePicks = useMemo(() => picksSubscriber(actions), [actions])
   const picking = useSyncExternalStore(subscribePicks, () => actions?.picking?.(sessionId) === true)
   const ackAt = useWork?.(work => work.acking?.[sessionId])
-  const sentAt = useSession(snapshot => Math.max(0, ...(snapshot?.pendingSubmissions ?? []).map(sub => sub.time ?? 0)))
-  // The host's flag arrives with the answer that names the part; it stops hiding once this window
-  // saw that run end (the next run is the person's) or sent input after it arrived (latched: a
-  // submission leaves the list).
-  const ack = useRef({ at: undefined, seen: 0, ran: false, spent: false })
-  if (ack.current.at !== ackAt) ack.current = { at: ackAt, seen: Date.now(), ran: false, spent: false }
+  const submitted = useSession(snapshot => (snapshot?.pendingSubmissions?.length ?? 0) > 0)
+  // The host's handoff creates no local submission on this fresh Session. Once the window
+  // sees an accepted submission or the ack run end, keep showing real work after the echo retires.
+  const ack = useRef({ at: undefined, ran: false, spent: false })
+  if (ack.current.at !== ackAt) ack.current = { at: ackAt, ran: false, spent: false }
   if (ackAt !== undefined) {
     if (running) ack.current.ran = true
     else if (ack.current.ran) ack.current.spent = true
-    if (sentAt > ack.current.seen) ack.current.spent = true
+    if (submitted) ack.current.spent = true
   }
   const acking = ackAt !== undefined && !ack.current.spent
   const pendingInput = useSession(snapshot => freshInputAt(snapshot?.pendingSubmissions, steeredAt))
