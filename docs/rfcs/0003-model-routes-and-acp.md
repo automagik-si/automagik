@@ -1249,3 +1249,62 @@ this amendment" lines.
   "Groups, tasks, scheduled runs … move to DSH's tools".
 - **Rollback.** Revert the change: the removed locks return, a saved `false` stays `false`, and
   older builds ignore the marker.
+
+## Amendment: Antigravity native tools (2026-11-24, #1564)
+
+- **Decision.** Decided by the owner's delegate (the lead), 2026-11-23/24: Antigravity gets the
+  Bot's `nativeTools` switch, with parity with omp. A new Antigravity Bot starts OFF; an existing
+  one keeps its own tools once. Read only, an unreadable level, `restricted`, `managed` and
+  multi-user apply as for the other agents ([everywhere]).
+- **ON** is today's launch (`agy acp`, agy's own tools, its asks through DSH's approval). **OFF is
+  chat only**, as omp's (agy has no DSH bridge): two agy-side layers, both per process, under
+  acp-dsh's own guard. L1: `--agent automagik-native-off`, our main agent with `tools: []`,
+  `excludeDefaultComponents: true`, `hidden: true`, `subagent: false`. L2: `--cli_dir_name
+  automagik-native-off`, our settings folder whose `permissions.deny` names every documented tool
+  action (`--cli_dir_name` is listed by `agy acp --help` but not on agy's documentation pages).
+  L3: acp-dsh ends the answer at the first tool call agy reports and refuses every ask. Both files
+  are written 0600 at each OFF start into the home the child itself runs in
+  (`AUTOMAGIK_BOT_CLI_HOME`, equal to its `HOME`, else the start refuses).
+- **Proven on one version.** Native tools OFF for Antigravity is proven on agy `AGY_OFF_CHECKED`,
+  the version stage 6 ran. On any other version it launches OFF, warns in the host log and in
+  Details, and rests on two agy layers nobody re-checked plus L3. L3 cannot undo an action that
+  needed no permission and had already run when its report arrived (a read, a search, a fetch, a
+  subagent's inner calls), and never sees anything agy runs without reporting a tool call. The
+  Details version line uses the version agy reported at its last start in this host run; before
+  any start it uses the installed folder's version, which an in-place self-update does not change.
+- **L2 check.** At each OFF start, after `session/new` and before the first prompt, acp-dsh reads
+  agy's own log for that process (in our own `automagik-native-off/log/`, bounded: 4096 entries,
+  256 KiB, a fresh regular file only, never through a link or a FIFO) and refuses if agy says it
+  failed to load the OFF settings (a missing or malformed file). With no such log it warns once.
+  Each later turn of a kept OFF Session checks again and ends the Session if the failure appeared.
+  agy writes no line after it loads its settings (one unsigned run set on agy 1.5.16, 2026-11-24),
+  so the first turn is not covered against a failure line written after its `session/new` answer;
+  the next turn's check catches it. A settings file in a shape a later agy ignores produces no log
+  line and is not caught. L1 has no runtime check. A crafted log folder can make the start refuse
+  or warn; a link to a folder whose I/O blocks (a mount the same user made) could hold the host,
+  which that user can already stop.
+- **Hooks and plugins.** An OFF start refuses while the Antigravity home holds `config/hooks.json`
+  or `config/plugins` (agy loads hooks from both, outside every tool layer); off Windows the
+  refusal and Details name Switch account in Settings, which starts a new, empty home. Hooks or
+  plugins in a workspace (the Bot's own folder), if agy loads those, including ones the Bot wrote
+  itself while it was ON, are not checked; nor are MCP config or skills in the shared home. If an
+  agy version creates `config/plugins` by itself, every OFF start refuses until Automagik changes;
+  Switch account does not help then.
+- **Threat model.** OFF holds against the OFF Bot's own chat input in that home. It does not hold
+  against another ON Bot of the same installation: same OS user, same agy home, which can already
+  act as that user.
+- **Identity-less Sessions.** An Antigravity chat with no Bot (Workspace, Code pane, DSH
+  subagents, Omni threads and answer children, a scheduled run with no single owner) is chat-only
+  once a Bot team is registered, as omp's. With no Bot team, agy launches as before.
+- **Migration.** Once (marker `nativeToolsAntigravityKept`), each existing Antigravity Bot keeps
+  its own tools with the Codex block's rule: an ON saved for another agent moves to Antigravity,
+  shell access off or denied tools stay off (warned), an explicit `false` is left as it is. On an
+  install where the removed-lock upgrade has not run yet (`nativeToolsLocksRetired` unset), an
+  Antigravity Bot in that lock (shared with people, IM-bound, a live LiveShare share) is kept ON at
+  load and then turned off by that upgrade at the first native read.
+- **Capability.** bots-dsh offers the Antigravity switch only when acp-dsh lists `acp-antigravity`
+  in `nativeArgsAgents`; with an older acp-dsh there is no row (`unoffered`), as before. Details
+  drops #2026's own-tools notice for an Antigravity Bot with the switch (denied tools lock it
+  OFF); the menu and save refusals are kept.
+- **Rollback.** Revert the change: agy launches with its own tools in every Session again, as
+  before; the marker and an ON saved for Antigravity are ignored, and Details shows no row.
