@@ -1277,7 +1277,7 @@ export function install(rt) {
           const pet = await pets.adopt(String(body.source ?? ''), String(body.id ?? ''))
           const bot = rt.botOf(body.botId)
           if (!bot) return fail('Unknown Bot', 'bot/not-found')
-          return okBot(await rt.updateBot(bot.id, { avatar: { ...(bot.avatar ?? {}), image: undefined, pet: { source: pet.source, id: pet.id, version: pet.version, ...(pet.sleep ? { sleep: true } : {}) } } }))
+          return okBot(await rt.updateBot(bot.id, { avatar: { ...bot.avatar, image: undefined, pet: { source: pet.source, id: pet.id, version: pet.version, ...(pet.sleep ? { sleep: true } : {}) } } }))
         }
         case 'privacy':
           return ok(privacy.view())

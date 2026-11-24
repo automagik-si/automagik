@@ -1867,7 +1867,7 @@ export function install(rt) {
     if (!back) return
     try {
       await rt.save()
-    if (bot.waitingRole?.id === SOLVER_ROLE_ID) rt.solverSettle?.armTimer()
+      if (rt.botOf(id)?.waitingRole?.id === SOLVER_ROLE_ID) rt.solverSettle?.armTimer()
     } catch (error) {
       rt.warn('ds-bot: Bot %s is back in its groups, but that was not saved: %s', id, error)
     }

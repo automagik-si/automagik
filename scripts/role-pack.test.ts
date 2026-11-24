@@ -151,6 +151,8 @@ test('archives preserve Git bytes across dirty clones and have fixed small and m
     const big = Buffer.concat([MODULE, Buffer.alloc(1024 * 1024 + 19, 32)]);
     writeRole(root, 'multi-block', {}, multi);
     writeRole(root, 'large-role', {}, big);
+    // The packer imports the mapping from disk in both checkouts.
+    git(root, 'add', '--force', PLUGIN + '/src/host/bundled-roles.json');
     commit(root, 'three roles');
 
     const first = cut(fixture, A);

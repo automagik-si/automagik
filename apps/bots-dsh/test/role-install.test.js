@@ -1459,6 +1459,40 @@ test('D2 B11 the first created waiter arms one timer and a pass tries one instal
   assert.equal(installs, 1)
 })
 
+test('D2 a failed deletion saves the restored Solver and re-arms its timer without a save warning', async t => {
+  const timers = fakeSolverClock()
+  const f = await fixture(t, { offline: true, roleDeps: { timers } })
+  const created = await f.call('create-bot', {
+    name: 'Waiting Solver', role: 'Solver', instructions: solverInstructions(), waitingRole: 'solver',
+  })
+  assert.equal(created.ok, true, JSON.stringify(created))
+  const { id } = created.value
+  const members = [BOT.id, id]
+  const room = await f.call('create-room', { name: 'Solver team', members, admin: id })
+  assert.equal(room.ok, true, JSON.stringify(room))
+  const roomId = room.value.id
+  assert.deepEqual([...timers.pending.keys()], [1])
+
+  const failure = new Error('Fixture session release failed')
+  t.mock.method(f.rt, 'releaseBot', async () => {
+    await f.rt.save()
+    const { rooms } = await f.disk()
+    assert.deepEqual(rooms[roomId].members, [BOT.id])
+    assert.equal(rooms[roomId].admin, null)
+    f.rt.solverSettle.cancel()
+    throw failure
+  })
+  const warn = t.mock.method(f.rt, 'warn', () => {})
+  await assert.rejects(f.rt.deleteBot(id), error => error === failure)
+
+  const { bots, rooms } = await f.disk()
+  assert.deepEqual(bots[id].waitingRole, waitFor(bots[id].instructions))
+  assert.deepEqual(rooms[roomId].members, members)
+  assert.equal(rooms[roomId].admin, id)
+  const saveWarnings = warn.mock.calls.map(({ arguments: [message] }) => message).filter(message => message.includes('not saved'))
+  assert.deepEqual({ pending: [...timers.pending.keys()], saveWarnings }, { pending: [2], saveWarnings: [] })
+})
+
 test('D2 B12 deletion, roles off, lock loss, and disposal each release the timer', async t => {
   const timers = fakeSolverClock()
   const f = await fixture(t, { offline: true, roleDeps: { timers } })
@@ -1470,6 +1504,8 @@ test('D2 B12 deletion, roles off, lock loss, and disposal each release the timer
   const first = await make('First waiter')
   assert.equal(timers.pending.size, 1)
   assert.equal((await f.call('delete-bot', { id: first })).ok, true)
+  f.rt.solverSettle.schedule()
+  await until(() => timers.cleared.length > 0, { t, poll: immediate })
   assert.deepEqual(timers.cleared, [1])
   await make('Second waiter')
   assert.equal(timers.pending.size, 1)
