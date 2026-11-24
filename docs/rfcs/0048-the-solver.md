@@ -36,7 +36,8 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   `update-bot { nativeTools: true }` on its own when ticked (RFC 0003: the switch changes only
   through `update-bot` on its own), then, when ticked, the brief the person typed goes through
   `send` after the switch, so the task's first turn already runs with native tools (unticked, it
-  goes with `create-bot`). No endpoint is added and nothing new is stored.
+  goes with `create-bot`). No endpoint is added; the only new stored fields are the Solver review
+  mark's `reviewerId` and `reviewTrack` (under "Contracts introduced").
 - **Best-effort rollback.** A failure at the reviewer, the Solver or the switch deletes,
   newest first, only the Bots this run created (never an existing Bot chosen as reviewer, never by
   name). "Nothing was created" is said only when every failed step was a host refusal and every
@@ -105,7 +106,14 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   the predicate and never repeats the literal. The marker is cosmetic (it only chooses which
   characters are offered), so a person who renames a description to `Solver` gains nothing.
   Delivery 2's official `solver` role replaces it, and `isSolverBot` then reads both (the role tag
-  or the description), so a delivery 1 Solver keeps its characters. No new stored field.
+  or the description), so a delivery 1 Solver keeps its characters. The marker adds no stored field.
+- **Solver review mark** (delivery 1): a Solver Bot may store `reviewerId`, the id of its reviewer
+  Bot, which the New Solver dialog sends once with the person's `create-bot`. The host marks each
+  delivery of the Solver's own chat from the work calls and the reviewer verdicts it saw
+  (`reviewMark` in the owner's view: plan and result reviewed, plan unreviewed, result unreviewed,
+  fresh session, or no reviewer). Like the Solver marker it is cosmetic: it grants and refuses
+  nothing and is never a caller-view field; delivery 1.5's hard guard keys on its own user-only
+  field.
 - Delivery 2 adds the official role id `solver`.
 
 ## Threat model
