@@ -309,6 +309,7 @@ test('D2 E3 a lost attach reply needs the exact active pin and empty instruction
     [() => ({ bots: [{ ...bot, instructions: 'Written method' }], roleRuntime }), 'attach'],
     [() => ({ bots: [bot], roleRuntime: { s1: { pin: { ...pin, attachedAt: 'later' } } } }), 'attach'],
     [() => ({ bots: [bot], roleRuntime: { s1: { pin, acp: true } } }), 'attach'],
+    [() => ({ bots: [bot], roleRuntime: { s1: { pin, acp: false, promptWarning: "This model uses its Hermes profile's own instructions." } } }), 'attach'],
     [lost, 'attach'],
   ]) {
     const run = solverRun({ attach: lost, read })

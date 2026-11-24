@@ -734,6 +734,19 @@ export function install(rt) {
     ...(typeof config?.model === 'string' ? { model: config.model } : {}),
     ...(config?.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
   })
+  function storedRouteEvent(route, event) {
+    if (event?.type === 'model/selection') return { ...route, pendingSelection: routeFields(event.data) }
+    if (event?.type !== 'request/header') return route
+    const header = event.data?.header
+    const used = routeFields(header?.config)
+    const selected = header?.adapterDefaults?.reasoningEffort === true ? { ...used, reasoningEffort: undefined } : used
+    // History callers read the last request. Prompt delivery follows DSH's pending choice
+    // until a request uses that choice.
+    if (route.pendingSelection && !sameSelection(route.pendingSelection, selected)) {
+      return { ...used, pendingSelection: route.pendingSelection }
+    }
+    return used
+  }
   const storedRoutes = new Map()
   let watchingRoutes = false
   async function storedRoute(sessionId) {
@@ -749,10 +762,7 @@ export function install(rt) {
         handle = await persistence.open(sessionId, 'read')
         if (typeof handle?.read !== 'function') return { missing: true }
         const { events } = await handle.read()
-        for (let index = events.length - 1; index >= 0; index -= 1) {
-          if (events[index]?.type === 'request/header') return routeFields(events[index].data?.header?.config)
-        }
-        return { provider: undefined }
+        return events.reduce(storedRouteEvent, { provider: undefined })
       } catch (error) {
         return error?.name === 'SessionPersistenceNotFoundError' ? { missing: true } : { unreadable: true }
       } finally {
@@ -763,7 +773,9 @@ export function install(rt) {
     storedRoutes.set(sessionId, pending)
     if (storedRoutes.size > 500) storedRoutes.delete(storedRoutes.keys().next().value)
     const stored = await pending
-    if ((stored.missing || stored.unreadable) && storedRoutes.get(sessionId) === pending) storedRoutes.delete(sessionId)
+    const current = storedRoutes.get(sessionId)
+    if (current && current !== pending) return current
+    if ((stored.missing || stored.unreadable) && current === pending) storedRoutes.delete(sessionId)
     return stored
   }
   // Registered on first use, so nothing is listened to until a stored route is read.
@@ -771,8 +783,12 @@ export function install(rt) {
     if (watchingRoutes) return
     watchingRoutes = true
     ctx.on?.('session/event', (session, event) => {
-      if (event?.type !== 'request/header' || typeof session?.id !== 'string' || !storedRoutes.has(session.id)) return
-      storedRoutes.set(session.id, Promise.resolve(routeFields(event.data?.header?.config)))
+      if ((event?.type !== 'request/header' && event?.type !== 'model/selection') || typeof session?.id !== 'string') return
+      const current = storedRoutes.get(session.id)
+      if (!current) return
+      storedRoutes.set(session.id, current.then(route => storedRouteEvent(
+        route.missing || route.unreadable ? { provider: undefined } : route, event,
+      )))
     })
   }
 

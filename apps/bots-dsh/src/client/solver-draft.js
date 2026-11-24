@@ -277,7 +277,7 @@ export async function createSolver({ actions, before, reviewer, reviewerPayload:
             const runtime = fresh?.roleRuntime?.[solver.id]
             if (rolesOn(fresh?.prefs) && bot?.role === SOLVER_DESCRIPTION && bot.instructions === ''
               && pin?.id === SOLVER_ROLE_ID && pin.version === version
-              && sameRolePin(pin, runtime?.pin) && runtime.acp !== true) roleNote = undefined
+              && sameRolePin(pin, runtime?.pin) && runtime.acp !== true && !runtime.promptWarning) roleNote = undefined
           } catch { /* The fallback remains in place when completion is uncertain. */ }
         }
       }

@@ -18425,7 +18425,7 @@ function PackageAttachmentCard({ roster, bot, pin, recoveryId, onDetach, actions
     ),
     runtime ? (0, import_react42.createElement)(RoleControls, { key: `${bot.id}:${pin.attachedAt}`, bot, runtime, actions, run: run3, readOnly: roleReadOnly(roster) }) : (0, import_react42.createElement)(Row, { label: t("Grants requested"), hint: declarations2 ? declarations2.capabilities.join(", ") || t("None") : t("Details unavailable") }),
     !runtime && declarations2?.fromCatalog ? (0, import_react42.createElement)(Row, { label: t("From the catalog") }) : null,
-    runtime?.acp ? (0, import_react42.createElement)(Row, { label: t("ACP coding agents do not receive this role’s prompt.") }) : null,
+    runtime?.promptWarning ? (0, import_react42.createElement)(Row, { label: hostText(runtime.promptWarning) }) : runtime?.acp ? (0, import_react42.createElement)(Row, { label: t("ACP coding agents do not receive this role’s prompt.") }) : null,
     !runtime ? (0, import_react42.createElement)(Row, {
       label: healthReason ? hostText(healthReason) : t("Its tools arrive with the role runtime."),
       hint: recover ? t("Detach it from every Bot, uninstall, then install again.") : void 0
@@ -33148,7 +33148,7 @@ async function createSolver({ actions, before, reviewer, reviewerPayload: firstP
             const bot = fresh?.bots?.find((bot2) => bot2.id === solver.id);
             const pin = packageAttachment(bot);
             const runtime = fresh?.roleRuntime?.[solver.id];
-            if (rolesOn(fresh?.prefs) && bot?.role === SOLVER_DESCRIPTION && bot.instructions === "" && pin?.id === SOLVER_ROLE_ID && pin.version === version && sameRolePin(pin, runtime?.pin) && runtime.acp !== true) roleNote = void 0;
+            if (rolesOn(fresh?.prefs) && bot?.role === SOLVER_DESCRIPTION && bot.instructions === "" && pin?.id === SOLVER_ROLE_ID && pin.version === version && sameRolePin(pin, runtime?.pin) && runtime.acp !== true && !runtime.promptWarning) roleNote = void 0;
           } catch {
           }
         }

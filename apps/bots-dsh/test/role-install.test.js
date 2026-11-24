@@ -1244,7 +1244,8 @@ test('D2S the Solver card keeps recovery usable pending verification and shows t
   const before = (await f.call('state')).value
   assert.equal(before.roleDetails.solver.installed.sha256, undefined)
   findNode(app(before).roles, node => node.props?.className === 'bt-app-main').props.onClick()
-  const recovery = app(before).roles
+  let recovery
+  assert.doesNotThrow(() => { recovery = app(before).roles })
   assert.match(surfaceText(recovery), /Installed SHA-256\s+Details unavailable/)
   assert.equal(surfaceButton(recovery, 'Uninstall').props.disabled, false)
 
@@ -1254,7 +1255,20 @@ test('D2S the Solver card keeps recovery usable pending verification and shows t
   assert.equal(verified.roleDetails.solver.installed.sha256, BUNDLED_DIGEST)
   const checksum = findNode(app(verified).roles, node => node.type === 'code')
   assert.equal(surfaceText(checksum).replace(/\s/g, ''), BUNDLED_DIGEST)
-  await surfaceButton(app(verified).roles, 'Uninstall').props.onClick()
+  assert.equal(verified.roles.solver.status, 'ok')
+
+  await fs.writeFile(join(installedSolverDir(f), 'prompt.md'), 'Damaged after verification.')
+  refused(await installSolver(f), /files differ from the signed package/)
+  const damaged = (await f.call('state')).value
+  assert.equal(damaged.roleDetails.solver.installed.sha256, undefined)
+  assert.equal(damaged.roleDetails.solver.installed.attachable, false)
+  assert.equal(damaged.roles.solver.status, 'damaged')
+  let damagedCard
+  assert.doesNotThrow(() => { damagedCard = app(damaged).roles })
+  assert.match(surfaceText(damagedCard), /Installed SHA-256\s+Details unavailable/)
+  const uninstall = surfaceButton(damagedCard, 'Uninstall')
+  assert.equal(uninstall.props.disabled, false)
+  await uninstall.props.onClick()
   assert.deepEqual((await f.disk()).roles, {})
 })
 
@@ -1278,7 +1292,7 @@ test('D2S final bundled verification refuses the install and preserves the recov
 })
 
 test('D2 B2 local content and a matching team receipt cannot authenticate a forged prompt', async t => {
-  const f = await fixture(t, { offline: true, roleDeps: {} })
+  const f = await fixture(t, { offline: true, roleDeps: { bundledHistory: solverCutHistory() } })
   const files = await copyBundle(installedSolverDir(f), { version: PLUGIN_VERSION, prompt: 'Untrusted fixture.' })
   f.rt.state.roles = { solver: f.record({
     id: 'solver', version: PLUGIN_VERSION, source: 'bundled', sha256: fixtureBundleDigest(files),
@@ -1375,7 +1389,7 @@ test('D2 B5 catalog Solver attaches after a cold start from retained evidence', 
 })
 
 test('D2 B6 an existing damaged Solver is preserved and install refuses offline', async t => {
-  const f = await fixture(t, { offline: true, roleDeps: {} })
+  const f = await fixture(t, { offline: true, roleDeps: { bundledHistory: solverCutHistory() } })
   const files = await copyBundle(installedSolverDir(f), { version: PLUGIN_VERSION })
   f.rt.state.roles = { solver: f.record({
     id: 'solver', version: PLUGIN_VERSION, source: 'bundled', sha256: fixtureBundleDigest(files),
@@ -1615,6 +1629,25 @@ test('D2S an edited or empty unpinned waiter needs a verified Solver role before
     assert.deepEqual(stored.roles, [pinOf('solver', PLUGIN_VERSION)])
     assert.equal(stored.waitingRole, undefined)
   }
+})
+
+test('D2T-2 Duplicate refuses an edited waiter whose copy would use Remote Hermes', async t => {
+  const f = await catalogSolverFixture(t)
+  await f.rt.installRole('solver', { settling: true })
+  const source = f.rt.state.bots[BOT.id]
+  Object.assign(source, {
+    model: 'hermes-remote/attach', waitingRole: waitFor(source.instructions, source.role),
+    instructions: 'Person changed these instructions.',
+  })
+  await f.rt.save()
+  t.mock.method(f.rt, 'catalog', async () => [{ ref: source.model }])
+  t.mock.method(f.rt, 'resolveModel', async ref => ref)
+  t.mock.method(f.rt, 'assertModelAccess', async () => {})
+  const before = await fs.readFile(f.statePath, 'utf8')
+  const copy = await f.call('duplicate-bot', { id: source.id })
+  refused(copy, /uses its Hermes profile's own instructions/)
+  assert.equal(await fs.readFile(f.statePath, 'utf8'), before)
+  assert.deepEqual(Object.keys(f.rt.state.bots), [source.id])
 })
 
 test('D2 B14 a pin-only Researcher copy has a method before and after attach', async t => {

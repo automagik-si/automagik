@@ -185,12 +185,13 @@ export function installRoles(rt, deps = {}) {
     })
   }
   async function finishSolverAttach(id, record, pin, expect, mayClear) {
-    if (!runtime.serving(id, record, pin)) return { pending: true }
+    const routes = await runtime.readDeliveryRoutes([expect.bot])
+    if (!runtime.serving(id, record, pin, routes)) return { pending: true }
     const check = () => {
       packages.requireWriter()
       if (!rolesOn(state.prefs)) throw rolesOff()
       const target = rt.own(state.bots, id)
-      if (target !== expect.bot || !sameWaiter(target, expect) || !runtime.serving(id, record, pin)) throw changedRole()
+      if (target !== expect.bot || !sameWaiter(target, expect) || !runtime.serving(id, record, pin, routes)) throw changedRole()
     }
     await commit(team => {
       const target = rt.own(team.bots, id)
@@ -322,7 +323,8 @@ export function installRoles(rt, deps = {}) {
         if (rt.lockTerm?.() !== term || rt.own(state.bots, source.id) !== source
           || !sameWaiter(source, expect) || packages.damaged(record)) throw changedRole()
         packages.expectRecord(id, true, record)
-        if (copy && !runtime.canDeliverPrompt(copy)) throw refusal('ACP coding agents do not receive this role’s prompt.')
+        const warning = copy && runtime.copyWarning(copy)
+        if (warning) throw refusal(warning)
       }
       const details = await packages.verifyExisting(id, record)
       if (!details.prompt.trim() || details.manifest.tools.length || details.manifest.settings.length) throw changedRole()

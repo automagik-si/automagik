@@ -253,7 +253,8 @@ function PackageAttachmentCard({ roster, bot, pin, recoveryId, onDetach, actions
     runtime ? h(RoleControls, { key: `${bot.id}:${pin.attachedAt}`, bot, runtime, actions, run, readOnly: roleReadOnly(roster) })
       : h(Row, { label: t('Grants requested'), hint: declarations ? declarations.capabilities.join(', ') || t('None') : t('Details unavailable') }),
     !runtime && declarations?.fromCatalog ? h(Row, { label: t('From the catalog') }) : null,
-    runtime?.acp ? h(Row, { label: t('ACP coding agents do not receive this role’s prompt.') }) : null,
+    runtime?.promptWarning ? h(Row, { label: hostText(runtime.promptWarning) })
+      : runtime?.acp ? h(Row, { label: t('ACP coding agents do not receive this role’s prompt.') }) : null,
     !runtime ? h(Row, { label: healthReason ? hostText(healthReason) : t('Its tools arrive with the role runtime.'),
       hint: recover ? t('Detach it from every Bot, uninstall, then install again.') : undefined }) : null)
 }

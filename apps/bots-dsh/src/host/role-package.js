@@ -291,22 +291,41 @@ export function createRolePackages(rt, catalog, {
       || (bundled && !BUNDLED_ROLE_IDS.includes(id))) throw refusal('The installed role record is invalid.')
     const term = rt.lockTerm?.()
     const paths = rolePaths(rt.home, id, record.version)
-    const before = await directories(fs, paths)
-    if (!before[3]) throw refusal('The installed role folder is missing.')
+    const currentWriter = () => recordOf(id) === record && rt.holdsLock?.() === true
+      && rt.lockTerm?.() === term && rt.readOnly?.() === undefined
     const verifiedDetails = (details, files) => {
-      if (recordOf(id) === record && rt.holdsLock?.() === true && rt.lockTerm?.() === term
-        && rt.readOnly?.() === undefined && !runtimeDamage.has(record)) remember(record, details, files)
+      if (currentWriter() && !runtimeDamage.has(record)) {
+        remember(record, details, files)
+        if (bundled) statuses.set(id, { record, status: 'ok' })
+      }
       return details
     }
     if (bundled) {
+      let status = 'damaged'
       try {
-        const files = await readBundleFiles(fs, paths.verDir, true)
-        const details = validateBundle(files, id, record.version, expectedDigest(id, record.version))
-        const after = await directories(fs, paths)
-        if (before.every((stat, index) => sameFile(stat, after[index]))) return verifiedDetails(details, files)
-      } catch { /* Unreadable or untrusted installed files. */ }
-      throw filesDiffer()
+        const before = await directories(fs, paths)
+        if (!before[3]) {
+          status = 'broken'
+          throw refusal('The installed role folder is missing.')
+        }
+        try {
+          const files = await readBundleFiles(fs, paths.verDir, true)
+          const details = validateBundle(files, id, record.version, expectedDigest(id, record.version))
+          const after = await directories(fs, paths)
+          if (before.every((stat, index) => sameFile(stat, after[index]))) return verifiedDetails(details, files)
+        } catch { /* Unreadable or untrusted installed files. */ }
+        throw filesDiffer()
+      } catch (error) {
+        if (currentWriter()) {
+          verified.delete(record)
+          fingerprints.delete(record)
+          statuses.set(id, { record, status })
+        }
+        throw error
+      }
     }
+    const before = await directories(fs, paths)
+    if (!before[3]) throw refusal('The installed role folder is missing.')
     const [archive, bytes, signature] = await Promise.all(evidencePaths(paths).map(async (path, i) => {
       const stat = await lstat(fs, path)
       if (privateEvidence(stat)) return readRegular(fs, path, stat, ROLE_EVIDENCE_LIMITS[i])

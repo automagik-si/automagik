@@ -14,6 +14,7 @@ import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { apply as applyExecutor, inject as executorInject } from '@deepseek-ai/dsh-tool-executor-native'
 import { createIdentityReaders, IDENTITY_PROVIDERS } from '../../acp-dsh/src/host/identity.js'
 import { apply } from '../index.js'
+import { createSolver } from '../src/client/solver-draft.js'
 import { ROUTE } from '../src/host/constants.js'
 import { installRoles } from '../src/host/roles.js'
 import { fakeContext } from './fake-ctx.js'
@@ -1011,6 +1012,94 @@ test('D2S settlement retains the written method until the selected ACP route rec
   assert.deepEqual(after.roles, before.roles)
   assert.equal(h.rt.roleRuntime.view()[FIRST].acp, false)
   assert.match(registry.read(FIRST).rolePrompt, solverPart)
+})
+
+test('D2T-1 settlement and the public view follow the owning and retained group Sessions', async t => {
+  for (const [label, sessionId, unloaded] of [
+    ['owning chat', FIRST, false], ['retained group', GROUP, false], ['unloaded retained group', GROUP, true],
+  ]) await t.test(label, async t => {
+    const f = await solverFixture(t)
+    const registry = createIdentityReaders()
+    const h = await f.start({ acpAgents: acpService(registry) })
+    const bot = h.rt.state.bots[FIRST]
+    const text = bot.instructions
+    const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+    Object.assign(bot, { model: 'test-provider/fixture', appliedModel: 'test-provider/fixture', waitingRole: waiting })
+    let provider = 'acp-fixture'
+    if (unloaded) {
+      const getSession = h.host.sessions.get
+      h.host.sessions.get = id => id === sessionId ? undefined : getSession(id)
+      const get = h.host.get
+      const agents = get('agents')
+      const nativeHeader = { type: 'request/header', data: { header: { config: { provider: 'test-provider', model: 'fixture' } } } }
+      const pendingSelection = { type: 'model/selection', data: { provider, model: 'fixture' } }
+      t.mock.method(h.host, 'get', name => {
+        if (name === 'agents') return { ...agents, get: id => id === sessionId ? undefined : agents.get(id) }
+        if (name === 'sessionPersistence') return {
+          open: async id => ({
+            read: async () => ({ events: id === sessionId ? [nativeHeader, pendingSelection, nativeHeader] : [] }),
+          }),
+        }
+        return get(name)
+      })
+    } else {
+      h.agentOf(sessionId).model = { current: () => ({ provider }) }
+    }
+    const result = await createSolver({
+      actions: {
+        installRole: id => h.ok('role-install', { id }),
+        createBot: () => bot,
+        attachRole: (id, role) => h.ok('role-attach', { id, role }),
+      },
+      before: [], solverPayloadFor: () => ({ payload: { name: bot.name } }),
+    })
+    assert.equal(result.roleNote, 'attach', 'New Solver reports K3')
+    const pending = (await f.disk()).bots[FIRST]
+    assert.equal(pending.instructions, text)
+    assert.deepEqual(pending.waitingRole, waiting)
+    const runtime = (await h.ok('state')).roleRuntime[FIRST]
+    assert.deepEqual(runtime.pin, h.pin())
+    assert.equal(runtime.acp, true)
+    if (!unloaded) {
+      h.events(sessionId, 'turn/start', { turn: 1 })
+      assert.match(h.prompt(sessionId), /Follow the fixture instructions/)
+      assert.doesNotMatch(h.prompt(sessionId), solverPart)
+    }
+
+    provider = 'test-provider'
+    if (unloaded) h.events(sessionId, 'model/selection', { provider, model: 'fixture' })
+    assert.deepEqual(await h.ok('role-attach', { id: FIRST, role: 'solver' }), ['solver'])
+    const settled = (await f.disk()).bots[FIRST]
+    assert.equal(settled.instructions, '')
+    assert.equal(settled.waitingRole, undefined)
+    assert.equal((await h.ok('state')).roleRuntime[FIRST].acp, false)
+    if (!unloaded) {
+      assert.equal(h.rt.roleRuntime.instructionsFor(sessionId, bot), text)
+      h.events(sessionId, 'turn/end', { turn: 1 })
+      assert.equal(h.rt.roleRuntime.instructionsFor(sessionId, bot), '')
+    }
+  })
+})
+
+test('D2T-2 settlement retains the written method and identifies the Remote Hermes route', async t => {
+  const f = await solverFixture(t)
+  const h = await f.start()
+  await h.ok('role-install', { id: 'solver' })
+  const bot = h.rt.state.bots[FIRST]
+  const text = bot.instructions
+  const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+  bot.waitingRole = waiting
+  h.agentOf(FIRST).model = { current: () => ({ provider: 'hermes-remote', model: 'attach' }) }
+  assert.deepEqual(await h.ok('role-attach', { id: FIRST, role: 'solver' }), { pending: true })
+  const saved = (await f.disk()).bots[FIRST]
+  assert.equal(saved.instructions, text)
+  assert.deepEqual(saved.waitingRole, waiting)
+  const runtime = (await h.ok('state')).roleRuntime[FIRST]
+  assert.equal(runtime.acp, false)
+  assert.match(runtime.promptWarning, /uses its Hermes profile's own instructions/)
+  assert.doesNotMatch(h.prompt(FIRST), solverPart)
+  const card = await mountRoleSettings(t, h, FIRST)
+  assert.match(card.text(), /uses its Hermes profile's own instructions/)
 })
 
 test('D2S a detached Solver turn never sends saved review material to a matching display name', async t => {

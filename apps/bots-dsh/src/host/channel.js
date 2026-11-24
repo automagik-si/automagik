@@ -88,7 +88,7 @@ export function install(rt) {
   installRoles(rt)
   ctx.on('session/event', (session, event) => {
     const sessionId = session?.id
-    rt.roleRuntime?.event?.(sessionId, event)
+    rt.roleRuntime?.event?.(sessionId, event, session)
     rt.publishChatEvent?.(sessionId, event)
   })
 
@@ -336,7 +336,7 @@ export function install(rt) {
     try { acp = ctx.get?.('acpAgents') } catch { acp = undefined }
     return nativeWorkersView(rt, acp)
   }
-  const live = (roles) => ({
+  const live = (roles, roleRuntime) => ({
     activity: rt.activityView(),
     // The web self-update holds new work (update-hold.js): the composer says so.
     updateHold: rt.updateHoldView?.() === true,
@@ -371,7 +371,7 @@ export function install(rt) {
     computerLive: rt.computerLive?.() ?? {},
     roleCatalog: rt.roleCatalogView(),
     roleDetails: rt.roleDetailsView(),
-    roleRuntime: rt.roleRuntime.view(),
+    roleRuntime,
     // File checks may change a record's status without a state write.
     roles,
   })
@@ -393,8 +393,8 @@ export function install(rt) {
   const liveRun = randomUUID()
   let liveSeq = 0
   let liveCache = null
-  const liveAnswer = (roles) => {
-    const value = live(roles)
+  const liveAnswer = (roles, roleRuntime) => {
+    const value = live(roles, roleRuntime)
     const json = JSON.stringify(value)
     if (liveCache?.json === json) return liveCache
     return liveCache = { key: `${liveRun}:${++liveSeq}`, value, json }
@@ -698,7 +698,7 @@ export function install(rt) {
           await rt.loadSecrets()
           const roles = await rt.roleRecordsView()
           await rt.prepareLearning()
-          const answer = liveAnswer(roles)
+          const answer = liveAnswer(roles, await rt.roleRuntime.publicView())
           const newBlocks = nativeToolsNewMap()
           if (body.since === state.revision && (body.models === undefined || body.models === modelsKey(newBlocks))) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })
