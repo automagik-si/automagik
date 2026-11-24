@@ -325,9 +325,15 @@ test('Windows direct inflight writes retry only the adopted checkpoint after a f
   const writeFile = fsp.writeFile
   const flushes = []
   let failFlush = false
+  let failOpen = false
+  let failedOpenBytes
   const spy = t.mock.method(fsp, 'writeFile', async (path, bytes, options) => {
     if (path === file) {
       flushes.push(options.flush)
+      if (failOpen) {
+        failedOpenBytes = bytes
+        throw Object.assign(new Error('injected direct-write open failure'), { code: 'EBUSY', syscall: 'open' })
+      }
       if (options.flush && failFlush) {
         await writeFile(path, bytes, options.encoding)
         throw new Error('injected direct-write flush failure')
@@ -386,4 +392,18 @@ test('Windows direct inflight writes retry only the adopted checkpoint after a f
   assert.deepEqual({ matching, afterSuccess, superseded }, {
     matching: [true], afterSuccess: [false], superseded: [false],
   })
+
+  rt.chatOwners.set('another-chat', 'solver')
+  await failPublished('another-chat', 4)
+  const published = fs.readFileSync(file, 'utf8')
+  failOpen = true
+  assert.equal(await writeNote(() => rt.noteApproval('another-chat', { tool: 'fixture' })), false)
+  failOpen = false
+  assert.equal(JSON.parse(failedOpenBytes).turns['another-chat'].approval.tool, 'fixture')
+  assert.equal(fs.readFileSync(file, 'utf8'), published, 'the failed open left the published checkpoint intact')
+  assert.deepEqual(flushes.splice(0), [true])
+
+  await takeOver()
+  assert.deepEqual(await writeOrdinary(), [true], 'the adopted checkpoint still needs its flush')
+  assert.deepEqual(await writeOrdinary(), [false], 'the successful retry cleared the pending flush')
 })

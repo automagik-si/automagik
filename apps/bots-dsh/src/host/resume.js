@@ -353,9 +353,13 @@ export function install(rt) {
       if (!current()) return false
       // Windows can refuse to replace the file while another process has it open for reading.
       if (process.platform === 'win32') {
-        // A failed flush can leave the full checkpoint on disk.
-        if (flush) unconfirmedNotes = snapshot
-        await writeFile(file, snapshot, { encoding: 'utf8', flush })
+        try {
+          await writeFile(file, snapshot, { encoding: 'utf8', flush })
+        } catch (error) {
+          // A failed open leaves the previous checkpoint intact. A later failure can leave these bytes on disk.
+          if (flush && error?.syscall !== 'open') unconfirmedNotes = snapshot
+          throw error
+        }
         unconfirmedNotes = undefined
       } else {
         const temp = join(home, `.inflight-${randomUUID()}.tmp`)
