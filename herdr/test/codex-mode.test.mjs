@@ -1116,8 +1116,19 @@ function scene(t, { programs = null, templates = [], env: more = {} } = {}) {
 /** What an `hc run` call launches, past `/usr/bin/env NAME=value…` and the seat's briefing. */
 const DONE_LINE = "Before you report done: commit or discard every change you made and leave the worktree "
   + "clean (`git status --porcelain` prints nothing).";
-const withoutDone = (words) => words.map((w) => typeof w === "string" && w.endsWith(`\n\n${DONE_LINE}`)
-  ? w.slice(0, -(DONE_LINE.length + 2)) : w);
+// #2057: the needs-owner rule every non-Hermes worker task carries before the done line,
+// written out (never imported), so a wording change shows here.
+const OWNER_LINE = "Waiting on the person: when you end your turn because only the person can unblock you (a "
+  + "question or a choice, not a permission prompt), ask it in your reply and also mark your own "
+  + "pane so the Herdr sidebar shows a Question, with a short paraphrase in single quotes and no "
+  + "apostrophe, e.g. `hc label \"$HC_TERMINAL_ID\" 'automagik-herdr.needs-owner=Which release should "
+  + "ship?'`. For each new question, set it again with the new paraphrase. Clear it with `hc label "
+  + "\"$HC_TERMINAL_ID\" automagik-herdr.needs-owner=` as soon as you work again or the question is "
+  + "withdrawn. A question your lead bot can answer: ask it in your reply, without the label. If "
+  + "HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
+const TAIL = `${OWNER_LINE}\n\n${DONE_LINE}`;
+const withoutDone = (words) => words.map((w) => typeof w === "string" && w.endsWith(`\n\n${TAIL}`)
+  ? w.slice(0, -(TAIL.length + 2)) : w);
 const launched = (call) => {
   const words = call.slice(call.indexOf("--") + 1);
   let i = words[0] === "/usr/bin/env" ? 1 : 0;

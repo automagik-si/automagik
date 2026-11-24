@@ -514,6 +514,7 @@ roster. Run the same edit against the main checkout to change the live schedule.
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
 `hc label <terminal> automagik-herdr.needs-owner=` once you have answered).
+Every `am worker` task, whatever its agent except Hermes, ends with the same rule.
 A bot started by the pack as Claude Code, Codex, omp, pi, grok or guarded dsh-tui is told to
 set and clear it in its launch briefing. Attached Claude Code seats get the guidance when the
 briefing hook prints. `am brief` and Hermes omit it. The dsh-tui guard and per-pane proxy

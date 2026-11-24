@@ -34,7 +34,7 @@ import { isHcTerminalId } from "../hcProxy.mjs";
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { amPartEntryPath, amPartRunnerPath, briefingFilePath, briefingPath, installHook, launchBriefingText, runnerPath, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingFileOf, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
+import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentArgv, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingFileOf, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -12221,9 +12221,6 @@ async function cmdWorker(opts, rest) {
   if (rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined) return cmdWorkerKill(opts, rest.slice(1));
   const task = rest.join(" ").trim();
   if (!task) throw new CliError('worker needs the task text: am worker "<task>" --branch <name>.', 2);
-  // #1278 cause 5: the worker is sent back with a clean worktree, so the sweep never has to
-  // keep its worktree for uncommitted changes.
-  const prompt = workerTaskText(task);
   if (optionLike(task)) throw new CliError("The task text can't start with a dash; the agent would read it as an option.", 2);
   if ((opts.branch === undefined) === (opts.worktree === undefined)) throw new CliError("Give --branch or --worktree (one of them).", 2);
   if (opts.base !== undefined && opts.branch === undefined) throw new CliError("--base goes with --branch.", 2);
@@ -12297,16 +12294,23 @@ async function cmdWorker(opts, rest) {
   // no environment. One that can't take its task as a last argument is refused, as unrunnable.
   let templateArgv = null;
   let templateCommand = null;
-  if (plan.template) {
-    const t = await templateRuns(plan.template, agents);
-    templateCommand = t.command?.trim() ? t.command : null;
-    runs = t.runs;
-    if (runs === "claude") {
-      templateArgv = t.command?.trim() ? commandArgv({ shell: t.command }, [task]) : null;
-      if (!templateArgv) {
-        throw new CliError(`Template ${plan.template} runs Claude, but ${t.command?.trim() ? "its command ends in a separator or a comment, so it can't take the task"
-          : "hc gave no command for it"}; it can't be started on the chosen Claude login. Not started.`);
-      }
+  const t = plan.template ? await templateRuns(plan.template, agents) : null;
+  if (t) { templateCommand = t.command?.trim() ? t.command : null; runs = t.runs; }
+  // #1278 cause 5: the worker is sent back with a clean worktree, so the sweep never has to
+  // keep its worktree for uncommitted changes. #2057: it is also taught the needs-owner Question
+  // chip, except a Hermes worker (#1747), told by its key, its program or a template command
+  // naming hermes when the template's agent can't be told. Every route reads this one text.
+  const hermes = runs === "hermes"
+    || agentKeyOfArgv(plan.argv ?? [], agents) === "hermes"
+    || /^hermes(-agent)?$/.test(agentArgv(plan.argv ?? []).program)
+    || (Boolean(plan.template) && runs === undefined
+      && /(^|[\s'"`/;&|(=])hermes(-agent)?([\s'"`;&|)<>]|$)/.test(templateCommand ?? ""));
+  const prompt = workerTaskText(task, hermes ? "hermes" : runs);
+  if (t && runs === "claude") {
+    templateArgv = t.command?.trim() ? commandArgv({ shell: t.command }, [prompt]) : null;
+    if (!templateArgv) {
+      throw new CliError(`Template ${plan.template} runs Claude, but ${t.command?.trim() ? "its command ends in a separator or a comment, so it can't take the task"
+        : "hc gave no command for it"}; it can't be started on the chosen Claude login. Not started.`);
     }
   }
   // The pointer record (#1509) rules when the entrypoint set it; otherwise the launch is exactly
@@ -12435,7 +12439,7 @@ async function cmdWorker(opts, rest) {
       if (modeWarning) warnings.push(modeWarning);
       if (plan.template && runs === "antigravity") {
         const built = templateCommand
-          ? commandArgv({ shell: templateCommand }, [...agySettingsArgs("antigravity", agySettings?.path), task]) : null;
+          ? commandArgv({ shell: templateCommand }, [...agySettingsArgs("antigravity", agySettings?.path), prompt]) : null;
         if (built) templateArgv = built;
         else warnings.push(`${bot.name}'s template ${plan.template} ${templateCommand
           ? "ends in a separator or a comment, so its Antigravity permission list can't be added" : "gave no command, so its Antigravity permission list can't be added"}; it runs without one.`);
