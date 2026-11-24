@@ -352,8 +352,12 @@ export function install(rt) {
       await mkdir(home, { recursive: true })
       if (!current()) return false
       // Windows can refuse to replace the file while another process has it open for reading.
-      if (process.platform === 'win32') await writeFile(file, snapshot, { encoding: 'utf8', flush })
-      else {
+      if (process.platform === 'win32') {
+        // A failed flush can leave the full checkpoint on disk.
+        if (flush) unconfirmedNotes = snapshot
+        await writeFile(file, snapshot, { encoding: 'utf8', flush })
+        unconfirmedNotes = undefined
+      } else {
         const temp = join(home, `.inflight-${randomUUID()}.tmp`)
         let renamed = false
         try {

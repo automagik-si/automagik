@@ -318,3 +318,72 @@ test('only pending durability for the adopted checkpoint survives takeover', pos
   assert.equal(read('inflight.json').turns.solver.since, 3)
   assert.deepEqual({ same, superseded }, { same: ['state', 'directory', 'inflight', 'directory'], superseded: [] })
 })
+
+test('Windows direct inflight writes retry only the adopted checkpoint after a failed flush', async (t) => {
+  const { rt, home, read, write, noteWrite } = await recoveryHost(t, installResume)
+  const file = join(home, 'inflight.json')
+  const writeFile = fsp.writeFile
+  const flushes = []
+  let failFlush = false
+  const spy = t.mock.method(fsp, 'writeFile', async (path, bytes, options) => {
+    if (path === file) {
+      flushes.push(options.flush)
+      if (options.flush && failFlush) {
+        await writeFile(path, bytes, options.encoding)
+        throw new Error('injected direct-write flush failure')
+      }
+    }
+    return writeFile(path, bytes, options)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { spy.mock.restore(); syncBuiltinESMExports() })
+
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  const writeNote = async (change) => {
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+    try {
+      change()
+      return await noteWrite()
+    } finally {
+      Object.defineProperty(process, 'platform', platform)
+    }
+  }
+  const failPublished = async (id, turn) => {
+    failFlush = true
+    assert.equal(await writeNote(() => {
+      for (const listener of rt.ctx.listeners.get('session/event')) {
+        listener({ id }, { type: 'turn/start', time: turn, data: { turn } })
+      }
+    }), false)
+    assert.equal(read('inflight.json').turns[id].since, turn)
+    assert.deepEqual(flushes.splice(0), [true])
+    failFlush = false
+  }
+  const takeOver = async () => {
+    write('state.lock', { host: 'other-host', pid: 1, token: 'other-owner' })
+    await rt.refresh()
+    fs.rmSync(join(home, 'state.lock'))
+    await rt.refresh()
+    await rt.reloadDeliveryNotes(() => {})
+  }
+  const writeOrdinary = async () => {
+    assert.equal(await writeNote(() => rt.noteApproval('solver', undefined)), true)
+    return flushes.splice(0)
+  }
+
+  await failPublished('solver', 1)
+  await takeOver()
+  const matching = await writeOrdinary()
+  const afterSuccess = await writeOrdinary()
+
+  await failPublished('reviewer', 2)
+  const outside = read('inflight.json')
+  outside.turns.reviewer.since = 3
+  write('inflight.json', outside)
+  await takeOver()
+  const superseded = await writeOrdinary()
+  assert.equal(read('inflight.json').turns.reviewer.since, 3)
+  assert.deepEqual({ matching, afterSuccess, superseded }, {
+    matching: [true], afterSuccess: [false], superseded: [false],
+  })
+})
