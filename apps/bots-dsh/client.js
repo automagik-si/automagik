@@ -22876,7 +22876,74 @@ function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, clo
 }
 
 // src/client/team-actions.js
-function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession, loginState, panelFolded }) {
+function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession, loginState, panelFolded, work }) {
+  const picks = createSource({});
+  const pickEntries = /* @__PURE__ */ new Map();
+  let unwatchPicks;
+  const dropPick = (part, entry) => {
+    if (pickEntries.get(part) !== entry) return;
+    clearTimeout(entry.timer);
+    pickEntries.delete(part);
+    picks.set((state2) => {
+      const next = { ...state2 };
+      delete next[part];
+      return next;
+    });
+    if (pickEntries.size === 0 && unwatchPicks !== void 0) {
+      const stop3 = unwatchPicks;
+      unwatchPicks = void 0;
+      stop3();
+    }
+  };
+  const syncPicks = () => {
+    const snapshot2 = work?.getSnapshot?.();
+    for (const [part, entry] of pickEntries) {
+      const noting = snapshot2?.noting?.[part] === true;
+      if (noting || entry.settled && snapshot2?.models?.[entry.botId]?.switching === void 0) dropPick(part, entry);
+    }
+  };
+  const noPick = { mark: () => {
+  }, end: () => {
+  } };
+  const pickFor = (id, ref) => {
+    if (typeof ref !== "string") return noPick;
+    const bot = roster?.getSnapshot?.()?.byId?.[id];
+    const current = bot?.model ?? bot?.appliedModel;
+    if (typeof current !== "string" || ref === current || !crossesHarness(current, ref)) return noPick;
+    if (routeOfRef(current).route !== "acp") return noPick;
+    const part = partFor(id);
+    let entry;
+    return {
+      mark: () => {
+        const older = pickEntries.get(part);
+        if (older !== void 0) clearTimeout(older.timer);
+        const own2 = { botId: bot.id, settled: false, timer: void 0 };
+        entry = own2;
+        own2.timer = setTimeout(() => dropPick(part, own2), CROSSING_DEADLINE_MS);
+        own2.timer?.unref?.();
+        pickEntries.set(part, own2);
+        if (older === void 0 && pickEntries.size === 1 && typeof work?.subscribe === "function") unwatchPicks = work.subscribe(syncPicks);
+        picks.set((state2) => state2[part] === true ? state2 : { ...state2, [part]: true });
+      },
+      end: (ok) => {
+        if (entry === void 0) return;
+        if (ok === true) {
+          entry.settled = true;
+          syncPicks();
+        } else dropPick(part, entry);
+      }
+    };
+  };
+  const picked = (pick4, request) => pick4 === noPick ? after(request) : after(request.then((value) => {
+    pick4.mark();
+    return value;
+  })).then((value) => {
+    pick4.end(true);
+    return value;
+  }, (error) => {
+    pick4.end(false);
+    throw error;
+  });
   const openCliLogin = (botId, provider, ref) => {
     const bot = cliLoginBotOf(roster.getSnapshot(), botId);
     const manager = loginState?.();
@@ -23014,7 +23081,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     deleteAvatar: (id) => call2("avatar-delete", { id }),
     createRoom: (members, options = {}) => after(call2("create-room", { members, ...options })),
     setBotAuto: (id, rev) => after(call2("set-bot-auto", { id, rev })),
-    updateBot: (id, patch) => after(call2("update-bot", { id, ...patch })),
+    updateBot: (id, patch) => picked(pickFor(id, patch?.model), call2("update-bot", { id, ...patch })),
     attachRole: (id, role) => after(call2("role-attach", { id, role })),
     detachRole: (id) => after(call2("role-detach", { id })),
     roleCatalog: () => after(call2("role-catalog")),
@@ -23031,10 +23098,10 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     // picked with it. `options.stopReply`: the person's Switch on "This stops the current reply",
     // the only consent that lets the host stop a running reply; without it the host answers
     // reason reply-running while one runs.
-    switchRoute: (id, ref, patch = {}, options) => after(call2("switch-route", { id, ...patch, model: ref, ...stopping(options) })),
+    switchRoute: (id, ref, patch = {}, options) => picked(pickFor(id, ref), call2("switch-route", { id, ...patch, model: ref, ...stopping(options) })),
     switchRouteInChat: async (id, ref, patch = {}, options) => {
       try {
-        return await after(call2("switch-route", { id, ...patch, model: ref, ...stopping(options) }));
+        return await picked(pickFor(id, ref), call2("switch-route", { id, ...patch, model: ref, ...stopping(options) }));
       } catch (error) {
         const provider = signInProviderOf(ref);
         if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider)) return void 0;
@@ -23048,7 +23115,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     // as for switchRoute.
     chooseModelInChat: async (id, ref, patch = {}, options) => {
       try {
-        return await after(call2("update-bot", { id, ...patch, model: ref, ...stopping(options) }));
+        return await picked(pickFor(id, ref), call2("update-bot", { id, ...patch, model: ref, ...stopping(options) }));
       } catch (error) {
         const provider = signInProviderOf(ref);
         if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider, ref)) return void 0;
@@ -23056,6 +23123,9 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
         throw error;
       }
     },
+    // The activity row reads the mark like the host's `noting`.
+    subscribePicks: (listener) => picks.subscribe(listener),
+    picking: (part) => picks.getSnapshot()[part] === true,
     openCliLogin,
     async recoverCliLogin(botId, provider) {
       const bot = cliLoginBotOf(roster.getSnapshot(), botId);
@@ -25592,7 +25662,12 @@ var import_react55 = require("react");
 var import_react_dom8 = require("react-dom");
 var PHRASE_HOLD_MS = 800;
 var drawPhrase = (pool) => t(pool[Math.min(pool.length - 1, Math.floor(Math.random() * pool.length))]);
-var rowVisible = ({ running: running2, streaming, tools, relaying, bot, room: room2, noting = false }) => !noting && running2 && (!streaming || tools.length > 0) && !relaying && (bot !== void 0 || room2 !== void 0);
+var rowVisible = ({ running: running2, streaming, tools, relaying, bot, room: room2, noting = false, picking = false }) => !noting && !picking && running2 && (!streaming || tools.length > 0) && !relaying && (bot !== void 0 || room2 !== void 0);
+var picksSubscriber = (actions) => (listener) => {
+  const stop3 = actions?.subscribePicks?.(listener);
+  return typeof stop3 === "function" ? stop3 : () => {
+  };
+};
 var freshInputAt = (submissions, steeredAt) => Math.max(
   0,
   steeredAt ?? 0,
@@ -25691,6 +25766,8 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   const liveKey = useLive((state2) => JSON.stringify(state2[sessionId] ?? {}));
   const steeredAt = useWork?.((work) => work.steered?.[sessionId]);
   const noting = useWork?.((work) => work.noting?.[sessionId] === true) === true;
+  const subscribePicks = (0, import_react55.useMemo)(() => picksSubscriber(actions), [actions]);
+  const picking = (0, import_react55.useSyncExternalStore)(subscribePicks, () => actions?.picking?.(sessionId) === true);
   const pendingInput = useSession((snapshot2) => freshInputAt(snapshot2?.pendingSubmissions, steeredAt));
   const bot = roster.byId[sessionId];
   const room2 = roster.roomsById[sessionId];
@@ -25702,7 +25779,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   const streaming = entries2.some((entry) => entry.text);
   const tools = entries2.filter((entry) => !entry.text).sort((a, b) => a.at - b.at);
   const relaying = tools.some((entry) => entry.relay);
-  const visible = moveAt !== 0 || rowVisible({ running: running2, streaming, tools, relaying, bot, room: room2, noting });
+  const visible = moveAt !== 0 || rowVisible({ running: running2, streaming, tools, relaying, bot, room: room2, noting, picking });
   const tool = tools.at(-1);
   const inputRef = (0, import_react55.useRef)(0);
   const inputAt = Math.max(inputRef.current, pendingInput);
@@ -47240,7 +47317,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   let cliLogin;
   const codePanel = codePanelNavigation(ctx.layout, seatNavigation);
   const actions = {
-    ...teamActions({ call, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession: (id) => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
+    ...teamActions({ call, after, partFor, roster, ui: ui2, live, cards: cards2, heldCards, turnClock, openSession: (id) => actions.openSession(id), loginState: () => cliLogin, panelFolded, work }),
     selfUpdateStatusSource,
     learningAnswer: (id, approve) => after(call("learning-answer", { id, approve })),
     // The full-pane overlays sit above the conversation, so opening one must dismiss them

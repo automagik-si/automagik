@@ -608,7 +608,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   let cliLogin
   const codePanel = codePanelNavigation(ctx.layout, seatNavigation)
   const actions = {
-    ...teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession: id => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
+    ...teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession: id => actions.openSession(id), loginState: () => cliLogin, panelFolded, work }),
     selfUpdateStatusSource,
     learningAnswer: (id, approve) => after(call('learning-answer', { id, approve })),
     // The full-pane overlays sit above the conversation, so opening one must dismiss them

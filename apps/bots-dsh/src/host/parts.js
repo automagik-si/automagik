@@ -215,6 +215,108 @@ export function canonicalHeadings(note, names) {
   return lines.join('\n')
 }
 
+// The names a note lacks: a heading of one to four `#` with the name alone, a `:` allowed
+// after it. One pattern with no two adjacent quantifiers over the same characters, so a long
+// line costs linear time (the note is model output).
+export function missingHeadings(note, names) {
+  return names.filter(name => !new RegExp(`^#{1,4}\\s*${escapeRegExp(name)}(?:\\s*:)?\\s*$`, 'mi').test(note))
+}
+
+// One line of a note read as a heading: `{ rank, name }` (rank 1-6 for `#`..`######`, 7 for a
+// whole bold line, which ranks below every `#` level), else undefined. A per-line parse, no
+// backtracking pattern.
+function headingOf(line) {
+  const trimmed = line.trimEnd()
+  let lead = 0
+  while (lead < 3 && trimmed[lead] === ' ') lead += 1
+  const rest = trimmed.slice(lead)
+  let text
+  let rank
+  let hashes = 0
+  while (hashes < 7 && rest[hashes] === '#') hashes += 1
+  if (hashes >= 1 && hashes <= 6 && rest[hashes] === ' ') {
+    rank = hashes
+    text = rest.slice(hashes + 1).replace(/ #+$/, '')
+  } else {
+    const marker = rest.startsWith('**') ? '**' : rest.startsWith('__') ? '__' : undefined
+    if (marker === undefined) return undefined
+    const closed = rest.endsWith(':') ? rest.slice(0, -1) : rest
+    if (closed.length <= marker.length * 2 || !closed.endsWith(marker)) return undefined
+    const inner = closed.slice(marker.length, -marker.length)
+    if (inner.includes(marker)) return undefined
+    rank = 7
+    text = inner
+  }
+  let name = text.trim()
+  if (name.endsWith(':')) name = name.slice(0, -1).trim()
+  name = name.replace(/^\d+[.)]/, '').trim()
+  if (name.endsWith(':')) name = name.slice(0, -1).trim()
+  return name === '' ? undefined : { rank, name }
+}
+
+// A note whose headings are written another way: bold, numbered, at another level, with a
+// title or a closing line, or translated. A heading named in English (any case) becomes
+// `## <name>`; translated headings are rewritten in order only when one group of the same
+// kind is clearly the sections. Lines inside a fenced block are never headings and never
+// rewritten; no other line changes. Any other shape comes back with only its English names
+// rewritten, so the caller still finds the sections it lacks.
+export function tolerantHeadings(note, names) {
+  const canonical = canonicalHeadings(note, names)
+  if (missingHeadings(canonical, names).length === 0) return canonical
+  const lines = note.split('\n')
+  const headings = []
+  let fence
+  for (let index = 0; index < lines.length; index += 1) {
+    const start = lines[index].trimStart()
+    if (fence !== undefined) {
+      if (start.startsWith(fence)) fence = undefined
+      continue
+    }
+    if (start.startsWith('```') || start.startsWith('~~~')) {
+      fence = start.slice(0, 3)
+      continue
+    }
+    const heading = headingOf(lines[index])
+    if (heading !== undefined) headings.push({ index, ...heading })
+  }
+  const known = name => names.findIndex(each => each.toLowerCase() === name.toLowerCase())
+  // Step 1: the English names, wherever they stand.
+  for (const heading of headings) {
+    const at = known(heading.name)
+    if (at < 0) continue
+    lines[heading.index] = `## ${names[at]}`
+    Object.assign(heading, { rank: 2, name: names[at] })
+  }
+  const stepOne = lines.join('\n')
+  if (missingHeadings(stepOne, names).length === 0) return stepOne
+  // Step 2: translated headings. A group of `names.length + 1` passes only with a title: the
+  // note's first non-empty line, with no body before the group's second heading.
+  const firstLine = lines.findIndex(line => line.trim() !== '')
+  const groups = new Map()
+  for (const heading of headings) {
+    if (!groups.has(heading.rank)) groups.set(heading.rank, [])
+    groups.get(heading.rank).push(heading)
+  }
+  const candidates = []
+  for (const [rank, group] of groups) {
+    let chosen
+    if (group.length === names.length) chosen = group
+    else if (group.length === names.length + 1 && group[0].index === firstLine) {
+      const next = lines.findIndex((line, index) => index > firstLine && line.trim() !== '')
+      if (next === group[1].index) chosen = group.slice(1)
+    }
+    if (chosen === undefined) continue
+    // Every other heading outside fences, the note's first line aside, ranks below it.
+    const outranked = headings.some(heading => heading.rank !== rank && heading.index !== firstLine && heading.rank <= rank)
+    if (!outranked) candidates.push(chosen)
+  }
+  if (candidates.length !== 1) return stepOne
+  const [chosen] = candidates
+  if (chosen.some((heading, n) => known(heading.name) >= 0 && known(heading.name) !== n)) return stepOne
+  chosen.forEach((heading, n) => { lines[heading.index] = `## ${names[n]}` })
+  return lines.join('\n')
+}
+
 export function install(rt) {
   const { ctx, config, state } = rt
   const agents = new Map()
@@ -581,8 +683,7 @@ export function install(rt) {
   const FOLDER_PROMPT = handoffPrompt('Your working folder changed')
   const NOTE_RETRY_SHORTER = 'Your last note was cut off at the output limit, so it was not used. Write the whole note again, shorter: at most about 1,000 words. Keep every heading; drop detail before you drop facts.'
   const noteRetryMissing = missing => `Your last note lacked these headings, so it was not used: ${missing.map(name => `"## ${name}"`).join(', ')}. Write the whole note again with every heading exactly as given, in English.`
-  const missingSections = note => NOTE_SECTIONS.map(([name]) => name)
-    .filter(name => !new RegExp(`^#{1,4}\\s*${escapeRegExp(name)}\\s*:?\\s*$`, 'mi').test(note))
+  const missingSections = note => missingHeadings(note, NOTE_SECTIONS.map(([name]) => name))
 
   // A part's own calls run on the conversation's route, so the provider serves its prefix
   // from cache. A chat on an agent over ACP cannot take a request beside its turn (the agent
@@ -1867,11 +1968,18 @@ export function install(rt) {
     try { messages = agent.session.deriveMessages() } catch { return }
     const at = messages.findLastIndex(message => message?.role === 'user' && message.source?.exchangeId === exchangeId)
     if (at < 0) return
-    const text = messages.slice(at + 1).filter(message => message?.role === 'assistant')
-      .map(message => textOf(message.content).trim()).filter(Boolean).at(-1) ?? ''
-    const note = missingSections(text).length > 0 ? canonicalHeadings(text, NOTE_SECTIONS.map(([name]) => name)) : text
-    if (note === '' || missingSections(note).length > 0) {
-      rt.warn('ds-bot: the handoff note written for the agent switch of %s was not usable', rt.botOf(job.botId)?.name ?? agent.id)
+    // The last assistant text with every heading: a closing line after the note, or a later
+    // partial note, does not throw the note away. A text that passes as written is kept as is.
+    const names = NOTE_SECTIONS.map(([name]) => name)
+    const texts = messages.slice(at + 1).filter(message => message?.role === 'assistant')
+      .map(message => textOf(message.content).trim()).filter(Boolean)
+    const note = texts.map(text => (missingSections(text).length === 0 ? text : tolerantHeadings(text, names)))
+      .findLast(text => missingSections(text).length === 0)
+    if (note === undefined) {
+      // Why, and the counts; never the note's text.
+      const last = texts.at(-1) ?? ''
+      const reason = last === '' ? 'it was empty' : `it lacked ${missingSections(tolerantHeadings(last, names)).join(', ')}`
+      rt.warn('ds-bot: the handoff note written for the agent switch of %s was not usable: %s (%d assistant texts after the request, the last one %d characters long)', rt.botOf(job.botId)?.name ?? agent.id, reason, texts.length, last.length)
       return
     }
     // The same bound as a note written on a native route: a longer one is not carried.

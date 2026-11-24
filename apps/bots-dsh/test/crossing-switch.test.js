@@ -1764,3 +1764,86 @@ test('F4c notingView names the old part while an ACP note turn is pending, and n
   await b.moved()
   assert.deepEqual(b.rt.notingView(), {})
 })
+
+// ---- PLAN-S6R O2 (stage 6): the outgoing ACP agent's note is kept over the way its headings
+// are written; with none usable, the line says why (never the note's text) ----
+const NOTE_PT = IN_CHAT_NOTE
+  .replace('## Goals', '## Objetivos').replace('## Constraints and preferences', '## Restrições e preferências')
+  .replace('## Progress', '## Progresso').replace('## Decisions', '## Decisões')
+  .replace('## Facts to keep', '## Fatos a manter').replace('## Open threads', '## Pendências')
+  .replace('## Next step', '## Próximo passo').replace('## Where to look', '## Onde procurar')
+// The outgoing agent (Claude over ACP) answers its note request with `answers`, one assistant
+// message each, then the switch to Codex runs to its end.
+async function noteAnswered(t, answers) {
+  const b = bench({ model: 'acp-claude/default' })
+  t.after(() => b.ctx.dispose())
+  b.agent.send = (item) => {
+    b.calls.sends.push({ id: 's1', item })
+    if (item.source?.role !== 'handoff-note') return
+    b.rt.markNoteTurn('s1', 4)
+    b.messages.push(item, ...answers.map(text => ({ role: 'assistant', content: [{ type: 'text', text }] })))
+    setTimeout(() => b.sessionEvent('s1', { type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } }), 5)
+  }
+  await b.rt.switchRoute('b1', 'acp-codex/default')
+  await b.moved()
+  const unusable = b.calls.warnings.filter(line => /handoff note written for the agent switch of %s was not usable/.test(line))
+  return { b, text: textOf(b.handoffOf('s2').content), unusable }
+}
+const carried = /carry on, from the agent itself/
+
+test('O2a O2b O2c a note with bold headings, a translated one under a title, or one before a closing line is carried', async (t) => {
+  const shapes = [
+    [IN_CHAT_NOTE.replace(/^## (.*)$/gm, (_line, name) => `**${name}**`)],
+    [`## Nota de passagem\n\n${NOTE_PT}`],
+    [IN_CHAT_NOTE, 'Pronto.'],
+  ]
+  for (const answers of shapes) {
+    const { text, unusable } = await noteAnswered(t, answers)
+    assert.match(text, carried, answers[0].slice(0, 30))
+    assert.deepEqual(unusable, [])
+  }
+})
+
+test('O2d a full note, then a later one with a heading missing: the full note is carried', async (t) => {
+  const partial = IN_CHAT_NOTE.replace('from the agent itself', 'a later partial one').replace('\n## Where to look\n- none', '')
+  const { text, unusable } = await noteAnswered(t, [IN_CHAT_NOTE, partial])
+  assert.match(text, carried)
+  assert.doesNotMatch(text, /a later partial one/)
+  assert.deepEqual(unusable, [])
+})
+
+test('O2e an empty answer: no summary, and the line says it was empty', async (t) => {
+  const { text, unusable } = await noteAnswered(t, [''])
+  assert.doesNotMatch(text, carried)
+  assert.match(text, /the agent of the previous part wrote no summary in time for the switch/)
+  assert.equal(unusable.length, 1)
+  assert.match(unusable[0], /was not usable: %s \(%d assistant texts after the request/)
+  assert.match(unusable[0], / it was empty 0 0$/)
+})
+
+test('O2f a section missing: no summary; the line names it and the counts, never the note', async (t) => {
+  const { text, unusable } = await noteAnswered(t, [IN_CHAT_NOTE.replace('\n## Where to look\n- none', '')])
+  assert.doesNotMatch(text, carried)
+  assert.equal(unusable.length, 1)
+  assert.match(unusable[0], /was not usable: %s \(%d assistant texts after the request, the last one %d characters long\)/)
+  assert.match(unusable[0], / it lacked Where to look 1 \d+$/)
+  assert.doesNotMatch(unusable[0], /carry on|none/)
+})
+
+test('P1 a reply with no headings at all carries no summary, the latest messages as before', async (t) => {
+  const { text, unusable } = await noteAnswered(t, ['I will just keep going with the task as it is.'])
+  assert.doesNotMatch(text, carried)
+  assert.doesNotMatch(text, /keep going with the task/)
+  assert.match(text, /the agent of the previous part wrote no summary in time for the switch/)
+  assert.match(text, /on it/)
+  assert.equal(unusable.length, 1)
+})
+
+test('O2g a note that passes as written is carried as written: no heading of it, nor a fenced line, is rewritten', async (t) => {
+  const asWritten = IN_CHAT_NOTE.replace('## Goals', '## GOALS').replace('## Facts to keep\n- none', '## Facts to keep\n- run:\n```\n# Progress\n```')
+  const { text, unusable } = await noteAnswered(t, [asWritten])
+  assert.match(text, carried)
+  assert.match(text, /## GOALS/)
+  assert.match(text, /```\n {0,8}# Progress\n {0,8}```/)
+  assert.deepEqual(unusable, [])
+})
