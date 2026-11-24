@@ -749,6 +749,24 @@ test('T15b MD-1 a cut reply whose fresh part fails its first call goes on in the
   assert.equal(b.rt.switchResumes('s2', signInFailure), false)
 })
 
+// ME-2: a cut request that already waits in the old part before the revert is queued once,
+// never added a second time; the old part still wakes once.
+test('T15b ME-2 a cut request already waiting in the old part is not added twice', async t => {
+  const b = cutBench()
+  t.after(() => b.ctx.dispose())
+  await b.rt.switchRoute('b1', 'acp-claude/default', undefined, { stopReply: true })
+  await b.moved()
+  // Something already put the cut exchange back into the old inbox before the revert.
+  b.agent.inbox.nextTurn.push(message(SOURCE_KIND, 'already waiting', { exchangeId: 'e-cut', role: 'request', form: 'relay', senderSessionId: 'other' }))
+  b.calls.sends.length = 0
+  b.sessionEvent('s2', { type: 'turn/end', data: { turn: 1, reason: signInFailure } })
+  await waitFor(() => b.calls.archived.includes('s2'))
+  const sent = b.calls.sends.filter(send => send.id === 's1')
+  assert.equal(sent.filter(send => send.item.source?.exchangeId === 'e-cut').length, 1)
+  assert.equal(textOf(sent.find(send => send.item.source?.exchangeId === 'e-cut').item.content), 'already waiting')
+  assert.equal(sent.filter(send => send.wake).length, 1)
+})
+
 test('T15b MD-1 with no way back (acp_tool denied), the fresh part runs its handoff once more', async t => {
   const b = cutBench({ model: 'acp-antigravity/default' })
   t.after(() => b.ctx.dispose())
