@@ -178,8 +178,9 @@ function validateBundle(files, id, version, expected) {
     || !['tools', 'settings', 'capabilities', 'ui'].every(key => Array.isArray(manifest[key]) && manifest[key].length === 0)
     || !manifestBytes(manifest).equals(files.get('role.json'))) throw bundleInvalid()
   const details = validateManifest(files, { id, version, publisher: 'automagik', capabilities: [] })
-  if (!details.prompt.trim() || bundleDigest(files) !== expected) throw bundleInvalid()
-  return details
+  const sha256 = bundleDigest(files)
+  if (!details.prompt.trim() || sha256 !== expected) throw bundleInvalid()
+  return { ...details, sha256 }
 }
 
 function expectedDirectories(files) {
@@ -263,7 +264,7 @@ export function createRolePackages(rt, catalog, {
       && entry.sha256 === record.sha256.toLowerCase()))
   const fingerprint = files => new Map([...files].map(([path, data]) => [path, { length: data.length, sha256: digest(data) }]))
   const remember = (record, details, files) => {
-    verified.set(record, details.declarations)
+    verified.set(record, details.sha256 ? { ...details.declarations, sha256: details.sha256 } : details.declarations)
     fingerprints.set(record, fingerprint(files))
   }
   const expectedDigest = (id, version) => compareVersions(version, ROLE_PLUGIN_VERSION) <= 0
@@ -353,7 +354,7 @@ export function createRolePackages(rt, catalog, {
         ...details.get(id),
         installed: {
           version: record.version,
-          ...(record.source !== 'bundled' || verified.has(record) ? { sha256: record.sha256.toLowerCase() } : {}),
+          ...(record.source !== 'bundled' ? { sha256: record.sha256.toLowerCase() } : {}),
           attachable: attachable(id, record, entries?.get(id)),
           ...verified.get(record),
         },
@@ -557,12 +558,6 @@ export function createRolePackages(rt, catalog, {
           if (!bundle) remember(record, details, files)
         },
       })
-      if (bundle) {
-        try { await verifyExisting(id, record) } catch {
-          warn('Installed bundled role %s could not be verified.', id)
-        }
-      }
-      return result
     } catch (error) {
       if (!renamed && !current[3]) throw error
       if (renamed && refusedBeforeCommit && published) {
@@ -598,6 +593,12 @@ export function createRolePackages(rt, catalog, {
         }
       }
     }
+    if (bundle) {
+      requireRoles()
+      await verifyExisting(id, record)
+      requireRoles()
+    }
+    return result
   }
 
   async function uninstall(id) {

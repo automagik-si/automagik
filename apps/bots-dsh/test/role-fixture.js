@@ -1,6 +1,7 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
+import { bundleDigest } from '../src/host/bundled-roles.js'
 
 export const REPOSITORY = 'https://github.com/automagik-si/automagik'
 export const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
@@ -8,6 +9,12 @@ export const RELEASE = `${REPOSITORY}/releases/download/v${VERSION}/`
 export const INDEX = `${RELEASE}roles.json`
 export const SIGNATURE = `${INDEX}.sig`
 export const SHA256 = bytes => createHash('sha256').update(bytes).digest('hex')
+
+export function solverCutHistory() {
+  const source = new URL('../roles/solver/', import.meta.url)
+  const files = new Map(['role.json', 'role.mjs', 'prompt.md'].map(name => [name, readFileSync(new URL(name, source))]))
+  return { solver: { [VERSION]: bundleDigest(files) } }
+}
 
 export function signer(keyId = 'test-key') {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')

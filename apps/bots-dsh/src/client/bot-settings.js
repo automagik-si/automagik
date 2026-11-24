@@ -280,6 +280,7 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
   const teamBot = roster.bots?.some(item => item.id === bot.id)
     ?? (Object.hasOwn(roster.byId ?? {}, bot.id) && roster.byId[bot.id]?.id === bot.id)
   const showingRoles = teamBot && rolesOn(roster.prefs)
+  const canCancelSolverWait = teamBot && bot.canCancelSolverWait === true
   const requestedRoleCatalog = useRef()
   useEffect(() => {
     if (!showingRoles || !actions.roleCatalog || requestedRoleCatalog.current === bot.id) return
@@ -349,15 +350,15 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
     h(Card, { title: t('Profile') },
       h(Row, { label: t('Name') }, h(InlineText, { label: t('Name'), value: bot.name, placeholder: 'Bob', required: true, maxLength: 40, onSave: name => save({ name }) })),
       h(Row, { label: t('Description'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Description'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) })),
-      showingRoles ? h('div', { className: choices.size ? 'bt-set-row bt-bs-row bt-bs-stack' : 'bt-set-row bt-bs-row' },
+      (showingRoles || canCancelSolverWait) ? h('div', { className: choices.size ? 'bt-set-row bt-bs-row bt-bs-stack' : 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Role')),
           h('span', { className: 'bt-set-hint' }, t('What this Bot can do, on top of what every Bot has.'))),
         h(rolePicker, rolePickerProps,
-          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': activeRole === undefined, disabled: readOnly,
-            onClick: () => { if (activeRole !== undefined && !readOnly) detach() } }, t('None')),
-          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': effective.includes('genie'),
+          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': activeRole === undefined && !canCancelSolverWait, disabled: readOnly,
+            onClick: () => { if (!readOnly) detach() } }, t('None')),
+          showingRoles ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': effective.includes('genie'),
             disabled: readOnly || Boolean(genieReason), title: genieReason,
-            onClick: () => { if (activeRole === undefined && !genieReason && !readOnly) void run(actions.attachRole(bot.id, 'genie')) } }, t('Genie')),
+            onClick: () => { if (activeRole === undefined && !genieReason && !readOnly) void run(actions.attachRole(bot.id, 'genie')) } }, t('Genie')) : null,
           ...[...choices].map(([id, version]) => {
             const installed = Object.hasOwn(roster.roleDetails ?? {}, id) ? roster.roleDetails[id].installed : undefined
             const pressed = pin?.id === id && activeRole === id

@@ -308,6 +308,7 @@ test('D2 E3 a lost attach reply needs the exact active pin and empty instruction
     [() => ({ bots: [bot] }), 'attach'],
     [() => ({ bots: [{ ...bot, instructions: 'Written method' }], roleRuntime }), 'attach'],
     [() => ({ bots: [bot], roleRuntime: { s1: { pin: { ...pin, attachedAt: 'later' } } } }), 'attach'],
+    [() => ({ bots: [bot], roleRuntime: { s1: { pin, acp: true } } }), 'attach'],
     [lost, 'attach'],
   ]) {
     const run = solverRun({ attach: lost, read })
@@ -328,4 +329,10 @@ test('D2 E4 only a new reviewer is dedicated, and every create carries the writt
   assert.equal(Object.hasOwn(solverPayload(base).payload, 'reviewerMade'), false)
   assert.equal(Object.hasOwn(solverPayload({ ...base, reviewerId: undefined, dedicated: true }).payload, 'reviewerMade'), false)
   assert.equal(solverPayload(base).payload.waitingRole, 'solver')
+})
+
+test('D2S a final verification refusal keeps Create on the install fallback', async () => {
+  const run = solverRun({ install: () => { throw new Error('The installed role files differ from the signed package.') } })
+  assert.equal((await run.result).roleNote, 'install')
+  assert.deepEqual(run.calls, [['installRole', 'solver'], ['createBot', 'Solver'], ['send', 's1', 'Compare libraries']])
 })

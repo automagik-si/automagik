@@ -259,6 +259,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   const acp = ref => routeOf(String(ref ?? '').split('/')[0]).connectedBy === 'acp'
   const reaches = ref =>
     rt.acpRolePromptProviders?.includes?.(String(ref ?? '').split('/')[0]) === true
+  const canDeliverPrompt = bot => ![bot.appliedModel, bot.model].some(ref => acp(ref) && !reaches(ref))
   function partOf(sessionId, held) {
     if (!held?.runtime.prompt?.trim() || (owner(sessionId) === undefined && !promptOnly(held.manifest))) return undefined
     const tail = held.pin.id === SOLVER_ROLE_ID ? `\n${solverReviewPart(held.bot, ownBot)}` : ''
@@ -300,7 +301,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       const part = partOf(sessionId, active(id))
       // A greeting may begin before attachment. Keep its complete method if
       // writing the new pin later clears the instructions on the live Bot.
-      const instructions = !part && bot.waitingRole?.id === SOLVER_ROLE_ID ? bot.instructions : undefined
+      const instructions = (!part || !canDeliverPrompt(bot)) && bot.waitingRole?.id === SOLVER_ROLE_ID ? bot.instructions : undefined
       turnPrompts.set(sessionId, { id, bot, part, instructions })
     }
   }
@@ -313,10 +314,11 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
 
   return {
-    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings,
+    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings, canDeliverPrompt,
     serving(id, record, pin) {
       const held = active(id)
       return held?.record === record && sameRolePin(held?.pin, pin) && Boolean(held.runtime.prompt?.trim())
+        && canDeliverPrompt(held.bot)
     },
     async prepare(details, sha256) {
       try {
@@ -337,11 +339,10 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     view: () => Object.fromEntries([...attachments].flatMap(([id, held]) => {
       if (!current(id, held) || !held.manifest
         || (held.pin.id === SOLVER_ROLE_ID && !held.runtime?.prompt?.trim())) return []
-      const ref = held.bot.appliedModel ?? held.bot.model
       return [[id, {
         pin: held.pin, settings: held.manifest.settings,
         capabilities: held.manifest.capabilities,
-        tools: held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp: acp(ref) && !reaches(ref),
+        tools: held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp: !canDeliverPrompt(held.bot),
       }]]
     })),
     dispose() {

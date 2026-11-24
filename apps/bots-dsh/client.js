@@ -18450,6 +18450,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
   const save = (patch) => run3(actions.updateBot(bot.id, patch));
   const teamBot = roster.bots?.some((item) => item.id === bot.id) ?? (Object.hasOwn(roster.byId ?? {}, bot.id) && roster.byId[bot.id]?.id === bot.id);
   const showingRoles = teamBot && rolesOn(roster.prefs);
+  const canCancelSolverWait = teamBot && bot.canCancelSolverWait === true;
   const requestedRoleCatalog = (0, import_react42.useRef)();
   (0, import_react42.useEffect)(() => {
     if (!showingRoles || !actions.roleCatalog || requestedRoleCatalog.current === bot.id) return;
@@ -18536,7 +18537,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
       { title: t("Profile") },
       (0, import_react42.createElement)(Row, { label: t("Name") }, (0, import_react42.createElement)(InlineText, { label: t("Name"), value: bot.name, placeholder: "Bob", required: true, maxLength: 40, onSave: (name) => save({ name }) })),
       (0, import_react42.createElement)(Row, { label: t("Description"), hint: t("A few words on what it does.") }, (0, import_react42.createElement)(InlineText, { label: t("Description"), value: bot.role, placeholder: t("Research, admin…"), maxLength: 24, onSave: (role) => save({ role }) })),
-      showingRoles ? (0, import_react42.createElement)(
+      showingRoles || canCancelSolverWait ? (0, import_react42.createElement)(
         "div",
         { className: choices.size ? "bt-set-row bt-bs-row bt-bs-stack" : "bt-set-row bt-bs-row" },
         (0, import_react42.createElement)(
@@ -18551,13 +18552,13 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
           (0, import_react42.createElement)("button", {
             type: "button",
             className: "bt-soft bt-soft-sm",
-            "aria-pressed": activeRole === void 0,
+            "aria-pressed": activeRole === void 0 && !canCancelSolverWait,
             disabled: readOnly,
             onClick: () => {
-              if (activeRole !== void 0 && !readOnly) detach();
+              if (!readOnly) detach();
             }
           }, t("None")),
-          (0, import_react42.createElement)("button", {
+          showingRoles ? (0, import_react42.createElement)("button", {
             type: "button",
             className: "bt-soft bt-soft-sm",
             "aria-pressed": effective.includes("genie"),
@@ -18566,7 +18567,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
             onClick: () => {
               if (activeRole === void 0 && !genieReason && !readOnly) void run3(actions.attachRole(bot.id, "genie"));
             }
-          }, t("Genie")),
+          }, t("Genie")) : null,
           ...[...choices].map(([id, version]) => {
             const installed = Object.hasOwn(roster.roleDetails ?? {}, id) ? roster.roleDetails[id].installed : void 0;
             const pressed2 = pin?.id === id && activeRole === id;
@@ -33146,7 +33147,8 @@ async function createSolver({ actions, before, reviewer, reviewerPayload: firstP
             const fresh = await actions.teamState();
             const bot = fresh?.bots?.find((bot2) => bot2.id === solver.id);
             const pin = packageAttachment(bot);
-            if (rolesOn(fresh?.prefs) && bot?.role === SOLVER_DESCRIPTION && bot.instructions === "" && pin?.id === SOLVER_ROLE_ID && pin.version === version && sameRolePin(pin, fresh.roleRuntime?.[solver.id]?.pin)) roleNote = void 0;
+            const runtime = fresh?.roleRuntime?.[solver.id];
+            if (rolesOn(fresh?.prefs) && bot?.role === SOLVER_DESCRIPTION && bot.instructions === "" && pin?.id === SOLVER_ROLE_ID && pin.version === version && sameRolePin(pin, runtime?.pin) && runtime.acp !== true) roleNote = void 0;
           } catch {
           }
         }
@@ -36001,7 +36003,7 @@ function RoleShopCard({ row: row2, roster, actions, operation }) {
     ),
     reason ? (0, import_react86.createElement)(Row, { label: reason }) : null,
     record ? (0, import_react86.createElement)(Row, { label: t("Installed version"), hint: [record.version, record.status !== "ok" && roleHealth(record.status)].filter(Boolean).join(" · ") }) : null,
-    installed ? (0, import_react86.createElement)(Row, { label: t("Installed SHA-256"), hint: checksum(installed.sha256), stack: true }) : null,
+    installed ? (0, import_react86.createElement)(Row, { label: t("Installed SHA-256"), hint: installed.sha256 ? checksum(installed.sha256) : t("Details unavailable"), stack: true }) : null,
     listed ? (0, import_react86.createElement)(Row, { label: t("Catalog version"), hint: listed.version }) : null,
     catalog ? (0, import_react86.createElement)(Row, { label: t("Catalog SHA-256"), hint: checksum(catalog.sha256), stack: true }) : null,
     newerVersion(listed?.version, record?.version) ? (0, import_react86.createElement)(Row, { label: t("Update available") }) : null,

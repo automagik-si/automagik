@@ -405,13 +405,14 @@ test('documents stable role versions and the next-cut recovery option', () => {
 });
 
 test('D2 the cut preserves the Solver mapping from its released predecessor', async () => {
-  const { checkBundledSolver } = await import('./role-pack');
-  const { bundleDigest } = await import('../apps/bots-dsh/src/host/bundled-roles.js');
+  const { checkBundledSolver, stampBundledSolver } = await import('./role-pack');
+  const { bundleDigest, expectedBundleDigest } = await import('../apps/bots-dsh/src/host/bundled-roles.js');
   const root = mkdtempSync(join(tmpdir(), 'solver-release-history-'));
   const role = PLUGIN + '/roles/solver';
   const history = PLUGIN + '/src/host/bundled-roles.json';
-  const first = '3.173.8';
-  const next = '3.173.9';
+  const beforeSolver = '3.173.9';
+  const first = '3.174.0';
+  const next = '3.174.2';
   const commitFixture = (message: string) => {
     const file = join(root, '.git', 'test-message');
     writeFileSync(file, message + '\n');
@@ -419,25 +420,48 @@ test('D2 the cut preserves the Solver mapping from its released predecessor', as
     git(root, 'commit', '-q', '-F', file);
     return git(root, 'rev-parse', 'HEAD');
   };
-  const mapping = (versions: Record<string, string>) =>
-    writeFileSync(join(root, history), JSON.stringify({ solver: versions }));
   const digest = () => bundleDigest(new Map(['role.json', 'role.mjs', 'prompt.md']
     .map(name => [name, readFileSync(join(root, role, name))])));
+  const mapping = (versions: Record<string, string>) =>
+    writeFileSync(join(root, history), JSON.stringify({ candidate: digest(), solver: versions }));
+  const inputs = (sha: string, version: string) => ({ root, sha, version, neverShipped: () => false });
+  const historyOnDisk = () => JSON.parse(readFileSync(join(root, history), 'utf8'));
   try {
     git(root, 'init', '-q');
     mkdirSync(join(root, PLUGIN, 'src/host'), { recursive: true });
     mkdirSync(join(root, PLUGIN, 'roles'), { recursive: true });
+    writeFileSync(join(root, PLUGIN, 'package.json'), JSON.stringify({ version: beforeSolver }));
+    commitFixture('release without Solver');
+    git(root, 'tag', 'v' + beforeSolver);
     cpSync(join(ROOT, role), join(root, role), { recursive: true });
     const old = digest();
-    mapping({ [first]: old });
-    commitFixture('initial Solver package');
+    mapping({ [beforeSolver]: old, [first]: old });
+    const retroactive = commitFixture('try to backdate the initial Solver history');
+    expect(() => checkBundledSolver({ ...inputs(retroactive, first), release: true })).toThrow(/start new entries at the cut/);
+    expect(() => stampBundledSolver(inputs(retroactive, first))).toThrow(/start new entries at the cut/);
+
+    mapping({});
+    const initial = commitFixture('initial Solver candidate');
+    expect(() => checkBundledSolver(inputs(initial, beforeSolver))).not.toThrow();
+    expect(expectedBundleDigest(historyOnDisk(), 'solver', beforeSolver)).toBeUndefined();
+    stampBundledSolver(inputs(initial, first));
+    writeFileSync(join(root, PLUGIN, 'package.json'), JSON.stringify({ version: first }));
+    const firstCut = commitFixture('initial Solver release');
+    expect(() => checkBundledSolver({ ...inputs(firstCut, first), release: true })).not.toThrow();
+    expect(expectedBundleDigest(historyOnDisk(), 'solver', beforeSolver)).toBeUndefined();
+    expect(expectedBundleDigest(historyOnDisk(), 'solver', first)).toBe(old);
+    expect(expectedBundleDigest(historyOnDisk(), 'solver', '3.174.1')).toBeUndefined();
     git(root, 'tag', 'v' + first);
     writeFileSync(join(root, role, 'prompt.md'), 'Updated Solver method.\n');
     const current = digest();
     const check = (sha: string, predecessorVersion?: string) =>
-      checkBundledSolver({ root, sha, version: next, predecessorVersion, neverShipped: () => false, release: true });
-    mapping({ [first]: old, [next]: current });
+      checkBundledSolver({ ...inputs(sha, next), predecessorVersion, release: true });
+    mapping({ [first]: old });
+    const candidate = commitFixture('update Solver sources before the version bump');
+    expect(() => checkBundledSolver(inputs(candidate, first))).not.toThrow();
+    stampBundledSolver(inputs(candidate, next));
     const valid = commitFixture('new Solver content range');
+    expect(historyOnDisk().solver).toEqual({ [first]: old, [next]: current });
     expect(() => check(valid, first)).not.toThrow();
     expect(() => check(valid)).not.toThrow();
     mapping({ [next]: current });

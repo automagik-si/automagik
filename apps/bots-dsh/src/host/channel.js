@@ -235,12 +235,14 @@ export function install(rt) {
     // what failed it. `blocked`: the facts of a failure only the user can fix (turns.js).
     // `adoptionHistoryMatches` (adopted originals only): rollback's history guard
     // (agents.js rollbackAdoption) would pass, so the menu offers rollback only then.
-    bots: Object.values(state.bots).map(publicBot).map(({ segments, kickoff, reviewTrack, ...bot }) => {
+    bots: Object.values(state.bots).map(source => {
+      const { segments, kickoff, reviewTrack, ...bot } = publicBot(source)
       const tail = rt.chatTail(rt.chatOf(bot.id))
       const nativeToolsBlock = rt.nativeToolsBlock(bot)
       const agyNotes = antigravityNotes(bot, nativeToolsBlock)
       return {
         ...bot, sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
+        ...(source.waitingRole?.id === SOLVER_ROLE_ID ? { canCancelSolverWait: true } : {}),
         ...(bot.dshAgentId === undefined ? {} : { adoptionHistoryMatches: rt.adoptionHistoryMatches(bot.id) }),
         ...rt.permissionFallbackOf('bot', bot),
         ...rt.autoViewOf?.(bot),
@@ -829,7 +831,7 @@ export function install(rt) {
         }
         case 'set-bot-auto':
           await rt.load()
-          return ok(await rt.setBotAuto(String(body.id ?? ''), body.rev))
+          return okBot(await rt.setBotAuto(String(body.id ?? ''), body.rev))
         case 'people-seen': {
           const service = callerService(ctx)
           return service ? ok(service.seen()) : fail('Sharing needs multiuser mode', 'bot/refused')

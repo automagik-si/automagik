@@ -10,7 +10,6 @@ import { absoluteLinks } from './links.js'
 import { NAME_MAX } from './requests.js'
 import { headOf, unquote } from './text.js'
 import { mentionSpans } from '../shared/mentions.js'
-import { isSolverBot } from '../shared/solver-method.js'
 import { BUILTIN_ROLES, genieDetached } from '../shared/roles.js'
 import { checkShownView, showViewDescription, showViewParameters } from 'deep-view/core'
 import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
@@ -255,7 +254,7 @@ export function install(rt) {
       if (Array.isArray(args.images) && args.images.length > 4) return refusedMessage('Not sent: send at most 4 pictures in one message_bot call.')
       const sender = callerBot(exec)
       if (sender === undefined) return refusedMessage('Only Bots on the team can use message_bot.')
-      const toReviewer = isSolverBot(sender) && args.to === sender.reviewerId
+      const toReviewer = typeof sender.reviewerId === 'string' && args.to === sender.reviewerId
       const target = toReviewer ? rt.botOf(args.to) : rt.findBot(args.to)
       if (target === undefined) return refusedMessage(`No Bot named ${args.to}. Team: ${Object.values(state.bots).map(bot => bot.name).join(', ')}`)
       if (target.id === sender.id) return refusedMessage('You cannot message yourself.')

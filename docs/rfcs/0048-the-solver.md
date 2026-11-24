@@ -4,7 +4,7 @@
 |---|---|
 | Status | Accepted (2026-11-23: the owner's decisions in #2056, and, by the owner's delegate, the D1 design choices recorded here: best-effort rollback, the native tick's parity with Details, and the read-only view field; no delivery merged) |
 | Milestone | none (ships outside the five milestones) |
-| Lanes | none for this RFC (docs only). Deliveries: plugin (3.N.P), bots-dsh and its pt-BR strings |
+| Lanes | none for this RFC (docs only). D1 and D1.5 use the plugin lane (3.N.P). D2 first ships in a full release (3.N.0). |
 | Created | 2026-11-23 |
 
 ## Summary
@@ -31,13 +31,14 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   disables Create with the existing Hermes note: such a Bot would ignore the method), project
   folder, reviewer, the native-tools tick, and the new-Bot level shown, not picked (`create-bot`
   takes no level; the Solver starts where every new Bot starts).
-- **Create** runs through the person's own existing endpoints: `create-bot` for the reviewer,
-  `create-bot` for the Solver (its instructions name the reviewer by the name the host returned),
-  `update-bot { nativeTools: true }` on its own when ticked (RFC 0003: the switch changes only
-  through `update-bot` on its own), then, when ticked, the brief the person typed goes through
-  `send` after the switch, so the task's first turn already runs with native tools (unticked, it
-  goes with `create-bot`). No endpoint is added; the only new stored fields are the Solver review
-  mark's `reviewerId` and `reviewTrack` (under "Contracts introduced").
+- **Create** uses the person's existing endpoints. With roles on, it first tries `role-install`.
+  It calls `create-bot` for a new reviewer when chosen, then `create-bot` for the Solver with the
+  written method and a waiting mark. The written method names the reviewer by the name the host
+  returned. After a successful install it tries `role-attach`. When native tools are ticked, it
+  calls `update-bot { nativeTools: true }` on its own (RFC 0003). The brief always goes through
+  `send` after the role attempt and any native-tools switch. The host stores `reviewerId`,
+  `reviewTrack` and `reviewGuard` for reviews, and D2 adds `reviewerMade` and `waitingRole`
+  (under "Contracts introduced").
 - **Best-effort rollback.** A failure at the reviewer, the Solver or the switch deletes,
   newest first, only the Bots this run created (never an existing Bot chosen as reviewer, never by
   name). "Nothing was created" is said only when every failed step was a host refusal and every
@@ -84,13 +85,14 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   plugin's own copy, then tries the catalog when that copy is missing or invalid. A damaged
   install stays in place for the person to uninstall. Create makes the reviewer and the Solver
   (description `Solver`, the written method of delivery 1 and a waiting mark), then attaches the
-  role. The host clears the generated text only after the prompt part is served for that exact
-  pin and the text still matches what the host wrote. With roles turned off or an incomplete
-  install or attachment, the Solver keeps the written method and the dialog says so. The host
+  role. The host clears the generated text only after the selected route can receive the prompt
+  part for that exact pin and the text still matches what the host wrote. With roles turned off
+  or an incomplete install or attachment, the Solver keeps the written method and the dialog says so. The host
   tries again after loading the team, when roles come on, after an install, and every ten minutes
   while a Solver waits. A changed description or an unpinned change to the instructions drops
-  the waiting mark. An explicit detach also drops it. Inside the role's part the host adds review
-  lines built on each turn from `reviewerId`, using the reviewer's ID. A role with no tools and no
+  the waiting mark. Choosing None in Details cancels the wait and keeps the instructions, including
+  when roles are off. The host adds review lines to the role prompt on each turn and addresses
+  them to the reviewer's team ID. A role with no tools and no
   settings serves its prompt part without evaluating a module, including in task Sessions that
   speak as its Bot. A copy keeps the role or a proven written method. A delivery 1 Solver keeps
   its own instructions.
@@ -188,8 +190,9 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
     hides, the Solver's chat still draws a guard stop line, without the call's row.
 - **The `solver` role** (delivery 2): the official role ID `solver`, its package under
   `apps/bots-dsh/roles/solver/` shipped in the plugin, the plugin's append-only mapping from release
-  versions to content digests (`BUNDLED_ROLE_HISTORY`), and the host-built review lines. Two stored
-  fields grant nothing. `waitingRole: { id: 'solver', instructions: <sha256>, role: <description> }`
+  versions to content digests (`BUNDLED_ROLE_HISTORY`), and the host-built review lines. A plugin
+  cut stamps its version using the checked candidate digest and retains earlier released entries.
+  Two stored fields grant nothing. `waitingRole: { id: 'solver', instructions: <sha256>, role: <description> }`
   is derived by the host during the person's create or copy, consumed by attachment, detachment
   and settlement. `reviewerMade: true` is written by the person's create with a new reviewer and
   read by the role's review lines. Both fields stay internal. Create uses the existing owner
@@ -219,7 +222,8 @@ work refused.
    PR. Rollback: reverting the release removes the switch; the stored field is ignored.
 
 2. **D2 (#2056):** the official `solver` role (tag, prompt part, pinned version). The dialog installs
-   and attaches it. Existing D1 Solvers keep their instructions. Plugin lane. On a candidate with
+   and attaches it. Existing D1 Solvers keep their instructions. The first cut is a full release
+   because adding `roles/solver/` changes the plugin's `package.json` `files` list. On a candidate with
    roles turned off, Create makes a Solver with the written method and waiting mark and shows the
    roles-off status. On the first installed release carrying D2, the new Solver carries the role
    at that version with empty instructions, and its review message reaches its reviewer. Reverting

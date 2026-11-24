@@ -466,7 +466,7 @@ export function install(rt) {
       const saveBot = async () => {
         if (solverCopy) {
           const check = () => {
-            solverCopy.check()
+            solverCopy.check(bot)
             if (rt.botOf(id)) throw refusal('Session already belongs to the team')
           }
           // A copy with custom instructions requires the verified role before
@@ -618,9 +618,10 @@ export function install(rt) {
     // No await from here to createBot's check, so two copies at once get different names.
     const pin = packageAttachment(bot)
     const solverPin = pin?.id === SOLVER_ROLE_ID
+    const waiting = bot.waitingRole?.id === SOLVER_ROLE_ID
     const text = bot.instructions ?? ''
-    const generated = unchangedSolverWaiter(bot, state.prefs) && isWrittenSolverMethod(text)
-    const keepWritten = solverPin && isWrittenSolverMethod(text)
+    const keepWritten = (waiting || solverPin) && isWrittenSolverMethod(text)
+    const generated = keepWritten && unchangedSolverWaiter(bot, state.prefs)
     const regenerate = generated || (solverPin && text.trim() === '')
     const reviewer = typeof bot.reviewerId === 'string' ? rt.botOf(bot.reviewerId)?.name ?? null : null
     const createCopy = solverCopy => createBot({
@@ -647,7 +648,7 @@ export function install(rt) {
       // capability away here would not be the user's choice either.
       ...(bot.shell === false ? { shell: false } : {}),
     })
-    if (solverPin && !regenerate && !keepWritten) return rt.withSolverCopy(bot, pin, createCopy)
+    if ((waiting || solverPin) && !regenerate && !keepWritten) return rt.withSolverCopy(bot, createCopy)
     const copy = await createCopy()
     if (solverPin) {
       try {
@@ -1835,7 +1836,10 @@ export function install(rt) {
     const listed = noteDeletedParts([...[...parts].filter(part => part !== currentPart), currentPart])
     let failed
     try { failed = await saveForDelete() } catch (error) { unlistDraftSweep(listed); throw error }
-    if (failed === undefined) rt.wakeLog?.botGone(id)
+    if (failed === undefined) {
+      rt.solverSettle?.armTimer()
+      rt.wakeLog?.botGone(id)
+    }
     // Same as deleteRoom: stopActivity removes the Session's armed scheduled tasks.
     // Past parts are archived too: a part move can leave tasks on the old Session,
     // which otherwise stays armed and invisible. Already-archived ids are a no-op.

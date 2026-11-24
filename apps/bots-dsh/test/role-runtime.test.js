@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,7 +17,7 @@ import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
 import { installRoles } from '../src/host/roles.js'
 import { fakeContext } from './fake-ctx.js'
-import { archive, entryOf, INDEX, SIGNATURE, signer, tarMember } from './role-fixture.js'
+import { archive, entryOf, INDEX, SIGNATURE, signer, solverCutHistory, tarMember } from './role-fixture.js'
 import { until } from './until.js'
 import { mountVoiceWindow, mountRoleSettings } from './role-runtime-client.js'
 
@@ -132,7 +132,8 @@ async function fixture(t, {
     const warnings = []
     rt.warn = (...args) => warnings.push(args)
     const fetched = []
-    installRoles(rt, { keys: [signed.key], now: () => NOW, ...(bundle ? {} : { bundledRoot: join(home, 'no-bundle') }), fetch: async url => {
+    installRoles(rt, { keys: [signed.key], now: () => NOW,
+      ...(bundle ? { bundledHistory: solverCutHistory() } : { bundledRoot: join(home, 'no-bundle') }), fetch: async url => {
       fetched.push(url)
       assert.ok(paths.has(url), `Unexpected network URL: ${url}`)
       return new Response(paths.get(url))
@@ -982,6 +983,59 @@ test('D2 A5 a gone reviewer holds the method only while the guard remains on', a
   assert.match(h.prompt(FIRST), /work stays held: .*BLOCKED-review/)
   h.rt.state.bots[FIRST].reviewGuard = false
   assert.match(h.prompt(FIRST), /is no longer on the team; the delivery says so\. Run each review in a fresh session/)
+})
+
+test('D2S settlement retains the written method until the selected ACP route receives the role prompt', async t => {
+  const f = await solverFixture(t)
+  const registry = createIdentityReaders()
+  const h = await f.start({ acpAgents: acpService(registry) })
+  await h.ok('role-install', { id: 'solver' })
+  const bot = h.rt.state.bots[FIRST]
+  const text = bot.instructions
+  const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+  Object.assign(bot, { model: 'acp-fixture/model', appliedModel: 'acp-fixture/model', waitingRole: waiting })
+  assert.deepEqual(await h.ok('role-attach', { id: FIRST, role: 'solver' }), { pending: true })
+  const before = (await f.disk()).bots[FIRST]
+  assert.equal(before.instructions, text)
+  assert.deepEqual(before.waitingRole, waiting)
+  assert.deepEqual(h.rt.roleRuntime.view()[FIRST].pin, h.pin())
+  assert.equal(h.rt.roleRuntime.view()[FIRST].acp, true)
+  assert.match(h.prompt(FIRST), /Follow the fixture instructions/)
+  assert.doesNotMatch(h.prompt(FIRST), solverPart)
+
+  Object.assign(bot, { model: 'acp-codex/default', appliedModel: 'acp-codex/default' })
+  assert.deepEqual(await h.ok('role-attach', { id: FIRST, role: 'solver' }), ['solver'])
+  const after = (await f.disk()).bots[FIRST]
+  assert.equal(after.instructions, '')
+  assert.equal(after.waitingRole, undefined)
+  assert.deepEqual(after.roles, before.roles)
+  assert.equal(h.rt.roleRuntime.view()[FIRST].acp, false)
+  assert.match(registry.read(FIRST).rolePrompt, solverPart)
+})
+
+test('D2S a detached Solver turn never sends saved review material to a matching display name', async t => {
+  const f = await solverFixture(t)
+  const h = await f.start()
+  const { rt } = h
+  rt.state.bots[FIRST].reviewerId = SECOND
+  await attachSolver(h)
+  h.events(FIRST, 'turn/start', { turn: 1 })
+  const saved = rt.roleRuntime.acpPrompt(FIRST, FIRST)
+  assert.match(saved, new RegExp(`\\(to: "${SECOND}"\\)`))
+  await h.ok('role-detach', { id: FIRST })
+  assert.equal(rt.roleRuntime.acpPrompt(FIRST, FIRST), saved)
+  delete rt.state.bots[SECOND]
+  rt.state.bots[PLAIN] = fixtureBot(PLAIN, { name: SECOND })
+  const deliveries = []
+  t.mock.method(rt, 'deliver', async ({ toId }) => { deliveries.push(toId) })
+  const message = rt.teamTools.find(tool => tool.name === 'message_bot')
+  const send = to => message.execute({ to, message: 'Fixture review material', reply_to: 'none' }, { agent: h.agentOf(FIRST) })
+  assert.equal((await send(SECOND)).sent, false)
+  assert.deepEqual(deliveries, [])
+
+  rt.state.bots[PLAIN].name = 'Other fixture'
+  assert.match(await send('Other fixture'), /^Delivered to Other fixture/)
+  assert.deepEqual(deliveries, [PLAIN])
 })
 
 test('D2 an offline bundled Solver serves its authenticated method', async t => {

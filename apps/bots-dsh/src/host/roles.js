@@ -207,16 +207,16 @@ export function installRoles(rt, deps = {}) {
     await rt.load()
     const bot = typeof id === 'string' ? rt.own(state.bots, id) : undefined
     if (bot === undefined) throw refusal('No such Bot')
+    const waiting = solverMarker(bot)
+    const detachedMarker = !attach && waiting ? JSON.stringify(waiting) : undefined
     const requireRoles = () => {
-      if (!rolesOn(state.prefs) && (attach || !packageRecoveryId(bot))) {
-        throw rolesOff()
-      }
+      const cancelWait = detachedMarker !== undefined && JSON.stringify(solverMarker(bot)) === detachedMarker
+      if (!rolesOn(state.prefs) && (attach || (!packageRecoveryId(bot) && !cancelWait))) throw rolesOff()
     }
     requireRoles()
     packages.requireWriter()
     const hasSlot = Object.hasOwn(bot, 'roles')
     const slot = hasSlot ? JSON.stringify(bot.roles) : undefined
-    const waiting = solverMarker(bot)
     const transition = attach && roleId === SOLVER_ROLE_ID && waiting ? expect ?? waitingSnapshot(bot) : undefined
     const mayClear = Boolean(transition && instructionsDigest(transition.instructions) === waiting.instructions)
     const checkSlot = () => {
@@ -277,8 +277,6 @@ export function installRoles(rt, deps = {}) {
       }
     } else if (!waiting && ((hasSlot && Array.isArray(bot.roles) && bot.roles.length === 0)
       || (!hasSlot && bot.kind !== BUILTIN_ROLES.genie.kind))) return effective
-    const detachedMarker = !attach && waiting ? JSON.stringify(waiting) : undefined
-
     await commit((team) => {
       const target = rt.own(team.bots, id)
       if (target === undefined) {
@@ -309,26 +307,31 @@ export function installRoles(rt, deps = {}) {
   })
 
   rt.attachRole = (id, roleId, options) => editRole(id, true, roleId, options)
-  rt.withSolverCopy = (source, pin, make) => serialize(async () => {
-    const id = SOLVER_ROLE_ID
-    if (!rolesOn(state.prefs)) throw rolesOff()
-    const record = packages.recordOf(id)
-    if (record?.version !== pin.version) throw changedRole()
-    const term = rt.lockTerm?.()
-    const check = () => {
-      packages.requireWriter()
+  rt.withSolverCopy = (source, make) => {
+    const expect = waitingSnapshot(source)
+    const pin = packageAttachment(source)
+    return serialize(async () => {
+      const id = SOLVER_ROLE_ID
       if (!rolesOn(state.prefs)) throw rolesOff()
-      if (rt.lockTerm?.() !== term || rt.own(state.bots, source.id) !== source
-        || !sameRolePin(packageAttachment(source), pin) || packages.damaged(record)) throw changedRole()
-      packages.expectRecord(id, true, record)
-    }
-    const details = await packages.verifyExisting(id, record)
-    if (!details.prompt.trim() || details.manifest.tools.length || details.manifest.settings.length) throw changedRole()
-    check()
-    const pinForCopy = { id, version: record.version, attachedAt: new Date((deps.now ?? Date.now)()).toISOString(), grants: [] }
-    runtime.keepProof(record, details)
-    return make({ pin: pinForCopy, check })
-  })
+      const record = packages.recordOf(id)
+      if (!record || (pin?.id === id && record.version !== pin.version)) throw changedRole()
+      const term = rt.lockTerm?.()
+      const check = copy => {
+        packages.requireWriter()
+        if (!rolesOn(state.prefs)) throw rolesOff()
+        if (rt.lockTerm?.() !== term || rt.own(state.bots, source.id) !== source
+          || !sameWaiter(source, expect) || packages.damaged(record)) throw changedRole()
+        packages.expectRecord(id, true, record)
+        if (copy && !runtime.canDeliverPrompt(copy)) throw refusal('ACP coding agents do not receive this role’s prompt.')
+      }
+      const details = await packages.verifyExisting(id, record)
+      if (!details.prompt.trim() || details.manifest.tools.length || details.manifest.settings.length) throw changedRole()
+      check()
+      const pinForCopy = { id, version: record.version, attachedAt: new Date((deps.now ?? Date.now)()).toISOString(), grants: [] }
+      runtime.keepProof(record, details)
+      return make({ pin: pinForCopy, check })
+    })
+  }
   rt.detachRole = id => editRole(id, false)
   const roleWrite = work => serialize(async () => {
     await rt.load()

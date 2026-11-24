@@ -96,7 +96,7 @@ export function RoleShopCard({ row, roster, actions, operation }) {
       roleAction(row, roster, actions, operation, 'bt-soft bt-soft-sm')),
     reason ? h(Row, { label: reason }) : null,
     record ? h(Row, { label: t('Installed version'), hint: [record.version, record.status !== 'ok' && roleHealth(record.status)].filter(Boolean).join(' · ') }) : null,
-    installed ? h(Row, { label: t('Installed SHA-256'), hint: checksum(installed.sha256), stack: true }) : null,
+    installed ? h(Row, { label: t('Installed SHA-256'), hint: installed.sha256 ? checksum(installed.sha256) : t('Details unavailable'), stack: true }) : null,
     listed ? h(Row, { label: t('Catalog version'), hint: listed.version }) : null,
     catalog ? h(Row, { label: t('Catalog SHA-256'), hint: checksum(catalog.sha256), stack: true }) : null,
     newerVersion(listed?.version, record?.version) ? h(Row, { label: t('Update available') }) : null,

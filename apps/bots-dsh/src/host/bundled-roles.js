@@ -1,19 +1,16 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { SOLVER_ROLE_ID } from '../shared/solver-method.js'
-import { compareVersions } from './lane-verify.js'
 
 export const BUNDLED_ROLE_IDS = Object.freeze([SOLVER_ROLE_ID])
-// Each key starts a new content range. Keep all released entries and append a new
-// range when the source changes. The release check compares against its predecessor.
+// Only the release cut adds versions to this history. The candidate digest is
+// checked against the source before the cut and never authenticates an install.
 export const BUNDLED_ROLE_HISTORY = Object.freeze({
   solver: Object.freeze(JSON.parse(readFileSync(new URL('./bundled-roles.json', import.meta.url))).solver),
 })
 
 export function expectedBundleDigest(history, id, version) {
-  const starts = Object.keys(history[id] ?? {}).sort(compareVersions)
-  const start = starts.findLast(from => compareVersions(from, version) <= 0)
-  return history[id]?.[start]
+  return Object.hasOwn(history[id] ?? {}, version) ? history[id][version] : undefined
 }
 
 export const manifestBytes = manifest => Buffer.from(JSON.stringify(manifest, null, 2) + '\n')

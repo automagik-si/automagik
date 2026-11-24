@@ -274,9 +274,10 @@ export async function createSolver({ actions, before, reviewer, reviewerPayload:
             const fresh = await actions.teamState()
             const bot = fresh?.bots?.find(bot => bot.id === solver.id)
             const pin = packageAttachment(bot)
+            const runtime = fresh?.roleRuntime?.[solver.id]
             if (rolesOn(fresh?.prefs) && bot?.role === SOLVER_DESCRIPTION && bot.instructions === ''
               && pin?.id === SOLVER_ROLE_ID && pin.version === version
-              && sameRolePin(pin, fresh.roleRuntime?.[solver.id]?.pin)) roleNote = undefined
+              && sameRolePin(pin, runtime?.pin) && runtime.acp !== true) roleNote = undefined
           } catch { /* The fallback remains in place when completion is uncertain. */ }
         }
       }
