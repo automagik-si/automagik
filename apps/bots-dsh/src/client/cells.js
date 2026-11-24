@@ -1368,6 +1368,9 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
   }
 }
 
+// The review guard's stop reasons (K10, K14), the ones a hidden turn still draws.
+const GUARD_WHYS = new Set(['guard', 'guard-request'])
+
 export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions }) {
   const roster = useRoster(value => value)
   const heldCards = useHeldCards?.(state => state[sessionId])
@@ -1378,28 +1381,32 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
   // A plugin that loads after the transcript drew still gets its cards drawn.
   useSyncExternalStore(toolCards.source.subscribe, toolCards.source.getSnapshot)
   const closed = roster.closedCards?.[sessionId]
-  // Hidden Bot-to-Bot turns keep their own calls out of the chat, except a question
-  // or view card the user dismissed or answered by message, which settles here.
-  const calls = hidden
-    ? callTree(root).filter(call => (toolName(call) === 'ask_user' || toolName(call) === 'show_view') && call.callId && closed?.[call.callId] !== undefined)
-    : callTree(root)
-  const stopKeys = useWork ? useWork(work => JSON.stringify(calls.flatMap(call => {
+  const all = callTree(root)
+  const closedCard = call => (toolName(call) === 'ask_user' || toolName(call) === 'show_view') && call.callId && closed?.[call.callId] !== undefined
+  const stopKeys = useWork ? useWork(work => JSON.stringify(all.flatMap(call => {
     const entry = stopOfCall(work.stops, sessionId, call.callId)
     return entry ? [[call.callId, stopLine(entry), entry.why]] : []
   }))) : '[]'
   const stops = new Map(JSON.parse(stopKeys).map(([id, line, why]) => [id, { line, why }]))
+  // A call the review guard refused in a hidden turn draws only its stop line (RFC 0048): the
+  // Solver's chat shows why a Bot's request did not run, never the call's own row.
+  const guardOnly = call => hidden && GUARD_WHYS.has(stops.get(call.callId)?.why) && !closedCard(call)
+  // Hidden Bot-to-Bot turns keep their own calls out of the chat, except a question
+  // or view card the user dismissed or answered by message, which settles here.
+  const calls = hidden ? all.filter(call => closedCard(call) || guardOnly(call)) : all
   const readRefused = call => call.isError === true && call.error?.code === READ_SCOPE_CODE
   const drawn = calls.filter(call => readRefused(call) || DRAWN.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.renderer(toolName(call)) || agentImage(call) || stops.has(call.callId))
   // The newest call still running names the work, so a program reads as the tool it is in.
-  const running = root.kind === 'tool-result' ? undefined : calls.findLast(call => call.kind !== 'tool-result')
+  const running = root.kind === 'tool-result' ? undefined : calls.findLast(call => call.kind !== 'tool-result' && !guardOnly(call))
   const note = running ? toolActivity(toolName(running), toolArgs(running).text, findBot, roster.byId[sessionId]) : null
   // A running tool shows only as the activity row's phrase.
   useLiveNote(actions, sessionId, `tool:${root.callId ?? node.key}`, note)
-  useShownCards(actions, sessionId, drawn.filter(call => (CARDS.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.asks(toolName(call))) && call.callId).map(call => call.callId))
+  useShownCards(actions, sessionId, drawn.filter(call => !guardOnly(call) && (CARDS.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.asks(toolName(call))) && call.callId).map(call => call.callId))
   if (drawn.length === 0) return h(CellEmpty)
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } }
   return h(Fragment, null, drawn.map((call, index) => {
     const stop = stops.get(call.callId)
+    if (guardOnly(call)) return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status', title: stop.why }, stop.line)
     if (readRefused(call)) {
       return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status' },
         call.error.reason ?? contentText(call.content))

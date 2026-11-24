@@ -535,11 +535,7 @@ export function install(rt) {
       // skips it. The Session's folder is where a relative path lands (a write to the Solver's notes
       // file is not work).
       if (isSolverBot(bot) || bot.reviewGuard === true) {
-        const sessionId = exec.agent?.id ?? exec.agent?.session?.id
-        const base = exec.agent?.session === undefined ? undefined : rt.sessionFolder?.(exec.agent.session)
-        const own = ownChatLineage(sessionId, exec.agent, bot)
-        const definition = definitionOf(exec)
-        const held = rt.reviewGuardHolds?.(bot, own, name, exec.arguments, definition, base)
+        const { sessionId, base, own, definition, held } = reviewGuardOf(exec, bot, name)
         if (held !== undefined) {
           rt.noteStop?.(sessionId, { why: held.why, tool: name, callId: exec.callId, text: held.text }, exec.agent)
           throw refusal(held.text)
@@ -555,6 +551,30 @@ export function install(rt) {
     throw refusal(`${bot.name} does not have the ${name} tool`)
   }
 
+  // The review guard's answer for one call of a Solver or a guarded Bot (review-guard.js).
+  function reviewGuardOf(exec, bot, name) {
+    const sessionId = exec.agent?.id ?? exec.agent?.session?.id
+    const base = exec.agent?.session === undefined ? undefined : rt.sessionFolder?.(exec.agent.session)
+    const own = ownChatLineage(sessionId, exec.agent, bot)
+    const definition = definitionOf(exec)
+    return { sessionId, base, own, definition, held: rt.reviewGuardHolds?.(bot, own, name, exec.arguments, definition, base) }
+  }
+
+  // The same hold for `tools/pre-execute` (review-guard.js installAhead), with guardTool's own
+  // preconditions: { held, sessionId } when the guard refuses the call, else undefined. A denied
+  // name or a shell call without a shell is left to guardTool's refusal.
+  function heldOfExec(exec) {
+    const name = typeof exec?.name === 'string' ? exec.name : ''
+    if (name === '' || exec?.agent === undefined) return undefined
+    const bot = botOfSession(exec.agent?.id ?? exec.agent?.session?.id, exec.agent)
+    if (bot === undefined || (!isSolverBot(bot) && bot.reviewGuard !== true)) return undefined
+    if (deniedNames(bot, exec.agent).includes(name)) return undefined
+    if (noShell(bot) && shellCall(name, exec.arguments, definitionOf(exec))) return undefined
+    const { sessionId, held } = reviewGuardOf(exec, bot, name)
+    return held === undefined ? undefined : { held, sessionId }
+  }
+
   // Retries stop on a Session that leaves the team, so a lift is not attempted on a gone agent.
   Object.assign(rt, { botOfSession, ownChatLineage, applyToolDeny, applyToolDenyToAgent: apply, cleanDenyTools, unknownDenyTools, assertDenyTools })
+  Object.assign(rt, { reviewGuardOfExec: heldOfExec })
 }

@@ -123,8 +123,9 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   message in it, its first and last work calls (a write to exactly its notes file,
   `.solver/notes.md` in its folder, never dates the plan side), at most 4 verdicts (the last
   whole-word SHIP, FIX-FIRST or BLOCKED in a reply from `reviewerId` that starts a line, follows
-  `Verdict:` or ends a line after a sentence, never asked, one of a list of options or inside a
-  fenced code block), the last delivery's mark, and the first guard verdict's time. No view carries
+  `Verdict:`, ends a line after a sentence, or is glued to a sentence's end before a spaced dash
+  (`….SHIP — …`), never asked, one of a list of options or inside a fenced code block), the last
+  delivery's mark, and the first guard verdict's time. No view carries
   `reviewTrack`: the owner's view shows only `reviewMark`, the last mark (plan and result reviewed,
   plan unreviewed, result unreviewed, delivered before the reviewer answered, fresh session not
   checked, or no reviewer), and neither field is ever a caller-view field. Like the Solver marker it
@@ -139,8 +140,16 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
     every call that is not on its open list (reads, research, asking the person, one-file writes
     to exactly `.solver/notes.md`, and messages to the reviewer), so an unknown tool is refused. A
     native subagent's question is refused at its approval request.
+  - A bridged call (an ACP agent with native tools off) is refused at its approval request too,
+    read from the call's own `tool/call` row, and the agent is told the guard's text, not that
+    the person rejected it. A call with no such row (a turn the agent opened itself, a subagent
+    Session) may still show the card; the executor refuses it.
+  - A DSH tool call is refused before DSH asks about it (`tools/pre-execute`), so it never
+    reaches a hard-step, Auto review or computer-consent prompt.
   - A verdict counts only in the reviewer's own reply to work the Solver opened in that request:
-    its first line, unquoted, or a line that starts with `Verdict:`, outside fences.
+    its first line, unquoted, or a line that starts with `Verdict:`, outside fences. A verdict
+    glued to the end of the first line's sentence also counts (`… evidence.SHIP` or
+    `….SHIP — …`), so a reviewer first line such as `Not yet.SHIP` counts as SHIP.
   - `reviewTrack` gains `planVerdictAt`, `openedBy` (`'bot'`) and `openerId`. Another Bot's
     request after the plan verdict opens a new track that needs its own verdict; a message that
     asks no reply, a follow-up from the Bot that opened the track, and the reviewer's own message
@@ -153,7 +162,8 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
     on a Bot it turned on; the app draws it as one line in that part of the Bot's chat. Display
     only.
   - The owner view's `reviewGuardWaitingSince` (never stored): since when the plan waits.
-  - Stop line reasons `guard` and `guard-request`.
+  - Stop line reasons `guard` and `guard-request`. In a Bot-request turn, whose calls the chat
+    hides, the Solver's chat still draws a guard stop line, without the call's row.
 - Delivery 2 adds the official role id `solver`.
 
 ## Threat model

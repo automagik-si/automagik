@@ -28,6 +28,15 @@ export function bridgeRefusalText(name, outcome, policy) {
   return `DSH could not approve ${name}.`
 }
 
+/**
+ * The text an in-process approval listener left on a bridge ask it rejected (`bridgeCall.refused`,
+ * the Solver's review guard, RFC 0048), so the agent reads why instead of "The person rejected".
+ */
+const refusedText = request => {
+  const reason = request?.bridgeCall?.refused?.reason
+  return typeof reason === 'string' && reason.trim() !== '' ? reason.replace(/\s+/g, ' ').slice(0, 2000) : undefined
+}
+
 /** How long a bridge's long-poll waits before answering "nothing changed". */
 export const WAIT_MS = 20_000
 const MAX_BODY = 16 * 1024 * 1024
@@ -1060,9 +1069,10 @@ export class Backchannel {
           if (ended()) return await revoked()
           // Stop (or a caller that went away) withdrew the dialog: nobody refused the call.
           if (own.signal.aborted) return await cancelled()
-          const text = outcome === 'rejected' && typeof request.bridgeCall.judged?.reason === 'string'
-            ? `Auto's judge refused ${name}: ${request.bridgeCall.judged.reason}.`.replace(/\s+/g, ' ').slice(0, 300)
-            : bridgeRefusalText(name, outcome, policy)
+          const text = (outcome === 'rejected' ? refusedText(request) : undefined)
+            ?? (outcome === 'rejected' && typeof request.bridgeCall.judged?.reason === 'string'
+              ? `Auto's judge refused ${name}: ${request.bridgeCall.judged.reason}.`.replace(/\s+/g, ' ').slice(0, 300)
+              : bridgeRefusalText(name, outcome, policy))
           return await settle([{ type: 'text', text }], true, { name: 'ApprovalDeniedError', code: String(outcome).toUpperCase() })
         }
       }
@@ -1242,7 +1252,7 @@ export class Backchannel {
           if (ended()) return { revoked: true }
           if (own.signal.aborted) return cancelled()
           note('refused')
-          return error(bridgeRefusalText(name, outcome, policy))
+          return error((outcome === 'rejected' ? refusedText(request) : undefined) ?? bridgeRefusalText(name, outcome, policy))
         }
       }
       if (ended()) return { revoked: true }

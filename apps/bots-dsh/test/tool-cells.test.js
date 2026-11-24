@@ -1457,6 +1457,53 @@ test('a refused bash call draws the reason once, on its first call in that Sessi
   effects = []
 })
 
+// RFC 0048 (#2056 F2): a call the review guard refused in a hidden Bot-request turn draws its
+// stop line in the Solver's chat, and nothing else of the call.
+const K10 = "write did not run: the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details"
+const K14 = "write did not run: the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details"
+const stopDraw = (root, stops, { hidden = true } = {}) => {
+  const roster = team({ exchangeTurns: hidden ? { chief: [1] } : {} })
+  return expand(ToolCell({ ...props(root, { roster }), useWork: select => select({ stops }) }))
+}
+const stopOf = (why, callId, extra = {}) => ({ why, tool: 'write', calls: [{ sessionId: 'chief', callId }], ...extra })
+const errorLines = tree => findAll(tree, node => node.props?.className === 'bt-event bt-event-error')
+
+test('a hidden Bot-request turn draws the review guard\'s stop line, and no tool row', () => {
+  for (const [why, line] of [['guard-request', K14], ['guard', K10]]) {
+    const refused = call('write', 'w1', { args: { file_path: 'bom.md' }, isError: true, content: 'held' })
+    const tree = stopDraw(refused, [stopOf(why, 'w1')])
+    const lines = errorLines(tree)
+    assert.equal(lines.length, 1, why)
+    assert.equal(text(lines[0]), line)
+    assert.equal(lines[0].props.title, why)
+    assert.equal(lines[0].props.role, 'status')
+    assert.equal(text(tree), line, 'nothing else of the call is drawn')
+    assert.equal(find(tree, node => node.props?.['data-bt-empty'] === true), undefined, 'no tool row or mark beside it')
+    // Inside a program, the refused sub-call draws its line the same way.
+    const nested = stopDraw(program([call('read', 'program:ptc:1'), call('write', 'program:ptc:2', { isError: true })]), [stopOf(why, 'program:ptc:2')])
+    assert.deepEqual(errorLines(nested).map(text), [line])
+    assert.equal(text(nested), line)
+    effects = []
+  }
+})
+
+test('a hidden turn keeps every other stop and call out of the chat; a visible turn is unchanged', () => {
+  const refused = call('write', 'w1', { args: { file_path: 'bom.md' }, isError: true })
+  for (const why of ['sandbox', 'tool', 'level', 'review']) assert.ok(onlyMarks(stopDraw(refused, [stopOf(why, 'w1')])), why)
+  assert.ok(onlyMarks(stopDraw(refused, [])))
+  assert.ok(onlyMarks(stopDraw(refused, [stopOf('guard', 'other')])), 'a stop on another call')
+  // A visible turn draws the call as before, with the line under it.
+  const visible = stopDraw(refused, [stopOf('guard', 'w1')], { hidden: false })
+  assert.deepEqual(errorLines(visible).map(text), [K10])
+  assert.ok(find(visible, node => node.props?.['data-bt-empty'] === true), 'the call\'s own seat stays, as today')
+  // A count-2 entry draws once, on its first call (hidden or not).
+  const twice = stopOf('guard-request', 'x', { count: 2, calls: [{ sessionId: 'chief', callId: 'x' }, { sessionId: 'chief', callId: 'y' }] })
+  assert.deepEqual(errorLines(stopDraw(call('write', 'x', { isError: true }), [twice])).map(text),
+    ["2 steps did not run: the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details"])
+  assert.ok(onlyMarks(stopDraw(call('write', 'y', { isError: true }), [twice])))
+  effects = []
+})
+
 test('a permission-stop group reply draws the round reason', () => {
   const replies = [{ kind: 'permission-stop', botId: 'ada', name: 'ada', why: 'review', count: 2, time: 1 }]
   const tree = show(call('group_relay', 'x', { content: { replies } }), { sessionId: 'room' })

@@ -2,21 +2,27 @@
 // a guarded Solver's work, and how far the guard holds on the route a Bot runs on. Pure, so the
 // host and the client share it. The guard keys on the person's own `reviewGuard` field and on the
 // reviewer id the New Solver dialog stores, never on the cosmetic Solver marker.
-import { FENCE, WORD } from './review-mark.js'
+import { FENCE, INDENTED, LEAD, LIST_ITEM, MD, WORD } from './review-mark.js'
 import { effectiveMarkOf, nativeToolsOn } from './native-tools.js'
 
 // The verdict at the start of the reply's first line, or after a "Verdict:" label that starts a
-// line. Nothing else: no verdict ending a sentence, no last-wins, no list item (H5-4).
+// line, or (iii) glued to the first line's sentence. Nothing else: no verdict ending a later
+// sentence, no last-wins, no list item (H5-4).
 const AT_START = new RegExp(`^${WORD}`)
 const LABEL = new RegExp(`^(?:Verdict|verdict|VERDICT)[*_\`]*\\s*:\\s*[*_\`]*\\s*${WORD}`)
+// (iii) A verdict glued to the end of the first line's sentence (review-mark.js LEAD): the line
+// ends there, or a spaced dash and text follow.
+const GLUED = new RegExp(`${LEAD}${MD}${WORD}${MD}(?:\\s*[.!]*$|\\s+[-\u2013\u2014]\\s+\\S)`)
 
 /**
  * The verdict that opens a guarded Solver's work, or undefined: the reviewer's own contract,
  * "Answer first with one verdict" (solver-method.js), read strictly. The reply is cut at the
  * line that hands a third Bot's answers back to the reviewer (handoffs.js); lines in fenced blocks
  * are never read; the first non-empty line counts unless it is quoted (`>`); else the first line
- * that starts with a "Verdict:" label. A lead-in line before the verdict gives none: work stays
- * held (a false block only).
+ * that starts with a "Verdict:" label; else a verdict glued to the end of the first line's
+ * sentence (`… evidence.SHIP` or `….SHIP — …`), unless that line is quoted, a list item or
+ * indented code, so a reviewer first line such as `Not yet.SHIP` counts as SHIP. A lead-in line
+ * before the verdict gives none: work stays held (a false block only).
  * @param {unknown} text - the reviewer's reply.
  * @param {unknown} reviewerName - the reviewer's name, for the handed-back line.
  * @returns {'SHIP'|'FIX-FIRST'|'BLOCKED'|undefined} the verdict.
@@ -47,6 +53,19 @@ export function guardVerdictOf(text, reviewerName) {
     }
     const label = LABEL.exec(line)
     if (label) return label[1]
+  }
+  return gluedFirstLine(lines)
+}
+
+// (iii): the first non-empty line, as rule (i) finds it, read with GLUED; only `#`, `*`, `_` and
+// spaces are stripped, so a backtick or a quote before the sentence keeps it unread.
+function gluedFirstLine(lines) {
+  for (const raw of lines) {
+    if (FENCE.test(raw)) return undefined
+    const line = raw.replace(/^[\s#*_`]+/, '')
+    if (line === '') continue
+    if (line.startsWith('>') || LIST_ITEM.test(raw) || INDENTED.test(raw)) return undefined
+    return GLUED.exec(raw.replace(/^[\s#*_]+/, ''))?.[1]
   }
   return undefined
 }

@@ -109,8 +109,18 @@ export function install(rt) {
   // An ACP agent's question that reaches the approval chain without passing the executor: a
   // Claude Code native subagent's nested call asked from its Agent card (acp-dsh tool.js). Held
   // like the executor would hold it, answered with the agent's own reject, and no card is shown.
+  // The same for acp-dsh's bridge ask (`bridgeCall`, native tools off): it asks before
+  // tools.execute and carries no arguments, so they come from the live record of the tool/call row
+  // the bridge wrote just before it asked (turns.js startCall; the record the card itself reads).
+  // No record (an agent-opened turn, a subagent Session), another name, or no string: the card
+  // shows as before and the executor holds the call. With an agent id reused by two concurrent calls
+  // the record may be the other call's: a card or a false hold, never a release (the executor
+  // re-checks the call's own arguments). A held bridge ask leaves the guard's text on
+  // `bridgeCall.refused`, which acp-dsh hands the agent instead of "The person rejected".
   function reviewGuardAsk(request) {
-    if (request?.toolName !== 'acp_tool') return undefined
+    const bridge = request?.toolName !== 'acp_tool' && isRecord(request?.bridgeCall)
+      && typeof request.toolName === 'string' && request.toolName !== ''
+    if (request?.toolName !== 'acp_tool' && !bridge) return undefined
     const agent = request.agent
     const sessionId = agent?.id ?? agent?.session?.id
     if (typeof sessionId !== 'string') return undefined
@@ -120,16 +130,36 @@ export function install(rt) {
     // From here the question is the guarded Bot's own: an error holds it (fails closed, as the
     // executor's path does), and only this Bot's question is refused (DG-3).
     try {
-      const mirror = request.mirrorCall
       let base
       try { base = agent?.session === undefined ? undefined : rt.sessionFolder?.(agent.session) } catch {}
+      if (bridge) return bridgeHeld(request, bot, sessionId, base)
+      const mirror = request.mirrorCall
       const held = reviewGuardHolds(bot, true, 'acp_tool', isRecord(mirror) ? mirror : undefined, undefined, base)
       if (held === undefined) return undefined
       rt.noteStop?.(sessionId, { why: held.why, ...(typeof mirror?.title === 'string' ? { tool: mirror.title } : {}), callId: request.callId, text: held.text, child: true }, agent)
       return held
     } catch {
+      if (bridge) {
+        try { request.bridgeCall.refused = { reason: 'The review guard holds this call until the reviewer answers the plan.' } } catch {}
+      }
       return { why: 'guard', text: 'held' }
     }
+  }
+
+  // A bridge ask, read from the live call record: a record that does not parse is held as work
+  // until the plan verdict (fails closed), and the stop sits on the bridge's own tool/call row.
+  function bridgeHeld(request, bot, sessionId, base) {
+    const agent = request.agent
+    const liveId = agent?.session?.id ?? sessionId
+    const call = typeof request.callId === 'string' ? rt.live?.get(liveId)?.calls?.get(request.callId) : undefined
+    if (call?.name !== request.toolName || typeof call?.args !== 'string') return undefined
+    let args
+    try { args = JSON.parse(call.args) } catch {}
+    const held = reviewGuardHolds(bot, true, request.toolName, args, undefined, base)
+    if (held === undefined) return undefined
+    rt.noteStop?.(sessionId, { why: held.why, tool: request.toolName, callId: request.callId, text: held.text }, agent)
+    request.bridgeCall.refused = { reason: held.text }
+    return held
   }
 
   /**
@@ -181,5 +211,23 @@ export function installAhead(rt) {
     let held
     try { held = rt.reviewGuardAsk?.(request) } catch {}
     return held === undefined ? next() : 'rejected'
+  }, { prepend: true })
+  installPreExecute(rt)
+}
+
+/**
+ * The same hold before DeepSeek Harness asks about its own tools: a held call is denied in
+ * `tools/pre-execute`, so it never reaches the hard-step ladder, Auto review or a computer consent
+ * card. `acp_tool` mirror calls stay on the executor's refusal, and an error goes on: the executor
+ * still holds the call (tool-deny.js).
+ */
+function installPreExecute(rt) {
+  rt.ctx.on('tools/pre-execute', function reviewGuardGate(exec, next) {
+    if (exec?.name === 'acp_tool') return next()
+    let found
+    try { found = rt.reviewGuardOfExec?.(exec) } catch { return next() }
+    if (found === undefined) return next()
+    rt.noteStop?.(found.sessionId, { why: found.held.why, tool: exec.name, callId: exec.callId, text: found.held.text }, exec.agent)
+    return { kind: 'deny', reason: found.held.text }
   }, { prepend: true })
 }

@@ -269,6 +269,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on approval/request (prepend)',
     // The review guard, right after it, so it runs before Auto (review-guard.js installAhead).
     'on approval/request (prepend)',
+    'on tools/pre-execute (prepend)',
     'provide omniTeam',
     'effect omni-ui: stop the team modules',
   ])

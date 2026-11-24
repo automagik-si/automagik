@@ -246,6 +246,51 @@ test('G5: injection: quoted, handed-back, another Bot, the Solver itself, a grou
   assert.equal(await run(bot, 'write', { file_path: 'a.md' }), 'ran')
 })
 
+// #2056 F3 (iii): a Codex reviewer's progress sentence and its verdict arrive glued on the first
+// line ("I'll check the file.SHIP — …"). Read there only, and never from a quote, a list item,
+// indented code or a lead-in with a colon, a backtick or a quote mark.
+test('G5b: a verdict glued to the end of the first line\'s sentence opens the plan; quoted, indented or later lines do not', async (t) => {
+  const { run, person, reply, solver, reviewer } = bench(t)
+  const ada = await reviewer()
+  const S4 = "I'll inspect the delivered file directly and verify the two lines.SHIP — bom.md contains two lines."
+  for (const [value, verdict] of [
+    [S4, 'SHIP'],
+    ["I'll read the note and check its line count against the request.BLOCKED — bom.md was not found.", 'BLOCKED'],
+    ["I'll check the delivered file against the request and the supplied evidence.SHIP", 'SHIP'],
+    ['**I checked the plan.SHIP** — fine', 'SHIP'],
+    ['I’ll check the file.SHIP', 'SHIP'],
+    ["I'll inspect the file (bom.md) and verify it.SHIP — ok", 'SHIP'],
+  ]) assert.equal(guardVerdictOf(value, ada.name), verdict, value)
+  for (const value of [
+    'Output: done.SHIP', '`done.SHIP`', '"done.SHIP"', 'I checked.SHIP? Not yet.', 'I checked.SHIP, FIX-FIRST or BLOCKED', 'I checked.SHIP or BLOCKED',
+    'I checked.SHIP - or FIX-FIRST', 'I checked.SHIPPED', '> I checked.SHIP', '```\nI checked.SHIP\n```', '- I checked.SHIP', 'I checked. SHIP — fine',
+    'Hello.\nI checked.SHIP', 'Read it.\nNot yet. SHIP',
+    // (iv), one lead-in line, is not taken: a verdict on the second line still gives none.
+    'Done.\n> SHIP', 'Done.\n- SHIP', 'Done.\n```\nSHIP\n```', 'Done:\nSHIP', 'Pick one.\nSHIP, FIX-FIRST or BLOCKED', 'Is it ready?\nSHIP?',
+    'Done.\nOne more line.\nSHIP', 'Done SHIP.\nBLOCKED',
+    // S6G-1: a quoted or bracketed first line.
+    '“He said done.SHIP — later”', "'He said done.SHIP — later'", '‘done.SHIP — x’', '«done.SHIP — x»',
+    '„done.SHIP — x“', 'The note reads “ready.”SHIP — ok', '(see done.)SHIP', '[done.]SHIP',
+    // S6G-2 and S6H-2: an indented code line.
+    '    I checked.SHIP', '\tI checked.SHIP', '    I checked.SHIP — fine', '  \tI checked.SHIP',
+    // S6H-1: other quote marks, a zero-width character before a leading quote, a lone CR.
+    'He wrote ‘done.SHIP — x’', '‹done.SHIP — x›', '「done.SHIP — x」', "​'He said done.SHIP — later'",
+    'Hello.\rI checked.SHIP',
+  ]) assert.equal(guardVerdictOf(value, ada.name), undefined, JSON.stringify(value))
+  // Accepted risk (RFC 0048): a first line the reviewer wrote that glues a verdict to any
+  // sentence counts, a negation or an echo included.
+  assert.equal(guardVerdictOf('Not yet.SHIP', ada.name), 'SHIP')
+  assert.equal(guardVerdictOf('I will not say done.SHIP', ada.name), 'SHIP')
+  // Wired: the reviewer's glued plan verdict opens the work.
+  const bot = await solver({ reviewerId: ada.id })
+  person(bot.id, 'Write bom.md.')
+  await step()
+  await assert.rejects(run(bot, 'write', { file_path: 'bom.md' }), HELD)
+  reply(ada.id, bot.id, S4)
+  assert.equal(typeof bot.reviewTrack.planVerdictAt, 'number')
+  assert.equal(await run(bot, 'write', { file_path: 'bom.md' }), 'ran')
+})
+
 test('G6: a DSH subagent under the Solver\'s chat is held; a group Session and a task of the Solver are not', async (t) => {
   const { rt, guard, person, solver, reviewer, sessions } = bench(t)
   const ada = await reviewer()
@@ -737,6 +782,261 @@ test('G16/G16b: a held native subagent question is rejected first in the approva
   answer = await ask(request(bot.id, edit))
   assert.ok(answer.reached.length > 1)
   assert.equal(typeof rt.reviewGuardAsk, 'function')
+})
+
+// The team's approval/request listeners as cordis runs them: prepended, newest first.
+const askChain = ctx => {
+  const hooks = [...ctx.listeners.get('approval/request')].reverse()
+  return (request) => {
+    const reached = []
+    const step = i => () => {
+      if (i >= hooks.length) { reached.push('card'); return 'person' }
+      reached.push(i)
+      return hooks[i](request, step(i + 1))
+    }
+    return Promise.resolve(step(0)()).then(outcome => ({ outcome, reached }))
+  }
+}
+
+test('G16c: a held bridged call (acp-dsh, native tools off) is rejected before the card, read from its tool/call record', async (t) => {
+  const { ctx, rt, guard, person, botMessage, reply, solver, reviewer, plain, stops, sessions, event } = bench(t)
+  const ada = await reviewer()
+  const main = await plain('Main Bot Y')
+  const bot = await solver({ reviewerId: ada.id })
+  const plainSolver = await solver({ reviewerId: ada.id, reviewGuard: false })
+  const root = mkdtempSync(join(tmpdir(), 'ds-bot-guard-bridge-'))
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }))
+  bot.workDir = root
+  person(bot.id, 'Task.')
+  person(plainSolver.id, 'Task.')
+  const ask = askChain(ctx)
+  let n = 0
+  // The live record turns.js keeps for the bridge's tool/call row (startCall), seeded as it does.
+  const record = (sessionId, callId, name, args) => {
+    const entry = rt.live.get(sessionId) ?? { calls: new Map() }
+    ;(entry.calls ??= new Map()).set(callId, { name, args })
+    if (!rt.live.has(sessionId)) rt.live.set(sessionId, entry)
+  }
+  // acp-dsh's bridge ask: no arguments, only `bridgeCall`.
+  const bridgeAsk = (sessionId, name, args, { seed = true, extra = {} } = {}) => {
+    const callId = `b${++n}`
+    if (seed) record(sessionId, callId, name, typeof args === 'string' ? args : JSON.stringify(args))
+    return {
+      agent: { id: sessionId, session: { id: sessionId } }, toolName: name, callId, reason: `Claude Code (ACP): ${name}`,
+      displayReason: { en: `Claude Code (ACP) wants to run ${name}` }, signal: new AbortController().signal,
+      bridgeCall: { agentAsked: false }, ...extra,
+    }
+  }
+  const heldAs = async (request, why, text) => {
+    stops.length = 0
+    const answer = await ask(request)
+    assert.equal(answer.outcome, 'rejected', JSON.stringify(request))
+    assert.deepEqual(answer.reached, [0], 'nothing after the guard is asked')
+    assert.equal(stops.length, 1)
+    assert.deepEqual({ why: stops[0].why, tool: stops[0].tool, callId: stops[0].callId }, { why, tool: request.toolName, callId: request.callId })
+    assert.equal('child' in stops[0], false, 'the Solver\'s own call')
+    assert.match(request.bridgeCall.refused.reason, text)
+    assert.equal(stops[0].text, request.bridgeCall.refused.reason)
+  }
+  // The team's card can wait for the person: the question is cancelled once it got past the guard.
+  const reaches = async (request, label) => {
+    stops.length = 0
+    const controller = new AbortController()
+    request.signal = controller.signal
+    const pending = ask(request)
+    await step()
+    controller.abort()
+    const answer = await pending
+    assert.ok(answer.reached.length > 1, `${label}: ${JSON.stringify(answer)}`)
+    assert.notEqual(answer.outcome, 'rejected', label)
+    assert.equal(stops.length, 0, label)
+    assert.equal(request.bridgeCall.refused, undefined, label)
+  }
+  // Held: work, a message to another Bot, and a record that does not parse.
+  await heldAs(bridgeAsk(bot.id, 'write', { file_path: 'bom.md', content: 'x' }), 'guard', /cannot use write yet/)
+  await heldAs(bridgeAsk(bot.id, 'bash', { command: 'ls' }), 'guard', HELD)
+  await heldAs(bridgeAsk(bot.id, 'message_bot', { to: main.name, message: 'hi' }), 'guard', ONLY_REVIEWER)
+  await heldAs(bridgeAsk(bot.id, 'write', '{'), 'guard', HELD)
+  // Open: the arguments are read (the notes file, the reviewer), a read, another Bot's call.
+  await reaches(bridgeAsk(bot.id, 'read', { file_path: 'bom.md' }), 'read')
+  await reaches(bridgeAsk(bot.id, 'write', { file_path: '.solver/notes.md', content: 'x' }), 'notes')
+  await reaches(bridgeAsk(bot.id, 'message_bot', { to: ada.name, message: 'My plan', reply_to: 'me' }), 'reviewer')
+  await reaches(bridgeAsk(plainSolver.id, 'write', { file_path: 'bom.md' }), 'unguarded')
+  // No usable record: the card shows as before, and the executor holds the call (S6G-5).
+  await reaches(bridgeAsk(bot.id, 'write', { file_path: 'bom.md' }, { seed: false }), 'no record')
+  const other = bridgeAsk(bot.id, 'write', { file_path: 'bom.md' }, { seed: false })
+  record(bot.id, other.callId, 'read', '{"file_path":"bom.md"}')
+  await reaches(other, 'another name')
+  const notString = bridgeAsk(bot.id, 'write', { file_path: 'bom.md' }, { seed: false })
+  rt.live.get(bot.id).calls.set(notString.callId, { name: 'write', args: { file_path: 'bom.md' } })
+  await reaches(notString, 'args not a string')
+  // A subagent Session in the Solver's lineage has no live record (turns.js): the card shows,
+  // and the executor holds the call (S6H-3).
+  const childId = 'bridge-child-of-solver'
+  sessions.set(childId, Session.create(childId, [], {
+    version: SESSION_FORMAT_VERSION, id: childId, createdAt: Date.now(), cwd: '/tmp', parentSession: bot.id, origin: 'subagent', isSeeded: false,
+  }))
+  await reaches(bridgeAsk(childId, 'write', { file_path: 'bom.md' }, { seed: false }), 'subagent Session')
+  assert.equal(rt.live.has(childId), false)
+  await assert.rejects(guard({ name: 'write', callId: 'k-child', arguments: { file_path: 'bom.md' }, agent: { id: childId } }), HELD)
+  // A question without bridgeCall is not a bridge ask (G16's `bash`).
+  const bare = bridgeAsk(bot.id, 'write', { file_path: 'bom.md' })
+  delete bare.bridgeCall
+  stops.length = 0
+  const bareAnswer = await ask(bare)
+  assert.ok(bareAnswer.reached.length > 1)
+  assert.equal(stops.length, 0)
+  // Wired: the real turns.js listener records the bridge's tool/call row; the ask is held.
+  stops.length = 0
+  event(bot.id, 'tool/call', { turn: 1, step: 1, callId: 'wired-1', name: 'write', arguments: '{"file_path":"bom.md","content":"x"}' })
+  const wired = bridgeAsk(bot.id, 'write', {}, { seed: false })
+  wired.callId = 'wired-1'
+  await heldAs(wired, 'guard', /cannot use write yet/)
+  // The group and task Sessions are not its own chat (DG-1): they go on, never refused.
+  rt.groupOwners.set('group-1', { botId: bot.id, roomId: 'room-1' })
+  rt.state.tasks = { ...rt.state.tasks, 'task-1': { from: bot.id, title: 'side' } }
+  for (const sessionId of ['group-1', 'task-1']) {
+    const controller = new AbortController()
+    const request = bridgeAsk(sessionId, 'write', { file_path: 'bom.md' }, { extra: { signal: controller.signal } })
+    stops.length = 0
+    const pending = ask(request)
+    await step()
+    controller.abort()
+    const answer = await pending
+    assert.ok(answer.reached.length > 1, `${sessionId}: ${JSON.stringify(answer)}`)
+    assert.notEqual(answer.outcome, 'rejected', sessionId)
+    assert.equal(stops.length, 0, sessionId)
+    assert.equal(request.bridgeCall.refused, undefined, sessionId)
+  }
+  // An error in the check holds the guarded Solver's own call with the fixed text (fails closed);
+  // another Bot's call still goes on.
+  const fixed = 'The review guard holds this call until the reviewer answers the plan.'
+  const botOf = rt.botOf
+  rt.botOf = id => { if (id === ada.id) throw new Error('guard check failed'); return botOf(id) }
+  try {
+    const request = bridgeAsk(bot.id, 'write', { file_path: 'bom.md' })
+    const answer = await ask(request)
+    assert.equal(answer.outcome, 'rejected')
+    assert.deepEqual(answer.reached, [0])
+    assert.equal(request.bridgeCall.refused.reason, fixed)
+    await reaches(bridgeAsk(plainSolver.id, 'write', { file_path: 'bom.md' }), 'unguarded, check error')
+  } finally {
+    rt.botOf = botOf
+  }
+  const live = rt.live
+  Object.defineProperty(rt, 'live', { configurable: true, get: () => { throw new Error('record lookup failed') } })
+  try {
+    const request = bridgeAsk(bot.id, 'write', {}, { seed: false })
+    const answer = await ask(request)
+    assert.equal(answer.outcome, 'rejected')
+    assert.equal(request.bridgeCall.refused.reason, fixed)
+  } finally {
+    Object.defineProperty(rt, 'live', { configurable: true, writable: true, value: live })
+  }
+  const botOfSession = rt.botOfSession
+  rt.botOfSession = () => { throw new Error('lookup failed') }
+  try {
+    await reaches(bridgeAsk(plainSolver.id, 'write', { file_path: 'bom.md' }), 'botOfSession throws')
+  } finally {
+    rt.botOfSession = botOfSession
+  }
+  // After the plan verdict: work and an unparsable record go on to the card.
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  await reaches(bridgeAsk(bot.id, 'write', { file_path: 'bom.md' }), 'after the verdict')
+  await reaches(bridgeAsk(bot.id, 'write', '{'), 'after the verdict, unparsable')
+  // A Bot's request after the plan verdict: held again, as a Bot-opened track.
+  await step()
+  botMessage(bot.id, main.id, 'Now do C.')
+  assert.equal(bot.reviewTrack.openedBy, 'bot')
+  await heldAs(bridgeAsk(bot.id, 'write', { file_path: 'bom.md' }), 'guard-request', HELD)
+})
+
+test('G16d: a held DSH-tool call is denied in tools/pre-execute, before the hard-step ladder or Auto review can ask', async (t) => {
+  const { ctx, rt, person, reply, solver, reviewer, stops } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  const plainSolver = await solver({ reviewerId: ada.id, reviewGuard: false })
+  const root = mkdtempSync(join(tmpdir(), 'ds-bot-guard-bridge-'))
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }))
+  bot.workDir = root
+  person(bot.id, 'Task.')
+  person(plainSolver.id, 'Task.')
+  // The pre-execute waterfall as cordis runs it, prepended listeners newest first; a stand-in for
+  // the ladder sits after the team's listeners: it asks unless the downstream result is a deny.
+  const hooks = ctx.listeners.get('tools/pre-execute') ?? []
+  const guardHook = hooks.find(hook => hook.name === 'reviewGuardGate')
+  assert.ok(guardHook, 'the guard listens on tools/pre-execute')
+  const pre = async (exec) => {
+    const trail = []
+    const ladder = async () => {
+      trail.push('ladder')
+      const downstream = { kind: 'allow' }
+      if (downstream.kind === 'deny') return downstream
+      trail.push('ask')
+      return { kind: 'ask' }
+    }
+    const result = await guardHook(exec, ladder)
+    return { result, trail }
+  }
+  let n = 0
+  const exec = (sessionId, name, args = {}) => ({ name, callId: `p${++n}`, arguments: args, agent: { id: sessionId, session: { id: sessionId } } })
+  stops.length = 0
+  let call = exec(bot.id, 'write', { file_path: 'bom.md' })
+  let out = await pre(call)
+  assert.equal(out.result.kind, 'deny')
+  assert.match(out.result.reason, /cannot use write yet/)
+  assert.deepEqual(out.trail, [], 'the ladder\'s ask is never reached')
+  assert.equal(stops.length, 1)
+  assert.deepEqual({ why: stops[0].why, tool: stops[0].tool, callId: stops[0].callId, text: stops[0].text }, { why: 'guard', tool: 'write', callId: call.callId, text: out.result.reason })
+  out = await pre(exec(bot.id, 'bash', { command: 'make' }))
+  assert.equal(out.result.kind, 'deny')
+  assert.deepEqual(out.trail, [])
+  // The other order: the ladder ahead of the guard computes its ask only after `await next()` and
+  // passes a downstream deny through (ladder.js), so the guard's deny still wins and no card shows.
+  const trail = []
+  const ladderAhead = async (item) => {
+    trail.push('ladder')
+    const downstream = await guardHook(item, async () => ({ kind: 'allow' }))
+    if (downstream?.kind === 'deny') return downstream
+    trail.push('ask')
+    return { kind: 'ask' }
+  }
+  const ahead = await ladderAhead(exec(bot.id, 'bash', { command: 'make' }))
+  assert.equal(ahead.kind, 'deny')
+  assert.match(ahead.reason, HELD)
+  assert.deepEqual(trail, ['ladder'])
+  // Not held here: the notes file, a read, an ACP mirror call, an unguarded Bot, a denied name.
+  stops.length = 0
+  for (const [label, item] of [
+    ['notes', exec(bot.id, 'write', { file_path: '.solver/notes.md' })],
+    ['read', exec(bot.id, 'read', { file_path: 'bom.md' })],
+    ['acp_tool', exec(bot.id, 'acp_tool', { kind: 'edit', title: 'Write', input: { file_path: 'bom.md' } })],
+    ['unguarded', exec(plainSolver.id, 'write', { file_path: 'bom.md' })],
+  ]) {
+    out = await pre(item)
+    assert.deepEqual(out.result, { kind: 'ask' }, label)
+    assert.deepEqual(out.trail, ['ladder', 'ask'], label)
+  }
+  assert.equal(stops.length, 0)
+  bot.denyTools = ['write']
+  out = await pre(exec(bot.id, 'write', { file_path: 'bom.md' }))
+  assert.deepEqual(out.trail, ['ladder', 'ask'], 'a denied name is left to the executor\'s refusal')
+  delete bot.denyTools
+  // An error in the lookup goes on; the executor still holds the call.
+  const lookup = rt.reviewGuardOfExec
+  rt.reviewGuardOfExec = () => { throw new Error('lookup failed') }
+  try {
+    out = await pre(exec(bot.id, 'write', { file_path: 'bom.md' }))
+    assert.deepEqual(out.trail, ['ladder', 'ask'])
+  } finally {
+    rt.reviewGuardOfExec = lookup
+  }
+  // After the plan verdict the call goes on.
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  out = await pre(exec(bot.id, 'write', { file_path: 'bom.md' }))
+  assert.deepEqual(out.trail, ['ladder', 'ask'])
 })
 
 test('the owner view says since when a guarded Solver waits; the caller view never carries the fields', async (t) => {
