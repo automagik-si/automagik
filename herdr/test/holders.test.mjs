@@ -48,8 +48,11 @@ function diagnosticTraceSource() {
         const source = typeof loaded.source === "string" ? loaded.source : Buffer.from(loaded.source).toString("utf8");
         const boundary = "const { config, counts, connected, view } = await holderView()";
         if (source.split(boundary).length !== 2) throw new Error("Missing or ambiguous holder view boundary");
-        return { ...loaded, source: source.replace(boundary,
-          'appendFileSync(process.env.HC_FAKE_CUTOFF_LOG, JSON.stringify({ kind: "view" }) + "\\\\n"); ' + boundary) };
+        // Only the diagnostic sees the FIFO. The ordinary view reads a regular fixture file.
+        const beforeView = 'const poolFifo = process.env.HC_FAKE_CUTOFF_POOL_FIFO; ' +
+          'if (poolFifo) { unlinkSync(poolFifo); writeFileSync(poolFifo, "{}"); } ' +
+          'appendFileSync(process.env.HC_FAKE_CUTOFF_LOG, JSON.stringify({ kind: "view" }) + "\\\\n"); ';
+        return { ...loaded, source: source.replace(boundary, beforeView + boundary) };
       },
     });
   `;
@@ -100,7 +103,11 @@ function scene(t, { folder = "proj", diagnostic = false } = {}) {
     Object.assign(env, core.env);
   }
   const cli = (args, extraEnv) => {
-    const r = spawnSync(process.execPath, [...nodeFlags, CLI, ...args], { cwd: project, env: { ...env, ...extraEnv }, encoding: "utf8" });
+    const fifoTimeout = extraEnv?.HC_FAKE_CUTOFF_POOL_FIFO ? { timeout: 5000, killSignal: "SIGKILL" } : {};
+    const r = spawnSync(process.execPath, [...nodeFlags, CLI, ...args], {
+      cwd: project, env: { ...env, ...extraEnv }, encoding: "utf8", ...fifoTimeout,
+    });
+    if (extraEnv?.HC_FAKE_CUTOFF_POOL_FIFO) assert.ifError(r.error);
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   // A start that must be launched beside another one: no sleep, the promises settle on close.
@@ -988,6 +995,30 @@ test("C10b cut-off: an alias from default to an unrelated listener leaves local 
   checkTrace(json, []);
 });
 
+test("D1432-1 cut-off: a redirected named member leaves the whole pool unchecked before RPC", (t) => {
+  const s = cutoffScene(t, { two: true });
+  rmSync(s.sockets.h2);
+  symlinkSync(s.sockets.other, s.sockets.h2);
+  const json = s.view();
+  uncheckedCutOff(json, "a core socket could not be determined", ["local", "h2"]);
+  checkTrace(json, []);
+  assert.equal(json.events.some(({ socket }) => socket === s.sockets.other), false);
+});
+
+test("D1432-2 cut-off: an unrelated listener with the same stem makes holder ownership ambiguous", (t) => {
+  const s = cutoffScene(t);
+  const control = s.sockets.local.replace(/\.sock$/, ".control");
+  startFakeCore(t, s.env, { socket: control, status: { core: { id: "core-control" }, pid: 403, holders: [{ pid: 222 }] } });
+  for (const root of s.roots) {
+    appendFileSync(join(root, "net/unix"), `0000000000000000: 00000002 00000000 00010000 0001 01 903 ${control}\n`);
+    writeFixtureProc(root, 403, { fd: { 3: 903 } });
+  }
+  const json = s.view();
+  uncheckedCutOff(json, "pool membership is ambiguous");
+  checkTrace(json, [s.sockets.local]);
+  assert.equal(json.events.some(({ socket }) => socket === control), false);
+});
+
 test("C11 cut-off: a set custom override makes the check explicitly unchecked", (t) => {
   const s = cutoffScene(t);
   const json = s.view(["--json"], { AUTOMAGIK_HERDR_CORE_SOCKET: s.sockets.local });
@@ -1010,5 +1041,30 @@ test("C12b cut-off: the ordinary view still emits its own corrupt-pool warning o
   const json = s.view();
   uncheckedCutOff(json, "the pool file could not be read");
   assert.equal(json.err.split("holders: the file isn't JSON").length, 2);
+  checkTrace(json, []);
+});
+
+test("D1432-3 cut-off: a pool FIFO without a writer returns promptly on both platform branches", (t) => {
+  const s = cutoffScene(t);
+  for (const [platform, reason] of [
+    ["linux", "the pool file could not be read"],
+    ["darwin", "process table not readable on this system"],
+  ]) {
+    rmSync(s.holdersFile, { force: true });
+    const fifo = spawnSync("mkfifo", ["-m", "600", s.holdersFile], { env: s.env, encoding: "utf8" });
+    assert.equal(fifo.status, 0, fifo.stderr ?? String(fifo.error));
+    const json = s.view(["--json"], {
+      AUTOMAGIK_HERDR_TEST_PLATFORM: platform, HC_FAKE_CUTOFF_POOL_FIFO: s.holdersFile,
+    });
+    uncheckedCutOff(json, reason);
+    checkTrace(json, []);
+  }
+});
+
+test("D1432-3 cut-off: a valid but oversized pool file is unchecked", (t) => {
+  const s = cutoffScene(t);
+  writeFileSync(s.holdersFile, `{}${" ".repeat(128 * 1024)}`);
+  const json = s.view();
+  uncheckedCutOff(json, "the pool file could not be read");
   checkTrace(json, []);
 });

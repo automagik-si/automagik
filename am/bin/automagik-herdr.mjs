@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
-import { coreSocketDiscovery, coreSockets, coreStatus, inTestRoots, inTestRootsReal, userCoreSockets } from "../coreSocket.mjs";
+import { coreSocketDiscovery, coreSockets, coreStatus, inTestRoots, inTestRootsReal, readBoundedFile, userCoreSockets } from "../coreSocket.mjs";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots, restartAtOf,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId, rateLimitModeOf,
@@ -4407,6 +4407,8 @@ async function holdersUp() {
 }
 
 // The diagnostic owns its readers. None consults the view's routing, caches or ledger.
+const MAX_CUTOFF_POOL_BYTES = 64 * 1024;
+
 function cutOffMembers() {
   const path = holdersPath();
   try { lstatSync(path); }
@@ -4414,7 +4416,7 @@ function cutOffMembers() {
     if (error?.code === "ENOENT") return parseHolders(null, { strict: true });
     throw error;
   }
-  return parseHolders(readFileSync(path, "utf8"), { strict: true });
+  return parseHolders(readBoundedFile(path, MAX_CUTOFF_POOL_BYTES).toString("utf8"), { strict: true });
 }
 
 function cutOffMemberEnv(env, { session }) {
@@ -4436,8 +4438,8 @@ export function cutOffEndpoints(env, member, check) {
       throw error;
     }
     if (!inTestRootsReal(socket, env) || !basename(socket).endsWith(".sock")) throw new Error("Unrecognized core socket target.");
-    if (member.name === LOCAL_HOLDER && index === 0 && socket !== join(realpathSync.native(dirname(name)), basename(name))) {
-      throw new Error("The default socket does not identify the local core.");
+    if (index === 0 && socket !== join(realpathSync.native(dirname(name)), basename(name))) {
+      throw new Error(`The primary socket does not identify the ${member.name} core.`);
     }
     if (!endpoints.has(socket)) endpoints.set(socket, []);
     endpoints.get(socket).push(name);
@@ -4451,6 +4453,10 @@ function procPathInside(root, path) {
 }
 
 const PID_NAMESPACE = /^pid:\[\d+\]$/;
+const MOUNT_NAMESPACE = /^mnt:\[\d+\]$/;
+const MAX_PROC_FIELDS_BYTES = 64 * 1024;
+const MAX_PROC_CMDLINE_BYTES = 2 * 1024 * 1024;
+const MAX_PROC_UNIX_BYTES = 4 * 1024 * 1024;
 
 /** A Linux process snapshot. The two fixture roots and each path used for IO are guarded. */
 export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
@@ -4476,18 +4482,18 @@ export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
     if (!procPathInside(root, resolved)) throw new Error("Process path outside its table.");
     return resolved;
   };
-  const read = (path) => {
-    const fd = openSync(follow(path), constants.O_RDONLY | constants.O_NONBLOCK);
-    try {
-      if (!fstatSync(fd).isFile()) throw new Error("Invalid process file.");
-      return readFileSync(fd, "utf8");
-    } finally { closeSync(fd); }
-  };
+  const read = (path, maxBytes = MAX_PROC_FIELDS_BYTES) => readBoundedFile(follow(path), maxBytes).toString("utf8");
   const link = (path) => readlinkSync(join(follow(dirname(path)), basename(path)));
   const namespace = (dir) => {
     const value = link(join(dir, "ns/pid"));
     if (!PID_NAMESPACE.test(value)) throw new Error("Unreadable PID namespace.");
     return value;
+  };
+  const filesystem = (dir) => {
+    const mount = link(join(dir, "ns/mnt"));
+    const rootStat = statSync(follow(join(dir, "root")), { bigint: true });
+    if (!MOUNT_NAMESPACE.test(mount) || !rootStat.isDirectory()) throw new Error("Unreadable process filesystem context.");
+    return `${mount}:${rootStat.dev}:${rootStat.ino}`;
   };
   const executable = (dir) => {
     const value = link(join(dir, "exe"));
@@ -4517,7 +4523,7 @@ export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
     if (owner !== uid) continue;
     const entry = { pid, ...stat(info, pid) };
     if (liveProc(entry)) {
-      entry.argv = parseCmdline(read(join(info, "cmdline")));
+      entry.argv = parseCmdline(read(join(info, "cmdline"), MAX_PROC_CMDLINE_BYTES));
       if (entry.argv === null) throw new Error("Unreadable process arguments.");
       entry.exe = executable(info);
     }
@@ -4529,12 +4535,16 @@ export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
     return liveProc(current) && current.starttime === entry.starttime &&
       parseProcStatus(read(join(dir, "status"))) === uid && executable(dir) === entry.exe;
   };
-  let listeners;
+  let listeners, selfFilesystem;
+  const readerFilesystem = () => selfFilesystem ??= filesystem(join(root, "self"));
   return {
     entries: [...entries.values()],
     namespace: self,
+    listeningPaths: () => listeners.keys(),
     namespaceOf: (entry) => {
       const dir = join(root, String(entry.pid));
+      // Absolute socket names are comparable only in the same mount namespace and root.
+      if (filesystem(dir) !== readerFilesystem()) throw new Error("Holder filesystem context differs from the reader's.");
       if (!sameProcess(dir, entry)) throw new Error("Holder process identity changed.");
       return namespace(dir);
     },
@@ -4543,9 +4553,11 @@ export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
       if (!entry || !liveProc(entry) || !sameProcess(dir, entry)) return null;
       const coreNamespace = namespace(dir);
       if (coreNamespace !== self) return { namespace: coreNamespace };
+      const coreFilesystem = filesystem(dir);
+      if (coreFilesystem !== readerFilesystem()) throw new Error("Core filesystem context differs from the reader's.");
       // The path in /proc/net/unix and the listening socket inode held by this PID
       // tie the reply to a local process. A PID number from a reply alone is insufficient.
-      listeners ??= procUnixListeners(read(join(root, "net/unix")), check);
+      listeners ??= procUnixListeners(read(join(root, "net/unix"), MAX_PROC_UNIX_BYTES), check);
       const inodes = new Set();
       for (const socket of sockets) {
         const matches = listeners.get(socket);
@@ -4559,6 +4571,7 @@ export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
         if (!inodes.size) break;
       }
       if (inodes.size || !sameProcess(dir, entry) || namespace(dir) !== coreNamespace) return null;
+      if (filesystem(dir) !== coreFilesystem) throw new Error("Core filesystem context changed.");
       return { namespace: coreNamespace, exe: entry.exe, starttime: entry.starttime };
     },
   };

@@ -81,22 +81,28 @@ function configValue(token) {
   return n;
 }
 
-function readConfig(path) {
-  // Bound the read even if the file is replaced or grows. Do not wait on a pipe.
+/** Read at most maxBytes plus one byte to detect overflow, including for size-zero proc files. */
+export function readBoundedFile(path, maxBytes) {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const st = fstatSync(fd);
-    if (!st.isFile() || st.size > MAX_CONFIG_BYTES) throw new Error("invalid config file");
-    const bytes = Buffer.alloc(MAX_CONFIG_BYTES + 1);
+    if (!st.isFile() || st.size > maxBytes) throw new Error("Invalid bounded file.");
+    const chunks = [];
     let size = 0;
-    while (size < bytes.length) {
-      const count = readSync(fd, bytes, size, bytes.length - size, null);
+    while (size <= maxBytes) {
+      const bytes = Buffer.allocUnsafe(Math.min(8192, maxBytes + 1 - size));
+      const count = readSync(fd, bytes, 0, bytes.length, null);
       if (!count) break;
       size += count;
+      chunks.push(bytes.subarray(0, count));
     }
-    if (size > MAX_CONFIG_BYTES) throw new Error("invalid config size");
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, size));
+    if (size > maxBytes) throw new Error("Bounded file exceeds its size limit.");
+    return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, size);
   } finally { closeSync(fd); }
+}
+
+function readConfig(path) {
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readBoundedFile(path, MAX_CONFIG_BYTES));
 }
 
 // null: no setting. A path is trusted only when the entire file fits this TOML subset.
@@ -135,6 +141,16 @@ function configuredSocket(env, home, strict = false) {
 }
 
 const stateHome = (env, home) => isAbsolute(env.XDG_STATE_HOME || "") ? env.XDG_STATE_HOME : join(home, ".local/state");
+const MAX_LOCK_BYTES = 64 * 1024;
+
+function readStrictLockSocket(lock) {
+  const record = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readBoundedFile(lock, MAX_LOCK_BYTES));
+  // The lock contains a single socket path, optionally terminated by LF.
+  const socket = record.endsWith("\n") ? record.slice(0, -1) : record;
+  if (socket !== socket.trim() || /[\r\n]/.test(socket)) throw new Error("Invalid core socket record.");
+  return socket;
+}
+
 function readLockSocket(lock) {
   const fd = openSync(lock, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
@@ -193,7 +209,7 @@ function socketDiscovery(env, { platform, uid, home, strict = false }, configure
       if (error?.code === "ENOENT") return discovery;
       throw error;
     }
-    const lockSocket = readLockSocket(lockPath);
+    const lockSocket = readStrictLockSocket(lockPath);
     if (!isAbsolute(lockSocket) || lockSocket.includes("\0") || !allowed(lockSocket)) uncertain();
     if (lockSocket !== defaultSocket) {
       discovery.sockets.push(lockSocket);

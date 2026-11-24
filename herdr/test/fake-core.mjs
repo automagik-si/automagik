@@ -46,6 +46,13 @@ export function startFakeCore(t, env, { socket: listenAt, status } = {}) {
 // Synthetic Linux process and socket tables, independent of the fake listener PIDs.
 export const CUT_OFF_EXE = "/fixture/bin/herdr-core";
 export const CUT_OFF_NS = "pid:[404]";
+const CUT_OFF_MOUNT_NS = "mnt:[405]";
+
+function writeFixtureFilesystem(dir) {
+  symlinkSync(CUT_OFF_MOUNT_NS, join(dir, "ns/mnt"));
+  symlinkSync("..", join(dir, "root"));
+}
+
 export function fixtureProcStat(pid, { ppid = 1, state = "S", starttime = "600", comm = "herdr-core" } = {}) {
   return `${pid} (${comm}) ${state} ${ppid} ${"0 ".repeat(17)}${starttime} 0\n`;
 }
@@ -61,6 +68,7 @@ export function writeFixtureProc(root, pid, options = {}) {
     writeFileSync(join(dir, "cmdline"), argv.length ? argv.join("\0") + "\0" : "");
     symlinkSync(exe, join(dir, "exe"));
     symlinkSync(namespace, join(dir, "ns/pid"));
+    writeFixtureFilesystem(dir);
   }
   for (const [number, inode] of Object.entries(fd)) symlinkSync(`socket:[${inode}]`, join(dir, "fd", number));
 }
@@ -68,7 +76,9 @@ export function writeFixtureProc(root, pid, options = {}) {
 export function writeFixtureProcRoot(root, listeners) {
   mkdirSync(join(root, "self/ns"), { recursive: true });
   mkdirSync(join(root, "net"), { recursive: true });
-  symlinkSync(CUT_OFF_NS, join(root, "self/ns/pid"));
+  const self = join(root, "self");
+  symlinkSync(CUT_OFF_NS, join(self, "ns/pid"));
+  writeFixtureFilesystem(self);
   const header = "Num       RefCount Protocol Flags    Type St Inode Path\n";
   const rows = listeners.map(([path, inode]) => `0000000000000000: 00000002 00000000 00010000 0001 01 ${inode} ${path}\n`);
   writeFileSync(join(root, "net/unix"), header + rows.join(""));

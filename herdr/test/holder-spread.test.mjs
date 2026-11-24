@@ -4,7 +4,7 @@
 // local holder (today's behaviour), and the limit's default is documented in README.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { CUT_OFF_EXE, fixtureProcStat, writeFixtureProc, writeFixtureProcRoot } from "./fake-core.mjs";
@@ -186,7 +186,7 @@ function fakeCutOff({ names = ["local"], tables = [[hold()], [hold()]] } = {}) {
       read = index;
       processes.push(index);
       return { entries: tables[index], namespace: NAMESPACE, namespaceOf: () => NAMESPACE,
-        coreProof: () => ({ exe: EXE, namespace: NAMESPACE }) };
+        coreProof: () => ({ exe: EXE, namespace: NAMESPACE }), listeningPaths: () => answers.keys() };
     },
     clock: { now: () => now, sleep: async (delay) => { waits.push(delay); now += delay; } },
     recheckMs: 0,
@@ -351,7 +351,7 @@ test("U6b cut-off: strict discovery rejects malformed, escaping and dangling loc
   const before = f.calls.length;
   const dangling = join(dirname(io.socket), "dangling.sock");
   symlinkSync(join(io.root, "missing.sock"), dangling);
-  for (const target of ["", "relative.sock", "/outside-test.sock", dangling]) {
+  for (const target of ["", "relative.sock", "/outside-test.sock", dangling, ` ${io.socket}`, `${io.socket} `, `${io.socket}\r`]) {
     writeFileSync(io.lock, target + "\n");
     assertUnchecked(await holderCutOffs(f.input), "a core socket could not be determined");
   }
@@ -415,6 +415,17 @@ test("U6f cut-off: member sessions use the exact stored name and the pool is rer
   let reads = 0;
   f.input.members = () => (++reads === 1 ? valid : { ...valid, holders: [valid.holders[0]] });
   assertUnchecked(await holderCutOffs(f.input), "its core changed between the reads", ["local", "team_a"]);
+});
+
+test("D1432-3 cut-off: an oversized lock leaves the socket unchecked", async (t) => {
+  const { holderCutOffs } = await spread();
+  const f = fakeCutOff(), io = discoveryFixture(t);
+  await withDiscovery(f, io);
+  assert.deepEqual(await holderCutOffs(f.input), positive);
+  const before = f.calls.length;
+  writeFileSync(io.lock, `${io.socket}\n${" ".repeat(128 * 1024)}`);
+  assertUnchecked(await holderCutOffs(f.input), "a core socket could not be determined");
+  assert.equal(f.calls.length, before);
 });
 
 async function procFixture(t) {
@@ -513,6 +524,35 @@ test("U7e cut-off: test mode never replaces a missing fixture with the host proc
   assert.deepEqual(await holderCutOffs(f.input), positive);
   const before = f.calls.length;
   delete f.env.AUTOMAGIK_HERDR_PROC_ROOT;
+  assertUnchecked(await holderCutOffs(f.input), "process table could not be read");
+  assert.equal(f.calls.length, before);
+});
+
+test("D1432-2 cut-off: matching PID namespaces still require comparable mount namespaces and roots", async (t) => {
+  const { holderCutOffs } = await spread();
+  const f = await procFixture(t);
+  assert.deepEqual(await holderCutOffs(f.input), positive);
+
+  const mount = join(f.roots[0], "222/ns/mnt");
+  const originalMount = readlinkSync(mount);
+  unlinkSync(mount);
+  symlinkSync("mnt:[999]", mount);
+  assertUnchecked(await holderCutOffs(f.input), "process table could not be read");
+
+  unlinkSync(mount);
+  symlinkSync(originalMount, mount);
+  const coreRoot = join(f.roots[0], "400/root");
+  unlinkSync(coreRoot);
+  symlinkSync("../222", coreRoot);
+  assertUnchecked(await holderCutOffs(f.input), "process table could not be read");
+});
+
+test("D1432-3 cut-off: a valid but oversized process file leaves the table unchecked", async (t) => {
+  const { holderCutOffs } = await spread();
+  const f = await procFixture(t);
+  assert.deepEqual(await holderCutOffs(f.input), positive);
+  const before = f.calls.length;
+  writeFileSync(join(f.roots[0], "222/status"), `Name:\tfake\nUid:\t${process.getuid()}\t0\t0\t0${" ".repeat(128 * 1024)}\n`);
   assertUnchecked(await holderCutOffs(f.input), "process table could not be read");
   assert.equal(f.calls.length, before);
 });

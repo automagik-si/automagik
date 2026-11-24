@@ -233,6 +233,11 @@ export function holderSocketOf(endpoint, socket) {
     socket.startsWith(prefix + ".") && /^\.(?:[0-9a-f]{8}|[0-9a-f]{32})\.sock$/.test(socket.slice(prefix.length));
 }
 
+function endpointStem(path) {
+  const dot = path.lastIndexOf(".");
+  return dot > path.lastIndexOf("/") + 1 ? path.slice(0, dot) : path;
+}
+
 export function holdProcess(entry) {
   const { argv } = entry;
   return liveProc(entry) && argv?.length === 4 && argv[0] && argv[1] === "hold" && argv[2] === "--socket"
@@ -326,6 +331,15 @@ async function observationOf({ pool, discover, rpc, proc, clock, index, readPool
     core.starttime = proof.starttime;
   }
 
+  // Core replaces the final extension when naming a holder socket. Include listeners
+  // outside the pool here, since a different endpoint can produce the same name.
+  const listenersByStem = new Map();
+  for (const path of table.listeningPaths()) {
+    check();
+    const stem = endpointStem(path);
+    listenersByStem.set(stem, listenersByStem.has(stem) ? null : path);
+  }
+
   const candidates = new Map();
   for (const entry of table.entries) {
     check();
@@ -334,10 +348,12 @@ async function observationOf({ pool, discover, rpc, proc, clock, index, readPool
     const matches = requests.filter(([endpoint]) => holderSocketOf(endpoint, socket));
     if (!matches.length) continue;
     if (matches.length !== 1) unknownCutOff(CUT_OFF_REASONS.ambiguous);
-    const [, core] = matches[0];
+    const [endpoint, core] = matches[0];
     const namespace = readCutOff(check, CUT_OFF_REASONS.proc, () => table.namespaceOf(entry));
     if (entry.exe !== core.exe || namespace !== table.namespace) unknownCutOff(CUT_OFF_REASONS.proc);
-    if (!listed.has(entry.pid)) candidates.set(entry.pid, { holder: core.member.name, socket, ...entry });
+    if (listed.has(entry.pid)) continue;
+    if (listenersByStem.get(endpointStem(endpoint)) !== endpoint) unknownCutOff(CUT_OFF_REASONS.ambiguous);
+    candidates.set(entry.pid, { holder: core.member.name, socket, ...entry });
   }
   check();
   return { members: members.holders, cores, candidates, entries: table.entries, namespace: table.namespace };
