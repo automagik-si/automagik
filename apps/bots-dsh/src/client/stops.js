@@ -12,6 +12,8 @@ export function whyText(why) {
     case 'address': return t('the address list blocks that site')
     case 'review': return t('Auto review refused it')
     case 'sandbox': return t('the sandbox blocked it')
+    case 'guard': return t('the review guard waits for the reviewer\'s verdict on the plan; you can turn it off in Details')
+    case 'guard-request': return t('the review guard waits for the reviewer\'s verdict on a new plan, because another Bot sent a new request; you can turn it off in Details')
     default: return t('a rule here refused it')
   }
 }

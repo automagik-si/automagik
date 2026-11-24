@@ -10,13 +10,14 @@ import { ChevronLeftIcon, CloseIcon } from './icons.js'
 import { useEscape } from './overlay-hooks.js'
 import { freshBotName } from './bot-draft.js'
 import { addStrings, hostText, t } from './i18n.js'
-import { presetName } from './permission-picker.js'
+import { presetDanger, presetName } from './permission-picker.js'
 import { nameProblem } from '../shared/mentions.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import {
-  SOLVER_LOOKS, createSolver, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
+  SOLVER_LOOKS, createSolver, guardLevelOf, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
   reviewerPayload, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
 } from './solver-draft.js'
+import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 import { DEFAULT_COLORS, DEFAULT_SHAPES } from './characters.js'
 
 addStrings(nativeToolsZh)
@@ -32,6 +33,7 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const [choiceKey, setChoiceKey] = useState(null)
   const [reviewerModel, setReviewerModel] = useState(null)
   const [ticked, setTicked] = useState(false)
+  const [guarded, setGuarded] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notes, setNotes] = useState([])
@@ -69,13 +71,14 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
     const before = new Set(roster.bots.map(bot => bot.id))
     const workDir = folder || undefined
     const reviewer = choice.kind === 'new' ? { kind: 'new' } : choice.kind === 'bot' ? { kind: 'bot', name: choice.name, botId: choice.botId } : { kind: 'fresh' }
+    const guard = reviewer.kind !== 'fresh' && guarded
     const result = await createSolver({
       actions, before, reviewer, native,
       reviewerPayload: choice.kind === 'new' ? reviewerPayload({
         name: reviewerName(roster, finalName), look: { shape: pick(DEFAULT_SHAPES), color: pick(DEFAULT_COLORS) }, model: newModel, workDir,
       }) : undefined,
       solverPayloadFor: ({ reviewer: reviewerBot, dedicated, reviewerId }) => solverPayload({
-        name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, native,
+        name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, native, guard,
       }),
     })
     setBusy(false)
@@ -103,6 +106,10 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
         t('Each review runs in a fresh session that sees only your request and the result. The delivery says so.')].filter(Boolean).join(' ')
     : t('Another Bot on a different model or agent reviews its plan and its result.')
   const tickHint = shownView === null ? '' : shownView.hint.map(key => t(key)).join(' ')
+  // The Review guard tick (RFC 0048 delivery 1.5): only with a reviewer Bot, on by default, with the
+  // line Details shows for the chosen model and level, so it never claims a hold the route lacks.
+  const guardReach = model && choice.kind !== 'fresh' ? reviewGuardReach(solverCandidate(roster, model, native), guardLevelOf(permission, presetDanger(permission))) : null
+  const guardHint = guardReach === null || guardReach === 'hard' ? null : t(REVIEW_GUARD_COPY[guardReach])
   const worksWithout = shownView !== null && !shownView.disabled && ['acp-claude', 'acp-codex'].includes(shownView.mark)
   return h('div', { className: 'bt-create', role: 'dialog', 'aria-label': t('New Solver') },
     h('div', { className: 'bt-create-head' },
@@ -153,6 +160,15 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
             }), ' ', t(nativeToolsCopy.label)),
           h('span', { className: 'bt-note' }, tickHint),
           worksWithout ? h('span', { className: 'bt-note' }, t('Off by default. The Solver also works without them, with its reviewer.')) : null),
+        guardReach === null ? null : h('div', { className: 'bt-field', 'data-review-guard': guarded ? 'on' : 'off' },
+          h('label', { className: 'bt-field-label' },
+            h('input', {
+              type: 'checkbox', checked: guarded, disabled: busy,
+              'aria-label': t(REVIEW_GUARD_COPY.tick),
+              onChange: event => setGuarded(event.target.checked),
+            }), ' ', t(REVIEW_GUARD_COPY.tick)),
+          h('span', { className: 'bt-note' }, t(REVIEW_GUARD_COPY.tickNote)),
+          guardHint === null ? null : h('span', { className: 'bt-note' }, guardHint)),
         permission == null ? null : h('div', { className: 'bt-note' },
           t('New Bots start at {level}.', { level: presetName(permission, roster.permissions) })),
         error ? h('div', { className: 'bt-error', role: 'alert', style: { padding: 0 } }, error) : null,

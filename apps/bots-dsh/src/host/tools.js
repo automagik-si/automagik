@@ -1022,6 +1022,10 @@ export function install(rt) {
         asked[key] = String(args[arg])
       }
       if (Object.keys(asked).length === 0) return 'Propose at least one change: name, role, instructions, work_dir, model or effort.'
+      // While the review guard is on, only the person moves the Bot to another model (H5-1): no card.
+      if (asked.model !== undefined && bot.reviewGuard === true) {
+        return `${bot.name}'s review guard is on, so its model cannot be proposed here. Only the person can change it, in ${bot.name}'s Settings.`
+      }
       const proposal = {}
       try {
         if (asked.name !== undefined) {

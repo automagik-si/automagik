@@ -421,6 +421,27 @@ export function install(rt) {
       state.nativeToolsCodexKept = true
       if (kept > 0) migrated = true
     }
+    // RFC 0048 delivery 1.5: once, each Solver made by the D1 dialog whose reviewer Bot is still on
+    // the team gets the review guard (the owner's rule: always a counterpoint), with one line in its
+    // chat saying so (`reviewGuardNotice`, its part read from the record, H7-6). A Solver with no
+    // reviewer Bot stays off. The cosmetic Solver marker is not read. Nothing to change writes
+    // nothing: the flag rides the next real save, which encodes the whole state, so a Solver made
+    // or copied later keeps what its own create gave it, and an OFF the person chose stays off.
+    if (state.reviewGuardMigrated !== true) {
+      const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+      const at = Date.now()
+      let turned = 0
+      for (const bot of Object.values(state.bots)) {
+        const reviewer = bot?.reviewerId
+        if (!isRecord(bot) || typeof reviewer !== 'string' || reviewer === '' || reviewer === bot.id) continue
+        if (!isRecord(own(state.bots, reviewer)) || bot.reviewGuard === true) continue
+        bot.reviewGuard = true
+        bot.reviewGuardNotice = { at, sessionId: typeof bot.sessionId === 'string' && bot.sessionId !== '' ? bot.sessionId : bot.id }
+        turned += 1
+      }
+      state.reviewGuardMigrated = true
+      if (turned > 0) migrated = true
+    }
     // A builtin pet the plugin no longer ships would draw nothing: its Bot wears Genie instead.
     // Genie kept from before its approved figure names the old atlas's version: it reads as
     // the Genie shipped now (pets.js shippedPet), whatever the file says, every time.

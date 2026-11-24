@@ -671,6 +671,36 @@ function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDel
   }
 }
 
+// The one line a Solver's chat shows where the one-time upgrade turned its review guard on (RFC
+// 0048 delivery 1.5, `reviewGuardNotice`): only in the part it was stored for, after the last turn
+// that ended at or before it, or above the part's first turn when every turn began after it. A
+// part opened later, or an earlier page not loaded yet, shows none.
+export function upgradeNoticeOf(roster, sessionId) {
+  for (const bot of roster?.bots ?? []) {
+    const notice = bot?.reviewGuardNotice
+    if (notice === null || typeof notice !== 'object' || typeof notice.at !== 'number' || !Number.isFinite(notice.at)) continue
+    if (typeof notice.sessionId === 'string' && notice.sessionId === sessionId) return { at: notice.at, name: bot.name }
+  }
+  return undefined
+}
+const noticeKey = (roster, sessionId) => {
+  const notice = upgradeNoticeOf(roster, sessionId)
+  return notice === undefined ? '' : `${notice.at}\u0000${notice.name}`
+}
+const noticeOfKey = (key) => {
+  if (key === '') return undefined
+  const cut = key.indexOf('\u0000')
+  return { at: Number(key.slice(0, cut)), name: key.slice(cut + 1) }
+}
+/** Whether the upgrade line goes right after a turn that ended at `end`, the next one starting at `nextStart`. */
+export const noticeAfterTurn = (at, end, nextStart) => typeof end === 'number' && end <= at && (nextStart === undefined || nextStart > at)
+/** Whether it goes above a turn: the part's first, begun after it. */
+export const noticeBeforeTurn = (at, first, start) => first === true && typeof start === 'number' && start > at
+function UpgradeLine({ name }) {
+  return h('div', { className: 'bt-event', 'data-review-guard-notice': '' },
+    t('The review guard is now on for {name}: its work waits for its reviewer\'s verdict on the plan. You can turn it off in Details.', { name }))
+}
+
 export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, useUi, actions }) {
   const roster = useRoster(value => value)
   const data = node.data
@@ -705,9 +735,14 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
     return first?.turn === turn && unseenSince(visit, first.start) ? clockLabel(first.start) : ''
   })
   const body = triggerBody()
-  return unreadOpening
+  const notice = noticeOfKey(noticeKey(roster, sessionId))
+  const firstTurn = order !== '' && Number(order.split(',')[0]) === turn
+  const upgrade = notice !== undefined && noticeBeforeTurn(notice.at, firstTurn, node.location?.turn?.start?.time ?? data.time)
+    ? h(UpgradeLine, { name: notice.name }) : null
+  const opening = unreadOpening
     ? h(Fragment, null, h('div', { className: 'bt-open-new' }, h(NewDivider), h('div', { className: 'bt-time-sep', role: 'separator' }, unreadOpening)), body)
-    : (body ?? h(CellEmpty))
+    : body
+  return upgrade === null ? (opening ?? h(CellEmpty)) : h(Fragment, null, upgrade, opening)
 
   function triggerBody() {
     if (source.kind === 'bot') {
@@ -874,8 +909,17 @@ export function TurnTailCell({ turn: location, sessionId, useRoster, useTurnCloc
   })
   // Every reply says when it ended, under its last line.
   const ended = hidden ? null : h('time', { className: 'bt-turn-time', dateTime: new Date(time).toISOString() }, new Date(time).toLocaleTimeString(dateLocale(), { hour: 'numeric', minute: '2-digit' }))
+  // The review guard's upgrade line, after the last turn that ended before the upgrade.
+  const notice = noticeOfKey(useRoster(roster => noticeKey(roster, sessionId)))
+  const upgradeHere = useTurnClock((state) => {
+    if (notice === undefined) return false
+    const turns = state[sessionId] ?? {}
+    const next = nextTurnOf(turns, turn)
+    return noticeAfterTurn(notice.at, time, next === undefined ? undefined : turns[next].first)
+  })
   return h(Fragment, null,
     ended,
+    upgradeHere ? h(UpgradeLine, { name: notice.name }) : null,
     label ? h('div', { className: 'bt-time-sep', role: 'separator' }, label) : null,
     fresh ? h(NewDivider) : null)
 }
@@ -1324,6 +1368,9 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
   }
 }
 
+// The review guard's stop reasons (K10, K14), the ones a hidden turn still draws.
+const GUARD_WHYS = new Set(['guard', 'guard-request'])
+
 export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions }) {
   const roster = useRoster(value => value)
   const heldCards = useHeldCards?.(state => state[sessionId])
@@ -1334,28 +1381,32 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
   // A plugin that loads after the transcript drew still gets its cards drawn.
   useSyncExternalStore(toolCards.source.subscribe, toolCards.source.getSnapshot)
   const closed = roster.closedCards?.[sessionId]
-  // Hidden Bot-to-Bot turns keep their own calls out of the chat, except a question
-  // or view card the user dismissed or answered by message, which settles here.
-  const calls = hidden
-    ? callTree(root).filter(call => (toolName(call) === 'ask_user' || toolName(call) === 'show_view') && call.callId && closed?.[call.callId] !== undefined)
-    : callTree(root)
-  const stopKeys = useWork ? useWork(work => JSON.stringify(calls.flatMap(call => {
+  const all = callTree(root)
+  const closedCard = call => (toolName(call) === 'ask_user' || toolName(call) === 'show_view') && call.callId && closed?.[call.callId] !== undefined
+  const stopKeys = useWork ? useWork(work => JSON.stringify(all.flatMap(call => {
     const entry = stopOfCall(work.stops, sessionId, call.callId)
     return entry ? [[call.callId, stopLine(entry), entry.why]] : []
   }))) : '[]'
   const stops = new Map(JSON.parse(stopKeys).map(([id, line, why]) => [id, { line, why }]))
+  // A call the review guard refused in a hidden turn draws only its stop line (RFC 0048): the
+  // Solver's chat shows why a Bot's request did not run, never the call's own row.
+  const guardOnly = call => hidden && GUARD_WHYS.has(stops.get(call.callId)?.why) && !closedCard(call)
+  // Hidden Bot-to-Bot turns keep their own calls out of the chat, except a question
+  // or view card the user dismissed or answered by message, which settles here.
+  const calls = hidden ? all.filter(call => closedCard(call) || guardOnly(call)) : all
   const readRefused = call => call.isError === true && call.error?.code === READ_SCOPE_CODE
   const drawn = calls.filter(call => readRefused(call) || DRAWN.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.renderer(toolName(call)) || agentImage(call) || stops.has(call.callId))
   // The newest call still running names the work, so a program reads as the tool it is in.
-  const running = root.kind === 'tool-result' ? undefined : calls.findLast(call => call.kind !== 'tool-result')
+  const running = root.kind === 'tool-result' ? undefined : calls.findLast(call => call.kind !== 'tool-result' && !guardOnly(call))
   const note = running ? toolActivity(toolName(running), toolArgs(running).text, findBot, roster.byId[sessionId]) : null
   // A running tool shows only as the activity row's phrase.
   useLiveNote(actions, sessionId, `tool:${root.callId ?? node.key}`, note)
-  useShownCards(actions, sessionId, drawn.filter(call => (CARDS.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.asks(toolName(call))) && call.callId).map(call => call.callId))
+  useShownCards(actions, sessionId, drawn.filter(call => !guardOnly(call) && (CARDS.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.asks(toolName(call))) && call.callId).map(call => call.callId))
   if (drawn.length === 0) return h(CellEmpty)
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } }
   return h(Fragment, null, drawn.map((call, index) => {
     const stop = stops.get(call.callId)
+    if (guardOnly(call)) return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status', title: stop.why }, stop.line)
     if (readRefused(call)) {
       return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status' },
         call.error.reason ?? contentText(call.content))

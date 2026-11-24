@@ -588,6 +588,9 @@ export function install(rt) {
       // Keep the original registration intact for rollback, but out of the standalone
       // roster and restriction index. Only persist before changing live tool access.
       delete state.bots[chatId].sessions
+      // A Solver's review fields are the New Solver dialog's and the person's: an adopted record
+      // carries none of them, so no adopted Bot is held with no reviewer (RFC 0048 delivery 1.5).
+      for (const key of ['reviewGuard', 'reviewerId', 'reviewGuardNotice', 'reviewTrack']) delete state.bots[chatId][key]
       const creationFields = {}
       for (const key of ['pendingCreation', 'creationToken', 'creationSessionId', 'creationCleanup']) {
         delete state.bots[chatId][key]

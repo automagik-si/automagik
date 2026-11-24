@@ -12345,7 +12345,22 @@ var ZH = {
   "Plan unreviewed: {name} gave no verdict before the work started.": "计划未审阅：{name} 在工作开始前没有给出结论。",
   "Result unreviewed: {name} gave no verdict on the finished work.": "结果未审阅：{name} 没有对完成的工作给出结论。",
   "Plan and result unreviewed: no verdict from {name} came in time.": "计划和结果都未审阅：没有及时收到 {name} 的结论。",
-  "{name} had not answered when this was delivered; the app cannot see a fresh-session review.": "交付时 {name} 尚未回复；应用无法看到全新会话中的审阅。"
+  "{name} had not answered when this was delivered; the app cannot see a fresh-session review.": "交付时 {name} 尚未回复；应用无法看到全新会话中的审阅。",
+  // The Solver's review guard (RFC 0048 delivery 1.5).
+  "Review guard": "审阅守卫",
+  "Hold work until the reviewer answers the plan": "在审阅者答复计划之前暂停工作",
+  "On by default. You can turn it off later in Details.": "默认开启。之后可以在详情中关闭。",
+  "Work waits for {reviewer}'s verdict on the plan: file changes, commands and messages to other Bots are refused until it answers.": "工作要等 {reviewer} 对计划给出结论：在它答复之前，修改文件、运行命令和给其他 Bot 发消息都会被拒绝。",
+  "Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.": "只拦住 Claude Code 会先询问的步骤。它自己的允许规则、钩子和已保存的批准可能让某个步骤在守卫看到之前就运行，而该步骤仍可能显示为已拒绝。",
+  "Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.": "在此级别不拦截：没有任何步骤会先询问。只有交付标记会显示未审阅的工作。",
+  "Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.": "在此代理上不拦截：它自己的工具无需询问即可运行。只有交付标记会显示未审阅的工作。",
+  "Its reviewer is no longer on the team: work stays held until you turn this off.": "它的审阅者已不在团队中：在你关闭此项之前，工作会一直被拦住。",
+  "Off: {name} has no reviewer Bot on the team, so there is no verdict to wait for.": "已关闭：{name} 在团队中没有审阅 Bot，因此没有可等待的结论。",
+  "the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details": "审阅守卫正在等待审阅者对计划的结论；你可以在详情中关闭它",
+  "The review guard is now on for {name}: its work waits for its reviewer's verdict on the plan. You can turn it off in Details.": "{name} 的审阅守卫现已开启：它的工作要等审阅者对计划给出结论。你可以在详情中关闭它。",
+  "The review guard is on: change the model in Settings, not here.": "审阅守卫已开启：请在设置中更改模型，不要在这里更改。",
+  "Waiting for {reviewer}'s verdict on the plan since {time}.": "自 {time} 起等待 {reviewer} 对计划的结论。",
+  "the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details": "审阅守卫正在等待审阅者对新计划的结论，因为另一个 Bot 发来了新请求；你可以在详情中关闭它"
 };
 var HOST_ERRORS = [
   [/^Could not reach the mail server at (.+)\. Check the server address\.$/, "连不上邮件服务器 $1，请检查服务器地址。"],

@@ -237,3 +237,24 @@ test('DSH’s own approval service: a never ask is one stop under its Bot', asyn
   assert.deepEqual(rt.stopsView().map(entry => [entry.why, entry.botId, entry.sessionId, entry.tool, entry.count, entry.calls]),
     [['never', 'ada', 'ada-chat', 'bash', 1, [{ sessionId: 'ada-chat', callId: 'x' }]]])
 })
+
+// #2056 D1.5: the review guard's stop reasons, and a step refused at its approval question that a
+// native subagent asked from the Solver's own chat is drawn as a subagent's.
+test('the review guard stops: their lines, and a child stop noted on the parent\'s Session', async () => {
+  assert.equal(stopLineEn({ why: 'guard', tool: 'write' }), `write did not run: ${WHY_EN.guard}`)
+  assert.equal(stopLineEn({ why: 'guard-request', tool: 'write' }), `write did not run: ${WHY_EN['guard-request']}`)
+  assert.equal(stopLineEn({ why: 'guard', child: true }), `A subagent step did not run: ${WHY_EN.guard}`)
+  assert.ok(STOP_WHYS.includes('guard') && STOP_WHYS.includes('guard-request'))
+  const b = bench()
+  b.emit('ada-chat', 'turn/start', { turn: 1 })
+  b.rt.noteStop('ada-chat', { why: 'guard', tool: 'Write bom.md', callId: 'n1', text: 'held', child: true })
+  const [entry] = b.rt.stopsView()
+  assert.equal(entry.why, 'guard')
+  assert.equal(entry.child, true)
+  assert.equal(b.rt.stopLineOfTurn('ada-chat', 1), `A subagent step did not run: ${WHY_EN.guard}`)
+  // Without `child` the same Session's stop names its tool.
+  const own = bench()
+  own.emit('ada-chat', 'turn/start', { turn: 1 })
+  own.rt.noteStop('ada-chat', { why: 'guard-request', tool: 'write', callId: 'n2' })
+  assert.equal(own.rt.stopLineOfTurn('ada-chat', 1), `write did not run: ${WHY_EN['guard-request']}`)
+})

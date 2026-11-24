@@ -723,3 +723,26 @@ test('conversation state distinguishes running, waiting and idle without exposin
     rt.state.questions['group-member-session'] = { text: 'Private group question' }
     assert.equal((await tool('get_conversation', { id: 'r' })).value.status, 'waiting')
   })
+
+// #2056 D1.5 (G13b): while a Bot's review guard is on, an outside agent cannot move it to another
+// model; its other fields, and an unguarded Bot's model, still change.
+test('agent access cannot change a guarded Bot\'s model; other fields and unguarded Bots are unchanged', async t => {
+  const { rt, tool, view } = await fixture(t)
+  rt.resolveModel = async ref => ref
+  rt.resolveEffort = async (ref, effort) => effort
+  rt.applyModel = async () => {}
+  rt.state.bots.b.reviewerId = 'c'
+  rt.state.bots.b.reviewGuard = true
+  await rt.save({ required: true })
+  const refused = await tool('update_bot', { id: 'b', model: 'provider/model' })
+  assert.equal(refused.isError, true)
+  assert.deepEqual(refused.value, { error: 'Action refused', code: 'bot/review-guard' })
+  assert.equal(rt.botOf('b').model, undefined)
+  assert.ok((await view()).audit.some(entry => entry.action === 'update_bot' && entry.target === 'b' && entry.outcome === 'refused'))
+  const instructions = await tool('update_bot', { id: 'b', instructions: 'Still editable' })
+  assert.equal(instructions.isError, false)
+  assert.equal(rt.botOf('b').instructions, 'Still editable')
+  const free = await tool('update_bot', { id: 'c', model: 'provider/model' })
+  assert.equal(free.isError, false)
+  assert.equal(rt.botOf('c').model, 'provider/model')
+})

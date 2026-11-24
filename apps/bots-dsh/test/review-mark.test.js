@@ -137,6 +137,25 @@ test('verdictOf reads a whole-word verdict at the start of any line, after "Verd
   ]) assert.equal(verdictOf(value), verdict, value)
 })
 
+// #2056 F3: a Codex reviewer's progress sentence glued to its verdict and a spaced dash (S4).
+test('verdictOf reads a verdict glued to a sentence\'s end before a spaced dash; quoted, indented or spaced lines are not read this way', () => {
+  for (const [value, verdict] of [
+    ["I'll inspect the delivered file directly and verify the two lines.SHIP — bom.md contains two lines.", 'SHIP'],
+    ["I'll read the note and check its line count against the request.BLOCKED — bom.md was not found.", 'BLOCKED'],
+    ['**I checked the plan.SHIP** — fine', 'SHIP'],
+  ]) assert.equal(verdictOf(value), verdict, value)
+  for (const value of [
+    '“He said done.SHIP — later”', "'He said done.SHIP — later'", '‘done.SHIP — x’', '«done.SHIP — x»',
+    '„done.SHIP — x“', 'The note reads “ready.”SHIP — ok', '    I checked.SHIP — fine',
+    // S6H-1: other quote marks, and a zero-width character before a leading quote.
+    'He wrote ‘done.SHIP — x’', '‹done.SHIP — x›', '「done.SHIP — x」', "​'He said done.SHIP — later'",
+    // S6H-2: spaces then a tab indent a code line too.
+    '  \tI checked.SHIP — fine',
+    // A space before the verdict is mid-sentence, as before.
+    'Done. SHIP — later',
+  ]) assert.equal(verdictOf(value), undefined, value)
+})
+
 test('a work call on every route: DSH tools, the dsh bridge, and an ACP agent\'s own tools', () => {
   // DSH-tool routes (DSH models; Claude Code, Codex, omp with native tools off through the dsh bridge).
   for (const name of ['write', 'edit', 'str_replace_editor', 'apply_patch', 'bash', 'pwsh', 'terminal_send', 'start_task',

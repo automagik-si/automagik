@@ -213,3 +213,31 @@ test('U1 the off-mode agent route rejects a people argument at the schema bounda
   assert.equal((await response.json()).error.code, -32602)
   assert.equal(f.rt.botOf('b').people, undefined)
 })
+
+// #2056 D1.5: the review guard is the person's alone, set or cleared on its own; a Bot's update_bot
+// never carries it, and a Bot's own change is refused.
+test('the review guard: only the person turns it on or off, on its own, with a reviewer Bot on the team', async (t) => {
+  const team = structuredClone(TEAM)
+  team.bots.b2 = { ...team.bots.b2, role: 'Solver', reviewerId: 'b3', reviewGuard: true }
+  team.bots.m1 = { ...team.bots.m1, role: 'Solver' }
+  team.reviewGuardMigrated = true
+  const { tool, call, state, stop } = start(team)
+  t.after(stop)
+  await rt.load()
+  // The tool drops an extra key, and a Bot's own change is refused.
+  assert.match(await tool('update_bot', { role: 'Solver', reviewGuard: false }, 'b2'), /Updated/)
+  assert.equal(rt.botOf('b2').reviewGuard, true)
+  await assert.rejects(rt.updateBot('b2', { reviewGuard: false }, 'b2'), /Only the user can turn the review guard on or off for Writer/)
+  // The person's switch, on its own.
+  const mixed = await call('update-bot', { id: 'b2', reviewGuard: true, role: 'x' })
+  assert.match(mixed.error.message, /Change the review guard on its own/)
+  assert.equal((await call('update-bot', { id: 'b2', reviewGuard: 'yes' })).error.code, 'bot/invalid')
+  assert.equal((await call('update-bot', { id: 'b2', reviewGuard: false })).ok, true)
+  assert.equal(state().bots.b2.reviewGuard, undefined)
+  assert.equal((await call('update-bot', { id: 'b2', reviewGuard: true })).ok, true)
+  assert.equal(state().bots.b2.reviewGuard, true)
+  // ON with no reviewer Bot is refused.
+  const none = await call('update-bot', { id: 'm1', reviewGuard: true })
+  assert.match(none.error.message, /Omni has no reviewer Bot on the team, so there is no verdict to wait for\./)
+  assert.equal(state().bots.m1.reviewGuard, undefined)
+})

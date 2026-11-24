@@ -276,3 +276,35 @@ test('C8: Apply that meets a running reply asks first; Switch resends the model 
     react.useState = useState
   }
 })
+
+// #2056 D1.5 (G13d): while the review guard is on, only the person moves the Bot to another model,
+// in Settings: an older card with a model row says so and cannot Apply; without the guard it can.
+test('a model card for a guarded Bot shows the guard line and a disabled Apply; Open in Settings stays', async () => {
+  const proposal = { bot: 'b2', change: { model: 'p/new', role: 'Editor' } }
+  const saved = []
+  const actions = { updateBot: async (id, patch) => { saved.push([id, patch]) }, openSettings() {} }
+  states = ['open', '']
+  const guarded = card.ProposalCard({ proposal, roster: rosterOf({ ...editor, reviewGuard: true }), actions })
+  assert.match(textOf(guarded), /The review guard is on: change the model in Settings, not here\./)
+  const [apply] = walk(guarded, node => node.type === 'button' && textOf(node) === 'Apply')
+  assert.equal(apply.props.disabled, true)
+  await apply.props.onClick()
+  assert.deepEqual(saved, [])
+  assert.equal(walk(guarded, node => node.type === 'button' && textOf(node) === 'Open in Settings').length, 1)
+  // A card without a model row, and the same card for an unguarded Bot, are unchanged.
+  states = ['open', '']
+  const roleOnly = card.ProposalCard({ proposal: { bot: 'b2', change: { role: 'Editor' } }, roster: rosterOf({ ...editor, reviewGuard: true }), actions })
+  assert.doesNotMatch(textOf(roleOnly), /review guard/)
+  assert.equal(walk(roleOnly, node => node.type === 'button' && textOf(node) === 'Apply')[0].props.disabled, false)
+  states = ['open', '']
+  const free = card.ProposalCard({ proposal, roster: rosterOf(editor), actions })
+  assert.doesNotMatch(textOf(free), /review guard/)
+  assert.equal(walk(free, node => node.type === 'button' && textOf(node) === 'Apply')[0].props.disabled, false)
+  // A guarded card never asks the running-reply question (#2061 C8): the guard line and a
+  // disabled Apply stay in its place, so no Switch can move the model.
+  states = ['asking', '', 0]
+  const held = card.ProposalCard({ proposal, roster: rosterOf({ ...editor, reviewGuard: true }), actions })
+  assert.equal(walk(held, node => node.type?.name === 'RouteConfirm').length, 0)
+  assert.match(textOf(held), /The review guard is on: change the model in Settings, not here\./)
+  assert.equal(walk(held, node => node.type === 'button' && textOf(node) === 'Apply')[0].props.disabled, true)
+})

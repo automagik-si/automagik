@@ -45,6 +45,7 @@ import * as privateBots from './src/host/private-bots.js'
 import * as agents from './src/host/agents.js'
 import * as toolDeny from './src/host/tool-deny.js'
 import * as reviewMark from './src/host/review-mark.js'
+import * as reviewGuard from './src/host/review-guard.js'
 import * as botRunner from './src/host/bot-runner.js'
 import * as botSessions from './src/host/bot-sessions.js'
 import * as readScope from './src/host/read-scope.js'
@@ -127,7 +128,7 @@ const instanceId = () => process.env.AUTOMAGIK_INSTANCE_ID
 // installed: channels are Omni's, and a local CLI runs a Bot through the ACP plugin's routes only.
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
-  turns, steer, handoffs, requests, delivery, roster, nativeTools, ownTools, installed, folders, agents, toolDeny, reviewMark, botSessions, botRunner, readScope, privateBots, prompt, timeContext,
+  turns, steer, handoffs, requests, delivery, roster, nativeTools, ownTools, installed, folders, agents, toolDeny, reviewMark, reviewGuard, botSessions, botRunner, readScope, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory,
   parts, callerAccess, callerView, callerFeed, callerRoutes, fallback, modelState,
   { install: rt => modelAccessHooks.install(rt, { machine: machineOf(rt), instanceId }) },
@@ -240,8 +241,10 @@ export function createRuntime(ctx, config = {}) {
       try { dispose() } catch (error) { rt.warn?.('omni-ui: a module did not stop cleanly: %s', error?.message ?? error) }
     }
   }
-  // Cordis runs prepended listeners newest first: Auto, person grants, Pocket, then the team card.
+  // Cordis runs prepended listeners newest first: the review guard, Auto, person grants, Pocket,
+  // then the team card.
   autoJudge.installAhead(rt)
+  reviewGuard.installAhead(rt)
   const disposeHold = botSessions.installAhead(rt)
   if (disposeHold !== undefined) disposers.push(disposeHold)
   const disposeRunner = botRunner.installAhead(rt)

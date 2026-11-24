@@ -4,9 +4,10 @@
 import { CHARACTERS, DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from './characters.js'
 import { createPayload, freshBotName, setUp, startModel } from './bot-draft.js'
 import { isRefusal } from './api.js'
-import { t } from './i18n.js'
-import { markOf } from '../shared/permission-levels.js'
-import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, solverInstructions } from '../shared/solver-method.js'
+import { dateLocale, t } from './i18n.js'
+import { AUTO, AUTO_ROW, markOf } from '../shared/permission-levels.js'
+import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, isSolverBot, solverInstructions } from '../shared/solver-method.js'
+import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 
 // The Solver's character slot: avatar objects as the host's cleanAvatar keeps them, `{ shape }`
 // of a CHARACTERS key or `{ pet: { source: 'builtin', id, version } }`. The twelve Solver
@@ -124,15 +125,19 @@ export function reviewerPayload({ name, look, model, workDir }) {
  * that name, or null for fresh-session reviews; `dedicated`: made by this dialog; `reviewerId`:
  * its id, which the host's "unreviewed" mark reads, review-mark.js). With native
  * tools ticked the brief is not in the payload: it is sent after the switch (`sendBrief`), so
- * the task's first turn already runs with them.
+ * the task's first turn already runs with them. `guard`: the Review guard tick, sent only with a
+ * reviewer Bot (review-guard.js), in the Solver's own create, so it is never half made.
  */
-export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, native = false }) {
+export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, native = false, guard = false }) {
   const payload = createPayload({
     name, look, model, effort, sectionId, ownLook: true, avatar: avatarOfLook(look),
     brief: native ? '' : brief, role: SOLVER_DESCRIPTION, instructions: solverInstructions({ reviewer, dedicated }),
   })
   if (workDir) payload.workDir = workDir
-  if (typeof reviewer === 'string' && reviewer !== '' && typeof reviewerId === 'string' && reviewerId !== '') payload.reviewerId = reviewerId
+  if (typeof reviewer === 'string' && reviewer !== '' && typeof reviewerId === 'string' && reviewerId !== '') {
+    payload.reviewerId = reviewerId
+    if (guard === true) payload.reviewGuard = true
+  }
   return { payload, ...(native && brief ? { sendBrief: brief } : {}) }
 }
 
@@ -154,6 +159,40 @@ export function reviewMarkText(bot, roster) {
   if (mark.plan === true) return t('Result unreviewed: {name} gave no verdict on the finished work.', { name })
   return t('Plan and result unreviewed: no verdict from {name} came in time.', { name })
 }
+
+/**
+ * The Review guard row of a Bot's Details (RFC 0048 delivery 1.5), or null when it has none: a
+ * Bot with a reviewer id, the guard on, or the Solver marker (display only: a Fresh-session Solver
+ * sees why it has no guard). `level`: 'full', 'auto' or 'ask', the Bot's level. The line says how
+ * far the guard holds on the Bot's route (reviewGuardReach), never more. With no reviewer Bot on
+ * the team the switch is off and disabled, or, when it is on, says the work stays held.
+ * @returns {{ on: boolean, disabled: boolean, lines: string[] } | null}
+ */
+export function reviewGuardView(bot, roster, level) {
+  if (bot === null || typeof bot !== 'object') return null
+  const on = bot.reviewGuard === true
+  const reviewerId = typeof bot.reviewerId === 'string' && bot.reviewerId !== '' ? bot.reviewerId : undefined
+  if (!on && reviewerId === undefined && !isSolverBot(bot)) return null
+  const reviewer = reviewerId === undefined || reviewerId === bot.id ? undefined : roster?.byId?.[reviewerId]
+  const readOnly = Boolean(roster?.readOnly)
+  if (reviewer === undefined) {
+    return on ? { on, disabled: readOnly, lines: [t(REVIEW_GUARD_COPY.gone)] }
+      : { on, disabled: true, lines: [t(REVIEW_GUARD_COPY.noReviewer, { name: bot.name })] }
+  }
+  const reach = reviewGuardReach(bot, level)
+  const lines = [reach === 'hard' ? t(REVIEW_GUARD_COPY.hard, { reviewer: reviewer.name }) : t(REVIEW_GUARD_COPY[reach])]
+  if (on && typeof bot.reviewGuardWaitingSince === 'number' && Number.isFinite(bot.reviewGuardWaitingSince)) {
+    const time = new Date(bot.reviewGuardWaitingSince).toLocaleTimeString(dateLocale(), { hour: 'numeric', minute: '2-digit' })
+    lines.push(t(REVIEW_GUARD_COPY.waiting, { reviewer: reviewer.name, time }))
+  }
+  return { on, disabled: readOnly, lines }
+}
+
+/** The Review guard row's text, or null (reviewGuardView). */
+export const reviewGuardText = (bot, roster, level) => reviewGuardView(bot, roster, level)?.lines.join(' ') ?? null
+
+/** The guard's level from a saved level row: Auto, a dangerous (Full access) one, or one that asks. */
+export const guardLevelOf = (saved, danger) => (saved === AUTO_ROW || saved === AUTO ? 'auto' : danger ? 'full' : 'ask')
 
 /**
  * Whether a failure leaves it unknown what the host did: anything that is not a host refusal,
