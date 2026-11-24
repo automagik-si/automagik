@@ -1,5 +1,6 @@
 import { createElement as h, useEffect, useRef, useState } from 'react'
-import { fnv1a, lookOf, shapeId, shapeOf, MASK_ID, nextMarkSerial, characterMarkup } from './characters.js'
+import { fnv1a, shapeId, shapeOf, MASK_ID, nextMarkSerial, characterMarkup } from './characters.js'
+import { botLookOf as lookOf } from './bot-look.js'
 import { reducedMotion } from './motion.js'
 import { t } from './i18n.js'
 import { clayArtOf, faceAt, faceOf } from './clay-art.js'
@@ -7,7 +8,9 @@ import { PetSprite, useDrowsy } from './pet.js'
 import { bakedPet, canBake } from './pet-bake.js'
 import { GENIE_AURORA, genieTint } from './genie-tint.js'
 
-export { colorOf, lookOf } from './characters.js'
+export { colorOf } from './characters.js'
+export { lookOf }
+export { catalogueLookOf } from './bot-look.js'
 
 // -------------------------------------------------------------------------
 // Bot mark: the Bot's character (or its uploaded photo), looked up by lookOf.
@@ -94,14 +97,14 @@ export function petOf(bot, look, { live, size }) {
 }
 export function useBaked(wanted) {
   const key = wanted ? `${wanted.clay ?? ''}|${wanted.shape ?? ''}|${wanted.color ?? ''}` : ''
-  const [pet, setPet] = useState(null)
+  const [baked, setBaked] = useState(null)
   useEffect(() => {
-    if (!wanted || !canBake()) { setPet(null); return undefined }
+    if (!wanted || !canBake()) { setBaked(null); return undefined }
     let live = true
-    bakedPet(wanted).then((next) => { if (live) setPet(next) }, () => { if (live) setPet(null) })
+    bakedPet(wanted).then((pet) => { if (live) setBaked({ key, pet }) }, () => { if (live) setBaked(null) })
     return () => { live = false }
   }, [key])
-  return pet
+  return baked?.key === key ? baked.pet : null
 }
 
 export function BotMark(props) {

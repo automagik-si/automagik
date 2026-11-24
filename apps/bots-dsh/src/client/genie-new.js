@@ -2,7 +2,7 @@
 // genie-create { folder } with that repository's Genie, the one it has or a new one
 // (existed), so picking a repository that has a Genie opens it.
 import { createElement as h, useState } from 'react'
-import { BotMark } from './mark.js'
+import { BotMark, catalogueLookOf } from './mark.js'
 import { FolderMenu } from './folder-menu.js'
 import { ChevronLeftIcon, CloseIcon } from './icons.js'
 import { hostText, t } from './i18n.js'
@@ -39,7 +39,7 @@ export function NewGenie({ roster, actions, onBack, onCreated }) {
     h('div', { className: 'bt-create-body' },
       h('div', { className: 'bt-create-card' },
         h('div', { className: 'bt-create-preview' },
-          h('span', { className: 'bt-create-pop' }, h(BotMark, { bot: preview, size: 88, live: true, gaze: true, pokeable: true }))),
+          h('span', { className: 'bt-create-pop' }, h(BotMark, { bot: preview, look: catalogueLookOf(preview), size: 88, live: true, gaze: true, pokeable: true }))),
         h('div', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Repository')),
           h(FolderMenu, { value: folder || undefined, team: true, actions, run, onPick: path => { setError(''); setFolder(path) }, wide: true }),

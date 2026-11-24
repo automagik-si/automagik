@@ -2,22 +2,21 @@ import { createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useR
 import { createPortal } from 'react-dom'
 import { CHARACTERS, CHARACTER_COLORS, MAIN_LOOK, PICKER_SHAPES, SOLVER_SHAPES, shapeOf } from './characters.js'
 import { paintCss } from './inks.js'
-import { BotMark, GENIE_PET, lookOf, petOf, servedPet, UNFOLD_PET, useBaked } from './mark.js'
+import { BotMark, catalogueLookOf, GENIE_PET, lookOf, petOf, servedPet, UNFOLD_PET, useBaked } from './mark.js'
 import { PetSprite } from './pet.js'
 import { bakeBlobs, canBake } from './pet-bake.js'
 import { CloseIcon } from './icons.js'
 import { t } from './i18n.js'
 import { importPhotos, loadLibrary } from './avatar-library.js'
 import { checkViewer, requestViewer, viewerChanged, viewerRefused, viewerResponse } from './viewer.js'
-import { isSolverBot } from '../shared/solver-method.js'
+import { isSolverLooks, solverDefaultShape } from './solver-looks.js'
 
 // -------------------------------------------------------------------------
 // The character select: where a Bot's look is chosen, as a fighting game's select screen. The
 // stage on the left plays the highlighted character big, under a spotlight, with its name; the
-// roster on the right lists Automagik's own first (Genie, Omni and every character, in the
-// color picked on the stage), then the Solvers in a section of their own (a Solver Bot's chooser
-// only), then the person's (pets the team keeps and Codex's own), then codex-pets.net, which is
-// asked only once that section is opened. Arrow keys move the cursor, Enter picks, Escape leaves.
+// roster on the right lists the twelve Solver characters for Solvers. Other Bots can choose
+// photos, Automagik characters, local pets and pets from codex-pets.net. The market is asked
+// only once its section is opened. Arrow keys move the cursor, Enter picks, Escape leaves.
 // The pick plays a jump before the select closes.
 
 const SORTS = [['popular', 'Most liked'], ['new', 'Newest'], ['views', 'Most viewed'], ['random', 'Surprise me']]
@@ -47,7 +46,7 @@ export function automagikRoster({ unfold = false } = {}) {
 /** The roster's Solvers section: the twelve, in the catalogue's order. */
 export const solverRoster = () => SOLVER_SHAPES.map(shapeEntry)
 /** The Solvers a Bot's chooser offers: all of them to a Solver Bot, none to any other. */
-export const solversFor = bot => (isSolverBot(bot) ? solverRoster() : [])
+export const solversFor = bot => (isSolverLooks(bot) ? solverRoster() : [])
 
 /**
  * The tile an Arrow Down (`down` 1) or Arrow Up (-1) reaches from tile `at`, given every tile's
@@ -165,13 +164,16 @@ function useMarket(actions, open) {
 }
 
 export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
+  const solver = isSolverLooks(bot)
   const look = lookOf(bot)
+  const stored = catalogueLookOf(bot)
   const [color, setColor] = useState(look.color)
   const [local, setLocal] = useState([])
   const [unfold, setUnfold] = useState(false)
   const [browse, setBrowse] = useState(false)
-  const market = useMarket(actions, browse)
-  const [focus, setFocus] = useState(() => currentKey(bot, look))
+  const market = useMarket(actions, browse && !solver)
+  const [focus, setFocus] = useState(null)
+  const [chosen, setChosen] = useState(null)
   const [stage, setStage] = useState('idle')
   const [picking, setPicking] = useState(false)
   const [note, setNote] = useState('')
@@ -180,32 +182,44 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   const fileRef = useRef(null)
   const gridRef = useRef(null)
   useEffect(() => {
+    if (solver) return
     void actions.pets().then((list) => {
       setLocal(list.filter(pet => pet.source !== 'builtin'))
       setUnfold(list.some(pet => pet.source === 'builtin' && pet.id === 'unfold'))
     }, () => setLocal([]))
-  }, [])
+  }, [solver])
   const loadPhotos = () => loadLibrary(actions).then(page => setLibrary(page.items), () => setLibrary([]))
-  useEffect(() => { void loadPhotos() }, [])
+  useEffect(() => { if (!solver) void loadPhotos() }, [solver])
 
   const ours = useMemo(() => automagikRoster({ unfold }), [unfold])
-  const solvers = useMemo(() => solversFor(bot), [bot.role])
+  const solvers = solver ? solverRoster() : []
   const yours = local.map(pet => ({ key: `pet:${pet.source}:${pet.id}`, kind: 'pet', pet, name: pet.name, line: sourceLine[pet.source] ?? pet.source }))
   const theirs = market.market.pets.map(pet => ({ key: `market:${pet.id}`, kind: 'market', pet, name: pet.name, line: pet.by ? t('by {name}', { name: pet.by }) : 'codex-pets.net' }))
   const photo = look.image ? [{ key: 'photo', kind: 'photo', image: look.image, name: t('Photo'), line: t('Uploaded') }] : []
   const photos = library.filter(entry => entry.image !== look.image).map(entry => ({ key: `library:${entry.id}`, kind: 'library', image: entry.image, name: entry.name || t('Photo'), line: t('Your photos') }))
-  const all = [...photo, ...photos, ...ours, ...solvers, ...yours, ...theirs]
+  const all = solver ? solvers : [...photo, ...photos, ...ours, ...yours, ...theirs]
+  const pressed = currentKey(bot, stored)
   const worn = currentKey(bot, look)
-  // A worn character the roster does not offer (a Solver on a Bot that is not a Solver Bot, the
-  // octopus in another color) stays on the stage, with no tile: Choose keeps it, in the picked color.
-  const wornShape = worn === `shape:${look.shape}` && Object.hasOwn(CHARACTERS, look.shape) ? shapeEntry(look.shape) : null
-  const item = all.find(entry => entry.key === focus) ?? wornShape ?? ours[0]
+  // An eligible worn character can still preview without a tile, such as a recolored octopus.
+  const wornShape = worn === `shape:${look.shape}` && Object.hasOwn(CHARACTERS, look.shape)
+    && SOLVER_SHAPES.includes(look.shape) === solver ? shapeEntry(look.shape) : null
+  const defaultKey = solver ? `shape:${solverDefaultShape(bot.id)}` : currentKey(bot, catalogueLookOf({ ...bot, avatar: undefined }))
+  const item = all.find(entry => entry.key === focus) ?? all.find(entry => entry.key === worn) ?? wornShape
+    ?? all.find(entry => entry.key === defaultKey) ?? ours[0]
+  const focused = item.key
+  const selected = chosen?.solver === solver ? all.find(entry => entry.key === chosen.key) : undefined
+  if (chosen !== null && !selected) setChosen(null)
 
   // A new highlight greets: the fighter waves once, then stands.
-  const move = (key) => { if (key !== focus) { setFocus(key); setStage('poked') } }
-  const pick = (entry = item) => {
+  const move = (key) => { if (key !== focused) { setFocus(key); setStage('poked') } }
+  const choose = (key) => {
+    setFocus(key)
+    if (key !== focused) setStage('poked')
+    setChosen({ key, solver })
+  }
+  const pick = (entry) => {
     if (picking || !entry) return
-    setFocus(entry.key)
+    choose(entry.key)
     setPicking(true)
     setStage('done')
     const save = entry.kind === 'shape' ? actions.updateBot(bot.id, { avatar: { shape: entry.shape }, color })
@@ -216,6 +230,13 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
               : Promise.resolve()
     const wait = new Promise(resolve => setTimeout(resolve, PICK_MS))
     void run(Promise.all([save, wait]).then(() => onClose(), (error) => { setPicking(false); setStage('idle'); throw error }))
+  }
+  const commit = () => {
+    if (picking) return
+    if (selected) { pick(selected); return }
+    if (item.kind !== 'shape' || color === look.color) { onClose(); return }
+    setPicking(true)
+    void run(actions.updateBot(bot.id, { color }).then(() => onClose(), (error) => { setPicking(false); throw error }))
   }
   // One photo is worn at once, as before; every photo also goes into the library, so a
   // later character does not lose it, and several at once only fill the library.
@@ -240,10 +261,21 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   // The cursor moves through the tiles in their grid: across a row, and a row up or down.
   const onKeyDown = (event) => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); return }
+    if (event.key === 'Enter' || event.key === ' ') {
+      const entry = all.find(item => item.key === event.target?.dataset?.key)
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        if (entry) pick(entry)
+        else commit()
+      } else if (entry) {
+        event.preventDefault()
+        choose(entry.key)
+      }
+      return
+    }
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return
     const tiles = [...(gridRef.current?.querySelectorAll('.bt-cs-tile') ?? [])]
-    const at = tiles.findIndex(tile => tile.dataset.key === focus)
-    if (event.key === 'Enter') { event.preventDefault(); pick(); return }
+    const at = tiles.findIndex(tile => tile.dataset.key === focused)
     const across = { ArrowRight: 1, ArrowLeft: -1 }[event.key]
     const down = { ArrowDown: 1, ArrowUp: -1 }[event.key]
     if ((across === undefined && down === undefined) || at < 0) return
@@ -252,21 +284,21 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
       ? tiles[Math.max(0, Math.min(tiles.length - 1, at + across))]
       // Layout offsets, not the drawn box: the tile under the cursor is drawn lifted.
       : tiles[tileBeyond(tiles.map(tile => ({ top: tile.offsetTop, left: tile.offsetLeft })), at, down)]
-    if (next && next !== tiles[at]) { move(next.dataset.key); next.focus() }
+    if (next && next !== tiles[at]) { choose(next.dataset.key); next.focus() }
   }
-  useLayoutEffect(() => { gridRef.current?.querySelector(`[data-key="${CSS.escape(focus)}"]`)?.focus({ preventScroll: false }) }, [])
+  useLayoutEffect(() => { gridRef.current?.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: false }) }, [])
 
   const tile = entry => h('button', {
     key: entry.key, type: 'button', className: 'bt-cs-tile', 'data-key': entry.key,
-    'aria-pressed': entry.key === worn, 'data-focus': entry.key === focus || undefined,
-    title: entry.name, onClick: () => { if (entry.key === focus) pick(entry); else move(entry.key) },
+    'aria-pressed': entry.key === pressed, 'data-focus': entry.key === focused || undefined,
+    title: entry.name, onClick: () => { if (entry.key === focused) pick(entry); else choose(entry.key) },
     // Tabbing to a tile moves the cursor there; a click's own focus does not, or its click would pick.
     onFocus: (event) => { if (event.currentTarget.matches(':focus-visible')) move(entry.key) },
     onDoubleClick: () => pick(entry),
   },
   h('span', { className: 'bt-cs-face' }, h(Portrait, { item: entry, color })),
   h('span', { className: 'bt-cs-tile-name' }, entry.name),
-  entry.key === focus ? h('span', { className: 'bt-cs-p1', 'aria-hidden': true }, 'P1') : null)
+  entry.key === focused ? h('span', { className: 'bt-cs-p1', 'aria-hidden': true }, 'P1') : null)
   const section = (label, entries, extra) => h('section', { className: 'bt-cs-sec' },
     h('h3', { className: 'bt-cs-label' }, label, extra ?? null),
     entries.length > 0 ? h('div', { className: 'bt-cs-grid' }, entries.map(tile)) : null)
@@ -286,13 +318,15 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
           key: ink, type: 'button', className: 'bt-cs-color', 'aria-label': t(capitalize(ink)), title: t(capitalize(ink)), 'aria-pressed': color === ink,
           onClick: () => setColor(ink),
         }, h('span', { style: { background: paintCss(ink) } })))) : null,
-        h('button', { type: 'button', className: 'bt-cs-go', disabled: picking || item?.kind === 'photo', onClick: () => pick() }, picking ? t('Chosen!') : t('Choose')),
+        h('button', { type: 'button', className: 'bt-cs-go', disabled: picking || (item.kind === 'photo' && !selected), onClick: commit }, picking ? t('Chosen!') : t('Choose')),
         h('div', { className: 'bt-cs-links' },
-          h('button', { type: 'button', className: 'bt-cs-link', onClick: () => fileRef.current?.click() }, t('Add photos')),
+          solver ? null : h('button', { type: 'button', className: 'bt-cs-link', onClick: () => fileRef.current?.click() }, t('Add photos')),
           canBake() ? h('button', { type: 'button', className: 'bt-cs-link', onClick: () => { setNote('…'); toCodex(bot, look).then(id => setNote(t('In Codex as {id}. Pick it in Codex\'s pet menu.', { id })), error => setNote(error?.message ?? String(error))) } }, t('Use in Codex')) : null,
-          h('button', { type: 'button', className: 'bt-cs-link', onClick: () => run(actions.updateBot(bot.id, { avatar: null, color: null }).then(() => onClose())) }, t('Default look'))),
+          h('button', { type: 'button', className: 'bt-cs-link', onClick: () => run(actions.updateBot(bot.id, solver
+            ? { avatar: { shape: solverDefaultShape(bot.id) } }
+            : { avatar: null, color: null }).then(() => onClose())) }, t('Default look'))),
         note ? h('p', { className: 'bt-cs-note', role: 'status' }, note) : null,
-        h('input', { ref: fileRef, type: 'file', multiple: true, accept: 'image/png,image/jpeg,image/webp,image/gif', hidden: true, onChange: (event) => { const files = [...(event.target.files ?? [])]; event.target.value = ''; void run(upload(files)) } })),
+        solver ? null : h('input', { ref: fileRef, type: 'file', multiple: true, accept: 'image/png,image/jpeg,image/webp,image/gif', hidden: true, onChange: (event) => { const files = [...(event.target.files ?? [])]; event.target.value = ''; void run(upload(files)) } })),
       h('div', { className: 'bt-cs-roster' },
         h('div', { className: 'bt-cs-head' },
           h('div', null,
@@ -300,11 +334,10 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
             h('p', { className: 'bt-cs-sub' }, t('For {name}. Arrow keys move, Enter picks.', { name: bot.name }))),
           h('button', { type: 'button', className: 'bt-icon-btn', 'aria-label': t('Close'), onClick: onClose }, h(CloseIcon))),
         h('div', { ref: gridRef, className: 'bt-cs-scroll' },
-          photo.length + photos.length > 0 ? section(t('Yours'), [...photo, ...photos]) : null,
-          section('Automagik', ours),
-          solvers.length > 0 ? section(t('Solvers'), solvers) : null,
-          yours.length > 0 ? section(t('Your pets'), yours) : null,
-          h('section', { className: 'bt-cs-sec' },
+          !solver && photo.length + photos.length > 0 ? section(t('Yours'), [...photo, ...photos]) : null,
+          solver ? section(t('Solvers'), solvers) : section('Automagik', ours),
+          !solver && yours.length > 0 ? section(t('Your pets'), yours) : null,
+          solver ? null : h('section', { className: 'bt-cs-sec' },
             h('h3', { className: 'bt-cs-label' }, 'codex-pets.net',
               browse ? h('select', { className: 'bt-input bt-cs-sort', value: market.sort, 'aria-label': t('Order'), onChange: event => market.setSort(event.target.value) },
                 SORTS.map(([id, label]) => h('option', { key: id, value: id }, t(label)))) : null),

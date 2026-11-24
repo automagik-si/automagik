@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { SOLVER_SHAPES } from '../src/client/characters.js'
 
 const { outputFiles } = await build({
   stdin: { contents: [
@@ -159,12 +160,38 @@ const dialog = ({ roster = rosterOf(), actions = fakeActions(), brief = 'Compare
     },
     choose(key) { ui.select().props.onChange({ target: { value: key } }) },
     pickModel(ref) { ui.modelMenu('new-bot').props.onPick(ref) },
+    looks() {
+      const picker = find(node => node.type?.name === 'CharacterGrid')[0]
+      return picker ? picker.type(picker.props) : null
+    },
     tickNative(on = true) { ui.tick().props.onChange({ target: { checked: on } }) },
   }
   tree()
   return ui
 }
 const kinds = calls => calls.map(call => call[0])
+
+test('New Solver shows the twelve character tiles and one row of twelve swatches', () => {
+  const tree = dialog().looks()
+  const tiles = all(tree, node => node.props.className === 'bt-shape')
+  assert.deepEqual(tiles.map(tile => tile.props.key), SOLVER_SHAPES)
+  const groups = all(tree, node => node.props.className === 'bt-colors')
+  assert.equal(groups.length, 1)
+  assert.equal(all(groups[0], node => node.props.className === 'bt-color').length, 12)
+})
+
+test('New Solver creates with the picked character and swatch', async () => {
+  const ui = dialog()
+  const tile = (key) => all(ui.looks(), node => node.props.className === 'bt-shape' && node.props.key === key)[0]
+  // Move off Frog if the random start chose it.
+  if (tile('frog')?.props['aria-pressed']) tile('puff').props.onClick()
+  tile('frog').props.onClick()
+  all(ui.looks(), node => node.props.className === 'bt-color' && node.props.key === 'aurora')[0].props.onClick()
+  await ui.create()
+  const solver = ui.actions.calls.find(([kind, payload]) => kind === 'createBot' && payload.role === 'Solver')[1]
+  assert.deepEqual(solver.avatar, { shape: 'frog' })
+  assert.equal(solver.color, 'aurora')
+})
 
 test('Create makes the reviewer, then the Solver with its real name, then native tools alone, then the brief', async () => {
   const ui = dialog()
