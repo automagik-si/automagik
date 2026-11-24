@@ -120,16 +120,20 @@ function bench({ model = 'deepseek/v4', groupRoute = 'deepseek/v4', ownEmpty = f
   ctx.workspaceRegistry = { archiveSession: async (id) => { calls.archived.push(id) } }
   const bot = { id: 'b1', name: 'Ops', createdAt: 1, sessionId: 's1', model, appliedModel: model }
   const room = { id: 'r1', name: 'Ops room', members: ['b1'], sessions: { b1: 'g1' }, segments: {} }
-  const ownerOf = id => (room.sessions.b1 === id ? { botId: 'b1', roomId: 'r1' } : undefined)
+  const rooms = { r1: room }
+  const ownerOf = id => {
+    const owner = Object.values(rooms).find(group => group.sessions.b1 === id)
+    return owner === undefined ? undefined : { botId: 'b1', roomId: owner.id }
+  }
   let fresh = 1
   const rows = ['deepseek/v4', 'acp-claude/default', 'acp-codex/default', 'acp-antigravity/default', 'hermes-remote/attach', 'acp-hermes/default']
     .map(ref => ({ ref, provider: ref.split('/')[0], ...(ref === 'acp-claude/default' ? { providerName: 'Claude Code' } : {}), ...(ref === 'deepseek/v4' ? { name: 'DeepSeek V4' } : {}) }))
   const rt = {
-    ctx, config: {}, state: { switching: {}, bots: { b1: bot }, rooms: { r1: room }, questions: {}, views: {}, exchangeTurns: {} },
+    ctx, config: {}, state: { switching: {}, bots: { b1: bot }, rooms, questions: {}, views: {}, exchangeTurns: {} },
     botOf: id => rt.state.bots[id],
-    roomOf: id => (id === 'r1' ? room : undefined),
+    roomOf: id => rooms[id],
     chatOf: id => rt.state.bots[id]?.sessionId,
-    groupSessionsOf: botId => (room.sessions[botId] === undefined ? [] : [room.sessions[botId]]),
+    groupSessionsOf: botId => Object.values(rooms).map(group => group.sessions[botId]).filter(Boolean),
     selfOf: id => (id.startsWith('s') || ownerOf(id) !== undefined ? 'b1' : undefined),
     chatOwners: { get: id => (rt.state.bots.b1?.sessionId === id ? 'b1' : undefined), has: id => rt.state.bots.b1?.sessionId === id },
     groupOwners: { get: ownerOf, has: id => ownerOf(id) !== undefined },
@@ -970,6 +974,82 @@ test('KG6 a pick made while pre-step awaits group eligibility keeps that step wi
   assert.deepEqual(b.calls.selected, [['s2', 'acp-codex/default']])
 })
 
+test('KG7 an idle pick replaces a busy follow and retries its own failed selection', async t => {
+  const b = bench({ model: 'acp-claude/default' })
+  t.after(() => b.ctx.dispose())
+  b.group.status = 'running'
+  await b.rt.followGroups(b.bot)
+  assert.deepEqual(b.jobs(), [])
+
+  const attempts = []
+  const select = b.rt.selectSessionModel
+  b.rt.selectSessionModel = async (id, selection) => {
+    attempts.push([id, `${selection.provider}/${selection.model}`])
+    if (attempts.length === 1) throw new Error('not signed in')
+    return select(id, selection)
+  }
+  const target = 'acp-codex/default'
+  b.group.status = 'idle'
+  b.bot.model = b.bot.appliedModel = target
+  await b.rt.followGroups(b.bot)
+  await b.settled()
+  assert.deepEqual(attempts, [['s2', target]])
+  assert.equal(b.room.sessions.b1, 'g1')
+
+  const post = message(SOURCE_KIND, '[Group chat] which agent?', ROOM_CALL)
+  assert.equal((await b.preStep('g1', { messages: [post] })).passed, false)
+  await b.followed('s3')
+  assert.deepEqual(b.calls.selected, [['s3', target]])
+})
+
+test('KG8 a stale pick cannot reset a newer pick\'s retry count in the next group', async t => {
+  const b = bench({ model: 'acp-claude/default' })
+  const resolving = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  t.after(() => { release.resolve(); b.ctx.dispose() })
+  const secondRoom = { id: 'r2', name: 'Release room', members: ['b1'], sessions: { b1: 'g2' }, segments: {} }
+  b.rt.state.rooms.r2 = secondRoom
+  b.logOf.set('g2', b.logOf.get('g1'))
+  const secondGroup = b.makeAgent('g2', { ...b.gSession, id: 'g2' })
+  b.ctx.emit('agent/created', { agent: secondGroup })
+  b.group.status = 'running'
+
+  const resolve = b.rt.resolveAgent
+  b.rt.resolveAgent = async id => {
+    if (id === 'g1') {
+      b.rt.resolveAgent = resolve
+      resolving.resolve()
+      await release.promise
+    }
+    return resolve(id)
+  }
+  const older = b.rt.followGroups(b.bot)
+  await resolving.promise
+
+  const attempts = []
+  const target = 'acp-codex/default'
+  b.rt.selectSessionModel = async (id, selection) => {
+    attempts.push([id, `${selection.provider}/${selection.model}`])
+    throw new Error('not signed in')
+  }
+  b.bot.model = b.bot.appliedModel = target
+  await b.rt.followGroups(b.bot)
+  await b.settled()
+  assert.deepEqual(attempts, [['s2', target]])
+  release.resolve()
+  await older
+
+  const retry = message(SOURCE_KIND, '[Group chat] can you retry?', ROOM_CALL)
+  assert.equal((await b.preStep('g2', { messages: [retry] })).passed, false)
+  await b.settled()
+  assert.deepEqual(attempts, [['s2', target], ['s3', target]])
+
+  const later = message(SOURCE_KIND, '[Group chat] what ships today?', ROOM_CALL)
+  assert.deepEqual(await b.preStep('g2', { messages: [later] }), { passed: true, decision: { kind: 'enter', messages: [later] } })
+  assert.deepEqual(attempts, [['s2', target], ['s3', target]])
+  assert.equal(secondRoom.sessions.b1, 'g2')
+})
+
 // GX-3: another member's part never moves on this Bot's pick, even when a list names it.
 test('G9 another member\'s group part stays on its route and gets no job', async t => {
   const b = bench()
@@ -1045,68 +1125,4 @@ test('G9 a message waiting in the old group part at the commit is in the fresh p
   const waiting = id => [...b.agents.get(id).inbox.nextStep, ...b.agents.get(id).inbox.nextTurn].filter(item => item.source?.exchangeId === 'e-wait').length
   assert.equal(waiting('s3'), 1)
   assert.equal(waiting('g1'), 0)
-})
-
-// ---- F4-ack (PLAN-D15-ACK): a group part's hidden handoff acknowledgement after its follow ----
-// is flagged from the commit like the own chat's, and is no member work in the group.
-test('KG1 a followed group part is flagged at its commit; its ack turn is no member work, the next turn is', async t => {
-  const b = bench({ turns: true })
-  t.after(() => b.ctx.dispose())
-  const atCommit = []
-  const save = b.rt.save
-  b.rt.save = async () => { if (b.room.sessions.b1 === 's3' && atCommit.length === 0) atCommit.push(b.rt.ackingView()); return save() }
-  await b.rt.switchRoute('b1', 'acp-claude/default')
-  await b.followed('s3')
-  assert.equal(typeof atCommit[0]?.s3, 'number')
-  b.sessionEvent('s3', { type: 'turn/start', data: { turn: 1 } })
-  assert.equal(b.rt.ackingPart('s3'), true)
-  assert.equal((b.rt.roomWorkView().r1 ?? []).some(item => item.botId === 'b1'), false)
-  b.sessionEvent('s3', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
-  assert.equal(b.rt.ackingView().s3, undefined)
-  b.sessionEvent('s3', { type: 'turn/start', data: { turn: 2 } })
-  assert.equal((b.rt.roomWorkView().r1 ?? []).some(item => item.botId === 'b1'), true)
-})
-
-test('KG2 a busy group conversation that follows at its next step is never flagged', async t => {
-  const b = bench({ model: 'acp-claude/default' })
-  t.after(() => b.ctx.dispose())
-  const probes = []
-  const save = b.rt.save
-  b.rt.save = async () => { probes.push(b.rt.ackingView()); return save() }
-  const send = (agent) => {
-    const through = agent.send.bind(agent)
-    agent.send = (item, where, wake) => { probes.push(b.rt.ackingView()); return through(item, where, wake) }
-  }
-  const create = b.rt.createSession
-  b.rt.createSession = async (...args) => { const id = await create(...args); send(b.agents.get(id)); return id }
-  b.group.status = 'running'
-  b.rt.live.set('g1', { turn: 5, info: ROOM_CALL, joined: [] })
-  await b.rt.followGroups(b.bot)
-  const idle = Promise.withResolvers()
-  b.group.whenIdle = () => idle.promise
-  const { passed } = await b.preStep('g1', { messages: [message(SOURCE_KIND, '[Group post] the build is green', { role: 'post', exchangeId: 'e-mid' })], step: 2 })
-  assert.equal(passed, false)
-  b.group.status = 'idle'
-  b.rt.live.delete('g1')
-  idle.resolve()
-  await b.followed('s2')
-  assert.equal(b.handoffOf('s2').source.resume, true)
-  assert.equal(probes.length > 0, true)
-  assert.equal(probes.every(view => view.s2 === undefined), true)
-  assert.deepEqual(b.rt.ackingView(), {})
-})
-
-// AK2-2.2: a group round's message spliced into the flagged part clears the flag; the turn it
-// starts is member work again.
-test('KG3 a group round message spliced into the flagged part clears it; its turn is member work', async t => {
-  const b = bench({ turns: true })
-  t.after(() => b.ctx.dispose())
-  await b.rt.switchRoute('b1', 'acp-claude/default')
-  await b.followed('s3')
-  assert.equal(b.rt.ackingPart('s3'), true)
-  const round = message(SOURCE_KIND, '[Group chat] status?', { form: 'relay', role: 'room', exchangeId: 'e-round' })
-  b.sessionEvent('s3', { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, inserted: [round] } })
-  assert.equal(b.rt.ackingView().s3, undefined)
-  b.sessionEvent('s3', { type: 'turn/start', data: { turn: 1 } })
-  assert.equal((b.rt.roomWorkView().r1 ?? []).some(item => item.botId === 'b1'), true)
 })

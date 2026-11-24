@@ -134,7 +134,6 @@ const api = (handlers = {}) => {
     // Omni's extension registry (extend.js): no other plugin adds endpoints here.
     extended: { endpointOf: () => undefined, view: () => ({}), live: () => ({}) },
     warn() {},
-    ...handlers.extra,
   }
   installChannel(rt)
   const post = async (endpoint, payload) => {
@@ -154,16 +153,4 @@ test('the thinking endpoint answers ms only for a Bot session', async () => {
 test('the thinking endpoint omits ms when the time is unknown', async () => {
   const { post } = api({ selfOf: () => 'bot-1', thinkingOf: async () => undefined })
   assert.deepEqual(await post('thinking', { sessionId: 's', turn: 1 }), { ok: true, value: {} })
-})
-
-// PLAN-D15-ACK KC1 (#2061, F4-ack): the state answer's work carries the host's `acking`.
-test('the state answer carries the acking parts in its work, and none without the view', async () => {
-  const extra = {
-    bootstrap: async () => {}, roleRecordsView: async () => ({}), prepareLearning: async () => {},
-    learningView: () => ({}), learningSettledView: () => ({}), secretSourcesView: () => ({}), secretSourcesPresent: () => false,
-    roleCatalogView: () => ({}), roleDetailsView: () => ({}), roleRuntime: { view: () => ({}) }, home: '/nonexistent',
-  }
-  const work = async (handlers) => (await api({ extra: { ...extra, ...handlers } }).post('state', { since: 0 })).value.work
-  assert.deepEqual((await work({ ackingView: () => ({ s2: 5 }) })).acking, { s2: 5 })
-  assert.deepEqual((await work({})).acking, {})
 })
