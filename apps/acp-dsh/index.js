@@ -26,7 +26,7 @@ import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
 import { CliStore, CLI_CHECK_EVERY_MS } from './src/host/clis.js'
-import { CliHomes, HOME_ENV, stopRuns } from './src/host/cli-homes.js'
+import { CliHomes, HOME_ENV, runCount, stopRuns } from './src/host/cli-homes.js'
 import { canRunProfile, ensureChatProfiles } from './src/host/codex-chat-profiles.js'
 import { NATIVE_OFF_UNAVAILABLE, nativeOffLaunch } from './src/host/codex-native.js'
 import { CONSENT_FILE, ConsentStore } from './src/host/consent.js'
@@ -1114,7 +1114,20 @@ export function apply(ctx, config = {}, {
       // The version of the CLI the attempt started, as it was read then (`resolve` below).
       const version = attemptVersions.get(id)
       const cli = typeof version === 'string' && /^\d+\.\d+\.\d+[\w.+-]{0,32}$/.test(version) ? `CLI ${version}` : 'CLI version unknown'
-      warn(ctx, `sign-in to ${AGENTS[id]?.defaultName ?? id} failed: ${cause} (${phase}${exit === undefined ? '' : `, ${exit}`}; ${cli})`)
+      signInNote(ctx, `sign-in to ${AGENTS[id]?.defaultName ?? id} failed: ${cause} (${phase}${exit === undefined ? '' : `, ${exit}`}; ${cli})`)
+    },
+    // A Switch account's start and end (#2064), for the app log: fixed words only, never an
+    // account, a link or a code.
+    onSwitch({ id, step, signedIn, status, linkShown, exit, same, signedInAfter }) {
+      const name = AGENTS[id]?.defaultName ?? id
+      const yes = value => (value === true ? 'yes' : value === false ? 'no' : 'unknown')
+      if (step === 'start') {
+        signInNote(ctx, `account switch for ${name}: status at the new sign-in's start: ${signedIn ? 'signed in' : 'not signed in'}`)
+        return
+      }
+      const ended = ['ready', 'failed', 'expired', 'cancelled'].includes(status) ? status : 'unknown'
+      const how = typeof exit === 'string' && /^(?:exit -?\d{1,5}|SIG[A-Z0-9]{2,12}|running)$/.test(exit) ? exit : 'unknown'
+      signInNote(ctx, `account switch for ${name} ended: ${ended} (link shown: ${linkShown ? 'yes' : 'no'}; ${how}; same account: ${yes(same)}; signed in after: ${yes(signedInAfter)})`)
     },
     ...(loginSpawn ? { spawn: loginSpawn } : {}),
     ...(loginRecord ? { record: loginRecord } : {}),
@@ -1132,7 +1145,7 @@ export function apply(ctx, config = {}, {
     // `existing`: the CLI was signed in before the attempt, so nobody signed in through it. A
     // sign-in the person made here is their word for that account; an existing one waits for
     // `accountConfirm`, and until then nothing is announced, so no chosen model is applied.
-    async onReady(id, selected, { existing = false, valid = () => false } = {}) {
+    async onReady(id, selected, { existing = false, fresh = false, compare = false, valid = () => false, same } = {}) {
       const version = authVersions.get(id)
       const current = () => {
         if (!valid() || disposed || restarting || accountChanges.has(id)
@@ -1151,7 +1164,12 @@ export function apply(ctx, config = {}, {
       nextEpoch(id)
       if (consents !== undefined) {
         if (!current()) return
-        if (!existing) consents.confirm(id, who)
+        if (!existing) {
+          // A Switch that ended on the account it signed out of says so (#2064); read before the
+          // new word is written over it, and only when the one signed out was agreed here.
+          if (fresh && compare && consents.sameAccount(id, who)) same?.()
+          consents.confirm(id, who)
+        }
         if (!current()) return
         noteAccount(id, true, who)
       }
@@ -1170,11 +1188,25 @@ export function apply(ctx, config = {}, {
         warn(ctx, `the sign-in of ${id} was not announced: ${error?.message ?? error}`)
       }
     },
+    // A failed Switch never strands Bots (#2064): still signed in -> the home runs again on the
+    // account that stayed; signed out or unknown -> it stays paused until a sign-in. Only this
+    // attempt's own lock: a newer sign-out, switch or restart already took it.
+    onSettled({ id, attemptId, signedIn, valid }) {
+      if (restarting || disposed || !loginLocks.has(id) || logins.current(id) || !logins.owns(id, attemptId)) return
+      const { key } = AGENTS[id]
+      loginLocks.delete(id)
+      const resume = signedIn === true && valid() && !accountChanges.has(id)
+      if (resume) homes.resume(key)
+      homes.end(key)
+      if (resume) { inspections.delete(id); agents.get(id)?.catalog.refresh(); void inspect(id).catch(() => {}) }
+      publish()
+    },
     // Both events carry the in-app attempts too (#2048): one count for the busy signal.
     onActivity(activity) { announceActivity(activity) },
     onChange(active) {
       for (const id of restarting ? [] : loginLocks) {
-        if (logins.current(id)) continue
+        // A Switch that settles keeps its lock until `onSettled` decides the home (#2064).
+        if (logins.current(id) || logins.settling(id)) continue
         loginLocks.delete(id)
         homes.end(AGENTS[id].key)
       }
@@ -1306,7 +1338,7 @@ export function apply(ctx, config = {}, {
     }
   }
 
-  async function signOutAccount(id, { expect } = {}) {
+  async function signOutAccount(id, { expect, note = false } = {}) {
     restartGuard()
     const matched = expect === undefined ? undefined : await expectAccount(id, expect)
     if (!homes || !consentIds.includes(id) || disposed) {
@@ -1326,13 +1358,18 @@ export function apply(ctx, config = {}, {
     try {
       // Block admission first, then end starting/live chats, model probes, images and logins.
       adapter.endProvider(id, 'The Bot account changed. Sign in again in the app.')
+      // For a Switch's log line (#2064): whether a model probe of this home was alive here.
+      const probe = agents.get(id)?.catalog?.run !== undefined
       agents.get(id)?.catalog?.dispose()
       await logins.stop(id)
+      const runs = runCount(homes.home(spec.key))
       await stopRuns(homes.home(spec.key))
       const env = cliEnvironment(spec, cliDetails.get(id))
+      let logout = false
       // Both CLIs may answer differently when logout is asked on a brand-new home. A definite
       // signed-out status already proves there is no login to end; unknown still logs out.
       if (await signedIn(spec, cli, { env }).catch(() => undefined) !== false) {
+        logout = true
         await new Promise((resolve, reject) => {
           const args = spec.key === 'claude' ? ['auth', 'logout'] : ['logout']
           logoutRun(...batchSafe(cli, args, {
@@ -1344,6 +1381,9 @@ export function apply(ctx, config = {}, {
       }
       if (await signedIn(spec, cli, { env }).catch(() => undefined) !== false) {
         throw accountFailure('logout', 'Sign-out could not be verified. Try again.')
+      }
+      if (note) {
+        signInNote(ctx, `account switch for ${spec.defaultName}: sign-out verified (logout run: ${logout ? 'yes' : 'no'}; model probe live: ${probe ? 'yes' : 'no'}; runs stopped: ${runs})`)
       }
       homes.resume(spec.key)
       return { id, signedIn: false, authScope: 'isolated' }
@@ -1801,13 +1841,20 @@ export function apply(ctx, config = {}, {
     return resetAccount(id)
   }
 
-  async function startLogin(id, label, alreadySignedOut = false) {
+  // `alreadySignedOut` is a Switch account (#2064): its attempt is fresh, never a plain one.
+  async function startLogin(id, label, alreadySignedOut = false, { compare = false } = {}) {
     restartGuard()
     if (!homes || !consentIds.includes(id)) return logins.start(id, { label })
     await awaitRecovery(id)
     if (accountChanges.has(id)) throw accountFailure('busy', 'The Bot account is changing.')
     const current = logins.current(id)
-    if (current) return current
+    if (current && !alreadySignedOut) return current
+    // A Switch ends any attempt it did not start (#2064); its own runs under the home's lock below.
+    if (current) {
+      await logins.stop(id)
+      restartGuard()
+      if (accountChanges.has(id)) throw accountFailure('busy', 'The Bot account is changing.')
+    }
     const spec = AGENTS[id]
     if (!alreadySignedOut) await inspect(id)
     restartGuard()
@@ -1819,7 +1866,7 @@ export function apply(ctx, config = {}, {
     homes.begin(spec.key)
     loginLocks.add(id)
     authVersions.set(id, (authVersions.get(id) ?? 0) + 1)
-    try { return logins.start(id, { label }) } catch (error) {
+    try { return logins.start(id, { label, ...(alreadySignedOut ? { fresh: true, compare } : {}) }) } catch (error) {
       loginLocks.delete(id)
       homes.end(spec.key)
       throw error
@@ -2012,8 +2059,10 @@ export function apply(ctx, config = {}, {
       return { required: homes.recovery(key) }
     },
     accountSwitch: async (id, { label } = {}) => {
-      await signOutAccount(id)
-      return startLogin(id, label, true)
+      // "Before" is read before the sign-out (#2064): only a signed-in, agreed account is compared.
+      const compare = signIns.get(id) === true && ['given', 'carried'].includes(consentStates.get(id))
+      await signOutAccount(id, { note: true })
+      return startLogin(id, label, true, { compare })
     },
     /** The attempt at work for this agent, from any view, or undefined. Never starts or cancels one. */
     loginCurrent: id => (isHomedNative(id) ? nativeLogins.current(id) : logins.current(id)),
@@ -2397,6 +2446,13 @@ function warn(ctx, message) {
 }
 
 function imageWarn(ctx, line) {
+  warn(ctx, line)
+  try { console.error(`[acp-dsh] ${line}`) } catch {}
+}
+
+// A sign-in line that also reaches the app's log (dsh.log), as the image lines do: fixed words
+// only, never an account, a link or a code.
+function signInNote(ctx, line) {
   warn(ctx, line)
   try { console.error(`[acp-dsh] ${line}`) } catch {}
 }

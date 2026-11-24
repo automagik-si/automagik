@@ -176,6 +176,21 @@ export class ConsentStore {
   }
 
   /**
+   * Whether a read names the account the record holds (#2064): a naming facet both have, none
+   * that differs. A Claude account needs its email on both sides (its org alone, or a key's
+   * source, never says it is the same person's account).
+   */
+  sameAccount(id, account) {
+    if (!this.ids.includes(id)) return false
+    this.sync()
+    const stored = this.vendors[id]?.account
+    const seen = this.digests(account)
+    if (stored === undefined || seen === undefined || differs(stored, seen)) return false
+    if (id === 'acp-claude' && (stored.email === undefined || seen.email === undefined)) return false
+    return Object.keys(seen).some(facet => facet !== 'kind' && stored[facet] !== undefined)
+  }
+
+  /**
    * What a fresh read of a vendor means: 'given', 'carried', 'needed', or undefined when the
    * vendor is not (known to be) signed in.
    * @param {string} id
