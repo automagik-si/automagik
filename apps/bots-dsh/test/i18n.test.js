@@ -214,3 +214,12 @@ test('the review guard lines have Chinese and Brazilian Portuguese texts with th
     assert.equal(holes(pt[key]), holes(key), key)
   }
 })
+
+test('skill refusal: every introduced key has Chinese and Brazilian Portuguese copy', async () => {
+  const { SKILL_KEYS } = await import('../src/host/skill-keys.js')
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  for (const text of Object.values(SKILL_KEYS)) {
+    assert.equal(typeof DICTIONARY.zh[text], 'string', text)
+    assert.equal(typeof pt[text], 'string', text)
+  }
+})

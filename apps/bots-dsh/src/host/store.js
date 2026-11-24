@@ -90,6 +90,8 @@ export function install(rt) {
   let seen = ''
   // Bumped each time the in-memory state is replaced from the file, so a queued
   // save cannot write a snapshot taken of the state it replaced.
+  let capabilitiesIntact = true
+  rt.capabilitiesIntact = () => capabilitiesIntact
   let lockEpoch = 0
   const stamp = () => {
     try {
@@ -262,15 +264,18 @@ export function install(rt) {
     if (state.agents === null || typeof state.agents !== 'object' || Array.isArray(state.agents)) state.agents = {}
     // `computer` is the computer-use switch; absent or corrupt means off.
     if (state.computer === null || typeof state.computer !== 'object' || Array.isArray(state.computer)) state.computer = {}
+    capabilitiesIntact = true
     let migrated = !hadCapabilities || (parsed?.version !== STATE_VERSION && parsed?.version !== ENCRYPTED_STATE_VERSION)
     if (state.autoStamp !== state.revision && rt.dropAutoMarks()) migrated = true
     if (holder !== undefined) rt.dropAutoMarks()
     // The single DSH Agent of older teams splits into a DSH bot and the tasks record (agents.js).
     if (rt.migrateAgents?.()) migrated = true
     if (state.capabilities === null || typeof state.capabilities !== 'object' || Array.isArray(state.capabilities)) {
+      capabilitiesIntact = false
       state.capabilities = { items: {} }
       migrated = true
     } else if (state.capabilities.items === null || typeof state.capabilities.items !== 'object' || Array.isArray(state.capabilities.items)) {
+      capabilitiesIntact = false
       state.capabilities.items = {}
       migrated = true
     }

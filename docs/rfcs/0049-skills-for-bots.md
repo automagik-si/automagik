@@ -310,6 +310,10 @@ existing card, row and button styles; it is always shown, also when the library 
   | `clear`, `resume` | Claude Code's new and resumed session ([`docs/rfcs/0015-live-chat-projection.md:198`](0015-live-chat-projection.md#L198), [`docs/rfcs/0021-meter-attribution.md:140`](0021-meter-attribution.md#L140)) |
   | `restart` | Claude Code's restart (`herdr/README.md:403`) |
   | `help` | every agent's and DSH's help (named by the business rule) |
+  | `goal` | DSH's `@deepseek-ai/dsh-base` command (`apps/bots-dsh/src/host/tools.js`) |
+  | `plan` | DSH's `@deepseek-ai/dsh-base` command (`apps/desktop/profile/package.json`) |
+  | `export` | DSH's `@deepseek-ai/dsh-web-app` command (`apps/desktop/profile/package.json`) |
+  | `upload` | DSH's `@deepseek-ai/dsh-web-app` command (`apps/desktop/profile/package.json`) |
 
   The list is closed and versioned in the code: one exported constant beside the name rule
   (`RESERVED_COMMAND_NAMES` with `RESERVED_COMMANDS_VERSION`, next to `CONNECTOR_IDS` in

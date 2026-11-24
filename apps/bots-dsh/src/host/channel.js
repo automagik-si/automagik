@@ -106,9 +106,10 @@ export function install(rt) {
   // Photos staged by `stage-image`, kept until the message that names them is sent.
   const staged = new Map()
   const ok = value => ({ ok: true, value })
-  const fail = (message, code = 'bot/error', reason) => ({
+  const fail = (message, code = 'bot/error', reason, { key, params } = {}) => ({
     ok: false,
-    error: { code, message, details: {}, ...(code === 'bot/refused' && (reason === 'needs-new-conversation' || reason === 'reply-running') ? { reason } : {}) },
+    error: { code, message, details: {},
+      ...(code === 'bot/refused' && key !== undefined ? { key, ...(params === undefined ? {} : { params }) } : {}), ...(code === 'bot/refused' && (reason === 'needs-new-conversation' || reason === 'reply-running') ? { reason } : {}) },
   })
   // Keep native holds and releases for one Bot in order across all browser controls.
   const browserChanges = new Set()
@@ -1449,7 +1450,7 @@ export function install(rt) {
       // or `memory/` code (memory writes `memory/*`). Any other error may be a
       // provider's, carrying its request or endpoint text, or a file system's, carrying
       // a path: neither the log nor the reply says its message, only its kind.
-      if (code !== 'bot/internal' && exposition(error) !== undefined) return fail(error.message, code, error.reason)
+      if (code !== 'bot/internal' && exposition(error) !== undefined) return fail(error.message, code, error.reason, error)
       if (VAULT.has(endpoint)) return fail('The vault did not answer.', 'bot/internal')
       const kind = errorKind(error)
       rt.noteFailure({ source: 'api', text: `${endpoint}: ${kind}`, code: kind, stack: error?.stack })

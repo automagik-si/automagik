@@ -79,6 +79,7 @@ import * as secrets from './src/host/secrets.js'
 import { dropUnlockVariables } from './src/host/unlock-env.js'
 import * as connectors from './src/host/connectors/index.js'
 import * as capabilities from './src/host/capabilities.js'
+import { portableKey } from './src/host/skill-store.js'
 import * as learning from './src/host/learning.js'
 import * as schedules from './src/host/schedules.js'
 import * as usage from './src/host/usage.js'
@@ -165,19 +166,45 @@ function importTeam(home, from) {
   const sourceState = join(from, 'state.json')
   const destinationState = join(home, 'state.json')
   if (existsSync(destinationState) || !existsSync(sourceState)) return false
-  const copyHome = keyed => cpSync(from, home, { recursive: true, force: false, filter: source => {
-    if (source.endsWith('state.lock') || /[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source)) return false
+  const storeAliases = dir => (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
+    .filter(name => portableKey(name) === 'skills')
+  const sourceStores = storeAliases(from)
+  const destinationStores = storeAliases(home)
+  if (sourceStores.length > 1 || destinationStores.length > 1) {
+    throw new Error('The imported Bot team has conflicting skill store names.')
+  }
+  const markerPath = join(home, '.skills-import.json')
+  const copyHome = () => cpSync(from, home, { recursive: true, force: false, filter: source => {
+    if (source.endsWith('state.lock') || /[/\\]wake\.jsonl\.[^/\\]*\.tmp$/.test(source)) return false
     if (dirname(source) !== from) return true
     const name = basename(source)
-    return !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && (!keyed || source !== sourceState)
+    const key = portableKey(name)
+    return !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && source !== sourceState
+      && key !== 'skills' && key !== '.skills-import.json'
   } })
   const stateBytes = fs.readFileSync(sourceState)
   const sourceKey = readConnectorKey(join(from, CONNECTOR_KEY))
   checkImportedCredentials(stateBytes, sourceKey)
-  if (sourceKey.missing) {
-    copyHome(false)
+  const finishImport = (checkKey = () => {}) => {
+    fs.mkdirSync(home, { recursive: true, mode: 0o700 })
+    const at = Date.now()
+    let aside = null
+    if (destinationStores.length === 1) {
+      aside = `skills.pre-import-${at}`
+      if (fs.lstatSync(join(home, aside), { throwIfNoEntry: false })) throw new Error('The skill store backup already exists.')
+      fs.renameSync(join(home, destinationStores[0]), join(home, aside))
+    }
+    copyHome()
+    checkKey()
+    writeBytesAtomic(markerPath, JSON.stringify({ v: 1, at, sourceHadStore: sourceStores.length !== 0, aside }),
+      { durable: process.platform !== 'win32' })
+    try { writeBytesAtomic(destinationState, stateBytes, { exclusive: true, durable: process.platform !== 'win32' }) } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      return false
+    }
     return true
   }
+  if (sourceKey.missing) return finishImport()
   if (sourceKey.bytes === undefined) throw new Error('The imported Bot team needs a readable connector key.')
 
   const destinationPath = join(home, CONNECTOR_KEY)
@@ -200,13 +227,9 @@ function importTeam(home, from) {
       checkDestination()
     }
   }
-  copyHome(true)
-  if (checkDestination().missing) throw new Error('The imported Bot team needs a matching connector key.')
-  try { writeBytesAtomic(destinationState, stateBytes, { exclusive: true }) } catch (error) {
-    if (error?.code !== 'EEXIST') throw error
-    return false
-  }
-  return true
+  return finishImport(() => {
+    if (checkDestination().missing) throw new Error('The imported Bot team needs a matching connector key.')
+  })
 }
 
 export function createRuntime(ctx, config = {}) {

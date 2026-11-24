@@ -2,6 +2,7 @@
 // a Bot can reach a shell through is a row here: its own chat, a group Session, a worker
 // it starts, a task, a renamed or aliased command tool, and a skill. The capability is
 // stored as `shell: false` (absent means a shell), so an existing Bot keeps what it had.
+import { makeSkillFixtureWritable } from './fixtures/skill-home-cleanup.mjs'
 import { Session, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -212,6 +213,7 @@ function bench({ storedTeam, providers } = {}) {
   const stop = async () => {
     // Let every module's cleanup (and the writes it awaits) settle before the temp home goes.
     await ctx.dispose()
+    makeSkillFixtureWritable(home)
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
     for (const path of folders) rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }

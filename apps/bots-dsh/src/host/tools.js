@@ -16,6 +16,7 @@ import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
 import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
 import { refusal } from './refusal.js'
+import { skillName } from './skill-store.js'
 import { registerTrustedTool } from './tool-registrations.js'
 import { deniesAcpTool } from '../shared/own-tools.js'
 
@@ -1527,10 +1528,21 @@ export function install(rt) {
       const self = rt.selfOf(exec.agent?.id)
       const bot = rt.botOf(self)
       if (!bot) return 'Only Bots on the team can use list_capabilities.'
-      const items = Object.values(state.capabilities?.items ?? {})
+      await rt.skillsReady()
+      const items = Object.entries(state.capabilities?.items ?? {})
       if (items.length === 0) return 'No shared capabilities are saved yet.'
       const statuses = rt.capabilityStatusesView()[bot.id] ?? {}
-      const lines = items.map(item => {
+      const lines = items.flatMap(([name, item]) => {
+        if (item.kind === 'skill') {
+          if (!skillName(name) || name !== item.name) return []
+          const { status, snapshot } = rt.skillDelivery(name)
+          if (!snapshot) return `- ${name} (skill; held: ${status.state})`
+          const description = snapshot.skillMd.description
+          const mounted = statuses[name]
+          const mountState = mounted ? ` (${mounted.state}${mounted.error ? `: ${mounted.error}` : ''})` : ''
+          const attached = bot.capabilities?.includes(name) ? `; attached to you${mountState}` : ''
+          return `- ${name} (skill)${description ? ` — ${description}` : ''}${attached}`
+        }
         const extra = item.kind === 'pack' ? `; includes ${(item.items ?? []).join(', ') || 'nothing'}`
           : item.kind === 'mcp' && item.transport === 'stdio' ? `; ${item.approved ? 'allowed' : 'needs user approval'}` : ''
         const itemStatus = statuses[item.name]
@@ -1545,7 +1557,7 @@ export function install(rt) {
     name: 'save_capability',
     description: 'Create or update a shared MCP server, skill, or pack. Changes apply from your next message.',
     parameters: {
-      name: { type: 'string', required: true, description: 'Lowercase letters, digits, and single hyphens, up to 32 characters; "github" is reserved' },
+      name: { type: 'string', required: true, description: 'Lowercase letters, digits, and single hyphens, up to 32 characters; "github" is reserved; app and agent command names such as compact, clear, goal, plan or help are reserved' },
       kind: { type: 'string', required: true, enum: ['mcp', 'skill', 'pack'] },
       description: { type: 'string', description: 'What this capability provides' },
       transport: { type: 'string', enum: ['stdio', 'streamable-http'], description: 'How to reach an MCP server: a local command or an HTTP URL' },
@@ -1563,7 +1575,9 @@ export function install(rt) {
       const self = rt.selfOf(exec.agent?.id)
       if (!rt.botOf(self)) return 'Only Bots on the team can use save_capability.'
       try {
-        const item = await rt.capabilitySave(args, { botId: self })
+        const selection = args.kind === 'skill' ? exec.agent?.model?.current?.() : undefined
+        const authorModel = selection?.provider && selection.model ? `${selection.provider}/${selection.model}` : undefined
+        const item = await rt.capabilitySave(args, { botId: self, authorModel })
         const verdict = item.verification?.status === 'verified' ? ' (verified)'
           : item.verification?.status === 'unverified' ? ` (unverified${item.verification.reason ? `: ${item.verification.reason}` : ''})`
             : ''

@@ -1,6 +1,7 @@
 // A capability mounted into one Session (rt.mountCapability) for another plugin's thread, and
 // the secret scoped to that Session. The tool registry, its scopes, the tool pipeline and the
 // MCP client are DSH's own from the pinned harness; the MCP server is a real stdio process.
+import { makeSkillFixtureWritable } from './fixtures/skill-home-cleanup.mjs'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -310,7 +311,10 @@ test('mountCapability refuses what it cannot hold to one Session', async (t) => 
     secret('SUPPORT_KEY', 'support-key-90b3-value', ['support']), secret('SHORT_KEY', 'abc', []),
   ])
   const env = await setup(t, { home })
-  t.after(() => rmSync(home, { recursive: true, force: true }))
+  t.after(() => {
+    makeSkillFixtureWritable(home)
+    rmSync(home, { recursive: true, force: true })
+  })
   await env.open('person-a')
   const save = (name, key) => env.rt.capabilitySave({ name, kind: 'mcp', transport: 'stdio', command: process.execPath, args: [SERVER], env: { PERSON_KEY: `$DSH_SECRET_${key}` } }, { ui: true })
   await save('shared-space', 'SHARED_KEY')

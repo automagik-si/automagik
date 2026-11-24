@@ -467,3 +467,13 @@ test('H2 a stalled 200 is aborted at the revalidation deadline and a later check
   assert.equal(clock.pending.size, 0)
   stalled.resolve({ ok: true, value: {} })
 })
+
+test('skill refusal: carries bounded keys and params through API errors', async () => {
+  let payload = { code: 'bot/refused', message: 'Choose another name.', key: 'skill.name-reserved', params: { name: 'goal' } }
+  const f = fixture({ fetch: () => ({ ok: true, json: async () => ({ ok: false, error: payload }) }) })
+  await assert.rejects(f.api.call('capability-save'), error => (
+    error.key === 'skill.name-reserved' && error.params?.name === 'goal' && error.message === 'Choose another name.'
+  ))
+  payload = { ...payload, key: 'skill.bad/shape', params: { name: 'x'.repeat(201) } }
+  await assert.rejects(f.api.call('capability-save'), error => error.key === undefined && error.params === undefined)
+})

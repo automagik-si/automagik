@@ -10,9 +10,11 @@ import { access, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { replaceFile } from './files.js'
 import { looksLikeKey, looksSecret, writtenIn } from './memory.js'
-import { validateCapabilityName } from './capabilities.js'
+import { CONNECTOR_IDS, validateCapabilityName } from './capabilities.js'
 import { credentialShapes } from './redact.js'
 import { refusal } from './refusal.js'
+import { skillRefusal } from './skill-keys.js'
+import { skillHashId } from './skill-store.js'
 
 export const LEARNING = {
   minTurnMs: 3 * 60_000,
@@ -275,7 +277,7 @@ export function skillProblem(proposal, { skills, learned, limit = LEARNING.learn
   if (action !== 'create' && action !== 'update') return `unknown action ${String(action)}`
   let name
   try {
-    name = validateCapabilityName(proposal.name)
+    name = validateCapabilityName(proposal.name, CONNECTOR_IDS, { kind: 'skill', creating: action === 'create' })
   } catch (error) {
     return error.message
   }
@@ -291,7 +293,7 @@ export function skillProblem(proposal, { skills, learned, limit = LEARNING.learn
     if (learned.length >= limit) return `the Bot already keeps ${limit} learned skills`
   } else {
     if (existing === undefined || existing.kind !== 'skill' || !learned.includes(name)) return `${name} is not a learned skill of this Bot`
-    if (existing.content.trim() === content && existing.description.trim() === description) return 'the update changes nothing'
+    if (existing.content?.trim() === content && existing.description?.trim() === description) return 'the update changes nothing'
   }
   return undefined
 }
@@ -546,21 +548,28 @@ export function install(rt) {
   }
 
   async function reviewSkill(bot, lines) {
+    await rt.skillsReady()
     const secrets = secretChange
-    const skills = skillsOf()
     const learned = learnedOf(bot)
-    const library = Object.values(skills).filter(item => !learned.includes(item.name)).map(item => ({ name: item.name, description: item.description }))
+    const skills = Object.fromEntries(Object.entries(skillsOf()).map(([name, item]) => {
+      const text = rt.skillModelText(name)
+      return [name, text ? { name, kind: 'skill', hash: text.hash, description: text.description, content: text.body } : { name, kind: item.kind }]
+    }))
+    const library = Object.values(skills).filter(item => item.hash && !learned.includes(item.name))
     const text = skillRequest({
       bot,
       lines,
-      learned: learned.map(name => skills[name]),
+      learned: learned.map(name => skills[name]).filter(item => item?.hash),
       library,
       declined: data().declined.filter(entry => entry.kind !== 'agents' && entry.botId === bot.id),
       language: writtenIn(lines.filter(line => line.startsWith('User: ')).map(line => line.slice(6)), rt.uiLanguage?.()),
       limit: settings.learnedMax,
     })
     const check = () => checkReview(bot, secrets)
-    const reply = await rt.botShot(bot, skillSystem(), text, { sessionId: rt.chatOf(bot.id), kind: 'memory' }, { check })
+    let authorModel
+    const reply = await rt.botShot(bot, skillSystem(), text, { sessionId: rt.chatOf(bot.id), kind: 'memory' }, {
+      check, answered: ref => { authorModel = ref },
+    })
     check()
     const proposal = parseJson(reply)
     if (sensitiveSkill(proposal)) {
@@ -575,6 +584,7 @@ export function install(rt) {
     if (proposal.action === 'none') return undefined
     const name = proposal.name.trim()
     const previous = proposal.action === 'update' ? skills[name] : undefined
+    if (previous && !previous.hash) return undefined
     return {
       id: randomUUID(),
       kind: 'skill',
@@ -585,9 +595,10 @@ export function install(rt) {
       description: proposal.description.trim(),
       content: proposal.content.trim(),
       why: typeof proposal.why === 'string' ? clip(proposal.why.trim(), 300) : '',
+      ...(authorModel ? { authorModel } : {}),
       ...(previous ? {
         previous: { description: previous.description, content: previous.content },
-        base: hashOf(`${previous.description}\n${previous.content}`),
+        skillBase: { v: 1, hash: previous.hash },
       } : {}),
     }
   }
@@ -900,7 +911,8 @@ export function install(rt) {
 
   if (!on) {
     const view = () => ({})
-    Object.assign(rt, { prepareLearning, learningView: view, learningSettledView: view, learningEndpoint: async () => { throw refusal('Learning is turned off on this host') }, learningRun: async () => 0 })
+    rt.learnedSkillNames = () => new Set(Object.values(data().learned).flat())
+  Object.assign(rt, { prepareLearning, learningView: view, learningSettledView: view, learningEndpoint: async () => { throw refusal('Learning is turned off on this host') }, learningRun: async () => 0 })
     return
   }
 
@@ -927,7 +939,7 @@ export function install(rt) {
     const settle = (outcome) => {
       checkOpen()
       delete store.proposals[id]
-      const { saved: _saved, ...kept } = proposal
+      const { saved: _saved, savedHash: _savedHash, ...kept } = proposal
       store.settled[id] = { ...kept, sessionId: rt.chatOf(proposal.botId), outcome, settledAt: Date.now() }
     }
     if (approve !== true) {
@@ -949,6 +961,13 @@ export function install(rt) {
         checkOpen()
         checkPublic(proposal)
         if (sensitiveSkill(proposal) || sensitiveSkill(item)) throw refusal('This proposal contains a secret.')
+      }
+      if ((proposal.action === 'update' && (proposal.skillBase?.v !== 1 || !skillHashId(proposal.skillBase.hash)))
+        || (proposal.action === 'create' && proposal.saved && !skillHashId(proposal.savedHash))) {
+        checkOpen()
+        delete store.proposals[id]
+        await persist()
+        throw skillRefusal('proposal-stale')
       }
       await applySkill(proposal, admit)
     }
@@ -1011,25 +1030,27 @@ export function install(rt) {
     if (bot === undefined) throw refusal('The Bot that learned this skill is gone')
     const current = skillsOf()[proposal.name]
     const store = data()
-    const options = { botId: bot.id, ui: false, admit }
+    const options = {
+      botId: bot.id, ui: false, admit, via: 'learning-card', authorModel: proposal.authorModel, team: rt.teamGeneration(),
+    }
     if (proposal.action === 'create') {
       if (proposal.saved) {
-        if (current === undefined || current.description !== proposal.description || current.content !== proposal.content) {
+        if (current === undefined || current.hash !== proposal.savedHash) {
           throw refusal(`${proposal.name} changed since this was proposed`)
         }
         store.learned[bot.id] = [...new Set([...(store.learned[bot.id] ?? []), current.name])]
         await persist()
       } else {
         if (current !== undefined) throw refusal(`A skill named ${proposal.name} exists now`)
-        const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, options)
+        const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, { ...options, op: 'create' })
         admit()
         proposal.saved = true
+        proposal.savedHash = item.hash
         store.learned[bot.id] = [...new Set([...(store.learned[bot.id] ?? []), item.name])]
         await persist()
       }
     } else if (proposal.action === 'update') {
-      if (current === undefined || hashOf(`${current.description}\n${current.content}`) !== proposal.base) throw refusal(`${proposal.name} changed since this was proposed`)
-      const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, options)
+      const item = await rt.capabilitySave({ name: proposal.name, kind: 'skill', description: proposal.description, content: proposal.content }, { ...options, op: 'edit', base: proposal.skillBase.hash })
       admit()
       store.learned[bot.id] = [...new Set([...(store.learned[bot.id] ?? []), item.name])]
       await persist()
@@ -1082,5 +1103,6 @@ export function install(rt) {
     return result
   }
 
+  rt.learnedSkillNames = () => new Set(Object.values(data().learned).flat())
   Object.assign(rt, { prepareLearning, learningView, learningSettledView, learningEndpoint, learningRun: run })
 }

@@ -1540,14 +1540,18 @@ export function install(rt) {
     const cancelled = error => error?.code === NO_BOT_RUNNER || error?.code === 'bot/stale'
     const first = await modelFor(sessionId)
     try {
-      return await oneShot(first, system, text, tag, sessionId, dispatch)
+      const answer = await oneShot(first, system, text, tag, sessionId, dispatch)
+      dispatch?.answered?.(`${first.provider}/${first.model}`)
+      return answer
     } catch (error) {
       if (cancelled(error)) throw error
       const mine = await rt.desiredModel(bot, { aside: true, noCommands: rt.botRunnerRequired?.(sessionId) })
       const fallback = rt.answersAside(mine) ? splitRef(mine) : undefined
       if (fallback === undefined || (fallback.provider === first.provider && fallback.model === first.model)) throw answerFailure(error)
       try {
-        return await oneShot(fallback, system, text, tag, sessionId, dispatch)
+        const answer = await oneShot(fallback, system, text, tag, sessionId, dispatch)
+        dispatch?.answered?.(`${fallback.provider}/${fallback.model}`)
+        return answer
       } catch (again) {
         if (cancelled(again)) throw again
         const said = failure => failureText(failure, 'provider error')

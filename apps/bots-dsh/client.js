@@ -3527,6 +3527,24 @@ var HOST_ERRORS = [
   [/^Memory cannot change now: [\s\S]*$/, "现在不能修改记忆：另一个 dsh 正在使用这个 Bot 团队"]
 ];
 var HOST_ZH = {
+  "Use a capability name with lowercase letters, digits, and single hyphens; connector names are reserved.": "请使用小写字母、数字和单个连字符命名。连接器的名称是保留名称。",
+  'The name "{name}" is reserved for the /{name} command of the app or an agent. Choose another name.': "“{name}”是应用或代理命令 /{name} 的保留名称。请选择其他名称。",
+  'The name "{name}" is reserved by Windows for a device. Choose another name.': "“{name}”是 Windows 保留的设备名称。请选择其他名称。",
+  "A capability named {name} already exists. Edit it, or choose another name.": "名为 {name} 的能力已存在。请编辑现有能力或选择其他名称。",
+  "No skill named {name}.": "找不到名为 {name} 的技能。",
+  "The name in SKILL.md must stay {name}; renaming a skill is not possible here.": "SKILL.md 中的名称必须保留为 {name}。这里无法重命名技能。",
+  "This skill version is not valid. Open the skill again.": "此技能版本无效。请重新打开技能。",
+  "A file path in the skill is not allowed: {rule}.": "技能包含不允许的文件路径：{rule}。",
+  "The skill is over 64 KiB. Shorten it or move detail to a separate file.": "技能超过 64 KiB。请缩短内容或将详细信息移到单独的文件中。",
+  "A file in the skill is over 1 MiB.": "技能中的一个文件超过 1 MiB。",
+  "The skill is over 5 MiB in all.": "技能的文件合计超过 5 MiB。",
+  "The skill has more than 256 files.": "技能包含的文件超过 256 个。",
+  "Could not store the skill's files ({code}). Nothing was saved.": "无法存储技能文件（{code}）。未保存任何更改。",
+  "This skill changed in another window. Open it again.": "此技能已在另一个窗口中更改。请重新打开。",
+  "This skill's record cannot be read by this version. Delete it, or update the app.": "此版本无法读取技能记录。请删除技能或更新应用。",
+  "This proposal was made by an older version. It will be proposed again if it still applies.": "这条提案由旧版本创建。如果提案仍然适用，将再次提出。",
+  "This skill is held until it passes the skill check.": "此技能暂停使用，直到通过检查。",
+  "Its stored files are missing or changed; save the skill again.": "已存储的文件丢失或已更改。请重新保存技能。",
   "This approval is no longer open": "这个审批已经关闭了",
   "The Server address must start with ws:// or wss://": "服务器地址必须以 ws:// 或 wss:// 开头",
   "Enter the Server address first": "请先填服务器地址",
@@ -3964,6 +3982,13 @@ function t(key, params) {
   return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
+  'The name "{name}" is reserved for the /{name} command of the app or an agent. Choose another name.',
+  'The name "{name}" is reserved by Windows for a device. Choose another name.',
+  "A capability named {name} already exists. Edit it, or choose another name.",
+  "No skill named {name}.",
+  "The name in SKILL.md must stay {name}; renaming a skill is not possible here.",
+  "A file path in the skill is not allowed: {rule}.",
+  "Could not store the skill's files ({code}). Nothing was saved.",
   "Detach {name} first.",
   "{name} is already moving to a new conversation.",
   "{name} is still handing on earlier messages; try again shortly.",
@@ -4574,6 +4599,14 @@ var call = async (endpoint, payload, signal) => {
     const message = hostText(result.error?.message ?? "Request failed");
     const error = Object.assign(new Error(code === "bot/internal" ? `${message} ${t("Settings → Feedback has the details.")}` : message), { code });
     if (code === "bot/refused" && (result.error?.reason === "needs-new-conversation" || result.error?.reason === "reply-running")) error.reason = result.error.reason;
+    if (code === "bot/refused") {
+      const { key, params } = result.error ?? {};
+      if (typeof key === "string" && /^skill\.[a-z-]{1,40}$/.test(key)) error.key = key;
+      if (params && Object.getPrototypeOf(params) === Object.prototype) {
+        const entries2 = Object.entries(params);
+        if (entries2.length <= 8 && entries2.every(([, value]) => typeof value === "string" ? value.length <= 200 : Number.isFinite(value))) error.params = params;
+      }
+    }
     const staleShare = code === "bot/stale" && endpoint === "update-bot" && Object.hasOwn(payload ?? {}, "people");
     if (!vault && !staleShare && !isRefusal(code)) {
       noteClientError(endpoint, Object.assign(new Error(result.error?.message ?? "Request failed"), { code }));

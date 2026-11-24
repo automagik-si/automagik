@@ -1,3 +1,4 @@
+import { makeSkillFixtureWritable } from './fixtures/skill-home-cleanup.mjs'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -104,6 +105,7 @@ function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-learning-')), replies
   const teamState = () => JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
   const stop = async () => {
     await ctx.dispose()
+    makeSkillFixtureWritable(home)
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
   return { ctx, home, call, requests, history, learningPath, learningState, teamState, rt, stop }
@@ -1382,7 +1384,9 @@ test('an update approval fails if the learned skill description alone changed', 
   })
   const answer = await runtime.call('learning-answer', { id: proposal.id, approve: true })
   assert.equal(answer.ok, false)
-  assert.match(JSON.stringify(answer), /release-checks changed since this was proposed/)
+  assert.deepEqual([answer.error.key, answer.error.message], [
+    'skill.changed-elsewhere', 'This skill changed in another window. Open it again.',
+  ])
   assert.equal(runtime.teamState().capabilities.items['release-checks'].description, 'Use when checking a release candidate.')
   assert.equal(Object.keys(runtime.learningState().proposals).length, 1)
   const declined = await runtime.call('learning-answer', { id: proposal.id, approve: false })
@@ -1661,3 +1665,40 @@ test('folder learning rechecks path privacy after model selection and before ret
   })
 })
 
+
+test('skill learning: uses verified prior text and stores the full base and answered route', async t => {
+  const seed = structuredClone(TEAM)
+  seed.bots.b2.capabilities = ['release-checks']
+  seed.capabilities.items['release-checks'] = {
+    name: 'release-checks', kind: 'skill', description: 'Use when checking a release.', content: 'Run the older checks.', createdBy: 'b2',
+  }
+  const runtime = await startRuntime({ seed, learningSeed: { learned: { b2: ['release-checks'] } } })
+  t.after(() => runtime.stop())
+  runtime.rt.botShot = async (_bot, _system, text, _tag, dispatch) => {
+    if (!text.startsWith('The Bot:')) return noneReply
+    assert.match(text, /Run the older checks\./)
+    dispatch?.answered?.('fake/reviewer')
+    return JSON.stringify({ ...JSON.parse(createReply), action: 'update' })
+  }
+  await finishTurn(runtime.ctx)
+  await until(() => Object.keys(runtime.learningState().proposals ?? {}).length === 1)
+  const proposal = Object.values(runtime.learningState().proposals)[0]
+  assert.match(proposal.skillBase?.hash ?? '', /^[a-f0-9]{64}$/)
+  assert.equal(proposal.skillBase.hash, runtime.teamState().capabilities.items['release-checks'].hash)
+  assert.equal(proposal.previous.content, 'Run the older checks.')
+  assert.equal(proposal.authorModel, 'fake/reviewer')
+  const approval = await runtime.call('learning-answer', { id: proposal.id, approve: true })
+  assert.equal(approval.ok, true)
+  assert.equal(runtime.teamState().capabilities.items['release-checks'].authorModel, 'fake/reviewer')
+})
+
+test('skill learning: retires an old short base without applying or settling the proposal', async t => {
+  const proposal = { ...JSON.parse(createReply), action: 'update', id: 'stale', botId: 'b2', kind: 'skill', base: '1234567890abcdef' }
+  const runtime = await startRuntime({ learningSeed: { proposals: { stale: proposal } } })
+  t.after(() => runtime.stop())
+  const answer = await runtime.call('learning-answer', { id: 'stale', approve: true })
+  assert.equal(answer.error?.key, 'skill.proposal-stale')
+  assert.equal(runtime.learningState().proposals.stale, undefined)
+  assert.equal(runtime.learningState().settled?.stale, undefined)
+  assert.equal(runtime.teamState().capabilities.items[proposal.name], undefined)
+})

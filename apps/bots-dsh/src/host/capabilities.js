@@ -1,11 +1,17 @@
 import { createHash } from 'node:crypto'
+import { reservedCommandOf } from '../shared/reserved-commands.js'
 import { noBotRunner } from './bot-runner.js'
 import { refusal } from './refusal.js'
 import { encodeUrlComponent } from './secrets.js'
 import { own } from './store.js'
+import { skillRefusal } from './skill-keys.js'
+import { installSkillRecords } from './skill-records.js'
+import { isPortableDeviceName, skillName } from './skill-store.js'
+
+export { RESERVED_COMMAND_NAMES, RESERVED_COMMANDS_VERSION, reservedCommandOf } from '../shared/reserved-commands.js'
+export { validSkillRecord } from './skill-records.js'
 
 const MCP_CLIENT = '@deepseek-ai/dsh-mcp-client'
-const NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 const SECRET_REFERENCE = /\$DSH_SECRET_([A-Z][A-Z0-9_]*)/g
 const ENSURE_TIMEOUT_MS = 15_000
 // One initialize request, as the mount sends it. The SDK's reconnect budget is not a probe:
@@ -24,11 +30,12 @@ const PROBE_BODY = JSON.stringify({
 // Connector ids are reserved: a capability named like one would collide with
 // its mcp__<id>__* tool prefix. The connectors module registers its ids here.
 export const CONNECTOR_IDS = new Set(['github', 'mail'])
-export function validateCapabilityName(value, reserved = CONNECTOR_IDS) {
+export function validateCapabilityName(value, reserved = CONNECTOR_IDS, { kind, creating = true } = {}) {
   const name = String(value ?? '').trim()
-  if (name.length > 32 || !NAME.test(name) || name === 'github' || reserved.has(name)) {
-    throw refusal('Use a capability name with lowercase letters, digits, and single hyphens; connector names are reserved.')
-  }
+  const command = creating && reservedCommandOf(value)
+  if (command) throw skillRefusal('name-reserved', { name: command })
+  if (!skillName(name) || name === 'github' || reserved.has(name)) throw skillRefusal('name-format')
+  if (creating && kind === 'skill' && isPortableDeviceName(name)) throw skillRefusal('name-device', { name })
   return name
 }
 
@@ -71,6 +78,20 @@ export function install(rt) {
   // Mounted fibers live in each Agent's own context, so they outlive this plugin unless
   // its cleanup disposes them; a strong map keeps them reachable for that.
   const mounts = new Map()
+  const admittedTurns = new WeakMap()
+  const waitingForIdle = new WeakSet()
+  const capturesSkills = agent => agent.status === 'running' && admittedTurns.has(agent)
+
+  function reconcileAfterTurn(agent) {
+    if (waitingForIdle.has(agent) || typeof agent.whenIdle !== 'function') return
+    waitingForIdle.add(agent)
+    const reconcile = () => {
+      waitingForIdle.delete(agent)
+      admittedTurns.delete(agent)
+      if (!stopped) void scheduleReconcile()
+    }
+    void agent.whenIdle().then(reconcile, reconcile)
+  }
   // One reconcile chain per Agent: a slow MCP server holds up only its own Agent.
   const chains = new WeakMap()
   const queued = new WeakSet()
@@ -119,11 +140,11 @@ export function install(rt) {
     if (!rt.isMain(botId) && usedByOthers(item.name, botId)) throw refusal(`Another Bot uses ${item.name}, so only a Main Bot can ${verb} it.`)
   }
   const itemInput = (body, { botId, ui }) => {
-    const name = validateCapabilityName(body.name)
     const kind = body.kind
     if (!['mcp', 'skill', 'pack'].includes(kind)) throw refusal('Choose an MCP server, skill, or pack.')
     const items = ensureLibrary()
-    const previous = own(items, name)
+    const previous = own(items, String(body.name ?? '').trim())
+    const name = validateCapabilityName(body.name, CONNECTOR_IDS, { kind, creating: !previous })
     if (previous && !ui) editCheck(previous, botId, 'change')
     if (previous && previous.kind !== kind) throw refusal('A capability cannot change its kind. Delete it and save a new one.')
     const now = Date.now()
@@ -177,8 +198,25 @@ export function install(rt) {
     }
     return item
   }
+  function deleteFrom(team, name) {
+    const items = team.capabilities.items
+    delete items[name]
+    for (const pack of Object.values(items)) if (pack.kind === 'pack') pack.items = (pack.items ?? []).filter(child => child !== name)
+    for (const bot of Object.values(team.bots)) bot.capabilities = (bot.capabilities ?? []).filter(attached => attached !== name)
+  }
+  const skills = installSkillRecords(rt, {
+    library, deleteFrom, input: itemInput,
+    validateName: (name, options) => validateCapabilityName(name, CONNECTOR_IDS, options),
+  })
   const capabilitySave = async (body, options = {}) => {
+    await rt.load()
+    const team = options.team ?? rt.teamGeneration()
     await loadInputs()
+    if (body?.kind === 'skill') {
+      writeCheck()
+      await rt.skillsReady()
+      return skills.saveText(body, options, team)
+    }
     writeCheck()
     const item = itemInput(body ?? {}, options)
     if (item.kind === 'mcp' && item.transport === 'streamable-http') {
@@ -197,10 +235,15 @@ export function install(rt) {
     const items = ensureLibrary()
     const item = own(items, String(name ?? ''))
     if (!item) throw refusal(`No capability named ${name}.`)
-    if (!ui) editCheck(item, botId, 'delete')
-    delete items[item.name]
-    for (const pack of Object.values(items)) if (pack.kind === 'pack') pack.items = (pack.items ?? []).filter(child => child !== item.name)
-    for (const bot of Object.values(state.bots)) bot.capabilities = (bot.capabilities ?? []).filter(attached => attached !== item.name)
+    const authorize = current => {
+      if (!current || current.kind !== item.kind) throw refusal(`No capability named ${name}.`)
+      if (!ui) editCheck(current, botId, 'delete')
+    }
+    if (item.kind === 'skill' && skillName(name) && !(item.skillFormat > 1)) {
+      return skills.deleteSkill(name, authorize)
+    }
+    authorize(item)
+    deleteFrom(state, String(name ?? ''))
     await rt.save()
     return true
   }
@@ -307,11 +350,16 @@ export function install(rt) {
     }
     return result
   }
-  const libraryView = () => Object.values(library()).map(item => ({
+  const libraryView = () => Object.entries(library()).map(([name, item]) => ({
     ...item,
     ...(item.env ? { env: { ...item.env } } : {}),
     ...(item.headers ? { headers: { ...item.headers } } : {}),
     ...(item.items ? { items: [...item.items] } : {}),
+    ...(item.kind === 'skill' ? {
+      ...(Array.isArray(item.files) ? { files: item.files.map(file => ({ ...file })) } : {}),
+      ...(item.source ? { source: { ...item.source } } : {}),
+      status: rt.skillDelivery(name).status,
+    } : {}),
   }))
 
   async function loadMcpPlugin() {
@@ -355,7 +403,6 @@ export function install(rt) {
   const resolveUrl = (url, owner) => String(url).replace(SECRET_REFERENCE, (_match, name) => encodeUrlComponent(secretFor(name, owner)))
   const resolveList = (list, owner) => (list ?? []).map(raw => String(raw).replace(SECRET_REFERENCE, (_match, name) => secretFor(name, owner)))
   const configFor = (item, owner) => {
-    if (item.kind === 'skill') return { name: item.name, description: item.description, content: item.content }
     if (item.transport === 'stdio') return { transport: 'stdio', serverName: item.name, command: item.command, args: resolveList(item.args, owner), env: resolveValues(item.env, owner), failOnStartupError: true }
     return { transport: 'streamable-http', serverName: item.name, url: resolveUrl(item.url, owner), headers: resolveValues(item.headers, owner), failOnStartupError: true }
   }
@@ -448,6 +495,8 @@ export function install(rt) {
     return resolved
   }
   const disposeMount = async mount => {
+    if (mount) mount.retired = true
+    mount?.unregister?.()
     if (mount?.fiber) await Promise.resolve().then(() => mount.fiber.dispose()).catch(() => {})
   }
   // One capability into one Agent, for its Bot ({ botId }) or for its Session alone
@@ -455,11 +504,15 @@ export function install(rt) {
   const mountOne = async (agent, mountFor, agentMounts, name) => {
     const sessionId = agent.session.id
     const owner = mountFor.botId !== undefined ? mountFor : { sessionId, name, grant: grants.get(sessionId)?.get(name) }
+    await rt.skillsReady()
     const item = own(library(), name)
+    if (item?.kind === 'skill' && capturesSkills(agent)) return reconcileAfterTurn(agent)
     const drop = async () => {
-      await disposeMount(agentMounts.get(name))
+      const mount = agentMounts.get(name)
       agentMounts.delete(name)
+      await disposeMount(mount)
     }
+    if (!item) return drop()
     const suspended = async () => {
       await drop()
       setStatus(owner, name, sessionId, { state: 'error', error: runnerWarning(name).message })
@@ -479,7 +532,15 @@ export function install(rt) {
     }
     let config
     try {
-      config = configFor(item, owner)
+      if (item.kind === 'skill') {
+        const { snapshot } = rt.skillDelivery(name)
+        if (!snapshot) {
+          await drop()
+          setStatus(owner, name, sessionId, { state: 'error', error: 'This skill is held until it passes the skill check.' })
+          return
+        }
+        config = { name, description: snapshot.skillMd.description, content: snapshot.skillMd.body, hash: snapshot.hash }
+      } else config = configFor(item, owner)
     } catch (error) {
       await drop()
       setStatus(owner, name, sessionId, { state: 'error', error: rt.redactSecrets(error.message).slice(0, 300) })
@@ -489,20 +550,31 @@ export function install(rt) {
     if (agentMounts.get(name)?.key === key) return
     await drop()
     setStatus(owner, name, sessionId, { state: 'connecting' })
+    const mount = { key, hash: item.kind === 'skill' ? config.hash : undefined }
     try {
       const plugin = item.kind === 'skill'
         ? {
           name: `ds-bot-capability-skill-${name}`,
           inject: ['skills'],
           apply(c) {
-            c.effect(() => c.skills.register({ name: config.name, description: config.description, source: 'runtime', content: config.content }))
+            c.effect(() => {
+              if (mount.retired) return
+              const unregister = c.skills.register({ name: config.name, description: config.description, source: 'runtime', content: config.content })
+              mount.unregister = () => {
+                mount.unregister = undefined
+                unregister()
+              }
+              return () => mount.unregister?.()
+            })
           },
         }
         : await loadMcpPlugin()
       if (stopped) return
+      if (item.kind === 'skill' && capturesSkills(agent)) return reconcileAfterTurn(agent)
       if (needsRunner(item, sessionId, agent)) return suspended()
       const fiber = item.kind === 'skill' ? agent.ctx.plugin(plugin) : agent.ctx.plugin(plugin, config)
-      agentMounts.set(name, { key, fiber })
+      mount.fiber = fiber
+      agentMounts.set(name, mount)
       await fiber.await()
       if (stopped || agents.get(sessionId)?.deref() !== agent) return
       setStatus(owner, name, sessionId, { state: 'ready' })
@@ -541,6 +613,10 @@ export function install(rt) {
     }
     for (const [name, mount] of agentMounts) {
       if (desired.has(name)) continue
+      if (mount.hash !== undefined && capturesSkills(agent)) {
+        reconcileAfterTurn(agent)
+        continue
+      }
       await disposeMount(mount)
       agentMounts.delete(name)
     }
@@ -574,6 +650,7 @@ export function install(rt) {
   async function reconcile() {
     if (stopped) return
     await loadInputs()
+    await rt.skillsReady()
     const runs = []
     for (const [sessionId, reference] of agents) {
       const agent = reference.deref()
@@ -797,11 +874,12 @@ export function install(rt) {
   }
   rt.capabilitiesStateSaved = () => { void scheduleReconcile() }
   // Creation waits for these listeners, so a new Agent's first request already has its
-  // tools and skill catalog. agent/pre-step is too late: a step assembles its tools first.
+  // tools. The skill catalog is read later, inside DSH's pre-step middleware.
   ctx.on('agent/created', async function prepareCapabilities({ agent }) {
     trackAgent(agent)
     try {
       await rt.load()
+      await rt.skillsReady()
       const bot = botOfSession(agent.session.id)
       // A Session mount follows its Session to each new Agent (a clear, a compaction).
       if ((bot?.capabilities ?? []).length > 0 || (!bot && grants.has(agent.session.id))) await prepare(agent, agent.session.id)
@@ -809,6 +887,26 @@ export function install(rt) {
       rt.warn('ds-bot: capability load failed: %s', error)
     }
   })
+  ctx.on('agent/pre-step', function admitSkills({ agent, turn }, next) {
+    if (turn !== undefined && admittedTurns.get(agent) === turn) return next()
+    if (turn !== undefined) admittedTurns.set(agent, turn)
+    const mounted = mounts.get(agent)
+    if (mounted) {
+      for (const [name, mount] of mounted) {
+        if (mount.hash === undefined) continue
+        let verified = false
+        try {
+          verified = rt.teamCurrent() && rt.skillDelivery(name).snapshot?.hash === mount.hash
+        } catch { /* withhold on failure */ }
+        if (verified) continue
+        mounted.delete(name)
+        mount.unregister?.()
+        void disposeMount(mount)
+        reconcileAfterTurn(agent)
+      }
+    }
+    return next()
+  }, { prepend: true })
   // A Session that closes takes its Session mounts with it; the Session scope of their
   // secrets stays, so after this only that Session can mount them again.
   ctx.on('session/disposed', function releaseSessionMounts(session) {
@@ -820,7 +918,9 @@ export function install(rt) {
     if (agent !== undefined) void reconcileOne(agent)
   })
   ctx.effect(() => {
+    const unregister = rt.onLockGained(() => { void scheduleReconcile() })
     void rt.load().then(async () => {
+      await rt.skillsReady()
       for (const bot of Object.values(state.bots)) {
         if ((bot.capabilities ?? []).length > 0) await trackBotAgents(bot)
       }
@@ -828,6 +928,7 @@ export function install(rt) {
     }).catch(error => rt.warn('ds-bot: capability startup failed: %s', error))
     return async () => {
       stopped = true
+      unregister()
       const live = [...mounts.values()]
       mounts.clear()
       agents.clear()
@@ -840,6 +941,14 @@ export function install(rt) {
   Object.assign(rt, {
     capabilitySave,
     capabilityDelete,
+    skillMountRoots(name) {
+      const roots = new Set()
+      for (const [agent, mounted] of mounts) {
+        const mount = mounted.get(name)
+        if (mount?.hash && capturesSkills(agent)) roots.add(mount.hash)
+      }
+      return roots
+    },
     dropOrphanCapabilities,
     capabilityEndpoint,
     capabilityLibraryView: libraryView,

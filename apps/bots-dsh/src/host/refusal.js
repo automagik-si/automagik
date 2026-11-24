@@ -2,7 +2,7 @@
 // an error carrying a `bot/` or `memory/` code by its message; every other error may
 // be a provider's (its request or endpoint text) or a file system's (a path), so it is
 // answered by kind alone. A deliberate message therefore says so with this helper.
-export const refusal = (message, { code = 'bot/refused', cause } = {}) => Object.assign(
+export const refusal = (message, { code = 'bot/refused', cause, key, params } = {}) => Object.assign(
   new Error(message, cause === undefined ? undefined : { cause }),
-  { code },
+  { code, ...(key === undefined ? {} : { key }), ...(params === undefined ? {} : { params }) },
 )
