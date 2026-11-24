@@ -554,7 +554,10 @@ export const Caret = () => h('svg', { className: 'bt-model-caret', width: 12, he
 // A menu that opens under its trigger, or above when the window has no room below. A
 // click outside, Escape, or a scroll outside it closes it. `onEscape` (a menu with steps)
 // handles Escape first, and returns true when it went back a step instead.
-export function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
+// `holdOnScroll`: a scroll outside follows the trigger instead of closing (the running
+// question, which an approval card arriving must not close); while the trigger is not
+// drawn (no client rects), the menu keeps its last place.
+export function useAnchoredMenu({ onEscape, minWidth = 240, holdOnScroll = false } = {}) {
   const [anchor, setAnchor] = useState(null)
   const [place, setPlace] = useState(null)
   const [shownPlace, leaving] = useLinger(place, MENU_EXIT_MS)
@@ -563,6 +566,8 @@ export function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
   const tick = useViewport()
   const escape = useRef(onEscape)
   escape.current = onEscape
+  const hold = useRef(holdOnScroll)
+  hold.current = holdOnScroll
   const close = () => { setAnchor(null); setPlace(null) }
   useEffect(() => {
     if (place === null) return undefined
@@ -578,7 +583,11 @@ export function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
       close()
       button.current?.focus()
     }
-    const onScroll = (event) => { if (!menu.current?.contains(event.target)) close() }
+    const onScroll = (event) => {
+      if (menu.current?.contains(event.target)) return
+      if (!hold.current) { close(); return }
+      if ((button.current?.getClientRects?.().length ?? 0) > 0) setAnchor({})
+    }
     window.addEventListener('mousedown', onDown)
     window.addEventListener('keydown', onKey, true)
     window.addEventListener('scroll', onScroll, true)
@@ -684,7 +693,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     else setView(MENU_ROOT)
     return true
   }
-  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300 })
+  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300, holdOnScroll: confirm?.ask === 'running' })
   const live = useRef(false)
   live.current = isOpen
   // An agent switch is running in this Bot's own chat (the host's model state): no pick
@@ -774,11 +783,12 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   const askFor = ref => askFirst(current, ref, actions?.turnRunning?.(currentPart(bot)) === true)
   // The host saw a reply the menu did not (reason reply-running): the same question opens, and
   // nothing changed. Switch sends the pick again with stopReply.
-  const askAgain = (ref, effort) => (error) => {
+  // `level`: the pick came from a level step, where Default clears the Bot's level.
+  const askAgain = (ref, effort, level = false) => (error) => {
     if (error?.reason !== 'reply-running' || owner.current !== bot.id) throw error
     keys.current = true
     setView(MENU_ROOT)
-    setConfirm({ ref, effort, ask: 'running' })
+    setConfirm({ ref, effort, ask: 'running', level })
     open()
     return undefined
   }
@@ -789,7 +799,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     // A crossing started from a saved Bot's settings still goes through the picker's own
     // action: the settings wrapper needs to keep its sign-in/account handling.
     if (routeChange && typeof onPick === 'function') {
-      return Promise.resolve(onPick(ref, { routeChange: true, effort }, ...sending)).catch(stopReply ? (error) => { throw error } : askAgain(ref, effort))
+      return Promise.resolve(onPick(ref, { routeChange: true, effort, ...(level ? { level: true } : {}) }, ...sending)).catch(stopReply ? (error) => { throw error } : askAgain(ref, effort, level))
     }
     if (onPick) {
       const pickedIt = Promise.resolve(onPick(ref))
@@ -811,7 +821,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       const pick = chat && actions.switchRouteInChat ? actions.switchRouteInChat : actions.switchRoute
       if (typeof pick === 'function') {
         const sent = Promise.resolve(pick(bot.id, ref, level || effort !== undefined ? { effort: effort ?? null } : {}, ...sending))
-        return run(stopReply ? sent : sent.catch(askAgain(ref, effort)))
+        return run(stopReply ? sent : sent.catch(askAgain(ref, effort, level)))
       }
     }
     // In a Bot's chat a signed-out agent opens the sign-in row there (cli-login.js, rule 2).
@@ -863,7 +873,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     let routeChange = recovery(model.ref)
     if (!routeChange && crossing(model.ref)) {
       const ask = askFor(model.ref)
-      if (ask !== null) { setConfirm({ ref: model.ref, effort, ask }); return }
+      if (ask !== null) { setConfirm({ ref: model.ref, effort, ask, level: true }); return }
       routeChange = true
     }
     finish()
@@ -897,7 +907,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   const second = bits.length > 0 ? bits.join(' · ') : null
   const confirmView = confirm === undefined ? null : h(RouteConfirm, {
     bot, roster, current, target: confirm, ask: confirm.ask, onCancel: () => setConfirm(undefined),
-    onConfirm: () => { const next = confirm; setConfirm(undefined); finish(); void Promise.resolve(pickModel(next.ref, next.effort, { routeChange: true, stopReply: next.ask === 'running' })).catch(() => {}) },
+    onConfirm: () => { const next = confirm; setConfirm(undefined); finish(); void Promise.resolve(pickModel(next.ref, next.effort, { routeChange: true, level: next.level === true, stopReply: next.ask === 'running' })).catch(() => {}) },
   })
   const openRemote = (manage = false) => {
     const generation = ++remote.current.generation

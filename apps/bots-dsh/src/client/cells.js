@@ -713,8 +713,9 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
     if (source.kind === 'bot') {
       // A part opens with its handoff package, so the earlier parts go right above it.
       if (source.handoff === true) return h(EarlierParts, { sessionId, roster, actions })
-      // Group turns belong to the group chat; the member's own chat stays one-to-one.
-      if (source.role === 'kickoff' || source.role === 'room' || source.role === 'goal') return null
+      // Group turns belong to the group chat; the member's own chat stays one-to-one. An agent
+      // switch's note turn is the switch's own work: the composer lock already says so.
+      if (source.role === 'kickoff' || source.role === 'room' || source.role === 'goal' || source.role === 'handoff-note') return null
       // The secret card itself shows what the user did; the note to the Bot stays out.
       if (source.role === 'secret' || deferred) return null
       // A profile notice is the user's edit landing in the Bot's chat, not a peer

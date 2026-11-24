@@ -23,6 +23,8 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // nothing about the switch made in the chat.
 import { turnFailure } from './turns.js'
 import { OWN_TOOLS_MODEL_TEXT } from '../shared/own-tools.js'
+import { HANDOFF_ACK } from './constants.js'
+import { textOf } from './text.js'
 
 export const MODEL_ACCESS_REQUIRED = 'MODEL_ACCESS_REQUIRED'
 export const SWITCH_FAILED = 'MODEL_SWITCH_COMPACTION_FAILED'
@@ -139,6 +141,9 @@ export function install(rt) {
       case 'assistant/message': {
         // A stopped answer is part of one, not the route's answer.
         if (event.data?.interrupted === true) break
+        // Omni's own acknowledgement of a bare handoff (parts.js) carries the request's route,
+        // but the new agent has not answered yet.
+        if (textOf(event.data?.message?.content) === HANDOFF_ACK) break
         const ref = answeredRef(bot, refOf(event.data?.message?.source))
         if (ref === undefined) break
         const entry = stateOf(botId)

@@ -100,3 +100,12 @@ test('fresh input ignores queued sends and takes the newest of the rest', () => 
   assert.equal(freshInputAt(undefined, 400), 400)
   assert.equal(freshInputAt([], undefined), 0)
 })
+
+// PLAN-F1 F4 (#2061): an agent switch's note turn runs on the shown part, but the row stays
+// hidden while it does (the host's `noting`); the composer lock names the switch.
+test('F4b: the row stays hidden while an agent switch writes its note', () => {
+  const bot = {}
+  assert.equal(rowVisible({ running: true, streaming: false, tools: [], relaying: false, bot, noting: true }), false)
+  assert.equal(rowVisible({ running: true, streaming: false, tools: [{ label: 'x' }], relaying: false, bot, noting: true }), false)
+  assert.equal(rowVisible({ running: true, streaming: false, tools: [], relaying: false, bot, noting: false }), true)
+})

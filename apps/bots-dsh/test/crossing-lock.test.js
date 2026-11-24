@@ -205,3 +205,17 @@ test('a switch that failed is said once, in the model line\'s words, when the lo
   assert.equal(probe.reported.length, 2)
   assert.match(probe.reported[1][0], /acp_tool/)
 })
+
+// T22e (c) (MG-8): a part a restart could not start keeps the chat locked with the marker's
+// `{ to, since }`; when the go-back records its failure and the key goes, the line is said once.
+test('T22e (c) a restart that goes back says the failure line once when its lock ends', (t) => {
+  const view = page(t)
+  const probe = mount(t, view, { bot })
+  const since = Date.now() - 1000
+  probe.setWork({ models: { b1: { selected: 'deepseek/v4', switching: { to: 'deepseek/v4', since } } } })
+  assert.equal(probe.state.locked, true)
+  probe.setWork({ models: { b1: { selected: 'acp-claude/default', lastFailure: { code: 'MODEL_SWITCH_COMPACTION_FAILED', ref: 'deepseek/v4', kept: 'acp-claude/default', at: Date.now() } } } })
+  assert.equal(probe.state.locked, false)
+  assert.equal(probe.reported.length, 1)
+  assert.match(probe.reported[0][0], /could not take over this conversation\. This Bot stays on Default\.$/)
+})

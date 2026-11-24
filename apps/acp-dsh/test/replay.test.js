@@ -21,7 +21,7 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { AcpAdapter, NOTICE_KIND, promptOf } from '../src/host/adapter.js'
 import { Backchannel } from '../src/host/backchannel.js'
 import { SYNTHETIC_KIND } from '../src/host/names.js'
-import { BOUNDARY_KIND, answered, isHandoff, missedBy, renderMessage, replayBlocks } from '../src/host/switch.js'
+import { BOUNDARY_KIND, answered, isHandoff, missedBy, renderMessage, replayBlocks, unreadHandoff } from '../src/host/switch.js'
 
 const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-agent.mjs')
 const ROUTE = 'acp-fake'
@@ -35,6 +35,10 @@ const user = text => ({ role: 'user', source: { kind: 'user' }, content: [{ type
 const answer = (text, provider = 'deepseek-official') => ({ role: 'assistant', source: { kind: 'model', provider, model: 'm' }, content: [{ type: 'text', text }] })
 // A Bot part's opening package, as the Bot team writes it (bots-dsh parts.js handoffSource).
 const handoff = text => ({ role: 'user', source: { kind: 'bot', form: 'relay', role: 'handoff', senderName: 'Omni', handoff: true, exchangeId: 'x' }, content: [{ type: 'text', text }] })
+// A resumed part's package: the prompt of its own turn, never a package the agent has not read.
+const resumedHandoff = text => ({ ...handoff(text), source: { ...handoff(text).source, resume: true } })
+// The Bot team's own answer to a bare handoff turn (bots-dsh HANDOFF_ACK), logged on the route.
+const ACK = 'Noted. I have my handoff note and carry on from here.'
 
 function fixture({ cli, toolsOn, dir, name = 'fake' }) {
   const trace = join(dir, `${name}.ndjson`)
@@ -288,6 +292,7 @@ for (const cli of ['claude', 'codex']) {
       assert.equal(first.text.includes('hunter2'), false)
       assert.ok(first.text.endsWith('plain go on'))
       assert.equal(rows(h, NOTICE_KIND).length, 0)
+      assert.equal(first.text.split('Handoff (not from the user)').length, 2)
     } finally {
       h.close()
       rmSync(dir, { recursive: true, force: true })
@@ -312,6 +317,111 @@ test("a handoff in the turn's own messages stays in the prompt beside the person
     h.close()
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+for (const cli of ['claude', 'codex']) {
+  test(`the kill switch: a Bot part's handoff the Bot team answered reaches ${cli} once, in the first real prompt, ahead of the person's words`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-k1-'))
+    const h = fixture({ cli, toolsOn: false, dir })
+    try {
+      const messages = [
+        handoff('[Handoff · part 2]\n## Handoff note\nthe deploy key is hunter2; finish the report'),
+        answer(ACK, ROUTE),
+      ]
+      await agentTurn(h, messages, 'plain go on')
+      const [first] = prompts(h)
+      assert.match(first.text, /^Handoff \(not from the user\): \[Handoff · part 2\]/)
+      assert.match(first.text, /\[secret:TOKEN\]/)
+      assert.equal(first.text.includes('hunter2'), false)
+      assert.ok(first.text.endsWith('plain go on'))
+      assert.equal(first.text.split('Handoff (not from the user)').length, 2)
+      assert.equal(rows(h, NOTICE_KIND).length, 0)
+    } finally {
+      h.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
+
+test('the kill switch: the second prompt does not repeat the handoff', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-k2-'))
+  const h = fixture({ cli: 'claude', toolsOn: false, dir })
+  try {
+    const messages = [
+      handoff('[Handoff · part 2]\n## Handoff note\nthe deploy key is hunter2; finish the report'),
+      answer(ACK, ROUTE),
+    ]
+    await agentTurn(h, messages, 'plain go on')
+    assert.match(prompts(h)[0].text, /^Handoff \(not from the user\): \[Handoff · part 2\]/)
+    assert.equal(rows(h, NOTICE_KIND).length, 0)
+    await agentTurn(h, messages, 'plain again')
+    assert.equal(prompts(h).at(-1).text, 'plain again')
+    // A later new session, after the first real answer: the kill switch's notice, as today.
+    h.restart()
+    await agentTurn(h, messages, 'plain after')
+    assert.equal(prompts(h).at(-1).text, 'plain after')
+    assert.equal(rows(h, NOTICE_KIND).length, 1)
+  } finally {
+    h.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the kill switch: a package at the ACP cap arrives whole with its closing line', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-k3-'))
+  const h = fixture({ cli: 'claude', toolsOn: false, dir })
+  try {
+    const closing = 'Every message above has had its answer. Nothing needs an answer now; wait for the next message.'
+    const head = '[Handoff · part 2]\n## Handoff note\n'
+    const text = `${head}${'n'.repeat(58_000 - head.length - closing.length - 1)}\n${closing}`
+    assert.equal(text.length, 58_000)
+    const messages = [handoff(text), answer(ACK, ROUTE)]
+    await agentTurn(h, messages, 'plain go on')
+    const [first] = prompts(h)
+    const at = first.text.indexOf(closing)
+    assert.ok(at > 0)
+    assert.equal(first.text.slice(at).includes('…'), false)
+    assert.ok(first.text.endsWith('plain go on'))
+  } finally {
+    h.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("the kill switch: a resumed handoff or one joined with the person's words is not sent again", async () => {
+  const cases = [
+    [resumedHandoff('pkg'), answer('done', ROUTE)],
+    [handoff('pkg'), user('plain first'), answer('done', ROUTE)],
+  ]
+  for (const messages of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-k4-'))
+    const h = fixture({ cli: 'claude', toolsOn: false, dir })
+    try {
+      h.restart()
+      await agentTurn(h, messages, 'plain next')
+      assert.equal(prompts(h).at(-1).text, 'plain next')
+    } finally {
+      h.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('unreadHandoff is the handoff the Bot team answered itself, and only while that answer is the only one', () => {
+  const h = handoff('pkg')
+  const ack = answer(ACK, ROUTE)
+  const notice = { role: 'user', source: { kind: NOTICE_KIND, form: 'notice', summary: 'A new Fake agent session' }, content: [{ type: 'text', text: '[A new Fake agent session.]' }] }
+  const relay = { role: 'user', source: { kind: 'bot', form: 'relay' }, content: [{ type: 'text', text: 'another Bot' }] }
+  assert.equal(unreadHandoff([h, ack]), h)
+  assert.equal(unreadHandoff([h, notice, ack]), h)
+  assert.equal(unreadHandoff([]), undefined)
+  assert.equal(unreadHandoff([h]), undefined)
+  assert.equal(unreadHandoff([h, ack, user('q'), answer('a')]), undefined)
+  assert.equal(unreadHandoff([h, user('q'), answer('a')]), undefined)
+  assert.equal(unreadHandoff([resumedHandoff('pkg'), answer('a')]), undefined)
+  assert.equal(unreadHandoff([h, ack, handoff('pkg 2')]), undefined)
+  // Another Bot's relay is a turn of its own, not the Bot team's acknowledgement.
+  assert.equal(unreadHandoff([h, relay, answer('a')]), undefined)
 })
 
 test('promptOf keeps a handoff with the person\'s words and drops DSH notes', () => {

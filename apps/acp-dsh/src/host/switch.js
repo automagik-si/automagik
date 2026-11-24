@@ -234,6 +234,29 @@ export function isHandoff(message) {
 
 export const CONTEXT_KINDS = new Set(['runtime-context', 'skill-catalog', 'time-context'])
 
+/** The source kind of the row that says a new agent session does not see the chat before it. */
+export const NOTICE_KIND = 'acp-session'
+
+/**
+ * A Bot part's opening package the agent has not read: the last handoff in `history` when the Bot team
+ * answered it as a turn of its own (not `resume`: a resumed one was the prompt of its own turn) and that
+ * answer is the only one since it. Undefined otherwise. Any user row between the handoff and that answer
+ * other than DSH's context notes and this plugin's notices (the person, a retry, another Bot's relay)
+ * means the answer was a turn of its own, not the Bot team's acknowledgement.
+ * @param {any[]} history the transcript before this turn
+ */
+export function unreadHandoff(history) {
+  const at = history.findLastIndex(isHandoff)
+  if (at < 0 || history[at].source?.resume === true) return undefined
+  const after = history.slice(at + 1)
+  const answers = after.filter(message => (message?.role === 'assistant' && message.source?.synthetic !== SYNTHETIC_KIND) || message?.role === 'tool')
+  if (answers.length !== 1 || answers[0].role !== 'assistant') return undefined
+  const person = after.slice(0, after.indexOf(answers[0]))
+    .some(message => message?.role === 'user' && !isHandoff(message)
+      && !CONTEXT_KINDS.has(message.source?.kind) && message.source?.kind !== NOTICE_KIND)
+  return person ? undefined : history[at]
+}
+
 /** Whether `messages` hold an answer: an assistant turn that is not a bridge's synthetic block. */
 export function answered(messages) {
   return (messages ?? []).some(message =>

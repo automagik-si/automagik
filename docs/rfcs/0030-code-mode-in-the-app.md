@@ -332,6 +332,21 @@ Otherwise:
    goes back the same way. A time-boxed Auto grant ends at the pick and stays ended. A Bot that
    denies `acp_tool` is not moved onto, or back to, an agent that runs its own tools (#2026): the
    switch, or its way back, stops with that reason.
+8. The new part starts its first turn at the commit, so the chat never shows a part with no turn
+   (DSH draws one as a blank home, whose composer is disabled for a Bot outside every workspace). A
+   handoff with nothing to answer is acknowledged by the Bot team itself, with no model call and no
+   row beyond the "Switched to" line; a stopped reply is answered at once. If that turn cannot
+   start, the switch goes back as in 7. After a restart, a part that cannot start is tried again at
+   most 3 times or for 2 minutes from the first try, whichever comes first, with the composer locked
+   meanwhile; then the Bot goes back to the agent it came from with the line of 7. Where there is no
+   way back, it stays on the new agent, the handoff runs once more, and the line names the new
+   agent on both sides.
+9. A handoff package for an agent over ACP is at most 58,000 characters, under acp-dsh's
+   60,000-character replay clip, on every path that opens a part on one: the oldest carried lines
+   are left out first, so the newest messages and the closing line arrive, and a summary too long
+   for it is not carried. With acp-dsh's kill switch (`dshTools: false`) the package still reaches
+   the agent, as plain text ahead of the person's words in the part's first prompt, once;
+   `read_own_chat` does not, because the kill switch turns DSH's tool bridge off.
 
 Only the person moves a Bot to another agent when its chat has history. `update_bot` from a Bot is
 refused ("Only the person moves <name> to another agent. Use propose_bot_change so the person can

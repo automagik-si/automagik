@@ -25,8 +25,8 @@ import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './
 import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
 import {
-  agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, replayBlocks,
-  turnStart,
+  agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, NOTICE_KIND, renderMessage,
+  replayBlocks, turnStart, unreadHandoff,
 } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
 import { callArguments, entered, levelOf, mirrorTool, reviewed, TOOL_NAME } from './tool.js'
@@ -183,8 +183,9 @@ class Blocks {
 
 const textOf = content => (typeof content === 'string' ? content : (content ?? []).filter(block => block?.type === 'text').map(block => block.text).join('\n'))
 
-/** The source kind of the row that says a new agent session does not see the chat before it. */
-export const NOTICE_KIND = 'acp-session'
+// The source kind of the row that says a new agent session does not see the chat before it
+// (switch.js, which reads it too).
+export { NOTICE_KIND }
 
 /**
  * The chat row that says the agent is a new session and has not seen the chat's earlier
@@ -1994,6 +1995,16 @@ export class AcpAdapter extends LlmAdapter {
             live.owed = { renewed: true }
             live.replay = blocks
           }
+        } else if (!replaying) {
+          // The kill switch carries no chat, but a Bot part's handoff package is not chat: it is the record the
+          // part starts from, which the Bot team acknowledged itself, so the agent has never read it. It goes
+          // ahead of the person's words in this first prompt, once, the way the replay would carry it.
+          const row = unreadHandoff(history)
+          const line = row === undefined ? undefined : renderMessage(row)
+          if (line !== undefined) {
+            live.owed = { renewed: true, handoff: true }
+            live.replay = [{ type: 'text', text: this.redact(line) }]
+          }
         }
       } else if (replaying && live.replay !== undefined) {
         // The last turn never reached its prompt (a refused model, a busy agent): its replay is
@@ -2239,7 +2250,7 @@ export class AcpAdapter extends LlmAdapter {
         }
       }
       if (!uploadValid()) return yield uploadStopped()
-      const cutRows = prepared === undefined && fresh && live.replay === undefined
+      const cutRows = prepared === undefined && fresh && (live.replay === undefined || live.owed?.handoff === true)
         ? cutUserRows(options.messages, dshAgent?.session) : []
       const cutIds = new Set(cutRows.map(row => row.id))
       const current = cutRows.length === 0 ? options.messages : options.messages.filter(row => !cutIds.has(row.id))
@@ -2247,7 +2258,7 @@ export class AcpAdapter extends LlmAdapter {
         ...replayBlocks(cutRows, { redact: this.redact, to: agent.name, renewed: true }),
         { type: 'text', text: 'The previous turn was interrupted. Check any tool outcomes before repeating work.' },
       ]
-      const prompt = prepared ?? [...(live.replay ?? recovered), ...promptOf(current, this.redact)]
+      const prompt = prepared ?? [...(live.replay ?? []), ...recovered, ...promptOf(current, this.redact)]
       if (prepared !== undefined) {
         try { checkUploadSize(uploadRun.sessionId, prompt) } catch (error) {
           return yield finish('error', error.message, 'acp_upload_content')

@@ -19,11 +19,46 @@ let rootTree
 const PLACE = { left: 0, top: 0, width: 300, maxHeight: 400 }
 // `drawRoot`: what a test draws instead of the menu (the model card), else the menu.
 let drawRoot
+// Opt-in effect runner (C12), off by default so no other case changes: with EFFECTS on,
+// useEffect/useLayoutEffect take a hook slot and run after each draw when their deps changed,
+// and a menu that closes stays closed (the stub no longer reopens it).
+let EFFECTS = false
+const pendingEffects = []
+let flushing = false
+const runEffects = () => {
+  if (flushing) return
+  flushing = true
+  try {
+    while (pendingEffects.length > 0) {
+      const { slot, run } = pendingEffects.shift()
+      if (typeof slot.cleanup === 'function') slot.cleanup()
+      slot.cleanup = run()
+    }
+  } finally {
+    flushing = false
+  }
+}
+const useEffectStub = (run, deps) => {
+  if (!EFFECTS) return
+  const index = at++
+  const fresh = !(index in SLOTS)
+  if (fresh) SLOTS[index] = { kind: 'effect' }
+  const slot = SLOTS[index]
+  if (slot.kind !== 'effect') throw new Error('hook order changed')
+  const same = !fresh && deps !== undefined && slot.deps !== undefined && deps.length === slot.deps.length
+    && deps.every((dep, i) => Object.is(dep, slot.deps[i]))
+  if (same) return
+  slot.deps = deps
+  pendingEffects.push({ slot, run })
+}
+// The window's listeners, by event type (the anchored menu's mousedown, keydown and scroll).
+const listeners = new Map()
 const draw = () => {
   at = 0
   if (drawRoot !== undefined) return (rootTree = drawRoot())
   const picked = module.exports.ModelMenu(rootProps)
   rootTree = picked.type(picked.props)
+  if (EFFECTS) runEffects()
   return rootTree
 }
 const module = { exports: {} }
@@ -35,12 +70,13 @@ const react = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
   useState: (initial) => {
     const index = at++
-    if (!(index in SLOTS)) SLOTS[index] = { kind: 'state', value: typeof initial === 'function' ? initial() : initial }
+    const fresh = !(index in SLOTS)
+    if (fresh) SLOTS[index] = { kind: 'state', value: typeof initial === 'function' ? initial() : initial }
     const owner = SLOTS
     const slot = SLOTS[index]
     if (slot.kind !== 'state') throw new Error('hook order changed')
     // The anchored menu starts with two null states; the stub keeps it open for the test.
-    if (slot.value === null && initial === null) slot.value = { ...PLACE }
+    if (slot.value === null && initial === null && (!EFFECTS || fresh)) slot.value = { ...PLACE }
     const set = (value) => {
       slot.value = typeof value === 'function' ? value(slot.value) : value
       if (SLOTS === owner) draw()
@@ -53,14 +89,21 @@ const react = {
     if (SLOTS[index].kind !== 'ref') throw new Error('hook order changed')
     return SLOTS[index].value
   },
-  useEffect: () => {},
-  useLayoutEffect: () => {},
+  useEffect: useEffectStub,
+  useLayoutEffect: useEffectStub,
   useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
 }
 runInNewContext(bundle.outputFiles[0].text, {
   module, exports: module.exports,
   document: { body: {}, activeElement: null },
-  window: { innerWidth: 1280, innerHeight: 800, addEventListener() {}, removeEventListener() {} },
+  window: {
+    innerWidth: 1280, innerHeight: 800,
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, new Set())
+      listeners.get(type).add(listener)
+    },
+    removeEventListener(type, listener) { listeners.get(type)?.delete(listener) },
+  },
   requestAnimationFrame: fn => setTimeout(fn, 0),
   cancelAnimationFrame: clearTimeout,
   setTimeout, clearTimeout,
@@ -84,6 +127,8 @@ const rosterOf = (bot = { id: 'b1', name: 'Ops', model: 'deepseek/flash', applie
     // Reasoning known empty: the pick applies at once instead of asking the host.
     { ref: 'acp-claude/default', provider: 'acp-claude', providerName: 'Claude Code', name: 'Default', reasoning: { efforts: [] } },
     { ref: 'acp-claude/haiku', provider: 'acp-claude', providerName: 'Claude Code', name: 'Haiku', reasoning: { efforts: [] } },
+    // A model with levels: its pick opens the level step (C10, C11, C13b).
+    { ref: 'acp-claude/opus', provider: 'acp-claude', providerName: 'Claude Code', name: 'Opus', reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } },
   ],
 })
 const openModels = (roster, extra = {}) => {
@@ -359,4 +404,132 @@ test('C9 (menu): while an agent switch runs, a pick sends nothing and the trigge
   assert.deepEqual(calls.switched, [])
   assert.deepEqual(calls.updated, [])
   assert.equal(find(rootTree, node => node.props.className === 'bt-model-trigger')?.props['aria-busy'], true)
+})
+
+// PLAN-F1 F2 (#2061): "Default" on a level step clears the Bot's level, also when the pick
+// waits on the running question (asked by the menu, or by the host).
+const OPUS = 'acp-claude/opus'
+const pickOpusDefault = (extra = {}) => {
+  SLOTS = []
+  click(openModels(rosterOf(), extra), node => node.props.role === 'menuitemradio' && node.props.title === OPUS)
+  const steps = find(rootTree, node => node.type?.name === 'ModelSteps')
+  assert.ok(steps, 'the levelled model opens its level step')
+  click(steps.type(steps.props), node => node.props.role === 'menuitemradio' && node.props.key === 'default')
+}
+
+test('C10: the level step\'s Default on the running question clears the level when Switch sends it', async () => {
+  const calls = recorder({ turnRunning: id => id === 'b1' })
+  pickOpusDefault()
+  const confirm = await confirmNow()
+  assert.deepEqual(calls.switched, [])
+  confirm.props.onConfirm()
+  await tick()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.switched)), [['b1', OPUS, { effort: null }, { stopReply: true }]])
+  assert.deepEqual(calls.updated, [])
+})
+
+test('C11: the level step\'s Default the host finds a reply running for keeps clearing the level on Switch', async () => {
+  const switched = []
+  globalThis.ACTIONS = {
+    updateBot() { assert.fail('a crossing must use switchRoute') },
+    switchRoute: (...args) => {
+      switched.push(args)
+      return args[3]?.stopReply === true ? Promise.resolve()
+        : Promise.reject(Object.assign(new Error('This stops the current reply and continues on Claude Code.'), { code: 'bot/refused', reason: 'reply-running' }))
+    },
+    refreshModels: () => {},
+  }
+  pickOpusDefault()
+  await tick()
+  await tick()
+  const confirm = confirmOf()
+  assert.ok(confirm, 'the host\'s answer opens the question')
+  assert.deepEqual(JSON.parse(JSON.stringify(switched)), [['b1', OPUS, { effort: null }]])
+  confirm.props.onConfirm()
+  await tick()
+  assert.deepEqual(JSON.parse(JSON.stringify(switched)), [['b1', OPUS, { effort: null }], ['b1', OPUS, { effort: null }, { stopReply: true }]])
+})
+
+// PLAN-F1 F3 + R2.6 + MG-10 (#2061): an approval card arriving scrolls the chat; the running
+// question holds (and follows its trigger while the trigger is drawn); every other menu still
+// closes on a scroll outside it.
+const scrollOutside = () => {
+  for (const listener of Array.from(listeners.get('scroll') ?? [])) listener({ target: { outside: true } })
+}
+const triggerOf = () => find(rootTree, node => node.props.className === 'bt-model-trigger')
+const menuOf = () => find(rootTree, node => node.props.role === 'menu')
+const stubTrigger = (rects) => {
+  const rect = { top: 600, bottom: 630, left: 780, right: 900, width: 120, height: 30 }
+  triggerOf().props.ref.current = {
+    getClientRects: () => rects(rect), getBoundingClientRect: () => rect, contains: () => false, focus() {},
+  }
+}
+
+test('C12: a scroll outside keeps the running question (in place while the trigger is hidden, re-anchored when drawn); with no question it closes the menu', async () => {
+  EFFECTS = true
+  listeners.clear()
+  try {
+    const calls = recorder({ turnRunning: id => id === 'b1' })
+    pickHaiku()
+    await confirmNow()
+    let hidden = true
+    stubTrigger(rect => (hidden ? [] : [rect]))
+    const before = JSON.stringify(menuOf().props.style)
+    assert.ok((listeners.get('scroll')?.size ?? 0) > 0, 'the open menu listens for scrolls')
+    // The approval panel hides the composer bar: no client rects, the question keeps its place.
+    scrollOutside()
+    await tick()
+    assert.ok(confirmOf(), 'the running question is still drawn')
+    assert.equal(triggerOf().props['aria-expanded'], true)
+    assert.equal(menuOf().props['data-leaving'], undefined)
+    assert.equal(JSON.stringify(menuOf().props.style), before)
+    // The trigger is drawn again: the question follows it.
+    hidden = false
+    scrollOutside()
+    await tick()
+    assert.ok(confirmOf(), 'the running question is still drawn')
+    assert.equal(triggerOf().props['aria-expanded'], true)
+    assert.deepEqual(JSON.parse(JSON.stringify(menuOf().props.style)), { left: 600, width: 300, bottom: 204, maxHeight: 584, '--bt-origin': 'bottom right' })
+    assert.deepEqual(calls.switched, [])
+    assert.deepEqual(calls.updated, [])
+
+    // No question (the model step): the same scroll closes the menu.
+    listeners.clear()
+    const idle = recorder()
+    SLOTS = []
+    openModels(rosterOf())
+    stubTrigger(() => [])
+    assert.equal(triggerOf().props['aria-expanded'], true)
+    scrollOutside()
+    await tick()
+    assert.equal(triggerOf().props['aria-expanded'], false)
+    assert.equal(listeners.get('scroll')?.size ?? 0, 0)
+    assert.deepEqual(idle.switched, [])
+    assert.deepEqual(idle.updated, [])
+  } finally {
+    EFFECTS = false
+    SLOTS = []
+    listeners.clear()
+  }
+})
+
+// PLAN-F1-r2 R2.7 (#2061): a saved Bot's settings picker hears that the pick came from a level
+// step, idle or on the running question, so its Default clears the level too.
+test('C13b: the settings picker gets level: true from the level step\'s Default, idle and on the running question', async () => {
+  for (const running of [false, true]) {
+    const calls = recorder(running ? { turnRunning: id => id === 'b1' } : {})
+    const picked = []
+    pickOpusDefault({ onPick: (ref, options, ...rest) => { picked.push([ref, options, ...rest]); return Promise.resolve() } })
+    if (running) {
+      const confirm = await confirmNow()
+      assert.deepEqual(picked, [])
+      confirm.props.onConfirm()
+    }
+    await tick()
+    assert.deepEqual(JSON.parse(JSON.stringify(picked)), running
+      ? [[OPUS, { routeChange: true, level: true }, { stopReply: true }]]
+      : [[OPUS, { routeChange: true, level: true }]])
+    assert.deepEqual(calls.switched, [])
+    assert.deepEqual(calls.updated, [])
+  }
 })

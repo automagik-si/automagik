@@ -9483,7 +9483,7 @@ function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2,
 }
 var menuRows = (node) => [...node.querySelectorAll('[role^="menuitem"]:not(:disabled)')];
 var Caret = () => (0, import_react16.createElement)("svg", { className: "bt-model-caret", width: 12, height: 12, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, (0, import_react16.createElement)("path", { d: "M5.5 8l4.5 4.5L14.5 8" }));
-function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
+function useAnchoredMenu({ onEscape, minWidth = 240, holdOnScroll = false } = {}) {
   const [anchor, setAnchor] = (0, import_react16.useState)(null);
   const [place, setPlace] = (0, import_react16.useState)(null);
   const [shownPlace, leaving] = useLinger(place, MENU_EXIT_MS);
@@ -9492,6 +9492,8 @@ function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
   const tick = useViewport();
   const escape = (0, import_react16.useRef)(onEscape);
   escape.current = onEscape;
+  const hold = (0, import_react16.useRef)(holdOnScroll);
+  hold.current = holdOnScroll;
   const close = () => {
     setAnchor(null);
     setPlace(null);
@@ -9511,7 +9513,12 @@ function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
       button2.current?.focus();
     };
     const onScroll = (event) => {
-      if (!menu.current?.contains(event.target)) close();
+      if (menu.current?.contains(event.target)) return;
+      if (!hold.current) {
+        close();
+        return;
+      }
+      if ((button2.current?.getClientRects?.().length ?? 0) > 0) setAnchor({});
     };
     window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey, true);
@@ -9596,7 +9603,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     else setView(MENU_ROOT);
     return true;
   };
-  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300 });
+  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300, holdOnScroll: confirm?.ask === "running" });
   const live = (0, import_react16.useRef)(false);
   live.current = isOpen;
   const switching = (0, import_react16.useSyncExternalStore)(actions?.subscribeWork ?? noWork, () => typeof actions?.modelStateOf?.(bot.id)?.switching?.to === "string");
@@ -9666,11 +9673,11 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
   const crossing = (ref) => Boolean(current) && saved && ref !== current && crossesHarness(current, ref);
   const recovery = (ref) => saved && bot.shellHeld !== void 0 && !commandCapableAgent(ref);
   const askFor = (ref) => askFirst(current, ref, actions?.turnRunning?.(currentPart(bot)) === true);
-  const askAgain = (ref, effort) => (error) => {
+  const askAgain = (ref, effort, level = false) => (error) => {
     if (error?.reason !== "reply-running" || owner.current !== bot.id) throw error;
     keys.current = true;
     setView(MENU_ROOT);
-    setConfirm({ ref, effort, ask: "running" });
+    setConfirm({ ref, effort, ask: "running", level });
     open();
     return void 0;
   };
@@ -9678,9 +9685,9 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     if (switching) return void 0;
     const sending = stopReply ? [{ stopReply: true }] : [];
     if (routeChange && typeof onPick === "function") {
-      return Promise.resolve(onPick(ref, { routeChange: true, effort }, ...sending)).catch(stopReply ? (error) => {
+      return Promise.resolve(onPick(ref, { routeChange: true, effort, ...level ? { level: true } : {} }, ...sending)).catch(stopReply ? (error) => {
         throw error;
-      } : askAgain(ref, effort));
+      } : askAgain(ref, effort, level));
     }
     if (onPick) {
       const pickedIt = Promise.resolve(onPick(ref));
@@ -9700,7 +9707,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
       const pick4 = chat && actions.switchRouteInChat ? actions.switchRouteInChat : actions.switchRoute;
       if (typeof pick4 === "function") {
         const sent = Promise.resolve(pick4(bot.id, ref, level || effort !== void 0 ? { effort: effort ?? null } : {}, ...sending));
-        return run3(stopReply ? sent : sent.catch(askAgain(ref, effort)));
+        return run3(stopReply ? sent : sent.catch(askAgain(ref, effort, level)));
       }
     }
     if (chat && actions.chooseModelInChat) return run3(actions.chooseModelInChat(bot.id, ref, level || effort !== void 0 ? { effort: effort ?? null } : {}));
@@ -9763,7 +9770,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     if (!routeChange && crossing(model.ref)) {
       const ask = askFor(model.ref);
       if (ask !== null) {
-        setConfirm({ ref: model.ref, effort, ask });
+        setConfirm({ ref: model.ref, effort, ask, level: true });
         return;
       }
       routeChange = true;
@@ -9817,7 +9824,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
       const next = confirm;
       setConfirm(void 0);
       finish();
-      void Promise.resolve(pickModel(next.ref, next.effort, { routeChange: true, stopReply: next.ask === "running" })).catch(() => {
+      void Promise.resolve(pickModel(next.ref, next.effort, { routeChange: true, level: next.level === true, stopReply: next.ask === "running" })).catch(() => {
       });
     }
   });
@@ -15805,7 +15812,7 @@ function settingsModelPicker({ bot, roster, actions, run: run3, onFailure = () =
     if (error?.reason === "reply-running" && sending?.stopReply !== true) throw error;
     return run3(Promise.reject(error).catch(onFailure(ref)));
   });
-  const pick4 = (ref, { routeChange = false, effort } = {}, sending) => routeChange ? pickRoute(ref, effort === void 0 ? {} : { effort }, sending) : ref !== (bot.model ?? bot.appliedModel) || !bot.model ? pickModel(ref) : void 0;
+  const pick4 = (ref, { routeChange = false, effort, level = false } = {}, sending) => routeChange ? pickRoute(ref, level || effort !== void 0 ? { effort: effort ?? null } : {}, sending) : ref !== (bot.model ?? bot.appliedModel) || !bot.model ? pickModel(ref) : void 0;
   return { bot, roster, actions, run: run3, saved: true, onPick: pick4 };
 }
 
@@ -21903,7 +21910,7 @@ function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, us
   function triggerBody() {
     if (source.kind === "bot") {
       if (source.handoff === true) return (0, import_react49.createElement)(EarlierParts, { sessionId, roster, actions });
-      if (source.role === "kickoff" || source.role === "room" || source.role === "goal") return null;
+      if (source.role === "kickoff" || source.role === "room" || source.role === "goal" || source.role === "handoff-note") return null;
       if (source.role === "secret" || deferred) return null;
       if (source.role === "update") return (0, import_react49.createElement)("div", { className: "bt-event" }, t("Profile updated"));
       if (source.role === "post") {
@@ -25585,7 +25592,7 @@ var import_react55 = require("react");
 var import_react_dom8 = require("react-dom");
 var PHRASE_HOLD_MS = 800;
 var drawPhrase = (pool) => t(pool[Math.min(pool.length - 1, Math.floor(Math.random() * pool.length))]);
-var rowVisible = ({ running: running2, streaming, tools, relaying, bot, room: room2 }) => running2 && (!streaming || tools.length > 0) && !relaying && (bot !== void 0 || room2 !== void 0);
+var rowVisible = ({ running: running2, streaming, tools, relaying, bot, room: room2, noting = false }) => !noting && running2 && (!streaming || tools.length > 0) && !relaying && (bot !== void 0 || room2 !== void 0);
 var freshInputAt = (submissions, steeredAt) => Math.max(
   0,
   steeredAt ?? 0,
@@ -25683,6 +25690,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   else if (runAt.current === 0) runAt.current = Date.now();
   const liveKey = useLive((state2) => JSON.stringify(state2[sessionId] ?? {}));
   const steeredAt = useWork?.((work) => work.steered?.[sessionId]);
+  const noting = useWork?.((work) => work.noting?.[sessionId] === true) === true;
   const pendingInput = useSession((snapshot2) => freshInputAt(snapshot2?.pendingSubmissions, steeredAt));
   const bot = roster.byId[sessionId];
   const room2 = roster.roomsById[sessionId];
@@ -25694,7 +25702,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   const streaming = entries2.some((entry) => entry.text);
   const tools = entries2.filter((entry) => !entry.text).sort((a, b) => a.at - b.at);
   const relaying = tools.some((entry) => entry.relay);
-  const visible = moveAt !== 0 || rowVisible({ running: running2, streaming, tools, relaying, bot, room: room2 });
+  const visible = moveAt !== 0 || rowVisible({ running: running2, streaming, tools, relaying, bot, room: room2, noting });
   const tool = tools.at(-1);
   const inputRef = (0, import_react55.useRef)(0);
   const inputAt = Math.max(inputRef.current, pendingInput);

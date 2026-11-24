@@ -11,8 +11,9 @@ export function settingsModelPicker({ bot, roster, actions, run, onFailure = () 
       if (error?.reason === 'reply-running' && sending?.stopReply !== true) throw error
       return run(Promise.reject(error).catch(onFailure(ref)))
     })
-  const pick = (ref, { routeChange = false, effort } = {}, sending) => (routeChange
-    ? pickRoute(ref, effort === undefined ? {} : { effort }, sending)
+  // `level`: picked on a level step, where Default clears the Bot's level (as the chat menu).
+  const pick = (ref, { routeChange = false, effort, level = false } = {}, sending) => (routeChange
+    ? pickRoute(ref, level || effort !== undefined ? { effort: effort ?? null } : {}, sending)
     : (ref !== (bot.model ?? bot.appliedModel) || !bot.model ? pickModel(ref) : undefined))
   return { bot, roster, actions, run, saved: true, onPick: pick }
 }

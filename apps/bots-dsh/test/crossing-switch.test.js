@@ -36,6 +36,7 @@ function inboxOf() {
     nextStep: [], nextTurn: [], unshift() {},
     remove(id) { for (const list of [inbox.nextStep, inbox.nextTurn]) { const at = list.findIndex(item => item.id === id); if (at >= 0) list.splice(at, 1) } },
     prepend(target, item) { (target === 'next-step' ? inbox.nextStep : inbox.nextTurn).unshift(item) },
+    append(target, item) { (target === 'next-step' ? inbox.nextStep : inbox.nextTurn).push(item) },
   }
   return inbox
 }
@@ -810,9 +811,9 @@ test('MY-6 a resumed handoff with only injected messages behind it is still woke
   assert.deepEqual(onFresh.map(send => send.item.source.exchangeId).sort(), ['e-cut', 'e-inject'])
 })
 
-// MY-7 (MD-3, M9): after a restart, a bare handoff that resumes nothing, with nothing behind
-// it, stays inert until the next message.
-test('MY-7 a restart after the commit leaves a bare non-resume handoff inert', async t => {
+// F1 (reverses MY-7): after a restart, a bare handoff opens its turn at once, as the live switch
+// does: Omni acknowledges it with no model call, so the part is never left with no turn.
+test('F1 a restart after the commit wakes a bare non-resume handoff once (HANDOFF_ACK answers it)', async t => {
   const b = bench()
   t.after(() => b.ctx.dispose())
   const freshId = await b.rt.createSession()
@@ -823,7 +824,7 @@ test('MY-7 a restart after the commit leaves a bare non-resume handoff inert', a
   b.rt.state.switching.s1 = { botId: 'b1' }
   await b.rt.heldBack()
   assert.equal(b.rt.state.switching.s1, undefined)
-  assert.deepEqual(b.calls.sends, [])
+  assert.deepEqual(b.calls.sends.map(send => [send.id, send.item.source.exchangeId, send.wake]), [[freshId, 'e-bare', true]])
   assert.deepEqual(fresh.inbox.nextTurn.map(item => item.source.exchangeId), ['e-bare'])
   assert.deepEqual(fresh.inbox.nextStep, [])
 })
@@ -881,4 +882,639 @@ test('T4 MD-2 an ACP in-chat note over the note bound is not carried; the reques
   assert.equal(b.calls.background, 0)
   assert.equal(b.calls.notes.length, 0)
   assert.equal(b.calls.warnings.filter(line => /handoff note written for the agent switch of %s is over %d tokens/.test(line)).length, 1)
+})
+
+// ---- F1 (stage 6): an idle crossing leaves no part without a turn ----
+// A fresh part's `send` that fails: `before` throws before it queues, `after` queues and then
+// throws; `unloaded` throws the error of a plugin whose context is gone. `when` picks the sends
+// that fail; the rest go through. Answers the failed sends.
+const failSend = (b, id, { mode = 'before', unloaded = false, when = () => true, onFail } = {}) => {
+  const agent = b.agents.get(id)
+  const through = agent.send.bind(agent)
+  const failed = []
+  agent.send = (item, where, wake) => {
+    if (!when(item, wake, failed)) return through(item, where, wake)
+    failed.push({ id, item, wake })
+    if (mode === 'after') (where === 'next-step' ? agent.inbox.nextStep : agent.inbox.nextTurn).push(item)
+    onFail?.(item)
+    throw new Error(unloaded ? 'Cannot use a service in inactive context' : 'the driver could not start')
+  }
+  return failed
+}
+// A waking send on an idle agent: DSH's driver claims every next-step message and the first
+// next-turn one, and the agent runs.
+const claiming = (agent) => {
+  agent.claimed = []
+  const through = agent.send.bind(agent)
+  agent.send = (item, where, wake) => {
+    through(item, where, wake)
+    if (!wake || agent.status === 'running') return
+    agent.claimed.push(...agent.inbox.nextStep.splice(0), ...agent.inbox.nextTurn.splice(0, 1))
+    agent.status = 'running'
+  }
+  return agent
+}
+// Runs `fn(agent, id)` on each fresh part as it is made.
+const onFresh = (b, fn) => {
+  const create = b.rt.createSession
+  b.rt.createSession = async (...args) => {
+    const id = await create(...args)
+    fn(b.agents.get(id), id)
+    return id
+  }
+}
+const ids2 = (list) => list.map(item => item.source?.exchangeId)
+const queuedOf = agent => [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
+const once = (list, exchangeId) => list.filter(item => item.source?.exchangeId === exchangeId).length
+
+// T22: an idle crossing wakes the fresh part at the commit with its bare handoff, once.
+test('T22 an idle crossing wakes the fresh part with its bare handoff at the commit, once', async t => {
+  for (const [model, target] of [['deepseek/v4', 'acp-claude/default'], ['acp-codex/default', 'deepseek/v4']]) {
+    const b = bench({ model })
+    t.after(() => b.ctx.dispose())
+    b.rt.config.crossingNoteTimeoutMs = 20
+    await b.rt.switchRoute('b1', target)
+    await b.moved()
+    const onFresh2 = b.calls.sends.filter(send => send.id === 's2')
+    assert.deepEqual(onFresh2.map(send => [send.item.source.handoff, send.item.source.resume, send.wake]), [[true, undefined, true]])
+    assert.equal(onFresh2[0].item, b.handoffOf('s2'))
+    assert.deepEqual(queuedOf(b.agent), [])
+    assert.equal(b.rt.awaitingFirstAnswer('s2'), true)
+  }
+})
+
+// T22b: the ack turn through the real listeners: no answer of the route, no model state change.
+test('T22b the HANDOFF_ACK turn settles nothing and is no answer in the model state', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  b.bot.previousModel = 'deepseek/v4'
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.moved()
+  const handoff = b.handoffOf('s2')
+  const chunks = []
+  for await (const chunk of b.listener('llm/stream')({ sessionId: 's2', messages: [handoff] }, () => assert.fail('a bare handoff is acknowledged'))) chunks.push(chunk)
+  assert.equal(chunks.find(chunk => chunk.type === 'text-delta').text, HANDOFF_ACK)
+  b.sessionEvent('s2', { type: 'turn/start', data: { turn: 1 } })
+  b.sessionEvent('s2', { type: 'assistant/message', data: { message: { source: { provider: 'acp-claude', model: 'default' }, content: [{ type: 'text', text: HANDOFF_ACK }] } } })
+  b.sessionEvent('s2', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  await tick()
+  assert.equal(b.rt.awaitingFirstAnswer('s2'), true)
+  assert.equal(b.calls.archived.includes('s1'), false)
+  const view = b.rt.modelStateView().b1
+  assert.deepEqual({ answered: view.answered, pending: view.pending }, { answered: false, pending: true })
+  // The next batch holds the person's words: it is not acknowledged (pass-through check).
+  const ack = { role: 'assistant', content: [{ type: 'text', text: HANDOFF_ACK }] }
+  const person = message('user', 'go on', { exchangeId: 'e-next' })
+  let passed
+  b.listener('llm/stream')({ sessionId: 's2', messages: [handoff, ack, person] }, () => { passed = true })
+  assert.equal(passed, true)
+  b.sessionEvent('s2', { type: 'turn/start', data: { turn: 2 } })
+  b.sessionEvent('s2', { type: 'assistant/message', data: { message: { source: { provider: 'acp-claude', model: 'default' }, content: [{ type: 'text', text: 'hello' }] } } })
+  await waitFor(() => b.calls.archived.includes('s1'))
+  assert.equal(b.rt.modelStateView().b1.answered, true)
+})
+
+// T22c (a): the fresh part cannot be woken: the switch goes back whole from inside its job.
+test('T22c (a) a fresh part that cannot be woken takes the switch back whole, the marker cleared in that save', async t => {
+  for (const mode of ['before', 'after']) {
+    const b = bench()
+    t.after(() => b.ctx.dispose())
+    Object.assign(b.bot, { effort: 'high', appliedEffort: 'high', previousModel: 'deepseek/v4' })
+    let failed
+    onFresh(b, (_agent, id) => { failed = failSend(b, id, { mode }) })
+    await b.rt.switchRoute('b1', 'acp-claude/default')
+    await b.settled()
+    assert.equal(failed.length, 1)
+    assert.equal(b.bot.sessionId, 's1')
+    assert.deepEqual({ model: b.bot.model, appliedModel: b.bot.appliedModel, effort: b.bot.effort, appliedEffort: b.bot.appliedEffort },
+      { model: 'deepseek/v4', appliedModel: 'deepseek/v4', effort: 'high', appliedEffort: 'high' })
+    assert.equal((await b.rt.modelStateOf('b1')).lastFailure.code, SWITCH_FAILED)
+    assert.equal(b.calls.archived.includes('s2'), true)
+    assert.equal(b.calls.archived.includes('s1'), false)
+    assert.equal(b.calls.diagnostics.some(text => / completed/.test(text)), false)
+    assert.equal(b.rt.state.switching.s1, undefined)
+    assert.equal(queuedOf(b.freshAgent('s2')).filter(item => item.source?.handoff === true).length, 1)
+  }
+})
+
+// T22c (b): an unloaded plugin keeps the marker; the restart pass wakes the part once.
+test('T22c (b) an unloaded wake keeps the marker; the restart pass wakes the fresh part once', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  let fresh
+  onFresh(b, (agent, id) => { fresh = agent; failSend(b, id, { unloaded: true, when: (_item, _wake, failed) => failed.length === 0 }) })
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.moved()
+  assert.notEqual(b.rt.state.switching.s1, undefined)
+  assert.equal(queuedOf(fresh).filter(item => item.source?.handoff === true).length, 1)
+  assert.equal(b.calls.sends.filter(send => send.id === 's2').length, 0)
+  await b.rt.heldBack()
+  assert.deepEqual(b.calls.sends.filter(send => send.id === 's2').map(send => [send.item.source.handoff, send.wake]), [[true, true]])
+  assert.equal(b.rt.state.switching.s1, undefined)
+})
+
+// T22c (c) MF-1: the way back's commit save fails: no unhandled rejection, one warn, marker kept.
+test('T22c (c) a failing commit save on the way back warns once and keeps the marker', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  const unhandled = []
+  const spy = error => unhandled.push(error)
+  process.on('unhandledRejection', spy)
+  t.after(() => process.off('unhandledRejection', spy))
+  const save = b.rt.save
+  let armed = false
+  b.rt.save = async () => {
+    if (armed && b.bot.sessionId === 's1') {
+      armed = false
+      throw new Error('disk full')
+    }
+    return save()
+  }
+  onFresh(b, (_agent, id) => failSend(b, id, { onFail: () => { armed = true } }))
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.settled()
+  await tick()
+  assert.deepEqual(unhandled, [])
+  assert.equal(b.calls.warnings.filter(line => /going back from the fresh part %s failed/.test(line) && / s2 /.test(line)).length, 1)
+  assert.notEqual(b.rt.state.switching.s1, undefined)
+})
+
+// T22c (d) MF-2: what the failed wake took out goes back once, in order.
+test('T22c (d) a failed wake puts the handoff and an injected message back once, in order', async t => {
+  for (const mode of ['before', 'after']) {
+    const b = bench()
+    t.after(() => b.ctx.dispose())
+    b.agent.inbox.nextStep.push(message('notice', 'a background notice', { exchangeId: 'e-inject' }))
+    let fresh
+    onFresh(b, (agent, id) => { fresh = agent; failSend(b, id, { mode, unloaded: true }) })
+    await b.rt.switchRoute('b1', 'acp-claude/default')
+    await b.moved()
+    assert.deepEqual(ids2(fresh.inbox.nextStep), ['e-inject'])
+    assert.deepEqual(fresh.inbox.nextTurn.map(item => item.source.handoff), [true])
+  }
+})
+
+// T22c (d2) MG-1: a message the driver claimed is not put back; the rest is, once.
+test('T22c (d2) a wake that fails after the driver claimed puts back only what it did not claim', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  b.agent.inbox.nextStep.push(message('notice', 'a background notice', { exchangeId: 'e-inject' }))
+  let fresh
+  onFresh(b, (agent, id) => {
+    fresh = claiming(agent)
+    failSend(b, id, { unloaded: true, when: item => item.source?.handoff === true })
+  })
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.moved()
+  assert.deepEqual(ids2(fresh.claimed), ['e-inject'])
+  const handoffs = [...fresh.claimed, ...queuedOf(fresh)].filter(item => item.source?.handoff === true)
+  assert.equal(handoffs.length, 1)
+  assert.equal(once([...fresh.claimed, ...queuedOf(fresh)], 'e-inject'), 1)
+  assert.equal(queuedOf(fresh).some(item => fresh.claimed.includes(item)), false)
+})
+
+// T22c (e) MF-3, MG-2, MG-3: input during the way back runs once, on the part the Bot ends on.
+test('T22c (e) input during the way back: fenced on the fresh part, the old part runs as it is after the commit', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  const loadGate = Promise.withResolvers()
+  const moveGate = Promise.withResolvers()
+  let gateLoad = false
+  let inLoad = false
+  let inMove = false
+  b.rt.load = async () => {
+    if (!gateLoad) return
+    gateLoad = false
+    inLoad = true
+    await loadGate.promise
+  }
+  b.rt.moveSchedules = async (from, to) => {
+    if (from !== 's2' || to !== 's1') return
+    inMove = true
+    await moveGate.promise
+  }
+  let failed
+  onFresh(b, (_agent, id) => { failed = failSend(b, id, { onFail: () => { gateLoad = true } }) })
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await waitFor(() => inLoad)
+  // Window 1: before the commit the fresh part runs nothing.
+  const m1 = message('user', 'during the way back', { exchangeId: 'e-m1' })
+  assert.equal((await b.preStep('s2', { messages: [m1] })).passed, false)
+  loadGate.resolve()
+  await waitFor(() => inMove)
+  assert.equal(b.bot.sessionId, 's1')
+  // Window 1b: after the commit save the fresh part is fenced still.
+  const m3 = message('user', 'after the commit, to the fresh part', { exchangeId: 'e-m3' })
+  assert.equal((await b.preStep('s2', { messages: [m3] })).passed, false)
+  // Window 2: the old part runs as it is; nothing is carried.
+  const m2 = message('user', 'after the commit, to the old part', { exchangeId: 'e-m2' })
+  assert.equal((await b.preStep('s1', { messages: [m2] })).passed, true)
+  moveGate.resolve()
+  await b.settled()
+  const onOld = b.calls.sends.filter(send => send.id === 's1')
+  assert.equal(once(onOld.map(send => send.item), 'e-m1'), 1)
+  assert.equal(once(onOld.map(send => send.item), 'e-m3'), 1)
+  assert.equal(once(onOld.map(send => send.item), 'e-m2'), 0)
+  assert.equal(onOld.filter(send => send.wake).length, 1)
+  assert.equal([...failed, ...b.calls.sends.filter(send => send.id === 's2')].some(send => ['e-m1', 'e-m3'].includes(send.item.source?.exchangeId)), false)
+  assert.equal(b.calls.archived.includes('s2'), true)
+})
+
+// T22c (e2) MG-3: a stopped reply goes on in the old part, once, ahead of what was fenced.
+test('T22c (e2) a resumed crossing going back: the cut runs once on the old part, fenced input behind it', async t => {
+  const b = cutBench()
+  t.after(() => b.ctx.dispose())
+  const loadGate = Promise.withResolvers()
+  const archiveGate = Promise.withResolvers()
+  let gateLoad = false
+  let inLoad = false
+  let inArchive = false
+  b.rt.load = async () => {
+    if (!gateLoad) return
+    gateLoad = false
+    inLoad = true
+    await loadGate.promise
+  }
+  b.ctx.workspaceRegistry.archiveSession = async (id) => {
+    b.calls.archived.push(id)
+    if (id !== 's2') return
+    inArchive = true
+    await archiveGate.promise
+  }
+  onFresh(b, (_agent, id) => failSend(b, id, { onFail: () => { gateLoad = true } }))
+  await b.rt.switchRoute('b1', 'acp-claude/default', undefined, { stopReply: true })
+  await waitFor(() => inLoad)
+  claiming(b.agent)
+  // Before the way back commits, what reaches the fresh part is the switch's to carry.
+  const m2 = message('user', 'carried before the commit', { exchangeId: 'e-m2' })
+  assert.equal((await b.preStep('s2', { messages: [m2] })).passed, false)
+  loadGate.resolve()
+  await waitFor(() => inArchive)
+  // After the commit, before the job ends, the old part's own step runs.
+  const cut = b.agent.claimed.find(item => item.source?.exchangeId === 'e-cut')
+  assert.notEqual(cut, undefined)
+  assert.equal((await b.preStep('s1', { messages: [cut] })).passed, true)
+  archiveGate.resolve()
+  await b.settled()
+  const onOld = b.calls.sends.filter(send => send.id === 's1').map(send => send.item.source?.exchangeId)
+  assert.equal(onOld.filter(id => id === 'e-cut').length, 1)
+  assert.equal(onOld.filter(id => id === 'e-m2').length, 1)
+  assert.ok(onOld.indexOf('e-cut') < onOld.indexOf('e-m2'))
+})
+
+// T22c (f) MG-4: no way back (acp_tool denied): the fresh part runs its handoff once more.
+test('T22c (f) no way back: the fresh part reruns its handoff with the fenced input behind it', async t => {
+  {
+    const b = bench({ model: 'acp-antigravity/default' })
+    t.after(() => b.ctx.dispose())
+    b.rt.config.crossingNoteTimeoutMs = 20
+    const loadGate = Promise.withResolvers()
+    let gateLoad = false
+    let inLoad = false
+    b.rt.load = async () => {
+      if (!gateLoad) return
+      gateLoad = false
+      inLoad = true
+      await loadGate.promise
+    }
+    let fresh
+    onFresh(b, (agent, id) => {
+      fresh = agent
+      failSend(b, id, { when: (_item, _wake, failed) => failed.length === 0, onFail: () => { b.bot.denyTools = ['acp_tool']; gateLoad = true } })
+    })
+    await b.rt.switchRoute('b1', 'deepseek/v4')
+    await waitFor(() => inLoad)
+    const m1 = message('user', 'during the way back', { exchangeId: 'e-m1' })
+    assert.equal((await b.preStep('s2', { messages: [m1] })).passed, false)
+    loadGate.resolve()
+    await b.settled()
+    assert.equal(b.bot.sessionId, 's2')
+    assert.equal(b.bot.model, 'deepseek/v4')
+    const sent = b.calls.sends.filter(send => send.id === 's2')
+    assert.deepEqual(sent.map(send => [send.item.source.handoff === true, send.wake]), [[true, true], [false, false]])
+    assert.equal(b.rt.state.switching.s1, undefined)
+    assert.equal(b.calls.archived.includes('s1'), true)
+    assert.equal(once(queuedOf(fresh), 'e-m1'), 1)
+    assert.equal(once(queuedOf(b.agent), 'e-m1'), 0)
+    // The fresh part is no longer fenced: its own step runs.
+    assert.equal((await b.preStep('s2', { messages: [b.handoffOf('s2')] })).passed, true)
+  }
+  {
+    const b = bench({ model: 'acp-antigravity/default' })
+    t.after(() => b.ctx.dispose())
+    b.rt.config.crossingNoteTimeoutMs = 20
+    let failing = true
+    let failed
+    onFresh(b, (_agent, id) => { failed = failSend(b, id, { when: () => failing, onFail: () => { b.bot.denyTools = ['acp_tool'] } }) })
+    await b.rt.switchRoute('b1', 'deepseek/v4')
+    await b.settled()
+    assert.equal(failed.length, 2)
+    assert.notEqual(b.rt.state.switching.s1, undefined)
+    assert.equal(b.calls.archived.includes('s1'), false)
+    failing = false
+    await b.rt.heldBack()
+    assert.deepEqual(b.calls.sends.filter(send => send.id === 's2').map(send => [send.item.source.handoff, send.wake]), [[true, true]])
+    assert.equal(b.rt.state.switching.s1, undefined)
+    assert.equal(b.calls.archived.includes('s1'), true)
+  }
+})
+
+// T22c (g) MF-3: a way back that cannot run (read-only) keeps the marker for the restart pass.
+test('T22c (g) a way back that bails out keeps the marker; the restart pass wakes the fresh part once', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  onFresh(b, (_agent, id) => failSend(b, id, { when: (_item, _wake, failed) => failed.length === 0, onFail: () => { b.rt.readOnly = () => 'another process holds the team' } }))
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.settled()
+  assert.equal(b.bot.sessionId, 's2')
+  assert.notEqual(b.rt.state.switching.s1, undefined)
+  b.rt.readOnly = () => undefined
+  await b.rt.heldBack()
+  assert.deepEqual(b.calls.sends.filter(send => send.id === 's2').map(send => [send.item.source.handoff, send.wake]), [[true, true]])
+  assert.equal(b.rt.state.switching.s1, undefined)
+})
+
+// T22d (MF-4, MG-5, MG-7): a package for an agent over ACP stays under acp-dsh's clip.
+const CLOSING = 'Every message above has had its answer. Nothing needs an answer now; wait for the next message.'
+const longLog = (b) => {
+  const events = []
+  for (let n = 1; n <= 40; n += 1) {
+    events.push({ type: 'user/message', seq: n * 2 - 1, time: n * 2 - 1, data: { content: [{ type: 'text', text: `line ${n} ${'a'.repeat(2990)}` }], source: { kind: 'user' } } })
+    events.push({ type: 'assistant/message', seq: n * 2, time: n * 2, data: { message: { content: [{ type: 'text', text: `ok ${n}` }] } } })
+  }
+  b.logOf.set('s1', events)
+  b.ctx.llm.resolveModelInfo = async () => ({ context: { contextWindow: 4_000_000 }, defaultMaxTokens: 1000 })
+  b.bot.contextRecentTokens = 200_000
+}
+test('T22d a package for an ACP target drops its oldest lines to stay under 58,000 characters; native is whole', async t => {
+  {
+    const b = bench()
+    t.after(() => b.ctx.dispose())
+    longLog(b)
+    await b.rt.switchRoute('b1', 'acp-claude/default')
+    await b.moved()
+    const text = textOf(b.handoffOf('s2').content)
+    assert.ok(text.length <= 58_000, `${text.length}`)
+    assert.ok(text.endsWith(CLOSING))
+    assert.match(text, /#79 · /)
+    assert.doesNotMatch(text, /#1 · /)
+    assert.match(text, /older messages are not listed\./)
+  }
+  {
+    const b = bench({ model: 'acp-codex/default' })
+    t.after(() => b.ctx.dispose())
+    b.rt.config.crossingNoteTimeoutMs = 20
+    longLog(b)
+    await b.rt.switchRoute('b1', 'deepseek/v4')
+    await b.moved()
+    assert.ok(textOf(b.handoffOf('s2').content).length > 60_000)
+  }
+})
+
+test('T22d MG-5 a native note too long for an ACP target is not carried', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  const big = NOTE.replace('- carry on', `- carry on ${'b'.repeat(60_000)}`)
+  b.ctx.llm.stream = (options) => {
+    b.calls.notes.push(options)
+    return (async function* () {
+      yield { type: 'text-delta', index: 0, text: big }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })()
+  }
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.moved()
+  assert.equal(b.calls.notes.length, 1)
+  const text = textOf(b.handoffOf('s2').content)
+  assert.match(text, /\(No note, on purpose:/)
+  assert.doesNotMatch(text, /bbbbbbbbbb/)
+  assert.ok(text.length <= 58_000)
+  assert.ok(text.endsWith(CLOSING))
+  assert.equal(b.calls.warnings.filter(line => /is over %d tokens; it moves on with no summary/.test(line) && / 8192$/.test(line)).length, 1)
+})
+
+test('T22d MG-7 a part move on an ACP agent is capped too; the same move on a native model is not', async t => {
+  {
+    const b = bench({ model: 'acp-claude/default' })
+    t.after(() => b.ctx.dispose())
+    longLog(b)
+    await b.rt.newPart('s1')
+    await b.moved()
+    const text = textOf(b.handoffOf('s2').content)
+    assert.ok(text.length <= 58_000, `${text.length}`)
+    assert.ok(text.endsWith(CLOSING))
+    assert.match(text, /#79 · /)
+    assert.match(text, /older messages are not listed\./)
+  }
+  {
+    const b = bench()
+    t.after(() => b.ctx.dispose())
+    longLog(b)
+    await b.rt.newPart('s1')
+    await b.moved()
+    assert.ok(textOf(b.handoffOf('s2').content).length > 60_000)
+  }
+})
+
+// T22e (MG-8): after a restart, a part that cannot start is tried at most 3 times or for 2
+// minutes, whichever comes first; then the Bot goes back with the existing failure line.
+const afterRestart = (t, { from = 'acp-claude/default', to = 'deepseek/v4', at = Date.now() - 1000, window = 600_000, user = false } = {}) => {
+  const b = bench({ model: from })
+  t.after(() => b.ctx.dispose())
+  let term = 1
+  b.rt.lockTerm = () => term
+  b.nextTerm = () => { term += 1 }
+  b.rt.config.now = () => at
+  if (window !== null) b.rt.config.wakeRetryWindowMs = window
+  return b.rt.createSession().then((freshId) => {
+    const fresh = b.freshAgent(freshId)
+    fresh.inbox.nextTurn.push(message(SOURCE_KIND, '[Handoff · part 2] …', { handoff: true, exchangeId: 'e-bare' }))
+    if (user) fresh.inbox.nextTurn.push(message('user', 'sent while it waited', { exchangeId: 'e-user' }))
+    Object.assign(b.bot, { sessionId: freshId, model: to, appliedModel: to, segments: [{ sessionId: 's1', switchedTo: to, archivePending: true }] })
+    b.rt.pastOwners.set('s1', { botId: 'b1' })
+    b.rt.state.switching.s1 = { botId: 'b1', target: to, back: { model: from, appliedModel: from } }
+    return { b, fresh, freshId, at }
+  })
+}
+const wokenFor = line => /could not be woken for its handoff/.test(line)
+
+test('T22e MH-13 a loaded marker with tries shows the lock before the pass runs', async t => {
+  const { b, at } = await afterRestart(t)
+  Object.assign(b.rt.state.switching.s1, { wakeTries: 1, wakeFailedAt: at })
+  assert.deepEqual(b.rt.modelStateView().b1.switching, { to: 'deepseek/v4', since: at })
+})
+
+test('T22e (a) three failed tries: the Bot goes back with the existing failure line', async t => {
+  const { b, fresh, at } = await afterRestart(t, { user: true })
+  const failed = failSend(b, 's2')
+  for (const tries of [1, 2]) {
+    await b.rt.heldBack()
+    assert.equal(b.rt.state.switching.s1.wakeTries, tries)
+    assert.equal(b.bot.sessionId, 's2')
+    assert.deepEqual(b.rt.switchingChat('b1', { crossing: true }), { to: 'deepseek/v4', since: at })
+    assert.equal(b.calls.warnings.filter(wokenFor).length, tries)
+    b.nextTerm()
+  }
+  await b.rt.heldBack()
+  assert.equal(b.bot.sessionId, 's1')
+  assert.deepEqual({ model: b.bot.model, appliedModel: b.bot.appliedModel }, { model: 'acp-claude/default', appliedModel: 'acp-claude/default' })
+  const failure = (await b.rt.modelStateOf('b1')).lastFailure
+  assert.deepEqual({ code: failure.code, ref: failure.ref, kept: failure.kept }, { code: SWITCH_FAILED, ref: 'deepseek/v4', kept: 'acp-claude/default' })
+  assert.match(failure.text, /could not take over this conversation\. It stays on/)
+  assert.equal(b.rt.state.switching.s1, undefined)
+  assert.equal(b.calls.archived.includes('s2'), true)
+  assert.equal(b.calls.archived.includes('s1'), false)
+  assert.equal(failed.filter(send => send.wake).length, 3)
+  assert.equal(b.calls.sends.filter(send => send.id === 's1' && send.item.source?.exchangeId === 'e-user').length, 1)
+  assert.equal(once(queuedOf(fresh), 'e-user'), 0)
+  assert.equal(b.rt.switchingChat('b1', { crossing: true }), false)
+})
+
+test('T22e (b) two minutes from the first failure: the Bot goes back with no further send', async t => {
+  {
+    const { b, at } = await afterRestart(t, { window: null })
+    const failed = failSend(b, 's2')
+    await b.rt.heldBack()
+    assert.equal(failed.length, 1)
+    b.rt.config.now = () => at + 120_001
+    b.nextTerm()
+    await b.rt.heldBack()
+    assert.equal(failed.length, 1)
+    assert.equal(b.bot.sessionId, 's1')
+    assert.equal(b.rt.state.switching.s1, undefined)
+  }
+  {
+    const { b } = await afterRestart(t, { window: 30 })
+    delete b.rt.config.now
+    const failed = failSend(b, 's2')
+    await b.rt.heldBack()
+    assert.equal(b.bot.sessionId, 's2')
+    await waitFor(() => b.bot.sessionId === 's1')
+    await waitFor(() => b.rt.state.switching.s1 === undefined)
+    assert.equal(failed.length, 1)
+  }
+})
+
+test('T22e (d) a read-only term sends nothing; the next one past the window goes back', async t => {
+  const { b, at } = await afterRestart(t, { window: null })
+  const failed = failSend(b, 's2')
+  await b.rt.heldBack()
+  b.nextTerm()
+  await b.rt.heldBack()
+  b.nextTerm()
+  b.rt.readOnly = () => 'another process holds the team'
+  await b.rt.heldBack()
+  assert.equal(failed.length, 2)
+  assert.deepEqual(b.rt.state.switching.s1, { botId: 'b1', target: 'deepseek/v4', back: { model: 'acp-claude/default', appliedModel: 'acp-claude/default' }, wakeTries: 2, wakeFailedAt: at })
+  b.rt.readOnly = () => undefined
+  b.rt.config.now = () => at + 120_001
+  b.nextTerm()
+  await b.rt.heldBack()
+  assert.equal(failed.length, 2)
+  assert.equal(b.bot.sessionId, 's1')
+  assert.equal(b.rt.state.switching.s1, undefined)
+})
+
+test('T22e (d) MH-5 no way back after a restart: the Bot stays, the handoff runs once more, the line names the new agent', async t => {
+  {
+    const { b, fresh } = await afterRestart(t, { from: 'acp-antigravity/default' })
+    b.bot.denyTools = ['acp_tool']
+    claiming(fresh)
+    const failed = failSend(b, 's2', { when: (_item, _wake, list) => list.length < 3 })
+    for (let n = 0; n < 3; n += 1) {
+      await b.rt.heldBack()
+      b.nextTerm()
+    }
+    assert.equal(failed.length, 3)
+    assert.equal(b.bot.sessionId, 's2')
+    assert.equal(b.bot.model, 'deepseek/v4')
+    assert.equal(b.rt.state.switching.s1, undefined)
+    assert.equal(b.calls.archived.includes('s1'), true)
+    assert.deepEqual(b.calls.sends.filter(send => send.id === 's2').map(send => [send.item.source.exchangeId, send.wake]), [['e-bare', true]])
+    assert.deepEqual(ids2(fresh.claimed), ['e-bare'])
+    const failure = (await b.rt.modelStateOf('b1')).lastFailure
+    assert.deepEqual({ code: failure.code, ref: failure.ref, kept: failure.kept }, { code: SWITCH_FAILED, ref: 'deepseek/v4', kept: 'deepseek/v4' })
+  }
+  {
+    const { b, fresh } = await afterRestart(t, { from: 'acp-antigravity/default' })
+    b.bot.denyTools = ['acp_tool']
+    const failed = failSend(b, 's2')
+    for (let n = 0; n < 4; n += 1) {
+      await b.rt.heldBack()
+      b.nextTerm()
+    }
+    assert.equal(failed.length, 4)
+    assert.equal(b.rt.state.switching.s1, undefined)
+    assert.equal(b.calls.archived.includes('s1'), true)
+    assert.equal(b.bot.sessionId, 's2')
+    assert.deepEqual(ids2(queuedOf(fresh)), ['e-bare'])
+    const failure = (await b.rt.modelStateOf('b1')).lastFailure
+    assert.deepEqual({ code: failure.code, ref: failure.ref, kept: failure.kept }, { code: SWITCH_FAILED, ref: 'deepseek/v4', kept: 'deepseek/v4' })
+  }
+})
+
+test('T22e (e) an unloaded wake is no try; a counted one keeps the old part out of the archive sweep', async t => {
+  const { b } = await afterRestart(t)
+  let unloaded = true
+  const failed = failSend(b, 's2', { unloaded: true, when: () => unloaded })
+  await b.rt.heldBack()
+  assert.equal(failed.length, 1)
+  assert.equal(b.rt.state.switching.s1.wakeTries, undefined)
+  assert.equal(b.rt.state.switching.s1.wakeFailedAt, undefined)
+  unloaded = false
+  failSend(b, 's2')
+  b.nextTerm()
+  await b.rt.heldBack()
+  assert.equal(b.rt.state.switching.s1.wakeTries, 1)
+  assert.equal(b.calls.archived.includes('s1'), false)
+})
+
+test('T22e MH-3 a wake whose first send went out is no failed try: the pass finishes', async t => {
+  const { b, fresh } = await afterRestart(t, { user: true })
+  failSend(b, 's2', { when: item => item.source?.exchangeId === 'e-user' })
+  await b.rt.heldBack()
+  assert.equal(b.rt.state.switching.s1, undefined)
+  assert.equal(b.calls.archived.includes('s1'), true)
+  assert.equal(b.bot.sessionId, 's2')
+  assert.equal(once(queuedOf(fresh), 'e-user'), 1)
+})
+
+// MY-7b: a restart wake that fails keeps the marker; a later pass wakes the part once.
+test('MY-7b a restart wake that throws keeps the marker; the next pass wakes the part once', async t => {
+  for (const mode of ['before', 'after']) {
+    const { b, fresh, freshId } = await afterRestart(t)
+    let failing = true
+    failSend(b, 's2', { mode, when: () => failing })
+    await b.rt.heldBack()
+    assert.notEqual(b.rt.state.switching.s1, undefined)
+    assert.equal(b.calls.warnings.filter(wokenFor).length, 1)
+    assert.equal(once(queuedOf(fresh), 'e-bare'), 1)
+    assert.equal(b.calls.archived.includes('s1'), false)
+    failing = false
+    b.nextTerm()
+    await b.rt.heldBack()
+    assert.deepEqual(b.calls.sends.map(send => [send.id, send.item.source.exchangeId, send.wake]), [[freshId, 'e-bare', true]])
+    assert.equal(b.rt.state.switching.s1, undefined)
+    assert.equal(b.calls.archived.includes('s1'), true)
+  }
+})
+
+// F4c: while the outgoing agent writes its note, the chat draws no activity row for it.
+test('F4c notingView names the old part while an ACP note turn is pending, and nothing after the commit', async t => {
+  const b = bench({ model: 'acp-codex/default' })
+  t.after(() => b.ctx.dispose())
+  let request
+  b.agent.send = (item) => {
+    b.calls.sends.push({ id: 's1', item })
+    if (item.source?.role !== 'handoff-note') return
+    request = item
+    b.rt.markNoteTurn('s1', 4)
+    b.messages.push(item, { role: 'assistant', content: [{ type: 'text', text: IN_CHAT_NOTE }] })
+  }
+  await b.rt.switchRoute('b1', 'deepseek/v4')
+  await waitFor(() => request !== undefined)
+  assert.deepEqual(b.rt.notingView(), { s1: true })
+  b.sessionEvent('s1', { type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } })
+  await b.moved()
+  assert.deepEqual(b.rt.notingView(), {})
 })

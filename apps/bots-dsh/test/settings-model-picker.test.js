@@ -38,3 +38,14 @@ test('a same-route Settings pick still updates the Bot in place', async () => {
   assert.deepEqual(switched, [])
   assert.equal(await props.onPick('deepseek/flash'), undefined)
 })
+
+// PLAN-F1-r2 R2.7 (#2061): the level step's Default in Settings clears the Bot's level, idle
+// or on the running question's Switch, as the chat menu does.
+test('C13a: a Settings crossing picked on a level step\'s Default sends effort null', async () => {
+  for (const sending of [undefined, { stopReply: true }]) {
+    const { props, updated, switched } = picker()
+    await props.onPick('acp-claude/opus', { routeChange: true, level: true }, sending)
+    assert.deepEqual(switched, [['b1', 'acp-claude/opus', { effort: null }]], JSON.stringify(sending))
+    assert.deepEqual(updated, [])
+  }
+})
