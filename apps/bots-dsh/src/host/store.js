@@ -17,6 +17,7 @@ import { refusal } from './refusal.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
 import { markOf } from '../shared/permission-levels.js'
 import { effectiveMarkOf, nativeToolsOn, restrictedBot } from '../shared/native-tools.js'
+import { TASK_ROUTE_DEFAULT } from '../shared/route-policy.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import updateContract from './update-contract.json' with { type: 'json' }
 
@@ -604,9 +605,15 @@ export function install(rt) {
     teamPresentAtLoad = parsed !== undefined ? true : stuck === undefined && !aside ? false : null
     const { migrated, stale } = adopt(parsed)
     if (holder !== undefined) return
+    // Install defaults belong to a new team's saved configuration. Once an
+    // explicit policy takes over, removing it must not restore the seed.
+    const explicitTaskPolicy = rt.config?.routePolicy !== undefined
+    if (teamPresentAtLoad === false && !explicitTaskPolicy) state.taskRoutePolicySeed = TASK_ROUTE_DEFAULT
+    const retiredSeed = explicitTaskPolicy && Object.hasOwn(state, 'taskRoutePolicySeed')
+    if (retiredSeed) delete state.taskRoutePolicySeed
     // A file set aside just now stays where it is: the person's bytes were copied, and the
     // fresh team reaches the disk on the next real save rather than within this read.
-    if (migrated && stuck === undefined && !aside) {
+    if ((migrated || retiredSeed) && stuck === undefined && !aside) {
       // A failed write must not poison `loaded`: the migrated state stays in
       // memory and the next save() writes it.
       try {

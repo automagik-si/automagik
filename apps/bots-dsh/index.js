@@ -217,6 +217,9 @@ export function createRuntime(ctx, config = {}) {
     ctx,
     config,
     routePolicy: selectorRoutePolicy(config.routePolicy ?? DEFAULT_ROUTE_POLICY),
+    get taskRoutePolicy() {
+      return selectorRoutePolicy(config.routePolicy === undefined ? this.state?.taskRoutePolicySeed : config.routePolicy)
+    },
     dshHome,
     home,
     statePath: join(home, 'state.json'),

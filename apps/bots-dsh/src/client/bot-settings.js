@@ -213,10 +213,21 @@ function RoleControls({ bot, runtime, actions, run, readOnly }) {
       setDirty(false)
     }).finally(() => setSaving(false)))
   }
-  const granted = bot.roles[0].grants.includes('audio-out')
+  const grants = bot.roles[0].grants
+  const taskStart = grants.includes('task-start')
+  const routePolicy = grants.includes('route-policy')
   return h(Fragment, null,
-    runtime.capabilities.includes('audio-out') ? h(SwitchRow, { label: t('Allow speech'), on: granted, disabled: readOnly,
+    runtime.capabilities.includes('audio-out') ? h(SwitchRow, { label: t('Allow speech'), on: grants.includes('audio-out'), disabled: readOnly,
       onChange: on => void run(actions.grantRole(bot.id, pin, 'audio-out', on)) }) : null,
+    runtime.capabilities.includes('task-start') ? h(SwitchRow, {
+      label: t('Allow starting tasks'), on: taskStart, disabled: readOnly,
+      hint: bot.reviewGuard === true ? t('Tasks require the review guard to be off.') : undefined,
+      onChange: on => void run(actions.grantRole(bot.id, pin, 'task-start', on)),
+    }) : null,
+    runtime.capabilities.includes('route-policy') ? h(SwitchRow, {
+      label: t('Allow its tasks to run on another model'), on: routePolicy, disabled: readOnly || (!taskStart && !routePolicy),
+      onChange: on => void run(actions.grantRole(bot.id, pin, 'route-policy', on)),
+    }) : null,
     values ? runtime.settings.map(({ key, kind, label }) => {
       const name = label === 'Voice' ? t('Voice') : label === 'Speed' ? t('Speed') : label
       const value = values[key]

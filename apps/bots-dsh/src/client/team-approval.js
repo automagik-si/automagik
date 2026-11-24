@@ -35,7 +35,7 @@ export function approvalView(toolName, args, from) {
   const rows = (keys) => keys.map(key => [key, text(args[key])]).filter(([, value]) => value !== '')
   switch (tool) {
     case 'message_bot': return { title: t('{from} wants to hand work to {to}', { from: who, to: text(args.to) || t('another Bot') }), to: text(args.to), quote: text(args.message), note: t('{to} works on it in its own chat and reports back.', { to: text(args.to) || t('The Bot') }), rows: [] }
-    case 'start_task': return { title: t('{from} wants to start a task', { from: who }), quote: text(args.brief) || text(args.prompt) || text(args.message), rows: rows(['title', 'folder']) }
+    case 'start_task': return { title: t('{from} wants to start a task', { from: who }), quote: text(args.brief) || text(args.prompt) || text(args.message), rows: [...rows(['title', 'folder']), ...(text(args.model) ? [['Requested model', text(args.model)]] : [])] }
     case 'stop_bot': return { title: t('{from} wants to stop {to}', { from: who, to: text(args.to) || text(args.name) || t('another Bot') }), to: text(args.to) || text(args.name), quote: text(args.reason), rows: [] }
     case 'create_bot': return { title: t('{from} wants to add {name} to the team', { from: who, name: text(args.name) || t('a Bot') }), quote: text(args.instructions), rows: rows(['role', 'model']) }
     case 'update_bot': return { title: t('{from} wants to change {name}', { from: who, name: text(args.name) || text(args.to) || t('a Bot') }), quote: text(args.instructions), rows: rows(['role', 'model']) }

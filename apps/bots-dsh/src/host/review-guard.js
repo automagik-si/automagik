@@ -84,6 +84,12 @@ export function install(rt) {
   const reviewerOf = bot => (typeof bot.reviewerId === 'string' && bot.reviewerId !== '' && bot.reviewerId !== bot.id
     ? rt.botOf(bot.reviewerId) : undefined)
   const waiting = text => `${text} A fresh-session review does not open this guard: deliver the plan as BLOCKED-review.`
+  function taskLaunchHold(botId) {
+    const bot = rt.botOf(botId)
+    if (bot?.reviewGuard === true) {
+      return { why: 'guard-launch', text: `${bot.name} cannot use start_task: its review guard is on. Do the work in your own chat, or ask the person to turn the review guard off in ${bot.name}'s Details.` }
+    }
+  }
 
   /**
    * Whether the guard refuses one call: { text, why } (the refusal, and the stop's reason), or
@@ -126,6 +132,12 @@ export function install(rt) {
     if (typeof sessionId !== 'string') return undefined
     const bot = rt.botOfSession?.(sessionId, agent)
     if (bot?.reviewGuard !== true) return undefined
+    if (bridge && teamToolOf(request.toolName) === 'start_task') {
+      const held = taskLaunchHold(bot.id)
+      rt.noteStop?.(sessionId, { why: held.why, tool: request.toolName, callId: request.callId, text: held.text }, agent)
+      request.bridgeCall.refused = { reason: held.text }
+      return held
+    }
     if (rt.ownChatLineage?.(sessionId, agent, bot) !== true) return undefined
     // From here the question is the guarded Bot's own: an error holds it (fails closed, as the
     // executor's path does), and only this Bot's question is refused (DG-3).
@@ -198,7 +210,7 @@ export function install(rt) {
     return { reviewGuardWaitingSince: clean.requestAt }
   }
 
-  Object.assign(rt, { reviewGuardHolds, reviewGuardAsk, setReviewGuard, reviewGuardViewOf })
+  Object.assign(rt, { reviewGuardHolds, reviewGuardAsk, setReviewGuard, reviewGuardViewOf, taskLaunchHold })
 }
 
 /**

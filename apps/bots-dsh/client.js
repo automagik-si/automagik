@@ -1556,6 +1556,25 @@ var ZH = {
   "Runs in the Bot team": "在 Bot 团队中运行",
   "Waits for the isolated runtime": "等待隔离运行环境",
   "Active tools": "已启用的工具",
+  "{name} cannot use start_task: its review guard is on. Do the work in your own chat, or ask the person to turn the review guard off in {name}'s Details.": "{name} 的审阅守卫已开启，无法使用 start_task。请在自己的聊天中完成工作，或请用户在 {name} 的详情中关闭审阅守卫。",
+  "the review guard is on and prevents starting tasks; you can turn it off in Details": "审阅守卫已开启，无法启动任务。你可以在详情中关闭它",
+  "Starting tasks is not allowed for this Bot yet. The person can allow it in this Bot's Details, under Role.": "此 Bot 尚未获准启动任务。用户可以在此 Bot 的详情中的“角色”下允许。",
+  "Naming a model for a task is not allowed for this Bot, so it can name no model now. Leave out model to run the task on your own model, or ask the person to allow it in your Details, under Role.": "此 Bot 不允许为任务指定模型，因此现在不能指定任何模型。省略 model 即可在你自己的模型上运行任务，或请用户在你的详情中的“角色”下允许。",
+  "The model {model} cannot run a task now.": "模型 {model} 现在无法运行任务。",
+  "{model} could not be selected for the task.": "无法为该任务选择 {model}。",
+  "This Bot has Full access on its coding CLI, so its task cannot run on another agent's model. Name a model of the same agent, or leave out model.": "此 Bot 在其编码 CLI 上拥有完全权限，因此其任务不能在其他代理的模型上运行。请指定同一代理的模型，或省略 model。",
+  "The task did not start: {reason}": "任务未启动：{reason}",
+  "The start changed while it was being prepared (a grant, the role, the review guard, the permission level or the Bot), so no turn was sent. Ask again.": "启动在准备期间发生了变化（授权、角色、审阅守卫、权限级别或 Bot），因此未发送任何回合。请重新请求。",
+  "The task's permission level could not be proven no wider than this Bot's and this conversation's, so it did not start.": "无法证明任务的权限级别不高于此 Bot 和此对话的级别，因此任务未启动。",
+  "The model {model} is not in the list of models.": "模型 {model} 不在模型列表中。",
+  "{model} runs only through its coding CLI; name its CLI model.": "{model} 只能通过其编码 CLI 运行；请指定其 CLI 模型。",
+  "Models you may name: {models} and {n} more.": "可以指定的模型：{models} 以及另外 {n} 个。",
+  "Models you may name: none; leave out model.": "可以指定的模型：无；请省略 model。",
+  "Models you may name: {models}.": "可以指定的模型：{models}。",
+  "Allow starting tasks": "允许启动任务",
+  "Allow its tasks to run on another model": "允许其任务在其他模型上运行",
+  "Tasks require the review guard to be off.": "请先关闭审阅守卫，再启动任务。",
+  "Requested model": "请求的模型",
   "Allow speech": "允许朗读",
   "Saved voice unavailable": "保存的语音不可用",
   "ACP coding agents do not receive this role’s prompt.": "ACP 编程助手不会收到此角色的提示词。",
@@ -4044,6 +4063,15 @@ function t(key, params) {
   return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
+  "{name} cannot use start_task: its review guard is on. Do the work in your own chat, or ask the person to turn the review guard off in {name}'s Details.",
+  "The model {model} cannot run a task now.",
+  "{model} could not be selected for the task.",
+  { template: "The task did not start: {reason}", host: ["reason"] },
+  "The model {model} is not in the list of models.",
+  "{model} runs only through its coding CLI; name its CLI model.",
+  "Models you may name: {models} and {n} more.",
+  "Models you may name: none; leave out model.",
+  "Models you may name: {models}.",
   "Detach {name} first.",
   "{name} is already moving to a new conversation.",
   "{name} is still handing on earlier messages; try again shortly.",
@@ -10519,6 +10547,8 @@ function whyText(why) {
       return t("the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details");
     case "guard-request":
       return t("the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details");
+    case "guard-launch":
+      return t("the review guard is on and prevents starting tasks; you can turn it off in Details");
     default:
       return t("a rule here refused it");
   }
@@ -10731,7 +10761,7 @@ var taskState = (task, waiting) => {
 var endLabel = (task) => {
   if (task?.status === "failed") {
     const reason = String(task.summary ?? "").split("\n")[0].trim();
-    return reason ? t("Failed: {reason}", { reason }) : t("Failed");
+    return reason ? t("Failed: {reason}", { reason: hostText(reason) }) : t("Failed");
   }
   return task?.status === "stopped" ? t("Stopped") : t("Task finished");
 };
@@ -10820,7 +10850,7 @@ function TaskCard({
           task?.steps ? (0, import_react19.createElement)("span", { className: "op-task-steps" }, t("step {count}", { count: task.steps })) : null
         ),
         (0, import_react19.createElement)("div", { className: "op-task-bar", "aria-hidden": true }, (0, import_react19.createElement)("i"))
-      ) : task?.summary ? (0, import_react19.createElement)("p", { className: "op-task-summary" }, task.summary) : null,
+      ) : task?.summary ? (0, import_react19.createElement)("p", { className: "op-task-summary" }, status === "failed" ? hostText(task.summary) : task.summary) : null,
       status === "waiting" && grantAsk ? (0, import_react19.createElement)(GrantAction, {
         key: grantAsk.id,
         approval: grantAsk,
@@ -18352,15 +18382,30 @@ function RoleControls({ bot, runtime, actions, run: run3, readOnly }) {
       setDirty(false);
     }).finally(() => setSaving(false)));
   };
-  const granted = bot.roles[0].grants.includes("audio-out");
+  const grants = bot.roles[0].grants;
+  const taskStart = grants.includes("task-start");
+  const routePolicy = grants.includes("route-policy");
   return (0, import_react42.createElement)(
     import_react42.Fragment,
     null,
     runtime.capabilities.includes("audio-out") ? (0, import_react42.createElement)(SwitchRow, {
       label: t("Allow speech"),
-      on: granted,
+      on: grants.includes("audio-out"),
       disabled: readOnly,
       onChange: (on) => void run3(actions.grantRole(bot.id, pin, "audio-out", on))
+    }) : null,
+    runtime.capabilities.includes("task-start") ? (0, import_react42.createElement)(SwitchRow, {
+      label: t("Allow starting tasks"),
+      on: taskStart,
+      disabled: readOnly,
+      hint: bot.reviewGuard === true ? t("Tasks require the review guard to be off.") : void 0,
+      onChange: (on) => void run3(actions.grantRole(bot.id, pin, "task-start", on))
+    }) : null,
+    runtime.capabilities.includes("route-policy") ? (0, import_react42.createElement)(SwitchRow, {
+      label: t("Allow its tasks to run on another model"),
+      on: routePolicy,
+      disabled: readOnly || !taskStart && !routePolicy,
+      onChange: (on) => void run3(actions.grantRole(bot.id, pin, "route-policy", on))
     }) : null,
     values ? runtime.settings.map(({ key, kind, label }) => {
       const name = label === "Voice" ? t("Voice") : label === "Speed" ? t("Speed") : label;
@@ -22582,7 +22627,7 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
   );
 }
 var isComputerCall = (name) => name === "cua" || name?.startsWith("cua_driver_native__") === true;
-var DRAWN = /* @__PURE__ */ new Set(["start_task", "message_bot", "stop_bot", "create_bot", "update_bot", "delete_bot", "group_relay", "create_group", "update_group", "delete_group", "post_to_group", "ask_user", "request_secret", "request_connector", "mail_send", "ask_user_question", "show_view", "show_settings", "propose_bot_change", "browser_handoff", "read_group_chat", "remember", "forget", "generate_image"]);
+var DRAWN = /* @__PURE__ */ new Set(["start_task", "mcp__dsh__start_task", "message_bot", "stop_bot", "create_bot", "update_bot", "delete_bot", "group_relay", "create_group", "update_group", "delete_group", "post_to_group", "ask_user", "request_secret", "request_connector", "mail_send", "ask_user_question", "show_view", "show_settings", "propose_bot_change", "browser_handoff", "read_group_chat", "remember", "forget", "generate_image"]);
 var CARDS = /* @__PURE__ */ new Set(["ask_user", "request_secret", "request_connector", "mail_send", "show_view", "browser_handoff", "computer_handoff"]);
 var agentImage = (call2) => isAgentImageCall({ name: toolName(call2), image: toolArgs(call2).value("image"), done: call2.kind === "tool-result", content: call2.kind === "tool-result" ? contentText(call2.content) : "" });
 function callTree(root) {
@@ -22616,9 +22661,18 @@ function renderCall(call2, { sessionId, roster, actions, useUi, useWork, useSess
   const card = toolCards.renderer(tool);
   if (card !== void 0) return card({ call: call2, tool, arg, argValue, done, content: done ? contentText(call2.content) : "", sessionId, roster, actions });
   switch (tool) {
-    case "start_task": {
-      const started = done ? /\((session-[^)]+)\) under (?:Tasks|your row)/.exec(contentText(call2.content))?.[1] : void 0;
-      if (done && !started) return (0, import_react49.createElement)("div", { className: "bt-event" }, contentText(call2.content).slice(0, 160));
+    case "start_task":
+    case "mcp__dsh__start_task": {
+      const result = done ? contentText(call2.content) : "";
+      const started = done && result.startsWith('Started task "') ? /\((session-[^)]+)\) under (?:Tasks|your row)/.exec(result)?.[1] : void 0;
+      if (done && !started) {
+        const text2 = call2.isError ? result.replace(/^Error: /, "") : result;
+        return (0, import_react49.createElement)(
+          "div",
+          { className: "bt-event" },
+          (0, import_react49.createElement)("div", null, text2.split("\n").map((line, index) => (0, import_react49.createElement)("div", { key: index }, hostText(line))))
+        );
+      }
       return (0, import_react49.createElement)(TaskCard, {
         sessionId: started,
         title: arg("title") ?? t("a task"),
@@ -22743,7 +22797,7 @@ function renderCall(call2, { sessionId, roster, actions, useUi, useWork, useSess
       return (0, import_react49.createElement)(CellEmpty);
   }
 }
-var GUARD_WHYS = /* @__PURE__ */ new Set(["guard", "guard-request"]);
+var GUARD_WHYS = /* @__PURE__ */ new Set(["guard", "guard-request", "guard-launch"]);
 function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions }) {
   const roster = useRoster((value) => value);
   const heldCards = useHeldCards?.((state2) => state2[sessionId]);
@@ -31728,7 +31782,7 @@ function approvalView(toolName2, args, from) {
     case "message_bot":
       return { title: t("{from} wants to hand work to {to}", { from: who, to: text(args.to) || t("another Bot") }), to: text(args.to), quote: text(args.message), note: t("{to} works on it in its own chat and reports back.", { to: text(args.to) || t("The Bot") }), rows: [] };
     case "start_task":
-      return { title: t("{from} wants to start a task", { from: who }), quote: text(args.brief) || text(args.prompt) || text(args.message), rows: rows2(["title", "folder"]) };
+      return { title: t("{from} wants to start a task", { from: who }), quote: text(args.brief) || text(args.prompt) || text(args.message), rows: [...rows2(["title", "folder"]), ...text(args.model) ? [["Requested model", text(args.model)]] : []] };
     case "stop_bot":
       return { title: t("{from} wants to stop {to}", { from: who, to: text(args.to) || text(args.name) || t("another Bot") }), to: text(args.to) || text(args.name), quote: text(args.reason), rows: [] };
     case "create_bot":

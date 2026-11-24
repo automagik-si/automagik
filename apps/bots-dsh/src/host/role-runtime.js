@@ -8,6 +8,7 @@ import { NO_BOT_RUNNER_REASON } from './no-runner.js'
 import { refusal } from './refusal.js'
 import { readableRoute } from './session-route.js'
 import { output } from './tools.js'
+import { BUNDLED_ROLE_CAPABILITIES, BUNDLED_ROLE_IDS } from './bundled-roles.js'
 
 const START_MS = 5_000
 const DISPLAY_READ_LIMIT = 4
@@ -51,8 +52,19 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     const held = attachments.get(id)
     return held?.runtime && current(id, held) ? held : undefined
   }
+  const capabilitiesOf = held => BUNDLED_ROLE_IDS.includes(held.pin.id) && packages.verifiedBundled(held.record)
+    ? BUNDLED_ROLE_CAPABILITIES[held.pin.id] : held.manifest?.capabilities ?? []
+  const heldOf = id => {
+    const held = attachments.get(id)
+    return held?.manifest && current(id, held) ? held : undefined
+  }
   const granted = (held, capability) => current(held.bot.id, held)
-    && held.runtime.manifest.capabilities.includes(capability) && held.bot.roles[0].grants.includes(capability)
+    && capabilitiesOf(held).includes(capability) && held.bot.roles[0].grants.includes(capability)
+  const grantOf = (id, capability) => {
+    const held = heldOf(id)
+    if (held === undefined || !capabilitiesOf(held).includes(capability)) return undefined
+    return held.bot.roles[0].grants.includes(capability) ? 'granted' : 'declared'
+  }
 
   async function moduleFor(details, sha256) {
     const { manifest, entryBytes } = details
@@ -383,7 +395,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
         && providerWarning(providerOf(held.bot.appliedModel ?? held.bot.model)) === acpWarning)
       return [[id, {
         pin: held.pin, settings: held.manifest.settings,
-        capabilities: held.manifest.capabilities,
+        capabilities: capabilitiesOf(held),
         tools: held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp,
         ...(warning && warning !== acpWarning ? { promptWarning: warning } : {}),
       }]]
@@ -391,7 +403,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
 
   return {
-    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings,
+    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings, capabilitiesOf, heldOf, grantOf,
     readDeliveryRoutes, view,
     copyWarning: bot => savedWarning(bot) ?? providerWarning(liveProvider(bot.sessionId ?? bot.id)),
     async publicView() {

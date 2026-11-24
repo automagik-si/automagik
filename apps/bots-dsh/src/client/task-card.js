@@ -72,7 +72,7 @@ export const taskState = (task, waiting) => {
 export const endLabel = (task) => {
   if (task?.status === 'failed') {
     const reason = String(task.summary ?? '').split('\n')[0].trim()
-    return reason ? t('Failed: {reason}', { reason }) : t('Failed')
+    return reason ? t('Failed: {reason}', { reason: hostText(reason) }) : t('Failed')
   }
   return task?.status === 'stopped' ? t('Stopped') : t('Task finished')
 }
@@ -149,7 +149,7 @@ export function TaskCard({
               : h('span', { className: 'op-task-said op-task-quiet' }, t('Getting started…')),
             task?.steps ? h('span', { className: 'op-task-steps' }, t('step {count}', { count: task.steps })) : null),
           h('div', { className: 'op-task-bar', 'aria-hidden': true }, h('i')))
-          : task?.summary ? h('p', { className: 'op-task-summary' }, task.summary) : null,
+          : task?.summary ? h('p', { className: 'op-task-summary' }, status === 'failed' ? hostText(task.summary) : task.summary) : null,
       status === 'waiting' && grantAsk ? h(GrantAction, {
         key: grantAsk.id, approval: grantAsk, place: task?.title ?? title, actions,
         disabled: answering || readOnly || ask?.answerable === false,

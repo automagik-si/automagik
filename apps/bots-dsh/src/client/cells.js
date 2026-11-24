@@ -16,7 +16,7 @@ import { agentPromptOf, ImageCell, isAgentImageCall } from './image-cell.js'
 import { ConnectorToolCell, MailToolCell } from './connectors.js'
 import { HandoffCall } from './handoff-card.js'
 import { AppAccessCall, ComputerCallRow, ComputerHandoffCall } from './computer.js'
-import { dateLocale, t } from './i18n.js'
+import { dateLocale, hostText, t } from './i18n.js'
 import { call } from './api.js'
 import { failureClause } from './diagnostics.js'
 import { turnReasoning, thinkingStep, opensReply, stepActivity } from './turn-reasoning.js'
@@ -1197,7 +1197,7 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
 // its sub-calls, so a call draws by its own name wherever it sits in the tree.
 // Another Omni plugin's tools draw when they register a card (extend.js).
 const isComputerCall = name => name === 'cua' || name?.startsWith('cua_driver_native__') === true
-const DRAWN = new Set(['start_task', 'message_bot', 'stop_bot', 'create_bot', 'update_bot', 'delete_bot', 'group_relay', 'create_group', 'update_group', 'delete_group', 'post_to_group', 'ask_user', 'request_secret', 'request_connector', 'mail_send', 'ask_user_question', 'show_view', 'show_settings', 'propose_bot_change', 'browser_handoff', 'read_group_chat', 'remember', 'forget', 'generate_image'])
+const DRAWN = new Set(['start_task', 'mcp__dsh__start_task', 'message_bot', 'stop_bot', 'create_bot', 'update_bot', 'delete_bot', 'group_relay', 'create_group', 'update_group', 'delete_group', 'post_to_group', 'ask_user', 'request_secret', 'request_connector', 'mail_send', 'ask_user_question', 'show_view', 'show_settings', 'propose_bot_change', 'browser_handoff', 'read_group_chat', 'remember', 'forget', 'generate_image'])
 // Calls whose card a dock above the composer carries when the call is not drawn.
 const CARDS = new Set(['ask_user', 'request_secret', 'request_connector', 'mail_send', 'show_view', 'browser_handoff', 'computer_handoff'])
 // An image an agent makes with its own tool draws as the image card (image-cell.js).
@@ -1242,10 +1242,16 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
   const card = toolCards.renderer(tool)
   if (card !== undefined) return card({ call, tool, arg, argValue, done, content: done ? contentText(call.content) : '', sessionId, roster, actions })
   switch (tool) {
-    case 'start_task': {
+    case 'start_task':
+    case 'mcp__dsh__start_task': {
       // The task's own card: it works where the user can watch, then says what it found.
-      const started = done ? /\((session-[^)]+)\) under (?:Tasks|your row)/.exec(contentText(call.content))?.[1] : undefined
-      if (done && !started) return h('div', { className: 'bt-event' }, contentText(call.content).slice(0, 160))
+      const result = done ? contentText(call.content) : ''
+      const started = done && result.startsWith('Started task "') ? /\((session-[^)]+)\) under (?:Tasks|your row)/.exec(result)?.[1] : undefined
+      if (done && !started) {
+        const text = call.isError ? result.replace(/^Error: /, '') : result
+        return h('div', { className: 'bt-event' },
+          h('div', null, text.split('\n').map((line, index) => h('div', { key: index }, hostText(line)))))
+      }
       return h(TaskCard, {
         sessionId: started, title: arg('title') ?? t('a task'),
         task: started ? roster.tasks?.[started] : undefined,
@@ -1373,7 +1379,7 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
 }
 
 // The review guard's stop reasons (K10, K14), the ones a hidden turn still draws.
-const GUARD_WHYS = new Set(['guard', 'guard-request'])
+const GUARD_WHYS = new Set(['guard', 'guard-request', 'guard-launch'])
 
 export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions }) {
   const roster = useRoster(value => value)

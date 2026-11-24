@@ -336,7 +336,13 @@ export function install(rt) {
     }
     const bot = task.from === undefined ? undefined : rt.botOf(task.from)
     const room = task.roomId ? rt.roomOf(task.roomId) : undefined
-    const base = bot === undefined ? service.catalog().defaultPreset : room?.permission ?? bot.permission ?? service.catalog().defaultPreset
+    let base = bot === undefined ? service.catalog().defaultPreset : room?.permission ?? bot.permission ?? service.catalog().defaultPreset
+    if (task.botBound === true && bot !== undefined) {
+      const own = bot.permission ?? service.catalog().defaultPreset
+      if (runRank(service, own) === undefined || task.permissionCap === undefined) return { unproven: true }
+      base = narrowerLevel(service, base, own)
+      if (base === undefined) return { unproven: true }
+    }
     const level = base === undefined ? base : narrowedByCaller(task, task.permissionCap === undefined ? base : narrowerLevel(service, base, task.permissionCap), service)
     if (!linked) return { level }
     if (level === undefined) return { unproven: true }
@@ -469,6 +475,10 @@ export function install(rt) {
     const call = callers.getStore()
     return call?.active === true ? call.sessionId : undefined
   }
+  rt.callerBotId = () => {
+    const call = callers.getStore()
+    if (call?.active === true) return rt.botOfSession?.(call.sessionId, { session: call.session })?.id
+  }
   rt.levelHeld = sessionId => unapplied.has(sessionId)
 
   function callerTask() {
@@ -478,19 +488,29 @@ export function install(rt) {
   }
   // What the calling Session runs at now. An unreadable opener is still an opener:
   // it gives the narrowest offered level, never the wider saved level of its owner.
-  function callerLevel() {
+  function callerLevel({ proven = false } = {}) {
     const call = callers.getStore()
     const service = presets()
     if (call?.active !== true || service === undefined) return undefined
     try {
       const session = call.session ?? (ctx.sessions?.list?.() ?? []).find(loaded => loaded?.id === call.sessionId)
-      if (session === undefined) return narrowestOffered(service)
+      if (session === undefined) return proven ? undefined : narrowestOffered(service)
       const level = service.current(session)
+      if (proven && runRank(service, level) === undefined) return undefined
       return typeof level === 'string' && level !== '' ? level : undefined
     } catch {
-      return narrowestOffered(service)
+      return proven ? undefined : narrowestOffered(service)
     }
   }
+  rt.taskBound = (task) => {
+    const service = presets()
+    if (service === undefined || task.permissionCap === undefined) return undefined
+    const run = taskRun(task, service)
+    const rank = runRank(service, run.level)
+    if (run.unproven || rank === undefined) return undefined
+    return { level: run.level, rank, wide: wideLevel(service, run.level), defaultLevel: service.catalog().defaultPreset }
+  }
+  rt.sessionLevel = session => presets()?.current(session)
   // Save only a narrowing: an opener at the same or a wider level adds no lasting cap.
   function capTaskByOpener(task, opener) {
     const service = presets()
@@ -932,8 +952,8 @@ export function install(rt) {
           if (keptLevel(error)) left.push(sessionId)
         })
     }
-    // Its tasks too, but one asked for in a group with a level of its own keeps that one.
-    left.push(...await reapplyTasks(task => task.from === bot.id && !(task.roomId && rt.roomOf(task.roomId)?.permission)))
+    // Role-started tasks also keep the Bot's live bound in a group with its own level.
+    left.push(...await reapplyTasks(task => task.from === bot.id && (task.botBound === true || !(task.roomId && rt.roomOf(task.roomId)?.permission))))
     if (left.length > 0) throw notEverywhere(bot.name, left)
   }
 
