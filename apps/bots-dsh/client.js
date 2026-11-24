@@ -23623,6 +23623,7 @@ function teamActions({
 
 // src/client/draft-sweep.js
 var draftKey = (id) => `dsh.conversation.${id}`;
+var NAMING_MAX = 200;
 var defaultStorage = () => {
   try {
     return globalThis.localStorage;
@@ -23652,7 +23653,15 @@ function liveSessionIds(view) {
   for (const agent of Array.isArray(view?.agents) ? view.agents : []) addAll(agent?.sessions);
   return ids;
 }
-function createDraftSweep({ storage = defaultStorage(), call: call2, openSession = () => void 0 }) {
+function unarchivedSessionIds(sessions, workspaces) {
+  const ids = /* @__PURE__ */ new Set();
+  const archived = workspaces?.archivedSessionIds;
+  if (workspaces?.phase !== "ready" || !Array.isArray(archived)) return ids;
+  const set2 = new Set(archived);
+  for (const id of Object.keys(sessions?.byId ?? {})) if (!set2.has(id)) ids.add(id);
+  return ids;
+}
+function createDraftSweep({ storage = defaultStorage(), call: call2, openSession = () => void 0, unarchived = () => [] }) {
   const pending = /* @__PURE__ */ new Set();
   const naming = /* @__PURE__ */ new Set();
   let waiting = false;
@@ -23671,7 +23680,12 @@ function createDraftSweep({ storage = defaultStorage(), call: call2, openSession
     } catch {
       return;
     }
-    const swept = [];
+    try {
+      for (const id of unarchived()) pending.delete(id);
+    } catch {
+      return;
+    }
+    const found = [];
     for (const id of pending) {
       if (naming.has(id) || id === open) continue;
       try {
@@ -23683,8 +23697,9 @@ function createDraftSweep({ storage = defaultStorage(), call: call2, openSession
         gone = storage.getItem(draftKey(id)) === null;
       } catch {
       }
-      if (gone) swept.push(id);
+      if (gone) found.push(id);
     }
+    const swept = found.slice(0, NAMING_MAX);
     if (swept.length === 0) return;
     for (const id of swept) naming.add(id);
     try {
@@ -47333,7 +47348,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   const refreshed = /* @__PURE__ */ new Set();
   let pulls = 0;
   let applied = 0;
-  const drafts = createDraftSweep({ call, openSession: () => mainView() });
+  const drafts = createDraftSweep({ call, openSession: () => mainView(), unarchived: () => unarchivedSessionIds(ctx.sessions.list.getSnapshot(), workspaces?.list?.getSnapshot()) });
   const pull = async () => {
     const order = ++pulls;
     const known2 = roster.getSnapshot();

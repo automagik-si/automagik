@@ -266,6 +266,23 @@ test('a saved sweep list keeps only distinct ids, and an empty one is no list', 
   const second = await start(empty)
   t.after(second.stop)
   assert.equal(Object.hasOwn((await second.call('state', {})).value, 'draftSweep'), false)
+  const long = team()
+  long.draftSweep = Array.from({ length: 202 }, (_, at) => `s-${at}`)
+  const third = await start(long)
+  t.after(third.stop)
+  const list = (await third.call('state', {})).value.draftSweep
+  assert.equal(list.length, 200)
+  assert.equal(list[0], 's-2')
+})
+
+test('one clear takes off at most 200 named ids: the 201st stays listed', async (t) => {
+  const seed = team()
+  const ids = Array.from({ length: 201 }, (_, at) => `s-${at}`)
+  seed.draftSweep = ids.slice(1)
+  const { call, stop } = await start(seed)
+  t.after(stop)
+  assert.equal((await call('drafts-swept', { ids })).ok, true)
+  assert.deepEqual((await call('state', {})).value.draftSweep, ['s-200'])
 })
 
 // Ops on its second own part, with Writer's group Session on its second part too.

@@ -4,6 +4,8 @@
 // view, whichever route deleted them); this page removes their keys and names the ids it
 // removed (`drafts-swept`), which takes them off the list.
 const draftKey = id => `dsh.conversation.${id}`
+// The host takes at most this many ids per naming (its own list bound, roster.js).
+const NAMING_MAX = 200
 const defaultStorage = () => { try { return globalThis.localStorage } catch { return null } }
 
 // Every Session id a full view shows in use: Bots' chats and their parts, groups' own
@@ -27,13 +29,27 @@ export function liveSessionIds(view) {
   return ids
 }
 
+// The Sessions DSH's own list holds outside its archive: a deleted Bot's or group's Session
+// the person took back out of the archive is a plain DSH Session again, so its draft stays.
+// Before DSH's archive set has arrived nothing counts, since every Session would look so.
+export function unarchivedSessionIds(sessions, workspaces) {
+  const ids = new Set()
+  const archived = workspaces?.archivedSessionIds
+  if (workspaces?.phase !== 'ready' || !Array.isArray(archived)) return ids
+  const set = new Set(archived)
+  for (const id of Object.keys(sessions?.byId ?? {})) if (!set.has(id)) ids.add(id)
+  return ids
+}
+
 // `note` takes each full view's list and the ids it shows live; `run` removes the keys of
 // the pending ids, except the Session open in the main view (DSH may write its key again
-// while it is mounted), and names the ones whose key is really gone. An id stays pending
-// until this page saw its key gone and the host took the name, so a chat that closes
-// later is swept then, even when another window cleared the list first. A failed naming
-// waits for the next view.
-export function createDraftSweep({ storage = defaultStorage(), call, openSession = () => undefined }) {
+// while it is mounted), and names the ones whose key is really gone, at most NAMING_MAX
+// per call (the rest stay pending for the next run). A pending id DSH shows outside its
+// archive (`unarchived`) leaves pending unswept; a later full view that still lists it
+// notes it again. An id stays pending until this page saw its key gone and the host took
+// the name, so a chat that closes later is swept then, even when another window cleared
+// the list first. A failed naming waits for the next view.
+export function createDraftSweep({ storage = defaultStorage(), call, openSession = () => undefined, unarchived = () => [] }) {
   const pending = new Set()
   const naming = new Set()
   let waiting = false
@@ -46,14 +62,18 @@ export function createDraftSweep({ storage = defaultStorage(), call, openSession
     if (storage == null || waiting || pending.size === 0) return
     let open
     try { open = openSession() } catch { return }
-    const swept = []
+    try {
+      for (const id of unarchived()) pending.delete(id)
+    } catch { return }
+    const found = []
     for (const id of pending) {
       if (naming.has(id) || id === open) continue
       try { storage.removeItem(draftKey(id)) } catch { /* storage unavailable */ }
       let gone = false
       try { gone = storage.getItem(draftKey(id)) === null } catch { /* storage unavailable */ }
-      if (gone) swept.push(id)
+      if (gone) found.push(id)
     }
+    const swept = found.slice(0, NAMING_MAX)
     if (swept.length === 0) return
     for (const id of swept) naming.add(id)
     try {

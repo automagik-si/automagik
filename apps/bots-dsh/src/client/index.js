@@ -19,7 +19,7 @@ import { isHex, inkText, paintCss } from './inks.js'
 import { CHARACTERS, DEFAULT_MASK, MAIN_LOOK, SHAPES, markupCache, maskOf } from './characters.js'
 import { createSource, EMPTY_ROSTER, indexRoster, isAgentSession } from './sources.js'
 import { teamActions } from './team-actions.js'
-import { createDraftSweep, liveSessionIds } from './draft-sweep.js'
+import { createDraftSweep, liveSessionIds, unarchivedSessionIds } from './draft-sweep.js'
 import { themeCss, shellTokens, registry, registerShape, registerTheme, allThemes, layoutOf, widthOf, flatWidthOf } from './themes.js'
 import { markConversation } from './stage.js'
 import { MENTION_ORIGIN, currentPart, relativeShort } from './text.js'
@@ -302,7 +302,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   let pulls = 0
   let applied = 0
   // Deleted Sessions' composer state, removed as the host lists them (draft-sweep.js).
-  const drafts = createDraftSweep({ call, openSession: () => mainView() })
+  const drafts = createDraftSweep({ call, openSession: () => mainView(), unarchived: () => unarchivedSessionIds(ctx.sessions.list.getSnapshot(), workspaces?.list?.getSnapshot()) })
   const pull = async () => {
     const order = ++pulls
     const known = roster.getSnapshot()

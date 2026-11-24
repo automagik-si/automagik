@@ -3329,3 +3329,20 @@ test('a delete whose save is lost to another host takes its ids off the sweep li
   }
   assert.equal(rt.state.draftSweep, undefined)
 })
+
+test('a group delete whose save is lost to another host takes its ids off the sweep list', async (t) => {
+  const { call, tool, stop } = start()
+  t.after(() => stop())
+  await call('state', {})
+  const save = rt.save
+  rt.save = async (...args) => {
+    if (rt.state.draftSweep !== undefined) throw Object.assign(new Error('lost'), { code: 'ELOCKLOST' })
+    return save(...args)
+  }
+  try {
+    await assert.rejects(tool('delete_group', { group: 'Launch' }, 'm1'), error => error.code === 'ELOCKLOST')
+  } finally {
+    rt.save = save
+  }
+  assert.equal(rt.state.draftSweep, undefined)
+})

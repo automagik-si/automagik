@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { createDraftSweep, liveSessionIds } from '../src/client/draft-sweep.js'
+import { createDraftSweep, liveSessionIds, unarchivedSessionIds } from '../src/client/draft-sweep.js'
 
 // A page's storage, with the keys it holds; `stuck` keys ignore a removal, as the viewer's
 // draft guard does in a document that is not the current viewer.
@@ -114,7 +114,8 @@ test('the page notes each full view and sweeps after it reads the team', () => {
   const index = readFileSync(new URL('../src/client/index.js', import.meta.url), 'utf8')
   assert.match(index, /drafts\.note\(value\.draftSweep, liveSessionIds\(value\)\)/)
   assert.equal(index.match(/drafts\.run\(\)/g)?.length, 2)
-  assert.match(index, /createDraftSweep\(\{ call, openSession: \(\) => mainView\(\) \}\)/)
+  assert.match(index, /createDraftSweep\(\{ call, openSession: \(\) => mainView\(\), unarchived: \(\) => unarchivedSessionIds\(ctx\.sessions\.list\.getSnapshot\(\), workspaces\?\.list\?\.getSnapshot\(\)\) \}\)/)
+  assert.match(index, /const workspaces = ctx\.get\('workspaces'\)/)
 })
 
 test('an id seen once stays pending after a later view drops it, until this page sweeps it', async () => {
@@ -154,4 +155,47 @@ test('the live ids are every Bot part, group Session and DSH bot Session a view 
   assert.deepEqual([...liveSessionIds(view)].sort(), ['b', 'b-mid', 'b-next', 'g', 'g-0', 'r', 'r-next', 's1', 's2'])
   assert.deepEqual([...liveSessionIds({ bots: [{ id: 'b', parts: [3, null] }], rooms: [{}] })], ['b'])
   assert.deepEqual([...liveSessionIds(undefined)], [])
+})
+
+test('a deleted Session the person took back out of DSH\'s archive keeps its draft', async () => {
+  const storage = storageOf(['dsh.conversation.x', 'dsh.conversation.y'])
+  const { calls, call } = host()
+  let open = 'x'
+  // DSH's own list: x is back out of the archive, y is still archived.
+  const sessions = { byId: { x: { id: 'x' }, y: { id: 'y' }, z: { id: 'z' } } }
+  const workspaces = { phase: 'ready', archivedSessionIds: ['y'] }
+  const drafts = createDraftSweep({ storage, call, openSession: () => open, unarchived: () => unarchivedSessionIds(sessions, workspaces) })
+  drafts.note(['x', 'y'])
+  await drafts.run()
+  assert.deepEqual(calls, [['drafts-swept', { ids: ['y'] }]])
+  open = 'z'
+  await drafts.run()
+  drafts.note(['x'])
+  await drafts.run()
+  assert.equal(storage.getItem('dsh.conversation.x'), '{"draft":"x"}')
+  assert.deepEqual(calls, [['drafts-swept', { ids: ['y'] }]])
+})
+
+test('DSH\'s Sessions count as out of the archive only once its archive set arrived', () => {
+  const sessions = { byId: { x: {}, y: {} } }
+  assert.deepEqual([...unarchivedSessionIds(sessions, { phase: 'ready', archivedSessionIds: ['y'] })], ['x'])
+  assert.deepEqual([...unarchivedSessionIds(sessions, { phase: 'pending', archivedSessionIds: [] })], [])
+  assert.deepEqual([...unarchivedSessionIds(sessions, { phase: 'ready' })], [])
+  assert.deepEqual([...unarchivedSessionIds(sessions, undefined)], [])
+  assert.deepEqual([...unarchivedSessionIds(undefined, { phase: 'ready', archivedSessionIds: [] })], [])
+})
+
+test('one naming holds at most 200 ids; the rest stay pending for the next run', async () => {
+  const ids = Array.from({ length: 201 }, (_, at) => `s-${at}`)
+  const storage = storageOf(ids.map(id => `dsh.conversation.${id}`))
+  const { calls, call } = host()
+  const drafts = createDraftSweep({ storage, call })
+  drafts.note(ids)
+  await drafts.run()
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0][1].ids, ids.slice(0, 200))
+  await drafts.run()
+  assert.deepEqual(calls.at(-1), ['drafts-swept', { ids: ['s-200'] }])
+  await drafts.run()
+  assert.equal(calls.length, 2)
 })
