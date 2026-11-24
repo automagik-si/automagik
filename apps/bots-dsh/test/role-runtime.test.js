@@ -1060,7 +1060,7 @@ test('D2T-1 settlement and the public view follow the owning and retained group 
         return get(name)
       })
     } else {
-      h.agentOf(sessionId).model = { current: () => ({ provider }) }
+      h.agentOf(sessionId).model = { current: () => ({ provider, model: 'fixture' }) }
     }
     const result = await createSolver({
       actions: {
