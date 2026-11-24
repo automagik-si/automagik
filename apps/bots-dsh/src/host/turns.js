@@ -324,7 +324,7 @@ export function install(rt) {
       label: label || existing?.label || subagentLabelFromCall(live.get(parentId)),
       since: existing?.since ?? since,
     })
-    if (rt.groupOwners.has(parentId)) rt.workRoomTurn?.(parentId, 'subagent')
+    if (countsInRound(parentId)) rt.workRoomTurn?.(parentId, 'subagent')
   }
 
   const noteSubagentEnd = (childId) => {
@@ -514,13 +514,20 @@ export function install(rt) {
   // for turns that a finished background job or a fresh part starts; a Bot's private
   // message to it is answered privately.
   const speaksInGroup = (id, info) => rt.groupOwners.has(id) && !(info !== undefined && expectsReply(info))
+  // The outgoing agent's handoff-note turn in a group Session that follows its Bot's agent
+  // switch (parts.js): it reaches the group neither while it runs nor at its end, and counts
+  // in no group round: no step lines, no touch or work on the round's waiter (RFC 0030,
+  // Handoff note; MX-12). Before its request is read, the turn is the note's too.
+  const noting = (id, turn) => rt.handoffNoteTurn?.(id, turn) === true || rt.writingNote?.(id) === true
+  // The round counter: a group Session's events keep its round's waiter alive and mark work.
+  const countsInRound = id => rt.groupOwners.has(id) && !noting(id, live.get(id)?.turn)
 
   // The group hears what the member says while it works. A text with a tool call goes
   // on at once; one without may be the turn's last, so it waits for the next text or the
   // turn's end, which shows the rest as the turn's reply.
   const showSteps = (id, entry, upTo) => {
     const info = entry.info
-    if (entry.suppressedSubagent || !speaksInGroup(id, info) || (info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))) return
+    if (entry.suppressedSubagent || !speaksInGroup(id, info) || (info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId)) || noting(id, entry.turn)) return
     for (; entry.shown < upTo; entry.shown += 1) {
       const text = stripWrittenCalls(entry.texts[entry.shown])
       if (text !== '') void rt.roomStepText?.(id, info, text, entry.shown === 0)?.catch(error => rt.warn('omni-ui: step text from %s not posted: %s', id, error))
@@ -685,7 +692,8 @@ export function install(rt) {
     }
     for (const [id, entry] of live) {
       const owner = rt.groupOwners.get(id)
-      if (entry.turn !== undefined && owner !== undefined) add(owner.roomId, owner.botId, { since: entry.since, ...doingOf(entry) })
+      // A note turn shows as the move it belongs to (the switch job below), never its own work.
+      if (entry.turn !== undefined && owner !== undefined && !noting(id, entry.turn)) add(owner.roomId, owner.botId, { since: entry.since, ...doingOf(entry) })
     }
     for (const [id] of subagentsByParent) {
       const owner = rt.groupOwners.get(id)
@@ -839,7 +847,7 @@ export function install(rt) {
       return
     }
     const entry = liveOf(id)
-    if (rt.groupOwners.has(id)) rt.touchRoomTurn?.(id)
+    if (countsInRound(id)) rt.touchRoomTurn?.(id)
     switch (event.type) {
       case 'subagent/catalog': {
         const childId = event.data?.childId
@@ -853,7 +861,7 @@ export function install(rt) {
         // A program is as quick as the tools it runs, so its sub-calls decide.
         if (name !== PROGRAM_TOOL) {
           entry.toolCount = (entry.toolCount ?? 0) + 1
-          if (rt.groupOwners.has(id)) rt.workRoomTurn?.(id, name)
+          if (countsInRound(id)) rt.workRoomTurn?.(id, name)
         }
         break
       }
@@ -861,7 +869,7 @@ export function install(rt) {
         const name = String(event.data?.name ?? '')
         startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}))
         entry.toolCount = (entry.toolCount ?? 0) + 1
-        if (rt.groupOwners.has(id)) rt.workRoomTurn?.(id, name)
+        if (countsInRound(id)) rt.workRoomTurn?.(id, name)
         break
       }
       case 'tool/ptc-dispatch':
@@ -1296,7 +1304,9 @@ export function install(rt) {
             .catch(error => rt.warn('omni-ui: answer from %s not sent: %s', name, error))
         }
         // A retried turn answers the same waiter or sender, so this one passes nothing on.
-        if (!retry && info?.role === 'room') {
+        // A fresh part's failed first turn whose switch goes back and resumes it (goesOn)
+        // leaves the round's waiter to that resumed turn: the group hears no failure for it.
+        if (!goesOn && !retry && info?.role === 'room') {
           const waiter = roomWaiters.get(info.exchangeId)
           roomWaiters.delete(info.exchangeId)
           const stopped = stoppedRoomTurns.delete(info.exchangeId)
@@ -1308,7 +1318,7 @@ export function install(rt) {
             if (failure !== undefined) void rt.lateRoomFailure?.(id, info, failure)
             else void rt.lateRoomReply?.(id, info, groupReply(), { shown })
           }
-        } else if (!retry && speaksInGroup(id, info)) {
+        } else if (!goesOn && !retry && speaksInGroup(id, info)) {
           // A turn that failed before it took any input (DSH can turn it down before its
           // first step) never names its call, so the call waiting on this Session fails.
           const inRound = failure !== undefined && info === undefined && rt.failRoomTurn?.(id, failure) === true

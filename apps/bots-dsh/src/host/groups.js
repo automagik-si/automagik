@@ -71,7 +71,9 @@ export const isIdleRelayText = (text, everyone, priorBodies) => {
 }
 
 // Rows only the group chat draws: members read who is at work from the round itself.
-const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop'])
+// 'switched': a member's conversation here followed its agent switch (parts.js); the member
+// itself reads that in its handoff.
+const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop', 'switched'])
 const memberLine = record => record !== undefined && !SHOWN_ONLY.has(record.kind)
 
 // A member's own lines are already in its Session, so only the others' are news.
@@ -388,6 +390,7 @@ export function install(rt) {
     }
     if (record.kind === 'lookup') return { kind: 'lookup', ...who, text: record.text, time }
     if (record.kind === 'permission-stop') return { kind: 'permission-stop', ...who, why: record.why, count: record.count, time }
+    if (record.kind === 'switched') return { kind: 'switched', ...who, agent: record.agent ?? record.to, time }
     if (record.kind !== 'notice') return { kind: record.kind, ...who, time,
       ...(record.resumedByUpdate ? { resumedByUpdate: true } : {}) }
     switch (record.reason) {

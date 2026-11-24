@@ -1731,6 +1731,7 @@ var ZH = {
   // An agent switch in a Bot's own chat (RFC 0030, Handoff note, 2026-11-23).
   "This stops the current reply and continues on {agent}.": "这会停止当前回复，并在 {agent} 上继续。",
   "Switched to {agent}": "已切换到 {agent}",
+  "{name} switched to {agent}": "{name} 已切换到 {agent}",
   "Switching to {agent}…": "正在切换到 {agent}…",
   "Using {model} · {route} · {provider}": "使用 {model} · {route} · {provider}",
   // Shapes
@@ -22381,6 +22382,9 @@ function RelayEvent({ reply, bot, sessionId, actions }) {
   }
   if (reply.kind === "missed") {
     return (0, import_react49.createElement)("div", { className: "bt-event" }, t("{name} didn't answer in time", { name: bot.name }));
+  }
+  if (reply.kind === "switched") {
+    return (0, import_react49.createElement)("div", { className: "bt-event" }, t("{name} switched to {agent}", { name: bot.name, agent: reply.agent }));
   }
   if (reply.kind === "admin-passed") {
     return (0, import_react49.createElement)(

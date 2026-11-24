@@ -469,6 +469,7 @@ const pack = createPack({
     "Change agent": "Mudar agente",
     "This stops the current reply and continues on {agent}.": "Isso interrompe a resposta atual e continua em {agent}.",
     "Switched to {agent}": "Mudou para {agent}",
+    "{name} switched to {agent}": "{name} mudou para {agent}",
     "Switching to {agent}…": "Mudando para {agent}…",
     "Using {model} · {route} · {provider}": "Usando {model} · {route} · {provider}",
     "Whale": "Baleia",
