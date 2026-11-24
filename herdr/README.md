@@ -1368,10 +1368,11 @@ none it gets no guard, no briefing paragraph claiming one, and one warning namin
 
 A send to a pane held by a dialog is refused before anything is typed (#1414). The wrapper
 reads the target's herdr-core status and, when it is neither working nor blocked, its screen
-(the restart planner's `pendingDialog`); a blocked pane or a visible question, permission or
-sign-in dialog gets one JSON error line on stderr, kind `blocked`, naming the pane, and exit 9
-(hc's own `blocked` code), so a relay can tell it from a transport error and route the message
-elsewhere. It never presses a key and never answers the dialog, and `--force` does not bypass
+(the restart planner's `pendingDialog`); a pane running agy is also read once when working, for
+Antigravity's two prompts (see "Antigravity's prompts: Needs you");
+a blocked pane or a visible question, permission or sign-in dialog gets one JSON error line on
+stderr, kind `blocked`, naming the pane, and exit 9 (hc's own `blocked` code), so a relay can tell
+it from a transport error and route the message elsewhere. It never presses a key and never answers the dialog, and `--force` does not bypass
 it. A free pane's message is forwarded as given. When the screen cannot be read, hc handles
 delivery. This is the pack's wrapper: a sender that bypasses it with an
 absolute hc path, `hc connect` or a raw socket still reaches herdr-core's delivery, where the
@@ -2182,6 +2183,59 @@ launch, a review worker's included), in JSON too, plus one host-level row saying
 terminal sandbox, and so `--mode`, can
 work here: Linux's user namespace controls, or macOS's `/usr/bin/sandbox-exec`. Unreadable evidence
 is a note, not a false warning.
+
+### Antigravity's prompts: Needs you
+
+agy fires no hook while it waits at its folder-trust or file-access prompt, so herdr-core never
+reports that pane as blocked (#917). The sidebar reads the screen of a live pane when the
+foreground argv Herdr reports for it runs `agy`: `agy` itself, its absolute path, `env ... agy`,
+or agy under the pack's `hc keep` wrapper, which covers the pack's bots, workers and helpers and
+an agy typed by hand in a pane. It does not read a pane whose foreground is a script or a shell
+that started agy (`bash run.sh`, `sh -c 'agy; wait'`, an opaque worker template), nor one whose
+record carries no foreground argv. It does read any program the same identity rule names agy:
+past any of the launchers `node`, `bun`, `bunx`, `deno`, `python`, `python3`, `npx`, `pnpm`,
+`yarn`, `uv`, `uvx`, `ruby`, `bundle`, `env`, `sudo`, `nice`, `time`, `watch` and `nodemon` and
+their flags, a program whose file name, without a leading `-` and without a `.js`, `.mjs` or
+`.cjs` suffix, is `agy` or `antigravity`, such as `node /tools/agy.js`. Such a pane is treated as
+agy: when its screen ends in the exact rows of one of agy's two captured prompts (a quotation of
+them, say), the sidebar draws it Needs you after two identical reads and a send into it is
+refused after the wrapper's one read. Each 2.5-second tick reads at most eight of these panes
+shown in the sidebar; when one of the two prompts captured on agy 1.5.16 on Linux is at the
+bottom of the screen in two reads in a row with nothing changed, it draws that pane as
+**Needs you**, its tooltip naming the question. On a small, responsive host that takes about
+5 seconds (two visits): an estimate, not a bound.
+
+- folder trust: "Do you trust the contents of this project?";
+- file access: "Allow access to this file?", directly under agy's "File access" heading, its
+  rule, the "Read:" row naming the file and the reason "outside workspace".
+
+A send through the pack's wrapper into such a pane is refused with the `blocked` error (exit 9) a
+dialog gets (#1414), naming the pane, never the prompt's folder or file: nothing is typed into the
+prompt. Answer it in the pane. The wrapper's check is best effort: it reads the screen once, just
+before the send, so a pane it cannot read or a prompt that opens after that read still reaches
+herdr-core's delivery. Automatic delivery (a message or an update notice the pack sends on its
+own) checks such a pane too: the attempt is withheld; update notices remain pending, and retry
+behavior for other messages depends on the caller.
+
+The pack's own launches carry `--dangerously-skip-permissions` and trust their folder, so they
+stop at neither prompt; a launch at the home folder (left out of `trustedWorkspaces`), a launch
+with no settings file and an agy started by hand can. Only those exact screens count, measured on
+the captures: a question wrapped between words still matches. A wrapped path matches while the
+"File access" heading is visible and no continuation resembles a structural row. A word split
+across rows, a choice or footer wrapped onto two rows (a narrow pane), a question scrolled off the
+top, a missing model row, a prompt worded otherwise (another agy release, or macOS, not captured
+yet), a selection marker on no choice or on two, or a file-access block whose heading, rule,
+"Read:" row or reason is missing, reworded, out of order or scrolled off the top draws nothing:
+never a guess. On a matcher miss, a pane reported working proceeds to herdr-core's delivery.
+A pane reported idle or done, or with no status, still gets the generic dialog and rate-limit
+checks. The generic dialog check refuses sends under a visible question, numbered choices or a
+confirm footer. It still recognizes the file-access fixture when just the heading rows, selection
+marker or exact choice wording change. It returns no dialog for the padded folder-trust fixture
+with its selection marker removed. Trimming that same unmarked fixture exposes the question to
+the generic dialog check. Two parts of a matched screen are free: the trust screen's model row,
+so a quotation of those rows with any text there but an input line is taken as the prompt once
+it sits unchanged at the bottom of an agy pane; and the path after "Read:". Its continuation
+rows can contain ordinary text, but must not be a heading, rule, "Read:" or "Reason:" row.
 
 ### Ending a worker
 
