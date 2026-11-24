@@ -13,7 +13,7 @@
   "The skill has more than 256 files.": "A habilidade tem mais de 256 arquivos.",
   "Could not store the skill's files ({code}). Nothing was saved.": "Não foi possível armazenar os arquivos da habilidade ({code}). Nenhuma alteração foi salva.",
   "This skill changed in another window. Open it again.": "Esta habilidade mudou em outra janela. Abra novamente.",
-  "This preview expired. Preview the skill again.": "Esta prévia expirou. Gere a prévia da skill de novo.",
+  "This preview expired. Preview the skill again.": "Esta prévia expirou. Gere a prévia da habilidade de novo.",
   "This skill's record cannot be read by this version. Delete it, or update the app.": "Esta versão não consegue ler o registro da habilidade. Exclua a habilidade ou atualize o app.",
   "This proposal was made by an older version. It will be proposed again if it still applies.": "Uma versão anterior criou esta proposta. Se ainda fizer sentido, a proposta aparecerá novamente.",
   "This skill is held until it passes the skill check.": "A habilidade fica indisponível até passar pela verificação.",

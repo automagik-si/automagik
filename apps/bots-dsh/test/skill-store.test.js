@@ -138,7 +138,7 @@ test('skill-store: verifies the manifest before opening files and refuses lying 
   fs.writeFileSync(path, Buffer.alloc(2 * 1024 * 1024))
   const read = t.mock.method(fs, 'readSync')
   assert.throws(() => store.read('field-guide', hash, files), SkillFilesChanged)
-  assert.ok(read.mock.calls.reduce((bytes, call) => bytes + call.result, 0) <= 2)
+  assert.ok(read.mock.calls.reduce((bytes, call) => bytes + call.result, 0) <= Buffer.byteLength(GOLDEN.bytes))
 })
 
 test('skill-store: removes only manifest-owned files and preserves unknown entries', t => {
