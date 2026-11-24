@@ -75,6 +75,8 @@ export function wakeAutomationName(botId, projectKey) {
  * main bot's alone, derived from its kind.
  */
 export const RANKS = ["captain", "dev", "tester", "reviewer", "fixer", "integrator", "pm", "owner"];
+export const SEND_GRANT_ROLES = Object.freeze(["reviewer", "fixer"]);
+export const isSendGrantRole = (value) => SEND_GRANT_ROLES.includes(value);
 /** A category id: a lowercase slug, as it goes into a pane's `category=` label (A16). */
 export const CATEGORY_ID = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 

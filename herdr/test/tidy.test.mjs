@@ -497,12 +497,12 @@ test("create with no hc on PATH warns once, about its own panes, and nothing fro
 });
 
 test("tidy ledger: the bound bot supplies role and category, and its stale twin label is ignored", () => {
-  const file = bots([MAIN_A, "main"], [MAIN_B, "member", { rank: "reviewer", category: "eng" }]);
+  const file = bots([MAIN_A, "main"], [MAIN_B, "member", { rank: "tester", category: "eng" }]);
   file.categories = [{ id: "eng", title: "Engineering" }];
   const s = base({ projects: [{ key: A, machine: null, file }], spaces: [],
     terminals: [T("t1", A, { bot: MAIN_A, role: "main" }), T("t2", A, { bot: MAIN_B }), T("t3", A, { bot: MAIN_A })],
     ledger: { bound: [{ terminal: "t1", bot: MAIN_B, project: A }], known: [MAIN_B] } });
-  assert.deepEqual(planOf(s).filter((a) => a.kind === "relabel").map(brief), ["relabel t1 role=reviewer category=eng", "relabel t3 role=main"]);
+  assert.deepEqual(planOf(s).filter((a) => a.kind === "relabel").map(brief), ["relabel t1 role=tester category=eng", "relabel t3 role=main"]);
 });
 
 test("tidy ledger: null gives the same plan as an absent ledger", () => {
@@ -580,4 +580,20 @@ test("readState ledger: empty and absent ledgers stay distinct, and a refusal re
   await assert.rejects(read({ ledger }), (error) => error === refusal);
   const remoteOnly = async () => ({ code: 0, stdout: JSON.stringify([{ address: "lab/t1", state: "live" }]) });
   assert.equal((await read({ run: remoteOnly, ledger })).ledger, null);
+});
+
+function grantTidy(rank, role) {
+  const file = bots([MAIN_A, "main"], [MAIN_B, "member", { rank, category: "eng" }]);
+  file.categories = [{ id: "eng", title: "Engineering" }];
+  const state = base({ projects: [{ key: A, machine: null, file }], spaces: [],
+    terminals: [T("t1", A, { bot: MAIN_B, ...(role && { role }) })] });
+  return planOf(state).filter((a) => a.kind === "relabel").map(brief);
+}
+
+test("#628 r3 T1 tidy sets the category without adding a grant", () => {
+  assert.deepEqual(grantTidy("reviewer"), ["relabel t1 category=eng"]);
+});
+
+test("#628 r3 T2 tidy keeps an existing grant during rank demotion and removal", () => {
+  for (const rank of ["tester", undefined]) assert.deepEqual(grantTidy(rank, "reviewer"), ["relabel t1 category=eng"]);
 });

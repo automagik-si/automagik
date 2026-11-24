@@ -20,7 +20,8 @@ import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdi
   readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseBots, workerHomeOf } from "./model.js";
+import { isSendGrantRole, parseBots, workerHomeOf } from "./model.js";
+import { roleOf } from "./launchArgs.js";
 import { dataRootOf } from "./workers.js";
 
 /** The record shape this pack writes and reads. */
@@ -147,14 +148,14 @@ function checkedRecord(text, project) {
  * `file` is the parsed roster. A missing record throws with code ENOENT; a corrupt one throws
  * without it, so the proxy and approve can tell them apart.
  */
-export function readApprovedRecord({ project, env = process.env, path = undefined }) {
+export function readApprovedRecord({ project, env = process.env, path = undefined, exactMode = false }) {
   const main = canonicalProject(project);
   const file = path ?? recordFileOf(main, env);
   let text;
   try {
     const info = lstatSync(file);
     if (!info.isFile()) throw new Error(`the approved record ${file} is not a regular file`);
-    if ((info.mode & 0o077) !== 0) {
+    if ((info.mode & 0o077) !== 0 || (exactMode && (info.mode & 0o7777) !== 0o600)) {
       throw new Error(`the approved record ${file} is not 0600; run `
         + `\`am proxy approve --project ${main}\` again; ${APPROVAL_REVIEW}`);
     }
@@ -166,6 +167,18 @@ export function readApprovedRecord({ project, env = process.env, path = undefine
     throw e;
   }
   return { ...parseApprovedRecord(text, main), path: file, text };
+}
+
+/** A grant must agree with both rosters, including any name used to select the bot. */
+export function approvedGrant({ project, botId, workingFile, env, matches = () => true }) {
+  try {
+    const { record, file } = readApprovedRecord({ project, env, exactMode: true });
+    const role = roleOf(file, botId);
+    if (isSendGrantRole(role) && roleOf(workingFile, botId) === role && matches(file) && matches(workingFile)) {
+      return { role, sha256: record.sha256, project: record.project };
+    }
+  } catch { /* a missing, changed or unreadable approval grants nothing */ }
+  return null;
 }
 
 /** Check record bytes read on the project's own computer (including linked reads). */
