@@ -9,6 +9,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { SOLVER_NOTES, isSolverBot } from '../shared/solver-method.js'
 import { VERDICTS_KEPT, deliveryMark, verdictOf } from '../shared/review-mark.js'
+import { guardVerdictOf } from '../shared/review-guard.js'
 import { teamToolOf } from './approvals.js'
 import { reachesShell } from './tool-deny.js'
 
@@ -109,6 +110,11 @@ export function cleanTrack(track) {
     ...(isTime(track.personAt) ? { personAt: track.personAt } : {}),
     ...(isTime(track.firstWorkAt) ? { firstWorkAt: track.firstWorkAt } : {}),
     ...(isTime(track.lastWorkAt) ? { lastWorkAt: track.lastWorkAt } : {}),
+    // The review guard (review-guard.js): when the request's plan got its verdict, and whether a
+    // Bot's request opened it (and which Bot).
+    ...(isTime(track.planVerdictAt) ? { planVerdictAt: track.planVerdictAt } : {}),
+    ...(track.openedBy === 'bot' ? { openedBy: 'bot' } : {}),
+    ...(typeof track.openerId === 'string' && track.openerId !== '' ? { openerId: track.openerId } : {}),
     verdicts,
     ...(track.delivered === true ? { delivered: true } : {}),
     ...(isRecord(track.last) && typeof track.last.review === 'string' ? { last: track.last } : {}),
@@ -117,12 +123,14 @@ export function cleanTrack(track) {
 
 export function install(rt) {
   const save = () => void rt.save?.().catch?.(() => {})
-  const tracked = bot => bot !== undefined && isSolverBot(bot)
+  // A guarded Bot stays tracked whatever its role says: the guard never reads the marker.
+  const tracked = bot => bot !== undefined && (isSolverBot(bot) || bot.reviewGuard === true)
   // The record of the request in progress: { requested, requestAt, personAt, firstWorkAt,
   // lastWorkAt, verdicts, delivered, last }. `requested`: a person asked for something (a message
   // in its own chat, or the brief it was made with), so the next delivery answers it; a greeting
   // does not. `personAt`: the person's last message in it. `last` is the last delivery's mark,
-  // which the view shows.
+  // which the view shows. `planVerdictAt`: the first verdict that opened a guarded Solver's work
+  // in it; `openedBy: 'bot'` and `openerId`: a Bot's request opened it (reviewBotRequest).
   // A stored track is read as the host wrote it, or repaired: a corrupted state.json must not
   // throw on a reply, a tool call or a turn's end (SR3-6).
   const trackOf = (bot) => {
@@ -183,14 +191,52 @@ export function install(rt) {
   // Solver's own reviewer answering a request from the Solver's own chat, and opens with a verdict.
   // `workAt`: when the work it answers was opened. A reply to work opened before this request (a
   // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
+  // The guard's own strict reading (guardVerdictOf) dates the plan's verdict once per request, for
+  // every tracked Bot, so a guard turned on mid-request reads a verdict that already came.
   function reviewVerdict(fromId, toId, roomId, text, workAt) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
+    if (typeof workAt !== 'number') return
     const verdict = verdictOf(text)
-    if (verdict === undefined || typeof workAt !== 'number') return
+    const planVerdict = guardVerdictOf(text, rt.botOf(fromId)?.name)
+    if (verdict === undefined && planVerdict === undefined) return
     const track = trackOf(bot)
     if (track.delivered === true || workAt < track.requestAt) return
-    track.verdicts = [...track.verdicts, { verdict, at: Date.now() }].slice(-VERDICTS_KEPT)
+    const at = Date.now()
+    if (planVerdict !== undefined) track.planVerdictAt ??= at
+    if (verdict !== undefined) track.verdicts = [...track.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
+    save()
+  }
+
+  // Another Bot's message_bot request in a guarded Solver's own chat (turns.js, first arrival
+  // only). Before the plan's verdict it joins the review still to come. After it, and before the
+  // delivery, it opens a new track that needs its own plan verdict (H6-2 (b)), keeping the person's
+  // last message (H7-1); a message that asks no reply, a follow-up from the Bot that opened the
+  // current track, and the reviewer's own message only date it, as a person's message does (H7-2).
+  // After a delivery (or with none asked yet) a request opens the next track; a no-reply message
+  // and the reviewer's own message open nothing.
+  function reviewBotRequest(botId, senderId, { noReply = false } = {}) {
+    const bot = rt.botOf(botId)
+    if (bot?.reviewGuard !== true || typeof senderId !== 'string' || senderId === botId) return
+    const track = cleanTrack(bot.reviewTrack)
+    const dates = noReply || senderId === bot.reviewerId
+    if (track?.requested === true && track.delivered !== true) {
+      if (!isTime(track.planVerdictAt)) return
+      if (dates || senderId === track.openerId) {
+        track.personAt = Date.now()
+        bot.reviewTrack = track
+        save()
+        return
+      }
+      open(bot, Date.now())
+      if (isTime(track.personAt)) bot.reviewTrack.personAt = track.personAt
+      else delete bot.reviewTrack.personAt
+    } else {
+      if (dates) return
+      open(bot, Date.now())
+    }
+    bot.reviewTrack.openedBy = 'bot'
+    bot.reviewTrack.openerId = senderId
     save()
   }
 
@@ -223,5 +269,5 @@ export function install(rt) {
     return last ? { reviewMark: { ...last } } : {}
   }
 
-  Object.assign(rt, { reviewCreated, reviewRequest, reviewWork, reviewVerdict, reviewTurnEnd, reviewMarkOf })
+  Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewTurnEnd, reviewMarkOf })
 }

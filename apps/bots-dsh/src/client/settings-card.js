@@ -11,6 +11,7 @@ import { t } from './i18n.js'
 import { SETTINGS_PAGES } from '../shared/settings-pages.js'
 import { applySteps, parseProposal } from '../shared/proposals.js'
 import { RouteConfirm } from './model-menu.js'
+import { REVIEW_GUARD_COPY } from '../shared/review-guard.js'
 
 // The Settings pages, registered by index.js (as canvas-slot.js is), so the chat cells load
 // without the whole Settings dialog. Without them (tests, a window before the client is
@@ -114,6 +115,9 @@ export function ProposalCard({ proposal, roster, actions }) {
   if (bot === undefined) return h('div', { className: 'bt-event' }, t('That Bot is no longer on the team.'))
   const rows = Object.entries(proposal.change).map(([key, value]) => ({ key, value, now: currentOf(bot, key) }))
   const done = rows.every(row => row.now === row.value)
+  // While the review guard is on, only the person moves the Bot to another model, in Settings: a
+  // card made before the guard came on cannot Apply a model change (RFC 0048 delivery 1.5).
+  const guarded = bot.reviewGuard === true && rows.some(row => row.key === 'model' && row.now !== row.value)
   // The steps from `from` on; `stopReply` goes with the first one only. Answers whether the
   // card now asks.
   const runSteps = async (from, stopReply = false) => {
@@ -143,10 +147,10 @@ export function ProposalCard({ proposal, roster, actions }) {
     }
   }
   const apply = async () => {
-    if (state === 'busy' || state === 'asking' || !actions.updateBot) return
+    if (state === 'busy' || state === 'asking' || !actions.updateBot || guarded) return
     await go(0, false)
   }
-  const question = state === 'asking' && asking !== undefined && typeof proposal.change.model === 'string'
+  const question = !guarded && state === 'asking' && asking !== undefined && typeof proposal.change.model === 'string'
     ? h(RouteConfirm, {
       bot, roster, current: currentOf(bot, 'model'), target: { ref: proposal.change.model }, ask: 'running',
       onCancel: () => { setAsking(undefined); setState('open') },
@@ -168,11 +172,12 @@ export function ProposalCard({ proposal, roster, actions }) {
         h('span', { className: 'bt-propcard-was', role: 'cell' }, shown(row.key, row.now)),
         h('span', { className: 'bt-propcard-arrow', 'aria-hidden': true }, '→'),
         h('span', { className: 'bt-propcard-new', role: 'cell' }, shown(row.key, row.value))))),
-    error ? h('div', { className: 'bt-error bt-propcard-error', role: 'alert' }, error) : null,
+    guarded && !done && state !== 'dismissed' ? h('div', { className: 'bt-error bt-propcard-error', role: 'alert', 'data-review-guard': '' }, t(REVIEW_GUARD_COPY.card))
+      : error ? h('div', { className: 'bt-error bt-propcard-error', role: 'alert' }, error) : null,
     done || state === 'dismissed' ? null : question ?? h('div', { className: 'bt-q-foot bt-propcard-actions' },
       actions.openSettings ? h('button', { type: 'button', className: 'bt-q-btn', onClick: () => actions.openSettings('bots', bot.id) }, t('Open in Settings')) : null,
       h('button', { type: 'button', className: 'bt-q-btn', disabled: state === 'busy', onClick: () => setState('dismissed') }, t('Dismiss')),
-      h('button', { type: 'button', className: 'bt-q-submit', disabled: state === 'busy' || !actions.updateBot, onClick: apply }, state === 'busy' ? t('Applying…') : t('Apply'))))
+      h('button', { type: 'button', className: 'bt-q-submit', disabled: state === 'busy' || !actions.updateBot || guarded, onClick: apply }, state === 'busy' ? t('Applying…') : t('Apply'))))
 }
 
 // The propose_bot_change call in the transcript: the checked proposal from its result.

@@ -145,7 +145,9 @@ const dialog = ({ roster = rosterOf(), actions = fakeActions(), brief = 'Compare
     view, created, actions, tree,
     go: () => find(node => node.type === 'button' && String(node.props.className).includes('bt-create-go'))[0],
     select: () => find(node => node.type === 'select')[0],
-    tick: () => find(node => node.type === 'input' && node.props.type === 'checkbox')[0],
+    // The native tick by its label: the Review guard tick (#2056 D1.5) is another checkbox.
+    tick: () => find(node => node.type === 'input' && node.props.type === 'checkbox' && node.props['aria-label'] === 'Native tools')[0],
+    guard: () => find(node => node.type === 'input' && node.props.type === 'checkbox' && node.props['aria-label'] === 'Hold work until the reviewer answers the plan')[0],
     modelMenu: id => find(node => node.props?.bot?.id === id && typeof node.props.onPick === 'function')[0],
     folder: () => find(node => node.type?.name === 'FolderMenu')[0],
     alert: () => text(find(node => node.props?.role === 'alert')),
@@ -433,4 +435,45 @@ test('the palette lists New Solver and opens its dialog', () => {
   assert.equal(text(row).includes('New Solver'), true)
   row.props.onClick()
   assert.deepEqual(opened, ['solver'])
+})
+
+// #2056 D1.5: the Review guard tick, sent with the Solver's own create-bot, only with a reviewer Bot.
+test('the Review guard tick: on by default with a reviewer Bot, absent for a fresh session, sent in the Solver\'s own create', async () => {
+  const made = dialog()
+  assert.equal(made.guard().props.checked, true)
+  assert.match(made.text(), /On by default\. You can turn it off later in Details\./)
+  await made.create()
+  const solver = made.actions.calls.filter(call => call[0] === 'createBot')[1][1]
+  assert.equal(solver.reviewGuard, true)
+  assert.equal(solver.reviewerId, 'r-new')
+  const existing = dialog()
+  existing.choose('bot:ann')
+  assert.equal(existing.guard().props.checked, true)
+  await existing.create()
+  assert.equal(existing.actions.calls.find(call => call[0] === 'createBot')[1].reviewGuard, true)
+  const fresh = dialog()
+  fresh.choose('fresh')
+  assert.equal(fresh.guard(), undefined)
+  await fresh.create()
+  assert.equal(Object.hasOwn(fresh.actions.calls.find(call => call[0] === 'createBot')[1], 'reviewGuard'), false)
+  const unticked = dialog()
+  unticked.guard().props.onChange({ target: { checked: false } })
+  assert.equal(unticked.guard().props.checked, false)
+  await unticked.create()
+  assert.equal(Object.hasOwn(unticked.actions.calls.filter(call => call[0] === 'createBot')[1][1], 'reviewGuard'), false)
+})
+
+test('the Review guard tick stays on where the guard holds nothing, with the not-held line beside it', () => {
+  const ui = dialog()
+  ui.pickModel(CODEX)
+  ui.tickNative()
+  assert.equal(ui.guard().props.checked, true)
+  assert.match(ui.text(), /Not held on this agent: its own tools run without asking\. Only the delivery mark shows unreviewed work\./)
+  ui.pickModel(KEPT)
+  assert.match(ui.text(), /Not held on this agent/)
+  ui.pickModel(CLAUDE)
+  ui.tickNative()
+  assert.match(ui.text(), /Held only for the steps Claude Code asks about\./)
+  ui.tickNative(false)
+  assert.doesNotMatch(ui.text(), /Held only for the steps|Not held/)
 })

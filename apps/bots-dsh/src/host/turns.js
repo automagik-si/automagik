@@ -1003,6 +1003,12 @@ export function install(rt) {
             ...(source.goalId !== undefined ? { goalId: source.goalId } : {}),
           })
         } else if (source?.kind === SOURCE_KIND) {
+          // A Bot's request in a guarded Solver's own chat, at its first arrival (a handed-back,
+          // resumed or retried one was counted then, H7-3), may open a new review (review-mark.js).
+          if (source.role === 'request' && rt.chatOwners.get(id) !== undefined && source.deferred !== true && source.resumed !== true
+            && source.resumedByUpdate !== true && source.retried !== true) {
+            rt.reviewBotRequest?.(rt.chatOwners.get(id), source.senderSessionId, { noReply: source.noReply === true })
+          }
           if (entry.turn === undefined) {
             entry.pending = source
             entry.pendingText = textOf(event.data.content).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')

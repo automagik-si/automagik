@@ -337,6 +337,14 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
         const current = await authenticate(candidate)
         if (!current || current.revokedAt !== undefined) return refuse(401, 'Invalid agent token')
         await rt.refresh()
+        // While a Bot's review guard is on, only the person moves it to another model (H5-1),
+        // read after the refresh, inside this transaction (H6-9).
+        if (definition.endpoint === 'update-bot' && Object.hasOwn(args, 'model') && rt.botOf(args.id)?.reviewGuard === true) {
+          await audit({ ...entry, outcome: 'refused' })
+          return reply({ isError: true, content: [
+            { type: 'text', text: JSON.stringify(clean({ error: 'Action refused', code: 'bot/review-guard' })) },
+          ] })
+        }
         const before = snapshot()
         // An intent persists before side effects. Audit failure therefore fails closed.
         await audit({ ...entry, outcome: 'started' })

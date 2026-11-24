@@ -671,6 +671,36 @@ function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDel
   }
 }
 
+// The one line a Solver's chat shows where the one-time upgrade turned its review guard on (RFC
+// 0048 delivery 1.5, `reviewGuardNotice`): only in the part it was stored for, after the last turn
+// that ended at or before it, or above the part's first turn when every turn began after it. A
+// part opened later, or an earlier page not loaded yet, shows none.
+export function upgradeNoticeOf(roster, sessionId) {
+  for (const bot of roster?.bots ?? []) {
+    const notice = bot?.reviewGuardNotice
+    if (notice === null || typeof notice !== 'object' || typeof notice.at !== 'number' || !Number.isFinite(notice.at)) continue
+    if (typeof notice.sessionId === 'string' && notice.sessionId === sessionId) return { at: notice.at, name: bot.name }
+  }
+  return undefined
+}
+const noticeKey = (roster, sessionId) => {
+  const notice = upgradeNoticeOf(roster, sessionId)
+  return notice === undefined ? '' : `${notice.at}\u0000${notice.name}`
+}
+const noticeOfKey = (key) => {
+  if (key === '') return undefined
+  const cut = key.indexOf('\u0000')
+  return { at: Number(key.slice(0, cut)), name: key.slice(cut + 1) }
+}
+/** Whether the upgrade line goes right after a turn that ended at `end`, the next one starting at `nextStart`. */
+export const noticeAfterTurn = (at, end, nextStart) => typeof end === 'number' && end <= at && (nextStart === undefined || nextStart > at)
+/** Whether it goes above a turn: the part's first, begun after it. */
+export const noticeBeforeTurn = (at, first, start) => first === true && typeof start === 'number' && start > at
+function UpgradeLine({ name }) {
+  return h('div', { className: 'bt-event', 'data-review-guard-notice': '' },
+    t('The review guard is now on for {name}: its work waits for its reviewer\'s verdict on the plan. You can turn it off in Details.', { name }))
+}
+
 export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, useUi, actions }) {
   const roster = useRoster(value => value)
   const data = node.data
@@ -705,9 +735,14 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
     return first?.turn === turn && unseenSince(visit, first.start) ? clockLabel(first.start) : ''
   })
   const body = triggerBody()
-  return unreadOpening
+  const notice = noticeOfKey(noticeKey(roster, sessionId))
+  const firstTurn = order !== '' && Number(order.split(',')[0]) === turn
+  const upgrade = notice !== undefined && noticeBeforeTurn(notice.at, firstTurn, node.location?.turn?.start?.time ?? data.time)
+    ? h(UpgradeLine, { name: notice.name }) : null
+  const opening = unreadOpening
     ? h(Fragment, null, h('div', { className: 'bt-open-new' }, h(NewDivider), h('div', { className: 'bt-time-sep', role: 'separator' }, unreadOpening)), body)
-    : (body ?? h(CellEmpty))
+    : body
+  return upgrade === null ? (opening ?? h(CellEmpty)) : h(Fragment, null, upgrade, opening)
 
   function triggerBody() {
     if (source.kind === 'bot') {
@@ -874,8 +909,17 @@ export function TurnTailCell({ turn: location, sessionId, useRoster, useTurnCloc
   })
   // Every reply says when it ended, under its last line.
   const ended = hidden ? null : h('time', { className: 'bt-turn-time', dateTime: new Date(time).toISOString() }, new Date(time).toLocaleTimeString(dateLocale(), { hour: 'numeric', minute: '2-digit' }))
+  // The review guard's upgrade line, after the last turn that ended before the upgrade.
+  const notice = noticeOfKey(useRoster(roster => noticeKey(roster, sessionId)))
+  const upgradeHere = useTurnClock((state) => {
+    if (notice === undefined) return false
+    const turns = state[sessionId] ?? {}
+    const next = nextTurnOf(turns, turn)
+    return noticeAfterTurn(notice.at, time, next === undefined ? undefined : turns[next].first)
+  })
   return h(Fragment, null,
     ended,
+    upgradeHere ? h(UpgradeLine, { name: notice.name }) : null,
     label ? h('div', { className: 'bt-time-sep', role: 'separator' }, label) : null,
     fresh ? h(NewDivider) : null)
 }

@@ -1,0 +1,179 @@
+// The Solver's review guard (RFC 0048, delivery 1.5; #2056's hard guard). A Bot with the person's
+// own `reviewGuard: true` has its work refused, in its own chat and the subagents under it, until
+// its reviewer (the `reviewerId` the New Solver dialog stored) answers the current request's plan
+// with a verdict (review-mark.js records `planVerdictAt`). It only removes tools: a call is held
+// unless it is on the open list below (reads, research, asking the person, the notes file and
+// messages to the reviewer), so a tool nobody taught this file about is held. It never reads the
+// cosmetic Solver marker, and only the person sets or clears the field (setReviewGuard), or the
+// one-time upgrade turns it on (store.js).
+import { refusal } from './refusal.js'
+import { teamToolOf } from './approvals.js'
+import { cleanTrack, isNotesWrite } from './review-mark.js'
+
+// The team tools (constants.js TEAM_TOOLS, each on exactly one list) open while the plan waits for
+// its verdict: they read the team, a chat or a memory, or ask the person. `update_bot` and
+// `message_bot` are open only in part (heldCall).
+export const OPEN_TEAM_TOOLS = Object.freeze([
+  'list_bots', 'list_bot_models', 'list_capabilities', 'list_connectors', 'list_secrets', 'read_own_chat',
+  'read_group_chat', 'read_browser', 'recall', 'remember', 'forget',
+  'ask_user', 'request_secret', 'request_connector', 'show_view', 'show_settings', 'propose_bot_change',
+  'update_bot', 'message_bot',
+])
+// The team tools held while the plan waits: they change the team, act outside it or start work.
+// The tools other plugins define (`find_chats`, the automations, Omni's) are not proven read-only
+// here, so they are held too (H5-3).
+export const HELD_TEAM_TOOLS = Object.freeze([
+  'stop_bot', 'create_bot', 'delete_bot', 'create_group', 'update_group', 'delete_group', 'post_to_group',
+  'group_relay', 'save_capability', 'delete_capability', 'attach_capability', 'detach_capability', 'group_goal',
+  'find_chats', 'list_automations', 'save_automation', 'pause_automation', 'delete_automation', 'generate_image',
+  'omni_endpoints', 'omni_call', 'omni_channels', 'omni_chats', 'omni_messages', 'omni_send', 'omni_react',
+  'omni_media', 'omni_delete', 'omni_connect', 'show_canvas', 'start_task',
+])
+// This plugin's other tools that only read: mail and browser lookups.
+const OPEN_HOST_TOOLS = ['mail_read', 'mail_search', 'browser_open', 'browser_snapshot', 'browser_screenshot', 'browser_tabs', 'browser_back']
+// DeepSeek Harness tools proven read-only in its installed harness (SOL-IMPLEMENT-D15, stage 4):
+// file reads and searches, the web, the subagent spawn (each child's own calls pass this guard by
+// its lineage), the goal read and the session's todo list.
+const OPEN_DSH_TOOLS = ['read', 'read_image', 'grep', 'glob', 'web_search', 'web_fetch', 'subagent', 'list_subagent_models', 'get_goal', 'todo_write']
+const OPEN = new Set([...OPEN_TEAM_TOOLS, ...OPEN_HOST_TOOLS, ...OPEN_DSH_TOOLS])
+// An ACP agent's own call (`acp_tool`) that only reads, searches, fetches or thinks (Claude Code's
+// Agent/Task spawn arrives as `think`).
+const ACP_OPEN_KINDS = new Set(['read', 'search', 'fetch', 'think'])
+
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const quoted = name => JSON.stringify(String(name ?? ''))
+
+/**
+ * Whether one call is held while the plan has no verdict: 'message' for message_bot to a Bot that
+ * is not the reviewer, 'work' for anything else not on the open list, undefined when it is open.
+ * @param {object} rt - the team runtime (`findBot` resolves message_bot's target).
+ * @param {object} bot - the guarded Bot.
+ * @param {string} name - the tool name as the executor sees it.
+ * @param {unknown} args - the call's arguments.
+ * @param {object} [definition] - the tool definition, when known.
+ * @param {string} [base] - the Session's folder, where a relative path lands.
+ */
+export function heldCall(rt, bot, name, args, definition, base) {
+  if (typeof name !== 'string' || name === '') return 'work'
+  const folder = bot.workDir ?? rt.teamFolder?.()
+  if (name === 'acp_tool') {
+    if (!isRecord(args) || typeof args.kind !== 'string') return 'work'
+    if (isNotesWrite(name, args, folder, base ?? folder)) return undefined
+    const input = args.input
+    const command = isRecord(input) && (Object.hasOwn(input, 'command') || Object.hasOwn(input, 'cmd'))
+    return ACP_OPEN_KINDS.has(args.kind) && !command ? undefined : 'work'
+  }
+  if (isNotesWrite(name, args, folder, base ?? folder)) return undefined
+  const team = teamToolOf(name)
+  if (team === 'message_bot') {
+    const target = typeof args?.to === 'string' ? rt.findBot?.(args.to) : undefined
+    return target !== undefined && target.id === bot.reviewerId && target.id !== bot.id ? undefined : 'message'
+  }
+  if (team === 'update_bot') {
+    const other = typeof args?.bot === 'string' && args.bot !== '' && rt.findBot?.(args.bot)?.id !== bot.id
+    return other || (isRecord(args) && args.model !== undefined && args.model !== null && args.model !== '') ? 'work' : undefined
+  }
+  if (OPEN.has(team)) return undefined
+  // An MCP server's tool marked read-only by its server (the connector gateway's own rule). The
+  // installed DeepSeek Harness drops MCP annotations, so today every one of them is held.
+  if (/^mcp__[^_]/.test(name) && !name.startsWith('mcp__dsh__') && definition?.annotations?.readOnlyHint === true) return undefined
+  return 'work'
+}
+
+export function install(rt) {
+  const reviewerOf = bot => (typeof bot.reviewerId === 'string' && bot.reviewerId !== '' && bot.reviewerId !== bot.id
+    ? rt.botOf(bot.reviewerId) : undefined)
+  const waiting = text => `${text} A fresh-session review does not open this guard: deliver the plan as BLOCKED-review.`
+
+  /**
+   * Whether the guard refuses one call: { text, why } (the refusal, and the stop's reason), or
+   * undefined. `own`: the Session is the Bot's own chat or a subagent under it.
+   */
+  function reviewGuardHolds(bot, own, name, args, definition, base) {
+    if (bot?.reviewGuard !== true || !own) return undefined
+    const track = cleanTrack(bot.reviewTrack)
+    if (typeof track?.planVerdictAt === 'number') return undefined
+    const held = heldCall(rt, bot, name, args, definition, base)
+    if (held === undefined) return undefined
+    const why = track?.openedBy === 'bot' ? 'guard-request' : 'guard'
+    const tool = name === 'acp_tool' && typeof args?.title === 'string' && args.title !== '' ? args.title : teamToolOf(name) || 'this tool'
+    const reviewer = reviewerOf(bot)
+    if (reviewer === undefined) {
+      return { why, text: waiting(`${bot.name} cannot use ${tool}: its review guard is on and its reviewer is no longer on the team. Deliver what you have with this blocker named; only the person can turn the guard off in ${bot.name}'s Details.`) }
+    }
+    const who = quoted(reviewer.name)
+    if (held === 'message') return { why, text: `${bot.name} can message only ${who} until ${who} answers the plan.` }
+    return { why, text: waiting(`${bot.name} cannot use ${tool} yet: its review guard holds work until ${who} answers the plan. Send the plan to ${who} with message_bot (reply_to "me"), end your turn, and wait for its verdict. Until then you can read, research, ask the person, and write notes to .solver/notes.md with the write tool.`) }
+  }
+
+  // An ACP agent's question that reaches the approval chain without passing the executor: a
+  // Claude Code native subagent's nested call asked from its Agent card (acp-dsh tool.js). Held
+  // like the executor would hold it, answered with the agent's own reject, and no card is shown.
+  function reviewGuardAsk(request) {
+    if (request?.toolName !== 'acp_tool') return undefined
+    const agent = request.agent
+    const sessionId = agent?.id ?? agent?.session?.id
+    if (typeof sessionId !== 'string') return undefined
+    const bot = rt.botOfSession?.(sessionId, agent)
+    if (bot?.reviewGuard !== true) return undefined
+    if (rt.ownChatLineage?.(sessionId, agent, bot) !== true) return undefined
+    const mirror = request.mirrorCall
+    let base
+    try { base = agent?.session === undefined ? undefined : rt.sessionFolder?.(agent.session) } catch {}
+    const held = reviewGuardHolds(bot, true, 'acp_tool', isRecord(mirror) ? mirror : undefined, undefined, base)
+    if (held === undefined) return undefined
+    rt.noteStop?.(sessionId, { why: held.why, ...(typeof mirror?.title === 'string' ? { tool: mirror.title } : {}), callId: request.callId, text: held.text, child: true }, agent)
+    return held
+  }
+
+  /**
+   * The person's switch (Details), on its own: refused for any Bot, with other settings, for a
+   * value that is not a boolean, an unknown Bot, or ON with no reviewer Bot on the team. Saved
+   * before it answers; a failed save puts the earlier value back.
+   */
+  async function setReviewGuard(id, patch, actorId) {
+    const bot = rt.botOf(id)
+    if (actorId !== undefined) throw refusal('Only the user can turn the review guard on or off for ' + (bot?.name ?? 'this Bot'))
+    if (Object.keys(patch).some(key => key !== 'id' && key !== 'reviewGuard')) {
+      throw refusal('Change the review guard on its own, without other settings.')
+    }
+    const on = patch.reviewGuard
+    if (typeof on !== 'boolean') throw Object.assign(new Error('The review guard is true or false.'), { code: 'bot/invalid' })
+    if (bot === undefined) throw refusal('Unknown Bot')
+    if (on && reviewerOf(bot) === undefined) throw refusal(`${bot.name} has no reviewer Bot on the team, so there is no verdict to wait for.`)
+    const before = bot.reviewGuard
+    if (on) bot.reviewGuard = true
+    else delete bot.reviewGuard
+    try {
+      await rt.save({ required: true })
+    } catch (error) {
+      if (before === undefined) delete bot.reviewGuard
+      else bot.reviewGuard = before
+      throw error
+    }
+    return bot
+  }
+
+  // What the owner's view shows while the guard holds: since when the plan waits for its verdict.
+  const reviewGuardViewOf = (bot, track = bot?.reviewTrack) => {
+    if (bot?.reviewGuard !== true) return {}
+    const clean = cleanTrack(track)
+    if (clean?.requested !== true || clean.delivered === true || typeof clean.planVerdictAt === 'number') return {}
+    return { reviewGuardWaitingSince: clean.requestAt }
+  }
+
+  Object.assign(rt, { reviewGuardHolds, reviewGuardAsk, setReviewGuard, reviewGuardViewOf })
+}
+
+/**
+ * The guard ahead of everyone who would answer an approval: createRuntime (index.js) calls this
+ * right after Auto's judge, and cordis runs `prepend` listeners newest first, so a held question
+ * is refused before Auto, a person's grant, Pocket or the card can allow it (H6-1).
+ */
+export function installAhead(rt) {
+  rt.ctx.on('approval/request', (request, next) => {
+    let held
+    try { held = rt.reviewGuardAsk?.(request) } catch {}
+    return held === undefined ? next() : 'rejected'
+  }, { prepend: true })
+}

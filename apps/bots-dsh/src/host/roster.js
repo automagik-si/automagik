@@ -319,7 +319,7 @@ export function install(rt) {
     return state.prefs.permission ?? (personDefault !== rt.permissionCatalog?.()?.defaultPreset ? personDefault : undefined)
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId }, readScopeSource) {
+  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard }, readScopeSource) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
@@ -423,6 +423,9 @@ export function install(rt) {
         // The Bot that reviews a Solver's work (the New Solver dialog's choice). Cosmetic: only
         // the "unreviewed" mark reads it (review-mark.js); it grants and refuses nothing.
         ...(typeof reviewerId === 'string' && reviewerId !== id && rt.botOf(reviewerId) !== undefined ? { reviewerId } : {}),
+        // The person's review guard (review-guard.js): only with that reviewer kept, and only from the
+        // person's create-bot (the New Solver tick) or a copy of a guarded Solver.
+        ...(reviewGuard === true && typeof reviewerId === 'string' && reviewerId !== id && rt.botOf(reviewerId) !== undefined ? { reviewGuard: true } : {}),
         instructions: String(instructions).trim(),
         createdAt: Date.now(),
         createdBy: createdBy ?? null,
@@ -596,6 +599,8 @@ export function install(rt) {
       // A copy of a Solver keeps its reviewer (buildBot checks it again), so its review mark
       // reads that reviewer's verdicts, not a fresh-session review it cannot see (#2056).
       ...(typeof bot.reviewerId === 'string' ? { reviewerId: bot.reviewerId } : {}),
+      // And its review guard: a copy only narrows, and copying is the person's.
+      ...(bot.reviewGuard === true ? { reviewGuard: true } : {}),
       // A copy keeps a shell the original was denied: the copy is new, but taking a
       // capability away here would not be the user's choice either.
       ...(bot.shell === false ? { shell: false } : {}),
@@ -643,6 +648,11 @@ export function install(rt) {
 
   async function updateBot(id, patch, actorId, fromSessionId, options) {
     if (Object.hasOwn(patch, 'nativeTools')) return rt.setNativeTools(id, patch, actorId)
+    if (Object.hasOwn(patch, 'reviewGuard')) return rt.setReviewGuard(id, patch, actorId)
+    // While the review guard is on, only the person moves the Bot to another model (H5-1).
+    if (patch.model !== undefined && actorId !== undefined && rt.botOf(id)?.reviewGuard === true) {
+      throw refusal(`Only the person can move ${rt.botOf(id).name} to another model while its review guard is on.`)
+    }
     if (Object.hasOwn(patch, 'people')) throw refusal('Only the user can choose who may talk to ' + (rt.botOf(id)?.name ?? 'this Bot'))
     const run = () => updateBotRecord(id, patch, actorId, fromSessionId, options)
     return patch.model !== undefined || patch.effort !== undefined ? withModelChange(id, run, options?.admit !== undefined) : run()

@@ -254,3 +254,21 @@ test('listeners preserve decisions, error metadata, and downstream throws', asyn
   await assert.rejects(hook(exec, result, async () => { throw new Error('x') }), /x/)
   await assert.rejects(b.handlers.get('agent/pre-step')({}, async () => { throw new Error('x') }), /x/)
 })
+
+// #2056 D1.5 (H6-8): a subagent step the review guard held reaches its parent with the guard's
+// reason, and the tail never tells the parent to run that step itself.
+test('a guard-held child step tells the parent to wait for its reviewer, never to do it itself', async () => {
+  const guardTail = 'Send the plan to your reviewer with message_bot and wait for its verdict; until then work steps are refused here too.'
+  for (const why of ['guard', 'guard-request']) {
+    const b = bench({ parentPolicy: 'ask' })
+    b.rt.noteStop('child', { why, tool: 'write', callId: 'g1', text: 'held' }, { session: { id: 'child', header: { origin: 'subagent', parentSession: 'ada-chat' } } })
+    const text = noteText(await b.step(enter()))
+    assert.equal(text, `Subagent child was refused a step without anyone being asked: write (the review guard holds work until the reviewer answers the plan). ${guardTail}`)
+    assert.doesNotMatch(text, /do it yourself/)
+  }
+  // A mixed note (guard + sandbox) at ask keeps the guard tail.
+  const mixed = childRefusalNote('child', { items: [{ tool: 'write', why: 'guard' }, { tool: 'bash', why: 'sandbox' }], more: 0 }, 'ask').content[0].text
+  assert.match(mixed, /bash \(the sandbox blocked it and it could not ask to widen it\)/)
+  assert.ok(mixed.endsWith(guardTail))
+  assert.doesNotMatch(mixed, /do it yourself/)
+})

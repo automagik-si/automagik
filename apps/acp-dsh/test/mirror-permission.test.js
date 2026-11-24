@@ -675,6 +675,25 @@ test('Manual: a waiting parent refuses a nested question that only offers allow_
   assert.equal(childResult.meta.text, 'Test ACP offered to allow Read README.md only from now on, not just once, so Automagik did not approve it.')
 })
 
+// bots-dsh's review guard (RFC 0048 delivery 1.5) refuses a held native subagent step at this
+// approval request: a pin of the contract it relies on. At Manual, a waiting Agent card's nested
+// question reaches approval.request as `acp_tool` with the nested call's kind and input, and a
+// `rejected` answer gives the agent its own reject option and asks nothing more.
+test('Manual: a waiting parent\'s nested question reaches the approval request with its call, and a rejection answers the agent', async (t) => {
+  const w = await world(t, { preset: 'workspace-write', answer: 'rejected' })
+  const { parent, child, running } = await waitingParent(w)
+  const asked = child.ask()
+  assert.deepEqual(await soon(asked), picked('no'))
+  assert.equal(w.asked.length, 1)
+  assert.equal(w.asked[0].toolName, TOOL_NAME)
+  assert.equal(w.asked[0].mirrorCall.kind, 'read')
+  assert.deepEqual(w.asked[0].mirrorCall.input, { path: 'README.md' })
+  child.close(await asked)
+  parent.close(picked('yes'))
+  await running
+  assert.equal(w.asked.length, 1)
+})
+
 test('Auto: a lasting-only question spends the review, so a second one-shot question is asked', async (t) => {
   const w = await world(t)
   const c = w.chat('s1', [{ question: false }])

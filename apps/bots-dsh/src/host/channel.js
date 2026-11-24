@@ -206,6 +206,8 @@ export function install(rt) {
         ...(ownTools(bot.model ?? bot.appliedModel) ? { ownTools: true } : {}),
         // A Solver's last delivery: which review the host saw (review-mark.js).
         ...rt.reviewMarkOf?.(bot, reviewTrack),
+        // A guarded Solver waiting for its plan's verdict: since when (review-guard.js).
+        ...rt.reviewGuardViewOf?.(bot, reviewTrack),
         ...(tail ? { lastAt: tail.lastAt, preview: tail.preview } : {}),
       }
     }),
@@ -775,7 +777,7 @@ export function install(rt) {
           await rt.bootstrap()
           // `private` and `shell` are the user's own create fields (no acting Bot here):
           // a Bot created private starts without a shell unless `shell` says otherwise.
-          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId })
+          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId, reviewGuard: body.reviewGuard })
           return ok(bot)
         }
         case 'set-bot-auto':

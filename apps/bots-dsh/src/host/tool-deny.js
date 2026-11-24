@@ -529,12 +529,22 @@ export function install(rt) {
     // renamed or aliased shell tool never needs this plugin to know its name first.
     const shell = noShell(bot) && shellCall(name, exec.arguments, definitionOf(exec))
     if (!denied.includes(name) && !shell) {
-      // A Solver's work call in its own chat dates its review mark (review-mark.js); it refuses nothing.
-      // Only a Solver walks the lineage: every other Bot's call skips it. The Session's folder is where a
-      // relative path lands (a write to the Solver's notes file is not work).
-      if (isSolverBot(bot)) {
+      // A Solver's work call in its own chat dates its review mark (review-mark.js). A Bot with the
+      // person's review guard on has its work refused there until its reviewer answers the plan
+      // (review-guard.js). Only a Solver or a guarded Bot walks the lineage: every other Bot's call
+      // skips it. The Session's folder is where a relative path lands (a write to the Solver's notes
+      // file is not work).
+      if (isSolverBot(bot) || bot.reviewGuard === true) {
+        const sessionId = exec.agent?.id ?? exec.agent?.session?.id
         const base = exec.agent?.session === undefined ? undefined : rt.sessionFolder?.(exec.agent.session)
-        rt.reviewWork?.(bot, ownChatLineage(exec.agent?.id ?? exec.agent?.session?.id, exec.agent, bot), name, exec.arguments, definitionOf(exec), base)
+        const own = ownChatLineage(sessionId, exec.agent, bot)
+        const definition = definitionOf(exec)
+        const held = rt.reviewGuardHolds?.(bot, own, name, exec.arguments, definition, base)
+        if (held !== undefined) {
+          rt.noteStop?.(sessionId, { why: held.why, tool: name, callId: exec.callId, text: held.text }, exec.agent)
+          throw refusal(held.text)
+        }
+        rt.reviewWork?.(bot, own, name, exec.arguments, definition, base)
       }
       return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
     }
@@ -546,5 +556,5 @@ export function install(rt) {
   }
 
   // Retries stop on a Session that leaves the team, so a lift is not attempted on a gone agent.
-  Object.assign(rt, { botOfSession, applyToolDeny, applyToolDenyToAgent: apply, cleanDenyTools, unknownDenyTools, assertDenyTools })
+  Object.assign(rt, { botOfSession, ownChatLineage, applyToolDeny, applyToolDenyToAgent: apply, cleanDenyTools, unknownDenyTools, assertDenyTools })
 }

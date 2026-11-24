@@ -10,7 +10,7 @@
 // ("SHIP? no."), never as one of a list of options ("SHIP, FIX-FIRST or BLOCKED.", SR5-2).
 const ANY = '(?:SHIP|FIX-FIRST|BLOCKED)'
 const MD = '[*_\\`]*'
-const WORD = `(SHIP|FIX-FIRST|BLOCKED)(?![A-Za-z0-9-]|${MD}\\s*\\?|${MD}\\s*[,;/|]\\s*${MD}${ANY}|${MD}\\s+(?:or|and|nor|vs\\.?|versus)\\s+${MD}${ANY}|${MD}\\s*[-–—(]\\s*(?:or\\s+)?${MD}${ANY})`
+export const WORD = `(SHIP|FIX-FIRST|BLOCKED)(?![A-Za-z0-9-]|${MD}\\s*\\?|${MD}\\s*[,;/|]\\s*${MD}${ANY}|${MD}\\s+(?:or|and|nor|vs\\.?|versus)\\s+${MD}${ANY}|${MD}\\s*[-–—(]\\s*(?:or\\s+)?${MD}${ANY})`
 const AT_START = new RegExp(`^${WORD}`)
 const AFTER_LABEL = new RegExp(`(?:^|[^A-Za-z])(?:Verdict|verdict|VERDICT)[*_\`]*\\s*:\\s*[*_\`]*\\s*${WORD}`)
 const ENDS_LINE = new RegExp(`[.!?\u2026]["'\u201d\u2019)\\]]*\\s*[*_\`]*${WORD}[*_\`]*[\\s.!]*$`)
@@ -20,7 +20,7 @@ export const VERDICTS_KEPT = 4
 // A line that opens or closes a fenced code block (three backticks or three tildes), and a list
 // item (a bullet or a number): a verdict word in a fenced block or opening a list item is quoted
 // text or one of a list of options, never the reviewer's verdict (SR5-2).
-const FENCE = /^[\s>]*(?:```|~~~)/
+export const FENCE = /^[\s>]*(?:```|~~~)/
 const LIST_ITEM = /^[\s>]*(?:[*+-]|\d+[.)])\s+/
 
 /**

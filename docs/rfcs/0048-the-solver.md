@@ -75,6 +75,14 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   The cap of 2 FIX-FIRST rounds per review point is enforced by this text only; delivery 4's
   `group_goal` stages can enforce it. Stored descriptions (`Solver`, `Reviewer`) and the method are
   English in every locale; the Bot answers in the person's language.
+- **Review guard** (delivery 1.5): a per-Solver switch, on by default in the dialog when the
+  reviewer is a Bot, and turned on once at the upgrade for an existing Solver whose reviewer Bot is
+  on the team (a later OFF stays off). While it is on, the Solver's work calls in its own chat (and
+  its subagents) are refused at the tool executor until its reviewer's reply to the current request
+  carries a verdict (SHIP, FIX-FIRST or BLOCKED). The person turns it off in Details. It holds on
+  routes whose calls are DSH tools. On Claude Code with native tools at Workspace it holds only for
+  calls that ask first. It does not hold on Codex or omp native tools, or at Full access or Auto,
+  and Details says so. The 'unreviewed' mark stays on every route.
 - **The character slot.** `SOLVER_LOOKS` in `solver-draft.js` holds avatar objects as the
   host keeps them (`{ shape }` of a known character, or a built-in pet). Whichever of D1 and the
   change that adds the Solver characters lands second fills it, editing only this list (and its
@@ -116,11 +124,36 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   `.solver/notes.md` in its folder, never dates the plan side), at most 4 verdicts (the last
   whole-word SHIP, FIX-FIRST or BLOCKED in a reply from `reviewerId` that starts a line, follows
   `Verdict:` or ends a line after a sentence, never asked, one of a list of options or inside a
-  fenced code block) and the last delivery's mark. No view carries `reviewTrack`: the owner's
-  view shows only `reviewMark`, the last mark (plan and result reviewed, plan unreviewed, result
-  unreviewed, delivered before the reviewer answered, fresh session not checked, or no reviewer),
-  and neither field is ever a caller-view field. Like the Solver marker it grants and refuses
+  fenced code block), the last delivery's mark, and the first guard verdict's time. No view
+  carries `reviewTrack`: the owner's view shows only `reviewMark`, the last mark (plan and result
+  reviewed, plan unreviewed, result unreviewed, delivered before the reviewer answered, fresh
+  session not checked, or no reviewer), and neither field is ever a caller-view field. Like the Solver marker it grants and refuses
   nothing; delivery 1.5's hard guard keys on its own user-only field.
+- **Solver review guard** (delivery 1.5): the stored field `reviewGuard` (`true` or absent). It is
+  set by the person (the New Solver tick through `create-bot`, with a kept `reviewerId`; the
+  Details switch through `update-bot`, carrying it on its own), or once by the host's upgrade for
+  a Solver whose `reviewerId` names a Bot on the team; only the person clears it. No Bot tool,
+  proposal card, agent-access call or caller route changes it, and it is never a caller-view
+  field. It never reads the Solver marker.
+  - It narrows only: while the current request has no verdict from `reviewerId`, the host refuses
+    every call that is not on its open list (reads, research, asking the person, one-file writes
+    to exactly `.solver/notes.md`, and messages to the reviewer), so an unknown tool is refused. A
+    native subagent's question is refused at its approval request.
+  - A verdict counts only in the reviewer's own reply to work the Solver opened in that request:
+    its first line, unquoted, or a line that starts with `Verdict:`, outside fences.
+  - `reviewTrack` gains `planVerdictAt`, `openedBy` (`'bot'`) and `openerId`. Another Bot's
+    request after the plan verdict opens a new track that needs its own verdict; a message that
+    asks no reply, a follow-up from the Bot that opened the track, and the reviewer's own message
+    only date it.
+  - While it is on, only the person moves the Bot to another model.
+  - A gone reviewer keeps work refused until the person turns the guard off.
+  - `state.reviewGuardMigrated` (`true` or absent): a top-level team flag; while it is `true` the
+    one-time upgrade never runs again for that team.
+  - `state.bots[id].reviewGuardNotice` (`{ at, sessionId }`, or absent): set only by that upgrade
+    on a Bot it turned on; the app draws it as one line in that part of the Bot's chat. Display
+    only.
+  - The owner view's `reviewGuardWaitingSince` (never stored): since when the plan waits.
+  - Stop line reasons `guard` and `guard-request`.
 - Delivery 2 adds the official role id `solver`.
 
 ## Threat model
@@ -131,12 +164,19 @@ sandbox (RFC 0003), and are only ever the person's explicit tick. The reviewer i
 `message_bot` under its own fences; the Solver is never made a Main Bot and the list never offers
 one. Web pages, files and other Bots' replies are data to the method.
 
+The review guard adds no trust: it only removes tools. It is set by the person, or once by the
+host's upgrade (`reviewGuardMigrated`) for a Solver whose reviewer Bot is on the team; only the
+person clears it. It fails closed: no verdict, an unreadable review track or a gone reviewer keep
+work refused.
+
 ## Deliveries
 
 1. **D1 (#2056):** menu line and palette command, the dialog, the method module, the read-only
    view field, i18n (en, zh, pt-BR). Plugin lane. Acceptance: the issue's "Done when" on the
    installed app. Rollback: reverting the release removes the line and the dialog; Bots made by it
    stay ordinary Bots.
+1.5. **D1.5 (#2056):** the review guard. Plugin lane. Acceptance: the installed-app rows in its
+   PR. Rollback: reverting the release removes the switch; the stored field is ignored.
 2. **D2:** `roles/solver/` official role (tag, prompt part, pinned version); the dialog attaches it
    and stops writing instructions; existing D1 Solvers keep theirs. Plugin lane, with a cut that
    carries the role. Check: a new Solver carries the `solver` tag and no written instructions; a
