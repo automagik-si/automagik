@@ -32195,8 +32195,9 @@ var REVIEWER_INSTRUCTIONS = `You are a reviewer for a Solver. You get a request 
 var FRESH_REVIEW = "Run each review in a fresh session that shares nothing with you: a subagent (your Agent/Task tool or your harness's subagent tool) given only the person's original request word for word and the plan or the deliverable, never your notes, reasoning or earlier reviews. The delivery says the review ran in a fresh session and names the model it ran on. If no subagent tool is available, never review your own work and call it independent: deliver with the missing review named as the blocker.";
 function reviewText(reviewer, dedicated) {
   if (typeof reviewer !== "string" || reviewer === "") return `There is no reviewer Bot. ${FRESH_REVIEW}`;
+  const name = JSON.stringify(reviewer);
   const how = dedicated ? '(reply_to "me")' : '(reply_to "me", when "queue")';
-  return `Send the plan, then the result, with message_bot to ${JSON.stringify(reviewer)} ${how}. Start every review message with these rules: "Review this as a reviewer. ${REVIEWER_RULES}" Then the person's original request word for word and the plan or the deliverable (paths and evidence). Your reviewer runs on another model or agent. If the reviewer errors or has not answered after your other work is done, run the review in a fresh session and say so in the delivery. Fresh-session review: ${FRESH_REVIEW}`;
+  return `Message ${name} with message_bot FIRST for every review, plan and result alike ${how}. Start every review message with these rules: "Review this as a reviewer. ${REVIEWER_RULES}" Then the person's original request word for word and the plan or the deliverable (paths and evidence). You have a reviewer on another model or agent: never say otherwise, and never replace it with a subagent or your own review. A fresh-session review is allowed ONLY when message_bot to ${name} fails, and the delivery quotes that failure. If ${name} has not answered after your other work is done, deliver marked BLOCKED-review. Fresh-session review: ${FRESH_REVIEW}`;
 }
 function solverInstructions({ reviewer = null, dedicated = false } = {}) {
   const others = typeof reviewer === "string" && reviewer !== "" ? "message no Bot but your reviewer" : "message no other Bot";
@@ -32208,13 +32209,13 @@ function solverInstructions({ reviewer = null, dedicated = false } = {}) {
     "3. Questions: ask the person only when you truly need them (a choice only they can make, access only they can give). Otherwise decide, and record each decision and why.",
     "4. Brainstorm 2-3 approaches; pick one and say why.",
     "5. Plan: steps, each with its check.",
-    "6. Independent review of the plan (see Review).",
+    "6. Review the plan (mandatory, see Review); implement only after its verdict.",
     "7. Implement; use subagents for parallel parts.",
     "8. Test: run the checks from step 1 and keep the output.",
     "9. Verify the result against the person's original words, not against your plan, through a second review.",
     "10. Deliver: one message with what was done, where it is, each review's verdict, each check with its evidence, the decisions you took alone, every outside source you relied on, and what was not done and why.",
     `Review: ${reviewText(reviewer, dedicated)}`,
-    "The review is mandatory: never deliver without the reviewer's verdict, SHIP, FIX-FIRST or BLOCKED, with evidence, and never skip a review point or deliver before its verdict, however small the task. If the reviewer cannot be reached and no fresh-session review can run, the delivery says so explicitly, marked BLOCKED-review, never silently.",
+    "The review is mandatory: never deliver without the reviewer's verdict, SHIP, FIX-FIRST or BLOCKED, with evidence, and never skip a review point or deliver before its verdict, however small the task. Both review points, the plan (step 6) and the result (step 9), are mandatory. If the reviewer cannot be reached and no fresh-session review can run, the delivery says so explicitly, marked BLOCKED-review, never silently.",
     "At most 2 FIX-FIRST rounds per review point; after that, deliver with the open point named as the blocker.",
     "Always deliver. Never end in silence. When blocked, deliver what is done, the blocker in one line (what, why, what it needs), the person's options and how to resume. Never get around a block that would widen your rights (a level, a shell, a folder, a sign-in, a refused approval).",
     `You manage yourself and every work item you open (your plan, notes, subagents and reviewer threads) from start to delivery: follow each up and close it, and list any left open. You have no powers over the team: do not create Bots, groups or tasks, and ${others}.`,

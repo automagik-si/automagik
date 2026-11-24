@@ -111,7 +111,10 @@ test('the Solver and reviewer payloads', () => {
   // Its own look, never the engine's badge.
   assert.deepEqual(plain.payload.avatar, { shape: 'moon' })
   assert.deepEqual(solverPayload({ name: 'S', look, model: 'local-claude-code/sonnet' }).payload.avatar, { shape: 'moon' })
-  assert.match(plain.payload.instructions, /message_bot to "Solver reviewer" \(reply_to "me"\)\./)
+  // The dialog writes the reviewer's real name: asked first, a fresh session only after its failure.
+  assert.ok(plain.payload.instructions.includes('Message "Solver reviewer" with message_bot FIRST for every review, plan and result alike (reply_to "me").'))
+  assert.ok(plain.payload.instructions.includes('ONLY when message_bot to "Solver reviewer" fails, and the delivery quotes that failure.'))
+  assert.doesNotMatch(plain.payload.instructions, /no reviewer/i)
   const native = solverPayload({ name: 'Solver', look, model: CLAUDE, brief: 'Compare two libraries', native: true })
   assert.equal(native.payload.brief, undefined)
   assert.equal(native.sendBrief, 'Compare two libraries')
