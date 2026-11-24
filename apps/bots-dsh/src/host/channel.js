@@ -223,6 +223,8 @@ export function install(rt) {
     }),
     // Deleted private Bots whose folder, memory and chats stay closed to the others.
     privateArchives: rt.archivesView(),
+    // Deleted Sessions whose composer state this page removes, then names (`drafts-swept`).
+    ...(state.draftSweep?.length > 0 ? { draftSweep: state.draftSweep } : {}),
     exchangeTurns: state.exchangeTurns,
     questions: state.questions,
     views: state.views ?? {},
@@ -858,10 +860,15 @@ export function install(rt) {
         case 'avatar-delete':
           await rt.load()
           return ok(await rt.avatarLibraryDelete(String(body.id ?? '')))
-        case 'delete-bot':
+        case 'delete-bot': {
           await rt.load()
-          await rt.deleteBot(body.id)
-          return ok(await currentView())
+          // The deleted Bot's parts, whose composer state the page removes.
+          const deletedParts = await rt.deleteBot(body.id)
+          return ok({ ...(await currentView()), deletedParts })
+        }
+        case 'drafts-swept':
+          await rt.load()
+          return ok(await rt.draftsSwept(body.ids))
         case 'private-release':
           await rt.load()
           await rt.releaseArchive(String(body.id ?? ''))

@@ -1745,3 +1745,16 @@ test('rfc0039 D3b [C] G24 a seat a held Session adoption may give back is not la
     assert.equal(rt.chatOf(botId), 'later')
   })
 })
+
+test('a deleted Bot\'s Session adopted into a DSH bot leaves the composer sweep list', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'ds-bot-agents-'))
+  const { call, stop } = start({ ...TEAM, bots: { ...TEAM.bots, b2: { id: 'b2', sessionId: 'b2', name: 'Writer', role: 'Write', instructions: '', createdAt: 2 } } }, { home })
+  t.after(stop)
+  await call('state', {})
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  assert.deepEqual((await call('state', {})).value.draftSweep, ['b2'])
+  const agent = (await call('add-agent', { name: 'Notes' })).value
+  assert.equal((await call('agent-adopt', { agentId: agent.id, sessionId: 'b2' })).ok, true)
+  assert.equal(Object.hasOwn((await call('state', {})).value, 'draftSweep'), false)
+  assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')), 'draftSweep'), false)
+})

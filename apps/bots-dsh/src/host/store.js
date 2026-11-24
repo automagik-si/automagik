@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { piAiClaudeOf } from './claude-models.js'
 import { KEY_ERROR } from './connectors/credential-key.js'
 import { connectorState, ENCRYPTED_STATE_VERSION } from './connectors/credential-state.js'
-import { LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
+import { DRAFT_SWEEP_MAX, LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
 import { replaceFile } from './files.js'
 import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
@@ -304,6 +304,12 @@ export function install(rt) {
     }
     state.mainBotIds = state.mainBotIds.filter(id => state.bots[id])
     if (!Array.isArray(state.privateArchives)) state.privateArchives = []
+    // Deleted Sessions whose composer state the owner's page still removes (roster.js).
+    if (Object.hasOwn(state, 'draftSweep')) {
+      const sweep = [...new Set(Array.isArray(state.draftSweep) ? state.draftSweep.filter(id => typeof id === 'string' && id !== '') : [])].slice(-DRAFT_SWEEP_MAX)
+      if (sweep.length > 0) state.draftSweep = sweep
+      else delete state.draftSweep
+    }
     if (!Array.isArray(state.sections)) state.sections = []
     else {
       const seen = new Set()

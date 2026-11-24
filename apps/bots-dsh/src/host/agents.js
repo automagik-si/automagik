@@ -252,6 +252,8 @@ export function install(rt) {
         || rt.roomOf(sessionId) !== undefined || agentOf(sessionId) !== undefined
       if (owned) throw refusal('Session already belongs to the team')
       agent.sessions.push(sessionId)
+      // A deleted Bot's or group's Session in use again keeps its composer state.
+      rt.unlistDraftSweep?.([sessionId])
       await rt.save()
       await restrictTeamTools(await rt.resolveAgent(sessionId))
       return sessionId

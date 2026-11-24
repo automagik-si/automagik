@@ -14,16 +14,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRuntime } from '../index.js'
 import { createAgentAccess, agentBindAddress, AGENT_TOOLS } from '../src/host/agent-access.js'
+import { createDraftSweep } from '../src/client/draft-sweep.js'
 import { fakeContext } from './fake-ctx.js'
 
-async function fixture(t) {
+async function fixture(t, { bots = {}, rooms = {} } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'agent-access-'))
   await writeFile(join(home, 'state.json'), JSON.stringify({ version: 1, revision: 1,
     mainBotIds: ['a'], workspaceId: 'w', bots: {
       a: { id: 'a', name: 'Alpha', instructions: 'Help', capabilities: [] },
       b: { id: 'b', name: 'Beta', instructions: '', capabilities: [] },
       c: { id: 'c', name: 'Gamma', instructions: '', capabilities: [] },
-    }, rooms: {}, agents: {}, exchanges: [] }))
+      ...bots,
+    }, rooms, agents: {}, exchanges: [] }))
   const ctx = fakeContext()
   const agents = new Map()
   let count = 0
@@ -745,4 +747,52 @@ test('agent access cannot change a guarded Bot\'s model; other fields and unguar
   const free = await tool('update_bot', { id: 'c', model: 'provider/model' })
   assert.equal(free.isError, false)
   assert.equal(rt.botOf('c').model, 'provider/model')
+})
+
+test('a Bot an agent token deletes is listed for the page\'s composer sweep; a reading host cannot clear it', async t => {
+  const { rt, tool, call } = await fixture(t)
+  const bot = (await tool('create_bot', { name: 'Scratch', instructions: 'Temporary' })).value
+  assert.equal((await tool('delete_bot', { id: bot.id })).isError, false)
+  assert.equal((await call('state')).value.draftSweep.includes(bot.id), true)
+  rt.readOnly = () => 'Owner has read-only access'
+  const refused = await call('drafts-swept', { ids: [bot.id] })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.error.code, 'bot/read-only')
+  assert.equal(rt.state.draftSweep.includes(bot.id), true)
+})
+
+// The owner's page over the host route: a storage holding the named composer keys, and a
+// `call` that rejects a refused request.
+async function pageSweep(call, keys) {
+  const items = new Map(keys.map(key => [key, '{"draft":"x"}']))
+  const storage = { items, getItem: key => (items.has(key) ? items.get(key) : null), removeItem: (key) => { items.delete(key) } }
+  const drafts = createDraftSweep({ storage, openSession: () => undefined, call: async (endpoint, payload) => {
+    const answer = await call(endpoint, payload)
+    if (!answer.ok) throw new Error(answer.error?.message ?? 'refused')
+    return answer.value
+  } })
+  drafts.note((await call('state')).value.draftSweep)
+  await drafts.run()
+  return [...items.keys()]
+}
+
+test('a moved Bot an agent token deletes has its current chat swept by the page', async t => {
+  const { tool, call } = await fixture(t, { bots: {
+    b: { id: 'b', name: 'Beta', instructions: '', capabilities: [], sessionId: 'b-next', segments: [{ sessionId: 'b', endedAt: 1 }] },
+  } })
+  assert.equal((await tool('delete_bot', { id: 'b' })).isError, false)
+  const left = await pageSweep(call, ['dsh.conversation.b', 'dsh.conversation.b-next', 'dsh.conversation.c'])
+  assert.deepEqual(left, ['dsh.conversation.c'])
+  assert.equal(Object.hasOwn((await call('state')).value, 'draftSweep'), false)
+})
+
+test('a group an agent token deletes has its composer keys swept by the page', async t => {
+  const { tool, call } = await fixture(t, { rooms: {
+    r1: { id: 'r1', name: 'Ops', members: ['a', 'b', 'c'], mode: 'admin', admin: 'b', named: true,
+      sessionId: 'r1-next', parts: [{ sessionId: 'r1' }], sessions: { b: 'gb' } },
+  } })
+  assert.equal((await tool('delete_group', { id: 'r1' })).isError, false)
+  const left = await pageSweep(call, ['dsh.conversation.r1', 'dsh.conversation.r1-next', 'dsh.conversation.gb', 'dsh.conversation.c'])
+  assert.deepEqual(left, ['dsh.conversation.c'])
+  assert.equal(Object.hasOwn((await call('state')).value, 'draftSweep'), false)
 })

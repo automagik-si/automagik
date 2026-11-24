@@ -9,7 +9,7 @@ import { constants } from 'node:fs'
 import { access, mkdir } from 'node:fs/promises'
 import { osBlocked } from './folder-access.js'
 import { refusal } from './refusal.js'
-import { MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOTICE_MAX, SECTION_COLORS, SECTION_NAME_MAX, inUnfoldInstance } from './constants.js'
+import { DRAFT_SWEEP_MAX, MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOTICE_MAX, SECTION_COLORS, SECTION_NAME_MAX, inUnfoldInstance } from './constants.js'
 import { currentColor, isColor, normalize, unquote } from './text.js'
 import { nameProblem } from '../shared/mentions.js'
 import { contextPatch } from '../shared/context-policy.js'
@@ -1536,6 +1536,14 @@ export function install(rt) {
   async function deleteRoomHeld(id) {
     const room = rt.roomOf(id)
     if (room === undefined) throw refusal('Unknown group chat')
+    // Every Session whose composer the group's chat may have used, read before its members'
+    // Sessions leave the room: its own earlier parts, each member's group Session and its
+    // parts, and its own current Session last.
+    const sweep = [
+      ...(room.parts ?? []).map(part => part.sessionId),
+      ...Object.entries(room.sessions ?? {}).flatMap(([botId, sessionId]) => [...(room.segments?.[botId] ?? []).map(part => part.sessionId), sessionId]),
+      rt.sessionOfRoom(room),
+    ]
     // Before the group's Sessions leave the state, which the archive reads.
     const archived = rt.archiveGroupMemory(room)
     // A fresh-Session task armed from one of these Sessions has no other lineage (#584, L5).
@@ -1558,12 +1566,27 @@ export function install(rt) {
     rt.dropGroupLines(id)
     await rt.reapplyTasks(task => rt.taskOfRoom(task, id))
     await archived
-    const failed = await saveForDelete()
+    const listed = noteDeletedParts(sweep)
+    let failed
+    try { failed = await saveForDelete() } catch (error) { unlistDraftSweep(listed); throw error }
     // Armed scheduled tasks refuse a plain archive and would keep delivering into
     // the deleted group; the session-stop that stopActivity runs removes them.
     await ctx.workspaceRegistry.archiveSession(rt.sessionOfRoom(room), { stopActivity: true })
       .catch(error => rt.warn('omni-ui: group chat %s not archived: %s', room.name, error))
+    // Only once the deletion is saved: a failed save leaves the Bot or group on disk with its records.
+    if (failed === undefined) await forgetReadScopes(sweep, room.name)
     if (failed !== undefined) throw failed
+  }
+
+  // A deleted Bot's or group's Sessions leave their file-tool folder records, except one a
+  // surviving Session's lineage still names (read-scope.js). A failure is warned and never
+  // stops the deletion.
+  async function forgetReadScopes(ids, name) {
+    try {
+      await rt.forgetReadScopes?.(ids)
+    } catch (error) {
+      rt.warn('ds-bot: the file-tool folder records of %s were not removed: %s', name, error)
+    }
   }
 
   // The first Main Bot is the sidebar tile. `replace` gives a Main Bot's place to
@@ -1720,6 +1743,8 @@ export function install(rt) {
     // Only certify the seats of the Bot this deletion began with.
     let removed
     try { removed = rt.botOf(id) } catch {}
+    // Read while the Bot is still in the team: after, its current part reads as its id.
+    const currentPart = rt.chatOf(id)
     delete state.bots[id]
     rt.forgetShare?.(id)
     rt.dropGrantsForBot?.(id)
@@ -1754,7 +1779,10 @@ export function install(rt) {
       if (archivePath !== undefined) closedArchive.archivePath = archivePath
       delete closedArchive.archiving
     }
-    const failed = await saveForDelete()
+    // In the deletion's own save, its current part last, so a cut of the list keeps it.
+    const listed = noteDeletedParts([...[...parts].filter(part => part !== currentPart), currentPart])
+    let failed
+    try { failed = await saveForDelete() } catch (error) { unlistDraftSweep(listed); throw error }
     if (failed === undefined) rt.wakeLog?.botGone(id)
     // Same as deleteRoom: stopActivity removes the Session's armed scheduled tasks.
     // Past parts are archived too: a part move can leave tasks on the old Session,
@@ -1763,7 +1791,11 @@ export function install(rt) {
       await ctx.workspaceRegistry.archiveSession(part, { stopActivity: true })
         .catch(error => rt.warn('omni-ui: Bot %s not archived: %s', bot.name, error))
     }
+    // Only once the deletion is saved: a failed save leaves the Bot or group on disk with its records.
+    if (failed === undefined) await forgetReadScopes(sessions, bot.name)
     if (failed !== undefined) throw failed
+    // The page removes the composer state of these parts (channel.js `deletedParts`).
+    return [...parts]
   }
 
   // A deletion that fails puts the Bot back in the groups it left, as their member and
@@ -1786,6 +1818,41 @@ export function install(rt) {
     } catch (error) {
       rt.warn('ds-bot: Bot %s is back in its groups, but that was not saved: %s', id, error)
     }
+  }
+
+  // The deleted Sessions whose composer state (DSH's `dsh.conversation.<id>` in the page's
+  // storage) the owner's page removes on its next view, whichever route deleted them: the
+  // person, another Bot's tool or an agent token. The page names the ids it removed
+  // (`drafts-swept`), and only those leave. A reading host never lists any. Returns the
+  // ids that were not listed before, which a deletion whose save is lost takes back.
+  function noteDeletedParts(ids) {
+    if (rt.readOnly() !== undefined) return []
+    const named = [...new Set(ids.filter(part => typeof part === 'string' && part !== ''))]
+    if (named.length === 0) return []
+    const before = state.draftSweep ?? []
+    const added = named.filter(part => !before.includes(part))
+    state.draftSweep = [...before.filter(part => !named.includes(part)), ...named].slice(-DRAFT_SWEEP_MAX)
+    return added
+  }
+
+  // Takes exactly the named ids off the list, with no save; says whether it changed.
+  function unlistDraftSweep(ids) {
+    const list = state.draftSweep
+    if (!Array.isArray(list) || !Array.isArray(ids)) return false
+    const named = new Set(ids.filter(part => typeof part === 'string'))
+    const next = list.filter(part => !named.has(part))
+    if (next.length === list.length) return false
+    if (next.length > 0) state.draftSweep = next
+    else delete state.draftSweep
+    return true
+  }
+
+  // The page removed these ids' composer state: they leave the list. Ids it does not
+  // hold change nothing and save nothing.
+  async function draftsSwept(ids) {
+    const named = Array.isArray(ids) ? ids.filter(part => typeof part === 'string' && part !== '').slice(0, DRAFT_SWEEP_MAX) : []
+    if (unlistDraftSweep(named)) await rt.save()
+    return true
   }
 
   // A deletion whose save fails stays in memory, and the next save writes it, so its
@@ -1855,6 +1922,6 @@ export function install(rt) {
     ensureWorkspace, keepTeamFolder, createSession, createBot, newBotStoredPermission, duplicateBot, updateBot, setFlags,
     saveSection, reorderSections, deleteSection,
     roomBusy, autoRoomName, retitleRoom, createRoom, updateRoom, deleteRoom,
-    setMain, deleteBot, beforeBotDelete, bootstrap, releaseKickoff, greetingOut, holdKickoffAgain, userWrote, userAnswered,
+    setMain, deleteBot, beforeBotDelete, unlistDraftSweep, draftsSwept, bootstrap, releaseKickoff, greetingOut, holdKickoffAgain, userWrote, userAnswered,
   })
 }

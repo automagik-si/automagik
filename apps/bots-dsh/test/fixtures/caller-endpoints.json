@@ -197,6 +197,7 @@
       "code-start",
       "create-bot",
       "delete-bot",
+      "drafts-swept",
       "duplicate-bot",
       "im-add",
       "im-chat",
