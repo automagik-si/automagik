@@ -110,9 +110,11 @@ this page (owner-only endpoints).
 - **Tools:** the tools the text names and any declared `allowed-tools` (shown, never honoured).
 - **Scripts:** every file under `scripts/` or with a shebang, with its interpreter and size.
 - **Endpoints:** every URL and host the files name.
-- **Secrets:** every `$DSH_SECRET_<NAME>` reference. Show "Not mapped in the Vault" beside each name
-  without a Vault mapping. Vault mapping status is checked when the row or preview is shown. It does
-  not affect the pinned verdict.
+- **Secrets:** With no target Bot, list the skill's declared key names without a lookup or mark.
+  In an owner view with a selected Bot, check only those names at display time. Show
+  'Not set for this Bot' when neither that Bot's secret scope nor an active connector env/header
+  that resolves for that Bot supplies the key. Return only the name and mark. The status does not
+  affect the pinned verdict.
 
 Skills are shared: any Bot may use any library skill once it is added to that Bot. Creating a
 skill never attaches it to a Bot.
@@ -127,7 +129,7 @@ shown, only its kind and place.
 | Area | Blocks | Warns |
 |---|---|---|
 | Structure | a missing or unparsable `SKILL.md`, no description, a path with `..`, an absolute path, a link, a device or other non-regular file, a duplicate path, a size or count over the limits, malformed UTF-8 in a text file | a name changed to fit the rule; files outside the usual folders |
-| Secrets | a credential shape or key-like value in any text file (`credentialShapes`, `apps/bots-dsh/src/host/redact.js:77`; `looksLikeKey` and `looksSecret`, `apps/bots-dsh/src/host/memory-entries.js:200,221`) | none (Vault mapping status is shown on the row and in the preview; it does not affect the pinned verdict) |
+| Secrets | a credential shape or key-like value in any text file (`credentialShapes`, `apps/bots-dsh/src/host/redact.js:77`; `looksLikeKey` and `looksSecret`, `apps/bots-dsh/src/host/memory-entries.js:200,221`) | none (see Secrets under "What a skill uses" above. The status does not affect the pinned verdict) |
 | Prompt injection | invisible or bidirectional control characters in instruction text; text that tells the agent to turn off approvals, raise its own level, hide what it does from the person, or read credential locations and send them out | text that tells the agent to ignore earlier instructions, take another identity, or treat the skill as above the person; long encoded blobs in instruction text |
 | Dangerous commands | piping a download into a shell, reverse shells, disk or home wipes, writing to boot or system folders, reading browser or agent credential stores | `sudo`, recursive deletes, installing packages, changing crontab, shell start files or services |
 | External endpoints | URLs with embedded credentials or tokens; loopback, private, link-local and cloud-metadata addresses | every other endpoint, listed |
@@ -369,11 +371,11 @@ future loads only.
   level, its denied tools and its read scope; with shell access off they cannot run. Stored files
   never carry an executable bit; the body names the interpreter (`node`, `python3`, `bash`).
 - Declared `allowed-tools`, hooks and inline commands are never honoured.
-- API keys never live inside a skill: a skill names `$DSH_SECRET_<NAME>`, and the value comes only
-  from a Vault-mapped `$DSH_SECRET_<NAME>` ([RFC 0034](0034-vault-plugin-bitwarden-first.md),
-  #1271), under the Vault's grant, when an approved command needs it. If the mapping or the grant is
-  unavailable, that state is reported and the command gets no value; it never falls back to a typed
-  value. A key in a skill blocks it.
+- A skill names an API key only as `$DSH_SECRET_<NAME>`. A typed secret-card value reaches every
+  shell call made by a Bot in scope. The host resolves connector credentials for that connector's
+  environment or headers. Skills do not depend on #1271. If neither route supplies the key, the
+  status reads "Not set for this Bot" and the command gets no value.
+  A typed key in a skill blocks it.
 - The current business rule that Bots may create skills (`save_capability`,
   `apps/bots-dsh/src/host/tools.js:1545-1572`) is not changed. Their saves are hashed, checked
   and reviewed too, in report-only mode: the findings show in the library, marked "Saved by a
@@ -442,8 +444,11 @@ from a paste, all turned into instructions a Bot follows.
 - **Prompt injection.** By design a skill is instructions. The check blocks known hostile shapes
   and lists the rest; the preview shows the full text; reviewed text never grants a tool, a
   folder or a level.
-- **Secrets.** Key shapes block; keys come only from a Vault-mapped `$DSH_SECRET_<NAME>`, never
-  from a typed value; a missing mapping or grant is reported, not filled another way.
+- **Secrets.** Key shapes block. A skill names a key only as `$DSH_SECRET_<NAME>`. Until a vault
+  delivery ships, the existing secret card or connector env/header routes supply the value. Skills
+  do not depend on #1271. When neither route supplies it, the status reads "Not set for this Bot"
+  and the command gets no value. A shell command can therefore read a card value even when the
+  skill never names that key. Vault's per-execution grant does not apply to typed card values.
 - **A second opinion, never a gate.** The model review reads the skill's content only, in a
   history-less call with no tools, so an injected skill cannot act through it: it can at worst
   write wrong findings. It cannot pass what the gate blocks, and its output is checked against a
@@ -526,6 +531,9 @@ Ruled by the lead on 2026-11-24; each is folded into the Design above.
 8. **Limits:** 64 KiB `SKILL.md`, 256 files, 1 MiB per file, 5 MiB in all, an 8,000-character
    catalog.
 
+Amendment (2026-11-24): keys are supplied through the existing secret card or connector env/header
+routes until a vault delivery ships; Skills do not depend on #1271.
+
 ## Links
 
 [RFC 0003](0003-model-routes-and-acp.md) (model routes and ACP),
@@ -549,12 +557,14 @@ Ruled by the lead on 2026-11-24; each is folded into the Design above.
 - R49-3 ("Use", "How a skill reaches each route", "Deliveries" D3): the omp row is split by tool
   mode; with native tools off the host supplies the selected skill's text in the turn and the agent
   reads no folder; the person's native-tools setting is kept; D3's acceptance names both modes.
-- R49-4 ("Scripts, tools and keys", "Threat model"): skill API keys come only from a Vault-mapped
-  `$DSH_SECRET_<NAME>`; a missing mapping or grant is reported, with no fallback to a typed value.
+- R49-4 ("Scripts, tools and keys", "Threat model"): skills name keys only as `$DSH_SECRET_<NAME>`.
+  The existing secret card or connector env/header routes supply the value until a vault delivery
+  ships. Skills do not depend on #1271. The status reads "Not set for this Bot" when neither route
+  supplies the key, and a typed key in a skill blocks it.
 - R49-5 ("Storage and privacy", "The model review"): the gate check stays local; skill content
   reaches a model provider on two named occasions only, the background review and a Bot's use.
 
-- R49D-1 (2026-11-24): the Secrets row and check table use the Vault-mapping label; the mapping
-  status does not affect the pinned verdict.
+- R49D-1 (2026-11-24): the Secrets row and check table use "Not set for this Bot" when neither
+  route supplies the key. The status does not affect the pinned verdict.
 - R49D-2 (2026-11-24): the size limits are mandatory before save for every new or edited skill, Bot
   saves included.
