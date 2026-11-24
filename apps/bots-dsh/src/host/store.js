@@ -47,6 +47,12 @@ export function install(rt) {
   const missingTeamHeld = () => teamPresentAtLoad === false && !!process.env.AUTOMAGIK_SUPERVISOR_RUN
     && rt.updateHold?.awaitingBootVerdict !== false
   let writing = Promise.resolve()
+  const queueTeamWrite = fn => {
+    const run = writing.then(fn)
+    writing = run.then(() => {}, () => {})
+    return run
+  }
+  rt.queueTeamWrite = queueTeamWrite
   const { warn } = rt
 
   const diagnosticLabel = value => headOf(String(value).replace(/\s+/g, ' ').trim(), 120)
@@ -808,7 +814,7 @@ export function install(rt) {
 
   let warnedCredentialSave = false
   const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch, beforeCommit, afterWrite, durable } = {}) => {
-    const run = writing.then(async () => {
+    const run = queueTeamWrite(async () => {
       // An adopt ahead of this save may have made the team read-only.
       if (missingTeamHeld()) {
         if (required) throw new Error(`This host cannot save the Bot team: ${readOnly()}`)
@@ -868,7 +874,6 @@ export function install(rt) {
         throw error
       }
     })
-    writing = run.then(() => {}, () => {})
     return run.catch(error => {
       warn('omni-ui: state write failed: %s', error)
       throw error

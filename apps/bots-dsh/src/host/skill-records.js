@@ -177,12 +177,15 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
     updateImportHolds(team, items => Object.hasOwn(items, name) && delete items[name])
   }
 
-  async function finishDelete(name, team) {
+  // A team save can rename state.json before its completion updates the observed stamp.
+  // Run the learning write on the same queue so its authority check sees completed saves.
+  const finishDelete = (name, team, { syncState = false } = {}) => rt.queueTeamWrite(async () => {
     const check = () => {
       assertTeam(team)
       if (!rt.teamCurrent() || !rt.capabilitiesIntact() || itemOf(name) !== undefined) throw changes()
     }
     check()
+    if (syncState) rt.syncTeamState(team)
     await rt.removeSkillLearning?.(name, check)
     check()
     forgetImportHold(name, team)
@@ -200,12 +203,11 @@ export function installSkillRecords(rt, { library, deleteFrom, input, validateNa
       }
     }, team)
     failures.delete(name)
-  }
+  })
 
   async function finishAbsentDelete(name, team, row) {
     if (!row?.deleting || itemOf(name) !== undefined) return
-    rt.syncTeamState(team)
-    await finishDelete(name, team)
+    await finishDelete(name, team, { syncState: true })
   }
 
   async function commitLocked(held, request) {
