@@ -1758,3 +1758,24 @@ test('a deleted Bot\'s Session adopted into a DSH bot leaves the composer sweep 
   assert.equal(Object.hasOwn((await call('state', {})).value, 'draftSweep'), false)
   assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')), 'draftSweep'), false)
 })
+
+test('adoption drops a Solver shape and leaves the original agent’s avatar intact through rollback', async t => {
+  const { call, stop } = start(TEAM)
+  t.after(stop)
+  await call('state', {})
+  const added = await call('add-agent', { name: 'Candidate' })
+  assert.equal(added.ok, true, added.error?.message)
+  const original = rt.state.agents[added.value.id]
+  const image = 'data:image/png;base64,AA=='
+  const avatar = { shape: 'frog', image }
+  const snapshot = structuredClone(avatar)
+  original.avatar = avatar
+  const adopted = await call('agent-bot-adopt', { agentId: original.id })
+  assert.equal(adopted.ok, true, adopted.error?.message)
+  assert.deepEqual(rt.botOf(adopted.value.botId).avatar, { image })
+  assert.equal(original.avatar, avatar)
+  assert.deepEqual(original.avatar, snapshot)
+  assert.equal((await call('agent-bot-rollback', { agentId: original.id })).ok, true)
+  assert.equal(rt.state.agents[original.id].avatar, avatar)
+  assert.deepEqual(avatar, snapshot)
+})

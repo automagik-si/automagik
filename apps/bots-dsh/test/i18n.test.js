@@ -214,3 +214,12 @@ test('the review guard lines have Chinese and Brazilian Portuguese texts with th
     assert.equal(holes(pt[key]), holes(key), key)
   }
 })
+
+test('the Solver look refusals have their Chinese dictionary entries', () => {
+  for (const [key, text] of [
+    ['Only a Solver wears the Solver characters. Choose another character.', '只有 Solver 才能使用 Solver 角色。请选择其他角色。'],
+    ['A Solver wears one of the Solver characters. Choose one of those characters.', 'Solver 只能使用 Solver 角色。请从这些角色中选择一个。'],
+    ['Only the person can make a Bot a Solver.', '只有本人才能把 Bot 设为 Solver。'],
+    ['That look is not valid. Choose another character.', '这个形象无效。请选择其他角色。'],
+  ]) assert.equal(DICTIONARY.zh[key], text)
+})

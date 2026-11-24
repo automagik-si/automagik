@@ -18,6 +18,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AGENT_NAME, AGENT_SESSION_TITLE_MAX, DSH_BOT_NAME_MAX, TEAM_TOOLS } from './constants.js'
 import { nameProblem } from '../shared/mentions.js'
 import { routeOf } from '../shared/routes.js'
+import { displayAvatar } from '../shared/solver-looks.js'
 import { splitRef } from './text.js'
 import { output } from './tools.js'
 import { OMNI_KIND } from './roster.js'
@@ -590,6 +591,10 @@ export function install(rt) {
       // Keep the original registration intact for rollback, but out of the standalone
       // roster and restriction index. Only persist before changing live tool access.
       delete state.bots[chatId].sessions
+      const adopted = state.bots[chatId]
+      const avatar = displayAvatar(adopted)
+      if (avatar === undefined) delete adopted.avatar
+      else adopted.avatar = avatar
       // A Solver's review fields are the New Solver dialog's and the person's: an adopted record
       // carries none of them, so no adopted Bot is held with no reviewer (RFC 0048 delivery 1.5).
       for (const key of ['reviewGuard', 'reviewerId', 'reviewGuardNotice', 'reviewTrack']) delete state.bots[chatId][key]
