@@ -1266,12 +1266,14 @@ this amendment" lines.
   are written 0600 at each OFF start into the home the child itself runs in
   (`AUTOMAGIK_BOT_CLI_HOME`, equal to its `HOME`, else the start refuses).
 - **Proven on one version.** Native tools OFF for Antigravity is proven on agy `AGY_OFF_CHECKED`,
-  the version stage 6 ran. On any other version it launches OFF, warns in the host log and in
-  Details, and rests on two agy layers nobody re-checked plus L3. L3 cannot undo an action that
-  needed no permission and had already run when its report arrived (a read, a search, a fetch, a
-  subagent's inner calls), and never sees anything agy runs without reporting a tool call. The
-  Details version line uses the version agy reported at its last start in this host run; before
-  any start it uses the installed folder's version, which an in-place self-update does not change.
+  the version stage 6 ran. It moves only in a reviewed commit that a stage 6 on the new version
+  then passes before its pull request. On any other version it launches OFF, warns in the host log
+  and in Details, and rests on two agy layers nobody re-checked plus L3. L3 cannot undo an action
+  that needed no permission and had already run when its report arrived (a read, a search, a
+  fetch, a subagent's inner calls), and never sees anything agy runs without reporting a tool
+  call. The Details version line uses the version agy reported at its last start in this host run;
+  before any start it uses the installed folder's version, which an in-place self-update does not
+  change.
 - **L2 check.** At each OFF start, after `session/new` and before the first prompt, acp-dsh reads
   agy's own log for that process (in our own `automagik-native-off/log/`, bounded: 4096 entries,
   256 KiB, a fresh regular file only, never through a link or a FIFO) and refuses if agy says it

@@ -24,9 +24,9 @@ import { join } from 'node:path'
 
 export const AGY_OFF_NAME = 'automagik-native-off'
 
-// The agy version native tools off was checked on (stage 6 of #1564). It moves only by a
-// reviewed commit after a stage 6 on the new version; another version still starts OFF and
-// warns (the host log, and Details).
+// The agy version native tools off was checked on (stage 6 of #1564). It moves only in a
+// reviewed commit that a stage 6 on the new version then passes before its pull request;
+// another version still starts OFF and warns (the host log, and Details).
 export const AGY_OFF_CHECKED = '1.5.16'
 
 export const AGY_OFF_AGENT = `---
