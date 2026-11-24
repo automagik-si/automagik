@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-20, approved by the owner's delegate: Q1-Q5, Q7 and Q8 answered with this RFC's recommendations; Q6 answered, then amended on 2026-11-21 (see "Q6 amended" under the answers); delivery 1 approved ahead of the answers as the fix of today's defect; deliveries 1 and 2 and the §F interim merged (#1959, #1993, #2032); the herdr-core work is parked) |
+| Status | Accepted (2026-11-20, approved by the owner's delegate: Q1-Q5, Q7 and Q8 answered with this RFC's recommendations; Q6 answered, then amended on 2026-11-21 (see "Q6 amended" under the answers); delivery 1 approved ahead of the answers as the fix of today's defect; deliveries 1 and 2 and the §F interim merged (#1959, #1993, #2032); the herdr-core work is parked; #631 closed with the §F interim's native macOS proof, and deliveries 3-9 tracked in 'Status of deliveries 3-9') |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none for this RFC (docs only). Deliveries: herdr (3.N.P), with am's byte copies when a shared file changes; `apps/dsh-sandbox/` ships only through its byte-equal copy in the pack, never alone (`scripts/lane.ts:148-151`); herdr-core for the upstream request; owner steps for enablement |
 | Created | 2026-11-20 |
@@ -53,6 +53,7 @@ hides the real core socket from the sandboxed pane and puts a per-pane proxy at 
 | Delivery 1: core versions 0.1.14 and 0.1.21 supported, status checked on each new upstream connection, forced sends refused | #1959 (`18e202c91`) |
 | Delivery 2: exact roster bytes previewed and confirmed by digest; rootless containerd and BuildKit sockets masked; bwrap failures without payload status reported | #1993 (`45b9493fc`) |
 | §F interim: macOS doctor warning for an approved local dsh-tui proxy configuration (the macOS mask stays open) | #2032 (`05d69a29f`) |
+| §F interim proved natively: the five macOS doctor rows run on a macOS arm64 CI runner (ci.yml herdr-macos-doctor) | #2101 ([CI job](https://github.com/automagik-si/automagik/actions/runs/45454505051/job/138679093794)) |
 
 The guard's own `ls` and plain `events` stay cross-pane (`hcGuard.mjs:49-51`): the guard is not a
 boundary, and the proxy is where a sandboxed pane's list is filtered and its subscription refused.
@@ -373,7 +374,10 @@ chooses that form for R3, become an Automagik contract in the delivery that writ
 
 Order: 1 and 2, then 3; 4 any time; 5-7 follow upstream; 8 and 9 need the hardware.
 
-### Status of deliveries 3-9
+### Status of deliveries 3-9 (#631 closed)
+
+#631 closes with deliveries 1 and 2, the §F interim and its native macOS proof. The rest is tracked here, each with
+the reason it waits:
 
 | Delivery | Status | Waits on |
 |---|---|---|
