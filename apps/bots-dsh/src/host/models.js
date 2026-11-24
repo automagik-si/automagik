@@ -729,10 +729,11 @@ export function install(rt) {
 
   // `model` and `reasoningEffort` name the whole route for a part that keeps it (parts.js).
   const routeFields = config => ({
-    provider: typeof config?.provider === 'string' ? config.provider : undefined,
-    ...(typeof config?.model === 'string' ? { model: config.model } : {}),
+    provider: typeof config?.provider === 'string' ? config.provider.trim() : undefined,
+    ...(typeof config?.model === 'string' ? { model: config.model.trim() } : {}),
     ...(config?.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
   })
+  const readableRoute = route => Boolean(route.provider && route.model)
   function storedRouteEvent(route, event) {
     if (event?.type === 'model/selection') return { ...route, pendingSelection: routeFields(event.data) }
     if (event?.type !== 'request/header') return route
@@ -758,8 +759,8 @@ export function install(rt) {
       if (typeof handle?.read !== 'function') return unreadableRoute
       const { events } = await handle.read()
       const route = events.reduce(storedRouteEvent, {})
-      if (Object.hasOwn(route, 'provider') && !route.provider) return unreadableRoute
-      return (route.pendingSelection ?? route).provider ? route : unreadableRoute
+      if (Object.hasOwn(route, 'provider') && !readableRoute(route)) return unreadableRoute
+      return readableRoute(route.pendingSelection ?? route) ? route : unreadableRoute
     } catch {
       return unreadableRoute
     } finally {
@@ -773,15 +774,24 @@ export function install(rt) {
   // Session keeps its route and the exact-route guard accepts the turn. The decision is
   // the chat's ACTUAL route: the live Session's request header, or, for an unloaded
   // chat, the last request/header in its stored log. It is never the history of picks.
+  // An unreadable route blocks a selection without confirming a carried Hermes chat.
+  /** @returns {Promise<boolean | 'unreadable'>} */
   async function keepsCarriedRoute(sessionId, ref) {
     if (ref !== 'hermes-remote/attach') return false
     try {
-      const provider = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config?.provider
-      if (typeof provider === 'string' && provider) return provider === 'hermes-remote'
-    } catch { return true }
+      const header = ctx.sessions?.get?.(sessionId)?.requestHeader?.()
+      if (header != null) {
+        const route = routeFields(header.config)
+        return readableRoute(route) ? route.provider === 'hermes-remote' : 'unreadable'
+      }
+    } catch { return 'unreadable' }
     const stored = await storedRoute(sessionId)
-    // An unreadable log keeps its route: switching would load and measure it too.
-    return stored.unreadable === true || stored.provider === 'hermes-remote'
+    return stored.unreadable === true ? 'unreadable' : stored.provider === 'hermes-remote'
+  }
+
+  const unreadableRouteMessage = bot => `${bot.name} could not switch because its current Session route could not be read.`
+  async function assertReadableRoute(bot, ref) {
+    if (await keepsCarriedRoute(rt.chatOf(bot.id), ref) === 'unreadable') throw refusal(unreadableRouteMessage(bot))
   }
 
   // The store can replace a Bot while a model choice is in flight.
@@ -797,7 +807,7 @@ export function install(rt) {
 
   // Group Sessions already logged as keeping their route, so the warning comes once.
   const keptGroupRoutes = new Set()
-  async function applyModelHeld(bot, { force = false, modelEntry, checkChoice, selected } = {}) {
+  async function applyModelHeld(bot, { force = false, requireReadable = false, modelEntry, checkChoice, selected } = {}) {
     const pinned = modelEntry !== undefined
     const expectedChat = pinned ? rt.chatOf(bot.id) : undefined
     const live = () => modelTargetLive(bot) && !rt.switchingChat?.(bot.id)
@@ -825,8 +835,13 @@ export function install(rt) {
     const effort = await desiredEffort(bot, ref, modelEntry)
     const ownChanged = force || staying.size > 0 || bot.appliedModel !== ref || (bot.appliedEffort ?? undefined) !== effort
     const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
-    if (ownChanged && !staying.has(chat)) {
-      if (await keepsCarriedRoute(chat, ref)) {
+    const applyOwn = ownChanged && !staying.has(chat)
+    const carried = applyOwn ? await keepsCarriedRoute(chat, ref) : false
+    if (applyOwn) {
+      if (carried === 'unreadable') {
+        if (pinned) throw Object.assign(new SettingsSelectionRejected(unreadableRouteMessage(bot)), { code: 'bot/refused' })
+        if (requireReadable) throw refusal(unreadableRouteMessage(bot))
+      } else if (carried === true) {
         if (pinned) accept()
       } else {
         await selectSessionModel(chat, route, pinned ? { check, selected: accept } : undefined)
@@ -862,7 +877,7 @@ export function install(rt) {
     // model. A record left naming the CLI would skip the selection when the CLI is served
     // again, and the Sessions moved here would stay off it. Nothing is returned as applied.
     if (pinned) check()
-    if (!modelTargetLive(bot)) return undefined
+    if (!modelTargetLive(bot) || carried === 'unreadable') return undefined
     if (staying.size > 0 && staying.has(chat)) {
       if (bot.appliedModel === undefined || bot.appliedModel === ref) return undefined
       delete bot.appliedModel
@@ -950,7 +965,7 @@ export function install(rt) {
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
     defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
-    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, storedRouteOf: storedRoute,
+    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, assertReadableRoute, storedRouteOf: storedRoute,
     applyModel, waitForModel, syncModels, routeRefused,
     dropCatalog: () => { catalogCache = { at: 0, value: [] } },
   })

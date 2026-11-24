@@ -202,6 +202,36 @@ test('5a: forced applies read the latest stored request header', async t => {
   assert.deepEqual(selected, ['b1:hermes-remote/attach'])
 })
 
+test('5b: concurrent forced applies never select over a carried route', async t => {
+  const host = await storedTeam(t, { b1: CARRIED })
+  const { rt, bot, selected } = await runtime(host)
+  await Promise.all([rt.applyModel(bot, { force: true }), rt.applyModel(bot, { force: true })])
+  assert.deepEqual(selected, [])
+})
+
+test('D2W-4 concurrent forced applies never select or record attach on an unreadable route', async t => {
+  const host = await storedTeam(t, {})
+  const { rt, bot, selected } = await runtime(host)
+  delete bot.appliedModel
+  await Promise.all([rt.applyModel(bot, { force: true }), rt.applyModel(bot, { force: true })])
+  assert.deepEqual(selected, [])
+  assert.equal(bot.appliedModel, undefined)
+})
+
+test('D2W-1 the pinned model picker refuses attach when the current route is unreadable', async t => {
+  const host = await storedTeam(t, {})
+  const { rt, bot, selected } = await runtime(host, { model: 'deepseek/sample-model' })
+  delete bot.appliedModel
+  const publish = t.mock.fn(() => { bot.model = ATTACH })
+  await assert.rejects(rt.applyModel(bot, {
+    force: true, modelEntry: { ...ROW, ref: ATTACH }, checkChoice() {}, selected: publish,
+  }), { code: 'bot/refused', message: /current Session route could not be read/ })
+  assert.equal(publish.mock.callCount(), 0)
+  assert.equal(bot.model, 'deepseek/sample-model')
+  assert.equal(bot.appliedModel, undefined)
+  assert.deepEqual(selected, [])
+})
+
 test('5c: a damaged log is retried on every forced apply and never selects attach', async t => {
   const host = await storedTeam(t, { b1: CARRIED }, ['b1'])
   const { rt, bot, selected } = await runtime(host)

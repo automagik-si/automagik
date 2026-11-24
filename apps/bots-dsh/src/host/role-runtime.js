@@ -9,6 +9,7 @@ import { refusal } from './refusal.js'
 import { output } from './tools.js'
 
 const START_MS = 5_000
+const DISPLAY_READ_LIMIT = 4
 const inactive = "This Bot's role changed. Try again."
 const cancelled = 'Voice / Mouth speech was cancelled.'
 const acpWarning = 'ACP coding agents do not receive this role’s prompt.'
@@ -33,6 +34,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   const installedModules = new Map()
   const attachments = new Map()
   const turnPrompts = new Map()
+  let displayReads = Promise.resolve()
   let disposed = false
   let warnedRunner = false
 
@@ -280,10 +282,15 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       return selection?.next?.provider ?? live.requestHeader?.()?.config?.provider
     } catch { return undefined }
   }
-  async function readDeliveryRoutes(bots) {
+  async function readDeliveryRoutes(bots, limit = Infinity) {
     const sessions = new Set(bots.flatMap(sessionsOf))
     const needStoredRoute = [...sessions].filter(id => !liveProvider(id))
-    return new Map(await Promise.all(needStoredRoute.map(async id => [id, await rt.storedRouteOf?.(id)])))
+    const routes = new Map()
+    for (let at = 0; at < needStoredRoute.length; at += limit) {
+      const batch = await Promise.all(needStoredRoute.slice(at, at + limit).map(async id => [id, await rt.storedRouteOf?.(id)]))
+      for (const [id, route] of batch) routes.set(id, route)
+    }
+    return routes
   }
   function deliveryWarning(bot, routes) {
     const sessions = sessionsOf(bot)
@@ -373,8 +380,14 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     readDeliveryRoutes, view,
     copyWarning: bot => savedWarning(bot) ?? providerWarning(liveProvider(bot.sessionId ?? bot.id)),
     async publicView() {
-      const bots = [...attachments.values()].filter(held => held.manifest).map(held => held.bot)
-      return view(await readDeliveryRoutes(bots))
+      const waitingSolvers = () => [...attachments].flatMap(([id, held]) =>
+        held.manifest && held.pin.id === SOLVER_ROLE_ID && held.bot.waitingRole?.id === SOLVER_ROLE_ID
+          && current(id, held) ? [held.bot] : [])
+      if (waitingSolvers().length === 0) return view()
+      // Roster windows can poll at the same time. Share the read limit across their polls.
+      const read = displayReads.then(() => readDeliveryRoutes(waitingSolvers(), DISPLAY_READ_LIMIT))
+      displayReads = read.catch(() => {})
+      return view(await read)
     },
     serving(id, record, pin, routes) {
       const held = active(id)

@@ -21,7 +21,7 @@ export class SettingsRefusal extends Error {
   }
 }
 
-/** Only the rejection of the own chat's DSH selection can settle a write as not-applied. */
+/** The own chat refused the pick before a selection was applied. */
 export class SettingsSelectionRejected extends Error {}
 
 export function settingsRevOf(botId, bot) {

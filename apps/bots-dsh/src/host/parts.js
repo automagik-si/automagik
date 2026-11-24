@@ -2015,8 +2015,10 @@ export function install(rt) {
     const model = bot?.model ?? bot?.appliedModel
     if (typeof model !== 'string' || rt.chatOf(bot.id) !== agent.id || awaiting.has(agent.id)) return false
     const ref = `${selection.provider}/${selection.model}`
-    if (!crossesHarness(model, ref) || await rt.keepsCarriedRoute?.(agent.id, ref) === true) return false
-    if (!await crossingHistory(agent.id, ref)) return false
+    if (!crossesHarness(model, ref)) return false
+    const carried = await rt.keepsCarriedRoute?.(agent.id, ref)
+    if (carried === true) return false
+    if (!await crossingHistory(agent.id, ref) && carried !== 'unreadable') return false
     rt.warn('ds-bot: %s: a step on %s with this chat\'s history was not run; the chat stays on %s (an agent switch goes through the model menu)', bot.name, ref, model)
     return true
   }
@@ -2404,13 +2406,16 @@ export function install(rt) {
       }
       // The old group part never left the route it ran on: nothing is selected on it.
       const picked = group ? undefined : await freshRoute(bot, old?.session)
-      if (picked !== undefined && await rt.keepsCarriedRoute?.(entry.oldId, picked.ref) === true) {
-        // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
-        bot.appliedModel = picked.ref
-        if (picked.effort === undefined) delete bot.appliedEffort
-        else bot.appliedEffort = picked.effort
-        await rt.save()
-      } else if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
+      if (picked !== undefined) {
+        const carried = await rt.keepsCarriedRoute?.(entry.oldId, picked.ref)
+        if (carried === true) {
+          // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
+          bot.appliedModel = picked.ref
+          if (picked.effort === undefined) delete bot.appliedEffort
+          else bot.appliedEffort = picked.effort
+          await rt.save()
+        } else if (carried !== 'unreadable') await selectRoute(bot, entry.oldId, picked)
+      }
       if (old !== undefined) partBase.set(entry.oldId, tokensOf(old.session) ?? 0)
       rt.renewMemory(entry.oldId)
       // A reply the agent switch stopped goes on in the part it came from, once: the handoff
@@ -4315,6 +4320,8 @@ export function install(rt) {
       note('accepted')
       return { id: botId, model: target, ...(effortId == null ? {} : { effort: effortId }), status: 'switching' }
     }
+    await rt.assertReadableRoute?.(bot, target)
+    checkCurrent()
     await rt.clearAuto?.(bot)
     checkCurrent()
     const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort, previousModel: bot.previousModel, shellHeld: bot.shellHeld }
@@ -4337,7 +4344,7 @@ export function install(rt) {
     const takeRoute = async () => {
       putRoute()
       try {
-        await rt.applyModel(bot, { force: true })
+        await rt.applyModel(bot, { force: true, requireReadable: true })
       } catch (error) {
         restore()
         note('rolled back', 'in-place selection failed')

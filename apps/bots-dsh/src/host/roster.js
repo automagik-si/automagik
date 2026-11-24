@@ -1201,13 +1201,14 @@ export function install(rt) {
         }
         return
       }
+      await rt.assertReadableRoute?.(bot, modelRef === undefined ? bot.model : modelRef)
       // The live list, right before the pick is written (#2026).
       if (patch.model !== undefined && modelRef != null) {
         rt.assertOwnToolsModel?.(bot, { next: modelRef, denyTools: bot.denyTools })
       }
       choose()
       try {
-        await rt.applyModel(bot, { force: true })
+        await rt.applyModel(bot, { force: true, requireReadable: true })
       } catch (error) {
         putModelFields(bot, before)
         if (blockedBefore !== undefined) bot.blocked = blockedBefore

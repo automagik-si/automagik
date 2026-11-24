@@ -1138,6 +1138,86 @@ test('D2V-1 a persistence handle without read keeps Solver settlement pending', 
   assert.deepEqual(result, { pending: true })
 })
 
+for (const [name, config] of [
+  ['a blank provider with no model', { provider: ' ' }],
+  ['a blank provider with a model', { provider: ' ', model: 'fixture' }],
+  ['a provider with a blank model', { provider: 'test-provider', model: ' ' }],
+  ['a provider with no model', { provider: 'test-provider' }],
+]) {
+  test(`D2W-2 settlement retains the method for a stored header with ${name}`, async t => {
+    const header = { type: 'request/header', data: { header: { config } } }
+    const f = await solverFixture(t)
+    const h = await f.start({ sessionPersistence: {
+      open: async () => ({ read: async () => ({ events: [header] }) }),
+    } })
+    h.agentOf(FIRST).model = { current: () => ({ provider: 'test-provider', model: 'fixture' }) }
+    h.unload(GROUP)
+    await h.ok('role-install', { id: 'solver' })
+    const bot = h.rt.state.bots[FIRST]
+    const text = bot.instructions
+    const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+    bot.waitingRole = waiting
+
+    const result = await h.ok('role-attach', { id: FIRST, role: 'solver' })
+    const saved = (await f.disk()).bots[FIRST]
+    assert.equal(saved.instructions, text)
+    assert.deepEqual(saved.waitingRole, waiting)
+    assert.deepEqual(result, { pending: true })
+  })
+}
+
+test('D2W-3 idle roster polls read no stored routes', async t => {
+  const config = { provider: 'test-provider', model: 'fixture' }
+  const header = { type: 'request/header', data: { header: { config } } }
+  const reads = []
+  const f = await solverFixture(t)
+  const h = await f.start({ sessionPersistence: {
+    open: async id => ({ read: async () => { reads.push(id); return { events: [header] } } }),
+  } })
+  await attachSolver(h)
+  h.unload(FIRST)
+  h.unload(GROUP)
+  reads.length = 0
+
+  const first = await h.ok('state')
+  assert.equal(first.roleRuntime[FIRST].pin.id, 'solver')
+  assert.deepEqual(reads, [])
+  const next = await h.ok('state', { since: first.revision, live: first.liveKey })
+  assert.equal(next.unchanged, true)
+  assert.deepEqual(reads, [])
+})
+
+test('D2W-3 overlapping roster polls read at most four waiting Solver routes at once', async t => {
+  const config = { provider: 'acp-fixture', model: 'fixture' }
+  const header = { type: 'request/header', data: { header: { config } } }
+  const reads = []
+  let active = 0
+  let peak = 0
+  const f = await solverFixture(t)
+  const h = await f.start({ sessionPersistence: {
+    open: async id => ({ read: async () => {
+      reads.push(id)
+      peak = Math.max(peak, ++active)
+      await new Promise(resolve => setImmediate(resolve))
+      active -= 1
+      return { events: [header] }
+    } }),
+  } })
+  const bot = h.rt.state.bots[FIRST]
+  bot.waitingRole = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(bot.instructions).digest('hex') }
+  await attachSolver(h)
+  const groups = [GROUP, 'group-2', 'group-3', 'group-4', 'group-5']
+  h.rt.groupSessionsOf = id => id === FIRST ? groups : []
+  reads.length = 0
+  peak = 0
+
+  const views = await Promise.all([h.rt.roleRuntime.publicView(), h.rt.roleRuntime.publicView()])
+  const sessions = [FIRST, ...groups]
+  assert.deepEqual(reads.toSorted(), [...sessions, ...sessions].sort())
+  assert.ok(peak <= 4, `expected at most 4 concurrent reads, saw ${peak}`)
+  assert.deepEqual(views.map(view => view[FIRST].acp), [true, true])
+})
+
 test('D2V-2 a rejected stored read keeps settlement pending and a later read can settle', async t => {
   const native = { provider: 'test-provider', model: 'fixture' }
   const header = { type: 'request/header', data: { header: { config: native } } }
