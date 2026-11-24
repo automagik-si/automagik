@@ -1,4 +1,4 @@
-import { startFakeCore } from "./fake-core.mjs";
+import { CUT_OFF_EXE, fixtureProcStat, startFakeCore, writeFixtureProc, writeFixtureProcRoot } from "./fake-core.mjs";
 // #1432: the holder pool's CLI, its start distribution, and the holder-loss record. A holder
 // is an hc session's core on this computer, exposed as a linked machine by `am holders add
 // --local`; starts there use the pack's own linked-machine path. Fake hc and a scratch home
@@ -6,12 +6,12 @@ import { startFakeCore } from "./fake-core.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { readJsonLines } from "./log-lines.mjs";
-import { scratchProject, scratchRoot } from "./scratch-project.mjs";
+import { scratchProject, scratchRoot, shortSocketDir } from "./scratch-project.mjs";
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
 const FAKE_HC = new URL("./fake-hc.mjs", import.meta.url).pathname;
@@ -21,7 +21,41 @@ const burstId = (i) => `b-${"a".repeat(9)}${"bcdefghijklmn"[i]}`;
 const BURST = Array.from({ length: 13 }, (_, i) => burstId(i));
 const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
 
-function scene(t, { folder = "proj" } = {}) {
+function diagnosticTraceSource() {
+  // The preload observes the existing view call on both the base and candidate. Its log is
+  // shared with every fake listener, so view RPCs cannot be mistaken for diagnostic RPCs.
+  return `
+    import childProcess from "node:child_process";
+    import { appendFileSync } from "node:fs";
+    import { registerHooks, syncBuiltinESMExports } from "node:module";
+    import { basename } from "node:path";
+    const note = (event) => appendFileSync(process.env.HC_FAKE_CUTOFF_LOG, JSON.stringify(event) + "\\n");
+    for (const method of ["spawn", "spawnSync", "execFile"]) {
+      const original = childProcess[method];
+      childProcess[method] = function (file, args, ...options) {
+        const command = basename(file);
+        if (["hc", "herdr-core", "herdr-app", "systemctl"].includes(command)) {
+          note({ kind: "process", command, args });
+        }
+        return original.call(this, file, args, ...options);
+      };
+    }
+    syncBuiltinESMExports();
+    registerHooks({
+      load(url, context, nextLoad) {
+        const loaded = nextLoad(url, context);
+        if (!url.endsWith("/bin/automagik-herdr.mjs")) return loaded;
+        const source = typeof loaded.source === "string" ? loaded.source : Buffer.from(loaded.source).toString("utf8");
+        const boundary = "const { config, counts, connected, view } = await holderView()";
+        if (source.split(boundary).length !== 2) throw new Error("Missing or ambiguous holder view boundary");
+        return { ...loaded, source: source.replace(boundary,
+          'appendFileSync(process.env.HC_FAKE_CUTOFF_LOG, JSON.stringify({ kind: "view" }) + "\\\\n"); ' + boundary) };
+      },
+    });
+  `;
+}
+
+function scene(t, { folder = "proj", diagnostic = false } = {}) {
   const root = scratchRoot(t, "hb-holders-");
   const bin = join(root, "bin"), home = join(root, "home"), app = join(root, "app"), vmBin = join(root, "vm-bin");
   for (const d of [bin, home, app, vmBin]) mkdirSync(d, { recursive: true });
@@ -42,10 +76,31 @@ function scene(t, { folder = "proj" } = {}) {
   writeFileSync(logPath, "");
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     GIT_CEILING_DIRECTORIES: root, HC_SESSION: "", HC_SOCKET: "", HC_TERMINAL_ID: "", HC_TERMINAL_SOCKET: "" };
-  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
-  Object.assign(env, core.env);
+  let diagnosticScene = null;
+  let nodeFlags = [];
+  if (diagnostic) {
+    const runtime = shortSocketDir(t, "cut1432-");
+    const socketsDir = join(runtime, "herdr-core");
+    mkdirSync(socketsDir);
+    const sockets = Object.fromEntries(Object.entries({ local: "default", h2: "am-holder-h2", other: "other" })
+      .map(([key, name]) => [key, join(socketsDir, `${name}.sock`)]));
+    const eventsFile = join(root, "ordered.log"), preload = join(root, "trace.mjs");
+    writeFileSync(eventsFile, "");
+    writeFileSync(preload, diagnosticTraceSource());
+    nodeFlags = ["--import", preload];
+    Object.assign(env, { XDG_RUNTIME_DIR: runtime, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"),
+      AUTOMAGIK_HERDR_TEST_ROOTS: `${root}:${runtime}`, AUTOMAGIK_HERDR_CUTOFF_RECHECK_MS: "0",
+      HC_FAKE_CUTOFF_LOG: eventsFile, HERDR_APP_BIN: "/bin/false" });
+    const cores = Object.fromEntries(Object.entries(sockets).map(([key, socket], i) => [key, startFakeCore(t, env, {
+      socket, status: { core: { id: `core-${key}` }, pid: 400 + i, holders: key === "local" ? [{ pid: 111 }] : [] },
+    })]));
+    diagnosticScene = { runtime, sockets, cores, eventsFile, env };
+  } else {
+    const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+    Object.assign(env, core.env);
+  }
   const cli = (args, extraEnv) => {
-    const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...extraEnv }, encoding: "utf8" });
+    const r = spawnSync(process.execPath, [...nodeFlags, CLI, ...args], { cwd: project, env: { ...env, ...extraEnv }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   // A start that must be launched beside another one: no sleep, the promises settle on close.
@@ -75,8 +130,13 @@ function scene(t, { folder = "proj" } = {}) {
     writeFileSync(file, JSON.stringify(def));
   };
   const runHint = (line) => spawnSync("/bin/sh", ["-c", line], { cwd: project, env, encoding: "utf8" });
+  const trace = (args, extraEnv) => {
+    const offset = readJsonLines(diagnosticScene.eventsFile).length;
+    const result = cli(args, extraEnv);
+    return { ...result, events: readJsonLines(diagnosticScene.eventsFile).slice(offset) };
+  };
   return { root, project, app, cli, cliAsync, runHint, state, setState, calls, rows, holdersFile, lossesFile, reservationsFile,
-    reservations, addBots };
+    reservations, addBots, ...diagnosticScene, trace };
 }
 
 test("holders: one local holder and the documented default limit; the limit is configurable", (t) => {
@@ -740,4 +800,215 @@ test("holder losses: a terminal id reused before the sweep doesn't count as the 
   });
   sweepLoss(s);
   assert.deepEqual(ok(s.cli(["holders", "losses", "--json"])).json().losses, []);
+});
+
+function cutoffScene(t, { two = false } = {}) {
+  const s = scene(t, { diagnostic: true });
+  mkdirSync(dirname(s.holdersFile), { recursive: true });
+  if (two) writeFileSync(s.holdersFile, '{"holders":[{"name":"h2","machine":"h2","session":"am-holder-h2"}]}\n');
+  const ledger = attachPath(s.app);
+  writeFileSync(ledger, "");
+  writeFileSync(s.lossesFile, '{"v":1,"at":"2026-11-24T00:00:00.000Z","holder":"local","reason":"holder_lost","agents":["b-aaaaaaaaaa"]}\n');
+  const roots = [join(s.root, "proc-first"), join(s.root, "proc-second")];
+  for (const root of roots) {
+    const listeners = [[s.sockets.local, 900], [s.sockets.h2, 901], [s.sockets.other, 902]];
+    writeFixtureProcRoot(root, listeners);
+    for (const [i, pid] of [400, 401, 402].entries()) writeFixtureProc(root, pid, { fd: { 3: listeners[i][1] } });
+    const hold = (pid, suffix) => writeFixtureProc(root, pid, { argv: [CUT_OFF_EXE, "hold", "--socket",
+      s.sockets.local.replace(/\.sock$/, `.holder${suffix}.sock`)] });
+    hold(111, "");
+    hold(222, ".1a2b3c4d");
+    for (const pid of [300, 301, 302]) writeFixtureProc(root, pid, { ppid: 222 });
+    writeFixtureProc(root, 303, { ppid: 222, state: "Z" });
+    writeFixtureProc(root, 304, { ppid: 222, uid: process.getuid() + 1 });
+    writeFixtureProc(root, 305, { ppid: 300 });
+  }
+  const view = (args = ["--json"], env = {}) => s.trace(["holders", ...args], {
+    AUTOMAGIK_HERDR_PROC_ROOT: JSON.stringify(roots), ...env,
+  });
+  const bytes = () => [readFileSync(ledger), readFileSync(s.lossesFile)];
+  return { ...s, roots, view, bytes };
+}
+
+function checkTrace({ events }, sockets, { boundary = true } = {}) {
+  const end = events.findIndex((event) => event.kind === "view");
+  if (boundary) assert.notEqual(end, -1, "the view boundary is recorded even if the view fails");
+  const check = events.slice(0, end < 0 ? events.length : end);
+  assert.deepEqual(check.map(({ kind, method, socket }) => [kind, method, socket]).sort(),
+    sockets.map((socket) => ["rpc", "server.status", socket]).sort(), "exact diagnostic calls before the view");
+  for (const event of events.filter(({ kind }) => kind === "process")) {
+    assert.equal(event.command, "hc", JSON.stringify(event));
+    assert.ok(["ls", "get", "machine"].includes(event.args[0]), JSON.stringify(event));
+    if (event.args[0] === "machine") assert.equal(event.args[1], "ls");
+  }
+}
+
+function uncheckedCutOff(result, reason, holders = ["local"]) {
+  assert.deepEqual(ok(result).json().cutOff, {
+    holders: [], unchecked: holders.map((holder) => ({ holder, reason })), recheckMs: 0,
+  });
+}
+
+const CUTOFF_HINT = "  local: No pool core listed holder process 222 in either read. At the second read it had 3 same-user live direct children. They may include working agents. Verify that the previous agent stopped before starting it again.";
+
+test("C1 cut-off: text and JSON show the same two-read holder and second-read child count", (t) => {
+  const s = cutoffScene(t);
+  const before = s.bytes();
+  const text = ok(s.view([]));
+  assert.ok(text.out.includes(`cut-off check:\n${CUTOFF_HINT}\nrecent losses:\n`), text.out);
+  checkTrace(text, [s.sockets.local, s.sockets.local]);
+  const json = ok(s.view());
+  const { cutOff, ...withCandidate } = json.json();
+  assert.deepEqual(cutOff, { holders: [{ holder: "local", pid: 222, programs: 3 }], unchecked: [], recheckMs: 0 });
+  assert.ok(!json.out.includes(s.runtime) && !text.out.includes(s.runtime) && !json.out.includes(CUT_OFF_EXE));
+  checkTrace(json, [s.sockets.local, s.sockets.local]);
+  s.cores.local.patchStatus({ holders: [{ pid: 111 }, { pid: 222 }] });
+  const clean = ok(s.view());
+  const { cutOff: empty, ...withoutCandidate } = clean.json();
+  assert.deepEqual(empty, { holders: [], unchecked: [], recheckMs: 0 });
+  assert.deepEqual(withCandidate, withoutCandidate);
+  assert.deepEqual(s.bytes(), before, "the ledger and loss records are byte-equal with and without the candidate");
+});
+
+test("C2 cut-off: all holders listed needs one observation and no text section", (t) => {
+  const s = cutoffScene(t);
+  s.cores.local.patchStatus({ holders: [{ pid: 111 }, { pid: 222 }] });
+  const json = ok(s.view()), text = ok(s.view([]));
+  assert.deepEqual(json.json().cutOff, { holders: [], unchecked: [], recheckMs: 0 });
+  assert.doesNotMatch(text.out, /cut-off check:/);
+  checkTrace(json, [s.sockets.local]);
+  checkTrace(text, [s.sockets.local]);
+});
+
+test("C3 cut-off: macOS reports an unchecked process table", (t) => {
+  const s = cutoffScene(t);
+  const env = { AUTOMAGIK_HERDR_TEST_PLATFORM: "darwin" };
+  const json = s.view(["--json"], env), text = ok(s.view([], env));
+  uncheckedCutOff(json, "process table not readable on this system");
+  assert.ok(text.out.includes("cut-off check:\n  local: not checked (process table not readable on this system)\n"));
+  checkTrace(json, []);
+  checkTrace(text, []);
+});
+
+test("C3b cut-off: an escaping second process root is rejected before any status RPC", (t) => {
+  const s = cutoffScene(t);
+  const escape = join(s.root, "escape");
+  symlinkSync("/proc", escape);
+  const json = s.view(["--json"], { AUTOMAGIK_HERDR_PROC_ROOT: JSON.stringify([s.roots[0], escape]) });
+  uncheckedCutOff(json, "process table could not be read");
+  checkTrace(json, []);
+});
+
+test("C4 cut-off: a core without a holder list is reported unchecked", (t) => {
+  const s = cutoffScene(t);
+  s.cores.local.patchStatus({ holders: undefined });
+  const json = s.view();
+  uncheckedCutOff(json, "its core does not list its holder processes");
+  checkTrace(json, [s.sockets.local]);
+});
+
+test("C4b cut-off: a malformed holder PID invalidates the observation", (t) => {
+  const s = cutoffScene(t);
+  s.cores.local.patchStatus({ holders: [{ pid: "bad" }] });
+  const json = s.view();
+  uncheckedCutOff(json, "its core gave an unreadable holder list");
+  checkTrace(json, [s.sockets.local]);
+});
+
+test("C5 cut-off: a missing local core preserves the view error and JSON stdout", (t) => {
+  const s = cutoffScene(t);
+  rmSync(s.sockets.local);
+  const text = s.view([]), json = s.view();
+  const error = `am: hc server status failed: herdr-core isn't answering on this computer (tried ${s.sockets.local}); nothing was started.\n`;
+  assert.equal(text.code, 1);
+  assert.equal(text.out, "");
+  assert.equal(text.err, "cut-off check:\n  local: not checked (its core did not answer)\n" + error);
+  assert.equal(json.code, 1);
+  assert.equal(json.out, "");
+  assert.equal(json.err, error);
+  checkTrace(text, []);
+  checkTrace(json, []);
+});
+
+test("C7 cut-off: a second member listing the PID vetoes the report", (t) => {
+  const s = cutoffScene(t, { two: true });
+  s.cores.h2.patchStatus({ holders: [{ pid: 222 }] });
+  const json = ok(s.view());
+  assert.deepEqual(json.json().cutOff, { holders: [], unchecked: [], recheckMs: 0 });
+  checkTrace(json, [s.sockets.local, s.sockets.h2]);
+});
+
+test("C7b cut-off: a hanging second member leaves the whole pool unchecked", (t) => {
+  const s = cutoffScene(t, { two: true });
+  s.cores.h2.patchStatus({ statusMode: "hang" });
+  const json = s.view();
+  uncheckedCutOff(json, "the check did not finish in time", ["local", "h2"]);
+  checkTrace(json, [s.sockets.local, s.sockets.h2]);
+});
+
+test("C7c cut-off: a malformed wire reply leaves the whole pool unchecked", (t) => {
+  const s = cutoffScene(t, { two: true });
+  s.cores.h2.patchStatus({ statusMode: "malformed" });
+  const json = s.view();
+  uncheckedCutOff(json, "its core did not answer", ["local", "h2"]);
+  checkTrace(json, [s.sockets.local, s.sockets.h2]);
+});
+
+test("C8 cut-off: a reused holder PID is suppressed after the second observation", (t) => {
+  const s = cutoffScene(t);
+  writeFileSync(join(s.roots[1], "222/stat"), fixtureProcStat(222, { starttime: "601" }));
+  const json = ok(s.view());
+  assert.deepEqual(json.json().cutOff, { holders: [], unchecked: [], recheckMs: 0 });
+  checkTrace(json, [s.sockets.local, s.sockets.local]);
+});
+
+test("C9 cut-off: an unrelated listener receives no RPC", (t) => {
+  const s = cutoffScene(t, { two: true });
+  const json = ok(s.view());
+  assert.equal(json.events.some(({ socket }) => socket === s.sockets.other), false);
+  assert.equal(json.events.every(({ kind, method }) => kind !== "rpc" || method === "server.status"), true);
+});
+
+test("C10 cut-off: inherited routing is cleared only for the check", (t) => {
+  const s = cutoffScene(t);
+  const inherited = { HC_SESSION: "other", HC_SOCKET: s.sockets.other, HC_TERMINAL_SOCKET: s.sockets.other };
+  const json = ok(s.view(["--json"], inherited));
+  assert.deepEqual(json.json().cutOff.holders, [{ holder: "local", pid: 222, programs: 3 }]);
+  checkTrace(json, [s.sockets.local, s.sockets.local]);
+  assert.ok(json.events.some(({ socket }) => socket === s.sockets.other), "the original view still uses inherited routing");
+  assert.equal(s.env.HC_SOCKET, "", "the base fixture environment was not mutated");
+});
+
+test("C10b cut-off: an alias from default to an unrelated listener leaves local ownership uncertain", (t) => {
+  const s = cutoffScene(t);
+  rmSync(s.sockets.local);
+  symlinkSync(s.sockets.other, s.sockets.local);
+  const json = s.view(["--json"], { HC_SESSION: "other", HC_SOCKET: s.sockets.other, HC_TERMINAL_SOCKET: s.sockets.other });
+  uncheckedCutOff(json, "a core socket could not be determined");
+  checkTrace(json, []);
+});
+
+test("C11 cut-off: a set custom override makes the check explicitly unchecked", (t) => {
+  const s = cutoffScene(t);
+  const json = s.view(["--json"], { AUTOMAGIK_HERDR_CORE_SOCKET: s.sockets.local });
+  uncheckedCutOff(json, "a custom core socket is set");
+  checkTrace(json, []);
+});
+
+test("C12 cut-off: a blank pool is unchecked without consuming the view's warning state", (t) => {
+  const s = cutoffScene(t);
+  writeFileSync(s.holdersFile, " \n");
+  const json = s.view();
+  uncheckedCutOff(json, "the pool file could not be read");
+  assert.equal(json.err, "");
+  checkTrace(json, []);
+});
+
+test("C12b cut-off: the ordinary view still emits its own corrupt-pool warning once", (t) => {
+  const s = cutoffScene(t);
+  writeFileSync(s.holdersFile, "{bad");
+  const json = s.view();
+  uncheckedCutOff(json, "the pool file could not be read");
+  assert.equal(json.err.split("holders: the file isn't JSON").length, 2);
+  checkTrace(json, []);
 });

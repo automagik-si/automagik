@@ -181,3 +181,223 @@ export function lossLine(event) {
   const names = agents.length > 6 ? `${agents.slice(0, 6).join(", ")}, +${agents.length - 6}` : agents.join(", ");
   return `${what}: ${agents.length} ${agents.length === 1 ? "agent" : "agents"} in holder "${event.holder}"${names ? ` (${names})` : ""}`;
 }
+
+// #1432: the read-only cut-off check, independent of the attach view and revive.
+export const CUT_OFF_REASONS = {
+  platform: "process table not readable on this system",
+  proc: "process table could not be read",
+  time: "the check did not finish in time",
+  pool: "the pool file could not be read",
+  custom: "a custom core socket is set",
+  socket: "a core socket could not be determined",
+  answer: "its core did not answer",
+  ambiguous: "pool membership is ambiguous",
+  old: "its core does not list its holder processes",
+  list: "its core gave an unreadable holder list",
+  changed: "its core changed between the reads",
+};
+
+const positivePid = (n) => Number.isSafeInteger(n) && n > 0;
+export const liveProc = ({ state }) => state !== "Z" && state !== "X" && state !== "x";
+
+export function parseProcStat(text, pid) {
+  // The process name can contain spaces, newlines and closing parentheses.
+  const end = text.lastIndexOf(")");
+  if (end < 0 || !text.startsWith(`${pid} (`)) return null;
+  const fields = text.slice(end + 1).trim().split(/\s+/);
+  const [state, parent] = fields;
+  const starttime = fields[19], ppid = Number(parent);
+  if (!/^[RSDZTtWXxKPI]$/.test(state) || !/^\d+$/.test(parent ?? "") ||
+      !Number.isSafeInteger(ppid) || !/^\d+$/.test(starttime ?? "") ||
+      fields.slice(2, 19).some((field) => !/^-?\d+$/.test(field))) return null;
+  return { state, ppid, starttime };
+}
+
+export function parseProcStatus(text) {
+  const match = /^Uid:[ \t]+(\d+)[ \t]+\d+[ \t]+\d+[ \t]+\d+[ \t]*$/m.exec(text);
+  const uid = match ? Number(match[1]) : NaN;
+  return Number.isSafeInteger(uid) ? uid : null;
+}
+
+export function parseCmdline(text) {
+  // An empty cmdline is valid. Preserve empty arguments other than the final terminator.
+  if (!text) return [];
+  return text.endsWith("\0") ? text.slice(0, -1).split("\0") : null;
+}
+
+/** The literal sibling socket name used by a holder of this endpoint. */
+export function holderSocketOf(endpoint, socket) {
+  if (!endpoint.startsWith("/") || !endpoint.endsWith(".sock") || !socket.startsWith("/")) return false;
+  const prefix = endpoint.slice(0, -5) + ".holder";
+  return socket === prefix + ".sock" ||
+    socket.startsWith(prefix + ".") && /^\.(?:[0-9a-f]{8}|[0-9a-f]{32})\.sock$/.test(socket.slice(prefix.length));
+}
+
+export function holdProcess(entry) {
+  const { argv } = entry;
+  return liveProc(entry) && argv?.length === 4 && argv[0] && argv[1] === "hold" && argv[2] === "--socket"
+    && argv[3].startsWith("/") ? argv[3] : null;
+}
+
+export function cutOffRecheckMs(value) {
+  const delay = typeof value === "string" && value.trim() ? Number(value) : value;
+  return Number.isInteger(delay) && delay >= 0 && delay <= 60_000 ? delay : 5000;
+}
+
+class CutOffUnknown extends Error {}
+const unknownCutOff = (why) => { throw new CutOffUnknown(why); };
+
+function readCutOff(check, reason, read) {
+  check();
+  try { return read(); }
+  catch (error) {
+    if (error instanceof CutOffUnknown) throw error;
+    if (error?.code === "CUSTOM_CORE_SOCKET") unknownCutOff(CUT_OFF_REASONS.custom);
+    if (error?.code === "CORE_SOCKET_ABSENT") unknownCutOff(CUT_OFF_REASONS.answer);
+    unknownCutOff(reason);
+  } finally { check(); }
+}
+
+function memberVerdict(answer) {
+  if (answer?.timedOut) unknownCutOff(CUT_OFF_REASONS.time);
+  const status = answer?.status;
+  if (answer?.error !== undefined || !status || typeof status.core?.id !== "string" ||
+      !status.core.id.trim() || !positivePid(status.pid)) unknownCutOff(CUT_OFF_REASONS.answer);
+  if (!Object.hasOwn(status, "holders")) unknownCutOff(CUT_OFF_REASONS.old);
+  if (!Array.isArray(status.holders) || status.holders.some((row) => !positivePid(row?.pid))) {
+    unknownCutOff(CUT_OFF_REASONS.list);
+  }
+  return status;
+}
+
+async function observationOf({ pool, discover, rpc, proc, clock, index, readPool }) {
+  const deadline = clock.now() + 4000;
+  const check = () => { if (clock.now() >= deadline) unknownCutOff(CUT_OFF_REASONS.time); };
+  const members = readCutOff(check, CUT_OFF_REASONS.pool, readPool);
+  if (members.warnings.length || members.holders.some((h) => h.name !== LOCAL_HOLDER && h.session !== `am-holder-${h.name}`)) {
+    unknownCutOff(CUT_OFF_REASONS.pool);
+  }
+  if (pool && JSON.stringify(pool) !== JSON.stringify(members.holders)) unknownCutOff(CUT_OFF_REASONS.changed);
+
+  const endpoints = new Map();
+  const cores = members.holders.map((member) => {
+    const targets = readCutOff(check, CUT_OFF_REASONS.socket, () => discover(member, check));
+    if (!targets.length) unknownCutOff(CUT_OFF_REASONS.socket);
+    const core = { member, targets, statuses: [] };
+    for (const { socket } of targets) {
+      if (endpoints.has(socket) && endpoints.get(socket) !== core) unknownCutOff(CUT_OFF_REASONS.ambiguous);
+      endpoints.set(socket, core);
+    }
+    return core;
+  });
+
+  // Take the process table before any status RPC, so a subsequent adoption can veto a candidate.
+  const table = readCutOff(check, CUT_OFF_REASONS.proc, () => proc(index, check));
+  const listed = new Set();
+  const requests = [...endpoints];
+  for (let i = 0; i < requests.length; i += 4) {
+    const batch = requests.slice(i, i + 4);
+    const replies = await Promise.allSettled(batch.map(async ([socket, core]) => {
+      check();
+      return rpc(socket, Math.max(1, Math.ceil(deadline - clock.now())), core.member);
+    }));
+    check();
+    for (const [index, reply] of replies.entries()) {
+      const [socket, core] = batch[index];
+      const status = memberVerdict(reply.value);
+      core.statuses.push({ socket, id: status.core.id, pid: status.pid });
+      for (const row of status.holders) listed.add(row.pid);
+    }
+  }
+
+  const coreIds = new Set(), corePids = new Set();
+  for (const core of cores) {
+    const { id, pid } = core.statuses[0];
+    if (coreIds.has(id) || corePids.has(pid) || core.statuses.some((status) => status.id !== id || status.pid !== pid)) {
+      unknownCutOff(CUT_OFF_REASONS.ambiguous);
+    }
+    coreIds.add(id);
+    corePids.add(pid);
+    const sockets = core.statuses.map((status) => status.socket);
+    const proof = readCutOff(check, CUT_OFF_REASONS.proc, () => table.coreProof(pid, sockets));
+    if (!proof) unknownCutOff(CUT_OFF_REASONS.socket);
+    if (proof.namespace !== table.namespace) unknownCutOff(CUT_OFF_REASONS.proc);
+    core.exe = proof.exe;
+    core.starttime = proof.starttime;
+  }
+
+  const candidates = new Map();
+  for (const entry of table.entries) {
+    check();
+    const socket = holdProcess(entry);
+    if (!socket) continue;
+    const matches = requests.filter(([endpoint]) => holderSocketOf(endpoint, socket));
+    if (!matches.length) continue;
+    if (matches.length !== 1) unknownCutOff(CUT_OFF_REASONS.ambiguous);
+    const [, core] = matches[0];
+    const namespace = readCutOff(check, CUT_OFF_REASONS.proc, () => table.namespaceOf(entry));
+    if (entry.exe !== core.exe || namespace !== table.namespace) unknownCutOff(CUT_OFF_REASONS.proc);
+    if (!listed.has(entry.pid)) candidates.set(entry.pid, { holder: core.member.name, socket, ...entry });
+  }
+  check();
+  return { members: members.holders, cores, candidates, entries: table.entries, namespace: table.namespace };
+}
+
+function confirmCutOffs(first, second) {
+  if (first.namespace !== second.namespace || JSON.stringify(first.cores) !== JSON.stringify(second.cores)) {
+    unknownCutOff(CUT_OFF_REASONS.changed);
+  }
+  const children = new Map();
+  for (const entry of second.entries) {
+    if (liveProc(entry)) children.set(entry.ppid, (children.get(entry.ppid) ?? 0) + 1);
+  }
+  const confirmed = [];
+  for (const [pid, before] of first.candidates) {
+    const after = second.candidates.get(pid);
+    if (after && ["holder", "starttime", "socket", "exe"].every((key) => before[key] === after[key])) {
+      confirmed.push({ holder: after.holder, pid, programs: children.get(pid) ?? 0 });
+    }
+  }
+  return confirmed;
+}
+
+/** At most two complete pool observations, with one wait only if the first has a candidate. */
+export async function holderCutOffs({ members, discover, rpc, proc, clock, recheckMs, platform = "linux" }) {
+  const seen = new Set([LOCAL_HOLDER]);
+  const readPool = () => {
+    const pool = members();
+    for (const member of pool.holders) seen.add(member.name);
+    return pool;
+  };
+  const delay = cutOffRecheckMs(recheckMs);
+  const result = { holders: [], unchecked: [], recheckMs: delay };
+  try {
+    if (platform !== "linux") {
+      try { readPool(); } catch { /* The unsupported platform still determines the result. */ }
+      unknownCutOff(CUT_OFF_REASONS.platform);
+    }
+    const readers = { discover, rpc, proc, clock, readPool };
+    const first = await observationOf({ ...readers, index: 0 });
+    if (first.candidates.size) {
+      await clock.sleep(delay);
+      const second = await observationOf({ ...readers, index: 1, pool: first.members });
+      result.holders = confirmCutOffs(first, second);
+    }
+  } catch (error) {
+    if (!(error instanceof CutOffUnknown)) throw error;
+    result.unchecked = [...seen].map((holder) => ({ holder, reason: error.message }));
+  }
+  return result;
+}
+
+export function cutOffLines({ holders, unchecked }) {
+  if (!holders.length && !unchecked.length) return [];
+  const lines = ["cut-off check:"];
+  for (const { holder, pid, programs } of holders) {
+    const first = `  ${holder}: No pool core listed holder process ${pid} in either read. At the second read it had `;
+    lines.push(first + (programs === 0 ? "no same-user live direct children. This does not establish that a previous agent stopped."
+      : `${programs} same-user live direct ${programs === 1 ? "child" : "children"}. They may include working agents. Verify that the previous agent stopped before starting it again.`));
+  }
+  for (const { holder, reason } of unchecked) lines.push(`  ${holder}: not checked (${reason})`);
+  return lines;
+}

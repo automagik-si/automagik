@@ -100,15 +100,19 @@ function readConfig(path) {
 }
 
 // null: no setting. A path is trusted only when the entire file fits this TOML subset.
-function configuredSocket(env, home) {
+function configuredSocket(env, home, strict = false) {
   const config = env.XDG_CONFIG_HOME || join(home, ".config");
   if (!isAbsolute(config)) return INDETERMINATE;
   const path = `${config}/herdr-core/config.toml`;
-  if (!inTestRoots(path, env)) return null;
-  if (!inTestRootsReal(path, env)) return INDETERMINATE;
+  if (!inTestRoots(path, env)) return strict ? INDETERMINATE : null;
+  if (!inTestRootsReal(path, env) || (strict && realPathPrefix(path) === null)) return INDETERMINATE;
+  if (strict) {
+    try { lstatSync(path); }
+    catch (error) { return error?.code === "ENOENT" ? null : INDETERMINATE; }
+  }
   try {
     const source = readConfig(path);
-    if (!source.includes("socket")) return null;
+    if (!strict && !source.includes("socket")) return null;
     const entries = new Map();
     for (const line of source.split(/\r?\n/)) {
       const assignment = LINE.exec(line);
@@ -126,8 +130,8 @@ function configuredSocket(env, home) {
     }
     if (!entries.has("socket")) return null;
     const socket = entries.get("socket");
-    return isAbsolute(socket) && !socket.includes("\0") ? socket : INDETERMINATE;
-  } catch (error) { return error?.code === "ENOENT" ? null : INDETERMINATE; }
+    return (strict || isAbsolute(socket)) && !socket.includes("\0") ? socket : INDETERMINATE;
+  } catch (error) { return !strict && error?.code === "ENOENT" ? null : INDETERMINATE; }
 }
 
 const stateHome = (env, home) => isAbsolute(env.XDG_STATE_HOME || "") ? env.XDG_STATE_HOME : join(home, ".local/state");
@@ -139,16 +143,30 @@ function readLockSocket(lock) {
   } finally { closeSync(fd); }
 }
 
-function socketDiscovery(env, { platform, uid, home }, configured = () => configuredSocket(env, home)) {
-  const only = (path) => ({ sockets: inTestRootsReal(path, env) ? [path] : [] });
+function socketDiscovery(env, { platform, uid, home, strict = false }, configured = () => configuredSocket(env, home, strict)) {
+  const allowed = (path) => inTestRootsReal(path, env) && (!strict || realPathPrefix(path) !== null);
+  const uncertain = () => { throw new Error("Cannot determine the herdr-core socket."); };
+  const custom = () => { throw Object.assign(new Error("A custom herdr-core socket is set."), { code: "CUSTOM_CORE_SOCKET" }); };
+  const only = (path) => {
+    if (allowed(path)) return { sockets: [path] };
+    if (strict) uncertain();
+    return { sockets: [] };
+  };
   const rawSession = env.HC_SESSION || "";
   const session = rawSession.trim() || "default";
   if (platform === "win32" || /[\p{Cc}\/\\:*?"<>|]/u.test(rawSession) || session === "." || session === "..") return { sockets: [] };
   const override = env.HC_SOCKET || env.AUTOMAGIK_HERDR_CORE_SOCKET;
+  if (strict && (env.HC_SOCKET || env.AUTOMAGIK_HERDR_CORE_SOCKET !== undefined)) custom();
   if (override) return only(override);
   const setting = configured();
-  if (setting === INDETERMINATE) return { sockets: [] };
-  if (setting !== null) return only(setting);
+  if (setting === INDETERMINATE) {
+    if (strict) uncertain();
+    return { sockets: [] };
+  }
+  if (setting !== null) {
+    if (strict) custom();
+    return only(setting);
+  }
   const state = stateHome(env, home);
   const sessionState = join(state, "herdr-core", session);
   let socketDir = sessionState;
@@ -159,12 +177,30 @@ function socketDiscovery(env, { platform, uid, home }, configured = () => config
     if (inTestRootsReal(runtime, env)) {
       try {
         if (statSync(runtime).isDirectory()) socketDir = join(runtime, "herdr-core");
-      } catch { /* Use session state when the runtime directory is unavailable. */ }
+      } catch (error) {
+        if (strict && (error?.code !== "ENOENT" || realPathPrefix(runtime) === null)) uncertain();
+        // Use session state when the runtime directory is absent.
+      }
     }
   }
   const defaultSocket = join(socketDir, `${session}.sock`);
   const discovery = only(defaultSocket);
   const lockPath = join(sessionState, "core.lock");
+  if (strict) {
+    if (!allowed(lockPath)) uncertain();
+    try { lstatSync(lockPath); }
+    catch (error) {
+      if (error?.code === "ENOENT") return discovery;
+      throw error;
+    }
+    const lockSocket = readLockSocket(lockPath);
+    if (!isAbsolute(lockSocket) || lockSocket.includes("\0") || !allowed(lockSocket)) uncertain();
+    if (lockSocket !== defaultSocket) {
+      discovery.sockets.push(lockSocket);
+      discovery.lockSocket = lockSocket;
+    }
+    return discovery;
+  }
   if (inTestRootsReal(lockPath, env)) {
     try {
       const lockSocket = readLockSocket(lockPath);
@@ -178,8 +214,8 @@ function socketDiscovery(env, { platform, uid, home }, configured = () => config
 }
 
 /** The chosen socket, or the default followed by an endpoint recorded in the lock. */
-export function coreSocketDiscovery(env = process.env, { platform = process.platform, uid = process.getuid?.(), home = env.HOME || homedir() } = {}) {
-  return socketDiscovery(env, { platform, uid, home });
+export function coreSocketDiscovery(env = process.env, { platform = process.platform, uid = process.getuid?.(), home = env.HOME || homedir(), strict = false } = {}) {
+  return socketDiscovery(env, { platform, uid, home, strict });
 }
 
 export function coreSockets(env, options) {

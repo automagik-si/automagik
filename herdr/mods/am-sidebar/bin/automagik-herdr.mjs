@@ -13,7 +13,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
   readSync, renameSync, rmdirSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname, uptime } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { basename, dirname, isAbsolute, join, relative as relativePath, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
@@ -59,7 +59,8 @@ import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, install
 import { NO_UPDATE_ENV, OLD_PACK_NAME, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
 import { DEFAULT_HOLDER_LIMIT, HOLDERS_FILE, HOLDER_NAME, LOCAL_HOLDER, MAX_HOLDER_LIMIT, chooseHolder, holderNameProblem, holderRows, holdersText,
-  lossEvent, lossLine, parseHolders, sameLoss } from "../holderSpread.mjs";
+  cutOffLines, holderCutOffs, liveProc, lossEvent, lossLine, parseCmdline, parseHolders, parseProcStat,
+  parseProcStatus, sameLoss } from "../holderSpread.mjs";
 import { readMeterLane } from "../meterLane.mjs";
 import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, entryLine, installLine, linkedUpdate, meterResults, parseState, probeOn, stateAfter, stateLines, updateOn } from "../machineUpdates.js";
 import { appHomeOn as createLinkedAppHome, installOn as installLinkedAm, selectMachine as selectInstallMachine } from "../machineInstall.js";
@@ -4405,6 +4406,198 @@ async function holdersUp() {
   return started;
 }
 
+// The diagnostic owns its readers. None consults the view's routing, caches or ledger.
+function cutOffMembers() {
+  const path = holdersPath();
+  try { lstatSync(path); }
+  catch (error) {
+    if (error?.code === "ENOENT") return parseHolders(null, { strict: true });
+    throw error;
+  }
+  return parseHolders(readFileSync(path, "utf8"), { strict: true });
+}
+
+function cutOffMemberEnv(env, { session }) {
+  const { HC_SOCKET, HC_SESSION, HC_TERMINAL_SOCKET, ...memberEnv } = env;
+  if (session !== null) memberEnv.HC_SESSION = session;
+  return memberEnv;
+}
+
+export function cutOffEndpoints(env, member, check) {
+  const { sockets } = coreSocketDiscovery(env, { strict: true });
+  const endpoints = new Map();
+  for (const [index, name] of sockets.entries()) {
+    check();
+    if (!basename(name).endsWith(".sock")) throw new Error("Unrecognized core socket name.");
+    let socket;
+    try { socket = realpathSync.native(name); }
+    catch (error) {
+      if (error?.code === "ENOENT") throw Object.assign(new Error("Core socket absent."), { code: "CORE_SOCKET_ABSENT" });
+      throw error;
+    }
+    if (!inTestRootsReal(socket, env) || !basename(socket).endsWith(".sock")) throw new Error("Unrecognized core socket target.");
+    if (member.name === LOCAL_HOLDER && index === 0 && socket !== join(realpathSync.native(dirname(name)), basename(name))) {
+      throw new Error("The default socket does not identify the local core.");
+    }
+    if (!endpoints.has(socket)) endpoints.set(socket, []);
+    endpoints.get(socket).push(name);
+  }
+  return [...endpoints].map(([socket, names]) => ({ socket, names }));
+}
+
+function procPathInside(root, path) {
+  const name = relativePath(root, path);
+  return name !== ".." && !name.startsWith("../") && !isAbsolute(name);
+}
+
+const PID_NAMESPACE = /^pid:\[\d+\]$/;
+
+/** A Linux process snapshot. The two fixture roots and each path used for IO are guarded. */
+export function cutOffProcTable(env, index, check, uid = process.getuid?.()) {
+  const test = env.AUTOMAGIK_HERDR_TEST_ROOTS !== undefined;
+  if (test && !env.AUTOMAGIK_HERDR_TEST_ROOTS) throw new Error("Missing process fixture roots.");
+  const roots = test ? JSON.parse(env.AUTOMAGIK_HERDR_PROC_ROOT ?? "null") : ["/proc", "/proc"];
+  if (!Number.isSafeInteger(uid) || !Array.isArray(roots) || roots.length !== 2) throw new Error("Missing process table.");
+  const root = roots.map((path) => {
+    check();
+    if (!inTestRootsReal(path, env)) throw new Error("Process table outside scratch roots.");
+    const resolved = realpathSync.native(path);
+    if ((test && procPathInside("/proc", resolved)) || !statSync(resolved).isDirectory()) {
+      throw new Error("Invalid process table root.");
+    }
+    return resolved;
+  })[index];
+
+  const follow = (path) => {
+    check();
+    if (!test) return path;
+    if (!inTestRootsReal(path, env)) throw new Error("Process path outside scratch roots.");
+    const resolved = realpathSync.native(path);
+    if (!procPathInside(root, resolved)) throw new Error("Process path outside its table.");
+    return resolved;
+  };
+  const read = (path) => {
+    const fd = openSync(follow(path), constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error("Invalid process file.");
+      return readFileSync(fd, "utf8");
+    } finally { closeSync(fd); }
+  };
+  const link = (path) => readlinkSync(join(follow(dirname(path)), basename(path)));
+  const namespace = (dir) => {
+    const value = link(join(dir, "ns/pid"));
+    if (!PID_NAMESPACE.test(value)) throw new Error("Unreadable PID namespace.");
+    return value;
+  };
+  const executable = (dir) => {
+    const value = link(join(dir, "exe"));
+    if (!isAbsolute(value)) throw new Error("Unreadable process executable.");
+    return value;
+  };
+  const stat = (dir, pid) => {
+    const value = parseProcStat(read(join(dir, "stat")), pid);
+    if (!value) throw new Error("Unreadable process stat.");
+    return value;
+  };
+  const self = namespace(join(root, "self"));
+  const pids = readdirSync(follow(root)).filter((name) => /^[1-9]\d*$/.test(name));
+  if (pids.length > 32768) throw new Error("Process table exceeds its entry limit.");
+  const entries = new Map();
+  for (const name of pids) {
+    const pid = Number(name), dir = join(root, name);
+    if (!Number.isSafeInteger(pid)) throw new Error("Unreadable process ID.");
+    // Only a directory that has actually gone away can be skipped. A dangling fixture alias,
+    // or a process disappearing after the directory was found, leaves an incomplete snapshot.
+    check();
+    try { lstatSync(dir); }
+    catch (error) { if (error?.code === "ENOENT") continue; throw error; }
+    const info = follow(dir);
+    const owner = parseProcStatus(read(join(info, "status")));
+    if (owner === null) throw new Error("Unreadable process UID.");
+    if (owner !== uid) continue;
+    const entry = { pid, ...stat(info, pid) };
+    if (liveProc(entry)) {
+      entry.argv = parseCmdline(read(join(info, "cmdline")));
+      if (entry.argv === null) throw new Error("Unreadable process arguments.");
+      entry.exe = executable(info);
+    }
+    entries.set(pid, entry);
+  }
+
+  const sameProcess = (dir, entry) => {
+    const current = stat(dir, entry.pid);
+    return liveProc(current) && current.starttime === entry.starttime &&
+      parseProcStatus(read(join(dir, "status"))) === uid && executable(dir) === entry.exe;
+  };
+  let listeners;
+  return {
+    entries: [...entries.values()],
+    namespace: self,
+    namespaceOf: (entry) => {
+      const dir = join(root, String(entry.pid));
+      if (!sameProcess(dir, entry)) throw new Error("Holder process identity changed.");
+      return namespace(dir);
+    },
+    coreProof: (pid, sockets) => {
+      const entry = entries.get(pid), dir = join(root, String(pid));
+      if (!entry || !liveProc(entry) || !sameProcess(dir, entry)) return null;
+      const coreNamespace = namespace(dir);
+      if (coreNamespace !== self) return { namespace: coreNamespace };
+      // The path in /proc/net/unix and the listening socket inode held by this PID
+      // tie the reply to a local process. A PID number from a reply alone is insufficient.
+      listeners ??= procUnixListeners(read(join(root, "net/unix")), check);
+      const inodes = new Set();
+      for (const socket of sockets) {
+        const matches = listeners.get(socket);
+        if (matches?.length !== 1) return null;
+        inodes.add(matches[0]);
+      }
+      const fds = join(dir, "fd");
+      for (const fd of readdirSync(follow(fds))) {
+        const target = link(join(fds, fd));
+        inodes.delete(/^socket:\[(\d+)\]$/.exec(target)?.[1]);
+        if (!inodes.size) break;
+      }
+      if (inodes.size || !sameProcess(dir, entry) || namespace(dir) !== coreNamespace) return null;
+      return { namespace: coreNamespace, exe: entry.exe, starttime: entry.starttime };
+    },
+  };
+}
+
+function procUnixListeners(text, check) {
+  const [header, ...rows] = text.split("\n");
+  if (rows.pop() !== "" || !/^Num\s+RefCount\s+Protocol\s+Flags\s+Type\s+St\s+Inode\s+Path\s*$/.test(header)) {
+    throw new Error("Unreadable Unix socket table.");
+  }
+  const listeners = new Map();
+  for (const row of rows) {
+    check();
+    const match = /^\S+:\s+[\da-f]+\s+[\da-f]+\s+([\da-f]+)\s+(\S+)\s+(\S+)\s+(\d+)(?:\s+(.*))?$/i.exec(row);
+    if (!match) throw new Error("Unreadable Unix socket entry.");
+    const [, flags, type, state, inode, path] = match;
+    if (!(Number.parseInt(flags, 16) & 0x10000) || type !== "0001" || state !== "01" || !path?.startsWith("/")) continue;
+    if (!listeners.has(path)) listeners.set(path, []);
+    listeners.get(path).push(inode);
+  }
+  return listeners;
+}
+
+function checkHolderCutOffs() {
+  const env = { ...process.env };
+  return holderCutOffs({
+    members: cutOffMembers,
+    discover: (member, check) => cutOffEndpoints(cutOffMemberEnv(env, member), member, check),
+    rpc: async (socket, timeoutMs, member) => {
+      const answer = await coreStatus(cutOffMemberEnv(env, member), { sockets: [socket], method: "server.status", timeoutMs });
+      return answer.error === `${socket}: timed out` ? { timedOut: true } : answer;
+    },
+    proc: (index, check) => cutOffProcTable(env, index, check),
+    clock: { now: () => performance.now(), sleep: later },
+    recheckMs: env.AUTOMAGIK_HERDR_CUTOFF_RECHECK_MS,
+    platform: env.AUTOMAGIK_HERDR_TEST_ROOTS ? env.AUTOMAGIK_HERDR_TEST_PLATFORM || process.platform : process.platform,
+  });
+}
+
 function readLosses(limit = HOLDER_LOSSES_KEPT) {
   let text = "";
   try { text = readFileSync(holderLossPath(), "utf8"); } catch { return []; }
@@ -4603,11 +4796,16 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
     + " | holders losses [--all] | holders up";
   if (verb === undefined) {
     if (arg !== undefined) throw new CliError(usage, 2);
-    const { config, counts, connected, view } = await holderView();
+    const cutOff = await checkHolderCutOffs();
+    const { config, counts, connected, view } = await holderView().catch((error) => {
+      const lines = cutOffLines(cutOff);
+      if (!opts.json && lines.length) process.stderr.write(unprinted(lines.join("\n") + "\n"));
+      throw error;
+    });
     const rows = holderRows({ config, counts, connected });
     const all = holderLossReadback(readLosses(opts.all || !opts.json ? Infinity : 5));
     const losses = opts.all ? all : all.slice(-5);
-    if (opts.json) return { limit: config.limit, holders: rows, losses: losses.map(holderLossJson) };
+    if (opts.json) return { limit: config.limit, holders: rows, losses: losses.map(holderLossJson), cutOff };
     const lines = [`holders: limit ${config.limit} agents each${rows.length === 1 ? " (one holder: a holder loss ends every agent in it)" : ""}`];
     for (const h of rows) {
       const where = h.local ? "this computer" : `machine ${h.machine}${h.connected ? "" : " (away)"}`;
@@ -4617,6 +4815,7 @@ export async function cmdHolders(opts, [verb, arg, ...rest] = []) {
     if (rows.length === 1 && rows[0].count > 0) {
       lines.push(`A single holder's loss ends all ${rows[0].count}; spread new starts with: am holders add --local <name>`);
     }
+    lines.push(...cutOffLines(cutOff));
     if (losses.length) {
       lines.push("recent losses:");
       for (const loss of losses) lines.push(...holderLossText(loss, view).map((line) => `  ${line}`));
