@@ -2219,13 +2219,14 @@ behavior for other messages depends on the caller.
 
 The pack's own launches carry `--dangerously-skip-permissions` and trust their folder, so they
 stop at neither prompt; a launch at the home folder (left out of `trustedWorkspaces`), a launch
-with no settings file and an agy started by hand can. Only those exact screens count, measured on
-the captures: a question wrapped between words still matches. A wrapped path matches while the
-"File access" heading is visible and no continuation resembles a structural row. A word split
-across rows, a choice or footer wrapped onto two rows (a narrow pane), a question scrolled off the
-top, a missing model row, a prompt worded otherwise (another agy release, or macOS, not captured
-yet), a selection marker on no choice or on two, or a file-access block whose heading, rule,
-"Read:" row or reason is missing, reworded, out of order or scrolled off the top draws nothing:
+with no settings file and an agy started by hand can. The supported prompt rows were measured on
+Linux with agy 1.5.16. macOS and other agy releases are unverified. A release that draws the same
+supported rows can match. Only the folder-trust screen requires a separate model row. A question
+wrapped between words still matches. A wrapped path matches while the "File access" heading is
+visible and no continuation resembles a structural row. A word split across rows, a choice or footer
+wrapped onto two rows (a narrow pane), a question scrolled off the top, a prompt worded otherwise, a
+selection marker on no choice or on two, or a file-access block whose heading, rule, "Read:" row or
+reason is missing, reworded, out of order or scrolled off the top draws nothing:
 never a guess. On a matcher miss, a pane reported working proceeds to herdr-core's delivery.
 A pane reported idle or done, or with no status, still gets the generic dialog and rate-limit
 checks. The generic dialog check refuses sends under a visible question, numbered choices or a
