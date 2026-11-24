@@ -65,7 +65,7 @@ export const opensByItself = source => source?.kind === 'goal'
 
 // DSH injects a schedule-change notice as context when a task changes elsewhere.
 const scheduleNotice = message => message?.source?.kind === 'schedule'
-  && /^\[SCHEDULE CHANGE\]/.test(textOf(message.content))
+  && textOf(message.content).startsWith('[SCHEDULE CHANGE]')
 
 // A step containing a handoff and any other opener needs a model reply.
 export const opensTurn = message => {
