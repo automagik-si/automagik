@@ -8,9 +8,9 @@
 //
 // Everything here is written to, and read from, the home the child itself runs in
 // (`AUTOMAGIK_BOT_CLI_HOME`, cli-homes.js), never the person's. Only our own files and our own
-// log folder are read; agy's sign-in store is never touched. Every failure here fails the start
-// closed, before or right after agy's session opens, with a fixed sentence: agy's log text never
-// leaves this file.
+// log folder are read, and only that folder's old log files are removed (pruneAgyLog); agy's
+// sign-in store is never touched. Every failure here fails the start closed, before or right
+// after agy's session opens, with a fixed sentence: agy's log text never leaves this file.
 //
 // The start failures are English only, as every acp-dsh start failure is (index.js): the Bot
 // team does not translate a chat's turn failure. Details shows the translated hooks, plugins and
@@ -61,6 +61,7 @@ export const AGY_SETTINGS_FAILED = 'Failed to load CLI settings, using defaults:
 const MAX_ENTRIES = 4096
 const MAX_BYTES = 256 * 1024
 const FRESH_MS = 10 * 60_000
+const PRUNE_MS = 24 * 60 * 60_000
 
 export const agyOffPaths = home => {
   const gemini = join(home, '.gemini')
@@ -95,13 +96,43 @@ function writeVerified(dir, file, text, posix) {
   }
 }
 
-/** Writes both OFF files into `home` (rewritten at every OFF start); throws on any mismatch. */
-export function writeAgyOff(home, { platform = process.platform } = {}) {
+/**
+ * Writes both OFF files into `home` (rewritten at every OFF start); throws on any mismatch. Then
+ * removes our own log folder's old files (pruneAgyLog), which never fails the start.
+ */
+export function writeAgyOff(home, { platform = process.platform, now = Date.now() } = {}) {
   const posix = platform !== 'win32'
   const paths = agyOffPaths(home)
   writeVerified(paths.agentDir, paths.agentFile, AGY_OFF_AGENT, posix)
   writeVerified(paths.settingsDir, paths.settingsFile, AGY_OFF_SETTINGS, posix)
+  pruneAgyLog(home, now)
   return paths
+}
+
+/**
+ * Every OFF agy process writes one log into our own settings folder's `log/` and nothing removes
+ * it, so past starts would fill readAgyLog's 4096-entry bound. Removes, from that folder only, the
+ * regular files with agy's log name whose time is more than 24 hours before `now`: `lstat`, never
+ * through a link, each by its own name. Reads at most 4096 entries; any error is ignored.
+ */
+export function pruneAgyLog(home, now = Date.now()) {
+  let dir
+  try {
+    const folder = agyOffPaths(home).logDir
+    dir = opendirSync(folder)
+    for (let count = 0; count < MAX_ENTRIES; count += 1) {
+      const entry = dir.readSync()
+      if (entry === null) break
+      if (!NAME.test(entry.name)) continue
+      const file = join(folder, entry.name)
+      try {
+        const stat = lstatSync(file)
+        if (stat.isFile() && stat.mtimeMs < now - PRUNE_MS) unlinkSync(file)
+      } catch {}
+    }
+  } catch {} finally {
+    try { dir?.closeSync() } catch {}
+  }
 }
 
 // Whether a literal path exists (a file, a folder or a link, a dangling one included). Only
@@ -136,9 +167,10 @@ const NAME = /^acp-server-\d{8}_\d{6}-(\d+)\.log$/
  * What agy's own log for the process `pid` says of its OFF settings: 'failed' (it did not load
  * them, or the log cannot be read safely), 'clean' (a fresh log of that process with no failure
  * line) or 'unchecked' (no such log). Bounded: at most 4096 folder entries and 256 KiB of the one
- * file, a regular file only, never through a link, never blocking on a FIFO.
+ * file, a regular file only, never through a link, never blocking on a FIFO. `open` is for tests:
+ * the file opened must be the one `lstat` saw (same device and inode).
  */
-export function readAgyLog(home, pid, spawnedAt) {
+export function readAgyLog(home, pid, spawnedAt, { open = openSync } = {}) {
   const own = String(pid)
   if (!/^\d+$/.test(own)) return 'unchecked'
   const folder = agyOffPaths(home).logDir
@@ -171,7 +203,7 @@ export function readAgyLog(home, pid, spawnedAt) {
   if (!chosen.stat.isFile()) return 'failed'
   let fd
   try {
-    fd = openSync(join(folder, chosen.name), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+    fd = open(join(folder, chosen.name), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
     const opened = fstatSync(fd)
     if (!opened.isFile() || opened.dev !== chosen.stat.dev || opened.ino !== chosen.stat.ino) return 'failed'
     const buffer = Buffer.alloc(MAX_BYTES)

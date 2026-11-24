@@ -222,11 +222,12 @@ test('V1 the view carries acp-dsh\'s Details facts for an Antigravity Bot only, 
   assert.equal(off.nativeToolsFresh, true)
   assert.deepEqual(notesOf(row(off)), [
     'Native tools off is checked on agy 1.5.15; this version was not checked.',
+    'The check that Antigravity loaded its native-tools-off settings does not cover the first message after Antigravity starts, only the messages after it.',
     "Antigravity can't start with native tools off while its settings hold a hooks.json file. Remove hooks.json to use it with native tools off.",
     "Antigravity can't start with native tools off while its settings hold plugins.",
     'Switch account on Antigravity in Settings starts it with empty settings; it also signs it out.',
   ])
-  // ON: only the version line.
+  // ON: only the version line (no first-message line either).
   assert.deepEqual(notesOf(row(await h.view('agy'))), ['Native tools off is checked on agy 1.5.15; this version was not checked.'])
   const claude = await h.view('claude')
   for (const key of ['nativeToolsUnchecked', 'nativeToolsHooks', 'nativeToolsPlugins', 'nativeToolsFresh']) assert.equal(Object.hasOwn(claude, key), false, key)

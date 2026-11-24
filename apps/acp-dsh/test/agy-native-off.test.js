@@ -3,13 +3,16 @@
 // home), the hooks and plugins refusals, the check of agy's own log at the start and before each
 // later prompt, the version warning, and the capability the Bot team reads. A fake agy only.
 import assert from 'node:assert/strict'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, lstatSync, lutimesSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, symlinkSync, utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import {
   AGY_FRESH_TEXT, AGY_HOOKS_TEXT, AGY_NOT_LOADED_TEXT, AGY_OFF_AGENT, AGY_OFF_CHECKED, AGY_OFF_SETTINGS, AGY_PLUGINS_TEXT,
-  AGY_TOOLS_OFF_TEXT, AGY_UNCHECKED_LOG, agyExtensionRefusal, agyOffPaths, readAgyLog,
+  AGY_TOOLS_OFF_TEXT, AGY_UNCHECKED_LOG, agyExtensionRefusal, agyOffPaths, pruneAgyLog, readAgyLog,
 } from '../src/host/agy-off.js'
 import { AGENTS } from '../src/host/agents.js'
 import { CliHomes } from '../src/host/cli-homes.js'
@@ -236,11 +239,12 @@ test('8: the child\'s log as a link to a large file refuses at once', unixOnly, 
 })
 
 test('8: the child\'s log as a FIFO refuses at once, with no hang', unixOnly, async t => {
-  const at = Date.now()
-  const { h, chunks } = await offTurn(t, 'plain fifo-log', { log: { fifo: true } })
+  // Timed from the turn itself, not the world's setup: the plan's bound is 2 s.
+  let at
+  const { h, chunks } = await offTurn(t, 'plain fifo-log', { log: { fifo: true }, before: () => { at = Date.now() } })
+  assert.ok(Date.now() - at < 2_000, `the turn took ${Date.now() - at} ms`)
   assert.equal(failure(chunks), `Antigravity (ACP) did not start: ${AGY_NOT_LOADED_TEXT}`)
   assert.deepEqual(h.events('prompt'), [])
-  assert.ok(Date.now() - at < 10_000)
 })
 
 test('8: an older file of the same pid with the failure line is ignored next to a fresh clean one', unixOnly, async t => {
@@ -275,6 +279,67 @@ test('8: more than 4096 entries in the log folder warns and answers', unixOnly, 
   assert.equal(unchecked(h.logs).length, 1)
 })
 
+// Our own log folder gains one file per OFF start: each start first removes the regular files with
+// agy's log name more than 24 hours old (#1564 AJ-3), so past starts never fill the 4096 bound.
+const TWO_DAYS_AGO = (Date.now() - 2 * 24 * 60 * 60_000) / 1000
+
+test('8: an OFF start removes old log files first, so a crowd of past starts still refuses a failure', unixOnly, async t => {
+  const old = n => `acp-server-20261120_000000-${900000 + n}.log`
+  const { h, chunks } = await offTurn(t, 'plain pruned-log', {
+    log: { lines: [BOOT, FAILED] },
+    before: h => {
+      mkdirSync(h.logDir(), { recursive: true })
+      for (let n = 0; n < 4097; n++) {
+        writeFileSync(join(h.logDir(), old(n)), `${BOOT}\n`)
+        utimesSync(join(h.logDir(), old(n)), TWO_DAYS_AGO, TWO_DAYS_AGO)
+      }
+    },
+  })
+  assert.equal(failure(chunks), `Antigravity (ACP) did not start: ${AGY_NOT_LOADED_TEXT}`)
+  assert.deepEqual(h.events('prompt'), [])
+  assert.deepEqual(unchecked(h.logs), [])
+  // One prune reads at most 4096 entries: of the 4097 old files one is left for the next start,
+  // next to this start's own log.
+  const left = readdirSync(h.logDir())
+  assert.equal(left.filter(name => name.startsWith('acp-server-20261120_000000-')).length, 1)
+  assert.equal(left.length, 2)
+})
+
+test('8: the prune removes only old regular files with agy\'s log name, and never throws (unit)', unixOnly, async t => {
+  const h = agyWorld(t)
+  const home = join(h.dir, 'prune-home')
+  // No folder, or no home at all: nothing to do, no throw.
+  pruneAgyLog(home)
+  pruneAgyLog(join(h.dir, 'nowhere'))
+  const folder = agyOffPaths(home).logDir
+  mkdirSync(folder, { recursive: true })
+  const at = name => join(folder, name)
+  const aged = path => utimesSync(path, TWO_DAYS_AGO, TWO_DAYS_AGO)
+  writeFileSync(at('acp-server-20261120_000000-11.log'), 'old\n')
+  aged(at('acp-server-20261120_000000-11.log'))
+  writeFileSync(at('acp-server-20261124_000000-12.log'), 'fresh\n')
+  for (const other of ['other.txt', 'acp-server-x-13.log', 'acp-server-20261120_000000-14.log.bak']) {
+    writeFileSync(at(other), 'not ours\n')
+    aged(at(other))
+  }
+  // A folder and a link with the log name are never removed, nor what the link points to.
+  mkdirSync(at('acp-server-20261120_000000-15.log'))
+  aged(at('acp-server-20261120_000000-15.log'))
+  writeFileSync(join(h.dir, 'outside.log'), 'outside\n')
+  aged(join(h.dir, 'outside.log'))
+  symlinkSync(join(h.dir, 'outside.log'), at('acp-server-20261120_000000-16.log'))
+  lutimesSync(at('acp-server-20261120_000000-16.log'), TWO_DAYS_AGO, TWO_DAYS_AGO)
+  pruneAgyLog(home)
+  assert.deepEqual(readdirSync(folder).sort(), [
+    'acp-server-20261120_000000-14.log.bak', 'acp-server-20261120_000000-15.log', 'acp-server-20261120_000000-16.log',
+    'acp-server-20261124_000000-12.log', 'acp-server-x-13.log', 'other.txt',
+  ])
+  assert.equal(readFileSync(join(h.dir, 'outside.log'), 'utf8'), 'outside\n')
+  // 24 hours is measured from `now`: a day and a minute later the fresh one goes too.
+  pruneAgyLog(home, Date.now() + 24 * 60 * 60_000 + 60_000)
+  assert.equal(existsSync(at('acp-server-20261124_000000-12.log')), false)
+})
+
 test('8: a failure line written after the first answer is not caught at the start (no marker)', unixOnly, async t => {
   const { h, chunks } = await offTurn(t, 'plain late-line', { log: { lines: [BOOT], late: { ms: 300, lines: [FAILED] } } })
   assert.equal(chunks.at(-1).reason.kind, 'stop')
@@ -297,6 +362,22 @@ test('8: the read is bounded and never follows a link (unit)', unixOnly, async t
   symlinkSync(join(folder, 'acp-server-20261124_022134-4242.log'), join(folder, 'acp-server-20261124_022136-4444.log'))
   assert.ok(lstatSync(join(folder, 'acp-server-20261124_022136-4444.log')).isSymbolicLink())
   assert.equal(readAgyLog(home, 4444, Date.now()), 'failed')
+})
+
+test('8: a file swapped in between the folder read and the open is refused (unit)', unixOnly, async t => {
+  const h = agyWorld(t)
+  const home = join(h.dir, 'swap-home')
+  const folder = agyOffPaths(home).logDir
+  mkdirSync(folder, { recursive: true })
+  writeFileSync(join(folder, 'acp-server-20261124_022134-4545.log'), `${BOOT}\n`)
+  writeFileSync(join(h.dir, 'other.log'), `${BOOT}\n`)
+  const opened = []
+  const open = (path, flags) => { opened.push(path); return openSync(path, flags) }
+  assert.equal(readAgyLog(home, 4545, Date.now(), { open }), 'clean')
+  // Another regular file's fd (not the device and inode lstat saw): failed, never read.
+  const swapped = (_path, flags) => openSync(join(h.dir, 'other.log'), flags)
+  assert.equal(readAgyLog(home, 4545, Date.now(), { open: swapped }), 'failed')
+  assert.deepEqual(opened, [join(folder, 'acp-server-20261124_022134-4545.log')])
 })
 
 test('8b: a failure line after the first turn ends the kept child before the next prompt', unixOnly, async t => {

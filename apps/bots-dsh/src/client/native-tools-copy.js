@@ -24,6 +24,7 @@ export const antigravityNativeToolsCopy = {
   off: "With this off, Antigravity has no tools at all in any of this Bot's chats, so this Bot can only chat. Turning this on applies from the next message in each chat.",
   blocked: 'Here Antigravity has no tools, so this Bot can only chat.',
   unchecked: 'Native tools off is checked on agy {version}; this version was not checked.',
+  firstTurn: 'The check that Antigravity loaded its native-tools-off settings does not cover the first message after Antigravity starts, only the messages after it.',
   hooks: "Antigravity can't start with native tools off while its settings hold a hooks.json file. Remove hooks.json to use it with native tools off.",
   plugins: "Antigravity can't start with native tools off while its settings hold plugins.",
   fresh: 'Switch account on Antigravity in Settings starts it with empty settings; it also signs it out.',
@@ -39,12 +40,30 @@ export const NATIVE_TOOLS_HINTS = {
   'level-unknown': "Not available: the permission level of this Bot's chat could not be read.",
 }
 
+// The lines under Antigravity's switch (#1564), as untranslated keys with their values: the agy
+// version native tools off was checked on when this one differs; while the switch is not ON,
+// that the log check does not cover the first message after agy starts, then why an OFF start
+// refuses (hooks, plugins) and the way out (Switch account, never on Windows). The host sends
+// the facts (channel.js); a Bot not made yet has none, so only the first-message line.
+function antigravityNotes(bot, on) {
+  const notes = []
+  const copy = antigravityNativeToolsCopy
+  if (typeof bot.nativeToolsUnchecked === 'string') notes.push({ key: copy.unchecked, values: { version: bot.nativeToolsUnchecked } })
+  if (on) return notes
+  notes.push({ key: copy.firstTurn })
+  if (bot.nativeToolsHooks === true) notes.push({ key: copy.hooks })
+  if (bot.nativeToolsPlugins === true) notes.push({ key: copy.plugins })
+  if (bot.nativeToolsFresh === true && (bot.nativeToolsHooks === true || bot.nativeToolsPlugins === true)) notes.push({ key: copy.fresh })
+  return notes
+}
+
 /**
  * The native-tools switch as one Bot shows it: null when it has no switch (an agent without
- * one, or a multi-user workspace), else whether it reads ON, whether it is locked, the lock's
- * code and the hint as untranslated keys (joined with a space once translated). The Details
- * switch and the New Solver dialog's tick both read this one function, so they always show
- * the same thing for the same Bot.
+ * one, a multi-user workspace, or Antigravity with an acp-dsh that does not offer it), else
+ * whether it reads ON, whether it is locked, the lock's code, the hint as untranslated keys
+ * (joined with a space once translated) and, for Antigravity, the `notes` lines under it. The
+ * Details switch and the New Solver dialog's tick both read this one function, so they always
+ * show the same thing for the same Bot (the dialog shows the hint; Details also the notes).
  */
 export function nativeSwitchView(bot, roster) {
   const mark = effectiveMarkOf(bot)
@@ -58,7 +77,11 @@ export function nativeSwitchView(bot, roster) {
   // omp and Antigravity have no bridge: locked means no tools at all.
   const hint = blocked === undefined ? [on ? copy.on : copy.off]
     : copy.blocked !== undefined ? [blocked, copy.blocked] : [blocked]
-  return { mark, on, disabled: blocked !== undefined || Boolean(roster?.readOnly), blocked, hint }
+  const notes = mark === 'acp-antigravity' ? antigravityNotes(bot, on) : []
+  return {
+    mark, on, disabled: blocked !== undefined || Boolean(roster?.readOnly), blocked, hint,
+    ...(notes.length === 0 ? {} : { notes }),
+  }
 }
 
 export const nativeToolsZh = {
@@ -66,6 +89,7 @@ export const nativeToolsZh = {
   [antigravityNativeToolsCopy.off]: '关闭后，Antigravity 在此 Bot 的所有对话中都没有任何工具，此 Bot 只能聊天。开启后，从每个对话的下一条消息起生效。',
   [antigravityNativeToolsCopy.blocked]: '在这里 Antigravity 没有任何工具，此 Bot 只能聊天。',
   [antigravityNativeToolsCopy.unchecked]: '关闭原生工具已在 agy {version} 上验证；此版本尚未验证。',
+  [antigravityNativeToolsCopy.firstTurn]: '关于 Antigravity 是否已加载关闭原生工具设置的检查，不涵盖 Antigravity 启动后的第一条消息，只涵盖之后的消息。',
   [antigravityNativeToolsCopy.hooks]: 'Antigravity 的设置中有 hooks.json 文件时，无法在关闭原生工具的情况下启动。删除 hooks.json 后即可在关闭原生工具时使用。',
   [antigravityNativeToolsCopy.plugins]: 'Antigravity 的设置中有插件时，无法在关闭原生工具的情况下启动。',
   [antigravityNativeToolsCopy.fresh]: '在设置中对 Antigravity 使用“切换账号”，会以空白设置重新开始，同时也会退出它的登录。',

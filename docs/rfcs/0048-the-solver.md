@@ -51,10 +51,11 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   closes and shows nothing, and the Bots made so far stay.
 - **Native tools, parity with Details.** The tick and the Details switch read one function,
   `nativeSwitchView` (`native-tools-copy.js`), so for the same Bot they always show the same
-  thing: offered on Claude Code, on a Codex model the switch applies to, and on omp (ticked: its own
-  tools; unticked: chat only, said with the existing omp text); locked with the existing text on a
-  kept Codex model, at Read only, or when the level cannot be read; absent in a multi-user
-  workspace, on Antigravity until its switch lands, and on DSH models. Unticked is the default.
+  thing: offered on Claude Code, on a Codex model the switch applies to, and on omp and Antigravity
+  (ticked: its own tools; unticked: chat only, said with that agent's existing text); locked with
+  the existing text on a kept Codex model, at Read only, or when the level cannot be read; absent
+  in a multi-user workspace, on Antigravity with an acp-dsh that does not offer its switch, and on
+  DSH models. Unticked is the default.
   The block a Bot the person makes now would read comes from the host (below), so a tick the host
   would refuse is never offered; a change between the view and Create (another window, a Codex
   check) is the only way to a refusal, and its text is shown.

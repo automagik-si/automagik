@@ -34,6 +34,9 @@ const unchecked = 'Native tools off is checked on agy {version}; this version wa
 const hooks = "Antigravity can't start with native tools off while its settings hold a hooks.json file. Remove hooks.json to use it with native tools off."
 const plugins = "Antigravity can't start with native tools off while its settings hold plugins."
 const fresh = 'Switch account on Antigravity in Settings starts it with empty settings; it also signs it out.'
+const firstTurn = 'The check that Antigravity loaded its native-tools-off settings does not cover the first message after Antigravity starts, only the messages after it.'
+const firstTurnZh = '关于 Antigravity 是否已加载关闭原生工具设置的检查，不涵盖 Antigravity 启动后的第一条消息，只涵盖之后的消息。'
+const firstTurnPt = 'A verificação de que o Antigravity carregou as configurações de ferramentas nativas desligadas não cobre a primeira mensagem depois que o Antigravity inicia, só as mensagens seguintes.'
 // The row's lines come from the bundle's own realm: compared as plain arrays.
 const notesOf = row => (row.props.notes === undefined ? undefined : [...row.props.notes])
 const agy = bot => render({ model: 'acp-antigravity/default', ...bot })
@@ -104,7 +107,7 @@ test('Antigravity: ON and OFF copy, the owner update, and no row while acp-dsh d
   assert.equal(off.props.on, false)
   assert.equal(off.props.disabled, false)
   assert.equal(off.props.hint, agyOffHint)
-  assert.equal(off.props.notes, undefined)
+  assert.deepEqual(notesOf(off), [firstTurn])
   const on = agy({ appliedModel: 'acp-antigravity/default', model: undefined, nativeTools: true, nativeToolsAgent: 'acp-antigravity' })
   assert.equal(on.props.on, true)
   assert.equal(on.props.hint, agyOnHint)
@@ -118,21 +121,51 @@ test('Antigravity: ON and OFF copy, the owner update, and no row while acp-dsh d
   assert.equal(agy({ nativeToolsBlock: 'multiuser' }), null)
 })
 
-test('Antigravity: the unchecked-version, hooks, plugins and Switch account lines', () => {
+test('Antigravity: the unchecked-version, first-message, hooks, plugins and Switch account lines', () => {
   const version = unchecked.replace('{version}', '1.5.15')
-  assert.deepEqual(notesOf(agy({ nativeToolsUnchecked: '1.5.15' })), [version])
+  // Not ON (OFF or locked): the first-message line, after the version line, before hooks and plugins.
+  assert.deepEqual(notesOf(agy({ nativeToolsUnchecked: '1.5.15' })), [version, firstTurn])
   assert.deepEqual(notesOf(agy({ nativeToolsUnchecked: '1.5.15', nativeTools: true, nativeToolsAgent: 'acp-antigravity' })), [version])
-  assert.deepEqual(notesOf(agy({ nativeToolsUnchecked: '1.5.15', nativeToolsBlock: 'read-only' })), [version])
-  assert.deepEqual(notesOf(agy({ nativeToolsHooks: true })), [hooks])
-  assert.deepEqual(notesOf(agy({ nativeToolsPlugins: true })), [plugins])
-  assert.deepEqual(notesOf(agy({ nativeToolsHooks: true, nativeToolsPlugins: true, nativeToolsFresh: true })), [hooks, plugins, fresh])
-  assert.deepEqual(notesOf(agy({ nativeToolsPlugins: true, nativeToolsFresh: true, nativeToolsBlock: 'restricted' })), [plugins, fresh])
-  assert.deepEqual(notesOf(agy({ nativeToolsPlugins: true, nativeToolsFresh: false })), [plugins])
-  // ON: no hooks, plugins or Switch account line.
+  assert.deepEqual(notesOf(agy({ nativeToolsUnchecked: '1.5.15', nativeToolsBlock: 'read-only' })), [version, firstTurn])
+  assert.deepEqual(notesOf(agy({ nativeToolsHooks: true })), [firstTurn, hooks])
+  assert.deepEqual(notesOf(agy({ nativeToolsPlugins: true })), [firstTurn, plugins])
+  assert.deepEqual(notesOf(agy({ nativeToolsHooks: true, nativeToolsPlugins: true, nativeToolsFresh: true })), [firstTurn, hooks, plugins, fresh])
+  assert.deepEqual(notesOf(agy({ nativeToolsPlugins: true, nativeToolsFresh: true, nativeToolsBlock: 'restricted' })), [firstTurn, plugins, fresh])
+  assert.deepEqual(notesOf(agy({ nativeToolsPlugins: true, nativeToolsFresh: false })), [firstTurn, plugins])
+  // ON: no first-message, hooks, plugins or Switch account line.
   assert.equal(agy({ nativeToolsHooks: true, nativeToolsPlugins: true, nativeToolsFresh: true, nativeTools: true, nativeToolsAgent: 'acp-antigravity' }).props.notes, undefined)
   // The Switch account line only follows a hooks or plugins line; never on another agent.
-  assert.equal(agy({ nativeToolsFresh: true }).props.notes, undefined)
+  assert.deepEqual(notesOf(agy({ nativeToolsFresh: true })), [firstTurn])
   assert.equal(render({ model: 'acp-omp/default', nativeToolsUnchecked: '1.5.15', nativeToolsHooks: true, nativeToolsFresh: true }).props.notes, undefined)
+})
+
+// #1564 AJ-1 (lead decision (1)): Details says plainly that the log check does not cover the first
+// message after agy starts, whenever the row is not ON; never when the row is hidden.
+test('Antigravity: the first-message line shows OFF and locked, in English, Chinese and Portuguese, and never ON', () => {
+  const locked = { nativeTools: true, nativeToolsAgent: 'acp-antigravity', nativeToolsBlock: 'read-only' }
+  const on = { nativeTools: true, nativeToolsAgent: 'acp-antigravity' }
+  assert.deepEqual(notesOf(agy({})), [firstTurn])
+  assert.deepEqual(notesOf(agy(locked)), [firstTurn])
+  assert.equal(agy(on).props.notes, undefined)
+  assert.equal(agy({ nativeToolsBlock: 'unoffered' }), null)
+  assert.equal(agy({ nativeToolsBlock: 'multiuser' }), null)
+  // Never on another agent's row.
+  for (const model of ['acp-omp/default', 'acp-claude/default', 'acp-codex/default']) assert.equal(render({ model }).props.notes, undefined)
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
+  assert.equal(pt[firstTurn], firstTurnPt)
+  for (const [dictionary, expected] of [[null, firstTurnZh], [pt, firstTurnPt]]) {
+    let zh
+    const dispose = installLocale({
+      register: (_namespace, _locale, entries) => { zh = entries; return () => {} },
+      bind: () => key => (dictionary ?? zh)[key] ?? key,
+    })
+    try {
+      assert.equal(zh[firstTurn], firstTurnZh)
+      assert.deepEqual(notesOf(agy({})), [expected])
+      assert.deepEqual(notesOf(agy(locked)), [expected])
+      assert.equal(agy(on).props.notes, undefined)
+    } finally { dispose() }
+  }
 })
 
 test('Antigravity: both locale services carry its copy, with {version} kept', () => {
@@ -151,13 +184,14 @@ test('Antigravity: both locale services carry its copy, with {version} kept', ()
       [hooks, 'Antigravity 的设置中有 hooks.json 文件时，无法在关闭原生工具的情况下启动。删除 hooks.json 后即可在关闭原生工具时使用。', 'O Antigravity não pode iniciar com as ferramentas nativas desligadas enquanto as configurações do Antigravity tiverem um arquivo hooks.json. Remova o hooks.json para usá-lo com as ferramentas nativas desligadas.'],
       [plugins, 'Antigravity 的设置中有插件时，无法在关闭原生工具的情况下启动。', 'O Antigravity não pode iniciar com as ferramentas nativas desligadas enquanto as configurações do Antigravity tiverem plugins.'],
       [fresh, '在设置中对 Antigravity 使用“切换账号”，会以空白设置重新开始，同时也会退出它的登录。', 'Em Configurações, Trocar de conta no Antigravity o inicia com as configurações vazias; isso também sai da conta do Antigravity.'],
+      [firstTurn, firstTurnZh, firstTurnPt],
     ]) {
       assert.equal(zh[key], chinese)
       assert.equal(pt[key], portuguese)
     }
     for (const dictionary of [zh, pt]) assert.ok(dictionary[unchecked].includes('{version}'))
     // The row fills {version} through t() in the installed locale.
-    assert.deepEqual(notesOf(agy({ nativeToolsUnchecked: '9.9.9' })), ['关闭原生工具已在 agy 9.9.9 上验证；此版本尚未验证。'])
+    assert.deepEqual(notesOf(agy({ nativeToolsUnchecked: '9.9.9' })), ['关闭原生工具已在 agy 9.9.9 上验证；此版本尚未验证。', firstTurnZh])
     assert.equal(agy({ nativeToolsBlock: 'read-only' }).props.hint, '在“仅可查看”级别下不可用。 在这里 Antigravity 没有任何工具，此 Bot 只能聊天。')
   } finally { dispose() }
 })

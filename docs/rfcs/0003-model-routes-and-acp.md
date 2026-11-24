@@ -1276,10 +1276,14 @@ this amendment" lines.
   agy's own log for that process (in our own `automagik-native-off/log/`, bounded: 4096 entries,
   256 KiB, a fresh regular file only, never through a link or a FIFO) and refuses if agy says it
   failed to load the OFF settings (a missing or malformed file). With no such log it warns once.
+  Before each OFF start acp-dsh removes, from that folder only, the regular files with agy's log
+  name that are more than 24 hours old (`lstat`, never through a link; any error is ignored and
+  never stops the start), so its own past starts do not fill the 4096-entry bound.
   Each later turn of a kept OFF Session checks again and ends the Session if the failure appeared.
   agy writes no line after it loads its settings (one unsigned run set on agy 1.5.16, 2026-11-24),
   so the first turn is not covered against a failure line written after its `session/new` answer;
-  the next turn's check catches it. A settings file in a shape a later agy ignores produces no log
+  the next turn's check catches it. Details says so under the switch whenever it is not ON. A
+  settings file in a shape a later agy ignores produces no log
   line and is not caught. L1 has no runtime check. A crafted log folder can make the start refuse
   or warn; a link to a folder whose I/O blocks (a mount the same user made) could hold the host,
   which that user can already stop.

@@ -243,8 +243,10 @@ that makes your harness lose all your power."
   tool layer); Switch account on Antigravity in Settings starts a new home. At each OFF start, and
   again before each later prompt of a kept OFF process, acp-dsh reads agy's own log for that
   process (bounded, no links) and refuses when agy says it did not load the OFF settings; with no
-  such log it warns once. agy writes no line after loading its settings, so a failure written after
-  the first answer is caught at the next turn. Native tools off was checked on the agy version in
+  such log it warns once. agy writes no line after loading its settings, so the first turn of each
+  OFF agy process is not covered by this check: a failure agy logs after the session opens is
+  caught only at the next turn. acp-dsh removes its own log files there (regular files with agy's
+  log name) once they are more than 24 hours old. Native tools off was checked on the agy version in
   `AGY_OFF_CHECKED`; another version starts OFF, warns in the host log and in Details, and rests on
   agy honouring the two options and on acp-dsh's guard. If an agy version creates
   `config/plugins` by itself, every OFF start refuses until Automagik changes; Switch account does

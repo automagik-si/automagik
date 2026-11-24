@@ -22,7 +22,7 @@ import { reopenPermissionChoice } from './permission-card.js'
 import { BotConnectors } from './connectors.js'
 import { ComputerView } from './computer.js'
 import { addStrings, t } from './i18n.js'
-import { antigravityNativeToolsCopy, nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
+import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
 import { effectiveMarkOf } from '../shared/native-tools.js'
@@ -32,23 +32,10 @@ import { REVIEW_GUARD_COPY } from '../shared/review-guard.js'
 
 addStrings(nativeToolsZh)
 
-// What Details says under Antigravity's switch (#1564): the agy version native tools off was
-// checked on when this one differs, and, while the switch reads OFF, why an OFF start refuses
-// (hooks, plugins) and the way out (Switch account, never on Windows). The host sends the facts.
-function antigravityNotes(bot, on) {
-  const notes = []
-  if (typeof bot.nativeToolsUnchecked === 'string') notes.push(t(antigravityNativeToolsCopy.unchecked, { version: bot.nativeToolsUnchecked }))
-  if (on) return notes
-  if (bot.nativeToolsHooks === true) notes.push(t(antigravityNativeToolsCopy.hooks))
-  if (bot.nativeToolsPlugins === true) notes.push(t(antigravityNativeToolsCopy.plugins))
-  if (bot.nativeToolsFresh === true && (bot.nativeToolsHooks === true || bot.nativeToolsPlugins === true)) notes.push(t(antigravityNativeToolsCopy.fresh))
-  return notes
-}
-
 export function NativeToolsRow({ bot, roster, run, actions }) {
   const view = nativeSwitchView(bot, roster)
   if (view === null) return null
-  const notes = view.mark === 'acp-antigravity' ? antigravityNotes(bot, view.on) : []
+  const notes = (view.notes ?? []).map(note => t(note.key, note.values))
   return h(SwitchRow, {
     details: true, label: t(nativeToolsCopy.label), hint: view.hint.map(key => t(key)).join(' '), on: view.on, disabled: view.disabled,
     ...(notes.length === 0 ? {} : { notes }),
