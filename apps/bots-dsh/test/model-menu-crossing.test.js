@@ -179,7 +179,7 @@ test('a rejected Settings crossing shows its final error and the same menu can r
     assert.equal(JSON.stringify(roster.byId.b1), before)
   }
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
-    ['b1', 'acp-claude/haiku', {}], ['b1', 'acp-claude/haiku', {}],
+    ['b1', 'acp-claude/haiku', {}, { stopReply: true }], ['b1', 'acp-claude/haiku', {}, { stopReply: true }],
   ])
   SLOTS = []
 })
