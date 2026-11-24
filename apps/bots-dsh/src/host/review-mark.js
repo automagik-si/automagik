@@ -122,7 +122,7 @@ export function cleanTrack(track) {
 }
 
 export function install(rt) {
-  const save = () => void rt.save?.().catch?.(() => {})
+  const save = () => void rt.save?.({ durable: true }).catch?.(() => {})
   // A guarded Bot stays tracked whatever its role says: the guard never reads the marker.
   const tracked = bot => bot !== undefined && (isSolverBot(bot) || bot.reviewGuard === true)
   // The record of the request in progress: { requested, requestAt, personAt, firstWorkAt,

@@ -5,12 +5,12 @@ import { createHash } from 'node:crypto'
 import { constants, copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { mkdir, unlink, writeFile } from 'node:fs/promises'
 
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { piAiClaudeOf } from './claude-models.js'
 import { KEY_ERROR } from './connectors/credential-key.js'
 import { connectorState, ENCRYPTED_STATE_VERSION } from './connectors/credential-state.js'
 import { DRAFT_SWEEP_MAX, LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
-import { replaceFile } from './files.js'
+import { replaceFile, syncDirectory, syncFile } from './files.js'
 import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { refusal } from './refusal.js'
@@ -33,6 +33,14 @@ const LEGACY_VERSION = 0
 // Object.prototype.
 export const own = (table, key) => (table != null && Object.hasOwn(table, key) ? table[key] : undefined)
 
+// Compare only the recovery fields. In particular, annotating a work does not
+// open or close a request. A roster or copy save can also change a review track.
+const recoveryFields = ({ bots, works }) => JSON.stringify({
+  tracks: Object.keys(bots ?? {}).sort().filter(id => bots[id]?.reviewTrack !== undefined)
+    .map(id => [id, bots[id].reviewTrack]),
+  open: Object.keys(works ?? {}).sort().map(id => [id, works[id]?.at, works[id]?.open]),
+})
+
 export function install(rt) {
   const { ctx, home, statePath } = rt
   const credentials = connectorState(home, () => rt.ownsLockForPendingWrite())
@@ -47,6 +55,8 @@ export function install(rt) {
   const missingTeamHeld = () => teamPresentAtLoad === false && !!process.env.AUTOMAGIK_SUPERVISOR_RUN
     && rt.updateHold?.awaitingBootVerdict !== false
   let writing = Promise.resolve()
+  let savedRecovery = recoveryFields(state)
+  let durabilityPending = false
   const { warn } = rt
 
   const diagnosticLabel = value => headOf(String(value).replace(/\s+/g, ' ').trim(), 120)
@@ -256,6 +266,8 @@ export function install(rt) {
     credentials.decode(parsed)
     for (const key of Object.keys(state)) delete state[key]
     Object.assign(state, JSON.parse(EMPTY), parsed ?? {})
+    savedRecovery = recoveryFields(state)
+    durabilityPending = false
     // The serializer stamps the format of the saved fields.
     state.version = STATE_VERSION
     state.prefs ??= {}
@@ -749,7 +761,7 @@ export function install(rt) {
     }
     return dropped
   }
-  rt.saveCopy = (change, { beforeCommit, afterWrite } = {}) => {
+  rt.saveCopy = (change, { beforeCommit, afterWrite, durable = false } = {}) => {
     if (missingTeamHeld()) return Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`))
     if (stopped || !writable()) return Promise.reject(new Error('This host cannot save the Bot team.'))
     refreshShellHolds(state.bots)
@@ -768,6 +780,7 @@ export function install(rt) {
         return copy
       }, {
         required: true,
+        durable,
         epoch: lockEpoch,
         beforeCommit,
         afterWrite: () => {
@@ -795,13 +808,13 @@ export function install(rt) {
       else if (useLiveConnectors) delete copy.connectors
       if (copy.revision < state.revision) copy.revision = copy.autoStamp = state.revision + 1
       return copy
-    }, { required: true, epoch: lockEpoch, afterWrite: () => {
+    }, { required: true, durable, epoch: lockEpoch, afterWrite: () => {
       if (copy.revision > state.revision) state.revision = state.autoStamp = copy.revision
     } })
   }
 
-  const save = ({ required = false, copy, enableNativeTools, nativeToolsAgent } = {}) => {
-    if (copy !== undefined) return rt.saveCopy(copy.change, copy)
+  const save = ({ required = false, durable = false, copy, enableNativeTools, nativeToolsAgent } = {}) => {
+    if (copy !== undefined) return rt.saveCopy(copy.change, { durable, ...copy })
     if (stopped) return required ? Promise.reject(new Error('The Bot team cannot be saved after this host stopped.')) : writing
     refreshShellHolds(state.bots)
     indexSessions()
@@ -824,11 +837,11 @@ export function install(rt) {
       const enabled = { ...bot, nativeTools: true, nativeToolsAgent }
       delete enabled.nativeToolsKept
       return { ...state, bots: { ...state.bots, [bot.id]: enabled } }
-    }, { required })
+    }, { required, durable })
   }
 
   let warnedCredentialSave = false
-  const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch, beforeCommit, afterWrite } = {}) => {
+  const writeSnapshot = (snapshotOf, { required = false, durable = false, epoch: copyEpoch, beforeCommit, afterWrite } = {}) => {
     const run = writing.then(async () => {
       // An adopt ahead of this save may have made the team read-only.
       if (missingTeamHeld()) {
@@ -843,6 +856,7 @@ export function install(rt) {
       const epoch = copyEpoch ?? lockEpoch
       // Ordinary saves use the adopted state, not a snapshot of the replaced team.
       const temp = `${statePath}.${process.pid}.tmp`
+      durabilityPending ||= durable
       try {
         await mkdir(home, { recursive: true })
         const ensureLock = () => {
@@ -860,13 +874,17 @@ export function install(rt) {
           }
         }
         ensureLock()
-        const snapshot = credentials.encode(snapshotOf())
+        const data = snapshotOf()
+        const recovery = recoveryFields(data)
+        durabilityPending ||= recovery !== savedRecovery
+        const snapshot = credentials.encode(data)
         if (snapshot.refused) throw refusal(KEY_ERROR)
         if (snapshot.pending && !warnedCredentialSave) {
           warnedCredentialSave = true
           warn('ds-bot: %s', KEY_ERROR)
         }
         await writeFile(temp, snapshot.bytes, 'utf8')
+        if (durabilityPending) await syncFile(temp)
         const ensureKey = () => {
           if (!snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
         }
@@ -882,7 +900,15 @@ export function install(rt) {
         const checked = ensureCommit()
         if (checked !== undefined) await checked
         await replaceFile(temp, statePath, ensureCommit)
+        // Even if the directory sync fails, this rename was ours. A later save
+        // can retry durability without mistaking the new stamp for an outside edit.
         seen = stamp()
+        if (durabilityPending) {
+          await syncDirectory(dirname(statePath))
+          ensureLock()
+        }
+        savedRecovery = recovery
+        durabilityPending = false
         snapshot.commit()
         afterWrite?.()
         // The file now holds this team, a fresh one after a corrupt file included.

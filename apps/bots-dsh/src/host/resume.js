@@ -12,11 +12,12 @@
 // that waits for it, and an outcome that cannot be read is said to be unknown. The
 // request itself is never sent again there.
 import { randomUUID } from 'node:crypto'
-import { closeSync, fsyncSync, openSync, readFileSync, renameSync } from 'node:fs'
+import { readFileSync, renameSync } from 'node:fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
+import { syncDirectory, syncFile } from './files.js'
 import { answerSender, cutOffText, failureLine, handBackRequests, turnFailure } from './turns.js'
 import { textOf } from './text.js'
 import { startUpdateRecovery } from './self-update-recovery.js'
@@ -305,8 +306,10 @@ export function install(rt) {
   let writing = Promise.resolve()
   rt.holdLockUntil?.(() => writing)
   let stopped = false
-  let latest
+  const encodeNotes = ({ turns, queued, held, cut }) => JSON.stringify({ turns, queued, held, cut })
+  let latest = encodeNotes(interrupted)
   let flushLatest = false
+  let flushPending = false
   let due = false
   let reloading
   let noteTerm
@@ -320,11 +323,12 @@ export function install(rt) {
     const term = rt.lockTerm()
     noteTerm ??= term
     const notedTurns = passTook ? { ...pendingTurns, ...turns } : { ...turns, ...interrupted.turns }
-    latest = JSON.stringify({
+    const snapshot = encodeNotes({
       turns: { ...notedTurns, ...Object.fromEntries(updateTurns) },
       queued, held, cut,
     })
-    flushLatest ||= durable
+    flushLatest ||= durable || snapshot !== latest
+    latest = snapshot
     // One write waits at a time and takes the latest notes, so a busy round does not
     // write the file once per change.
     if (due) return writing
@@ -333,33 +337,33 @@ export function install(rt) {
       due = false
       const snapshot = latest
       const changes = new Map(localHeld)
-      const flush = flushLatest
+      // A failed flush still belongs to the next snapshot. Changes arriving
+      // during this write independently set flushLatest for the queued one.
+      flushPending ||= flushLatest
       flushLatest = false
       await mkdir(home, { recursive: true })
       // Noted before the stop: it still lands, since the store keeps the lock until this write ends.
       const current = () => !notesFenced() && rt.lockTerm() === term
         && (term === 0 || (rt.ownsLockForPendingWrite?.() ?? rt.holdsLock()))
       if (!current()) return false
-      const options = { encoding: 'utf8', flush }
       // Windows can refuse to replace the file while another process has it open for reading.
-      if (process.platform === 'win32') await writeFile(file, snapshot, options)
+      if (process.platform === 'win32') await writeFile(file, snapshot, { encoding: 'utf8', flush: flushPending })
       else {
         const temp = join(home, `.inflight-${randomUUID()}.tmp`)
         let renamed = false
         try {
-          await writeFile(temp, snapshot, { ...options, flag: 'wx', mode: 0o600 })
+          await writeFile(temp, snapshot, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+          if (flushPending) await syncFile(temp)
           if (!current()) return false
           renameSync(temp, file)
           renamed = true
-          if (flush) {
-            const dir = openSync(home, 'r')
-            try { fsyncSync(dir) } finally { closeSync(dir) }
-          }
+          if (flushPending) await syncDirectory(home)
         } finally {
           if (!renamed) await rm(temp, { force: true }).catch(() => {})
         }
       }
       if (!current()) return false
+      flushPending = false
       for (const [id, change] of changes) if (localHeld.get(id) === change) localHeld.delete(id)
       return true
     }).catch(error => {
@@ -389,6 +393,7 @@ export function install(rt) {
     const reload = writing.then(() => {
       if (stopped || !rt.holdsLock() || rt.lockTerm() !== term) return
       interrupted = readNotes(file, { strict: true })
+      latest = encodeNotes(interrupted)
       pendingTurns = {}
       // Startup can still replay the disk snapshot. Local deliveries already have a sender.
       // Held input from a prior owner is authoritative on disk; only apply edits made here.
