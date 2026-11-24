@@ -3440,7 +3440,22 @@ var ZH = {
   "Plan unreviewed: {name} gave no verdict before the work started.": "计划未审阅：{name} 在工作开始前没有给出结论。",
   "Result unreviewed: {name} gave no verdict on the finished work.": "结果未审阅：{name} 没有对完成的工作给出结论。",
   "Plan and result unreviewed: no verdict from {name} came in time.": "计划和结果都未审阅：没有及时收到 {name} 的结论。",
-  "{name} had not answered when this was delivered; the app cannot see a fresh-session review.": "交付时 {name} 尚未回复；应用无法看到全新会话中的审阅。"
+  "{name} had not answered when this was delivered; the app cannot see a fresh-session review.": "交付时 {name} 尚未回复；应用无法看到全新会话中的审阅。",
+  // The Solver's review guard (RFC 0048 delivery 1.5).
+  "Review guard": "审阅守卫",
+  "Hold work until the reviewer answers the plan": "在审阅者答复计划之前暂停工作",
+  "On by default. You can turn it off later in Details.": "默认开启。之后可以在详情中关闭。",
+  "Work waits for {reviewer}'s verdict on the plan: file changes, commands and messages to other Bots are refused until it answers.": "工作要等 {reviewer} 对计划给出结论：在它答复之前，修改文件、运行命令和给其他 Bot 发消息都会被拒绝。",
+  "Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.": "只拦住 Claude Code 会先询问的步骤。它自己的允许规则、钩子和已保存的批准可能让某个步骤在守卫看到之前就运行，而该步骤仍可能显示为已拒绝。",
+  "Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.": "在此级别不拦截：没有任何步骤会先询问。只有交付标记会显示未审阅的工作。",
+  "Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.": "在此代理上不拦截：它自己的工具无需询问即可运行。只有交付标记会显示未审阅的工作。",
+  "Its reviewer is no longer on the team: work stays held until you turn this off.": "它的审阅者已不在团队中：在你关闭此项之前，工作会一直被拦住。",
+  "Off: {name} has no reviewer Bot on the team, so there is no verdict to wait for.": "已关闭：{name} 在团队中没有审阅 Bot，因此没有可等待的结论。",
+  "the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details": "审阅守卫正在等待审阅者对计划的结论；你可以在详情中关闭它",
+  "The review guard is now on for {name}: its work waits for its reviewer's verdict on the plan. You can turn it off in Details.": "{name} 的审阅守卫现已开启：它的工作要等审阅者对计划给出结论。你可以在详情中关闭它。",
+  "The review guard is on: change the model in Settings, not here.": "审阅守卫已开启：请在设置中更改模型，不要在这里更改。",
+  "Waiting for {reviewer}'s verdict on the plan since {time}.": "自 {time} 起等待 {reviewer} 对计划的结论。",
+  "the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details": "审阅守卫正在等待审阅者对新计划的结论，因为另一个 Bot 发来了新请求；你可以在详情中关闭它"
 };
 var HOST_ERRORS = [
   [/^Could not reach the mail server at (.+)\. Check the server address\.$/, "连不上邮件服务器 $1，请检查服务器地址。"],
@@ -10415,6 +10430,10 @@ function whyText(why) {
       return t("Auto review refused it");
     case "sandbox":
       return t("the sandbox blocked it");
+    case "guard":
+      return t("the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details");
+    case "guard-request":
+      return t("the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details");
     default:
       return t("a rule here refused it");
   }
@@ -20990,6 +21009,145 @@ function applySteps(change) {
   return [model, rest2].filter((step2) => Object.keys(step2).length > 0);
 }
 
+// src/shared/review-mark.js
+var ANY = "(?:SHIP|FIX-FIRST|BLOCKED)";
+var MD = "[*_\\`]*";
+var WORD = `(SHIP|FIX-FIRST|BLOCKED)(?![A-Za-z0-9-]|${MD}\\s*\\?|${MD}\\s*[,;/|]\\s*${MD}${ANY}|${MD}\\s+(?:or|and|nor|vs\\.?|versus)\\s+${MD}${ANY}|${MD}\\s*[-–—(]\\s*(?:or\\s+)?${MD}${ANY})`;
+var AT_START = new RegExp(`^${WORD}`);
+var AFTER_LABEL = new RegExp(`(?:^|[^A-Za-z])(?:Verdict|verdict|VERDICT)[*_\`]*\\s*:\\s*[*_\`]*\\s*${WORD}`);
+var ENDS_LINE = new RegExp(`[.!?…]["'”’)\\]]*\\s*[*_\`]*${WORD}[*_\`]*[\\s.!]*$`);
+var VERDICTS_KEPT = 4;
+var FENCE3 = /^[\s>]*(?:```|~~~)/;
+var LIST_ITEM = /^[\s>]*(?:[*+-]|\d+[.)])\s+/;
+var LEAD = `^(?!['‘])[^:\`"“”«»„>‘‚‹›「」『』＂〝〞″​-‍⁠\r\u2028\u2029]*?[.!?…]["'”’]*`;
+var INDENTED = /^(?: {0,3}\t| {4})/;
+var GLUED_DASH = new RegExp(`${LEAD}${MD}${WORD}${MD}\\s+[-–—]\\s+\\S`);
+var gluedDash = (raw) => INDENTED.test(raw) ? null : GLUED_DASH.exec(raw.replace(/^[\s#*_]+/, ""));
+function verdictOf(text2) {
+  if (typeof text2 !== "string") return void 0;
+  let verdict2;
+  let fenced = false;
+  for (const raw of text2.split(/\r?\n/)) {
+    if (FENCE3.test(raw)) {
+      if (raw.split(/```|~~~/).length % 2 === 0) fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const line = raw.replace(/^[\s#>*_`]+/, "");
+    const found = LIST_ITEM.test(raw) ? AFTER_LABEL.exec(line) : AT_START.exec(line) ?? AFTER_LABEL.exec(line) ?? ENDS_LINE.exec(line) ?? gluedDash(raw);
+    if (found) verdict2 = found[1];
+  }
+  return verdict2;
+}
+function deliveryMark(track, review, at, { pending = false } = {}) {
+  if (review !== "bot") return { at, review };
+  if (pending) return { ...deliveryMark(track, review, at), pending: true };
+  const verdicts = Array.isArray(track?.verdicts) ? track.verdicts : [];
+  const first = track?.firstWorkAt;
+  const last = track?.lastWorkAt ?? first;
+  const planBefore = first ?? last;
+  const plan = typeof planBefore === "number" ? verdicts.some((entry) => entry.at < planBefore) : verdicts.length >= 1;
+  const result = typeof last === "number" ? verdicts.some((entry) => entry.at > last) : verdicts.length >= 2;
+  return { at, review, plan, result };
+}
+
+// src/shared/permission-levels.js
+var AUTO = "auto";
+var AUTO_FALLBACK = "workspace-write";
+var AUTO_MARK = "acp-codex";
+var MARK_LEVEL = "workspace-write";
+var AUTO_ROW = "workspace-write:auto";
+var OWN_MODE_MARKS = ["acp-codex", "acp-claude"];
+var TEAM_MARKS = ["acp-hermes", "acp-antigravity", "acp-omp"];
+function markOf(ref) {
+  if (typeof ref !== "string") return void 0;
+  const slash = ref.indexOf("/");
+  const provider = slash < 0 ? ref : ref.slice(0, slash);
+  if (OWN_MODE_MARKS.includes(provider) || TEAM_MARKS.includes(provider)) return provider;
+  return slash > 0 && ref.slice(slash + 1) && ["native", "pi-ai"].includes(routeOf(provider).connectedBy) ? `api:${ref}` : void 0;
+}
+var judgeOf = (mark2) => mark2 === "acp-codex" ? "codex" : mark2 === "acp-claude" ? "claude" : TEAM_MARKS.includes(mark2) ? "team" : typeof mark2 === "string" && mark2.startsWith("api:") ? "own" : void 0;
+
+// src/shared/native-tools.js
+var NATIVE_AGENTS = Object.freeze(["acp-claude", "acp-codex", "acp-omp"]);
+var effectiveMarkOf = (bot) => markOf(bot?.model ?? bot?.appliedModel);
+var nativeAgentOf = (bot) => bot?.nativeTools === true ? bot.nativeToolsAgent ?? bot.nativeToolsKept ?? "acp-claude" : void 0;
+var nativeToolsOn = (bot) => {
+  const agent = nativeAgentOf(bot);
+  return agent !== void 0 && agent === effectiveMarkOf(bot);
+};
+var restrictedBot = (bot) => bot?.shell === false || Array.isArray(bot?.denyTools) && bot.denyTools.length > 0;
+
+// src/shared/review-guard.js
+var AT_START2 = new RegExp(`^${WORD}`);
+var LABEL2 = new RegExp(`^(?:Verdict|verdict|VERDICT)[*_\`]*\\s*:\\s*[*_\`]*\\s*${WORD}`);
+var GLUED = new RegExp(`${LEAD}${MD}${WORD}${MD}(?:\\s*[.!]*$|\\s+[-–—]\\s+\\S)`);
+function guardVerdictOf(text2, reviewerName2) {
+  if (typeof text2 !== "string") return void 0;
+  let lines = text2.split(/\r?\n/);
+  if (typeof reviewerName2 === "string" && reviewerName2 !== "") {
+    const cut = lines.indexOf(`[Handed back to ${reviewerName2} for this work]`);
+    if (cut >= 0) lines = lines.slice(0, cut);
+  }
+  let fenced = false;
+  let first = true;
+  for (const raw of lines) {
+    if (FENCE3.test(raw)) {
+      if (raw.split(/```|~~~/).length % 2 === 0) fenced = !fenced;
+      first = false;
+      continue;
+    }
+    if (fenced) continue;
+    const line = raw.replace(/^[\s#*_`]+/, "");
+    if (first && line !== "") {
+      first = false;
+      if (!line.startsWith(">")) {
+        const found = AT_START2.exec(line);
+        if (found) return found[1];
+      }
+    }
+    const label = LABEL2.exec(line);
+    if (label) return label[1];
+  }
+  return gluedFirstLine(lines);
+}
+function gluedFirstLine(lines) {
+  for (const raw of lines) {
+    if (FENCE3.test(raw)) return void 0;
+    const line = raw.replace(/^[\s#*_`]+/, "");
+    if (line === "") continue;
+    if (line.startsWith(">") || LIST_ITEM.test(raw) || INDENTED.test(raw)) return void 0;
+    return GLUED.exec(raw.replace(/^[\s#*_]+/, ""))?.[1];
+  }
+  return void 0;
+}
+var REVIEW_GUARD_COPY = Object.freeze({
+  label: "Review guard",
+  tick: "Hold work until the reviewer answers the plan",
+  tickNote: "On by default. You can turn it off later in Details.",
+  hard: "Work waits for {reviewer}'s verdict on the plan: file changes, commands and messages to other Bots are refused until it answers.",
+  asks: "Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.",
+  level: "Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.",
+  agent: "Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.",
+  gone: "Its reviewer is no longer on the team: work stays held until you turn this off.",
+  noReviewer: "Off: {name} has no reviewer Bot on the team, so there is no verdict to wait for.",
+  stop: "the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details",
+  upgrade: "The review guard is now on for {name}: its work waits for its reviewer's verdict on the plan. You can turn it off in Details.",
+  card: "The review guard is on: change the model in Settings, not here.",
+  waiting: "Waiting for {reviewer}'s verdict on the plan since {time}.",
+  stopRequest: "the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details"
+});
+function reviewGuardReach(bot, level) {
+  const remote = (ref) => typeof ref === "string" && ref.startsWith("hermes-remote/");
+  if (remote(bot?.model) || remote(bot?.appliedModel)) return "agent";
+  const mark2 = effectiveMarkOf(bot);
+  if (mark2 === "acp-antigravity" || mark2 === "acp-hermes") return "agent";
+  if (bot?.nativeToolsBlock === "model-kept") return "agent";
+  if (bot?.nativeToolsBlock !== void 0 || !nativeToolsOn(bot)) return "hard";
+  if (mark2 === "acp-claude") return level === "full" || level === "auto" ? "level" : "asks";
+  return "agent";
+}
+
 // src/client/settings-card.js
 var import_react48 = require("react");
 var pages = null;
@@ -21092,6 +21250,7 @@ function ProposalCard({ proposal, roster, actions }) {
   if (bot === void 0) return (0, import_react48.createElement)("div", { className: "bt-event" }, t("That Bot is no longer on the team."));
   const rows2 = Object.entries(proposal.change).map(([key, value]) => ({ key, value, now: currentOf(bot, key) }));
   const done = rows2.every((row2) => row2.now === row2.value);
+  const guarded = bot.reviewGuard === true && rows2.some((row2) => row2.key === "model" && row2.now !== row2.value);
   const runSteps = async (from, stopReply = false) => {
     const steps = applySteps(proposal.change);
     for (let index = from; index < steps.length; index += 1) {
@@ -21119,10 +21278,10 @@ function ProposalCard({ proposal, roster, actions }) {
     }
   };
   const apply2 = async () => {
-    if (state2 === "busy" || state2 === "asking" || !actions.updateBot) return;
+    if (state2 === "busy" || state2 === "asking" || !actions.updateBot || guarded) return;
     await go(0, false);
   };
-  const question = state2 === "asking" && asking !== void 0 && typeof proposal.change.model === "string" ? (0, import_react48.createElement)(RouteConfirm, {
+  const question = !guarded && state2 === "asking" && asking !== void 0 && typeof proposal.change.model === "string" ? (0, import_react48.createElement)(RouteConfirm, {
     bot,
     roster,
     current: currentOf(bot, "model"),
@@ -21167,13 +21326,13 @@ function ProposalCard({ proposal, roster, actions }) {
         (0, import_react48.createElement)("span", { className: "bt-propcard-new", role: "cell" }, shown(row2.key, row2.value))
       ))
     ),
-    error ? (0, import_react48.createElement)("div", { className: "bt-error bt-propcard-error", role: "alert" }, error) : null,
+    guarded && !done && state2 !== "dismissed" ? (0, import_react48.createElement)("div", { className: "bt-error bt-propcard-error", role: "alert", "data-review-guard": "" }, t(REVIEW_GUARD_COPY.card)) : error ? (0, import_react48.createElement)("div", { className: "bt-error bt-propcard-error", role: "alert" }, error) : null,
     done || state2 === "dismissed" ? null : question ?? (0, import_react48.createElement)(
       "div",
       { className: "bt-q-foot bt-propcard-actions" },
       actions.openSettings ? (0, import_react48.createElement)("button", { type: "button", className: "bt-q-btn", onClick: () => actions.openSettings("bots", bot.id) }, t("Open in Settings")) : null,
       (0, import_react48.createElement)("button", { type: "button", className: "bt-q-btn", disabled: state2 === "busy", onClick: () => setState("dismissed") }, t("Dismiss")),
-      (0, import_react48.createElement)("button", { type: "button", className: "bt-q-submit", disabled: state2 === "busy" || !actions.updateBot, onClick: apply2 }, state2 === "busy" ? t("Applying…") : t("Apply"))
+      (0, import_react48.createElement)("button", { type: "button", className: "bt-q-submit", disabled: state2 === "busy" || !actions.updateBot || guarded, onClick: apply2 }, state2 === "busy" ? t("Applying…") : t("Apply"))
     )
   );
 }
@@ -21879,6 +22038,32 @@ function chatRow(row2, key, { sessionId, selfId, roster, actions, useUi, onBtwDe
       return null;
   }
 }
+function upgradeNoticeOf(roster, sessionId) {
+  for (const bot of roster?.bots ?? []) {
+    const notice = bot?.reviewGuardNotice;
+    if (notice === null || typeof notice !== "object" || typeof notice.at !== "number" || !Number.isFinite(notice.at)) continue;
+    if (typeof notice.sessionId === "string" && notice.sessionId === sessionId) return { at: notice.at, name: bot.name };
+  }
+  return void 0;
+}
+var noticeKey = (roster, sessionId) => {
+  const notice = upgradeNoticeOf(roster, sessionId);
+  return notice === void 0 ? "" : `${notice.at}\0${notice.name}`;
+};
+var noticeOfKey = (key) => {
+  if (key === "") return void 0;
+  const cut = key.indexOf("\0");
+  return { at: Number(key.slice(0, cut)), name: key.slice(cut + 1) };
+};
+var noticeAfterTurn = (at, end, nextStart) => typeof end === "number" && end <= at && (nextStart === void 0 || nextStart > at);
+var noticeBeforeTurn = (at, first, start2) => first === true && typeof start2 === "number" && start2 > at;
+function UpgradeLine({ name }) {
+  return (0, import_react49.createElement)(
+    "div",
+    { className: "bt-event", "data-review-guard-notice": "" },
+    t("The review guard is now on for {name}: its work waits for its reviewer's verdict on the plan. You can turn it off in Details.", { name })
+  );
+}
 function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, useUi, actions }) {
   const roster = useRoster((value) => value);
   const data = node.data;
@@ -21906,7 +22091,11 @@ function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, us
     return first?.turn === turn && unseenSince(visit, first.start) ? clockLabel(first.start) : "";
   });
   const body = triggerBody();
-  return unreadOpening ? (0, import_react49.createElement)(import_react49.Fragment, null, (0, import_react49.createElement)("div", { className: "bt-open-new" }, (0, import_react49.createElement)(NewDivider), (0, import_react49.createElement)("div", { className: "bt-time-sep", role: "separator" }, unreadOpening)), body) : body ?? (0, import_react49.createElement)(CellEmpty);
+  const notice = noticeOfKey(noticeKey(roster, sessionId));
+  const firstTurn = order !== "" && Number(order.split(",")[0]) === turn;
+  const upgrade = notice !== void 0 && noticeBeforeTurn(notice.at, firstTurn, node.location?.turn?.start?.time ?? data.time) ? (0, import_react49.createElement)(UpgradeLine, { name: notice.name }) : null;
+  const opening = unreadOpening ? (0, import_react49.createElement)(import_react49.Fragment, null, (0, import_react49.createElement)("div", { className: "bt-open-new" }, (0, import_react49.createElement)(NewDivider), (0, import_react49.createElement)("div", { className: "bt-time-sep", role: "separator" }, unreadOpening)), body) : body;
+  return upgrade === null ? opening ?? (0, import_react49.createElement)(CellEmpty) : (0, import_react49.createElement)(import_react49.Fragment, null, upgrade, opening);
   function triggerBody() {
     if (source.kind === "bot") {
       if (source.handoff === true) return (0, import_react49.createElement)(EarlierParts, { sessionId, roster, actions });
@@ -22047,10 +22236,18 @@ function TurnTailCell({ turn: location2, sessionId, useRoster, useTurnClock, use
     return start2 !== void 0 && start2 > visit.seen && start2 <= visit.entered;
   });
   const ended = hidden ? null : (0, import_react49.createElement)("time", { className: "bt-turn-time", dateTime: new Date(time).toISOString() }, new Date(time).toLocaleTimeString(dateLocale(), { hour: "numeric", minute: "2-digit" }));
+  const notice = noticeOfKey(useRoster((roster) => noticeKey(roster, sessionId)));
+  const upgradeHere = useTurnClock((state2) => {
+    if (notice === void 0) return false;
+    const turns = state2[sessionId] ?? {};
+    const next = nextTurnOf(turns, turn);
+    return noticeAfterTurn(notice.at, time, next === void 0 ? void 0 : turns[next].first);
+  });
   return (0, import_react49.createElement)(
     import_react49.Fragment,
     null,
     ended,
+    upgradeHere ? (0, import_react49.createElement)(UpgradeLine, { name: notice.name }) : null,
     label ? (0, import_react49.createElement)("div", { className: "bt-time-sep", role: "separator" }, label) : null,
     fresh ? (0, import_react49.createElement)(NewDivider) : null
   );
@@ -22499,6 +22696,7 @@ function renderCall(call2, { sessionId, roster, actions, useUi, useWork, useSess
       return (0, import_react49.createElement)(CellEmpty);
   }
 }
+var GUARD_WHYS = /* @__PURE__ */ new Set(["guard", "guard-request"]);
 function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions }) {
   const roster = useRoster((value) => value);
   const heldCards = useHeldCards?.((state2) => state2[sessionId]);
@@ -22508,22 +22706,26 @@ function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus
   const findBot3 = (nameOrId) => roster.byId[nameOrId] ?? roster.bots.find((bot) => bot.name.toLowerCase() === String(nameOrId ?? "").toLowerCase());
   (0, import_react49.useSyncExternalStore)(toolCards.source.subscribe, toolCards.source.getSnapshot);
   const closed = roster.closedCards?.[sessionId];
-  const calls = hidden ? callTree(root).filter((call2) => (toolName(call2) === "ask_user" || toolName(call2) === "show_view") && call2.callId && closed?.[call2.callId] !== void 0) : callTree(root);
-  const stopKeys = useWork ? useWork((work) => JSON.stringify(calls.flatMap((call2) => {
+  const all = callTree(root);
+  const closedCard = (call2) => (toolName(call2) === "ask_user" || toolName(call2) === "show_view") && call2.callId && closed?.[call2.callId] !== void 0;
+  const stopKeys = useWork ? useWork((work) => JSON.stringify(all.flatMap((call2) => {
     const entry = stopOfCall(work.stops, sessionId, call2.callId);
     return entry ? [[call2.callId, stopLine(entry), entry.why]] : [];
   }))) : "[]";
   const stops = new Map(JSON.parse(stopKeys).map(([id, line, why]) => [id, { line, why }]));
+  const guardOnly = (call2) => hidden && GUARD_WHYS.has(stops.get(call2.callId)?.why) && !closedCard(call2);
+  const calls = hidden ? all.filter((call2) => closedCard(call2) || guardOnly(call2)) : all;
   const readRefused = (call2) => call2.isError === true && call2.error?.code === READ_SCOPE_CODE;
   const drawn2 = calls.filter((call2) => readRefused(call2) || DRAWN.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.renderer(toolName(call2)) || agentImage(call2) || stops.has(call2.callId));
-  const running2 = root.kind === "tool-result" ? void 0 : calls.findLast((call2) => call2.kind !== "tool-result");
+  const running2 = root.kind === "tool-result" ? void 0 : calls.findLast((call2) => call2.kind !== "tool-result" && !guardOnly(call2));
   const note = running2 ? toolActivity(toolName(running2), toolArgs(running2).text, findBot3, roster.byId[sessionId]) : null;
   useLiveNote(actions, sessionId, `tool:${root.callId ?? node.key}`, note);
-  useShownCards(actions, sessionId, drawn2.filter((call2) => (CARDS.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.asks(toolName(call2))) && call2.callId).map((call2) => call2.callId));
+  useShownCards(actions, sessionId, drawn2.filter((call2) => !guardOnly(call2) && (CARDS.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.asks(toolName(call2))) && call2.callId).map((call2) => call2.callId));
   if (drawn2.length === 0) return (0, import_react49.createElement)(CellEmpty);
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot: findBot3, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } };
   return (0, import_react49.createElement)(import_react49.Fragment, null, drawn2.map((call2, index) => {
     const stop3 = stops.get(call2.callId);
+    if (guardOnly(call2)) return (0, import_react49.createElement)("div", { key: call2.callId ?? index, className: "bt-event bt-event-error", role: "status", title: stop3.why }, stop3.line);
     if (readRefused(call2)) {
       return (0, import_react49.createElement)(
         "div",
@@ -29046,23 +29248,6 @@ function NewMessagePills({ sessionId, useSessions, useUi, useTurnClock }) {
   );
 }
 
-// src/shared/permission-levels.js
-var AUTO = "auto";
-var AUTO_FALLBACK = "workspace-write";
-var AUTO_MARK = "acp-codex";
-var MARK_LEVEL = "workspace-write";
-var AUTO_ROW = "workspace-write:auto";
-var OWN_MODE_MARKS = ["acp-codex", "acp-claude"];
-var TEAM_MARKS = ["acp-hermes", "acp-antigravity", "acp-omp"];
-function markOf(ref) {
-  if (typeof ref !== "string") return void 0;
-  const slash = ref.indexOf("/");
-  const provider = slash < 0 ? ref : ref.slice(0, slash);
-  if (OWN_MODE_MARKS.includes(provider) || TEAM_MARKS.includes(provider)) return provider;
-  return slash > 0 && ref.slice(slash + 1) && ["native", "pi-ai"].includes(routeOf(provider).connectedBy) ? `api:${ref}` : void 0;
-}
-var judgeOf = (mark2) => mark2 === "acp-codex" ? "codex" : mark2 === "acp-claude" ? "claude" : TEAM_MARKS.includes(mark2) ? "team" : typeof mark2 === "string" && mark2.startsWith("api:") ? "own" : void 0;
-
 // src/client/permission-picker.js
 var import_react65 = require("react");
 var import_react_dom13 = require("react-dom");
@@ -32508,16 +32693,6 @@ function NewGenie({ roster, actions, onBack, onCreated }) {
   );
 }
 
-// src/shared/native-tools.js
-var NATIVE_AGENTS = Object.freeze(["acp-claude", "acp-codex", "acp-omp"]);
-var effectiveMarkOf = (bot) => markOf(bot?.model ?? bot?.appliedModel);
-var nativeAgentOf = (bot) => bot?.nativeTools === true ? bot.nativeToolsAgent ?? bot.nativeToolsKept ?? "acp-claude" : void 0;
-var nativeToolsOn = (bot) => {
-  const agent = nativeAgentOf(bot);
-  return agent !== void 0 && agent === effectiveMarkOf(bot);
-};
-var restrictedBot = (bot) => bot?.shell === false || Array.isArray(bot?.denyTools) && bot.denyTools.length > 0;
-
 // src/client/native-tools-copy.js
 var nativeToolsCopy = {
   label: "Native tools",
@@ -32634,7 +32809,7 @@ function reviewerPayload({ name, look, model, workDir }) {
   if (workDir) payload.workDir = workDir;
   return payload;
 }
-function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, native = false }) {
+function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, native = false, guard: guard2 = false }) {
   const payload = createPayload({
     name,
     look,
@@ -32648,7 +32823,10 @@ function solverPayload({ name, look, model, effort, workDir, brief, sectionId, r
     instructions: solverInstructions({ reviewer, dedicated })
   });
   if (workDir) payload.workDir = workDir;
-  if (typeof reviewer === "string" && reviewer !== "" && typeof reviewerId === "string" && reviewerId !== "") payload.reviewerId = reviewerId;
+  if (typeof reviewer === "string" && reviewer !== "" && typeof reviewerId === "string" && reviewerId !== "") {
+    payload.reviewerId = reviewerId;
+    if (guard2 === true) payload.reviewGuard = true;
+  }
   return { payload, ...native && brief ? { sendBrief: brief } : {} };
 }
 function reviewMarkText(bot, roster) {
@@ -32663,6 +32841,26 @@ function reviewMarkText(bot, roster) {
   if (mark2.plan === true) return t("Result unreviewed: {name} gave no verdict on the finished work.", { name });
   return t("Plan and result unreviewed: no verdict from {name} came in time.", { name });
 }
+function reviewGuardView(bot, roster, level) {
+  if (bot === null || typeof bot !== "object") return null;
+  const on = bot.reviewGuard === true;
+  const reviewerId = typeof bot.reviewerId === "string" && bot.reviewerId !== "" ? bot.reviewerId : void 0;
+  if (!on && reviewerId === void 0 && !isSolverBot(bot)) return null;
+  const reviewer = reviewerId === void 0 || reviewerId === bot.id ? void 0 : roster?.byId?.[reviewerId];
+  const readOnly = Boolean(roster?.readOnly);
+  if (reviewer === void 0) {
+    return on ? { on, disabled: readOnly, lines: [t(REVIEW_GUARD_COPY.gone)] } : { on, disabled: true, lines: [t(REVIEW_GUARD_COPY.noReviewer, { name: bot.name })] };
+  }
+  const reach = reviewGuardReach(bot, level);
+  const lines = [reach === "hard" ? t(REVIEW_GUARD_COPY.hard, { reviewer: reviewer.name }) : t(REVIEW_GUARD_COPY[reach])];
+  if (on && typeof bot.reviewGuardWaitingSince === "number" && Number.isFinite(bot.reviewGuardWaitingSince)) {
+    const time = new Date(bot.reviewGuardWaitingSince).toLocaleTimeString(dateLocale(), { hour: "numeric", minute: "2-digit" });
+    lines.push(t(REVIEW_GUARD_COPY.waiting, { reviewer: reviewer.name, time }));
+  }
+  return { on, disabled: readOnly, lines };
+}
+var reviewGuardText = (bot, roster, level) => reviewGuardView(bot, roster, level)?.lines.join(" ") ?? null;
+var guardLevelOf = (saved, danger) => saved === AUTO_ROW || saved === AUTO ? "auto" : danger ? "full" : "ask";
 var uncertain = (error) => error?.code === "bot/viewer-changed" || !isRefusal(String(error?.code ?? ""));
 function mayHaveBeenCreated(before, fresh, known2 = []) {
   const seen = /* @__PURE__ */ new Set([...before, ...known2]);
@@ -32756,6 +32954,7 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
   const [choiceKey, setChoiceKey] = (0, import_react77.useState)(null);
   const [reviewerModel, setReviewerModel] = (0, import_react77.useState)(null);
   const [ticked, setTicked] = (0, import_react77.useState)(false);
+  const [guarded, setGuarded] = (0, import_react77.useState)(true);
   const [busy, setBusy] = (0, import_react77.useState)(false);
   const [error, setError] = (0, import_react77.useState)("");
   const [notes, setNotes] = (0, import_react77.useState)([]);
@@ -32795,6 +32994,7 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
     const before = new Set(roster.bots.map((bot) => bot.id));
     const workDir = folder || void 0;
     const reviewer = choice.kind === "new" ? { kind: "new" } : choice.kind === "bot" ? { kind: "bot", name: choice.name, botId: choice.botId } : { kind: "fresh" };
+    const guard2 = reviewer.kind !== "fresh" && guarded;
     const result = await createSolver({
       actions,
       before,
@@ -32817,7 +33017,8 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
         reviewer: reviewerBot,
         dedicated,
         reviewerId,
-        native
+        native,
+        guard: guard2
       })
     });
     setBusy(false);
@@ -32843,6 +33044,8 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
     t("Each review runs in a fresh session that sees only your request and the result. The delivery says so.")
   ].filter(Boolean).join(" ") : t("Another Bot on a different model or agent reviews its plan and its result.");
   const tickHint = shownView === null ? "" : shownView.hint.map((key) => t(key)).join(" ");
+  const guardReach = model && choice.kind !== "fresh" ? reviewGuardReach(solverCandidate(roster, model, native), guardLevelOf(permission, presetDanger(permission))) : null;
+  const guardHint = guardReach === null || guardReach === "hard" ? null : t(REVIEW_GUARD_COPY[guardReach]);
   const worksWithout = shownView !== null && !shownView.disabled && ["acp-claude", "acp-codex"].includes(shownView.mark);
   return (0, import_react77.createElement)(
     "div",
@@ -32955,6 +33158,25 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
           ),
           (0, import_react77.createElement)("span", { className: "bt-note" }, tickHint),
           worksWithout ? (0, import_react77.createElement)("span", { className: "bt-note" }, t("Off by default. The Solver also works without them, with its reviewer.")) : null
+        ),
+        guardReach === null ? null : (0, import_react77.createElement)(
+          "div",
+          { className: "bt-field", "data-review-guard": guarded ? "on" : "off" },
+          (0, import_react77.createElement)(
+            "label",
+            { className: "bt-field-label" },
+            (0, import_react77.createElement)("input", {
+              type: "checkbox",
+              checked: guarded,
+              disabled: busy,
+              "aria-label": t(REVIEW_GUARD_COPY.tick),
+              onChange: (event) => setGuarded(event.target.checked)
+            }),
+            " ",
+            t(REVIEW_GUARD_COPY.tick)
+          ),
+          (0, import_react77.createElement)("span", { className: "bt-note" }, t(REVIEW_GUARD_COPY.tickNote)),
+          guardHint === null ? null : (0, import_react77.createElement)("span", { className: "bt-note" }, guardHint)
         ),
         permission == null ? null : (0, import_react77.createElement)(
           "div",
@@ -40088,6 +40310,19 @@ function NativeToolsRow({ bot, roster, run: run3, actions }) {
     onChange: (value) => void run3(actions.updateBot(bot.id, { nativeTools: value }))
   });
 }
+function ReviewGuardRow({ bot, roster, run: run3, actions }) {
+  const saved = savedLevelOf(bot, roster.permissions ?? {});
+  const view = reviewGuardView(bot, roster, guardLevelOf(saved, presetDanger(saved)));
+  if (view === null) return null;
+  return (0, import_react99.createElement)("div", { "data-review-guard": view.on ? "on" : "off" }, (0, import_react99.createElement)(SwitchRow, {
+    details: true,
+    label: t(REVIEW_GUARD_COPY.label),
+    hint: view.lines.join(" "),
+    on: view.on,
+    disabled: view.disabled,
+    onChange: (value) => void run3(actions.updateBot(bot.id, { reviewGuard: value }))
+  }));
+}
 function transcriptOf(list, id, name, hiddenTurns = []) {
   const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline;
   if (!Array.isArray(outline)) return "";
@@ -40538,6 +40773,7 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
           (0, import_react99.createElement)(FolderMenu, { value: bot.workDir, actions, run: run3, wide: true, onPick: (workDir) => run3(actions.updateBot(bot.id, { workDir })) })
         ),
         (0, import_react99.createElement)(NativeToolsRow, { key: "native-tools", bot, roster, actions, run: run3 }),
+        (0, import_react99.createElement)(ReviewGuardRow, { key: "review-guard", bot, roster, actions, run: run3 }),
         // A Solver's last delivery: which review the host saw (#2056).
         reviewMarkText(bot, roster) ? (0, import_react99.createElement)(
           "div",

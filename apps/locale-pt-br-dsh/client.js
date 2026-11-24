@@ -3752,7 +3752,21 @@ const pack = createPack({
     "Plan unreviewed: {name} gave no verdict before the work started.": "Plano sem revisão: {name} não deu veredito antes de o trabalho começar.",
     "Result unreviewed: {name} gave no verdict on the finished work.": "Resultado sem revisão: {name} não deu veredito sobre o trabalho pronto.",
     "Plan and result unreviewed: no verdict from {name} came in time.": "Plano e resultado sem revisão: nenhum veredito de {name} chegou a tempo.",
-    "{name} had not answered when this was delivered; the app cannot see a fresh-session review.": "{name} ainda não tinha respondido quando isto foi entregue; o app não consegue ver uma revisão em sessão nova."
+    "{name} had not answered when this was delivered; the app cannot see a fresh-session review.": "{name} ainda não tinha respondido quando isto foi entregue; o app não consegue ver uma revisão em sessão nova.",
+    "Review guard": "Trava de revisão",
+    "Hold work until the reviewer answers the plan": "Segurar o trabalho até o revisor responder ao plano",
+    "On by default. You can turn it off later in Details.": "Ligada por padrão. Dá para desligar depois em Detalhes.",
+    "Work waits for {reviewer}'s verdict on the plan: file changes, commands and messages to other Bots are refused until it answers.": "O trabalho espera o veredito de {reviewer} sobre o plano: alterações em arquivos, comandos e mensagens para outros Bots são recusados até a resposta chegar.",
+    "Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.": "Segura só as etapas sobre as quais o Claude Code pergunta. As próprias regras de permissão, hooks e aprovações salvas do Claude Code podem deixar uma etapa rodar antes de a trava ver, e essa etapa ainda pode aparecer como recusada.",
+    "Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.": "Não segura neste nível: nada pergunta antes de agir. Só a marca da entrega mostra o trabalho sem revisão.",
+    "Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.": "Não segura neste agente: as próprias ferramentas do agente rodam sem perguntar. Só a marca da entrega mostra o trabalho sem revisão.",
+    "Its reviewer is no longer on the team: work stays held until you turn this off.": "O revisor não está mais na equipe: o trabalho continua segurado até você desligar esta opção.",
+    "Off: {name} has no reviewer Bot on the team, so there is no verdict to wait for.": "Desligada: {name} não tem um Bot revisor na equipe, então não há veredito para esperar.",
+    "the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details": "a trava de revisão espera o veredito do revisor sobre o plano; dá para desligar em Detalhes",
+    "The review guard is now on for {name}: its work waits for its reviewer's verdict on the plan. You can turn it off in Details.": "A trava de revisão agora está ligada para {name}: o trabalho espera o veredito do revisor sobre o plano. Dá para desligar em Detalhes.",
+    "The review guard is on: change the model in Settings, not here.": "A trava de revisão está ligada: troque o modelo em Configurações, não aqui.",
+    "Waiting for {reviewer}'s verdict on the plan since {time}.": "Esperando o veredito de {reviewer} sobre o plano desde {time}.",
+    "the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details": "a trava de revisão espera o veredito do revisor sobre um novo plano, porque outro Bot mandou um novo pedido; dá para desligar em Detalhes"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })
