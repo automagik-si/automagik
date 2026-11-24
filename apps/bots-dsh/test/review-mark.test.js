@@ -125,11 +125,15 @@ test('verdictOf reads a whole-word verdict at the start of any line, after "Verd
     'FIX-FIRST or SHIP', 'SHIP / FIX-FIRST / BLOCKED', 'Verdict: SHIP, FIX-FIRST or BLOCKED', '**SHIP**, FIX-FIRST or BLOCKED',
     'The options are:\n* SHIP\n* FIX-FIRST\n* BLOCKED', 'The options are:\n- SHIP\n- FIX-FIRST\n- BLOCKED', 'Options:\n1. SHIP\n2. FIX-FIRST\n3. BLOCKED',
     '> * SHIP', '+ SHIP', '```\nSHIP\n```', '```text\nFIX-FIRST\n```\nI could not open the file.', '```SHIP```', '  ```\n  BLOCKED',
+    // SR6-2: a tilde fence, and options joined by "and", "vs", a dash or a bracket.
+    '~~~\nSHIP\n~~~', 'SHIP and FIX-FIRST are the two choices.', 'SHIP vs FIX-FIRST', 'SHIP - FIX-FIRST - BLOCKED', 'SHIP (or FIX-FIRST)',
   ]) assert.equal(verdictOf(value), undefined, String(value))
   // SR5-2: a verdict still counts after a fenced block, with a comment after a comma, and after "Verdict:" in a list item.
   for (const [value, verdict] of [
     ['```\nSHIP\n```\nFIX-FIRST\nLine 2 overclaims.', 'FIX-FIRST'], ['SHIP, with one note below.', 'SHIP'], ['FIX-FIRST: line 2, then SHIP', 'FIX-FIRST'],
     ['- **Verdict:** SHIP', 'SHIP'], ['Checked.\n* Verdict: BLOCKED (no access)', 'BLOCKED'], ['SHIP\n```\nnpm test\n```', 'SHIP'], ['I checked it. Ready? SHIP', 'SHIP'],
+    // SR6-2: a dash followed by a comment, not by another verdict word, still counts.
+    ['SHIP - all checks pass', 'SHIP'], ['SHIP \u2014 all checks pass', 'SHIP'],
   ]) assert.equal(verdictOf(value), verdict, value)
 })
 
@@ -162,6 +166,10 @@ test('deliveryMark: plan missing, result missing, both present, both missing, fr
   // No work call seen: the first verdict counts for the plan, a second one for the result.
   assert.deepEqual(deliveryMark({ verdicts: [verdict(5)] }, 'bot', 40), { at: 40, review: 'bot', plan: true, result: false })
   assert.deepEqual(deliveryMark({ verdicts: [verdict(5), verdict(6)] }, 'bot', 40), { at: 40, review: 'bot', plan: true, result: true })
+  // SR6-1: only notes writes seen (no firstWorkAt): the plan needs its own verdict before the last
+  // notes write, the result one after it, so one verdict never reviews both.
+  assert.deepEqual(deliveryMark({ lastWorkAt: 30, verdicts: [verdict(20), verdict(40)] }, 'bot', 50), { at: 50, review: 'bot', plan: true, result: true })
+  assert.deepEqual(deliveryMark({ lastWorkAt: 30, verdicts: [verdict(40)] }, 'bot', 50), { at: 50, review: 'bot', plan: false, result: true })
   // A work call at the same moment as a verdict is not ordered: neither side counts it.
   assert.deepEqual(deliveryMark({ firstWorkAt: 10, lastWorkAt: 10, verdicts: [verdict(10)] }, 'bot', 40), { at: 40, review: 'bot', plan: false, result: false })
   assert.deepEqual(deliveryMark({ verdicts: [verdict(5)] }, 'fresh', 40), { at: 40, review: 'fresh' })
@@ -593,6 +601,25 @@ test('a notes-only deliverable with no result review reads result unreviewed', a
   await step()
   endTurn(bot.id, 'Delivered: the comparison is in .solver/notes.md.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
+})
+
+// SR6-1: an answer written only into the notes file, with no plan review, reviewed once after the
+// notes: the one verdict reviews the result, never the plan too.
+test('a notes-only delivery reviewed once, after the notes, reads plan unreviewed', async (t) => {
+  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { folder } = notesFolder(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  bot.workDir = folder
+  person(bot.id, 'Research two libraries and give me a one-page comparison.')
+  await step()
+  assert.equal(await guard({ name: 'write', arguments: { file_path: '.solver/notes.md', content: '# Comparison' }, agent: { id: bot.id } }), 'ran')
+  assert.equal(bot.reviewTrack.firstWorkAt, undefined)
+  await step()
+  reply(ada.id, bot.id, 'SHIP')
+  await step()
+  endTurn(bot.id, 'Delivered: the comparison is in .solver/notes.md.')
+  assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: false, result: true })
 })
 
 // SR5-1: a delivered file that is a symlink into the notes file, changed through a notes write after
