@@ -5,7 +5,7 @@ import { load, sidebar, setSnapshot, state } from "./sidebar-tree.mjs";
 import { index, nodes, textOf } from "./gpui-stub.mjs";
 import { parseBots } from "../mods/am-sidebar/model.js";
 import { AGY_SCAN_MS, AGY_READ_MS, machineOf } from "../mods/am-sidebar/agyScan.js";
-import { SYNTHETIC, TRUST, trustScreen, fileQuestion, fileScreen } from "./agy-prompt-fixture.mjs";
+import { SYNTHETIC, TRUST, trustScreen, fileQuestion, fileScreen, capture } from "./agy-prompt-fixture.mjs";
 
 const Spaces = await load();
 const NOW = 1_800_000_000_000;
@@ -126,7 +126,7 @@ test("init registers the Antigravity scan on its own 2.5 s timer", () => {
 });
 
 test("unarmed, the timer makes no snapshot read and adds no row or Needs you chip", async () => {
-  const h = setup(scene(), null);
+  const h = setup(scene(), []);
   h.draw();
   const reads = { ...state.reads };
   await h.tick();
@@ -155,6 +155,23 @@ test("startup with no report shows an extra row, then Needs you on the second ma
   assert.equal(h.notifications(), 0);
   await h.step();
   assertHold("t1");
+  assert.equal(h.notifications(), 1);
+  await h.step();
+  assert.equal(h.notifications(), 1);
+});
+
+test("armed by default, the shipped shapes hold a hand-started agy at the captured trust screen on the second identical read", async () => {
+  const h = setup(scene(), null);
+  state.hcAnswer = () => answer(capture("folder-trust.txt"));
+  h.draw();
+  assert.ok(nodes.has("ag-t1"));
+  assert.equal(nodes.get("unknown-t1")?.props.tooltip, "No status reported");
+  await h.step();
+  assert.equal(needs("t1"), undefined);
+  assert.ok(nodes.has("unknown-t1"));
+  assert.equal(h.notifications(), 0);
+  await h.step();
+  assertHold("t1", "Do you trust the contents of this project? Antigravity CLI requires permission to read, edit, and execute files here.");
   assert.equal(h.notifications(), 1);
   await h.step();
   assert.equal(h.notifications(), 1);
@@ -277,7 +294,7 @@ test("native blocked and error keep the existing agent, sub-agent and bot marks 
     snap.panes.push(pane("t4", snap.spaces[0]));
     snap.bots = [project()];
     const ids = ["ag-t1", "sub-t2", "row-b:" + BOT];
-    const unarmed = setup(snap, null);
+    const unarmed = setup(snap, []);
     unarmed.draw();
     const before = ids.map(rowShape);
     const h = setup(snap);
@@ -459,7 +476,7 @@ test("on a mixed host each scanner uses its own read and the Hermes row keeps it
   snap.screen = { t1: "blocked" };
   snap.terminals.push(term("t2"));
   snap.panes.push(pane("t2", snap.spaces[0]));
-  const unarmed = setup(snap, null);
+  const unarmed = setup(snap, []);
   unarmed.draw();
   const before = rowShape("ag-t1");
   const h = setup(snap);
@@ -574,7 +591,7 @@ test("a remote child joined by a bare parent keeps its row and lights neither ma
   snap.agents.push(agent(p, w));
   snap.terminals.push(term("box/t1", { foreground: front("claude") }), term("box/t2", { parent: "t1" }),
     term("box/t3", { parent: "box/t2" }));
-  const unarmed = setup(snap, null);
+  const unarmed = setup(snap, []);
   unarmed.draw();
   const before = [rowShape("sub-box/t2"), rowShape("sub-box/t3")];
   const h = setup(snap);

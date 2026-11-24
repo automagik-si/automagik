@@ -316,7 +316,7 @@ test("the installed stable copy carries the Antigravity matcher the guard import
   const guard = await import(`${pathToFileURL(join(root, "hcGuard.mjs")).href}?t=${Date.now()}`);
   for (const name of ["runGuard", "runKillGuard", "heldTarget"]) assert.equal(typeof guard[name], "function", name);
   const { AGY_SHAPES } = await import(pathToFileURL(matcher).href);
-  assert.deepEqual(AGY_SHAPES, []);
+  assert.deepEqual(AGY_SHAPES.map((shape) => shape.kind), ["folder-trust", "file-access"]);
 
   const stubDir = join(s.root, "stub-hc"), log = join(s.root, "stub-hc.log");
   mkdirSync(stubDir);
