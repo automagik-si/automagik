@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22)) |
+| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22); RFC 0030's 2026-11-23 amendment (#2061) carries a Bot's own chat across a harness change with a handoff and read_own_chat, and adds the one-tool dsh-history bridge for agents without the bridge) |
 | Milestone | 2. One message box (route descriptor); 3. Other agents in the same chat (ACP) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-10-30 |
@@ -519,14 +519,19 @@ wrapper delegates to whatever is below it at call time and, on dispose, unwinds 
 top. The method is private to `compaction-basic`, so a guard test pins it. An agent gets the chat
 as the bounded, redacted replay above instead.
 
-**Explicit harness changes in a Bot's own chat (RFC 0030 Q7a).** `switchRoute` refuses a
-pick for a chat with history and keeps the old route and Session. Start New conversation,
-then pick the route. If the Bot has an active goal, pause it before New conversation.
-A crossing on a part with nothing said can apply in place, including a move between ACP
-agents. RFC 0030 defines what counts as history for that decision. The earlier managed
-path could open a new part with the latest messages. Automatic moves, effort, rollback
-and default fallbacks, the in-place path's races, and other writers remain owed under
-RFC 0030.
+**Explicit harness changes in a Bot's own chat (RFC 0030 Q7a).** Until 2026-11-23,
+`switchRoute` refuses a pick for a chat with history and keeps the old route and Session.
+Start New conversation, then pick the route. If the Bot has an active goal, pause it before
+New conversation. A crossing on a part with nothing said can apply in place, including a
+move between ACP agents. RFC 0030 defines what counts as history for that decision. The
+earlier managed path could open a new part with the latest messages. Automatic moves,
+effort, rollback and default fallbacks, the in-place path's races, and other writers remain
+owed under RFC 0030.
+
+Since 2026-11-23 (RFC 0030 Handoff note, #2061) the pick opens a new part with a handoff on the
+picked route; the new agent reads the chat with `read_own_chat`, over the `dsh` bridge or, for an
+agent whose bridge is off (omp, Antigravity), over `dsh-history`, a bridge that lists and runs only
+that tool.
 
 **Off an agent, onto an API model (the Bot team).** For route writers that remain, including
 the native Session picker and fallback selection, the Bot team measures the chat against
