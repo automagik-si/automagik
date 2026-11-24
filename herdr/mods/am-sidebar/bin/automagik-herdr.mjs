@@ -10300,7 +10300,7 @@ function importMayRestoreBot(project, bot) {
   catch (error) { return error?.code === "ENOENT"; }
 }
 
-async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed = true, importTarget = null } = {}) {
+async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed = true, importTarget = null, skipRelabels } = {}) {
   if (!terminal) throw new CliError("attach needs a bot and a terminal: am attach <bot> <terminal> [--move].", 2);
   if (terminal.startsWith("-")) throw new CliError(`"${terminal}" isn't a terminal; name one like t7.`, 2);
   const project = await projectFor(opts);
@@ -10385,6 +10385,8 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed =
   };
   // A moved binding identifies the old pane to check. The live core must confirm it before any cleanup.
   if (decided.movedFrom) {
+    // This move's tidy pass must leave the old address alone, even if it now shows another bot.
+    skipRelabels?.add(decided.movedFrom);
     const old = await hcGet(decided.movedFrom).catch(() => null);
     const { core, created_ms, bot: oldBot } = decided.old;
     if (sameLivePane(old, decided.movedFrom, created_ms) && old.labels?.[BOT_LABEL] === oldBot) {
@@ -12934,7 +12936,7 @@ async function cmdTidy(opts) {
  * prune's note only when the command succeeded: a failed one's last stderr line stays its own
  * error (the sidebar shows that line, restart.js restartAnswer).
  */
-async function tidyQuietly(warnedRelabels, { localOnly = false } = {}) {
+async function tidyQuietly(warnedRelabels, { localOnly = false, skipRelabels } = {}) {
   const warnings = [];
   const onRelabelFailure = warnedRelabels ? (failure) => {
     const { terminal, words } = failure;
@@ -12944,7 +12946,8 @@ async function tidyQuietly(warnedRelabels, { localOnly = false } = {}) {
   try {
     const io = tidyIo();
     const actions = tidyPlan(await readState(io, { window: false, localOnly }), { now: Date.now(), home: io.home, appHome: io.appHome });
-    report(await fixNonVisual(actions.filter((a) => !a.visual), io, { notes: exitAfter.code === 0, onRelabelFailure }));
+    const fixes = actions.filter((a) => !a.visual && (a.kind !== "relabel" || !skipRelabels?.has(a.terminal)));
+    report(await fixNonVisual(fixes, io, { notes: exitAfter.code === 0, onRelabelFailure }));
   } catch (e) { report([`tidy: ${e?.message ?? e}`]); }
   report(warnings);
   return warnings;
@@ -15211,20 +15214,23 @@ async function dispatch(argv, io) {
     // Tidy is this computer's window and labels: never after a command on a linked machine.
     const tidy = !preview && TIDIES.has(command) && opts.machine === undefined;
     const warnedRelabels = tidy && (command === "start" || command === "attach") ? new Set() : undefined;
+    const skipRelabels = tidy && command === "attach" ? new Set() : undefined;
     const out = command === "proxy" ? await run(opts, rest, io)
       : linkedInstall ? await run(opts, rest, { ...io, machineCount: tokens.filter((t) => t.kind === "option" && t.name === "machine").length })
+      : command === "attach" ? await run(opts, rest, warnedRelabels, { skipRelabels })
       : await run(opts, rest, warnedRelabels, callerAction ? io.repairCliLinks : undefined);
     if (out === PRINTED) return exitAfter.code;
     const tidyBeforeJson = warnedRelabels !== undefined && opts.json && !out?.partial;
     const locality = { localOnly: opts["local-only"] };
+    const tidyOptions = { ...locality, skipRelabels };
     if (tidyBeforeJson) {
-      const warnings = await tidyQuietly(warnedRelabels, locality);
+      const warnings = await tidyQuietly(warnedRelabels, tidyOptions);
       if (warnings.length && !(opts["local-only"] && out.running)) (out.warnings ??= []).push(...warnings);
     }
     if (opts.json) process.stdout.write(unprinted(`${JSON.stringify(out, null, 2)}\n`));
     else if (out) process.stdout.write(unprinted(`${out}\n`));
     if (tidy && !out?.partial) {
-      if (!tidyBeforeJson) await tidyQuietly(warnedRelabels, locality);
+      if (!tidyBeforeJson) await tidyQuietly(warnedRelabels, tidyOptions);
       await recordSessions(locality);
     }
     return exitAfter.code;
