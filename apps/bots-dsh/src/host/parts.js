@@ -28,7 +28,7 @@ import { RESUME_DELAY_MS } from './resume.js'
 import { OWN_TOOLS_SWITCH, SWITCH_FAILED, switchFailure } from './model-state.js'
 import { redactorFor } from './redact.js'
 import { OWN_TOOLS_MODEL_TEXT } from '../shared/own-tools.js'
-import { answerSender, failureLine, turnFailure } from './turns.js'
+import { answerSender, failureLine, opensTurn, turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
 import { routeAllowed } from '../shared/route-policy.js'
 import { ACP_NAME, CROSSING_DEADLINE_MS, commandCapableAgent, crossesHarness, isHermesRoute, routeOfRef, shellHoldText } from '../shared/routes.js'
@@ -1294,7 +1294,7 @@ export function install(rt) {
         }
         if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
         const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
-        if (kind === 'user' || kind === 'retry' || kind === SOURCE_KIND || kind === REPLY_KIND) {
+        if (opensTurn(message)) {
           agent.followup(copy)
           woke += 1
         } else agent.inject(copy)
@@ -1317,7 +1317,7 @@ export function install(rt) {
   const currentProvider = agent => agent.model?.current?.()?.provider ?? agent.session.requestHeader?.()?.config?.provider
 
   // A message's inbox boundary, the same one forward() delivers it to.
-  const inboxTargetOf = message => (message.source?.kind === 'user' || message.source?.kind === 'retry' || message.source?.kind === SOURCE_KIND || message.source?.kind === REPLY_KIND ? 'next-turn' : 'next-step')
+  const inboxTargetOf = message => (opensTurn(message) ? 'next-turn' : 'next-step')
 
   // Input a switch could not hand on goes back into the part's own durable inbox, in
   // order: input followup would deliver waits for the next turn, the rest waits for
@@ -3534,7 +3534,7 @@ export function install(rt) {
 
   // The handoff package opens a part as a turn of its own, so it is the first message
   // in the part's history. When nothing is left to do, that turn's reply is a fixed
-  // line instead of a model call.
+  // line instead of a model call. A batch with another opener is a real step.
   ctx.on('llm/stream', (options, next) => {
     if (options.sessionId === undefined || options.purpose !== undefined || rt.ownRequest(options)) return next()
     const messages = options.messages ?? []
@@ -3543,7 +3543,7 @@ export function install(rt) {
     // The outgoing agent's handoff-note request is answered by the agent itself, and a batch
     // that holds one is never acknowledged in its place.
     const noting = batch.some(message => message.source?.role === 'handoff-note')
-    const opened = batch.filter(message => message.source?.role !== 'handoff-note' && (message.source?.kind === 'user' || message.source?.kind === 'retry' || message.source?.kind === SOURCE_KIND))
+    const opened = batch.filter(message => message.source?.role !== 'handoff-note' && opensTurn(message))
     const bare = !noting && opened.length > 0 && opened.every(message => message.source.kind === SOURCE_KIND && message.source.handoff === true && message.source.resume !== true)
     if (!bare) return next()
     if (awaiting.has(options.sessionId)) acked.add(options.sessionId)

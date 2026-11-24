@@ -63,6 +63,17 @@ export function capabilityOfArgs(raw, tool) {
 // so its reply stays in the chat (issue #62).
 export const opensByItself = source => source?.kind === 'goal'
 
+// DSH injects a schedule-change notice as context when a task changes elsewhere.
+const scheduleNotice = message => message?.source?.kind === 'schedule'
+  && textOf(message.content).startsWith('[SCHEDULE CHANGE]')
+
+// A step containing a handoff and any other opener needs a model reply.
+export const opensTurn = message => {
+  const source = message?.source
+  return source?.kind === 'user' || source?.kind === 'retry' || source?.kind === REPLY_KIND
+    || (source?.kind === 'schedule' && !scheduleNotice(message)) || source?.kind === SOURCE_KIND || opensByItself(source)
+}
+
 // Failures only the user can fix: a key, a sign-in, a balance. They block the Bot
 // until it is fixed (`bot.blocked`, for the repair card).
 export const BLOCKING_CODES = new Set(['MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'AUTH', 'QUOTA', 'ACCOUNT_QUOTA', 'ACCOUNT_SIGN_IN_REQUIRED', 'ACCOUNT_SIGNED_OUT', 'ACCOUNT_TOKEN_INVALID', 'LOCAL_AGENT_MISSING', 'LOCAL_AGENT_SIGNIN', 'LOCAL_AGENT_QUOTA', 'LOCAL_AGENT_EXIT'])
@@ -952,11 +963,10 @@ export function install(rt) {
         // Bot relay that lands inside it may claim: the first message of a turn
         // still claims it as today, a later one only joins it.
         const opened = entry.opened === true
-        if (entry.turn !== undefined && !bare(source)
-          && (source?.kind === 'user' || source?.kind === 'retry' || source?.kind === REPLY_KIND || source?.kind === 'schedule' || source?.kind === SOURCE_KIND || opensByItself(source))) {
+        if (entry.turn !== undefined && !bare(source) && opensTurn(event.data)) {
           entry.opened = true
         }
-        if (entry.turn !== undefined && (source?.kind === 'user' || source?.kind === 'retry' || source?.kind === REPLY_KIND || source?.kind === SOURCE_KIND)) {
+        if (entry.turn !== undefined && opensTurn(event.data)) {
           if (bare(source)) {
             if (entry.answers) break
           } else {
