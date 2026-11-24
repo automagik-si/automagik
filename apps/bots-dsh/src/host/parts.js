@@ -1166,8 +1166,10 @@ export function install(rt) {
 
   // Input for an earlier part goes on in the current one: a browser may still show the
   // old part, and a turn stopped for a switch hands on what it claimed. Answers how many
-  // messages it sent with followup, the sends that wake the part.
-  async function forward(owner, messages, from) {
+  // messages it sent with followup, the sends that wake the part. `handed` collects the ids
+  // of what now waits on the target. A throw after a followup went out carries `started`:
+  // the part's turn began (MJ-2).
+  async function forward(owner, messages, from, handed) {
     const target = currentOf(owner)
     if (target === undefined || messages.length === 0) return 0
     let woke = 0
@@ -1176,26 +1178,32 @@ export function install(rt) {
     rt.assertBotRunnerProvider?.(currentProvider(agent), target, agent)
     // A retry after a forward that stopped halfway must not deliver the same input twice.
     const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
-    for (const message of messages) {
-      const kind = message.source?.kind
-      // DSH's notice of a folder change is about the Session it was queued in; the part
-      // that goes on has its own folder, which its handoff names.
-      if (kind === 'working-directory') continue
-      const exchangeId = message.source?.exchangeId
-      if (exchangeId !== undefined && pending.some(queued => queued.source?.exchangeId === exchangeId)) {
+    try {
+      for (const message of messages) {
+        const kind = message.source?.kind
+        // DSH's notice of a folder change is about the Session it was queued in; the part
+        // that goes on has its own folder, which its handoff names.
+        if (kind === 'working-directory') continue
+        const exchangeId = message.source?.exchangeId
+        if (exchangeId !== undefined && pending.some(queued => queued.source?.exchangeId === exchangeId)) {
+          rt.wakeLog?.retireClaim(from, message)
+          handed?.add(message.id)
+          continue
+        }
+        if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
+        const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
+        if (kind === 'user' || kind === 'retry' || kind === SOURCE_KIND || kind === REPLY_KIND) {
+          agent.followup(copy)
+          woke += 1
+        } else agent.inject(copy)
+        handed?.add(message.id)
         rt.wakeLog?.retireClaim(from, message)
-        continue
+        pending.push(copy)
       }
-      if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
-      const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
-      if (kind === 'user' || kind === 'retry' || kind === SOURCE_KIND || kind === REPLY_KIND) {
-        agent.followup(copy)
-        woke += 1
-      } else agent.inject(copy)
-      rt.wakeLog?.retireClaim(from, message)
-      pending.push(copy)
+      await ctx.sessions.flush(agent.session)
+    } catch (error) {
+      throw Object.assign(error, { started: woke > 0 })
     }
-    await ctx.sessions.flush(agent.session)
     return woke
   }
 
@@ -1364,19 +1372,34 @@ export function install(rt) {
         const fresh = await rt.resolveAgent(current).catch(() => undefined)
         const waiting = [...(fresh?.inbox?.nextStep ?? []), ...(fresh?.inbox?.nextTurn ?? [])]
         const handoff = fresh !== undefined && waiting.some(message => message.source?.handoff === true)
+        const handed = new Set()
         const handOn = async () => {
-          const sent = await forward(owner, held, sessionId)
+          const sent = await forward(owner, held, sessionId, handed)
           quietly(() => { for (const message of held) agent.inbox.remove(message.id) })
           return sent
         }
+        // The pass finishes and archives the old part: what it held and no forward took waits
+        // in the fresh part's durable inbox, once, and leaves the old one (MJ-1, MJ-2).
+        const keepHeld = () => quietly(() => {
+          appendById(fresh, held.filter(message => message.source?.kind !== 'working-directory' && !handed.has(message.id)))
+          for (const message of held) agent.inbox.remove(message.id)
+        })
         // A move committed before its part's first turn: DSH draws a part with no turn as a
         // blank home, with no composer for a Bot outside every workspace. It starts now: a
         // stopped reply is answered at once, a bare handoff is acknowledged by Omni with no
         // model call (F1, which reverses MY-7's "bare stays inert"). Forwarding what the old
         // part held is that start when there is any, so it is a counted try too (MI-5).
         if (handoff && !switches.has(current) && !awaiting.has(current)) {
-          const send = async () => { if (await handOn() === 0) wakeKept(fresh) }
-          if (await wakeHandoff(sessionId, owner, fresh, current, canRecover, { expire, send, held }) !== true) return
+          const send = async () => {
+            let sent
+            try { sent = await handOn() } catch (error) {
+              // A followup went out: the pass finishes (MH-3), so the rest waits on the fresh part.
+              if (error?.started === true) keepHeld()
+              throw error
+            }
+            if (sent === 0) wakeKept(fresh)
+          }
+          if (await wakeHandoff(sessionId, owner, fresh, current, canRecover, { expire, send, held, keep: keepHeld }) !== true) return
         } else {
           const sent = await handOn()
           if (sent === 0 && handoff) {
@@ -1454,7 +1477,8 @@ export function install(rt) {
   // the marker gone); anything else ends the pass with the marker as it decided.
   // `send` starts the fresh part: by default its own inbox wakes it; with `held`, the input the
   // old part held is forwarded first (MI-5), and a go-back carries `held` to where the Bot ends.
-  async function wakeHandoff(oldId, owner, fresh, freshId, canRecover, { expire = false, send = () => wakeKept(fresh), held = [] } = {}) {
+  // `keep` moves `held` into the fresh part's durable inbox when the pass ends there anyway.
+  async function wakeHandoff(oldId, owner, fresh, freshId, canRecover, { expire = false, send = () => wakeKept(fresh), held = [], keep = () => {} } = {}) {
     const term = rt.lockTerm?.()
     // A live move of the fresh part decides first; this pass waits for it (MH-8).
     if (switches.has(freshId) || awaiting.has(freshId)) {
@@ -1506,7 +1530,11 @@ export function install(rt) {
     if (!canRecover()) return false
     // A group's own part has no Bot and no way back: one more try, then it stays (MH-5).
     if (owner.botId === undefined) {
-      try { await send() } catch (error) { rt.warn('omni-ui: part %s could not be woken for its handoff: %s', freshId, error) }
+      try { await send() } catch (error) {
+        rt.warn('omni-ui: part %s could not be woken for its handoff: %s', freshId, error)
+        // The old part is archived next: the person's input waits in the fresh part (MJ-1).
+        if (error?.started !== true) keep()
+      }
       clearWakeCount(owner)
       return true
     }

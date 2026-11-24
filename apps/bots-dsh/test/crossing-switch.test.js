@@ -1664,6 +1664,52 @@ test('T22e MH-9 the stopped reply goes on in the old part after a restart go-bac
 })
 
 // MY-7b: a restart wake that fails keeps the marker; a later pass wakes the part once.
+test('T22e MJ-1 a group part with no Bot whose held input cannot be forwarded: the input waits once in the fresh part, the old part is archived', async t => {
+  const { b, fresh } = await afterRestart(t, { window: 30 })
+  const room = { id: 'r1', sessionId: 's2' }
+  b.rt.roomOf = id => (id === 'r1' ? room : undefined)
+  b.rt.sessionOfRoom = place => place?.sessionId
+  b.rt.state.switching.s1 = { roomId: 'r1' }
+  b.agent.inbox.nextTurn.push(message('user', 'held by the old part', { exchangeId: 'e-held' }))
+  fresh.followup = () => { throw new Error('the driver could not start') }
+  await b.rt.heldBack()
+  await waitFor(() => b.rt.state.switching.s1 === undefined)
+  assert.equal(b.calls.archived.includes('s1'), true)
+  assert.equal(b.calls.archived.includes('s2'), false)
+  assert.equal(once(queuedOf(fresh), 'e-held'), 1)
+  assert.equal(once(queuedOf(b.agent), 'e-held'), 0)
+})
+
+test('T22e MJ-2 a forward whose followup went out and then throws is no failed try: the pass finishes, the input once', async t => {
+  const { b, fresh } = await afterRestart(t)
+  b.agent.inbox.nextTurn.push(message('user', 'held by the old part', { exchangeId: 'e-held' }))
+  let flushes = 0
+  b.ctx.sessions.flush = async () => { flushes += 1; if (flushes === 1) throw new Error('the part could not be written') }
+  await b.rt.heldBack()
+  assert.equal(b.rt.state.switching.s1, undefined)
+  assert.equal(b.calls.archived.includes('s1'), true)
+  assert.equal(b.bot.sessionId, 's2')
+  assert.equal(b.rt.switchingChat('b1', { crossing: true }), false)
+  assert.equal(once(queuedOf(fresh), 'e-held'), 1)
+  assert.equal(once(queuedOf(b.agent), 'e-held'), 0)
+})
+
+test('T22e MJ-2 a forward that stops after its first followup: the rest waits once in the fresh part, the old part is archived', async t => {
+  const { b, fresh } = await afterRestart(t)
+  b.agent.inbox.nextTurn.push(message('user', 'first', { exchangeId: 'e-held' }), message('user', 'second', { exchangeId: 'e-held2' }))
+  const followup = fresh.followup.bind(fresh)
+  fresh.followup = (item) => {
+    if (item.source?.exchangeId === 'e-held2') throw new Error('the driver could not start')
+    followup(item)
+  }
+  await b.rt.heldBack()
+  assert.equal(b.rt.state.switching.s1, undefined)
+  assert.equal(b.calls.archived.includes('s1'), true)
+  assert.deepEqual(ids2(queuedOf(fresh)).filter(id => id?.startsWith('e-held')), ['e-held', 'e-held2'])
+  assert.equal(once(queuedOf(b.agent), 'e-held'), 0)
+  assert.equal(once(queuedOf(b.agent), 'e-held2'), 0)
+})
+
 test('MY-7b a restart wake that throws keeps the marker; the next pass wakes the part once', async t => {
   for (const mode of ['before', 'after']) {
     const { b, fresh, freshId } = await afterRestart(t)
