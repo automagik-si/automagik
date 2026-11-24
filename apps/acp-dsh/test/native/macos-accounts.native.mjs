@@ -350,6 +350,8 @@ function storeShim(cli, args, { env, cwd }) {
     signInBaseline[vendor] = logouts.length
     if (vendor === 'claude') {
       check(json(args) === json(['auth', 'login', '--claudeai']), 'unexpected Claude sign-in command')
+      const link = 'https://claude.com/cai/oauth/authorize?code=true&client_id=fake&state=fixture_state_0123&code_challenge=fake'
+      child.stdout.write(`Visit: ${link}\nPaste code here if prompted > `)
       if (account.round === 'K') await plantClaudeItem(botItem(vendor), account.plan)
       else writeJson(claudeCredentials(env.CLAUDE_CONFIG_DIR), claudeJson(account.plan))
       plantClaudeAccount(claudeConfig(env.CLAUDE_CONFIG_DIR), account.email)

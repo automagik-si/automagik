@@ -920,3 +920,58 @@ test('a failed switch or a missing chat says why and keeps Settings open', async
     } finally { section.done() }
   }
 })
+
+// #2064: a Switch account hands its own attempt to the chat's row; a plain Sign in hands none.
+test('the default bridge gets the switch\'s attempt, and a plain Sign in passes nothing (B14)', async () => {
+  const calls = []
+  const row = agentView(agent('acp-codex', { signedIn: false, authScope: 'isolated' }))
+  const attemptId = 'attempt_000000000000000000000002'
+  // The options object comes from the page's realm: copied here, so it compares by value.
+  sandbox[ui.CHAT_LOGIN] = { open: (provider, options) => { calls.push([provider, options === undefined ? undefined : { ...options }]); return true } }
+  const request = async () => ({ available: true, agents: [row] })
+  const run = runHook(() => ui.useAcp(request))
+  try {
+    await run.settle()
+    assert.equal(run.current.login(row, { attemptId }), true)
+    assert.deepEqual(calls, [['acp-codex', { attemptId }]])
+    calls.length = 0
+    assert.equal(run.current.login(row), true)
+    assert.deepEqual(calls, [['acp-codex', undefined]])
+    await run.settle()
+    assert.equal(run.current.problems['acp-codex'] ?? null, null, 'no "Sign-in needs a Bot chat." message')
+  } finally {
+    run.done()
+    delete sandbox[ui.CHAT_LOGIN]
+  }
+})
+
+test('Settings\' Switch account opens the chat\'s row on the switch\'s own attempt (B14)', async () => {
+  const attemptId = 'attempt_000000000000000000000002'
+  for (const [answer, options] of [[{ id: 'acp-codex', attemptId, status: 'failed', signedIn: false }, { attemptId }],
+    [{ id: 'acp-codex', signedIn: false }, undefined], [undefined, undefined]]) {
+    const calls = []
+    const face = {
+      hooks: { roster: { getSnapshot: () => ({ mainBotIds: ['main'], byId: { main: {} } }) } },
+      actions: {
+        cliLoginAccounts: async () => ({ accounts: { 'acp-codex': accountEntry() } }),
+        cliLoginSwitch: async (...args) => { calls.push(['switch', ...args]); return answer },
+        refreshModels: async () => {},
+      },
+    }
+    sandbox.fetch = async () => ({ ok: true, json: async () => ({ ok: true, value: view([agent('acp-codex', { authScope: 'isolated' })]) }) })
+    sandbox[ui.CHAT_LOGIN] = { open: (provider, opened) => { calls.push(['open', provider, opened === undefined ? undefined : { ...opened }]); return true } }
+    const run = runHook(() => ui.AcpSettingsSection({ close: () => calls.push(['close']), load: () => ({ omni: { face: () => face } }) }))
+    try {
+      await run.settle()
+      buttons(render(run.current), 'Switch account')[0].props.onClick()
+      await run.settle()
+      buttons(render(run.current), 'Continue')[0].props.onClick()
+      await run.settle()
+      assert.deepEqual(calls, [['switch', 'main', 'acp-codex'], ['open', 'acp-codex', options], ['close']])
+    } finally {
+      run.done()
+      delete sandbox.fetch
+      delete sandbox[ui.CHAT_LOGIN]
+    }
+  }
+})

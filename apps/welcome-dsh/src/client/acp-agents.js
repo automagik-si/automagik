@@ -44,11 +44,12 @@ const signInCommand = agent => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? 
 // How the person signs in to the CLI in a terminal, the other way to the chat's row.
 export const SIGN_IN_OF = { 'acp-claude': 'claude auth login', 'acp-codex': 'codex login' }
 // The Bot team's bridge (apps/bots-dsh src/client/cli-login.js, CLI_LOGIN_BRIDGE): open(provider)
-// opens the sign-in row in a Bot's chat and answers whether it could.
+// opens the sign-in row in a Bot's chat and answers whether it could. A Switch account hands
+// its own attempt over (`attemptId`, #2064), so the row reads that attempt even if it ended.
 export const CHAT_LOGIN = Symbol.for('automagik.cli-login')
-export function openChatLogin(provider, scope = globalThis) {
+export function openChatLogin(provider, scope = globalThis, { attemptId } = {}) {
   if (!Object.hasOwn(SIGN_IN_OF, provider)) return false
-  try { return scope[CHAT_LOGIN]?.open?.(provider) === true } catch { return false }
+  try { return scope[CHAT_LOGIN]?.open?.(provider, attemptId === undefined ? undefined : { attemptId }) === true } catch { return false }
 }
 export const POLL_MS = 2000
 const UNREACHABLE_POLL_MS = 15_000
@@ -349,10 +350,11 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
     reload: () => load(false),
-    // Opens the sign-in row in a Bot's chat. An isolated sign-in needs that chat.
-    login: (agent) => {
+    // Opens the sign-in row in a Bot's chat. An isolated sign-in needs that chat. A switch
+    // passes its own attempt (#2064); a plain Sign in passes none.
+    login: (agent, { attemptId } = {}) => {
       say(agent.id, null)
-      if (!open(agent.id)) {
+      if (!open(agent.id, undefined, { attemptId })) {
         say(agent.id, isolatedSignIn(agent)
           ? t('Sign-in needs a Bot chat. If you have no Bot yet, set one up first.')
           : t('No Bot chat to sign in from here. Run {command} in a terminal instead.', { command: signInCommand(agent) }))
@@ -497,9 +499,10 @@ export function AcpSettingsSection({ close, load = loadBots } = {}) {
         acp.setProblem(agent.id, t('Sign-in needs a Bot chat. If you have no Bot yet, set one up first.'))
         return
       }
-      await face.actions.cliLoginSwitch(main, agent.id)
+      // The switch's own attempt (#2064): the row reads it, even when it already ended.
+      const switched = await face.actions.cliLoginSwitch(main, agent.id)
       await face.actions.refreshModels?.()
-      acp.login(agent)
+      acp.login(agent, { attemptId: typeof switched?.attemptId === 'string' ? switched.attemptId : undefined })
     } catch (error) {
       const message = error?.message ?? String(error)
       acp.setProblem(agent.id, accountView.hostText?.(message) ?? message)

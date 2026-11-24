@@ -690,6 +690,8 @@ var ZH = {
   "Not now": "暂不",
   "Done: signed in to {name}.": "完成：已登录 {name}。",
   "Done: signed in to {name} as {account}.": "完成：已使用 {account} 登录 {name}。",
+  "The account did not change: {name} is still signed in as {account}.": "账号没有变化：仍使用 {account} 登录 {name}。",
+  "The account did not change: {name} is still signed in to the same account.": "账号没有变化：仍使用同一个账号登录 {name}。",
   "Done: {name} uses an API key.": "完成：{name} 使用 API 密钥。",
   "Signed in, but {model} could not be used: {reason} This Bot stays on {kept}.": "已登录，但无法使用 {model}：{reason} 此 Bot 仍使用 {kept}。",
   "its model": "原来的模型",
@@ -735,6 +737,7 @@ var ZH = {
   "Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.": "Codex 设备登录不可用。请在 ChatGPT 安全设置或工作区权限中启用设备代码登录后重试。",
   "Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.": "Codex 无法启动设备登录。请检查网络连接和 ChatGPT 中的设备代码登录权限后重试。",
   "Sign-in did not finish. Try again.": "登录未完成，请重试。",
+  "The account did not change. Try again.": "账号没有变化，请重试。",
   "This sign-in expired. Start again.": "本次登录已过期，请重新开始。",
   "Sign-in cancelled.": "登录已取消。",
   // The account step of that row (#869): a CLI already signed in on this computer.
@@ -17663,14 +17666,15 @@ function CliAccounts({ bot, actions }) {
     setError(null);
     try {
       const { provider, action } = pending;
+      let switched;
       if (action === "recover") await actions.recoverCliLogin(bot.id, provider);
-      else if (action === "switch") await actions.cliLoginSwitch(bot.id, provider);
+      else if (action === "switch") switched = await actions.cliLoginSwitch(bot.id, provider);
       else if (action === "reset") await actions.cliLoginReset(bot.id, provider);
       else await actions.cliLoginSignOut(bot.id, provider);
       await actions.refreshModels?.();
       await refresh();
       setPending(null);
-      if (action === "switch" || action === "reset") actions.openCliLogin(bot.id, provider);
+      if (action === "switch" || action === "reset") actions.openCliLogin(bot.id, provider, ...typeof switched?.attemptId === "string" ? [void 0, switched.attemptId] : []);
     } catch (error2) {
       if (error2?.code === ACCOUNT_RECOVERY_CODE) {
         const provider = pending.provider;
@@ -23177,12 +23181,17 @@ function teamActions({
     pick4.end(false);
     throw error;
   });
-  const openCliLogin = (botId, provider, ref) => {
+  const openCliLogin = (botId, provider, ref, attemptId) => {
     const bot = cliLoginBotOf(roster.getSnapshot(), botId);
     const manager = loginState?.();
     if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
     openSession?.(bot.id);
-    void manager.open({ botId: bot.id, provider, ref: signInProviderOf(ref) === provider ? ref : void 0 });
+    void manager.open({
+      botId: bot.id,
+      provider,
+      ref: signInProviderOf(ref) === provider ? ref : void 0,
+      ...typeof attemptId === "string" ? { attemptId } : {}
+    });
     return true;
   };
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra });
@@ -32070,9 +32079,9 @@ function FailureCell({ node, sessionId, useRoster, useTurnClock, actions }) {
     setSwitching("busy");
     setError("");
     try {
-      await actions.cliLoginSwitch(bot.id, cliProvider);
+      const switched = await actions.cliLoginSwitch(bot.id, cliProvider);
       await actions.refreshModels?.();
-      actions.openCliLogin(bot.id, cliProvider);
+      actions.openCliLogin(bot.id, cliProvider, ...typeof switched?.attemptId === "string" ? [void 0, switched.attemptId] : []);
       setSwitching("idle");
     } catch (failure) {
       setError(hostText(failure?.message ?? String(failure)));
@@ -43545,11 +43554,11 @@ var PASTES = /* @__PURE__ */ new Set(["acp-claude", "acp-antigravity"]);
 var codeStep = (row2) => row2?.stage === "attempt" && PASTES.has(row2.provider) && row2.attempt?.status === "waiting" && row2.attempt.prompt !== void 0 && row2.attempt.checking !== true;
 function installCliLoginBridge({ scope = globalThis, selectedBot, mainBot, openLogin }) {
   const bridge = {
-    open(provider) {
+    open(provider, { attemptId } = {}) {
       if (!Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
       const bot = selectedBot() ?? mainBot();
       if (!bot) return false;
-      return openLogin(bot.id, provider);
+      return openLogin(bot.id, provider, attemptId);
     },
     remember(url) {
       return rememberCallbackState(url);
@@ -43881,6 +43890,10 @@ function CliLoginRow({ bot, row: row2, roster, manager, secretPending, seat, fie
         return (0, import_react104.createElement)(Attempt, { bot, row: row2, roster, manager, secretPending, fieldRef });
       case "done": {
         if (row2.taken) return (0, import_react104.createElement)("p", null, t("Done: Bots will use this {name} account.", { name }));
+        if (row2.sameAccount) {
+          const same = row2.signedInAs?.kind === "key" ? void 0 : accountLabel(row2.signedInAs);
+          return (0, import_react104.createElement)("p", null, same ? t("The account did not change: {name} is still signed in as {account}.", { name, account: same }) : t("The account did not change: {name} is still signed in to the same account.", { name }));
+        }
         if (row2.signedInAs?.kind === "key") return (0, import_react104.createElement)("p", null, t("Done: {name} uses an API key.", { name }));
         const account = accountLabel(row2.signedInAs);
         return (0, import_react104.createElement)("p", null, account ? t("Done: signed in to {name} as {account}.", { name, account }) : t("Done: signed in to {name}.", { name }));
@@ -43892,19 +43905,66 @@ function CliLoginRow({ bot, row: row2, roster, manager, secretPending, seat, fie
           kept: modelName(roster, row2.outcome?.kept) || t("its model")
         }));
       case "failed":
-      case "interrupted":
+      case "interrupted": {
+        const message = (0, import_react104.createElement)("p", { className: "bt-cli-error" }, row2.stage === "interrupted" ? t("The sign-in was interrupted by a restart. Get a new link.") : hostText(row2.message ?? "Sign-in did not finish. Try again."));
+        const error = row2.error ? (0, import_react104.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row2.error)) : null;
+        const close = (0, import_react104.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row2.busy, onClick: () => manager.dismiss(bot.id) }, t("Close"));
+        if (row2.switched && row2.stillSignedIn && row2.confirm) {
+          return (0, import_react104.createElement)(
+            import_react104.Fragment,
+            null,
+            (0, import_react104.createElement)("p", null, t("This stops running Bot work for this account. Continue?")),
+            error,
+            (0, import_react104.createElement)(
+              "div",
+              { className: "bt-cli-actions" },
+              (0, import_react104.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row2.busy, onClick: () => void manager.switchAgain(bot.id) }, t("Continue")),
+              (0, import_react104.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row2.busy, onClick: () => manager.keepAttempt(bot.id) }, t("Cancel"))
+            )
+          );
+        }
+        if (row2.switched && row2.stillSignedIn) {
+          return (0, import_react104.createElement)(
+            import_react104.Fragment,
+            null,
+            message,
+            error,
+            (0, import_react104.createElement)(
+              "div",
+              { className: "bt-cli-actions" },
+              (0, import_react104.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row2.busy, onClick: () => manager.askSwitch(bot.id) }, t("Try again")),
+              close
+            )
+          );
+        }
+        if (row2.switched) {
+          return (0, import_react104.createElement)(
+            import_react104.Fragment,
+            null,
+            message,
+            (0, import_react104.createElement)("p", null, t("To use {name} in this Bot, sign in to your account.", { name })),
+            error,
+            (0, import_react104.createElement)(
+              "div",
+              { className: "bt-cli-actions" },
+              (0, import_react104.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row2.busy, onClick: () => void manager.start(bot.id) }, t("Sign in")),
+              close
+            )
+          );
+        }
         return (0, import_react104.createElement)(
           import_react104.Fragment,
           null,
-          (0, import_react104.createElement)("p", { className: "bt-cli-error" }, row2.stage === "interrupted" ? t("The sign-in was interrupted by a restart. Get a new link.") : hostText(row2.message ?? "Sign-in did not finish. Try again.")),
-          row2.error ? (0, import_react104.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row2.error)) : null,
+          message,
+          error,
           (0, import_react104.createElement)(
             "div",
             { className: "bt-cli-actions" },
             (0, import_react104.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row2.busy, onClick: () => void manager.start(bot.id) }, t("Try again")),
-            (0, import_react104.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row2.busy, onClick: () => manager.dismiss(bot.id) }, t("Close"))
+            close
           )
         );
+      }
       default:
         return null;
     }
@@ -44107,9 +44167,13 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     else if (view.status === "cancelled") {
       stopPoll(provider);
       for (const row2 of attemptRows(provider)) setRow(row2.botId, null);
+    } else if (view.fresh === true && view.settling === true) {
+      for (const row2 of attemptRows(provider)) setRow(row2.botId, { ...row2, attempt, busy: true });
+      armPoll(provider);
     } else {
       stopPoll(provider);
-      for (const row2 of attemptRows(provider)) setRow(row2.botId, { ...row2, stage: "failed", attempt: null, busy: false, confirm: false, message: view.message ?? "Sign-in did not finish. Try again." });
+      const switched = view.fresh === true ? { switched: true, stillSignedIn: view.signedInAfter === true } : {};
+      for (const row2 of attemptRows(provider)) setRow(row2.botId, { ...row2, stage: "failed", attempt: null, busy: false, confirm: false, message: view.message ?? "Sign-in did not finish. Try again.", ...switched });
     }
   }
   function askAccount(provider, account) {
@@ -44151,7 +44215,9 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         busy: false,
         confirm: false,
         error: null,
-        ...signedInAs ? { signedInAs: Object.freeze({ ...signedInAs }) } : {}
+        ...signedInAs ? { signedInAs: Object.freeze({ ...signedInAs }) } : {},
+        // A Switch that ended on the account it signed out of says so (#2064).
+        ...view?.sameAccount === true ? { sameAccount: true } : {}
       });
       leaveAfter(row2.botId, row2.seq, DONE_MS);
       if (view?.choice?.state === "failed") applyFailed(row2.botId, row2.seq, view.choice);
@@ -44211,7 +44277,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     }
     const last = attempts[provider];
     if (last?.expiresAt !== void 0 && last.expiresAt > now()) interrupt(provider);
-    else applyView(provider, { status: "expired", message: EXPIRED });
+    else applyView(provider, { status: "expired", message: EXPIRED, ...last?.fresh === true ? { fresh: true } : {} });
   }
   function failedCall(provider, error) {
     if (error?.code === ENDED) {
@@ -44254,13 +44320,16 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
      * The explicit entry (rule 2): a chat where the person chose an agent that is signed out,
      * or the Sign in button in Settings or Welcome. A live attempt of that agent is joined, never
      * started again; `ref` (the model the person chose) is kept by the host for this Bot.
+     * `attemptId` is a Switch account's own attempt (#2064): it is read by its id, even after
+     * it ended, so a switch that failed fast still shows why.
      */
-    async open({ botId, provider, ref }, valid = () => true, owner) {
+    async open({ botId, provider, ref, attemptId }, valid = () => true, owner) {
       nextIntent();
       if (disposed || !valid() || typeof botId !== "string" || botId === "" || !known(provider)) return false;
       const model = typeof ref === "string" && ref.startsWith(`${provider}/`) ? ref : void 0;
+      const switched = typeof attemptId === "string" && attemptId !== "";
       const existing = rowOf(botId);
-      if (existing?.provider === provider && ["offer", "attempt", "account"].includes(existing.stage)) {
+      if (!switched && existing?.provider === provider && ["offer", "attempt", "account"].includes(existing.stage)) {
         setRow(botId, { ...existing, reveal: ++sequence, ...model ? { ref: model } : {} });
         if (existing.stage === "attempt" && model && model !== existing.ref && !existing.busy) {
           const seq2 = existing.seq;
@@ -44276,6 +44345,24 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       const seq = ++sequence;
       if (owner) owner.seq = seq;
       setRow(botId, { botId, provider, ref: model, stage: "offer", busy: true, reveal: seq, seq, attempt: null, error: null, confirm: false });
+      if (switched) {
+        try {
+          const view = await actions.cliLoginStatus(botId, provider, attemptId);
+          if (!live(botId, seq) || !valid()) return false;
+          setRow(botId, { ...rowOf(botId), stage: "attempt", busy: false });
+          applyView(provider, view);
+          return true;
+        } catch (error) {
+          if (!live(botId, seq) || !valid()) return false;
+          if (error?.code === ENDED || error?.code === RESTARTED) {
+            setRow(botId, { ...rowOf(botId), stage: "attempt", busy: false });
+            failedCall(provider, error);
+            return true;
+          }
+        }
+        patchRow(botId, seq, { busy: false });
+        return true;
+      }
       try {
         const current = await actions.cliLoginCurrent(botId, provider);
         if (!live(botId, seq) || !valid()) return false;
@@ -44334,7 +44421,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       try {
         const view = await actions.cliLoginStart(botId, row2.provider, row2.ref);
         if (!live(botId, seq) || !valid()) return false;
-        setRow(botId, { ...rowOf(botId), stage: "attempt", busy: false, message: void 0 });
+        setRow(botId, { ...rowOf(botId), stage: "attempt", busy: false, message: void 0, switched: void 0, stillSignedIn: void 0 });
         applyView(row2.provider, view);
         return true;
       } catch (error) {
@@ -44418,6 +44505,51 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     askCancel(botId) {
       const row2 = rowOf(botId);
       if (row2?.stage === "attempt") patchRow(botId, row2.seq, { confirm: true });
+    },
+    /**
+     * Try again after a failed Switch account whose CLI is still signed in (#2064): it asks
+     * first, as every Switch does, since its home runs Bot work again.
+     */
+    askSwitch(botId) {
+      const row2 = rowOf(botId);
+      if (row2?.switched === true && row2.stillSignedIn === true && ["failed", "interrupted"].includes(row2.stage) && !row2.busy) patchRow(botId, row2.seq, { confirm: true });
+    },
+    /**
+     * "Continue": the same host switch again (#2064), never a plain sign-in. Its own attempt is
+     * read by its id; only a host that names none is joined through its current attempt.
+     */
+    async switchAgain(botId, valid = () => true) {
+      nextIntent();
+      const row2 = rowOf(botId);
+      if (disposed || !valid() || row2?.switched !== true || row2.stillSignedIn !== true || row2.busy || !["failed", "interrupted"].includes(row2.stage) || typeof actions.cliLoginSwitch !== "function") return false;
+      const { seq, provider } = row2;
+      patchRow(botId, seq, { busy: true, error: null });
+      let switched;
+      try {
+        switched = await actions.cliLoginSwitch(botId, provider);
+      } catch (error) {
+        if (!live(botId, seq) || !valid()) return false;
+        patchRow(botId, seq, { busy: false, confirm: false, error: messageOf(error) });
+        return false;
+      }
+      void Promise.resolve().then(() => actions.refreshModels?.()).catch(() => {
+      });
+      if (!live(botId, seq) || !valid()) return false;
+      setRow(botId, { ...rowOf(botId), stage: "attempt", attempt: null, busy: false, confirm: false, error: null, message: void 0, switched: void 0, stillSignedIn: void 0 });
+      try {
+        if (typeof switched?.attemptId === "string") {
+          const view = await actions.cliLoginStatus(botId, provider, switched.attemptId);
+          if (live(botId, seq)) applyView(provider, view);
+        } else {
+          const current = await actions.cliLoginCurrent(botId, provider);
+          if (!live(botId, seq)) return false;
+          if (current?.attempt) applyView(provider, current.attempt);
+          else await readAccount(botId, provider, seq, null);
+        }
+      } catch (error) {
+        if (live(botId, seq) && !failedCall(provider, error)) await readAccount(botId, provider, seq, messageOf(error));
+      }
+      return true;
     },
     keepAttempt(botId) {
       const row2 = rowOf(botId);
@@ -47942,7 +48074,7 @@ function applyOwner(ctx, { gated = false } = {}) {
       const snapshot2 = roster.getSnapshot();
       return [...snapshot2.mainBotIds ?? [], snapshot2.mainBotId].map((id) => cliLoginBotOf(snapshot2, id)).find(Boolean);
     },
-    openLogin: (botId, provider) => actions.openCliLogin(botId, provider)
+    openLogin: (botId, provider, attemptId) => actions.openCliLogin(botId, provider, void 0, attemptId)
   }), "ds-bot: CLI sign-in bridge");
   actions.signInEntry = () => ctx.slots.entries?.("settings.models.sign-in")?.[0] ?? null;
   actions.canSignIn = () => Boolean(actions.signInEntry());

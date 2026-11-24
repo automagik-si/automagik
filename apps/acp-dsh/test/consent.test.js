@@ -601,3 +601,29 @@ test('a consented agent never waits on the account read, and another account sto
   assert.equal(out.signedIn, false)
   assert.equal(Object.hasOwn(out, 'consent'), false)
 })
+
+test('C1: sameAccount names only the account the record holds; Claude needs its email on both sides', (t) => {
+  const file = scratch(t)
+  const store = new ConsentStore({ file, ids: IDS, now: () => 1000 })
+  const who = email => ({ kind: 'account', id: email, facets: { kind: 'account', email }, email })
+  assert.equal(store.sameAccount('acp-codex', who('a@x.example')), false, 'no record')
+  store.confirm('acp-codex', who('a@x.example'))
+  assert.equal(store.sameAccount('acp-codex', who('a@x.example')), true)
+  assert.equal(store.sameAccount('acp-codex', who('b@x.example')), false)
+  assert.equal(store.sameAccount('acp-codex', { kind: 'account', id: 'x', facets: { kind: 'account' } }), false, 'kind alone names nobody')
+  assert.equal(store.sameAccount('acp-codex', undefined), false)
+  assert.equal(store.sameAccount('acp-unknown', who('a@x.example')), false, 'an unknown id')
+  // A key: the same `source` is the same key for Codex.
+  const key = { kind: 'key', id: 'k', facets: { kind: 'key', source: 'env:OPENAI_API_KEY' } }
+  store.confirm('acp-codex', key)
+  assert.equal(store.sameAccount('acp-codex', key), true)
+  // Claude: the email facet on both sides, never the org alone or a key's source.
+  store.confirm('acp-claude', WORK)
+  assert.equal(store.sameAccount('acp-claude', WORK), true)
+  assert.equal(store.sameAccount('acp-claude', HOME), false)
+  const orgOnly = { kind: 'account', id: 'o', facets: { kind: 'account', org: 'org-work' } }
+  assert.equal(store.sameAccount('acp-claude', orgOnly), false)
+  const claudeKey = { kind: 'key', id: 'ck', facets: { kind: 'key', source: 'env:ANTHROPIC_API_KEY' } }
+  store.confirm('acp-claude', claudeKey)
+  assert.equal(store.sameAccount('acp-claude', claudeKey), false)
+})

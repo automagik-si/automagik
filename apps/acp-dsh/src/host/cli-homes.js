@@ -499,6 +499,11 @@ export function releaseRun(run) {
   return run.accountStopping
 }
 
+/** How many runs are tracked on a home now (#2064, a Switch's log line). */
+export function runCount(home) {
+  return runs.get(home)?.size ?? 0
+}
+
 export async function stopRuns(home) {
   await Promise.all([...(runs.get(home) ?? [])].map(releaseRun))
 }

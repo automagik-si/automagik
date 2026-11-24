@@ -15,6 +15,7 @@ const vendorOf = cli => cli.endsWith('claude') ? 'claude' : 'codex'
 const roots = {}
 const cleanups = []
 let service, nextAccount
+const CLAUDE_LINK = 'https://claude.com/cai/oauth/authorize?code=true&client_id=fake&state=fixture_state_0123&code_challenge=fake'
 
 function spawnLogin(cli, args, { env }) {
   const vendor = vendorOf(cli)
@@ -30,7 +31,11 @@ function spawnLogin(cli, args, { env }) {
   }
   const complete = () => writeFileSync(file(vendor, env), nextAccount)
   if (vendor === 'claude') {
-    void setImmediate().then(() => { complete(); child.kill() })
+    // As the real CLI: its full link and prompt first, then it completes (#2064).
+    void setImmediate().then(() => {
+      child.stdout.write(`Visit: ${CLAUDE_LINK}\nPaste code here if prompted > `)
+      return setImmediate()
+    }).then(() => { complete(); child.kill() })
   } else {
     const send = message => child.stdout.write(`${JSON.stringify(message)}\n`)
     child.stdin.on('data', line => {

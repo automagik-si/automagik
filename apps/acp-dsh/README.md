@@ -477,7 +477,7 @@ A settings page reads the agents through this host service; the plugin stays hos
 | `loginCurrent(id)` | The attempt at work for that agent, from any view, or undefined. Never starts or cancels one. |
 | `loginStatus(id, attemptId)` / `loginAnswer(id, attemptId, value)` / `loginCancel(id, attemptId)` | Reads an attempt (an ended one stays readable for 60 seconds), sends Claude's pasted `code#state` to the CLI (which then has 90 seconds to confirm), or ends it. |
 | `loginTextMatches(text)` | Whether a text carries a Claude sign-in state shown in the last 24 hours. Only a boolean: the states are kept as keyed hashes in memory. |
-| `loginActive()` | How many attempts are starting or waiting. |
+| `loginActive()` | How many attempts are starting, waiting or settling (a failed Switch account's status read, #2064). |
 | `account(id, { fresh? })` | For the DSH owner's views only: `{ id, signedIn?, consent?, ref?, account?: { kind: 'account' \| 'key', email?, org?, plan? }, notice? }`. Who the CLI is signed in as, read from the CLI itself (below); never on a `status()` or `inspect()` row, in a log or in an event. `ref` names the account read and goes back with `accountConfirm`. |
 | `accountConfirm(id, { ref? })` | The person's word that the app may use the account this CLI is signed in to. Asks the CLI again, records the consent and announces `acp-dsh/login-ready`. Another account than `ref` is refused (`acp-account/changed`); a signed-out CLI too (`acp-account/signed-out`). |
 | `accountNoticed(id)` | The one-time notice of a vendor carried through an upgrade was shown. |
@@ -1039,8 +1039,8 @@ the provider's when its answer reports one (at most an hour), otherwise ten minu
 shown; the CLI has 45 seconds to print its link. The CLI keeps its own credentials: no model,
 transcript, tool or credential store is involved, and no link, code or state is logged. A sign-in
 the CLI confirms is recorded only for the executable that confirmed it and announced as
-`acp-dsh/login-ready` (the Bot team applies the model the person chose); the number at work is
-announced as `acp-dsh/login-active` (the welcome's busy file adds it, so the app's automatic
+`acp-dsh/login-ready` (the Bot team applies the model the person chose); the number at work
+(starting, waiting or settling) is announced as `acp-dsh/login-active` (the welcome's busy file adds it, so the app's automatic
 restarts wait). These methods are not tools and not listed by `status()`; the only caller is the
 Bot team's owner-only route (its README, "Signing in to Claude Code or Codex").
 

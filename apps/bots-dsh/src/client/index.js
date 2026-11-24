@@ -864,7 +864,7 @@ function applyOwner(ctx, { gated = false } = {}) {
       const snapshot = roster.getSnapshot()
       return [...(snapshot.mainBotIds ?? []), snapshot.mainBotId].map(id => cliLoginBotOf(snapshot, id)).find(Boolean)
     },
-    openLogin: (botId, provider) => actions.openCliLogin(botId, provider),
+    openLogin: (botId, provider, attemptId) => actions.openCliLogin(botId, provider, undefined, attemptId),
   }), 'ds-bot: CLI sign-in bridge')
   // Whether AccountLauncher holds the shell's settings seat; FooterAccount steps aside if so.
   actions.signInEntry = () => ctx.slots.entries?.('settings.models.sign-in')?.[0] ?? null

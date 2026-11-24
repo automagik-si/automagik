@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { apply, SERVICE } from '../index.js'
 import { accountEvidenceOf } from '../src/host/account.js'
 import { CliGenerations, GENERATION_ENV, POINTER_ENV } from '../src/host/cli-generations.js'
-import { CliHomes, HOME_ENV, trackRun } from '../src/host/cli-homes.js'
+import { CliHomes, HOME_ENV, releaseRun, trackRun } from '../src/host/cli-homes.js'
 import { CONSENT_FILE, ConsentStore } from '../src/host/consent.js'
 import { recordLogin } from '../src/host/login-ownership.js'
 import { CliLogins } from '../src/host/login.js'
@@ -23,6 +23,7 @@ import { plantWindowsRecord, proved } from './support/windows-record.js'
 import { loginReadIo, resolveLogin } from '../../../herdr/mods/am-sidebar/loginRecord.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
+const CLAUDE_LINK = 'https://claude.com/cai/oauth/authorize?code=true&client_id=fake&state=fixture_state_0123&code_challenge=fake'
 const who = email => ({ kind: 'account', id: email, facets: { kind: 'account', email }, email })
 
 function fixture(t, { cold, root: sharedRoot, installation, deps, onEffect } = {}) {
@@ -75,6 +76,7 @@ function fixture(t, { cold, root: sharedRoot, installation, deps, onEffect } = {
   let failLogout = false
   let imageCheck = async () => ({ ok: true })
   let stuckLogin = false
+  let silentLogin = false
   const loginChildren = []
   const spawn = (cli, args, options) => {
     calls.push({ kind: 'login', cli, args, ...options })
@@ -95,7 +97,13 @@ function fixture(t, { cold, root: sharedRoot, installation, deps, onEffect } = {
     const complete = () => auth.set(selected(cli.endsWith('claude') ? 'claude' : 'codex',
       options.env), nextAccount)
     if (cli.endsWith('claude')) {
-      setImmediate(() => { complete(); child.exitCode = 0; child.emit('close', 0) })
+      // As the real CLI: its full link and prompt first, then it completes (#2064).
+      // `silentLogin(true)` completes without printing them.
+      const silent = silentLogin
+      setImmediate(() => {
+        if (!silent) child.stdout.write(`Visit: ${CLAUDE_LINK}\nPaste code here if prompted > `)
+        setImmediate(() => { complete(); child.exitCode = 0; child.emit('close', 0) })
+      })
     } else {
       child.stdin.on('data', line => {
         const request = JSON.parse(String(line))
@@ -181,6 +189,7 @@ function fixture(t, { cold, root: sharedRoot, installation, deps, onEffect } = {
     dispose, windowsRecord,
     next: email => { nextAccount = email }, fail: value => { failLogout = value },
     stallLogin: value => { stuckLogin = value },
+    silentLogin: value => { silentLogin = value },
     imageCheck: check => { imageCheck = check } }
 }
 
@@ -1079,3 +1088,424 @@ for (const action of ['dispose', 'login']) {
     }
   })
 }
+
+// Switch account (#2064). The fixture's status read, wrapped: every read is recorded with the
+// logout calls made before it, and `answer(read)` may give another value or hold it (a promise).
+function statusReads(calls) {
+  const reads = []
+  let answer = () => undefined
+  const signedIn = async (spec, cli, { env }) => {
+    const home = env[spec.key === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME']
+    const real = existsSync(join(home, 'account'))
+    const read = { n: reads.length, vendor: spec.key, real, home, env,
+      logouts: calls().filter(call => call.kind === 'logout').length }
+    reads.push(read)
+    const value = answer(read)
+    return value === undefined ? real : value
+  }
+  return { reads, signedIn, answer: fn => { answer = fn } }
+}
+
+function switchFixture(t, extra = {}) {
+  let h
+  const status = statusReads(() => h?.calls ?? [])
+  h = fixture(t, { deps: { signedIn: status.signedIn, ...extra } })
+  return { ...h, status }
+}
+
+const UNCHANGED = 'The account did not change. Try again.'
+const settled = async (h, id, attemptId, rounds = 60) => {
+  for (let i = 0; i < rounds; i++) {
+    const view = h.service.loginStatus(id, attemptId)
+    if (!['starting', 'waiting'].includes(view.status) && view.settling !== true) return view
+    await tick()
+  }
+  assert.fail('the switch did not settle')
+}
+const homeOf = (h, id) => h.adapter.agents.get(id).spawn().env[HOME_ENV]
+const admitted = (h, id) => {
+  const run = { spec: { env: h.adapter.agents.get(id).spawn().env }, stop: async () => {} }
+  trackRun(run)
+  return releaseRun(run)
+}
+const until = async (done, rounds = 60) => { for (let i = 0; i < rounds && !done(); i++) await tick() }
+
+for (const id of ['acp-claude', 'acp-codex']) {
+  test(`S1 ${id}: a switch back to the same account says so; to another it does not`, async t => {
+    const h = fixture(t)
+    await h.login(id)
+    h.next('personal@example.test')
+    const same = await h.service.accountSwitch(id)
+    assert.equal(same.fresh, true)
+    await h.waitForLogin(id, same)
+    assert.equal(h.service.loginStatus(id, same.attemptId).sameAccount, true)
+    h.next('second@example.test')
+    const other = await h.service.accountSwitch(id)
+    await h.waitForLogin(id, other)
+    assert.equal(h.service.loginStatus(id, other.attemptId).sameAccount, undefined)
+    assert.equal((await h.service.account(id, { fresh: true })).account.email, 'second@example.test')
+  })
+
+  test(`S1b ${id}: a switch from signed out or from another account is never "the same account"`, async t => {
+    const h = fixture(t)
+    await h.login(id)
+    await h.service.accountSignOut(id)
+    h.next('personal@example.test')
+    const fromOut = await h.service.accountSwitch(id)
+    await h.waitForLogin(id, fromOut)
+    assert.equal(h.service.loginStatus(id, fromOut.attemptId).sameAccount, undefined)
+    // The CLI now names another account: consent `needed`; the switch ends on the recorded one.
+    const env = h.adapter.agents.get(id).spawn().env
+    h.auth.set(env[id === 'acp-codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR'], 'other@example.test')
+    assert.equal((await h.service.account(id, { fresh: true })).consent, 'needed')
+    const fromNeeded = await h.service.accountSwitch(id)
+    await h.waitForLogin(id, fromNeeded)
+    assert.equal(h.service.loginStatus(id, fromNeeded.attemptId).sameAccount, undefined)
+  })
+
+  test(`S2 ${id}: a status that says signed in again right after the verified sign-out still runs the sign-in`, async t => {
+    const h = switchFixture(t)
+    await h.login(id)
+    let flipped = false
+    h.status.answer(read => {
+      if (read.logouts === 0) return undefined
+      if (!flipped) { flipped = true; return false }
+      return true
+    })
+    const before = h.calls.length
+    const attempt = await h.service.accountSwitch(id)
+    await h.waitForLogin(id, attempt)
+    const after = h.calls.slice(before)
+    const logout = after.findIndex(call => call.kind === 'logout')
+    assert.ok(logout >= 0)
+    assert.ok(after.slice(logout).some(call => call.kind === 'login'), 'a new login after the logout')
+    const account = await h.service.account(id, { fresh: true })
+    assert.equal(account.consent, 'given', 'the attempt was not `existing`')
+  })
+
+  test(`S4 ${id}: a switch logs its sign-out, its start and its end in fixed words only`, async t => {
+    const lines = []
+    t.mock.method(console, 'error', line => { lines.push(String(line)) })
+    const h = fixture(t)
+    await h.login(id)
+    const attempt = await h.service.accountSwitch(id)
+    await h.waitForLogin(id, attempt)
+    await until(() => lines.filter(line => line.includes('account switch')).length >= 3)
+    const notes = lines.filter(line => line.startsWith('[acp-dsh] account switch'))
+    const name = id === 'acp-claude' ? 'Claude Code' : 'Codex'
+    assert.equal(notes.length, 3)
+    assert.match(notes[0], new RegExp(`^\\[acp-dsh\\] account switch for ${name}: sign-out verified \\(logout run: yes; model probe live: (yes|no); runs stopped: \\d+\\)$`))
+    assert.deepEqual(notes.slice(1), [
+      `[acp-dsh] account switch for ${name}: status at the new sign-in's start: not signed in`,
+      `[acp-dsh] account switch for ${name} ended: ready (link shown: yes; ${id === 'acp-claude' ? 'exit 0' : 'running'}; same account: yes; signed in after: unknown)`,
+    ])
+    for (const line of lines) {
+      assert.doesNotMatch(line, /@|https:/)
+      assert.equal(line.includes(h.root), false)
+    }
+  })
+
+  test(`S5a ${id}: a failed switch whose CLI is still signed in resumes the home for the Bots`, async t => {
+    const h = switchFixture(t)
+    await h.login(id)
+    const mark = h.status.reads.length
+    let attempt
+    if (id === 'acp-claude') {
+      h.silentLogin(true)
+      attempt = await h.service.accountSwitch(id)
+      const view = await settled(h, id, attempt.attemptId)
+      assert.equal(view.message, UNCHANGED)
+    } else {
+      // The start read is held; the attempt is cancelled while it waits, then the CLI says
+      // signed in, at its start and in the settle read.
+      const start = Promise.withResolvers()
+      const after = Promise.withResolvers()
+      h.status.answer(read => (read.n === mark + 2 ? start.promise : read.n === mark + 3 ? after.promise : undefined))
+      attempt = await h.service.accountSwitch(id)
+      await until(() => h.status.reads.length > mark + 2)
+      h.service.loginCancel(id, attempt.attemptId)
+      await until(() => h.status.reads.length > mark + 3)
+      assert.equal(h.service.loginActive(), 1, 'the settle holds the busy signal')
+      h.auth.set(h.status.reads[mark + 2].home, 'personal@example.test')
+      start.resolve(true)
+      after.resolve(true)
+      await settled(h, id, attempt.attemptId)
+    }
+    await until(() => !existsSync(join(homeOf(h, id), 'paused')))
+    assert.equal(existsSync(join(homeOf(h, id), 'paused')), false)
+    assert.equal((await h.service.inspect(id)).signedIn, true)
+    await admitted(h, id)
+    assert.equal(h.service.loginActive(), 0)
+    assert.equal(h.service.loginStatus(id, attempt.attemptId).signedInAfter, true)
+  })
+
+  test(`S5b ${id}: a failed switch whose CLI is signed out keeps the home paused`, async t => {
+    const h = switchFixture(t)
+    await h.login(id)
+    const mark = h.status.reads.length
+    let attempt
+    if (id === 'acp-claude') {
+      h.silentLogin(true)
+      h.status.answer(read => (read.n >= mark + 2 ? false : undefined))
+      attempt = await h.service.accountSwitch(id)
+      await settled(h, id, attempt.attemptId)
+    } else {
+      const start = Promise.withResolvers()
+      h.status.answer(read => (read.n === mark + 2 ? start.promise : undefined))
+      attempt = await h.service.accountSwitch(id)
+      await until(() => h.status.reads.length > mark + 2)
+      h.service.loginCancel(id, attempt.attemptId)
+      start.resolve(false)
+      await settled(h, id, attempt.attemptId)
+    }
+    await until(() => h.service.loginActive() === 0)
+    assert.equal(existsSync(join(homeOf(h, id), 'paused')), true)
+    assert.equal((await h.service.inspect(id)).signedIn, false)
+    assert.throws(() => admitted(h, id), { message: 'The Bot account is changing. Sign in again when it finishes.' })
+    assert.equal(h.service.loginStatus(id, attempt.attemptId).signedInAfter, false)
+    assert.equal(h.service.loginActive(), 0)
+  })
+
+  test(`S5c ${id}: a second switch while the first settles: the first resumes nothing and ends no lock`, async t => {
+    const h = switchFixture(t)
+    await h.login(id)
+    const mark = h.status.reads.length
+    const start = Promise.withResolvers()
+    const after = Promise.withResolvers()
+    const second = Promise.withResolvers()
+    h.status.answer(read => (read.n === mark + 2 ? start.promise : read.n === mark + 3 ? after.promise
+      : read.n === mark + 6 ? second.promise : undefined))
+    const first = await h.service.accountSwitch(id)
+    await until(() => h.status.reads.length > mark + 2)
+    h.service.loginCancel(id, first.attemptId)
+    await until(() => h.status.reads.length > mark + 3)
+    assert.equal(h.service.loginStatus(id, first.attemptId).settling, true)
+    const next = await h.service.accountSwitch(id)
+    assert.notEqual(next.attemptId, first.attemptId)
+    await until(() => h.status.reads.length > mark + 6)
+    h.auth.set(h.status.reads[mark + 2].home, 'personal@example.test')
+    start.resolve(true)
+    after.resolve(true)
+    for (let i = 0; i < 10; i++) await tick()
+    assert.equal(existsSync(join(homeOf(h, id), 'paused')), true, 'the second attempt\'s home stays paused')
+    assert.equal(h.service.loginCurrent(id).attemptId, next.attemptId)
+    assert.equal(h.service.loginActive(), 1)
+    second.resolve(false)
+    await h.waitForLogin(id, next)
+  })
+
+  test(`S5d ${id}: a switch cancelled before its CLI was resolved still settles and resumes`, async t => {
+    let cancelAt
+    let verified = false
+    let armed = true
+    let service
+    const timers = {
+      setTimeout: (run, ms) => {
+        if (verified && armed) {
+          armed = false
+          queueMicrotask(() => {
+            cancelAt = h.status.reads.length
+            service.loginCancel(id, service.loginCurrent(id).attemptId)
+          })
+        }
+        return globalThis.setTimeout(run, ms)
+      },
+      clearTimeout: timer => globalThis.clearTimeout(timer),
+      now: () => Date.now(),
+    }
+    const h = switchFixture(t, { loginTimers: timers })
+    service = h.service
+    await h.login(id)
+    const mark = h.status.reads.length
+    h.status.answer(read => {
+      if (read.n === mark + 1) { verified = true; return false }
+      if (read.n > mark + 1) return true
+      return undefined
+    })
+    const attempt = await h.service.accountSwitch(id)
+    const view = await settled(h, id, attempt.attemptId)
+    assert.equal(view.status, 'cancelled')
+    assert.equal(cancelAt, mark + 2, 'no start read of the fresh attempt yet: its CLI was not resolved')
+    await until(() => h.service.loginActive() === 0 && !existsSync(join(homeOf(h, id), 'paused')))
+    assert.equal(existsSync(join(homeOf(h, id), 'paused')), false)
+    assert.equal((await h.service.inspect(id)).signedIn, true)
+    assert.equal(h.service.loginStatus(id, attempt.attemptId).signedInAfter, true)
+    assert.equal(h.service.loginActive(), 0)
+  })
+
+  test(`S5e ${id}: two switches settle in turn: the first ends no lock of the second, which resumes`, async t => {
+    // The first switch settles; the second signs out, starts and is cancelled, so it settles too:
+    // it holds the lock and nothing is current when the first one's `onSettled` arrives.
+    const h = switchFixture(t)
+    await h.login(id)
+    const mark = h.status.reads.length
+    const start = Promise.withResolvers()
+    const after = Promise.withResolvers()
+    const nextStart = Promise.withResolvers()
+    const nextAfter = Promise.withResolvers()
+    h.status.answer(read => (read.n === mark + 2 ? start.promise : read.n === mark + 3 ? after.promise
+      : read.n === mark + 6 ? nextStart.promise : read.n === mark + 7 ? nextAfter.promise : undefined))
+    const first = await h.service.accountSwitch(id)
+    await until(() => h.status.reads.length > mark + 2)
+    h.service.loginCancel(id, first.attemptId)
+    await until(() => h.status.reads.length > mark + 3)
+    assert.equal(h.service.loginStatus(id, first.attemptId).settling, true)
+    const next = await h.service.accountSwitch(id)
+    assert.notEqual(next.attemptId, first.attemptId)
+    await until(() => h.status.reads.length > mark + 6)
+    h.service.loginCancel(id, next.attemptId)
+    await until(() => h.status.reads.length > mark + 7)
+    assert.equal(h.service.loginStatus(id, next.attemptId).settling, true)
+    assert.equal(h.service.loginCurrent(id), undefined)
+    const paused = join(homeOf(h, id), 'paused')
+    h.auth.set(h.status.reads[mark + 6].home, 'personal@example.test')
+    start.resolve(true)
+    after.resolve(true)
+    for (let i = 0; i < 10; i++) await tick()
+    assert.equal(existsSync(paused), true, 'the first settle leaves the second\'s home paused')
+    assert.equal(h.service.loginActive(), 1, 'the second still settles')
+    assert.equal(h.service.loginStatus(id, next.attemptId).settling, true)
+    nextStart.resolve(true)
+    nextAfter.resolve(true)
+    await until(() => h.service.loginActive() === 0 && !existsSync(paused))
+    assert.equal(existsSync(paused), false, 'the second settle resumes the home')
+    assert.equal((await h.service.inspect(id)).signedIn, true)
+    await admitted(h, id)
+    assert.equal(h.service.loginStatus(id, next.attemptId).signedInAfter, true)
+    assert.equal(h.service.loginActive(), 0)
+  })
+
+  test(`S6 ${id}: a plain Sign in after a failed switch is never fresh and never settles`, async t => {
+    const h = switchFixture(t)
+    await h.login(id)
+    let mark = h.status.reads.length
+    const start = Promise.withResolvers()
+    h.status.answer(read => (read.n === mark + 2 ? start.promise : undefined))
+    const failed = await h.service.accountSwitch(id)
+    await until(() => h.status.reads.length > mark + 2)
+    h.service.loginCancel(id, failed.attemptId)
+    start.resolve(false)
+    await settled(h, id, failed.attemptId)
+    await until(() => h.service.loginActive() === 0)
+    assert.equal(existsSync(join(homeOf(h, id), 'paused')), true)
+    // The plain path signs out again (two reads answer false), then its own attempt.
+    mark = h.status.reads.length
+    const spawns = h.calls.filter(call => call.kind === 'login').length
+    if (id === 'acp-claude') {
+      h.silentLogin(true)
+      h.status.answer(read => (read.n <= mark + 2 ? false : true))
+    } else {
+      h.status.answer(read => (read.n <= mark + 1 ? false : true))
+    }
+    const plain = await h.service.loginStart(id, { label: 'bot' })
+    const views = [plain]
+    for (let i = 0; i < 60; i++) {
+      const view = h.service.loginStatus(id, plain.attemptId)
+      views.push(view)
+      if (view.status === 'ready') break
+      await tick()
+    }
+    assert.equal(views.at(-1).status, 'ready')
+    assert.ok(views.every(view => view.fresh === undefined && view.settling === undefined))
+    assert.notEqual(views.at(-1).message, UNCHANGED)
+    if (id === 'acp-codex') assert.equal(h.calls.filter(call => call.kind === 'login').length, spawns, 'the shortcut: no login child')
+  })
+
+  test(`L5 ${id}: a switch ends a live plain attempt it did not start and runs its own, fresh`, async t => {
+    const { CliLogins } = await import('../src/host/login.js')
+    const current = CliLogins.prototype.current
+    let armed = false
+    let plain
+    let plainFlow
+    let seen
+    // Makes a plain attempt current in the gap after the switch's verified sign-out: the first
+    // `current` after that read is the switch's own check.
+    t.mock.method(CliLogins.prototype, 'current', function (agent) {
+      if (armed && agent === id) {
+        armed = false
+        plain = this.start(agent, { label: 'plain-bot' })
+        plainFlow = this.flows.get(agent)
+        seen = current.call(this, agent)
+        return seen
+      }
+      return current.call(this, agent)
+    })
+    const h = switchFixture(t)
+    await h.login(id)
+    const mark = h.status.reads.length
+    const hold = Promise.withResolvers()
+    h.status.answer(read => {
+      if (read.n === mark + 1) { armed = true; return false }
+      if (read.n === mark + 2) return hold.promise
+      return undefined
+    })
+    const attempt = await h.service.accountSwitch(id)
+    assert.ok(plain, 'a plain attempt was live in the gap')
+    assert.equal(seen.attemptId, plain.attemptId, 'the switch saw it')
+    assert.notEqual(attempt.attemptId, plain.attemptId)
+    assert.equal(attempt.fresh, true)
+    assert.equal(plain.fresh, undefined)
+    assert.equal(plainFlow.status, 'cancelled', 'the switch ended it')
+    await until(() => h.status.reads.length > mark + 2)
+    assert.equal(existsSync(join(homeOf(h, id), 'paused')), true, 'paused under the switch\'s lock')
+    const spawns = h.calls.filter(call => call.kind === 'login').length
+    hold.resolve(true)
+    await h.waitForLogin(id, attempt)
+    assert.ok(h.calls.filter(call => call.kind === 'login').length > spawns, 'never `existing`: a login ran')
+  })
+}
+
+test('S3: a switched Claude that ends without its link is "The account did not change. Try again."', async t => {
+  const h = fixture(t)
+  await h.login('acp-claude')
+  h.silentLogin(true)
+  const attempt = await h.service.accountSwitch('acp-claude')
+  const view = await settled(h, 'acp-claude', attempt.attemptId)
+  assert.equal(view.status, 'failed')
+  assert.equal(view.message, UNCHANGED)
+})
+
+test('S3b: a plain Claude sign-in that ends without its link is still confirmed by status', async t => {
+  const h = fixture(t)
+  h.silentLogin(true)
+  await h.login('acp-claude')
+  assert.equal((await h.service.inspect('acp-claude')).signedIn, true)
+})
+
+test('SD2-1: a Claude switch that settles keeps its lock while the Codex count changes, then resumes', async t => {
+  // The Claude switch is cancelled and its settle read is held; a Codex sign-in starts meanwhile,
+  // so the active count changes and `onChange` runs while Claude settles (#2064).
+  const id = 'acp-claude'
+  const h = switchFixture(t)
+  await h.login(id)
+  const mark = h.status.reads.length
+  const start = Promise.withResolvers()
+  const after = Promise.withResolvers()
+  h.status.answer(read => {
+    if (read.vendor === 'codex') return false
+    return read.n === mark + 2 ? start.promise : read.n === mark + 3 ? after.promise : undefined
+  })
+  const attempt = await h.service.accountSwitch(id)
+  await until(() => h.status.reads.length > mark + 2)
+  h.service.loginCancel(id, attempt.attemptId)
+  await until(() => h.status.reads.length > mark + 3)
+  assert.equal(h.service.loginStatus(id, attempt.attemptId).settling, true)
+  assert.equal(h.service.loginActive(), 1)
+  const changes = () => h.events.filter(name => name === 'acp-dsh/login-active').length
+  const before = changes()
+  const codex = await h.service.loginStart('acp-codex', { label: 'bot' })
+  assert.ok(codex.attemptId)
+  await until(() => changes() > before)
+  assert.ok(changes() > before, 'the active count changed while Claude settles')
+  const paused = join(homeOf(h, id), 'paused')
+  assert.equal(existsSync(paused), true)
+  assert.equal(h.service.loginStatus(id, attempt.attemptId).settling, true)
+  h.auth.set(h.status.reads[mark + 2].home, 'personal@example.test')
+  start.resolve(true)
+  after.resolve(true)
+  await until(() => !existsSync(paused))
+  assert.equal(existsSync(paused), false, 'the settle resumed the Claude home')
+  assert.equal((await h.service.inspect(id)).signedIn, true)
+  await admitted(h, id)
+  assert.equal(h.service.loginStatus(id, attempt.attemptId).signedInAfter, true)
+})

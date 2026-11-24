@@ -177,9 +177,10 @@ export function FailureCell({ node, sessionId, useRoster, useTurnClock, actions 
     setSwitching('busy')
     setError('')
     try {
-      await actions.cliLoginSwitch(bot.id, cliProvider)
+      // The switch's own attempt (#2064): the row reads it, even when it already ended.
+      const switched = await actions.cliLoginSwitch(bot.id, cliProvider)
       await actions.refreshModels?.()
-      actions.openCliLogin(bot.id, cliProvider)
+      actions.openCliLogin(bot.id, cliProvider, ...(typeof switched?.attemptId === 'string' ? [undefined, switched.attemptId] : []))
       setSwitching('idle')
     } catch (failure) {
       setError(hostText(failure?.message ?? String(failure)))

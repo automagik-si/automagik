@@ -90,6 +90,8 @@ const FAILED_REASONS = new Map([
   ['short sign-in link unsupported', 'The CLI returned a short sign-in link Automagik cannot use yet. Update Automagik, then try again.'],
   ['the CLI did not confirm the sign-in', 'The CLI did not confirm the sign-in. Try again.'],
   ['the CLI exited', 'The CLI exited before the sign-in finished. Try again.'],
+  // A Switch account whose CLI ended before its link while still signed in (#2064).
+  ['the account did not change', 'The account did not change. Try again.'],
 ])
 const DEVICE_CAUSES = new Map([['device-code login is not enabled', DEVICE_ACCESS], ['device sign-in did not start', DEVICE_START]])
 const failedMessageOf = (value, provider) => {
@@ -240,6 +242,15 @@ export function cliLoginView(value, provider, attemptId) {
   if (value.status === 'failed') view.message = failedMessageOf(value, provider)
   if (value.status === 'expired') view.message = 'This sign-in expired. Start again.'
   if (value.status === 'cancelled') view.message = 'Sign-in cancelled.'
+  // A Switch account attempt (#2064): booleans only, never an account.
+  if (value.fresh === true) {
+    view.fresh = true
+    if (['failed', 'expired', 'cancelled'].includes(value.status)) {
+      if (value.settling === true) view.settling = true
+      if (typeof value.signedInAfter === 'boolean') view.signedInAfter = value.signedInAfter
+    }
+  }
+  if (value.status === 'ready' && value.sameAccount === true) view.sameAccount = true
   return view
 }
 
@@ -721,8 +732,10 @@ export function install(rt, reservationDeps) {
         throw failed('Bot account controls are unavailable. Update Automagik and try again.')
       }
       try {
-        await service[method](body.provider, { label: body.botId })
-        return { id: body.provider, signedIn: false }
+        const result = await service[method](body.provider, { label: body.botId })
+        if (action !== 'switch') return { id: body.provider, signedIn: false }
+        // The switch's own attempt (#2064): its id lets the row read it even after it ended.
+        try { return { ...cliLoginView(result, body.provider), signedIn: false } } catch { return { id: body.provider, signedIn: false } }
       } catch (error) {
         if (error?.code === 'acp-account/unverified-login') {
           throw failed(ACCOUNT_RECOVERY_HINT, ACCOUNT_RECOVERY_CODE)
