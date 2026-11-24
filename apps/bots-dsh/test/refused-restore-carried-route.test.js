@@ -628,11 +628,11 @@ const RULE_ROWS = [
   ['stored carried', undefined, CARRIED, ATTACH, true],
   ['live other provider', DEEPSEEK, CARRIED, ATTACH, false],
   ['stored other provider', undefined, DEEPSEEK, ATTACH, false],
-  ['missing log', undefined, 'missing', ATTACH, false],
+  ['missing log', undefined, 'missing', ATTACH, true],
   ['unreadable log', undefined, 'unreadable', ATTACH, true],
   ['other ref', CARRIED, CARRIED, 'deepseek/saved', false],
   ['other Hermes ref', CARRIED, CARRIED, 'hermes-remote/nous:sample-model', false],
-  ['throwing live header', 'throws', CARRIED, ATTACH, false],
+  ['throwing live header', 'throws', CARRIED, ATTACH, true],
 ]
 for (const [name, live, stored, ref, expected] of RULE_ROWS) {
   test(`keepsCarriedRoute: ${name}`, async t => {

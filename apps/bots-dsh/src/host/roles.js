@@ -187,12 +187,13 @@ export function installRoles(rt, deps = {}) {
   async function finishSolverAttach(id, record, pin, expect, mayClear) {
     const routes = await runtime.readDeliveryRoutes([expect.bot])
     if (!runtime.serving(id, record, pin, routes)) return { pending: true }
-    const check = () => {
+    const check = async () => {
+      // Phase B needs a fresh read once the queued write reaches replacement.
+      const commitRoutes = await runtime.readDeliveryRoutes([expect.bot])
       packages.requireWriter()
       if (!rolesOn(state.prefs)) throw rolesOff()
       const target = rt.own(state.bots, id)
-      // Read the live routes and the watcher's current stored routes at the commit point.
-      if (target !== expect.bot || !sameWaiter(target, expect) || !runtime.serving(id, record, pin)) throw changedRole()
+      if (target !== expect.bot || !sameWaiter(target, expect) || !runtime.serving(id, record, pin, commitRoutes)) throw changedRole()
     }
     await commit(team => {
       const target = rt.own(team.bots, id)

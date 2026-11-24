@@ -727,10 +727,9 @@ export function install(rt) {
 
   const sameSelection = (a, b) => a.provider === b.provider && a.model === b.model && a.reasoningEffort === b.reasoningEffort
 
-  // Read a stored route once, not on every forced apply; the live feed keeps it current.
   // `model` and `reasoningEffort` name the whole route for a part that keeps it (parts.js).
   const routeFields = config => ({
-    provider: config?.provider,
+    provider: typeof config?.provider === 'string' ? config.provider : undefined,
     ...(typeof config?.model === 'string' ? { model: config.model } : {}),
     ...(config?.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
   })
@@ -747,57 +746,25 @@ export function install(rt) {
     }
     return used
   }
-  const storedRoutes = new Map()
-  let watchingRoutes = false
-  // Settlement reads the watcher's last route synchronously just before publishing.
-  const cachedStoredRoute = sessionId => storedRoutes.get(sessionId)?.route
+  const unreadableRoute = Object.freeze({ unreadable: true })
   async function storedRoute(sessionId) {
-    const current = storedRoutes.get(sessionId)
-    // A missing or unreadable log can become readable on the next lookup.
-    if (current && !current.route?.missing && !current.route?.unreadable) return current.route ?? current.pending
     // bots-dsh does not inject sessionPersistence: in real cordis a sibling plugin's
     // service throws on a property read but is readable through ctx.get.
-    let persistence
-    try { persistence = ctx.get?.('sessionPersistence') } catch { return undefined }
-    if (typeof persistence?.open !== 'function') return undefined
-    const entry = { events: [] }
-    entry.pending = (async () => {
-      let handle
-      try {
-        handle = await persistence.open(sessionId, 'read')
-        if (typeof handle?.read !== 'function') return { missing: true }
-        const { events } = await handle.read()
-        return events.reduce(storedRouteEvent, { provider: undefined })
-      } catch (error) {
-        return error?.name === 'SessionPersistenceNotFoundError' ? { missing: true } : { unreadable: true }
-      } finally {
-        try { await handle?.close?.() } catch {}
-      }
-    })().then(route => {
-      entry.route = entry.events.reduce(updateStoredRoute, route)
-      delete entry.events
-      delete entry.pending
-      return entry.route
-    })
-    watchRoutes()
-    storedRoutes.set(sessionId, entry)
-    if (storedRoutes.size > 500) storedRoutes.delete(storedRoutes.keys().next().value)
-    return entry.pending
-  }
-  const updateStoredRoute = (route, event) => storedRouteEvent(
-    route.missing || route.unreadable ? { provider: undefined } : route, event,
-  )
-  // Registered on first use, so nothing is listened to until a stored route is read.
-  function watchRoutes() {
-    if (watchingRoutes) return
-    watchingRoutes = true
-    ctx.on?.('session/event', (session, event) => {
-      if ((event?.type !== 'request/header' && event?.type !== 'model/selection') || typeof session?.id !== 'string') return
-      const entry = storedRoutes.get(session.id)
-      if (!entry) return
-      if (entry.events) entry.events.push(event)
-      else entry.route = updateStoredRoute(entry.route, event)
-    })
+    let handle
+    try {
+      const persistence = ctx.get?.('sessionPersistence')
+      if (typeof persistence?.open !== 'function') return unreadableRoute
+      handle = await persistence.open(sessionId, 'read')
+      if (typeof handle?.read !== 'function') return unreadableRoute
+      const { events } = await handle.read()
+      const route = events.reduce(storedRouteEvent, {})
+      if (Object.hasOwn(route, 'provider') && !route.provider) return unreadableRoute
+      return (route.pendingSelection ?? route).provider ? route : unreadableRoute
+    } catch {
+      return unreadableRoute
+    } finally {
+      try { await handle?.close?.() } catch {}
+    }
   }
 
   // THE RULE: a chat already on a Remote Hermes route never takes the in-place model
@@ -808,15 +775,13 @@ export function install(rt) {
   // chat, the last request/header in its stored log. It is never the history of picks.
   async function keepsCarriedRoute(sessionId, ref) {
     if (ref !== 'hermes-remote/attach') return false
-    let config
     try {
-      config = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config
-    } catch { return false }
-    if (config !== undefined) return config?.provider === 'hermes-remote'
+      const provider = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config?.provider
+      if (typeof provider === 'string' && provider) return provider === 'hermes-remote'
+    } catch { return true }
     const stored = await storedRoute(sessionId)
     // An unreadable log keeps its route: switching would load and measure it too.
-    // A missing log is a fresh part and takes the row.
-    return stored?.unreadable === true || stored?.provider === 'hermes-remote'
+    return stored.unreadable === true || stored.provider === 'hermes-remote'
   }
 
   // The store can replace a Bot while a model choice is in flight.
@@ -985,7 +950,7 @@ export function install(rt) {
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
     defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
-    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, storedRouteOf: storedRoute, cachedStoredRouteOf: cachedStoredRoute,
+    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, storedRouteOf: storedRoute,
     applyModel, waitForModel, syncModels, routeRefused,
     dropCatalog: () => { catalogCache = { at: 0, value: [] } },
   })

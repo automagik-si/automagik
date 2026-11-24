@@ -867,12 +867,20 @@ export function install(rt) {
           warn('ds-bot: %s', KEY_ERROR)
         }
         await writeFile(temp, snapshot.bytes, 'utf8')
-        const ensureCommit = () => {
-          ensureLock()
-          beforeCommit?.()
+        const ensureKey = () => {
           if (!snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
         }
-        ensureCommit()
+        const ensureCommit = () => {
+          ensureLock()
+          const checked = beforeCommit?.()
+          if (typeof checked?.then === 'function') return checked.then(() => {
+            ensureLock()
+            ensureKey()
+          })
+          ensureKey()
+        }
+        const checked = ensureCommit()
+        if (checked !== undefined) await checked
         await replaceFile(temp, statePath, ensureCommit)
         seen = stamp()
         snapshot.commit()

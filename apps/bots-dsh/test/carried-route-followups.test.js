@@ -27,12 +27,13 @@ async function realStore(root) {
   return host
 }
 
-function turnEvents(route) {
+function turnEvents(route, turn = 1) {
+  const seq = (turn - 1) * 4
   return [
-    { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
-    { type: 'request/header', seq: 1, time: 2, data: { header: { config: route } } },
-    { type: 'user/message', seq: 2, time: 3, surfaceOp: 'append', data: { content: [{ type: 'text', text: 'sample message' }], role: 'user', id: 'm-0', source: { kind: 'user' } } },
-    { type: 'turn/end', seq: 3, time: 4, data: { turn: 1, reason: { kind: 'stop' } } },
+    { type: 'turn/start', seq, time: seq + 1, data: { turn } },
+    { type: 'request/header', seq: seq + 1, time: seq + 2, data: { header: { config: route } } },
+    { type: 'user/message', seq: seq + 2, time: seq + 3, surfaceOp: 'append', data: { content: [{ type: 'text', text: 'sample message' }], role: 'user', id: `m-${turn - 1}`, source: { kind: 'user' } } },
+    { type: 'turn/end', seq: seq + 3, time: seq + 4, data: { turn, reason: { kind: 'stop' } } },
   ]
 }
 
@@ -124,9 +125,9 @@ function countOpens(t, rt) {
   const store = rt.ctx.get('sessionPersistence')
   const original = store.open
   const opened = []
-  store.open = function (...args) {
-    opened.push(args[0])
-    return original.apply(this, args)
+  store.open = function (id, access, options) {
+    if (access === 'read') opened.push(id)
+    return original.call(this, id, access, options)
   }
   t.after(() => { store.open = original })
   return opened
@@ -150,15 +151,15 @@ test('2: forced attach skips a damaged group log and selects the readable DeepSe
   assert.deepEqual(selected, ['b1:hermes-remote/attach'])
 })
 
-test('3: a missing log takes attach as a fresh part and is not memoised', async t => {
+test('3: a missing log refuses attach and is read again on the next apply', async t => {
   const host = await storedTeam(t, {})
   const { rt, bot, selected } = await runtime(host)
   const opened = countOpens(t, rt)
   await rt.applyModel(bot, { force: true })
-  assert.deepEqual(selected, ['b1:hermes-remote/attach'])
+  assert.deepEqual(selected, [])
   await rt.applyModel(bot, { force: true })
   assert.deepEqual(opened, ['b1', 'b1'])
-  assert.deepEqual(selected, ['b1:hermes-remote/attach', 'b1:hermes-remote/attach'])
+  assert.deepEqual(selected, [])
 })
 
 test('4a: a readable DeepSeek log selects attach', async t => {
@@ -179,7 +180,7 @@ test('4b: a non-attach ref selects DeepSeek for own and group chats without open
   assert.deepEqual(selected, ['b1:deepseek/sample-model', 'group-1:deepseek/sample-model'])
 })
 
-test('5a: forced applies reuse the stored Hermes route until a live request header changes it', async t => {
+test('5a: forced applies read the latest stored request header', async t => {
   const host = await storedTeam(t, { b1: CARRIED })
   const { rt, bot, selected } = await runtime(host)
   const opened = countOpens(t, rt)
@@ -187,21 +188,18 @@ test('5a: forced applies reuse the stored Hermes route until a live request head
   assert.deepEqual(opened, ['b1'])
   assert.deepEqual(selected, [])
   await rt.applyModel(bot, { force: true })
-  assert.deepEqual(opened, ['b1'])
+  assert.deepEqual(opened, ['b1', 'b1'])
   assert.deepEqual(selected, [])
-  host.emit('session/event', { id: 'b1' }, { type: 'request/header', time: 5, data: { header: { config: DEEPSEEK } } })
+  const handle = await host.get('sessionPersistence').open('b1', 'write')
+  try {
+    await handle.append(turnEvents(DEEPSEEK, 2))
+    await handle.flush()
+  } finally {
+    await handle.close()
+  }
   await rt.applyModel(bot, { force: true })
-  assert.deepEqual(opened, ['b1'], 'the live header updates the memo without reopening the log')
+  assert.deepEqual(opened, ['b1', 'b1', 'b1'])
   assert.deepEqual(selected, ['b1:hermes-remote/attach'])
-})
-
-test('5b: concurrent forced applies share one in-flight stored-route read and never select', async t => {
-  const host = await storedTeam(t, { b1: CARRIED })
-  const { rt, bot, selected } = await runtime(host)
-  const opened = countOpens(t, rt)
-  await Promise.all([rt.applyModel(bot, { force: true }), rt.applyModel(bot, { force: true })])
-  assert.deepEqual(opened, ['b1'])
-  assert.deepEqual(selected, [])
 })
 
 test('5c: a damaged log is retried on every forced apply and never selects attach', async t => {
@@ -216,11 +214,23 @@ test('5c: a damaged log is retried on every forced apply and never selects attac
   assert.deepEqual(selected, [])
 })
 
+test('D2V-3 a model selection cannot make an unreadable Hermes log safe to switch', async t => {
+  const host = await storedTeam(t, { b1: CARRIED }, ['b1'])
+  const { rt, bot, selected } = await runtime(host)
+  const opened = countOpens(t, rt)
+  await rt.applyModel(bot, { force: true })
+  assert.deepEqual(selected, [])
+  host.emit('session/event', { id: 'b1' }, { type: 'model/selection', data: DEEPSEEK })
+  await rt.applyModel(bot, { force: true })
+  assert.deepEqual(selected, [])
+  assert.deepEqual(opened, ['b1', 'b1'])
+})
+
 test('6: a non-forced apply skips an already applied group selection before opening its log', async t => {
   const host = await storedTeam(t, { b1: DEEPSEEK, 'group-1': DEEPSEEK })
   const { rt, bot, selected } = await runtime(host, { groups: ['group-1'] })
   const opened = countOpens(t, rt)
-  // Seed the real selection bookkeeping without warming the stored-route memo. Selecting
+  // Seed the real selection bookkeeping without reading a stored route. Selecting
   // a model precedes its next request/header, so its stored header can still be DeepSeek.
   await rt.selectSessionModel('group-1', { provider: 'hermes-remote', model: 'attach' })
   assert.deepEqual(selected, ['group-1:hermes-remote/attach'])

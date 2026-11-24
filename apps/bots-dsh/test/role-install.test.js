@@ -68,7 +68,9 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false, role
 
   async function start() {
     const ctx = fakeContext({ services: {
-      sessionPersistence: { open: async () => ({ read: async () => ({ events: [] }) }) },
+      sessionPersistence: { open: async () => ({ read: async () => ({ events: [{
+        type: 'request/header', data: { header: { config: { provider: 'test-provider', model: 'fixture' } } },
+      }] }) }) },
     } })
     contexts.add(ctx)
     const routes = new Map()
@@ -1456,8 +1458,8 @@ test('D2 B9 a live instructions edit during Phase B publication survives its que
     if (++writes !== 2) return saveCopy(change, options)
     return saveCopy(change, {
       ...options,
-      beforeCommit() {
-        options.beforeCommit()
+      async beforeCommit() {
+        await options.beforeCommit()
         edit ??= f.rt.updateBot(bot.id, { instructions: 'Person edited the method.' })
       },
     })

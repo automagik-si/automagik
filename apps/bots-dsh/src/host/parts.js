@@ -1888,10 +1888,12 @@ export function install(rt) {
   }
   // A Session's own route, `{ ref, effort }`: its last request's, else its saved log's.
   async function ownRouteOf(session) {
-    const config = session?.requestHeader?.()?.config
-    const route = config?.provider && config?.model ? config : await rt.storedRouteOf?.(session?.id).catch?.(() => undefined)
-    if (!route?.provider || !route?.model) return undefined
-    return { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort }
+    try {
+      const config = session?.requestHeader?.()?.config
+      const route = config?.provider && config?.model ? config : await rt.storedRouteOf?.(session?.id)
+      if (!route?.provider || !route?.model) return undefined
+      return { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort }
+    } catch { return undefined }
   }
   // Whether a Session's history ran on another harness than `ref`, so a model change would
   // carry that history across (RFC 0030, Handoff note). A carried handoff package counts as
@@ -1904,24 +1906,26 @@ export function install(rt) {
   // route a group part was opened on, else its saved log's.
   async function sessionRoute(sessionId) {
     let session
-    let selection
     try {
-      session = agents.get(sessionId)?.session ?? ctx.sessions?.get?.(sessionId)
-      selection = agents.get(sessionId)?.model?.current?.()
-    } catch {}
-    const config = session?.requestHeader?.()?.config
-    const kept = splitRef(keptRoutes.get(sessionId))
-    const route = config?.provider ? config : selection?.provider ? selection : kept?.provider ? kept
-      : await Promise.resolve(rt.storedRouteOf?.(sessionId)).catch(() => undefined)
-    return { session, route }
+      const agent = agents.get(sessionId)
+      session = agent?.session ?? ctx.sessions?.get?.(sessionId)
+      const selection = agent?.model?.current?.()
+      const config = session?.requestHeader?.()?.config
+      const kept = splitRef(keptRoutes.get(sessionId))
+      const route = config?.provider ? config : selection?.provider ? selection : kept?.provider ? kept
+        : await rt.storedRouteOf?.(sessionId)
+      return { session, route }
+    } catch { return { session, route: { unreadable: true } } }
   }
   async function crossingHistory(sessionId, ref) {
     if (typeof sessionId !== 'string' || typeof ref !== 'string') return false
     const { session, route } = await sessionRoute(sessionId)
+    const kept = keptRoutes.has(sessionId)
+    if (route?.unreadable || (kept && route === undefined)) return true
     if (!route?.provider || !crossesHarness(`${route.provider}/${route.model ?? 'default'}`, ref)) return false
     // A group part opened on its kept route holds that history in its handoff package, even
     // before its first turn reads it.
-    if (session === undefined || keptRoutes.has(sessionId)) return true
+    if (session === undefined || kept) return true
     try { return saidForCrossing(session.deriveMessages(), undefined) } catch { return true }
   }
   rt.crossingHistory = crossingHistory

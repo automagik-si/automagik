@@ -82,7 +82,9 @@ async function fixture(t, {
 
   async function start({
     acpAgents,
-    sessionPersistence = { open: async () => ({ read: async () => ({ events: [] }) }) },
+    sessionPersistence = { open: async () => ({ read: async () => ({ events: [{
+      type: 'request/header', data: { header: { config: { provider: 'test-provider', model: 'fixture' } } },
+    }] }) }) },
   } = {}) {
     const harness = new Context()
     await harness.plugin(SystemPrompt)
@@ -259,6 +261,7 @@ test('the reviewed package speaks through DSH to one mounted pane and rolls back
   // while the card and the identity renderer withhold its role prompt.
   await h.ok('role-attach', { id: SECOND, role: ID })
   h.rt.state.bots[SECOND].model = 'acp-codex/default'
+  h.agentOf(SECOND).model = { current: () => ({ provider: 'acp-codex', model: 'default' }) }
   assert.equal(h.has(SECOND), true)
   assert.doesNotMatch(h.prompt(SECOND), /role-prompt/)
   const acpCard = await mountRoleSettings(t, h, SECOND)
@@ -457,17 +460,22 @@ test('the role card shows unsupported ACP routes and tracks the identity registr
   await h.ok('role-attach', { id: FIRST, role: ID })
   const bot = h.rt.state.bots[FIRST]
   const row = /ACP coding agents do not receive this role’s prompt/
+  let provider = 'acp-codex'
+  h.agentOf(FIRST).model = { current: () => ({ provider, model: 'default' }) }
   bot.model = 'acp-codex/default'
   const card = await mountRoleSettings(t, h, FIRST)
   assert.match(card.text(), /Active tools\s*speak/)
   assert.doesNotMatch(card.text(), row)
   bot.appliedModel = 'acp-claude/default'
+  provider = 'acp-claude'
   await card.refresh()
   assert.doesNotMatch(card.text(), row)
   bot.appliedModel = 'acp-hermes/default'
+  provider = 'acp-hermes'
   await card.refresh()
   assert.match(card.text(), row)
   delete bot.appliedModel
+  provider = 'acp-codex'
   h.disposeIdentity()
   assert.equal(registry.read(FIRST), undefined)
   await card.refresh()
@@ -477,6 +485,7 @@ test('the role card shows unsupported ACP routes and tracks the identity registr
   await old.ok('role-install', { id: ID })
   await old.ok('role-attach', { id: FIRST, role: ID })
   old.rt.state.bots[FIRST].model = 'acp-codex/default'
+  old.agentOf(FIRST).model = { current: () => ({ provider: 'acp-codex', model: 'default' }) }
   const oldCard = await mountRoleSettings(t, old, FIRST)
   assert.match(oldCard.text(), row)
 })
@@ -998,6 +1007,8 @@ test('D2S settlement retains the written method until the selected ACP route rec
   const bot = h.rt.state.bots[FIRST]
   const text = bot.instructions
   const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+  let selected = { provider: 'acp-fixture', model: 'model' }
+  h.agentOf(FIRST).model = { current: () => selected }
   Object.assign(bot, { model: 'acp-fixture/model', appliedModel: 'acp-fixture/model', waitingRole: waiting })
   assert.deepEqual(await h.ok('role-attach', { id: FIRST, role: 'solver' }), { pending: true })
   const before = (await f.disk()).bots[FIRST]
@@ -1008,6 +1019,7 @@ test('D2S settlement retains the written method until the selected ACP route rec
   assert.match(h.prompt(FIRST), /Follow the fixture instructions/)
   assert.doesNotMatch(h.prompt(FIRST), solverPart)
 
+  selected = { provider: 'acp-codex', model: 'default' }
   Object.assign(bot, { model: 'acp-codex/default', appliedModel: 'acp-codex/default' })
   assert.deepEqual(await h.ok('role-attach', { id: FIRST, role: 'solver' }), ['solver'])
   const after = (await f.disk()).bots[FIRST]
@@ -1036,12 +1048,13 @@ test('D2T-1 settlement and the public view follow the owning and retained group 
       const get = h.host.get
       const agents = get('agents')
       const nativeHeader = { type: 'request/header', data: { header: { config: { provider: 'test-provider', model: 'fixture' } } } }
-      const pendingSelection = { type: 'model/selection', data: { provider, model: 'fixture' } }
       t.mock.method(h.host, 'get', name => {
         if (name === 'agents') return { ...agents, get: id => id === sessionId ? undefined : agents.get(id) }
         if (name === 'sessionPersistence') return {
           open: async id => ({
-            read: async () => ({ events: id === sessionId ? [nativeHeader, pendingSelection, nativeHeader] : [] }),
+            read: async () => ({ events: id === sessionId
+              ? [nativeHeader, { type: 'model/selection', data: { provider, model: 'fixture' } }, nativeHeader]
+              : [nativeHeader] }),
           }),
         }
         return get(name)
@@ -1071,7 +1084,6 @@ test('D2T-1 settlement and the public view follow the owning and retained group 
     }
 
     provider = 'test-provider'
-    if (unloaded) h.events(sessionId, 'model/selection', { provider, model: 'fixture' })
     assert.deepEqual(await h.ok('role-attach', { id: FIRST, role: 'solver' }), ['solver'])
     const settled = (await f.disk()).bots[FIRST]
     assert.equal(settled.instructions, '')
@@ -1108,20 +1120,70 @@ test('D2U-1 an unloaded ACP Session keeps the method and waiter when persistence
   assert.deepEqual(result, { pending: true })
 })
 
+test('D2V-1 a persistence handle without read keeps Solver settlement pending', async t => {
+  const f = await solverFixture(t)
+  const h = await f.start({ sessionPersistence: { open: async () => ({}) } })
+  h.agentOf(FIRST).model = { current: () => ({ provider: 'test-provider', model: 'fixture' }) }
+  h.unload(GROUP)
+  await h.ok('role-install', { id: 'solver' })
+  const bot = h.rt.state.bots[FIRST]
+  const text = bot.instructions
+  const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+  bot.waitingRole = waiting
+
+  const result = await h.ok('role-attach', { id: FIRST, role: 'solver' })
+  const saved = (await f.disk()).bots[FIRST]
+  assert.equal(saved.instructions, text)
+  assert.deepEqual(saved.waitingRole, waiting)
+  assert.deepEqual(result, { pending: true })
+})
+
+test('D2V-2 a rejected stored read keeps settlement pending and a later read can settle', async t => {
+  const native = { provider: 'test-provider', model: 'fixture' }
+  const header = { type: 'request/header', data: { header: { config: native } } }
+  let rejectRead = false
+  const f = await solverFixture(t)
+  const h = await f.start({ sessionPersistence: {
+    open: async id => ({ read: async () => {
+      if (id === GROUP && rejectRead) throw new Error('fixture read rejected')
+      return { events: [header] }
+    } }),
+  } })
+  h.unload(GROUP)
+  await h.ok('role-install', { id: 'solver' })
+  assert.equal((await h.rt.storedRouteOf(GROUP)).provider, native.provider)
+  rejectRead = true
+  const bot = h.rt.state.bots[FIRST]
+  const text = bot.instructions
+  const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
+  bot.waitingRole = waiting
+
+  let result
+  await assert.doesNotReject(async () => { result = await h.rt.attachRole(FIRST, 'solver') })
+  const saved = (await f.disk()).bots[FIRST]
+  assert.equal(saved.instructions, text)
+  assert.deepEqual(saved.waitingRole, waiting)
+  assert.deepEqual(result, { pending: true })
+
+  rejectRead = false
+  assert.deepEqual(await h.ok('role-attach', { id: FIRST, role: 'solver' }), ['solver'])
+  assert.equal((await f.disk()).bots[FIRST].waitingRole, undefined)
+})
+
 test('D2U-2 a retained Session that moves to ACP while Phase B is queued keeps the written method', async t => {
   const native = { provider: 'test-provider', model: 'fixture' }
   const header = { type: 'request/header', data: { header: { config: native } } }
+  let groupEvents = [header]
   const f = await solverFixture(t)
   const h = await f.start({ sessionPersistence: {
-    open: async id => ({ read: async () => ({ events: id === GROUP ? [header] : [] }) }),
+    open: async id => ({ read: async () => ({ events: id === GROUP ? groupEvents : [header] }) }),
   } })
   await h.ok('role-install', { id: 'solver' })
   const bot = h.rt.state.bots[FIRST]
   const text = bot.instructions
   const waiting = { id: 'solver', role: bot.role, instructions: createHash('sha256').update(text).digest('hex') }
   bot.waitingRole = waiting
-  h.agentOf(GROUP).model = { current: () => native }
-  await h.rt.storedRouteOf(GROUP)
+  h.unload(GROUP)
 
   const saveCopy = h.rt.saveCopy
   let writes = 0
@@ -1130,9 +1192,8 @@ test('D2U-2 a retained Session that moves to ACP while Phase B is queued keeps t
     if (++writes === 2) queuedAhead = saveCopy(() => {}, {
       beforeCommit() {
         const selection = { provider: 'acp-fixture', model: 'fixture' }
-        h.agentOf(GROUP).model = { current: () => selection }
-        h.events(GROUP, 'model/selection', selection)
-        h.unload(GROUP)
+        // The write sees the durable change even when no live event reaches this host.
+        groupEvents = [header, { type: 'model/selection', data: selection }]
       },
       afterWrite() {},
     })

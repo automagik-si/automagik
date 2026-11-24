@@ -282,23 +282,19 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
   async function readDeliveryRoutes(bots) {
     const sessions = new Set(bots.flatMap(sessionsOf))
-    const routes = await Promise.all([...sessions].map(async id => {
-      const provider = liveProvider(id)
-      return [id, provider ? { provider } : await rt.storedRouteOf?.(id)]
-    }))
-    return new Map(routes.filter(([, route]) => route !== undefined))
+    const needStoredRoute = [...sessions].filter(id => !liveProvider(id))
+    return new Map(await Promise.all(needStoredRoute.map(async id => [id, await rt.storedRouteOf?.(id)])))
   }
-  function deliveryWarning(bot, readRoute) {
+  function deliveryWarning(bot, routes) {
     const sessions = sessionsOf(bot)
+    if (!sessions.length) return routeUnavailable
     for (const id of sessions) {
-      const live = liveProvider(id)
-      const stored = live ? undefined : readRoute?.(id)
-      const provider = live ?? stored?.pendingSelection?.provider ?? stored?.provider
-      if (!provider && (stored?.unreadable || (readRoute && stored === undefined))) return routeUnavailable
-      const warning = provider ? providerWarning(provider) : savedWarning(bot)
+      const stored = routes?.get(id)
+      const provider = liveProvider(id) ?? (stored?.pendingSelection ?? stored)?.provider
+      if (typeof provider !== 'string' || !provider) return routeUnavailable
+      const warning = providerWarning(provider)
       if (warning) return warning
     }
-    if (!sessions.length) return savedWarning(bot)
   }
   function partOf(sessionId, held) {
     if (!held?.runtime.prompt?.trim() || (owner(sessionId) === undefined && !promptOnly(held.manifest))) return undefined
@@ -359,11 +355,10 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
 
   function view(routes) {
-    const readRoute = routes && (id => routes.get(id))
     return Object.fromEntries([...attachments].flatMap(([id, held]) => {
       if (!current(id, held) || !held.manifest
         || (held.pin.id === SOLVER_ROLE_ID && !held.runtime?.prompt?.trim())) return []
-      const warning = deliveryWarning(held.bot, readRoute)
+      const warning = deliveryWarning(held.bot, routes)
       return [[id, {
         pin: held.pin, settings: held.manifest.settings,
         capabilities: held.manifest.capabilities,
@@ -383,9 +378,8 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     },
     serving(id, record, pin, routes) {
       const held = active(id)
-      const readRoute = routes ? sessionId => routes.get(sessionId) : sessionId => rt.cachedStoredRouteOf?.(sessionId)
       return held?.record === record && sameRolePin(held?.pin, pin) && Boolean(held.runtime.prompt?.trim())
-        && !deliveryWarning(held.bot, readRoute)
+        && !deliveryWarning(held.bot, routes)
     },
     async prepare(details, sha256) {
       try {
