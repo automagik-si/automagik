@@ -417,7 +417,7 @@ function failSaves(t, home, stop) {
   t.after(() => { chmodSync(home, 0o700); return stop() })
 }
 
-test('a Bot deletion whose save fails removes no file-tool record', async (t) => {
+test('a Bot deletion whose save fails removes no file-tool record', { skip: process.getuid?.() === 0 }, async (t) => {
   const scopes = { b: { folder: '/work/b' }, 'b-next': { rootId: 'b', continuation: true } }
   const { home, call, stop } = await start(moved(), { scopes })
   failSaves(t, home, stop)
@@ -426,7 +426,7 @@ test('a Bot deletion whose save fails removes no file-tool record', async (t) =>
   assert.deepEqual(scopesLeft(home, Object.keys(scopes)), ['b', 'b-next'])
 })
 
-test('a group deletion whose save fails removes no file-tool record', async (t) => {
+test('a group deletion whose save fails removes no file-tool record', { skip: process.getuid?.() === 0 }, async (t) => {
   const scopes = { r1: { folder: '/team/ops' }, 'r1-next': { rootId: 'r1', continuation: true }, gb: { rootId: 'r1-next', continuation: false } }
   const { home, call, stop } = await start(movedGroup(), { scopes })
   failSaves(t, home, stop)
