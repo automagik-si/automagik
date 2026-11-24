@@ -256,7 +256,7 @@ test('save_capability answers verified, unverified, or the refusal', async t => 
   assert.match(verified, /^Saved good \(verified\)\. Bots with it attached use the change from their next message\.$/)
 
   mode = 'auth'
-  const refused = await ask(capability('auth', server.url))
+  const refused = await ask(capability('auth-api', server.url))
   assert.match(refused, /HTTP 401/)
   assert.doesNotMatch(refused, /^Saved/)
 
