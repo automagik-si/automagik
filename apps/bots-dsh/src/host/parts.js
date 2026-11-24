@@ -29,7 +29,7 @@ import { switchFailure } from './model-state.js'
 import { turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
 import { routeAllowed } from '../shared/route-policy.js'
-import { commandCapableAgent, crossesHarness, routeOfRef, shellHoldText } from '../shared/routes.js'
+import { ACP_NAME, commandCapableAgent, crossesHarness, routeOfRef, shellHoldText } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
@@ -2846,6 +2846,17 @@ export function install(rt) {
         + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
     }
     checkShell(model)
+    // A Bot that denies acp_tool cannot move to a model that runs its own tools (#2026). The
+    // live list is read again at the last check before the route is written.
+    const checkOwnTools = (ref) => {
+      try {
+        rt.assertOwnToolsModel?.(bot, { next: ref, denyTools: bot.denyTools })
+      } catch (error) {
+        note('refused', 'acp_tool denied')
+        throw error
+      }
+    }
+    checkOwnTools(model)
     if (typeof current !== 'string' || !crossesHarness(current, model)) throw refused('refused', `${bot.name} is already on that route.`)
     // A level picked with the crossing belongs to the fresh part. Without one, the Bot's
     // current level travels with it; desiredEffort drops it if the new model lacks it.
@@ -2856,6 +2867,7 @@ export function install(rt) {
       note('refused', 'model or thinking level unavailable')
       throw error
     }
+    checkOwnTools(target)
     // A saved plan ref can resolve to the CLI the Bot is already using.
     if (crossesHarness(current, target)) assertRouteAllowed(bot, target, entry)
     try {
@@ -2883,6 +2895,7 @@ export function install(rt) {
     const checkCurrent = () => {
       if (bot.sessionPinned === true) refusePinned()
       checkShell(target)
+      checkOwnTools(target)
       if (rt.botOf(botId) === bot && rt.chatOf(botId) === sessionId && (agent.id ?? agent.session?.id) === sessionId
         && (bot.model ?? bot.appliedModel) === current && !switches.has(sessionId) && !checkpoints.has(sessionId)) return
       note('refused', 'conversation changed or busy')
@@ -2891,7 +2904,11 @@ export function install(rt) {
     checkCurrent()
     if (said) {
       const { route, provider } = routeOfRef(target)
-      const destination = route === 'acp' && routeOfRef(current).route === 'acp' ? provider
+      // Inside ACP the destination is the agent, named as the model menu names it: the
+      // published catalog's brand, else the name of an agent the owner names. Never its id.
+      const agentName = () => rt.cachedCatalog?.()?.find(entry => entry.provider === provider)?.providerName
+        ?? ACP_NAME[provider] ?? provider
+      const destination = route === 'acp' && routeOfRef(current).route === 'acp' ? agentName()
         : { native: 'Native', acp: 'ACP', herdr: 'Herdr', 'hermes-remote': 'Remote Hermes' }[route]
       note('refused', 'needs-new-conversation')
       let goal = ' (pause an active goal first)'

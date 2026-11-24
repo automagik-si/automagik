@@ -148,10 +148,15 @@ export function install(rt) {
     } catch { return {} }
   }
   rt.runningOf = runningOf
+  const ownTools = ref => rt.ownToolsRoute?.(ref) === true
   // Models come from DSH, not state.json, so a provider added in Harness settings
   // changes the view without a new revision. So do the permission presets DSH offers and
   // the Bots and groups whose Auto runs as workspace-write (permissions.js).
-  const modelsKey = () => [
+  // Per served model ref, the native-tools block a Bot the person makes there now reads (null:
+  // none), for the New Solver dialog's tick (RFC 0048). Read only, never stored; built once per
+  // answer for both the comparison and the view.
+  const nativeToolsNewMap = () => Object.fromEntries(rt.cachedCatalog().map(entry => [entry.ref, rt.nativeToolsNewBotBlock(entry.ref) ?? null]))
+  const modelsKey = (newBlocks = nativeToolsNewMap()) => [
     rt.cachedCatalog().map(entry => [
       entry.ref, entry.needsKey ? '!' : '', entry.needsSignIn ? '?' : '',
       entry.needsAccount ? '~' : '', entry.covered ? '=' : '',
@@ -161,13 +166,19 @@ export function install(rt) {
     rt.cachedDefault() ?? '', rt.cachedBackground?.() ?? '', rt.permissionKey?.() ?? '',
     rt.modelsEpoch?.() ?? 0,
     Object.values(state.bots).map(bot => [bot.nativeTools === true, rt.nativeToolsBlock(bot) ?? ''].join('/')).join(','),
+    // Which models run their own tools whatever the Denied tools say (#2026): Codex can measure
+    // a model as kept with no new revision.
+    rt.cachedCatalog().map(entry => ownTools(entry.ref) ? 1 : 0).join(''),
+    Object.values(state.bots).map(bot => ownTools(bot.model ?? bot.appliedModel) ? 1 : 0).join(''),
     // Fresh reads each poll catch selection changes and Agents appearing or going, without a listener or state revision.
     Object.values(state.bots).map(bot => {
       const running = runningOf(bot)
       return running.runningModel === undefined ? '' : `${bot.id}=${running.runningModel}:${running.runningEffort ?? ''}`
     }).join(','),
+    // Only the blocked refs: a flip between none and a block adds or removes an entry.
+    Object.entries(newBlocks).filter(([, block]) => block !== null).map(([ref, block]) => `${ref}=${block}`).join(','),
   ].join('|')
-  const view = roles => ({
+  const view = (roles, newBlocks = nativeToolsNewMap()) => ({
     revision: state.revision,
     workspaceId: state.workspaceId ?? null,
     // `mainBotId` is the first Main Bot, which the sidebar shows as its tile.
@@ -182,7 +193,7 @@ export function install(rt) {
     // what failed it. `blocked`: the facts of a failure only the user can fix (turns.js).
     // `adoptionHistoryMatches` (adopted originals only): rollback's history guard
     // (agents.js rollbackAdoption) would pass, so the menu offers rollback only then.
-    bots: Object.values(state.bots).map(({ segments, kickoff, ...bot }) => {
+    bots: Object.values(state.bots).map(({ segments, kickoff, reviewTrack, ...bot }) => {
       const tail = rt.chatTail(rt.chatOf(bot.id))
       const nativeToolsBlock = rt.nativeToolsBlock(bot)
       return {
@@ -192,6 +203,9 @@ export function install(rt) {
         ...rt.autoViewOf?.(bot),
         ...runningOf(bot),
         ...(nativeToolsBlock === undefined ? {} : { nativeToolsBlock }),
+        ...(ownTools(bot.model ?? bot.appliedModel) ? { ownTools: true } : {}),
+        // A Solver's last delivery: which review the host saw (review-mark.js).
+        ...rt.reviewMarkOf?.(bot, reviewTrack),
         ...(tail ? { lastAt: tail.lastAt, preview: tail.preview } : {}),
       }
     }),
@@ -232,12 +246,14 @@ export function install(rt) {
     connectorRequests: state.connectorRequests ?? {},
     mailRequests: state.mailRequests ?? {},
     colors: [...COLORS, ...EXTRA_COLORS],
-    models: rt.cachedCatalog(),
+    // `ownTools`: the model runs its own tools whatever the Bot's Denied tools say (#2026).
+    models: rt.cachedCatalog().map(entry => ownTools(entry.ref) ? { ...entry, ownTools: true } : entry),
     defaultModel: rt.cachedDefault() ?? null,
     backgroundModel: rt.cachedBackground?.() ?? null,
     permissions: rt.permissionCatalog?.() ?? null,
     newBotPermission: rt.newBotPermission?.() ?? null,
-    modelsKey: modelsKey(),
+    nativeToolsNew: newBlocks,
+    modelsKey: modelsKey(newBlocks),
     prefs: state.prefs,
     roles,
     // Whether a Desktop window should serve Bot browser reads (see browser.js).
@@ -633,11 +649,12 @@ export function install(rt) {
           const roles = await rt.roleRecordsView()
           await rt.prepareLearning()
           const answer = liveAnswer(roles)
-          if (body.since === state.revision && (body.models === undefined || body.models === modelsKey())) {
+          const newBlocks = nativeToolsNewMap()
+          if (body.since === state.revision && (body.models === undefined || body.models === modelsKey(newBlocks))) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })
             return ok({ revision: state.revision, unchanged: true, liveKey: answer.key, ...answer.value })
           }
-          return ok({ ...view(roles), liveKey: answer.key, ...answer.value })
+          return ok({ ...view(roles, newBlocks), liveKey: answer.key, ...answer.value })
         }
         case 'models':
           await rt.refreshHostModels?.()
@@ -758,7 +775,7 @@ export function install(rt) {
           await rt.bootstrap()
           // `private` and `shell` are the user's own create fields (no acting Bot here):
           // a Bot created private starts without a shell unless `shell` says otherwise.
-          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell })
+          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId })
           return ok(bot)
         }
         case 'set-bot-auto':

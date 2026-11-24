@@ -1,6 +1,6 @@
 # automagik-pets
 
-Bakes one of the Bot team's 21 characters, in one of its 19 inks, into a Codex v2 pet folder,
+Bakes one of the Bot team's 33 characters, in one of its 19 inks, into a Codex v2 pet folder,
 with no browser. DSH and Automagik Herdr both run it, from `~/.automagik/bin/automagik-pets`
 (the install and the release tarball come in a later slice).
 
@@ -68,7 +68,7 @@ Omni's clay art (`OMNI_ATLAS`, clay-art.js) is not baked here.
 ```sh
 bun install
 bun run test                          # node --test; bakes into temporary homes only
-node scripts/bake-all.mjs /tmp/bots   # all 399 looks, with the time and one folder's size
+node scripts/bake-all.mjs /tmp/bots   # all 627 looks, with the time and one folder's size
 ```
 
 sharp renders the SVG cells (librsvg) and encodes the WebP files (libvips). Its prebuilt binaries

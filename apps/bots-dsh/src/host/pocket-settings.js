@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { MARK_LEVEL } from '../shared/permission-levels.js'
 import { routeAllowed } from '../shared/route-policy.js'
 import { commandCapableAgent, crossesHarness } from '../shared/routes.js'
+import { deniesAcpTool } from '../shared/own-tools.js'
 import { CUSTOM, LEVELS } from './permission-diagnostics.js'
 import { MAX_SCHEDULE_LINE, MODEL_REF_OK, refusedWrite, settingsReply } from './pocket-socket.js'
 
@@ -45,6 +46,8 @@ export function modelChoiceOf(rt, bot, entry) {
     && !entry.needsAccount && !entry.superseded && current !== undefined
     && !crossesHarness(current, entry.ref) && routeAllowed(bot, entry.ref, rt.routePolicy)
     && !(bot.shell === false && commandCapableAgent(entry.ref))
+    // The server refuses a Bot that denies acp_tool a model that runs its own tools (#2026).
+    && !(entry.ref !== current && deniesAcpTool(bot.denyTools) && rt.ownToolsRoute?.(entry.ref) === true)
 }
 
 const modelChoicesOf = (rt, bot, catalog) => catalog.filter(entry => modelChoiceOf(rt, bot, entry))
@@ -182,6 +185,8 @@ export function pocketSettingsOf(rt) {
       if (error instanceof SettingsRefusal) {
         return error.withSettings ? withSettings(refusedWrite(error.reason)) : refusedWrite(error.reason)
       }
+      // A model found to run its own tools after admission (#2026): refused, never pending.
+      if (error?.ownTools === true) return withSettings(refusedWrite('model-not-allowed'))
       if (!admitted && typeof error?.code === 'string' && error.code.startsWith('bot/')) {
         if (stale(bot)) return withSettings(refusedWrite('stale'))
         const block = blockOf(rt, bot, method)

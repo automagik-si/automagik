@@ -2,7 +2,7 @@
 // service). Codex runs only through fakes here: a fake `codex` for the checks, the fake ACP agent
 // for the process. Nothing reads a real Codex home.
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -351,11 +351,15 @@ test('N8 a symlinked folder: the checks run at its real path, the launch answers
   const s = scratch(t)
   const link = join(s.root, 'linked-chat')
   symlinkSync(s.cwd, link)
+  // The temp folder may itself sit behind a symlink (macOS: /var -> /private/var), so the real
+  // path comes from the file system, never from the path this test built.
+  const real = realpathSync(s.cwd)
+  assert.notEqual(real, link)
   const fake = fakeCodex()
   const launched = await nativeOffLaunch(s.launch, { cwd: link, dir: s.dir, kept: ['gpt-5.5'], run: fake.run })
   assert.equal(launched.checkedCwd, link)
-  assert.ok(fake.calls.every(call => call.cwd === s.cwd))
-  assert.deepEqual(Object.keys(JSON.parse(launched.env.CODEX_CONFIG).projects), [s.cwd])
+  assert.deepEqual([...new Set(fake.calls.map(call => call.cwd))], [real])
+  assert.deepEqual(Object.keys(JSON.parse(launched.env.CODEX_CONFIG).projects), [real])
 })
 
 test('offCatalog clears apply_patch, drops the catalog extras and the kept models, and refuses an empty result', () => {
@@ -462,24 +466,50 @@ test('A-B8b no Bot team ever registered: today\'s Codex launch, no check', async
   assert.equal(w.adapter.live.get('direct').native, true)
 })
 
+// #1564 follow-up: every turn of an ON Bot follows its switch, whoever sends it.
 for (const [label, message] of [
   ['A-B1c a scheduled turn into the ON Bot\'s direct chat', scheduled('scheduled delivery')],
   ['A-B1d a Bot relay request', sourced('a request', { kind: 'bot', form: 'relay', role: 'request', senderName: 'Other' })],
   ['A-B1e a resumed relay', sourced('resumed handoff', { kind: 'user', handoff: true, resume: true })],
 ]) {
-  test(`${label} opens OFF`, async t => {
+  test(`${label} opens ON`, async t => {
     const w = world(t, { identity: ON })
     await turnOn(w, w.chat('direct'), message)
-    assert.deepEqual(offContexts(w), [true])
-    assert.deepEqual(servers(w), [['dsh']])
+    assert.deepEqual(offContexts(w), [false])
+    assert.deepEqual(servers(w), [[]])
   })
 }
 
-test('A-B1h a DSH subagent origin opens OFF even with an owner-shaped input', async t => {
-  const w = world(t, { identity: ON })
+// A DSH subagent Session has no Bot identity on a team host (B-8): OFF, as any identity-less one.
+test('A-B1h a DSH subagent Session with no Bot identity opens OFF even with an owner-shaped input', async t => {
+  const w = world(t, { identity: id => id === 'child' ? undefined : ON() })
   await turnOn(w, subagentChat(w, 'child'), owner('from the parent'))
   assert.deepEqual(offContexts(w), [true])
 })
+
+// E7-a / E7-b: group, task and IM turns follow the switch: OFF checks the nativeOff config and
+// forces the bridge; ON keeps Codex's own tools.
+const elsewhere = [
+  ['a group member turn', () => sourced('group message', { kind: 'user', principal: { kind: 'person', id: 'member' } })],
+  ['a task request', () => sourced('task request', { kind: 'bot', form: 'relay', role: 'request', senderName: 'Other' })],
+  ['an IM turn', () => sourced('im message', { kind: 'user', rpcId: 'im:telegram:dm-sender:1' })],
+]
+for (const [label, message] of elsewhere) {
+  test(`E7-a ${label} with the switch OFF: the nativeOff config is checked and the bridge forced`, async t => {
+    const w = world(t, { identity: OFF })
+    await turnOn(w, w.chat('elsewhere'), message())
+    assert.deepEqual(offContexts(w), [true])
+    assert.deepEqual(servers(w), [['dsh']])
+    assert.equal(w.adapter.live.get('elsewhere').nativeOff, true)
+  })
+  test(`E7-b ${label} with the switch ON: Codex's own tools`, async t => {
+    const w = world(t, { identity: ON })
+    await turnOn(w, w.chat('elsewhere'), message())
+    assert.deepEqual(offContexts(w), [false])
+    assert.deepEqual(servers(w), [[]])
+    assert.equal(w.adapter.live.get('elsewhere').native, true)
+  })
+}
 
 test('owner turn with the switch ON for Codex: today\'s launch (ON), its own tools', async t => {
   const w = world(t, { identity: ON })
@@ -499,26 +529,25 @@ test('A-B1g an owner turn with a time-context row opens ON', async t => {
   assert.deepEqual(offContexts(w), [false])
 })
 
-test('A-B1f/B1a a live ON then a scheduled turn remakes it OFF; a relay then the owner remakes OFF to ON', async t => {
+// E3-1: identity ON = ON on any turn: a scheduled turn and a relay reuse the ON process.
+test('A-B1f/B1a a live ON serves a scheduled turn; a relay opens ON and the owner turn reuses it', async t => {
   const w = world(t, { identity: ON })
   const chat = w.chat('direct')
   await turnOn(w, chat, owner('owner first'))
   const on = w.adapter.live.get('direct').run
   await turnOn(w, chat, scheduled('scheduled delivery'))
-  assert.deepEqual(offContexts(w), [false, true])
-  assert.equal(sessions(w).length, 2)
-  await on.gone.catch(() => {})
-  assert.equal(on.alive, false)
+  assert.deepEqual(offContexts(w), [false])
+  assert.equal(sessions(w).length, 1)
+  assert.equal(w.adapter.live.get('direct').run, on)
+  assert.equal(on.alive, true)
   const relayChat = w.chat('fresh')
   await turnOn(w, relayChat, freshRelay())
-  const off = w.adapter.live.get('fresh').run
+  const relayed = w.adapter.live.get('fresh').run
   await turnOn(w, relayChat, owner('owner after the relay'))
-  assert.deepEqual(offContexts(w), [false, true, true, false])
-  const [, , offPid, onPid] = pids(w)
-  assert.notEqual(offPid, onPid)
-  assert.equal(promptPids(w).at(-1), onPid)
-  await off.gone.catch(() => {})
-  assert.equal(off.alive, false)
+  assert.deepEqual(offContexts(w), [false, false])
+  const [, relayPid] = pids(w)
+  assert.equal(promptPids(w).at(-1), relayPid)
+  assert.equal(w.adapter.live.get('fresh').run, relayed)
 })
 
 test('A-S1 team registration during a standalone ON startup stops it before its first prompt; the next turn opens OFF', async t => {
@@ -582,7 +611,8 @@ test('A-S5 Read only during a held ON startup ends it with the notice and no pro
 })
 
 test('A-RO Read only ends a live ON Codex at once; a live OFF and a live kept process keep their PID', async t => {
-  const w = world(t, { identity: ON })
+  // E2-6: the `off` Session is OFF through its identity (a Bot saved OFF).
+  const w = world(t, { identity: id => id === 'off' ? OFF() : ON() })
   const on = w.chat('on')
   await turnOn(w, on, owner('owner turn'))
   const off = w.chat('off')
@@ -621,8 +651,9 @@ test('A4 refusals before a process: the kill switch with OFF, and a refused chec
   assert.equal(finishOf(await turnOn(w4, w4.chat('direct'), scheduled('scheduled'))).failure.code, 'acp/native-off-unavailable')
 })
 
-// The Details switch is named only where it could turn this Codex ON.
-test('A4 refusal texts point to the Details switch only in an eligible owner chat', async t => {
+// The Details switch is named only where it could turn this Codex ON: any Session of a Bot it is
+// not blocked for (#1564 follow-up).
+test('A4 refusal texts point to the Details switch for any Session of an unblocked Bot', async t => {
   const refuse = () => Promise.reject(Object.assign(new Error('x'),
     { code: 'acp/native-off-unavailable', reason: 'a test refusal' }))
   const SENT = 'Codex could not turn its own tools off (a test refusal),'
@@ -633,11 +664,10 @@ test('A4 refusal texts point to the Details switch only in an eligible owner cha
   const own = world(t, { identity: eligible, offSpawn: refuse })
   const ownTurn = await turnOn(own, own.chat('direct'), owner('owner'))
   assert.equal(finishOf(ownTurn).failure.message, `${SENT} ${DETAILS}, or update Automagik.`)
-  // BI-1: a scheduled turn in that same direct chat is never ON, whatever the switch says.
+  // BI-1: a scheduled turn in that same direct chat follows the switch too, so it names it.
   const timed = world(t, { identity: eligible, offSpawn: refuse })
   const timedTurn = await turnOn(timed, timed.chat('direct'), scheduled('scheduled'))
-  const SWITCH = `${SENT} Switch its model, or update Automagik.`
-  assert.equal(finishOf(timedTurn).failure.message, SWITCH)
+  assert.equal(finishOf(timedTurn).failure.message, `${SENT} ${DETAILS}, or update Automagik.`)
   // A group, task or scheduled Session, or a blocked Bot, is never ON: no pointer to the
   // switch, one full stop.
   const blocked = () => ({ name: 'Ada', nativeToolsBlocked: true })
@@ -654,8 +684,7 @@ test('A4 refusal texts point to the Details switch only in an eligible owner cha
   const timedOff = world(t, { identity: eligible, dshTools: false })
   const timedOffTurn = await turnOn(timedOff, timedOff.chat('direct'), scheduled('scheduled'))
   const timedText = finishOf(timedOffTurn).failure.message
-  assert.equal(timedText.includes(DETAILS), false, timedText)
-  assert.ok(timedText.endsWith("Turn Automagik's tools back on, or switch its model."), timedText)
+  assert.ok(timedText.endsWith(`${DETAILS}, or turn Automagik's tools back on.`), timedText)
   const group = world(t, { identity: OFF, dshTools: false })
   const groupTurn = await turnOn(group, group.chat('group'), scheduled('scheduled'))
   const text = finishOf(groupTurn).failure.message
@@ -791,7 +820,8 @@ test('A11 an OFF fork finds its checked catalog: a deleted file is written back 
 })
 
 test('A-E endNative: a starting ON Codex and a live ON one before its first prompt get the notice; a live ON one after it the OFF text; live OFF and kept processes stay', async t => {
-  const w = world(t, { identity: ON })
+  // E2-6: the `off` Session is OFF through its identity (a Bot saved OFF).
+  const w = world(t, { identity: id => id === 'off' ? OFF() : ON() })
   const chat = w.chat('starting')
   const gate = Promise.withResolvers()
   const entered = Promise.withResolvers()
@@ -1115,8 +1145,9 @@ test('K3 a live OFF process asked for gpt-5.5 is remade with today\'s launch; th
   assert.equal(off.alive, false)
 })
 
-test('K4 a live kept process meeting a checked model is remade: OFF for a non-owner turn, ON for an eligible owner turn', async t => {
-  const w = world(t, { identity: ON })
+// E3-1: its OFF meaning is kept through the identity: `direct` is a Bot saved OFF.
+test('K4 a live kept process meeting a checked model is remade: OFF for a Bot saved OFF, ON for one saved ON', async t => {
+  const w = world(t, { identity: id => id === 'direct' ? OFF() : ON() })
   const chat = w.chat('direct')
   await turnOn(w, chat, scheduled('kept'), { model: KEPT })
   await turnOn(w, chat, scheduled('checked'), { model: 'gpt-6.2-sol' })
@@ -1130,8 +1161,9 @@ test('K4 a live kept process meeting a checked model is remade: OFF for a non-ow
   assert.equal(w.adapter.live.get('direct2').nativeManaged, true)
 })
 
-test('K5 a kept-launched process whose `default` turned out checked stops once on a non-owner turn; the next turn opens OFF', async t => {
-  const w = world(t, { identity: ON, start: 'gpt-6.2-sol' })
+// E3-1: its OFF meaning is kept through the identity (a Bot saved OFF).
+test('K5 a kept-launched process whose `default` turned out checked stops once for a Bot saved OFF; the next turn opens OFF', async t => {
+  const w = world(t, { identity: OFF, start: 'gpt-6.2-sol' })
   w.codex.catalog.ownModel = () => KEPT
   const chat = w.chat('direct')
   const first = await turnOn(w, chat, scheduled('first'))

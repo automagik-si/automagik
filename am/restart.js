@@ -5,7 +5,7 @@
 
 import { AGENTS, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
   modelArgs, ownsSession, resumeArgs, resumesById, seatSettingsArgs, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
-import { SQUAD_LABEL, SQUAD_MARK } from "./launchArgs.js";
+import { SQUAD_LABEL, SQUAD_MARK, unwrapKeep } from "./launchArgs.js";
 import { ENV, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, codexCommandCheck,
   codexTemplateRefusal, codexTemplateWarning, templateAgent } from "./workers.js";
 import { CONFIG_VAR, envWords } from "./logins.js";
@@ -73,6 +73,34 @@ export function paneCommand(get) {
     return { shell: argv.length > 3 && cmd.endsWith(ARGS) ? cmd.slice(0, -ARGS.length) : cmd };
   }
   return { argv };
+}
+
+/**
+ * #1418: a helper's launch as Restart --tree and revive plan it (helperPlan, the CLI's planOf and
+ * its rival scan). { keep, command, foreground }: `command` is its paneCommand, `foreground` the
+ * argv in front. Keep is read only at the launch's own start: hc's keep wrapper (hc run --keep,
+ * launchArgs.js unwrapKeep) around a direct command of an agent of `agents` other than Hermes,
+ * whose program in front, looked through the wrapper, names no other agent, and that the plan's
+ * own agent is (the one in front, else the worker row's `workerAgent`, else the launch's when
+ * `launchAgent`, as helperPlan picks it). Then `command` is the wrapped command, `foreground` the
+ * unwrapped one and `keep` true, so its replacement runs that command again with --keep. Any
+ * other launch, or `keepAware` false (the Bot login policy), gets exactly what it got before:
+ * paneCommand(get), the raw foreground, keep false.
+ */
+export function keptLaunch(get, agents, { keepAware = true, launchAgent = false, workerAgent = null } = {}) {
+  const today = { keep: false, command: paneCommand(get), foreground: get?.foreground?.argv ?? null };
+  if (!keepAware) return today;
+  const inner = unwrapKeep(get?.argv);
+  if (inner === get?.argv) return today;
+  const command = paneCommand({ argv: inner });
+  const innerAgent = command?.argv ? agentKeyOfArgv(command.argv, agents) : null;
+  if (!innerAgent || innerAgent === "hermes") return today;
+  const foreground = unwrapKeep(get?.foreground?.argv);
+  const fgAgent = agentKeyOfArgv(foreground, agents);
+  if (fgAgent && fgAgent !== innerAgent) return today;
+  const planAgent = fgAgent ?? (workerAgent && agents?.[workerAgent] ? workerAgent : null) ?? (launchAgent ? innerAgent : null);
+  if (planAgent !== innerAgent) return today;
+  return { keep: true, command, foreground };
 }
 
 /** `cmd` with its quoted text ('…', "…", a backslash-escaped character) blanked out: what sh reads as syntax. */
@@ -531,7 +559,8 @@ export function restartRefusal({ name, old, helpers = [], force = false, tree = 
  * bot a rebuilt worker's command comes from: its automatic mode is the definition's (#946, #955).
  * A worker's command is rebuilt from its row (its task, the last word hc was given, isn't sent
  * twice) unless a template owns it;
- * any other helper's is its own launch command (paneCommand). Codex (#1125): only a template
+ * any other helper's is its own launch command (paneCommand; inside hc's keep wrapper, keptLaunch's
+ * command, #1418). Codex (#1125): only a template
  * worker (its worker.template label, or its ledger row's template) keeps its command as it is,
  * the owner's template exception, with a warning when it lacks --no-daemon, never with the pack's
  * folders, and refused when it puts a Codex option after its `--` (#1142). Any other Codex
@@ -542,7 +571,8 @@ export function restartRefusal({ name, old, helpers = [], force = false, tree = 
  * codexWhere, doesn't allow) and provably forwards words to Codex as options (codexCommandCheck
  * `forwards`) gets the mode words it lacks and the grants through "$@"; any other is refused by name.
  * Returns { name, replaced, cwd, labels, agent, template (#1418), session, mode: "resume" | "fresh",
- * resume, argv, agySettings (the file to write first, or null), note, warning }, or
+ * resume, argv, agySettings (the file to write first, or null), note, warning, keep (#1418: run it
+ * again with --keep, keptLaunch) }, or
  * { name, replaced, error } when there is nothing to run.
  */
 export function helperPlan({ directLogin = false, get, worker = null, session = null, agents, fresh = null, agy = null, bot = null, launchAgent = false, grants = [],
@@ -551,9 +581,11 @@ export function helperPlan({ directLogin = false, get, worker = null, session = 
   const replaced = get?.address ?? null;
   const cwd = helperCwd({ get, worker, realpath: agy?.realpath });
   const labels = { ...(get?.labels ?? {}) };
+  // #1418: hc's keep wrapper around the helper's own command (keptLaunch); off under the login policy.
+  const kept = keptLaunch(get, agents, { keepAware: !directLogin, launchAgent, workerAgent: worker?.agent ?? null });
   // `launchAgent` (#939, revive: the pane is a bare shell hc kept): its agent by its launch command.
-  const agent = agentKeyOfArgv(get?.foreground?.argv, agents) ?? (worker?.agent && agents[worker.agent] ? worker.agent : null)
-    ?? (launchAgent ? agentKeyOfArgv(paneCommand(get)?.argv, agents) : null);
+  const agent = agentKeyOfArgv(kept.foreground, agents) ?? (worker?.agent && agents[worker.agent] ? worker.agent : null)
+    ?? (launchAgent ? agentKeyOfArgv(kept.command?.argv, agents) : null);
   const template = worker?.template ?? labels[WORKER_TEMPLATE_LABEL] ?? get?.template ?? null;
   const isWorker = Boolean(worker || labels[WORKER_OF_LABEL]);
   // #1125: the owner's template exception reaches only a template worker the pack started.
@@ -572,7 +604,7 @@ export function helperPlan({ directLogin = false, get, worker = null, session = 
     command = { argv: withCodexGrants([...launchRun(agent, agents[agent].run, { ...bot, hermes: undefined }, where ?? agy?.homeDir ?? null),
       ...agyModeArgs(agent, agyMode), ...modelArgs(agent, model), ...effortArgs(agent, effort)], grants) };
   } else {
-    const launch = paneCommand(get);
+    const launch = kept.command;
     if (directLogin && launch) {
       const problem = launch.shell !== undefined ? DIRECT_LOGIN_PROBLEM : loginLaunchProblem(launch.argv, agent, AGENTS[agent]?.run);
       if (problem) return { loginProblem: problem };
@@ -640,7 +672,7 @@ export function helperPlan({ directLogin = false, get, worker = null, session = 
   // an Antigravity helper never runs on skip-permissions.
   argv = agyGuarded(agent, argv);
   return { name, replaced, cwd, labels, agent, template, session: resume && resumesById(agent) ? id : null, mode: resume ? "resume" : "fresh",
-    resume: resume ?? [], argv, agySettings: settings, note, warning };
+    resume: resume ?? [], argv, agySettings: settings, note, warning, keep: kept.keep };
 }
 
 /**
@@ -658,8 +690,9 @@ export function helperCwd({ get, worker = null, realpath = null }) {
  * `login`: a Claude helper's login words (logins.js chooseLogin), before its argv or its `sh -c`.
  * `env`: home variables the helper's own launch named (#1490: HOME, DSH_HOME, CODEX_HOME or
  * KIMI_CODE_HOME), after its PATH, so the replacement records where its session belongs.
+ * `keep` (#1418, helperPlan's keep): `--keep`, so hc keeps its shell once the program exits.
  */
-export function helperArgs({ name, cwd, labels = {}, parent, argv, path = null, login = [], env: more = {} }) {
+export function helperArgs({ name, cwd, labels = {}, parent, argv, path = null, login = [], env: more = {}, keep = false }) {
   const args = ["run", "--bg", "--json"];
   if (name) args.push("--name", name);
   args.push("--cwd", cwd);
@@ -667,6 +700,8 @@ export function helperArgs({ name, cwd, labels = {}, parent, argv, path = null, 
   // An explicitly empty Bot login pointer stays: it keeps the helper under the login policy (#1509).
   const home = Object.entries(more ?? {}).filter(([k, v]) => typeof v === "string" && (v || k === POINTER_VAR)).map(([k, v]) => `${k}=${v}`);
   const env = envWords([...(path ? [`PATH=${path}`] : []), ...home], login);
+  // #1418: a helper hc kept (helperPlan's keep) is started kept again.
+  if (keep) args.push("--keep");
   return [...args, "--parent", parent, "--", ...(env.length ? [ENV, ...env] : []), ...argv];
 }
 

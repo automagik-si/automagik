@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { callerService, multiuserMode } from './multiuser.js'
 import { refusal } from './refusal.js'
 import { NATIVE_TOOLS_CHANGED_TEXT } from '../shared/held.js'
@@ -14,15 +16,15 @@ export const NATIVE_TOOLS_BLOCK_TEXT = Object.freeze({
   'level-unknown': "Not available: the permission level of this Bot's chat could not be read.",
 })
 
-function shared(ctx, bot) {
-  const people = bot.people
-  if (people !== undefined && (people?.mode !== 'owners' || !Array.isArray(people.allow) || people.allow.length !== 0)) return true
-  try {
-    for (const runtime of ctx.registry.values()) {
-      if (/liveshare/i.test(runtime.name) && [...runtime.fibers].some(fiber => fiber.state === 2)) return true
+// A sharing plugin (LiveShare) that shares right now: one of its fibers is live. Throws when the
+// registry cannot be read.
+function liveShareActive(ctx) {
+  for (const runtime of ctx.registry.values()) {
+    if (/liveshare/i.test(runtime.name) && [...runtime.fibers].some(fiber => fiber.state === 2)) {
+      return true
     }
-    return false
-  } catch { return true }
+  }
+  return false
 }
 
 const levelBlock = mode => {
@@ -50,16 +52,89 @@ export function install(rt) {
     try { return ctx.get('acpAgents')?.nativeModelKept?.(bot.model ?? bot.appliedModel) === true } catch { return false }
   })()
 
+  // The lock the switch had before it applied in every chat of the Bot (#1564, RFC 0003,
+  // Amendment: native tools in every chat of the Bot): `shared`, shared with people, bound to an
+  // IM connection, or a live LiveShare share. It lives on only for the upgrade below and until it
+  // has run on the host that writes the team. Any throw goes to the caller. `managed` is not
+  // removed: Omni's plugin takes the tools of a Bot that operates it. A Main Bot with Omni
+  // configured counts here too, read from the saved link, so the upgrade writes its ON off once
+  // even while `omniLinked()` still reads false at host start (before `omniChannels` registers).
+  function lockOf(bot, liveShare) {
+    if (rt.isMain(bot.id) && (rt.omniLinked?.() === true || typeof rt.config?.omni?.url === 'string'
+      || (typeof rt.home === 'string' && existsSync(join(rt.home, 'omni.json'))))) return 'shared'
+    const people = bot.people
+    if (people !== undefined && (people?.mode !== 'owners' || !Array.isArray(people.allow)
+      || people.allow.length !== 0)) return 'shared'
+    if (rt.imBoundBot?.(bot.id) === true || liveShare()) return 'shared'
+  }
+
+  // The one-time upgrade: a Bot that sat in the removed lock with the switch ON is turned off once,
+  // so nothing gains native tools without the person. It runs at the first native read or switch
+  // write on a host that writes the loaded team. Phase 1 only reads: a throw writes nothing,
+  // sets no marker, warns once and is tried again at the next read. Phase 2 cannot throw: it
+  // writes the Bots and the marker together. Bots already off are not written: the marker then
+  // rides the next save.
+  let retireWarned = false
+  function retireRemovedLocks() {
+    const state = rt.state
+    if (state === undefined || state === null || state.nativeToolsLocksRetired === true) return
+    let list
+    try {
+      if (rt.teamLoaded?.() !== true) return
+      if (rt.holdsLock?.() !== true && rt.canWriteTeam?.() !== true) return
+      const live = liveShareActive(ctx)
+      list = Object.values(state.bots ?? {})
+        .filter(bot => bot?.nativeTools === true && lockOf(bot, () => live) !== undefined)
+    } catch (error) {
+      if (!retireWarned) {
+        retireWarned = true
+        try { rt.warn('ds-bot: native tools upgrade check failed, retrying: %s', error) } catch {}
+      }
+      return
+    }
+    for (const bot of list) {
+      bot.nativeTools = false
+      delete bot.nativeToolsAgent
+      delete bot.nativeToolsKept
+    }
+    state.nativeToolsLocksRetired = true
+    if (list.length === 0) return
+    const failed = (error) => {
+      try { rt.warn('ds-bot: native tools upgrade was not saved yet: %s', error) } catch {}
+    }
+    try { void Promise.resolve(rt.save({ required: true })).catch(failed) }
+    catch (error) { failed(error) }
+  }
+
   function policyBlock(bot) {
+    retireRemovedLocks()
     if (multiuserMode() || callerService(ctx)) return 'multiuser'
     if (modelKept(bot)) return 'model-kept'
     if (bot.kind !== undefined || (rt.isMain(bot.id) && rt.omniLinked?.())) return 'managed'
-    if (shared(ctx, bot) || rt.imBoundBot?.(bot.id)) return 'shared'
+    // Until the upgrade has run, a Bot in the removed lock keeps it, as before.
+    if (rt.state?.nativeToolsLocksRetired !== true) {
+      try {
+        const lock = lockOf(bot, () => liveShareActive(ctx))
+        if (lock !== undefined) return lock
+      } catch { return 'shared' }
+    }
     if (restrictedBot(bot)) return 'restricted'
   }
 
   function nativeToolsBlock(bot) {
     return policyBlock(bot) ?? sandboxBlock(bot)
+  }
+
+  // The block a Bot the person makes now on `model` reads right after it is made (the New
+  // Solver dialog's native tick, RFC 0048): the Bot createBot builds for the user (no id, no
+  // kind, no people, shell on, no denied tools, the level it stores), read through the same
+  // policy and level as a Bot with no live Session. Read only; any throw is `level-unknown`.
+  function nativeToolsNewBotBlock(model) {
+    try {
+      const stored = rt.newBotStoredPermission()
+      const bot = { model, ...(stored === undefined ? {} : { permission: stored }) }
+      return policyBlock(bot) ?? levelBlock(defaultMode(bot))
+    } catch { return 'level-unknown' }
   }
 
   async function saveBlock(bot) {
@@ -86,27 +161,47 @@ export function install(rt) {
     }
   }
 
-  const ownChatBot = sessionId => rt.botOf(rt.chatOwners.get(sessionId))
+  // The Bot a Session runs as: its own chat, a group Session, a task, an earlier part, or a fresh
+  // scheduled Session whose task belongs to one Bot (schedules.js).
+  const sessionBot = sessionId =>
+    rt.botOf(rt.selfOf?.(sessionId) ?? rt.scheduledNativeOwner?.(sessionId))
+  // The switch applies in every Session of the Bot at that Session's own level.
+  function sessionBlock(bot, sessionId) {
+    let session
+    try {
+      session = ctx.sessions?.get?.(sessionId)
+      if (session !== undefined) {
+        return levelBlock(ctx.get('sandboxPolicy')?.resolve?.({ session })?.mode)
+      }
+    } catch { return 'level-unknown' }
+    return sandboxBlock(bot)
+  }
   const nativeToolsEligible = sessionId => {
-    const bot = ownChatBot(sessionId)
-    return bot !== undefined && nativeToolsBlock(bot) === undefined
+    const bot = sessionBot(sessionId)
+    return bot !== undefined && (policyBlock(bot) ?? sessionBlock(bot, sessionId)) === undefined
+  }
+
+  // Ends the native processes of one Session (every agent).
+  function endNativeSession(id) {
+    const acp = ctx.get('acpAgents')
+    if (acp == null) return
+    // An older acp-dsh has no endNative: it ends Claude's processes only.
+    const end = typeof acp.endNative === 'function' ? acp.endNative : acp.endClaudeSession
+    try { end?.call(acp, id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
+    catch (error) { rt.warn('omni-ui: Session %s could not be ended: %s', id, error) }
+    try { acp.endOmpSession?.(id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
+    catch (error) { rt.warn('omni-ui: omp Session %s could not be ended: %s', id, error) }
   }
 
   function endNativeTools(bot) {
-    const acp = ctx.get('acpAgents')
-    if (acp == null) return
+    if (ctx.get('acpAgents') == null) return
     const sessions = [rt.chatOf(bot.id)]
     for (const owners of [rt.groupOwners, rt.pastOwners, rt.taskOwners]) {
       for (const [id, owner] of owners) if (owner.botId === bot.id) sessions.push(id)
     }
-    // An older acp-dsh has no endNative: it ends Claude's processes only.
-    const end = typeof acp.endNative === 'function' ? acp.endNative : acp.endClaudeSession
-    for (const id of sessions) {
-      try { end?.call(acp, id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
-      catch (error) { rt.warn('omni-ui: Session %s could not be ended: %s', id, error) }
-      try { acp.endOmpSession?.(id, NATIVE_OFF_TEXT, NATIVE_TOOLS_CHANGED_TEXT) }
-      catch (error) { rt.warn('omni-ui: omp Session %s could not be ended: %s', id, error) }
-    }
+    // Fresh scheduled Sessions of its tasks too.
+    for (const id of rt.scheduledNativeSessions?.(bot.id) ?? []) sessions.push(id)
+    for (const id of sessions) endNativeSession(id)
   }
 
   async function setNativeTools(id, patch, actorId) {
@@ -157,8 +252,17 @@ export function install(rt) {
     return bot
   }
 
+  // Read only: whether the Bot's switch is ON for the agent it runs on and no Bot-wide lock
+  // blocks it (a managed Bot, one that operates Omni included, always reads false).
+  const nativeToolsBotOn = botId => {
+    const bot = rt.botOf(botId)
+    return bot !== undefined && policyBlock(bot) === undefined && nativeToolsOn(bot)
+  }
+
   Object.assign(rt, {
-    setNativeTools, endNativeTools, nativeToolsBlock, nativeToolsEligible,
-    nativeToolsFor: sessionId => nativeToolsEligible(sessionId) && nativeToolsOn(ownChatBot(sessionId)),
+    setNativeTools, endNativeTools, endNativeSession, nativeToolsBlock, nativeToolsEligible,
+    nativeToolsBotOn, nativeToolsNewBotBlock,
+    nativeToolsFor: sessionId =>
+      nativeToolsEligible(sessionId) && nativeToolsOn(sessionBot(sessionId)),
   })
 }

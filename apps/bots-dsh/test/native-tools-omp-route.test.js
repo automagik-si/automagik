@@ -118,9 +118,10 @@ test('two owner turns at Manual share one ON child, re-checking the saved ON\'s 
   assert.deepEqual(first.servers, [])
   assert.equal(second.pid, first.pid)
   // #1564 PR B (B2-1 (2)): each identity read of the agent tag reads the saved ON too, and
-  // a reused child's eligibility now compares that tag.
-  assert.equal(readsAtStart, 4)
-  assert.equal(reads, readsAtStart + 1)
+  // a reused child's eligibility now compares that tag. #1564 follow-up: the one-time upgrade
+  // reads it once more, and reuse confirms the saved ON itself (fail closed).
+  assert.equal(readsAtStart, 5)
+  assert.equal(reads, readsAtStart + 2)
 })
 
 // #1564 PR B (BD-5): the tag check on reuse is what remakes the child when ending it failed.
@@ -142,7 +143,8 @@ test('turning OFF while endOmpSession throws: the next owner turn does not reuse
   assert.deepEqual(after.args, offArgs(h.overlayPath))
 })
 
-test('a real scheduled delivery starts OFF and an owner turn replays its history ON', async t => {
+// #1564 follow-up: a scheduled delivery follows the Bot's switch.
+test('a real scheduled delivery starts ON, and an owner turn replays its history ON', async t => {
   const h = await host(t)
   const chat = h.chat()
   const ctx = new Context()
@@ -184,7 +186,7 @@ test('a real scheduled delivery starts OFF and an owner turn replays its history
   const second = h.conversation('replay-marker')
   assert.match(second.prompt, /scheduled-marker/)
   assert.notEqual(second.pid, first.pid)
-  assert.deepEqual(first.args, offArgs(h.overlayPath))
+  assert.deepEqual(first.args, ['acp'])
   assert.deepEqual(second.args, ['acp'])
 })
 
@@ -213,8 +215,10 @@ async function startFreshPart(h) {
   return { ...fresh, relay }
 }
 
+// #1564 follow-up: the handoff relay follows the saved switch too, so the relay opens omp ON
+// and the next owner input reuses it.
 for (const opening of ['failed relay', 'ACK with generated system prompt']) {
-  test(`a real new-part ${opening} permits the next owner input to reach omp ON`, async t => {
+  test(`a real new-part ${opening} opens omp ON, and the next owner input reaches it`, async t => {
     const h = await host(t)
     h.rt.botOf('a').nativeToolsKept = OMP
     const chat = await startFreshPart(h)
@@ -226,15 +230,15 @@ for (const opening of ['failed relay', 'ACK with generated system prompt']) {
     const openingMessages = session.deriveMessages()
     assert.deepEqual(openingMessages.map(message => message.source.kind), ['system-prompt', 'bot'])
     const promptCount = h.events('prompt').length
-    let off
+    let relayRun
     if (opening === 'failed relay') {
       // ACP takes the relay but rejects model choice before it can send a prompt.
       const failed = await chat.stream({ model: 'unsupported-model' })
       assert.equal(failed.at(-1).reason.kind, 'error')
       assert.match(failed.at(-1).reason.failure.message, /would not take unsupported-model/)
-      off = h.adapter.live.get(session.id).run
-      assert.equal(off.alive, true)
-      assert.deepEqual(h.events('start').find(row => row.pid === off.child.pid)?.args, offArgs(h.overlayPath))
+      relayRun = h.adapter.live.get(session.id).run
+      assert.equal(relayRun.alive, true)
+      assert.deepEqual(h.events('start').find(row => row.pid === relayRun.child.pid)?.args, ['acp'])
     } else {
       const stream = h.ctx.listeners.get('llm/stream').reduceRight(
         (next, handler) => options => handler(options, updated => next(updated ?? options)),
@@ -260,15 +264,13 @@ for (const opening of ['failed relay', 'ACK with generated system prompt']) {
     assert.equal(messages.at(-1).id, owner.id)
     assert.equal((await chat.stream()).at(-1).reason.kind, 'stop')
     const on = h.conversation('fresh-part-owner')
-    t.diagnostic(JSON.stringify({ opening, offPid: off?.child.pid, ownerPid: on.pid, argv: on.args, sources: messages.map(m => m.source.kind) }))
+    t.diagnostic(JSON.stringify({ opening, relayPid: relayRun?.child.pid, ownerPid: on.pid, argv: on.args, sources: messages.map(m => m.source.kind) }))
     assert.deepEqual(on.args, ['acp'])
     assert.match(on.prompt, /\[Handoff · part \d+\]/)
     assert.equal(h.adapter.live.get(session.id).provider, OMP)
-    if (off) {
-      assert.notEqual(on.pid, off.child.pid)
-      assert.equal(h.events('prompt').some(row => row.pid === off.child.pid), false)
-      await off.gone.catch(() => {})
-      assert.equal(off.alive, false)
+    if (relayRun) {
+      assert.equal(on.pid, relayRun.child.pid)
+      assert.equal(relayRun.alive, true)
     } else assert.ok(on.prompt.includes(HANDOFF_ACK))
   })
 }
@@ -279,6 +281,8 @@ for (const phase of ['held ACP startup', 'live turn']) {
     const ben = h.chat('ben')
     const other = h.chat('old-a')
     const off = h.chat('off-a')
+    // #1564 follow-up: an earlier part follows the switch too; Read only keeps this one OFF.
+    off.session.append('sandbox/mode', { mode: 'read-only' })
     await ben.turn('plain ben-control')
     await other.turn('plain other-control', HERMES)
     await off.turn('plain off-control')

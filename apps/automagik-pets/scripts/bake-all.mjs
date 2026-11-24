@@ -1,4 +1,4 @@
-// Bakes every look, 21 characters in 19 inks, into a bots home and reports the time it took
+// Bakes every look, 33 characters in 19 inks, into a bots home and reports the time it took
 // and the size of one folder.
 //
 //   node scripts/bake-all.mjs <bots home> [--jobs 4]

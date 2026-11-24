@@ -12,17 +12,22 @@
 //   - another View on top (files and the like): not mounted; the attempt goes on in the host.
 // The row's state lives in cli-login-state.js, above the portal: a remount loses nothing.
 //
-// The composer and its model menu stay as they are. While Claude's code step is shown, the
-// native editor takes no edit (D18): its draft stays untouched, the code goes only through the
-// field here. Afterwards a paste, a drop or a send that carries `#<state>` of a state this page
-// showed is refused (installKnownStateGuard). Only this page's states: after a reload or in another
+// The composer and its model menu stay as they are. While Claude's code step (or Antigravity's
+// paste step, #2048) is shown, the native editor takes no edit (D18): its draft stays untouched,
+// the code or the address goes only through the field here. Afterwards a paste, a drop or a send
+// that carries `#<state>` of a Claude state, or `state=<state>` of an Antigravity link's state,
+// this page showed is refused (installKnownStateGuard).
+//
+// Antigravity (#2048, parity) signs in here as Claude Code does, through its app sign-in in
+// acp-dsh: the link with Copy link and its expiry, then a field for the address the browser
+// ends on after the person signs in, on this computer or any other. Only this page's states: after a reload or in another
 // window the host's step guard is what remains, and DSH has recorded the prompt by then (the
 // residual risk in host/cli-login.js's header and RFC 0023).
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { currentPart } from './text.js'
 import { dateLocale, hostText, t } from './i18n.js'
-import { CLI_NAMES, carriesKnownState, cliLoginBotOf, knowsStates } from './cli-login-model.js'
+import { CLI_NAMES, SIGN_IN_NAMES, carriesKnownState, cliLoginBotOf, knowsStates, rememberCallbackState } from './cli-login-model.js'
 
 export const CLI_LOGIN_BRIDGE = Symbol.for('automagik.cli-login')
 const noSubscribe = () => () => {}
@@ -30,20 +35,25 @@ const safeLink = value => { try { return new URL(value).protocol === 'https:' ? 
 const occurrenceOf = sessionId => [...document.querySelectorAll('[data-conversation-content][data-conversation-session]')]
   .find(node => node.dataset.conversationSession === sessionId)
 
-/** Whether a row is at Claude's code step, the one that locks the native editor (D18). */
-const codeStep = row => row?.stage === 'attempt' && row.provider === 'acp-claude' && row.attempt?.status === 'waiting'
+// The agents whose attempt asks for something pasted back: Claude's code, Antigravity's address.
+const PASTES = new Set(['acp-claude', 'acp-antigravity'])
+/** Whether a row is at a paste step (Claude's code, Antigravity's address), the one that locks the native editor (D18). */
+const codeStep = row => row?.stage === 'attempt' && PASTES.has(row.provider) && row.attempt?.status === 'waiting'
   && row.attempt.prompt !== undefined && row.attempt.checking !== true
 
 // Welcome (and anything else outside the chat) opens the row in the selected Bot, else the Main
-// Bot, through this bridge: it only opens the chat and the offer, never starts a sign-in.
+// Bot, through this bridge: it only opens the chat and the offer, never starts a sign-in. A page
+// that shows an Antigravity sign-in link elsewhere (Settings, Connect AI) hands it here
+// (`remember`), so this page's composers refuse the address it ends on too.
 export function installCliLoginBridge({ scope = globalThis, selectedBot, mainBot, openLogin }) {
   const bridge = {
     open(provider) {
-      if (!Object.hasOwn(CLI_NAMES, provider)) return false
+      if (!Object.hasOwn(SIGN_IN_NAMES, provider)) return false
       const bot = selectedBot() ?? mainBot()
       if (!bot) return false
       return openLogin(bot.id, provider)
     },
+    remember(url) { return rememberCallbackState(url) },
   }
   scope[CLI_LOGIN_BRIDGE] = bridge
   return () => { if (scope[CLI_LOGIN_BRIDGE] === bridge) delete scope[CLI_LOGIN_BRIDGE] }
@@ -119,7 +129,7 @@ const FIELD_EVENTS = ['keydown', 'keyup', 'keypress', 'beforeinput', 'input', 'p
   'compositionstart', 'compositionupdate', 'compositionend', 'select', 'focusin', 'focusout']
 const BLOCKED = new Set(['copy', 'cut', 'drop', 'dragover'])
 
-function CodeField({ disabled, busy, onSubmit, fieldRef }) {
+function CodeField({ disabled, busy, onSubmit, fieldRef, label = 'Authorization code' }) {
   const wrap = useRef(null)
   const input = useRef(null)
   const [filled, setFilled] = useState(false)
@@ -157,7 +167,7 @@ function CodeField({ disabled, busy, onSubmit, fieldRef }) {
     h('span', { ref: wrap, className: 'bt-cli-code-wrap', 'data-cli-login-field': '' },
       h('input', {
         ref: input, type: 'password', className: 'bt-input bt-cli-code-input', disabled, autoComplete: 'off', autoCorrect: 'off', autoCapitalize: 'off',
-        spellCheck: false, 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-bwignore': '', 'data-form-type': 'other', 'aria-label': t('Authorization code'),
+        spellCheck: false, 'data-1p-ignore': '', 'data-lpignore': 'true', 'data-bwignore': '', 'data-form-type': 'other', 'aria-label': t(label),
       })),
     h('button', { type: 'button', className: 'bt-q-submit', disabled: disabled || busy || !filled, onClick: submit }, t('Send')))
 }
@@ -174,7 +184,8 @@ function CopyLink({ url }) {
 }
 
 function Attempt({ bot, row, roster, manager, secretPending, fieldRef }) {
-  const name = CLI_NAMES[row.provider]
+  const name = SIGN_IN_NAMES[row.provider]
+  const agy = row.provider === 'acp-antigravity'
   const attempt = row.attempt
   const url = safeLink(attempt?.url)
   const opener = attempt?.openedBy && attempt.openedBy !== bot.id ? roster.byId?.[attempt.openedBy]?.name : undefined
@@ -196,9 +207,13 @@ function Attempt({ bot, row, roster, manager, secretPending, fieldRef }) {
       h('p', null, t('Enter this code on that page:'), ' ', h('code', { className: 'bt-cli-code-text' }, attempt.userCode)),
       h('p', { className: 'bt-cli-subtle' }, t('Waiting for {name} to confirm…', { name }))) : null,
     row.provider === 'acp-claude' && attempt?.checking ? h('p', { className: 'bt-cli-subtle' }, t('Checking the code…')) : null,
+    agy && attempt?.checking ? h('p', { className: 'bt-cli-subtle' }, t('Finishing the sign-in to {name}…', { name })) : null,
     step ? h(Fragment, null,
-      h('p', null, t('Paste here the code shown after you authorize:')),
-      h(CodeField, { disabled: secretPending, busy: row.busy, fieldRef, onSubmit: value => void manager.answer(bot.id, value) }),
+      h('p', null, agy ? t('Paste here the address your browser ends on after you sign in:') : t('Paste here the code shown after you authorize:')),
+      h(CodeField, {
+        disabled: secretPending, busy: row.busy, fieldRef, onSubmit: value => void manager.answer(bot.id, value),
+        ...(typeof attempt.prompt?.label === 'string' ? { label: attempt.prompt.label } : {}),
+      }),
       h('p', { className: 'bt-cli-subtle' }, secretPending ? t('Finish the secret requested first.') : t('The message field comes back as soon as you send the code or cancel.'))) : null,
     row.error ? h('p', { className: 'bt-cli-error', role: 'alert' }, hostText(row.error)) : null,
     h('div', { className: 'bt-cli-actions' },
@@ -247,7 +262,7 @@ export async function announceCarried({ actions }) {
 const modelName = (roster, ref) => (typeof ref === 'string' ? roster.models?.find(model => model.ref === ref)?.name ?? (ref.split('/').slice(1).join('/') || ref) : '')
 
 function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef }) {
-  const name = CLI_NAMES[row.provider]
+  const name = SIGN_IN_NAMES[row.provider]
   // An explicit entry brings the row into view once; nothing scrolls after that.
   useLayoutEffect(() => {
     if (row.reveal === undefined) return

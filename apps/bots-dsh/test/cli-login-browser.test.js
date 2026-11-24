@@ -667,3 +667,86 @@ test('the machine card shows the sign-out reason and missing folder notice', asy
     + 'this machine has no reservations folder.'
   await codex.getByText(notice, { exact: true }).waitFor()
 })
+
+// ---- Antigravity in a Bot's chat (#2048, r6 parity) ------------------------------------------
+
+async function antigravityStep(page, id = 'alpha') {
+  await page.evaluate(id => window.openLogin(id, 'acp-antigravity'), id)
+  await row(page, id).getByRole('button', { name: 'Sign in', exact: true }).click()
+  await field(page).waitFor()
+}
+const pasteInto = async (page, editor, text) => {
+  await editor.click()
+  await page.evaluate(value => navigator.clipboard.writeText(value), text)
+  await page.keyboard.press('Control+v')
+}
+
+test('Antigravity: the row shows Google\'s link, Copy link, the address field and Finishing; then Done', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await seed(page)
+  const link = await page.evaluate(() => window.AGY_LINK)
+  const callback = await page.evaluate(() => window.AGY_CALLBACK)
+  // Nothing opens the link by itself (#2048, r9): only a person's click does.
+  await page.evaluate(() => { window.OPENED = 0; window.open = () => { window.OPENED += 1; return null } })
+  await antigravityStep(page)
+  const shown = row(page)
+  assert.equal(await shown.locator('a').getAttribute('href'), link)
+  await shown.getByRole('button', { name: 'Copy link' }).waitFor()
+  await shown.filter({ hasText: 'Paste here the address your browser ends on after you sign in:' }).waitFor()
+  await shown.filter({ hasText: 'Expires at' }).waitFor()
+  assert.equal(await page.evaluate(() => window.OPENED), 0)
+  assert.equal(await shown.locator('a').getAttribute('target'), '_blank')
+  assert.equal(await field(page).getAttribute('aria-label'), 'Sign-in address')
+  assert.equal(await field(page).getAttribute('type'), 'password')
+  // While the paste step shows, the native editor takes no edit (D18).
+  await editorOf(page).click()
+  await page.keyboard.type('typed')
+  assert.doesNotMatch(await editorOf(page).innerText(), /typed/)
+  // A wrong address: refused, the field emptied, the step kept.
+  await field(page).click()
+  await page.keyboard.type('http://localhost:1/auth/callback?code=x&state=y')
+  await page.keyboard.press('Enter')
+  await shown.getByRole('alert').filter({ hasText: 'This link is not from this sign-in.' }).waitFor()
+  assert.equal(await field(page).inputValue(), '')
+  await field(page).click()
+  await page.evaluate(text => navigator.clipboard.writeText(`  ${text}\n`), callback)
+  await page.keyboard.press('Control+v')
+  await shown.getByRole('button', { name: 'Send', exact: true }).click()
+  await shown.filter({ hasText: 'Finishing the sign-in to Antigravity…' }).waitFor()
+  assert.equal((await calls(page, 'cli-login-answer')).at(-1).payload.value, callback)
+  await page.evaluate(() => window.finishSignIn('acp-antigravity'))
+  await shown.filter({ hasText: 'Done: signed in to Antigravity.' }).waitFor()
+})
+
+test('Antigravity: the address it ends on is refused in the composer in any shape; Google\'s link is allowed', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await seed(page)
+  const state = await page.evaluate(() => window.AGY_STATE)
+  const link = await page.evaluate(() => window.AGY_LINK)
+  const callback = await page.evaluate(() => window.AGY_CALLBACK)
+  await antigravityStep(page)
+  await row(page).getByRole('button', { name: 'Cancel sign-in' }).click()
+  await row(page).getByRole('button', { name: 'Yes, cancel' }).click()
+  await row(page).waitFor({ state: 'detached' })
+  // Only an Antigravity state was shown on this page (no Claude link): still refused (G7-5).
+  const editor = editorOf(page)
+  const redirectFirst = 'https://accounts.google.com/o/oauth2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback'
+    + `&access_type=offline&state=${state}&client_id=c`
+  for (const text of [callback, `(${callback})`, `${callback}.`, `${callback},`, `"${callback}"`,
+    callback.replace(state, `${state.slice(0, 5)}\n${state.slice(5)}`), callback.replace('~', '%7E'), `${redirectFirst} then ${callback}`]) {
+    await pasteInto(page, editor, text)
+    assert.doesNotMatch(await editor.innerText(), /auth\/callback/, text)
+  }
+  assert.ok(await page.evaluate(() => window.refusedNotices) > 0)
+  // Google's link itself, in either parameter order, goes in as typed text.
+  for (const text of [link, redirectFirst]) {
+    await page.evaluate(() => window.forceDraft('alpha', ''))
+    await pasteInto(page, editor, text)
+    assert.match(await editor.innerText(), /accounts\.google\.com/, text)
+  }
+  await page.keyboard.press('Enter')
+  await page.waitForFunction(() => window.sends.length === 1)
+  assert.match((await page.evaluate(() => window.sends))[0].text, /accounts\.google\.com/)
+})

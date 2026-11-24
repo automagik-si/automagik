@@ -14,12 +14,14 @@
 // this plugin's live settings, written through DSH's settings service.
 import { sessionFileConfig } from './src/host/session-files.js'
 import { execFile, spawn } from 'node:child_process'
-import { dirname, join, posix, sep } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { delimiter, dirname, join, posix, sep } from 'node:path'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
 import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js'
 import { AcpAdapter, aside, BRIDGE_PATH, SIDE_MODEL } from './src/host/adapter.js'
-import { AGENTS, findCommand, isNative, launchOf, signedInOf } from './src/host/agents.js'
+import { AgentRun, isUnanswered } from './src/host/acp.js'
+import { AGENTS, cliIdOf, findCommand, isNative, isolatedSignInHintOf, isSignInUrl, launchOf, signedInOf, signInHintOf } from './src/host/agents.js'
 import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
@@ -38,6 +40,8 @@ import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
 import { writeOmpOverlay } from './src/host/omp-overlay.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
 import { retiredLine } from './src/host/retired-home.js'
+import { callbackOf, checkCallback, deliverCallback } from './src/host/sign-in-callback.js'
+import { makeSignInOpener, readSignInLinks, removeSignInOpener, sweepSignInOpeners } from './src/host/sign-in-opener.js'
 import { enginesFor, PRESSURE_METHOD, pressureGuard } from './src/host/pressure.js'
 import { redactorFor } from './src/host/redact.js'
 import {
@@ -67,7 +71,7 @@ export const Config = z.object({
   // Automagik, and turning one on is the person's word that the app may use the sign-in that CLI
   // already has on this computer, shared with their terminal.
   hermes: z.boolean().default(false).volatile().description('Offer Hermes as the acp-hermes model when the hermes CLI is installed. It runs `hermes acp` on the sign-in and settings Hermes already has on this computer.'),
-  antigravity: z.boolean().default(false).volatile().description('Offer Antigravity as the acp-antigravity model when the agy CLI is installed. It runs `agy acp` on the sign-in and settings Antigravity already has on this computer.'),
+  antigravity: z.boolean().default(false).volatile().description('Offer Antigravity as the acp-antigravity model when the agy CLI is installed. It runs `agy acp` in its own home in this installation, signed in from Settings, apart from the Antigravity sign-in in your terminal.'),
   omp: z.boolean().default(false).volatile().description('Offer omp as the acp-omp model when the omp CLI is installed. It runs `omp acp` on the sign-in and settings omp already has on this computer.'),
   sideModel: z.object({
     provider: z.string().required(),
@@ -165,6 +169,10 @@ function defaultCliHome(ctx, storeHome, identity) {
  *   person's word for each account is kept (consent.js), in the isolated CLI root by default.
  *   evidenceOf: a direct account read for the owner's reservation check (account.js).
  *   installation: the DSH home used for the default private CLI root. cliHome overrides that root.
+ *   nativeSignInMs, nativeLogoutMs: how long an in-app sign-in (ACP `authenticate`) and a sign-out
+ *   over ACP may take, shorter in tests. nativeSignInWindowMs: how long a sign-in link stays
+ *   good from `authenticate` (shown as its expiry); nativeSignInCheckMs: how long agy has to
+ *   finish once a pasted address was delivered (#2048, paste-back).
  *   logoutRun: fake logout runner for tests. A synthetic store
  *   without a home keeps the legacy in-memory test behavior; real stores always have a home.
  */
@@ -181,6 +189,8 @@ export function apply(ctx, config = {}, {
   cliHome: override, consentFile: accountFile,
   logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile,
   platform = process.platform,
+  nativeSignInMs = 600_000, nativeLogoutMs = 30_000, nativeSignInLinkMs = 15_000,
+  nativeSignInWindowMs = 240_000, nativeSignInCheckMs = 60_000,
 } = {}) {
   // Windows has no Codex chat permission profiles (codex-chat-profiles.js). There, and only there,
   // an OFF Codex takes its legacy `read-only` mode as the backstop instead: adapter.js forces that
@@ -201,9 +211,13 @@ export function apply(ctx, config = {}, {
     onRecordError: vendor => warn(ctx, `the ${vendor} generation record could not be saved at startup`),
     onRetired: (vendor, retired) => info(ctx, retiredLine(vendor, retired)),
   })
-  if (homes) for (const vendor of ['claude', 'codex']) {
+  // Antigravity has its own home too (#2048), on every installation with one, even while it is
+  // off: its CliLogins recovery below does not apply (agy never has login trees).
+  if (homes) for (const vendor of ['claude', 'codex', 'antigravity']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.
   }
+  // Sign-in attempts' folders a crash left behind (signInNative's stand-in opener).
+  if (homes) sweepSignInOpeners(homes.acpHome)
   if (homes) for (const vendor of ['claude', 'codex']) void homes.recoverLogins(vendor).catch(() => {})
   if (cliStore === undefined && !config.fakeAgent
     && (process.env.AUTOMAGIK_APP_BROWSER === '1' || process.env.AUTOMAGIK_PNPM)) {
@@ -307,6 +321,26 @@ export function apply(ctx, config = {}, {
   const signIns = new Map()
   // Why an agent's last sign-in check could not tell, while its sign-in is unknown.
   const signInChecks = new Map()
+  // In-app sign-ins of an agent with its own home (signInNative): the attempt at work, one per
+  // agent, and the one word that says why the last one failed (`unsupported`, `timeout`,
+  // `failed`), kept until the next attempt or a check that finds it signed in.
+  const nativeSignIns = new Map()
+  const nativeSignInErrors = new Map()
+  // For acceptance, the two log words as status fields, set where the log lines are written:
+  // whether the agent offers a sign-out over ACP (`yes|no`), and how the last sign-out over ACP
+  // went (`done|none|failed`; cleared when a sign-in starts).
+  const signOutOverAcp = new Map()
+  const lastSignOuts = new Map()
+  // How the last in-app attempt ended, in one word, for acceptance (`signInEnd`): agy's own end
+  // (`agent-error`, `agent-exit`), the process cap (`deadline`), the link's window (`window`),
+  // the cap after a delivered paste (`checking`) or a paste that did not reach agy
+  // (`unreachable`). Cleared when a sign-in starts.
+  const signInEnds = new Map()
+  // The last ended in-app attempt of each agent, for a Bot chat that reads it by its id
+  // (loginStatus) for NATIVE_RETAIN_MS: { attemptId, status, cause?, at }.
+  const nativeEnded = new Map()
+  const NATIVE_RETAIN_MS = 60_000
+  const abortNativeSignIn = (id) => { nativeSignIns.get(id)?.controller.abort() }
   // Account consent inside the isolated home (#869, consent.js): a signed-in CLI is used for
   // chats/images only once the person said so. `consentStates` is what the last
   // read of each agent meant ('given', 'carried', 'needed'); `accountsSeen` who it was signed in
@@ -322,6 +356,20 @@ export function apply(ctx, config = {}, {
     log: message => warn(ctx, message),
   })
   const consentIds = Object.keys(AGENTS).filter(id => !isNative(AGENTS[id]))
+  // The agents that run in this installation's own home (cli-homes.js): Claude Code and Codex,
+  // and a native agent marked `isolatedHome` (Antigravity, #2048). Only the first two have an
+  // account read, a consent and a logout command (`consentIds`); the homed native one signs in
+  // and out in the app only (signInNative, resetAccount).
+  const homed = spec => homes !== undefined && (!isNative(spec) || spec?.isolatedHome === true)
+  const homedNative = spec => homed(spec) && isNative(spec)
+  const homeIds = Object.keys(AGENTS).filter(id => homed(AGENTS[id]))
+  // The homed native agent's terminal command, in its own home, for the log only (never the
+  // page or a chat); undefined when it cannot be quoted safely (agents.js isolatedSignInHintOf).
+  const isolatedHint = (spec, detail) => {
+    let home
+    try { home = homes.home(spec.key) } catch { return undefined }
+    return isolatedSignInHintOf(spec, detail, home, platform)
+  }
   const consentStates = new Map()
   const accountsSeen = new Map()
   // The account reads still running behind an answer already given (`probe`), and a count per
@@ -342,7 +390,7 @@ export function apply(ctx, config = {}, {
   let registration
   let disposed = false
   const cliEnvironment = (spec, detail) => {
-    const env = homes && !isNative(spec) ? homes.environment(spec.key) : {}
+    const env = homed(spec) ? homes.environment(spec.key) : {}
     if (!detail?.managed) return env
     if (spec.key === 'claude') return { ...env, DISABLE_UPDATES: '1' }
     // Managed Codex runs its native executable; inherited package-manager ownership flags
@@ -504,7 +552,10 @@ export function apply(ctx, config = {}, {
     // with the models it never applies to (adapter.js nativeKept).
     ...(spec.nativeSwitch ? { nativeSwitch: spec.nativeSwitch } : {}),
     ...(spec.nativeKeptModels ? { nativeKeptModels: spec.nativeKeptModels } : {}),
-    ...(typeof spec.signInHint === 'string' ? { signInHint: spec.signInHint } : {}),
+    // A copy Automagik installed (Antigravity) is not on PATH: the command names its path. One
+    // with its own home signs in only in Settings, which the chat names instead.
+    ...(homedNative(spec) ? { signInWhere: 'settings' }
+      : typeof spec.signInHint === 'string' ? { signInHint: signInHintOf(spec, cliDetails.get(id)) } : {}),
     ...(spec.modeFor === undefined ? { levelNotice: true } : {}),
     cli,
     // The agent's own models and efforts, read from the adapter release installed now.
@@ -516,7 +567,7 @@ export function apply(ctx, config = {}, {
       onChange: catalog => {
         if (!disposed && agents.get(id)?.catalog === catalog) publish()
       },
-      home: homes && !isNative(spec) ? join(cliHome, 'catalog') : catalogHome,
+      home: homed(spec) ? join(cliHome, 'catalog') : catalogHome,
       log,
       key: () => launch(spec, cli, id).key,
       spawn: () => { const { command, args, env } = launch(spec, cli, id); return { command, args, env } },
@@ -616,8 +667,11 @@ export function apply(ctx, config = {}, {
     const added = []
     for (const [id, spec] of Object.entries(AGENTS)) {
       const external = find(spec.cli)
-      // Only a CLI Automagik installs itself (`cliPackage`) can have a managed copy.
-      const detail = (spec.cliPackage === undefined ? undefined : cliStore?.find(spec, external)) ?? (external ? { path: external, managed: false } : undefined)
+      // An install a hard quit left half done goes now, with no click (a manual CLI's folder).
+      if (spec.cliInstall?.manual) cliStore?.sweep?.(spec)
+      // Only a CLI Automagik installs itself (`cliPackage`, or a manual `cliInstall`) can have a
+      // managed copy.
+      const detail = (cliIdOf(spec) === undefined ? undefined : cliStore?.find(spec, external)) ?? (external ? { path: external, managed: false } : undefined)
       const cli = detail?.path
       cliDetails.set(id, detail)
       if (clis.get(id) !== cli) { signIns.delete(id); signInChecks.delete(id) }
@@ -631,6 +685,8 @@ export function apply(ctx, config = {}, {
         changed = true
         if (have === undefined) added.push(spec)
       } else if (!want && have !== undefined) {
+        // Turned off (or its CLI gone): an in-app sign-in under way ends with it.
+        abortNativeSignIn(id)
         if (have.sessionFiles) adapter.endProvider(id, 'The Codex provider is no longer available.')
         have.catalog?.dispose()
         agents.delete(id)
@@ -648,12 +704,22 @@ export function apply(ctx, config = {}, {
   const probe = async (id, { fresh = false } = {}) => {
     const spec = AGENTS[id]
     const version = authVersions.get(id)
-    if (homes && !isNative(spec) && (accountChanges.has(id) || homes.paused(spec.key))) {
+    let env
+    try {
+      if (homed(spec) && (accountChanges.has(id) || homes.paused(spec.key))) {
+        signIns.set(id, false)
+        return
+      }
+      env = { ...process.env, ...cliEnvironment(spec, cliDetails.get(id)) }
+    } catch (error) {
+      // A homed native agent whose home cannot be read (a damaged pointer) is signed out: its
+      // Sign in retires that home and signs in to a fresh one (signInNative). Claude Code and
+      // Codex keep their own recovery (accountRecovery).
+      if (!homedNative(spec)) throw error
       signIns.set(id, false)
       return
     }
     const cli = clis.get(id)
-    const env = { ...process.env, ...cliEnvironment(spec, cliDetails.get(id)) }
     // Why a check that ran could not tell (agents.js `signedInOf`): a timeout or an answer it
     // could not read. Kept only while the sign-in is unknown, for the status row. It is this
     // probe's own until an answer that is not "signed in" is written, and is written with it
@@ -672,6 +738,8 @@ export function apply(ctx, config = {}, {
     const epoch = nextEpoch(id)
     if (authenticated !== true || consents === undefined || isNative(spec)) {
       if (clis.get(id) === cli) {
+        // A sign-in that now holds clears the last in-app attempt's failure.
+        if (authenticated === true) nativeSignInErrors.delete(id)
         signIns.set(id, authenticated)
         noteCheck(authenticated)
         noteAccount(id, authenticated, undefined)
@@ -704,7 +772,8 @@ export function apply(ctx, config = {}, {
       noteAccount(id, true, who)
     }
   }
-  const probeAll = options => Promise.all(Object.keys(AGENTS).map(id => probe(id, options)))
+  // One agent whose check throws never keeps the others' answers from the person.
+  const probeAll = options => Promise.all(Object.keys(AGENTS).map(id => probe(id, options).catch(() => {})))
   // One agent's status with a fresh sign-in check, for a Bot that is about to be put on it
   // (bots-dsh models.js). Read-only: it asks the CLI `auth status` and nothing else, never
   // installs, enables or starts a login. Only that sign-in check is shared and kept: checks a
@@ -774,16 +843,20 @@ export function apply(ctx, config = {}, {
 
   // Required desktop tools are independent of model switches and onboarding. Installing
   // them never starts authentication; the existing explicit refresh owns sign-in checks.
-  const ensureCli = (spec, { force = false } = {}) => {
-    // Only a CLI with an official package (`cliPackage`) is Automagik's to install.
-    if (!cliStore || disposed || spec.cliPackage === undefined) return Promise.resolve()
-    return cliStore.ensure(spec, find(spec.cli), { force }).then(() => {
+  const ensureCli = (spec, { force = false, click = false } = {}) => {
+    // Only a CLI with an official package (`cliPackage`) or a manual install (`cliInstall`) is
+    // Automagik's to install, and a manual one only on the person's click (installCli): the
+    // start, the 15 min check, a plugin install, a switch, Retry and refresh never reach it.
+    if (!cliStore || disposed || cliIdOf(spec) === undefined) return Promise.resolve()
+    if (spec.cliInstall?.manual && click !== true) return Promise.resolve()
+    return cliStore.ensure(spec, find(spec.cli), { force, click }).then(() => {
       if (!disposed) reconcile()
     }, () => {
       if (!disposed) {
         // Discovery may have found a newer verified local copy before the registry failed.
         reconcile()
-        warn(ctx, `${spec.defaultName} update check failed: ${cliStore.lastError?.(spec.cliPackage) ?? 'the install failed'}`)
+        // A manual CLI only ever installs on a click: there is no update check to speak of.
+        warn(ctx, `${spec.defaultName} ${spec.cliInstall?.manual ? 'install failed' : 'update check failed'}: ${cliStore.lastError?.(cliIdOf(spec)) ?? 'the install failed'}`)
       }
     })
   }
@@ -813,9 +886,11 @@ export function apply(ctx, config = {}, {
     const failure = installFailure ?? (native ? undefined : recordWaits.get(spec.adapter))
     const connectorState = native ? undefined : store.stateOf?.(spec.adapter)
     // Only a CLI Automagik installs itself has an install to report; any other is found or missing.
-    const managed = cliStore !== undefined && spec.cliPackage !== undefined
-    const cliFailure = managed ? cliStore.lastFailure(spec.cliPackage) : undefined
-    const cliBusy = managed && cliStore.busy(spec.cliPackage) === true
+    const managed = cliStore !== undefined && cliIdOf(spec) !== undefined
+    // A manual one (Antigravity) installs on the person's click only: missing until then.
+    const manual = managed && spec.cliInstall?.manual === true
+    const cliFailure = managed ? cliStore.lastFailure(cliIdOf(spec)) : undefined
+    const cliBusy = managed && cliStore.busy(cliIdOf(spec)) === true
     const detail = cliDetails.get(id)
     // A connector being reinstalled (Retry, or a start that showed it damaged) is installing:
     // the settings page says so and follows it until it is back.
@@ -839,8 +914,11 @@ export function apply(ctx, config = {}, {
       cli: {
         found: cli !== undefined, installUrl: spec.installUrl,
         // How the person signs in to a CLI that has no sign-in in the app: its terminal command.
-        ...(typeof spec.signInHint === 'string' ? { signInHint: spec.signInHint } : {}),
-        state: cli ? 'ready' : cliBusy || (managed && !cliFailure) ? 'installing' : cliFailure ? 'failed' : 'missing',
+        // An agent with its own home signs in in the app only: no command (#2048, owner).
+        ...(homedNative(spec) ? {}
+          : typeof spec.signInHint === 'string' ? { signInHint: signInHintOf(spec, detail) } : {}),
+        state: cli ? 'ready' : cliBusy || (managed && !manual && !cliFailure) ? 'installing' : cliFailure ? 'failed' : 'missing',
+        ...(manual ? { install: 'manual' } : {}),
         managed: detail?.managed === true,
         ...(detail?.version ? { version: detail.version } : {}),
         ...(cliBusy && cli ? { updating: true } : {}),
@@ -872,6 +950,23 @@ export function apply(ctx, config = {}, {
       ...(connector === 'failed' && installFailure?.unreachable !== undefined ? { connectorUnreachable: true } : {}),
       ...(signIns.get(id) === undefined ? {} : { signedIn: signIns.get(id) }),
       ...(homes && !native ? { authScope: 'isolated' } : {}),
+      // An agent with its own home that signs in in the app (Antigravity): Settings offers Sign
+      // in (signInNative), says while it runs, with the sign-in link the agent printed if any,
+      // and, in one word, why the last one failed. While a link waits, the page may paste back
+      // the address the browser ends on (`signInPaste`, signInCallback), for that attempt
+      // (`signInAttempt`) until `signInExpiresAt`; `signInChecking` once it was delivered.
+      // Never the pasted address or its code: the status never holds them.
+      ...(homedNative(spec) && typeof spec.acpSignIn === 'string' ? {
+        appSignIn: true,
+        ...(nativeSignIns.has(id) ? nativeSignInFields(nativeSignIns.get(id)) : {}),
+        ...(nativeSignInErrors.has(id) ? { signInError: nativeSignInErrors.get(id) } : {}),
+        ...(signInEnds.has(id) ? { signInEnd: signInEnds.get(id) } : {}),
+        ...(signOutOverAcp.has(id) ? { signOutOverAcp: signOutOverAcp.get(id) } : {}),
+        ...(lastSignOuts.has(id) ? { lastSignOut: lastSignOuts.get(id) } : {}),
+      } : {}),
+      // Windows keeps the sign-in in Credential Manager, which belongs to the Windows account
+      // and not to the home: there the account is shared with the person's own agy.
+      ...(homedNative(spec) && platform === 'win32' ? { sharedAccount: true } : {}),
       // No `signedIn`: the last check ran and could not tell, and this is why. Absent when no
       // check has run yet (or there was nothing to check), so the two are told apart (#971).
       ...(signIns.get(id) === undefined && signInChecks.get(id) !== undefined ? { signInCheck: signInChecks.get(id) } : {}),
@@ -883,6 +978,18 @@ export function apply(ctx, config = {}, {
     }
   }
   const status = async () => ({ agents: await Promise.all(Object.keys(AGENTS).map(statusOf)) })
+  // The status fields of an in-app attempt at work (#2048, paste-back).
+  function nativeSignInFields(attempt) {
+    const pasting = typeof attempt.url === 'string' && attempt.callback !== undefined && !attempt.delivered
+    return {
+      signingIn: true,
+      signInAttempt: attempt.attemptId,
+      ...(typeof attempt.url === 'string' ? { signInUrl: attempt.url } : {}),
+      ...(pasting ? { signInPaste: true } : {}),
+      ...(attempt.delivered ? { signInChecking: true } : {}),
+      ...(!attempt.delivered && Number.isFinite(attempt.expiresAt) ? { signInExpiresAt: attempt.expiresAt } : {}),
+    }
+  }
 
   // A real probe of this machine's bridge, run once per installed adapter version and cached:
   // a fresh per-session credential, the bridge process over stdio, MCP `initialize`, then
@@ -998,6 +1105,9 @@ export function apply(ctx, config = {}, {
   // file, so the app's own restarts wait for an attempt to end.
   const attemptVersions = new Map()
   const logins = new CliLogins({
+    // The command a terminal-only sign-in names: a copy Automagik installed by its path. An
+    // agent with its own home names none (null): it signs in in the app only (#2048).
+    hintOf: id => (homedNative(AGENTS[id]) ? null : signInHintOf(AGENTS[id], cliDetails.get(id))),
     // Why an attempt failed, for the host log (#970): a fixed class, where the attempt stood,
     // the CLI's exit and its version. Never what the CLI printed, a link, a code or an account.
     onFail({ id, cause, phase, exit }) {
@@ -1060,22 +1170,37 @@ export function apply(ctx, config = {}, {
         warn(ctx, `the sign-in of ${id} was not announced: ${error?.message ?? error}`)
       }
     },
-    onActivity(activity) {
-      try { ctx.emit?.('acp-dsh/login-activity', activity) } catch {}
-    },
+    // Both events carry the in-app attempts too (#2048): one count for the busy signal.
+    onActivity(activity) { announceActivity(activity) },
     onChange(active) {
       for (const id of restarting ? [] : loginLocks) {
         if (logins.current(id)) continue
         loginLocks.delete(id)
         homes.end(AGENTS[id].key)
       }
-      try {
-        ctx.emit?.('acp-dsh/login-active', { active })
-      } catch (error) {
-        warn(ctx, `the sign-in count was not announced: ${error?.message ?? error}`)
-      }
+      announceActive(active)
     },
   })
+  // The busy signal counts the in-app sign-ins of a homed native agent beside the terminal
+  // ones (#2048): the app does not restart DSH under a sign-in finishing on another computer.
+  const nativeActive = () => (disposed ? 0 : nativeSignIns.size)
+  const loginActivity = () => {
+    const activity = logins.activity()
+    return { ...activity, active: activity.active + nativeActive() }
+  }
+  const loginActive = () => logins.activeAttempts() + nativeActive()
+  // From CliLogins, its own counts plus the in-app ones; from an in-app start or end, both read.
+  const announceActivity = (activity = logins.activity()) => {
+    try { ctx.emit?.('acp-dsh/login-activity', { ...activity, active: activity.active + nativeActive() }) } catch {}
+  }
+  const announceActive = (active = logins.activeAttempts()) => {
+    try {
+      ctx.emit?.('acp-dsh/login-active', { active: active + nativeActive() })
+    } catch (error) {
+      warn(ctx, `the sign-in count was not announced: ${error?.message ?? error}`)
+    }
+  }
+  const announceLogins = () => { announceActivity(); announceActive() }
 
   // One read of an account, named for the confirm step: never stored.
   const refOf = who => (who?.id === undefined ? 'unknown' : consents.digest(who.id))
@@ -1232,17 +1357,60 @@ export function apply(ctx, config = {}, {
     }
   }
 
+  // A homed native agent's sign-out over ACP, in its current home, before that home is retired:
+  // only where the agent says it can (`agentCapabilities.auth.logout`), never on Windows (the
+  // sign-in there is the person's own too), and never longer than nativeLogoutMs. Whatever
+  // happens is one word in the log, and the retire goes on.
+  async function nativeLogout(id, spec) {
+    if (platform === 'win32') return
+    let word = 'none'
+    let run
+    try {
+      const cli = clis.get(id)
+      if (cli !== undefined && !homes.paused(spec.key) && !homes.changing(spec.key)) {
+        const { command, args, env } = launch(spec, cli, id)
+        run = new AgentRun({ command, args, env, cwd: env[HOME_ENV], name: spec.name, logout: true,
+          startMs: nativeLogoutMs })
+        await run.start()
+        if (run.init !== undefined) signOutOverAcp.set(id, run.init?.agentCapabilities?.auth?.logout ? 'yes' : 'no')
+        word = run.loggedOut === true ? 'done' : 'none'
+      }
+    } catch {
+      word = 'failed'
+    } finally {
+      try { run?.dispose() } catch {}
+    }
+    lastSignOuts.set(id, word)
+    info(ctx, `${spec.defaultName} sign-out over ACP: ${word}`)
+  }
+
   async function resetAccount(id) {
     restartGuard()
-    if (!homes || !consentIds.includes(id) || disposed) {
+    if (!homes || !homeIds.includes(id) || disposed) {
       throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
     }
     if (accountChanges.has(id)) throw accountFailure('busy', 'The Bot account is changing.')
     const spec = AGENTS[id]
-    // Reserve outside the replaceable home before pausing/awaiting work. Other app instances
-    // cannot reset or admit a launch while the pointer transition is in progress.
-    const reset = homes.reserveReset(spec.key)
+    const native = isNative(spec)
+    // The change is marked first, so a second Sign out or a Sign in during the sign-out over
+    // ACP below is refused as busy, and an in-app sign-in under way ends.
     accountChanges.add(id)
+    let reset
+    try {
+      if (native) {
+        abortNativeSignIn(id)
+        await nativeLogout(id, spec)
+        restartGuard()
+        if (disposed) throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
+      }
+      // Reserve outside the replaceable home before pausing/awaiting work. Other app instances
+      // cannot reset or admit a launch while the pointer transition is in progress.
+      reset = homes.reserveReset(spec.key)
+    } catch (error) {
+      accountChanges.delete(id)
+      if (native) publish()
+      throw error
+    }
     authVersions.set(id, (authVersions.get(id) ?? 0) + 1)
     signedOut(id)
     try {
@@ -1256,6 +1424,9 @@ export function apply(ctx, config = {}, {
       ])
       loginLocks.delete(id)
       reset.complete()
+      // No sign-in flow of its own lifts the new home's pause for a homed native agent: it is
+      // lifted here. A crash before this line leaves a paused home, which its Sign in retires.
+      if (native) homes.resume(spec.key)
       logins.retire(id, reset.home)
       consents?.forget(id)
       if (consents?.saveError) {
@@ -1269,6 +1440,365 @@ export function apply(ctx, config = {}, {
       if (!disposed && agents.has(id)) agents.set(id, agentOf(spec, clis.get(id)))
       publish()
     }
+  }
+
+  // The ids an agent's `initialize` offers for sign-in, for the log: plain ids only, at most 8.
+  const methodIds = init => (Array.isArray(init?.authMethods) ? init.authMethods : [])
+    .map(method => method?.id).filter(value => typeof value === 'string' && /^[a-z0-9-]{1,40}$/.test(value)).slice(0, 8)
+  const signInFailure = (code, message) => Object.assign(new Error(message), { code: `acp-sign-in/${code}` })
+  // The Claude/Codex sentence for an ended sign-in, for Antigravity too (#2048, parity).
+  const EXPIRED_SIGN_IN = 'This sign-in expired. Start again.'
+  // The terminal command that signs in to a homed native agent's own home, for support: the
+  // log only, never the page or a chat (#2048, owner).
+  const logTerminalHint = (spec, id, why) => {
+    const hint = isolatedHint(spec, cliDetails.get(id))
+    if (typeof hint !== 'string') return
+    info(ctx, `${spec.defaultName}: ${why}; its terminal sign-in, for support: ${hint}`)
+  }
+
+  // The in-app sign-in of an agent with its own home (Antigravity, #2048): ACP `authenticate`
+  // with its `acpSignIn` method, in that home. It answers at once (`signingIn` on its status
+  // row); one attempt per agent, whichever view opened it (Settings, Connect AI, a Bot's chat).
+  // A home left paused (a sign-out that did not finish) or unreadable is first retired for a
+  // fresh one, as Reset does, so no old sign-in is reused.
+  // agy never opens the browser itself on Linux and macOS: a stand-in for its opener, first on
+  // the sign-in run's PATH only, hands the link over (sign-in-opener.js), the status carries it
+  // once it passes isSignInUrl, and the app shows it as a link with Copy; a person's click
+  // opens it. The person may also sign in on another computer and paste back the address the
+  // browser ends on (signInCallback). On Linux an attempt with no link nativeSignInLinkMs after
+  // `authenticate` ends as `no-browser`; a link is good for nativeSignInWindowMs after
+  // `authenticate`.
+  async function signInNative(id, { label } = {}) {
+    restartGuard()
+    const spec = AGENTS[id]
+    if (spec === undefined || !homedNative(spec) || typeof spec.acpSignIn !== 'string') {
+      throw signInFailure('unsupported', 'Automagik cannot sign in to this agent here.')
+    }
+    if (!enabled(spec)) throw signInFailure('off', `Turn ${spec.defaultName} on first.`)
+    reconcile({ kick: false })
+    if (clis.get(id) === undefined) throw signInFailure('missing', `Install ${spec.defaultName} first.`)
+    if (nativeSignIns.has(id)) return status()
+    if (accountChanges.has(id)) throw accountFailure('busy', 'The Bot account is changing.')
+    // A live change lock fails closed, as today. A home that cannot be read counts as paused.
+    let changing = false
+    let paused = false
+    try {
+      changing = homes.changing(spec.key)
+      paused = !changing && homes.paused(spec.key)
+    } catch { paused = true }
+    if (changing) throw accountFailure('busy', 'The Bot account is changing.')
+    if (paused) {
+      // Awaited before the attempt is registered, so the reset never ends this attempt; a
+      // second click meanwhile is refused as busy (`accountChanges`).
+      try {
+        await resetAccount(id)
+        homes.resume(spec.key)
+        paused = homes.paused(spec.key)
+      } catch (error) {
+        // The recovery's sign-out word is not the person's Sign out: it does not stay.
+        lastSignOuts.delete(id)
+        nativeSignInErrors.set(id, 'failed')
+        const line = homeRelativeText(redactInstallerOutput(String(error?.message ?? error))).split('\n')[0].slice(0, 300)
+        warn(ctx, `the sign-in to ${spec.defaultName} could not start in a fresh home: ${line}`)
+        return status()
+      }
+      if (paused) throw accountFailure('busy', 'The Bot account is changing.')
+    }
+    restartGuard()
+    if (disposed || nativeSignIns.has(id)) return status()
+    if (accountChanges.has(id)) throw accountFailure('busy', 'The Bot account is changing.')
+    const controller = new AbortController()
+    const attempt = { controller, attemptId: randomUUID(), delivered: false,
+      ...(typeof label === 'string' && label !== '' ? { label } : {}) }
+    nativeSignIns.set(id, attempt)
+    nativeSignInErrors.delete(id)
+    signInEnds.delete(id)
+    nativeEnded.delete(id)
+    lastSignOuts.delete(id)
+    announceLogins()
+    const current = () => !disposed && nativeSignIns.get(id) === attempt && !controller.signal.aborted
+    attempt.current = current
+    // Ends this attempt as `no-browser`: there is no link to show. `why` goes to the log.
+    const noBrowser = (why) => {
+      if (!current()) return
+      attempt.noBrowser = why
+      attempt.url = undefined
+      controller.abort()
+    }
+    // After a delivered paste, agy has nativeSignInCheckMs to finish (G6-6).
+    attempt.checkCap = () => {
+      if (!current() || !attempt.delivered) return
+      attempt.end = 'checking'
+      attempt.checkFailed = true
+      controller.abort()
+    }
+    void (async () => {
+      let run
+      let word
+      let opener
+      let poll
+      let linkTimer
+      try {
+        const { command, args, env } = launch(spec, clis.get(id), id)
+        // A sign-in link the agent prints while it waits (its browser may not have opened) is
+        // shown as a link, only when it is one of its own OAuth entry points (isSignInUrl) and
+        // names where agy listens and the state it waits for (callbackOf). Its state is
+        // remembered, so a Bot chat refuses a message carrying the address it ends on.
+        let printed = ''
+        const found = (url) => {
+          if (attempt.url !== undefined || !current()) return
+          const callback = callbackOf(url)
+          if (callback === undefined) return
+          attempt.url = url
+          attempt.callback = callback
+          logins.rememberCallbackState(callback.state)
+          publish()
+        }
+        const onStderr = (chunk) => {
+          if (attempt.url !== undefined || controller.signal.aborted) return
+          printed = (printed + chunk).slice(-16_384)
+          const urls = printed.match(/https:\/\/[^\s<>"'\p{Cc}]+/gu) ?? []
+          const url = urls.find(link => isSignInUrl(spec, link))
+          if (url !== undefined) found(url)
+        }
+        // The stand-in for agy's opener (Linux, macOS), on this run's PATH only.
+        let runEnv = env
+        if (platform === 'linux' || platform === 'darwin') {
+          opener = makeSignInOpener(homes.acpHome, platform)
+          if (opener !== undefined) {
+            runEnv = { ...env, PATH: [opener.bin, env.PATH].filter(Boolean).join(delimiter) }
+            // What it handed over, read while the attempt runs. Two different links that both
+            // pass are not told apart: the attempt ends instead (a same-user writer, R10).
+            poll = setInterval(() => {
+              if (!current()) return
+              const links = new Set(readSignInLinks(opener.links).filter(line => isSignInUrl(spec, line)))
+              if (links.size > 1) noBrowser('more than one sign-in link')
+              else if (links.size === 1) found([...links][0])
+            }, 200)
+            poll.unref?.()
+          } else if (platform === 'linux') {
+            // No stand-in, so no link could reach the app: the browser cannot open.
+            attempt.noBrowser = 'agy handed no sign-in link'
+          }
+        }
+        // From `authenticate`, on every platform, a link is good for nativeSignInWindowMs: the
+        // app ends the attempt as `expired` before agy ends its own wait (G6-2). On Linux the
+        // link comes right after `authenticate`, or there is no link to show.
+        const onAuthenticate = () => {
+          attempt.authenticateAt = Date.now()
+          attempt.expiresAt = attempt.authenticateAt + nativeSignInWindowMs
+          attempt.window = setTimeout(() => {
+            if (current() && !attempt.delivered) { attempt.end = 'window'; attempt.expired = true; controller.abort() }
+          }, nativeSignInWindowMs)
+          attempt.window.unref?.()
+          publish()
+          if (platform !== 'linux') return
+          linkTimer = setTimeout(() => {
+            if (attempt.url === undefined) noBrowser('agy handed no sign-in link')
+          }, nativeSignInLinkMs)
+          linkTimer.unref?.()
+        }
+        if (attempt.noBrowser === undefined) {
+          run = new AgentRun({ command, args, env: runEnv, cwd: env[HOME_ENV], name: spec.name,
+            authenticate: spec.acpSignIn, startMs: nativeSignInMs, onStderr, onAuthenticate })
+          await run.start({ signal: controller.signal })
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          word = error?.code === 'acp-sign-in/unsupported' ? 'unsupported' : isUnanswered(error) ? 'timeout' : 'failed'
+          attempt.end = isUnanswered(error) ? 'deadline' : run?.exited !== undefined ? 'agent-exit' : 'agent-error'
+          // Only the first line, redacted and home-relative, goes to the log; the page gets the word.
+          if (word === 'failed') {
+            const line = homeRelativeText(redactInstallerOutput(String(error?.message ?? error))).split('\n')[0].slice(0, 300)
+            warn(ctx, `the sign-in to ${spec.defaultName} did not finish: ${line}`)
+          }
+        }
+      } finally {
+        clearTimeout(linkTimer)
+        clearTimeout(attempt.window)
+        clearTimeout(attempt.check)
+        clearInterval(poll)
+        if (run?.init !== undefined) {
+          const ids = methodIds(run.init)
+          const logout = run.init?.agentCapabilities?.auth?.logout ? 'yes' : 'no'
+          signOutOverAcp.set(id, logout)
+          info(ctx, `${spec.defaultName} offers sign-in methods: ${ids.length > 0 ? ids.join(', ') : 'none'}; `
+            + `sign-out over ACP: ${logout}`)
+        }
+        try { run?.dispose() } catch {}
+        if (opener !== undefined) removeSignInOpener(opener.dir)
+      }
+      // How the attempt ended, for a Bot chat that reads it by its id (loginStatus).
+      const ended = (status, cause) => {
+        if (disposed) return
+        nativeEnded.set(id, { attemptId: attempt.attemptId, status, ...(cause ? { cause } : {}), at: Date.now() })
+      }
+      try {
+        if (!disposed && attempt.noBrowser !== undefined) {
+          nativeSignInErrors.set(id, 'no-browser')
+          ended('failed', 'no sign-in link in time')
+          logTerminalHint(spec, id, `the browser did not open (${attempt.noBrowser})`)
+          return
+        }
+        if (!disposed && attempt.expired) {
+          nativeSignInErrors.set(id, 'expired')
+          signInEnds.set(id, attempt.end)
+          ended('expired')
+          info(ctx, `the sign-in to ${spec.defaultName} expired`)
+          return
+        }
+        if (!disposed && attempt.checkFailed) {
+          nativeSignInErrors.set(id, 'failed')
+          signInEnds.set(id, attempt.end)
+          ended('failed')
+          warn(ctx, `the sign-in to ${spec.defaultName} was not finished by agy after the address was delivered`)
+          return
+        }
+        if (disposed || controller.signal.aborted) {
+          ended('cancelled')
+          return
+        }
+        if (word !== undefined) {
+          nativeSignInErrors.set(id, word)
+          signInEnds.set(id, attempt.end)
+          ended('failed', attempt.end === 'agent-exit' ? 'the CLI exited' : undefined)
+          logTerminalHint(spec, id, `the sign-in ended (${word})`)
+          return
+        }
+        // Signed in: the agent's own session says so, read afresh in the same home.
+        signIns.delete(id)
+        signInChecks.delete(id)
+        inspections.delete(id)
+        await agents.get(id)?.catalog?.refresh?.()
+        if (!disposed) await probe(id, { fresh: true }).catch(() => {})
+        ended(signIns.get(id) === true ? 'ready' : 'failed')
+        if (!disposed && signIns.get(id) === true) {
+          // As a terminal sign-in: the Bot team applies the model the person chose.
+          try {
+            ctx.emit?.('acp-dsh/login-ready', { id })
+          } catch (error) {
+            warn(ctx, `the sign-in of ${id} was not announced: ${error?.message ?? error}`)
+          }
+        }
+      } finally {
+        if (nativeSignIns.get(id) === attempt) nativeSignIns.delete(id)
+        announceLogins()
+        if (!disposed) publish()
+      }
+    })()
+    return status()
+  }
+
+  // The address the browser ended on after the person signed in, on any computer, pasted back
+  // for the attempt `attemptId` (#2048, paste-back). It must name that attempt's own listener
+  // and state (checkCallback); it is delivered once, by one loopback GET (deliverCallback).
+  // Never logged, kept or returned: only the status and a refusal word come back.
+  async function signInCallback(id, attemptId, value) {
+    const spec = AGENTS[id]
+    if (spec === undefined || !homedNative(spec) || typeof spec.acpSignIn !== 'string') {
+      throw signInFailure('unsupported', 'Automagik cannot sign in to this agent here.')
+    }
+    const attempt = nativeSignIns.get(id)
+    if (attempt === undefined || attempt.attemptId !== attemptId || !attempt.current()
+      || attempt.delivered || attempt.callback === undefined) {
+      throw signInFailure('expired', EXPIRED_SIGN_IN)
+    }
+    let checked = checkCallback(value, attempt.callback)
+    value = undefined
+    if (checked === undefined) throw signInFailure('not-this-sign-in', 'This link is not from this sign-in.')
+    // Marked before any wait: a second paste is refused above, and the window no longer runs.
+    attempt.delivered = true
+    clearTimeout(attempt.window)
+    attempt.check = setTimeout(attempt.checkCap, nativeSignInCheckMs)
+    attempt.check.unref?.()
+    publish()
+    let answer
+    try {
+      answer = await deliverCallback({ ...attempt.callback, path: checked.path })
+    } catch {
+      checked = undefined
+      if (attempt.current()) {
+        attempt.end = 'unreachable'
+        attempt.expired = true
+        clearTimeout(attempt.check)
+        attempt.controller.abort()
+      }
+      throw signInFailure('expired', EXPIRED_SIGN_IN)
+    }
+    checked = undefined
+    // Only the status number: never the path, the code or the answer's body.
+    if (answer.status >= 400) info(ctx, `agy answered the sign-in address with HTTP ${answer.status}`)
+    return status()
+  }
+
+  // The view of an in-app attempt in the shape of a terminal sign-in's (login.js view), for a
+  // Bot chat's sign-in row (#2048, parity): the link, its expiry, and the paste field.
+  function nativeLoginView(id, attempt) {
+    const pasting = typeof attempt.url === 'string' && attempt.callback !== undefined && !attempt.delivered
+    return {
+      id, attemptId: attempt.attemptId, status: typeof attempt.url === 'string' ? 'waiting' : 'starting',
+      ...(!attempt.delivered && Number.isFinite(attempt.expiresAt) ? { expiresAt: attempt.expiresAt, expiresBy: 'app' } : {}),
+      ...(attempt.label ? { openedBy: attempt.label } : {}),
+      ...(typeof attempt.url === 'string' ? { url: attempt.url } : {}),
+      ...(pasting ? { prompt: { id: 'agy-callback', secret: true } } : {}),
+      ...(attempt.delivered ? { checking: true } : {}),
+    }
+  }
+  const nativeNotFound = () => Object.assign(new Error('This sign-in has ended. Start again.'), { code: 'acp-login/not-found' })
+  // The live attempt with this id, else the retained end with this id (NATIVE_RETAIN_MS).
+  function nativeViewOf(id, attemptId) {
+    const attempt = nativeSignIns.get(id)
+    if (attempt !== undefined && attempt.attemptId === attemptId && attempt.current()) return nativeLoginView(id, attempt)
+    const ended = nativeEnded.get(id)
+    if (ended !== undefined && ended.attemptId === attemptId && Date.now() - ended.at < NATIVE_RETAIN_MS) {
+      return { id, attemptId, status: ended.status, ...(ended.cause ? { cause: ended.cause } : {}) }
+    }
+    throw nativeNotFound()
+  }
+  const nativeLogins = {
+    async start(id, label) {
+      await signInNative(id, { label })
+      const attempt = nativeSignIns.get(id)
+      if (attempt === undefined) {
+        const ended = nativeEnded.get(id)
+        if (ended !== undefined) return { id, attemptId: ended.attemptId, status: ended.status }
+        throw signInFailure('failed', `The sign-in to ${AGENTS[id].defaultName} did not start. Try again.`)
+      }
+      if (attempt.label === undefined && typeof label === 'string' && label !== '') attempt.label = label
+      return nativeLoginView(id, attempt)
+    },
+    current(id) {
+      const attempt = nativeSignIns.get(id)
+      return attempt !== undefined && attempt.current() ? nativeLoginView(id, attempt) : undefined
+    },
+    status: (id, attemptId) => nativeViewOf(id, attemptId),
+    async answer(id, attemptId, value) {
+      await signInCallback(id, attemptId, value)
+      return nativeViewOf(id, attemptId)
+    },
+    cancel(id, attemptId) {
+      const attempt = nativeSignIns.get(id)
+      if (attempt === undefined || attempt.attemptId !== attemptId || !attempt.current()) throw nativeNotFound()
+      attempt.controller.abort()
+      return { id, attemptId, status: 'cancelled' }
+    },
+  }
+  const isHomedNative = id => Object.hasOwn(AGENTS, id) && homedNative(AGENTS[id])
+
+  // Sign out of an agent with its own home: its home is retired, as Reset does (resetAccount).
+  // Not on Windows: the sign-in is in Credential Manager there, shared with the person's own
+  // agy, so retiring the home would not sign out. Only this and the `acp-sign-out` route refuse
+  // there; `accountReset` is reached only in-process (the Bot team filters this agent out).
+  async function signOutNative(id) {
+    restartGuard()
+    const spec = AGENTS[id]
+    if (spec === undefined || !homedNative(spec) || typeof spec.acpSignIn !== 'string') {
+      throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
+    }
+    if (platform === 'win32') {
+      throw accountFailure('unavailable', `Sign out is not available on Windows. Sign out in ${spec.defaultName} itself.`)
+    }
+    return resetAccount(id)
   }
 
   async function startLogin(id, label, alreadySignedOut = false) {
@@ -1408,7 +1938,19 @@ export function apply(ctx, config = {}, {
       step = 'runs'
       adapter.dispose()
       for (const agent of agents.values()) agent.catalog?.dispose()
-      if (homes) await Promise.all(consentIds.map(id => stopRuns(homes.home(AGENTS[id].key))))
+      for (const id of nativeSignIns.keys()) abortNativeSignIn(id)
+      // Only the pointer read is forgiven, for a homed native agent's damaged pointer: a stop
+      // that cannot be proved still fails the step, for every agent.
+      if (homes) {
+        await Promise.all(homeIds.map(async (id) => {
+          let home
+          try { home = homes.home(AGENTS[id].key) } catch (error) {
+            if (isNative(AGENTS[id])) return
+            throw error
+          }
+          await stopRuns(home)
+        }))
+      }
       if (expired) return { ok: false, step }
       step = 'homes'
       for (const id of loginLocks) {
@@ -1437,12 +1979,32 @@ export function apply(ctx, config = {}, {
     // Sign-in, for the DSH owner's views only (the Bot team's owner-only route): never tools,
     // never listed by status(), and nothing here writes into a conversation or a model setting.
     // `label` names the view that opens an attempt (a Bot id) for the cancel confirmation.
+    // An agent with its own home (Antigravity) answers the same five calls with its in-app
+    // sign-in (#2048, parity): the link, its expiry and the field for the address the browser
+    // ends on, the attempt Settings shows too. Never a terminal-only attempt.
     loginStart: (id, { label } = {}) => {
       restartGuard()
+      if (isHomedNative(id)) return nativeLogins.start(id, label)
       return homes && consentIds.includes(id) ? startLogin(id, label) : logins.start(id, { label })
     },
     accountSignOut: (id, options) => signOutAccount(id, options),
     accountReset: id => resetAccount(id),
+    /**
+     * The in-app sign-in of an agent with its own home (Antigravity): starts ACP `authenticate`
+     * in that home and answers status() at once; `signingIn` on its row while it runs, and
+     * `signInError` (`unsupported`, `timeout`, `failed`, `no-browser`, `expired`) after a failure.
+     * Refusals carry an `acp-sign-in/*` code (`unsupported`, `off`, `missing`) or `acp-account/busy`.
+     */
+    signInNative: id => signInNative(id),
+    /**
+     * The address the browser ended on after a sign-in on any computer, for the attempt
+     * `attemptId` (#2048, paste-back): answers status() once it reached agy. Refusals carry
+     * `acp-sign-in/not-this-sign-in` (not that attempt's address; the attempt goes on) or
+     * `acp-sign-in/expired` (no such attempt waiting, or the address did not reach agy).
+     */
+    signInCallback: (id, attemptId, value) => signInCallback(id, attemptId, value),
+    /** Signs out of an agent with its own home by retiring that home; refused on Windows. */
+    accountSignOutNative: id => signOutNative(id),
     accountRecovery: async id => {
       if (!homes || !consentIds.includes(id)) return { required: false }
       const { key } = AGENTS[id]
@@ -1454,15 +2016,15 @@ export function apply(ctx, config = {}, {
       return startLogin(id, label, true)
     },
     /** The attempt at work for this agent, from any view, or undefined. Never starts or cancels one. */
-    loginCurrent: id => logins.current(id),
-    loginStatus: (id, attemptId) => logins.status(id, attemptId),
-    loginAnswer: (id, attemptId, value) => logins.answer(id, attemptId, value),
-    loginCancel: (id, attemptId) => logins.cancel(id, attemptId),
-    /** Whether a text carries a Claude sign-in state shown in the last day. Only a boolean. */
+    loginCurrent: id => (isHomedNative(id) ? nativeLogins.current(id) : logins.current(id)),
+    loginStatus: (id, attemptId) => (isHomedNative(id) ? nativeLogins.status(id, attemptId) : logins.status(id, attemptId)),
+    loginAnswer: (id, attemptId, value) => (isHomedNative(id) ? nativeLogins.answer(id, attemptId, value) : logins.answer(id, attemptId, value)),
+    loginCancel: (id, attemptId) => (isHomedNative(id) ? nativeLogins.cancel(id, attemptId) : logins.cancel(id, attemptId)),
+    /** Whether a text carries a sign-in state shown in the last day (Claude, Antigravity). Only a boolean. */
     loginTextMatches: text => logins.textMatches(text),
     /** How many sign-in attempts are starting or waiting (the busy signal). */
-    loginActive: () => logins.activeAttempts(),
-    loginActivity: () => logins.activity(),
+    loginActive: () => loginActive(),
+    loginActivity: () => loginActivity(),
     prepareRestart,
     /**
      * Which account an agent's CLI is signed in to, for the DSH owner's views only (#869): never
@@ -1689,6 +2251,23 @@ export function apply(ctx, config = {}, {
       await Promise.all(accountReads.values())
       return status()
     },
+    /**
+     * Installs a manual CLI (Antigravity) on the person's click: only while its switch is on,
+     * never one that is already here, and never an update. Answers at once, the install under
+     * way (`cli.state: 'installing'`); the agent is offered when it ends.
+     */
+    async installCli(id) {
+      const spec = AGENTS[id]
+      if (spec === undefined) throw new Error(`no ACP agent ${String(id).slice(0, 40)}`)
+      if (spec.cliInstall?.manual !== true || !cliStore) {
+        throw Object.assign(new Error(`Automagik cannot install the ${spec.defaultName} CLI here.`), { code: 'acp-install/unsupported' })
+      }
+      if (!enabled(spec)) throw Object.assign(new Error(`Turn ${spec.defaultName} on first.`), { code: 'acp-install/off' })
+      reconcile({ kick: false })
+      if (clis.get(id) !== undefined) return status()
+      void ensureCli(spec, { force: true, click: true })
+      return status()
+    },
     /** Retries the required CLI and its connector; answers at once without enabling a model. */
     async retry(id) {
       const spec = AGENTS[id]
@@ -1787,10 +2366,17 @@ export function apply(ctx, config = {}, {
     store.dispose?.()
     cliStore?.dispose?.()
     adapter.dispose()
+    for (const id of nativeSignIns.keys()) abortNativeSignIn(id)
     if (homes && !prepared) {
-      void Promise.all(consentIds.map(async id => {
-        await logins.stop(id)
-        await stopRuns(homes.home(AGENTS[id].key))
+      void Promise.all(homeIds.map(async id => {
+        if (consentIds.includes(id)) await logins.stop(id)
+        let home
+        // A homed native agent's damaged pointer: nothing of it runs, and the rest goes on.
+        try { home = homes.home(AGENTS[id].key) } catch (error) {
+          if (isNative(AGENTS[id])) return
+          throw error
+        }
+        await stopRuns(home)
       })).then(() => homes.dispose()).catch(() => {})
     }
     backchannel.dispose()

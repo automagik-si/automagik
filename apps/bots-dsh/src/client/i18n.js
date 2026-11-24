@@ -3,6 +3,7 @@
 // switch, so nothing caches a translated string.
 
 import { MACHINE_MESSAGES } from '../shared/machine-reservations.js'
+import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_DENY_TEXT, OWN_TOOLS_MENU_HINT, OWN_TOOLS_MODEL_TEXT, OWN_TOOLS_NOTICE } from '../shared/own-tools.js'
 
 export const NAMESPACE = 'omni-ui'
 
@@ -580,14 +581,20 @@ const ZH = {
   "Waiting for {name} to confirm…": "正在等待 {name} 确认…",
   "Checking the code…": "正在检查代码…",
   "Paste here the code shown after you authorize:": "授权后，将显示的代码粘贴到这里：",
+  "This link is not from this sign-in.": "此链接不属于本次登录。",
+  "Paste here the address your browser ends on after you sign in:": "登录后，请将浏览器最后停留的地址粘贴到这里：",
+  "Sign-in address": "登录地址",
+  "Finishing the sign-in to {name}…": "正在完成 {name} 的登录…",
+  "Turn this coding agent on in Settings, under Coding agents, then try again.": "请先在设置 → 编程助手中开启此编程助手，然后重试。",
+  "Install this coding agent in Settings, under Coding agents, then try again.": "请先在设置 → 编程助手中安装此编程助手，然后重试。",
   "Finish the secret requested first.": "请先完成所请求的密钥。",
   "The message field comes back as soon as you send the code or cancel.": "发送代码或取消后，消息框会恢复。",
   "Cancel sign-in": "取消登录",
   "To use {name} in this Bot, sign in to your account.": "要在此 Bot 中使用 {name}，请登录你的账号。",
   "Sign in": "登录",
   "Sign in to this chat's AI provider": "登录此聊天的 AI 提供商",
-  "Sign-in from the chat is for Claude Code and Codex. Set up {provider} in Settings.": "聊天内登录仅支持 Claude Code 和 Codex。请在设置中配置 {provider}。",
-  "Sign-in from the chat is for Claude Code and Codex. Set up this AI in Settings.": "聊天内登录仅支持 Claude Code 和 Codex。请在设置中配置此 AI。",
+  "Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up {provider} in Settings.": "聊天内登录仅支持 Claude Code、Codex 和 Antigravity。请在设置中配置 {provider}。",
+  "Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up this AI in Settings.": "聊天内登录仅支持 Claude Code、Codex 和 Antigravity。请在设置中配置此 AI。",
   "Choose an AI for this Bot first.": "请先为此 Bot 选择一个 AI。",
   "Sign-in runs in a Bot's chat. Open the Bot whose AI you want to sign in.": "请在 Bot 的聊天中登录。打开要登录其 AI 提供商的 Bot 聊天。",
   "Your team is still loading. Try /login again in a moment.": "团队仍在加载。请稍后重试 /login。",
@@ -1451,6 +1458,11 @@ const ZH = {
   'The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.': 'Bot 团队在授予工具时执行此设置：它会移除这些工具，而不会把 shell 放进操作系统沙箱。',
   "This removes this Bot's own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.": '这只会移除这个 Bot 自己的 shell 工具；它不能阻止另一个有 shell 的 Bot，或操作系统用户，读取这个 Bot 能读取的文件。',
   'Denied tools': '禁止使用的工具',
+  [OWN_TOOLS_MODEL_TEXT]: '此 Bot 禁止使用 acp_tool，但此模型仍会使用它自己的工具。请先从“禁止使用的工具”中移除 acp_tool，或选择其他模型。',
+  [OWN_TOOLS_MENU_HINT]: '已禁止 acp_tool 时不可用',
+  [OWN_TOOLS_DENY_TEXT]: '此 Bot 运行的模型会使用它自己的工具，因此不能禁止 acp_tool。请先选择其他模型。',
+  [OWN_TOOLS_NOTICE]: 'acp_tool 已被禁止，但此模型会使用它自己的工具，这些调用仍会运行并显示为已拒绝。请在 Bot 设置中从“禁止使用的工具”移除 acp_tool，或选择其他模型。',
+  [OWN_TOOLS_CREATE_TEXT]: '由禁止使用 acp_tool 的 Bot 创建的 Bot 不能在会使用它自己的工具的模型上运行。请指定其他模型。',
   'Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.': '精确的工具名，每行一个或用逗号分隔，区分大小写。留空表示允许所有工具。',
   'What this Bot does': '这个 Bot 做什么',
   "Its job on the team. Part of the Bot's system prompt.": '它在团队里的分工，会写进 Bot 的系统提示词。',
@@ -1644,7 +1656,8 @@ const ZH = {
   Whale: '鲸鱼', Star: '星星', Moon: '月亮', Wave: '声波', Squircle: '圆角方', Bull: '牛角', Blossom: '花朵',
   Gumdrop: '软糖', Peanut: '花生', Bubbles: '泡泡', Saucer: '飞碟', Sprout: '嫩芽', Bunny: '兔子',
   Kitty: '小猫', Beacon: '灯塔', Plus: '加号', Magnet: '磁铁', Acorn: '橡果', Pebbles: '石子', Cushion: '靠垫',
-  Ring: '圆环', Gem: '宝石',
+  Ring: '圆环', Gem: '宝石', Puff: '绒球', Cap: '蘑菇', Bell: '铃铛', Cloud: '云朵', Spike: '刺球', Floppy: '垂耳',
+  Antenna: '天线', Cactus: '仙人掌', Bulb: '灯泡', Chick: '小鸡', Frog: '青蛙',
 
   // Colors
   Black: '黑', Brown: '棕', Red: '红', Orange: '橙', Yellow: '黄', Green: '绿', Cyan: '青', Blue: '蓝',
@@ -2951,6 +2964,8 @@ const ZH = {
   '{count} photos added to Yours.': '已有 {count} 张照片加入“你的”。',
   'Not added: {names}': '未添加：{names}',
   'Your pets': '你的宠物',
+  // A product name, kept as it is.
+  'Solvers': 'Solvers',
   'Browse codex-pets.net': '浏览 codex-pets.net',
   'Thousands of pets shared by the Codex community, in the same format. Opening it asks codex-pets.net; a pet you pick is kept on this computer.': '成千上万个由 Codex 社区分享的宠物，格式相同。打开时会访问 codex-pets.net；你选中的宠物会保存在这台电脑上。',
   'Automagik character': 'Automagik 角色',
@@ -3295,6 +3310,34 @@ const ZH = {
   'Reading the seat…': '正在读取席位…',
   'No transcript rows yet. The seat is quiet.': '还没有对话记录。这个席位很安静。',
   'Latest': '最新',
+  // New Solver (RFC 0048).
+  'New Solver': '新建 Solver',
+  'Plans, does the work and has it reviewed': '规划、完成工作并交由审阅',
+  'Solver': 'Solver',
+  'Reviewer': '审阅者',
+  'New reviewer on another model': '在另一个模型上新建审阅者',
+  'Fresh session': '全新会话',
+  '{name} reviewer': '{name} 审阅者',
+  'Another Bot on a different model or agent reviews its plan and its result.': '另一个使用不同模型或代理的 Bot 审阅它的计划和结果。',
+  'Each review runs in a fresh session that sees only your request and the result. The delivery says so.': '每次审阅都在全新会话中进行，只看到你的请求和结果。交付时会说明这一点。',
+  'No other model is set up, so reviews run in a fresh session.': '没有设置其他模型，因此审阅在全新会话中进行。',
+  'Off by default. The Solver also works without them, with its reviewer.': '默认关闭。没有它们，Solver 也能和审阅者一起工作。',
+  'Nothing was created: {error}': '未创建任何内容：{error}',
+  'Native tools could not be turned on, so nothing was created: {error}': '无法开启原生工具，因此未创建任何内容：{error}',
+  '{name} could not be removed after the failure. Delete it in its Details.': '失败后无法移除 {name}。请在其详情中删除。',
+  '{name} may have been created. Check the sidebar and delete it in its Details if you do not want it.': '{name} 可能已被创建。请查看侧边栏，如不需要，请在其详情中删除。',
+  '{name} was created, but your request was not sent: {error}': '{name} 已创建，但你的请求没有发送：{error}',
+  '{name} was created, but your request may not have been sent: {error}': '{name} 已创建，但你的请求可能没有发送：{error}',
+  // The Solver's review mark (#2056).
+  'Last delivery': '上次交付',
+  'its reviewer': '它的审阅者',
+  'Review not checked: this Solver has no reviewer Bot, and the app cannot see a fresh-session review.': '审阅未核实：此 Solver 没有审阅 Bot，应用无法看到全新会话中的审阅。',
+  'Unreviewed: its reviewer is no longer on the team.': '未审阅：它的审阅者已不在团队中。',
+  'Plan and result reviewed by {name}.': '计划和结果已由 {name} 审阅。',
+  'Plan unreviewed: {name} gave no verdict before the work started.': '计划未审阅：{name} 在工作开始前没有给出结论。',
+  'Result unreviewed: {name} gave no verdict on the finished work.': '结果未审阅：{name} 没有对完成的工作给出结论。',
+  'Plan and result unreviewed: no verdict from {name} came in time.': '计划和结果都未审阅：没有及时收到 {name} 的结论。',
+  '{name} had not answered when this was delivered; the app cannot see a fresh-session review.': '交付时 {name} 尚未回复；应用无法看到全新会话中的审阅。',
 }
 
 // Host errors stay English, since Bots read them too; they are translated where the

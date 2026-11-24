@@ -24,6 +24,11 @@
 // route to the CLI's (`moveSubscriptionBots`); a Bot still on it afterwards (or a team that
 // cannot be read) keeps the route, listed as a duplicate, so no Bot is left on a provider that
 // no longer exists.
+// Antigravity is a third CLI row (acp-dsh's acp-antigravity, #2048), listed only when acp-dsh
+// offers its sign-in in the app (`appSignIn`): it signs in in place, in the step itself, with
+// the link, a Copy button and the field for the address the browser ends on (no Bot chat), and
+// has no pi-ai route and no key. The sign-in link and the paste-back values stay in `acp`,
+// behind the owner viewer: an `ais` row never carries them.
 // Everything else connects through DSH's own sign-ins and keys; dsh-subscriptions keeps the
 // vendors nothing else covers.
 //
@@ -48,6 +53,7 @@ const OLLAMA_PROBE_MS = 800
 export const VENDORS = [
   { id: 'claude', name: 'Claude', via: 'Your Claude Pro or Max plan through Claude Code, or an Anthropic API key', kind: 'signin', cli: 'acp-claude', provider: 'anthropic', envRefs: ['ANTHROPIC_API_KEY'], keyUrl: 'https://console.anthropic.com/settings/keys' },
   { id: 'chatgpt', name: 'ChatGPT', via: 'Your ChatGPT Plus or Pro plan, through Codex', kind: 'signin', cli: 'acp-codex', provider: 'openai-codex' },
+  { id: 'antigravity', name: 'Antigravity', via: 'Your Google account, through Antigravity', kind: 'signin', cli: 'acp-antigravity', appOnly: true },
   { id: 'deepseek', name: 'DeepSeek', via: 'With your API key, or your DeepSeek account', kind: 'key', provider: 'deepseek', ref: DEEPSEEK_REF, route: false, keyUrl: 'https://platform.deepseek.com/api_keys' },
   { id: 'kimi', name: 'Kimi', via: 'Your Kimi Code plan', kind: 'signin', provider: 'kimi-coding' },
   { id: 'copilot', name: 'GitHub Copilot', via: 'Your Copilot plan', kind: 'signin', provider: 'github-copilot' },
@@ -73,6 +79,13 @@ const RowId = z.object({ id: z.string().max(40) }).strict()
 const SubscriptionSwitch = z.object({ provider: z.enum(SUBSCRIPTION_ONLY), on: z.boolean() }).strict()
 
 const failure = (code, message) => Object.assign(new Error(message), { code })
+// `ais` needs no viewer: the sign-in link and the paste-back values stay in `acp` (owner viewer only).
+const SIGN_IN_ONLY = ['signInUrl', 'signInAttempt', 'signInPaste', 'signInChecking', 'signInExpiresAt', 'signInEnd']
+const cliOf = (agent) => {
+  const view = { ...agentView(agent) }
+  for (const key of SIGN_IN_ONLY) delete view[key]
+  return view
+}
 const invalid = message => failure('omni-ai/invalid', message)
 const refused = message => failure('omni-ai/refused', message)
 
@@ -202,7 +215,7 @@ export function createAiActions(ctx, { fetch: fetchImpl = globalThis.fetch, save
       on: agentRunning(agent) || keyOn,
       found,
       signIn: agent !== undefined,
-      ...(agent ? { cli: agentView(agent) } : {}),
+      ...(agent ? { cli: cliOf(agent) } : {}),
       ...(vendor.keyUrl ? { keyUrl: vendor.keyUrl } : {}),
     }
   }
@@ -238,7 +251,7 @@ export function createAiActions(ctx, { fetch: fetchImpl = globalThis.fetch, save
   // The pi-ai route a CLI row's AI still has on DSH's own sign-in, if any: openai-codex's
   // route, or anthropic's when it names no key. Never a route that names a key.
   function legacyRoute(vendor, seen) {
-    if (!vendor.cli) return null
+    if (!vendor.cli || vendor.provider === undefined) return null
     const route = seen.routes[vendor.provider]
     if (route === undefined || route.apiKeyEnv !== undefined) return null
     if (vendor.provider === 'anthropic' && !seen.anthropicSignIn) return null
@@ -264,6 +277,8 @@ export function createAiActions(ctx, { fetch: fetchImpl = globalThis.fetch, save
     const seen = await look()
     const out = []
     for (const vendor of VENDORS) {
+      // A row the app signs in to only in place: listed when acp-dsh offers that sign-in.
+      if (vendor.appOnly && seen.agents?.find(agent => agent?.id === vendor.cli)?.appSignIn !== true) continue
       const row = await rowFor(vendor, seen)
       const duplicates = duplicatesOf(row, seen)
       out.push(duplicates.length ? { ...row, duplicates } : row)
@@ -363,7 +378,7 @@ export function createAiActions(ctx, { fetch: fetchImpl = globalThis.fetch, save
     const agent = seen.agents?.find(row => row?.id === vendor.cli)
     if (!on) {
       if (agent?.on === true) await setAgent(ctx, vendor.cli, false)
-      if (Object.hasOwn(seen.routes, vendor.provider)) await unsetRoute(vendor.provider)
+      if (vendor.provider !== undefined && Object.hasOwn(seen.routes, vendor.provider)) await unsetRoute(vendor.provider)
       return
     }
     const key = vendor.envRefs ? await keyOf(ctx, vendor) : null
@@ -380,6 +395,8 @@ export function createAiActions(ctx, { fetch: fetchImpl = globalThis.fetch, save
       await quietly(() => acp?.refresh?.(), undefined)
       return
     }
+    // A row with no key (Antigravity: no route either) is set up only by its sign-in.
+    if (key === null || vendor.provider === undefined) throw refused(`${vendor.name} is not set up yet.`)
     if (seen.routes[vendor.provider]?.apiKeyEnv === key.ref) return
     return saveRoute(vendor.provider, { apiKeyEnv: key.ref })
   }

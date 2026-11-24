@@ -1,15 +1,15 @@
 // `/login` in a Bot's chat (#1754): a client command in the composer's `/` menu (DSH's
-// commandUi, kind 'action'). Claude Code and Codex open the same sign-in row Settings opens
+// commandUi, kind 'action'). Claude Code, Codex and Antigravity (#2048) open the same sign-in row Settings opens
 // (actions.openCliLogin); any other AI gets a short notice pointing to Settings. Mounted with the
 // conversation group, so it is listed only where that row and the notice are drawn.
-import { CLI_NAMES } from './cli-login-model.js'
+import { SIGN_IN_NAMES } from './cli-login-model.js'
 import { providerOfRef, targetOf } from './composer-packs.js'
 
 const LOADING_NOTICE = 'Your team is still loading. Try /login again in a moment.'
 const GROUP_NOTICE = "Sign-in runs in a Bot's chat. Open the Bot whose AI you want to sign in."
 const NO_MODEL_NOTICE = 'Choose an AI for this Bot first.'
-const SETUP_AI_NOTICE = 'Sign-in from the chat is for Claude Code and Codex. Set up this AI in Settings.'
-const SETUP_PROVIDER_NOTICE = 'Sign-in from the chat is for Claude Code and Codex. Set up {provider} in Settings.'
+const SETUP_AI_NOTICE = 'Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up this AI in Settings.'
+const SETUP_PROVIDER_NOTICE = 'Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up {provider} in Settings.'
 
 const loginNotice = (key, params) => ({ kind: 'notice', key, params })
 const isBotChat = (roster, sessionId) => {
@@ -25,7 +25,7 @@ export function loginRoute({ roster, sessionId, actions }) {
   if (!target) return loginNotice(NO_MODEL_NOTICE)
   if (target.host !== undefined) return loginNotice(SETUP_AI_NOTICE)
   const { bot, provider } = target
-  if (Object.hasOwn(CLI_NAMES, provider)) {
+  if (Object.hasOwn(SIGN_IN_NAMES, provider)) {
     return typeof actions?.openCliLogin === 'function'
       ? { kind: 'cli', botId: bot.id, provider }
       : loginNotice(SETUP_AI_NOTICE)

@@ -18,7 +18,7 @@
 // A row that only offers or reports (offer, account, failed, interrupted) closes by itself when the Bot's
 // selected model moves to another provider: it is about a model the Bot left. A live attempt
 // stays, since it belongs to the CLI, not to the Bot's pick.
-import { APPLY_FAILED_MS, CLI_NAMES, DONE_MS, rememberLinkState } from './cli-login-model.js'
+import { APPLY_FAILED_MS, DONE_MS, SIGN_IN_NAMES, rememberCallbackState, rememberLinkState } from './cli-login-model.js'
 
 const ACTIVE = new Set(['starting', 'waiting'])
 // The host's codes for an attempt it no longer has, and for one a restart ended: the message
@@ -29,7 +29,8 @@ const EXPIRED = 'This sign-in expired. Start again.'
 // How often, and how many times, a finished sign-in asks what became of the chosen model.
 const CHOICE_MS = 500
 const CHOICE_TRIES = 8
-const known = provider => Object.hasOwn(CLI_NAMES, provider)
+const known = provider => Object.hasOwn(SIGN_IN_NAMES, provider)
+const PASTES = new Set(['acp-claude', 'acp-antigravity'])
 const CLOSES_ON_MOVE = new Set(['offer', 'account', 'failed', 'interrupted'])
 const ACCESS_REQUIRED = 'MODEL_ACCESS_REQUIRED'
 const ACCOUNT_CHANGED = 'bot/account-changed'
@@ -124,6 +125,8 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
     delete attempt.signedInAs
     attempts[provider] = attempt
     if (provider === 'acp-claude' && typeof view.url === 'string') rememberLinkState(view.url)
+    // Antigravity's link (#2048): the address it ends on is refused in a message too.
+    if (provider === 'acp-antigravity' && typeof view.url === 'string') rememberCallbackState(view.url)
     if (ACTIVE.has(view.status)) {
       for (const row of attemptRows(provider)) setRow(row.botId, { ...row, attempt })
       armPoll(provider)
@@ -373,7 +376,8 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       nextIntent()
       const row = rowOf(botId)
       const attempt = row?.attempt
-      if (disposed || row?.stage !== 'attempt' || row.provider !== 'acp-claude' || row.busy || attempt?.prompt === undefined
+      // Claude's code, or Antigravity's address (#2048): the agents whose attempt asks for a paste.
+      if (disposed || row?.stage !== 'attempt' || !PASTES.has(row.provider) || row.busy || attempt?.prompt === undefined
         || typeof value !== 'string' || value.trim() === '') return false
       const seq = row.seq
       patchRow(botId, seq, { busy: true, error: null })
@@ -498,7 +502,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
     async restore(botId) {
       if (disposed || typeof botId !== 'string' || rowOf(botId) !== undefined || restored.has(botId)) return
       restored.add(botId)
-      for (const provider of Object.keys(CLI_NAMES)) {
+      for (const provider of Object.keys(SIGN_IN_NAMES)) {
         const epoch = providerEpochs.get(provider)
         let current
         try { current = await actions.cliLoginCurrent(botId, provider) } catch { continue }

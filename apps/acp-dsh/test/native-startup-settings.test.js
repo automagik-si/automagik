@@ -205,7 +205,8 @@ test('a switch change during the final turn gate still stops before the first pr
   assert.equal(w.adapter.live.has('direct'), false)
 })
 
-test('an unchanged ON startup gets its first prompt and reuses the same PID without another switch read', async t => {
+// #1564 follow-up (A13): reuse confirms the saved switch once more (fail closed).
+test('an unchanged ON startup gets its first prompt and reuses the same PID, confirming the switch once', async t => {
   let reads = 0
   const w = nativeWorld(t, { identity: () => ({ name: 'Ada', get nativeTools() { reads++; return true } }) })
   const chat = w.chat('direct')
@@ -225,7 +226,7 @@ test('an unchanged ON startup gets its first prompt and reuses the same PID with
   const [launch] = w.events('new-session')
   assert.equal(w.events('new-session').length, 1)
   assert.deepEqual(w.events('prompt').map(row => row.pid), [launch.pid, launch.pid])
-  assert.equal(reads, startupReads)
+  assert.equal(reads, startupReads + 1)
 })
 
 for (const [type, value] of [

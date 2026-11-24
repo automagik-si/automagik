@@ -92,7 +92,12 @@ export const failureLine = failure => `${failure.code}${failure.status ? ` ${fai
 export function answerSender(rt, id, source, text, long, shouldSend) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
+  // When the work this answers was opened, read before closeWork deletes it: a Solver's review
+  // mark counts a verdict only for work its current request opened (review-mark.js).
+  const workAt = rt.state?.works?.[source.exchangeId]?.at
   const work = rt.closeWork?.(source.exchangeId, name, text)
+  // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
+  rt.reviewVerdict?.(rt.selfOf(id), source.senderSessionId, source.senderRoomId, text, workAt)
   // A reply that arrives after the user gave up the wait is a late answer: it closes
   // nothing, opens nothing, and says on it that the wait was already over.
   const late = work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
@@ -1060,6 +1065,8 @@ export function install(rt) {
           }
           const own = rt.chatOwners.get(id)
           if (own !== undefined) rt.userWrote(own)
+          // A person's request to a Solver opens the review its delivery is marked with (review-mark.js).
+          if (own !== undefined && source.kind === 'user' && source.handoff !== true) rt.reviewRequest?.(own)
           // Any user message answers or supersedes the open question card and view card.
           let dropped = false
           if (state.questions[id] !== undefined) {
@@ -1212,6 +1219,8 @@ export function install(rt) {
           && toolCount === 0 && lastCalled !== true && info?.role === 'room'
           && promisesWork(lastText) && !rt.callsRoomMember?.(id, info, lastText)
         const retry = (wroteCall || promisedOnly) && info?.retried !== true && !(info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))
+        // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
+        if (owner !== undefined && !retry) rt.reviewTurnEnd?.(owner, { completed: failure === undefined && reason?.kind === 'completed', wroteText })
         if (retry) {
           if (promisedOnly) {
             const opening = stripWrittenCalls(lastText ?? '')

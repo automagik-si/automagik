@@ -1,7 +1,7 @@
 import { createElement as h, Fragment, useEffect, useState } from 'react'
 import { isMainOf } from './sources.js'
 import { currentPart, stripHeader } from './text.js'
-import { PlusIcon, SearchIcon, PeopleIcon, CloseIcon, GearIcon, TasksIcon, TerminalIcon } from './icons.js'
+import { PlusIcon, SearchIcon, PeopleIcon, CloseIcon, GearIcon, TasksIcon, TerminalIcon, GoalIcon } from './icons.js'
 import { agentRowSessions } from './task-card.js'
 import { BotAvatar, RoomAvatar } from './mark.js'
 import { useEscape } from './overlay-hooks.js'
@@ -86,6 +86,7 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
     { key: 'cmd:bot', icon: h(PlusIcon), title: t('Create Bot'), run: () => actions.openNewChat('create') },
     { key: 'cmd:group', icon: h(PeopleIcon), title: t('Create group chat'), run: () => actions.openNewChat('group') },
     { key: 'cmd:dsh', icon: h(TerminalIcon), title: t('New DSH bot'), run: () => actions.openNewChat('dsh-bot') },
+    { key: 'cmd:solver', icon: h(GoalIcon), title: t('New Solver'), run: () => actions.openNewChat('solver') },
     { key: 'cmd:settings', icon: h(GearIcon), title: t('Bot settings'), run: () => actions.openSettings('general') },
   ].filter(command => matchesName(command.title))
   if (commands.length) sections.push([t('Commands'), commands])

@@ -33,13 +33,15 @@ runInNewContext(outputFiles[0].text, {
 const { CliLoginRow, installLoginCommand, loginCommand, loginRoute } = module.exports
 
 const loading = 'Your team is still loading. Try /login again in a moment.'
-const setupAI = 'Sign-in from the chat is for Claude Code and Codex. Set up this AI in Settings.'
-const setup = provider => `Sign-in from the chat is for Claude Code and Codex. Set up ${provider} in Settings.`
+// #2048: Antigravity signs in from the chat too, so the notice names it.
+const setupAI = 'Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up this AI in Settings.'
+const setup = provider => `Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up ${provider} in Settings.`
 
 function fixture({ open = true } = {}) {
   const bots = [
     { id: 'claude', sessionId: 'current-part', parts: ['claude', 'current-part'], model: 'acp-claude/default', appliedModel: 'openrouter/default' },
     { id: 'codex', appliedModel: 'acp-codex/default' },
+    { id: 'agy', model: 'acp-antigravity/default' },
     { id: 'unconfigured' },
     { id: 'host', model: 'acp-codex/default' },
     { id: 'adopted', kind: 'dsh', model: 'acp-codex/default' },
@@ -76,6 +78,13 @@ test('/login opens the existing Claude or Codex row by Bot id without a model re
   command.ui.run({ sessionId: 'current-part' })
   command.ui.run({ sessionId: 'codex' })
   assert.deepEqual(calls, [['open', 'claude', 'acp-claude'], ['open', 'codex', 'acp-codex']])
+})
+
+test('/login opens Antigravity\'s row too, by Bot id (#2048, parity)', () => {
+  const { roster, actions, calls, command } = fixture()
+  assert.deepEqual({ ...loginRoute({ roster: roster.getSnapshot(), sessionId: 'agy', actions }) }, { kind: 'cli', botId: 'agy', provider: 'acp-antigravity' })
+  command.ui.run({ sessionId: 'agy' })
+  assert.deepEqual(calls, [['open', 'agy', 'acp-antigravity']])
 })
 
 test('/login shows the generic Settings notice if the existing CLI entry declines', () => {

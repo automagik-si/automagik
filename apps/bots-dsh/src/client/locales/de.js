@@ -613,7 +613,8 @@ export const DE = {
   Whale: 'Wal', Star: 'Stern', Moon: 'Mond', Wave: 'Welle', Squircle: 'Squircle', Bull: 'Stier', Blossom: 'Blüte',
   Gumdrop: 'Fruchtgummi', Peanut: 'Erdnuss', Bubbles: 'Blasen', Saucer: 'Untertasse', Sprout: 'Keimling', Bunny: 'Hase',
   Kitty: 'Kätzchen', Beacon: 'Leuchtfeuer', Plus: 'Plus', Magnet: 'Magnet', Acorn: 'Eichel', Pebbles: 'Kiesel', Cushion: 'Kissen',
-  Ring: 'Ring', Gem: 'Edelstein',
+  Ring: 'Ring', Gem: 'Edelstein', Puff: 'Puschel', Cap: 'Pilz', Bell: 'Glocke', Cloud: 'Wolke', Spike: 'Stachel', Floppy: 'Schlappohr',
+  Antenna: 'Antenne', Cactus: 'Kaktus', Bulb: 'Glühbirne', Chick: 'Küken', Frog: 'Frosch',
 
   // Colors
   Black: 'Schwarz', Brown: 'Braun', Red: 'Rot', Orange: 'Orange', Yellow: 'Gelb', Green: 'Grün', Cyan: 'Cyan', Blue: 'Blau',

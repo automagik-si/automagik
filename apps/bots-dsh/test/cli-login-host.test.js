@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { RESERVATION_FILE } from '../src/host/account-reservations.js'
-import { CODE_HINT, cliLoginUrl, cliLoginView, install } from '../src/host/cli-login.js'
+import { CALLBACK_REFUSED, CODE_HINT, cliLoginUrl, cliLoginView, install } from '../src/host/cli-login.js'
+import { isSignInUrl as welcomeSignInUrl } from '../../welcome-dsh/src/host/sign-in-url.js'
 import { CLAUDE, CODEX, reservationAcp } from './fixtures/account-reservations.js'
 
 const ATTEMPT = randomUUID()
@@ -617,4 +618,114 @@ test('fresh refusals leave the record untouched and Plus to Pro still reserves t
   assert.equal(result.claims[0].label, 'Codex project')
   assert.equal(result.scope, 'personal')
   assert.deepEqual(h.calls.filter(([method]) => ['switch', 'signout', 'reset'].includes(method)), [])
+})
+
+// ---- Antigravity in a Bot's chat (#2048, r6 parity) ------------------------------------------
+
+const AGY = 'acp-antigravity'
+const AGY_URL = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
+  + '&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=s1-state-0001'
+const PASTED = 'http://localhost:41234/auth/callback?code=4%2F0Abc-secret&state=s1-state-0001'
+function agyFixture() {
+  const h = fixture()
+  const attempt = { id: AGY, attemptId: ATTEMPT, status: 'waiting', expiresAt: 123456, expiresBy: 'app', url: AGY_URL, prompt: { id: 'agy-callback', secret: true } }
+  h.acp.loginStart = async (id, options) => { h.calls.push(['start', id, options]); return { ...attempt, openedBy: options.label } }
+  h.acp.loginCurrent = async (id) => { h.calls.push(['current', id]); return id === AGY ? { ...attempt } : undefined }
+  h.acp.loginStatus = async (id, attemptId) => { h.calls.push(['status', id, attemptId]); return { ...attempt } }
+  h.acp.loginAnswer = async (id, attemptId, value) => { h.calls.push(['answer', id, attemptId, value]); return { ...attempt, prompt: undefined, checking: true } }
+  h.acp.loginCancel = async (id, attemptId) => { h.calls.push(['cancel', id, attemptId]); return { id, attemptId, status: 'cancelled' } }
+  h.acp.account = async () => assert.fail('Antigravity has no account read')
+  return h
+}
+
+test('Antigravity\'s link: Google\'s own, with agy\'s loopback return and its state, the same rule as the welcome\'s', () => {
+  const back = (value) => {
+    const url = new URL(AGY_URL)
+    url.searchParams.set('redirect_uri', value)
+    return url.href
+  }
+  const cases = [
+    AGY_URL, AGY_URL.replace('/v2/auth', '/auth'), back('http://127.0.0.1:4242/cb'), back('http://[::1]:5000/cb'),
+    AGY_URL.replace('https:', 'http:'), AGY_URL.replace('accounts.google.com', 'evil.example'), AGY_URL.replace('response_type=code', 'response_type=token'),
+    AGY_URL.replace('state=s1-state-0001', 'state=short'), AGY_URL.replace('&state=s1-state-0001', ''), `${AGY_URL}&state=again-0001`,
+    back('http://localhost:1023/cb'), back('http://localhost/cb'), back('https://localhost:41234/cb'), back('http://evil.example:41234/cb'),
+    back('http://a@localhost:41234/cb'), back('http://localhost:41234/cb#x'), back('http://127.0.0.2:41234/cb'),
+    `${AGY_URL}#x`, `${AGY_URL} x`, CLAUDE_URL, CODEX_URL,
+  ]
+  for (const value of cases) {
+    assert.equal(cliLoginUrl(value, AGY) === value, welcomeSignInUrl(value), value)
+  }
+  assert.equal(welcomeSignInUrl(back('http://a@localhost:41234/cb')), false)
+  assert.equal(cliLoginUrl(AGY_URL, AGY), AGY_URL)
+  // Each agent keeps its own rule: Google's link is no Claude or Codex link, and back.
+  assert.equal(cliLoginUrl(AGY_URL, 'acp-claude'), undefined)
+  assert.equal(cliLoginUrl(CLAUDE_URL, AGY), undefined)
+})
+
+test('Antigravity\'s view: the link, its expiry and the field for the address, labelled Sign-in address', () => {
+  const view = cliLoginView({ id: AGY, attemptId: ATTEMPT, status: 'waiting', expiresAt: 5, expiresBy: 'app', url: AGY_URL, prompt: { id: 'agy-callback', secret: true, label: 'private' }, raw: 'private' }, AGY)
+  assert.deepEqual(view, { id: AGY, attemptId: ATTEMPT, status: 'waiting', expiresAt: 5, expiresBy: 'app', url: AGY_URL, prompt: { id: 'agy-callback', label: 'Sign-in address', secret: true } })
+  assert.equal(cliLoginView({ id: AGY, attemptId: ATTEMPT, status: 'waiting', url: AGY_URL, prompt: { id: 'claude-code', secret: true } }, AGY).prompt, undefined)
+  assert.equal(cliLoginView({ id: AGY, attemptId: ATTEMPT, status: 'waiting', checking: true }, AGY).checking, true)
+  assert.throws(() => cliLoginView({ id: AGY, attemptId: ATTEMPT, status: 'waiting', url: CLAUDE_URL }, AGY), { code: 'bot/refused' })
+  // Claude's field keeps its own label.
+  assert.equal(cliLoginView({ id: 'acp-claude', attemptId: ATTEMPT, status: 'waiting', url: CLAUDE_URL, prompt: { id: 'claude-code', secret: true } }, 'acp-claude').prompt.label, 'Authorization code')
+})
+
+test('Antigravity reaches acp-dsh through the five sign-in calls; the address is trimmed and never echoed', async () => {
+  const h = agyFixture()
+  const started = await h.actions['cli-login-start']({ botId: 'a', provider: AGY, model: `${AGY}/default` })
+  assert.deepEqual(started.prompt, { id: 'agy-callback', label: 'Sign-in address', secret: true })
+  assert.equal((await h.actions['cli-login-current']({ botId: 'a', provider: AGY })).attempt.url, AGY_URL)
+  assert.equal((await h.actions['cli-login-status']({ botId: 'a', provider: AGY, attemptId: ATTEMPT })).status, 'waiting')
+  const answered = await h.actions['cli-login-answer']({ botId: 'a', provider: AGY, attemptId: ATTEMPT, value: `  ${PASTED}\n` })
+  assert.equal(answered.checking, true)
+  assert.doesNotMatch(JSON.stringify(answered), /secret/)
+  assert.equal((await h.actions['cli-login-cancel']({ botId: 'a', provider: AGY, attemptId: ATTEMPT })).status, 'cancelled')
+  assert.deepEqual(h.calls.map(call => call.slice(0, 2)), [['start', AGY], ['current', AGY], ['status', AGY], ['answer', AGY], ['cancel', AGY]])
+  assert.equal(h.calls.find(call => call[0] === 'answer')[3], PASTED)
+  // Not printable inside: the owner's sentence, and acp-dsh is not asked.
+  for (const value of ['', '   ', 'http://localhost:1/a b', 'http://x\u0007', 'x'.repeat(8193), { url: PASTED }]) {
+    await assert.rejects(h.actions['cli-login-answer']({ botId: 'a', provider: AGY, attemptId: ATTEMPT, value }), error => error.code === 'bot/invalid' && error.message === CALLBACK_REFUSED && !/secret/.test(error.stack))
+  }
+  assert.equal(h.calls.filter(call => call[0] === 'answer').length, 1)
+  // acp-dsh's refusals read as fixed sentences.
+  for (const [code, message] of [
+    ['acp-sign-in/not-this-sign-in', 'This link is not from this sign-in.'],
+    ['acp-sign-in/expired', 'This sign-in expired. Start again.'],
+    ['acp-sign-in/off', 'Turn this coding agent on in Settings, under Coding agents, then try again.'],
+    ['acp-sign-in/missing', 'Install this coding agent in Settings, under Coding agents, then try again.'],
+  ]) {
+    h.acp.loginAnswer = async () => { throw nativeError(code) }
+    h.acp.loginStart = async () => { throw nativeError(code) }
+    await assert.rejects(h.actions['cli-login-answer']({ botId: 'a', provider: AGY, attemptId: ATTEMPT, value: PASTED }), error => error.message === message && !/private-cli-output/.test(error.stack))
+    await assert.rejects(h.actions['cli-login-start']({ botId: 'a', provider: AGY }), { message })
+  }
+})
+
+test('an expired Antigravity attempt reads the chat\'s own sentence through cli-login-status; Claude\'s is unchanged', async () => {
+  for (const provider of [AGY, 'acp-claude']) {
+    const h = provider === AGY ? agyFixture() : fixture()
+    h.acp.loginStatus = async (id, attemptId) => ({ id, attemptId, status: 'expired' })
+    const view = await h.actions['cli-login-status']({ botId: 'a', provider, attemptId: ATTEMPT })
+    assert.equal(view.status, 'expired', provider)
+    assert.equal(view.message, 'This sign-in expired. Start again.', provider)
+  }
+})
+
+test('the account controls stay Claude Code\'s and Codex\'s: Antigravity is refused before acp-dsh', async () => {
+  const h = agyFixture()
+  for (const [action, payload] of [
+    ['cli-login-switch', { botId: 'a', provider: AGY }], ['cli-login-signout', { botId: 'a', provider: AGY }],
+    ['cli-login-reset', { botId: 'a', provider: AGY }], ['cli-login-confirm', { botId: 'a', provider: AGY, ref: 'unknown' }],
+    ['cli-login-noticed', { provider: AGY }],
+  ]) await assert.rejects(h.actions[action](payload), { code: 'bot/invalid' }, action)
+  assert.deepEqual(h.calls, [])
+})
+
+test('Antigravity signed in: the model chosen with the entry is applied, as for Claude Code and Codex', async () => {
+  const h = agyFixture()
+  await h.actions['cli-login-start']({ botId: 'a', provider: AGY, model: `${AGY}/gemini` })
+  await h.ready(AGY)
+  assert.deepEqual(h.updates, [['a', { model: `${AGY}/gemini` }]])
 })
