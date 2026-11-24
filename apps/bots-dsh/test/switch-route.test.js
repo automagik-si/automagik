@@ -387,7 +387,8 @@ test('a cross-agent refusal names the agent, never its provider id, in en, pt-BR
     ['acp-codex/gpt-6.2-sol', 'acp-claude/default', [{ ref: 'acp-claude/default', provider: 'acp-claude', providerName: 'Claude Code' }], 'Claude Code'],
     // No catalog row for the agent: the menu's own names answer.
     ['acp-claude/default', 'acp-codex/gpt-6.2-sol', [], 'Codex'],
-    ['acp-claude/default', 'acp-omp/default', [{ ref: 'acp-omp/default', provider: 'acp-omp', providerName: 'omp' }], 'omp'],
+    // The catalog's brand wins over the menu's own name for the same agent.
+    ['acp-claude/default', 'acp-omp/default', [{ ref: 'acp-omp/default', provider: 'acp-omp', providerName: 'Oh My Pi' }], 'Oh My Pi'],
   ]) {
     const b = bench()
     t.after(() => b.ctx.dispose())
