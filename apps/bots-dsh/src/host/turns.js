@@ -692,8 +692,9 @@ export function install(rt) {
     }
     for (const [id, entry] of live) {
       const owner = rt.groupOwners.get(id)
-      // A note turn shows as the move it belongs to (the switch job below), never its own work.
-      if (entry.turn !== undefined && owner !== undefined && !noting(id, entry.turn)) add(owner.roomId, owner.botId, { since: entry.since, ...doingOf(entry) })
+      // A note turn shows as the move it belongs to (the switch job below), never its own work,
+      // nor does a fresh part's hidden handoff acknowledgement after a group follow.
+      if (entry.turn !== undefined && owner !== undefined && !noting(id, entry.turn) && rt.ackingPart?.(id) !== true) add(owner.roomId, owner.botId, { since: entry.since, ...doingOf(entry) })
     }
     for (const [id] of subagentsByParent) {
       const owner = rt.groupOwners.get(id)

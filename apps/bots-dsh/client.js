@@ -26011,7 +26011,7 @@ var import_react55 = require("react");
 var import_react_dom8 = require("react-dom");
 var PHRASE_HOLD_MS = 800;
 var drawPhrase = (pool) => t(pool[Math.min(pool.length - 1, Math.floor(Math.random() * pool.length))]);
-var rowVisible = ({ running: running2, streaming, tools, relaying, bot, room: room2, noting = false, picking = false }) => !noting && !picking && running2 && (!streaming || tools.length > 0) && !relaying && (bot !== void 0 || room2 !== void 0);
+var rowVisible = ({ running: running2, streaming, tools, relaying, bot, room: room2, noting = false, picking = false, acking = false }) => !noting && !picking && !acking && running2 && (!streaming || tools.length > 0) && !relaying && (bot !== void 0 || room2 !== void 0);
 var picksSubscriber = (actions) => (listener) => {
   const stop3 = actions?.subscribePicks?.(listener);
   return typeof stop3 === "function" ? stop3 : () => {
@@ -26117,6 +26117,16 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   const noting = useWork?.((work) => work.noting?.[sessionId] === true) === true;
   const subscribePicks = (0, import_react55.useMemo)(() => picksSubscriber(actions), [actions]);
   const picking = (0, import_react55.useSyncExternalStore)(subscribePicks, () => actions?.picking?.(sessionId) === true);
+  const ackAt = useWork?.((work) => work.acking?.[sessionId]);
+  const sentAt = useSession((snapshot2) => Math.max(0, ...(snapshot2?.pendingSubmissions ?? []).map((sub) => sub.time ?? 0)));
+  const ack = (0, import_react55.useRef)({ at: void 0, seen: 0, ran: false, spent: false });
+  if (ack.current.at !== ackAt) ack.current = { at: ackAt, seen: Date.now(), ran: false, spent: false };
+  if (ackAt !== void 0) {
+    if (running2) ack.current.ran = true;
+    else if (ack.current.ran) ack.current.spent = true;
+    if (sentAt > ack.current.seen) ack.current.spent = true;
+  }
+  const acking = ackAt !== void 0 && !ack.current.spent;
   const pendingInput = useSession((snapshot2) => freshInputAt(snapshot2?.pendingSubmissions, steeredAt));
   const bot = roster.byId[sessionId];
   const room2 = roster.roomsById[sessionId];
@@ -26128,7 +26138,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   const streaming = entries2.some((entry) => entry.text);
   const tools = entries2.filter((entry) => !entry.text).sort((a, b) => a.at - b.at);
   const relaying = tools.some((entry) => entry.relay);
-  const visible = moveAt !== 0 || rowVisible({ running: running2, streaming, tools, relaying, bot, room: room2, noting, picking });
+  const visible = moveAt !== 0 || rowVisible({ running: running2, streaming, tools, relaying, bot, room: room2, noting, picking, acking });
   const tool = tools.at(-1);
   const inputRef = (0, import_react55.useRef)(0);
   const inputAt = Math.max(inputRef.current, pendingInput);

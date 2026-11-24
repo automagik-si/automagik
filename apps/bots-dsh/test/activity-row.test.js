@@ -118,3 +118,12 @@ test('C1: the row stays hidden while this window\'s crossing pick waits for noti
   assert.equal(rowVisible({ running: true, streaming: false, tools: [{ label: 'x' }], relaying: false, bot, picking: true }), false)
   assert.equal(rowVisible({ running: true, streaming: false, tools: [], relaying: false, bot, picking: false }), true)
 })
+
+// PLAN-D15-ACK KR0 (#2061): the fresh part's hidden handoff acknowledgement after an agent
+// switch (`acking`) draws no row either.
+test('KR0: the row stays hidden while the fresh part acknowledges its handoff', () => {
+  const bot = {}
+  assert.equal(rowVisible({ running: true, streaming: false, tools: [], relaying: false, bot, acking: true }), false)
+  assert.equal(rowVisible({ running: true, streaming: false, tools: [{ label: 'x' }], relaying: false, bot, acking: true }), false)
+  assert.equal(rowVisible({ running: true, streaming: false, tools: [], relaying: false, bot }), true)
+})

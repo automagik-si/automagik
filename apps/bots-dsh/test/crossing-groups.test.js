@@ -910,3 +910,67 @@ test('G9 a message waiting in the old group part at the commit is in the fresh p
   assert.equal(waiting('s3'), 1)
   assert.equal(waiting('g1'), 0)
 })
+
+// ---- F4-ack (PLAN-D15-ACK): a group part's hidden handoff acknowledgement after its follow ----
+// is flagged from the commit like the own chat's, and is no member work in the group.
+test('KG1 a followed group part is flagged at its commit; its ack turn is no member work, the next turn is', async t => {
+  const b = bench({ turns: true })
+  t.after(() => b.ctx.dispose())
+  const atCommit = []
+  const save = b.rt.save
+  b.rt.save = async () => { if (b.room.sessions.b1 === 's3' && atCommit.length === 0) atCommit.push(b.rt.ackingView()); return save() }
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.followed('s3')
+  assert.equal(typeof atCommit[0]?.s3, 'number')
+  b.sessionEvent('s3', { type: 'turn/start', data: { turn: 1 } })
+  assert.equal(b.rt.ackingPart('s3'), true)
+  assert.equal((b.rt.roomWorkView().r1 ?? []).some(item => item.botId === 'b1'), false)
+  b.sessionEvent('s3', { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  assert.equal(b.rt.ackingView().s3, undefined)
+  b.sessionEvent('s3', { type: 'turn/start', data: { turn: 2 } })
+  assert.equal((b.rt.roomWorkView().r1 ?? []).some(item => item.botId === 'b1'), true)
+})
+
+test('KG2 a busy group conversation that follows at its next step is never flagged', async t => {
+  const b = bench({ model: 'acp-claude/default' })
+  t.after(() => b.ctx.dispose())
+  const probes = []
+  const save = b.rt.save
+  b.rt.save = async () => { probes.push(b.rt.ackingView()); return save() }
+  const send = (agent) => {
+    const through = agent.send.bind(agent)
+    agent.send = (item, where, wake) => { probes.push(b.rt.ackingView()); return through(item, where, wake) }
+  }
+  const create = b.rt.createSession
+  b.rt.createSession = async (...args) => { const id = await create(...args); send(b.agents.get(id)); return id }
+  b.group.status = 'running'
+  b.rt.live.set('g1', { turn: 5, info: ROOM_CALL, joined: [] })
+  await b.rt.followGroups(b.bot)
+  const idle = Promise.withResolvers()
+  b.group.whenIdle = () => idle.promise
+  const { passed } = await b.preStep('g1', { messages: [message(SOURCE_KIND, '[Group post] the build is green', { role: 'post', exchangeId: 'e-mid' })], step: 2 })
+  assert.equal(passed, false)
+  b.group.status = 'idle'
+  b.rt.live.delete('g1')
+  idle.resolve()
+  await b.followed('s2')
+  assert.equal(b.handoffOf('s2').source.resume, true)
+  assert.equal(probes.length > 0, true)
+  assert.equal(probes.every(view => view.s2 === undefined), true)
+  assert.deepEqual(b.rt.ackingView(), {})
+})
+
+// AK2-2.2: a group round's message spliced into the flagged part clears the flag; the turn it
+// starts is member work again.
+test('KG3 a group round message spliced into the flagged part clears it; its turn is member work', async t => {
+  const b = bench({ turns: true })
+  t.after(() => b.ctx.dispose())
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await b.followed('s3')
+  assert.equal(b.rt.ackingPart('s3'), true)
+  const round = message(SOURCE_KIND, '[Group chat] status?', { form: 'relay', role: 'room', exchangeId: 'e-round' })
+  b.sessionEvent('s3', { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, inserted: [round] } })
+  assert.equal(b.rt.ackingView().s3, undefined)
+  b.sessionEvent('s3', { type: 'turn/start', data: { turn: 1 } })
+  assert.equal((b.rt.roomWorkView().r1 ?? []).some(item => item.botId === 'b1'), true)
+})

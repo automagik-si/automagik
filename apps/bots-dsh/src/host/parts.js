@@ -1266,6 +1266,14 @@ export function install(rt) {
     return place !== undefined && place.roomId === undefined && rt.botOf(place.botId)?.sessionPinned === true
   }
 
+  // Fresh parts whose first turn is Omni's own acknowledgement of their bare handoff (the
+  // llm/stream hook below): the chat draws no activity row for it (F4-ack). Set in the
+  // commit's synchronous stretch, so every state answer that names the part carries it.
+  /** @type {Map<string, number>} */
+  const acking = new Map()
+  // The kinds forward() wakes a part with (followup).
+  const wakesPart = message => message?.source?.kind === 'user' || message?.source?.kind === 'retry' || message?.source?.kind === SOURCE_KIND || message?.source?.kind === REPLY_KIND
+
   // Input for an earlier part goes on in the current one: a browser may still show the
   // old part, and a turn stopped for a switch hands on what it claimed. Answers how many
   // messages it sent with followup, the sends that wake the part. `handed` collects the ids
@@ -1273,6 +1281,9 @@ export function install(rt) {
   // the part's turn began (MJ-2).
   async function forward(owner, messages, from, handed) {
     const target = currentOf(owner)
+    // Input that wakes the part makes its first turn a real one: no hidden acknowledgement,
+    // before anything is sent.
+    if (messages.some(wakesPart)) acking.delete(target)
     if (target === undefined || messages.length === 0) return 0
     let woke = 0
     await rt.ensureCapabilities(target)
@@ -2072,6 +2083,23 @@ export function install(rt) {
   rt.notingView = () => Object.fromEntries([...switches]
     .filter(([, job]) => job.crossing !== undefined && job.noteRequest !== undefined && job.moved !== true)
     .map(([id]) => [id, true]))
+  // Fresh parts whose first turn is the hidden handoff acknowledgement (`acking`), with when
+  // that was set: the chat draws no activity row for it (F4-ack). A flag whose turn never
+  // ended goes after the crossing deadline, in both reads.
+  const ackBound = () => config.crossingDeadlineMs ?? CROSSING_DEADLINE_MS
+  rt.ackingView = () => {
+    const now = Date.now()
+    for (const [id, at] of acking) if (now - at > ackBound()) acking.delete(id)
+    return Object.fromEntries(acking)
+  }
+  rt.ackingPart = id => {
+    const at = acking.get(id)
+    return at !== undefined && Date.now() - at <= ackBound()
+  }
+  // The fresh part's first turn is the hidden acknowledgement when its handoff does not resume
+  // a cut reply and nothing taken over or waiting in the old part will wake it.
+  const acksFirst = (agent, job, resume) => !resume && !job.carry.some(wakesPart)
+    && ![...agent.inbox.nextStep, ...agent.inbox.nextTurn].some(message => !isNoteRequest(message) && wakesPart(message))
   // A handoff-note request still waiting in a part's inbox never runs as a turn later.
   function dropNoteRequests(agent) {
     const stale = [...(agent?.inbox?.nextStep ?? []), ...(agent?.inbox?.nextTurn ?? [])].filter(message => isNoteRequest(message))
@@ -2406,7 +2434,8 @@ export function install(rt) {
         // awaiting its first answer goes back too, and one that already answered on the new
         // agent follows the Bot back with a handoff of its own, once those reverts settled.
         const reverts = []
-        for (const [groupFresh, groupEntry] of [...awaiting]) {
+        // A snapshot on purpose: revertSwitch deletes from `awaiting` during this loop.
+        for (const [groupFresh, groupEntry] of Array.from(awaiting)) {
           if (groupEntry.botId === bot.id && groupEntry.job?.crossing?.group === true && groupEntry.expected === entry.expected) {
             reverts.push(revertSwitch(groupFresh, groupEntry, failure).catch(error => rt.warn('ds-bot: group part %s not taken back: %s', groupFresh, error)))
           }
@@ -2523,6 +2552,10 @@ export function install(rt) {
     return entry?.job?.crossing !== undefined && entry.job.resume === true && goesBackOn(id, entry, reason)
   }
   ctx.on('session/event', (session, event) => {
+    // The hidden acknowledgement is over at its turn's end; input DSH admits into the part
+    // (anything but the handoff itself) makes the turn it starts a real one.
+    if (event?.type === 'turn/end') acking.delete(session?.id)
+    if (event?.type === 'agent/inbox/spliced' && (event.data?.inserted ?? []).some(message => message?.source?.handoff !== true && message?.source?.role !== 'handoff-note')) acking.delete(session?.id)
     const entry = awaiting.get(session?.id)
     if (entry === undefined) return
     if (event?.type === 'turn/start') {
@@ -2735,6 +2768,9 @@ export function install(rt) {
       return
     }
     const segment = { sessionId: agent.id, endedAt: Date.now(), ...(tokens !== undefined ? { tokens } : {}), ...noted, switchedTo: job.target, archivePending: true }
+    // In the same synchronous stretch as the pointer move, so every state answer that names
+    // the fresh part says its first turn is the hidden acknowledgement.
+    if (acksFirst(agent, job, resume)) acking.set(freshId, Date.now())
     rt.endGrants?.(agent.id, 'part')
     if (room !== undefined) return commitGroup(agent, job, { bot, room, segment, freshId, fresh, written, carried, number })
     ;(bot.segments ??= []).push(segment)
@@ -2803,6 +2839,7 @@ export function install(rt) {
     // context.
     if (sent === 0) {
       try { wakeKept(fresh) } catch (error) {
+        acking.delete(freshId)
         if (unloaded(error)) {
           // The marker stays: the next start's restart pass wakes the part. Nothing here
           // watches its first answer any more.
@@ -2885,6 +2922,7 @@ export function install(rt) {
     }
     if (sent === 0) {
       try { wakeKept(fresh) } catch (error) {
+        acking.delete(freshId)
         if (unloaded(error)) {
           job.kept = true
           if (awaiting.get(freshId)?.job === job) {
@@ -3527,7 +3565,11 @@ export function install(rt) {
     const noting = batch.some(message => message.source?.role === 'handoff-note')
     const opened = batch.filter(message => message.source?.role !== 'handoff-note' && (message.source?.kind === 'user' || message.source?.kind === 'retry' || message.source?.kind === SOURCE_KIND))
     const bare = !noting && opened.length > 0 && opened.every(message => message.source.kind === SOURCE_KIND && message.source.handoff === true && message.source.resume !== true)
-    if (!bare) return next()
+    // A model step on the part: its first turn is not the hidden acknowledgement.
+    if (!bare) {
+      acking.delete(options.sessionId)
+      return next()
+    }
     if (awaiting.has(options.sessionId)) acked.add(options.sessionId)
     return (async function* acknowledge() {
       yield { type: 'block-start', index: 0, blockType: 'text' }
