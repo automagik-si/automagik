@@ -4,7 +4,7 @@
 // the HOME it was given.
 import assert from 'node:assert/strict'
 import {
-  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync,
+  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync,
   utimesSync, writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -189,7 +189,7 @@ test('I1: the probe, a Session and the sign-in each run agy in its own home, wit
   assert.equal((await w.row()).signedIn, false)
   const probe = w.envs().at(-1)
   checkIsolated(probe, home)
-  assert.equal(probe.cwd, home)
+  assert.equal(probe.cwd, realpathSync(home))
   // A Session: refused as signed out, in its own home, and the chat names Settings.
   const before = w.envs().length
   const chunks = await w.turn()
