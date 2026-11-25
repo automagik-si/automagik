@@ -1,0 +1,32 @@
+name: Verify issue 2091 on macOS
+on:
+  push:
+    branches: [verify/2091-macos-i1]
+permissions:
+  contents: read
+jobs:
+  i1:
+    runs-on: macos-15
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/acp-dsh
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: 7019a7806f3838d15e4f3d91fb19762ed27e522b
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24.9
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run harness
+      - name: Check the exact PR commit and execute I1
+        run: |
+          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = 7019a7806f3838d15e4f3d91fb19762ed27e522b
+          node -e "const t = require('os').tmpdir(); console.log('tmpdir', t, 'physical', require('fs').realpathSync(t))"
+          node --import ./test/harness-resolve.mjs --test --test-name-pattern='^I1:' test/agy-isolation.test.js
