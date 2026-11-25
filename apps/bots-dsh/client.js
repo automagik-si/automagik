@@ -15390,7 +15390,7 @@ var viewT = (key, params) => key === "Send" ? t("Send to Bot") : t(key, params);
 var VIEW_UI = { t: viewT, Markdown: import_dsh_client_ui_primitives.MarkdownText };
 var Card = (props) => (0, import_react29.createElement)(ViewUi.Provider, { value: VIEW_UI }, (0, import_react29.createElement)(WidgetCard, props));
 var ViewCard = Card;
-var withUi = (Component3) => (props) => (0, import_react29.createElement)(ViewUi.Provider, { value: VIEW_UI }, (0, import_react29.createElement)(Component3, props));
+var withUi = (Component4) => (props) => (0, import_react29.createElement)(ViewUi.Provider, { value: VIEW_UI }, (0, import_react29.createElement)(Component4, props));
 var WidgetView2 = withUi(WidgetView);
 var ViewMenuList2 = withUi(ViewMenuList);
 function PendingView({ sessionId, view, actions, inline }) {
@@ -23982,39 +23982,57 @@ function teamActions({
   const stopping = (options) => options?.stopReply === true ? { stopReply: true } : {};
   const memoryOf = (id) => roster.getSnapshot().roomsById[id] ? { roomId: id } : { botId: id };
   const yieldTo = (state2, view) => state2.panelYield === true || panelFolded?.(view) === true;
+  let panelInstance;
+  const openPanel = (update) => ui2.set((state2) => {
+    const next = update(state2);
+    if (next !== state2) panelInstance = {};
+    return next;
+  });
   const openSideChat = (sessionId, chatId) => {
-    ui2.set((state2) => ({ ...state2, details: sessionId, view: "side", side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state2, "side") }));
+    openPanel((state2) => ({ ...state2, details: sessionId, view: "side", side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state2, "side") }));
   };
   const openSettings = (page = "general", id = null) => {
     ui2.set((state2) => ({ ...state2, settings: { page, id }, menu: null, palette: null, newChat: null }));
   };
   return {
     // The pane starts at the rail's edge, so a floating drawer would stick out from under it.
+    // The instance distinguishes two opens on the same mode and section.
     openNewChat: (mode, sectionId = null) => {
-      ui2.set((state2) => ({ ...state2, newChat: mode, newChatSection: sectionId ?? null, menu: null, palette: null }));
+      ui2.set((state2) => ({ ...state2, newChat: mode, newChatInstance: {}, newChatSection: sectionId ?? null, menu: null, palette: null }));
+    },
+    closeNewChat: (mode, sectionId, instance) => {
+      ui2.set((state2) => state2.newChat === mode && (state2.newChatSection ?? null) === sectionId && state2.newChatInstance === instance ? { ...state2, newChat: null, newChatSection: null } : state2);
     },
     openPalette: (query = "") => {
       ui2.set((state2) => ({ ...state2, palette: { query, token: Date.now() }, newChat: null, menu: null }));
     },
     // The token keeps a late exit timer from closing a palette opened again since.
-    closePalette: (token) => {
-      ui2.set((state2) => state2.palette && (token === void 0 || state2.palette.token === token) ? { ...state2, palette: null } : state2);
+    closePalette: (token, palette) => {
+      ui2.set((state2) => state2.palette && (token === void 0 || state2.palette.token === token) && (palette === void 0 || state2.palette === palette) ? { ...state2, palette: null } : state2);
     },
     openExchange: (a, b) => {
       if (a && b) ui2.set((state2) => ({ ...state2, exchange: [a, b] }));
     },
+    closeExchange: (pair) => {
+      ui2.set((state2) => state2.exchange === pair ? { ...state2, exchange: null } : state2);
+    },
     openVoice: (id) => {
-      if (id) ui2.set((state2) => ({ ...state2, voice: id, menu: null }));
+      if (id) ui2.set((state2) => ({ ...state2, voice: id, voiceInstance: {}, menu: null }));
     },
-    closeVoice: () => {
-      ui2.set((state2) => state2.voice ? { ...state2, voice: null } : state2);
+    closeVoice: (id, instance) => {
+      ui2.set((state2) => state2.voice && (id === void 0 || state2.voice === id && state2.voiceInstance === instance) ? { ...state2, voice: null } : state2);
     },
+    getPanelInstance: () => panelInstance,
     toggleDetails: (id, force) => {
       ui2.set((state2) => {
         const snap = roster?.getSnapshot?.();
         const same = state2.details != null && detailsSubject(snap, state2.details) === detailsSubject(snap, id);
         const details = force || !same || state2.view !== "details" ? id : null;
-        if (details === null && panelFolded?.("details") === true) return { ...state2, renaming: false, tab: null, details: id, view: "details", panelYield: true };
+        if (details === null && panelFolded?.("details") === true) {
+          panelInstance = {};
+          return { ...state2, renaming: false, tab: null, details: id, view: "details", panelYield: true };
+        }
+        panelInstance = details ? {} : null;
         return { ...state2, renaming: false, tab: null, details, view: "details" };
       });
     },
@@ -24022,7 +24040,7 @@ function teamActions({
     // chat, an outside Session) settles on the details view. So does one that
     // does not own the open side chat.
     followPanel: (id) => {
-      ui2.set((state2) => {
+      openPanel((state2) => {
         if (!state2.details || state2.details === id) return state2;
         const snap = roster.getSnapshot();
         const view = state2.view === "browser" && snap.byId[id] === void 0 ? "details" : state2.view === "side" && !(snap.sideChats?.[snap.byId[id]?.id] ?? []).some((chat) => chat?.id === state2.side) ? "details" : state2.view;
@@ -24030,23 +24048,34 @@ function teamActions({
       });
     },
     showDetails: (id, tab = null) => {
-      ui2.set((state2) => ({ ...state2, details: id, view: "details", renaming: false, tab, panelYield: yieldTo(state2, "details") }));
+      openPanel((state2) => ({ ...state2, details: id, view: "details", renaming: false, tab, panelYield: yieldTo(state2, "details") }));
     },
     // Opening the conversation would move focus to its composer and blur the name field.
     renameBot: (id) => {
-      ui2.set((state2) => ({ ...state2, details: id, view: "details", renaming: true, tab: null, panelYield: yieldTo(state2, "details") }));
+      openPanel((state2) => ({ ...state2, details: id, view: "details", renaming: true, tab: null, panelYield: yieldTo(state2, "details") }));
+    },
+    showBrowserPanel: (id, { resetDetails = false } = {}) => {
+      ui2.set((state2) => {
+        const next = { ...state2, details: id, view: "browser", panelYield: yieldTo(state2, "browser") };
+        if (resetDetails) {
+          next.renaming = false;
+          next.tab = null;
+        }
+        panelInstance = state2.details === id && state2.view === "browser" ? panelInstance ?? {} : {};
+        return next;
+      });
     },
     openSettings,
     // Omni's own Models page: the providers DSH serves, their keys and models.
     openModels: () => openSettings("models"),
-    closeSettings: () => {
-      ui2.set((state2) => state2.settings ? { ...state2, settings: null } : state2);
+    closeSettings: (settings) => {
+      ui2.set((state2) => state2.settings && (settings === void 0 || state2.settings === settings) ? { ...state2, settings: null } : state2);
     },
     openMemory: (id) => {
-      ui2.set((state2) => ({ ...state2, memory: id, menu: null, palette: null }));
+      ui2.set((state2) => ({ ...state2, memory: id, memoryInstance: {}, menu: null, palette: null }));
     },
-    closeMemory: () => {
-      ui2.set((state2) => state2.memory ? { ...state2, memory: null } : state2);
+    closeMemory: (id, instance) => {
+      ui2.set((state2) => state2.memory && (id === void 0 || state2.memory === id && state2.memoryInstance === instance) ? { ...state2, memory: null } : state2);
     },
     openConnectors: () => {
       ui2.set((state2) => ({ ...state2, settings: { page: "connectors", id: null }, menu: null, palette: null, newChat: null }));
@@ -24072,8 +24101,12 @@ function teamActions({
       ui2.set((state2) => state2.details && state2.view === "side" && state2.side === chatId ? { ...state2, view: "details", side: null } : state2);
       return after(call2("side-close", { chatId }));
     },
-    closePanel: () => {
-      ui2.set((state2) => state2.details ? { ...state2, details: null, view: "details", renaming: false, tab: null, side: null } : state2);
+    closePanel: (pane) => {
+      ui2.set((state2) => {
+        if (!state2.details) return state2;
+        if (pane !== void 0 && (panelInstance !== pane.instance || state2.details !== pane.id || (state2.view ?? "details") !== pane.view || state2.renaming !== pane.renaming || state2.tab !== pane.tab || state2.side !== pane.side)) return state2;
+        return { ...state2, details: null, view: "details", renaming: false, tab: null, side: null };
+      });
     },
     quote: (sessionId, text2) => ui2.set((state2) => ({ ...state2, quote: { sessionId, text: text2, token: Date.now() } })),
     clearQuote: (token) => ui2.set((state2) => state2.quote?.token === token ? { ...state2, quote: null } : state2),
@@ -24087,8 +24120,8 @@ function teamActions({
     openMenu: (menu) => {
       ui2.set((state2) => ({ ...state2, menu, palette: null }));
     },
-    closeMenu: () => {
-      ui2.set((state2) => state2.menu ? { ...state2, menu: null } : state2);
+    closeMenu: (menu) => {
+      ui2.set((state2) => state2.menu && (menu === void 0 || state2.menu === menu) ? { ...state2, menu: null } : state2);
     },
     closeOverlay: () => {
       ui2.set((state2) => ({ ...state2, newChat: null, newChatSection: null, exchange: null, details: state2.newChat || state2.exchange ? state2.details : null }));
@@ -34842,16 +34875,22 @@ var import_react81 = require("react");
 var SHEET_EXIT_MS = 220;
 function ExchangeDialog({ pair, roster, actions }) {
   const [entries2, setEntries] = (0, import_react81.useState)(null);
-  const [leaving, setLeaving] = (0, import_react81.useState)(false);
+  const [leavingPair, setLeavingPair] = (0, import_react81.useState)(null);
+  const exitTimer = (0, import_react81.useRef)(void 0);
   const log = (0, import_react81.useRef)(null);
   const atEnd = (0, import_react81.useRef)(true);
   (0, import_react81.useLayoutEffect)(() => {
     if (entries2 !== null && atEnd.current && log.current) log.current.scrollTop = log.current.scrollHeight;
   }, [entries2]);
+  (0, import_react81.useLayoutEffect)(() => () => {
+    clearTimeout(exitTimer.current);
+    exitTimer.current = void 0;
+  }, [pair]);
+  const leaving = leavingPair === pair;
   const close = () => {
-    if (leaving) return;
-    setLeaving(true);
-    setTimeout(() => actions.closeOverlay(), SHEET_EXIT_MS);
+    if (exitTimer.current !== void 0) return;
+    setLeavingPair(pair);
+    exitTimer.current = setTimeout(() => actions.closeExchange(pair), SHEET_EXIT_MS);
   };
   useEscape(close);
   (0, import_react81.useEffect)(() => {
@@ -40635,7 +40674,7 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
   const bot = roster.byId[menu.id];
   const room2 = roster.roomsById[menu.id];
   const entry = bot ?? room2;
-  const waitsRaw = useWork && bot ? useWork((work) => JSON.stringify(work.waiting?.[bot.id] ?? null)) : "null";
+  const waitsRaw = useWork ? useWork((work) => JSON.stringify(bot ? work.waiting?.[bot.id] ?? null : null)) : "null";
   const waits = (0, import_react97.useMemo)(() => JSON.parse(waitsRaw), [waitsRaw]);
   if (entry === void 0) return null;
   const isMainBot = isMainOf(roster, menu.id);
@@ -42756,7 +42795,7 @@ function ImportCard({ flow, page, busy, onApply, onCancel, onCloseAndImport, onD
     )
   ));
 }
-function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSessions, useSessionStatus, useActivity, useWork, useBrowserTabs, useBrowserPages, useBrowserHolds, useComputer }) {
+function BotPanel({ pane, leaving, room: room2, overlay: overlay2, roster, actions, useSessions, useSessionStatus, useActivity, useWork, useBrowserTabs, useBrowserPages, useBrowserHolds, useComputer }) {
   const bot = roster.byId[pane.id];
   const canBrowse = Boolean(bot && roster.browser === true && actions.browserShow);
   const sideChats = bot ? sideChatsOf(roster, bot.id) : [];
@@ -42793,7 +42832,7 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
   }, [pane.id, view, leaving]);
   (0, import_react102.useEffect)(() => {
     const panel = root.current;
-    if (!overlay || view !== "details" || leaving || !panel) return void 0;
+    if (!overlay2 || view !== "details" || leaving || !panel) return void 0;
     const shown2 = (node) => getComputedStyle(node).display !== "none" && getComputedStyle(node).visibility !== "hidden";
     const otherLayer = () => [...document.querySelectorAll('[role="dialog"],[role="menu"],[role="listbox"]')].some((node) => node !== panel && !panel.contains(node) && !node.closest('[data-leaving],[hidden],[inert],[aria-hidden="true"]') && shown2(node));
     const focusable = () => [...panel.querySelectorAll("button,a[href],input,textarea,select,[tabindex]")].filter((node) => node.tabIndex >= 0 && !node.disabled && !node.closest('[hidden],[inert],[aria-hidden="true"]') && shown2(node));
@@ -42820,7 +42859,7 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
       document.removeEventListener("keydown", contain);
       document.removeEventListener("focusin", contain);
     };
-  }, [overlay, view, leaving]);
+  }, [overlay2, view, leaving]);
   const panelWidth = fitWidth(width ?? (view === "browser" ? DEFAULT_WIDTH : DETAILS_WIDTH), widthRange(view, room2));
   (0, import_react102.useLayoutEffect)(() => {
     if (view === "browser" && width === null) setWidth(DEFAULT_WIDTH);
@@ -42838,9 +42877,9 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
     const switched = settling && shownView.current !== view;
     shownView.current = view;
     if (switched) chatRoom.hold(true);
-    chatRoom.setRight(leaving || overlay ? null : panelWidth);
+    chatRoom.setRight(leaving || overlay2 ? null : panelWidth);
     if (switched) chatRoom.hold(false);
-  }, [view, panelWidth, leaving, overlay]);
+  }, [view, panelWidth, leaving, overlay2]);
   (0, import_react102.useEffect)(() => () => {
     chatRoom.setRight(null);
     chatRoom.hold(false);
@@ -42963,7 +43002,7 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
     });
   }, [view, pane.id]);
   const startResize = (event) => {
-    if (event.button !== 0 || leaving || overlay) return;
+    if (event.button !== 0 || leaving || overlay2) return;
     event.preventDefault();
     const panel = root.current;
     const grip = event.currentTarget;
@@ -43015,8 +43054,8 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
       tabIndex: -1,
       "data-view": view,
       // React 18 drops a boolean inert; the empty string sets the attribute.
-      role: overlay && view === "details" ? "dialog" : void 0,
-      "aria-modal": overlay && view === "details" && !leaving ? true : void 0,
+      role: overlay2 && view === "details" ? "dialog" : void 0,
+      "aria-modal": overlay2 && view === "details" && !leaving ? true : void 0,
       inert: leaving ? "" : void 0,
       "aria-label": view === "browser" && bot ? t("{name}'s browser", { name: bot.name }) : view === "side" ? t("Side chat") : t("Conversation details"),
       "data-leaving": leaving || void 0,
@@ -43024,13 +43063,13 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
       "data-settling": settling || void 0,
       "data-instant": instant || void 0,
       "data-dragging": dragging || void 0,
-      "data-overlay": overlay || void 0,
+      "data-overlay": overlay2 || void 0,
       style: { "--bt-panel-w": `${panelWidth}px` },
       onAnimationEnd: (event) => {
         if (event.target === event.currentTarget) setLanded(true);
       }
     },
-    leaving || overlay ? null : (0, import_react102.createElement)("div", { className: "bt-panel-grip", role: "separator", "aria-orientation": "vertical", "aria-label": t("Resize panel"), onPointerDown: startResize }),
+    leaving || overlay2 ? null : (0, import_react102.createElement)("div", { className: "bt-panel-grip", role: "separator", "aria-orientation": "vertical", "aria-label": t("Resize panel"), onPointerDown: startResize }),
     // Over the whole window while dragging: the cursor stays a resize cursor and the
     // pages underneath (the chat, the guest) see no pointer.
     dragging ? (0, import_react_dom17.createPortal)((0, import_react102.createElement)("div", { className: "bt-drag-shield", "aria-hidden": true }), document.body) : null,
@@ -43195,6 +43234,29 @@ function menuKey(menu) {
   }
   return key;
 }
+var OverlayBoundary = class extends import_react103.Component {
+  state = { instance: this.props.instance, leaving: this.props.leaving, failure: null };
+  static getDerivedStateFromProps({ instance, leaving }, state2) {
+    if (instance === state2.instance && leaving === state2.leaving) return null;
+    return { instance, leaving, failure: leaving ? state2.failure : null };
+  }
+  static getDerivedStateFromError() {
+    return { failure: {} };
+  }
+  componentDidCatch(error) {
+    if (this.handled === this.state.failure) return;
+    this.handled = this.state.failure;
+    console.warn("[ds-bot] overlay", this.props.name, error);
+    try {
+      this.props.close();
+    } catch {
+    }
+  }
+  render() {
+    return this.state.failure ? null : this.props.children;
+  }
+};
+var overlay = (name, key, instance, close, child, leaving = false) => (0, import_react_dom18.createPortal)((0, import_react103.createElement)(OverlayBoundary, { name, key, instance, close, leaving }, child), document.body);
 function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity, useWork, useRegistry, useBrowserPages, useBrowserTabs, useBrowserHolds, useComputer, useUpdate, useFrame, actions }) {
   const roster = useRoster((value) => value);
   const ui2 = useUi((value) => value);
@@ -43208,7 +43270,15 @@ function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity
     if (ui2.voice && ui2.voice !== current) actions.closeVoice();
     if (current) actions.followPanel?.(current);
   }, [current]);
-  const open = ui2.details ? { id: ui2.details, view: ui2.view ?? "details", renaming: ui2.renaming, tab: ui2.tab, side: ui2.side } : null;
+  const panelInstance = actions.getPanelInstance();
+  const open = (0, import_react103.useMemo)(() => ui2.details ? {
+    id: ui2.details,
+    view: ui2.view ?? "details",
+    renaming: ui2.renaming,
+    tab: ui2.tab,
+    side: ui2.side,
+    instance: panelInstance
+  } : null, [ui2.details, ui2.view, ui2.renaming, ui2.tab, ui2.side, panelInstance]);
   const layout = frameLayout({
     viewport,
     sidebarWidth: 0,
@@ -43224,7 +43294,7 @@ function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity
     }
     const timer = setTimeout(() => setKept(null), PANEL_LINGER_MS);
     return () => clearTimeout(timer);
-  }, [ui2.details, ui2.view, ui2.renaming, ui2.tab, shown2 === null]);
+  }, [shown2]);
   const pane = shown2 ?? kept;
   const [settings, settingsLeaving] = useLinger(ui2.settings, DIALOG_EXIT_MS);
   const memoryOwner = (id) => {
@@ -43239,14 +43309,66 @@ function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity
   return (0, import_react103.createElement)(
     import_react103.Fragment,
     null,
-    pane ? (0, import_react_dom18.createPortal)((0, import_react103.createElement)(BotPanel, { pane, leaving: shown2 === null, room: layout.room, overlay: layout.panel === "overlay", roster, actions, useSessions, useSessionStatus, useActivity, useWork, useBrowserTabs, useBrowserPages, useBrowserHolds, useComputer }), document.body) : null,
-    ui2.newChat ? (0, import_react_dom18.createPortal)((0, import_react103.createElement)(NewChat, { key: `${ui2.newChat}:${ui2.newChatSection ?? ""}`, mode: ui2.newChat, sectionId: ui2.newChatSection ?? null, roster, actions }), document.body) : null,
-    ui2.palette ? (0, import_react_dom18.createPortal)((0, import_react103.createElement)(CommandPalette, { key: ui2.palette.token, start: ui2.palette.query, token: ui2.palette.token, roster, actions, useSessions }), document.body) : null,
-    ui2.exchange ? (0, import_react_dom18.createPortal)((0, import_react103.createElement)(ExchangeDialog, { pair: ui2.exchange, roster, actions }), document.body) : null,
-    ui2.voice ? (0, import_react_dom18.createPortal)((0, import_react103.createElement)(VoiceMode, { key: ui2.voice, sessionId: ui2.voice, roster, actions, useSessions, useSessionStatus }), document.body) : null,
-    menu ? (0, import_react_dom18.createPortal)((0, import_react103.createElement)(ContextMenu, { key: menuKey(menu), menu, roster, actions, useWork, leaving: menuLeaving }), document.body) : null,
-    settings ? (0, import_react_dom18.createPortal)((0, import_react103.createElement)(SettingsDialog, { page: settings.page, id: settings.id, roster, actions, useUpdate, leaving: settingsLeaving }), document.body) : null,
-    owner ? (0, import_react_dom18.createPortal)((0, import_react103.createElement)(MemoryDialog, { key: owner.id, owner, actions, leaving: memoryLeaving }), document.body) : null
+    pane ? overlay(
+      "BotPanel",
+      "panel",
+      pane,
+      () => actions.closePanel(pane),
+      (0, import_react103.createElement)(BotPanel, { pane, leaving: shown2 === null, room: layout.room, overlay: layout.panel === "overlay", roster, actions, useSessions, useSessionStatus, useActivity, useWork, useBrowserTabs, useBrowserPages, useBrowserHolds, useComputer }),
+      shown2 === null
+    ) : null,
+    ui2.newChat ? overlay(
+      "NewChat",
+      `${ui2.newChat}:${ui2.newChatSection ?? ""}`,
+      ui2.newChatInstance,
+      () => actions.closeNewChat(ui2.newChat, ui2.newChatSection ?? null, ui2.newChatInstance),
+      (0, import_react103.createElement)(NewChat, { mode: ui2.newChat, sectionId: ui2.newChatSection ?? null, roster, actions })
+    ) : null,
+    ui2.palette ? overlay(
+      "CommandPalette",
+      ui2.palette.token,
+      ui2.palette,
+      () => actions.closePalette(ui2.palette.token, ui2.palette),
+      (0, import_react103.createElement)(CommandPalette, { start: ui2.palette.query, token: ui2.palette.token, roster, actions, useSessions })
+    ) : null,
+    ui2.exchange ? overlay(
+      "ExchangeDialog",
+      "exchange",
+      ui2.exchange,
+      () => actions.closeExchange(ui2.exchange),
+      (0, import_react103.createElement)(ExchangeDialog, { pair: ui2.exchange, roster, actions })
+    ) : null,
+    ui2.voice ? overlay(
+      "VoiceMode",
+      ui2.voice,
+      ui2.voiceInstance,
+      () => actions.closeVoice(ui2.voice, ui2.voiceInstance),
+      (0, import_react103.createElement)(VoiceMode, { sessionId: ui2.voice, roster, actions, useSessions, useSessionStatus })
+    ) : null,
+    menu ? overlay(
+      "ContextMenu",
+      menuKey(menu),
+      menu,
+      () => actions.closeMenu(menu),
+      (0, import_react103.createElement)(ContextMenu, { menu, roster, actions, useWork, leaving: menuLeaving }),
+      menuLeaving
+    ) : null,
+    settings ? overlay(
+      "SettingsDialog",
+      "settings",
+      settings,
+      () => actions.closeSettings(settings),
+      (0, import_react103.createElement)(SettingsDialog, { page: settings.page, id: settings.id, roster, actions, useUpdate, leaving: settingsLeaving }),
+      settingsLeaving
+    ) : null,
+    owner ? overlay(
+      "MemoryDialog",
+      owner.id,
+      ui2.memoryInstance,
+      () => actions.closeMemory(owner.id, ui2.memoryInstance),
+      (0, import_react103.createElement)(MemoryDialog, { owner, actions, leaving: memoryLeaving }),
+      memoryLeaving
+    ) : null
   );
 }
 
@@ -48983,7 +49105,6 @@ function applyOwner(ctx, { gated = false } = {}) {
     if (state2.details === null) return false;
     return frameLayout({ viewport: frame.getSnapshot().viewport, sidebarWidth: 0, pref: "hidden", panel: { view: view ?? state2.view, yielded: state2.panelYield === true } }).panel === "folded";
   };
-  const yieldBrowser = (state2) => state2.panelYield === true || panelFolded("browser");
   const ensureBotHome2 = () => ensureBotHome({ roster, mainView, openSession: actions.openSession });
   let cliLogin;
   const codePanel = codePanelNavigation(ctx.layout, seatNavigation);
@@ -49163,7 +49284,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         if (!bot) return;
         browsers.ensureTabs(bot.id);
         if (browsers.tabs.getSnapshot()[bot.id]?.active == null) browsers.openTab(bot.id);
-        ui2.set((state2) => ({ ...state2, details: id, view: "browser", renaming: false, tab: null, panelYield: yieldBrowser(state2) }));
+        actions.showBrowserPanel(id, { resetDetails: true });
       },
       // '+' on the strip or the drawer's new-tab card: a blank tab in the browser view.
       browserNewTab: (id) => {
@@ -49171,7 +49292,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         if (!bot) return null;
         browsers.ensureTabs(bot.id);
         const tabId = browsers.openTab(bot.id);
-        ui2.set((state2) => ({ ...state2, details: id, view: "browser", renaming: false, tab: null, panelYield: yieldBrowser(state2) }));
+        actions.showBrowserPanel(id, { resetDetails: true });
         return tabId;
       },
       // A drawer card: its tab active, the panel on the browser view.
@@ -49179,7 +49300,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         const bot = roster.getSnapshot().byId[id];
         if (!bot) return;
         browsers.activate(bot.id, tabId);
-        ui2.set((state2) => ({ ...state2, details: id, view: "browser", panelYield: yieldBrowser(state2) }));
+        actions.showBrowserPanel(id);
       },
       browserEnsure: (botId) => browsers.ensureTabs(botId),
       browserCloseTab: (botId, tabId) => browsers.closeTab(botId, tabId),

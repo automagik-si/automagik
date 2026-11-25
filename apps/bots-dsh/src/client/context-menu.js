@@ -91,7 +91,7 @@ export function ContextMenu({ menu, roster, actions, useWork, leaving = false })
   const room = roster.roomsById[menu.id]
   const entry = bot ?? room
   // Only a Bot that is waiting on a hand-off offers to give one up.
-  const waitsRaw = useWork && bot ? useWork(work => JSON.stringify(work.waiting?.[bot.id] ?? null)) : 'null'
+  const waitsRaw = useWork ? useWork(work => JSON.stringify(bot ? work.waiting?.[bot.id] ?? null : null)) : 'null'
   const waits = useMemo(() => JSON.parse(waitsRaw), [waitsRaw])
   if (entry === undefined) return null
   const isMainBot = isMainOf(roster, menu.id)

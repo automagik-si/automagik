@@ -110,21 +110,41 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
   // `view` is the next view, since its minimum decides what fits; a yield already
   // given stays.
   const yieldTo = (state, view) => state.panelYield === true || panelFolded?.(view) === true
+  // Give each new panel scope its own identity before the UI source notifies listeners.
+  let panelInstance
+  const openPanel = update => ui.set(state => {
+    const next = update(state)
+    if (next !== state) panelInstance = {}
+    return next
+  })
   // The panel on a side chat's view, on the chat the strip tab or menu named.
   const openSideChat = (sessionId, chatId) => {
-    ui.set(state => ({ ...state, details: sessionId, view: 'side', side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state, 'side') }))
+    openPanel(state => ({ ...state, details: sessionId, view: 'side', side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state, 'side') }))
   }
   // `id` opens one Bot (page 'bots') or one group chat (page 'groups').
   const openSettings = (page = 'general', id = null) => { ui.set(state => ({ ...state, settings: { page, id }, menu: null, palette: null, newChat: null })) }
   return {
     // The pane starts at the rail's edge, so a floating drawer would stick out from under it.
-    openNewChat: (mode, sectionId = null) => { ui.set(state => ({ ...state, newChat: mode, newChatSection: sectionId ?? null, menu: null, palette: null })) },
+    // The instance distinguishes two opens on the same mode and section.
+    openNewChat: (mode, sectionId = null) => { ui.set(state => ({ ...state, newChat: mode, newChatInstance: {}, newChatSection: sectionId ?? null, menu: null, palette: null })) },
+    closeNewChat: (mode, sectionId, instance) => {
+      ui.set(state => (state.newChat === mode && (state.newChatSection ?? null) === sectionId && state.newChatInstance === instance
+        ? { ...state, newChat: null, newChatSection: null } : state))
+    },
     openPalette: (query = '') => { ui.set(state => ({ ...state, palette: { query, token: Date.now() }, newChat: null, menu: null })) },
     // The token keeps a late exit timer from closing a palette opened again since.
-    closePalette: (token) => { ui.set(state => (state.palette && (token === undefined || state.palette.token === token) ? { ...state, palette: null } : state)) },
+    closePalette: (token, palette) => {
+      ui.set(state => (state.palette && (token === undefined || state.palette.token === token)
+        && (palette === undefined || state.palette === palette) ? { ...state, palette: null } : state))
+    },
     openExchange: (a, b) => { if (a && b) ui.set(state => ({ ...state, exchange: [a, b] })) },
-    openVoice: (id) => { if (id) ui.set(state => ({ ...state, voice: id, menu: null })) },
-    closeVoice: () => { ui.set(state => (state.voice ? { ...state, voice: null } : state)) },
+    closeExchange: (pair) => { ui.set(state => (state.exchange === pair ? { ...state, exchange: null } : state)) },
+    openVoice: (id) => { if (id) ui.set(state => ({ ...state, voice: id, voiceInstance: {}, menu: null })) },
+    closeVoice: (id, instance) => {
+      ui.set(state => (state.voice && (id === undefined || (state.voice === id && state.voiceInstance === instance))
+        ? { ...state, voice: null } : state))
+    },
+    getPanelInstance: () => panelInstance,
     toggleDetails: (id, force) => {
       ui.set((state) => {
         // Any part of the open Bot closes it, as its header shows it expanded.
@@ -133,7 +153,11 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
         const details = force || !same || state.view !== 'details' ? id : null
         // A folded panel is open but not shown: its opener then means "show it"
         // (it takes the room it needs), not "close it".
-        if (details === null && panelFolded?.('details') === true) return { ...state, renaming: false, tab: null, details: id, view: 'details', panelYield: true }
+        if (details === null && panelFolded?.('details') === true) {
+          panelInstance = {}
+          return { ...state, renaming: false, tab: null, details: id, view: 'details', panelYield: true }
+        }
+        panelInstance = details ? {} : null
         return { ...state, renaming: false, tab: null, details, view: 'details' }
       })
     },
@@ -141,7 +165,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     // chat, an outside Session) settles on the details view. So does one that
     // does not own the open side chat.
     followPanel: (id) => {
-      ui.set((state) => {
+      openPanel((state) => {
         if (!state.details || state.details === id) return state
         const snap = roster.getSnapshot()
         const view = state.view === 'browser' && snap.byId[id] === undefined ? 'details'
@@ -150,15 +174,28 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
         return { ...state, details: id, view, renaming: false, tab: null }
       })
     },
-    showDetails: (id, tab = null) => { ui.set(state => ({ ...state, details: id, view: 'details', renaming: false, tab, panelYield: yieldTo(state, 'details') })) },
+    showDetails: (id, tab = null) => { openPanel(state => ({ ...state, details: id, view: 'details', renaming: false, tab, panelYield: yieldTo(state, 'details') })) },
     // Opening the conversation would move focus to its composer and blur the name field.
-    renameBot: (id) => { ui.set(state => ({ ...state, details: id, view: 'details', renaming: true, tab: null, panelYield: yieldTo(state, 'details') })) },
+    renameBot: (id) => { openPanel(state => ({ ...state, details: id, view: 'details', renaming: true, tab: null, panelYield: yieldTo(state, 'details') })) },
+    showBrowserPanel: (id, { resetDetails = false } = {}) => {
+      ui.set(state => {
+        const next = { ...state, details: id, view: 'browser', panelYield: yieldTo(state, 'browser') }
+        if (resetDetails) { next.renaming = false; next.tab = null }
+        panelInstance = state.details === id && state.view === 'browser' ? panelInstance ?? {} : {}
+        return next
+      })
+    },
     openSettings,
     // Omni's own Models page: the providers DSH serves, their keys and models.
     openModels: () => openSettings('models'),
-    closeSettings: () => { ui.set(state => (state.settings ? { ...state, settings: null } : state)) },
-    openMemory: (id) => { ui.set(state => ({ ...state, memory: id, menu: null, palette: null })) },
-    closeMemory: () => { ui.set(state => (state.memory ? { ...state, memory: null } : state)) },
+    closeSettings: (settings) => {
+      ui.set(state => (state.settings && (settings === undefined || state.settings === settings) ? { ...state, settings: null } : state))
+    },
+    openMemory: (id) => { ui.set(state => ({ ...state, memory: id, memoryInstance: {}, menu: null, palette: null })) },
+    closeMemory: (id, instance) => {
+      ui.set(state => (state.memory && (id === undefined || (state.memory === id && state.memoryInstance === instance))
+        ? { ...state, memory: null } : state))
+    },
     openConnectors: () => { ui.set(state => ({ ...state, settings: { page: 'connectors', id: null }, menu: null, palette: null, newChat: null })) },
     setPanelView: (view) => {
       if (view !== 'details' && view !== 'browser' && view !== 'side') return
@@ -181,7 +218,15 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
       ui.set(state => (state.details && state.view === 'side' && state.side === chatId ? { ...state, view: 'details', side: null } : state))
       return after(call('side-close', { chatId }))
     },
-    closePanel: () => { ui.set(state => (state.details ? { ...state, details: null, view: 'details', renaming: false, tab: null, side: null } : state)) },
+    closePanel: (pane) => {
+      ui.set(state => {
+        if (!state.details) return state
+        if (pane !== undefined && (panelInstance !== pane.instance || state.details !== pane.id
+          || (state.view ?? 'details') !== pane.view || state.renaming !== pane.renaming
+          || state.tab !== pane.tab || state.side !== pane.side)) return state
+        return { ...state, details: null, view: 'details', renaming: false, tab: null, side: null }
+      })
+    },
     quote: (sessionId, text) => ui.set(state => ({ ...state, quote: { sessionId, text, token: Date.now() } })),
     clearQuote: token => ui.set(state => (state.quote?.token === token ? { ...state, quote: null } : state)),
     setFlags: (id, flags) => after(call('set-flags', { id, ...flags })),
@@ -192,7 +237,9 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     endSectionRename: () => ui.set(state => (state.renameSection ? { ...state, renameSection: null } : state)),
     deleteRoom: id => after(call('delete-room', { id })),
     openMenu: (menu) => { ui.set(state => ({ ...state, menu, palette: null })) },
-    closeMenu: () => { ui.set(state => (state.menu ? { ...state, menu: null } : state)) },
+    closeMenu: (menu) => {
+      ui.set(state => (state.menu && (menu === undefined || state.menu === menu) ? { ...state, menu: null } : state))
+    },
     closeOverlay: () => { ui.set(state => ({ ...state, newChat: null, newChatSection: null, exchange: null, details: state.newChat || state.exchange ? state.details : null })) },
     createBot: payload => after(call('create-bot', payload)),
     // The team's full view, read once with no pull after it (the New Solver dialog's check of what a
