@@ -9135,7 +9135,7 @@ function solverLimitsPart(bot) {
   return [
     mode,
     'Use solver_progress status to get the active request ID. Pass it as request in every progress update. Register every agreed check with a stable ID and its exact foreground command using plan, then send that plan to your reviewer with message_bot (solver_review "plan", solver_request set to the request ID). Include the same check IDs and their meaning in the plan. Keep IDs for the same checks across re-plans even when their labels change.',
-    "Before a mediated command, use start with a unique run ID and one agreed check ID. Run that check in the foreground in the result folder, then record its actual outcome with checks and that run ID before attempting more work. If a check regenerates output, run the checks again on the stable result. Repeat the same ID only to retry a progress call. Record replan with its own unique run ID before replacing the plan. After a failing run or relevant work, verify all agreed checks again on the current result.",
+    "Before running an agreed check command, use start with a unique run ID and one agreed check ID. Run that check in the foreground in the result folder, then record its actual outcome with checks and that run ID before attempting more work. If a check regenerates output, run the checks again on the stable result. Repeat the same ID only to retry a progress call. Record replan with its own unique run ID before replacing the plan. After a failing run or relevant work, verify all agreed checks again on the current result.",
     'After every agreed check passes, use message_bot with solver_review "result" and solver_request for the result review. Wait for the designated reviewer to answer. Only its independent SHIP can certify Done. Ask for a decision at a limit even on a route whose native actions the host cannot intercept.',
     "If this route does not offer the progress or review tool, keep your own check and attempt record and follow these limits. Explain the missing host evidence in your delivery and withhold Done."
   ].join("\n");
@@ -9148,8 +9148,10 @@ function reviewText(head, dedicated) {
   const how = dedicated ? '(reply_to "me")' : '(reply_to "me", when "queue")';
   return `${head} FIRST for every review, plan and result alike ${how}. Start every review message with these rules: "Review this as a reviewer. ${REVIEWER_RULES}" Then the person's request word for word and the plan or deliverable (paths and evidence). You have a reviewer on another model or agent: never say otherwise, and never replace it with a subagent or your own review. A fresh-session review is allowed ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure. Its verdict comes later as a new message: end your turn to wait for it. If the person asks for the delivery first, your reviewer has not answered: run the fresh-session review, quote that no verdict came, then deliver. Fresh-session review: ${FRESH_REVIEW}`;
 }
+var TEST_STEP = "8. Test: runs only for agreed checks. Log output.";
+var PRIOR_TEST_STEP = "8. Test: run step 1's checks and keep the output.";
 function solverInstructions(options = {}) {
-  return writtenInstructions(options, CURRENT_COPY);
+  return writtenInstructions(options, CURRENT_COPY, TEST_STEP);
 }
 var GUARD_SCOPE = "Your review guard holds only this chat and its subagents, not schedules or automation runs; never move work there to dodge a review.";
 var CURRENT_COPY = {
@@ -9169,7 +9171,7 @@ var D1_COPY = {
     "Always deliver. Never end in silence. When blocked, deliver what is done, the blocker in one line (what, why, what it needs), the person's options and how to resume. Never get around a block that would widen your rights (a level, shell, folder, sign-in or refused approval)."
   ]
 };
-function writtenInstructions({ reviewer = null, dedicated = false }, copy) {
+function writtenInstructions({ reviewer = null, dedicated = false }, copy, testStep) {
   const named = typeof reviewer === "string" && reviewer !== "";
   const others = named ? "message no Bot but your reviewer" : "message no other Bot";
   const review = named ? reviewText(`Message ${JSON.stringify(plainName(reviewer))} with message_bot`, dedicated) : `There is no reviewer Bot. ${FRESH_REVIEW}`;
@@ -9183,7 +9185,7 @@ function writtenInstructions({ reviewer = null, dedicated = false }, copy) {
     "5. Plan: steps, each with its check.",
     "6. Review the plan (mandatory, see Review); implement only after its verdict.",
     "7. Implement; use subagents for parallel parts.",
-    "8. Test: run step 1's checks and keep the output.",
+    testStep,
     copy.verify,
     "10. Deliver: one message with what was done, where it is, each review's verdict, each check with its evidence, decisions you took alone, outside sources you relied on, and what was not done and why. Its first line names the review that ran: reviewer Bot, fresh session or none.",
     `Review: ${review}`,
@@ -9214,10 +9216,11 @@ You have no powers over the team: do not create Bots, groups or tasks, and ${oth
 }
 function isWrittenSolverMethod(text) {
   const matches = (options) => {
-    const current = solverInstructions(options);
+    if (text === solverInstructions(options)) return true;
+    const previous = writtenInstructions(options, CURRENT_COPY, PRIOR_TEST_STEP);
     const declaredScope = GUARD_SCOPE.replace("schedules or automation runs;", "schedules, automation runs or groups;");
-    const declared = current.replace("\n" + GUARD_SCOPE, "\n" + declaredScope);
-    return text === current || text === declared || text === writtenInstructions(options, D1_COPY);
+    const declared = previous.replace("\n" + GUARD_SCOPE, "\n" + declaredScope);
+    return text === previous || text === declared || text === writtenInstructions(options, D1_COPY, PRIOR_TEST_STEP) || text === writtenInstructions(options, D1_COPY, TEST_STEP);
   };
   if (matches({})) return true;
   const named = /^Review: Message ("(?:[^"\\]|\\.)*") with message_bot /m.exec(text);

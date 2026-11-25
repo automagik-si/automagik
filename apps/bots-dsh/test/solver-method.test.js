@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { MAX_INSTRUCTIONS } from '../src/shared/registry.js'
-import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_METHOD_VERSION, SOLVER_NOTES, isSolverBot, isWrittenSolverMethod, solverInstructions } from '../src/shared/solver-method.js'
+import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_METHOD_VERSION, SOLVER_NOTES, isSolverBot, isWrittenSolverMethod, solverInstructions, solverLimitsPart } from '../src/shared/solver-method.js'
 import { reviewerPayload, solverPayload } from '../src/client/solver-draft.js'
 
 const RULES = "Review this as a reviewer. Check it against the request's own words, not against the plan's claims."
@@ -16,6 +16,8 @@ const MANDATORY_REVIEW = 'The review is mandatory, however small the task: never
 const LONG = 'A'.repeat(40)
 // The same length at its longest once JSON-quoted: every `"` becomes `\"`.
 const QUOTES = '"'.repeat(40)
+const TEST_STEP = '8. Test: runs only for agreed checks. Log output.'
+const PRIOR_TEST_STEP = "8. Test: run step 1's checks and keep the output."
 
 test('every rule of the method is in both forms', () => {
   assert.equal(SOLVER_METHOD_VERSION, 1)
@@ -211,6 +213,10 @@ test('D2 D3 the fixed package prompt and written method stay in parity', async (
   const root = new URL('../roles/solver/', import.meta.url)
   const prompt = readFileSync(new URL('prompt.md', root), 'utf8')
   assert.ok(Buffer.byteLength(prompt) <= 16_384)
+  assert.equal(prompt.split('\n').find(line => line.startsWith('8. ')), TEST_STEP)
+  for (const solverAuto of [false, true]) {
+    assert.match(solverLimitsPart({ solverAuto }), /^Before running an agreed check command, use start with a unique run ID and one agreed check ID\./m)
+  }
   const expected = {
     id: 'solver', version: '0.0.0', name: 'Solver',
     description: 'Takes a request to a delivery with evidence: a plan, an independent review, the work and its checks.',
@@ -238,9 +244,9 @@ const methodDigest = text => createHash('sha256').update(text).digest('hex')
 
 test('D2 D6 the current written fallback matches its source pins', () => {
   const digest = options => methodDigest(solverInstructions(options))
-  assert.equal(digest({ reviewer: 'Ada', dedicated: true }), '22e4f6c8190aebc9450c676e67464a543d4814cd8a7fbb6d2e1f40acb3085e58')
-  assert.equal(digest({ reviewer: 'Ada' }), '23712810e82ac9ff8652614783be9d18fb6f445f8f7b480ebcc03461008d45fe')
-  assert.equal(digest({}), 'd957a4be34541d19971388c1adbdcaa822e65aebb1d120af61651e8ea7858029')
+  assert.equal(digest({ reviewer: 'Ada', dedicated: true }), 'e440725ca652e8c96565fdc772148a9d80924981d81f23845254b9e1929192c1')
+  assert.equal(digest({ reviewer: 'Ada' }), '2785fde7e3ea1e0510e9bea39dd0f16cc31566311019a9f65f12f6dd984cf65c')
+  assert.equal(digest({}), '7451ca4f78f46cb08172befb6356c2d9444d966c7a565c27333ccc8f5d3017c2')
 })
 
 test('written methods saved before guarded Bots were barred from groups are still recognised', () => {
@@ -249,7 +255,9 @@ test('written methods saved before guarded Bots were barred from groups are stil
     [{ reviewer: 'Ada' }, '53ee3b2bbd4360b4995c73b79b4b7d9136a53278d701667f370d5e0117bce165'],
     [{}, '6854745a4e08bc924eb0ea40d7a4a78fe125c718853d8480021000289ffdb864'],
   ]) {
-    const text = solverInstructions(options).replace('schedules or automation runs;', 'schedules, automation runs or groups;')
+    const text = solverInstructions(options)
+      .replace(`\n${TEST_STEP}\n`, `\n${PRIOR_TEST_STEP}\n`)
+      .replace('schedules or automation runs;', 'schedules, automation runs or groups;')
     assert.equal(methodDigest(text), pin)
     assert.equal(isWrittenSolverMethod(text), true)
     assert.equal(isWrittenSolverMethod(`${text}\n`), false)
@@ -264,5 +272,31 @@ test('D2 D6 the shipped D1 methods are still recognised as generated', () => {
   for (const text of Object.values(d1)) {
     assert.equal(isWrittenSolverMethod(text), true)
     assert.equal(isWrittenSolverMethod(`${text}\n`), false)
+  }
+})
+
+test('written methods from combined-3 before the copy edit and standalone with the new step 8 are recognised', () => {
+  const d1 = JSON.parse(readFileSync(new URL('./fixtures/solver-method-d1.json', import.meta.url), 'utf8'))
+  for (const [options, d1Text, priorCombinedPin, standalonePin] of [
+    [{ reviewer: 'Ada', dedicated: true }, d1.dedicated,
+      '22e4f6c8190aebc9450c676e67464a543d4814cd8a7fbb6d2e1f40acb3085e58',
+      '6e8dcacf12df1a2ac5491bb3060c6968c5b2371ed0bd5e67d49d254a392df7a5'],
+    [{ reviewer: 'Ada' }, d1.shared,
+      '23712810e82ac9ff8652614783be9d18fb6f445f8f7b480ebcc03461008d45fe',
+      '27387bb5c0bd342102734fc7800e4c85f1e9c1c98148792adba22a5fc04a3fbe'],
+    [{}, d1.fresh,
+      'd957a4be34541d19971388c1adbdcaa822e65aebb1d120af61651e8ea7858029',
+      '44d06fc9100cf989b41f54ed5c0d35cf3d0dd6da60c5c9f5aec251bfef70b696'],
+  ]) {
+    const current = solverInstructions(options)
+    const priorCombined = current.replace(`\n${TEST_STEP}\n`, `\n${PRIOR_TEST_STEP}\n`)
+    const currentStandalone = d1Text.replace(`\n${PRIOR_TEST_STEP}\n`, `\n${TEST_STEP}\n`)
+    assert.equal(methodDigest(priorCombined), priorCombinedPin)
+    assert.equal(methodDigest(currentStandalone), standalonePin)
+    assert.equal(isWrittenSolverMethod(current), true)
+    for (const text of [priorCombined, currentStandalone]) {
+      assert.equal(isWrittenSolverMethod(text), true)
+      assert.equal(isWrittenSolverMethod(text.replace('4. Brainstorm', '4. Consider')), false)
+    }
   }
 })
