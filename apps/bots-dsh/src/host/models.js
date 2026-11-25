@@ -495,9 +495,9 @@ export function install(rt) {
     if (typeof chosen === 'string' && aside.some(entry => entry.ref === chosen && canRun(entry))) return chosen
     return pickDefault(aside, canRun)
   }
-  const backgroundModel = async (sessionId) => {
+  const backgroundModel = async (sessionId, { noCommands = false } = {}) => {
     rt.assertBotRunnerProvider?.(state.prefs?.backgroundModel, sessionId)
-    return pickBackground(await catalog({ noCommands: rt.botRunnerRequired?.(sessionId) }))
+    return pickBackground(await catalog({ noCommands: noCommands || rt.botRunnerRequired?.(sessionId) }))
   }
   const memoryBackground = async (sessionId) => {
     rt.assertBotRunnerProvider?.(state.prefs?.backgroundModel, sessionId)

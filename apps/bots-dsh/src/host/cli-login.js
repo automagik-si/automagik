@@ -462,6 +462,8 @@ export function install(rt, reservationDeps) {
   }
   ctx.on('acp-dsh/login-ready', (payload) => {
     if (!SIGN_IN_PROVIDERS.has(payload?.id)) return
+    rt.clearAsideQuota?.(payload.id)
+    rt.liftMemoryHolds?.()
     void applyChoices(payload.id).catch(error => rt.warn('ds-bot: the model chosen for %s was not applied: %s', payload.id, error?.message ?? error))
       // Then the Bots that waited on this CLI's sign-in move to it (subscription-move.js, #868):
       // after the choices, so a model the person picked with the sign-in is theirs.

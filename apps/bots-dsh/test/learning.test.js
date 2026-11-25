@@ -1647,10 +1647,11 @@ test('folder learning rechecks path privacy after model selection and before ret
         if (runtime.requests.length === 2) await makePrivate()
       }
     } else {
-      const model = runtime.rt.backgroundModel
-      runtime.rt.backgroundModel = async (...args) => {
+      const model = runtime.rt.memoryModel
+      runtime.rt.memoryModel = async (...args) => {
+        const selected = await model(...args)
         if (runtime.requests.length === 1) await makePrivate()
-        return model(...args)
+        return selected
       }
     }
     await finishTurn(runtime.ctx)

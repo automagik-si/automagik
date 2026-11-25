@@ -1648,7 +1648,6 @@ export function install(rt) {
     const sessionId = shotSession(bot, tag)
     const chat = rt.chatOf(bot.id)
     rt.assertShellChoice?.(sessionId ?? chat, bot.id)
-    rt.assertBotRunnerProvider?.(bot.model, sessionId ?? chat)
     const mine = await rt.memoryModel(bot)
     const own = splitRef(mine)
     let acp
@@ -1759,7 +1758,7 @@ export function install(rt) {
 
   // The keeper's model and its background fallback. A failure stands until one changes.
   const summaryModels = async (keeper, sessionId) => {
-    const { ref } = await rt.memoryBackground(sessionId)
+    const ref = await rt.backgroundModel(sessionId, { noCommands: true })
     return `${keeper?.model ?? ''}|${ref ?? ''}`
   }
 
