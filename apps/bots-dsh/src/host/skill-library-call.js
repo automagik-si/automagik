@@ -5,6 +5,7 @@ import { defineTool, RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { AUTOMATIC_SKILL_MODE } from '../shared/skill-mode.js'
 import { routeOf } from '../shared/routes.js'
 import { reservedCommandOf } from '../shared/reserved-commands.js'
+import { SKILL_ACTIVITY_RECORD } from '../shared/skill-activity.js'
 import { GROUP_MEMORY_SOURCE, MEMORY_RECALL_SOURCE, MEMORY_UPDATE_SOURCE } from './memory-copy.js'
 import { freezeLoopRequest } from './secrets.js'
 import { skillName } from './skill-library-rules.js'
@@ -294,18 +295,25 @@ const ledgers = new WeakMap()
 function sessionLedger(session) {
   if (!session?.eventAt) return
   let state = ledgers.get(session)
-  if (!state) ledgers.set(session, state = { seq: 0, rows: new Map(), delivered: new Set(), refused: new Map() })
+  if (!state) ledgers.set(session, state = { seq: 0, rows: new Map(), delivered: new Set(), refused: new Map(), activity: new Set() })
   for (; state.seq < session.seq; state.seq++) {
     const event = session.eventAt(state.seq)
-    if (event.type === 'turn/start') state.turn = event.data.turn
-    else if (event.type === 'turn/end') state.turn = undefined
-    else if (event.type === 'step/start') state.batch = { rows: [], notices: new Map() }
-    else if (event.type === 'step/end' && state.batch) {
+    if (event.type === 'turn/start') {
+      state.turn = event.data.turn
+      state.position = { turn: state.turn, step: 0 }
+    } else if (event.type === 'turn/end') state.turn = undefined
+    else if (event.type === 'step/start') {
+      state.batch = { rows: [], notices: new Map() }
+      state.position = { ...state.position, turn: event.data.turn, step: event.data.step }
+    } else if (event.type === 'step/end' && state.batch) {
       rememberRefusedInputs(state)
       state.batch = undefined
     } else if (event.type === 'assistant/attempt') state.attempt = { seq: event.seq, turn: event.data.turn }
     else if (event.type === 'user/message') {
       const row = event.data
+      if (state.turn !== undefined && (row.source?.kind === 'user' || row.source?.kind === 'bot' && row.source.form === 'relay')) {
+        state.position = { turn: state.turn, step: state.position.step, source: row.source }
+      }
       state.rows.set(row.id, { seq: event.seq, turn: state.turn })
       if (state.batch && row.source?.kind === 'user' && !row.source.automagikSkillOriginalText) state.batch.rows.push(row)
       if (state.batch && row.source?.kind === SKILL_NOTICE && row.source.form === 'notice' && row.content?.length === 1) {
@@ -316,7 +324,7 @@ function sessionLedger(session) {
     } else if (event.type === 'tool/result') state.rows.set(event.data.message.id, { seq: event.seq, turn: event.data.turn })
     else if (event.type === DELIVERY_RECORD && Array.isArray(event.data)) {
       for (const id of event.data) state.delivered.add(id)
-    }
+    } else if (event.type === SKILL_ACTIVITY_RECORD) state.activity.add(event.data?.id)
   }
   return state
 }
@@ -485,7 +493,23 @@ export function install(rt) {
     return changed ? { ...options, messages: result } : options
   }
 
-  function admit(options, session = sessionOf(options.sessionId)) {
+  function recordActivity(session, state, id, ref, position) {
+    try {
+      if (!position || !skillName(ref.name) || state.activity.has(id) || ref.botId !== ownerOf(rt, session.id)) return
+      const { turn, step, source } = position
+      if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step)) return
+      const room = rt.skillRoomActivity?.(session.id, ref.botId, source)
+      // A private exchange in a group member Session has no visible room relay.
+      if (room === undefined && (source?.role === 'room' || rt.groupOwners?.has(session.id))) return
+      const seq = appendPluginRecord(session, SKILL_ACTIVITY_RECORD, { id, name: ref.name, turn, step,
+        ...(room && { roomId: room.roomId }) })
+      room?.record(id, ref.name, session.eventAt(seq).time)
+    } catch (error) {
+      try { rt.warn?.('Skills activity could not be recorded: %s', error) } catch {}
+    }
+  }
+
+  function admit(options, session = sessionOf(options.sessionId), { activity = true } = {}) {
     const state = sessionLedger(session)
     if (!state) return
     const delivered = new Set()
@@ -493,7 +517,13 @@ export function install(rt) {
       const ref = marker(part)
       if (ref && !ref.catalog) {
         const id = receipt(row, part, ref)
-        if (!state.delivered.has(id)) delivered.add(id)
+        if (state.delivered.has(id) || delivered.has(id)) continue
+        delivered.add(id)
+        const logged = state.rows.get(row.id)
+        if (activity && !options.signal?.aborted && !row.isError && logged && state.turn !== undefined && logged.turn === state.turn) {
+          const position = row.source?.role === 'room' ? { ...state.position, source: row.source } : state.position
+          recordActivity(session, state, id, ref, position)
+        }
       }
     }
     if (delivered.size) {
@@ -524,6 +554,14 @@ export function install(rt) {
       return { key: keyOf(records), text: catalogOf(records) }
     },
     project, admit,
+    bridgePosition: session => sessionLedger(session)?.position,
+    bridgeActivity(session, position, callId, part) {
+      const state = sessionLedger(session)
+      const ref = marker(part)
+      if (state && position && ref?.use === 'load') {
+        recordActivity(session, state, JSON.stringify(['bridge', position.turn, position.step, callId]), ref, position)
+      }
+    },
   }
 
   ctx.on('agent/pre-step', async ({ agent, messages, signal }, next) => {

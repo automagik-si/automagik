@@ -16,6 +16,7 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // word, and where the rest is. Input that arrives meanwhile waits and moves along.
 // read_own_chat searches every part, the condensed messages included.
 import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
+import { skillActivityOf } from '../shared/skill-activity.js'
 import { legacySkillHistory, projectRoomContent } from './skill-library-call.js'
 import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
@@ -3598,7 +3599,7 @@ export function install(rt) {
   // Earlier parts of a Bot's own chat, newest page first, for the chat to show above
   // the current part as one conversation.
   const EARLIER_PAGE = 60
-  function displayItems(partId, events, session, seedTurn) {
+  function displayItems(partId, events, session, seedTurn, activity = false) {
     const hidden = new Set(state.exchangeTurns[partId] ?? [])
     // Call ids of the page's group_relay calls; their tool/result events carry the
     // round's replies. A result without its call on the page (the page cut between
@@ -3616,6 +3617,13 @@ export function install(rt) {
       items.push(item)
     }
     for (const event of events) {
+      if (activity) {
+        const item = skillActivityOf(event)
+        if (item !== undefined) {
+          if (item.roomId === undefined && !hidden.has(item.turn)) items.push(item)
+          continue
+        }
+      }
       if (event.type === 'turn/start') {
         if (typeof event.data?.turn === 'number' && Number.isInteger(event.data.turn)) turn = event.data.turn
         continue
@@ -3664,7 +3672,8 @@ export function install(rt) {
         const text = textOf(message?.content)
         const range = relayRange(text)
         const room = range === undefined ? undefined : rt.roomOf(partId) ?? rt.roomOf(rt.pastOwners.get(partId)?.roomId)
-        const replies = range === undefined ? parseReplies(text).replies : room === undefined ? [] : rt.groupRows(room.id, range.from, range.to, range.anchor)
+        const replies = range === undefined ? parseReplies(text).replies : room === undefined ? []
+          : rt.groupRowsView(room.id, range.from, range.to, range.anchor, activity).rows
         for (const { reply, texts, time, duration } of stackReplies(replies)) {
           // Reply rows take the reply's own time, and no seq: several rows share
           // the result event's seq, which the chat keys a post's anchor by.
@@ -3747,7 +3756,7 @@ export function install(rt) {
         before = back.records[0]?.event?.seq
       }
     }
-    const items = displayItems(part.sessionId, events, agent?.session, seedTurn)
+    const items = displayItems(part.sessionId, events, agent?.session, seedTurn, true)
     const more = page.hasMore && events.length > 0
     // The line above a part's first message marks where it began, and names the agent an
     // agent switch moved the chat to (the segment of the part before it carries `switchedTo`).

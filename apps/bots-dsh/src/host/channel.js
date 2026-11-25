@@ -361,6 +361,7 @@ export function install(rt) {
   }
   const live = (roles, roleRuntime) => ({
     activity: rt.activityView(),
+    roomActivity: rt.roomActivityView?.() ?? {},
     // The web self-update holds new work (update-hold.js): the composer says so.
     updateHold: rt.updateHoldView?.() === true,
     work: { bots: rt.workView(), rooms: rt.roomWorkView(), approvals: rt.approvalsView(), grants: rt.grantsView?.() ?? [], withdrawn: rt.withdrawnView?.() ?? [], unanswered: rt.unansweredView?.() ?? [], stops: rt.stopsView?.() ?? [], waiting: rt.waitingView?.() ?? {}, turns: rt.turnsView?.() ?? {}, failed: rt.failedView?.() ?? {}, steered: rt.steeredView?.() ?? {}, noting: rt.notingView?.() ?? {}, models: rt.modelStateView?.() ?? {}, native: nativeWorkers() },
@@ -842,7 +843,7 @@ export function install(rt) {
         case 'room-progress': {
           // Any part id of the group's own Session means the group itself.
           const room = rt.roomOf(body.roomId) ?? rt.roomOf(rt.pastOwners.get(body.roomId)?.roomId)
-          return ok([...rt.roomProgress.entries()].filter(([, entry]) => entry.roomId === (room?.id ?? body.roomId)).map(([callId, entry]) => ({ callId, replies: rt.groupRows(entry.roomId, entry.from), speaking: entry.slots.filter(slot => slot.status === 'speaking').map(slot => slot.id) })))
+          return ok([...rt.roomProgress.entries()].filter(([, entry]) => entry.roomId === (room?.id ?? body.roomId)).map(([callId, entry]) => ({ callId, replies: rt.groupRowsView(entry.roomId, entry.from).rows, speaking: entry.slots.filter(slot => slot.status === 'speaking').map(slot => slot.id) })))
         }
         // The rows a settled round of a group chat shows, from its book.
         case 'group-rows': {

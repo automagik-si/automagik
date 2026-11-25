@@ -191,6 +191,8 @@ async function groupFixture(t) {
   f.rt.skillLibrary.active = host.skillLibrary.active = id => id === 'bot-b' ? savedActive(id) : active(id)
   f.rt.roomSkillNotice = host.roomSkillNotice
   f.rt.roomSkillHandled = host.roomSkillHandled
+  f.rt.skillRoomActivity = host.skillRoomActivity
+  f.rt.groupOwners = host.groupOwners
   const tool = (name, args, id, extra) => host.teamTools.find(entry => entry.name === name)
     .execute(args, { agent: { id }, ...extra })
   await tool('list_bots', {}, 'bot-b')
@@ -202,22 +204,46 @@ async function groupFixture(t) {
       if (listener.length >= 2) listener({ id }, { type, seq: ++seq, data })
     }
   }
-  const relay = async (recipient, input) => {
+  const relay = async (recipient, input, beforeRead) => {
     const signal = AbortSignal.timeout(5_000)
     emit(roomId, 'user/message', input)
-    await tool('group_relay', {}, roomId, { callId: `relay-${seq}`, signal })
+    const result = JSON.parse(await tool('group_relay', {}, roomId, { callId: `relay-${seq}`, signal }))
     await until(() => pending.has(recipient.id), { poll: immediate, ms: 2_000 })
     const delivered = pending.get(recipient.id)
     pending.delete(recipient.id)
+    await beforeRead?.()
     const records = await f.turnFor(recipient, delivered)
     for (const event of records) if (['turn/start', 'user/message', 'turn/end'].includes(event.type)) {
       emit(recipient.id, event.type, event.data)
     }
     await until(() => host.roomProgress.size === 0 && host.roomWaiters.size === 0, { poll: immediate })
     assert.deepEqual(records.at(-1)?.data.reason, { kind: 'completed' })
+    return result
   }
   return { f, second, roomId, host, room, tool, relay }
 }
+
+test('a checked recipient load stays on its own relay after a second anchor opens', { timeout: 20_000 }, async t => {
+  const { f, roomId, host, room, tool, relay } = await groupFixture(t)
+  let later
+  const first = await relay(f.agent, user(`@Writer Finish this /${manual.name}`), async () => {
+    later = JSON.parse(await tool('group_relay', {}, roomId, { callId: 'later-anchor' }))
+  })
+  assert.notEqual(later.anchor, first.anchor)
+  const activity = rows => rows.filter(row => row.kind === 'skill-activity').map(({ botId, skill }) => ({ botId, skill }))
+  assert.deepEqual(activity(host.groupRowsView(roomId, first.from, undefined, first.anchor).rows), [{ botId: 'bot-a', skill: manual.name }])
+  assert.deepEqual(activity(host.groupRowsView(roomId, later.from, undefined, later.anchor).rows), [])
+  assert.deepEqual(activity(host.groupRowsView('different-room', first.from, undefined, first.anchor).rows), [])
+  assert.deepEqual(activity(host.groupRows(roomId, 0, room.seq)), [])
+  assert.equal((await host.groupLinesAfter(roomId, 0)).some(line => line.kind === 'skill-activity'), false)
+  const book = `group-${roomId}`
+  const loaded = host.ledger.records(book).find(record => record.kind === 'skill-activity' && record.event === 'load')
+  host.ledger.append(book, { ...loaded })
+  host.ledger.append(book, { ...loaded, botId: 'bot-b', exchangeId: 'another-recipient' })
+  assert.deepEqual(activity(host.groupRowsView(roomId, first.from, undefined, first.anchor).rows), [
+    { botId: 'bot-a', skill: manual.name }, { botId: 'bot-b', skill: manual.name },
+  ])
+})
 
 test('round 2 group: relay and later reads project human lines for each recipient', { timeout: 20_000 }, async t => {
   const { f, second, roomId, host, room, tool, relay } = await groupFixture(t)

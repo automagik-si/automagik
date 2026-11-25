@@ -4,9 +4,10 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 import { defaultShape } from '../src/client/characters.js'
+import { readFileSync } from 'node:fs'
 
 const bundle = await build({
-  entryPoints: [fileURLToPath(new URL('../src/client/cells.js', import.meta.url))],
+  stdin: { contents: "export * from './cells.js'; export { installLocale } from './i18n.js'", resolveDir: fileURLToPath(new URL('../src/client/', import.meta.url)) },
   bundle: true, format: 'cjs', platform: 'node', write: false,
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
@@ -28,7 +29,7 @@ runInNewContext(bundle.outputFiles[0].text, {
   },
   queueMicrotask,
 })
-const { ChatRows, SkillNoticeCell, ThinkingRow, syncGroupChains } = module.exports
+const { ChatRows, installLocale, registerSkillActivity, SkillActivityCell, SkillNoticeCell, ThinkingRow, syncGroupChains } = module.exports
 
 const roster = { byId: { b: { id: 'b', name: 'Writer' } }, roomsById: {} }
 const MINUTE = 60_000
@@ -57,6 +58,43 @@ test('the private Skills remedy is visible in current and earlier Bot chat', () 
   }
   const other = SkillNoticeCell({ node: { data: { source: { kind: 'runtime-context' } } } })
   assert.equal(other.type.name, 'CellEmpty')
+})
+
+test('Skill activity renders outside bubbles before an answer, in both layouts and loaded relay history', () => {
+  const event = { type: 'plugin:automagik/skill-activity', ignorable: true, seq: 3, time: 4,
+    data: { id: 'receipt', name: 'mint', turn: 1, step: 0 } }
+  let definition
+  registerSkillActivity({ uiConversation: { events: { register(value) { definition = value } } } })
+  const start = { event, location: { kind: 'step' } }
+  const matcher = definition.match[event.type]
+  assert.equal(matcher(event).id, event.data.id)
+  assert.equal(matcher({ ...event, data: { ...event.data, roomId: 'room' } }), null)
+  const node = definition.buildViewNode({ key: 'row', id: event.data.id, start, state: definition.start({}, start) })
+  assert.equal(node.anchorSeq, event.seq)
+  assert.equal(node.location, start.location)
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
+  const translate = (dictionary) => installLocale({ register() {}, bind: () => (key, params) => (dictionary[key] ?? key).replace('{name}', params.name) })
+  const rendered = cell => {
+    while (typeof cell.type === 'function') cell = cell.type(cell.props)
+    assert.equal(cell.props.className, 'bt-agent-activity')
+    const [line] = cell.children
+    assert.equal(line.props.className, 'bt-agent-act')
+    return line.children.at(-1).children.join('')
+  }
+  for (const [dictionary, label] of [[{}, 'Skill: mint'], [pt, 'Habilidade: mint']]) {
+    const release = translate(dictionary)
+    try {
+      for (const layout of ['flat', 'bubble']) {
+        const view = { ...roster, exchangeTurns: {}, prefs: { layout } }
+        const useRoster = read => read(view)
+        assert.equal(rendered(SkillActivityCell({ node, sessionId: 'b', useRoster })), label)
+        assert.equal(rendered(ChatRows({ items: [node.data], sessionId: 'b', roster: view, actions: {} })[0]), label)
+        assert.equal(rendered(ChatRows({ items: [{ kind: 'relay', reply: { kind: 'skill-activity', botId: 'b', skill: 'mint' } }], sessionId: 'room', roster: view, actions: {} })[0]), label)
+        view.exchangeTurns.b = [1]
+        assert.equal(SkillActivityCell({ node, sessionId: 'b', useRoster }).type.name, 'CellEmpty')
+      }
+    } finally { release() }
+  }
 })
 
 test('a view row renders as a view card from its blueprint', () => {

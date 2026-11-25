@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { CALLER_BOT_KEYS, closesPart } from '../src/host/caller-view.js'
 import { REPLY_KIND, SOURCE_KIND } from '../src/host/constants.js'
+import { SKILL_ACTIVITY, SKILL_ACTIVITY_RECORD } from '../src/shared/skill-activity.js'
 import { allowlist, code, fixture, guest, member, owners, stranger } from './caller-fixture.js'
 
 const page = value => Buffer.from(JSON.stringify(value)).toString('base64url')
@@ -61,6 +62,39 @@ test('V3 unknown and invisible Bot reads return the same error', async t => {
     assert.throws(() => f.rt.callerBot(guest, id), error)
     await assert.rejects(f.rt.callerChat(guest, id), error)
   }
+})
+
+test('member and guest pages return settled skill names only while their chat remains readable', async t => {
+  const f = fixture(t)
+  await f.start()
+  const part = await f.open('a', allowlist)
+  const named = (name, turn, extra) => {
+    const event = f.event(part, SKILL_ACTIVITY_RECORD, { id: `private-${name}`, name, turn, step: 0, ...extra }, { notify: false })
+    event.ignorable = true
+  }
+  named('mint', 1)
+  named('hidden', 2)
+  named('elsewhere', 1, { roomId: 'wrong-room' })
+  f.rt.state.exchangeTurns[part] = [2]
+  for (const viewer of [member, guest]) {
+    const result = await f.rt.callerChat(viewer, 'a')
+    assert.deepEqual(result.items.map(({ kind, name }) => [kind, name]), [[SKILL_ACTIVITY, 'mint']])
+    assert.doesNotMatch(JSON.stringify(result), /private-|hidden|elsewhere|wrong-room/)
+  }
+  await assert.rejects(f.rt.callerChat(stranger, 'a'), code('not-found'))
+  const entered = Promise.withResolvers()
+  const resume = Promise.withResolvers()
+  const read = f.ctx.sessionController.events
+  t.mock.method(f.ctx.sessionController, 'events', async (...args) => {
+    entered.resolve()
+    await resume.promise
+    return read(...args)
+  })
+  const pending = f.rt.callerChat(guest, 'a')
+  await entered.promise
+  await f.rt.setPeople('a', owners)
+  resume.resolve()
+  await assert.rejects(pending, code('not-found'))
 })
 
 test('V4 the requested part is rechecked at completion', async t => {

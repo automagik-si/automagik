@@ -587,6 +587,7 @@ var ZH2 = {
   "Choose a skill mode.": "请选择技能模式。",
   "This skill is not active on this Bot.": "此技能未在这个 Bot 上启用。",
   "Skills": "技能",
+  "Skill: {name}": "技能：{name}",
   "Add skill": "添加技能",
   "From text": "文本",
   "From file": "文件",
@@ -20470,6 +20471,24 @@ function chatPersonParts({ content, source }) {
   return personParts(content.map((part, index) => part?.type === "text" && typeof original[index] === "string" ? { ...part, text: original[index] } : part));
 }
 
+// src/shared/skill-activity.js
+var SKILL_ACTIVITY = "skill-activity";
+var SKILL_ACTIVITY_RECORD = "plugin:automagik/skill-activity";
+function skillActivityOf(event) {
+  if (event?.type !== SKILL_ACTIVITY_RECORD || event.ignorable !== true) return;
+  const { name, id, turn, step: step2, roomId } = event.data ?? {};
+  if (typeof id !== "string" || typeof name !== "string" || name.length > 32 || !/^[a-z](?:[a-z0-9]|-(?=[a-z0-9]))*$/.test(name) || !Number.isSafeInteger(turn) || !Number.isSafeInteger(step2) || turn < 0 || step2 < 0) return;
+  return {
+    kind: SKILL_ACTIVITY,
+    name,
+    seq: event.seq,
+    time: event.time,
+    turn,
+    step: step2,
+    ...typeof roomId === "string" && { roomId }
+  };
+}
+
 // src/client/fold.js
 var import_react46 = require("react");
 var FOLD_AT = { chars: 1500, lines: 25 };
@@ -22355,7 +22374,7 @@ function AssistantCell({ node, groupPart, sessionId, openFile, fileMentions, use
       });
     }),
     head ? (0, import_react50.createElement)(SpeakerHead, { bot: speaker, time: data.time }) : null,
-    activity.length ? (0, import_react50.createElement)("div", { className: "bt-agent-activity" }, activity.map((line, index) => (0, import_react50.createElement)("div", { key: index, className: "bt-agent-act", title: line }, (0, import_react50.createElement)("span", { className: "bt-agent-act-mark", "aria-hidden": true }), (0, import_react50.createElement)("span", { className: "bt-agent-act-text" }, activityParts(line))))) : null,
+    activity.length ? (0, import_react50.createElement)(ActivityRows, { lines: activity }) : null,
     reasoning ? (0, import_react50.createElement)(ThinkingRow, {
       text: reasoning,
       live: thinking !== void 0,
@@ -22368,6 +22387,49 @@ function AssistantCell({ node, groupPart, sessionId, openFile, fileMentions, use
   );
 }
 var activityParts = (line) => line.split("`").map((part, index) => index % 2 === 1 ? (0, import_react50.createElement)("code", { key: index }, part) : part);
+function ActivityRows({ lines, bot }) {
+  return (0, import_react50.createElement)("div", { className: "bt-agent-activity" }, lines.map((line, index) => (0, import_react50.createElement)(
+    "div",
+    {
+      key: index,
+      className: "bt-agent-act",
+      title: bot?.name ? `${bot.name} · ${line}` : line
+    },
+    bot ? (0, import_react50.createElement)(BotMark, { bot, size: 16, live: false }) : (0, import_react50.createElement)("span", { className: "bt-agent-act-mark", "aria-hidden": true }),
+    (0, import_react50.createElement)("span", { className: "bt-agent-act-text" }, activityParts(line))
+  )));
+}
+var SkillActivityRow = ({ name, bot }) => (0, import_react50.createElement)(ActivityRows, { lines: [t("Skill: {name}", { name })], bot });
+function registerSkillActivity(ctx) {
+  return ctx.uiConversation.events.register({
+    kind: SKILL_ACTIVITY,
+    target: "chat",
+    match: { [SKILL_ACTIVITY_RECORD]: (event) => {
+      const activity = skillActivityOf(event);
+      return activity && activity.roomId === void 0 ? { id: event.data.id, role: "start" } : null;
+    } },
+    start: (_context, { event }) => skillActivityOf(event),
+    update: (context) => context.state,
+    buildViewNode({ key, id, start: start2, state: state2 }) {
+      if (!start2 || !state2) return null;
+      return {
+        key,
+        id,
+        kind: SKILL_ACTIVITY,
+        target: "chat",
+        anchorSeq: start2.event.seq,
+        location: start2.location,
+        visibility: "visible",
+        groupTree: "turn",
+        data: state2
+      };
+    }
+  });
+}
+function SkillActivityCell({ node, sessionId, useRoster }) {
+  const hidden = useRoster((roster) => Boolean(roster.roomsById[sessionId]) || isHiddenTurn(roster, sessionId, node.data.turn));
+  return hidden ? (0, import_react50.createElement)(CellEmpty) : (0, import_react50.createElement)(SkillActivityRow, { name: node.data.name });
+}
 var snapshotLook = (bot, roster) => roster.byId[bot.id] === bot ? void 0 : lookOf(bot);
 function EventLine({ prefix, bots, roster, joiner = t("and"), onOpen, whole = false }) {
   if (whole && bots.length === 1) {
@@ -22680,6 +22742,8 @@ function chatRow(row2, key, { sessionId, selfId, roster, actions, useUi, onBtwDe
       return (0, import_react50.createElement)(EarlierUser, { key, row: row2, actions });
     case SKILL_NOTICE:
       return (0, import_react50.createElement)(SkillNotice, { key, text: row2.text });
+    case SKILL_ACTIVITY:
+      return (0, import_react50.createElement)(SkillActivityRow, { key, name: row2.name });
     case "answer":
       return (0, import_react50.createElement)(AnsweredReply, { key, node: { data: row2 } });
     // A question or view card closed without an answer on it.
@@ -23054,6 +23118,7 @@ function useLiveNote(actions, sessionId, id, entry) {
 }
 function RelayEvent({ reply, bot, roster, sessionId, actions }) {
   if (reply.kind === SKILL_NOTICE) return (0, import_react50.createElement)(SkillNotice, { text: reply.text });
+  if (reply.kind === SKILL_ACTIVITY) return (0, import_react50.createElement)(SkillActivityRow, { bot, name: reply.skill });
   if (reply.kind === "permission-stop") {
     return (0, import_react50.createElement)(
       "div",
@@ -23148,14 +23213,16 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
   }, [done, sessionId, callId]);
   const resultText = done ? contentText(content) : "";
   const range = done ? relayRange(resultText) : void 0;
+  const roomRevision = roster.roomActivity?.[roster.roomsById[sessionId]?.id];
   const rowsKey = range === void 0 ? void 0 : `${sessionId}:${range.from}:${range.to ?? ""}:${range.anchor ?? ""}`;
-  const [view, setView] = (0, import_react50.useState)(() => rowsKey === void 0 ? null : settledRows.get(rowsKey) ?? null);
+  const [read, setRead] = (0, import_react50.useState)(() => ({ key: rowsKey, value: settledRows.get(rowsKey)?.value ?? null }));
+  const view = read.key === rowsKey ? read.value : null;
   const quietKey = view?.open === true && view.active !== true ? roster.revision : void 0;
   (0, import_react50.useEffect)(() => {
     if (rowsKey === void 0) return void 0;
     const known2 = settledRows.get(rowsKey);
-    if (known2 !== void 0) {
-      setView(known2);
+    if (known2 !== void 0 && known2.revision === roomRevision) {
+      setRead({ key: rowsKey, value: known2.value });
       return void 0;
     }
     let stop3 = false;
@@ -23165,11 +23232,11 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
       const next = await actions.groupRows(sessionId, range.from, range.to, range.anchor);
       if (stop3) return;
       if (next !== null && Array.isArray(next?.rows)) {
-        if (!next.open) settledRows.set(rowsKey, next);
+        if (!next.open) settledRows.set(rowsKey, { revision: roomRevision, value: next });
         const key = JSON.stringify(next);
         if (key !== seen) {
           seen = key;
-          setView(next);
+          setRead({ key: rowsKey, value: next });
         }
         if (!next.open || next.active !== true) return;
       }
@@ -23180,7 +23247,7 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
       stop3 = true;
       clearTimeout(timer);
     };
-  }, [rowsKey, quietKey]);
+  }, [rowsKey, quietKey, roomRevision]);
   let replies = cleanReplies(live.replies);
   let broken = false;
   if (range !== void 0) {
@@ -48346,6 +48413,7 @@ __export(gated_shared_exports, {
   SIDEBAR_CSS: () => SIDEBAR_CSS,
   Segmented: () => Segmented,
   Shimmer: () => Shimmer,
+  SkillActivityRow: () => SkillActivityRow,
   allThemes: () => allThemes,
   call: () => call,
   catalogueLookOf: () => lookOf,
@@ -49673,6 +49741,8 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => shadow("conversation.composer.dock", { id: "bot-native-note", order: 20, inject: face }, NativeControlsNote),
     () => shadow("conversation.composer.dock", { id: "bot-review-guard-off", order: 21, inject: face }, GuardOffLine),
     () => shadow("conversation.chat.node", { key: "assistant-step", priority: BOT_PRIORITY, locale: "chat", inject: assistantFace }, AssistantCell),
+    () => registerSkillActivity(ctx),
+    () => shadow("conversation.chat.node", { key: SKILL_ACTIVITY, priority: BOT_PRIORITY, locale: "chat", inject: face }, SkillActivityCell),
     () => shadow("conversation.chat.node", { key: "turn-trigger", priority: BOT_PRIORITY, locale: "chat", inject: face }, TriggerCell),
     () => shadow("conversation.chat.node", { key: "tool-call", priority: BOT_PRIORITY, locale: "chat", inject: face }, ToolCell),
     () => simpleOnly(() => shadow("conversation.chat.node", { key: "turn-process", priority: BOT_PRIORITY, locale: "chat", inject: face }, TurnProcessCell)),

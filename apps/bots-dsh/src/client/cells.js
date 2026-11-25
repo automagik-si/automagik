@@ -23,6 +23,7 @@ import { failureClause } from './diagnostics.js'
 import { turnReasoning, thinkingStep, opensReply, stepActivity } from './turn-reasoning.js'
 import { parseReplies, relayRange, stackReplies } from '../shared/group-replies.js'
 import { SKILL_NOTICE } from '../host/skill-message.js'
+import { SKILL_ACTIVITY, SKILL_ACTIVITY_RECORD, skillActivityOf } from '../shared/skill-activity.js'
 import { FOLD_AT, FOLD_HUGE, NEVER, stripLongNote, useFold } from './fold.js'
 import { noHover, useViewport, viewBottom } from './motion.js'
 import { heldCardKey } from './sources.js'
@@ -326,7 +327,7 @@ export function AssistantCell({ node, groupPart, sessionId, openFile, fileMentio
       })
     }),
     head ? h(SpeakerHead, { bot: speaker, time: data.time }) : null,
-    activity.length ? h('div', { className: 'bt-agent-activity' }, activity.map((line, index) => h('div', { key: index, className: 'bt-agent-act', title: line }, h('span', { className: 'bt-agent-act-mark', 'aria-hidden': true }), h('span', { className: 'bt-agent-act-text' }, activityParts(line))))) : null,
+    activity.length ? h(ActivityRows, { lines: activity }) : null,
     reasoning ? h(ThinkingRow, {
       text: reasoning, live: thinking !== undefined, viewKey: `${sessionId}:${data.turn}`,
       // The live clock counts the settled steps too: backing `at` by the settled
@@ -338,6 +339,38 @@ export function AssistantCell({ node, groupPart, sessionId, openFile, fileMentio
 
 // `code` in an activity line is the command or path the agent works on.
 const activityParts = line => line.split('`').map((part, index) => (index % 2 === 1 ? h('code', { key: index }, part) : part))
+
+function ActivityRows({ lines, bot }) {
+  return h('div', { className: 'bt-agent-activity' }, lines.map((line, index) => h('div', {
+    key: index, className: 'bt-agent-act', title: bot?.name ? `${bot.name} · ${line}` : line,
+  }, bot ? h(BotMark, { bot, size: 16, live: false }) : h('span', { className: 'bt-agent-act-mark', 'aria-hidden': true }),
+  h('span', { className: 'bt-agent-act-text' }, activityParts(line)))))
+}
+
+export const SkillActivityRow = ({ name, bot }) => h(ActivityRows, { lines: [t('Skill: {name}', { name })], bot })
+
+export function registerSkillActivity(ctx) {
+  return ctx.uiConversation.events.register({
+    kind: SKILL_ACTIVITY,
+    target: 'chat',
+    match: { [SKILL_ACTIVITY_RECORD]: event => {
+      const activity = skillActivityOf(event)
+      return activity && activity.roomId === undefined ? { id: event.data.id, role: 'start' } : null
+    } },
+    start: (_context, { event }) => skillActivityOf(event),
+    update: context => context.state,
+    buildViewNode({ key, id, start, state }) {
+      if (!start || !state) return null
+      return { key, id, kind: SKILL_ACTIVITY, target: 'chat', anchorSeq: start.event.seq,
+        location: start.location, visibility: 'visible', groupTree: 'turn', data: state }
+    },
+  })
+}
+
+export function SkillActivityCell({ node, sessionId, useRoster }) {
+  const hidden = useRoster(roster => Boolean(roster.roomsById[sessionId]) || isHiddenTurn(roster, sessionId, node.data.turn))
+  return hidden ? h(CellEmpty) : h(SkillActivityRow, { name: node.data.name })
+}
 
 // Only current owner records carry the identity needed to resolve Solver looks.
 const snapshotLook = (bot, roster) => roster.byId[bot.id] === bot ? undefined : catalogueLookOf(bot)
@@ -646,6 +679,7 @@ function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDel
     case GUARD_OFF_NOTICE: return h(UpgradeLine, { key: row.id, name: row.name, off: row.kind })
     case 'user': return h(EarlierUser, { key, row, actions })
     case SKILL_NOTICE: return h(SkillNotice, { key, text: row.text })
+    case SKILL_ACTIVITY: return h(SkillActivityRow, { key, name: row.name })
     case 'answer': return h(AnsweredReply, { key, node: { data: row } })
     // A question or view card closed without an answer on it.
     case 'closed': return row.view === undefined
@@ -1062,6 +1096,7 @@ function useLiveNote(actions, sessionId, id, entry) {
 // resolved member the reply names.
 function RelayEvent({ reply, bot, roster, sessionId, actions }) {
   if (reply.kind === SKILL_NOTICE) return h(SkillNotice, { text: reply.text })
+  if (reply.kind === SKILL_ACTIVITY) return h(SkillActivityRow, { bot, name: reply.skill })
   if (reply.kind === 'permission-stop') {
     return h('div', { className: 'bt-event bt-event-error', role: 'status', title: reply.why },
       t('{name} stopped on a permission: {why}', { name: bot.name, why: whyText(reply.why) }))
@@ -1149,14 +1184,16 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
   // the ledger carries them in its result.
   const resultText = done ? contentText(content) : ''
   const range = done ? relayRange(resultText) : undefined
+  const roomRevision = roster.roomActivity?.[roster.roomsById[sessionId]?.id]
   const rowsKey = range === undefined ? undefined : `${sessionId}:${range.from}:${range.to ?? ''}:${range.anchor ?? ''}`
-  const [view, setView] = useState(() => (rowsKey === undefined ? null : settledRows.get(rowsKey) ?? null))
+  const [read, setRead] = useState(() => ({ key: rowsKey, value: settledRows.get(rowsKey)?.value ?? null }))
+  const view = read.key === rowsKey ? read.value : null
   // An open cell that is quiet is read again when the team changes, not on a clock.
   const quietKey = view?.open === true && view.active !== true ? roster.revision : undefined
   useEffect(() => {
     if (rowsKey === undefined) return undefined
     const known = settledRows.get(rowsKey)
-    if (known !== undefined) { setView(known); return undefined }
+    if (known !== undefined && known.revision === roomRevision) { setRead({ key: rowsKey, value: known.value }); return undefined }
     // The newest call's rows grow while the group works: they are read every second then,
     // and once when the group is quiet, until the next call closes them.
     let stop = false
@@ -1166,16 +1203,16 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
       const next = await actions.groupRows(sessionId, range.from, range.to, range.anchor)
       if (stop) return
       if (next !== null && Array.isArray(next?.rows)) {
-        if (!next.open) settledRows.set(rowsKey, next)
+        if (!next.open) settledRows.set(rowsKey, { revision: roomRevision, value: next })
         const key = JSON.stringify(next)
-        if (key !== seen) { seen = key; setView(next) }
+        if (key !== seen) { seen = key; setRead({ key: rowsKey, value: next }) }
         if (!next.open || next.active !== true) return
       }
       timer = setTimeout(tick, document.hidden ? 5000 : 1000)
     }
     void tick()
     return () => { stop = true; clearTimeout(timer) }
-  }, [rowsKey, quietKey])
+  }, [rowsKey, quietKey, roomRevision])
   let replies = cleanReplies(live.replies)
   let broken = false
   if (range !== undefined) {

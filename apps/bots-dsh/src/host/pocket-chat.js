@@ -38,7 +38,8 @@
 //   own memory, manage its own scheduled tasks, and change its name and model without a chat
 //   subscription. Its permission level is shown read-only. Each check uses the current team lock
 //   and one fresh home registry snapshot.
-import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
+import { chatPersonParts, personParts, SKILL_NOTICE, SKILL_TOOL } from './skill-message.js'
+import { SKILL_ACTIVITY_RECORD, skillActivityOf } from '../shared/skill-activity.js'
 import { randomUUID } from 'node:crypto'
 import { isBotId } from '../shared/registry.js'
 import { guardGroupText, guardOffNoticeOf } from '../shared/guard-groups.js'
@@ -203,9 +204,14 @@ const rowsFor = (rows, attachments) => attachments ? rows : legacyRows(rows)
  */
 export function rowsOf(event, scope) {
   const data = event?.data ?? {}
-  if (Number.isInteger(data.turn)) scope.turn = data.turn
   if (!Number.isSafeInteger(event?.seq)) return []
   const base = part => ({ id: rowIdOf(scope.sessionId, event.seq, part), turn: scope.turn, at: Number.isFinite(event.time) ? event.time : null, source: 'session' })
+  if (event.type === SKILL_ACTIVITY_RECORD) {
+    const activity = skillActivityOf(event)
+    return activity === undefined || activity.roomId !== undefined || scope.hidden?.(activity.turn)
+      ? [] : [{ ...base(), turn: activity.turn, kind: 'tool-call', tool: 'Skill', summary: activity.name, input: '', output: '' }]
+  }
+  if (Number.isInteger(data.turn)) scope.turn = data.turn
   switch (event.type) {
     case 'user/message': {
       if (data.source?.kind === SKILL_NOTICE) {
@@ -233,12 +239,18 @@ export function rowsOf(event, scope) {
       return msg ? [{ ...base('stop'), kind: 'status', state: 'error', msg: cut(msg, PREVIEW_MAX) }] : []
     }
     case 'tool/call': {
+      if (data.name === SKILL_TOOL || data.name === `mcp__dsh__${SKILL_TOOL}`) {
+        scope.calls.set(data.callId, null)
+        return []
+      }
       const row = { ...base(), kind: 'tool-call', tool: String(data.name ?? ''), summary: String(data.name ?? ''), input: cut(typeof data.arguments === 'string' ? data.arguments : '', PREVIEW_MAX) }
       if (typeof data.callId === 'string') scope.calls.set(data.callId, row.id)
       return [row]
     }
     case 'tool/result': {
       const message = data.message ?? {}
+      if (scope.calls.get(message.toolCallId) === null || (Array.isArray(message.content) &&
+          message.content.some(part => part?.automagikSkill?.use === 'load'))) return []
       const call = scope.calls.get(message.toolCallId) ?? null
       return [{ ...base(), kind: 'tool-result', call, ok: message.isError !== true, output: cut(textOf(personParts(message.content)), PREVIEW_MAX) }]
     }
@@ -314,12 +326,13 @@ const globalOnly = bot => bot?.project == null
  *   fileUploads?: () => any, attachmentStore?: () => any,
  *   groups?: import('./pocket-groups.js').GroupSource,
  *   stopOf?: (sessionId: string, turn: number) => string | undefined,
+ *   turnHidden?: (sessionId: string, turn: number) => boolean,
  *   guardOffOf?: (botId: string, sessionId: string) => { id: string, at: number, text: string } | undefined,
  *   carriesSignInCode?: (text: string) => boolean, switching?: (botId: string) => boolean }} options
  */
 export class DshChatSource {
-  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, guardOffOf = () => undefined, management, schedules, settings, fileUploads, attachmentStore, groups, switching = () => false }) {
-    Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf, guardOffOf, fileUploads, attachmentStore })
+  constructor({ adapter, bots, timers = realTimers, pollMs = STATE_POLL_MS, listMs = LIST_STATE_MS, keep = KEEP_ROWS, maxFollowed = MAX_FOLLOWED, log = () => {}, writable = false, shown = globalOnly, registryIdOf = () => null, chatOwner, now = Date.now, carriesSignInCode = () => false, stopOf = () => undefined, guardOffOf = () => undefined, turnHidden = () => false, management, schedules, settings, fileUploads, attachmentStore, groups, switching = () => false }) {
+    Object.assign(this, { adapter, bots, timers, pollMs, listMs, keep, maxFollowed, log, shown, registryIdOf, now, stopOf, guardOffOf, turnHidden, fileUploads, attachmentStore })
     /** Whether a Bot's own chat is switching agents (parts.js): a send then waits, as queued. Never throws. */
     this.switching = (botId) => { try { return switching(botId) === true } catch { return false } }
     /** Whether a text carries a Claude sign-in code the computer showed (cli-login.js). Never throws. */
@@ -488,6 +501,7 @@ export class DshChatSource {
     entry.listeners.add(subscription)
     const live = this.writable ? [...(this.open.get(entry.sessionId)?.values() ?? [])].map(request => request.row) : []
     const snapshot = await this.snapshotFor(entry, after, attachments)
+    snapshot.rows = await this.visibleRows(entry, snapshot.rows)
     const firstApproval = live.find(row => row.kind === 'approval')
     this.emitTo(listener, this.writable ? { ...snapshot, approval: firstApproval ?? null, settled: [...(this.settled.get(entry.sessionId) ?? [])] } : snapshot)
     if (this.writable) {
@@ -523,10 +537,15 @@ export class DshChatSource {
     const controller = new AbortController()
     const entry = {
       botId: bot.id, sessionId: bot.sessionId, controller, listeners: new Set(), rows: [], floorSeq: 0, mediaFloorSeq: 0, cursor: -1,
-      scope: { sessionId: bot.sessionId, turn: 0, calls: new Map(), stopOf: turn => this.stopOf(bot.sessionId, turn) }, status: statusOf(null), approval: null, question: null, poller: null, gone: false,
+      scope: this.rowScope(bot.sessionId), status: statusOf(null), approval: null, question: null, poller: null, gone: false,
     }
     entry.ready = this.start(entry)
     return entry
+  }
+
+  rowScope(sessionId, calls) {
+    return { sessionId, turn: 0, calls: new Map(calls), stopOf: turn => this.stopOf(sessionId, turn),
+      hidden: turn => this.turnHidden(sessionId, turn) }
   }
 
   async start(entry) {
@@ -577,10 +596,15 @@ export class DshChatSource {
         const { value: frame, done } = await stream.next()
         if (done || entry.gone) break
         if (frame?.type !== 'event' || !Number.isSafeInteger(frame.event?.seq)) continue
+        if (frame.event.type === SKILL_ACTIVITY_RECORD && frame.event.seq <= entry.cursor) continue
         entry.cursor = frame.event.seq
         this.noteRequestId(entry.sessionId, frame.event)
         const rows = rowsOf(frame.event, entry.scope)
-        if (rows.length) { this.keepRows(entry, rows); this.emit(entry, { type: 'rows', rows }) }
+        if (rows.length) {
+          this.keepRows(entry, rows)
+          const visible = frame.event.type === SKILL_ACTIVITY_RECORD ? await this.visibleRows(entry, rows) : rows
+          if (visible.length) this.emit(entry, { type: 'rows', rows: visible })
+        }
         // A call can be waiting for approval now; turn edges change what is running.
         if (frame.event.type === 'tool/call' || frame.event.type === 'turn/start' || frame.event.type === 'turn/end') void this.readState(entry)
       }
@@ -634,7 +658,7 @@ export class DshChatSource {
    */
   async snapshotFor(entry, after, attachments = false) {
     const base = { type: 'snapshot', screen: [], status: entry.status, approval: entry.approval, held: [] }
-    const retained = rowsFor(entry.rows, attachments)
+    const retained = rowsFor(entry.rows, attachments).filter(row => row.tool !== 'Skill' || !this.turnHidden(entry.sessionId, row.turn))
     const floor = attachments ? entry.mediaFloorSeq : entry.floorSeq
     const notice = this.guardOffRow(entry)
     const page = (rows) => {
@@ -655,9 +679,9 @@ export class DshChatSource {
     try { older = await this.adapter.events(entry.sessionId, { beforeSeq: floor, maxMessages: PAGE_ROWS }, entry.controller.signal) } catch { return latest }
     const records = Array.isArray(older?.records) ? older.records : []
     if (!records.length || records[0].event.seq > cursor.seq + 1) return latest
-    const scope = { sessionId: entry.sessionId, turn: 0, calls: new Map(entry.scope.calls), stopOf: turn => this.stopOf(entry.sessionId, turn) }
+    const scope = this.rowScope(entry.sessionId, entry.scope.calls)
     const missed = records.filter(record => record.event.seq > cursor.seq && (!attachments || record.event.seq < floor)).flatMap(record => rowsOf(record.event, scope))
-    const current = rowsFor(entry.rows, attachments)
+    const current = retained
     const rows = [...rowsFor(missed, attachments), ...(attachments ? current.filter(row => seqOf(row) >= floor) : current)]
     // Everything missed must fit one page; otherwise the phone starts over from the latest page.
     return rows.length + Number(notice !== undefined) > PAGE_ROWS ? latest : { ...base, reset: false, rows: page(rows) }
@@ -681,9 +705,16 @@ export class DshChatSource {
       : cursor.seq
     if (beforeSeq < 0) return []
     const page = await this.adapter.events(entry.sessionId, { beforeSeq, maxMessages: max }, entry.controller.signal)
-    const scope = { sessionId: entry.sessionId, turn: 0, calls: new Map(), stopOf: turn => this.stopOf(entry.sessionId, turn) }
+    const scope = this.rowScope(entry.sessionId)
     const rows = (page?.records ?? []).filter(record => record.event.seq < beforeSeq).flatMap(record => rowsOf(record.event, scope))
-    return pageOf(rowsFor(rows, attachments), max)
+    return pageOf(await this.visibleRows(entry, rowsFor(rows, attachments)), max)
+  }
+
+  async visibleRows(entry, rows) {
+    if (!rows.some(row => row.tool === 'Skill')) return rows
+    let served = false
+    try { served = (await this.stillServed(entry)) === null && !entry.gone } catch {}
+    return rows.filter(row => row.tool !== 'Skill' || served && !this.turnHidden(entry.sessionId, row.turn))
   }
 
   emitTo(listener, event) { try { listener(event) } catch {} }
@@ -1247,6 +1278,7 @@ export function install(rt) {
         schedules: ownSchedules(rt, reader), settings: ownSettings(rt, reader),
         fileUploads: () => ctx.get?.('fileUploads'), attachmentStore: () => ctx.get?.('attachments'),
         stopOf: (id, turn) => rt.stopLineOfTurn?.(id, turn),
+        turnHidden: (id, turn) => (rt.state?.exchangeTurns?.[id] ?? []).includes(turn),
         guardOffOf: (botId, sessionId) => pocketGuardOffOf(rt, botId, sessionId),
         carriesSignInCode,
         switching: botId => Boolean(rt.switchingChat?.(botId, { crossing: true })),

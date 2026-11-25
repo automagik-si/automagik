@@ -34,3 +34,10 @@ test('member rows draw the projected Solver avatar while the owner resolver uses
   const ordinary = expand(BotMark({ bot: { ...bot, kind: undefined, role: 'Writer' } }))
   assert.equal(ordinary.props['data-shape'], defaultShape(bot.id))
 })
+
+test('member and guest rows use the chat activity styling for a checked skill name', () => {
+  const { MemberRows } = load(code, browser().globals)
+  const tree = expand(MemberRows({ roster: { byId: {} }, botId: 'b', pages: [[{ kind: 'skill-activity', name: 'mint' }]] }))
+  assert.equal(nodes(tree).find(node => node.props.className === 'bt-agent-act')?.props.title, 'Skill: mint')
+  assert.equal(nodes(tree).some(node => node.props.className === 'bt-bubble'), false)
+})

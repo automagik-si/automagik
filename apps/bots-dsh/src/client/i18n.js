@@ -22,6 +22,7 @@ const ZH = {
   "Choose a skill mode.": "请选择技能模式。",
   "This skill is not active on this Bot.": "此技能未在这个 Bot 上启用。",
   "Skills": "技能",
+  "Skill: {name}": "技能：{name}",
   "Add skill": "添加技能",
   "From text": "文本",
   "From file": "文件",

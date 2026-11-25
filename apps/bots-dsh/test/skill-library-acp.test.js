@@ -7,11 +7,13 @@ import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
 import { Backchannel, offeredTools } from '../../acp-dsh/src/host/backchannel.js'
 import { AGY_TOOLS_OFF_TEXT } from '../../acp-dsh/src/host/agy-off.js'
 import { AGY_OFF_ARGS, agyWorld, unixOnly } from '../../acp-dsh/test/fixtures/agy-world.js'
-import { createSystemMessage, createUserMessage, markAgentLoopRequest, textOnlyImageText } from '@deepseek-ai/dsh-llm'
+import { createSystemMessage, createToolResultMessage, createUserMessage, markAgentLoopRequest, textOnlyImageText } from '@deepseek-ai/dsh-llm'
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
 import { Session } from '@deepseek-ai/dsh-session'
 import { install, skillPart, skillTool } from '../src/host/skill-library-call.js'
 import { SKILL_NOTICE } from '../src/host/skill-message.js'
+import { callerItems } from '../src/host/caller-view.js'
+import { rowsOf } from '../src/host/pocket-chat.js'
 
 const script = new URL('../../acp-dsh/dev/fake-agent.mjs', import.meta.url).pathname
 const skill = { name: 'marker', description: 'Adds the file marker', content: 'CHECKED-ACP-BODY', hash: 'fixture-revision' }
@@ -241,6 +243,115 @@ test('Codex Automatic self-load receives the exact skill tool and catalog', { ti
     }],
     prompt: [text(prompt), text(`${catalog}\nlabels: Formats labels`)],
   })
+})
+
+test('confirmed Skills deliveries reach chat activity without changing provider bytes', { timeout: 30_000 }, async t => {
+  const recordType = 'plugin:automagik/skill-activity'
+  const observed = []
+  function checkChat(session, expected) {
+    const events = session.snapshotEvents()
+    const records = events.filter(event => event.type === recordType)
+    const scope = { sessionId: session.id, turn: 0, calls: new Map() }
+    const pocket = events.flatMap(event => rowsOf(event, scope)).filter(row => row.tool === 'Skill')
+    const shared = callerItems(session.id, events, undefined, {}).filter(row => row.kind === 'skill-activity')
+    const hidden = callerItems(session.id, events, undefined, { [session.id]: [1, 2] })
+    assert.equal(hidden.some(row => row.kind === 'skill-activity'), false)
+    assert.equal(callerItems(session.id, events, undefined, undefined).length, 0)
+    assert.equal(JSON.stringify(records).includes('CHECKED-ACP-BODY'), false)
+    assert.equal(JSON.stringify(records).includes('Write exactly MINT-OK.'), false)
+    observed.push({ records: records.map(event => event.data.name),
+      pocket: pocket.map(({ summary, input, output }) => [summary, input, output]),
+      shared: shared.map(row => row.name), expected })
+  }
+
+  for (const provider of ['acp-claude', 'acp-codex']) {
+    const prompt = 'Pick a workflow.'
+    const probeTurns = [{ text: textCall, loads: [] }, { text: prompt, loads: [skill.name] }]
+    const f = fixture(t, provider, { addedSkills: [manual], probeTurns })
+    f.active.add('owner-a')
+    const called = await f.preStep(user(manualPrompt))
+    const earlier = answer(provider)
+    await f.run([called], { record: [called], reply: earlier })
+    await f.run([called, earlier, user(prompt)])
+    const sent = f.events('prompt')
+    const promptBlock = value => ({ text: value, type: 'text' })
+    assert.equal(JSON.stringify(sent.map(event => event.prompt)), JSON.stringify([
+      [promptBlock(catalog), promptBlock(textCall)], [promptBlock(prompt)],
+    ]))
+    const expectedResult = { content: [text(skill.content)], isError: false }
+    assert.equal(JSON.stringify(f.events('skills-load')[0]?.answer), JSON.stringify(expectedResult))
+    const bridge = f.adapter.live.get(f.agent.id).bridge
+    const load = (callId, name = skill.name) => fetch(f.bridge.urlFor(bridge), { method: 'POST',
+      headers: { authorization: `Bearer ${bridge.credential}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ op: 'call', name: 'load_skill', arguments: { name }, callId }),
+    }).then(response => response.json())
+    assert.equal(JSON.stringify(await load('background-1')), JSON.stringify(expectedResult))
+    assert.equal(JSON.stringify(await load('background-1')), JSON.stringify(expectedResult))
+    assert.equal(JSON.stringify(await load('background-2')), JSON.stringify(expectedResult))
+    assert.equal((await load('inactive', 'missing')).isError, true)
+    checkChat(f.agent.session, [manual.name, skill.name, skill.name, skill.name])
+  }
+
+  const provider = 'deepseek-official'
+  const model = 'fixture-model'
+  const f = fixture(t, provider, { addedSkills: [manual] })
+  f.active.add('owner-a')
+  const session = f.agent.session
+  const connection = resolveAdapterOptions({ baseURL: 'https://fixture.invalid', models: [{ id: model, name: model }] })
+  const adapter = new DeepSeekAdapter({ options: () => connection,
+    resolveAuth: async () => ({ headers: {} }), resolveUserId: () => 'fixture',
+    prepareExtensions: async () => ({ fields: {}, accept: async () => {} }) })
+  const wire = []
+  let fail = false
+  t.mock.method(globalThis, 'fetch', async (url, { body }) => {
+    assert.equal(url, 'https://fixture.invalid/v1/messages')
+    wire.push(body)
+    if (fail) return new Response('{}', { status: 400 })
+    const events = [
+      { type: 'message_start', message: { id: 'fixture', type: 'message', role: 'assistant', model, content: [], usage: { input_tokens: 1, output_tokens: 0 } } },
+      { type: 'content_block_start', index: 0, content_block: text('') },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Ready.' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
+      { type: 'message_stop' },
+    ]
+    return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
+      { headers: { 'content-type': 'text/event-stream' } })
+  })
+  f.rt.ctx.llm = { stream: options => f.stream(options, () => adapter.stream(options)) }
+  const send = messages => Array.fromAsync(f.rt.ctx.llm.stream(markAgentLoopRequest({
+    provider, model, sessionId: session.id, messages, signal: t.signal,
+  })))
+  const called = await f.preStep(user(manualPrompt))
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 0 })
+  session.append('user/message', called, { surfaceOp: 'append' })
+  await send([called])
+  await send([called])
+  assert.equal(wire[0], wire[1], 'prior activity leaves the serialized manual prompt identical')
+  assert.deepEqual(JSON.parse(wire[0]).messages, [{ role: 'user', content: [text(manualPrompt), text(manual.content)] }])
+  const callId = 'automatic'
+  const args = JSON.stringify({ name: skill.name })
+  const call = { ...answer(provider), content: [{ type: 'tool-call', id: callId, name: 'load_skill', arguments: args }] }
+  session.append('assistant/message', { turn: 1, step: 0, message: call, stream: [] }, { surfaceOp: 'append' })
+  const callSeq = session.append('tool/call', { turn: 1, step: 0, callId, name: 'load_skill', arguments: args }).seq
+  const loaded = createToolResultMessage({ callId, content: [f.rt.skillCalls.load(session.id, skill.name)], isError: false })
+  session.append('tool/result', { turn: 1, step: 0, message: loaded }, { surfaceOp: 'append', sourceEventSeqs: [callSeq] })
+  session.append('step/end', { turn: 1, step: 0 })
+  session.append('step/start', { turn: 1, step: 1 })
+  await send([called, call, loaded])
+  await send([called, call, loaded])
+  assert.equal(wire[2], wire[3], 'prior activity leaves the serialized Automatic result identical')
+  assert.equal(JSON.stringify(JSON.parse(wire[2]).messages.at(-1).content[0].content), JSON.stringify([text(skill.content)]))
+  const failed = await f.preStep(user(manualPrompt))
+  session.append('user/message', failed, { surfaceOp: 'append' })
+  fail = true
+  await assert.rejects(send([called, call, loaded, failed]), /400/)
+  checkChat(session, [manual.name, skill.name])
+
+  assert.deepEqual(observed, observed.map(({ expected }) => ({ expected, records: expected, shared: expected,
+    pocket: expected.map(name => [name, '', '']),
+  })))
 })
 
 for (const provider of ['acp-claude', 'acp-codex']) {

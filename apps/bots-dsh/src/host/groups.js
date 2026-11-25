@@ -18,6 +18,7 @@
 // where the member that asked for it answers.
 import { emptyAfterSkillCall, groupSkillRequests, projectGroupSkillText, requestedSkills } from './skill-library-call.js'
 import { SKILL_NOTICE } from './skill-message.js'
+import { SKILL_ACTIVITY } from '../shared/skill-activity.js'
 import { isBotGroupPost, NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -75,7 +76,7 @@ export const isIdleRelayText = (text, everyone, priorBodies) => {
 // Rows only the group chat draws: members read who is at work from the round itself.
 // 'switched': a member's conversation here followed its agent switch (parts.js); the member
 // itself reads that in its handoff.
-const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop', 'switched', SKILL_NOTICE])
+const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop', 'switched', SKILL_NOTICE, SKILL_ACTIVITY])
 const memberLine = record => record !== undefined && !SHOWN_ONLY.has(record.kind)
 
 // A member's own lines are already in its Session, so only the others' are news.
@@ -383,6 +384,7 @@ export function install(rt) {
   }
 
   const roomLineListeners = new Set()
+  const activityRevisions = new WeakMap()
   // The one way anything is said in a group: into its book, then into the room's log for
   // the members' turns. `session` marks a message the group's own Session shows already.
   const say = (room, line) => {
@@ -436,12 +438,12 @@ export function install(rt) {
   // `to` undefined: up to the next anchor, or to the end while there is none (`open`).
   // `anchor` names the call, so the next call in the book ends its rows even when it starts
   // at the same seq.
-  const rowsView = (roomId, from, to, anchor) => {
+  const rowsView = (roomId, from, to, anchor, activity = true) => {
     const room = rt.roomOf(roomId)
     if (room !== undefined) ensureRoomLog(room)
+    const records = rt.ledger.records(bookOf(roomId))
     let end = to
     if (end === undefined) {
-      const records = rt.ledger.records(bookOf(roomId))
       const at = anchor === undefined ? -1 : records.findIndex(record => record.event === 'anchor' && record.id === anchor)
       const next = at === -1
         ? records.filter(record => record.event === 'anchor' && record.from > from).map(record => record.from)
@@ -449,13 +451,56 @@ export function install(rt) {
       if (next.length > 0) end = Math.min(...next) - 1
     }
     // Not the messages the group's own Session shows itself.
-    const rows = rt.ledger.range(bookOf(roomId), from, end).filter(record => record.session !== true).map(rowOf).filter(Boolean)
+    if (!activity) {
+      const rows = rt.ledger.range(bookOf(roomId), from, end).filter(record => record.session !== true).map(rowOf).filter(Boolean)
+      return { rows, open: end === undefined }
+    }
+    const rows = []
+    const shown = new Set()
+    for (const record of records) {
+      if (record.kind === SKILL_ACTIVITY) {
+        if (record.event !== 'load') continue
+        const receipt = JSON.stringify([record.exchangeId, record.id])
+        if (shown.has(receipt)) continue
+        const belongs = anchor === undefined
+          ? record.after >= from - 1 && (end === undefined || record.after <= end)
+          : record.anchor === anchor
+        if (!belongs) continue
+        shown.add(receipt)
+        rows.push({ kind: SKILL_ACTIVITY, botId: record.botId, skill: record.name, time: record.time })
+      } else if (Number.isInteger(record.seq) && record.seq >= from && (end === undefined || record.seq <= end) && record.session !== true) {
+        const row = rowOf(record)
+        if (row) rows.push(row)
+      }
+    }
     return { rows, open: end === undefined }
   }
-  const groupRows = (roomId, from, to, anchor) => rowsView(roomId, from, to, anchor).rows
+  const groupRows = (roomId, from, to, anchor) => rowsView(roomId, from, to, anchor, false).rows
 
   Object.assign(rt, {
     keepGroupLine, dropGroupLines, groupRows, groupRowsView: rowsView, roomHistory,
+    roomActivityView: () => Object.fromEntries(Object.values(rt.state.rooms).flatMap(room => {
+      const revision = activityRevisions.get(room)
+      return revision === undefined ? [] : [[room.id, revision]]
+    })),
+    skillRoomActivity(sessionId, botId, source) {
+      const owner = rt.groupOwners.get(sessionId)
+      if (source?.kind !== SOURCE_KIND || source.role !== 'room' || typeof source.exchangeId !== 'string' ||
+          owner?.roomId !== source.roomId || owner?.botId !== botId) return
+      const room = rt.roomOf(owner.roomId)
+      if (!room?.members.includes(botId) || rt.isPrivate?.(botId)) return
+      const book = bookOf(room.id)
+      const scope = rt.ledger.records(book).findLast(record => record.kind === SKILL_ACTIVITY && record.event === 'scope' &&
+        record.exchangeId === source.exchangeId && record.sessionId === sessionId && record.botId === botId)
+      if (scope === undefined) return
+      return { roomId: room.id, record(id, name, time) {
+        // UI records have no room sequence. Room prompts, read cursors and
+        // relay tool results use the same line order whether a skill loaded or not.
+        rt.ledger.append(book, { kind: SKILL_ACTIVITY, event: 'load', id, name, botId, exchangeId: source.exchangeId,
+          after: scope.after, ...(scope.anchor !== undefined && { anchor: scope.anchor }), time })
+        activityRevisions.set(room, randomUUID())
+      } }
+    },
     roomSkillNotice(roomId, botId, text, skill) {
       const room = rt.roomOf(roomId)
       if (room) say(room, { kind: SKILL_NOTICE, botId, text,
@@ -919,6 +964,16 @@ export function install(rt) {
     if (signal.aborted) return null
     const startedAt = Date.now()
     const exchangeId = randomUUID()
+    // A new relay can open while this recipient is still working. Keep the
+    // association made at dispatch, including for an ACP load after the reply.
+    try {
+      const book = bookOf(room.id)
+      const anchor = rt.ledger.records(book).findLast(record => record.event === 'anchor')?.id
+      rt.ledger.append(book, { kind: SKILL_ACTIVITY, event: 'scope', exchangeId, sessionId, botId: member.id,
+        after: room.seq, ...(anchor !== undefined && { anchor }) })
+    } catch (error) {
+      try { rt.warn('Skills room activity could not be scoped: %s', error) } catch {}
+    }
     const turn = { botId: member.id, sessionId, exchangeId }
     const { started } = round
     started.push(turn)

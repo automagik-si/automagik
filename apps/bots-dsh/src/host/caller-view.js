@@ -1,4 +1,5 @@
 import { personParts } from './skill-message.js'
+import { skillActivityOf } from '../shared/skill-activity.js'
 import { HISTORY_TIMEOUT_MS, MAX_AVATAR_IMAGE, SOURCE_KIND } from './constants.js'
 import { callerService, hasCallerLock } from './multiuser.js'
 import { refusal } from './refusal.js'
@@ -27,6 +28,11 @@ export function callerItems(sessionId, events, seedTurn, exchangeTurns) {
     const { type, data, time, seq } = event
     if (type === 'turn/start') {
       turn = Number.isInteger(data?.turn) ? data.turn : undefined
+      continue
+    }
+    const activity = skillActivityOf(event)
+    if (activity !== undefined) {
+      if (activity.roomId === undefined && !hidden.has(activity.turn)) items.push(activity)
       continue
     }
     if (turn === undefined || hidden.has(turn) || hidden.has(data?.turn)) continue

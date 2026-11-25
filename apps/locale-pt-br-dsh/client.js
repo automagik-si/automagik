@@ -77,6 +77,7 @@ const pack = createPack({
     "Choose a skill mode.": "Escolha um modo para a skill.",
     "This skill is not active on this Bot.": "Essa skill não está ativa neste Bot.",
     "Skills": "Skills",
+    "Skill: {name}": "Habilidade: {name}",
     "Add skill": "Adicionar skill",
     "From text": "Por texto",
     "From file": "Por arquivo",

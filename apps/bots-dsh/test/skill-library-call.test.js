@@ -11,6 +11,7 @@ import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { crossed } from '../../acp-dsh/src/host/switch.js'
 import { install, requestedSkills, skillPart, skillTool } from '../src/host/skill-library-call.js'
 import { SKILL_NOTICE } from '../src/host/skill-message.js'
+import { skillActivityOf } from '../src/shared/skill-activity.js'
 import { appendLegacyRefusal, nativeText, ordinaryText, rawText, refusedName, saveModelInput } from './support/legacy-skill-refusal.js'
 
 const route = { provider: 'deepseek-fixture', model: 'fixture-model' }
@@ -20,6 +21,18 @@ const x = doc('marker', 'CHECKED-BODY')
 const privateSkill = doc('private-skill', 'PRIVATE-BODY')
 const testRows = requests => requests.flatMap(request => request.messages)
 const text = rows => rows.flatMap(row => row.content?.map(part => part.text) ?? []).join('\n')
+
+test('deferred native Skills activity follows checked dispatch and counts fresh PTC reads', { timeout: 15_000 }, async t => {
+  const f = await fixture(t, { program: 'await tools.load_skill({ name: "marker" }); await tools.load_skill({ name: "marker" }); return {}' })
+  const first = await f.run('a', user('Use the workflow.'), true)
+  const activity = () => first.agent.session.snapshotEvents().map(skillActivityOf).filter(Boolean)
+  assert.deepEqual(activity().map(row => row.name), ['marker', 'marker'])
+  assert.equal(new Set(activity().map(row => row.seq)).size, 2)
+  assert.match(text(first.sent.at(-1).messages), /CHECKED-BODY/)
+  f.afterProgram(() => f.active.delete('a'))
+  await f.run('a', user('Try another workflow.'), true)
+  assert.deepEqual(activity().map(row => row.name), ['marker', 'marker'])
+})
 
 async function fixture(t, { program, siblingProgram, review = false } = {}) {
   const root = new Context()

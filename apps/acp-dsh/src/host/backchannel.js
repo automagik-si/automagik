@@ -454,6 +454,10 @@ function skillRequest(ctx, record, name, requested) {
   }
 }
 
+function skillActivityPosition(skills, session) {
+  try { return skills?.bridgePosition?.(session) } catch { return undefined }
+}
+
 export class Backchannel {
   /**
    * @param {{ ctx: any, log?: (message: string) => void, reviewTimeoutMs?: number, stepWaitMs?: number }} options
@@ -729,6 +733,7 @@ export class Backchannel {
       // (the adapter's endSession) keeps the Session's write guard until the last one is back.
       record.calls = (record.calls ?? 0) + 1
       let result
+      let confirmSkill
       try {
         result = await this.call(record, {
           name: typeof body.name === 'string' ? body.name : '',
@@ -736,6 +741,7 @@ export class Backchannel {
           callId: typeof body.callId === 'string' ? body.callId : undefined,
           signal: gone.signal,
           attachmentSignal,
+          onSkillDelivered: confirm => { confirmSkill = confirm },
         })
       } finally {
         record.calls -= 1
@@ -744,6 +750,9 @@ export class Backchannel {
       this.diagnostics?.bridgeCall(record, result)
       // A call that lost its authority while running answers with a refusal.
       if (record.closed || attachmentSignal?.aborted || result?.revoked === true) return reply(401, { error: 'refused' })
+      if (!gone.signal.aborted && result?.isError === false) {
+        try { confirmSkill?.() } catch { /* Activity cannot change the bridge answer. */ }
+      }
       return reply(200, result)
     }
     if (op === 'wait') {
@@ -885,9 +894,9 @@ export class Backchannel {
    * then does it run. Rows land on the Session as DSH's own tool rows do, so the chat shows the
    * call and its result; the bridge's call is the single record for it.
    * @param {any} record
-   * @param {{ name: string, arguments: any, callId?: string, signal?: AbortSignal, attachmentSignal?: AbortSignal }} call
+   * @param {{ name: string, arguments: any, callId?: string, signal?: AbortSignal, attachmentSignal?: AbortSignal, onSkillDelivered?: Function }} call
    */
-  async call(record, { name, arguments: args, callId, signal: callerGone, attachmentSignal = record.attachmentAbort?.signal }) {
+  async call(record, { name, arguments: args, callId, signal: callerGone, attachmentSignal = record.attachmentAbort?.signal, onSkillDelivered }) {
     const error = (text) => ({ content: name === 'load_skill' ? [] : [{ type: 'text', text }], isError: true })
     if (record.skillOnly && name !== 'load_skill') return error('Unknown tool')
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
@@ -931,7 +940,7 @@ export class Backchannel {
     // without a card (no loadable row exists outside a step); Auto refuses, because Auto review
     // reads a call from its step. A plain refusal here would be a silent dead end for the agent.
     if (openStepOf(session) === undefined && !betweenSteps(session) && record.promptRunning?.() !== true) {
-      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill })
+      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered })
     }
     const approval = this.ctx?.get?.('approval')
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
@@ -963,6 +972,8 @@ export class Backchannel {
       this.log(`bridge call id ${caller} replaced by ${id}`)
     }
     const { turn, step } = position
+    const skills = skill && this.ctx?.get?.('omniTeam')?.skillCalls
+    const skillPosition = skillActivityPosition(skills, session)
     const route = review === undefined
       ? routeOf(session)
       : { provider: review.provider, model: review.model }
@@ -1049,7 +1060,7 @@ export class Backchannel {
           if (name === 'load_skill' && !isError && content.length > 0) {
             this.ctx?.get?.('omniTeam')?.skillCalls?.admit({
               sessionId: record.sessionId, messages: [saved.data.message],
-            }, session)
+            }, session, { activity: false })
           }
         } catch (cause) {
           // A result the log refuses must not leave the call open: record a minimal row that
@@ -1068,6 +1079,9 @@ export class Backchannel {
       }
       // The terminal sentence is an MCP result only. The durable row carries
       // an empty error, so a later replay never turns it into an instruction.
+      if (skills && !isError && content.length > 0) {
+        onSkillDelivered?.(() => skills.bridgeActivity?.(session, skillPosition, id, content[0]))
+      }
       return terminal ?? {
         content: name === 'load_skill' ? content.map(({ text }) => ({ type: 'text', text }))
           : await contentOf(content, this.ctx?.get?.('attachments')),
@@ -1243,15 +1257,17 @@ export class Backchannel {
    * own turn numbering is private. Manual and Full run it without DSH rows and record a plugin
    * record instead; Auto refuses, because Auto review reads the pending call from its step.
    * @param {any} record
-   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean }} call
+   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean, skill?: any, onSkillDelivered?: Function }} call
    */
-  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill }) {
+  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered }) {
     const error = text => ({ content: name === 'load_skill' ? [] : [{ type: 'text', text }], isError: true })
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
     const session = record.agent?.session
     const tools = this.ctx?.get?.('tools')
     const approval = this.ctx?.get?.('approval')
     const id = bridgeCallId(callId)
+    const skills = skill && this.ctx?.get?.('omniTeam')?.skillCalls
+    const skillPosition = skillActivityPosition(skills, session)
     const note = (outcome) => {
       try { appendPluginRecord(session, 'plugin:acp-dsh/bridge-outside-step', { callId: id, name, outcome }) } catch {}
     }
@@ -1318,6 +1334,9 @@ export class Backchannel {
         return skill.refuse()
       }
       note(result.isError === true ? 'failed' : 'ran')
+      if (skills && result.isError !== true && content.length > 0) {
+        onSkillDelivered?.(() => skills.bridgeActivity?.(session, skillPosition, id, content[0]))
+      }
       return {
         content: name === 'load_skill' ? content.map(({ text }) => ({ type: 'text', text }))
           : await contentOf(content, this.ctx?.get?.('attachments')),
