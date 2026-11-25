@@ -18,7 +18,10 @@ const ownerOf = (rt, id) => rt.selfOf(id)
 const activeOf = (rt, id) => rt.skillLibrary?.active(ownerOf(rt, id)) ?? []
 const automaticOf = records => records.filter(record => record.mode === AUTOMATIC_SKILL_MODE)
 const keyOf = records => records.map(({ name, hash }) => `${name}:${hash}`).join(',')
-const catalogOf = records => records.map(({ name, description }) => `${name}: ${description}`).join('\n')
+const catalogOf = records => records.length === 0 ? '' : [
+  'Your skills (load with load_skill):',
+  ...records.map(({ name, description }) => `${name}: ${description}`),
+].join('\n')
 const noticeText = name => `The skill ${name} is not active on this Bot. Add it in the Bot's Details, under Skills.`
 const SKILL_UNAVAILABLE = 'No skill with that name is available to this Bot.'
 const SKILLS_PROJECTED = Symbol('Skills projected')
@@ -359,8 +362,8 @@ export function loadSkill(rt, sessionId, name) {
 export function skillTool(rt) {
   return defineTool({
     name: SKILL_TOOL,
-    description: '',
-    parameters: { name: { type: 'string', required: true } },
+    description: 'Load the full instructions of one of your active skills by its exact name from your skills list.',
+    parameters: { name: { type: 'string', required: true, description: 'Exact skill name from your skills list.' } },
     output: {
       schema: { type: 'object', additionalProperties: true },
       render: (_args, value) => value.type === 'text' ? [value] : [],

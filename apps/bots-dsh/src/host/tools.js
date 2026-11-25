@@ -1602,7 +1602,7 @@ export function install(rt) {
 
   rt.teamTools.push(defineTool({
     name: 'list_capabilities',
-    description: 'List shared MCP servers, skills, and packs, plus the capabilities attached to you.',
+    description: 'List shared MCP servers and packs, plus the capabilities attached to you.',
     parameters: {},
     output,
     async execute(_args, exec) {

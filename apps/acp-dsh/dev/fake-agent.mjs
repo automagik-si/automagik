@@ -219,7 +219,8 @@ async function attachServer(session, server, sessionId) {
   const connection = connect(server, sessionId)
   session.mcp.set(server.name, connection)
   const tools = await connection.tools.catch(() => [])
-  trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name) })
+  trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name),
+    ...(SKILLS_PROBE && { definitions: tools }) })
 }
 
 async function attach(session, servers, sessionId) {

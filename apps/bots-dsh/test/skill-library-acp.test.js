@@ -17,7 +17,8 @@ const script = new URL('../../acp-dsh/dev/fake-agent.mjs', import.meta.url).path
 const skill = { name: 'marker', description: 'Adds the file marker', content: 'CHECKED-ACP-BODY', hash: 'fixture-revision' }
 const manual = { name: 'mint-notes', description: 'Write a mint note.', content: 'Write exactly MINT-OK.', hash: 'mint', mode: 'manual' }
 const automatic = { ...skill, mode: 'automatic' }
-const catalog = 'marker: Adds the file marker'
+const catalogHeading = 'Your skills (load with load_skill):'
+const catalog = `${catalogHeading}\nmarker: Adds the file marker`
 const manualPrompt = 'Use the skill mint-notes.\n  Keep these spaces. '
 const textCall = manualPrompt + '\n' + manual.content
 const text = text => ({ type: 'text', text })
@@ -75,8 +76,8 @@ test('Skills row 8: production Antigravity OFF admits only the Session skill rea
   assert.deepEqual(launch.meta?.antigravity?.eagerMcpServers, ['dsh'])
   assert.equal(launch.systemPrompt, undefined)
   assert.deepEqual(child.find(event => event.event === 'mcp-list').tools, ['load_skill'])
-  assert.match(prompt, /marker: Adds the file marker/)
-  assert.doesNotMatch(prompt, /CHECKED-ACP-BODY|load_skill/)
+  assert.ok(prompt.includes(catalog))
+  assert.doesNotMatch(prompt.replace(catalogHeading, ''), /CHECKED-ACP-BODY|load_skill/)
 
   const loaded = await a.turn('agy-bridge load_skill {"name":"marker"}')
   assert.match(loaded.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), /The bridge said: CHECKED-ACP-BODY/)
@@ -121,7 +122,7 @@ test('Skills row 8: production Antigravity OFF admits only the Session skill rea
   assert.deepEqual(h.approvals.map(request => request.toolName), ['load_skill'])
 })
 
-function fixture(t, provider, { reforks = false, earlierTurns = 0, capturePrompt = false, addedSkills = [] } = {}) {
+function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, addedSkills = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'skill-acp-'))
   const trace = join(dir, 'trace.ndjson')
   const session = Session.create('bot-a')
@@ -175,9 +176,7 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, capturePrompt
     installed: () => true,
     spawn: () => ({ command: process.execPath, args: [script],
       env: { PATH: process.env.PATH, HOME: dir, FAKE_ACP_TRACE: trace,
-        ...(capturePrompt && { FAKE_ACP_SKILLS_PROBE: JSON.stringify({
-          turns: [manualPrompt, textCall].map(text => ({ text, loads: [] })),
-        }) }) } }),
+        ...(probeTurns && { FAKE_ACP_SKILLS_PROBE: JSON.stringify({ turns: probeTurns }) }) } }),
   }
   const bridge = new Backchannel({ ctx })
   const adapter = new AcpAdapter(ctx, new Map([[provider, row]]), {
@@ -215,10 +214,40 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, capturePrompt
     ctx, rt, agent, run, events, preStep, stream: handlers.get('llm/stream'), adapter, bridge, called: () => offered }
 }
 
+test('Codex Automatic self-load receives the exact skill tool and catalog', { timeout: 15_000 }, async t => {
+  const prompt = 'Choose a workflow for this task.'
+  const second = { ...automatic, name: 'labels', description: 'Formats labels', hash: 'labels' }
+  const f = fixture(t, 'acp-codex', {
+    addedSkills: [manual, second], probeTurns: [{ text: prompt, loads: [skill.name] }],
+  })
+  f.active.add('owner-a')
+  await f.run([user(prompt)])
+
+  const sent = f.events('prompt').at(-1)
+  const listed = f.events('mcp-list').find(event => event.sessionId === sent.sessionId && event.server === 'dsh')
+  assert.deepEqual(f.events('skills-load').map(({ sessionId, name, retry, answer }) => ({ sessionId, name, retry, answer })), [{
+    sessionId: sent.sessionId, name: skill.name, retry: false,
+    answer: { content: [text(skill.content)], isError: false },
+  }])
+  assert.deepEqual({ definitions: listed?.definitions, prompt: sent.prompt }, {
+    definitions: [{
+      name: 'load_skill',
+      description: 'Load the full instructions of one of your active skills by its exact name from your skills list.',
+      inputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string', description: 'Exact skill name from your skills list.' } },
+        required: ['name'],
+      },
+    }],
+    prompt: [text(prompt), text(`${catalog}\nlabels: Formats labels`)],
+  })
+})
+
 for (const provider of ['acp-claude', 'acp-codex']) {
   for (const uploaded of [false, true]) {
     test(`person-call order at the ${provider} ${uploaded ? 'prepared upload' : 'text'} prompt`, { timeout: 15_000 }, async t => {
-      const f = fixture(t, provider, { capturePrompt: true, addedSkills: [manual] })
+      const probeTurns = [manualPrompt, textCall].map(text => ({ text, loads: [] }))
+      const f = fixture(t, provider, { probeTurns, addedSkills: [manual] })
       f.active.add('owner-a')
       const ref = { attachmentId: 'sha256:' + 'a'.repeat(64), mediaType: 'image/png', bytes: 30, width: 1, height: 1 }
       const input = user(manualPrompt, ...uploaded ? [{ type: 'image', attachment: ref }] : [])

@@ -18,7 +18,7 @@ const explicit = `/${skill.name}`
 const automatic = 'Choose a workflow for the note.'
 const afterRemove = `Try /${skill.name} again.`
 const afterRemoveForModel = 'Try again.'
-const catalogLine = `${skill.name}: ${skill.description}`
+const catalogBlock = `Your skills (load with load_skill):\n${skill.name}: ${skill.description}`
 const notice = `The skill ${skill.name} is not active on this Bot. Add it in the Bot's Details, under Skills.`
 
 const texts = row => row?.content?.filter(part => part.type === 'text').map(part => part.text) ?? []
@@ -64,7 +64,7 @@ test('Skills v2 owner and Bot flow from checked creation to removal', { timeout:
       } else {
         const id = prompt === automatic ? 'automatic-load' : 'removed-load'
         const called = messages.some(row => row.role === 'assistant' && row.content.some(part => part.type === 'tool-call' && part.id === id))
-        if (!called && (prompt === afterRemoveForModel || catalogSections(messages).includes(catalogLine))) {
+        if (!called && (prompt === afterRemoveForModel || catalogSections(messages).includes(catalogBlock))) {
           yield { type: 'tool-call-delta', index: 0, id, name: 'load_skill', argumentsDelta: JSON.stringify({ name: skill.name }) }
           yield { type: 'finish', reason: { kind: 'tool-calls' } }
           return
@@ -167,7 +167,7 @@ test('Skills v2 owner and Bot flow from checked creation to removal', { timeout:
   assert.deepEqual(texts(personRow(offered.messages)), [automatic])
   assert.ok(offered.tools.includes('load_skill'))
   for (const request of [offered, loaded]) {
-    assert.deepEqual([...new Set(catalogSections(request.messages))], [catalogLine])
+    assert.deepEqual([...new Set(catalogSections(request.messages))], [catalogBlock])
     assert.ok(!request.messages.some(row => row.role === 'system' && texts(row).join('\n').includes(skill.content)))
   }
   assert.deepEqual(bodyLocations(offered.messages), bodyLocations(called.messages), 'the catalog alone carries no fresh body')
