@@ -11,6 +11,7 @@ import { osBlocked } from './folder-access.js'
 import { refusal } from './refusal.js'
 import { instructionsDigest, unchangedSolverWaiter } from './roles.js'
 import { packageAttachment } from '../shared/roles.js'
+import { CHOOSE_CONCRETE } from '../shared/solver-model.js'
 import { SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isWrittenSolverMethod, solverInstructions } from '../shared/solver-method.js'
 import { DRAFT_SWEEP_MAX, MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOTICE_MAX, SECTION_COLORS, SECTION_NAME_MAX, inUnfoldInstance } from './constants.js'
 import { currentColor, isColor, normalize, unquote } from './text.js'
@@ -372,7 +373,7 @@ export function install(rt) {
   }
 
   async function buildBot(cleanName, options, readScopeSource) {
-    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy, solverAuto } = options
+    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy, solverAuto, solverModelChoice } = options
     if (existingSessionId !== undefined && (createdBy !== undefined || reviewerId !== undefined || reviewGuard !== undefined)) {
       throw refusal('An adopted Session takes no creator or reviewer.')
     }
@@ -387,7 +388,18 @@ export function install(rt) {
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
     // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
     // its Session exists.
-    const modelRef = model ? await rt.resolveModel(model, { remember: false }) : pickModel ? undefined : await rt.defaultBotModel()
+    const strictChoice = solverModelChoice || (waitingRole === SOLVER_ROLE_ID && reviewerId !== undefined
+      && options.role === SOLVER_DESCRIPTION && isWrittenSolverMethod(options.instructions))
+    if (strictChoice && !model) throw refusal(CHOOSE_CONCRETE)
+    const modelRef = model ? await rt.resolveModel(model, { remember: false }).catch(error => {
+      if (strictChoice && error?.modelUnavailable) throw refusal(CHOOSE_CONCRETE)
+      throw error
+    }) : pickModel ? undefined : await rt.defaultBotModel()
+    const linkedReviewer = reviewerId === undefined ? undefined : rt.botOf(reviewerId)
+    if (strictChoice) {
+      if ((reviewerId !== undefined && !linkedReviewer) || model !== modelRef) throw refusal(CHOOSE_CONCRETE)
+      await rt.checkSolverModel(modelRef, linkedReviewer)
+    }
     if (model) {
       rt.assertRouteAllowed({ name: cleanName, kind }, modelRef, 'create-bot')
       await rt.assertModelAccess(modelRef)
@@ -465,6 +477,7 @@ export function install(rt) {
       }
       sectionsBefore = new Set((state.sections ?? []).map(sec => sec.id))
       assertCaller(createdBy)
+      if (strictChoice) await rt.checkSolverModel(modelRef, linkedReviewer)
       const { next, avatar: checkedAvatar } = createLook(options, id)
       const savedAvatar = copyOf !== undefined ? copyAvatar
         : checkedAvatar ?? (isSolverLooks(next) ? { shape: solverDefaultShape(id) } : undefined)

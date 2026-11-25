@@ -11,6 +11,7 @@
 // is settled from the Session's durable log: an answer that was produced goes to the Bot
 // that waits for it, and an outcome that cannot be read is said to be unknown. The
 // request itself is never sent again there.
+import { originalReviewContent } from '../shared/solver-model.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, renameSync } from 'node:fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -580,6 +581,10 @@ export function install(rt) {
     return source.role === 'resume' && source.resumed === true && source.resumedByUpdate === args.resumedByUpdate
       && typeof args.resumeMessageId === 'string' && message.id === args.resumeMessageId
   }
+  rt.reviewContinuationBinding = (id, message) => {
+    const args = reviewInputNote(message.source?.exchangeId)
+    if (matchesContinuation(id, message, args)) return args.consumedResult
+  }
   const noteReviewContinuation = (sessionId, message, args) => {
     const binding = args.consumedResult
     if (!binding || binding.toId !== args.toId || !rt.resultReplyRequest?.(binding)) return message
@@ -590,11 +595,12 @@ export function install(rt) {
       || randomUUID()
     if (prior !== undefined) forgetQueued(source.exchangeId)
     noteDelivery(sessionId, { ...args, reviewContinuation, resumeMessageId: message.id })
-    return { ...message, source: { ...source, reviewContinuation } }
+    const continuation = { ...message, source: { ...source, reviewContinuation } }
+    return rt.withReviewFeedback?.(continuation, args.toId, binding) ?? continuation
   }
   rt.notePartReviewContinuation = (sessionId, message, binding) => !binding ? message
     : noteReviewContinuation(sessionId, message, { toId: binding.toId, role: 'resume', resumed: true,
-      exchangeId: message.source.exchangeId, text: textOf(message.content), consumedResult: binding })
+      exchangeId: message.source.exchangeId, text: textOf(originalReviewContent(message)), consumedResult: binding })
   rt.takeReviewContinuation = (id, message) => {
     const args = reviewInputNote(message?.source?.exchangeId)
     if (!args?.consumedResult || args.resumeMessageId !== message.id || !matchesContinuation(id, message, args)
@@ -614,7 +620,15 @@ export function install(rt) {
       const adoption = adoptIfNeeded()
       if (adoption !== undefined) await adoption
       const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
-      noteDelivery(sessionId, noted)
+      const record = options?.onReplyRecorded
+      // A RESULT whose decision is deferred must not be replayable before that decision
+      // is durable. The delivery still joins its reply batch before waiting.
+      if (record?.ready) {
+        options = { ...options, onReplyRecorded: Object.assign(exchangeId => {
+          noteDelivery(sessionId, noted)
+          return record(exchangeId)
+        }, { ready: record.ready }) }
+      } else noteDelivery(sessionId, noted)
       const sent = await deliver(noted, options)
       if (noted.reviewReceipt !== undefined && sent === undefined) rt.retireReviewReply?.(noted.toId, noted.exchangeId)
       return sent
@@ -1618,7 +1632,8 @@ export function install(rt) {
           // A restart can target the current part instead of the one that took
           // this input. Close that destination to callers before sending it.
           rt.closePart?.(target, 'held input')
-          agent.followup(message)
+          const binding = rt.reviewContinuationBinding(target, message)
+          agent.followup(rt.withReviewFeedback?.(message, rt.chatOwners.get(target), binding) ?? message)
           // A flush can include a claim before its user/message. Keep the note until that event.
           if (await ctx.sessions.flush(agent.session) !== true) break
           recovery?.resumed('input', message.id)

@@ -3826,6 +3826,13 @@ const pack = createPack({
     "Done: every check passed and {name} approved.": "Concluído: todas as verificações passaram e {name} aprovou.",
     "Not marked done: current passing results are missing for agreed checks.": "Conclusão pendente: há verificações combinadas sem resultado atual de aprovação.",
     "Not marked done: {name} has not approved the current result on a different model.": "Conclusão pendente: {name} ainda não aprovou o resultado atual com outro modelo.",
+    "Choose a specific model for the Solver and its reviewer.": "Escolha um modelo específico para o Solver e para o revisor.",
+    "Choose a different model for the reviewer.": "Escolha um modelo diferente para o revisor.",
+    "Choose a specific model in the reviewer’s Details to verify its reviews.": "Escolha um modelo específico nos Detalhes do revisor para verificar as revisões.",
+    "RESULT review unverified. {reason}": "Revisão do RESULTADO sem verificação. {reason}",
+    "The reviewer’s effective model could not be verified.": "Não foi possível verificar o modelo usado pelo revisor.",
+    "The reviewer used the same model as the Solver.": "O revisor usou o mesmo modelo que o Solver.",
+    "The reviewer did not give a strict verdict.": "O revisor não deu um veredito no formato exigido.",
     "the Solver reached an attempt limit and is waiting for your answer": "o Solver chegou a um limite de tentativas e aguarda sua resposta"
   }
 })

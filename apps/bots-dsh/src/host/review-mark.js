@@ -5,6 +5,7 @@
 // see, or no reviewer. It grants and refuses nothing, so it reads the cosmetic marker and the
 // reviewer id the New Solver dialog stores (`reviewerId`). Groups, tasks and scheduled runs of a
 // Solver are not marked: only its own chat (and the subagents under it).
+import { originalReviewContent, unverifiedNotice, unverifiedReason } from '../shared/solver-model.js'
 import { lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { SOLVER_NOTES } from '../shared/solver-method.js'
@@ -526,10 +527,13 @@ export function install(rt) {
     const request = track.solver?.request
     const binding = { requestAt, workAt, ...(request ? { request } : {}),
       ...(reply?.reviewReceipt ? { receipt: reply.reviewReceipt } : {}) }
+    const resultReceipt = binding.receipt && track.solver?.review?.exchangeId === reply?.replyTo
+    const decision = resultReceipt ? Promise.withResolvers() : undefined
+    decision?.promise.catch(() => {})
     const applyVerdict = () => {
       const current = cleanTrack(bot.reviewTrack) ?? { requested: false, requestAt: bot.createdAt ?? 0, verdicts: [] }
       if (current.requestAt !== requestAt || current.delivered || bot.reviewerId !== fromId
-        || (request !== undefined && current.solver?.request !== request)) return
+        || rt.botOf(toId) !== bot || (request !== undefined && current.solver?.request !== request)) return
       reviewSends.delete(reply?.replyTo)
       const verdict = verdictOf(text)
       const reviewer = rt.botOf(fromId)
@@ -538,14 +542,25 @@ export function install(rt) {
       const at = Date.now()
       if (planVerdict !== undefined) current.planVerdictAt ??= at
       if (verdict !== undefined) current.verdicts = [...current.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
+      let reason
       if (reviewer) {
         const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
-        recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model)
+        reason = recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt)
       }
       bot.reviewTrack = current
+      if (reason && decision) return rt.save({ durable: true, required: true })
       save()
     }
-    if (!deferIngress(bot, applyVerdict)) applyVerdict()
+    const apply = () => {
+      try {
+        const saved = applyVerdict()
+        if (decision) Promise.resolve(saved).then(decision.resolve, decision.reject)
+      } catch (error) {
+        if (!decision) throw error
+        decision.reject(error)
+      }
+    }
+    if (!deferIngress(bot, apply)) apply()
     if (reply === undefined || !track.requested || !isTime(workAt)) return
     const currentRequest = () => rt.botOf(toId) === bot && bot.reviewTrack?.requestAt === requestAt
       && bot.reviewTrack.delivered !== true && bot.reviewTrack.solver?.request === request && bot.reviewerId === fromId
@@ -558,6 +573,7 @@ export function install(rt) {
     }
     // The send can await note adoption before the ledger append takes over the hold.
     return Object.assign(record, {
+      ...(decision ? { ready: decision.promise } : {}),
       begin: exchangeId => currentRequest()
         ? rememberReply(bot, exchangeId, fromId, reply.replyTo, binding, false).release : undefined,
     })
@@ -676,6 +692,29 @@ export function install(rt) {
       && binding.replyTo === track?.solver?.review?.exchangeId) return requestOfReply(bot, track, binding)
   }
 
+  function withReviewFeedback(message, toId, continuation) {
+    const source = message?.source
+    if (!source || (!source.reviewReceipt && !source.reviewFeedback && !continuation)) return message
+    const bot = rt.botOf(toId)
+    const track = bot?.reviewTrack
+    const reply = continuation === undefined && bot && unreadReplies(bot)?.get(source.exchangeId)
+    const binding = continuation ?? (reply?.recorded && matches(reply, source)
+      ? { ...reply, toId } : undefined)
+    const result = track?.solver?.review
+    const reason = binding && resultReplyRequest(bot, track, binding)
+      && result?.revision === track.solver.revision && result?.receipt === binding.receipt && result.verdict === 'unverified'
+      && unverifiedReason(result.unverified)
+    const notice = unverifiedNotice(reason)
+    if (!notice && !source.reviewFeedback) return message
+    const { reviewFeedback: _previous, ...originalSource } = source
+    const content = originalReviewContent(message)
+    return {
+      ...message,
+      source: notice ? { ...originalSource, reviewFeedback: reason } : originalSource,
+      content: notice ? [...content, { type: 'text', text: notice }] : content,
+    }
+  }
+
   // Another Bot's message_bot request in a guarded Solver's own chat (turns.js, first arrival
   // only). Before the plan's verdict it joins the review still to come. After it, and before the
   // delivery, it opens a new track that needs its own plan verdict (H6-2 (b)), keeping the person's
@@ -765,15 +804,20 @@ export function install(rt) {
     const track = cleanTrack(stored)
     if (!tracked(bot) && !track?.solver && !track?.outcome) return {}
     const limit = activeSolverLimit(bot, track)
+    const result = track?.solver?.review
+    const reason = result?.verdict === 'unverified' && result.revision === track.solver.revision
+      ? unverifiedReason(result.unverified) : undefined
     return { solverStatus: {
       ...(track?.requested && !track.delivered ? { auto: track.solver?.auto === true } : {}),
       ...(limit ? { limit: { kind: limit.kind, check: limit.check } } : {}),
       ...(track?.outcome ? { outcome: track.outcome } : {}),
+      ...(reason ? { unverified: reason } : {}),
+      ...(rt.reviewerModelWarning?.(bot.reviewerId) ? { reviewerModelChoice: true } : {}),
     } }
   }
 
   Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf,
-    solverProgress, solverReview, solverQuestion, solverStatusOf, solverBeforeWork, designatedReplyRequest, takeReviewReply,
+    solverProgress, solverReview, solverQuestion, solverStatusOf, solverBeforeWork, designatedReplyRequest, takeReviewReply, withReviewFeedback,
     resultReplyRequest: binding => {
       const bot = rt.botOf(binding.toId)
       return resultReplyRequest(bot, bot?.reviewTrack, binding)

@@ -588,12 +588,14 @@ export function apply(ctx, config = {}, {
       : typeof spec.signInHint === 'string' ? { signInHint: signInHintOf(spec, cliDetails.get(id)) } : {}),
     ...(spec.modeFor === undefined ? { levelNotice: true } : {}),
     cli,
+    ...(id === 'acp-claude' ? { concreteClaude: true } : {}),
     // The agent's own models and efforts, read from the adapter release installed now.
     catalog: new Catalog({
       id,
       name: spec.name,
       defaultName: spec.defaultName,
       fallback: spec.fallback,
+      announceIdentity: true,
       onChange: catalog => {
         if (!disposed && agents.get(id)?.catalog === catalog) publish()
       },
@@ -2239,11 +2241,10 @@ export function apply(ctx, config = {}, {
     },
     /** Read only the Bot that owns this Session. Returns this registration's disposer. */
     botIdentity: identityReaders.register,
-    /** The running ACP session's model option, after the agent took the selection. */
-    effectiveModelOf(sessionId, provider) {
-      const state = adapter.live.get(sessionId)
-      return state?.provider === provider ? state.run?.option('model')?.currentValue : undefined
-    },
+    modelIdentityOf: (provider, model) => adapter.modelIdentityOf(provider, model),
+    resolveModelIdentity: (provider, model) => adapter.resolveModelIdentity(provider, model),
+    /** The answering ACP session's model. A Claude alias needs a live acknowledgement. */
+    effectiveModelOf: (sessionId, provider, model) => adapter.effectiveModelOf(sessionId, provider, model),
     /**
      * Where an image an agent makes in a chat goes (agent-image.js): `keeper` is
      * { start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) ->

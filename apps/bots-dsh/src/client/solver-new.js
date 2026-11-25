@@ -18,8 +18,9 @@ import { nameProblem } from '../shared/mentions.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import {
   SOLVER_LOOKS, createSolver, guardLevelOf, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
-  reviewerPayload, solverAutoHint, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
+  reviewerPayload, solverAutoHint, solverCandidate, solverCatalog, solverIdentity, solverLook, solverPayload, solverStartModel, uncertain,
 } from './solver-draft.js'
+import { CHOOSE_CONCRETE, CHOOSE_DIFFERENT } from '../shared/solver-model.js'
 import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 import { DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from './characters.js'
 
@@ -36,6 +37,7 @@ const pick = list => list[Math.floor(Math.random() * list.length)]
 export function NewSolver({ roster, actions, brief = '', sectionId = null, onBack, canGoBack = false, onCreated }) {
   const [look, setLook] = useState(() => solverLook())
   const [name, setName] = useState('')
+  const pickerRoster = solverCatalog(roster)
   const [model, setModel] = useState(() => solverStartModel(roster))
   const [effort, setEffort] = useState(undefined)
   const [folder, setFolder] = useState('')
@@ -64,8 +66,8 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const problem = nameProblem(finalName)
   const choices = reviewerChoices(roster, model)
   const choice = choices.find(entry => entry.key === choiceKey) ?? choices[0]
-  const otherModels = reviewerModels(roster, model)
-  const newModel = choice.kind === 'new' && reviewerModel !== null && otherModels.some(entry => entry.ref === reviewerModel) ? reviewerModel : choice.model
+  const otherModels = reviewerModels(pickerRoster, model)
+  const newModel = choice.kind === 'new' && reviewerModel !== null ? reviewerModel : choice.model
   // The tick is the Details switch of the Solver once made: one function for both.
   // A locked or absent switch never keeps a tick; the hint follows the tick as Details does.
   const unticked = model ? nativeSwitchView(solverCandidate(roster, model, false), roster) : null
@@ -73,7 +75,15 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const shownView = native ? nativeSwitchView(solverCandidate(roster, model, true), roster) : unticked
   const hermes = isHermesRemote(model) || (choice.kind === 'new' && isHermesRemote(newModel))
   const permission = roster.newBotPermission ?? roster.prefs?.permission ?? roster.permissions?.defaultPreset
-  const blocked = busy || made !== null || clash || Boolean(problem) || !model || Boolean(roster.readOnly) || hermes
+  const hasProofCatalog = roster.models?.some(row => Object.hasOwn(row, 'solverIdentity')) === true
+  const designated = choice.kind !== 'fresh'
+  const solverIdentityNow = solverIdentity(roster, model)
+  const reviewerIdentity = solverIdentity(roster, choice.kind === 'new' ? newModel : choice.model)
+  const modelProblem = hasProofCatalog && designated
+    ? !solverIdentityNow || !reviewerIdentity ? CHOOSE_CONCRETE
+      : solverIdentityNow === reviewerIdentity ? CHOOSE_DIFFERENT : undefined
+    : undefined
+  const blocked = Boolean(modelProblem) || busy || made !== null || clash || Boolean(problem) || !model || Boolean(roster.readOnly) || hermes
   const intendsInstall = rolesOn(roster.prefs) && !Object.hasOwn(roster.roles ?? {}, SOLVER_ROLE_ID)
   const create = async () => {
     if (blocked || inFlight.current) return
@@ -90,9 +100,10 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
         actions, before, reviewer, native, prefs: roster.prefs,
         reviewerPayload: choice.kind === 'new' ? reviewerPayload({
           name: reviewerName(roster, finalName), look: { shape: pick(DEFAULT_SHAPES), color: pick(DEFAULT_COLORS) }, model: newModel, workDir,
+          solverModelChoice: hasProofCatalog,
         }) : undefined,
         solverPayloadFor: ({ reviewer: reviewerBot, dedicated, reviewerId }) => solverPayload({
-          name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, guard, auto,
+          name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, guard, auto, solverModelChoice: hasProofCatalog && designated,
         }),
       })
       if (result.solver && !result.sendError && !result.roleNote) { onCreated(result.solver); return }
@@ -159,7 +170,7 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
             : clash ? h('span', { className: 'bt-note bt-danger' }, t('A Bot named {name} already exists', { name: finalName })) : null),
         h('div', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Model')),
-          h(ModelMenu, { bot: { id: 'new-bot', name: finalName, model: model || undefined, effort }, roster, actions, wide: true, onPick: (ref) => { setModel(ref); setEffort(undefined) }, onPickEffort: picked => setEffort(picked ?? null) }),
+          h(ModelMenu, { bot: { id: 'new-bot', name: finalName, model: model || undefined, effort }, roster: pickerRoster, actions, wide: true, onPick: (ref) => { setModel(ref); setEffort(undefined) }, onPickEffort: picked => setEffort(picked ?? null) }),
           isHermesRemote(model) ? h('span', { className: 'bt-note bt-danger' }, t("This model uses its Hermes profile's own instructions.")) : null),
         h('div', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Project folder')),
@@ -172,12 +183,13 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
           }, choices.map(entry => h('option', { key: entry.key, value: entry.key },
             entry.kind === 'new' ? t('New reviewer on another model') : entry.kind === 'bot' ? entry.name : t('Fresh session')))),
           choice.kind === 'new' ? h(ModelMenu, {
-            bot: { id: 'new-reviewer', name: reviewerName(roster, finalName), model: newModel }, roster, actions, wide: true, withEfforts: false,
+            bot: { id: 'new-reviewer', name: reviewerName(roster, finalName), model: newModel }, roster: { ...pickerRoster, models: otherModels }, actions, wide: true, withEfforts: false,
             // The reviewer is another model: the Solver's own is not a pick. It has no level of its own.
             onPick: (ref) => { if (ref !== model) setReviewerModel(ref) },
           }) : null,
           choice.kind === 'new' && isHermesRemote(newModel) ? h('span', { className: 'bt-note bt-danger' }, t("This model uses its Hermes profile's own instructions.")) : null,
-          h('span', { className: 'bt-note' }, reviewerNote)),
+          h('span', { className: 'bt-note' }, reviewerNote),
+          modelProblem ? h('span', { className: 'bt-note bt-danger' }, t(modelProblem)) : null),
         shownView === null ? null : h('div', { className: 'bt-field' },
           h('label', { className: 'bt-field-label' },
             h('input', {

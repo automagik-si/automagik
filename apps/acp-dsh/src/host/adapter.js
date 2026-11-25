@@ -5,6 +5,7 @@
 // reasoning, and each of its tool calls ends the model step with a call to the mirror tool
 // (tool.js), so DSH shows the card and asks for approval. The next step drains what the agent
 // said since. DSH keeps the Session, its history and the sidebar.
+import { SONNET_PIN, sonnetWire } from './model-identity.js'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -578,21 +579,22 @@ export function aside(providers, ctx, sideModel = () => SIDE_MODEL, redact = tex
  * @param {string} model
  * @param {string | undefined} effort
  * @param {(id: string) => string | undefined} [ownEffort]
- * @param {{ signal?: AbortSignal, standIns?: string[] }} [options] the turn's Stop and the agent's stand-in ids
+ * @param {{ signal?: AbortSignal, standIns?: string[], pinWire?: string, proofWire?: string }} [options]
  */
-export async function choose(run, model, effort, ownEffort, { signal, standIns = [] } = {}) {
+export async function choose(run, model, effort, ownEffort, { signal, standIns = [], pinWire, proofWire } = {}) {
   const option = run.option('model')
   const offered = valuesOf(option).map(choice => choice.value)
   const ownModel = offered.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : run.startModel
   // A stand-in that has disappeared can use the agent's own model if it is still offered.
   const substituted = model !== DEFAULT_MODEL && standIns.includes(model) && !offered.includes(model)
     && (option === undefined || offered.includes(ownModel))
-  const target = substituted || model === DEFAULT_MODEL ? ownModel : model
+  const target = pinWire ?? (substituted || model === DEFAULT_MODEL ? ownModel : model)
   if (option === undefined) {
     if (!substituted && model !== DEFAULT_MODEL) throw new Error(`it offers no choice of model, so not ${model}`)
   } else if (target !== undefined) {
-    await run.setOption('model', target, { signal })
+    await run.setOption('model', target, { signal, ...(pinWire ? { requireReported: true } : {}) })
   }
+  if (proofWire && !substituted) run.bindSonnet(proofWire)
   if (!substituted && effort !== undefined) {
     await run.setOption('thought_level', effort, { signal })
   } else {
@@ -600,7 +602,7 @@ export async function choose(run, model, effort, ownEffort, { signal, standIns =
     const levels = valuesOf(levelOption).map(choice => choice.value)
     if (levels.includes(DEFAULT_MODEL)) await run.setOption('thought_level', DEFAULT_MODEL, { signal })
     else if (levelOption !== undefined) {
-      const own = ownEffort?.(substituted ? target ?? DEFAULT_MODEL : model)
+      const own = ownEffort?.(pinWire ?? (substituted ? target ?? DEFAULT_MODEL : model))
       if (levels.includes(own)) await run.setOption('thought_level', own, { signal })
     }
   }
@@ -1463,7 +1465,50 @@ export class AcpAdapter extends LlmAdapter {
   async listModels(provider) {
     const agent = this.agents.get(provider)
     if (agent === undefined || agent.installed?.() === false) return []
-    return (await agent.catalog.models()).map(model => ({ provider, id: model.id, name: model.name, ...(model.description ? { description: model.description } : {}) }))
+    if (agent.concreteClaude) agent.catalog.kick({ requireLive: true })
+    const models = await agent.catalog.models()
+    const wire = agent.concreteClaude && this.sonnetIn(agent.catalog.identityModels())
+    const pinned = wire && wire !== SONNET_PIN ? models.find(row => row.id === wire) : undefined
+    return [...models, ...(pinned ? [{ ...pinned, id: SONNET_PIN }] : [])]
+      .map(model => ({ provider, id: model.id, name: model.name, ...(model.description ? { description: model.description } : {}) }))
+  }
+
+  sonnetIn(models) {
+    return models && sonnetWire(models.map(({ id, name }) => ({ value: id, name })))
+  }
+
+  async resolveModelIdentity(provider, model) {
+    const agent = this.agents.get(provider)
+    if (agent?.installed?.() === false || !agent?.catalog) return { status: 'unavailable' }
+    await agent.catalog.probeIdentityModels()
+    return this.modelIdentityOf(provider, model)
+  }
+
+  modelIdentityOf(provider, model) {
+    const agent = this.agents.get(provider)
+    if (agent?.installed?.() === false || !agent?.catalog) return { status: 'unavailable' }
+    agent.catalog.kick({ requireLive: true })
+    const models = agent.catalog.identityModels()
+    if (models === undefined) return { status: 'unavailable' }
+    if (agent.concreteClaude && (model === 'sonnet' || model === SONNET_PIN)) {
+      const wire = this.sonnetIn(models)
+      // A raw alias alongside a concrete row still needs its own exact affiliation.
+      const alias = this.sonnetIn(models.filter(row => row.id !== SONNET_PIN))
+      if (wire && (model === SONNET_PIN || alias === 'sonnet')) return { status: 'offered', model: SONNET_PIN }
+      return { status: 'unresolved' }
+    }
+    return models.filter(row => row.id === model).length === 1
+      ? { status: 'offered', model } : { status: 'unresolved' }
+  }
+
+  effectiveModelOf(sessionId, provider, model) {
+    const state = this.live.get(sessionId)
+    if (state?.provider !== provider) return undefined
+    if (this.agents.get(provider)?.concreteClaude) {
+      if (!state.run?.alive || state.archived || state.held || (model !== undefined && model !== state.promptModel)) return undefined
+      return state.run.effectiveClaudeModel({ answered: true })
+    }
+    return state.run?.option('model')?.currentValue
   }
 
   // A model's efforts are the ones the agent offers for it; DSH turns down any other before the
@@ -1473,6 +1518,11 @@ export class AcpAdapter extends LlmAdapter {
     const agent = this.agents.get(provider)
     const models = agent?.catalog ? await agent.catalog.models() : []
     let found = models.find(entry => entry.id === model)
+    if (found === undefined && agent?.concreteClaude && model === SONNET_PIN) {
+      const wire = this.sonnetIn(agent.catalog.identityModels())
+      const row = models.find(entry => entry.id === wire)
+      if (row) found = { ...row, id: SONNET_PIN }
+    }
     if (found === undefined) {
       found = agent?.catalog?.spec?.fallback?.find(entry => entry.id === model)
       if (found && model !== DEFAULT_MODEL) found = withOfferedEfforts(found, models)
@@ -2169,12 +2219,19 @@ export class AcpAdapter extends LlmAdapter {
       }
       // The Session's model and effort, then its level as the agent's own permission mode, before every prompt.
       let substitution
+      const sonnetPin = agent.concreteClaude && options.model === SONNET_PIN
+      const wire = agent.concreteClaude && sonnetWire(valuesOf(live.run.option('model')))
+      const proofWire = sonnetPin || (options.model === 'sonnet' && wire === 'sonnet') ? wire : undefined
+      live.run.modelProof = undefined
+      live.run.modelProofPrompted = false
+      live.run.modelProofExpected = sonnetPin || options.model === 'sonnet'
       const standIns = (agent.catalog?.spec?.fallback ?? []).map(entry => entry.id).filter(id => id !== DEFAULT_MODEL)
       try {
+        if (sonnetPin && !wire) throw new Error('the pinned Sonnet model is not offered')
         substitution = await choose(
           live.run, options.model, options.reasoningEffort,
           id => agent.catalog?.ownEffort(id),
-          { signal: options.signal, standIns },
+          { signal: options.signal, standIns, proofWire, ...(sonnetPin ? { pinWire: wire } : {}) },
         )
       } catch (error) {
         if (archived()) return yield finish('stop')
@@ -2405,6 +2462,9 @@ export class AcpAdapter extends LlmAdapter {
           return yield finish('error', AGY_NOT_LOADED_TEXT)
         }
       }
+      if (sonnetPin && live.run.effectiveClaudeModel() !== SONNET_PIN) {
+        return yield finish('error', `${agent.name} did not acknowledge the pinned Sonnet model.`)
+      }
       started()
       live.replay = undefined
       live.owed = undefined
@@ -2418,6 +2478,8 @@ export class AcpAdapter extends LlmAdapter {
       live.calls.clear()
       live.confinedReason = undefined
       live.toolIds?.clear()
+      live.promptModel = options.model
+      live.run.modelProofPrompted = true
       live.run.prompt(prompt).catch(() => {})
       // The notice belongs to this prompt, including any step after a mirror result.
       if (substitution !== undefined) live.substitution = { ...substitution, signal: options.signal }

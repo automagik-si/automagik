@@ -1272,6 +1272,9 @@ export function install(rt) {
     return place !== undefined && place.roomId === undefined && rt.botOf(place.botId)?.sessionPinned === true
   }
 
+  const currentReviewInput = (sessionId, message, botId = rt.chatOwners.get(sessionId)) =>
+    rt.withReviewFeedback?.(message, botId, rt.reviewContinuationBinding?.(sessionId, message)) ?? message
+
   // Input for an earlier part goes on in the current one: a browser may still show the
   // old part, and a turn stopped for a switch hands on what it claimed. Answers how many
   // messages it sent with followup, the sends that wake the part. `handed` collects the ids
@@ -1300,7 +1303,8 @@ export function install(rt) {
           continue
         }
         if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
-        const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
+        const input = currentReviewInput(target, message, owner.botId)
+        const copy = createUserMessage({ content: input.content, ...(input.source ? { source: input.source } : {}) })
         if (opensTurn(message)) {
           agent.followup(copy)
           woke += 1
@@ -1341,7 +1345,7 @@ export function install(rt) {
         continue
       }
       if (message.source?.kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, agent.session.id)
-      agent.inbox.prepend(inboxTargetOf(message), message)
+      agent.inbox.prepend(inboxTargetOf(message), currentReviewInput(agent.session.id, message))
       rt.wakeLog?.retireClaim(from, message)
     }
   }
@@ -1353,7 +1357,7 @@ export function install(rt) {
   const wake = (agent) => {
     const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
     quietly(() => { for (const message of pending) agent.inbox.remove(message.id) })
-    pending.forEach((message, index) => agent.send(message, inboxTargetOf(message), index === 0))
+    pending.forEach((message, index) => agent.send(currentReviewInput(agent.session.id, message), inboxTargetOf(message), index === 0))
   }
   // Wakes a part and, if a send throws, puts back only what no send took: messages a send
   // queued or the running driver claimed stay where DSH put them; the rest go back behind
@@ -1363,7 +1367,7 @@ export function install(rt) {
     quietly(() => { for (const message of pending) agent.inbox.remove(message.id) })
     let at = 0
     try {
-      for (; at < pending.length; at += 1) agent.send(pending[at], inboxTargetOf(pending[at]), at === 0)
+      for (; at < pending.length; at += 1) agent.send(currentReviewInput(agent.session.id, pending[at]), inboxTargetOf(pending[at]), at === 0)
     } catch (error) {
       const queued = new Set([...agent.inbox.nextStep, ...agent.inbox.nextTurn].map(message => message.id))
       quietly(() => { for (const message of pending.slice(at)) if (!queued.has(message.id)) agent.inbox.append(inboxTargetOf(message), message) })
@@ -1376,7 +1380,7 @@ export function install(rt) {
     const queued = new Set([...agent.inbox.nextStep, ...agent.inbox.nextTurn].map(message => message.id))
     for (const message of messages) {
       if (queued.has(message.id)) continue
-      agent.inbox.append(inboxTargetOf(message), message)
+      agent.inbox.append(inboxTargetOf(message), currentReviewInput(agent.session.id, message))
       queued.add(message.id)
     }
   }

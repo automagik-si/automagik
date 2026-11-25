@@ -5,13 +5,17 @@ import { grantModelFields, grantTeamModels, withGrantHold } from './grants.js'
 import { BlockAssembler, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { cliRoute, commandCapableAgent, leavesCli, piAiRoutes, routeOf } from '../shared/routes.js'
+import { CHOOSE_CONCRETE, CHOOSE_DIFFERENT, concreteModel } from '../shared/solver-model.js'
 import { refusal } from './refusal.js'
 import { normalize, splitRef } from './text.js'
 import { install as installHostModels } from './host-models.js'
 import { PI_AI_CLAUDE, claudeFamilyOf, supersededClaude } from './claude-models.js'
 import { SettingsSelectionRejected } from './pocket-settings.js'
 import { readableRoute } from './session-route.js'
+import { solverTracked } from './solver-progress.js'
+import { switchPending } from './model-state.js'
 
+const SONNET_REF = 'acp-claude/claude-sonnet-5-5'
 const CATALOG_TTL_MS = 10_000
 const quiet = new AsyncLocalStorage()
 // What a refused model says, by case; `{connection}` is the agent's name and route. The client
@@ -228,6 +232,7 @@ export function install(rt) {
     // Invalidate a status already requested, including one still being read. Until the
     // first request, keep the ordinary catalog's lazy sign-in check.
     signInsDirty = signInsRead
+    if (rt.teamLoaded?.()) void upgradeReviewerModels()
     return forgetChangedRefusals()
   })
   ctx.on?.('credentials/reference-updated', async (ref) => {
@@ -336,13 +341,21 @@ export function install(rt) {
       if (noCommands && commandCapableAgent(provider.id)) continue
       let models = []
       try { models = await ctx.llm.listModels(provider.id) } catch { continue }
+      const acp = provider.id.startsWith('acp-') ? ctx.get?.('acpAgents') : undefined
       for (const model of models) {
+        let proof
+        try { proof = acp?.modelIdentityOf?.(provider.id, model.id) } catch { proof = { status: 'unavailable' } }
+        const identity = concreteModel(provider.id, proof?.status === 'offered' ? proof.model
+          : proof === undefined ? model.id : undefined)
         listed.push({
           ref: `${provider.id}/${model.id}`,
           provider: provider.id,
           providerName: brandOf(provider, directory),
           id: model.id,
           name: model.name ?? model.id,
+          solverIdentity: identity ?? null,
+          ...(identity && proof?.model !== undefined && proof.model !== model.id
+            ? { solverRef: `${provider.id}/${proof.model}` } : {}),
           route: routeOf(provider.id, { piAi }),
           ...(model.inputModalities ? { input: [...model.inputModalities] } : {}),
           ...resolvedDefault(provider.id, model),
@@ -504,6 +517,28 @@ export function install(rt) {
     throw Object.assign(refusal(`Model ${wanted} is not available. Available models: ${known}`), { modelUnavailable: true })
   }
 
+  async function solverIdentityOf(ref) {
+    const route = splitRef(ref)
+    if (!route?.model) return {}
+    const { provider, model } = route
+    const acp = provider.startsWith('acp-') ? ctx.get?.('acpAgents') : undefined
+    let proof
+    try { proof = await acp?.resolveModelIdentity?.(provider, model) } catch { return { status: 'unavailable' } }
+    const value = proof === undefined || proof.status === 'offered' ? (proof?.model ?? model) : undefined
+    const identity = concreteModel(provider, value)
+    return { identity, ...(identity ? { ref: `${provider}/${value}` } : {}), status: proof?.status }
+  }
+
+  async function checkSolverModel(ref, reviewer) {
+    const selected = await solverIdentityOf(ref)
+    if (!selected.identity || selected.ref !== ref) throw refusal(CHOOSE_CONCRETE)
+    if (!reviewer) return
+    const saved = reviewer.model ?? reviewer.appliedModel
+    const other = await solverIdentityOf(saved)
+    if (!other.identity || rt.botOf(reviewer.id) !== reviewer || (reviewer.model ?? reviewer.appliedModel) !== saved) throw refusal(CHOOSE_CONCRETE)
+    if (other.identity === selected.identity) throw refusal(CHOOSE_DIFFERENT)
+  }
+
   // Whether a model can run now, read-only: nothing is installed, enabled or signed in, and no
   // model is called. An agent over ACP (Claude Code, Codex) is asked through acp-dsh's
   // `inspect` (a fresh `auth status` of that CLI only); its connection must be on, installed
@@ -562,7 +597,11 @@ export function install(rt) {
     // A fallback is never one that needs a key.
     return entries.some(entry => entry.ref === bot.appliedModel && entry.needsKey !== true) ? bot.appliedModel : pickDefault(entries, configured, captured)
   }
-  const plainModel = async (bot, noCommands) => plainModelIn(bot, await catalog({ noCommands }))
+  const plainModel = async (bot, noCommands) => {
+    // Keep an exact Sonnet pin through a catalog outage so ACP can refuse it at dispatch.
+    if (!noCommands && bot.model === SONNET_REF) return SONNET_REF
+    return plainModelIn(bot, await catalog({ noCommands }))
+  }
   // A role task uses the same choice as desiredModel's aside route, from the
   // captured Bot and the catalog already read for the eligibility scan.
   const taskAskerState = bot => ({
@@ -807,13 +846,28 @@ export function install(rt) {
   // `force` re-selects even when the record says it is applied: the composer's own
   // model picker can move the Session without telling this plugin.
   function applyModel(bot, options) {
-    return withGrantHold(rt, { botId: bot.id }, () => grantModelFields(bot),
-      () => applyModelHeld(bot, options))
+    return withGrantHold(rt, { botId: bot.id }, () => grantModelFields(bot), async () => {
+      const upgrade = options?.upgrade
+      if (!upgrade) return applyModelHeld(bot, options)
+      const changedSessions = []
+      try {
+        return await applyModelHeld(bot, { ...options, upgrade: { ...upgrade, changedSessions } })
+      } catch (error) {
+        const original = () => upgrade.owns() && bot.model === upgrade.alias
+        if (original()) {
+          for (const { id, before } of changedSessions) {
+            if (id !== rt.chatOf(bot.id) && !rt.groupSessionsOf(bot.id).includes(id)) continue
+            await selectSessionModel(id, before, { check: () => { if (!original()) throw error } }).catch(() => {})
+          }
+        }
+        throw error
+      }
+    })
   }
 
   // Group Sessions already logged as keeping their route, so the warning comes once.
   const keptGroupRoutes = new Set()
-  async function applyModelHeld(bot, { force = false, requireReadable = false, modelEntry, checkChoice, selected } = {}) {
+  async function applyModelHeld(bot, { force = false, requireReadable = false, modelEntry, checkChoice, selected, upgrade } = {}) {
     const pinned = modelEntry !== undefined
     const expectedChat = pinned ? rt.chatOf(bot.id) : undefined
     const live = () => modelTargetLive(bot) && !rt.switchingChat?.(bot.id)
@@ -823,7 +877,17 @@ export function install(rt) {
       }
       checkChoice()
     }
-    const accept = () => { check(); selected() }
+    const accept = () => { check(); selected?.() }
+    const select = async (id, route, guard) => {
+      if (!upgrade) return selectSessionModel(id, route, guard)
+      const before = sessionSelections.get(id) ?? readableRoute(ctx.sessions?.get?.(id)?.requestHeader?.()?.config)
+        ?? { ...splitRef(bot.appliedModel ?? upgrade.alias), reasoningEffort: bot.appliedEffort ?? bot.effort }
+      const selection = await selectSessionModel(id, route, { check: guard.check, selected: () => upgrade.changedSessions.push({ id, before }) })
+      if (selection?.selected && (selection.selected.provider !== route.provider || selection.selected.model !== route.model)) {
+        throw new Error('The Session did not take the reviewer model.')
+      }
+      return selection
+    }
     if (pinned) check()
     if (!live()) return undefined
     // The Bot's own part is in a route switch: selecting the new model there would move the
@@ -850,7 +914,7 @@ export function install(rt) {
       } else if (carried === true) {
         if (pinned) accept()
       } else {
-        await selectSessionModel(chat, route, pinned ? { check, selected: accept } : undefined)
+        await select(chat, route, pinned ? { check, selected: accept } : undefined)
       }
     }
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
@@ -868,7 +932,7 @@ export function install(rt) {
         continue
       }
       keptGroupRoutes.delete(sessionId)
-      await selectSessionModel(sessionId, route, pinned ? { check: () => {
+      await select(sessionId, route, pinned ? { check: () => {
         check()
         if (!rt.groupSessionsOf(bot.id).includes(sessionId)) throw new Error('The group Session changed.')
       } } : undefined)
@@ -892,6 +956,19 @@ export function install(rt) {
       return undefined
     }
     if (!ownChanged) return ref
+    if (upgrade) {
+      const publish = record => {
+        record.model = record.appliedModel = ref
+        if (effort === undefined) delete record.appliedEffort
+        else record.appliedEffort = effort
+        keepUpgrade(record, upgrade.alias, 'applied')
+      }
+      await rt.saveCopy(copy => { check(); publish(copy.bots[bot.id]) }, {
+        durable: true, beforeCommit: check,
+        afterPublish: current => { if (current && upgrade.owns()) publish(bot) },
+      })
+      return ref
+    }
     bot.appliedModel = ref
     if (effort === undefined) delete bot.appliedEffort
     else bot.appliedEffort = effort
@@ -920,6 +997,7 @@ export function install(rt) {
   // not one of them): a provider that registers late still gets its Bots' models selected.
   let syncedKey
   const syncModels = () => {
+    void upgradeReviewerModels()
     const key = answerable(catalogCache.value).map(entry => entry.ref).join(',')
     if (key !== syncedKey) { syncedKey = key; modelsSynced = modelsSynced?.then(syncAll, syncAll) ?? syncAll() }
     return modelsSynced
@@ -928,6 +1006,84 @@ export function install(rt) {
     for (const bot of Object.values(state.bots)) {
       await applyModel(bot).catch(error => rt.warn('omni-ui: model for %s not applied: %s', bot.name, error))
     }
+  }
+
+  const legacyAlias = ref => typeof ref === 'string'
+    && /^acp-claude\/(?:default|sonnet|opus|haiku|fable|[a-z0-9.-]+-latest)(?:plan)?(?:\[1m\])?$/.test(ref)
+  const disposition = (bot, alias) => bot.reviewerModelChoices?.[alias]
+  function keepUpgrade(bot, alias, status) {
+    bot.reviewerModelChoices = { ...bot.reviewerModelChoices, [alias]: status }
+  }
+  const references = id => Object.values(state.bots).some(bot => bot.id !== id && bot.reviewerId === id && solverTracked(bot))
+  const reviewerModelWarning = id => {
+    const bot = rt.botOf(id)
+    return legacyAlias(bot?.model) && ['applied', 'unresolved'].includes(disposition(bot, bot.model))
+  }
+
+  let upgrading
+  let upgradeTimer
+  function upgradeReviewerModels() {
+    if (lifetime.signal.aborted || !rt.teamLoaded?.() || !rt.canWriteTeam?.()) return
+    if (upgrading) return upgrading
+    clearTimeout(upgradeTimer)
+    if (typeof ctx.get?.('acpAgents')?.resolveModelIdentity !== 'function') return
+    upgrading = (async () => {
+      const generation = rt.teamGeneration()
+      const leave = rt.enterOwnership()
+      try {
+        for (const bot of Object.values(state.bots)) {
+          const alias = bot.model
+          if (!legacyAlias(alias) || disposition(bot, alias) || !references(bot.id)) continue
+          const chat = rt.chatOf(bot.id)
+          const owns = () => !lifetime.signal.aborted && rt.sameTeam(generation) && rt.botOf(bot.id) === bot
+          const stillOriginal = () => owns() && references(bot.id) && rt.chatOf(bot.id) === chat
+            && bot.model === alias && !disposition(bot, alias)
+          const idle = () => !rt.replyRunning?.(bot.id) && !rt.switchingChat?.(bot.id) && !switchPending(bot)
+            && !rt.awaitingFirstAnswer?.(chat) && !rt.pickingModel?.(bot.id)
+            && [chat, ...rt.groupSessionsOf(bot.id)].every(id =>
+              rt.live?.get(id)?.turn === undefined && ctx.agents?.get?.(id)?.status !== 'running')
+          if (!stillOriginal() || !idle()) continue
+          try {
+            await rt.withModelChange(bot.id, async () => {
+              const check = () => {
+                if (!stillOriginal() || !idle()) throw new Error('Reviewer choice changed or is busy')
+              }
+              check()
+              const verdict = await solverIdentityOf(alias)
+              check()
+              if (verdict.status === 'unavailable') return
+              if (!verdict.ref || verdict.ref === alias) {
+                await rt.saveCopy(copy => { check(); keepUpgrade(copy.bots[bot.id], alias, 'unresolved') }, {
+                  durable: true, beforeCommit: check,
+                  afterPublish: current => { if (current && owns()) keepUpgrade(bot, alias, 'unresolved') },
+                })
+                return
+              }
+              const entry = (await catalog({ fresh: true, remember: false })).find(row => row.ref === verdict.ref)
+              if (!entry || entry.needsSignIn || entry.needsAccount) return
+              await assertModelAccess(entry.ref)
+              const checkChoice = () => {
+                check()
+                const proof = ctx.get('acpAgents')?.modelIdentityOf?.(entry.provider, splitRef(alias).model)
+                if (proof?.status !== 'offered' || proof.model !== entry.id) throw new Error('The reviewer model listing changed.')
+                rt.assertOwnToolsModel?.(bot, { next: entry.ref, denyTools: bot.denyTools })
+              }
+              await applyModel(bot, { force: true, modelEntry: entry, checkChoice, upgrade: { owns, alias } })
+            }, true)
+          } catch {
+            // A busy selection, replacement team or failed write leaves the alias pending.
+          }
+        }
+      } finally { leave() }
+    })().finally(() => {
+      upgrading = undefined
+      if (!lifetime.signal.aborted && rt.canWriteTeam() && Object.values(state.bots).some(bot =>
+        legacyAlias(bot.model) && !disposition(bot, bot.model) && references(bot.id))) {
+        upgradeTimer = setTimeout(upgradeReviewerModels, 15_000)
+        upgradeTimer.unref?.()
+      }
+    })
+    return upgrading
   }
 
   // A route that refused a request for not being a model endpoint: it stays out of
@@ -959,7 +1115,7 @@ export function install(rt) {
   }
 
   const lifetime = new AbortController()
-  ctx.effect?.(() => () => { lifetime.abort() }, 'ds-bot: auxiliary llm retry')
+  ctx.effect?.(() => () => { lifetime.abort(); clearTimeout(upgradeTimer) }, 'ds-bot: auxiliary llm retry')
   const assembleLlm = async (options, { check, dispatch } = {}) => {
     rt.assertBotRunnerProvider?.(options.provider, options.sessionId)
     return assembleLlmStream(ctx, options, { signal: lifetime.signal, backoff: rt.config?.llmRetryBackoff, check, dispatch })
@@ -969,10 +1125,10 @@ export function install(rt) {
     assembleLlm,
     modelsEpoch: () => catalogEpoch,
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
-    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, taskAskerState, taskAskerModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
+    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, solverIdentityOf, checkSolverModel, modelAccess, assertModelAccess, desiredModel, taskAskerState, taskAskerModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
     selectSessionModel, reselectOwnRoute, keepsCarriedRoute, assertReadableRoute, storedRouteOf: storedRoute,
-    applyModel, waitForModel, syncModels, routeRefused,
+    applyModel, waitForModel, syncModels, routeRefused, upgradeReviewerModels, reviewerModelWarning,
     dropCatalog: () => {
       invalidate()
       catalogCache = { at: 0, value: [] }

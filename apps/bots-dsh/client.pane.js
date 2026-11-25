@@ -12664,6 +12664,13 @@ var ZH2 = {
   "Done: every check passed and {name} approved.": "已完成：所有检查均已通过，且 {name} 已批准。",
   "Not marked done: current passing results are missing for agreed checks.": "未标记为完成：仍有约定的检查缺少当前版本的通过结果。",
   "Not marked done: {name} has not approved the current result on a different model.": "未标记为完成：{name} 尚未使用不同的模型批准当前结果。",
+  "Choose a specific model for the Solver and its reviewer.": "请为 Solver 和审阅者选择具体模型。",
+  "Choose a different model for the reviewer.": "请为审阅者选择不同的模型。",
+  "Choose a specific model in the reviewer’s Details to verify its reviews.": "请在审阅者的详情中选择具体模型，以便验证其审阅。",
+  "RESULT review unverified. {reason}": "结果审阅未通过验证。{reason}",
+  "The reviewer’s effective model could not be verified.": "无法验证审阅者实际使用的模型。",
+  "The reviewer used the same model as the Solver.": "审阅者使用了与 Solver 相同的模型。",
+  "The reviewer did not give a strict verdict.": "审阅者未按要求给出明确结论。",
   "the Solver reached an attempt limit and is waiting for your answer": "Solver 已达到尝试上限，正在等待你的答复"
 };
 var HOST_ERRORS = [

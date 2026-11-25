@@ -35,8 +35,8 @@ import { SOLVER_WEARS } from '../shared/solver-looks.js'
 import { isGuardGroupRefusal, refusal } from './refusal.js'
 
 const publicBot = bot => {
-  if (!bot || (!Object.hasOwn(bot, 'waitingRole') && !Object.hasOwn(bot, 'reviewerMade'))) return bot
-  const { waitingRole, reviewerMade, ...view } = bot
+  if (!bot || (!Object.hasOwn(bot, 'waitingRole') && !Object.hasOwn(bot, 'reviewerMade') && !Object.hasOwn(bot, 'reviewerModelChoices'))) return bot
+  const { waitingRole, reviewerMade, reviewerModelChoices, ...view } = bot
   return view
 }
 
@@ -855,7 +855,7 @@ export function install(rt) {
           // a Bot created private starts without a shell unless `shell` says otherwise.
           const options = { name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId, reviewGuard: body.reviewGuard,
             waitingRole: body.waitingRole === SOLVER_ROLE_ID ? SOLVER_ROLE_ID : undefined, reviewerMade: body.reviewerMade === true,
-            solverAuto: body.solverAuto === true }
+            solverAuto: body.solverAuto === true, solverModelChoice: body.solverModelChoice === true }
           await rt.load()
           rt.checkCreateLook(options)
           await rt.bootstrap()

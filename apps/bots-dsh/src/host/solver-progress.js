@@ -1,3 +1,4 @@
+import { concreteModel } from '../shared/solver-model.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, readdirSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
@@ -123,14 +124,8 @@ export function modelOf(rt, agent, session = agent?.session) {
     if (!route) return undefined
     const acp = route.provider.startsWith('acp-')
     const model = acp
-      ? rt.ctx.get?.('acpAgents')?.effectiveModelOf?.(session?.id ?? agent?.id, route.provider) : route.model
-    if (typeof model !== 'string') return undefined
-    const slug = model.trim().toLowerCase().split(route.provider === 'acp-hermes' ? /[:/]/ : '/').at(-1)
-    if (!slug || slug.endsWith('-latest') || /^(?:default|auto|unknown|opus|sonnet|haiku|fable)(?:plan)?(?:\[1m\])?$/.test(slug)) return undefined
-    // A CLI's friendly choices (including "latest") cannot prove a model identity.
-    if (acp && !/^(?:claude|gpt|o[1-9]|gemini|deepseek|qwen|llama|mistral|grok)[.-][a-z0-9.-]*\d[a-z0-9.\[\]-]*$/.test(slug)) return undefined
-    return slug.replace(/\[1m\]$/, '').replace(/-\d{8}$/, '')
-      .replace(/^claude-(\d+-\d+)-(opus|sonnet|haiku)$/, 'claude-$2-$1')
+      ? rt.ctx.get?.('acpAgents')?.effectiveModelOf?.(session?.id ?? agent?.id, route.provider, route.model) : route.model
+    return concreteModel(route.provider, model)
   } catch {
     return undefined
   }
@@ -173,7 +168,7 @@ export function designateReview(progress, { kind, exchangeId, reviewerId, model,
   progress.review = { exchangeId, reviewerId, revision: progress.revision, solverModel: model }
 }
 
-export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, model) {
+export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, model, receipt) {
   if (!progress || typeof exchangeId !== 'string') return
   const plan = progress.plan
   if (plan?.review?.exchangeId === exchangeId && plan.review.reviewerId === reviewer.id) {
@@ -181,11 +176,17 @@ export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, mod
   }
   const result = progress.review
   if (result?.exchangeId === exchangeId && result.reviewerId === reviewer.id && result.revision === progress.revision) {
+    const independent = model && model !== result.solverModel
+    const reason = ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? undefined
+      : !model ? 'model' : !independent ? 'same' : verdict === undefined ? 'verdict' : undefined
+    const { unverified: _previous, reviewer: _reviewer, receipt: _receipt, ...designated } = result
     progress.review = {
-      ...result,
-      verdict: model && model !== result.solverModel ? (verdict ?? 'unverified') : 'unverified',
-      ...(model && model !== result.solverModel ? { reviewer: { id: reviewer.id, name: reviewer.name, model } } : {}),
+      ...designated,
+      verdict: reason ? 'unverified' : verdict,
+      ...(independent ? { reviewer: { id: reviewer.id, name: reviewer.name, model } } : {}),
+      ...(reason ? { unverified: reason, ...(receipt ? { receipt } : {}) } : {}),
     }
+    return reason
   } else if (result?.verdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict)) {
     progress.review = { ...result, verdict }
   }

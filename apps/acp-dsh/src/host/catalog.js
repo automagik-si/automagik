@@ -74,7 +74,7 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
     if (model.id === start) Object.assign(model, { reasoning: startEffort, probed: true })
   }
   // The model the agent itself starts on: what DSH's `default` is for it (adapter.js nativeKept).
-  const state = { models, complete: false, start: typeof start === 'string' ? start : null }
+  const state = { models, offered: true, complete: false, start: typeof start === 'string' ? start : null }
   seen(state)
   for (const model of models) {
     if (model.probed) continue
@@ -125,7 +125,7 @@ export class Catalog {
    * @param {{
    *   id: string, name: string, defaultName: string, fallback: CatalogModel[],
    *   key(): string | undefined, spawn(): { command: string, args?: string[], env?: Record<string, string> } | Promise<any>,
-   *   home?: string, log?(message: string): void, waitMs?: number, now?(): number,
+   *   home?: string, log?(message: string): void, waitMs?: number, now?(): number, announceIdentity?: boolean,
    *   onChange?(catalog: Catalog): void,
    * }} spec - `key` names what the probe ran (the adapter's release); a new one probes again.
    */
@@ -153,6 +153,7 @@ export class Catalog {
     this.generation = 0
     this.refreshing = false
     this.releaseList = undefined
+    this.identityListing = undefined
     this.notified = this.visibleKey()
     // What the agent's own session last said of its sign-in: true once a probe opened a
     // session, false when the agent refused one with ACP's auth_required, undefined until then.
@@ -186,14 +187,14 @@ export class Catalog {
   }
 
   /** Probe again when nothing has, the agent's release changed, or the last try failed a while ago. */
-  kick() {
+  kick({ requireLive = false } = {}) {
     if (this.probing !== undefined || this.disposed) return
     const key = this.spec.key()
     if (key === undefined) return
     const fresh = this.failedAt !== undefined
       ? this.now() - this.failedAt < RETRY_MS
       : this.readAt !== undefined && this.now() - this.readAt < STALE_MS
-    if (this.probedKey === key && fresh) return
+    if (this.probedKey === key && fresh && (!requireLive || this.identityListing || this.failedAt !== undefined)) return
     this.begin(key)
   }
 
@@ -207,6 +208,7 @@ export class Catalog {
   }
 
   retire() {
+    this.identityListing = undefined
     this.generation += 1
     this.run?.dispose()
     this.run = undefined
@@ -217,6 +219,7 @@ export class Catalog {
   }
 
   begin(key, forced = false) {
+    this.identityListing = undefined
     const generation = ++this.generation
     this.probedKey = key
     this.failedAt = undefined
@@ -235,12 +238,13 @@ export class Catalog {
   }
 
   visibleKey() {
-    return JSON.stringify(this.current().map(model => ({
+    const models = this.current().map(model => ({
       id: model.id, name: model.name,
       resolvesTo: model.resolvesTo ?? (model.id === DEFAULT_MODEL
         ? /^Its own setting: (.+)$/.exec(model.description ?? '')?.[1]?.trim() : undefined),
       reasoning: model.reasoning,
-    })))
+    }))
+    return JSON.stringify([models, this.spec.announceIdentity === true && this.identityListing !== undefined])
   }
 
   changed() {
@@ -277,6 +281,7 @@ export class Catalog {
           if (!current()) return
           // readCatalog mutates its state as efforts arrive. Retired reads own no live data.
           this.live = structuredClone(state)
+          this.identityListing = { key, models: state.offered ? this.live.models : [] }
           listed()
           if (first || state.complete) this.changed()
           first = false
@@ -289,6 +294,7 @@ export class Catalog {
       this.write(key, state.models, state.start ?? null)
     } catch (error) {
       if (!current()) return
+      this.identityListing = undefined
       if (previous !== undefined) this.live = previous
       this.failedAt = this.now()
       // Signed out is the agent's own word; any other failure says nothing of the sign-in.
@@ -314,6 +320,23 @@ export class Catalog {
       const kept = saved?.find(other => other.id === model.id)
       return { ...model, reasoning: kept ? kept.reasoning : provisional }
     })
+  }
+
+  // Only a session opened by this process on the currently installed connector can
+  // establish a catalog identity. The kept list is still used for ordinary routes.
+  identityModels() {
+    const listing = this.identityListing
+    return listing && listing.key === this.spec.key() ? listing.models : undefined
+  }
+
+  async probeIdentityModels() {
+    this.kick({ requireLive: true })
+    if (this.identityModels() === undefined && this.listed !== undefined) {
+      let timer
+      await Promise.race([this.listed, new Promise(resolve => { timer = setTimeout(resolve, this.waitMs); timer.unref?.() })])
+      clearTimeout(timer)
+    }
+    return this.identityModels()
   }
 
   /** Every model the agent offers; a first probe is waited on briefly. */

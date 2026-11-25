@@ -3759,6 +3759,13 @@ var ZH2 = {
   "Done: every check passed and {name} approved.": "已完成：所有检查均已通过，且 {name} 已批准。",
   "Not marked done: current passing results are missing for agreed checks.": "未标记为完成：仍有约定的检查缺少当前版本的通过结果。",
   "Not marked done: {name} has not approved the current result on a different model.": "未标记为完成：{name} 尚未使用不同的模型批准当前结果。",
+  "Choose a specific model for the Solver and its reviewer.": "请为 Solver 和审阅者选择具体模型。",
+  "Choose a different model for the reviewer.": "请为审阅者选择不同的模型。",
+  "Choose a specific model in the reviewer’s Details to verify its reviews.": "请在审阅者的详情中选择具体模型，以便验证其审阅。",
+  "RESULT review unverified. {reason}": "结果审阅未通过验证。{reason}",
+  "The reviewer’s effective model could not be verified.": "无法验证审阅者实际使用的模型。",
+  "The reviewer used the same model as the Solver.": "审阅者使用了与 Solver 相同的模型。",
+  "The reviewer did not give a strict verdict.": "审阅者未按要求给出明确结论。",
   "the Solver reached an attempt limit and is waiting for your answer": "Solver 已达到尝试上限，正在等待你的答复"
 };
 var HOST_ERRORS = [
@@ -33295,6 +33302,31 @@ var nativeToolsZh = {
   "Not available for a Bot that operates Omni or that another plugin manages.": "对于操作 Omni 或由其他插件管理的 Bot 不可用。"
 };
 
+// src/shared/solver-model.js
+var CHOOSE_CONCRETE = "Choose a specific model for the Solver and its reviewer.";
+var CHOOSE_DIFFERENT = "Choose a different model for the reviewer.";
+var REVIEWER_MODEL_CHOICE = "Choose a specific model in the reviewer’s Details to verify its reviews.";
+function concreteModel(provider, model) {
+  if (typeof model !== "string") return void 0;
+  const slug2 = model.trim().toLowerCase().split(provider === "acp-hermes" ? /[:/]/ : "/").at(-1);
+  if (!slug2 || slug2.endsWith("-latest") || /^(?:default|auto|latest|unknown|opus|sonnet|haiku|fable)(?:plan)?(?:\[1m\])?$/.test(slug2)) return void 0;
+  if (provider.startsWith("acp-") && !/^(?:claude|gpt|o[1-9]|gemini|deepseek|qwen|llama|mistral|grok)[.-][a-z0-9.-]*\d[a-z0-9.\[\]-]*$/.test(slug2)) return void 0;
+  return slug2.replace(/\[1m\]$/, "").replace(/-\d{8}$/, "").replace(/^claude-(\d+-\d+)-(opus|sonnet|haiku)$/, "claude-$2-$1");
+}
+var RESULT_UNVERIFIED = Object.freeze({
+  model: "The reviewer’s effective model could not be verified.",
+  same: "The reviewer used the same model as the Solver.",
+  verdict: "The reviewer did not give a strict verdict."
+});
+var unverifiedReason = (reason) => typeof reason === "string" && Object.hasOwn(RESULT_UNVERIFIED, reason) ? reason : void 0;
+var unverifiedNotice = (reason) => unverifiedReason(reason) ? `[Automagik: RESULT review is unverified. ${RESULT_UNVERIFIED[reason]} Keep this request unmarked Done.]` : void 0;
+function originalReviewContent(message) {
+  const { content, source } = message;
+  const notice = unverifiedNotice(source?.reviewFeedback);
+  const tail = content?.at(-1);
+  return notice && tail?.type === "text" && tail.text === notice ? content.slice(0, -1) : content;
+}
+
 // src/client/solver-draft.js
 var SOLVER_LOOKS = SOLVER_SHAPES.map((shape) => ({ shape }));
 var pick2 = (list, random) => list[Math.floor(random() * list.length)];
@@ -33318,24 +33350,35 @@ var agentOf = (ref) => {
 };
 var modelOfBot = (bot) => bot?.model ?? bot?.appliedModel;
 var usableModels = (roster) => (roster.models ?? []).filter((model) => setUp(model) && !isHermesRemote(model.ref));
+function solverCatalog(roster) {
+  return { ...roster, models: roster.models?.filter((entry) => !entry.solverRef || entry.solverRef === entry.ref) };
+}
+var solverIdentity = (roster, ref) => {
+  const row2 = roster.models?.find((entry) => entry.ref === ref);
+  if (row2 && Object.hasOwn(row2, "solverIdentity")) return row2.solverIdentity;
+  return row2 ? ref : void 0;
+};
 function solverStartModel(roster) {
   const models = usableModels(roster);
   const claude = models.filter((model) => markOf(model.ref) === "acp-claude");
   const first = claude.find((model) => model.ref === roster.prefs?.defaultBotModel) ?? claude.find((model) => model.superseded !== true) ?? claude[0];
-  if (first) return first.ref;
+  if (first) return first.solverRef ?? first.ref;
   return startModel({ ...roster, models: (roster.models ?? []).filter((model) => !isHermesRemote(model.ref)) });
 }
 function reviewerChoices(roster, solverModel) {
   const models = usableModels(roster);
   const refs = new Set(models.map((model2) => model2.ref));
-  const others = models.filter((model2) => model2.ref !== solverModel);
+  const identity = solverIdentity(roster, solverModel);
+  const others = models.filter((model2) => model2.ref !== solverModel && solverIdentity(roster, model2.ref) !== identity);
   const elsewhere = others.filter((model2) => agentOf(model2.ref) !== agentOf(solverModel));
-  const model = (elsewhere.find((entry) => entry.superseded !== true) ?? elsewhere[0] ?? others.find((entry) => entry.superseded !== true) ?? others[0])?.ref;
-  const choices = model === void 0 ? [] : [{ key: "new", kind: "new", model }];
+  const resolvable = (entry) => entry.solverIdentity !== null;
+  const model = elsewhere.find((entry) => entry.superseded !== true && resolvable(entry)) ?? elsewhere.find(resolvable) ?? others.find((entry) => entry.superseded !== true && resolvable(entry)) ?? others.find(resolvable) ?? elsewhere[0] ?? others[0];
+  const ref = model?.solverRef ?? model?.ref;
+  const choices = ref === void 0 ? [] : [{ key: "new", kind: "new", model: ref }];
   const mains = new Set(roster.mainBotIds ?? []);
   const bots = (roster.bots ?? []).filter((bot) => {
-    const ref = modelOfBot(bot);
-    return !mains.has(bot.id) && bot.kind === void 0 && typeof ref === "string" && !isHermesRemote(ref) && refs.has(ref) && ref !== solverModel;
+    const ref2 = modelOfBot(bot);
+    return !mains.has(bot.id) && bot.kind === void 0 && typeof ref2 === "string" && !isHermesRemote(ref2) && refs.has(ref2) && ref2 !== solverModel && solverIdentity(roster, ref2) !== identity;
   });
   const away = (bot) => agentOf(modelOfBot(bot)) !== agentOf(solverModel) ? 0 : 1;
   bots.sort((a, b) => away(a) - away(b) || a.name.localeCompare(b.name));
@@ -33343,7 +33386,10 @@ function reviewerChoices(roster, solverModel) {
   choices.push({ key: "fresh", kind: "fresh" });
   return choices;
 }
-var reviewerModels = (roster, solverModel) => usableModels(roster).filter((model) => model.ref !== solverModel);
+function reviewerModels(roster, solverModel) {
+  const identity = solverIdentity(roster, solverModel);
+  return (roster.models ?? []).filter((row2) => row2.ref !== solverModel && (!identity || solverIdentity(roster, row2.ref) !== identity));
+}
 function newBotBlock(roster, ref) {
   const map = roster?.nativeToolsNew ?? {};
   if (typeof map !== "object" || !Object.hasOwn(map, ref)) return "level-unknown";
@@ -33358,12 +33404,13 @@ function solverCandidate(roster, model, ticked) {
   };
 }
 var reviewerName = (roster, name) => freshBotName(roster, t("{name} reviewer", { name }).slice(0, 36));
-function reviewerPayload({ name, look, model, workDir }) {
+function reviewerPayload({ name, look, model, workDir, solverModelChoice }) {
   const payload = createPayload({ name, look, model, role: "Reviewer", instructions: REVIEWER_INSTRUCTIONS });
   if (workDir) payload.workDir = workDir;
+  if (solverModelChoice) payload.solverModelChoice = true;
   return payload;
 }
-function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, guard: guard2 = false, auto = false }) {
+function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, guard: guard2 = false, auto = false, solverModelChoice }) {
   const payload = createPayload({
     name,
     look,
@@ -33376,6 +33423,7 @@ function solverPayload({ name, look, model, effort, workDir, brief, sectionId, r
     instructions: solverInstructions({ reviewer, dedicated })
   });
   if (workDir) payload.workDir = workDir;
+  if (solverModelChoice) payload.solverModelChoice = true;
   payload.waitingRole = SOLVER_ROLE_ID;
   if (auto === true) payload.solverAuto = true;
   if (typeof reviewer === "string" && reviewer !== "" && typeof reviewerId === "string" && reviewerId !== "") {
@@ -33413,7 +33461,10 @@ function solverAutoView(bot, roster, level) {
   if (!isSolverBot(bot) && bot?.reviewGuard !== true && bot?.solverAuto !== true && !bot?.solverStatus) return null;
   const limit = bot.solverStatus?.limit;
   const request = bot.solverStatus?.auto;
+  const reason = unverifiedReason(bot.solverStatus?.unverified);
   const lines = [
+    ...reason ? [t("RESULT review unverified. {reason}", { reason: t(RESULT_UNVERIFIED[reason]) })] : [],
+    ...bot.solverStatus?.reviewerModelChoice ? [t(REVIEWER_MODEL_CHOICE)] : [],
     ...typeof request === "boolean" ? [request ? t("Auto is on for this request.") : t("This request follows the saved Auto setting.")] : [],
     ...limit ? [limit.kind === "fix" ? t("Waiting for your answer after the attempt limit for {check}.", { check: limit.check }) : t("Waiting for your answer after the re-plan limit.")] : [],
     solverAutoHint(bot, level)
@@ -33566,6 +33617,7 @@ var pick3 = (list) => list[Math.floor(Math.random() * list.length)];
 function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canGoBack = false, onCreated }) {
   const [look, setLook] = (0, import_react77.useState)(() => solverLook());
   const [name, setName] = (0, import_react77.useState)("");
+  const pickerRoster = solverCatalog(roster);
   const [model, setModel] = (0, import_react77.useState)(() => solverStartModel(roster));
   const [effort, setEffort] = (0, import_react77.useState)(void 0);
   const [folder, setFolder] = (0, import_react77.useState)("");
@@ -33598,14 +33650,19 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
   const problem = nameProblem(finalName);
   const choices = reviewerChoices(roster, model);
   const choice = choices.find((entry) => entry.key === choiceKey) ?? choices[0];
-  const otherModels = reviewerModels(roster, model);
-  const newModel = choice.kind === "new" && reviewerModel !== null && otherModels.some((entry) => entry.ref === reviewerModel) ? reviewerModel : choice.model;
+  const otherModels = reviewerModels(pickerRoster, model);
+  const newModel = choice.kind === "new" && reviewerModel !== null ? reviewerModel : choice.model;
   const unticked = model ? nativeSwitchView(solverCandidate(roster, model, false), roster) : null;
   const native = ticked && unticked !== null && !unticked.disabled;
   const shownView = native ? nativeSwitchView(solverCandidate(roster, model, true), roster) : unticked;
   const hermes = isHermesRemote(model) || choice.kind === "new" && isHermesRemote(newModel);
   const permission = roster.newBotPermission ?? roster.prefs?.permission ?? roster.permissions?.defaultPreset;
-  const blocked = busy || made !== null || clash || Boolean(problem) || !model || Boolean(roster.readOnly) || hermes;
+  const hasProofCatalog = roster.models?.some((row2) => Object.hasOwn(row2, "solverIdentity")) === true;
+  const designated = choice.kind !== "fresh";
+  const solverIdentityNow = solverIdentity(roster, model);
+  const reviewerIdentity = solverIdentity(roster, choice.kind === "new" ? newModel : choice.model);
+  const modelProblem = hasProofCatalog && designated ? !solverIdentityNow || !reviewerIdentity ? CHOOSE_CONCRETE : solverIdentityNow === reviewerIdentity ? CHOOSE_DIFFERENT : void 0 : void 0;
+  const blocked = Boolean(modelProblem) || busy || made !== null || clash || Boolean(problem) || !model || Boolean(roster.readOnly) || hermes;
   const intendsInstall = rolesOn(roster.prefs) && !Object.hasOwn(roster.roles ?? {}, SOLVER_ROLE_ID);
   const create = async () => {
     if (blocked || inFlight.current) return;
@@ -33628,7 +33685,8 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
           name: reviewerName(roster, finalName),
           look: { shape: pick3(DEFAULT_SHAPES), color: pick3(DEFAULT_COLORS) },
           model: newModel,
-          workDir
+          workDir,
+          solverModelChoice: hasProofCatalog
         }) : void 0,
         solverPayloadFor: ({ reviewer: reviewerBot, dedicated, reviewerId }) => solverPayload({
           name: finalName,
@@ -33642,7 +33700,8 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
           dedicated,
           reviewerId,
           guard: guard2,
-          auto
+          auto,
+          solverModelChoice: hasProofCatalog && designated
         })
       });
       if (result.solver && !result.sendError && !result.roleNote) {
@@ -33732,7 +33791,7 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
           "div",
           { className: "bt-field" },
           (0, import_react77.createElement)("span", { className: "bt-field-label" }, t("Model")),
-          (0, import_react77.createElement)(ModelMenu, { bot: { id: "new-bot", name: finalName, model: model || void 0, effort }, roster, actions, wide: true, onPick: (ref) => {
+          (0, import_react77.createElement)(ModelMenu, { bot: { id: "new-bot", name: finalName, model: model || void 0, effort }, roster: pickerRoster, actions, wide: true, onPick: (ref) => {
             setModel(ref);
             setEffort(void 0);
           }, onPickEffort: (picked) => setEffort(picked ?? null) }),
@@ -33766,7 +33825,7 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
           ))),
           choice.kind === "new" ? (0, import_react77.createElement)(ModelMenu, {
             bot: { id: "new-reviewer", name: reviewerName(roster, finalName), model: newModel },
-            roster,
+            roster: { ...pickerRoster, models: otherModels },
             actions,
             wide: true,
             withEfforts: false,
@@ -33776,7 +33835,8 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
             }
           }) : null,
           choice.kind === "new" && isHermesRemote(newModel) ? (0, import_react77.createElement)("span", { className: "bt-note bt-danger" }, t("This model uses its Hermes profile's own instructions.")) : null,
-          (0, import_react77.createElement)("span", { className: "bt-note" }, reviewerNote)
+          (0, import_react77.createElement)("span", { className: "bt-note" }, reviewerNote),
+          modelProblem ? (0, import_react77.createElement)("span", { className: "bt-note bt-danger" }, t(modelProblem)) : null
         ),
         shownView === null ? null : (0, import_react77.createElement)(
           "div",

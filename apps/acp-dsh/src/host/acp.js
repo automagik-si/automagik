@@ -15,6 +15,7 @@ import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
 import { usageLimitOf } from './usage-limit.js'
+import { SONNET_PIN, sonnetWire } from './model-identity.js'
 import { observeTerminal } from './terminal-evidence.js'
 
 const STDERR_KEEP = 4000
@@ -315,7 +316,7 @@ export class AgentRun {
       })
       this.sessionId = session.sessionId
       this.modes = session.modes
-      this.options = withModels(session.configOptions ?? [], session.models)
+      this.takeOptions(session.configOptions ?? [], session.models)
       // The model the agent started on: DSH's `default` model goes back to it.
       this.startModel = optionOf(this.options, 'model')?.currentValue
       // The session exists (the spike's ordering rule for the bridge's first announcement) and
@@ -365,8 +366,11 @@ export class AgentRun {
       ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
     }))
     this.sessionId = answer.sessionId
+    this.modelProofPrompted = false
+    this.modelProof = undefined
+    this.reportedModel = undefined
     if (answer.modes !== undefined && answer.modes !== null) this.modes = answer.modes
-    if (Array.isArray(answer.configOptions)) this.options = withModels(answer.configOptions, answer.models ?? modelStateOf(this.options))
+    if (Array.isArray(answer.configOptions)) this.takeOptions(answer.configOptions, answer.models, modelStateOf(this.options))
     for (const tool of this.tools.values()) tool.permission?.answer(CANCELLED)
     this.tools.clear()
     this.turn.clear()
@@ -552,6 +556,31 @@ export class AgentRun {
     this.modes = { ...this.modes, currentModeId: modeId }
   }
 
+  takeOptions(options, models, fallback) {
+    this.reportedModel = optionOf(withModels(options, models), 'model')
+    this.options = withModels(options, models ?? fallback)
+    if (this.modelProof && !this.confirmsSonnet(this.modelProof.wire)) this.modelProof = undefined
+  }
+
+  confirmsSonnet(wire) {
+    return this.reportedModel?.currentValue === wire && this.option('model')?.currentValue === wire
+      && sonnetWire(valuesOf(this.reportedModel)) === wire && sonnetWire(valuesOf(this.option('model'))) === wire
+  }
+
+  bindSonnet(wire) {
+    if (wire !== undefined && this.confirmsSonnet(wire)) this.modelProof = { session: this.sessionId, wire }
+  }
+
+  effectiveClaudeModel({ answered = false } = {}) {
+    if (answered && !this.modelProofPrompted) return undefined
+    const proof = this.modelProof
+    if (proof && proof.session === this.sessionId && this.confirmsSonnet(proof.wire)) return SONNET_PIN
+    if (this.modelProofExpected) return undefined
+    const wire = this.reportedModel?.currentValue
+    // A raw alias remains an alias without a proof from the answering prompt.
+    if (wire !== SONNET_PIN && wire === this.option('model')?.currentValue) return wire
+  }
+
   /** The agent's own option of `category` (`model`, `thought_level`), as it last said. */
   option(category) {
     return optionOf(this.options, category)
@@ -563,14 +592,18 @@ export class AgentRun {
    * or effort than the person chose.
    * @param {string} category
    * @param {string} value
-   * @param {{ signal?: AbortSignal }} [options] the turn's Stop
+   * @param {{ signal?: AbortSignal, requireReported?: boolean }} [options]
    */
-  async setOption(category, value, { signal } = {}) {
+  async setOption(category, value, { signal, requireReported = false } = {}) {
     const option = this.option(category)
     if (option === undefined) throw new Error(`it has no ${category} setting`)
     const values = valuesOf(option)
     if (!values.some(choice => choice.value === value)) throw new Error(`it offers no ${category} ${value} (it offers ${values.map(choice => choice.value).join(', ') || 'none'})`)
-    if (option.currentValue === value) return
+    if (option.currentValue === value && (!requireReported || this.reportedModel?.currentValue === value)) return
+    if (category === 'model') {
+      this.reportedModel = undefined
+      this.modelProof = undefined
+    }
     if (option.id === MODEL_STATE) {
       // The session's own model list (`session/set_model`), for an agent with no model option.
       const params = { sessionId: this.sessionId, modelId: value }
@@ -590,7 +623,8 @@ export class AgentRun {
     }
     const answer = await this.held(() => this.conn.setSessionConfigOption({ sessionId: this.sessionId, configId: option.id, value }), { signal, what: `taking its ${category}` })
     // The answer is the whole set: a new model may bring other efforts.
-    this.options = answer?.configOptions ? withModels(answer.configOptions, modelStateOf(this.options)) : this.options.map(other => (other.id === option.id ? { ...other, currentValue: value } : other))
+    if (answer?.configOptions) this.takeOptions(answer.configOptions, undefined, modelStateOf(this.options))
+    else this.options = this.options.map(other => (other.id === option.id ? { ...other, currentValue: value } : other))
   }
 
   async cancel() {
@@ -785,7 +819,7 @@ export class AgentRun {
         break
       }
       case 'config_option_update':
-        if (Array.isArray(update.configOptions)) this.options = withModels(update.configOptions, modelStateOf(this.options))
+        if (Array.isArray(update.configOptions)) this.takeOptions(update.configOptions, undefined, modelStateOf(this.options))
         break
       case 'current_mode_update':
         if (this.modes) this.modes = { ...this.modes, currentModeId: update.currentModeId }

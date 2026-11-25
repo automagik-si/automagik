@@ -165,8 +165,9 @@ export function install(rt) {
       })
       if (remaining.length === 0) return
       for (const [index, item] of remaining.entries()) {
-        if (typeof agent.inject === 'function' && index < remaining.length - 1) agent.inject(item.message)
-        else agent.followup(item.message)
+        const input = rt.withReviewFeedback?.(item.message, queue.toId) ?? item.message
+        if (typeof agent.inject === 'function' && index < remaining.length - 1) agent.inject(input)
+        else agent.followup(input)
         item.acceptedBy = target
       }
       await ctx.sessions.flush(agent.session)
@@ -293,7 +294,10 @@ export function install(rt) {
     try {
       if (book !== undefined && (merged || !rt.ledger.records(book).some(record => record.event === undefined && record.id === exchangeId))) {
         rt.ledger.append(book, { id: exchangeId, from: fromId, to: toId, role, text, time: Date.now(), ...(length !== undefined ? { length, files } : {}), ...(replyTo ? { replyTo } : {}), ...(audience === 'user' ? { audience } : {}), ...(roomId ? { roomId } : {}) })
-        if (queued !== undefined) lost = onReplyRecorded?.(exchangeId)
+        if (queued !== undefined) {
+          if (onReplyRecorded?.ready) await onReplyRecorded.ready
+          lost = onReplyRecorded?.(exchangeId)
+        }
         await rt.ledger.written(book)
       }
       rt.assertShellChoice?.(targetSessionId, toId)
