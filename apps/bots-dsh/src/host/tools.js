@@ -18,7 +18,6 @@ import { ROLE_MAX } from '../shared/bot-profile.js'
 import { isGuardGroupRefusal, refusal } from './refusal.js'
 import { registerTrustedTool } from './tool-registrations.js'
 import { deniesAcpTool } from '../shared/own-tools.js'
-import { solverTracked } from './solver-progress.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
 // A message_bot call that sent nothing answers with this object rather than a string, so
@@ -1248,7 +1247,7 @@ export function install(rt) {
     if (held?.tools === true) {
       for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
         if (relayOnly && def.name !== 'group_relay') continue
-        if (def.name === 'solver_progress' && (!rt.chatOwners.has(id) || !solverTracked(rt.botOf(rt.selfOf(id))))) continue
+        if (def.name === 'solver_progress' && !rt.chatOwners.has(id)) continue
         if (held.added?.has(def.name) === true) continue
         try {
           const dispose = registerTrustedTool(agent.ctx.tools, def)
@@ -1284,7 +1283,7 @@ export function install(rt) {
     const registered = []
     for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
       if (relayOnly && def.name !== 'group_relay') continue
-      if (def.name === 'solver_progress' && (!rt.chatOwners.has(id) || !solverTracked(rt.botOf(rt.selfOf(id))))) continue
+      if (def.name === 'solver_progress' && !rt.chatOwners.has(id)) continue
       try {
         const dispose = registerTrustedTool(agent.ctx.tools, def)
         if (typeof dispose === 'function') {
