@@ -15,6 +15,7 @@ import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
 import { usageLimitOf } from './usage-limit.js'
+import { observeTerminal } from './terminal-evidence.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -790,6 +791,10 @@ export class AgentRun {
         break
       default:
         break
+    }
+    if (isTool && isToolId(sessionId) && sessionId === this.sessionId) {
+      const tool = this.tools.get(update.toolCallId)
+      if (tool !== undefined) observeTerminal(tool, update, sessionId)
     }
   }
 

@@ -97,6 +97,34 @@ export function solverCallId(sessionId, name, args, callId) {
   return typeof callId === 'string' ? `${sessionId}:${callId}` : undefined
 }
 
+// Recognize a single command, optionally in one literal bash -lc and one leading cd.
+// Quotes in the command itself remain part of the exact comparison.
+const BASH_WRAPPER = /^(?:\/bin\/)?bash[ \t]+-lc(?=[ \t'"]|$)/
+const CD_PREFIX = /^cd(?=[ \t'"]|$)/
+const SINGLE_COMMAND = /^(?:'[^'\r\n]*'|"(?:\\[^\r\n]|[^"\\$\x60\r\n]|\$(?!\())*"|\\[^\r\n]|[^'"\\\x60;&|()<>\r\n\0])+$/
+
+function nativeCheckCommand(input) {
+  const actual = input?.command ?? input?.cmd
+  if (typeof actual !== 'string' || actual.trim() === '') return { reason: 'The ACP command input is missing or ambiguous.' }
+  let command = actual.trim()
+  if (BASH_WRAPPER.test(command)) {
+    const match = /^(?:\/bin\/)?bash[ \t]+-lc[ \t]+(?:'([^'\r\n]*)'|"([^"$\x60\\\r\n]*)")$/.exec(command)
+    if (!match) return { reason: 'The ACP shell wrapper is ambiguous.' }
+    command = (match[1] ?? match[2]).trim()
+  }
+  let directory
+  if (CD_PREFIX.test(command)) {
+    const match = /^cd[ \t]+(?:'([^'\r\n]+)'|"([^"$\x60\\\r\n]+)"|([A-Za-z0-9_./:-]+))[ \t]*&&[ \t]*(.+)$/.exec(command)
+    directory = match && (match[1] ?? match[2] ?? match[3])
+    if (!directory || directory.startsWith('-')) return { reason: 'The ACP cd directory is ambiguous.' }
+    command = match[4].trim()
+  }
+  if (BASH_WRAPPER.test(command) || CD_PREFIX.test(command) || !SINGLE_COMMAND.test(command)) {
+    return { reason: 'The ACP command boundaries are ambiguous.' }
+  }
+  return { command, directory }
+}
+
 export function install(rt) {
   const guardChanges = new Map()
   const reviewGuardOn = id => rt.botOf(id)?.reviewGuard === true
@@ -128,9 +156,11 @@ export function install(rt) {
       && (args.to === bot.reviewerId || rt.findBot?.(args.to)?.id === bot.reviewerId)
     const acpRead = name === 'acp_tool' && args?.kind !== 'think'
       && ACP_OPEN_KINDS.has(args?.kind) && !commandInput
+    const nativeCommand = name === 'acp_tool' ? nativeCheckCommand(args?.input) : undefined
     return {
       relevant: !notes && (checkCommand || (!review && !acpRead && !ATTEMPT_READS.has(team))),
       checkCommand,
+      nativeCommand,
       shellCommand: ['bash', 'pwsh', 'powershell'].includes(team) && typeof args?.command === 'string'
         ? args.command.trim() : undefined,
     }
@@ -144,7 +174,7 @@ export function install(rt) {
     if (!own || !solverTracked(bot)) return undefined
     const track = cleanTrack(bot.reviewTrack)
     const tool = name === 'acp_tool' && typeof args?.title === 'string' && args.title !== '' ? args.title : teamToolOf(name) || 'this tool'
-    const { relevant, checkCommand } = solverCall(bot, name, args, definition, base)
+    const { relevant, checkCommand, nativeCommand } = solverCall(bot, name, args, definition, base)
     const limit = activeSolverLimit(bot, track)
     if (limit && relevant) {
       return { why: 'limit', text: `${bot.name} cannot use ${tool}: it reached its attempt limit (${limitWhat(limit)}). Ask the person how to proceed: say what you did, what still fails, the likely cause and the exact decision you need. Work resumes when the person answers, or when the person turns Auto on.` }
@@ -156,9 +186,7 @@ export function install(rt) {
       return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Finish recording the current Solver progress before doing more work.` }
     }
     if ((name === 'acp_tool' || checkCommand) && track?.requested && !track.delivered && track.solver?.plan?.accepted === true && !pending) {
-      // Admission can use the ACP mirror's input even though it cannot prove a check result.
-      const input = name === 'acp_tool' ? args?.input : args
-      const command = input?.command ?? input?.cmd
+      const command = nativeCommand ? nativeCommand.command : args?.command ?? args?.cmd
       if (typeof command === 'string' && Object.values(track.solver.plan.commands ?? {}).includes(command.trim())) {
         return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Start a check run with solver_progress before running a command for the accepted plan.` }
       }

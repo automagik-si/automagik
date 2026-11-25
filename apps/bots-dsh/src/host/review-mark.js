@@ -28,6 +28,30 @@ const LAUNCHERS = new Set(['start_task', 'attach_capability', 'approve_agent_act
 // changes files or runs a program.
 const ACP_WORK_KINDS = new Set(['edit', 'delete', 'move', 'execute'])
 
+function nativeOutcome(call, value) {
+  const outcome = value?.kind === 'execute' ? value.terminalOutcome : undefined
+  if (!outcome || typeof outcome !== 'object') return { reason: 'Trusted ACP terminal exit data is missing.' }
+  if (typeof outcome.reason === 'string') return { reason: outcome.reason }
+  if (!call.sessionId || !call.callId || !call.toolCallId || outcome.sessionId !== call.sessionId
+    || outcome.callId !== call.callId || outcome.toolCallId !== call.toolCallId
+    || typeof outcome.terminalId !== 'string' || outcome.terminalId === '') {
+    return { reason: 'The ACP terminal outcome does not match the observed execute call.' }
+  }
+  return outcome
+}
+
+function effectiveCwd(cwd, directory) {
+  if (typeof cwd !== 'string' || !isAbsolute(cwd)) return undefined
+  try {
+    const base = realpathSync.native(cwd)
+    const path = directory === undefined ? base : isAbsolute(directory) ? directory : `${base}${sep}${directory}`
+    const target = realpathSync.native(path)
+    // A symlink and ".." can make logical and physical cd reach different directories.
+    if (directory !== undefined && realpathSync.native(resolve(cwd, directory)) !== target) return undefined
+    if (lstatSync(target).isDirectory()) return target
+  } catch {}
+}
+
 /**
  * Whether one call can change files or run a program: a work call. Research (read, search,
  * fetch, list_bots, message_bot, a subagent) is not.
@@ -285,7 +309,7 @@ export function install(rt) {
       now: Date.now(),
       authorizedAuto: authority?.request === args.request && authority.instruction === normalizedAutoInstruction(args.quote),
       running: runningWork.has(bot),
-      snapshot: args.action === 'checks' ? snapshotOf(bot) : undefined,
+      snapshotOf: () => snapshotOf(bot),
     })
     if (changed.changed) {
       await saveProgress(bot, before, track.solver)
@@ -356,7 +380,7 @@ export function install(rt) {
 
   // Durably invalidate passing evidence before work can change the result. A
   // check may run one mediated command, then must report before more work.
-  async function solverBeforeWork(bot, { relevant, checkCommand, shellCommand, call, approvalOnly }) {
+  async function solverBeforeWork(bot, { relevant, checkCommand, shellCommand, nativeCommand, nativeCall, call, approvalOnly }) {
     const before = bot.reviewTrack
     const track = cleanTrack(before)
     if (!relevant || !track?.requested || track.delivered || !track.solver?.plan) return
@@ -364,9 +388,8 @@ export function install(rt) {
     const pending = progress.pending
     if (pending && checkCommand && call) {
       if (pending.call !== call) {
-        const snapshot = snapshotOf(bot)
-        if (progress.snapshot !== snapshot) invalidateResult(progress)
-        progress.pending = { ...pending, call, revision: progress.revision, ...(snapshot ? { snapshot } : {}) }
+        // The native execute may be over by the time its mirror appears.
+        progress.pending = { ...pending, call }
         await saveProgress(bot, before, progress)
       }
     } else if (progress.passed.length > 0 || progress.review) {
@@ -382,7 +405,8 @@ export function install(rt) {
       try {
         if (pending && checkCommand && call) {
           const agreed = pending.checks.length === 1 && progress.plan.commands?.[pending.checks[0]]
-          await observeCheck(bot, track.solver.request, pending.run, call, agreed, shellCommand, result)
+          await observeCheck(bot, { request: progress.request, run: pending.run, revision: pending.revision,
+            call, agreed, shellCommand, nativeCommand, nativeCall, result })
         }
       } finally {
         work.delete(token)
@@ -391,24 +415,34 @@ export function install(rt) {
     }
   }
 
-  async function observeCheck(bot, request, run, call, agreed, command, result) {
+  async function observeCheck(bot, { request, run, revision, call, agreed, shellCommand, nativeCommand, nativeCall, result }) {
     const before = bot.reviewTrack
     const progress = cleanProgress(before?.solver)
     const pending = progress?.pending
-    if (progress?.request !== request || pending?.run !== run || pending.call !== call) return
-    const outcome = command && result?.isError === false ? result.value : undefined
-    const folder = folderOf(bot)
-    const cwd = outcome?.cwd
+    if (progress?.request !== request || pending?.run !== run || pending.call !== call || pending.revision !== revision) return
+    const value = result?.isError === false ? result.value : undefined
+    const outcome = nativeCall ? nativeOutcome(nativeCall, value) : value
+    const command = nativeCommand ? nativeCommand.command : shellCommand
+    const folder = nativeCall ? effectiveCwd(folderOf(bot)) : folderOf(bot)
+    const cwd = nativeCall ? effectiveCwd(outcome?.cwd, nativeCommand?.directory) : outcome?.cwd
     const scope = typeof folder === 'string' && typeof cwd === 'string' && isAbsolute(cwd) ? relative(folder, cwd) : undefined
-    const known = outcome?.kind === 'foreground' && Number.isInteger(outcome.exitCode)
-      && outcome.signal === null && outcome.timedOut === false && outcome.aborted === false
-      && !outcome.stopped && !outcome.sandbox?.denied && !outcome.sandbox?.runnerFailed
-    const snapshot = snapshotOf(bot)
+    const known = nativeCall ? Number.isInteger(outcome.exitCode)
+      : outcome?.kind === 'foreground' && Number.isInteger(outcome.exitCode)
+        && outcome.signal === null && outcome.timedOut === false && outcome.aborted === false
+        && !outcome.stopped && !outcome.sandbox?.denied && !outcome.sandbox?.runnerFailed
     const scoped = scope !== undefined && !isAbsolute(scope) && scope !== '..' && !scope.startsWith(`..${sep}`)
-    const stable = known && command === agreed && scoped && snapshot !== undefined && pending.snapshot === snapshot
-    if (!stable) invalidateResult(progress)
-    progress.pending = { ...pending, evidence: { call, ...(known && command === agreed ? { pass: outcome.exitCode === 0 } : {}),
-      ...(stable ? { snapshot } : {}) } }
+    const snapshot = snapshotOf(bot)
+    let reason = nativeCommand?.reason
+    if (!reason && (!command || command !== agreed)) reason = 'The observed command does not match one agreed check.'
+    if (!reason && !known) reason = outcome?.reason ?? 'A completed foreground check outcome is missing.'
+    if (!reason && !scoped) reason = 'The check working directory could not be verified within the result root.'
+    if (!reason && !pending.startSnapshot) reason = 'The pre-run result snapshot is unavailable.'
+    if (!reason && !snapshot) reason = 'The result snapshot at completion is unavailable.'
+    if (!reason && pending.startSnapshot !== snapshot) reason = 'The result changed between the start and the outcome.'
+    if (!reason && revision !== progress.revision) reason = 'The Solver revision changed during the run.'
+    if (reason) invalidateResult(progress)
+    progress.pending = { ...pending, evidence: { call, ...(known && command && command === agreed ? { pass: outcome.exitCode === 0 } : {}),
+      ...(reason ? { reason } : { snapshot }) } }
     await saveProgress(bot, before, progress)
   }
 

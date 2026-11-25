@@ -548,7 +548,10 @@ export function install(rt) {
           throw refusal(held.text)
         }
         const observed = own ? rt.solverCall?.(bot, name, exec.arguments, definition, base) : undefined
-        const finish = observed?.relevant ? await rt.solverBeforeWork?.(bot, { ...observed, call }) : undefined
+        const nativeCall = name === 'acp_tool' ? {
+          sessionId: exec.agent.session?.id, callId: exec.callId, toolCallId: exec.arguments?.id,
+        } : undefined
+        const finish = observed?.relevant ? await rt.solverBeforeWork?.(bot, { ...observed, call, nativeCall }) : undefined
         rt.reviewWork?.(bot, own, name, exec.arguments, definition, base)
         let result
         try {

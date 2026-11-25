@@ -9,7 +9,7 @@ const record = value => value !== null && typeof value === 'object' && !Array.is
 const count = value => Number.isSafeInteger(value) && value >= 0
 const id = value => typeof value === 'string' && /^[a-z0-9][a-z0-9_.:-]{0,79}$/.test(value)
 const notDone = reason => ({ reason })
-const MISSING_PASS = 'No verified passing evidence for this run. Start a new run on the current result.'
+const missingPass = reason => `No verified passing evidence for this run. ${reason ? `${reason} ` : ''}Start a new run on the current result.`
 const listOfIds = value => Array.isArray(value) && value.length > 0 && value.length <= MAX_CHECKS
   && value.every(id) && new Set(value).size === value.length
 const fingerprint = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
@@ -182,7 +182,7 @@ export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, mod
   }
 }
 
-export function recordProgress(bot, track, args, { now, authorizedAuto, running, snapshot } = {}) {
+export function recordProgress(bot, track, args, { now, authorizedAuto, running, snapshotOf } = {}) {
   const progress = track.solver
   const limit = activeSolverLimit(bot, track)
   const recorded = `Recorded. ${Math.max(0, SOLVER_REPLAN_LIMIT - progress.replans)} re-plans left in Normal.`
@@ -200,7 +200,7 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   if (action === 'checks' && id(run) && Object.hasOwn(progress.runs, run)) {
     const prior = progress.runs[run]
     if (JSON.stringify(args.results) !== (prior?.reported ?? prior)) return { text: 'This run ID already has different results.' }
-    return { text: limit ? limitText(limit) : prior?.unverified ? MISSING_PASS : recorded }
+    return { text: limit ? limitText(limit) : prior?.unverified ? missingPass(prior.reason) : recorded }
   }
   if (limit) return { text: limitText(limit) }
   if (running) return { text: 'Wait for the current work to finish before updating Solver progress.' }
@@ -229,7 +229,9 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
     }
     if (progress.pending) return { text: progress.pending.run === run && includesAll(progress.pending.checks, checks)
       ? 'Recorded. This run is already open.' : 'Record the open run before starting another attempt.' }
-    progress.pending = { run, checks: [...checks], revision: progress.revision }
+    const startSnapshot = snapshotOf?.()
+    if (progress.snapshot && progress.snapshot !== startSnapshot) invalidateResult(progress)
+    progress.pending = { run, checks: [...checks], revision: progress.revision, ...(startSnapshot ? { startSnapshot } : {}) }
     delete progress.review
     return { changed: true, text: 'Recorded. Run the check and report all its outcomes.' }
   }
@@ -263,11 +265,19 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
         if (!solverAutoOn(bot, progress) && failuresSoFar > SOLVER_FIX_LIMIT) progress.limit ??= { kind: 'fix', check, at: now }
       }
     } else {
-      if (pending.checks.length !== 1 || evidence?.pass !== true || !fingerprint(evidence.snapshot)
-        || evidence.snapshot !== snapshot || pending.revision !== progress.revision) {
+      const snapshot = snapshotOf?.()
+      let reason = evidence?.reason
+      if (!reason && !fingerprint(pending.startSnapshot)) reason = 'The pre-run result snapshot is unavailable.'
+      if (!reason && (pending.checks.length !== 1 || !pending.call || evidence?.call !== pending.call
+        || evidence.pass !== true || !fingerprint(evidence.snapshot))) reason = 'No matching completed check was observed.'
+      if (!reason && pending.startSnapshot !== evidence.snapshot) reason = 'The result changed between the start and the outcome.'
+      if (!reason && pending.revision !== progress.revision) reason = 'The Solver revision changed during the run.'
+      if (!reason && !snapshot) reason = 'The result snapshot at report time is unavailable.'
+      if (!reason && snapshot !== evidence.snapshot) reason = 'The result changed between the outcome and the report.'
+      if (reason) {
         progress.passed = progress.passed.filter(check => !pending.checks.includes(check))
-        progress.runs[run].unverified = true
-        return { changed: true, text: MISSING_PASS }
+        Object.assign(progress.runs[run], { unverified: true, reason })
+        return { changed: true, text: missingPass(reason) }
       }
       progress.snapshot = snapshot
       progress.passed = [...new Set([...progress.passed, ...pending.checks])]

@@ -3,6 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import { Session } from '@deepseek-ai/dsh-session'
+import * as native from '@deepseek-ai/dsh-tool-executor-native'
+import { ToolsService } from '@deepseek-ai/dsh-tools'
+import { AgentRun } from '../../acp-dsh/src/host/acp.js'
+import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
+import { callArguments } from '../../acp-dsh/src/host/tool.js'
 import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
 import { questionReply } from '../src/host/parts.js'
@@ -145,6 +153,145 @@ async function reviewedPlan(h, checks) {
   verdict(delivered.at(-1).exchangeId)
   return { request, send: exchange, verdict, delivered }
 }
+
+const codexCapture = JSON.parse(readFileSync(new URL(
+  '../../acp-dsh/test/fixtures/permission-payloads/codex-acp-2.6.0.json', import.meta.url)))
+const codexUpdates = codexCapture.cases.find(item => item.name === 'agent: write outside the workspace').updates
+const codexExecute = codexUpdates.find(update => update.kind === 'execute')
+const codexExit = codexUpdates.find(update => update._meta?.terminal_exit)
+
+async function nativeCheck(t) {
+  const h = await setup(t)
+  const { request, send } = await reviewedPlan(h, ['check-a'])
+  const ctx = new Context()
+  ctx.provide('systemPrompt', { tools() {}, section() {} })
+  await ctx.plugin(ToolsService)
+  await ctx.plugin(native)
+  let agents
+  await ctx.plugin({ name: 'solver-fixture-agents', inject: ['tools'], apply(child) { agents = child } })
+  for (const listener of h.ctx.listeners.get('tools/execute')) ctx.on('tools/execute', listener)
+  const provider = 'acp-codex'
+  const agent = h.agentOf('solver')
+  const cwd = h.rt.botOf('solver').workDir
+  agent.session = Session.create(agent.id)
+  agent.session.append('request/header', { header: { config: { provider, model: 'default' } } })
+  h.ctx.acpAgents.effectiveModelOf = () => 'gpt-6.2-sol'
+  const scope = createScope(agents, agent)
+  agent.ctx = scope.ctx
+  const adapter = new AcpAdapter(ctx, new Map([[provider, { name: 'Codex fixture' }]]))
+  adapter.registerMirror(agent)
+  t.after(async () => { adapter.dispose(); await scope.dispose(); await ctx.fiber.dispose() })
+  const signal = new AbortController().signal
+  const resolve = () => ctx.tools.resolve({ agent, modelSelection: { provider, model: 'default' }, signal })
+
+  const report = (run, pass = true) => h.progress('checks', { request, run, results: results('check-a', pass) })
+  const start = run => h.progress('start', { request, run, checks: ['check-a'] })
+  async function mirror(runId, { command = "/bin/bash -lc 'fake check-a'", exit = 0, adjust, beforeMirror } = {}) {
+    const opened = structuredClone(codexExecute)
+    const finished = structuredClone(codexExit)
+    opened.rawInput = { command, cwd }
+    opened._meta.terminal_info.cwd = cwd
+    finished._meta.terminal_exit.exit_code = exit
+    if (exit !== 0) finished.status = 'failed'
+    const exitSession = adjust?.(opened, finished)
+    const run = new AgentRun({ name: 'Codex fixture', cwd })
+    run.sessionId = 'native-session'
+    await run.onUpdate(opened, run.sessionId)
+    const tool = run.tools.get(opened.toolCallId)
+    const args = callArguments(tool)
+    await run.onUpdate(finished, exitSession ?? run.sessionId)
+    await beforeMirror?.()
+    // The adapter's stream advertises this pairing when it ends a step at the mirror.
+    const id = `acp-${runId}`
+    adapter.live.set(agent.id, { run, name: 'Codex fixture', native: true, calls: new Set([id]), toolIds: new Map([[id, tool.id]]) })
+    const toolSet = await resolve()
+    try {
+      const batch = await ctx.tools.execute({ calls: [{ id, name: 'acp_tool', arguments: JSON.stringify(args) }], agent, signal, toolSet })
+      return batch.results[0].result
+    } finally {
+      toolSet.dispose()
+    }
+  }
+  const savedPending = () => JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots.solver.reviewTrack.solver.pending
+  return { cwd, start, report, mirror, send, savedPending, bot: () => h.rt.botOf('solver') }
+}
+
+test('MISSING_PASS records the Codex ACP check on the original result', async t => {
+  const h = await nativeCheck(t)
+  assert.match(await h.start('unchanged'), /Recorded/)
+  const result = await h.mirror('unchanged', { command: "/bin/bash -lc 'cd . && fake check-a'" })
+  assert.equal(result.isError, false)
+  assert.match(await h.report('unchanged'), /Recorded/)
+  assert.deepEqual(result.value.terminalOutcome, {
+    sessionId: 'solver', callId: 'acp-unchanged', toolCallId: codexExecute.toolCallId,
+    terminalId: codexExecute._meta.terminal_info.terminal_id, cwd: h.cwd, exitCode: 0,
+  })
+  assert.deepEqual(h.bot().reviewTrack.solver.passed, ['check-a'])
+  assert.equal(h.bot().reviewTrack.solver.review, undefined)
+  await h.send('result')
+  const denied = await h.mirror('without-start')
+  assert.equal(denied.isError, true)
+  assert.match(denied.content[0].text, /Start a check run/)
+
+  assert.match(await h.start('changed'), /Recorded/)
+  const { startSnapshot, revision } = h.savedPending()
+  assert.match(startSnapshot, /^[a-f0-9]{64}$/)
+  const changed = await h.mirror('changed', { beforeMirror: async () => {
+    writeFileSync(join(h.cwd, 'result'), 'changed before the mirror')
+    assert.match(await h.start('changed'), /already open/)
+  } })
+  assert.equal(changed.isError, false)
+  assert.equal(h.savedPending().startSnapshot, startSnapshot)
+  assert.equal(h.savedPending().revision, revision)
+  assert.match(await h.report('changed'), /no verified passing evidence.*changed/i)
+  await assert.rejects(h.send('result'), /every agreed check/)
+
+  assert.match(await h.start('nonzero'), /Recorded/)
+  assert.equal((await h.mirror('nonzero', { exit: 1 })).isError, false)
+  assert.match(await h.report('nonzero'), /contradicts.*outcome/i)
+  assert.match(await h.report('nonzero', false), /Recorded/)
+  await assert.rejects(h.send('result'), /every agreed check/)
+
+  assert.match(await h.start('changed-before-report'), /Recorded/)
+  await h.mirror('changed-before-report', { adjust: opened => {
+    opened.rawInput = { cmd: 'fake check-a', cwd: h.cwd }
+  } })
+  writeFileSync(join(h.cwd, 'result'), 'changed after the mirror')
+  assert.match(await h.report('changed-before-report'), /changed between the outcome and the report/i)
+})
+
+test('MISSING_PASS withholds ACP evidence for an ambiguous shell unwrap', async t => {
+  const h = await nativeCheck(t)
+  assert.match(await h.start('ambiguous'), /Recorded/)
+  const result = await h.mirror('ambiguous', { command: "/bin/bash -lc 'fake check-a' && true" })
+  assert.equal(result.isError, false)
+  assert.match(await h.report('ambiguous'), /no verified passing evidence.*ambiguous/i)
+  assert.match(await h.start('outside'), /Recorded/)
+  await h.mirror('outside', { command: 'cd .. && fake check-a' })
+  assert.match(await h.report('outside'), /no verified passing evidence.*working directory/i)
+  await assert.rejects(h.send('result'), /every agreed check/)
+})
+
+test('MISSING_PASS explains why a completed ACP card without trusted exit data cannot pass', async t => {
+  const h = await nativeCheck(t)
+  assert.match(await h.start('missing-exit'), /Recorded/)
+  const result = await h.mirror('missing-exit', { adjust: (_opened, finished) => { delete finished._meta.terminal_exit } })
+  assert.equal(result.isError, false)
+  assert.equal(result.value.status, 'completed')
+  assert.match(await h.report('missing-exit'), /no verified passing evidence.*exit.*missing/i)
+  assert.match(await h.report('missing-exit'), /exit.*missing/i)
+  for (const [run, adjust, reason] of [
+    ['wrong-terminal', (_opened, finished) => { finished._meta.terminal_exit.terminal_id = 'other-terminal' }, /exit does not match/i],
+    ['wrong-tool', (_opened, finished) => { finished.toolCallId = 'other-tool' }, /exit.*missing/i],
+    ['wrong-session', () => 'other-session', /exit.*missing/i],
+    ['interrupted', (_opened, finished) => { finished._meta.terminal_exit.signal = 'SIGTERM' }, /execution was interrupted/i],
+  ]) {
+    assert.match(await h.start(run), /Recorded/)
+    await h.mirror(run, { adjust })
+    assert.match(await h.report(run), reason)
+  }
+  await assert.rejects(h.send('result'), /every agreed check/)
+})
 
 test('LA-1 requires completed passing evidence on the same result', async t => {
   const h = await setup(t)
