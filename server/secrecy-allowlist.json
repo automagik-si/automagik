@@ -370,6 +370,34 @@
     "reason": "Generated Unix AbsolutePath example in ACP SDK 2.9.1 schema/v2/schema.unstable.json, verified byte for byte against the locked npm tarball."
   },
   {
+    "file": "opt/automagik/offline-store/v10/files/eb/e68d46ab56213721d5c576e2e0588586892e27ca26fc6c7c46dd85f95b829c84342a7da769e63a18822f98efd4bdc9b9746e5989759f5ae99d855455422215",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "99df705ebdd5399ef0ed4ae71eeb22be613dc72fe755fbecae9390d087f53fd7",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.12.0 dist/v2/unstable/schema/zod.gen.js, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/eb/e68d46ab56213721d5c576e2e0588586892e27ca26fc6c7c46dd85f95b829c84342a7da769e63a18822f98efd4bdc9b9746e5989759f5ae99d855455422215",
+    "rule": "home-path",
+    "sha256": "6600e9264f9f11ce58bd63caf7a2ae1f56bee1cda6f13410faf84bf30a80ae3e",
+    "fileSha256": "99df705ebdd5399ef0ed4ae71eeb22be613dc72fe755fbecae9390d087f53fd7",
+    "reason": "Generated Windows AbsolutePath example in ACP SDK 2.12.0 dist/v2/unstable/schema/zod.gen.js, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/ad/fc4edd30704e22e20963d566501783eb7868f7ccaafe48e80541fe366c171a6b7cc35f674ead0681f913a87cafa7afe234b97e37ddf7a2f025d4686a44002a",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "86dae71cce55d412b927383cb3838ea560bdbf683ea8903bede75785fc79c494",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.12.0 schema/v2/schema.json, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/25/d1b9363e345614a5ba0db06ca222b2b818b8c9d408dbf8f105f6b6b9836ac672346313c60b42110cc94458cb484a03df7d93d119eec4c4eb047fbc051c4f04",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "8514da63fb39f050ca56a49470a90dc3fd194ebae3f08eb29301504a71bcde66",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.12.0 schema/v2/schema.unstable.json, verified byte for byte against the locked npm tarball."
+  },
+  {
     "file": "opt/automagik/runtime/node_modules/@deepseek-ai/dsh-app-boot/src/config-schema/document.ts",
     "rule": "home-path",
     "sha256": "e60abf6d4fb6d751084c567c804fbf8d6cdb20de66f0999231a0fffd9f4edf88",
