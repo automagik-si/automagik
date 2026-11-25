@@ -29,7 +29,8 @@ import { parseReplies, relayRange, stackReplies } from '../shared/group-replies.
 import { CHECKPOINT_PROMPT, STEWARD_SYSTEM, checkpointCount, checkpointTail, checkpointTailNote, checkpointText, linesFor, parseDecision, stewardRequest } from './steward.js'
 import { RESUME_DELAY_MS } from './resume.js'
 import { OWN_TOOLS_SWITCH, SWITCH_FAILED, switchFailure } from './model-state.js'
-import { redactorFor } from './redact.js'
+import { credentialShapes, redactorFor } from './redact.js'
+import { maskLine } from './chat-index.js'
 import { OWN_TOOLS_MODEL_TEXT } from '../shared/own-tools.js'
 import { answerSender, failureLine, opensTurn, turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
@@ -631,9 +632,13 @@ export function install(rt) {
     const indent = text => text.replace(/\r?\n/g, '\n  ')
     try {
       const projectInput = legacySkillHistory(session)
+      rt.loadSecrets?.()
+      const mask = rt.connectorDiagnosticRedactor?.() ?? credentialShapes
       for await (const line of partLines(session.id, AbortSignal.timeout(HANDOFF_READ_MS), { group, pages: Infinity, projectInput })) {
+        const masked = maskLine(line.text, mask)
+        const lookup = `read_own_chat around "part ${number} #${line.seq}" shows all of it`
         if (!full) {
-          const text = clip(line.text, RECENT_LINE_MAX, group ? 'the full text is in the saved record' : `read_own_chat around "part ${number} #${line.seq}" shows all of it`)
+          const text = clip(masked, RECENT_LINE_MAX, group ? 'the full text is in the saved record' : lookup)
           const cost = estimateTokens(text)
           if (recent.length === 0 || used + cost <= budget) {
             recent.push(`${stamp(line)} ${indent(text)}`)
@@ -644,7 +649,7 @@ export function install(rt) {
         }
         if (group) break
         if (line.who === 'you') continue
-        const text = clip(line.text, LIST_LINE_MAX, `read_own_chat around "part ${number} #${line.seq}" shows all of it`)
+        const text = clip(masked, LIST_LINE_MAX, lookup)
         const cost = estimateTokens(text)
         if (unlisted > 0 || listed + cost > LIST_TOKENS) {
           unlisted += 1
