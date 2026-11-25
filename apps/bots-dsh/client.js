@@ -23982,8 +23982,14 @@ function teamActions({
   const stopping = (options) => options?.stopReply === true ? { stopReply: true } : {};
   const memoryOf = (id) => roster.getSnapshot().roomsById[id] ? { roomId: id } : { botId: id };
   const yieldTo = (state2, view) => state2.panelYield === true || panelFolded?.(view) === true;
+  let panelInstance;
+  const openPanel = (update) => ui2.set((state2) => {
+    const next = update(state2);
+    if (next !== state2) panelInstance = {};
+    return next;
+  });
   const openSideChat = (sessionId, chatId) => {
-    ui2.set((state2) => ({ ...state2, details: sessionId, panelInstance: {}, view: "side", side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state2, "side") }));
+    openPanel((state2) => ({ ...state2, details: sessionId, view: "side", side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state2, "side") }));
   };
   const openSettings = (page = "general", id = null) => {
     ui2.set((state2) => ({ ...state2, settings: { page, id }, menu: null, palette: null, newChat: null }));
@@ -24016,32 +24022,48 @@ function teamActions({
     closeVoice: (id, instance) => {
       ui2.set((state2) => state2.voice && (id === void 0 || state2.voice === id && state2.voiceInstance === instance) ? { ...state2, voice: null } : state2);
     },
+    getPanelInstance: () => panelInstance,
     toggleDetails: (id, force) => {
       ui2.set((state2) => {
         const snap = roster?.getSnapshot?.();
         const same = state2.details != null && detailsSubject(snap, state2.details) === detailsSubject(snap, id);
         const details = force || !same || state2.view !== "details" ? id : null;
-        if (details === null && panelFolded?.("details") === true) return { ...state2, renaming: false, tab: null, details: id, panelInstance: {}, view: "details", panelYield: true };
-        return { ...state2, renaming: false, tab: null, details, panelInstance: details ? {} : null, view: "details" };
+        if (details === null && panelFolded?.("details") === true) {
+          panelInstance = {};
+          return { ...state2, renaming: false, tab: null, details: id, view: "details", panelYield: true };
+        }
+        panelInstance = details ? {} : null;
+        return { ...state2, renaming: false, tab: null, details, view: "details" };
       });
     },
     // The open panel follows the main view; a subject with no browser (a group
     // chat, an outside Session) settles on the details view. So does one that
     // does not own the open side chat.
     followPanel: (id) => {
-      ui2.set((state2) => {
+      openPanel((state2) => {
         if (!state2.details || state2.details === id) return state2;
         const snap = roster.getSnapshot();
         const view = state2.view === "browser" && snap.byId[id] === void 0 ? "details" : state2.view === "side" && !(snap.sideChats?.[snap.byId[id]?.id] ?? []).some((chat) => chat?.id === state2.side) ? "details" : state2.view;
-        return { ...state2, details: id, panelInstance: {}, view, renaming: false, tab: null };
+        return { ...state2, details: id, view, renaming: false, tab: null };
       });
     },
     showDetails: (id, tab = null) => {
-      ui2.set((state2) => ({ ...state2, details: id, panelInstance: {}, view: "details", renaming: false, tab, panelYield: yieldTo(state2, "details") }));
+      openPanel((state2) => ({ ...state2, details: id, view: "details", renaming: false, tab, panelYield: yieldTo(state2, "details") }));
     },
     // Opening the conversation would move focus to its composer and blur the name field.
     renameBot: (id) => {
-      ui2.set((state2) => ({ ...state2, details: id, panelInstance: {}, view: "details", renaming: true, tab: null, panelYield: yieldTo(state2, "details") }));
+      openPanel((state2) => ({ ...state2, details: id, view: "details", renaming: true, tab: null, panelYield: yieldTo(state2, "details") }));
+    },
+    showBrowserPanel: (id, { resetDetails = false } = {}) => {
+      ui2.set((state2) => {
+        const next = { ...state2, details: id, view: "browser", panelYield: yieldTo(state2, "browser") };
+        if (resetDetails) {
+          next.renaming = false;
+          next.tab = null;
+        }
+        panelInstance = state2.details === id && state2.view === "browser" ? panelInstance ?? {} : {};
+        return next;
+      });
     },
     openSettings,
     // Omni's own Models page: the providers DSH serves, their keys and models.
@@ -24082,7 +24104,7 @@ function teamActions({
     closePanel: (pane) => {
       ui2.set((state2) => {
         if (!state2.details) return state2;
-        if (pane !== void 0 && (state2.panelInstance !== pane.instance || state2.details !== pane.id || (state2.view ?? "details") !== pane.view || state2.renaming !== pane.renaming || state2.tab !== pane.tab || state2.side !== pane.side)) return state2;
+        if (pane !== void 0 && (panelInstance !== pane.instance || state2.details !== pane.id || (state2.view ?? "details") !== pane.view || state2.renaming !== pane.renaming || state2.tab !== pane.tab || state2.side !== pane.side)) return state2;
         return { ...state2, details: null, view: "details", renaming: false, tab: null, side: null };
       });
     },
@@ -43248,14 +43270,15 @@ function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity
     if (ui2.voice && ui2.voice !== current) actions.closeVoice();
     if (current) actions.followPanel?.(current);
   }, [current]);
+  const panelInstance = actions.getPanelInstance();
   const open = (0, import_react103.useMemo)(() => ui2.details ? {
     id: ui2.details,
     view: ui2.view ?? "details",
     renaming: ui2.renaming,
     tab: ui2.tab,
     side: ui2.side,
-    instance: ui2.panelInstance
-  } : null, [ui2.details, ui2.view, ui2.renaming, ui2.tab, ui2.side, ui2.panelInstance]);
+    instance: panelInstance
+  } : null, [ui2.details, ui2.view, ui2.renaming, ui2.tab, ui2.side, panelInstance]);
   const layout = frameLayout({
     viewport,
     sidebarWidth: 0,
@@ -49082,7 +49105,6 @@ function applyOwner(ctx, { gated = false } = {}) {
     if (state2.details === null) return false;
     return frameLayout({ viewport: frame.getSnapshot().viewport, sidebarWidth: 0, pref: "hidden", panel: { view: view ?? state2.view, yielded: state2.panelYield === true } }).panel === "folded";
   };
-  const yieldBrowser = (state2) => state2.panelYield === true || panelFolded("browser");
   const ensureBotHome2 = () => ensureBotHome({ roster, mainView, openSession: actions.openSession });
   let cliLogin;
   const codePanel = codePanelNavigation(ctx.layout, seatNavigation);
@@ -49255,13 +49277,6 @@ function applyOwner(ctx, { gated = false } = {}) {
     clearUnread: (id) => writeUnread(id, false)
   };
   if (browsers) {
-    const browserPanel = (state2, id) => ({
-      ...state2,
-      details: id,
-      view: "browser",
-      panelYield: yieldBrowser(state2),
-      panelInstance: state2.details === id && state2.view === "browser" ? state2.panelInstance ?? {} : {}
-    });
     Object.assign(actions, {
       // The globe button: the Bot's active tab in the browser view, or a new tab.
       openBrowser: (id) => {
@@ -49269,7 +49284,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         if (!bot) return;
         browsers.ensureTabs(bot.id);
         if (browsers.tabs.getSnapshot()[bot.id]?.active == null) browsers.openTab(bot.id);
-        ui2.set((state2) => ({ ...browserPanel(state2, id), renaming: false, tab: null }));
+        actions.showBrowserPanel(id, { resetDetails: true });
       },
       // '+' on the strip or the drawer's new-tab card: a blank tab in the browser view.
       browserNewTab: (id) => {
@@ -49277,7 +49292,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         if (!bot) return null;
         browsers.ensureTabs(bot.id);
         const tabId = browsers.openTab(bot.id);
-        ui2.set((state2) => ({ ...browserPanel(state2, id), renaming: false, tab: null }));
+        actions.showBrowserPanel(id, { resetDetails: true });
         return tabId;
       },
       // A drawer card: its tab active, the panel on the browser view.
@@ -49285,7 +49300,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         const bot = roster.getSnapshot().byId[id];
         if (!bot) return;
         browsers.activate(bot.id, tabId);
-        ui2.set((state2) => browserPanel(state2, id));
+        actions.showBrowserPanel(id);
       },
       browserEnsure: (botId) => browsers.ensureTabs(botId),
       browserCloseTab: (botId, tabId) => browsers.closeTab(botId, tabId),

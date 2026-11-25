@@ -110,9 +110,16 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
   // `view` is the next view, since its minimum decides what fits; a yield already
   // given stays.
   const yieldTo = (state, view) => state.panelYield === true || panelFolded?.(view) === true
+  // Give each new panel scope its own identity before the UI source notifies listeners.
+  let panelInstance
+  const openPanel = update => ui.set(state => {
+    const next = update(state)
+    if (next !== state) panelInstance = {}
+    return next
+  })
   // The panel on a side chat's view, on the chat the strip tab or menu named.
   const openSideChat = (sessionId, chatId) => {
-    ui.set(state => ({ ...state, details: sessionId, panelInstance: {}, view: 'side', side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state, 'side') }))
+    openPanel(state => ({ ...state, details: sessionId, view: 'side', side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state, 'side') }))
   }
   // `id` opens one Bot (page 'bots') or one group chat (page 'groups').
   const openSettings = (page = 'general', id = null) => { ui.set(state => ({ ...state, settings: { page, id }, menu: null, palette: null, newChat: null })) }
@@ -137,6 +144,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
       ui.set(state => (state.voice && (id === undefined || (state.voice === id && state.voiceInstance === instance))
         ? { ...state, voice: null } : state))
     },
+    getPanelInstance: () => panelInstance,
     toggleDetails: (id, force) => {
       ui.set((state) => {
         // Any part of the open Bot closes it, as its header shows it expanded.
@@ -145,26 +153,38 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
         const details = force || !same || state.view !== 'details' ? id : null
         // A folded panel is open but not shown: its opener then means "show it"
         // (it takes the room it needs), not "close it".
-        if (details === null && panelFolded?.('details') === true) return { ...state, renaming: false, tab: null, details: id, panelInstance: {}, view: 'details', panelYield: true }
-        return { ...state, renaming: false, tab: null, details, panelInstance: details ? {} : null, view: 'details' }
+        if (details === null && panelFolded?.('details') === true) {
+          panelInstance = {}
+          return { ...state, renaming: false, tab: null, details: id, view: 'details', panelYield: true }
+        }
+        panelInstance = details ? {} : null
+        return { ...state, renaming: false, tab: null, details, view: 'details' }
       })
     },
     // The open panel follows the main view; a subject with no browser (a group
     // chat, an outside Session) settles on the details view. So does one that
     // does not own the open side chat.
     followPanel: (id) => {
-      ui.set((state) => {
+      openPanel((state) => {
         if (!state.details || state.details === id) return state
         const snap = roster.getSnapshot()
         const view = state.view === 'browser' && snap.byId[id] === undefined ? 'details'
           : state.view === 'side' && !(snap.sideChats?.[snap.byId[id]?.id] ?? []).some(chat => chat?.id === state.side) ? 'details'
             : state.view
-        return { ...state, details: id, panelInstance: {}, view, renaming: false, tab: null }
+        return { ...state, details: id, view, renaming: false, tab: null }
       })
     },
-    showDetails: (id, tab = null) => { ui.set(state => ({ ...state, details: id, panelInstance: {}, view: 'details', renaming: false, tab, panelYield: yieldTo(state, 'details') })) },
+    showDetails: (id, tab = null) => { openPanel(state => ({ ...state, details: id, view: 'details', renaming: false, tab, panelYield: yieldTo(state, 'details') })) },
     // Opening the conversation would move focus to its composer and blur the name field.
-    renameBot: (id) => { ui.set(state => ({ ...state, details: id, panelInstance: {}, view: 'details', renaming: true, tab: null, panelYield: yieldTo(state, 'details') })) },
+    renameBot: (id) => { openPanel(state => ({ ...state, details: id, view: 'details', renaming: true, tab: null, panelYield: yieldTo(state, 'details') })) },
+    showBrowserPanel: (id, { resetDetails = false } = {}) => {
+      ui.set(state => {
+        const next = { ...state, details: id, view: 'browser', panelYield: yieldTo(state, 'browser') }
+        if (resetDetails) { next.renaming = false; next.tab = null }
+        panelInstance = state.details === id && state.view === 'browser' ? panelInstance ?? {} : {}
+        return next
+      })
+    },
     openSettings,
     // Omni's own Models page: the providers DSH serves, their keys and models.
     openModels: () => openSettings('models'),
@@ -201,7 +221,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     closePanel: (pane) => {
       ui.set(state => {
         if (!state.details) return state
-        if (pane !== undefined && (state.panelInstance !== pane.instance || state.details !== pane.id
+        if (pane !== undefined && (panelInstance !== pane.instance || state.details !== pane.id
           || (state.view ?? 'details') !== pane.view || state.renaming !== pane.renaming
           || state.tab !== pane.tab || state.side !== pane.side)) return state
         return { ...state, details: null, view: 'details', renaming: false, tab: null, side: null }

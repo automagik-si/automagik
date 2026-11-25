@@ -613,7 +613,6 @@ function applyOwner(ctx, { gated = false } = {}) {
     if (state.details === null) return false
     return frameLayout({ viewport: frame.getSnapshot().viewport, sidebarWidth: 0, pref: 'hidden', panel: { view: view ?? state.view, yielded: state.panelYield === true } }).panel === 'folded'
   }
-  const yieldBrowser = state => state.panelYield === true || panelFolded('browser')
   const ensureBotHome = () => goToBotHome({ roster, mainView, openSession: actions.openSession })
   let cliLogin
   const codePanel = codePanelNavigation(ctx.layout, seatNavigation)
@@ -780,10 +779,6 @@ function applyOwner(ctx, { gated = false } = {}) {
   }
   // Without the Desktop bridge these stay undefined, and no browser control renders.
   if (browsers) {
-    const browserPanel = (state, id) => ({
-      ...state, details: id, view: 'browser', panelYield: yieldBrowser(state),
-      panelInstance: state.details === id && state.view === 'browser' ? state.panelInstance ?? {} : {},
-    })
     Object.assign(actions, {
       // The globe button: the Bot's active tab in the browser view, or a new tab.
       openBrowser: (id) => {
@@ -791,7 +786,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         if (!bot) return
         browsers.ensureTabs(bot.id)
         if (browsers.tabs.getSnapshot()[bot.id]?.active == null) browsers.openTab(bot.id)
-        ui.set(state => ({ ...browserPanel(state, id), renaming: false, tab: null }))
+        actions.showBrowserPanel(id, { resetDetails: true })
       },
       // '+' on the strip or the drawer's new-tab card: a blank tab in the browser view.
       browserNewTab: (id) => {
@@ -799,7 +794,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         if (!bot) return null
         browsers.ensureTabs(bot.id)
         const tabId = browsers.openTab(bot.id)
-        ui.set(state => ({ ...browserPanel(state, id), renaming: false, tab: null }))
+        actions.showBrowserPanel(id, { resetDetails: true })
         return tabId
       },
       // A drawer card: its tab active, the panel on the browser view.
@@ -807,7 +802,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         const bot = roster.getSnapshot().byId[id]
         if (!bot) return
         browsers.activate(bot.id, tabId)
-        ui.set(state => browserPanel(state, id))
+        actions.showBrowserPanel(id)
       },
       browserEnsure: botId => browsers.ensureTabs(botId),
       browserCloseTab: (botId, tabId) => browsers.closeTab(botId, tabId),

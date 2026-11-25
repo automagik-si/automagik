@@ -68,9 +68,10 @@ export function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useA
     if (ui.voice && ui.voice !== current) actions.closeVoice()
     if (current) actions.followPanel?.(current)
   }, [current])
+  const panelInstance = actions.getPanelInstance()
   const open = useMemo(() => ui.details ? {
-    id: ui.details, view: ui.view ?? 'details', renaming: ui.renaming, tab: ui.tab, side: ui.side, instance: ui.panelInstance,
-  } : null, [ui.details, ui.view, ui.renaming, ui.tab, ui.side, ui.panelInstance])
+    id: ui.details, view: ui.view ?? 'details', renaming: ui.renaming, tab: ui.tab, side: ui.side, instance: panelInstance,
+  } : null, [ui.details, ui.view, ui.renaming, ui.tab, ui.side, panelInstance])
   // A panel that no longer fits folds away: its state stays open, it just is not
   // mounted — the usual exit plays and the webview goes with it — until the room
   // returns and it shows again on its own.
