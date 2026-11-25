@@ -7,13 +7,20 @@ import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
 import { Backchannel, offeredTools } from '../../acp-dsh/src/host/backchannel.js'
 import { AGY_TOOLS_OFF_TEXT } from '../../acp-dsh/src/host/agy-off.js'
 import { AGY_OFF_ARGS, agyWorld, unixOnly } from '../../acp-dsh/test/fixtures/agy-world.js'
-import { createUserMessage, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { createSystemMessage, createUserMessage, markAgentLoopRequest, textOnlyImageText } from '@deepseek-ai/dsh-llm'
+import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
 import { Session } from '@deepseek-ai/dsh-session'
 import { install, skillPart, skillTool } from '../src/host/skill-library-call.js'
 import { SKILL_NOTICE } from '../src/host/skill-message.js'
 
 const script = new URL('../../acp-dsh/dev/fake-agent.mjs', import.meta.url).pathname
 const skill = { name: 'marker', description: 'Adds the file marker', content: 'CHECKED-ACP-BODY', hash: 'fixture-revision' }
+const manual = { name: 'mint-notes', description: 'Write a mint note.', content: 'Write exactly MINT-OK.', hash: 'mint', mode: 'manual' }
+const automatic = { ...skill, mode: 'automatic' }
+const catalog = 'marker: Adds the file marker'
+const manualPrompt = 'Use the skill mint-notes.\n  Keep these spaces. '
+const textCall = manualPrompt + '\n' + manual.content
+const text = text => ({ type: 'text', text })
 const user = (value, ...parts) => createUserMessage({
   source: { kind: 'user' }, content: [{ type: 'text', text: value }, ...parts],
 })
@@ -114,7 +121,7 @@ test('Skills row 8: production Antigravity OFF admits only the Session skill rea
   assert.deepEqual(h.approvals.map(request => request.toolName), ['load_skill'])
 })
 
-function fixture(t, provider, { reforks = false, earlierTurns = 0 } = {}) {
+function fixture(t, provider, { reforks = false, earlierTurns = 0, capturePrompt = false, addedSkills = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'skill-acp-'))
   const trace = join(dir, 'trace.ndjson')
   const session = Session.create('bot-a')
@@ -126,11 +133,13 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0 } = {}) {
   let offered = false
   let nextTurn = earlierTurns
   let preset = 'standard'
+  const handlers = new Map()
   const rt = {
-    ctx: { on() {}, get: key => key === 'sessions' ? { get: id => id === agent.id ? agent.session : undefined } : undefined },
+    ctx: { on: (key, handler) => handlers.set(key, handler),
+      get: key => key === 'sessions' ? { get: id => id === agent.id ? agent.session : undefined } : undefined },
     load: async () => {}, selfOf: id => id === agent.id ? 'owner-a' : undefined,
     botOf: id => id === 'owner-a' ? { id } : undefined,
-    skillLibrary: { active: id => id === 'owner-a' && active.has(id) ? [{ ...skill, mode }] : [] },
+    skillLibrary: { active: id => id === 'owner-a' && active.has(id) ? [{ ...skill, mode }, ...addedSkills] : [] },
   }
   install(rt)
   const tool = skillTool(rt)
@@ -165,7 +174,10 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0 } = {}) {
     catalog: { models: async () => [{ id: 'default', name: 'Fixture agent' }], dispose() {} },
     installed: () => true,
     spawn: () => ({ command: process.execPath, args: [script],
-      env: { PATH: process.env.PATH, HOME: dir, FAKE_ACP_TRACE: trace } }),
+      env: { PATH: process.env.PATH, HOME: dir, FAKE_ACP_TRACE: trace,
+        ...(capturePrompt && { FAKE_ACP_SKILLS_PROBE: JSON.stringify({
+          turns: [manualPrompt, textCall].map(text => ({ text, loads: [] })),
+        }) }) } }),
   }
   const bridge = new Backchannel({ ctx })
   const adapter = new AcpAdapter(ctx, new Map([[provider, row]]), {
@@ -193,10 +205,78 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0 } = {}) {
     return chunks
   }
   const events = kind => readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse).filter(event => event.event === kind)
+  const preStep = async row => {
+    const decision = await handlers.get('agent/pre-step')(
+      { agent, messages: [row], signal: t.signal }, async () => ({ kind: 'enter', messages: [row] }))
+    return decision.messages[0]
+  }
   return { active, setMode: value => { mode = value }, setPreset: value => { preset = value },
     onLoad: hook => { afterLoad = hook },
-    ctx, rt, agent, run, events, adapter, bridge, called: () => offered }
+    ctx, rt, agent, run, events, preStep, stream: handlers.get('llm/stream'), adapter, bridge, called: () => offered }
 }
+
+for (const provider of ['acp-claude', 'acp-codex']) {
+  for (const uploaded of [false, true]) {
+    test(`person-call order at the ${provider} ${uploaded ? 'prepared upload' : 'text'} prompt`, { timeout: 15_000 }, async t => {
+      const f = fixture(t, provider, { capturePrompt: true, addedSkills: [manual] })
+      f.active.add('owner-a')
+      const ref = { attachmentId: 'sha256:' + 'a'.repeat(64), mediaType: 'image/png', bytes: 30, width: 1, height: 1 }
+      const input = user(manualPrompt, ...uploaded ? [{ type: 'image', attachment: ref }] : [])
+      const called = await f.preStep(input)
+      const previous = answer(provider)
+      await f.run([called], { record: [called], reply: previous })
+      const first = f.events('prompt').at(-1)
+      const current = uploaded ? [text(manualPrompt), text(textOnlyImageText(ref)), text(manual.content)]
+        : [text(textCall)]
+      assert.equal(f.agent.session.snapshotEvents().filter(e => e.type === 'plugin:automagik/skill-delivery').length, 1)
+      assert.deepEqual(first.prompt, [text(catalog), ...current])
+
+      const next = await f.preStep(user(manualPrompt))
+      await f.run([called, previous, next], { record: [next] })
+      const cached = f.events('prompt').at(-1)
+      assert.equal(cached.sessionId, first.sessionId)
+      assert.deepEqual(cached.prompt, [text(textCall)])
+    })
+  }
+}
+
+test('person-call order in the serialized native request with a late system snapshot', async t => {
+  const provider = 'deepseek-official'
+  const model = 'fixture-model'
+  const f = fixture(t, provider, { addedSkills: [manual] })
+  f.active.add('owner-a')
+  const called = await f.preStep(user(manualPrompt))
+  const session = f.agent.session
+  const leading = 'The effective leading system snapshot.'
+  const late = 'A system snapshot sent after the person input.'
+  const earlier = 'An earlier person message.'
+  const connection = resolveAdapterOptions({ baseURL: 'https://fixture.invalid',
+    models: [{ id: model, name: model, systemPromptUpdate: 'in-history' }] })
+  const adapter = new DeepSeekAdapter({ options: () => connection,
+    resolveAuth: async () => ({ headers: {} }), resolveUserId: () => 'fixture',
+    prepareExtensions: async () => ({ fields: {}, accept: async () => {} }) })
+  const wire = []
+  t.mock.method(globalThis, 'fetch', async (url, { body }) => {
+    assert.equal(url, 'https://fixture.invalid/v1/messages')
+    wire.push(JSON.parse(body))
+    return new Response('{}', { status: 400 })
+  })
+  f.rt.ctx.llm = { stream: options => f.stream(options, () => adapter.stream(options)) }
+  session.append('request/context', { provider, model, systemPromptUpdate: 'in-history' })
+  const messages = [createSystemMessage('Superseded leading snapshot.'), createSystemMessage(leading),
+    user(earlier), createSystemMessage(late), called]
+  const options = markAgentLoopRequest({ provider, model, sessionId: session.id, messages, signal: t.signal })
+  await assert.rejects(async () => Array.fromAsync(f.rt.ctx.llm.stream(options)), /400/)
+  assert.equal(wire.length, 1)
+  assert.equal(wire[0].model, model)
+  assert.deepEqual({ system: wire[0].system, messages: wire[0].messages }, {
+    system: leading + '\n\n' + catalog,
+    messages: [
+      { role: 'user', content: [text(earlier), text(manualPrompt), text(manual.content)] },
+      { role: 'system', content: [text(late)] },
+    ],
+  })
+})
 
 for (const provider of ['acp-claude', 'acp-codex', 'acp-antigravity', 'acp-omp']) {
   test(`${provider} receives only checked Skills data over its ACP prompt and MCP load paths`, { timeout: 15_000 }, async t => {

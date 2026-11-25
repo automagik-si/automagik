@@ -382,13 +382,23 @@ export function skillTool(rt) {
   })
 }
 
+function leadingSystemIndex(messages) {
+  // In-history serialization uses the last snapshot before the first conversation
+  // content. Developer rows and empty turns do not end the leading section.
+  const start = messages.findIndex(row => row.role === 'tool' ||
+    (row.role === 'user' || row.role === 'assistant') && row.content.some(part =>
+      part.type === 'text' ? part.text !== '' : row.role === 'assistant' || part.type === 'image' || part.type === 'file'))
+  return messages.findLastIndex((row, index) => row.role === 'system' && index < start)
+}
+
 export function install(rt) {
   const { ctx } = rt
   const sessionOf = id => ctx.get?.('sessions')?.get?.(id) ?? ctx.get?.('agents')?.get?.(id)?.session
   const auxiliaryRequest = options => options.purpose !== undefined || rt.ownRequest?.(options) === true
 
   function project(options, { catalog = true, turnStart, historyOnly = false,
-    session = sessionOf(options.sessionId), auxiliary = auxiliaryRequest(options) } = {}) {
+    session = sessionOf(options.sessionId), auxiliary = auxiliaryRequest(options),
+    personCalls = catalog ? new WeakSet() : undefined } = {}) {
     const messages = options.messages
     if (!Array.isArray(messages)) return options
     const botId = ownerOf(rt, options.sessionId)
@@ -427,7 +437,12 @@ export function install(rt) {
         if (!fresh || (logged && (state.turn === undefined || logged.turn !== state.turn ||
           (state.attempt?.turn === logged.turn && state.attempt.seq > logged.seq)))) return false
         const skill = current.get(ref.name)
-        return skill !== undefined && skill.hash === ref.hash && skill.content === part.text && (ref.use !== 'load' || skill.mode === AUTOMATIC_SKILL_MODE)
+        const checked = skill !== undefined && skill.hash === ref.hash && skill.content === part.text &&
+          (ref.use !== 'load' || skill.mode === AUTOMATIC_SKILL_MODE)
+        if (checked && ref.use === 'person' && row.role === 'user' && part.type === 'text' && part.text !== '') {
+          personCalls?.add(part)
+        }
+        return checked
       })
       const refused = load && row.isError !== true && content?.length === 0
       const privateSource = automagikSkillParts !== undefined || automagikSkillOriginalText !== undefined ||
@@ -441,15 +456,20 @@ export function install(rt) {
     })
     if (catalog && bot && automatic.length) {
       // Add the current section to the request's system prompt without recording a
-      // catalog in the conversation. The first and latest system snapshots serve
-      // leading-only and in-history providers, respectively.
+      // catalog in the conversation.
       const part = {
         type: 'text', text: catalogOf(automatic),
         automagikSkill: { kind: SKILL_SOURCE, catalog: true, botId,
           skills: automatic.map(({ name, hash }) => ({ name, hash })) },
       }
-      const first = result.findIndex(row => row.role === 'system')
-      const last = result.findLastIndex(row => row.role === 'system' && row.content.length > 0)
+      const hasPersonCall = result.some(row => row.content?.some(part => personCalls.has(part)))
+      const request = hasPersonCall ? session?.requestContext?.() : undefined
+      const inHistoryCall = request?.systemPromptUpdate === 'in-history' &&
+        request.provider === options.provider && request.model === options.model
+      // In-history providers can flush an update after the called body. On a
+      // call turn, send the catalog only in the effective leading snapshot.
+      const first = inHistoryCall ? leadingSystemIndex(result) : result.findIndex(row => row.role === 'system')
+      const last = inHistoryCall ? first : result.findLastIndex(row => row.role === 'system' && row.content.length > 0)
       if (first < 0) result.unshift({ ...createSystemMessage(''), content: [part] })
       else for (const index of new Set([first, Math.max(first, last)])) {
         const row = result[index]

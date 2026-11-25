@@ -2400,7 +2400,7 @@ export class AcpAdapter extends LlmAdapter {
         if (live.ownSent === true || live.fileOwner) this.end(sessionId, live)
         return yield finish('error', `${agent.name} would not take DSH's permission level: ${error?.message ?? error}`)
       }
-      const currentSkills = () => skills?.project(options, { ...skillOptions, turnStart: inputStart }) ?? options
+      const currentSkills = personCalls => skills?.project(options, { ...skillOptions, turnStart: inputStart, personCalls }) ?? options
       const beforeUploads = currentSkills()
       const uploads = uploadBlocks(
         beforeUploads.messages, this.redact, dshAgent?.session, this.ctx)
@@ -2504,7 +2504,8 @@ export class AcpAdapter extends LlmAdapter {
       }
       if (archived() || this.isArchived(sessionId)) return yield finish('stop')
       if (!uploadValid()) return yield uploadStopped()
-      const send = currentSkills()
+      const personCalls = new WeakSet()
+      const send = currentSkills(personCalls)
       const catalog = skillCatalog()
       if (live.skillCatalog !== undefined && live.skillCatalog !== catalog?.key) {
         // A catalog edit can land while the model or permission mode is being
@@ -2525,7 +2526,13 @@ export class AcpAdapter extends LlmAdapter {
       const prompt = prepared ?? [...(replay ?? []), ...recovered, ...promptOf(current, this.redact)]
       if (catalog?.text && live.skillCatalog !== catalog.key) {
         if (live.bridge === undefined) return yield finish('error', 'Send this turn again.', 'acp_bridge_missing')
-        prompt.push({ type: 'text', text: this.redact(catalog.text) })
+        const block = { type: 'text', text: this.redact(catalog.text) }
+        // A prepared upload still represents these rows after the equality check
+        // above. Use the checked parts in the final selection to order either prompt.
+        const hasPersonCall = promptRows(current).rows.some(row =>
+          Array.isArray(row.content) && row.content.some(part => personCalls.has(part)))
+        if (hasPersonCall) prompt.unshift(block)
+        else prompt.push(block)
       }
       if (prepared !== undefined) {
         try { checkUploadSize(uploadRun.sessionId, prompt) } catch (error) {
