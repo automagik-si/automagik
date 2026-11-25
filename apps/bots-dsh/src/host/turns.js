@@ -4,7 +4,7 @@
 // Turn tracking: which turns were triggered by another Bot, and what they said.
 import { originalReviewContent } from '../shared/solver-model.js'
 import { requestedSkills } from './skill-library-call.js'
-import { personParts } from './skill-message.js'
+import { chatPersonParts, personParts } from './skill-message.js'
 import { randomUUID } from 'node:crypto'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import { closesPart } from './caller-view.js'
@@ -1169,7 +1169,7 @@ export function install(rt) {
           }
           let accepted
           if (own !== undefined && human) {
-            const plain = event.data.content
+            const plain = chatPersonParts(event.data)
             accepted = rt.reviewRequest?.(own, {
               text: plain?.length === 1 && plain[0]?.type === 'text' ? plain[0].text : undefined,
               trustedAuto: viaOf(source) === undefined || rt.takeImAuthor?.(id, source.rpcId) === true,
