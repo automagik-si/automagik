@@ -1050,6 +1050,9 @@ function useLiveNote(actions, sessionId, id, entry) {
 // for a reply that is not a member's message or the user's own line. `bot` is the
 // resolved member the reply names.
 function RelayEvent({ reply, bot, roster, sessionId, actions }) {
+  if (reply.kind === 'automagik-skill-notice') {
+    return h('div', { className: 'bt-event', role: 'status' }, hostText(reply.text))
+  }
   if (reply.kind === 'permission-stop') {
     return h('div', { className: 'bt-event bt-event-error', role: 'status', title: reply.why },
       t('{name} stopped on a permission: {why}', { name: bot.name, why: whyText(reply.why) }))

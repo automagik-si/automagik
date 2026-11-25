@@ -1,3 +1,4 @@
+import { SKILLS_PANEL, SkillsScreen } from './skills-screen.js'
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
 import { bootView, checkViewer, isRetired, onRetire, requestViewer, revalidateViewerOnRefusal, startViewer } from './viewer.js'
@@ -1323,6 +1324,10 @@ function applyOwner(ctx, { gated = false } = {}) {
       name: 'main', key: SEAT_CHAT_PANEL,
       inject: () => ({ onBack: () => ctx.layout.selectPanel(null), onReshowCode: actions.reshowCodePane }),
     }, SeatChatPanel)),
+    () => ctx.slots.inject('main', () => ctx.slots.register({
+      name: 'main', key: SKILLS_PANEL,
+      inject: () => ({ actions, rosterSource: roster, onBack: () => ctx.layout.selectPanel(null) }),
+    }, SkillsScreen)),
     () => ctx.slots.inject('main', () => ctx.slots.register({
       name: 'main', key: CODE_PANEL,
       inject: () => ({ onBack: codePanel.close, openSeat: actions.openSeat, useSeatRoster }),

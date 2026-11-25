@@ -16,6 +16,7 @@
 // it started, or that is called while still at earlier work, lets the round go on. Its
 // turn keeps running in its group Session, and what it ends with is posted to the group,
 // where the member that asked for it answers.
+import { requestedSkills } from './skill-library-call.js'
 import { isBotGroupPost, NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -73,7 +74,7 @@ export const isIdleRelayText = (text, everyone, priorBodies) => {
 // Rows only the group chat draws: members read who is at work from the round itself.
 // 'switched': a member's conversation here followed its agent switch (parts.js); the member
 // itself reads that in its handoff.
-const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop', 'switched'])
+const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop', 'switched', 'automagik-skill-notice'])
 const memberLine = record => record !== undefined && !SHOWN_ONLY.has(record.kind)
 
 // A member's own lines are already in its Session, so only the others' are news.
@@ -388,6 +389,7 @@ export function install(rt) {
       if (record.botId === undefined) return { kind: 'user', text: record.text, time, ...(record.via ? { via: record.via } : {}) }
       return { ...who, text: record.text, time, ...(record.duration === undefined ? {} : { duration: record.duration }) }
     }
+    if (record.kind === 'automagik-skill-notice') return { kind: record.kind, ...who, text: record.text, time }
     if (record.kind === 'lookup') return { kind: 'lookup', ...who, text: record.text, time }
     if (record.kind === 'permission-stop') return { kind: 'permission-stop', ...who, why: record.why, count: record.count, time }
     if (record.kind === 'switched') return { kind: 'switched', ...who, agent: record.agent ?? record.to, time }
@@ -431,6 +433,10 @@ export function install(rt) {
 
   Object.assign(rt, {
     keepGroupLine, dropGroupLines, groupRows, groupRowsView: rowsView, roomHistory,
+    roomSkillNotice(roomId, botId, text) {
+      const room = rt.roomOf(roomId)
+      if (room) say(room, { kind: 'automagik-skill-notice', botId, text })
+    },
     logRoom: (room, line) => say(room, line),
     onRoomLine: (listener) => {
       roomLineListeners.add(listener)
@@ -604,6 +610,7 @@ export function install(rt) {
       images: shown.flatMap(line => line.images ?? []),
       files: shown.flatMap(line => line.files ?? []),
       uploads: shown.flatMap(line => line.uploads ?? []),
+      skillRequests: current.flatMap(line => line.skillRequests ?? []),
     }
   }
 
@@ -842,7 +849,7 @@ export function install(rt) {
   // called it, which answers what the turn posts after the round moved on. What the
   // member writes before its last step is posted at once and collected in `said`, and
   // `heard` takes each such line once it is posted.
-  async function roomTurn(room, member, sessionId, { text, images = [], files = [], uploads = [] }, note, signal, round, by, said = [], heard = () => {}, onWork = () => {}) {
+  async function roomTurn(room, member, sessionId, { text, images = [], files = [], uploads = [], skillRequests }, note, signal, round, by, said = [], heard = () => {}, onWork = () => {}) {
     if (signal.aborted) return null
     const startedAt = Date.now()
     const exchangeId = randomUUID()
@@ -883,7 +890,7 @@ export function install(rt) {
       signal.addEventListener('abort', () => finish(null), { once: true })
     })
     try {
-      await rt.deliver({ fromId: undefined, toId: member.id, sessionId, role: 'room', roomId: room.id, exchangeId, note, text, images, files, uploads, steer: busy, ...(by ? { askedBy: by } : {}) })
+      await rt.deliver({ fromId: undefined, toId: member.id, sessionId, role: 'room', roomId: room.id, exchangeId, note, text, images, files, uploads, ...(skillRequests?.length ? { skillRequests } : {}), steer: busy, ...(by ? { askedBy: by } : {}) })
       // The prompt reached the member: its read position moves on.
       room.seen[member.id] = seenAt
       // Still held by an earlier request: this turn cannot start until the user answers.
@@ -1053,7 +1060,8 @@ export function install(rt) {
     rt.goalUserMessage?.(room.id)
     const members = room.members.map(rt.botOf).filter(Boolean)
     for (const line of lines) {
-      say(room, { who: 'User', text: line.text, ...(line.via ? { via: line.via } : {}), ...(line.requestId ? { requestId: line.requestId } : {}) })
+      const skillRequests = requestedSkills([{ type: 'text', text: line.text }])
+      say(room, { who: 'User', text: line.text, ...(skillRequests.length ? { skillRequests } : {}), ...(line.via ? { via: line.via } : {}), ...(line.requestId ? { requestId: line.requestId } : {}) })
       const { all, found } = mentionsIn(line.text, members)
       const note = all || found.length > 0 ? 'the user mentioned you' : 'new message from the user'
       const { speakers, ordered } = openingCall(room, { text: line.text })
@@ -1386,7 +1394,7 @@ export function install(rt) {
       if (post.botId !== undefined) continue
       // The user's message, as one the round takes in from the Session's inbox.
       const text = [post.text, ...(post.files ?? []).map(fileLine)].filter(Boolean).join('\n')
-      say(room, { who: 'User', text, ...(post.files === undefined ? {} : { files: post.files }), ...(post.files?.length ? { caption: post.text ?? '' } : {}), ...(post.uploads === undefined ? {} : { uploads: post.uploads }), ...(post.via === undefined ? {} : { via: post.via }), ...(isPhoneRequest(post.requestId) ? { requestId: post.requestId } : {}), session: true })
+      say(room, { who: 'User', text, ...(post.skillRequests?.length ? { skillRequests: post.skillRequests } : {}), ...(post.files === undefined ? {} : { files: post.files }), ...(post.files?.length ? { caption: post.text ?? '' } : {}), ...(post.uploads === undefined ? {} : { uploads: post.uploads }), ...(post.via === undefined ? {} : { via: post.via }), ...(isPhoneRequest(post.requestId) ? { requestId: post.requestId } : {}), session: true })
       unpauseRoomIdle(room)
       round.userMessage = true
       rt.goalUserMessage?.(room.id)
@@ -1458,6 +1466,7 @@ export function install(rt) {
       say(room, {
         who,
         ...(post.botId ? { botId: post.botId } : {}),
+        ...(post.skillRequests?.length ? { skillRequests: post.skillRequests } : {}),
         text,
         ...(post.images === undefined ? {} : { images: post.images }),
         ...(post.files === undefined ? {} : { files: post.files }),

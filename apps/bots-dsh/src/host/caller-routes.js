@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto'
 import { callerEndpoint } from './caller-policy.js'
+import { isSkillEndpoint } from './skill-library.js'
 import { ROUTE } from './constants.js'
 import { FEED_ROUTE } from './feed.js'
 import { callerService, multiuserMode } from './multiuser.js'
@@ -57,7 +58,13 @@ export function install(rt) {
       return fail('Your sign-in changed; reload this page.', 'bot/viewer-changed')
     }
     const decision = callerEndpoint(role, endpoint)
-    if (!decision.allow) return fail(decision.message, decision.code, decision.reason)
+    if (!decision.allow) {
+      if (isSkillEndpoint(endpoint) ||
+          (endpoint === 'update-bot' && Object.hasOwn(payload ?? {}, 'skills'))) {
+        await rt.skillLibrary?.refuse(endpoint, payload, role ?? 'untrusted')
+      }
+      return fail(decision.message, decision.code, decision.reason)
+    }
     try {
       await rt.load()
       switch (endpoint) {

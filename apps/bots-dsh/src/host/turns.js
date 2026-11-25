@@ -3,6 +3,8 @@
 //
 // Turn tracking: which turns were triggered by another Bot, and what they said.
 import { originalReviewContent } from '../shared/solver-model.js'
+import { requestedSkills } from './skill-library-call.js'
+import { personParts } from './skill-message.js'
 import { randomUUID } from 'node:crypto'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import { closesPart } from './caller-view.js'
@@ -1082,14 +1084,14 @@ export function install(rt) {
           }
           if (entry.turn === undefined) {
             entry.pending = source
-            entry.pendingText = textOf(originalReviewContent(event.data)).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')
+            entry.pendingText = textOf(personParts(originalReviewContent(event.data))).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')
           }
           else if (!opened) claimTrigger(id, entry, source)
           else if (source.work !== undefined && source.work !== rt.workOf?.(entry.info) && !expectsReply(source)) {
             // A result for other work than this turn's informs it, and comes back in a
             // turn of its own once this one ends, which goes on with that work.
             entry.later = [...(entry.later ?? []), {
-              info: source, text: textOf(originalReviewContent(event.data)).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, ''),
+              info: source, text: textOf(personParts(originalReviewContent(event.data))).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, ''),
               ...(consumedResult ? { consumedResult } : {}),
             }]
           } else if ((expectsReply(source) || source.role === 'room') && !answersUser(source)
@@ -1100,7 +1102,7 @@ export function install(rt) {
             // say hands it back for a turn of its own (see turn/end). A failed-switch
             // resume message re-sends the trigger's own source; the same exchangeId
             // must not join twice.
-            const text = textOf(event.data.content).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')
+            const text = textOf(personParts(event.data.content)).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')
             entry.joined = [...(entry.joined ?? []), { info: source, text }]
           }
           // A mid-turn relay that owes no reply only informs the turn: it neither
@@ -1141,8 +1143,10 @@ export function install(rt) {
               (block.type === 'file' || (block.type === 'image' && !block.offloaded))
                 ? [{ messageId: event.data.id, blockIndex,
                   attachmentId: block.attachment.attachmentId, kind: block.type }] : [])
+            const skillRequests = requestedSkills(content)
             queueRoomMessage(rt.roomOf(id).id, {
-              text: textOf(event.data.content),
+              text: textOf(content),
+              ...(skillRequests.length > 0 ? { skillRequests } : {}),
               ...(images.length > 0 ? { images } : {}),
               ...(files.length > 0 ? { files } : {}),
               ...(uploads.length > 0 ? { uploads } : {}),

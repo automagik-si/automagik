@@ -38,6 +38,7 @@
 //   own memory, manage its own scheduled tasks, and change its name and model without a chat
 //   subscription. Its permission level is shown read-only. Each check uses the current team lock
 //   and one fresh home registry snapshot.
+import { personParts, SKILL_NOTICE } from './skill-message.js'
 import { randomUUID } from 'node:crypto'
 import { isBotId } from '../shared/registry.js'
 import { guardGroupText, guardOffNoticeOf } from '../shared/guard-groups.js'
@@ -207,10 +208,14 @@ export function rowsOf(event, scope) {
   const base = part => ({ id: rowIdOf(scope.sessionId, event.seq, part), turn: scope.turn, at: Number.isFinite(event.time) ? event.time : null, source: 'session' })
   switch (event.type) {
     case 'user/message': {
+      if (data.source?.kind === SKILL_NOTICE) {
+        return [{ ...base(), kind: 'status', state: 'notice', msg: cut(textOf(data.content), PREVIEW_MAX) }]
+      }
       // A person's prompt only: injected context (file notices, skills, reminders) is not chat.
       if (data.role !== 'user' || data.source?.kind !== 'user') return []
-      const text = textOf(data.content)
-      const blocks = blocksOf(data.content)
+      const content = personParts(data.content)
+      const text = textOf(content)
+      const blocks = blocksOf(content)
       return text.trim() || blocks
         ? [{ ...base(), kind: 'text', role: 'user', text: text.trim() ? cut(text, TEXT_MAX) : '', ...(blocks ? { blocks } : {}) }]
         : []
@@ -235,7 +240,7 @@ export function rowsOf(event, scope) {
     case 'tool/result': {
       const message = data.message ?? {}
       const call = scope.calls.get(message.toolCallId) ?? null
-      return [{ ...base(), kind: 'tool-result', call, ok: message.isError !== true, output: cut(textOf(message.content), PREVIEW_MAX) }]
+      return [{ ...base(), kind: 'tool-result', call, ok: message.isError !== true, output: cut(textOf(personParts(message.content)), PREVIEW_MAX) }]
     }
     default:
       return []

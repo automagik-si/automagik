@@ -43,6 +43,11 @@ export function structuredNameOf(update) {
   return undefined
 }
 
+function isSkillBridgeCall(update) {
+  return structuredNameOf(update) === `mcp__${BRIDGE_NAME}__load_skill` ||
+    (update?.rawInput?.server === BRIDGE_NAME && update.rawInput.tool === 'load_skill')
+}
+
 /**
  * The Agent/Task call a call ran inside, when the agent says so: Claude Code's adapter stamps
  * every call a native subagent makes, and its result, with `_meta.claudeCode.parentToolUseId`,
@@ -878,7 +883,7 @@ export class AgentRun {
       if (known.retired !== true) this.changeTool(known, update)
       return known
     }
-    if (this.spec.refuseTools === true) {
+    if (this.spec.refuseTools === true && !(this.spec.skillBridge && isSkillBridgeCall(update))) {
       if (!this.forbiddenToolSeen) {
         this.forbiddenToolSeen = true
         this.spec.onForbiddenTool?.(update)
@@ -920,6 +925,7 @@ export class AgentRun {
     if (update?._meta?.is_mcp_tool_call === true) tool.mcp = true
     if (tool.structuredName !== undefined && tool.structuredName.startsWith('mcp__')) tool.mcp = true
     if (isBridgeName(tool.structuredName)) tool.bridge = true
+    if (this.spec.skillBridge && isSkillBridgeCall(update)) tool.skillBridge = true
     if (tool.noted !== true && (tool.structuredName !== undefined || tool.mcp === true)) {
       tool.noted = true
       try {
@@ -1004,7 +1010,9 @@ export class AgentRun {
    */
   onPermission(params, signal) {
     if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
-    if (this.spec.refuseTools === true) return Promise.resolve(refusal('rejected', params.options ?? []))
+    if (this.spec.refuseTools === true && !(this.spec.skillBridge && isSkillBridgeCall(params.toolCall))) {
+      return Promise.resolve(refusal('rejected', params.options ?? []))
+    }
     const known = this.tools.get(params.toolCall?.toolCallId)
     const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall })
     if (tool === undefined) return Promise.resolve(CANCELLED)
@@ -1025,7 +1033,7 @@ export class AgentRun {
     // which would let the agent record a standing rule nobody approved (RFC 0039). The ACP
     // request raises no DSH dialog. The bridge's own `approval/request` is the one dialog the
     // person sees (RFC 0003, amendment, "One dialog per call").
-    if (this.spec.dshTools === true && tool.bridge === true) {
+    if (tool.skillBridge === true || (this.spec.dshTools === true && tool.bridge === true)) {
       const once = (params.options ?? []).find(option => option.kind === 'allow_once')
       return Promise.resolve(once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } })
     }

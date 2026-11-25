@@ -1890,7 +1890,8 @@ export function install(rt) {
   function deleteBot(id) {
     const running = deletions.get(id)
     if (running !== undefined) return running
-    const run = deleteNow(id)
+    const remove = () => deleteNow(id)
+    const run = rt.skillLibrary?.duringBotDeletion(id, remove) ?? remove()
     deletions.set(id, run)
     const forget = () => { if (deletions.get(id) === run) deletions.delete(id) }
     run.then(forget, forget)

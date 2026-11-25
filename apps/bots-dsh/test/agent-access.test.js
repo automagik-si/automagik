@@ -865,3 +865,28 @@ test('an authenticated agent can rename a Solver', async t => {
   assert.equal(rt.botOf('b').name, 'Changed')
   assert.equal(rt.botOf('b').instructions, solverInstructions())
 })
+
+test('the MCP agent cannot read or activate Skills or set them through update_bot', async t => {
+  const f = await fixture(t)
+  const form = { name: 'fixture-skill', description: 'A checked description.', content: 'CHECKED-FIXTURE-BODY' }
+  assert.equal((await f.call('skill-library-save', form)).ok, true)
+  const privateValue = 'private-untrusted-argument'
+  for (const [name, args] of [
+    ['skill-library-get', { name: form.name }],
+    ['bot-skill-add', { id: 'b', name: form.name, content: privateValue }],
+    ['bot-skill-mode', { id: 'b', name: form.name, mode: 'automatic' }],
+    ['update_bot', { id: 'b', skills: [form.name] }],
+  ]) {
+    const result = await f.tool(name, args)
+    assert.equal(result.error.code, -32602)
+    assert.doesNotMatch(JSON.stringify(result), /CHECKED-FIXTURE-BODY|private-untrusted-argument/)
+  }
+  assert.deepEqual((await f.call('skill-library', {})).value.active, {})
+  const audit = await readFile(join(f.home, 'skill-library', 'audit.jsonl'), 'utf8')
+  for (const action of ['skill-library-get', 'bot-skill-add', 'bot-skill-mode', 'update_bot']) {
+    const row = audit.trim().split('\n').map(JSON.parse).find(row => row.action === action)
+    assert.equal(row.caller, 'agent')
+    assert.equal(row.outcome, 'refused')
+  }
+  assert.doesNotMatch(audit, /CHECKED-FIXTURE-BODY|private-untrusted-argument/)
+})

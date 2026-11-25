@@ -15,6 +15,7 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // The next part opens with the handoff package: the note, the latest messages word for
 // word, and where the rest is. Input that arrives meanwhile waits and moves along.
 // read_own_chat searches every part, the condensed messages included.
+import { personParts } from './skill-message.js'
 import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
 import { randomUUID } from 'node:crypto'
@@ -195,7 +196,7 @@ export function historyEntry(event, group) {
     return { answer: false, who: 'user', text: replyText(textOf(event.data.content)), keepAnswers: true }
   }
   if (event.type !== 'user/message' || (source?.kind !== 'user' && source?.kind !== SOURCE_KIND)) return undefined
-  const text = textOf(event.data.content)
+  const text = textOf(personParts(event.data.content))
   const ours = source.kind === SOURCE_KIND
   // The outgoing agent's handoff-note request (an agent switch) is Omni's, and so is its answer.
   const skipped = (ours && (source.handoff === true || source.role === 'kickoff' || source.role === 'goal' || source.role === 'handoff-note')) || (!group && text.startsWith('[Group chat'))

@@ -186,6 +186,9 @@
       "automations-remove",
       "automations-run",
       "bot-capability",
+      "bot-skill-add",
+      "bot-skill-remove",
+      "bot-skill-mode",
       "bot-fresh",
       "bot-new-part",
       "bot-open-part",
@@ -251,6 +254,10 @@
       "update-bot"
     ],
     "settings": [
+      "skill-library",
+      "skill-library-get",
+      "skill-library-save",
+      "skill-library-delete",
       "code-tree",
       "diagnostics",
       "diagnostics-clear",

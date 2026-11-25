@@ -1,4 +1,5 @@
 // Space reads and administration over stateless MCP Streamable HTTP. No browser cookies.
+import { isSkillEndpoint, SKILL_PERSON_ONLY } from './skill-library.js'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import ipaddr from 'ipaddr.js'
 import { createServer } from 'node:http'
@@ -315,6 +316,14 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
       else return error(-32601, 'Unknown method')
       await audit({ ...entry, outcome: 'allowed' })
       return reply(result)
+    }
+    const operation = body.params?.name
+    if (isSkillEndpoint(operation) ||
+        ((operation === 'update-bot' || operation === 'update_bot') && Object.hasOwn(body.params?.arguments ?? {}, 'skills'))) {
+      entry.action = operation
+      const args = body.params?.arguments
+      await rt.skillLibrary?.refuse(operation, args, 'agent')
+      return error(-32602, SKILL_PERSON_ONLY)
     }
     if (!definition) return error(-32602, 'Unknown tool')
     entry.action = definition.name

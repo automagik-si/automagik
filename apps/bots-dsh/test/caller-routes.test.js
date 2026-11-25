@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { callerEndpoint } from '../src/host/caller-policy.js'
 import { REPLY_KIND } from '../src/host/constants.js'
 import { allowlist, fixture, guest, identity, member, serviceStub, stranger } from './caller-fixture.js'
@@ -257,4 +259,25 @@ test('D2 caller reads omit the internal Solver fields and its owner actions refu
     const result = await read(f, member, endpoint, { id: 'b', role: 'solver', waitingRole: 'solver', reviewerMade: true })
     assert.equal(result.error?.reason, 'owner-only', endpoint)
   }
+})
+
+test('the signed-in owner can manage Skills and members and guests get audited refusals', async t => {
+  const f = fixture(t)
+  await f.start()
+  const headers = { 'x-automagik-principal': Buffer.from(JSON.stringify({ ...identity, roles: ['owner'] })).toString('base64url') }
+  const viewer = (await f.call('whoami', null, { headers })).value.viewer.id
+  const options = { headers, viewer }
+  const skill = { name: 'owner-skill', description: 'A private library description.', content: 'PRIVATE-LIBRARY-BODY' }
+  assert.equal((await f.call('skill-library-save', skill, options)).ok, true)
+  assert.equal((await f.call('skill-library-get', { name: skill.name }, options)).value.content, skill.content)
+  for (const principal of [member, guest]) {
+    for (const [endpoint, body] of [['skill-library', {}], ['bot-skill-add', { id: 'b', name: skill.name }]]) {
+      const result = await read(f, principal, endpoint, body)
+      assert.equal(result.error.reason, 'owner-only')
+      assert.doesNotMatch(JSON.stringify(result), /LIBRARY-BODY|library description/)
+    }
+  }
+  const audit = readFileSync(join(f.rt.home, 'skill-library', 'audit.jsonl'), 'utf8')
+  for (const caller of ['member', 'guest']) assert.match(audit, new RegExp(`"caller":"${caller}","outcome":"refused"`))
+  assert.doesNotMatch(audit, /LIBRARY-BODY|library description/)
 })

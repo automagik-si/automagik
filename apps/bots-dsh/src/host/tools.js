@@ -1,5 +1,6 @@
 // Team tools: the roster, bot-to-bot messages, group chat settings and posts, and the
 // question and view cards. Group rounds and reading chats are in groups.js.
+import { skillTool } from './skill-library-call.js'
 import { randomUUID } from 'node:crypto'
 import { createEditInput } from './image-input.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -1623,6 +1624,7 @@ export function install(rt) {
       return ['Shared capabilities:', ...lines].join('\n')
     },
   }))
+  rt.teamTools.push(skillTool(rt))
   rt.teamTools.push(defineTool({
     name: 'save_capability',
     description: 'Create or update a shared MCP server, skill, or pack. Changes apply from your next message.',

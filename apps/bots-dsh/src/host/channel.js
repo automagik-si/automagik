@@ -27,6 +27,7 @@ import { CHECK_READ_ONLY, newerCheckedCandidate, savedCheckSummary } from './sel
 import { readUpdateRecovery } from './self-update-recovery.js'
 import { callerService, multiuserMode } from './multiuser.js'
 import { callerJson } from './caller-routes.js'
+import { isSkillEndpoint, SKILL_PERSON_ONLY } from './skill-library.js'
 import { peopleOf } from './people.js'
 import { claimGrant } from './approvals.js'
 import { bindTicketDesk, createTicketDesk } from './grant-ticket.js'
@@ -427,6 +428,8 @@ export function install(rt) {
   const pets = createPets({ home: () => rt.home, warn: (...args) => rt.warn?.(...args) })
   const READS = new Set(['people-seen', 'people-share', 'privacy', 'pets', 'pets-browse', 'image-access', 'image-progress', 'state', 'models', 'efforts', 'providers', 'provider-models', 'earlier', 'chat', 'run-stats', 'context-status', 'usage-stats', 'memory-review-status', 'room-progress', 'exchange', 'exchange-text', 'file-text', 'usage', 'schedules', 'memory-view', 'browser-wait', 'browser-result', 'diagnostics', 'diagnostics-log', 'diagnostics-clear', 'diagnostics-permissions', 'update-check', 'update-install', 'dsh-update-install', 'repo-stars', 'approval-answer', 'thinking', 'agent-presets', 'avatar-library', 'model-state', 'cli-login-current', 'cli-login-status', 'cli-login-connections', 'cli-login-accounts', 'cli-login-noticed', 'group-rows', 'computer-system-status', 'computer-shot', 'browser-frame', 'secret-source-detail'])
   READS.add('role-catalog')
+  READS.add('skill-library')
+  READS.add('skill-library-get')
   // Sign-in (cli-login.js): its replies are never cached by the browser.
   const CLI_LOGIN = new Set([
     'cli-login-start', 'cli-login-current', 'cli-login-status', 'cli-login-answer',
@@ -614,9 +617,13 @@ export function install(rt) {
     'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback', 'role-attach', 'role-detach',
     'role-install', 'role-uninstall', 'role-grant', 'role-settings', 'role-settings-set'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
-  const handle = async (endpoint, payload, signal, windowSeen = false, ticket) => {
+  const handle = async (endpoint, payload, signal, windowSeen = false, ticket, caller) => {
     try {
       const body = payload ?? {}
+      if (endpoint === 'update-bot' && Object.hasOwn(body, 'skills')) {
+        await rt.skillLibrary?.refuse(endpoint, body, caller?.role ?? 'agent')
+        return fail(SKILL_PERSON_ONLY, 'bot/refused')
+      }
       if ((endpoint === 'create-bot' || endpoint === 'duplicate-bot') && Object.hasOwn(body, 'people')) {
         return fail('Only the user can choose who may talk to a Bot, in its settings', 'bot/refused')
       }
@@ -1151,6 +1158,15 @@ export function install(rt) {
         case 'bot-capability':
           await rt.load()
           return ok(await rt.capabilityEndpoint(endpoint, body))
+        case 'skill-library':
+        case 'skill-library-get':
+        case 'skill-library-save':
+        case 'skill-library-delete':
+        case 'bot-skill-add':
+        case 'bot-skill-remove':
+        case 'bot-skill-mode':
+          await rt.load()
+          return ok(await rt.skillLibrary.endpoint(endpoint, body, caller))
         case 'schedules':
         case 'schedule-create':
         case 'schedule-delete':
@@ -1691,14 +1707,18 @@ export function install(rt) {
       let body
       try { body = await request.json() } catch { body = {} }
       const endpoint = String(body?.endpoint ?? '')
+      const skillRequest = isSkillEndpoint(endpoint)
+      let viewer
       if (gatedOwner(request) || (endpoint === 'whoami' && callerService(ctx))) {
-        const viewer = rt.ownerViewer(request)
+        viewer = rt.ownerViewer(request)
+        if (!viewer && skillRequest) await rt.skillLibrary?.refuse(endpoint, body?.payload, 'untrusted')
         if (!viewer || (!(endpoint === 'whoami' && body?.viewer === undefined) && body?.viewer !== viewer.id)) {
           return callerJson(fail('Your sign-in changed; reload this page.', 'bot/viewer-changed'))
         }
         if (!callerService(ctx)) return new Response(null, { status: 503, headers: { 'cache-control': 'no-store' } })
         if (endpoint === 'whoami') return callerJson(ok({ role: 'owner', multiuser: true, viewer }))
       }
+      if (skillRequest && viewer === undefined) viewer = rt.ownerViewer(request)
       // The proof goes only to endpoints; this route's own checks read it as a boolean.
       const proof = appBrowserBridge() ? windowProof(request) : false
       const desktopWindow = proof !== false
@@ -1726,7 +1746,7 @@ export function install(rt) {
             return fail('Bitwarden Secrets Manager is unavailable in Automagik Cloud.', 'bot/refused')
           }
         }
-        return handle(endpoint, body?.payload, request.signal, proof, ticket)
+        return handle(endpoint, body?.payload, request.signal, proof, ticket, viewer)
       }
       // Read before the dispatch, as #1845 does: the dispatch can settle the request it names.
       const keyringDetail = endpoint === 'secret-source-detail' && rt.secretServiceDetail?.(body?.payload?.requestId)
@@ -1739,7 +1759,7 @@ export function install(rt) {
         desk.voidTicket(ticket)
         revokeWindowProof(proof)
       }
-      const noStore = CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint) || keyringDetail
+      const noStore = skillRequest || CLI_LOGIN.has(endpoint) || VAULT.has(endpoint) || VOICE_ACTIONS.has(endpoint) || keyringDetail
         || ['automations-entry', 'accounts-codex'].includes(endpoint)
         || endpoint === 'secret-source-detail'
         || ['accounts-claude', 'accounts-claude-use', 'accounts-claude-add', 'accounts-claude-remove'].includes(endpoint)
