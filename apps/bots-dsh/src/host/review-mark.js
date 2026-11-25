@@ -24,9 +24,7 @@ import {
 const WRITE_NAMES = new Set(['write', 'edit', 'str_replace_editor', 'apply_patch'])
 // Tools that start a worker or a program from outside the tool surface (tool-deny.js).
 const LAUNCHERS = new Set(['start_task', 'attach_capability', 'approve_agent_action'])
-// An ACP agent's own call (acp-dsh's `acp_tool`, Claude Code's and Codex's native tools) that
-// changes files or runs a program.
-const ACP_WORK_KINDS = new Set(['edit', 'delete', 'move', 'execute'])
+const ACP_WRITE_KINDS = new Set(['edit', 'delete', 'move'])
 
 function nativeOutcome(call, value) {
   const outcome = value?.kind === 'execute' ? value.terminalOutcome : undefined
@@ -61,6 +59,12 @@ function effectiveCwd(cwd, directory) {
   } catch {}
 }
 
+export function isExplicitWorkCall(name, args) {
+  if (name === 'acp_tool') return args?.image !== true && ACP_WRITE_KINDS.has(args?.kind)
+  const team = teamToolOf(name)
+  return WRITE_NAMES.has(team) || LAUNCHERS.has(team)
+}
+
 /**
  * Whether one call can change files or run a program: a work call. Research (read, search,
  * fetch, list_bots, message_bot, a subagent) is not.
@@ -70,12 +74,11 @@ function effectiveCwd(cwd, directory) {
  */
 export function isWorkCall(name, args, definition) {
   if (typeof name !== 'string' || name === '') return false
-  const team = teamToolOf(name)
-  if (WRITE_NAMES.has(team) || LAUNCHERS.has(team)) return true
+  if (isExplicitWorkCall(name, args)) return true
   if (name === 'acp_tool') {
     if (args === null || typeof args !== 'object' || args.image === true) return false
     const input = args.input
-    return ACP_WORK_KINDS.has(args.kind) || (input !== null && typeof input === 'object'
+    return args.kind === 'execute' || (input !== null && typeof input === 'object'
       && (Object.hasOwn(input, 'command') || Object.hasOwn(input, 'cmd')))
   }
   return reachesShell(name, definition)
@@ -393,21 +396,22 @@ export function install(rt) {
     save()
   }
 
-  // Durably invalidate passing evidence before work can change the result. A
-  // check may run one mediated command, then must report before more work.
-  async function solverBeforeWork(bot, { relevant, checkCommand, shellCommand, nativeCommand, nativeCall, call, approvalOnly }) {
+  // Bind an open check run at admission. For ordinary commands, check the result
+  // tree at completion. Other work still invalidates evidence before it runs.
+  async function solverBeforeWork(bot, { relevant, checkCommand, compareResult, shellCommand, nativeCommand, nativeCall, call, approvalOnly }) {
     const before = bot.reviewTrack
     const track = cleanTrack(before)
     if (!relevant || !track?.requested || track.delivered || !track.solver?.plan) return
     const progress = track.solver
     const pending = progress.pending
+    const compareOnExit = compareResult && !pending
     if (pending && checkCommand && call) {
       if (pending.call !== call) {
         // The native execute may be over by the time its mirror appears.
         progress.pending = { ...pending, call }
         await saveProgress(bot, before, progress)
       }
-    } else if (progress.passed.length > 0 || progress.review) {
+    } else if (!compareOnExit && (progress.passed.length > 0 || progress.review)) {
       invalidateResult(progress)
       await saveProgress(bot, before, progress)
     }
@@ -422,12 +426,30 @@ export function install(rt) {
           const agreed = pending.checks.length === 1 && progress.plan.commands?.[pending.checks[0]]
           await observeCheck(bot, { request: progress.request, run: pending.run, revision: pending.revision,
             call, agreed, shellCommand, nativeCommand, nativeCall, result })
+        } else if (compareOnExit) {
+          await observeResult(bot, progress.request, progress.revision)
         }
       } finally {
         work.delete(token)
         if (work.size === 0) runningWork.delete(bot)
       }
     }
+  }
+
+  async function observeResult(bot, request, revision) {
+    if (rt.botOf(bot.id) !== bot) return
+    const queue = progressWrites.get(bot)
+    if (queue) return new Promise((resolve, reject) => {
+      queue.push(() => { observeResult(bot, request, revision).then(resolve, reject) })
+    })
+    const before = bot.reviewTrack
+    const track = cleanTrack(before)
+    const progress = track?.solver
+    if (!track?.requested || track.delivered || progress?.request !== request || progress.revision !== revision) return
+    if (!progress.snapshot && !progress.review) return
+    if (progress.snapshot && progress.snapshot === snapshotOf(bot)) return
+    invalidateResult(progress)
+    await saveProgress(bot, before, progress)
   }
 
   async function observeCheck(bot, { request, run, revision, call, agreed, shellCommand, nativeCommand, nativeCall, result }) {

@@ -162,7 +162,7 @@ const codexExit = codexUpdates.find(update => update._meta?.terminal_exit)
 
 async function nativeCheck(t, agreed = 'fake check-a') {
   const h = await setup(t)
-  const { request, send } = await reviewedPlan(h, ['check-a'], [{ check: 'check-a', command: agreed }])
+  const { request, send, delivered } = await reviewedPlan(h, ['check-a'], [{ check: 'check-a', command: agreed }])
   const ctx = new Context()
   ctx.provide('systemPrompt', { tools() {}, section() {} })
   await ctx.plugin(ToolsService)
@@ -215,7 +215,7 @@ async function nativeCheck(t, agreed = 'fake check-a') {
     }
   }
   const savedPending = () => JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots.solver.reviewTrack.solver.pending
-  return { cwd, start, report, mirror, send, savedPending, bot: () => h.rt.botOf('solver') }
+  return { cwd, start, report, mirror, send, savedPending, bot: () => h.rt.botOf('solver'), host: h, delivered }
 }
 
 test('MISSING_PASS records the Codex ACP check on the original result', async t => {
@@ -374,6 +374,69 @@ test('Stage 6 result-changed refuses a native check after a result file edit', a
   assert.equal(result.isError, false)
   assert.match(await h.report('file-edit'), /no verified passing evidence.*result changed between the start and the outcome/i)
   assert.deepEqual(h.bot().reviewTrack.solver.passed, [])
+})
+
+test('Stage 6 full chain keeps native check and review evidence through unchanged commands and delivery', async t => {
+  const churn = cwd => () => {
+    const placeholder = join(cwd, '.codex')
+    writeFileSync(placeholder, '')
+    rmSync(placeholder)
+  }
+  const pass = async fixture => {
+    writeFileSync(join(fixture.cwd, 'average.mjs'), 'fixed')
+    assert.match(await fixture.start('pass-a'), /^Recorded\./)
+    assert.equal((await fixture.mirror('pass-a', { beforeExit: churn(fixture.cwd) })).isError, false)
+    assert.match(await fixture.report('pass-a'), /^Recorded\./)
+    const progress = fixture.bot().reviewTrack.solver
+    assert.deepEqual(progress.passed, ['check-a'])
+    assert.match(progress.snapshot, /^[a-f0-9]{64}$/)
+    return progress.snapshot
+  }
+  const h = await nativeCheck(t)
+  const snapshot = await pass(h)
+  const status = await h.mirror('status', { command: "/bin/bash -lc 'git status --short'", beforeExit: churn(h.cwd) })
+  assert.equal(status.isError, false)
+  assert.deepEqual(h.bot().reviewTrack.solver.passed, ['check-a'], 'accepted pass must survive git status before result handoff')
+  assert.equal(h.bot().reviewTrack.solver.snapshot, snapshot)
+  assert.match(await h.report('pass-a'), /^Recorded\./)
+
+  await h.send('result')
+  const exchangeId = h.delivered.at(-1).exchangeId
+  const { host } = h
+  host.agentOf('reviewer').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: 'default' } })
+  host.ctx.acpAgents.effectiveModelOf = id => id === 'reviewer' ? 'claude-sonnet-5-5' : 'gpt-6.2-sol'
+  host.event('reviewer', 'user/message', { content: content('Review the result.'), source: {
+    kind: 'bot', role: 'request', senderSessionId: 'solver', exchangeId,
+  } })
+  host.event('reviewer', 'turn/start', { turn: 2 })
+  host.finish('reviewer', 'Verdict: SHIP\nEvidence verified.')
+  const review = h.bot().reviewTrack.solver.review
+  assert.equal(review.verdict, 'SHIP')
+  assert.equal(review.solverModel, 'gpt-6.2-sol')
+  assert.equal(review.reviewer.model, 'claude-sonnet-5-5')
+
+  const diff = await h.mirror('diff', { command: "/bin/bash -lc 'git diff'", beforeExit: churn(h.cwd) })
+  assert.equal(diff.isError, false)
+  assert.deepEqual(h.bot().reviewTrack.solver.review, review)
+  host.event('solver', 'turn/start', { turn: 3 })
+  host.finish('solver', 'Delivered: both reviews SHIP, checks passed.')
+  assert.equal(h.bot().reviewTrack.last.done, true)
+  assert.equal(h.bot().reviewTrack.last.resultExchangeId, exchangeId)
+  assert.equal(h.bot().reviewTrack.delivered, true)
+
+  const changed = await nativeCheck(t)
+  await pass(changed)
+  const edit = await changed.mirror('edit-by-shell', {
+    command: "/bin/bash -lc 'echo x >> average.mjs'",
+    beforeExit: () => writeFileSync(join(changed.cwd, 'average.mjs'), 'changed'),
+  })
+  assert.equal(edit.isError, false)
+  await assert.rejects(changed.send('result'), /Record current passing runs for every agreed check/)
+  assert.match(await changed.report('pass-a'), /stale.*start a new run/i)
+  assert.deepEqual(changed.bot().reviewTrack.solver.passed, [])
+  const saved = JSON.parse(readFileSync(join(changed.host.home, 'state.json'), 'utf8')).bots.solver.reviewTrack.solver
+  assert.deepEqual(saved.passed, [])
+  assert.equal(saved.snapshot, undefined)
 })
 
 test('LA-1 requires completed passing evidence on the same result', async t => {

@@ -9,7 +9,7 @@
 import { guardGroupRefusal, refusal } from './refusal.js'
 import { guardGroupText } from '../shared/guard-groups.js'
 import { teamToolOf } from './approvals.js'
-import { cleanTrack, isNotesWrite } from './review-mark.js'
+import { cleanTrack, isExplicitWorkCall, isNotesWrite } from './review-mark.js'
 import { activeSolverLimit, limitWhat, solverTracked } from './solver-progress.js'
 import { reachesShell } from './tool-deny.js'
 
@@ -164,6 +164,7 @@ export function install(rt) {
     return {
       relevant: !notes && (checkCommand || (!review && !acpRead && !ATTEMPT_READS.has(team))),
       checkCommand,
+      compareResult: checkCommand && !isExplicitWorkCall(name, args),
       nativeCommand,
       shellCommand: ['bash', 'pwsh', 'powershell'].includes(team) && typeof args?.command === 'string'
         ? args.command.trim() : undefined,
@@ -270,6 +271,7 @@ export function install(rt) {
       if (!work.relevant) return undefined
       // Match solverBeforeWork's durable updates. The mirror may have bound this action already.
       const pending = progress.pending
+      if (!pending && work.compareResult) return undefined // Handoff and Done check the live result.
       const needsSave = pending && work.checkCommand && call
         ? pending.call !== call : progress.passed.length > 0 || progress.review !== undefined
       if (!needsSave) return undefined

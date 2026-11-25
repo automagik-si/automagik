@@ -46,6 +46,7 @@ export function cleanProgress(value) {
     revision: count(value.revision) ? value.revision : 0,
     runs: record(value.runs) ? value.runs : {},
     replanRuns: record(value.replanRuns) ? value.replanRuns : {},
+    ...(value.legacyRunsStale === true ? { legacyRunsStale: true } : {}),
     ...(value.auto === true ? { auto: true } : {}),
     ...(plan ? { plan } : {}),
     ...(plan && record(value.pending) && id(value.pending.run) && listOfIds(value.pending.checks)
@@ -70,6 +71,9 @@ export const limitText = limit => `Attempt limit reached (${limitWhat(limit)}). 
 
 export function invalidateResult(progress) {
   progress.revision++
+  // Older passing reports lack a revision. Once invalidated, a later check
+  // at the same snapshot cannot make those reports current again.
+  progress.legacyRunsStale = true
   progress.passed = []
   delete progress.snapshot
   delete progress.review
@@ -205,6 +209,14 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   if (action === 'checks' && id(run) && Object.hasOwn(progress.runs, run)) {
     const prior = progress.runs[run]
     if (JSON.stringify(args.results) !== (prior?.reported ?? prior)) return { text: 'This run ID already has different results.' }
+    if (!prior?.unverified && Array.isArray(args.results) && args.results.every(item => item?.pass === true)) {
+      const snapshot = prior?.evidence?.snapshot
+      const currentRevision = prior?.revision === undefined ? !progress.legacyRunsStale : prior.revision === progress.revision
+      if (!currentRevision || !snapshot || snapshot !== progress.snapshot
+        || args.results.some(({ check }) => !progress.passed.includes(check)) || snapshot !== snapshotOf?.()) {
+        return { text: 'This passing report is stale. Start a new run on the current result.' }
+      }
+    }
     return { text: limit ? limitText(limit) : prior?.unverified ? missingPass(prior.reason) : recorded }
   }
   if (limit) return { text: limitText(limit) }
@@ -284,6 +296,7 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
         Object.assign(progress.runs[run], { unverified: true, reason })
         return { changed: true, text: missingPass(reason) }
       }
+      progress.runs[run].revision = progress.revision
       progress.snapshot = snapshot
       progress.passed = [...new Set([...progress.passed, ...pending.checks])]
     }
