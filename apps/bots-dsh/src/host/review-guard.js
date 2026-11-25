@@ -134,7 +134,7 @@ export function install(rt) {
       && (args.to === bot.reviewerId || rt.findBot?.(args.to)?.id === bot.reviewerId)
     const acpRead = name === 'acp_tool' && args?.kind !== 'think'
       && ACP_OPEN_KINDS.has(args?.kind) && !commandInput
-    const nativeCommand = name === 'acp_tool' ? normalizeCheckCommand(trimmedCommand(args?.input)) : undefined
+    const nativeCommand = name === 'acp_tool' ? normalizeCheckCommand(args?.input?.command ?? args?.input?.cmd) : undefined
     const shellCommand = ['bash', 'pwsh', 'powershell'].includes(team) && typeof args?.command === 'string'
       ? args.command.trim() : undefined
     // The broader admission guard also covers launches, computer use and unknown shell-capable tools.

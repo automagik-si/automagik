@@ -904,6 +904,73 @@ test('Ruling B refuses ambiguous plans and native outcomes outside the exact agr
   await assert.rejects(h.send('result'), /every agreed check/)
 })
 
+test('Ruling B round 2 requires literal shell arguments in plans and native evidence', async t => {
+  const invalid = [
+    `bash '-c' 'fake check-a'`,
+    `zsh -l"c" 'fake check-a'`,
+    String.raw`/bin/sh -\c 'fake check-a'`,
+    `bash -o pipefail "-c" 'fake check-a'`,
+    `fish '--command=fake check-a'`,
+    'fake check-a *.mjs',
+    'fake check-a file?.mjs src/[ab].mjs',
+    'fake check-a {one,two} ~/tests',
+    'fake check-a # ignored',
+  ]
+  const accepted = []
+  for (const command of invalid) {
+    const host = await setup(t)
+    const reply = await plan(host, await requestOf(host), ['check-a'], [{ check: 'check-a', command }])
+    if (!/Cannot register check "check-a"\. The command boundaries are ambiguous\./.test(reply)) {
+      accepted.push({ stage: 'plan', command, reply })
+    }
+  }
+
+  for (const command of [invalid[0], invalid[5]]) {
+    const legacy = await nativeCheck(t, command, { legacyPlan: true })
+    const held = await legacy.mirror('legacy-before-start', { command })
+    assert.equal(held.isError, true)
+    assert.match(held.content[0].text, /Start a check run/)
+    const wrapped = `/bin/bash -lc "${command}"`
+    assert.match(await legacy.start('legacy-outcome'), /^Recorded\./)
+    assert.equal((await legacy.mirror('legacy-outcome', { command: wrapped })).isError, false)
+    const reply = await legacy.report('legacy-outcome')
+    if (!/^No verified passing evidence.*command boundaries are ambiguous/.test(reply)) {
+      accepted.push({ stage: 'legacy outcome', command, reply })
+    }
+  }
+
+  const literal = String.raw`fake check-a "*.mjs; ? [ab]" escaped\ space \*`
+  const h = await nativeCheck(t, literal)
+  const wrapped = `/bin/zsh -lc '${literal}'`
+  const held = await h.mirror('quoted-before-start', { command: wrapped })
+  assert.equal(held.isError, true)
+  assert.match(held.content[0].text, /Start a check run/)
+  assert.match(await h.start('changed-quoting'), /^Recorded\./)
+  await h.mirror('changed-quoting', { command: literal.replace('"*.mjs; ? [ab]"', "'*.mjs; ? [ab]'") })
+  assert.match(await h.report('changed-quoting'), /observed command does not match one agreed check/)
+  assert.match(await h.start('quoted'), /^Recorded\./)
+  assert.equal((await h.mirror('quoted', { command: wrapped })).isError, false)
+  assert.match(await h.report('quoted'), /^Recorded\./)
+  assert.deepEqual(h.bot().reviewTrack.solver.passed, ['check-a'])
+
+  assert.deepEqual(accepted, [])
+})
+
+test('Ruling B round 2 requires an initial native directory with an absolute agreed target', async t => {
+  const agreed = stage6CommandIn(checkDirectory(t))
+  const h = await nativeCheck(t, agreed)
+  const file = join(checkDirectory(t), 'starting-cwd')
+  writeFileSync(file, 'A file cannot be the shell working directory.\n')
+  assert.match(await h.start('file-cwd'), /^Recorded\./)
+  const result = await h.mirror('file-cwd', { command: agreed, adjust: opened => {
+    opened.rawInput.cwd = file
+    opened._meta.terminal_info.cwd = file
+  } })
+  assert.equal(result.isError, false)
+  assert.match(await h.report('file-cwd'), /No verified passing evidence.*working directory could not be verified as the agreed directory/)
+  assert.deepEqual(h.bot().reviewTrack.solver.passed, [])
+})
+
 test('MISSING_PASS records the Codex ACP check on the original result', async t => {
   const h = await nativeCheck(t)
   assert.match(await h.start('unchanged'), /Recorded/)
