@@ -15,7 +15,7 @@ import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
 import { usageLimitOf } from './usage-limit.js'
-import { SONNET_PIN, sonnetWire } from './model-identity.js'
+import { sonnetWire } from './model-identity.js'
 import { observeTerminal } from './terminal-evidence.js'
 
 const STDERR_KEEP = 4000
@@ -366,11 +366,12 @@ export class AgentRun {
       ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
     }))
     this.sessionId = answer.sessionId
-    this.modelProofPrompted = false
     this.modelProof = undefined
     this.reportedModel = undefined
     if (answer.modes !== undefined && answer.modes !== null) this.modes = answer.modes
-    if (Array.isArray(answer.configOptions)) this.takeOptions(answer.configOptions, answer.models, modelStateOf(this.options))
+    if (Array.isArray(answer.configOptions) || answer.models) {
+      this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
+    }
     for (const tool of this.tools.values()) tool.permission?.answer(CANCELLED)
     this.tools.clear()
     this.turn.clear()
@@ -557,28 +558,28 @@ export class AgentRun {
   }
 
   takeOptions(options, models, fallback) {
-    this.reportedModel = optionOf(withModels(options, models), 'model')
+    const reported = optionOf(withModels(options, models), 'model')
+    // The legacy session model list can be separate from an effort option update.
+    if (reported || models !== undefined || !fallback || this.reportedModel?.id !== MODEL_STATE) this.reportedModel = reported
     this.options = withModels(options, models ?? fallback)
-    if (this.modelProof && !this.confirmsSonnet(this.modelProof.wire)) this.modelProof = undefined
+    if (this.modelProof && !this.confirmsModel(this.modelProof)) this.modelProof = undefined
   }
 
-  confirmsSonnet(wire) {
-    return this.reportedModel?.currentValue === wire && this.option('model')?.currentValue === wire
-      && sonnetWire(valuesOf(this.reportedModel)) === wire && sonnetWire(valuesOf(this.option('model'))) === wire
+  confirmsModel({ wire, sonnetPin }) {
+    const confirms = option => option?.currentValue === wire && (sonnetPin
+      ? sonnetWire(valuesOf(option)) === wire
+      : valuesOf(option).filter(choice => choice.value === wire).length === 1)
+    return confirms(this.reportedModel) && confirms(this.option('model'))
   }
 
-  bindSonnet(wire) {
-    if (wire !== undefined && this.confirmsSonnet(wire)) this.modelProof = { session: this.sessionId, wire }
+  bindModel(model, wire, sonnetPin) {
+    const proof = { session: this.sessionId, model, wire, sonnetPin }
+    if (wire !== undefined && this.confirmsModel(proof)) this.modelProof = proof
   }
 
-  effectiveClaudeModel({ answered = false } = {}) {
-    if (answered && !this.modelProofPrompted) return undefined
+  acknowledgedModel() {
     const proof = this.modelProof
-    if (proof && proof.session === this.sessionId && this.confirmsSonnet(proof.wire)) return SONNET_PIN
-    if (this.modelProofExpected) return undefined
-    const wire = this.reportedModel?.currentValue
-    // A raw alias remains an alias without a proof from the answering prompt.
-    if (wire !== SONNET_PIN && wire === this.option('model')?.currentValue) return wire
+    if (proof && proof.session === this.sessionId && this.confirmsModel(proof)) return proof.model
   }
 
   /** The agent's own option of `category` (`model`, `thought_level`), as it last said. */
@@ -607,8 +608,9 @@ export class AgentRun {
     if (option.id === MODEL_STATE) {
       // The session's own model list (`session/set_model`), for an agent with no model option.
       const params = { sessionId: this.sessionId, modelId: value }
+      let answer
       try {
-        await this.held(() => this.conn.setSessionModel(params), { signal, what: `taking its ${category}` })
+        answer = await this.held(() => this.conn.setSessionModel(params), { signal, what: `taking its ${category}` })
       } catch (error) {
         // A request nobody answered, or one the turn's Stop ended, goes up as it is: the turn
         // ends the session on it (adapter.js `abandoned`), which a wrapped error would hide.
@@ -618,13 +620,20 @@ export class AgentRun {
         const details = typeof error?.data?.details === 'string' && /^[\w .:-]{1,80}$/.test(error.data.details) ? ` (${error.data.details})` : ''
         throw new Error(`it could not switch to ${value}: ${error?.message ?? error}${details}`, { cause: error })
       }
-      this.options = this.options.map(other => (other.id === MODEL_STATE ? { ...other, currentValue: value } : other))
+      if (Array.isArray(answer?.configOptions) || answer?.models) {
+        this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
+      } else if (!this.reportedModel) {
+        this.options = this.options.map(other => (other.id === MODEL_STATE ? { ...other, currentValue: value } : other))
+      }
       return
     }
     const answer = await this.held(() => this.conn.setSessionConfigOption({ sessionId: this.sessionId, configId: option.id, value }), { signal, what: `taking its ${category}` })
     // The answer is the whole set: a new model may bring other efforts.
-    if (answer?.configOptions) this.takeOptions(answer.configOptions, undefined, modelStateOf(this.options))
-    else this.options = this.options.map(other => (other.id === option.id ? { ...other, currentValue: value } : other))
+    if (Array.isArray(answer?.configOptions) || answer?.models) {
+      this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
+    } else if (category !== 'model' || !this.reportedModel) {
+      this.options = this.options.map(other => (other.id === option.id ? { ...other, currentValue: value } : other))
+    }
   }
 
   async cancel() {
@@ -819,7 +828,9 @@ export class AgentRun {
         break
       }
       case 'config_option_update':
-        if (Array.isArray(update.configOptions)) this.takeOptions(update.configOptions, undefined, modelStateOf(this.options))
+        if (typeof sessionId === 'string' && sessionId === this.sessionId && (Array.isArray(update.configOptions) || update.models)) {
+          this.takeOptions(update.configOptions ?? [], update.models, modelStateOf(this.options))
+        }
         break
       case 'current_mode_update':
         if (this.modes) this.modes = { ...this.modes, currentModeId: update.currentModeId }

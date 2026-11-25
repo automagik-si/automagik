@@ -200,12 +200,12 @@ async function reviewReplyFixture(t, averageCommand = 'node --test average.test.
       solver_review: kind, solver_request: request, reply_to: 'me' })
     return deliveries.at(-1).message.exchangeId
   }
-  const answer = (exchangeId, shouldSend) => {
+  const answer = (exchangeId, shouldSend, model = reviewerModel.model) => {
     const input = h.agentOf('reviewer').message
     assert.equal(input.source.exchangeId, exchangeId)
     h.takeInput('reviewer', input)
     answerSender(h.rt, 'reviewer', { exchangeId, senderSessionId: 'solver' },
-      reviewShip, undefined, shouldSend, reviewerModel.model)
+      reviewShip, undefined, shouldSend, model)
     return deliveries.at(-1)
   }
   const track = () => h.rt.botOf('solver').reviewTrack
@@ -1728,7 +1728,7 @@ async function pickDialogModel(node, provider, label, withLevel) {
   return rows[0].props.title
 }
 
-function wireHost(t, home, acknowledgement = 'selected', configure) {
+function wireHost(t, home, acknowledgement = 'selected', configure, codexAcknowledgement = 'selected') {
   const traces = Object.fromEntries(['acp-claude', 'acp-codex'].map(provider => [provider, join(home, provider + '.jsonl')]))
   const connector = (provider, ack) => {
     const path = join(home, provider + '.mjs')
@@ -1737,7 +1737,7 @@ function wireHost(t, home, acknowledgement = 'selected', configure) {
   }
   const connectors = {
     '@agentclientprotocol/claude-agent-acp': connector('acp-claude', acknowledgement),
-    '@agentclientprotocol/codex-acp': connector('acp-codex', 'selected'),
+    '@agentclientprotocol/codex-acp': connector('acp-codex', codexAcknowledgement),
   }
   let adapter
   let serial = 0
@@ -2115,4 +2115,226 @@ test('New Solver host refuses an alias payload and the same concrete model acros
   assert.match(refusal.error.message, /Choose a different model for the reviewer/)
   assert.equal(h.rt.botOf(reviewer.id).model, original)
   assert.equal(h.rt.botOf(solver.id).model, configuredSolver)
+})
+
+async function pendingResultReview(t) {
+  const f = await reviewReplyFixture(t)
+  const { h, request, review, answer, openReply } = f
+  const planExchange = await review('plan')
+  h.finish('solver', 'Waiting for plan review.')
+  await openReply(3, answer(planExchange))
+  assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
+  assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+  // Give the RESULT a parent work item so a concurrently opened turn defers it.
+  h.rt.openWork('solver-work', { from: 'other', to: 'solver' })
+  h.rt.live.get('solver').info = { kind: 'bot', role: 'request', exchangeId: 'solver-work', senderSessionId: 'other' }
+  const exchange = await review('result')
+  assert.equal(h.rt.state.works[exchange].parent, 'solver-work')
+  h.finish('solver', 'Waiting for result review.')
+  return { ...f, exchange }
+}
+
+const modelWarningCount = message => message?.content.filter(block =>
+  block.type === 'text' && block.text.includes('The reviewer’s effective model could not be verified.')).length
+
+test('identity round 2 recovers the original RESULT at the first durable work closure', async t => {
+  const { h, exchange, answer } = await pendingResultReview(t)
+  const snapshot = mkdtempSync(join(tmpdir(), 'solver-first-closure-'))
+  t.after(() => rmSync(snapshot, { recursive: true, force: true, maxRetries: 5 }))
+  const decision = Promise.withResolvers()
+  const closed = Promise.withResolvers()
+  const gate = Promise.withResolvers()
+  const capabilities = h.rt.ensureCapabilities
+  h.rt.ensureCapabilities = async id => {
+    if (id === 'solver') await gate.promise
+    return capabilities(id)
+  }
+  const save = h.rt.save
+  h.rt.save = async options => {
+    if (options?.required && options.durable && h.rt.botOf('solver').reviewTrack.solver.review?.unverified === 'model') {
+      await decision.promise
+    }
+    const written = await save(options)
+    if (options?.durable && written) {
+      const state = readFileSync(join(h.home, 'state.json'), 'utf8')
+      if (!JSON.parse(state).works[exchange]) {
+        closed.resolve({ state, notes: readFileSync(join(h.home, 'inflight.json'), 'utf8') })
+      }
+    }
+    return written
+  }
+  const reply = answer(exchange, undefined, null)
+  // Allow a candidate that keeps the work open until the decision is durable to reach closure.
+  // On the parent, the earlier closure is allowed to reach disk while the decision is held.
+  if (h.rt.state.works[exchange]) decision.resolve()
+  const cut = await closed.promise
+  assert.notEqual(h.agentOf('solver').message?.source.exchangeId, reply.message.exchangeId)
+  decision.resolve()
+  gate.resolve()
+  assert.equal(await reply.sent, reply.message.exchangeId)
+  writeFileSync(join(snapshot, 'state.json'), cut.state)
+  writeFileSync(join(snapshot, 'inflight.json'), cut.notes)
+  const notes = Object.entries(JSON.parse(cut.notes).queued).flatMap(([destination, items]) =>
+    items.filter(({ args }) => args.replyTo === exchange).map(({ args }) => ({ destination, args })))
+  assert.equal(notes.length, 1, 'the first durable closure must already have exactly one recoverable RESULT')
+  const [{ destination, args }] = notes
+  assert.equal(destination, 'solver')
+  assert.equal(args.text, reviewShip)
+  assert.equal(args.reviewReply.receipt, JSON.parse(cut.state).bots.solver.reviewTrack.solver.review.receipt)
+
+  const next = fixture(t, snapshot)
+  const inputs = []
+  next.agentOf('solver').followup = message => inputs.push(message)
+  await next.rt.load()
+  const keepAlive = setInterval(() => {}, 1000)
+  try { await next.rt.resumesDone } finally { clearInterval(keepAlive) }
+  const recovered = inputs.filter(message => message.source.replyTo === exchange)
+  assert.equal(recovered.length, 1)
+  assert.equal(recovered[0].source.reviewReceipt, args.reviewReply.receipt)
+  assert.match(recovered[0].content[0].text, /Verdict: SHIP\nEvidence verified\./)
+  assert.equal(modelWarningCount(recovered[0]), 1)
+  await next.close()
+})
+
+test('identity round 2 keeps only the current RESULT warning on deferred hand-back', async t => {
+  for (const path of ['ordinary', 'update restart', 'replaced request']) {
+    await t.test(path, async t => {
+      const { h, request, exchange, answer } = await pendingResultReview(t)
+      const solver = h.agentOf('solver')
+      const reply = answer(exchange, undefined, null)
+      assert.equal(await reply.sent, reply.message.exchangeId)
+      const input = solver.message
+      assert.equal(modelWarningCount(input), 1)
+      h.event('solver', 'turn/start', { turn: 4 })
+      h.event('solver', 'user/message', { content: content('Other work.'), source: {
+        kind: 'bot', role: 'reply', senderSessionId: 'other', exchangeId: 'other-reply', work: 'other-work',
+      } })
+      h.takeInput('solver', input)
+      const deferred = h.rt.live.get('solver').later
+      assert.equal(deferred?.length, 1, 'the actual RESULT was deferred during other work')
+      assert.equal(deferred[0].text, reviewShip)
+      assert.ok(h.rt.live.get('solver').consumedResult)
+      const expected = path === 'replaced request' ? 0 : 1
+      let inputs = []
+      if (path === 'update restart') {
+        await h.rt.markUpdateStop(['solver'])
+        await h.close()
+        const next = fixture(t, h.home)
+        next.agentOf('solver').followup = message => inputs.push(message)
+        await next.rt.load()
+        const keepAlive = setInterval(() => {}, 1000)
+        try { await next.rt.resumesDone } finally { clearInterval(keepAlive) }
+        await next.close()
+      } else {
+        solver.followup = message => inputs.push(message)
+        if (path === 'replaced request') {
+          h.rt.reviewTurnEnd('solver', { request, completed: true, wroteText: true, model: solverModel.model })
+          assert.equal(await requestOf(h), undefined)
+          h.person('A new task has replaced the review.')
+          assert.notEqual(await requestOf(h), request)
+        }
+        h.event('solver', 'turn/end', { reason: { kind: 'interrupted' } })
+        await until(() => inputs.length > 0)
+      }
+      inputs = inputs.filter(message => message.source.replyTo === exchange)
+      assert.equal(inputs.length, 1)
+      assert.match(inputs[0].content[0].text, /Verdict: SHIP\nEvidence verified\./)
+      assert.equal(modelWarningCount(inputs[0]), expected, 'the hand-back must reconstruct only the current host warning')
+      if (path === 'replaced request') {
+        h.event('solver', 'turn/start', { turn: 5 })
+        h.takeInput('solver', inputs[0])
+        assert.equal(h.rt.live.get('solver').consumedResult, undefined)
+      }
+    })
+  }
+})
+
+test('identity round 2 trusts only the requested ACP model in the answering turn', async t => {
+  for (const [provider, model, acknowledgement, expected] of [
+    ['acp-codex', 'gpt-6-sol', 'echo-only', undefined],
+    ['acp-codex', 'gpt-6-sol', 'already-current', 'gpt-6-sol'],
+    ['acp-codex', 'gpt-6-sol', 'conflict', undefined],
+    ['acp-claude', 'claude-opus-5-5', 'different-concrete', undefined],
+    ['acp-claude', 'claude-sonnet-5-5', 'selected', 'claude-sonnet-5-5'],
+  ]) {
+    await t.test(`${provider}/${model}: ${acknowledgement}`, async t => {
+      const home = mkdtempSync(join(tmpdir(), 'solver-answering-acp-'))
+      t.after(() => rmSync(home, { recursive: true, force: true, maxRetries: 5 }))
+      const { h, adapter, wire } = wireHost(t, home, acknowledgement, undefined, acknowledgement)
+      const id = 'reviewer'
+      const session = h.agentOf(id).session
+      h.event(id, 'turn/start', { turn: 21 })
+      const messages = [{ role: 'user', content: content('Review this.') }]
+      const prompt = async () => {
+        let answer = ''
+        for await (const chunk of adapter.stream({ provider, model, sessionId: id, messages, signal: AbortSignal.timeout(5000) })) {
+          if (chunk.type === 'block-end') answer += chunk.block.text ?? ''
+        }
+        assert.equal(answer, reviewShip)
+      }
+      await prompt()
+      const current = wire(provider).find(row => row.method === 'session/prompt')
+      assert.ok(current)
+      const identity = turn => h.ctx.acpAgents.effectiveModelOf(id, provider, model, turn)
+      assert.equal(identity(21), expected, 'only a live acknowledgement of the requested pin can identify the answer')
+      if (expected) {
+        h.event(id, 'turn/start', { turn: 22 })
+        assert.equal(identity(22), undefined, 'a reused ACP session has not prompted this turn yet')
+        assert.equal(identity(21), undefined, 'starting a new turn retires the previous turn proof')
+        await prompt()
+        assert.equal(wire(provider).at(-1).sessionId, current.sessionId)
+        assert.equal(identity(22), expected)
+        adapter.noteEvent(session, { type: 'model/selection', data: { provider } })
+        assert.equal(identity(22), undefined)
+      }
+    })
+  }
+})
+
+async function checkCodexReviewerUpgrade(t, acknowledgement) {
+  const defaultRef = 'acp-codex/default'
+  const resolved = acknowledgement === 'own-model'
+  const seed = fixture(t)
+  t.after(() => rmSync(seed.home, { recursive: true, force: true, maxRetries: 5 }))
+  await seed.rt.load()
+  const kept = { exchangeId: 'old-exchange', reviewerId: 'reviewer', revision: 1, verdict: 'SHIP' }
+  const put = (id, fields) => seed.rt.state.bots[id] = { id, name: id, createdAt: 1, ...fields }
+  put('reviewer', { model: defaultRef, appliedModel: defaultRef, role: 'Reviewer' })
+  put('solver', { role: 'Solver', reviewerId: 'reviewer', reviewTrack: { requested: true, requestAt: 1,
+    verdicts: [], solver: { request: 'kept-request', origin: 'person', revision: 1, review: kept } } })
+  put('second', { role: 'Solver', reviewerId: 'reviewer' })
+  seed.rt.state.mainBotIds = ['solver']
+  await seed.rt.save({ required: true, durable: true })
+  await seed.close()
+
+  let available = false
+  const resolutions = []
+  const { h, selections } = wireHost(t, seed.home, 'selected', ctx => {
+    const resolve = ctx.acpAgents.resolveModelIdentity
+    ctx.acpAgents.resolveModelIdentity = async (...args) => {
+      resolutions.push(args)
+      return available ? resolve(...args) : { status: 'unavailable' }
+    }
+  }, acknowledgement)
+  await h.rt.load()
+  await h.rt.upgradeReviewerModels()
+  assert.equal(h.rt.botOf('reviewer').reviewerModelChoices, undefined)
+  available = true
+  resolutions.length = 0
+  await h.rt.upgradeReviewerModels()
+  await h.rt.upgradeReviewerModels()
+  const disk = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots
+  assert.equal(disk.reviewer.reviewerModelChoices?.[defaultRef], resolved ? 'applied' : 'unresolved',
+    'the supported Codex alias needs a durable disposition')
+  assert.deepEqual(resolutions, [['acp-codex', 'default']])
+  assert.equal(disk.reviewer.model, resolved ? configuredSolver : defaultRef)
+  assert.deepEqual(disk.solver.reviewTrack.solver.review, kept)
+  assert.deepEqual(selections, resolved ? [{ sessionId: 'reviewer', provider: 'acp-codex', model: 'gpt-6-sol' }] : [])
+  assert.equal(h.rt.solverStatusOf(h.rt.botOf('second')).solverStatus.reviewerModelChoice, resolved ? undefined : true)
+  await h.close()
+}
+
+test('identity round 2 disposes the Codex default once for a shared reviewer', async t => {
+  await t.test('provider Default remains unresolved', t => checkCodexReviewerUpgrade(t, 'selected'))
+  await t.test('host Default resolves from the live choice', t => checkCodexReviewerUpgrade(t, 'own-model'))
 })

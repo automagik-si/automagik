@@ -1008,8 +1008,10 @@ export function install(rt) {
     }
   }
 
-  const legacyAlias = ref => typeof ref === 'string'
-    && /^acp-claude\/(?:default|sonnet|opus|haiku|fable|[a-z0-9.-]+-latest)(?:plan)?(?:\[1m\])?$/.test(ref)
+  const legacyAlias = ref => {
+    const route = splitRef(ref)
+    return route?.provider.startsWith('acp-') && !concreteModel(route.provider, route.model)
+  }
   const disposition = (bot, alias) => bot.reviewerModelChoices?.[alias]
   function keepUpgrade(bot, alias, status) {
     bot.reviewerModelChoices = { ...bot.reviewerModelChoices, [alias]: status }

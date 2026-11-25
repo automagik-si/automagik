@@ -542,13 +542,12 @@ export function install(rt) {
       const at = Date.now()
       if (planVerdict !== undefined) current.planVerdictAt ??= at
       if (verdict !== undefined) current.verdicts = [...current.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
-      let reason
       if (reviewer) {
         const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
-        reason = recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt)
+        recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt)
       }
       bot.reviewTrack = current
-      if (reason && decision) return rt.save({ durable: true, required: true })
+      if (decision) return rt.save({ durable: true, required: true })
       save()
     }
     const apply = () => {
@@ -573,7 +572,7 @@ export function install(rt) {
     }
     // The send can await note adoption before the ledger append takes over the hold.
     return Object.assign(record, {
-      ...(decision ? { ready: decision.promise } : {}),
+      ...(decision ? { ready: decision.promise, recovery: binding } : {}),
       begin: exchangeId => currentRequest()
         ? rememberReply(bot, exchangeId, fromId, reply.replyTo, binding, false).release : undefined,
     })
@@ -688,8 +687,12 @@ export function install(rt) {
   }
 
   function resultReplyRequest(bot, track, binding) {
-    if (binding?.toId === bot?.id && typeof binding?.receipt === 'string'
-      && binding.replyTo === track?.solver?.review?.exchangeId) return requestOfReply(bot, track, binding)
+    const result = track?.solver?.review
+    if (result && binding?.toId === bot?.id && typeof binding?.receipt === 'string'
+      && binding.replyTo === result.exchangeId && result.revision === track.solver.revision
+      && (result.receipt === binding.receipt || (result.receipt === undefined && ['SHIP', 'FIX-FIRST', 'BLOCKED'].includes(result.verdict)))) {
+      return requestOfReply(bot, track, binding)
+    }
   }
 
   function withReviewFeedback(message, toId, continuation) {
@@ -776,7 +779,9 @@ export function install(rt) {
     }
     bot.reviewTrack = track
     const review = reviewOf(bot)
-    const works = Object.values(rt.state?.works ?? {})
+    // An answered RESULT is held by its unread receipt while work closure waits
+    // for disk. The open-work check covers work that still owes an answer.
+    const works = Object.values(rt.state?.works ?? {}).filter(work => !rt.reviewWorkClosing?.(work))
     const beforePerson = at => typeof track.personAt === 'number' && typeof at === 'number' && at < track.personAt
     if (review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && !beforePerson(work.at))) return
     if (review === 'bot' && [...(unreadReplies(bot)?.values() ?? [])].some(reply =>

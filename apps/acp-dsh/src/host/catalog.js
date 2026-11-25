@@ -67,14 +67,16 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
   const start = run.startModel
   const models = valuesOf(modelOption).map(choice => ({ id: choice.value, name: choice.name || choice.value, ...(choice.description ? { description: choice.description } : {}), probed: false }))
   const own = models.find(model => model.id === start)
-  if (!models.some(model => model.id === DEFAULT_MODEL)) {
+  const syntheticDefault = !models.some(model => model.id === DEFAULT_MODEL)
+  if (syntheticDefault) {
     models.unshift({ id: DEFAULT_MODEL, name: defaultName, description: own ? `Its own setting: ${own.name}` : 'Its own setting', reasoning: startEffort, probed: true })
   }
   for (const model of models) {
     if (model.id === start) Object.assign(model, { reasoning: startEffort, probed: true })
   }
   // The model the agent itself starts on: what DSH's `default` is for it (adapter.js nativeKept).
-  const state = { models, offered: true, complete: false, start: typeof start === 'string' ? start : null }
+  const state = { models, offered: true, complete: false, start: typeof start === 'string' ? start : null,
+    ...(syntheticDefault && own ? { defaultModel: start } : {}) }
   seen(state)
   for (const model of models) {
     if (model.probed) continue
@@ -92,7 +94,7 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
 
 /**
  * @typedef {{ id: string, name: string, description?: string, reasoning?: { efforts: { id: string, name: string, description?: string }[], defaultEffort?: string }, probed?: boolean }} CatalogModel
- * @typedef {{ models: CatalogModel[], complete: boolean, start?: string | null }} CatalogState
+ * @typedef {{ models: CatalogModel[], complete: boolean, start?: string | null, defaultModel?: string }} CatalogState
  */
 
 const isText = value => typeof value === 'string' && value.length > 0
@@ -281,7 +283,7 @@ export class Catalog {
           if (!current()) return
           // readCatalog mutates its state as efforts arrive. Retired reads own no live data.
           this.live = structuredClone(state)
-          this.identityListing = { key, models: state.offered ? this.live.models : [] }
+          this.identityListing = { key, defaultModel: state.defaultModel, models: state.offered ? this.live.models : [] }
           listed()
           if (first || state.complete) this.changed()
           first = false
@@ -327,6 +329,10 @@ export class Catalog {
   identityModels() {
     const listing = this.identityListing
     return listing && listing.key === this.spec.key() ? listing.models : undefined
+  }
+
+  identityDefault() {
+    if (this.identityModels() !== undefined) return this.identityListing.defaultModel
   }
 
   async probeIdentityModels() {

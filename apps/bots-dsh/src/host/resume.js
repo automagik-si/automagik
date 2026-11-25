@@ -575,8 +575,15 @@ export function install(rt) {
   }
   const matchesContinuation = (id, message, args) => {
     const source = message?.source
-    if (args?.role !== 'resume' || rt.chatOwners.get(id) !== args.toId
+    if (!args?.consumedResult || rt.chatOwners.get(id) !== args.toId
       || source?.kind !== SOURCE_KIND || source.exchangeId !== args.exchangeId) return false
+    if (args.role === 'reply') {
+      const binding = args.consumedResult
+      return args.deferred === true && source.deferred === true && source.role === 'reply'
+        && source.senderSessionId === binding.reviewerId && source.replyTo === binding.replyTo
+        && source.reviewReceipt === binding.receipt
+    }
+    if (args.role !== 'resume') return false
     if (typeof args.reviewContinuation === 'string') return source.reviewContinuation === args.reviewContinuation
     return source.role === 'resume' && source.resumed === true && source.resumedByUpdate === args.resumedByUpdate
       && typeof args.resumeMessageId === 'string' && message.id === args.resumeMessageId
@@ -603,7 +610,7 @@ export function install(rt) {
       exchangeId: message.source.exchangeId, text: textOf(originalReviewContent(message)), consumedResult: binding })
   rt.takeReviewContinuation = (id, message) => {
     const args = reviewInputNote(message?.source?.exchangeId)
-    if (!args?.consumedResult || args.resumeMessageId !== message.id || !matchesContinuation(id, message, args)
+    if (!args?.consumedResult || (args.role === 'resume' && args.resumeMessageId !== message.id) || !matchesContinuation(id, message, args)
       || !matchesContinuation(id, claims.get(id)?.get(message.id), args)) return
     const binding = args.consumedResult
     const valid = binding.toId === args.toId && rt.resultReplyRequest?.(binding)
@@ -621,13 +628,19 @@ export function install(rt) {
       if (adoption !== undefined) await adoption
       const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
       const record = options?.onReplyRecorded
-      // A RESULT whose decision is deferred must not be replayable before that decision
-      // is durable. The delivery still joins its reply batch before waiting.
+      // The batch waits for the durable RESULT decision before recording its recoverable reply.
+      // Work can close once both writes have landed.
       if (record?.ready) {
+        const close = options.closeReviewWork
+        let notedReply = false
         options = { ...options, onReplyRecorded: Object.assign(exchangeId => {
-          noteDelivery(sessionId, noted)
+          noteDelivery(sessionId, close ? { ...noted, durableResult: true, reviewReply: record.recovery } : noted)
+          notedReply = true
           return record(exchangeId)
-        }, { ready: record.ready }) }
+        }, { ready: record.ready }), ...(close ? { closeReviewWork: async () => {
+          if (!notedReply || !await persist(true)) throw new Error('The reviewer reply could not be saved.')
+          close()
+        } } : {}) }
       } else noteDelivery(sessionId, noted)
       const sent = await deliver(noted, options)
       if (noted.reviewReceipt !== undefined && sent === undefined) rt.retireReviewReply?.(noted.toId, noted.exchangeId)
@@ -866,11 +879,12 @@ export function install(rt) {
   }
 
   async function handBackResults(id, record, ownsTeam) {
-    const sent = await Promise.all((record.later ?? []).map(({ info, text }) => {
+    const sent = await Promise.all((record.later ?? []).map(({ info, text, consumedResult }) => {
       if (!ownsTeam()) return false
       return handBack(id, record, {
         fromId: info.senderSessionId, toId: record.botId, text, role: info.role, exchangeId: info.exchangeId,
         replyTo: info.replyTo, work: info.work, ...(info.roomId ? { roomId: info.roomId } : {}),
+        ...(consumedResult ? { consumedResult } : {}),
         deferred: true,
       }, ownsTeam)
     }))
@@ -1503,6 +1517,16 @@ export function install(rt) {
     const seen = new Set()
     for (const item of notes) {
       const { args, oldId } = item
+      // The reply may have reached disk just before its work closed. Settle that
+      // work before considering the old reviewer's turn or waking the reply.
+      if (ownsTeam() && args.durableResult === true && args.role === 'reply' && typeof args.reviewReceipt === 'string'
+        && args.reviewReply?.receipt === args.reviewReceipt) {
+        const work = rt.state?.works?.[args.replyTo]
+        if (work && work.from === args.toId && work.to === args.fromId && work.at === args.reviewReply.workAt
+          && work.room === undefined && work.fromRoom === undefined) {
+          rt.closeWork?.(args.replyTo, rt.botOf(args.fromId)?.name ?? 'The other Bot', args.text)
+        }
+      }
       if (pendingBack.has(args.exchangeId) || (liveClaims && !liveClaims.has(args.exchangeId))) continue
       if (taken?.has(args.exchangeId)) recovery?.resumed('delivery', args.exchangeId)
       if (args.wake === true && rt.wakeLog?.accountsFor(args.exchangeId)) continue

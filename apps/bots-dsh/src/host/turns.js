@@ -99,6 +99,8 @@ export function turnFailure(error) {
 
 export const failureLine = failure => `${failure.code}${failure.status ? ` ${failure.status}` : ''}${failure.message ? `: ${failure.message.slice(0, 200)}` : ''}`
 
+const closingReviews = new WeakSet()
+
 // The reply a sender waits for, sent the way a finished turn sends it: the work it was
 // for closes, and the answer goes up to the Bot that asked. `id` is the Session the
 // answer comes from; `source` is the trigger the turn answered.
@@ -109,6 +111,7 @@ export function answerSender(rt, id, source, text, long, shouldSend, model) {
   // When the work this answers was opened, read before closeWork deletes it: a Solver's review
   // mark counts a verdict only for work its current request opened (review-mark.js).
   const answered = rt.state?.works?.[source.exchangeId]
+  if (closingReviews.has(answered)) return
   const exchangeId = randomUUID()
   const request = source.senderRoomId === undefined
     ? rt.designatedReplyRequest?.(source.senderSessionId, fromId, source.exchangeId, answered) : undefined
@@ -118,10 +121,22 @@ export function answerSender(rt, id, source, text, long, shouldSend, model) {
     ? { exchangeId, replyTo: source.exchangeId, reviewReceipt } : undefined
   // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
   const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply, reply === undefined ? undefined : model)
-  const work = rt.closeWork?.(source.exchangeId, name, text)
+  const durableResult = onReplyRecorded?.ready !== undefined
+  if (durableResult) closingReviews.add(answered)
+  const generation = rt.teamGeneration?.()
+  let closed = false
+  const close = () => {
+    if (durableResult && (rt.sameTeam?.(generation) === false || rt.state?.works?.[source.exchangeId] !== answered)) {
+      throw new Error('The reviewer work changed before its reply was saved.')
+    }
+    const parent = rt.closeWork?.(source.exchangeId, name, text)
+    closed = true
+    return parent
+  }
+  const work = durableResult ? answered.parent : close()
   // A reply that arrives after the user gave up the wait is a late answer: it closes
   // nothing, opens nothing, and says on it that the wait was already over.
-  const late = work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
+  const late = !durableResult && work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
   const marker = late === undefined ? '' : LATE_ANSWER
   const body = marker === '' ? (long?.text ?? text) : `${marker}${long?.text ?? text}`
   const length = long === undefined ? undefined : late === undefined ? long.length : (long.length ?? text.length) + marker.length
@@ -136,9 +151,13 @@ export function answerSender(rt, id, source, text, long, shouldSend, model) {
     exchangeId,
     ...(reviewReceipt ? { reviewReceipt } : {}),
     ...(work ? { work } : {}),
-  }, { shouldSend, onReplyRecorded }).catch((error) => {
+  }, { shouldSend, onReplyRecorded, ...(durableResult ? { closeReviewWork: close } : {}) }).then(sent => {
+    if (sent === undefined && durableResult && !closed) closingReviews.delete(answered)
+  }).catch((error) => {
+    if (durableResult && !closed) closingReviews.delete(answered)
     if (shouldSend?.() === false) return
     rt.warn('omni-ui: reply delivery failed: %s', error)
+    if (!closed) return
     // The reply never reached the asker: its note goes — the notice below carries
     // what it answered — the result kept with the work is marked, and the failure
     // reaches the asker the way the reply would have, so the work goes on and its
@@ -264,6 +283,7 @@ export const promisesWork = text => typeof text === 'string' && text.trim().leng
 
 export function install(rt) {
   const { ctx, state } = rt
+  rt.reviewWorkClosing = work => closingReviews.has(work)
   rt.turnCutSnapshot = (id) => {
     const entry = rt.live.get(id)
     return { info: entry?.info, joined: entry?.joined ?? [], later: entry?.later ?? [] }
@@ -957,12 +977,14 @@ export function install(rt) {
         break
       case 'user/message': {
         const source = event.data?.source
+        let consumedResult
         // A batch can include the review reply after the turn's first input.
         if (entry.turn !== undefined && source?.kind === SOURCE_KIND) {
           const turn = entry.turn === RECOVERED_TURN ? entry.adoptedTurn : entry.turn
           const review = source.role === 'reply' && turn !== undefined ? rt.takeReviewReply?.(id, event.data, turn) : undefined
           entry.reviewReplyRequest = review?.request ?? entry.reviewReplyRequest
-          entry.consumedResult = review?.consumedResult ?? rt.takeReviewContinuation?.(id, event.data) ?? entry.consumedResult
+          consumedResult = review?.consumedResult ?? rt.takeReviewContinuation?.(id, event.data)
+          entry.consumedResult = consumedResult ?? entry.consumedResult
         }
         if (source?.kind === 'subagent-settled' || source?.kind === 'agent-message') {
           if (typeof source.senderSessionId === 'string') {
@@ -1058,7 +1080,10 @@ export function install(rt) {
           else if (source.work !== undefined && source.work !== rt.workOf?.(entry.info) && !expectsReply(source)) {
             // A result for other work than this turn's informs it, and comes back in a
             // turn of its own once this one ends, which goes on with that work.
-            entry.later = [...(entry.later ?? []), { info: source, text: textOf(originalReviewContent(event.data)).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '') }]
+            entry.later = [...(entry.later ?? []), {
+              info: source, text: textOf(originalReviewContent(event.data)).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, ''),
+              ...(consumedResult ? { consumedResult } : {}),
+            }]
           } else if ((expectsReply(source) || source.role === 'room') && !answersUser(source)
             && source.exchangeId !== entry.info?.exchangeId
             && !(entry.joined ?? []).some(joined => joined.info.exchangeId === source.exchangeId)) {
@@ -1223,6 +1248,7 @@ export function install(rt) {
         const wroteText = entry.texts.length > 0
         const shown = entry.shown > 0 || (info?.retried === true && promisedOpenings.delete(info.exchangeId))
         const { lastText, lastCalled } = entry
+        const answeringTurn = event.data?.turn ?? entry.adoptedTurn ?? entry.turn
         const toolCount = entry.toolCount ?? 0
         const suppressedSubagent = entry.suppressedSubagent === true
         // A turn stopped for a switch goes on in the next part, which answers instead.
@@ -1270,6 +1296,7 @@ export function install(rt) {
             replyTo: result.info.replyTo,
             work: result.info.work,
             ...(result.info.roomId ? { roomId: result.info.roomId } : {}),
+            ...(result.consumedResult ? { consumedResult: result.consumedResult } : {}),
             deferred: true,
           }).catch(error => rt.warn('omni-ui: handing back a result failed: %s', error))
         }
@@ -1318,6 +1345,8 @@ export function install(rt) {
         const retry = (wroteCall || promisedOnly) && info?.retried !== true && !(info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))
         // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
         const model = reason?.kind === 'completed' ? modelOf(rt, undefined, session) : undefined
+        const answerModel = reason?.kind === 'completed'
+          ? modelOf(rt, undefined, session, typeof answeringTurn === 'number' ? answeringTurn : null) : undefined
         if (owner !== undefined && !retry) {
           const request = entry.reviewReplyRequest ?? (info === undefined || info.role === 'continue' ? entry.solverRequest : undefined)
           const mark = request => rt.reviewTurnEnd?.(owner, {
@@ -1357,7 +1386,7 @@ export function install(rt) {
           } else if (reply !== '' || reason?.kind === 'aborted') {
             // A turn stopped before it could answer still owes the sender a line,
             // or it would wait forever for a reply that never comes.
-            tellSender(id, source, reply !== '' ? reply : `${name} was stopped before it could answer your message.`, undefined, model)
+            tellSender(id, source, reply !== '' ? reply : `${name} was stopped before it could answer your message.`, undefined, answerModel)
           }
         }
         // Work a Bot asked for, also when what came back for it opens the turn: while
@@ -1371,9 +1400,9 @@ export function install(rt) {
           if (rt.waitsWork(work)) return rt.holdWork(work, reply)
           // With what came back, the answer may pass what one message carries.
           const text = rt.answerText(work, reply, name)
-          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text, undefined, model)
+          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text, undefined, answerModel)
           void rt.attachLong(text, `Answer from ${name}.txt`)
-            .then(long => tellSender(id, asker, text, long, model))
+            .then(long => tellSender(id, asker, text, long, answerModel))
             .catch(error => rt.warn('omni-ui: answer from %s not sent: %s', name, error))
         }
         // A retried turn answers the same waiter or sender, so this one passes nothing on.

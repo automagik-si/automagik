@@ -117,14 +117,14 @@ export function resultSnapshot(folder) {
   }
 }
 
-export function modelOf(rt, agent, session = agent?.session) {
+export function modelOf(rt, agent, session = agent?.session, answeringTurn) {
   // Only the generation's route and the ACP option the live agent actually selected.
   try {
     const route = readableRoute(session?.requestHeader?.()?.config)
     if (!route) return undefined
     const acp = route.provider.startsWith('acp-')
     const model = acp
-      ? rt.ctx.get?.('acpAgents')?.effectiveModelOf?.(session?.id ?? agent?.id, route.provider, route.model) : route.model
+      ? rt.ctx.get?.('acpAgents')?.effectiveModelOf?.(session?.id ?? agent?.id, route.provider, route.model, answeringTurn) : route.model
     return concreteModel(route.provider, model)
   } catch {
     return undefined
@@ -184,7 +184,8 @@ export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, mod
       ...designated,
       verdict: reason ? 'unverified' : verdict,
       ...(independent ? { reviewer: { id: reviewer.id, name: reviewer.name, model } } : {}),
-      ...(reason ? { unverified: reason, ...(receipt ? { receipt } : {}) } : {}),
+      ...(reason ? { unverified: reason } : {}),
+      ...(receipt ? { receipt } : {}),
     }
     return reason
   } else if (result?.verdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict)) {
