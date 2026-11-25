@@ -199,10 +199,14 @@ test('the wide bar row carries the reason, and the dead missing-preview line is 
   const team = { ...roster, bots: [pip, missing], byId: { pip, missing } }
   const rows = sidebar({ team }).teamRows()
   // The bar draws its rows through TeamRows; call it as React would.
-  const list = rows.type(rows.props)
+  const bots = rows.props.team.bots.map(bot => bot.id === 'omni' ? { ...bot, roleTag: 'Maintainer', unread: true } : bot)
+  const list = rows.type({ ...rows.props, team: { ...rows.props.team, bots } })
   const [row] = find(list, node => node.type === 'button' && node.props?.['data-id'] === 'omni')
-  assert.match(row.props['aria-label'], /Not installed/)
-  assert.match(row.props['aria-label'], /plugin is missing/)
+  assert.equal(row.props['aria-label'], undefined, 'keep the accessible name from the row contents')
+  assert.equal(row.props['aria-description'], missing.reason)
+  for (const word of ['Omni', 'Maintainer', 'Unread activity']) {
+    assert.ok(find(row, node => node.props?.children?.includes(word)).length > 0, word)
+  }
   // The mark's own title says why too, where a pointer or a reader arrives at it.
   const [status] = find(row, node => node.type?.name === 'Status')
   assert.equal(status.type(status.props).props.title, `Not installed · ${missing.reason}`)

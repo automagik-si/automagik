@@ -282,12 +282,10 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
         'aria-disabled': true,
         title: t('This Bot is on {machine}. It opens here once the link to that computer is scoped.', { machine: row.bot.machine }),
       } : null
-      // A crew Bot whose plugin is missing, switched off or did not load cannot run
-      // (installed.js in the host). The mark says its word; the row's accessible name and the
-      // mark's title say why, so a wide row exposes the reason as the narrow one does.
+      // Keep the button's name from its contents (including role and unread activity).
+      // The missing plugin's reason describes the row and remains on the status mark.
       const reason = row.bot?.installed === false && typeof row.bot.reason === 'string' ? hostText(row.bot.reason) : ''
-      const says = reason === '' ? null : { 'aria-label': [row.name, t('Not installed'), reason].join(' · ') }
-      return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), { ...extra, ...says },
+      return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), { ...extra, 'aria-description': reason || undefined },
         h('span', { className: 'lb-art' }, renderArt(row.bot, art, state)),
         h('span', { className: 'lb-name' }, row.name),
         tag ? h('span', { className: 'bt-tag' }, tag) : null,

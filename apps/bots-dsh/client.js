@@ -26783,11 +26783,10 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
         title: t("This Bot is on {machine}. It opens here once the link to that computer is scoped.", { machine: row2.bot.machine })
       } : null;
       const reason = row2.bot?.installed === false && typeof row2.bot.reason === "string" ? hostText(row2.bot.reason) : "";
-      const says = reason === "" ? null : { "aria-label": [row2.name, t("Not installed"), reason].join(" · ") };
       return button2(
         row2,
         classes(row2.unread && "lb-row-unread", row2.status === "off" && "lb-row-off"),
-        { ...extra, ...says },
+        { ...extra, "aria-description": reason || void 0 },
         (0, import_react58.createElement)("span", { className: "lb-art" }, renderArt2(row2.bot, art, state2)),
         (0, import_react58.createElement)("span", { className: "lb-name" }, row2.name),
         tag ? (0, import_react58.createElement)("span", { className: "bt-tag" }, tag) : null,
@@ -29536,7 +29535,7 @@ function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus, useSe
       title: away ? name : void 0,
       onClick: () => away ? selectView("chat") : memoryNotice ? actions.openMemory(changed) : actions.toggleDetails(sessionId)
     },
-    bot ? (0, import_react64.createElement)(BotAvatar, { bot, size: 24, state: botState(running2, doing, roster.questions?.[currentPart(bot)] !== void 0 || approval), badge: false }) : room2 ? (0, import_react64.createElement)(RoomAvatar, { room: room2, roster, size: 24 }) : null,
+    bot ? (0, import_react64.createElement)(BotAvatar, { bot, size: 24, state: botState(running2, doing, roster.questions?.[currentPart(bot)] !== void 0 || approval, { installed: bot.installed }), badge: false }) : room2 ? (0, import_react64.createElement)(RoomAvatar, { room: room2, roster, size: 24 }) : null,
     goalShown ? (0, import_react64.createElement)(
       "span",
       { className: "bt-pill-swap" },
