@@ -299,6 +299,8 @@ function sessionLedger(session) {
   for (; state.seq < session.seq; state.seq++) {
     const event = session.eventAt(state.seq)
     if (event === undefined) {
+      // Match only the legacy inputs and refusal notices seen together before the gap.
+      if (state.batch) rememberRefusedInputs(state)
       // A missing event breaks turn and step continuity. Keep confirmed history,
       // while waiting for a recorded turn start before admitting fresh deliveries.
       state.incompleteTurn = true

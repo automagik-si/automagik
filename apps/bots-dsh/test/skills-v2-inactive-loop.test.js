@@ -385,11 +385,19 @@ test('owner exception group: a manual Add cannot reopen a recorded refusal', { t
   assert.doesNotMatch(archived, /mint-fixture|is not active on this Bot/)
 })
 
-test('owner exception handoff: a new part carries only the ordinary legacy history', { timeout: 15_000 }, async t => {
+async function checkLegacyHandoff(t, { sparse = false } = {}) {
   const f = await fixture(t, 'acp-codex')
   const { agent } = f
   const fresh = await f.secondAgent()
   appendLegacyRefusal(agent.session, { provider: 'acp-codex', model: 'default' })
+  if (sparse) {
+    const read = agent.session.eventAt
+    t.mock.method(agent.session, 'eventAt', function (seq) {
+      const event = read.call(this, seq)
+      if (event?.type === 'assistant/message' && event.data?.message?.content?.some(part => part.text === replyText)) return undefined
+      return event
+    })
+  }
   const ctx = fakeContext()
   ctx.sessions = { flush: async () => {} }
   ctx.workspaceRegistry = { archiveSession: async () => {} }
@@ -425,7 +433,12 @@ test('owner exception handoff: a new part carries only the ordinary legacy histo
   for (const text of [ordinaryText, nativeText, replyText]) assert.ok(wire.includes(text), wire)
   assert.ok(agent.session.deriveMessages().some(row => row.content.some(part => part.text === rawText)))
   assert.doesNotMatch(wire, new RegExp(`${refusedName}|is not active on this Bot|under Skills`))
-})
+}
+
+test('owner exception handoff: a new part carries only the ordinary legacy history', { timeout: 15_000 }, checkLegacyHandoff)
+
+test('owner exception handoff: preserves a recorded refusal before a missing assistant event', { timeout: 15_000 },
+  t => checkLegacyHandoff(t, { sparse: true }))
 
 test('round 2 replay: a cold ACP request projects a matching parent-format refusal', { timeout: 15_000 }, async t => {
   const f = await fixture(t, 'acp-claude')
