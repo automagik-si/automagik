@@ -750,6 +750,8 @@ export function install(rt) {
     return { used, pendingSelection: pending }
   }
   async function storedRoute(sessionId) {
+    // undefined means the store confirms there is no log or the log has no events.
+    // null means the route could not be read.
     // bots-dsh does not inject sessionPersistence: in real cordis a sibling plugin's
     // service throws on a property read but is readable through ctx.get.
     let handle
@@ -759,11 +761,13 @@ export function install(rt) {
       handle = await persistence.open(sessionId, 'read')
       if (typeof handle?.read !== 'function') return null
       const { events } = await handle.read()
+      if (!Array.isArray(events)) return null
+      if (events.length === 0) return undefined
       const { used, pendingSelection } = events.reduce(storedRouteEvent, {})
       if (used === null || pendingSelection === null || (used === undefined && pendingSelection === undefined)) return null
       return pendingSelection === undefined ? used : { ...used, pendingSelection }
-    } catch {
-      return null
+    } catch (error) {
+      return error?.name === 'SessionPersistenceNotFoundError' && error.sessionId === sessionId ? undefined : null
     } finally {
       try { await handle?.close?.() } catch {}
     }
@@ -786,7 +790,9 @@ export function install(rt) {
     } catch { return 'unreadable' }
     const stored = await storedRoute(sessionId)
     const route = readableRoute(stored)
-    return stored === null ? 'unreadable' : route?.provider === 'hermes-remote'
+    if (route) return route.provider === 'hermes-remote'
+    // A valid selection before the first request confirms there is no carried route yet.
+    return readableRoute(stored?.pendingSelection) ? false : 'unreadable'
   }
 
   const unreadableRouteMessage = bot => `${bot.name} could not switch because its current Session route could not be read.`
