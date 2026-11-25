@@ -614,6 +614,11 @@ export function install(rt) {
     }
   }
 
+  function handoffRedactor() {
+    rt.loadSecrets?.()
+    return rt.connectorDiagnosticRedactor?.() ?? credentialShapes
+  }
+
   // What a fresh part carries of the part that ends, read newest first: the latest
   // messages word for word, and before them, in the Bot's own chat, every message to
   // the Bot (from the user or another Bot) as an anchored list. A group turn message
@@ -630,10 +635,9 @@ export function install(rt) {
     // A carried line's own line breaks are indented, so no text in it starts at column 0 and
     // reads as the package's own structure (a heading, a stamp, a closing line).
     const indent = text => text.replace(/\r?\n/g, '\n  ')
+    const projectInput = legacySkillHistory(session)
+    const mask = handoffRedactor()
     try {
-      const projectInput = legacySkillHistory(session)
-      rt.loadSecrets?.()
-      const mask = rt.connectorDiagnosticRedactor?.() ?? credentialShapes
       for await (const line of partLines(session.id, AbortSignal.timeout(HANDOFF_READ_MS), { group, pages: Infinity, projectInput })) {
         const masked = maskLine(line.text, mask)
         const lookup = `read_own_chat around "part ${number} #${line.seq}" shows all of it`
@@ -665,7 +669,7 @@ export function install(rt) {
       rt.warn('omni-ui: reading %s for its handoff stopped early: %s', session.id, error)
     }
     // `whole`: every message of the part is in `recent`.
-    return { recent: recent.reverse(), earlier: earlier.reverse(), unlisted, complete, whole: complete && !full }
+    return { recent: recent.reverse(), earlier: earlier.reverse(), unlisted, complete, whole: complete && !full, mask }
   }
 
   // The note's sections, in order. A note without all of them is not used.
@@ -2762,13 +2766,15 @@ export function install(rt) {
       // The deny list lands before the part can be reached; it reads the Bot it is given.
       await rt.applyToolDeny(bot, [freshId])
         .catch(error => rt.warn('ds-bot: tool deny for the fresh part of %s not applied: %s', name, error?.message ?? error))
+      // Paging or setup can change the mask. A clipped excerpt may hold only part of a saved value.
+      const excerpts = handoffRedactor() === carried.mask ? carried : { ...carried, recent: [], earlier: [] }
       const segment = { ...noted, switchedTo: job.target }
       const redact = redactorFor(ctx)
       const build = lines => redact(handoffPackage({
         room, segment, lines, number: number + 1, resume, folder,
         crossing: { from: agentNameOf(job.crossing.from), to: agentNameOf(job.target), group: room !== undefined },
       }))
-      const text = routeOfRef(job.target).route === 'acp' ? capForAcp(build, carried) : build(carried)
+      const text = routeOfRef(job.target).route === 'acp' ? capForAcp(build, excerpts) : build(excerpts)
       freshParts.set(freshId, estimateTokens(text))
       // Prepending the handoff does not wake the fresh part.
       const message = createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) })

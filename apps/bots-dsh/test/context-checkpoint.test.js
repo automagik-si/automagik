@@ -1484,15 +1484,9 @@ test('explicit crossings with history move to a new part with a handoff, their c
   })
 })
 
-test('AD-1 masks both handoff excerpts and subsequent history when the agent writes no summary', async t => {
+async function redactedHandoff(t, { changeDuringSetup = false } = {}) {
   const b = await switchBench({ perNode: 10, model: 'acp-codex/default' })
-  const home = mkdtempSync(join(tmpdir(), 'handoff-redaction-'))
-  const historyContext = fakeContext()
-  t.after(async () => {
-    await b.stop()
-    await historyContext.dispose()
-    rmSync(home, { recursive: true, force: true })
-  })
+  t.after(b.stop)
 
   const oldPiece = 'OldHandoffFixture'
   const newPiece = 'NewHandoffFixture'
@@ -1500,8 +1494,14 @@ test('AD-1 masks both handoff excerpts and subsequent history when the agent wri
   const oldValue = `VALUE${oldPiece.repeat(40)}END`
   const newValue = `VALUE${newPiece.repeat(300)}END`
   const mask = redactor([{ name: 'OLD', value: oldValue }, { name: 'NEW', value: newValue }])
-  b.rt.connectorDiagnosticRedactor = () => mask
-  b.ctx.provide('omniTeam', { redactSecrets: mask })
+  let savedMask = changeDuringSetup ? undefined : mask
+  let loadedMask = savedMask
+  b.rt.connectorDiagnosticRedactor = () => loadedMask
+  b.rt.loadSecrets = () => { loadedMask = savedMask }
+  b.ctx.provide('omniTeam', { redactSecrets: text => savedMask?.(text) ?? text })
+  if (changeDuringSetup) {
+    b.rt.applyToolDeny = async () => { savedMask = mask }
+  }
   b.bot.contextRecentTokens = 1000
   b.rt.config.crossingNoteTimeoutMs = 20
   b.rt.resolveModel = async ref => ref
@@ -1526,12 +1526,23 @@ test('AD-1 masks both handoff excerpts and subsequent history when the agent wri
   const handoff = fresh.snapshotEvents().find(event =>
     event.type === 'user/message' && event.data.source?.handoff)
   assert.ok(handoff, 'the fresh Session received the handoff')
-  const [earlier, latest] = textOf(handoff.data.content).split('## Latest messages (oldest first)')
+  return { b, fresh, text: textOf(handoff.data.content), oldPiece, newPiece, shapePiece }
+}
+
+test('AD-1 masks both handoff excerpts and subsequent history when the agent writes no summary', async t => {
+  const { b, fresh, text, oldPiece, newPiece, shapePiece } = await redactedHandoff(t)
+  const [earlier, latest] = text.split('## Latest messages (oldest first)')
   assert.match(earlier, /## Messages to you in part 1/)
   assert.match(earlier, /earlier-marker/)
   assert.match(earlier, /shape-marker/)
   assert.match(latest, /latest-marker/)
 
+  const home = mkdtempSync(join(tmpdir(), 'handoff-redaction-'))
+  const historyContext = fakeContext()
+  t.after(async () => {
+    await historyContext.dispose()
+    rmSync(home, { recursive: true, force: true })
+  })
   historyContext.sessionController = {
     async page({ address, throughSeq }) {
       const events = b.sessions.get(address.sessionId).snapshotEvents()
@@ -1564,6 +1575,22 @@ test('AD-1 masks both handoff excerpts and subsequent history when the agent wri
   assert.match(earlier, /earlier-marker \[secret:OLD\] earlier-tail/)
   assert.match(earlier, /\[hidden\] ok/)
   assert.match(latest, /latest-marker \[secret:NEW\] latest-tail/)
+})
+
+test('AD-1 drops both stale handoff excerpts when the redactor changes during fresh Session setup', async t => {
+  const { text, oldPiece, newPiece } = await redactedHandoff(t, { changeDuringSetup: true })
+  assert.deepEqual({
+    earlierExcerptLeaks: text.includes(oldPiece),
+    latestExcerptLeaks: text.includes(newPiece),
+  }, {
+    earlierExcerptLeaks: false,
+    latestExcerptLeaks: false,
+  })
+  assert.doesNotMatch(text, /earlier-marker|latest-marker|shape-marker/)
+  assert.match(text, /## Latest messages \(oldest first\)\n\(none\)/)
+  assert.match(text, /## Handoff note\n\(No note, on purpose: the agent of the previous part wrote no summary in time for the switch\./)
+  assert.match(text, /Everything earlier stays saved: read_own_chat searches every part/)
+  assert.match(text, /Nothing needs an answer now; wait for the next message\.$/)
 })
 
 // The restart classifier is also used by same-harness moves and their first turns.
