@@ -108,7 +108,6 @@ export function answerSender(rt, id, source, text, long, shouldSend, model) {
   // When the work this answers was opened, read before closeWork deletes it: a Solver's review
   // mark counts a verdict only for work its current request opened (review-mark.js).
   const answered = rt.state?.works?.[source.exchangeId]
-  const work = rt.closeWork?.(source.exchangeId, name, text)
   const exchangeId = randomUUID()
   const request = source.senderRoomId === undefined
     ? rt.designatedReplyRequest?.(source.senderSessionId, fromId, source.exchangeId, answered) : undefined
@@ -118,6 +117,7 @@ export function answerSender(rt, id, source, text, long, shouldSend, model) {
     ? { exchangeId, replyTo: source.exchangeId, reviewReceipt } : undefined
   // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
   const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply, reply === undefined ? undefined : model)
+  const work = rt.closeWork?.(source.exchangeId, name, text)
   // A reply that arrives after the user gave up the wait is a late answer: it closes
   // nothing, opens nothing, and says on it that the wait was already over.
   const late = work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
@@ -427,7 +427,8 @@ export function install(rt) {
       const entry = liveOf(sessionId)
       if (entry.turn !== undefined) continue
       entry.turn = RECOVERED_TURN
-      entry.consumedResult = rt.consumedReviewResultForLiveTurn?.(agent)
+      entry.adoptedTurn = rt.liveSessionTurn?.(agent)
+      entry.consumedResult = rt.consumedReviewResultForLiveTurn?.(agent, entry.adoptedTurn)
       // Its input was consumed before the reload; a later request joins this turn.
       entry.opened = true
       entry.since ??= Date.now()
@@ -904,6 +905,7 @@ export function install(rt) {
         setActivity(id, 'thinking')
         setFailed(id, undefined)
         entry.turn = event.data.turn
+        entry.adoptedTurn = undefined
         entry.since = event.time ?? Date.now()
         entry.texts = []
         entry.shown = 0
@@ -956,7 +958,8 @@ export function install(rt) {
         const source = event.data?.source
         // A batch can include the review reply after the turn's first input.
         if (entry.turn !== undefined && source?.kind === SOURCE_KIND) {
-          const review = source.role === 'reply' ? rt.takeReviewReply?.(id, event.data, entry.turn) : undefined
+          const turn = entry.turn === RECOVERED_TURN ? entry.adoptedTurn : entry.turn
+          const review = source.role === 'reply' && turn !== undefined ? rt.takeReviewReply?.(id, event.data, turn) : undefined
           entry.reviewReplyRequest = review?.request ?? entry.reviewReplyRequest
           entry.consumedResult = review?.consumedResult ?? rt.takeReviewContinuation?.(id, event.data) ?? entry.consumedResult
         }
@@ -1195,7 +1198,7 @@ export function install(rt) {
         break
       }
       case 'turn/end': {
-        rt.reviewReplyTurnEnd?.(id, { ...event.data, turn: event.data?.turn ?? entry.turn })
+        rt.reviewReplyTurnEnd?.(id, { ...event.data, turn: event.data?.turn ?? entry.adoptedTurn ?? entry.turn })
         setActivity(id, undefined)
         // A steer cut leaves the turn's routing state for the fresh turn that
         // claims the steer: nothing is answered or delivered for the cut one.
@@ -1230,6 +1233,7 @@ export function install(rt) {
         // that joined it, so that request still goes back for a turn of its own.
         const recovered = entry.turn === RECOVERED_TURN
         entry.turn = undefined
+        entry.adoptedTurn = undefined
         entry.info = undefined
         entry.texts = []
         entry.shown = 0

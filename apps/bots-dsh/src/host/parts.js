@@ -1664,6 +1664,7 @@ export function install(rt) {
         crossing: owner.group === true ? { group: true, from: owner.from, previous: {}, note: () => {} }
           : owner.back === undefined ? undefined : { previous: owner.back, note: () => {} },
         resume: owner.cut !== undefined, info: owner.cut?.info, joined: owner.cut?.joined,
+        consumedResult: owner.cut?.consumedResult,
       },
     }
     if (reverting.has(freshId)) return

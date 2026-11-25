@@ -539,21 +539,27 @@ export function install(rt) {
     persist()
   }
   rt.noteConsumedReviewResult = (id, consumedResult) => {
-    const turn = rt.live.get(id)?.turn
+    const entry = rt.live.get(id)
+    const turn = entry?.adoptedTurn ?? entry?.turn
     const bind = record => record === undefined ? record : {
       ...record, consumedResult, ...(typeof turn === 'number' ? { turn } : {}),
     }
     if (heldStarts.has(id)) heldStarts.set(id, bind(heldStarts.get(id)))
-    else update(id, bind)
+    else update(id, record => bind(record ?? (entry?.adoptedTurn !== undefined
+      ? pendingTurns[id] ?? interrupted.turns[id] : undefined)))
   }
 
-  rt.consumedReviewResultForLiveTurn = agent => {
+  rt.liveSessionTurn = agent => {
+    // A running Session may have a turn that started before the recovery scan window.
+    const start = lastTurnOf(agent, Infinity)
+    if (start?.type === 'turn/start' && Number.isInteger(start.data?.turn)) return start.data.turn
+  }
+  rt.consumedReviewResultForLiveTurn = (agent, turn = rt.liveSessionTurn(agent)) => {
     const id = agent.session?.id
     if (id === undefined) return
     const record = turns[id] ?? pendingTurns[id] ?? interrupted.turns[id]
     if (typeof record?.turn !== 'number' || !record.consumedResult || !rt.resultReplyRequest?.(record.consumedResult)) return
-    const start = lastTurnOf(agent)
-    if (start?.type === 'turn/start' && start.data?.turn === record.turn && rt.chatOwners.get(id) === record.botId) {
+    if (turn === record.turn && rt.chatOwners.get(id) === record.botId) {
       return record.consumedResult
     }
   }
@@ -570,25 +576,28 @@ export function install(rt) {
     const source = message?.source
     if (args?.role !== 'resume' || rt.chatOwners.get(id) !== args.toId
       || source?.kind !== SOURCE_KIND || source.exchangeId !== args.exchangeId) return false
-    if (typeof source.reviewContinuation === 'string') return source.reviewContinuation === args.reviewContinuation
+    if (typeof args.reviewContinuation === 'string') return source.reviewContinuation === args.reviewContinuation
     return source.role === 'resume' && source.resumed === true && source.resumedByUpdate === args.resumedByUpdate
       && typeof args.resumeMessageId === 'string' && message.id === args.resumeMessageId
   }
-  rt.notePartReviewContinuation = (sessionId, message, binding) => {
-    if (!binding || !rt.resultReplyRequest?.(binding)) return message
+  const noteReviewContinuation = (sessionId, message, args) => {
+    const binding = args.consumedResult
+    if (!binding || binding.toId !== args.toId || !rt.resultReplyRequest?.(binding)) return message
     const { source } = message
     const prior = reviewInputNote(source.exchangeId)
     // A switch can forward the same continuation under a new inbox ID.
     const reviewContinuation = prior?.consumedResult?.receipt === binding.receipt && prior.reviewContinuation
       || randomUUID()
     if (prior !== undefined) forgetQueued(source.exchangeId)
-    noteDelivery(sessionId, { toId: binding.toId, role: 'resume', resumed: true, exchangeId: source.exchangeId,
-      text: textOf(message.content), consumedResult: binding, reviewContinuation, resumeMessageId: message.id })
+    noteDelivery(sessionId, { ...args, reviewContinuation, resumeMessageId: message.id })
     return { ...message, source: { ...source, reviewContinuation } }
   }
+  rt.notePartReviewContinuation = (sessionId, message, binding) => !binding ? message
+    : noteReviewContinuation(sessionId, message, { toId: binding.toId, role: 'resume', resumed: true,
+      exchangeId: message.source.exchangeId, text: textOf(message.content), consumedResult: binding })
   rt.takeReviewContinuation = (id, message) => {
     const args = reviewInputNote(message?.source?.exchangeId)
-    if (!args?.consumedResult || !matchesContinuation(id, message, args)
+    if (!args?.consumedResult || args.resumeMessageId !== message.id || !matchesContinuation(id, message, args)
       || !matchesContinuation(id, claims.get(id)?.get(message.id), args)) return
     const binding = args.consumedResult
     const valid = binding.toId === args.toId && rt.resultReplyRequest?.(binding)
@@ -599,12 +608,13 @@ export function install(rt) {
 
   const deliver = rt.deliver
   rt.deliver = async (args, options) => {
-    const adoption = adoptIfNeeded()
-    if (adoption !== undefined) await adoption
     const noted = { ...args, exchangeId: args.exchangeId ?? randomUUID() }
-    const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
-    noteDelivery(sessionId, noted)
+    const releasePending = options?.onReplyRecorded?.begin?.(noted.exchangeId)
     try {
+      const adoption = adoptIfNeeded()
+      if (adoption !== undefined) await adoption
+      const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
+      noteDelivery(sessionId, noted)
       const sent = await deliver(noted, options)
       if (noted.reviewReceipt !== undefined && sent === undefined) rt.retireReviewReply?.(noted.toId, noted.exchangeId)
       return sent
@@ -613,6 +623,8 @@ export function install(rt) {
       if (noted.reviewReceipt !== undefined) rt.retireReviewReply?.(noted.toId, noted.exchangeId)
       else if (rt.botOf(noted.toId) === undefined) forgetQueued(noted.exchangeId)
       throw error
+    } finally {
+      releasePending?.()
     }
   }
 
@@ -882,6 +894,14 @@ export function install(rt) {
     if (claimed) {
       if (!claims.has(id)) claims.set(id, new Map())
       claims.get(id).set(message.id, message)
+    } else if (typeof message.source?.reviewContinuation === 'string') {
+      // DSH confirmed the forwarded input under its new ID. A claim alone cannot
+      // rebind the continuation to an ID that was never put in the inbox.
+      const args = reviewInputNote(message.source.exchangeId)
+      if (args?.consumedResult && args.resumeMessageId !== message.id && matchesContinuation(id, message, args)) {
+        forgetQueued(args.exchangeId)
+        noteDelivery(id, { ...args, resumeMessageId: message.id })
+      }
     }
     if (rt.updateHoldView?.() === true) void rt.noteHeldInput(id, [message])
   }
@@ -1031,14 +1051,12 @@ export function install(rt) {
           for (const [index, { item, message }] of batch.entries()) {
             if (!ownsTeam()) throw new Error('The team changed before the resumed turn could be sent')
             rt.assertShellChoice?.(target, item.args.toId)
-            if (item.args.consumedResult) {
-              // Bind the continuation to this concrete inbox message, including on replay.
-              noteDelivery(target, { ...item.args, resumeMessageId: message.id })
-            } else if (item.recordId !== undefined) noteDelivery(target, item.args)
+            const input = item.args.consumedResult ? noteReviewContinuation(target, message, item.args) : message
+            if (!item.args.consumedResult && item.recordId !== undefined) noteDelivery(target, item.args)
             if (!item.args.resumed && (item.args.role === 'request' || item.args.role === 'stopped')) rt.lateWork?.(item.args.exchangeId)
             // DSH claims next-step injections before the waking next-turn followup.
-            if (inject && index < batch.length - 1) agent.inject(message)
-            else agent.followup(message)
+            if (inject && index < batch.length - 1) agent.inject(input)
+            else agent.followup(input)
           }
           if (await ctx.sessions.flush(agent.session) === false) throw new Error('Could not flush the resumed turn')
           if (batch.some(({ item }) => !item.args.resumed)) resent.add(target)
@@ -1058,9 +1076,9 @@ export function install(rt) {
   // itself. Its last turn ended as DSH ends a cut turn and nothing ran since, so it goes on,
   // with DSH's own repair telling the model which tool calls have unknown outcomes. `skip`:
   // Sessions already picked up from the notes.
-  function lastTurnOf(agent) {
+  function lastTurnOf(agent, scan = EVENTS_SCANNED) {
     const latest = (agent.session?.seq ?? 0) - 1
-    for (let seq = latest; seq >= Math.max(0, latest - EVENTS_SCANNED); seq -= 1) {
+    for (let seq = latest; seq >= Math.max(0, latest - scan); seq -= 1) {
       const event = agent.session.eventAt?.(seq)
       if (event?.type === 'turn/end' || event?.type === 'turn/start') return event
     }

@@ -335,6 +335,64 @@ test('Stage 6 review reply preserves person interruption and request replacement
   assert.notEqual(track().delivered, true)
 })
 
+test('Rebase R2 preserves a matching verdict and the durable progress write at commit', async t => {
+  const { h, request, review, answer, track } = await reviewReplyFixture(t)
+  const exchange = await review('plan')
+  h.person('Work alone until delivered.')
+  const atCommit = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const saveCopy = h.rt.saveCopy
+  h.rt.saveCopy = (change, options) => saveCopy(change, {
+    ...options, beforeCommit: async () => {
+      atCommit.resolve()
+      await release.promise
+      return options.beforeCommit()
+    },
+  })
+  const write = h.progress('auto', { request, quote: 'Work alone until delivered.' })
+  await atCommit.promise
+  const reply = answer(exchange)
+  release.resolve()
+  assert.match(await write, /^Recorded\./)
+  h.finish('solver', 'Waiting for plan review.')
+  await reply.sent
+  await h.rt.save({ required: true, durable: true })
+  assert.equal(track().solver.plan.accepted, true)
+  assert.equal(track().solver.auto, true)
+  const saved = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots.solver.reviewTrack
+  assert.equal(saved.solver.plan.review.verdict, 'SHIP')
+  assert.equal(saved.solver.auto, true)
+})
+
+test('Rebase R2 holds delivery during reply note adoption and releases a pre-inbox rejection', async t => {
+  for (const accepted of [true, false]) await t.test(accepted ? 'claimed reply' : 'definite rejection', async t => {
+    const { h, request, review, answer, track, openReply } = await reviewReplyFixture(t)
+    const exchange = await review('plan')
+    let adoptedNotes = false
+    const adopted = h.rt.reloadDeliveryNotes(() => { adoptedNotes = true })
+    const reply = answer(exchange, () => accepted)
+    assert.equal(h.rt.deliveryNote(reply.message.exchangeId), undefined)
+    h.finish('solver', 'Waiting for plan review.')
+    const before = track().last
+    assert.equal(adoptedNotes, false)
+    await adopted
+    assert.equal(adoptedNotes, true)
+    assert.equal(before, undefined, 'the waiting turn must not deliver during adoption')
+    if (accepted) {
+      await openReply(3, reply)
+      h.finish('solver', 'Delivered after reading the PLAN.')
+    } else {
+      assert.equal(await reply.sent, undefined)
+      h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, request })
+    }
+    const mark = track().last
+    assert.ok(mark)
+    assert.equal(track().delivered, true)
+    h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, request })
+    assert.equal(track().last, mark)
+  })
+})
+
 test('Stage 6 review reply stays pending in the delivery notes across restart', async t => {
   const { h, request, review, answer, track } = await reviewReplyFixture(t)
   const exchange = await review('plan')
@@ -401,6 +459,31 @@ test('Stage 6 round 2 keeps a review reply through an ordinary inbox move and re
   assert.ok(h.rt.deliveryNote(other), 'withdrawing the review reply leaves the unrelated note')
   closeRequest()
   assert.equal(track().delivered, true)
+})
+
+test('Rebase R2 keeps a matching receipt while its sibling is withdrawn', async t => {
+  const { h, request, review, answer } = await reviewReplyFixture(t)
+  const reply = answer(await review('plan'))
+  h.finish('solver', 'Waiting for plan review.')
+  await reply.sent
+  const agent = h.agentOf('solver')
+  const original = agent.message
+  const pending = { ...original, id: 'pending-sibling' }
+  const withdrawn = { ...original, id: 'withdrawn-sibling' }
+  agent.inbox = { nextTurn: [pending], nextStep: [] }
+  h.ctx.emit('agent/inbox/discarded', { agent, message: withdrawn })
+  await immediate()
+  assert.ok(h.rt.deliveryNote(reply.message.exchangeId), 'an already pending sibling keeps the receipt')
+
+  agent.inbox.nextTurn.pop()
+  h.event('solver', 'turn/start', { turn: 3 })
+  h.ctx.emit('agent/inbox/claimed', { agent, message: pending, turn: 3 })
+  h.ctx.emit('agent/inbox/discarded', { agent, message: withdrawn })
+  await immediate()
+  assert.ok(h.rt.deliveryNote(reply.message.exchangeId), 'an outstanding claim keeps the receipt')
+  h.event('solver', 'user/message', pending)
+  assert.equal(h.rt.deliveryNote(reply.message.exchangeId), undefined)
+  assert.match(await h.progress('start', { request, run: 'kept-receipt', checks: ['average-test'] }), /^Recorded\./)
 })
 
 test('Stage 6 round 2 keeps an accepted reply after a later delivery failure', async t => {
@@ -500,6 +583,97 @@ test('Stage 6 round 2 delivers the original request once after restarting a cons
   assert.equal(await next.progress('status'), noSolverRequest)
   assert.equal(await next.rt.flushUpdateNotes(), true)
   await next.close()
+})
+
+test('Rebase R2 recovers a moved RESULT continuation only from its current claim', async t => {
+  const { h, request, resultExchange, openReply, reply } = await pendingResultReply(t)
+  await openReply(4, reply)
+  h.event('solver', 'turn/end', { reason: { kind: 'interrupted' } })
+  await h.rt.save({ required: true, durable: true })
+  assert.equal(await h.rt.flushUpdateNotes(), true)
+  await h.close()
+
+  const next = fixture(t, h.home)
+  await next.rt.load()
+  const keepAlive = setInterval(() => {}, 1000)
+  try {
+    assert.deepEqual((await next.rt.resumesDone).resumed, ['solver'])
+  } finally {
+    clearInterval(keepAlive)
+  }
+  const agent = next.agentOf('solver')
+  const original = agent.message
+  const moved = { ...original, id: 'forwarded-continuation' }
+  agent.inbox = { nextTurn: [moved], nextStep: [] }
+  next.ctx.emit('agent/inbox/discarded', { agent, message: original })
+  next.ctx.emit('agent/inbox/inserted', { agent, message: moved })
+  await immediate()
+  assert.ok(next.rt.deliveryNote(original.source.exchangeId), 'the note survives the inbox ID change')
+  assert.equal(next.rt.takeReviewContinuation('solver', moved), undefined, 'forwarding alone is not consumption')
+  assert.equal(await requestOf(next), request)
+  next.event('solver', 'turn/start', { turn: 5 })
+  agent.inbox.nextTurn.pop()
+  next.ctx.emit('agent/inbox/claimed', { agent, message: moved, turn: 5 })
+  assert.equal(next.rt.takeReviewContinuation('solver', original), undefined, 'the old ID was not claimed')
+  next.event('solver', 'user/message', moved)
+  next.finish('solver', 'Delivered after recovering and reading the moved RESULT.')
+  const track = next.rt.botOf('solver').reviewTrack
+  assert.equal(track.solver.request, request)
+  assert.equal(track.last?.done, true)
+  assert.equal(track.last.resultExchangeId, resultExchange)
+  assert.equal(next.rt.takeReviewContinuation('solver', moved), undefined)
+  assert.equal(await next.rt.flushUpdateNotes(), true)
+  await next.rt.save({ required: true, durable: true })
+  await next.close()
+})
+
+async function pendingResultReply(t) {
+  const { h, request, review, answer, track, openReply } = await reviewReplyFixture(t)
+  const planExchange = await review('plan')
+  h.finish('solver', 'Waiting for plan review.')
+  await openReply(3, answer(planExchange))
+  assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
+  assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+  const resultExchange = await review('result')
+  const reply = answer(resultExchange)
+  h.finish('solver', 'Waiting for result review.')
+  return { h, request, resultExchange, openReply, reply, track }
+}
+
+test('Rebase R2 authenticates new claims and consumed RESULT on the actual adopted turn', async t => {
+  for (const consumed of [false, true]) await t.test(consumed ? 'long consumed turn' : 'new numbered claim', async t => {
+    const { h, resultExchange, openReply, reply } = await pendingResultReply(t)
+    await reply.sent
+    const input = h.agentOf('solver').message
+    if (consumed) await openReply(4, reply)
+    await h.rt.save({ required: true, durable: true })
+    assert.equal(await h.rt.flushUpdateNotes(), true)
+    await h.close()
+
+    const next = fixture(t, h.home, { liveTurn: 4 })
+    const agent = next.agentOf('solver')
+    if (consumed) {
+      const start = agent.session.eventAt(0)
+      agent.session.seq = 450
+      agent.session.eventAt = seq => seq === 0 ? start : { type: 'step/start' }
+    }
+    await next.rt.load()
+    await immediate()
+    if (!consumed) {
+      next.ctx.emit('agent/inbox/claimed', { agent, message: input, turn: 5 })
+      next.event('solver', 'user/message', input)
+      assert.equal(next.rt.live.get('solver')?.consumedResult, undefined)
+      assert.ok(next.rt.deliveryNote(reply.message.exchangeId), 'the wrong-turn claim cannot consume the reply')
+      next.ctx.emit('agent/inbox/claimed', { agent, message: input, turn: 4 })
+      next.event('solver', 'user/message', input)
+    }
+    next.finish('solver', 'Delivered on the adopted RESULT turn.')
+    assert.equal(next.rt.botOf('solver').reviewTrack.last?.done, true)
+    assert.equal(next.rt.botOf('solver').reviewTrack.last.resultExchangeId, resultExchange)
+    assert.equal(await next.rt.flushUpdateNotes(), true)
+    await next.rt.save({ required: true, durable: true })
+    await next.close()
+  })
 })
 
 test('Stage 6 reload adopts a live turn only when it consumed the current RESULT', async t => {

@@ -4,12 +4,19 @@
 // part no surface can reach yet, and only then moves the Bot's record to it, in one save.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { reminderPrompts } from '../src/client/text.js'
 import { install } from '../src/host/parts.js'
 import { install as installModels } from '../src/host/models.js'
 import { install as installModelState, OWN_TOOLS_SWITCH, SWITCH_FAILED } from '../src/host/model-state.js'
 import { install as installOwnTools } from '../src/host/own-tools.js'
 import { HANDOFF_ACK, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, SWITCH_CUT } from '../src/host/constants.js'
+import { install as installResume } from '../src/host/resume.js'
+import { install as installReviewMark } from '../src/host/review-mark.js'
+import { resultSnapshot } from '../src/host/solver-progress.js'
+import { SOLVER_DESCRIPTION } from '../src/shared/solver-method.js'
 import { textOf } from '../src/host/text.js'
 import { OWN_TOOLS_DENY_TEXT, OWN_TOOLS_MODEL_TEXT } from '../src/shared/own-tools.js'
 import { fakeContext } from './fake-ctx.js'
@@ -1725,6 +1732,60 @@ test('T22e MH-9 the stopped reply goes on in the old part after a restart go-bac
   assert.equal(failed.length, 1)
   assert.equal(b.calls.sends.filter(send => send.id === 's1' && send.item.source?.exchangeId === 'e-cut').length, 1)
   assert.equal(b.calls.sends.filter(send => send.id === 's1' && send.item.source?.exchangeId === 'e-user').length, 1)
+})
+
+test('Rebase R2 delivers the consumed RESULT once after a restart switch rollback', async t => {
+  const { b, at, fresh } = await afterRestart(t, { from: 'deepseek/v4', to: 'acp-claude/default' })
+  const home = mkdtempSync(join(tmpdir(), 'restart-rollback-result-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const workspace = join(home, 'workspace')
+  mkdirSync(workspace)
+  writeFileSync(join(workspace, 'result.txt'), 'Verified result.')
+  Object.assign(b.rt, { home, holdsLock: () => true })
+  Object.assign(b.bot, { role: SOLVER_DESCRIPTION, reviewerId: 'reviewer', workDir: workspace })
+  b.rt.state.bots.reviewer = { id: 'reviewer', name: 'Reviewer' }
+  installReviewMark(b.rt)
+  installResume(b.rt)
+  b.rt.reviewCreated(b.bot, 'Review this change.')
+  const progress = b.bot.reviewTrack.solver
+  progress.plan = { revision: 0, checks: ['test'], accepted: true }
+  progress.passed = ['test']
+  progress.snapshot = resultSnapshot(workspace)
+  progress.review = { exchangeId: 'result-work', reviewerId: 'reviewer', revision: 0, solverModel: 'v4' }
+  const workAt = Date.now()
+  const info = { kind: SOURCE_KIND, role: 'reply', exchangeId: 'result-reply', replyTo: 'result-work',
+    senderSessionId: 'reviewer', reviewReceipt: 'host-receipt' }
+  b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', workAt, info, 'independent')()
+  const original = message(SOURCE_KIND, 'SHIP', info)
+  b.ctx.emit('agent/inbox/claimed', { agent: fresh, message: original, turn: 3 })
+  const { consumedResult } = b.rt.takeReviewReply(fresh.id, original, 3)
+  assert.equal(b.rt.resultReplyRequest(consumedResult), progress.request)
+  // This is the durable cut marker read by the restart pass.
+  const cut = JSON.parse(JSON.stringify({ exchangeId: info.exchangeId, info, joined: [], consumedResult }))
+  Object.assign(b.rt.state.switching.s1, { cut, wakeTries: 2, wakeFailedAt: at })
+  const failed = failSend(b, 's2')
+  claiming(b.agent)
+  await b.rt.heldBack()
+  assert.equal(failed.length, 1)
+  assert.equal(b.bot.sessionId, 's1')
+  const continuations = b.agent.claimed.filter(input => input.source.exchangeId === info.exchangeId)
+  assert.equal(continuations.length, 1)
+  const [input] = continuations
+  assert.equal(b.rt.takeReviewContinuation('s1', input), undefined)
+  b.rt.noteUpdateInbox({ agent: b.agent, message: input }, true)
+  const resumed = b.rt.takeReviewContinuation('s1', input)
+  assert.deepEqual(resumed, consumedResult)
+  const finish = consumedResult => b.rt.reviewTurnEnd('b1', {
+    completed: true, wroteText: true, model: 'v4', request: undefined, consumedResult,
+  })
+  finish(resumed)
+  const mark = b.bot.reviewTrack.last
+  assert.equal(mark?.done, true)
+  assert.equal(mark.resultExchangeId, info.replyTo)
+  assert.equal(b.rt.takeReviewContinuation('s1', input), undefined)
+  finish(resumed)
+  assert.equal(b.bot.reviewTrack.last, mark)
+  assert.equal(await b.rt.flushUpdateNotes(), true)
 })
 
 test('T22e MJ-1 a group part with no Bot whose held input cannot be forwarded: the input waits once in the fresh part, the old part is archived', async t => {

@@ -492,10 +492,11 @@ export function install(rt) {
     await saveProgress(bot, before, progress)
   }
 
-  function rememberReply(bot, exchangeId, reviewerId, replyTo, { workAt, request, receipt }) {
+  function rememberReply(bot, exchangeId, reviewerId, replyTo, { workAt, request, receipt }, recorded = true) {
     let replies = unread.get(bot)
     if (replies === undefined) unread.set(bot, replies = new Map())
-    const reply = { exchangeId, reviewerId, replyTo, workAt, request, receipt, release: () => replies.delete(exchangeId) }
+    const reply = { exchangeId, reviewerId, replyTo, workAt, request, receipt, recorded, claims: new Map(),
+      release: () => { if (replies.get(exchangeId) === reply) replies.delete(exchangeId) } }
     replies.set(exchangeId, reply)
     return reply
   }
@@ -531,11 +532,16 @@ export function install(rt) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     if (typeof workAt !== 'number') return
-    const track = trackOf(bot)
+    const track = cleanTrack(bot.reviewTrack) ?? { requested: false, requestAt: bot.createdAt ?? 0 }
     if (track.delivered === true || workAt < track.requestAt) return
+    const { requestAt } = track
+    const request = track.solver?.request
+    const binding = { requestAt, workAt, ...(request ? { request } : {}),
+      ...(reply?.reviewReceipt ? { receipt: reply.reviewReceipt } : {}) }
     const applyVerdict = () => {
-      const current = trackOf(bot)
-      if (current.requestAt !== track.requestAt || current.delivered || bot.reviewerId !== fromId) return
+      const current = cleanTrack(bot.reviewTrack) ?? { requested: false, requestAt: bot.createdAt ?? 0, verdicts: [] }
+      if (current.requestAt !== requestAt || current.delivered || bot.reviewerId !== fromId
+        || (request !== undefined && current.solver?.request !== request)) return
       reviewSends.delete(reply?.replyTo)
       const verdict = verdictOf(text)
       const reviewer = rt.botOf(fromId)
@@ -548,23 +554,25 @@ export function install(rt) {
         const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
         recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model)
       }
+      bot.reviewTrack = current
       save()
     }
     if (!deferIngress(bot, applyVerdict)) applyVerdict()
     if (reply === undefined || !track.requested || !isTime(workAt)) return
-    const { requestAt } = track
-    const request = track.solver?.request
-    // Only the delivery that appends this exchange can start its hold.
-    return (exchangeId = reply.exchangeId) => {
-      if (rt.botOf(toId) !== bot || bot.reviewTrack?.requestAt !== requestAt || bot.reviewTrack.delivered === true
-        || bot.reviewTrack.solver?.request !== request
-        || bot.reviewerId !== fromId) return
-      const binding = { requestAt, workAt, ...(request ? { request } : {}),
-        ...(reply.reviewReceipt ? { receipt: reply.reviewReceipt } : {}) }
+    const currentRequest = () => rt.botOf(toId) === bot && bot.reviewTrack?.requestAt === requestAt
+      && bot.reviewTrack.delivered !== true && bot.reviewTrack.solver?.request === request && bot.reviewerId === fromId
+    // The ledger append makes this reply eligible to be consumed.
+    const record = (exchangeId = reply.exchangeId) => {
+      if (!currentRequest()) return
       const recorded = rememberReply(bot, exchangeId, fromId, reply.replyTo, binding)
       rt.noteReviewReply?.(exchangeId, binding)
       return () => retire(recorded)
     }
+    // The send can await note adoption before the ledger append takes over the hold.
+    return Object.assign(record, {
+      begin: exchangeId => currentRequest()
+        ? rememberReply(bot, exchangeId, fromId, reply.replyTo, binding, false).release : undefined,
+    })
   }
 
   const matches = (reply, source) => source?.kind === SOURCE_KIND && source.role === 'reply'
@@ -576,7 +584,7 @@ export function install(rt) {
     const past = rt.pastOwners.get(sessionId)
     const bot = rt.botOf(rt.chatOwners.get(sessionId) ?? (past?.roomId === undefined ? past?.botId : undefined))
     const reply = unreadReplies(bot)?.get(source.exchangeId)
-    if (reply !== undefined && matches(reply, source)) return reply
+    if (reply?.recorded && matches(reply, source)) return reply
   }
 
   const agentSession = agent => agent?.session?.id ?? agent?.id
@@ -588,14 +596,18 @@ export function install(rt) {
   rt.ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
     const sessionId = agentSession(agent)
     const reply = replyAt(sessionId, message?.source)
-    if (reply !== undefined) reply.claim = { sessionId, turn, messageId: message.id }
+    if (reply !== undefined) reply.claims.set(message.id, { sessionId, turn, agent })
   })
   rt.ctx.on('agent/inbox/inserted', ({ agent, message }) => {
     const reply = replyAt(agentSession(agent), message?.source)
     if (reply === undefined) return
-    reply.claim = undefined
+    reply.claims.delete(message.id)
     reply.withdrawal = undefined
   })
+  const hasMatchingInput = (reply, agent) => reply.claims.size > 0
+    || [agent.inbox?.nextStep, agent.inbox?.nextTurn].some(queue =>
+      queue?.some(input => matches(reply, input.source)))
+
   function reviewReplyDiscarded(agent, message) {
     const reply = replyAt(agentSession(agent), message?.source)
     if (reply === undefined) return false
@@ -604,7 +616,10 @@ export function install(rt) {
     // insertion a chance to cancel the withdrawal before treating it as final.
     const withdrawal = {}
     reply.withdrawal = withdrawal
-    queueMicrotask(() => { if (reply.withdrawal === withdrawal) retire(reply) })
+    reply.claims.delete(message.id)
+    queueMicrotask(() => {
+      if (reply.withdrawal === withdrawal && !hasMatchingInput(reply, agent)) retire(reply)
+    })
     return true
   }
 
@@ -614,16 +629,20 @@ export function install(rt) {
     if (!replies?.size || rt.updateHold?.closed || rt.updateShuttingDown?.()
       || rt.cutByRestart?.(data?.reason) || data?.reason?.reason?.kind === 'disposed') return
     for (const reply of replies.values()) {
-      const claim = reply.claim
-      if (claim?.sessionId !== sessionId || (claim.turn !== undefined && claim.turn !== data?.turn)) continue
+      const ended = [...reply.claims].filter(([, claim]) =>
+        claim.sessionId === sessionId && (claim.turn === undefined || claim.turn === data?.turn))
+      if (ended.length === 0) continue
+      const settle = (messages = []) => {
+        if (replies.get(reply.exchangeId) !== reply) return
+        for (const [id, claim] of ended) {
+          if (reply.claims.get(id) === claim) reply.claims.delete(id)
+        }
+        if (!hasMatchingInput(reply, ended[0][1].agent)
+          && !messages.some(message => matches(reply, message.source))) retire(reply)
+      }
       // The switch may have taken the proposed input in pre-step. Wait for it
-      // to finish moving input before retiring the claim that ended unread.
-      const switching = rt.afterBotInputSwitch?.(sessionId, (messages) => {
-        if (replies.get(reply.exchangeId) !== reply || reply.claim !== claim) return
-        if (messages.some(message => matches(reply, message.source))) reply.claim = undefined
-        else retire(reply)
-      })
-      if (!switching && !rt.carriesBotInput?.(sessionId)) retire(reply)
+      // to finish moving input before retiring the claims that ended unread.
+      if (!rt.afterBotInputSwitch?.(sessionId, settle) && !rt.carriesBotInput?.(sessionId)) settle()
     }
   }
 
@@ -645,9 +664,8 @@ export function install(rt) {
     const id = rt.chatOwners.get(sessionId)
     if (id === undefined || typeof message?.id !== 'string') return
     const reply = replyAt(sessionId, message.source)
-    const claim = reply?.claim
-    if (claim?.sessionId !== sessionId || claim.messageId !== message.id
-      || (claim.turn !== undefined && claim.turn !== turn)) return
+    const claim = reply?.claims.get(message.id)
+    if (claim?.sessionId !== sessionId || (claim.turn !== undefined && claim.turn !== turn)) return
     const bot = rt.botOf(id)
     if (reply.receipt === undefined) {
       // An ordinary review may complete work that predates the feature's explicit plan.
