@@ -256,7 +256,7 @@ function BackgroundSection({ roster, actions, run }) {
   const shown = choices.some(model => model.ref === saved) ? saved : ''
   const fallback = choices.find(model => model.ref === roster.backgroundModel && saved === '')
   return h(SetSection, { title: t('Background jobs') },
-    h(SetRow, { label: t('Background model'), hint: t('Memory review runs on it, and so do the notes of a chat on Claude Code or Codex.') },
+    h(SetRow, { label: t('Background model'), hint: t("Memory runs on each Bot's own model first, and on this one if that fails. The notes of a chat on Claude Code or Codex run on this one.") },
       h('select', { className: 'bt-select', 'aria-label': t('Background model'), value: shown, onChange: event => run(actions.setPrefs({ backgroundModel: event.target.value || null })) },
         h('option', { value: '' }, fallback ? t('Default: {model}', { model: fallback.name }) : t('Default')),
         choices.map(model => h('option', { key: model.ref, value: model.ref }, `${model.name} · ${model.providerName ?? model.provider}`)))))

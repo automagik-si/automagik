@@ -1,11 +1,33 @@
 import { createElement as h, useEffect, useRef, useState } from 'react'
-import { t } from './i18n.js'
+import { dateLocale, t } from './i18n.js'
 
 export const countText = value => Number.isFinite(value) && value >= 0 ? value.toLocaleString() : t('Unknown')
 export const statsRows = scope => scope ? [{ label: t('All-in'), totals: scope.allIn }, ...Object.entries(scope.byKind ?? {}).map(([label, totals]) => ({ label, totals }))] : []
 export function contextSummary(context) {
   if (!context) return t('Loading…')
   return context.usage?.tokens == null ? t('Unavailable') : `${countText(context.usage.tokens)} ${t('tokens')} · ${t(context.usage.source)}`
+}
+
+const timeOf = at => new Date(at).toLocaleTimeString(dateLocale(), {
+  hour: 'numeric', minute: '2-digit',
+})
+function memoryStatus(memory) {
+  const status = !memory ? t('Loading…')
+    : !memory.allowed ? t('Automatic memory review is disabled by the host configuration.')
+    : memory.running ? t('Memory review running. Disabling review prevents future passes; this pass may finish.')
+    : memory.pending ? t('Memory review pending.')
+    : memory.enabled ? t('Memory review idle.') : t('Automatic memory review is off for this Bot.')
+  const failure = memory?.failure
+  if (!failure) return status
+  const time = timeOf(failure.at)
+  const detail = failure.reason === 'quota'
+    ? t("The last review failed at {time}: the model's account is out of quota or balance. The next review waits until {retry}.", {
+        time, retry: timeOf(failure.retryAt),
+      })
+    : failure.reason === 'no-model'
+      ? t('The last review failed at {time}: no model can run it. Pick a background model in Settings.', { time })
+      : t('The last review failed at {time}: the model could not answer.', { time })
+  return `${status} ${detail}`
 }
 
 // Empty resets an override; bad numbers never leave the input as a mutation.
@@ -112,7 +134,7 @@ export function AdvancedSettings({ bot, roster, actions, save, Card, Row, Switch
         h('p', { className: 'bt-set-hint bt-advanced-note' }, confirmFresh ? t('Start new part carries nothing from this part. Earlier history remains searchable. Click Confirm new part to continue.') : t('Checkpoint now condenses this part while keeping protected recent messages. Start new part is separate and carries nothing. Native manual compaction is unavailable for Bot-managed Sessions.'))),
       h(Card, { title: t('Memory review') },
         h(SwitchRow, { label: t('Automatic memory review'), hint: t('Reviews this Bot’s own chat after idle turns. Independent of context compaction; no fixed ordering is promised.'), on: memory?.enabled === true, disabled: disabled || !memory?.allowed, onChange: memoryReview => save({ memoryReview }) }),
-        h('p', { className: 'bt-set-hint bt-advanced-note', role: 'status' }, !memory ? t('Loading…') : !memory.allowed ? t('Automatic memory review is disabled by the host configuration.') : memory.running ? t('Memory review running. Disabling review prevents future passes; this pass may finish.') : memory.pending ? t('Memory review pending.') : memory.enabled ? t('Memory review idle.') : t('Automatic memory review is off for this Bot.'))),
+        h('p', { className: 'bt-set-hint bt-advanced-note', role: 'status' }, memoryStatus(memory))),
       h(Card, { title: t('Memory tidy') },
         h(SwitchRow, { label: t('Daily memory tidy'), hint: t('Once a day, when this Bot’s own memory has changed, its model merges repeats, retires what is over and moves details into topics. It uses tokens every day, so it is off until you turn it on. The memory panel can undo the latest tidy.'), on: memory?.tidy?.enabled === true, disabled: disabled || !memory?.tidy?.allowed || memory.tidy.always === true, onChange: memoryTidy => save({ memoryTidy }) }),
         h('p', { className: 'bt-set-hint bt-advanced-note', role: 'status' }, !memory?.tidy ? t('Loading…') : !memory.tidy.allowed ? t('The daily memory tidy is disabled by the host configuration.') : memory.tidy.always ? t('The host configuration runs the daily memory tidy for every memory.') : memory.tidy.enabled ? t('The daily memory tidy is on for this Bot.') : t('The daily memory tidy is off for this Bot.'))),

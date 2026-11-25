@@ -121,3 +121,47 @@ test('Advanced default, single-flight polling, late read isolation and separate 
     assert.deepEqual(mutations.at(-1), ['fresh', 'b'])
   } finally { lifecycle.close() }
 })
+
+test('T6 Advanced puts quota times and an error in the existing review status line', async () => {
+  const lifecycle = hooks()
+  const ticks = new Set()
+  const { AdvancedSettings } = load(lifecycle.react, {
+    setInterval: callback => { ticks.add(callback); return callback },
+    clearInterval: callback => ticks.delete(callback),
+  })
+  let failure
+  const actions = {
+    contextStatus: async () => null,
+    usageStats: async () => null,
+    memoryReviewStatus: async () => ({ enabled: true, allowed: true, failure }),
+  }
+  const render = () => lifecycle.render(() => AdvancedSettings({
+    bot: { id: 'a', advanced: true }, roster: {}, actions, Card() {}, Row() {}, SwitchRow() {},
+  }))
+  const status = () => {
+    const card = find(render(), node => node.props.title === 'Memory review')
+    const lines = card.children.filter(node => node?.props?.role === 'status')
+    assert.equal(lines.length, 1)
+    return lines[0].children.join('')
+  }
+  const at = new Date(2026, 10, 25, 10, 15).getTime()
+  const retryAt = new Date(2026, 10, 25, 11, 20).getTime()
+  const time = value => new Date(value).toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit',
+  })
+  const refresh = async (value) => {
+    failure = value
+    for (const tick of ticks) tick()
+    await flush()
+    return status()
+  }
+  try {
+    render()
+    await flush()
+    assert.equal(await refresh({ reason: 'quota', at, retryAt }),
+      `Memory review idle. The last review failed at ${time(at)}: the model's account is out of quota or balance. The next review waits until ${time(retryAt)}.`)
+    assert.equal(await refresh({ reason: 'error', at }),
+      `Memory review idle. The last review failed at ${time(at)}: the model could not answer.`)
+    assert.equal(await refresh(null), 'Memory review idle.')
+  } finally { lifecycle.close() }
+})

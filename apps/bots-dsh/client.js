@@ -2200,7 +2200,10 @@ var ZH2 = {
   "Bots you already have keep their own.": "已有的 Bot 保留各自的权限。",
   "Background jobs": "后台任务",
   "Background model": "后台模型",
-  "Memory review runs on it, and so do the notes of a chat on Claude Code or Codex.": "记忆整理用它运行，在 Claude Code 或 Codex 上的对话的笔记也用它。",
+  "Memory runs on each Bot's own model first, and on this one if that fails. The notes of a chat on Claude Code or Codex run on this one.": "记忆先用每个 Bot 自己的模型，失败时再用这个。在 Claude Code 或 Codex 上的对话的笔记用这个。",
+  "The last review failed at {time}: the model's account is out of quota or balance. The next review waits until {retry}.": "上次审核于 {time} 失败：模型账号的额度或余额已用完。下次审核将等到 {retry}。",
+  "The last review failed at {time}: no model can run it. Pick a background model in Settings.": "上次审核于 {time} 失败：没有模型可以运行它。请在设置中选择后台模型。",
+  "The last review failed at {time}: the model could not answer.": "上次审核于 {time} 失败：模型无法回答。",
   "Default: {model}": "默认：{model}",
   "Same for every member": "全员统一",
   "Replaces each member's own permissions in this group.": "在这个群里代替各成员自己的权限。",
@@ -18532,6 +18535,21 @@ function contextSummary(context) {
   if (!context) return t("Loading…");
   return context.usage?.tokens == null ? t("Unavailable") : `${countText(context.usage.tokens)} ${t("tokens")} · ${t(context.usage.source)}`;
 }
+var timeOf = (at) => new Date(at).toLocaleTimeString(dateLocale(), {
+  hour: "numeric",
+  minute: "2-digit"
+});
+function memoryStatus(memory) {
+  const status = !memory ? t("Loading…") : !memory.allowed ? t("Automatic memory review is disabled by the host configuration.") : memory.running ? t("Memory review running. Disabling review prevents future passes; this pass may finish.") : memory.pending ? t("Memory review pending.") : memory.enabled ? t("Memory review idle.") : t("Automatic memory review is off for this Bot.");
+  const failure = memory?.failure;
+  if (!failure) return status;
+  const time = timeOf(failure.at);
+  const detail = failure.reason === "quota" ? t("The last review failed at {time}: the model's account is out of quota or balance. The next review waits until {retry}.", {
+    time,
+    retry: timeOf(failure.retryAt)
+  }) : failure.reason === "no-model" ? t("The last review failed at {time}: no model can run it. Pick a background model in Settings.", { time }) : t("The last review failed at {time}: the model could not answer.", { time });
+  return `${status} ${detail}`;
+}
 function NumberSetting({ label, value, min, max, integer = false, disabled, onSave }) {
   const [draft, setDraft] = (0, import_react42.useState)(String(value ?? ""));
   const [invalid, setInvalid] = (0, import_react42.useState)(false);
@@ -18702,7 +18720,7 @@ function AdvancedSettings({ bot, roster, actions, save, Card: Card3, Row: Row3, 
         Card3,
         { title: t("Memory review") },
         (0, import_react42.createElement)(SwitchRow2, { label: t("Automatic memory review"), hint: t("Reviews this Bot’s own chat after idle turns. Independent of context compaction; no fixed ordering is promised."), on: memory?.enabled === true, disabled: disabled || !memory?.allowed, onChange: (memoryReview) => save({ memoryReview }) }),
-        (0, import_react42.createElement)("p", { className: "bt-set-hint bt-advanced-note", role: "status" }, !memory ? t("Loading…") : !memory.allowed ? t("Automatic memory review is disabled by the host configuration.") : memory.running ? t("Memory review running. Disabling review prevents future passes; this pass may finish.") : memory.pending ? t("Memory review pending.") : memory.enabled ? t("Memory review idle.") : t("Automatic memory review is off for this Bot."))
+        (0, import_react42.createElement)("p", { className: "bt-set-hint bt-advanced-note", role: "status" }, memoryStatus(memory))
       ),
       (0, import_react42.createElement)(
         Card3,
@@ -40381,7 +40399,7 @@ function BackgroundSection({ roster, actions, run: run3 }) {
     { title: t("Background jobs") },
     (0, import_react96.createElement)(
       SetRow,
-      { label: t("Background model"), hint: t("Memory review runs on it, and so do the notes of a chat on Claude Code or Codex.") },
+      { label: t("Background model"), hint: t("Memory runs on each Bot's own model first, and on this one if that fails. The notes of a chat on Claude Code or Codex run on this one.") },
       (0, import_react96.createElement)(
         "select",
         { className: "bt-select", "aria-label": t("Background model"), value: shown2, onChange: (event) => run3(actions.setPrefs({ backgroundModel: event.target.value || null })) },
@@ -45040,7 +45058,7 @@ function CodeField({ disabled, busy, onSubmit, fieldRef, label = "Authorization 
     (0, import_react106.createElement)("button", { type: "button", className: "bt-q-submit", disabled: disabled || busy || !filled, onClick: submit }, t("Send"))
   );
 }
-var timeOf = (at) => new Date(at).toLocaleTimeString(dateLocale(), { hour: "numeric", minute: "2-digit" });
+var timeOf2 = (at) => new Date(at).toLocaleTimeString(dateLocale(), { hour: "numeric", minute: "2-digit" });
 function CopyLink({ url }) {
   const [copied, setCopied] = (0, import_react106.useState)(false);
   (0, import_react106.useEffect)(() => {
@@ -45089,7 +45107,7 @@ function Attempt({ bot, row: row2, roster, manager, secretPending, fieldRef }) {
       "div",
       { className: "bt-cli-actions" },
       (0, import_react106.createElement)(CopyLink, { url }),
-      attempt?.expiresAt ? (0, import_react106.createElement)("span", { className: "bt-cli-subtle" }, t("Expires at {time}", { time: timeOf(attempt.expiresAt) })) : null
+      attempt?.expiresAt ? (0, import_react106.createElement)("span", { className: "bt-cli-subtle" }, t("Expires at {time}", { time: timeOf2(attempt.expiresAt) })) : null
     ) : null,
     row2.provider === "acp-codex" && attempt?.userCode ? (0, import_react106.createElement)(
       import_react106.Fragment,
