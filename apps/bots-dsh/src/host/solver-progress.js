@@ -89,14 +89,19 @@ export function resultSnapshot(folder) {
   function visit(path, name, root = false) {
     if (--remaining < 0) throw new Error('Result has too many entries to verify.')
     const stat = lstatSync(path, { bigint: true })
-    if (!stat.isDirectory() && !stat.isFile()) throw new Error('Result contains an unverifiable entry.')
-    hash.update(JSON.stringify([name, stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].map(String)))
+    const identity = [name, stat.dev, stat.ino, stat.mode].map(String)
     if (stat.isDirectory()) {
-      for (const child of readdirSync(path).sort()) {
-        if (root && child === '.git') continue
+      const children = readdirSync(path).sort().filter(child => !root || child !== '.git')
+      for (const child of children) {
         visit(join(path, child), child)
       }
       if (stat.ctimeNs !== lstatSync(path, { bigint: true }).ctimeNs) throw new Error('Result changed during verification.')
+      hash.update(JSON.stringify([...identity, children]))
+    } else if (stat.isFile()) {
+      const changes = [stat.size, stat.mtimeNs, stat.ctimeNs].map(String)
+      hash.update(JSON.stringify([...identity, ...changes]))
+    } else {
+      throw new Error('Result contains an unverifiable entry.')
     }
   }
   try {

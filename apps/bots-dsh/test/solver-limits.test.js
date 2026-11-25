@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -347,6 +347,33 @@ test('MISSING_PASS r2 holds exact ACP commands before start', async t => {
       }
     })
   }
+})
+
+test('Stage 6 result-changed records a native check after transient root churn', async t => {
+  const h = await nativeCheck(t)
+  const placeholder = join(h.cwd, 'sandbox-placeholder')
+  // Guarantee that the temporary entry advances the root's mtime even on fast runs.
+  utimesSync(h.cwd, 1, 1)
+  assert.match(await h.start('root-churn'), /Recorded/)
+  const result = await h.mirror('root-churn', { beforeExit: () => {
+    writeFileSync(placeholder, '')
+    rmSync(placeholder)
+  } })
+  assert.equal(result.isError, false)
+  assert.match(await h.report('root-churn'), /Recorded/)
+})
+
+test('Stage 6 result-changed refuses a native check after a result file edit', async t => {
+  const h = await nativeCheck(t)
+  const file = join(h.cwd, 'result')
+  writeFileSync(file, 'original result')
+  assert.match(await h.start('file-edit'), /Recorded/)
+  const result = await h.mirror('file-edit', { beforeExit: () => {
+    writeFileSync(file, 'changed result file')
+  } })
+  assert.equal(result.isError, false)
+  assert.match(await h.report('file-edit'), /no verified passing evidence.*result changed between the start and the outcome/i)
+  assert.deepEqual(h.bot().reviewTrack.solver.passed, [])
 })
 
 test('LA-1 requires completed passing evidence on the same result', async t => {
