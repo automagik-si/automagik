@@ -610,14 +610,18 @@ export function install(rt, { transport = options => new HermesTransport(options
       sessions: Object.entries(state.hermesSessions ?? {}).map(([sessionId, info]) => ({ sessionId, ...info })),
     }
   }
-  const publish = () => {
+  const publish = ({ startup = false } = {}) => {
     if (disposed) return
     adapter.registerAll()
-    registration?.(); registration = undefined
     // Keep the provider registered for an attached connection even before its first
     // connect: the model menu then lists no row (never the retired list), while an old
     // chat can still open and let the first attach normalization fill the one real row.
-    if (enabled() && (attachedRecord(record()) || servedModels().length > 0)) registration = ctx.llm.registerAdapter([HERMES_PROVIDER], adapter)
+    const shouldRegister = enabled() && (attachedRecord(record()) || servedModels().length > 0)
+    // When startup leaves the adapter list alone, a desktop catalog already building
+    // can still publish.
+    if (startup && registration === undefined && !shouldRegister) return
+    registration?.(); registration = undefined
+    if (shouldRegister) registration = ctx.llm.registerAdapter([HERMES_PROVIDER], adapter)
     rt.dropCatalog?.()
   }
   async function stopLive() {
@@ -1083,7 +1087,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     } finally { await run.close().catch(() => {}); await drain() }
   }, signal))
   ctx.effect(() => {
-    void rt.load().then(() => mutate(publish)).catch(() => {})
+    void rt.load().then(() => mutate(() => publish({ startup: true }))).catch(() => {})
     return async () => {
       interruptTests()
       for (const intent of intents) intent.controller.abort()

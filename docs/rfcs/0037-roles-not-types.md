@@ -370,12 +370,18 @@ process, and this RFC does not claim they do. That is why community roles wait f
    `role-detach` (one Bot), on the existing `POST /api/omni-ui` route, with the same person-only
    admission as the other admin actions and refused in read-only mode. The host resolves the
    version and sha256 from its signed catalog; a payload cannot name its own sha256 or source.
+   Exception (RFC 0048 delivery 2): a role whose package ships inside the Bot team plugin
+   (`solver`) installs from that copy when no install exists, recorded with `source: 'bundled'`.
+   It declares no tools, settings or capabilities. The host authenticates its content against the
+   plugin-owned digest for its installing version on every load.
 7. **The state answer.** The existing `state` answer adds the catalog plus the installed
    records, and each Bot's `roles`. A client that does not know the fields ignores them; the
    Bot's own fields do not change shape.
 8. **Capabilities.** `audio-out`, `task-start`, `route-policy`, `history-read`: declared by the
    package, granted one by one by the person, recorded on the attachment, removed by detach. A
    capability never widens the Bot's permission, folder, shell, channels, memory or Sessions.
+   RFC 0048 delivery 3 enforces `task-start` and `route-policy` at `start_task`. A verified
+   bundled role uses the running plugin's capability list for that role ID.
 9. **Kind stays a stored field.** `state.json`'s `kind: 'genie'` is read as the built-in role from
    P1 and as the installed package from P6. No product may add a new crew kind; a role is the
    extension point. Herdr's roster has its own seat `kind` (contract 12), which is not a crew
@@ -385,6 +391,9 @@ process, and this RFC does not claim they do. That is why community roles wait f
     Its `<version>` is the release in which the package's bytes last changed; a later release
     attaches the same bytes under its own tag, so an unchanged role keeps its version and its sha256.
     Nothing is published to npm.
+    A `bundled` install uses the version of the plugin that installed it. Identical content can
+    have different installed versions. The shop's update badge uses the signed catalog version
+    comparison.
 
     **Alternative considered.** Stamping every release's version would show an update on every
     plugin release and block fresh attachments after a plugin upgrade and restart.

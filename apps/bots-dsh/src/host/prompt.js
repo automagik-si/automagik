@@ -70,7 +70,8 @@ export function install(rt) {
           ? rt.botOf(rt.scheduledNativeOwner?.(sessionId)) : undefined
         return scheduled === undefined ? undefined : nativeGetters({}, sessionId, scheduled)
       }
-      const { name, role, instructions } = bot
+      const { name, role } = bot
+      const instructions = rt.roleRuntime?.instructionsFor?.(sessionId, bot) ?? bot.instructions
       const rolePrompt = rt.roleRuntime?.acpPrompt?.(sessionId, owner)
       const needsDshTools = roleToolsInDsh(bot, sessionId)
       const identity = {
@@ -106,10 +107,11 @@ export function install(rt) {
     const bot = rt.botOf(self)
     if (bot !== undefined) {
       const role = rt.roleRuntime?.prompt?.(id, agent)
+      const instructions = rt.roleRuntime?.instructionsFor?.(id, bot) ?? bot.instructions
       return [
         '# Your identity',
         `You are ${bot.name}, a Bot on the user's team in Omni.${bot.role ? ` Your role: ${bot.role}.` : ''}`,
-        bot.instructions ? `\n${bot.instructions}` : '',
+        instructions ? `\n${instructions}` : '',
         ...(role ? ['', role] : []),
         '',
         // Other Omni plugins add their parts between these (extend.js), such as operating Omni.

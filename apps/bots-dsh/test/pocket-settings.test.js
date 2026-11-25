@@ -1063,7 +1063,7 @@ test('astra-code #5 keeps the own chat on a carried Hermes route when picking at
       const h = await setup(t, { bot: { model, appliedModel: model } })
       h.providers['hermes-remote'] = [{ id: 'attach' }]
       await h.prime()
-      h.ctx.sessions.get = () => ({ requestHeader: () => ({ config: { provider } }) })
+      h.ctx.sessions.get = () => ({ requestHeader: () => ({ config: { provider, model: 'fixture' } }) })
       const c = await h.connect()
       const result = await c.model(await revision(c), target)
       assert.equal(result.state, 'saved')
@@ -1072,6 +1072,24 @@ test('astra-code #5 keeps the own chat on a carried Hermes route when picking at
       assert.deepEqual(h.calls, provider === 'hermes-remote' ? [] : [['select', 's-0', target]])
     })
   }
+})
+
+test('D2W-1 Pocket refuses attach with an unreadable live header', async t => {
+  const model = 'hermes-remote/nous:openai/gpt-6-astra'
+  const h = await setup(t, { bot: { model, appliedModel: model } })
+  h.providers['hermes-remote'] = [{ id: 'attach' }]
+  await h.prime()
+  h.ctx.sessions.get = () => ({ requestHeader: () => { throw new Error('header unavailable') } })
+  const c = await h.connect()
+  const rev = await revision(c)
+
+  const result = withReason(await c.model(rev, 'hermes-remote/attach'), 'not-applied')
+  assert.match(result.message, /current Session route could not be read/)
+  assert.equal(result.settings.model.saved, model)
+  assert.equal(result.settings.model.applied, model)
+  assert.equal(result.settings.rev, rev)
+  assert.equal(h.disk().bots[A].model, model)
+  assert.deepEqual(h.calls, [])
 })
 
 test('astra-code #6 a vanished ref leaves only the intended Auto clearing in the Bot record', async t => {

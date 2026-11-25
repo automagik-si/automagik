@@ -32,6 +32,24 @@ test('every literal the client translates has a Chinese entry', () => {
   assert.deepEqual(missing, [])
 })
 
+test('task model refusals use the specific retry templates in Chinese and Portuguese', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const examples = [
+    ['Models you may name: native-a/one and 4 more.', 'Models you may name: {models} and {n} more.'],
+    ['Models you may name: none; leave out model.', 'Models you may name: none; leave out model.'],
+    ['Models you may name: native-a/one.', 'Models you may name: {models}.'],
+    ['native-a/one could not be selected for the task.', '{model} could not be selected for the task.'],
+  ]
+  const undo = installLocale(fakeLocale('zh'))
+  try {
+    for (const [example, key] of examples) {
+      assert.equal(hostTemplateOf(example), key)
+      assert.ok(pt[key])
+      assert.notEqual(hostText(example), example)
+    }
+  } finally { undo() }
+})
+
 test('coding agent access messages name the renamed Settings section in all three languages', () => {
   const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
   assert.equal(ACCESS_MESSAGES.off, 'Turn on {connection} in Settings → Coding agents before using this model.')
@@ -199,18 +217,27 @@ test('zh-TW shows every character label in Traditional Chinese', () => {
   assert.deepEqual(labels.map(label => toTraditional(DICTIONARY.zh[label])), ['絨球', '嫩芽', '蘑菇', '鈴鐺', '雲朵', '刺球', '垂耳', '天線', '仙人掌', '燈泡', '小雞', '青蛙'])
 })
 
-// #2056 D1.5: every person-facing line of the review guard (K1-K14) in Chinese and Brazilian
+// #2056 D1.5: every person-facing line of the review guard (K1-K14 and scope) in Chinese and Brazilian
 // Portuguese, each with the English text's placeholders.
 test('the review guard lines have Chinese and Brazilian Portuguese texts with the same placeholders', async () => {
   const { REVIEW_GUARD_COPY } = await import('../src/shared/review-guard.js')
   const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
   const holes = text => [...String(text).matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort().join(',')
   const keys = Object.values(REVIEW_GUARD_COPY)
-  assert.equal(keys.length, 14)
+  assert.equal(keys.length, 15)
   for (const key of keys) {
     assert.equal(typeof DICTIONARY.zh[key], 'string', key)
     assert.equal(typeof pt[key], 'string', key)
     assert.equal(holes(DICTIONARY.zh[key]), holes(key), key)
     assert.equal(holes(pt[key]), holes(key), key)
   }
+})
+
+test('the Solver look refusals have their Chinese dictionary entries', () => {
+  for (const [key, text] of [
+    ['Only a Solver wears the Solver characters. Choose another character.', '只有 Solver 才能使用 Solver 角色。请选择其他角色。'],
+    ['A Solver wears one of the Solver characters. Choose one of those characters.', 'Solver 只能使用 Solver 角色。请从这些角色中选择一个。'],
+    ['Only the person can make a Bot a Solver.', '只有本人才能把 Bot 设为 Solver。'],
+    ['That look is not valid. Choose another character.', '这个形象无效。请选择其他角色。'],
+  ]) assert.equal(DICTIONARY.zh[key], text)
 })

@@ -1,13 +1,13 @@
 import { createElement as h, useSyncExternalStore } from 'react'
 import {
   allThemes, BotMark, BrandMark, BrandName, call, checkViewer, CONVERSATION_CSS, createSource, dayLabel, freePriority,
-  installCompiledStyles, installStyles, isRetired, LEFT_BAR_CSS, lookOf, mountedViewer, Nothing, onRetire,
+  catalogueLookOf, installCompiledStyles, installStyles, isRetired, LEFT_BAR_CSS, mountedViewer, Nothing, onRetire,
   requestViewer, SHELL_CSS, Shimmer, SIDEBAR_CSS, t, themeCss,
 } from './gated-shared.js'
 import { ACP_NAME } from '../shared/routes.js'
 import { applyPage, botLabels, changedBot, feedEnded, initialMember, isCurrent, pageRows, requestView, selectBot, updateRoster } from './member-model.js'
 
-const mark = bot => h(BotMark, { bot, look: { ...lookOf(bot), pet: undefined }, live: false, size: 28 })
+const mark = bot => h(BotMark, { bot, look: { ...catalogueLookOf(bot), pet: undefined }, live: false, size: 28 })
 const plain = text => (text ?? '').split('\n').flatMap((line, index) => index === 0 ? [line] : [h('br', { key: index }), line])
 
 export function MemberRows({ pages, roster, botId }) {

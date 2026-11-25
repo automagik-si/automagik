@@ -4,6 +4,7 @@ export const BUILTIN_ROLES = Object.freeze({
 })
 
 export const GENIE_ATTACH_REFUSAL = 'Genie can be given to another Bot after the next Genie update.'
+export const ROLES_OFF_REASON = 'roles-off'
 export const rolesOn = prefs => prefs?.roles !== false
 
 export const RESERVED_ROLE_IDS = Object.freeze(['data'])
@@ -32,6 +33,13 @@ export function packageAttachment(bot) {
     return { id: entry.id, version: entry.version, attachedAt: entry.attachedAt }
   }
 }
+
+export const SOLVER_DESCRIPTION = 'Solver'
+export const SOLVER_ROLE_ID = 'solver'
+export const hasSolverRole = bot => packageAttachment(bot)?.id === SOLVER_ROLE_ID
+
+// This identity is cosmetic or bookkeeping. Task-start checks the actual role pin.
+export const isSolverBot = bot => bot?.role === SOLVER_DESCRIPTION || hasSolverRole(bot)
 
 export const sameRolePin = (a, b) => Boolean(a && b && a.id === b.id && a.version === b.version && a.attachedAt === b.attachedAt)
 

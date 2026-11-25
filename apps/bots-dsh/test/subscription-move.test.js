@@ -549,7 +549,10 @@ test('a settled team with Codex ready asks the CLI nothing; Codex read gone agai
   const turns = async () => { for (let turn = 0; turn < 50; turn += 1) await immediate() }
   const agents = fakeAgents()
   const team = settledTeam()
-  const host = await gated(team, { agents })
+  const services = { sessionPersistence: {
+    async open() { return { read: async () => ({ eventState: 'detached', events: [] }) } },
+  } }
+  const host = await gated(team, { agents, services })
   t.after(host.stop)
   await host.pass()
   await host.pass()

@@ -4,10 +4,11 @@ import { runInNewContext } from 'node:vm'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
-import { SOLVER_DESCRIPTION } from '../src/shared/solver-method.js'
+import { defaultShape, shapeOf } from '../src/client/characters.js'
+import { SOLVER_DESCRIPTION, solverInstructions } from '../src/shared/solver-method.js'
 
 const bundle = await build({
-  stdin: { contents: "export * from './src/client/character-select.js'\nexport { lookOf } from './src/client/mark.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
+  stdin: { contents: "export * from './src/client/character-select.js'\nexport { lookOf } from './src/client/mark.js'\nexport { registerShape } from './src/client/themes.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
   bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent', external: ['react', 'react-dom'],
 })
 const select = { exports: {} }
@@ -98,7 +99,7 @@ test('Arrow Down and Up cross the section break by column, a short last row incl
 test('the cursor starts on what the Bot wears now', () => {
   const key = bot => currentKey(bot, lookOf(bot))
   assert.equal(key({ id: 'b', avatar: { shape: 'star' } }), 'shape:star')
-  assert.equal(key({ id: 'b', avatar: { shape: 'cactus' } }), 'shape:cactus')
+  assert.equal(key({ id: 'b', avatar: { shape: 'cactus' } }), `shape:${defaultShape('b')}`)
   assert.equal(key({ id: 'b', color: 'deepseek', avatar: { shape: 'octopus' } }), 'omni')
   assert.equal(key({ id: 'g', kind: 'genie' }), 'pet:builtin:genie-clay')
   const saved = JSON.parse(JSON.stringify({ id: 'g', kind: 'genie', avatar: { pet: automagikRoster()[2].pet } }))
@@ -107,23 +108,28 @@ test('the cursor starts on what the Bot wears now', () => {
   assert.equal(key({ id: 'b', avatar: { image: 'data:image/png;base64,AA==' } }), 'photo')
 })
 
-test('only a Solver Bot is offered the Solvers: the marker is the description, exactly', () => {
+test("only a Solver Bot is offered the Solvers: the marker is the Description plus the dialog's reviewer or method", () => {
   // Copied into this realm's arrays: the roster comes from the bundle's own context.
-  assert.deepEqual([...solversFor({ id: 'b', role: SOLVER_DESCRIPTION })].map(entry => entry.shape), SOLVERS)
+  assert.deepEqual([...solversFor({ id: 'b', role: SOLVER_DESCRIPTION })], [])
+  assert.deepEqual([...solversFor({ role: SOLVER_DESCRIPTION, reviewerId: 'r' })].map(entry => entry.shape), SOLVERS)
+  assert.deepEqual([...solversFor({ role: SOLVER_DESCRIPTION, instructions: solverInstructions() })].map(entry => entry.shape), SOLVERS)
   for (const bot of [{}, { role: '' }, { role: 'Researcher' }, { role: 'solver' }, { role: 'Reviewer' }, { role: ' Solver' }, { role: 'Solver helper' }, null, undefined]) {
     assert.deepEqual([...solversFor(bot)], [], JSON.stringify(bot))
   }
   // A Bot that wears a Solver and is not a Solver Bot: no tile of its roster is the worn one.
   const writer = { id: 'b', name: 'W', role: 'Writer', avatar: { shape: 'cactus' } }
-  assert.equal(currentKey(writer, lookOf(writer)), 'shape:cactus')
+  assert.equal(currentKey(writer, lookOf(writer)), `shape:${defaultShape('b')}`)
   assert.ok(![...automagikRoster({ unfold: true }), ...solversFor(writer)].some(entry => entry.key === 'shape:cactus'))
 })
 
-// The chooser itself, drawn by a React that keeps state between draws and only builds the tree
-// (effects never run; a component inside it is left as a node). `draw()` gives every node.
-function chooser(bot) {
+// Keep hook state between draws and connect tile focus to the chooser's DOM handlers.
+function chooser(bot, { importAvatars, avatarImage = async () => '' } = {}) {
   const slots = []
   let at = 0
+  const layoutEffects = []
+  const focusedSwatches = []
+  let pending
+  let closed = 0
   const slot = (make) => { const index = at; at += 1; if (!(index in slots)) slots[index] = make(); return index }
   const stub = {
     createElement: (type, props, ...children) => ({ type, props: { ...props, children: children.flat(Infinity) } }),
@@ -132,16 +138,31 @@ function chooser(bot) {
       return [slots[index], (next) => { slots[index] = typeof next === 'function' ? next(slots[index]) : next }]
     },
     useRef: current => slots[slot(() => ({ current }))],
-    useMemo: make => make(), useEffect() {}, useLayoutEffect() {}, Fragment: 'fragment',
+    useMemo: make => make(), useEffect() {},
+    useLayoutEffect: (effect, deps) => {
+      const index = slot(() => ({}))
+      const previous = slots[index]
+      if (!deps || !previous.deps || deps.some((value, i) => !Object.is(value, previous.deps[i]))) {
+        layoutEffects.push(() => {
+          previous.cleanup?.()
+          slots[index] = { deps, cleanup: effect() }
+        })
+      }
+    },
+    Fragment: 'fragment',
   }
   const module = { exports: {} }
-  runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, URLSearchParams, document: { body: {} }, setTimeout: () => 0, require: name => (name === 'react' ? stub : { createPortal: node => node }) })
+  runInNewContext(bundle.outputFiles[0].text, {
+    module, exports: module.exports, URLSearchParams, document: { body: {} }, setTimeout: () => 0,
+    CSS: { escape: value => value }, HTMLInputElement: class {}, HTMLSelectElement: class {},
+    require: name => (name === 'react' ? stub : { createPortal: node => node }),
+  })
   const saved = []
   const used = []
   const never = () => new Promise(() => {})
   const actions = {
-    pets: never, avatarLibrary: never, petsBrowse: never,
-    updateBot: (id, patch) => { saved.push(JSON.parse(JSON.stringify([id, patch]))); return never() },
+    pets: never, avatarLibrary: never, petsBrowse: never, importAvatars,
+    updateBot: async (id, patch) => { saved.push(JSON.parse(JSON.stringify([id, patch]))) },
     petUse: (...args) => { used.push(JSON.parse(JSON.stringify(args))); return never() },
   }
   const walk = (node, found = []) => {
@@ -151,14 +172,51 @@ function chooser(bot) {
     walk(node.props?.children, found)
     return found
   }
-  const draw = () => { at = 0; return walk(module.exports.CharacterSelect({ bot, actions, run: promise => promise, onClose() {}, avatarImage: async () => '' })) }
-  return { draw, saved, used }
+  const draw = (next = bot) => {
+    bot = next
+    at = 0
+    const nodes = walk(module.exports.CharacterSelect({
+      bot, actions, avatarImage, run: promise => (pending = promise), onClose: () => { closed += 1 },
+    }))
+    const renderedTiles = tiles(nodes).map(tile => ({
+      dataset: { key: tile.props['data-key'] },
+      focus: () => tile.props.onFocus({ currentTarget: { matches: selector => selector === ':focus-visible' } }),
+    }))
+    nodes.find(node => node.props.className === 'bt-cs-scroll').props.ref.current = {
+      querySelectorAll: () => renderedTiles,
+      querySelector: selector => renderedTiles.find(tile => selector === `[data-key="${tile.dataset.key}"]`),
+    }
+    const colors = nodes.find(node => node.props.className === 'bt-cs-colors')
+    if (colors?.props.ref) {
+      colors.props.ref.current = {
+        lastElementChild: { focus: () => focusedSwatches.push(colors.props.children.at(-1).props['aria-label']) },
+      }
+    }
+    for (const effect of layoutEffects.splice(0)) effect()
+    return nodes
+  }
+  const key = (nodes, key, target = {}, modifiers = {}) => {
+    let prevented = false
+    nodes[0].props.onKeyDown({ key, target, ...modifiers, preventDefault() { prevented = true }, stopPropagation() {} })
+    return prevented
+  }
+  const upload = (nodes) => {
+    const file = nodes.find(node => node.type === 'input' && node.props.type === 'file')
+    file.props.onChange({ target: { files: [{ name: 'avatar.png' }] } })
+    return pending
+  }
+  return { draw, key, saved, used, upload, focusedSwatches, registerShape: module.exports.registerShape, get closed() { return closed } }
 }
 const headings = nodes => nodes.filter(node => node.type === 'h3').map(node => node.props.children[0])
 const tiles = nodes => nodes.filter(node => node.type === 'button' && node.props.className === 'bt-cs-tile')
 const keysOf = nodes => tiles(nodes).map(tile => tile.props['data-key'])
 const SOLVER_KEYS = SOLVERS.map(shape => `shape:${shape}`)
 const stageName = nodes => nodes.find(node => node.props?.className === 'bt-cs-name').props.children[0]
+const solverBot = { id: 'b', name: 'Fixture', role: SOLVER_DESCRIPTION, instructions: solverInstructions(), avatar: { shape: 'frog' }, color: 'red' }
+const chooseButton = nodes => nodes.find(node => node.props.className === 'bt-cs-go')
+const tileOf = (nodes, shape) => tiles(nodes).find(tile => tile.props['data-key'] === `shape:${shape}`)
+const focusTile = (nodes, shape) => tileOf(nodes, shape).props.onFocus({ currentTarget: { matches: selector => selector === ':focus-visible' } })
+const ordinaryDefault = shapeOf(defaultShape('b')).label
 
 test('a regular Bot\'s chooser draws no Solvers section and no Solver tile', () => {
   const nodes = chooser({ id: 'b', name: 'W', role: 'Writer', avatar: { shape: 'moon' }, color: 'red' }).draw()
@@ -170,17 +228,19 @@ test('a regular Bot\'s chooser draws no Solvers section and no Solver tile', () 
 })
 
 test('a Solver Bot\'s chooser draws the Solvers section: the heading, then exactly the twelve in order', () => {
-  const nodes = chooser({ id: 'b', name: 'S', role: SOLVER_DESCRIPTION, avatar: { shape: 'moon' }, color: 'red' }).draw()
-  assert.deepEqual(headings(nodes), ['Automagik', 'Solvers', 'codex-pets.net'])
+  const nodes = chooser({ ...solverBot, avatar: { shape: 'moon' } }).draw()
+  assert.deepEqual(headings(nodes), ['Solvers'])
   const section = nodes.find(node => node.type === 'section' && node.props.children[0]?.type === 'h3' && node.props.children[0].props.children[0] === 'Solvers')
   const [heading, grid] = section.props.children
   assert.equal(heading.props.className, 'bt-cs-label')
   assert.equal(grid.props.className, 'bt-cs-grid')
   assert.deepEqual(grid.props.children.map(tile => tile.props['data-key']), SOLVER_KEYS)
   assert.deepEqual(keysOf(nodes).filter(key => SOLVER_KEYS.includes(key)), SOLVER_KEYS)
-  assert.equal(keysOf(nodes).length, 36)
+  assert.equal(keysOf(nodes).length, 12)
+  assert.deepEqual(tiles(nodes).filter(tile => tile.props['aria-pressed']), [])
+  assert.equal(stageName(nodes), 'Antenna')
   // It wears one: that tile is the pressed one, and the stage shows it.
-  const worn = chooser({ id: 'b', name: 'S', role: SOLVER_DESCRIPTION, avatar: { shape: 'cactus' }, color: 'red' }).draw()
+  const worn = chooser({ ...solverBot, avatar: { shape: 'cactus' } }).draw()
   assert.deepEqual(tiles(worn).filter(tile => tile.props['aria-pressed']).map(tile => tile.props['data-key']), ['shape:cactus'])
   assert.equal(stageName(worn), 'Cactus')
 })
@@ -192,25 +252,23 @@ test('a regular Bot that wears a Solver: no tile is pressed, and none of the Sol
   assert.deepEqual(keysOf(nodes).filter(key => SOLVER_KEYS.includes(key)), [])
 })
 
-test('a regular Bot that wears a Solver opens on it, and Choose keeps the shape in the newly picked color', () => {
+test('a regular Bot wearing a Solver character previews its ordinary default and Choose saves only the new color', () => {
   const { draw, saved } = chooser({ id: 'b', name: 'W', role: 'Writer', avatar: { shape: 'cactus' }, color: 'red' })
   let nodes = draw()
-  // The stage shows the worn Solver, not the roster's first entry; its colors are offered.
-  assert.equal(stageName(nodes), 'Cactus')
+  assert.equal(stageName(nodes), ordinaryDefault)
   const colors = () => nodes.filter(node => node.type === 'button' && node.props.className === 'bt-cs-color')
   assert.deepEqual(colors().filter(button => button.props['aria-pressed']).map(button => button.props['aria-label']), ['Red'])
   colors().find(button => button.props['aria-label'] === 'Blue').props.onClick()
   nodes = draw()
-  assert.equal(stageName(nodes), 'Cactus')
+  assert.equal(stageName(nodes), ordinaryDefault)
   assert.deepEqual(colors().filter(button => button.props['aria-pressed']).map(button => button.props['aria-label']), ['Blue'])
-  // Still no Solver to pick: the worn one is on the stage only.
+  // The stored Solver character is absent from the ordinary roster.
   assert.deepEqual(keysOf(nodes).filter(key => SOLVER_KEYS.includes(key)), [])
   assert.deepEqual(saved, [])
   const choose = nodes.find(node => node.type === 'button' && node.props.className === 'bt-cs-go')
   assert.ok(!choose.props.disabled)
   choose.props.onClick()
-  // Same shape, new color: the look is kept, the color change is saved.
-  assert.deepEqual(saved, [['b', { avatar: { shape: 'cactus' }, color: 'blue' }]])
+  assert.deepEqual(saved, [['b', { color: 'blue' }]])
 })
 
 test('an Unfold Bot wears no character: while its pet list loads the stage is not given its id\'s shape', () => {
@@ -221,21 +279,188 @@ test('an Unfold Bot wears no character: while its pet list loads the stage is no
   assert.deepEqual(nodes.filter(node => node.type === 'button' && node.props.className === 'bt-cs-color'), [])
   assert.deepEqual(tiles(nodes).filter(tile => tile.props['aria-pressed'] === true), [])
   nodes.find(node => node.type === 'button' && node.props.className === 'bt-cs-go').props.onClick()
-  // Choose picks the staged entry, a pet: it never saves a shape over the Unfold look.
+  // An untouched Choose keeps the Unfold look.
   assert.deepEqual(saved, [])
-  assert.deepEqual(used, [['u', 'builtin', 'genie-clay']])
+  assert.deepEqual(used, [])
   // The same with a shape stored under it.
   const stored = chooser({ id: 'u', name: 'U', kind: 'unfold', avatar: { shape: 'moon' } })
   assert.equal(stageName(stored.draw()), 'Genie')
 })
 
-test('the octopus in a color other than Omni\'s is kept: on the stage, no tile, and Choose saves it again', () => {
+test('the octopus in a color other than Omni\'s stays on stage without a tile', () => {
   const { draw, saved, used } = chooser({ id: 'b', name: 'O', avatar: { shape: 'octopus' }, color: 'red' })
   const nodes = draw()
   assert.equal(stageName(nodes), 'Octopus')
   assert.deepEqual(tiles(nodes).filter(tile => tile.props['aria-pressed'] === true), [])
   assert.ok(!keysOf(nodes).includes('shape:octopus'))
   nodes.find(node => node.type === 'button' && node.props.className === 'bt-cs-go').props.onClick()
-  assert.deepEqual(saved, [['b', { avatar: { shape: 'octopus' }, color: 'red' }]])
+  assert.deepEqual(saved, [])
   assert.deepEqual(used, [])
+})
+
+test('D2 G1 a Solver pin makes the Solvers available without the Solver description', () => {
+  const nodes = chooser({ id: 'b', name: 'Research', role: 'Researcher',
+    roles: [{ id: 'solver', version: '3.1.2', attachedAt: '2026-11-24T00:00:00Z', grants: [] }] }).draw()
+  assert.ok(headings(nodes).includes('Solvers'))
+  assert.ok(SOLVER_KEYS.every(key => keysOf(nodes).includes(key)))
+})
+
+test('a Solver wearing a photo gets only Solver tiles and Default look replaces the complete avatar', () => {
+  const ui = chooser({ ...solverBot, avatar: { shape: 'moon', image: 'data:image/png;base64,AA==' } })
+  const nodes = ui.draw()
+  assert.deepEqual(headings(nodes), ['Solvers'])
+  assert.deepEqual(keysOf(nodes), SOLVER_KEYS)
+  assert.ok(!nodes.some(node => node.type === 'button' && node.props.children.includes('Add photos')))
+  nodes.find(node => node.type === 'button' && node.props.children.includes('Default look')).props.onClick()
+  assert.deepEqual(ui.saved, [['b', { avatar: { shape: 'antenna' } }]])
+})
+
+test('Description Solver by itself gives the ordinary chooser', () => {
+  const nodes = chooser({ ...solverBot, instructions: '', avatar: { shape: 'moon' } }).draw()
+  assert.deepEqual(headings(nodes), ['Automagik', 'codex-pets.net'])
+  assert.ok(keysOf(nodes).every(key => !SOLVER_KEYS.includes(key)))
+})
+
+test('a tile choice is discarded when identity changes and does not revive on restoration', () => {
+  const ui = chooser(solverBot)
+  tileOf(ui.draw(), 'cactus').props.onClick()
+  const ordinary = ui.draw({ ...solverBot, instructions: '', reviewerId: undefined })
+  assert.equal(stageName(ordinary), ordinaryDefault)
+  chooseButton(ordinary).props.onClick()
+  chooseButton(ui.draw(solverBot)).props.onClick()
+  assert.deepEqual(ui.saved, [])
+})
+
+test('mount focus alone saves nothing and an arrow move chooses a character', () => {
+  const ui = chooser({ ...solverBot, avatar: { shape: 'cactus' } })
+  const nodes = ui.draw()
+  chooseButton(nodes).props.onClick()
+  assert.deepEqual(ui.saved, [])
+  ui.key(nodes, 'ArrowRight')
+  chooseButton(ui.draw()).props.onClick()
+  assert.deepEqual(ui.saved, [['b', { avatar: { shape: 'bulb' }, color: 'red' }]])
+})
+
+test('Shift+Tab over earlier tiles to a swatch recolors without choosing a tile', () => {
+  const ui = chooser(solverBot)
+  let nodes = ui.draw()
+  const buttons = () => nodes.filter(node => node.type === 'button' && !node.props.disabled)
+  const from = buttons().findIndex(node => node.props['data-key'] === 'shape:frog')
+  const to = buttons().findIndex(node => node.props.className === 'bt-cs-color' && node.props['aria-label'] === 'Blue')
+  assert.ok(to >= 0 && from > to)
+  // The stage precedes the roster. Walk the browser's backwards focus order.
+  for (let index = from; index > to; index -= 1) {
+    ui.key(nodes, 'Tab', { dataset: { key: buttons()[index].props['data-key'] } }, { shiftKey: true })
+    buttons()[index - 1].props.onFocus?.({ currentTarget: { matches: selector => selector === ':focus-visible' } })
+    nodes = ui.draw()
+  }
+  assert.equal(stageName(nodes), 'Puff')
+  buttons()[to].props.onClick()
+  chooseButton(ui.draw()).props.onClick()
+  assert.deepEqual(ui.saved, [['b', { color: 'blue' }]])
+})
+
+test('Enter saves its target tile and Space explicitly chooses one before focus moves', () => {
+  const direct = chooser(solverBot)
+  direct.key(direct.draw(), 'Enter', { dataset: { key: 'shape:cactus' } })
+  assert.deepEqual(direct.saved, [['b', { avatar: { shape: 'cactus' }, color: 'red' }]])
+  const staged = chooser(solverBot)
+  staged.key(staged.draw(), ' ', { dataset: { key: 'shape:cactus' } })
+  focusTile(staged.draw(), 'bulb')
+  staged.key(staged.draw(), 'Enter')
+  assert.deepEqual(staged.saved, [['b', { avatar: { shape: 'cactus' }, color: 'red' }]])
+})
+
+test('the chooser stages the ordinary default and restores the stored character when identity returns', () => {
+  const ui = chooser({ ...solverBot, instructions: '' })
+  const ordinary = ui.draw()
+  assert.equal(stageName(ordinary), ordinaryDefault)
+  assert.deepEqual(tiles(ordinary).filter(tile => tile.props['aria-pressed']), [])
+  chooseButton(ordinary).props.onClick()
+  assert.deepEqual(ui.saved, [])
+  const restored = ui.draw(solverBot)
+  assert.equal(stageName(restored), 'Frog')
+  assert.equal(tileOf(restored, 'frog').props['aria-pressed'], true)
+})
+
+test('untouched Choose and Enter keep the color from the latest roster snapshot', () => {
+  for (const commit of [(ui, nodes) => chooseButton(nodes).props.onClick(), (ui, nodes) => ui.key(nodes, 'Enter')]) {
+    const ui = chooser(solverBot)
+    ui.draw()
+    const nodes = ui.draw({ ...solverBot, color: 'blue' })
+    commit(ui, nodes)
+    assert.deepEqual(ui.saved, [])
+    assert.equal(ui.closed, 1)
+    assert.equal(nodes.find(node => node.props.className === 'bt-cs-color' && node.props['aria-label'] === 'Blue').props['aria-pressed'], true)
+  }
+})
+
+test('Shift+Tab from a former Solver default reaches the swatches without choosing a tile', () => {
+  const ui = chooser({ ...solverBot, instructions: '' })
+  const nodes = ui.draw()
+  assert.equal(stageName(nodes), ordinaryDefault)
+  const key = tileOf(nodes, defaultShape('b')).props['data-key']
+  assert.equal(ui.key(nodes, 'Tab', { dataset: { key } }, { shiftKey: true }), true)
+  assert.deepEqual(ui.focusedSwatches, ['Aurora'])
+  const stage = ui.draw()
+  assert.equal(stageName(stage), ordinaryDefault)
+  stage.find(node => node.props.className === 'bt-cs-color' && node.props['aria-label'] === 'Blue').props.onClick()
+  chooseButton(ui.draw()).props.onClick()
+  assert.deepEqual(ui.saved, [['b', { color: 'blue' }]])
+})
+
+test('a registered ordinary shape stays on stage without a chooser tile', () => {
+  const ui = chooser({ id: 'b', name: 'Fixture', avatar: { shape: 'plugin-shape' } })
+  const unregister = ui.registerShape('plugin-shape', {
+    label: 'Plugin shape', body: paint => `<circle fill="${paint}" r="10"/>`, eyes: { at: [[36, 50], [64, 50]] },
+  })
+  try {
+    const nodes = ui.draw()
+    assert.equal(stageName(nodes), 'Plugin shape')
+    assert.ok(!tileOf(nodes, 'plugin-shape'))
+  } finally {
+    unregister()
+  }
+})
+
+const uploadedImage = 'data:image/png;base64,AA=='
+function pendingUpload() {
+  const started = Promise.withResolvers()
+  const imported = Promise.withResolvers()
+  const ordinary = { ...solverBot, instructions: '', avatar: { shape: 'star' } }
+  const ui = chooser(ordinary, {
+    avatarImage: async () => uploadedImage,
+    importAvatars: () => { started.resolve(); return imported.promise },
+  })
+  const done = ui.upload(ui.draw())
+  return { ui, ordinary, started: started.promise, finish: () => { imported.resolve({}); return done } }
+}
+
+test('a photo import in flight cannot change a Bot that became a Solver', async () => {
+  const { ui, started, finish } = pendingUpload()
+  await started
+  assert.deepEqual(headings(ui.draw(solverBot)), ['Solvers'])
+  await finish()
+  assert.deepEqual(ui.saved, [])
+  assert.equal(ui.closed, 0)
+})
+
+test('a photo import in flight uses the latest avatar of the same ordinary Bot', async () => {
+  const { ui, ordinary, started, finish } = pendingUpload()
+  await started
+  ui.draw({ ...ordinary, avatar: { shape: 'moon' } })
+  await finish()
+  assert.deepEqual(ui.saved, [['b', { avatar: { shape: 'moon', image: uploadedImage } }]])
+  assert.equal(ui.closed, 1)
+})
+
+test('untouched Choose closes an ordinary photo chooser with zero writes', () => {
+  const ui = chooser({ id: 'b', name: 'Fixture', avatar: { image: uploadedImage } })
+  const nodes = ui.draw()
+  assert.equal(stageName(nodes), 'Photo')
+  const button = chooseButton(nodes)
+  assert.equal(button.props.disabled, false)
+  button.props.onClick()
+  assert.deepEqual(ui.saved, [])
+  assert.equal(ui.closed, 1)
 })

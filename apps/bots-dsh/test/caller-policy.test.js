@@ -111,3 +111,11 @@ test('R4 RFC 0038 records 5b as merged and leaves native reads conditional after
   }
   assert.match(rfc, /working folder path[^.]*would require[^.]*approval/s)
 })
+
+test('D2 Solver lifecycle request and response fields use existing owner actions', () => {
+  const settings = inventory.classes['bot-admin']
+  for (const endpoint of Object.keys(inventory.ownerFields)) {
+    assert.ok(settings.includes(endpoint))
+    for (const role of ['member', 'guest']) assert.equal(callerEndpoint(role, endpoint).reason, 'owner-only')
+  }
+})

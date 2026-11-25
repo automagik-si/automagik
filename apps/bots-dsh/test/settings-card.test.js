@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { defaultShape } from '../src/client/characters.js'
 
 // The show_settings card draws the very page the Settings dialog draws (SettingsPage), from
 // the live roster: one page, two places, one way to save.
@@ -152,6 +153,42 @@ test('the usage card opens UsagePage focused on the Bot it names', () => {
   } finally {
     release()
   }
+})
+
+test('Usage resolves live Bot glyphs and passes the catalogue look for a deleted Bot', () => {
+  const live = { ...writer, role: 'Solver', avatar: { shape: 'frog' } }
+  const deleted = { id: 'gone', name: 'Gone', deleted: true }
+  const usage = {
+    now: '2026-11-24 12',
+    owners: [live, deleted].map(bot => ({ id: bot.id, key: bot.id, name: bot.name, kind: 'bot', deleted: bot.deleted })),
+    models: [{ key: 'test-model', name: 'Test model' }],
+    kinds: ['chat'],
+    rows: [0, 1].map(owner => ['2026-11-24 12', owner, 0, 0, 10, 0, 0, 5, 1]),
+  }
+  const [page] = walk(settings.SettingsPage({
+    shown: 'usage', roster: { ...roster, byId: { [live.id]: live } }, actions: {},
+  }), node => node.type?.name === 'UsagePage')
+  states = [usage]
+  const tree = page.type(page.props)
+  const glyphs = walk(tree, node => node.props.glyph?.type?.name === 'BotAvatar').map(node => node.props.glyph)
+  assert.equal(glyphs.length, 2)
+  const markFor = (id) => {
+    const glyph = glyphs.find(node => node.props.bot.id === id)
+    assert.ok(glyph)
+    const [mark] = walk(glyph.type(glyph.props), node => node.type?.name === 'BotMark')
+    assert.ok(mark)
+    return mark
+  }
+  const shapeOfMark = (mark) => {
+    const drawn = mark.type(mark.props)
+    return drawn.type(drawn.props).props['data-shape']
+  }
+  const current = markFor(live.id)
+  assert.equal(current.props.look, undefined)
+  assert.equal(shapeOfMark(current), defaultShape(live.id))
+  const fallback = markFor(deleted.id)
+  assert.equal(fallback.props.look?.shape, defaultShape(deleted.id))
+  assert.equal(shapeOfMark(fallback), defaultShape(deleted.id))
 })
 
 test('open without the pages registered, or on a page this window lacks, it says so', () => {

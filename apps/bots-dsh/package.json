@@ -38,6 +38,7 @@
     "src/host/",
     "src/shared/",
     "src/office/",
+    "roles/solver/",
     "scripts/seed-registry.mjs",
     "client.js",
     "client.gated.js",

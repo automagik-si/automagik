@@ -348,6 +348,8 @@ test('Omni joining the team adds the Omni Bot once, in its own project, with its
     assert.equal(reply.value.omniBot.name, 'Omni')
     const [, options] = team.calls.find(call => call[0] === 'createBot')
     assert.deepEqual({ ...options, avatar: { ...options.avatar } }, { ...OMNI_BOT, avatar: { ...OMNI_BOT.avatar }, workDir: join(folder, 'omni'), pickModel: true })
+    assert.equal(team.botOf(reply.value.omniBot.id).kind, 'omni')
+    assert.deepEqual(team.botOf(reply.value.omniBot.id).avatar, { shape: 'octopus' })
     assert.ok(statSync(join(folder, 'omni')).isDirectory())
     assert.deepEqual(fake.valueOf('omni-ai'), { teamOmni: true, teamGenie: false, teamOmniAbilities: '{"channels":true,"shell":false}' })
 
@@ -356,6 +358,35 @@ test('Omni joining the team adds the Omni Bot once, in its own project, with its
   } finally {
     rmSync(folder, { recursive: true, force: true })
   }
+})
+
+test('the Welcome team step reports the same look refusal as companion save', async () => {
+  const bots = readFileSync(new URL('../../bots-dsh/src/shared/solver-looks.js', import.meta.url), 'utf8')
+  const welcome = readFileSync(new URL('../src/host/companion.js', import.meta.url), 'utf8')
+  assert.equal(bots.match(/^export const SOLVER_WEARS = '(.+)'$/m)[1], welcome.match(/^const SOLVER_LOOK_REFUSAL = '(.+)'$/m)[1])
+
+  const team = fakeTeam({ mainName: 'Mochi' })
+  const message = 'A Solver wears one of the Solver characters. Choose one of those characters.'
+  team.updateBot = async () => { throw Object.assign(new Error(message), { code: 'bot/refused' }) }
+  const fake = host({ team, entries: { 'omni-ai': { companionName: 'Pip', companionShape: 'octopus' } } })
+  const direct = await fake.handle('companion-save', { name: 'Pip', shape: 'octopus' })
+  assert.equal(direct.error?.message, message)
+  const result = await fake.handle('team-save', { omni: true })
+  assert.deepEqual(result, direct)
+  assert.deepEqual(team.calls, [])
+})
+
+test('the Welcome team step saves the choice and joins Omni after a non-look refusal', async () => {
+  const team = fakeTeam({ mainName: 'Mochi' })
+  team.updateBot = async () => { throw Object.assign(new Error('Unknown Bot'), { code: 'bot/refused' }) }
+  const fake = host({ team, entries: { 'omni-ai': { companionName: 'Pip', companionShape: 'octopus' } } })
+
+  const result = await fake.handle('team-save', { omni: true, genie: true })
+
+  assert.deepEqual(fake.valueOf('omni-ai'), { companionName: 'Pip', companionShape: 'octopus', teamOmni: true, teamGenie: true })
+  assert.equal(result.error, undefined)
+  assert.equal(team.botOf(result.value.omniBot.id).kind, 'omni')
+  assert.deepEqual(fake.logs, [['omni-ai: the companion was not applied: %s', 'Unknown Bot']])
 })
 
 test('a deleted Omni Bot comes back from the Bot team\'s Add Omni, made as the team step makes it', async () => {
@@ -375,6 +406,8 @@ test('a deleted Omni Bot comes back from the Bot team\'s Add Omni, made as the t
     assert.equal(bot.name, 'Omni')
     const [, options] = team.calls.find(call => call[0] === 'createBot')
     assert.equal(options.kind, OMNI_BOT.kind)
+    assert.equal(team.botOf(bot.id).kind, 'omni')
+    assert.deepEqual(team.botOf(bot.id).avatar, { shape: 'octopus' })
     assert.equal(options.workDir, join(folder, 'omni'))
     assert.equal(addable(), false)
   } finally {

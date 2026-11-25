@@ -1,7 +1,7 @@
 import { createElement as h, startTransition, useEffect, useMemo, useRef, useState } from 'react'
 import { colorOf, MAIN_LOOK } from './characters.js'
 import { GRADIENTS, paintCss } from './inks.js'
-import { BotAvatar, BotMark, RoomAvatar } from './mark.js'
+import { BotAvatar, BotMark, catalogueLookOf, RoomAvatar } from './mark.js'
 import { CalendarIcon, ChatsIcon, ChevronLeftIcon, ChevronRightIcon } from './icons.js'
 import { reducedMotion, useGlide } from './motion.js'
 import { dateLocale, t } from './i18n.js'
@@ -105,12 +105,14 @@ function ModelGlyph({ name, paint, size }) {
 // A Bot shows in its own color and character; a group chat and the other sessions in gray.
 function ownerFace(owner, roster) {
   if (owner.kind === 'bot') {
-    const bot = roster.byId[owner.id] ?? { id: owner.id, name: owner.name }
+    const current = roster.byId[owner.id]
+    const bot = current ?? { id: owner.id, name: owner.name }
+    const look = current ? undefined : catalogueLookOf(bot)
     const name = bot.name || owner.name || t('Deleted Bot')
     const role = bot.role?.trim() ?? ''
     return {
       kind: 'bot', name, sub: owner.deleted ? t('Deleted') : role.toLowerCase() === name.toLowerCase() ? '' : role,
-      paint: paintCss(colorOf(bot)), stops: GRADIENTS[colorOf(bot)], glyph: size => h(BotAvatar, { bot, size, badge: false, live: false }),
+      paint: paintCss(colorOf(bot)), stops: GRADIENTS[colorOf(bot)], glyph: size => h(BotAvatar, { bot, look, size, badge: false, live: false }),
     }
   }
   if (owner.kind === 'room') {

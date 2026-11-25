@@ -2,12 +2,19 @@ import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import * as fsPromises from 'node:fs/promises'
 import { dirname, isAbsolute, join, posix } from 'node:path'
-import { attachedRoleIds, isPackageRoleId, isRoleId, isRoleVersion, ROLE_SOURCE_UNCONFIRMED, rolesOn } from '../shared/roles.js'
-import { isSha256, parseRoleJson, plainObject, ROLE_EVIDENCE_LIMITS, roleDescription, roleName, roleToolName, validCapabilities } from './role-catalog.js'
+import { fileURLToPath } from 'node:url'
+import { BUNDLED_ROLE_CAPABILITIES, BUNDLED_ROLE_HISTORY, BUNDLED_ROLE_IDS, bundleDigest, expectedBundleDigest, manifestBytes } from './bundled-roles.js'
+import { compareVersions } from './lane-verify.js'
+import { attachedRoleIds, isPackageRoleId, isRoleId, isRoleVersion, ROLES_OFF_REASON, ROLE_SOURCE_UNCONFIRMED, rolesOn } from '../shared/roles.js'
+import { isSha256, parseRoleJson, plainObject, ROLE_EVIDENCE_LIMITS, ROLE_PLUGIN_VERSION, roleDescription, roleName, roleToolName, validCapabilities } from './role-catalog.js'
 import { MAX_ROLE_BYTES, MAX_ROLE_FILES, MAX_ROLE_FILE_SIZE, readRoleTar, roleFilePath } from './role-tar.js'
 import { refusal } from './refusal.js'
 
 const MANIFEST_LIMIT = 64 * 1024
+const BUNDLE_LEAVES = new Map([['prompt.md', 16 * 1024], ['role.json', MANIFEST_LIMIT], ['role.mjs', 4096]])
+const BUNDLED_ROOT = fileURLToPath(new URL('../../', import.meta.url))
+const bundleInvalid = () => refusal('Bundled role files are invalid.')
+const filesDiffer = () => refusal('The installed role files differ from the signed package.')
 const MANIFEST_FIELDS = new Set(['id', 'version', 'name', 'publisher', 'entry', 'prompt', 'tools', 'capabilities', 'settings', 'ui', 'description', 'requires'])
 const invalidManifest = detail => refusal(`Invalid role manifest (${detail}).`)
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -63,7 +70,7 @@ function validateManifest(files, entry) {
     source = decoder.decode(files.get(script))
     promptText = decoder.decode(files.get(prompt))
   } catch { throw invalidManifest('entry or prompt encoding') }
-  // P3 packages without runtime declarations stay inert. Executable entries are
+  // Prompt-only packages never evaluate their entry. Executable entries are
   // reviewed, single-module sources. Reject imports and re-exports before evaluating bytes.
   if ((tools.length || settings.length) && moduleDependency.test(source)) throw invalidManifest('entry must be self-contained')
   if (requires !== undefined && (!Array.isArray(requires) || !requires.every(item => typeof item === 'string'))) throw invalidManifest('requires')
@@ -104,12 +111,19 @@ async function directories(fs, paths) {
   return found
 }
 
-export async function readRegular(fs, path, stat, limit) {
-  if (!stat?.isFile() || stat.nlink !== 1 || stat.size > limit) return undefined
+export function readRegular(fs, path, stat, limit) {
+  return readBounded(fs, path, stat, limit, true)
+}
+
+const validLeaf = (stat, limit, singleLink) => stat?.isFile() && (!singleLink || stat.nlink === 1)
+  && stat.size <= limit
+
+async function readBounded(fs, path, stat, limit, singleLink) {
+  if (!validLeaf(stat, limit, singleLink)) return undefined
   const file = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   try {
     const opened = await file.stat()
-    if (!opened.isFile() || opened.nlink !== 1 || !sameFile(opened, stat) || opened.size !== stat.size) return undefined
+    if (!validLeaf(opened, limit, singleLink) || !sameFile(opened, stat) || opened.size !== stat.size) return undefined
     const bytes = Buffer.alloc(stat.size + 1)
     let offset = 0
     while (offset < bytes.length) {
@@ -121,6 +135,52 @@ export async function readRegular(fs, path, stat, limit) {
   } finally {
     await file.close()
   }
+}
+
+// A path relative to a held directory resolves from that inode, even if its
+// original name is replaced. Without descriptor-relative traversal, fail closed.
+async function readBundleFiles(fs, folder, singleLink) {
+  if (process.platform !== 'linux' || !constants.O_DIRECTORY || !constants.O_NOFOLLOW) throw bundleInvalid()
+  const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
+  const handles = []
+  try {
+    let path = '/'
+    for (const name of ['', ...folder.split('/').filter(Boolean)]) {
+      const handle = await fs.open(join(path, name), flags)
+      handles.push(handle)
+      path = `/proc/self/fd/${handle.fd}`
+      if (!sameFile(await handle.stat(), await fs.stat(path))) throw bundleInvalid()
+    }
+    const names = await fs.readdir(path)
+    if (names.length !== BUNDLE_LEAVES.size || !names.every(name => BUNDLE_LEAVES.has(name))) throw bundleInvalid()
+    const leaves = []
+    for (const [name, limit] of BUNDLE_LEAVES) {
+      const target = join(path, name)
+      const stat = await lstat(fs, target)
+      if (!validLeaf(stat, limit, singleLink)) throw bundleInvalid()
+      leaves.push({ name, target, stat, limit })
+    }
+    const files = new Map()
+    for (const { name, target, stat, limit } of leaves) {
+      const data = await readBounded(fs, target, stat, limit, singleLink)
+      if (!data) throw bundleInvalid()
+      files.set(name, data)
+    }
+    return files
+  } finally {
+    await Promise.all(handles.reverse().map(handle => handle.close()))
+  }
+}
+
+function validateBundle(files, id, version, expected) {
+  const manifest = decodeManifest(files.get('role.json'))
+  if (manifest.publisher !== 'automagik' || manifest.entry !== 'role.mjs' || manifest.prompt !== 'prompt.md'
+    || !['tools', 'settings', 'capabilities', 'ui'].every(key => Array.isArray(manifest[key]) && manifest[key].length === 0)
+    || !manifestBytes(manifest).equals(files.get('role.json'))) throw bundleInvalid()
+  const details = validateManifest(files, { id, version, publisher: 'automagik', capabilities: [] })
+  const sha256 = bundleDigest(files)
+  if (!details.prompt.trim() || sha256 !== expected) throw bundleInvalid()
+  return { ...details, sha256 }
 }
 
 function expectedDirectories(files) {
@@ -167,7 +227,9 @@ async function prune(fs, path) {
   }
 }
 
-export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.now } = {}) {
+export function createRolePackages(rt, catalog, {
+  fs = fsPromises, now = Date.now, bundledRoot = BUNDLED_ROOT, bundledHistory = BUNDLED_ROLE_HISTORY,
+} = {}) {
   const { state } = rt
   const statuses = new Map()
   // The install record pins the compressed archive. Keep verified file digests for this
@@ -175,6 +237,7 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
   const fingerprints = new WeakMap()
   // Declarations here also attest that this exact record passed official install admission.
   const verified = new WeakMap()
+  const verifiedBundled = record => record?.source === 'bundled' && verified.has(record)
   const runtimeDamage = new WeakMap()
   const warn = (...args) => rt.warn?.(...args)
   const hasRecord = id => Boolean(ownRecord(state.roles, id))
@@ -189,23 +252,79 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     if (readOnly !== undefined) throw refusal(readOnly, { code: 'bot/read-only' })
     if (rt.holdsLock?.() !== true) throw refusal('This host does not hold the Bot team.')
   }
+  const requireRoles = () => {
+    if (!rolesOn(state.prefs)) throw refusal('Roles are turned off for this team.', { reason: ROLES_OFF_REASON })
+  }
   const requireDetached = id => {
     if (Object.values(state.bots).some(bot => attachedRoleIds(bot).includes(id))) {
       throw refusal('Detach this role from every Bot before uninstalling it.')
     }
   }
   const attachable = (id, record, entry) => isPackageRoleId(id) && (verified.has(record)
-    || (entry?.display.installable === true && entry.display.version === record.version && entry.sha256 === record.sha256.toLowerCase()))
+    || (record.source !== 'bundled' && entry?.display.installable === true && entry.display.version === record.version
+      && entry.sha256 === record.sha256.toLowerCase()))
+  const fingerprint = files => new Map([...files].map(([path, data]) => [path, { length: data.length, sha256: digest(data) }]))
+  const remember = (record, details, files) => {
+    verified.set(record, details.sha256 ? { ...details.declarations, sha256: details.sha256 } : details.declarations)
+    fingerprints.set(record, fingerprint(files))
+  }
+  const expectedDigest = (id, version) => compareVersions(version, ROLE_PLUGIN_VERSION) <= 0
+    ? expectedBundleDigest(bundledHistory, id, version) : undefined
+
+  async function bundledSource(id) {
+    try {
+      const root = await fs.realpath(bundledRoot)
+      const files = await readBundleFiles(fs, join(root, 'roles', id), false)
+      const { manifest } = validateBundle(files, id, '0.0.0', expectedDigest(id, ROLE_PLUGIN_VERSION))
+      return { files, manifest }
+    } catch {
+      warn('Bundled role %s could not be read or verified.', id)
+    }
+  }
 
   function requireOfficial(id, record) {
     if (!attachable(id, record, catalog.entries()?.get(id))) throw refusal(ROLE_SOURCE_UNCONFIRMED)
   }
 
   async function authenticate(id, record) {
-    if (!validRecord(state.roles, id, record) || record.publisher !== 'automagik') {
-      throw refusal('The installed role record is invalid.')
-    }
+    const bundled = record?.source === 'bundled'
+    if (!validRecord(state.roles, id, record) || record.publisher !== 'automagik'
+      || (bundled && !BUNDLED_ROLE_IDS.includes(id))) throw refusal('The installed role record is invalid.')
+    const term = rt.lockTerm?.()
     const paths = rolePaths(rt.home, id, record.version)
+    const currentWriter = () => recordOf(id) === record && rt.holdsLock?.() === true
+      && rt.lockTerm?.() === term && rt.readOnly?.() === undefined
+    const verifiedDetails = (details, files) => {
+      if (currentWriter() && !runtimeDamage.has(record)) {
+        remember(record, details, files)
+        if (bundled) statuses.set(id, { record, status: 'ok' })
+      }
+      return details
+    }
+    if (bundled) {
+      let status = 'damaged'
+      try {
+        const before = await directories(fs, paths)
+        if (!before[3]) {
+          status = 'broken'
+          throw refusal('The installed role folder is missing.')
+        }
+        try {
+          const files = await readBundleFiles(fs, paths.verDir, true)
+          const details = validateBundle(files, id, record.version, expectedDigest(id, record.version))
+          const after = await directories(fs, paths)
+          if (before.every((stat, index) => sameFile(stat, after[index]))) return verifiedDetails(details, files)
+        } catch { /* Unreadable or untrusted installed files. */ }
+        throw filesDiffer()
+      } catch (error) {
+        if (currentWriter()) {
+          verified.delete(record)
+          fingerprints.delete(record)
+          statuses.set(id, { record, status })
+        }
+        throw error
+      }
+    }
     const before = await directories(fs, paths)
     if (!before[3]) throw refusal('The installed role folder is missing.')
     const [archive, bytes, signature] = await Promise.all(evidencePaths(paths).map(async (path, i) => {
@@ -222,14 +341,24 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     const details = validateManifest(files, entry.display)
     const equal = await inspect(fs, paths.verDir, files)
     const after = await directories(fs, paths)
-    if (!equal || !before.every((stat, i) => sameFile(stat, after[i]))) {
-      throw refusal('The installed role files differ from the signed package.')
+    if (!equal || !before.every((stat, i) => sameFile(stat, after[i]))) throw filesDiffer()
+    return verifiedDetails(details, files)
+  }
+
+  async function verifyExisting(id, record) {
+    requireWriter()
+    const term = rt.lockTerm?.()
+    const details = await authenticate(id, record)
+    requireWriter()
+    expectRecord(id, true, record)
+    if (rt.lockTerm?.() !== term || runtimeDamage.has(record) || !verified.has(record)) {
+      throw refusal(runtimeDamage.get(record)?.reason ?? 'The role install record changed. Try again.')
     }
-    if (recordOf(id) === record) verified.set(record, details.declarations)
     return details
   }
 
   async function requireAttachable(id, record) {
+    if (BUNDLED_ROLE_IDS.includes(id) && record) return verifyExisting(id, record)
     const status = await statusOf(id, record)
     if (status === 'broken') throw refusal('The role install is broken. Uninstall it first.')
     if (status !== 'ok') throw refusal('The role install is damaged. Uninstall it first.')
@@ -244,9 +373,11 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
       details.set(id, {
         ...details.get(id),
         installed: {
-          version: record.version, sha256: record.sha256.toLowerCase(),
+          version: record.version,
+          ...(record.source !== 'bundled' ? { sha256: record.sha256.toLowerCase() } : {}),
           attachable: attachable(id, record, entries?.get(id)),
           ...verified.get(record),
+          ...(verifiedBundled(record) && BUNDLED_ROLE_IDS.includes(id) ? { capabilities: BUNDLED_ROLE_CAPABILITIES[id] } : {}),
         },
       })
     }
@@ -274,6 +405,10 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     try {
       if (!(await directories(fs, paths))[3]) {
         status = 'broken'
+      } else if (record.source === 'bundled') {
+        const files = await readBundleFiles(fs, paths.verDir, true)
+        validateBundle(files, id, record.version, expectedDigest(id, record.version))
+        status = 'ok'
       } else if (expected) {
         status = await inspect(fs, paths.verDir, expected) ? 'ok' : 'damaged'
       } else if (await inspect(fs, paths.verDir)) {
@@ -291,48 +426,61 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
 
   async function install(id, prepare) {
     requireWriter()
-    if (!rolesOn(state.prefs)) throw refusal('Roles are turned off for this team.')
+    requireRoles()
     if (!isPackageRoleId(id)) throw refusal('Unknown role')
-    const snapshot = await catalog.snapshot()
-    requireWriter()
-    if (!snapshot.view.available) throw refusal('The role catalog is unavailable.')
-    const entry = snapshot.entries.get(id)
-    if (!entry) throw refusal('This role is not in the catalog.')
-    if (!entry.display.installable) throw refusal('Community roles cannot be installed yet.')
+    const hadRecord = hasRecord(id)
+    const previous = recordOf(id)
+    const canBundle = BUNDLED_ROLE_IDS.includes(id)
+    if (canBundle && hadRecord) {
+      await verifyExisting(id, previous)
+      requireRoles()
+      return { id, version: previous.version, warnings: [] }
+    }
+    const bundle = canBundle ? await bundledSource(id) : undefined
+    let entry, snapshot, bytes, files
+    if (bundle) {
+      const version = ROLE_PLUGIN_VERSION
+      files = bundle.files
+      files.set('role.json', manifestBytes({ ...bundle.manifest, version }))
+      entry = { display: { id, version, publisher: 'automagik', capabilities: [] },
+        sha256: bundleDigest(files), source: 'bundled' }
+    } else {
+      snapshot = await catalog.snapshot()
+      requireWriter()
+      if (!snapshot.view.available) throw refusal('The role catalog is unavailable.')
+      entry = snapshot.entries.get(id)
+      if (!entry) throw refusal('This role is not in the catalog.')
+      if (!entry.display.installable) throw refusal('Community roles cannot be installed yet.')
+      if (hadRecord) {
+        if (!validRecord(state.roles, id, previous)) throw refusal('The role install is damaged. Uninstall it first.')
+        if (previous.version !== entry.display.version) throw refusal('Another version is installed. Uninstall it first.')
+        if (previous.sha256.toLowerCase() !== entry.sha256) throw refusal('The installed role conflicts with this package.')
+      }
+      bytes = await catalog.download(entry)
+      if (bytes.length !== entry.size || digest(bytes) !== entry.sha256) {
+        throw refusal('The role download does not match the catalog size or checksum.')
+      }
+      files = readRoleTar(bytes)
+    }
     const { version, publisher } = entry.display
     const { sha256, source } = entry
     const paths = rolePaths(rt.home, id, version)
-    const hadRecord = Boolean(ownRecord(state.roles, id))
-    const previous = recordOf(id)
-    if (hadRecord) {
-      if (!validRecord(state.roles, id, previous)) throw refusal('The role install is damaged. Uninstall it first.')
-      if (previous.version !== version) throw refusal('Another version is installed. Uninstall it first.')
-      if (previous.sha256.toLowerCase() !== sha256) throw refusal('The installed role conflicts with this package.')
-    }
-
-    const bytes = await catalog.download(entry)
-    if (bytes.length !== entry.size || digest(bytes) !== sha256) throw refusal('The role download does not match the catalog size or checksum.')
-    const files = readRoleTar(bytes)
     const details = validateManifest(files, entry.display)
-    const { warnings, declarations } = details
+    const { warnings } = details
     requireWriter()
     await prepare?.(details, sha256)
-    const expected = new Map([...files].map(([path, data]) => [path, { length: data.length, sha256: digest(data) }]))
-    const remember = record => {
-      verified.set(record, declarations)
-      fingerprints.set(record, expected)
-    }
     const result = { id, version, warnings }
     const admit = () => {
       requireWriter()
+      if (canBundle) requireRoles()
       expectRecord(id, hadRecord, previous)
       if (state.roles !== undefined && !plainObject(state.roles)) throw refusal('The role install records are damaged.')
     }
     admit()
     statuses.delete(id)
     const { rolesDir, pkgDir, verDir } = paths
-    const evidence = [bytes, snapshot.bytes, snapshot.signature]
-    const sidecars = evidencePaths(paths)
+    const evidence = bundle ? [] : [bytes, snapshot.bytes, snapshot.signature]
+    const sidecars = bundle ? [] : evidencePaths(paths)
     const addedEvidence = []
     async function retain() {
       for (const [index, path] of sidecars.entries()) {
@@ -360,7 +508,12 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
     })
     if (hadRecord || current[3]) {
       let equal = false
-      try { equal = Boolean(current?.[3]) && await inspect(fs, verDir, files) } catch { /* Preserve an unreadable directory. */ }
+      try {
+        if (current?.[3] && bundle) {
+          const actual = await readBundleFiles(fs, verDir, true)
+          equal = [...files].every(([name, data]) => data.equals(actual.get(name)))
+        } else if (current?.[3]) equal = await inspect(fs, verDir, files)
+      } catch { /* Preserve an unreadable directory. */ }
       admit()
       if (hadRecord) {
         statuses.set(id, { record: previous, status: equal ? 'ok' : current && !current[3] ? 'broken' : 'damaged' })
@@ -368,7 +521,7 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
           // The original signed evidence stays valid across catalog releases.
           try { await authenticate(id, previous) } catch { await retain() }
           runtimeDamage.delete(previous)
-          remember(previous)
+          remember(previous, details, files)
           return result
         }
         throw refusal('The role install is damaged. Uninstall it first.')
@@ -421,9 +574,11 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
         beforeCommit: () => {
           try { admit() } catch (error) { refusedBeforeCommit = true; throw error }
         },
-        afterWrite: () => { add(state); remember(record) },
+        afterWrite: () => {
+          add(state)
+          if (!bundle) remember(record, details, files)
+        },
       })
-      return result
     } catch (error) {
       if (!renamed && !current[3]) throw error
       if (renamed && refusedBeforeCommit && published) {
@@ -459,6 +614,12 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
         }
       }
     }
+    if (bundle) {
+      requireRoles()
+      await verifyExisting(id, record)
+      requireRoles()
+    }
+    return result
   }
 
   async function uninstall(id) {
@@ -538,5 +699,5 @@ export function createRolePackages(rt, catalog, { fs = fsPromises, now = Date.no
 
   const damage = (record, reason) => runtimeDamage.set(record, { status: 'damaged', reason })
   return { install, uninstall, recordsView, detailsView, hasRecord, recordOf, expectRecord, requireWriter, requireAttachable, requireOfficial,
-    authenticate, damage, damaged: record => runtimeDamage.has(record) }
+    authenticate, verifyExisting, verifiedBundled, damage, damaged: record => runtimeDamage.has(record) }
 }

@@ -4,12 +4,15 @@
 // nothing to change writes nothing; a person's later OFF stays off.
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { format } from 'node:util'
+import { runInNewContext } from 'node:vm'
+import { build } from 'esbuild'
 import { createRuntime } from '../index.js'
+import * as pocket from '../src/host/pocket-chat.js'
 import { fakeContext } from './fake-ctx.js'
 
 const record = (id, extra = {}) => ({ id, sessionId: 'chat-' + id, name: 'Bot ' + id, model: 'deepseek/chat', createdAt: 1, capabilities: [], ...extra })
@@ -238,4 +241,158 @@ test('RG-M10 an outside write of an unflagged team adopted at reclaim migrates i
   assert.equal(h.rt.botOf('solver').reviewGuard, true)
   await h.rt.save()
   assertMigrated(h.stored())
+})
+
+const groupedRoom = (members = ['solver', 'rev']) => ({
+  id: 'group', name: 'Planning', named: true, members, admin: 'rev', mode: 'everyone',
+  sessions: { rev: 'group-reviewer' }, parts: [{ sessionId: 'older-group' }],
+})
+const guardTeam = (rooms, solver = FIXTURE.solver) => team(
+  { ...FIXTURE, solver }, { rooms, reviewGuardMigrated: true },
+)
+const joinRefusal = "Bot solver has the review guard on, so it cannot join a group. To add it, turn the review guard off in Bot solver's Details first."
+
+test('K-G1 / PD4C-1 refuses a group whose provisional Session was awaiting an ON switch', async (t) => {
+  const h = workspace(t, guardTeam({})).open()
+  await h.rt.load()
+  const creating = Promise.withResolvers()
+  const resume = Promise.withResolvers()
+  const archived = []
+  t.after(() => resume.resolve())
+  h.ctx.sessionController.create = async () => {
+    creating.resolve()
+    await resume.promise
+    return { sessionId: 'provisional-room' }
+  }
+  h.ctx.workspaceRegistry.archiveSession = async id => { archived.push(id) }
+  const create = h.call('create-room', { members: ['solver', 'rev'], section: 'Plans' })
+  await Promise.race([creating.promise, create])
+  const on = await h.call('update-bot', { id: 'solver', reviewGuard: true })
+  resume.resolve()
+  const result = await create
+  assert.equal(on.ok, true)
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'bot/review-guard')
+  assert.equal(result.error.message, joinRefusal)
+  assert.deepEqual(h.rt.state.rooms, {})
+  assert.deepEqual(h.stored().rooms, {})
+  assert.deepEqual(h.rt.state.sections, [])
+  assert.deepEqual(archived, ['provisional-room'])
+})
+
+test('K-G2 refuses ON for a grouped Bot with a valid reviewer', async (t) => {
+  const room = groupedRoom()
+  const h = workspace(t, guardTeam({ group: room })).open()
+  await h.rt.load()
+  const result = await h.call('update-bot', { id: 'solver', reviewGuard: true })
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'bot/review-guard')
+  assert.equal(result.error.message, 'Bot solver is in a group (Planning), so its review guard cannot be turned on. Remove Bot solver from its groups (for a group of two, delete the group or add another Bot first), then turn the guard on.')
+  assert.equal(h.rt.botOf('solver').reviewGuard, undefined)
+  assert.equal(h.stored().bots.solver.reviewGuard, undefined)
+  assert.deepEqual(h.stored().rooms.group, room)
+})
+
+test('K-G1 / PD4C-2 keeps ON effective while an OFF write fails', async (t) => {
+  const room = groupedRoom(['plain', 'rev'])
+  const h = workspace(t, guardTeam({ group: room }, { ...FIXTURE.solver, reviewGuard: true })).open()
+  await h.rt.load()
+  const writing = Promise.withResolvers()
+  const resume = Promise.withResolvers()
+  t.after(() => resume.resolve())
+  const delay = async (save, ...args) => {
+    writing.resolve()
+    await resume.promise
+    return save(...args)
+  }
+  const { save, saveCopy } = h.rt
+  h.rt.save = options => options?.required ? delay(save, options) : save(options)
+  h.rt.saveCopy = (...args) => delay(saveCopy, ...args)
+  const off = h.call('update-bot', { id: 'solver', reviewGuard: false })
+  await Promise.race([writing.promise, off])
+  const held = h.rt.botOf('solver').reviewGuard
+  const join = await h.call('update-room', { id: 'group', add: ['solver'] })
+  const temp = `${h.rt.statePath}.${process.pid}.tmp`
+  mkdirSync(temp)
+  resume.resolve()
+  const failed = await off
+  rmSync(temp, { recursive: true })
+  assert.equal(failed.ok, false)
+  assert.equal(held, true)
+  assert.equal(join.ok, false)
+  assert.equal(join.error.code, 'bot/review-guard')
+  assert.equal(join.error.message, joinRefusal)
+  assert.equal(h.rt.botOf('solver').reviewGuard, true)
+  assert.equal(h.stored().bots.solver.reviewGuard, true)
+  assert.deepEqual(h.rt.state.rooms.group.members, room.members)
+  assert.deepEqual(h.stored().rooms.group, room)
+})
+
+async function desktopGuardOffLine(bots, sessionId) {
+  const { outputFiles } = await build({
+    stdin: { contents: "export { GuardOffLine } from './src/client/cells.js'", resolveDir: import.meta.dirname + '/..' },
+    bundle: true, platform: 'browser', logLevel: 'silent', format: 'cjs', write: false,
+    external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
+  })
+  const module = { exports: {} }
+  runInNewContext(outputFiles[0].text, {
+    module, exports: module.exports,
+    window: { addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: false }) },
+    document: { querySelector: () => null, addEventListener() {}, removeEventListener() {} },
+    require: name => name === 'react' ? {
+      createContext: () => ({}),
+      createElement: (type, props, ...children) => typeof type === 'function' ? type(props) : { type, props, children },
+    } : new Proxy({}, { get: (_, key) => key }),
+  })
+  return module.exports.GuardOffLine({ sessionId, useRoster: select => select({ bots }) })
+}
+
+test('K-G3 / PD4C-5 persists one OFF line for the D1.5 Solver and never rewrites it on reopen', async (t) => {
+  const historicalOn = { at: 1, sessionId: 'chat-solver' }
+  const room = groupedRoom()
+  const { home, open } = workspace(t, guardTeam(
+    { group: room }, { ...FIXTURE.solver, reviewGuard: true, reviewGuardNotice: historicalOn },
+  ))
+  const first = open()
+  await first.rt.load()
+  const saved = first.stored()
+  assert.equal(saved.bots.solver.reviewGuard, undefined)
+  const notice = saved.bots.solver.guardOffNotice
+  assert.equal(notice.kind, 'review-guard-off')
+  assert.equal(notice.id, 'review-guard-off')
+  assert.equal(notice.sessionId, 'chat-solver')
+  assert.ok(Number.isFinite(notice.at))
+  assert.equal(saved.guardGroupMigrated, true)
+  assert.deepEqual(saved.bots.solver.reviewGuardNotice, historicalOn)
+  assert.deepEqual(saved.rooms.group, room)
+  await first.dispose()
+
+  const path = join(home, 'state.json')
+  utimesSync(path, 1, 1)
+  const bytes = read(home)
+  const mtime = statSync(path).mtimeMs
+  const reopened = open()
+  await reopened.rt.load()
+  assert.equal(read(home), bytes)
+  assert.equal(statSync(path).mtimeMs, mtime)
+  assert.deepEqual(reopened.rt.botOf('solver').guardOffNotice, notice)
+  assert.deepEqual(reopened.rt.roomOf('group'), room)
+
+  const text = 'The review guard of Bot solver was turned off because Bot solver is in a group, and a Bot with the guard on cannot be in one. To turn it back on, remove Bot solver from its groups (for a group of two, delete the group or add another Bot first), then turn the guard on in its Details.'
+  const desktop = await desktopGuardOffLine(Object.values(reopened.rt.state.bots), notice.sessionId)
+  assert.equal(desktop.props['data-review-guard-notice'], notice.kind)
+  assert.equal(desktop.children.length, 1)
+  assert.equal(desktop.children[0], text)
+  assert.equal(pocket.pocketGuardOffOf(reopened.rt, 'solver', 'group-reviewer'), undefined)
+  const source = new pocket.DshChatSource({
+    guardOffOf: (botId, sessionId) => pocket.pocketGuardOffOf(reopened.rt, botId, sessionId),
+  })
+  const entry = { botId: 'solver', sessionId: notice.sessionId, rows: [], floorSeq: 0, cursor: -1 }
+  const { rows } = await source.snapshotFor(entry)
+  assert.deepEqual(rows, [{
+    id: 'dsh:chat-solver:0#review-guard-off', at: notice.at, turn: 0,
+    source: 'session', kind: 'status', state: 'idle', msg: text,
+  }])
+  const resumed = await source.snapshotFor(entry, rows[0].id)
+  assert.deepEqual(resumed.rows, rows)
 })

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
+import { SOLVER_SHAPES } from '../src/client/characters.js'
 import { build } from 'esbuild'
 
 const { outputFiles } = await build({
@@ -36,6 +37,33 @@ function settings(bot, { main = false, rooms = [] } = {}) {
   return walk(BotSettingsForm({ bot, roster, actions: {}, run: fn => fn }))
 }
 const bot = { id: 'b', name: 'Writer', role: 'Writer', instructions: '', capabilities: [] }
+
+test('task grants are separate switches and a route grant can always be cleared', () => {
+  const pin = { id: 'tasker', version: '1.0.0', attachedAt: '2026-11-24' }
+  const calls = []
+  const roster = {
+    bots: [bot],
+    roles: { tasker: { version: pin.version, status: 'ok' } },
+    roleRuntime: { [bot.id]: { pin, settings: [], tools: [], capabilities: ['task-start', 'route-policy'] } },
+  }
+  const switches = grants => {
+    const record = { ...bot, reviewGuard: true, roles: [{ ...pin, grants }] }
+    const form = walk(BotSettingsForm({ bot: record, roster, actions: { grantRole: (...args) => calls.push(args) }, run: value => value }))
+    const card = form.find(node => node.type?.name === 'PackageAttachmentCard')
+    const controls = walk(card.type(card.props)).find(node => node.type?.name === 'RoleControls')
+    return walk(controls.type(controls.props)).filter(node => node.type?.name === 'SwitchRow').map(node => node.props)
+  }
+  const [start, route] = switches([])
+  assert.equal(start.label, 'Allow starting tasks')
+  assert.equal(start.hint, 'Tasks require the review guard to be off.')
+  assert.equal(start.disabled, false)
+  assert.equal(route.disabled, true)
+  assert.equal(switches(['task-start'])[1].disabled, false)
+  const enabled = switches(['route-policy'])[1]
+  assert.equal(enabled.disabled, false)
+  enabled.onChange(false)
+  assert.deepEqual(calls.map(([id, , capability, on]) => [id, capability, on]), [[bot.id, 'route-policy', false]])
+})
 
 test('the role picker serves team Bots, keeps Description, and follows the current role', () => {
   const record = { id: 'role-fixture', name: 'Bot', role: 'Description' }
@@ -250,4 +278,12 @@ test('the new-Bot card\'s character grid offers the 21 characters and no Solver'
   assert.equal(walk(tree).filter(node => node.props?.className === 'bt-shape').length, 21)
   // A stored shape the grid does not list still gets its tile, the 22nd.
   assert.deepEqual(rowsOf(draw('nope')).map(row => row.length), [6, 6, 6, 4])
+})
+
+test('an explicit grid list is authoritative and the worn shape stays outside it', () => {
+  const shapes = Object.freeze([...SOLVER_SHAPES])
+  const grid = module.exports.CharacterGrid({ shapes, look: { shape: 'moon', color: 'red' } })
+  const tiles = walk(grid).filter(node => node.props?.className === 'bt-shape')
+  assert.deepEqual(tiles.map(tile => tile.props.key), SOLVER_SHAPES)
+  assert.deepEqual(shapes, SOLVER_SHAPES)
 })

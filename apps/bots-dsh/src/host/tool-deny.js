@@ -27,6 +27,7 @@
 import { isComputerTool } from './computer/catalog.js'
 import { changesWorkingFolder } from './folders.js'
 import { refusal } from './refusal.js'
+import { teamToolOf } from './approvals.js'
 import { isSolverBot } from '../shared/solver-method.js'
 
 /** The most names one Bot may deny. */
@@ -524,6 +525,11 @@ export function install(rt) {
     if (name === '' || exec?.agent === undefined) return next()
     const bot = botOfSession(exec.agent?.id ?? exec.agent?.session?.id, exec.agent)
     if (bot === undefined) return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
+    const launch = taskLaunchOf(exec, bot)
+    if (launch !== undefined) {
+      rt.noteStop?.(launch.sessionId, { why: launch.held.why, tool: name, callId: exec.callId, text: launch.held.text }, exec.agent)
+      throw refusal(launch.held.text)
+    }
     const denied = deniedNames(bot, exec.agent)
     // A tool registered after the last apply is caught here from its definition, so a
     // renamed or aliased shell tool never needs this plugin to know its name first.
@@ -568,10 +574,18 @@ export function install(rt) {
     if (name === '' || exec?.agent === undefined) return undefined
     const bot = botOfSession(exec.agent?.id ?? exec.agent?.session?.id, exec.agent)
     if (bot === undefined || (!isSolverBot(bot) && bot.reviewGuard !== true)) return undefined
+    const launch = taskLaunchOf(exec, bot)
+    if (launch !== undefined) return launch
     if (deniedNames(bot, exec.agent).includes(name)) return undefined
     if (noShell(bot) && shellCall(name, exec.arguments, definitionOf(exec))) return undefined
     const { sessionId, held } = reviewGuardOf(exec, bot, name)
     return held === undefined ? undefined : { held, sessionId }
+  }
+
+  function taskLaunchOf(exec, bot) {
+    if (teamToolOf(exec.name) !== 'start_task') return undefined
+    const held = rt.taskLaunchHold?.(bot.id)
+    if (held !== undefined) return { held, sessionId: exec.agent?.id ?? exec.agent?.session?.id }
   }
 
   // Retries stop on a Session that leaves the team, so a lift is not attempted on a gone agent.

@@ -3,11 +3,18 @@
 // switch, so nothing caches a translated string.
 
 import { MACHINE_MESSAGES } from '../shared/machine-reservations.js'
+import { GUARD_GROUP_COPY, guardGroupZh } from '../shared/guard-groups.js'
 import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_DENY_TEXT, OWN_TOOLS_MENU_HINT, OWN_TOOLS_MODEL_TEXT, OWN_TOOLS_NOTICE } from '../shared/own-tools.js'
+import { LOOK_INVALID, SOLVER_BY_PERSON, SOLVER_ONLY, SOLVER_WEARS } from '../shared/solver-looks.js'
 
 export const NAMESPACE = 'omni-ui'
 
 const ZH = {
+  ...guardGroupZh,
+  [SOLVER_ONLY]: '只有 Solver 才能使用 Solver 角色。请选择其他角色。',
+  [SOLVER_WEARS]: 'Solver 只能使用 Solver 角色。请从这些角色中选择一个。',
+  [SOLVER_BY_PERSON]: '只有本人才能把 Bot 设为 Solver。',
+  [LOOK_INVALID]: '这个形象无效。请选择其他角色。',
   'File-tool folder': '文件工具的文件夹',
   'Folder for these four file tools': '这四个文件工具使用的文件夹',
   'Clear folder': '清除文件夹',
@@ -1402,6 +1409,25 @@ const ZH = {
   'Runs in the Bot team': '在 Bot 团队中运行',
   'Waits for the isolated runtime': '等待隔离运行环境',
   "Active tools": "已启用的工具",
+  "{name} cannot use start_task: its review guard is on. Do the work in your own chat, or ask the person to turn the review guard off in {name}'s Details.": "{name} 的审阅守卫已开启，无法使用 start_task。请在自己的聊天中完成工作，或请用户在 {name} 的详情中关闭审阅守卫。",
+  "the review guard is on and prevents starting tasks; you can turn it off in Details": "审阅守卫已开启，无法启动任务。你可以在详情中关闭它",
+  "Starting tasks is not allowed for this Bot yet. The person can allow it in this Bot's Details, under Role.": "此 Bot 尚未获准启动任务。用户可以在此 Bot 的详情中的“角色”下允许。",
+  "Naming a model for a task is not allowed for this Bot, so it can name no model now. Leave out model to run the task on your own model, or ask the person to allow it in your Details, under Role.": "此 Bot 不允许为任务指定模型，因此现在不能指定任何模型。省略 model 即可在你自己的模型上运行任务，或请用户在你的详情中的“角色”下允许。",
+  "The model {model} cannot run a task now.": "模型 {model} 现在无法运行任务。",
+  "{model} could not be selected for the task.": "无法为该任务选择 {model}。",
+  "This Bot has Full access on its coding CLI, so its task cannot run on another agent's model. Name a model of the same agent, or leave out model.": "此 Bot 在其编码 CLI 上拥有完全权限，因此其任务不能在其他代理的模型上运行。请指定同一代理的模型，或省略 model。",
+  "The task did not start: {reason}": "任务未启动：{reason}",
+  "The start changed while it was being prepared (a grant, the role, the review guard, the permission level or the Bot), so no turn was sent. Ask again.": "启动在准备期间发生了变化（授权、角色、审阅守卫、权限级别或 Bot），因此未发送任何回合。请重新请求。",
+  "The task's permission level could not be proven no wider than this Bot's and this conversation's, so it did not start.": "无法证明任务的权限级别不高于此 Bot 和此对话的级别，因此任务未启动。",
+  "The model {model} is not in the list of models.": "模型 {model} 不在模型列表中。",
+  "{model} runs only through its coding CLI; name its CLI model.": "{model} 只能通过其编码 CLI 运行；请指定其 CLI 模型。",
+  "Models you may name: {models} and {n} more.": "可以指定的模型：{models} 以及另外 {n} 个。",
+  "Models you may name: none; leave out model.": "可以指定的模型：无；请省略 model。",
+  "Models you may name: {models}.": "可以指定的模型：{models}。",
+  "Allow starting tasks": "允许启动任务",
+  "Allow its tasks to run on another model": "允许其任务在其他模型上运行",
+  "Tasks require the review guard to be off.": "请先关闭审阅守卫，再启动任务。",
+  "Requested model": "请求的模型",
   "Allow speech": "允许朗读",
   "Saved voice unavailable": "保存的语音不可用",
   "ACP coding agents do not receive this role’s prompt.": "ACP 编程助手不会收到此角色的提示词。",
@@ -3319,6 +3345,10 @@ const ZH = {
   'No transcript rows yet. The seat is quiet.': '还没有对话记录。这个席位很安静。',
   'Latest': '最新',
   // New Solver (RFC 0048).
+  'If the Solver role is not installed yet, Create installs it first.': '如果尚未安装 Solver 角色，点击创建会先安装它。',
+  'The Solver role could not be installed now, so this Solver uses the written method. The role is attached when it can be installed.': '目前无法安装 Solver 角色，因此此 Solver 使用书面方法。角色可安装时会自动附加。',
+  'The Solver role could not be attached now, so this Solver uses the written method. The role is attached when it can be.': '目前无法附加 Solver 角色，因此此 Solver 使用书面方法。角色可附加时会自动附加。',
+  'Roles are turned off for this team, so this Solver uses the written method.': '此团队已关闭角色，因此此 Solver 使用书面方法。',
   'New Solver': '新建 Solver',
   'Plans, does the work and has it reviewed': '规划、完成工作并交由审阅',
   'Solver': 'Solver',
@@ -3354,6 +3384,7 @@ const ZH = {
   "Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.": "只拦住 Claude Code 会先询问的步骤。它自己的允许规则、钩子和已保存的批准可能让某个步骤在守卫看到之前就运行，而该步骤仍可能显示为已拒绝。",
   "Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.": "在此级别不拦截：没有任何步骤会先询问。只有交付标记会显示未审阅的工作。",
   "Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.": "在此代理上不拦截：它自己的工具无需询问即可运行。只有交付标记会显示未审阅的工作。",
+  "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held.": "仅在此 Bot 自己的聊天及其在其中启动的子代理中生效。它开启新对话的计划任务和开启独立对话的 Omni 自动化运行不受约束。",
   "Its reviewer is no longer on the team: work stays held until you turn this off.": "它的审阅者已不在团队中：在你关闭此项之前，工作会一直被拦住。",
   "Off: {name} has no reviewer Bot on the team, so there is no verdict to wait for.": "已关闭：{name} 在团队中没有审阅 Bot，因此没有可等待的结论。",
   "the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details": "审阅守卫正在等待审阅者对计划的结论；你可以在详情中关闭它",
@@ -3887,6 +3918,17 @@ export function t(key, params) {
 // a model switch DSH turned down, roster.js): the template is the dictionary key, worded with
 // the values the message carried.
 const HOST_TEMPLATES = [
+  GUARD_GROUP_COPY.join,
+  GUARD_GROUP_COPY.inGroup,
+  "{name} cannot use start_task: its review guard is on. Do the work in your own chat, or ask the person to turn the review guard off in {name}'s Details.",
+  "The model {model} cannot run a task now.",
+  "{model} could not be selected for the task.",
+  { template: "The task did not start: {reason}", host: ['reason'] },
+  "The model {model} is not in the list of models.",
+  "{model} runs only through its coding CLI; name its CLI model.",
+  "Models you may name: {models} and {n} more.",
+  "Models you may name: none; leave out model.",
+  "Models you may name: {models}.",
   'Detach {name} first.',
   "{name} is already moving to a new conversation.",
   "{name} is still handing on earlier messages; try again shortly.",

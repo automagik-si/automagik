@@ -62,19 +62,24 @@ export function install(rt) {
     }
   }
 
-  async function publish(id, data) {
+  async function publish(id, data, guard) {
+    guard?.()
     await mkdir(directory, { recursive: true, mode: 0o700 })
     const path = fileOf(id)
     const temporary = path + '.' + randomUUID()
+    guard?.()
+    const handle = await open(temporary, 'wx', 0o600)
     try {
-      const handle = await open(temporary, 'wx', 0o600)
       try {
+        guard?.()
         await handle.writeFile(JSON.stringify({ version: 1, id, ...data }) + '\n')
+        guard?.()
         await handle.sync()
       } finally {
         await handle.close()
       }
-      await replaceFile(temporary, path)
+      guard?.()
+      await replaceFile(temporary, path, guard)
     } finally {
       await unlink(temporary).catch(() => {})
     }
@@ -160,7 +165,7 @@ export function install(rt) {
 
   // Use DSH's reserved Session id so a new workload cannot run before its
   // association is durable. Save even an unset root so later changes reach it.
-  async function reserveReadScope(source, { continuation = false } = {}) {
+  async function reserveReadScope(source, { continuation = false, guard } = {}) {
     let scope
     try { scope = await resolveReadScope(source) }
     catch {
@@ -168,7 +173,7 @@ export function install(rt) {
       return undefined
     }
     const sessionId = `session-${randomUUID()}`
-    await publish(sessionId, { rootId: scope.rootId, continuation: continuation && scope.editable })
+    await publish(sessionId, { rootId: scope.rootId, continuation: continuation && scope.editable }, guard)
     return sessionId
   }
 

@@ -443,6 +443,9 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
   version=$(next_version)
   bun scripts/version.ts set "${version}"
   bun scripts/version.ts check
+  if [[ "${KIND}" == full || "${KIND}" == plugins ]]; then
+    bun scripts/lane.ts stamp-bundled-solver "${version}"
+  fi
   # The crate's lock must still match its Cargo.toml, or the tag's --locked builds fail.
   if [[ "${METER}" == "yes" ]]; then cargo metadata --locked --format-version 1 --manifest-path meter/usagemeter/Cargo.toml > /dev/null; fi
   # The herdr pack's marketplace index rides the release commit, regenerated from this tree.

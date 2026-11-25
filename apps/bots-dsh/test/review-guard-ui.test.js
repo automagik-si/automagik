@@ -31,6 +31,8 @@ const render = (bot, extra = {}) => ReviewGuardRow({
   actions: { updateBot: (id, patch) => { updates.push([id, { ...patch }]) } }, run: value => value,
 })
 const switchOf = row => row?.children?.[0]?.props
+const hard = "Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers."
+const scope = "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held."
 
 test('the row: shown with a reviewer id, the guard on, or the marker; its line follows the route; toggling sends it alone', () => {
   const on = switchOf(render({ reviewGuard: true }))
@@ -38,7 +40,7 @@ test('the row: shown with a reviewer id, the guard on, or the marker; its line f
   assert.equal(on.details, true)
   assert.equal(on.on, true)
   assert.equal(on.disabled, false)
-  assert.equal(on.hint, "Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers.")
+  assert.equal(on.hint, `${hard} ${scope}`)
   on.onChange(false)
   assert.deepEqual(JSON.parse(JSON.stringify(updates.at(-1))), ['s1', { reviewGuard: false }])
   const off = switchOf(render({}))
@@ -47,7 +49,7 @@ test('the row: shown with a reviewer id, the guard on, or the marker; its line f
   assert.deepEqual(JSON.parse(JSON.stringify(updates.at(-1))), ['s1', { reviewGuard: true }])
   // The best-effort route (r1.6 K5), and the routes where it holds nothing (K6, K7).
   const claude = { model: 'acp-claude/default', nativeTools: true, nativeToolsAgent: 'acp-claude', reviewGuard: true }
-  assert.equal(switchOf(render(claude)).hint, 'Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.')
+  assert.equal(switchOf(render(claude)).hint, `Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused. ${scope}`)
   assert.equal(switchOf(render({ ...claude, permission: 'danger-full-access' }, { permissions: { defaultPreset: 'workspace-write', options: [] } })).hint.startsWith('Not held at this level'), true)
   assert.equal(switchOf(render({ model: 'acp-codex/x', nativeTools: true, nativeToolsAgent: 'acp-codex', reviewGuard: true })).hint.startsWith('Not held on this agent'), true)
   // A plain Bot has no row.
@@ -67,7 +69,7 @@ test('a Solver with no reviewer Bot shows the row off and disabled with the reas
   assert.equal(gone.hint, 'Its reviewer is no longer on the team: work stays held until you turn this off.')
   // A migrated Solver waiting for its verdict says since when (K13).
   const waiting = switchOf(render({ reviewGuard: true, reviewGuardWaitingSince: Date.now() }))
-  assert.match(waiting.hint, /Waiting for Ada reviewer's verdict on the plan since .+\.$/)
+  assert.match(waiting.hint, /^Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers\. Waiting for Ada reviewer's verdict on the plan since .+\. Held only in this Bot's own chat and the subagents it starts there\. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held\.$/)
 })
 
 test('the upgrade line: only in the part it names, after the last turn ended at or before it, once', () => {

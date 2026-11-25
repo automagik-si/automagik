@@ -242,3 +242,19 @@ test('CR9 adapter teardown keeps the configured owner boot gated and closes call
   assert.equal((await f.call('queued-owner-action', null, { headers: headers('first'), viewer })).ok, true)
   assert.equal(dispatched, 1)
 })
+
+test('D2 caller reads omit the internal Solver fields and its owner actions refuse', async t => {
+  const f = fixture(t, { seed: state => { state.prefs.roles = false } })
+  await f.start()
+  await f.open()
+  Object.assign(f.rt.state.bots.b, { waitingRole: { id: 'solver', instructions: 'fixture-digest', role: 'Solver' }, reviewerMade: true })
+  for (const [endpoint, body] of [['state'], ['list-bots'], ['get-bot', { id: 'b' }]]) {
+    const result = await read(f, member, endpoint, body)
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.doesNotMatch(JSON.stringify(result.value), /waitingRole|reviewerMade|fixture-digest/)
+  }
+  for (const endpoint of Object.keys(inventory.ownerFields)) {
+    const result = await read(f, member, endpoint, { id: 'b', role: 'solver', waitingRole: 'solver', reviewerMade: true })
+    assert.equal(result.error?.reason, 'owner-only', endpoint)
+  }
+})

@@ -15,7 +15,7 @@ import { checkShownView, showViewDescription, showViewParameters } from 'deep-vi
 import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
 import { PROPOSAL_FIELDS, proposalLine } from '../shared/proposals.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
-import { refusal } from './refusal.js'
+import { isGuardGroupRefusal, refusal } from './refusal.js'
 import { registerTrustedTool } from './tool-registrations.js'
 import { deniesAcpTool } from '../shared/own-tools.js'
 
@@ -230,7 +230,7 @@ export function install(rt) {
     name: 'message_bot',
     description: 'Send a message to another Bot on the team. If that Bot is working, it reads your message at its next step and can change course, then answers once that work is done; if it is idle, it starts on it right away. Its reply arrives later as a new message to you; with reply_to "user" it answers the user in its own chat instead, and with reply_to "none" nothing comes back at all. In a group chat it reaches only members of that group, as writing "@Name" there does. With request_id you name the request yourself: a repeat of that name with the same message is not sent again, but gives the receipt of the first call back.',
     parameters: {
-      to: { type: 'string', required: true, description: 'Exact Bot name from list_bots' },
+      to: { type: 'string', required: true, description: 'Bot ID or exact Bot name from list_bots' },
       message: { type: 'string', required: true, description: 'Self-contained message; the other Bot cannot see this conversation' },
       images: { type: 'array', items: { type: 'string' }, description: 'Pictures to send along, each by its name, sha256 or saved path as your own chat shows it; the other Bot gets its own copy. Only pictures you were given.' },
       reply_to: {
@@ -254,7 +254,8 @@ export function install(rt) {
       if (Array.isArray(args.images) && args.images.length > 4) return refusedMessage('Not sent: send at most 4 pictures in one message_bot call.')
       const sender = callerBot(exec)
       if (sender === undefined) return refusedMessage('Only Bots on the team can use message_bot.')
-      const target = rt.findBot(args.to)
+      const toReviewer = typeof sender.reviewerId === 'string' && args.to === sender.reviewerId
+      const target = toReviewer ? rt.botOf(args.to) : rt.findBot(args.to)
       if (target === undefined) return refusedMessage(`No Bot named ${args.to}. Team: ${Object.values(state.bots).map(bot => bot.name).join(', ')}`)
       if (target.id === sender.id) return refusedMessage('You cannot message yourself.')
       if (String(args.message ?? '').trim() === '') return refusedMessage('Write a message to send.')
@@ -419,7 +420,7 @@ export function install(rt) {
     },
   }))
 
-  rt.teamTools.push(defineTool({
+  const createBotTool = defineTool({
     name: 'create_bot',
     description: 'Main Bot only. Create a new Bot on the user\'s team. It appears in the sidebar and greets the user.',
     parameters: {
@@ -438,16 +439,18 @@ export function install(rt) {
     output,
     async execute(args, exec) {
       await rt.load()
-      if (!rt.isMain(rt.selfOf(exec.agent?.id))) return 'Only the Main Bot can create Bots. Ask the Main Bot instead.'
+      const self = rt.selfOf(exec.agent?.id)
+      if (!rt.isMain(self)) return 'Only the Main Bot can create Bots. Ask the Main Bot instead.'
       try {
-        const avatar = args.avatar ? await readAvatar(String(args.avatar), { baseDir: rt.sessionFolder?.(exec.agent?.session ?? exec.agent), isData: rt.inData }) : undefined
+        const supplied = Object.hasOwn(args, 'avatar') && args.avatar !== undefined
+        const avatar = supplied ? await readAvatar(args.avatar, { baseDir: rt.sessionFolder?.(exec.agent?.session ?? exec.agent), isData: rt.inData }) : undefined
         const workDir = args.work_dir ? await rt.cleanWorkDir(args.work_dir) : undefined
         const name = String(args.name ?? '').trim()
         await rt.approveFolder(exec, { path: workDir, who: { en: `the new Bot ${name}`, zh: `新 Bot ${name} ` } })
         // Without a named model the team's default applies; without one the new Bot
         // takes its creator's: the DSH default may be a provider that has no key, and
         // then the new Bot fails on its first reply.
-        const creator = callerBot(exec)
+        const creator = rt.botOf(self)
         const served = new Set((await rt.catalog()).filter(entry => entry.needsKey !== true && rt.isLocalAgentRef?.(entry.ref) !== true).map(entry => entry.ref))
         const denyTools = args.deny_tools ?? args.denyTools
         // A new Bot that will deny acp_tool skips a fallback that runs its own tools (#2026).
@@ -471,7 +474,7 @@ export function install(rt) {
           workDir,
           section: args.section,
           avatar: avatar === undefined ? undefined : { image: avatar },
-          createdBy: creator?.id,
+          createdBy: self,
           ...(inheritAuto === undefined ? {} : { inheritAuto }),
           // Only when asked: an older call keeps the exact payload it had.
           ...(denyTools === undefined ? {} : { denyTools }),
@@ -486,7 +489,17 @@ export function install(rt) {
         return `Could not create the Bot: ${error.message}`
       }
     },
-  }))
+  })
+  rt.teamTools.push({
+    ...createBotTool,
+    execute(args, exec) {
+      // Some model providers send null for omitted arguments. Normalize it before DSH validates the string.
+      if (args?.avatar !== null || !Object.hasOwn(args, 'avatar')) return createBotTool.execute(args, exec)
+      const normalized = { ...args }
+      delete normalized.avatar
+      return createBotTool.execute(normalized, exec)
+    },
+  })
 
   rt.teamTools.push(defineTool({
     name: 'update_bot',
@@ -704,6 +717,7 @@ export function install(rt) {
         const room = await rt.createRoom({ members, name: args.name, notice: args.notice, mode: args.mode, admin: admin.id, section: args.section, createdBy: self })
         return `Created group "${room.name}" with ${room.members.map(id => rt.botOf(id).name).join(', ')}. ${admin.id === self ? 'You are' : `${admin.name} is`} its admin. It is in the user's sidebar; use post_to_group to start a discussion there.`
       } catch (error) {
+        if (isGuardGroupRefusal(error)) return error.message
         return `Could not create the group: ${error.message}`
       }
     },
@@ -748,28 +762,32 @@ export function install(rt) {
           }
         }
         try {
+          const seats = { add: add.bots.map(bot => bot.id), remove: remove.bots.map(bot => bot.id) }
+          if (moving) rt.checkRoomJoins(room, seats, self)
           const workDir = moving ? await rt.cleanWorkDir(args.work_dir) : undefined
+          const live = rt.roomOf(room.id)
+          if (live === undefined) throw refusal('Unknown group chat')
           // A Bot that joins a group with a folder works there from its first turn.
-          const joining = add.bots.filter(bot => !room.members.includes(bot.id))
-          if (moving && workDir !== room.workDir) {
-            const members = [...room.members, ...joining.map(bot => bot.id)]
-            await rt.approveFolder(exec, { path: workDir, sessions: members.map(id => room.sessions?.[id]).filter(Boolean), who: { en: `every member of "${room.name}"`, zh: `群聊「${room.name}」的成员` } })
+          const joining = rt.checkRoomJoins(live, seats, self)
+          if (moving && workDir !== live.workDir) {
+            const members = [...live.members, ...joining.map(bot => bot.id)]
+            await rt.approveFolder(exec, { path: workDir, sessions: members.map(id => live.sessions?.[id]).filter(Boolean), who: { en: `every member of "${live.name}"`, zh: `群聊「${live.name}」的成员` } })
           } else if (joining.length > 0) {
             const names = joining.map(bot => bot.name)
-            await rt.approveFolder(exec, { path: room.workDir, sessions: joining.map(bot => room.sessions?.[bot.id]).filter(Boolean), who: { en: names.join(', '), zh: ` ${names.join('、')} ` } })
+            await rt.approveFolder(exec, { path: live.workDir, sessions: joining.map(bot => live.sessions?.[bot.id]).filter(Boolean), who: { en: names.join(', '), zh: ` ${names.join('、')} ` } })
           }
           const { room: next, changes } = await rt.updateRoom(room.id, {
             name: args.name,
             notice: args.notice,
             mode: args.mode,
             admin,
-            add: add.bots.map(bot => bot.id),
-            remove: remove.bots.map(bot => bot.id),
+            ...seats,
             ...(args.section === undefined ? {} : { section: args.section }),
             ...(moving ? { workDir: workDir ?? '' } : {}),
           }, self)
           return changes.length === 0 ? `Nothing changed in "${next.name}".` : `Updated "${next.name}": ${changes.join('; ')}.`
         } catch (failure) {
+          if (isGuardGroupRefusal(failure)) return failure.message
           return `Could not update "${room.name}": ${failure.message}`
         }
       } finally { leave() }

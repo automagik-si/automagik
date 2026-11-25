@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { OmniMark } from './logo.js'
 import { currentPart } from './text.js'
 import { PlusIcon, SearchIcon, TasksIcon } from './icons.js'
-import { BotMark } from './mark.js'
+import { BotMark, catalogueLookOf } from './mark.js'
 import { DSH_LOOK } from './characters.js'
 import { t } from './i18n.js'
 import { openStops } from './stops.js'
@@ -212,7 +212,11 @@ function SeatGlyph({ size }) {
 // humanized Bot: it wears the registry Bot's own character and colour; the pane glyph is only
 // for a seat with no Bot behind it.
 export const renderArt = (bot, size, state) => {
-  if (bot.seat) return bot.artId ? drawBot({ id: bot.artId, name: bot.name }, size, state) : h(SeatGlyph, { size: Math.round(size * 0.8) })
+  if (bot.seat) {
+    if (!bot.artId) return h(SeatGlyph, { size: Math.round(size * 0.8) })
+    const seat = { id: bot.artId, name: bot.name }
+    return drawBot(seat, size, state, catalogueLookOf(seat))
+  }
   if (bot.dsh === 'tasks') return h(TasksIcon, { size: Math.round(size * 0.72) })
   if (bot.dsh === 'agent') return h(BotMark, { bot: { id: bot.id }, look: DSH_LOOK, size })
   return drawBot(bot, size, state)

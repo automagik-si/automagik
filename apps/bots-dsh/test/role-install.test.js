@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
+import { solverInstructions } from '../src/shared/solver-method.js'
+import { immediate, until } from './until.js'
 import { build } from 'esbuild'
 import { apply } from '../index.js'
 import { teamActions } from '../src/client/team-actions.js'
@@ -13,7 +15,7 @@ import { MCP_PATH } from '../src/host/agent-access.js'
 import { ROUTE } from '../src/host/constants.js'
 import { installRoles } from '../src/host/roles.js'
 import { fakeContext } from './fake-ctx.js'
-import { entryOf, INDEX, manifestOf, packageOf, SHA256, SIGNATURE, signer } from './role-fixture.js'
+import { entryOf, INDEX, manifestOf, packageOf, SHA256, SIGNATURE, VERSION as PLUGIN_VERSION, signer, solverCutHistory } from './role-fixture.js'
 
 const ID = 'sample-role'
 const VERSION = '1.0.0'
@@ -26,7 +28,7 @@ const stateOf = extra => ({
 const missing = async path => assert.rejects(fs.lstat(path), { code: 'ENOENT' })
 const clock = Date.UTC(2026, 10, 20)
 
-async function fixture(t, { bytes, entry, extra, readOnly, offline = false } = {}) {
+async function fixture(t, { bytes, entry, extra, readOnly, offline = false, roleDeps } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), 'ds-bot-role-package-'))
   const statePath = join(home, 'state.json')
   const rolesDir = join(home, 'roles')
@@ -65,7 +67,11 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false } = {
   }
 
   async function start() {
-    const ctx = fakeContext()
+    const ctx = fakeContext({ services: {
+      sessionPersistence: { open: async () => ({ read: async () => ({ events: [{
+        type: 'request/header', data: { header: { config: { provider: 'test-provider', model: 'fixture' } } },
+      }] }) }) },
+    } })
     contexts.add(ctx)
     const routes = new Map()
     const registrations = new Set(['schedule_create', 'schedule_edit'])
@@ -76,11 +82,16 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false } = {
     ctx.sessions = { get: () => undefined, flush: async () => {} }
     ctx.sessionTitle = { rename: async () => {} }
     const agent = { id: BOT.id, session: { id: BOT.id }, ctx: { tools: { register: () => () => {}, restrict: () => () => {} } } }
-    ctx.sessionController = { resolveAgent: async () => ({ agent }) }
+    let created = 0
+    ctx.sessionController = {
+      resolveAgent: async id => ({ agent: !roleDeps || id === BOT.id ? agent
+        : { ...agent, id, session: { id }, followup() {}, inject() {}, steer() {} } }),
+      ...(roleDeps ? { create: async () => ({ sessionId: `created-${++created}` }), selectModel: async () => {} } : {}),
+    }
     apply(ctx, { home, memory: false, browser: false, updateCheck: false, mainName: BOT.name })
     const rt = ctx.provided.get('omniTeam')
     installRoles(rt, {
-      keys: [key], now: () => clock, fs: injectedFs,
+      ...roleDeps, keys: [key], now: () => clock, fs: injectedFs,
       fetch: async (url, init) => {
         fetches.push(url)
         assert.equal(init.redirect, 'manual')
@@ -89,6 +100,7 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false } = {
       },
     })
     await rt.load()
+    if (roleDeps) rt.solverSettle?.adopted()
     const post = (path, body, headers) => routes.get(path).fetch(new Request(`http://localhost${path}`, {
       method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body),
     })).then(response => response.json())
@@ -702,7 +714,9 @@ test('attaches an inert, pinned role to the ordinary Main Bot and preserves the 
   assert.deepEqual(f.rt.state.bots[BOT.id].roles, disk.bots[BOT.id].roles)
   const attached = await f.botBehavior()
   assert.deepEqual(attached.prompt, behavior.prompt)
-  assert.deepEqual(attached.identity, behavior.identity)
+  const rolePrompt = '\n\n<role-prompt id="sample-role">\nFixture prompt.\n</role-prompt>'
+  assert.ok(attached.identity.includes(rolePrompt))
+  assert.deepEqual(attached.identity.replace(rolePrompt, ''), behavior.identity)
   assert.deepEqual(attached.tools, behavior.tools)
   await missing(f.marker)
   f.rt.state.bots[BOT.id].roles[0].grants.push('fixture-existing-grant')
@@ -1074,7 +1088,9 @@ test('the real Apps and Bot settings surfaces complete the package flow through 
   const attached = settings()
   assert.ok(findNode(attached.form, node => node.props?.className === 'bt-tag' && surfaceText(node).trim() === 'Sample role'))
   assert.match(surfaceText(attached.card), /sample-role@1\.0\.0/)
-  assert.match(surfaceText(attached.card), /Its tools arrive with the role runtime/)
+  assert.match(surfaceText(attached.card), /Active tools/)
+  assert.match(surfaceText(attached.card), /None/)
+  assert.doesNotMatch(surfaceText(attached.card), /Its tools arrive with the role runtime/)
   await Promise.all(pending.splice(0))
   const locked = surfaceButton(app().roles, 'Uninstall')
   assert.equal(locked.props.disabled, true)
@@ -1152,4 +1168,629 @@ test('concurrent readers share the first health check for the same install recor
   assert.equal(reads, 1)
   await f.rt.roleRecordsView()
   assert.equal(reads, 1)
+})
+
+const BUNDLED_DIGEST = '4065d77560a7159f7537079e1c5d58e18683ef5b3f600f4def30a9e82b639dfc'
+const BUNDLE_NAMES = ['prompt.md', 'role.json', 'role.mjs']
+const bundleSource = new URL('../roles/solver/', import.meta.url)
+const installedSolverDir = (f, version = PLUGIN_VERSION) => join(f.rolesDir, 'solver', version)
+const waitFor = (instructions, role = 'Solver') => ({ id: 'solver', instructions: SHA256(instructions), role })
+const fixtureSolver = (id, extra = {}) => {
+  const instructions = solverInstructions()
+  return fixtureBot(id, { name: id, role: 'Solver', instructions, waitingRole: waitFor(instructions), ...extra })
+}
+const installSolver = f => f.install({ id: 'solver' })
+const officialSolver = async f => {
+  const result = await installSolver(f)
+  assert.equal(result.ok, true, JSON.stringify(result))
+  await immediate()
+  return result.value
+}
+async function catalogSolverFixture(t, options = {}) {
+  const bytes = packageOf(manifestOf({ id: 'solver', version: PLUGIN_VERSION, capabilities: [] }))
+  const entry = entryOf(bytes, { id: 'solver', version: PLUGIN_VERSION, capabilities: [] })
+  return fixture(t, { bytes, entry, ...options, roleDeps: { bundledRoot: '/fixture-bundle-unavailable', ...options.roleDeps } })
+}
+
+function fixtureBundleDigest(files) {
+  const manifest = JSON.parse(files.get('role.json'))
+  const source = new Map(files).set('role.json', Buffer.from(JSON.stringify({ ...manifest, version: '0.0.0' }, null, 2) + '\n'))
+  return SHA256(Buffer.concat(BUNDLE_NAMES.flatMap(name => {
+    const contents = source.get(name)
+    return [Buffer.from(`${name}\0${contents.length}\0`), contents]
+  })))
+}
+
+async function copyBundle(folder, { version, prompt, manifest } = {}) {
+  await fs.mkdir(folder, { recursive: true })
+  const files = new Map()
+  for (const name of BUNDLE_NAMES) files.set(name, await fs.readFile(new URL(name, bundleSource)))
+  if (version || manifest) {
+    const base = JSON.parse(files.get('role.json'))
+    files.set('role.json', Buffer.from(JSON.stringify({ ...base, ...manifest, version: version ?? base.version }, null, 2) + '\n'))
+  }
+  if (prompt !== undefined) files.set('prompt.md', Buffer.from(prompt))
+  for (const [name, bytes] of files) await fs.writeFile(join(folder, name), bytes)
+  return files
+}
+
+test('D2 B1 installs the shipped Solver offline and a cold host verifies it', async t => {
+  const f = await fixture(t, { offline: true, roleDeps: { bundledHistory: solverCutHistory() } })
+  const result = await officialSolver(f)
+  assert.deepEqual(result, { id: 'solver', version: PLUGIN_VERSION, warnings: [] })
+  assert.deepEqual(f.fetches, [])
+  const record = (await f.disk()).roles.solver
+  assert.equal(record.source, 'bundled')
+  assert.equal(record.publisher, 'automagik')
+  assert.equal(record.sha256, BUNDLED_DIGEST)
+  assert.deepEqual((await fs.readdir(join(f.rolesDir, 'solver'))).sort(), [PLUGIN_VERSION])
+  assert.deepEqual((await fs.readdir(installedSolverDir(f))).sort(), BUNDLE_NAMES)
+  assert.equal(JSON.parse(await fs.readFile(join(installedSolverDir(f), 'role.json'), 'utf8')).version, PLUGIN_VERSION)
+  await f.close()
+  const h = await f.start()
+  await until(() => h.rt.roleDetailsView().solver?.installed?.attachable === true, { t })
+  assert.deepEqual(await attachTo(h, BOT.id, 'solver'), { ok: true, value: ['solver'] })
+  assert.deepEqual(f.fetches, [])
+})
+
+test('D2S the Solver card keeps recovery usable pending verification and shows the authenticated digest', async t => {
+  const f = await fixture(t, { offline: true, roleDeps: { bundledHistory: solverCutHistory() } })
+  await copyBundle(installedSolverDir(f), { version: PLUGIN_VERSION })
+  const claimed = 'a'.repeat(64)
+  f.rt.state.roles = { solver: f.record({ id: 'solver', version: PLUGIN_VERSION, source: 'bundled', sha256: claimed }) }
+  await f.rt.save()
+  const surfaces = await mountRoleSurfaces()
+  const actions = teamActions({
+    call: async (endpoint, payload) => (await f.call(endpoint, payload)).value,
+    after: work => work,
+  })
+  const app = roster => surfaces.app({ roster, actions })
+  const before = (await f.call('state')).value
+  assert.equal(before.roleDetails.solver.installed.sha256, undefined)
+  findNode(app(before).roles, node => node.props?.className === 'bt-app-main').props.onClick()
+  let recovery
+  assert.doesNotThrow(() => { recovery = app(before).roles })
+  assert.match(surfaceText(recovery), /Installed SHA-256\s+Details unavailable/)
+  assert.equal(surfaceButton(recovery, 'Uninstall').props.disabled, false)
+
+  await officialSolver(f)
+  const verified = (await f.call('state')).value
+  assert.equal((await f.disk()).roles.solver.sha256, claimed)
+  assert.equal(verified.roleDetails.solver.installed.sha256, BUNDLED_DIGEST)
+  const checksum = findNode(app(verified).roles, node => node.type === 'code')
+  assert.equal(surfaceText(checksum).replace(/\s/g, ''), BUNDLED_DIGEST)
+  assert.equal(verified.roles.solver.status, 'ok')
+
+  await fs.writeFile(join(installedSolverDir(f), 'prompt.md'), 'Damaged after verification.')
+  refused(await installSolver(f), /files differ from the signed package/)
+  const damaged = (await f.call('state')).value
+  assert.equal(damaged.roleDetails.solver.installed.sha256, undefined)
+  assert.equal(damaged.roleDetails.solver.installed.attachable, false)
+  assert.equal(damaged.roles.solver.status, 'damaged')
+  let damagedCard
+  assert.doesNotThrow(() => { damagedCard = app(damaged).roles })
+  assert.match(surfaceText(damagedCard), /Installed SHA-256\s+Details unavailable/)
+  const uninstall = surfaceButton(damagedCard, 'Uninstall')
+  assert.equal(uninstall.props.disabled, false)
+  await uninstall.props.onClick()
+  assert.deepEqual((await f.disk()).roles, {})
+})
+
+test('D2S final bundled verification refuses the install and preserves the recovery record', async t => {
+  for (const rolesOff of [false, true]) await t.test(rolesOff ? 'roles turned off after the save' : 'payload changed after the save', async t => {
+    const f = await fixture(t, { offline: true, roleDeps: { bundledHistory: solverCutHistory() } })
+    const saveCopy = f.rt.saveCopy
+    const path = join(installedSolverDir(f), 'prompt.md')
+    f.rt.saveCopy = async (change, options) => {
+      await saveCopy(change, options)
+      if (rolesOff) f.rt.state.prefs.roles = false
+      else await fs.writeFile(path, 'Damaged after the install record was saved.')
+    }
+    const result = await installSolver(f)
+    refused(result, rolesOff ? /Roles are turned off/ : /files differ from the signed package/)
+    if (rolesOff) assert.equal(result.error.reason, 'roles-off')
+    assert.equal((await f.disk()).roles.solver.source, 'bundled')
+    assert.ok(await fs.readFile(path, 'utf8'))
+    assert.equal(f.rt.roleDetailsView().solver.installed.sha256, undefined)
+  })
+})
+
+test('D2 B2 local content and a matching team receipt cannot authenticate a forged prompt', async t => {
+  const f = await fixture(t, { offline: true, roleDeps: { bundledHistory: solverCutHistory() } })
+  const files = await copyBundle(installedSolverDir(f), { version: PLUGIN_VERSION, prompt: 'Untrusted fixture.' })
+  f.rt.state.roles = { solver: f.record({
+    id: 'solver', version: PLUGIN_VERSION, source: 'bundled', sha256: fixtureBundleDigest(files),
+  }) }
+  await f.rt.save()
+  await f.close()
+  const h = await f.start()
+  refused(await attachTo(h, BOT.id, 'solver'), /files differ from the signed package/)
+  const bot = h.rt.state.bots[BOT.id]
+  bot.roles = [pinOf('solver', PLUGIN_VERSION)]
+  h.rt.roleRuntime.reconcile()
+  await h.rt.roleRuntime.ready(BOT.id)
+  assert.equal(h.rt.roleRuntime.view()[BOT.id], undefined)
+  assert.equal((await h.call('state')).value.roles.solver.status, 'damaged')
+})
+
+test('D2 B3 authenticates old bytes under their released stamp only', async t => {
+  const older = '3.1.2'
+  const oldPrompt = 'Previous authenticated Solver prompt.'
+  const roleDeps = {}
+  const f = await fixture(t, { offline: true, roleDeps })
+  const oldSource = await copyBundle(join(f.home, 'old-source'), { prompt: oldPrompt })
+  const oldDigest = fixtureBundleDigest(oldSource)
+  roleDeps.bundledHistory = { solver: { [older]: oldDigest, [PLUGIN_VERSION]: BUNDLED_DIGEST } }
+  await copyBundle(installedSolverDir(f, older), { version: older, prompt: oldPrompt })
+  await copyBundle(installedSolverDir(f), { version: PLUGIN_VERSION, prompt: oldPrompt })
+  f.rt.state.roles = { solver: f.record({ id: 'solver', version: older, sha256: oldDigest, source: 'bundled' }) }
+  await f.rt.save()
+  await f.close()
+  const h = await f.start()
+  assert.deepEqual(await attachTo(h, BOT.id, 'solver'), { ok: true, value: ['solver'] })
+  assert.match((await h.botBehavior()).identity, /Previous authenticated Solver prompt\./)
+  assert.deepEqual(await detachFrom(h), { ok: true, value: [] })
+  h.rt.state.roles.solver = { ...h.rt.state.roles.solver, version: PLUGIN_VERSION }
+  refused(await attachTo(h, BOT.id, 'solver'), /files differ from the signed package/)
+})
+
+test('D2 B4 checks all bundle leaves before opening any payload', async t => {
+  for (const invalid of ['symlink', 'extra', 'oversize']) {
+    const roleDeps = {}
+    const f = await fixture(t, { offline: true, roleDeps })
+    roleDeps.bundledRoot = join(f.home, 'publisher')
+    const folder = join(roleDeps.bundledRoot, 'roles', 'solver')
+    await copyBundle(folder)
+    if (invalid === 'symlink') {
+      await fs.unlink(join(folder, 'prompt.md'))
+      await fs.symlink('role.mjs', join(folder, 'prompt.md'))
+    } else if (invalid === 'extra') await fs.writeFile(join(folder, 'extra'), 'unexpected')
+    else await fs.writeFile(join(folder, 'role.mjs'), 'x'.repeat(4097))
+    await f.close()
+    const h = await f.start()
+    f.fsCalls.length = 0
+    refused(await h.call('role-install', { id: 'solver' }), /catalog is unavailable/)
+    assert.deepEqual(f.fetches, [INDEX])
+    const payloadOpens = f.fsCalls.filter(([method, path, flags]) => method === 'open'
+      && !(flags & constants.O_DIRECTORY) && BUNDLE_NAMES.some(name => String(path).endsWith('/' + name)))
+    assert.deepEqual(payloadOpens, [], invalid)
+  }
+})
+
+test('D2 accepts neither bundled tool declarations nor bundled IDs outside the allowlist', async t => {
+  const roleDeps = {}
+  const f = await fixture(t, { offline: true, roleDeps })
+  const tools = [{ name: 'fixture_tool', description: 'Fixture tool', parameters: {} }]
+  const manifest = { tools }
+  const content = await copyBundle(join(f.home, 'tool-source'), { manifest })
+  const sha256 = fixtureBundleDigest(content)
+  roleDeps.bundledHistory = { solver: { [PLUGIN_VERSION]: sha256 } }
+  await copyBundle(installedSolverDir(f), { version: PLUGIN_VERSION, manifest })
+  f.rt.state.roles = { solver: f.record({ id: 'solver', version: PLUGIN_VERSION, sha256, source: 'bundled' }) }
+  await f.rt.save()
+  await f.close()
+  const h = await f.start()
+  refused(await attachTo(h, BOT.id, 'solver'), /files differ from the signed package/)
+  h.rt.state.roles[ID] = f.record({ source: 'bundled' })
+  refused(await attachTo(h), /broken|damaged|source cannot be confirmed/)
+})
+
+test('D2 B5 catalog Solver attaches after a cold start from retained evidence', async t => {
+  const bytes = packageOf(manifestOf({ id: 'solver', capabilities: [] }))
+  const entry = entryOf(bytes, { id: 'solver', capabilities: [] })
+  const roleDeps = {}
+  const f = await fixture(t, { bytes, entry, roleDeps })
+  roleDeps.bundledRoot = join(f.home, 'no-bundle')
+  await f.close()
+  const first = await f.start()
+  assert.equal((await first.call('role-install', { id: 'solver' })).ok, true)
+  await first.close()
+  f.fetches.length = 0
+  f.paths.set(INDEX, () => { throw new Error('Offline') })
+  const h = await f.start()
+  assert.deepEqual(await attachTo(h, BOT.id, 'solver'), { ok: true, value: ['solver'] })
+  assert.deepEqual(f.fetches, [])
+})
+
+test('D2 B6 an existing damaged Solver is preserved and install refuses offline', async t => {
+  const f = await fixture(t, { offline: true, roleDeps: { bundledHistory: solverCutHistory() } })
+  const files = await copyBundle(installedSolverDir(f), { version: PLUGIN_VERSION })
+  f.rt.state.roles = { solver: f.record({
+    id: 'solver', version: PLUGIN_VERSION, source: 'bundled', sha256: fixtureBundleDigest(files),
+  }) }
+  await f.rt.save()
+  const altered = 'Different bytes.'
+  const path = join(installedSolverDir(f), 'prompt.md')
+  await fs.writeFile(path, altered)
+  const record = (await f.disk()).roles.solver
+  f.fsCalls.length = 0
+  refused(await installSolver(f), /files differ from the signed package/)
+  assert.deepEqual((await f.disk()).roles.solver, record)
+  assert.equal(await fs.readFile(path, 'utf8'), altered)
+  assert.deepEqual(mutations(f), [])
+  assert.deepEqual(f.fetches, [])
+})
+
+test('D2 B7 runtime failure after the pin returns pending and retains the method', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  bot.waitingRole = waitFor(bot.instructions, bot.role)
+  const saveCopy = f.rt.saveCopy
+  f.rt.saveCopy = (change, options) => saveCopy(change, {
+    ...options, afterWrite() {
+      f.hooks.open = (path, flags, ...rest) => {
+        if (String(path).endsWith('/prompt.md')) throw new Error('Fixture runtime read failure')
+        return fs.open(path, flags, ...rest)
+      }
+      options.afterWrite()
+    },
+  })
+  assert.deepEqual(await attachTo(f, bot.id, 'solver'), { ok: true, value: { pending: true } })
+  const disk = (await f.disk()).bots[bot.id]
+  assert.deepEqual(disk.roles, [pinOf('solver', PLUGIN_VERSION)])
+  assert.equal(disk.instructions, BOT.instructions)
+  assert.deepEqual(disk.waitingRole, waitFor(BOT.instructions, BOT.role))
+})
+
+test('D2 B8 an already pinned damaged waiter reports pending without a write', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  Object.assign(bot, { roles: [pinOf('solver', PLUGIN_VERSION)], waitingRole: waitFor(bot.instructions, bot.role) })
+  await fs.writeFile(join(installedSolverDir(f), 'prompt.md'), 'Damaged fixture.')
+  await f.rt.save()
+  await f.rt.roleRuntime.ready(bot.id)
+  const prior = await fs.readFile(f.statePath, 'utf8')
+  assert.deepEqual(await attachTo(f, bot.id, 'solver'), { ok: true, value: { pending: true } })
+  assert.equal(await fs.readFile(f.statePath, 'utf8'), prior)
+})
+
+test('D2 B9 a live instructions edit during Phase B publication survives its queued save', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  bot.waitingRole = waitFor(bot.instructions, bot.role)
+  const saveCopy = f.rt.saveCopy
+  let writes = 0
+  let edit
+  f.rt.saveCopy = (change, options) => {
+    if (++writes !== 2) return saveCopy(change, options)
+    return saveCopy(change, {
+      ...options,
+      async beforeCommit() {
+        await options.beforeCommit()
+        edit ??= f.rt.updateBot(bot.id, { instructions: 'Person edited the method.' })
+      },
+    })
+  }
+  assert.deepEqual(await attachTo(f, bot.id, 'solver'), { ok: true, value: ['solver'] })
+  await edit
+  const disk = (await f.disk()).bots[bot.id]
+  assert.equal(disk.instructions, 'Person edited the method.')
+  assert.deepEqual(disk.roles, [pinOf('solver', PLUGIN_VERSION)])
+  assert.equal(Object.hasOwn(disk, 'waitingRole'), false)
+})
+
+test('D2 B10 automatic attach cannot pin a Bot whose description changed before commit', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  bot.waitingRole = waitFor(bot.instructions, bot.role)
+  const oldSave = f.rt.saveCopy
+  let checked = false
+  f.rt.saveCopy = (change, options) => oldSave(change, {
+    ...options, beforeCommit() {
+      bot.role = 'Changed description'
+      checked = true
+      options.beforeCommit()
+    },
+  })
+  f.rt.solverSettle?.schedule()
+  await until(() => checked, { t })
+  assert.equal(bot.roles, undefined)
+  assert.equal(bot.instructions, BOT.instructions)
+  assert.ok(bot.waitingRole)
+})
+
+function fakeSolverClock() {
+  const pending = new Map()
+  const cleared = []
+  let next = 0
+  return {
+    pending, cleared,
+    setTimeout(callback, delay) { assert.equal(delay, 600_000); pending.set(++next, callback); return next },
+    clearTimeout(handle) { cleared.push(handle); pending.delete(handle) },
+    tick() {
+      const [handle, callback] = pending.entries().next().value
+      pending.delete(handle)
+      callback()
+    },
+  }
+}
+
+test('D2 B11 the first created waiter arms one timer and a pass tries one install for two waiters', async t => {
+  const timers = fakeSolverClock()
+  const f = await fixture(t, { offline: true, roleDeps: { timers } })
+  assert.equal(timers.pending.size, 0)
+  let installs = 0
+  f.rt.installRole = async () => { ++installs; return { installed: false } }
+  for (const name of ['Wait one', 'Wait two']) {
+    const result = await f.call('create-bot', { name, role: 'Solver', instructions: solverInstructions(), waitingRole: 'solver' })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.deepEqual([...timers.pending.keys()], [1])
+  }
+  timers.tick()
+  await until(() => timers.pending.size === 1, { t })
+  assert.equal(installs, 1)
+})
+
+test('D2 a failed deletion saves the restored Solver and re-arms its timer without a save warning', async t => {
+  const timers = fakeSolverClock()
+  const f = await fixture(t, { offline: true, roleDeps: { timers } })
+  const created = await f.call('create-bot', {
+    name: 'Waiting Solver', role: 'Solver', instructions: solverInstructions(), waitingRole: 'solver',
+  })
+  assert.equal(created.ok, true, JSON.stringify(created))
+  const { id } = created.value
+  const members = [BOT.id, id]
+  const room = await f.call('create-room', { name: 'Solver team', members, admin: id })
+  assert.equal(room.ok, true, JSON.stringify(room))
+  const roomId = room.value.id
+  assert.deepEqual([...timers.pending.keys()], [1])
+
+  const failure = new Error('Fixture session release failed')
+  t.mock.method(f.rt, 'releaseBot', async () => {
+    await f.rt.save()
+    const { rooms } = await f.disk()
+    assert.deepEqual(rooms[roomId].members, [BOT.id])
+    assert.equal(rooms[roomId].admin, null)
+    f.rt.solverSettle.cancel()
+    throw failure
+  })
+  const warn = t.mock.method(f.rt, 'warn', () => {})
+  await assert.rejects(f.rt.deleteBot(id), error => error === failure)
+
+  const { bots, rooms } = await f.disk()
+  assert.deepEqual(bots[id].waitingRole, waitFor(bots[id].instructions))
+  assert.deepEqual(rooms[roomId].members, members)
+  assert.equal(rooms[roomId].admin, id)
+  const saveWarnings = warn.mock.calls.map(({ arguments: [message] }) => message).filter(message => message.includes('not saved'))
+  assert.deepEqual({ pending: [...timers.pending.keys()], saveWarnings }, { pending: [2], saveWarnings: [] })
+})
+
+test('D2 B12 deletion, roles off, lock loss, and disposal each release the timer', async t => {
+  const timers = fakeSolverClock()
+  const f = await fixture(t, { offline: true, roleDeps: { timers } })
+  const make = async name => {
+    const result = await f.call('create-bot', { name, role: 'Solver', instructions: solverInstructions(), waitingRole: 'solver' })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    return result.value.id
+  }
+  const first = await make('First waiter')
+  assert.equal(timers.pending.size, 1)
+  assert.equal((await f.call('delete-bot', { id: first })).ok, true)
+  await until(() => timers.cleared.length > 0, { t, poll: immediate })
+  assert.deepEqual(timers.cleared, [1])
+  await make('Second waiter')
+  assert.equal(timers.pending.size, 1)
+  assert.equal((await f.call('set-prefs', { roles: false })).ok, true)
+  assert.deepEqual(timers.cleared, [1, 2])
+  await make('Roles off waiter')
+  assert.equal(timers.pending.size, 0)
+  f.rt.state.prefs.roles = true
+  f.rt.solverSettle?.armTimer()
+  assert.equal(timers.pending.size, 1)
+  const holdsLock = f.rt.holdsLock
+  f.rt.holdsLock = () => false
+  f.rt.solverSettle.armTimer()
+  assert.deepEqual(timers.cleared, [1, 2, 3])
+  f.rt.holdsLock = holdsLock
+  f.rt.solverSettle.armTimer()
+  await f.close()
+  assert.deepEqual(timers.cleared, [1, 2, 3, 4])
+})
+
+test('D2 B13 waiting copies regenerate queued reviews and refuse edited text with roles off', async t => {
+  const instructions = solverInstructions({ reviewer: BOT.name, dedicated: true })
+  const waiting = fixtureSolver('waiting-solver', { instructions, waitingRole: waitFor(instructions), reviewerId: BOT.id, reviewerMade: true })
+  const { dedicated: d1 } = JSON.parse(await fs.readFile(new URL('./fixtures/solver-method-d1.json', import.meta.url), 'utf8'))
+  const d1Waiting = fixtureSolver('d1-waiting-solver', { instructions: d1, waitingRole: waitFor(d1), reviewerId: BOT.id, reviewerMade: true })
+  const edited = fixtureSolver('edited-solver', { instructions: 'Person changed these instructions.' })
+  const f = await fixture(t, {
+    roleDeps: {}, extra: { prefs: { roles: false }, bots: { [BOT.id]: BOT, [waiting.id]: waiting, [d1Waiting.id]: d1Waiting, [edited.id]: edited } },
+  })
+  for (const source of [waiting, d1Waiting]) {
+    const copy = await f.call('duplicate-bot', { id: source.id })
+    assert.equal(copy.ok, true, JSON.stringify(copy))
+    const stored = (await f.disk()).bots[copy.value.id]
+    assert.equal(Object.hasOwn(copy.value, 'waitingRole'), false)
+    assert.equal(Object.hasOwn(stored, 'reviewerMade'), false)
+    assert.equal(stored.reviewerId, BOT.id)
+    assert.equal(stored.instructions, solverInstructions({ reviewer: BOT.name, dedicated: false }))
+    assert.deepEqual(stored.waitingRole, waitFor(stored.instructions))
+  }
+
+  const before = await fs.readFile(f.statePath, 'utf8')
+  refused(await f.call('duplicate-bot', { id: edited.id }), /Roles are turned off/)
+  assert.equal(await fs.readFile(f.statePath, 'utf8'), before)
+})
+
+test('D2S an edited or empty unpinned waiter needs a verified Solver role before it can be copied', async t => {
+  const f = await catalogSolverFixture(t)
+  const source = f.rt.state.bots[BOT.id]
+  source.waitingRole = waitFor(source.instructions, source.role)
+  source.instructions = 'Person changed these instructions.'
+  await f.rt.save()
+  const before = await fs.readFile(f.statePath, 'utf8')
+  refused(await f.call('duplicate-bot', { id: source.id }), /role changed/)
+  assert.equal(await fs.readFile(f.statePath, 'utf8'), before)
+
+  // Keep the two edited waiters pending so Duplicate must make its own decision.
+  await f.rt.installRole('solver', { settling: true })
+  for (const instructions of ['Person changed these instructions.', '']) {
+    source.instructions = instructions
+    const copy = await f.call('duplicate-bot', { id: source.id })
+    assert.equal(copy.ok, true, JSON.stringify(copy))
+    const stored = (await f.disk()).bots[copy.value.id]
+    assert.equal(stored.instructions, instructions)
+    assert.deepEqual(stored.roles, [pinOf('solver', PLUGIN_VERSION)])
+    assert.equal(stored.waitingRole, undefined)
+  }
+})
+
+test('D2T-2 Duplicate refuses an edited waiter whose copy would use Remote Hermes', async t => {
+  const f = await catalogSolverFixture(t)
+  await f.rt.installRole('solver', { settling: true })
+  const source = f.rt.state.bots[BOT.id]
+  Object.assign(source, {
+    model: 'hermes-remote/attach', waitingRole: waitFor(source.instructions, source.role),
+    instructions: 'Person changed these instructions.',
+  })
+  await f.rt.save()
+  t.mock.method(f.rt, 'catalog', async () => [{ ref: source.model }])
+  t.mock.method(f.rt, 'resolveModel', async ref => ref)
+  t.mock.method(f.rt, 'assertModelAccess', async () => {})
+  const before = await fs.readFile(f.statePath, 'utf8')
+  const copy = await f.call('duplicate-bot', { id: source.id })
+  refused(copy, /uses its Hermes profile's own instructions/)
+  assert.equal(await fs.readFile(f.statePath, 'utf8'), before)
+  assert.deepEqual(Object.keys(f.rt.state.bots), [source.id])
+})
+
+test('D2 B14 a pin-only Researcher copy has a method before and after attach', async t => {
+  const source = fixtureBot('researcher', { name: 'Researcher', role: 'Researcher', instructions: '' })
+  const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: BOT, [source.id]: source } } })
+  await officialSolver(f)
+  f.rt.state.bots[source.id].roles = [pinOf('solver', PLUGIN_VERSION)]
+  await f.rt.save()
+  const attach = f.rt.attachRole
+  let fallback
+  f.rt.attachRole = async (...args) => {
+    fallback = (await f.disk()).bots[args[0]]
+    return attach(...args)
+  }
+  const copy = await f.call('duplicate-bot', { id: source.id })
+  assert.equal(copy.ok, true, JSON.stringify(copy))
+  assert.ok(fallback, 'the copy stores its fallback before attempting attachment')
+  assert.equal(fallback.instructions, solverInstructions())
+  assert.deepEqual(fallback.waitingRole, waitFor(fallback.instructions, 'Researcher'))
+  const stored = (await f.disk()).bots[copy.value.id]
+  assert.equal(stored.instructions, '')
+  assert.equal(stored.waitingRole, undefined)
+  assert.deepEqual(stored.roles, [pinOf('solver', PLUGIN_VERSION)])
+})
+
+test('D2 B15 a copy needs authenticated role content or a proven written method before publication', async t => {
+  const bots = { [BOT.id]: BOT }
+  for (const [id, role, instructions] of [
+    ['custom-researcher', 'Researcher', 'Custom Researcher text.'],
+    ['custom-solver', 'Solver', 'Custom Solver text.'],
+    ['written-solver', 'Solver', solverInstructions()],
+  ]) {
+    bots[id] = fixtureBot(id, { name: id, role, instructions, roles: [pinOf('solver', PLUGIN_VERSION)] })
+  }
+  const f = await fixture(t, { roleDeps: {}, extra: { prefs: { roles: false }, bots } })
+  const original = await fs.readFile(f.statePath, 'utf8')
+  for (const id of ['custom-researcher', 'custom-solver']) {
+    refused(await f.call('duplicate-bot', { id }), /Roles are turned off/)
+    assert.equal(await fs.readFile(f.statePath, 'utf8'), original)
+  }
+  const result = await f.call('duplicate-bot', { id: 'written-solver' })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal((await f.disk()).bots[result.value.id].instructions, solverInstructions())
+})
+
+test('D2 B16 the current source matches its pinned digest and the version mapping', async () => {
+  const { bundleDigest, BUNDLED_ROLE_HISTORY, expectedBundleDigest } = await import('../src/host/bundled-roles.js')
+  const mapping = BUNDLED_ROLE_HISTORY.solver
+  for (const [version, digest] of Object.entries(mapping)) {
+    assert.match(version, /^\d+\.\d+\.\d+$/)
+    assert.match(digest, /^[a-f0-9]{64}$/)
+  }
+  const files = new Map()
+  for (const name of BUNDLE_NAMES) files.set(name, await fs.readFile(new URL(name, bundleSource)))
+  assert.equal(bundleDigest(files), BUNDLED_DIGEST, 'retain the previous mapping and append the new release digest')
+  const { candidate } = JSON.parse(await fs.readFile(new URL('../src/host/bundled-roles.json', import.meta.url), 'utf8'))
+  assert.equal(candidate, bundleDigest(files))
+  for (const earlier of ['3.173.8', '3.173.9']) {
+    assert.equal(expectedBundleDigest(BUNDLED_ROLE_HISTORY, 'solver', earlier), undefined)
+  }
+  const stamped = '3.174.0'
+  const cut = { solver: { [stamped]: candidate } }
+  assert.equal(expectedBundleDigest(cut, 'solver', '3.173.9'), undefined)
+  assert.equal(expectedBundleDigest(cut, 'solver', stamped), BUNDLED_DIGEST)
+})
+
+test('D2S Details sends None for an unpinned waiter, including with roles turned off', async t => {
+  for (const roles of [true, false]) await t.test(`roles=${roles}`, async t => {
+    const f = await fixture(t, { offline: true, roleDeps: {}, extra: { prefs: { roles } } })
+    const bot = f.rt.state.bots[BOT.id]
+    bot.waitingRole = waitFor(bot.instructions, bot.role)
+    await f.rt.save()
+    const roster = (await f.call('state')).value
+    const shown = roster.bots.find(bot => bot.id === BOT.id)
+    assert.equal(Object.hasOwn(shown, 'waitingRole'), false)
+    const surfaces = await mountRoleSurfaces()
+    const posted = []
+    const operations = []
+    const actions = teamActions({
+      call: async (endpoint, payload) => {
+        posted.push([endpoint, payload])
+        const reply = await f.call(endpoint, payload)
+        assert.equal(reply.ok, true, reply.error?.message)
+        return reply.value
+      },
+      after: work => work,
+    })
+    actions.roleCatalog = undefined
+    actions.refreshModels = undefined
+    const { form } = surfaces.settings({ roster, bot: shown, actions, run: work => operations.push(work) })
+    surfaceButton(form, 'None').props.onClick()
+    await Promise.all(operations)
+    assert.deepEqual(posted, [['role-detach', { id: BOT.id }]])
+    const stored = (await f.disk()).bots[BOT.id]
+    assert.equal(stored.waitingRole, undefined)
+    assert.equal(stored.instructions, BOT.instructions)
+    assert.deepEqual(stored.roles, [])
+    if (roles) assert.deepEqual(await detachFrom(f), { ok: true, value: [] })
+  })
+})
+
+test('D2 manual attachment preserves an edit already present at Phase B', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  bot.waitingRole = waitFor(bot.instructions, bot.role)
+  bot.instructions = 'Person edited before attachment.'
+  assert.deepEqual(await attachTo(f, bot.id, 'solver'), { ok: true, value: ['solver'] })
+  const stored = (await f.disk()).bots[bot.id]
+  assert.equal(stored.instructions, 'Person edited before attachment.')
+  assert.equal(stored.waitingRole, undefined)
+})
+
+test('D2 the settler finishes a waiting Solver in one pass and rechecks a stale marker after detach', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  bot.waitingRole = waitFor(bot.instructions, bot.role)
+  const attach = f.rt.attachRole
+  let attempts = 0
+  f.rt.attachRole = (...args) => { ++attempts; return attach(...args) }
+  f.rt.solverSettle?.schedule()
+  await until(() => !bot.waitingRole, { t })
+  assert.equal(attempts, 1)
+  assert.equal(bot.instructions, '')
+  const prior = await fs.readFile(f.statePath, 'utf8')
+  f.rt.solverSettle.schedule()
+  await immediate()
+  assert.equal(await fs.readFile(f.statePath, 'utf8'), prior)
+  bot.instructions = BOT.instructions
+  bot.waitingRole = waitFor(bot.instructions, bot.role)
+  const expect = { bot, role: bot.role, slot: JSON.stringify(bot.roles), marker: JSON.stringify(bot.waitingRole), instructions: bot.instructions }
+  assert.deepEqual(await detachFrom(f, bot.id), { ok: true, value: [] })
+  await assert.rejects(attach(bot.id, 'solver', { expect }), /role changed/)
+  assert.equal(bot.waitingRole, undefined)
+  assert.equal(bot.instructions, BOT.instructions)
+  assert.deepEqual(bot.roles, [])
 })

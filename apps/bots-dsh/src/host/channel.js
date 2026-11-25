@@ -21,6 +21,8 @@ import { isWindowEndpoint } from './extend.js'
 import { appBrowserBridge, COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 import { nativeWorkersView } from './native-workers.js'
 import { installRoles } from './roles.js'
+import { ROLES_OFF_REASON } from '../shared/roles.js'
+import { SOLVER_ROLE_ID } from '../shared/solver-method.js'
 import { CHECK_READ_ONLY, newerCheckedCandidate, savedCheckSummary } from './self-update-check.js'
 import { readUpdateRecovery } from './self-update-recovery.js'
 import { callerService, multiuserMode } from './multiuser.js'
@@ -28,6 +30,15 @@ import { callerJson } from './caller-routes.js'
 import { peopleOf } from './people.js'
 import { claimGrant } from './approvals.js'
 import { bindTicketDesk, createTicketDesk } from './grant-ticket.js'
+import { isSolverLooks } from '../shared/solver-look-policy.js'
+import { SOLVER_WEARS } from '../shared/solver-looks.js'
+import { isGuardGroupRefusal, refusal } from './refusal.js'
+
+const publicBot = bot => {
+  if (!bot || (!Object.hasOwn(bot, 'waitingRole') && !Object.hasOwn(bot, 'reviewerMade'))) return bot
+  const { waitingRole, reviewerMade, ...view } = bot
+  return view
+}
 
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
@@ -80,12 +91,13 @@ export function install(rt) {
   installRoles(rt)
   ctx.on('session/event', (session, event) => {
     const sessionId = session?.id
-    rt.roleRuntime?.event?.(sessionId, event)
+    rt.roleRuntime?.event?.(sessionId, event, session)
     rt.publishChatEvent?.(sessionId, event)
   })
 
   // The DSH interface language of the last browser that asked for the team.
   let uiLocale
+  rt.uiLocale = () => uiLocale
   rt.uiLanguage = () => {
     if (uiLocale === undefined) return undefined
     const lower = uiLocale.toLowerCase()
@@ -107,9 +119,13 @@ export function install(rt) {
   // Photos staged by `stage-image`, kept until the message that names them is sent.
   const staged = new Map()
   const ok = value => ({ ok: true, value })
+  const okBot = bot => ok(publicBot(bot))
   const fail = (message, code = 'bot/error', reason) => ({
     ok: false,
-    error: { code, message, details: {}, ...(code === 'bot/refused' && (reason === 'needs-new-conversation' || reason === 'reply-running') ? { reason } : {}) },
+    error: { code, message, details: {},
+      ...(isGuardGroupRefusal({ code, reason })
+        || (code === 'bot/refused' && ['needs-new-conversation', 'reply-running', ROLES_OFF_REASON].includes(reason))
+        ? { reason } : {}) },
   })
   // Keep native holds and releases for one Bot in order across all browser controls.
   const browserChanges = new Set()
@@ -225,12 +241,14 @@ export function install(rt) {
     // what failed it. `blocked`: the facts of a failure only the user can fix (turns.js).
     // `adoptionHistoryMatches` (adopted originals only): rollback's history guard
     // (agents.js rollbackAdoption) would pass, so the menu offers rollback only then.
-    bots: Object.values(state.bots).map(({ segments, kickoff, reviewTrack, ...bot }) => {
+    bots: Object.values(state.bots).map(source => {
+      const { segments, kickoff, reviewTrack, ...bot } = publicBot(source)
       const tail = rt.chatTail(rt.chatOf(bot.id))
       const nativeToolsBlock = rt.nativeToolsBlock(bot)
       const agyNotes = antigravityNotes(bot, nativeToolsBlock)
       return {
         ...bot, sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
+        ...(source.waitingRole?.id === SOLVER_ROLE_ID ? { canCancelSolverWait: true } : {}),
         ...(bot.dshAgentId === undefined ? {} : { adoptionHistoryMatches: rt.adoptionHistoryMatches(bot.id) }),
         ...rt.permissionFallbackOf('bot', bot),
         ...rt.autoViewOf?.(bot),
@@ -324,7 +342,7 @@ export function install(rt) {
     try { acp = ctx.get?.('acpAgents') } catch { acp = undefined }
     return nativeWorkersView(rt, acp)
   }
-  const live = (roles) => ({
+  const live = (roles, roleRuntime) => ({
     activity: rt.activityView(),
     // The web self-update holds new work (update-hold.js): the composer says so.
     updateHold: rt.updateHoldView?.() === true,
@@ -359,7 +377,7 @@ export function install(rt) {
     computerLive: rt.computerLive?.() ?? {},
     roleCatalog: rt.roleCatalogView(),
     roleDetails: rt.roleDetailsView(),
-    roleRuntime: rt.roleRuntime.view(),
+    roleRuntime,
     // File checks may change a record's status without a state write.
     roles,
   })
@@ -381,8 +399,8 @@ export function install(rt) {
   const liveRun = randomUUID()
   let liveSeq = 0
   let liveCache = null
-  const liveAnswer = (roles) => {
-    const value = live(roles)
+  const liveAnswer = (roles, roleRuntime) => {
+    const value = live(roles, roleRuntime)
     const json = JSON.stringify(value)
     if (liveCache?.json === json) return liveCache
     return liveCache = { key: `${liveRun}:${++liveSeq}`, value, json }
@@ -523,11 +541,12 @@ export function install(rt) {
   // UI edits retain their existing concurrency. An MCP audit excludes UI config edits
   // for its entire before/handler/after interval, so attribution cannot absorb an owner edit.
   const adminContext = new AsyncLocalStorage()
-  const inTransaction = async fn => {
-    const scope = { active: true }
+  const inTransaction = async (fn, agent = false) => {
+    const scope = { active: true, agent }
     try { return await adminContext.run(scope, fn) }
     finally { scope.active = false }
   }
+  rt.agentCaller = () => adminContext.getStore()?.active === true && adminContext.getStore()?.agent === true
   let adminQueue = Promise.resolve()
   let pendingAgents = 0
   let activeOwners = 0
@@ -536,7 +555,7 @@ export function install(rt) {
     pendingAgents += 1
     const job = adminQueue.then(async () => {
       if (activeOwners > 0) await new Promise(resolve => { ownersIdle = resolve })
-      return inTransaction(fn)
+      return inTransaction(fn, true)
     }).finally(() => { pendingAgents -= 1 })
     adminQueue = job.catch(() => {})
     return job
@@ -686,7 +705,7 @@ export function install(rt) {
           await rt.loadSecrets()
           const roles = await rt.roleRecordsView()
           await rt.prepareLearning()
-          const answer = liveAnswer(roles)
+          const answer = liveAnswer(roles, await rt.roleRuntime.publicView())
           const newBlocks = nativeToolsNewMap()
           if (body.since === state.revision && (body.models === undefined || body.models === modelsKey(newBlocks))) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })
@@ -732,7 +751,7 @@ export function install(rt) {
           return ok(await rt.removeProvider(String(body.provider ?? '')))
         case 'duplicate-bot':
           await rt.load()
-          return ok(await rt.duplicateBot(body.id))
+          return okBot(await rt.duplicateBot(body.id))
         case 'set-prefs':
           await rt.load()
           await setPrefs(body)
@@ -810,15 +829,19 @@ export function install(rt) {
           return ok({ ...view, active, speaking })
         }
         case 'create-bot': {
-          await rt.bootstrap()
           // `private` and `shell` are the user's own create fields (no acting Bot here):
           // a Bot created private starts without a shell unless `shell` says otherwise.
-          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId, reviewGuard: body.reviewGuard })
-          return ok(bot)
+          const options = { name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId, reviewGuard: body.reviewGuard,
+            waitingRole: body.waitingRole === SOLVER_ROLE_ID ? SOLVER_ROLE_ID : undefined, reviewerMade: body.reviewerMade === true }
+          await rt.load()
+          rt.checkCreateLook(options)
+          await rt.bootstrap()
+          const bot = await rt.createBot(options)
+          return okBot(bot)
         }
         case 'set-bot-auto':
           await rt.load()
-          return ok(await rt.setBotAuto(String(body.id ?? ''), body.rev))
+          return okBot(await rt.setBotAuto(String(body.id ?? ''), body.rev))
         case 'people-seen': {
           const service = callerService(ctx)
           return service ? ok(service.seen()) : fail('Sharing needs multiuser mode', 'bot/refused')
@@ -842,9 +865,9 @@ export function install(rt) {
           // not a field of the Bot: it never reaches the patch.
           if (Object.hasOwn(body, 'stopReply')) {
             const { stopReply, ...patch } = body
-            return ok(await rt.updateBot(patch.id, patch, undefined, undefined, { stopReply: stopReply === true }))
+            return okBot(await rt.updateBot(patch.id, patch, undefined, undefined, { stopReply: stopReply === true }))
           }
-          return ok(await rt.updateBot(body.id, body))
+          return okBot(await rt.updateBot(body.id, body))
         case 'role-attach':
           if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
           return ok(await rt.attachRole(body.id, body.role))
@@ -1263,10 +1286,11 @@ export function install(rt) {
           return ok(await pets.browse({ query: body.query, page: body.page, sort: body.sort }))
         case 'pet-use': {
           await rt.load()
-          const pet = await pets.adopt(String(body.source ?? ''), String(body.id ?? ''))
           const bot = rt.botOf(body.botId)
           if (!bot) return fail('Unknown Bot', 'bot/not-found')
-          return ok(await rt.updateBot(bot.id, { avatar: { ...(bot.avatar ?? {}), image: undefined, pet: { source: pet.source, id: pet.id, version: pet.version, ...(pet.sleep ? { sleep: true } : {}) } } }))
+          if (isSolverLooks(bot)) throw refusal(SOLVER_WEARS)
+          const pet = await pets.adopt(String(body.source ?? ''), String(body.id ?? ''))
+          return okBot(await rt.updateBot(bot.id, { avatar: { ...bot.avatar, image: undefined, pet: { source: pet.source, id: pet.id, version: pet.version, ...(pet.sleep ? { sleep: true } : {}) } } }))
         }
         case 'privacy':
           return ok(privacy.view())

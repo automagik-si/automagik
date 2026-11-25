@@ -6,11 +6,14 @@ import { join } from 'node:path';
 import {
   isSha256, parseRoleJson, plainObject, ROLE_EVIDENCE_LIMITS, roleDescription, roleName, validCapabilities,
 } from '../apps/bots-dsh/src/host/role-catalog.js';
+import { bundleDigest, manifestBytes } from '../apps/bots-dsh/src/host/bundled-roles.js';
+import { compareVersions } from '../apps/bots-dsh/src/host/lane-verify.js';
 import { validateRoleManifest } from '../apps/bots-dsh/src/host/role-package.js';
 import { MAX_ROLE_BYTES, MAX_ROLE_FILE_SIZE, MAX_ROLE_FILES, readRoleTar } from '../apps/bots-dsh/src/host/role-tar.js';
 import { isPackageRoleId, isRoleVersion } from '../apps/bots-dsh/src/shared/roles.js';
 
 const ROLE_ROOT = 'apps/bots-dsh/roles';
+const BUNDLED_HISTORY = 'apps/bots-dsh/src/host/bundled-roles.json';
 const PREFIX = 'automagik-role-';
 const BLOCK = 512;
 const TAR_RECORD = 10240;
@@ -183,6 +186,79 @@ export function predecessorRoles(rows: unknown[], release: string, releaseVersio
     roles.set(entry.id, { version: entry.version, sha256: entry.sha256.toLowerCase() });
   }
   return roles;
+}
+
+type BundledSolver = { candidate: string; solver: Record<string, string> };
+
+function bundledMappingAt(root: string, sha: string): BundledSolver | undefined {
+  const file = utf8.decode(git(root, 'ls-tree', '-r', '-t', '-z', sha, '--', BUNDLED_HISTORY))
+    .split('\0').find(item => item.endsWith('\t' + BUNDLED_HISTORY));
+  if (!file) return undefined;
+  const [mode, type, oid] = file.split('\t')[0].split(' ');
+  if (type !== 'blob' || mode !== '100644') throw new Error('Solver bundled mapping must be a regular file');
+  const { candidate, solver } = JSON.parse(utf8.decode(git(root, 'cat-file', 'blob', oid)));
+  if (!isSha256(candidate) || !plainObject(solver) || !Object.entries(solver)
+    .every(([version, digest]) => isRoleVersion(version) && isSha256(digest))) {
+    throw new Error('Solver bundled mapping must contain release versions and digests');
+  }
+  return { candidate, solver };
+}
+
+type BundledCheck = {
+  root: string; sha: string; neverShipped: (path: string) => boolean;
+  version?: string; predecessorVersion?: string; release?: boolean;
+};
+
+function bundledCandidate({ root, sha, neverShipped }: BundledCheck) {
+  const mapping = bundledMappingAt(root, sha);
+  const source = sources(root, sha, neverShipped).get('solver');
+  if (!mapping && !source) return;
+  if (!mapping || !source) throw new Error('Solver bundled source and mapping must ship together');
+  const files = new Map([...source].map(([file, oid]) => [file, git(root, 'cat-file', 'blob', oid)]));
+  const manifest = readLayout(files, files.get('role.json'), 'solver');
+  if (manifest.version !== '0.0.0' || !manifestBytes(manifest).equals(files.get('role.json')!)
+    || bundleDigest(files) !== mapping.candidate) {
+    throw new Error('Solver bundled digest differs from the candidate source');
+  }
+  return mapping;
+}
+
+function priorBundledHistory(root: string, sha: string, version: string, predecessorVersion?: string) {
+  if (!isRoleVersion(version)) throw new Error('Solver bundled mapping requires a release version');
+  // The signed catalog can be older than the last tagged cut, or explicitly restamped.
+  const previous = utf8.decode(git(root, 'tag', '--merged', sha, '--list', 'v[0-9]*', '--sort=-version:refname'))
+    .split('\n').map(tag => tag.slice(1)).find(tag => isRoleVersion(tag) && compareVersions(tag, version) < 0)
+    ?? predecessorVersion;
+  return previous === undefined ? {} : bundledMappingAt(root, 'refs/tags/v' + previous)?.solver ?? {};
+}
+
+function requireBundledHistory(actual: Record<string, string>, prior: Record<string, string>, cut?: string) {
+  if (Object.entries(prior).some(([from, digest]) => actual[from] !== digest)
+    || Object.keys(actual).some(from => !Object.hasOwn(prior, from) && from !== cut)) {
+    throw new Error('Solver bundled mapping must preserve the released predecessor and start new entries at the cut');
+  }
+}
+
+export function checkBundledSolver(options: BundledCheck) {
+  const mapping = bundledCandidate(options);
+  if (!options.release) return;
+  const { root, sha, version = '', predecessorVersion } = options;
+  const prior = priorBundledHistory(root, sha, version, predecessorVersion);
+  requireBundledHistory(mapping?.solver ?? {}, prior, version);
+  if (mapping && mapping.solver[version] !== mapping.candidate) {
+    throw new Error('Solver bundled digest differs from the release stamp');
+  }
+}
+
+export function stampBundledSolver(options: BundledCheck & { version: string }) {
+  const { root, sha, version } = options;
+  const mapping = bundledCandidate(options);
+  const prior = priorBundledHistory(root, sha, version);
+  requireBundledHistory(mapping?.solver ?? {}, prior);
+  if (mapping) {
+    const stamped = { candidate: mapping.candidate, solver: { ...prior, [version]: mapping.candidate } };
+    writeFileSync(join(root, BUNDLED_HISTORY), JSON.stringify(stamped, null, 2) + '\n');
+  }
 }
 
 export function packRoleSources({ root, dir, version, sha, release, neverShipped, predecessor = new Map() }: {

@@ -4,7 +4,7 @@
 |---|---|
 | Status | Accepted (2026-11-23: the owner's decisions in #2056, and, by the owner's delegate, the D1 design choices recorded here: best-effort rollback, the native tick's parity with Details, and the read-only view field; no delivery merged) |
 | Milestone | none (ships outside the five milestones) |
-| Lanes | none for this RFC (docs only). Deliveries: plugin (3.N.P), bots-dsh and its pt-BR strings |
+| Lanes | none for this RFC (docs only). D1 and D1.5 use the plugin lane (3.N.P). D2 first ships in a full release (3.N.0). |
 | Created | 2026-11-23 |
 
 ## Summary
@@ -31,13 +31,14 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   disables Create with the existing Hermes note: such a Bot would ignore the method), project
   folder, reviewer, the native-tools tick, and the new-Bot level shown, not picked (`create-bot`
   takes no level; the Solver starts where every new Bot starts).
-- **Create** runs through the person's own existing endpoints: `create-bot` for the reviewer,
-  `create-bot` for the Solver (its instructions name the reviewer by the name the host returned),
-  `update-bot { nativeTools: true }` on its own when ticked (RFC 0003: the switch changes only
-  through `update-bot` on its own), then, when ticked, the brief the person typed goes through
-  `send` after the switch, so the task's first turn already runs with native tools (unticked, it
-  goes with `create-bot`). No endpoint is added; the only new stored fields are the Solver review
-  mark's `reviewerId` and `reviewTrack` (under "Contracts introduced").
+- **Create** uses the person's existing endpoints. With roles on, it first tries `role-install`.
+  It calls `create-bot` for a new reviewer when chosen, then `create-bot` for the Solver with the
+  written method and a waiting mark. The written method names the reviewer by the name the host
+  returned. After a successful install it tries `role-attach`. When native tools are ticked, it
+  calls `update-bot { nativeTools: true }` on its own (RFC 0003). The brief always goes through
+  `send` after the role attempt and any native-tools switch. The host stores `reviewerId`,
+  `reviewTrack` and `reviewGuard` for reviews, and D2 adds `reviewerMade` and `waitingRole`
+  (under "Contracts introduced").
 - **Best-effort rollback.** A failure at the reviewer, the Solver or the switch deletes,
   newest first, only the Bots this run created (never an existing Bot chosen as reviewer, never by
   name). "Nothing was created" is said only when every failed step was a host refusal and every
@@ -76,14 +77,53 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   The cap of 2 FIX-FIRST rounds per review point is enforced by this text only; delivery 4's
   `group_goal` stages can enforce it. Stored descriptions (`Solver`, `Reviewer`) and the method are
   English in every locale; the Bot answers in the person's language.
+- **The `solver` role** (delivery 2): an official role package, `apps/bots-dsh/roles/solver/` (name
+  `Solver`, a prompt part, no tools, settings or capabilities). It ships inside the Bot team
+  plugin and in every plugin cut's signed catalog. Create asks the host to install it. The host
+  keeps an installed copy it can authenticate offline using retained signed catalog evidence or
+  the plugin's expected content digest for that installing version. Otherwise it installs the
+  plugin's own copy, then tries the catalog when that copy is missing or invalid. A damaged
+  install stays in place for the person to uninstall. Create makes the reviewer and the Solver
+  (description `Solver`, the written method of delivery 1 and a waiting mark), then attaches the
+  role. The host clears the generated text only after the selected route can receive the prompt
+  part for that exact pin and the text still matches what the host wrote. With roles turned off
+  or an incomplete install or attachment, the Solver keeps the written method and the dialog says so. The host
+  tries again after loading the team, when roles come on, after an install, and every ten minutes
+  while a Solver waits. A changed description or an unpinned change to the instructions drops
+  the waiting mark. Choosing None in Details cancels the wait and keeps the instructions, including
+  when roles are off. The host adds review lines to the role prompt on each turn and addresses
+  them to the reviewer's team ID. A role with no tools and no
+  settings serves its prompt part without evaluating a module, including in task Sessions that
+  speak as its Bot. A copy keeps the role or a proven written method. A delivery 1 Solver keeps
+  its own instructions.
+- **Tasks** (delivery 3). The person can grant `task-start` in Details under Role. A task from
+  that grant runs at the narrower of the Bot's level, the calling Session's proven level, and
+  its group's level. The calling level stays as a cap and later Bot or group changes can narrow
+  the task. A verified bundled Solver uses the running plugin's declared capabilities
+  (`task-start` and `route-policy`). Catalog roles use their signed manifest.
+  An unnamed task follows the asking Bot's saved, applied, or fallback model as resolved from
+  the captured catalog. Naming an exact model ref requires both grants,
+  including for Main and Omni. The model must be ready to run on a native or ACP route allowed
+  by the plugin's `routePolicy`. A fresh team with no explicit policy saves a seed allowing
+  native and ACP, with native only for DSH Bots. An explicit policy supersedes the saved seed.
+  A missing effective policy, an empty policy, or one with no applicable route allows no named
+  models. Remote Hermes and local agents are excluded. The refusal lists the models the Bot
+  can name, using the same eligibility checks as the start. A task on omp with native tools off
+  can only chat. Bot task starts are unavailable in multiuser mode.
 - **Review guard** (delivery 1.5): a per-Solver switch, on by default in the dialog when the
   reviewer is a Bot, and turned on once at the upgrade for an existing Solver whose reviewer Bot is
   on the team (a later OFF stays off). While it is on, the Solver's work calls in its own chat (and
   its subagents) are refused at the tool executor until its reviewer's reply to the current request
-  carries a verdict (SHIP, FIX-FIRST or BLOCKED). The person turns it off in Details. It holds on
+  carries a verdict (SHIP, FIX-FIRST or BLOCKED). It holds nothing outside that chat: a scheduled task
+  that opens a new conversation and the Solver's Omni automation runs that open their own conversation
+  (event and test runs; chat-mode runs use its own chat and are held) are not held, and Details says so.
+  The person turns it off in Details. It holds on
   routes whose calls are DSH tools. On Claude Code with native tools at Workspace it holds only for
   calls that ask first. It does not hold on Codex or omp native tools, or at Full access or Auto,
   and Details says so. The 'unreviewed' mark stays on every route.
+  Delivery 3 checks the live guard at `start_task`, including after a plan verdict. The refusal
+  directs the person to turn the guard off in Details. The host checks before allocating the
+  task Session and again before its first turn.
 - **The character slot.** `SOLVER_LOOKS` in `solver-draft.js` holds avatar objects as the
   host keeps them (`{ shape }` of a known character, or a built-in pet). Whichever of D1 and the
   change that adds the Solver characters lands second fills it, editing only this list (and its
@@ -96,10 +136,14 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   Solver Bot's character chooser shows them, and the new-Solver dialog defaults to one of them; a
   regular Bot's character chooser, its new-Bot card and the welcome picker show none of them. The
   characters' colours are the catalogue's existing ones, unchanged.
-- Renaming the reviewer later breaks the Solver's reviews until its instructions are edited.
+- Renaming the reviewer breaks a Solver's written review instructions until the name is edited.
+  The ID-based Solver role part continues to address the same reviewer after a rename.
 
 ## Contracts introduced
 
+- `start_task` accepts an optional `model`. Tasks started under the role grants persist
+  `botBound` and their opener `permissionCap`. Fresh teams may persist `taskRoutePolicySeed`
+  in their team configuration.
 - The roster view field `nativeToolsNew` (owner view only, read-only, never stored): per served
   model ref, the native-tools block a Bot the person makes there now would read, `null` for none.
   Its builder is `rt.nativeToolsNewBotBlock` (`host/native-tools.js`); the blocked refs are part of
@@ -114,8 +158,10 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   `SOLVER_DESCRIPTION` (`'Solver'`), which the dialog also writes; the character chooser imports
   the predicate and never repeats the literal. The marker is cosmetic (it only chooses which
   characters are offered), so a person who renames a description to `Solver` gains nothing.
-  Delivery 2's official `solver` role replaces it, and `isSolverBot` then reads both (the role tag
-  or the description), so a delivery 1 Solver keeps its characters. The marker adds no stored field.
+  From delivery 2 `isSolverBot` reads both markers: the description, or a well-formed
+  `solver` role pin (`packageAttachment`, `shared/roles.js`). Both stay cosmetic or bookkeeping
+  (the characters offered, the review mark). Delivery 3's `task-start` reads the pin and its grant.
+  The marker adds no stored field.
 - **Solver review mark** (delivery 1): two cosmetic stored fields. `reviewerId` is the id of the
   Solver's reviewer Bot: the New Solver dialog sends it once with the person's `create-bot`, the
   host keeps it only when it names another Bot on the team, a copy of the Solver keeps it, and no
@@ -165,7 +211,15 @@ rights (native tools, a wider level, a shell) left as the person's own visible c
   - The owner view's `reviewGuardWaitingSince` (never stored): since when the plan waits.
   - Stop line reasons `guard` and `guard-request`. In a Bot-request turn, whose calls the chat
     hides, the Solver's chat still draws a guard stop line, without the call's row.
-- Delivery 2 adds the official role id `solver`.
+- **The `solver` role** (delivery 2): the official role ID `solver`, its package under
+  `apps/bots-dsh/roles/solver/` shipped in the plugin, the plugin's append-only mapping from release
+  versions to content digests (`BUNDLED_ROLE_HISTORY`), and the host-built review lines. A plugin
+  cut stamps its version using the checked candidate digest and retains earlier released entries.
+  Two stored fields grant nothing. `waitingRole: { id: 'solver', instructions: <sha256>, role: <description> }`
+  is derived by the host during the person's create or copy, consumed by attachment, detachment
+  and settlement. `reviewerMade: true` is written by the person's create with a new reviewer and
+  read by the role's review lines. Both fields stay internal. Create uses the existing owner
+  actions and views.
 
 ## Threat model
 
@@ -177,8 +231,11 @@ one. Web pages, files and other Bots' replies are data to the method.
 
 The review guard adds no trust: it only removes tools. It is set by the person, or once by the
 host's upgrade (`reviewGuardMigrated`) for a Solver whose reviewer Bot is on the team; only the
-person clears it. It fails closed: no verdict, an unreadable review track or a gone reviewer keep
-work refused.
+person clears it. Within its scope it fails closed: no verdict, an unreadable review track or a gone
+reviewer keep work refused. Its scope is the Solver's own chat and the subagents it starts there;
+scheduled tasks that open a new conversation, Omni automation runs that open their own conversation,
+and routes whose own tools never ask (Codex or omp native tools, Full access, Auto, Claude Code native
+calls that do not ask) are outside it.
 
 ## Deliveries
 
@@ -190,13 +247,19 @@ work refused.
 1.5. **D1.5 (#2056):** the review guard. Plugin lane. Acceptance: the installed-app rows in its
    PR. Rollback: reverting the release removes the switch; the stored field is ignored.
 
-2. **D2:** `roles/solver/` official role (tag, prompt part, pinned version); the dialog attaches it
-   and stops writing instructions; existing D1 Solvers keep theirs. Plugin lane, with a cut that
-   carries the role. Check: a new Solver carries the `solver` tag and no written instructions; a
-   D1 Solver keeps its own. Rollback: the dialog writes instructions again; attached roles stay.
-3. **D3:** RFC 0037's `task-start` capability for the Solver, at the narrower of its own and the
-   caller's level; tasks may name an allowed route for model diversity. Plugin lane; acceptance
-   and rollback set in its own issue.
+2. **D2 (#2056):** the official `solver` role (tag, prompt part, pinned version). The dialog installs
+   and attaches it. Existing D1 Solvers keep their instructions. The first cut is a full release
+   because adding `roles/solver/` changes the plugin's `package.json` `files` list. On a candidate with
+   roles turned off, Create makes a Solver with the written method and waiting mark and shows the
+   roles-off status. On the first installed release carrying D2, the new Solver carries the role
+   at that version with empty instructions, and its review message reaches its reviewer. Reverting
+   the release makes the dialog write instructions again. A Bot whose written method was cleared
+   still has its attachment and needs written instructions or a runtime that serves the part.
+   A waiting Bot keeps its written method.
+3. **D3:** Plugin lane. In the installed app, a guarded Solver's `start_task` refusal shows
+   the Details remedy. With the guard off and both grants enabled, a refused model lists
+   eligible alternatives. Retrying with a listed ref starts the task on that provider and model.
+   Reverting the release removes the new admission and model parameter. Stored grants stay inert.
 4. **D4:** an optional group "Solver + reviewer" running its steps as `group_goal` stages; a time
    cap, and a level picker capped at the person's new-Bot default (never wider). Plugin lane;
    acceptance and rollback set in its own issue.
@@ -206,6 +269,11 @@ work refused.
 ## Open questions
 
 None for D1. D4's time-cap value is decided with D4.
+
+## Changelog
+
+- 2026-11-24: the review guard's scope stated (own chat and its subagents; scheduled new-conversation
+  tasks and Omni automation runs in their own conversation are not held).
 
 ## Links
 

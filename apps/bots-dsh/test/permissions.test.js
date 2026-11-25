@@ -635,7 +635,7 @@ test('an adopted Session keeps its own level', async (t) => {
   const { rt, call, service, presets, settle } = team(t, { bots: { m1: { permission: 'danger-full-access' } } })
   assert.equal((await call('set-prefs', { permission: 'workspace-write' })).ok, true)
   service.set({ id: 'adopted' }, 'danger-full-access')
-  const bot = await rt.createBot({ name: 'Adopted', existingSessionId: 'adopted', createdBy: 'm1', pickModel: true })
+  const bot = await rt.createBot({ name: 'Adopted', existingSessionId: 'adopted', pickModel: true })
   assert.equal(bot.permission, undefined)
   await settle()
   assert.deepEqual(presets('adopted'), ['danger-full-access'])

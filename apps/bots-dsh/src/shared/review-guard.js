@@ -79,6 +79,7 @@ export const REVIEW_GUARD_COPY = Object.freeze({
   asks: 'Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.',
   level: 'Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.',
   agent: 'Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.',
+  scope: "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held.",
   gone: 'Its reviewer is no longer on the team: work stays held until you turn this off.',
   noReviewer: 'Off: {name} has no reviewer Bot on the team, so there is no verdict to wait for.',
   stop: "the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details",

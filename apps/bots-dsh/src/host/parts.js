@@ -30,10 +30,11 @@ import { redactorFor } from './redact.js'
 import { OWN_TOOLS_MODEL_TEXT } from '../shared/own-tools.js'
 import { answerSender, failureLine, opensTurn, turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
-import { routeAllowed } from '../shared/route-policy.js'
+import { routeAllowed, routeLabel } from '../shared/route-policy.js'
 import { ACP_NAME, CROSSING_DEADLINE_MS, commandCapableAgent, crossesHarness, isHermesRoute, routeOfRef, shellHoldText } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
+import { readableRoute } from './session-route.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
 
 // Whether a Bot's part has something a handoff note must carry. The team's own setup kickoff
@@ -433,8 +434,8 @@ export function install(rt) {
   // Lines for the model the Session last routed to; undefined while it has not
   // routed yet.
   async function contextLines(session, { inspect = false } = {}) {
-    const route = session.requestHeader()?.config
-    if (!route?.provider || !route?.model) return undefined
+    const route = readableRoute(session.requestHeader()?.config)
+    if (!route) return undefined
     if (!inspect) rt.assertBotRunnerProvider?.(route.provider, session.id)
     const info = await ctx.llm.resolveModelInfo(route.provider, route.model)
     return linesFor({ window: info.context?.contextWindow, reserve: route.maxTokens ?? info.defaultMaxTokens, checkRatio: policyOf(session.id).checkRatio })
@@ -690,7 +691,7 @@ export function install(rt) {
   // answers only in its own chat), so they run on the team's background model then, with that
   // model's own effort and output limit. No background model: the route as it is.
   async function asideRoute(route, sessionId) {
-    if (!route?.provider || !route?.model) return route
+    if (!route) return undefined
     const resolved = rt.answersAside?.(`${route.provider}/${route.model}`) === false
       ? splitRef(await rt.backgroundModel?.(sessionId)) ?? route
       : route
@@ -704,8 +705,8 @@ export function install(rt) {
   // answers aside; otherwise they are skipped, and noted once per Session.
   const asideSkipped = new Set()
   async function asideReady(session, what) {
-    const route = await asideRoute(session.requestHeader()?.config, session.id)
-    if (!route?.provider || !route?.model || rt.answersAside?.(`${route.provider}/${route.model}`) !== false) return true
+    const route = await asideRoute(readableRoute(session.requestHeader()?.config), session.id)
+    if (!route || rt.answersAside?.(`${route.provider}/${route.model}`) !== false) return true
     if (!asideSkipped.has(session.id)) {
       asideSkipped.add(session.id)
       rt.warn('ds-bot: %s runs on an agent over ACP and no model answers beside it, so Omni makes no context check, note or checkpoint there (first skipped: %s); past the hard line it moves on with its latest messages, without a model call. A background model in Settings lifts this.', session.id, what)
@@ -741,10 +742,11 @@ export function install(rt) {
   // route. Undefined when there is no guard to pass (no automatic engine, the same
   // route, an agent on either end that is not the origin) or the destination declares
   // no usable window, which the guard reports on its own.
-  async function destinationThreshold(agent, selection, signal) {
+  async function destinationThreshold(agent, candidate, signal) {
     const previous = agent.session.requestHeader()
-    if (!selection?.provider || !selection?.model || previous?.config === undefined) return undefined
-    const from = previous.config
+    const from = readableRoute(previous?.config)
+    const selection = readableRoute(candidate)
+    if (!selection || !from) return undefined
     if (from.provider === selection.provider && from.model === selection.model) return undefined
     if (rt.answersAside?.(`${from.provider}/${from.model}`) !== false) return undefined
     // Onto another agent there is nothing to price: acp-dsh lets that switch through (A-1).
@@ -882,9 +884,10 @@ export function install(rt) {
     const session = agent.session
     if (!own && !await asideReady(session, 'handoff note')) throw noAside()
     const header = session.requestHeader()
-    const route = own ? header?.config : await asideRoute(header?.config, session.id)
-    if (own && route?.provider) rt.assertBotRunnerProvider?.(route.provider, session.id)
-    if (!route?.provider || !route?.model) throw new Error('the Session has not called a model yet')
+    const used = readableRoute(header?.config)
+    const route = own ? used : await asideRoute(used, session.id)
+    if (!route) throw new Error('the Session has not called a model yet')
+    if (own) rt.assertBotRunnerProvider?.(route.provider, session.id)
     const messages = session.deriveMessages()
     const base = folder ? FOLDER_PROMPT : HANDOFF_PROMPT
     const asked = { provider: route.provider, model: route.model, ...(route.maxTokens === undefined ? {} : { maxTokens: route.maxTokens }) }
@@ -923,8 +926,8 @@ export function install(rt) {
     if (job !== undefined) assertCheckpoint(job)
     signal?.throwIfAborted()
     if (!await asideReady(session, 'checkpoint')) throw noAside()
-    const route = await asideRoute(session.requestHeader()?.config, session.id)
-    if (!route?.provider || !route?.model) throw new Error('the Session has not called a model yet')
+    const route = await asideRoute(readableRoute(session.requestHeader()?.config), session.id)
+    if (!route) throw new Error('the Session has not called a model yet')
     // The results list grows with the work, so the checkpoint may write as much as one
     // of the Bot's own replies.
     const maxTokens = route.maxTokens
@@ -1019,8 +1022,8 @@ export function install(rt) {
   async function askSteward(agent, { midTurn }) {
     const session = agent.session
     if (!await asideReady(session, 'context steward')) return undefined
-    const route = await asideRoute(session.requestHeader()?.config, session.id)
-    if (!route?.provider || !route?.model) return undefined
+    const route = await asideRoute(readableRoute(session.requestHeader()?.config), session.id)
+    if (!route) return undefined
     const group = placeOf(agent.id)?.roomId !== undefined
     const lines = []
     for await (const line of partLines(agent.id, AbortSignal.timeout(HANDOFF_READ_MS), { group })) {
@@ -1314,7 +1317,8 @@ export function install(rt) {
   // would fail the same way, so an unloaded failure is noted once at info instead.
   const unloaded = error => ctx.fiber?.uid === null || /in inactive context/.test(String(error?.message ?? error))
   const noteInfo = (template, ...args) => { try { ctx.logger.info(template, ...args) } catch {} }
-  const currentProvider = agent => agent.model?.current?.()?.provider ?? agent.session.requestHeader?.()?.config?.provider
+  const currentProvider = agent => readableRoute(agent.model?.current?.())?.provider
+    ?? readableRoute(agent.session.requestHeader?.()?.config)?.provider
 
   // A message's inbox boundary, the same one forward() delivers it to.
   const inboxTargetOf = message => (opensTurn(message) ? 'next-turn' : 'next-step')
@@ -1883,46 +1887,52 @@ export function install(rt) {
   }
   // The route the old part's conversation runs on, as its last request named it.
   const routeRefOf = (session, fallback) => {
-    const config = session?.requestHeader?.()?.config
-    return config?.provider && config?.model ? `${config.provider}/${config.model}` : fallback
+    const route = readableRoute(session?.requestHeader?.()?.config)
+    return route ? `${route.provider}/${route.model}` : fallback
   }
   // A Session's own route, `{ ref, effort }`: its last request's, else its saved log's.
   async function ownRouteOf(session) {
-    const config = session?.requestHeader?.()?.config
-    const route = config?.provider && config?.model ? config : await rt.storedRouteOf?.(session?.id).catch?.(() => undefined)
-    if (!route?.provider || !route?.model) return undefined
-    return { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort }
+    try {
+      const route = readableRoute(session?.requestHeader?.()?.config)
+        ?? readableRoute(await rt.storedRouteOf?.(session?.id))
+      if (!route) return undefined
+      return { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort }
+    } catch { return undefined }
   }
-  // Whether a Session's history ran on another harness than `ref`, so a model change would
-  // carry that history across (RFC 0030, Handoff note). A carried handoff package counts as
-  // history, a fresh opening does not. A route that crosses but a log that cannot be read
-  // counts as history: the Session keeps its route (the safe side).
   // A group part opened on the route its conversation kept: before its first request the
   // route is the one selected on it.
   const keptRoutes = new Map()
-  // A Session's route as crossingHistory reads it: its last request's, its selection, the
-  // route a group part was opened on, else its saved log's.
+  // A Session's last request, then its selection, kept group route, or saved log.
+  // A null route could not be read; undefined means there is no route yet.
   async function sessionRoute(sessionId) {
     let session
-    let selection
     try {
-      session = agents.get(sessionId)?.session ?? ctx.sessions?.get?.(sessionId)
-      selection = agents.get(sessionId)?.model?.current?.()
-    } catch {}
-    const config = session?.requestHeader?.()?.config
-    const kept = splitRef(keptRoutes.get(sessionId))
-    const route = config?.provider ? config : selection?.provider ? selection : kept?.provider ? kept
-      : await Promise.resolve(rt.storedRouteOf?.(sessionId)).catch(() => undefined)
-    return { session, route }
+      const agent = agents.get(sessionId)
+      session = agent?.session ?? ctx.sessions?.get?.(sessionId)
+      const current = agent?.model?.current?.()
+      const selection = readableRoute(current)
+      const header = session?.requestHeader?.()
+      const used = readableRoute(header?.config)
+      if (header != null) return { session, route: used }
+      if (current != null) return { session, route: selection }
+      const kept = readableRoute(splitRef(keptRoutes.get(sessionId)))
+      if (kept) return { session, route: kept }
+      const stored = await rt.storedRouteOf?.(sessionId)
+      const route = readableRoute(stored) ?? (keptRoutes.has(sessionId) ? readableRoute(stored?.pendingSelection) : undefined)
+      return { session, route: stored === null ? null : route }
+    } catch { return { session, route: null } }
+  }
+  // A carried handoff package counts as history, a fresh opening does not. An unreadable
+  // route or a crossing route whose log cannot be read counts as history (the safe side).
+  function historyCrosses(sessionId, ref, { session, route }) {
+    if (route === null) return true
+    if (!route || !crossesHarness(`${route.provider}/${route.model}`, ref)) return false
+    if (session === undefined || keptRoutes.has(sessionId)) return true
+    try { return saidForCrossing(session.deriveMessages(), undefined) } catch { return true }
   }
   async function crossingHistory(sessionId, ref) {
     if (typeof sessionId !== 'string' || typeof ref !== 'string') return false
-    const { session, route } = await sessionRoute(sessionId)
-    if (!route?.provider || !crossesHarness(`${route.provider}/${route.model ?? 'default'}`, ref)) return false
-    // A group part opened on its kept route holds that history in its handoff package, even
-    // before its first turn reads it.
-    if (session === undefined || keptRoutes.has(sessionId)) return true
-    try { return saidForCrossing(session.deriveMessages(), undefined) } catch { return true }
+    return historyCrosses(sessionId, ref, await sessionRoute(sessionId))
   }
   rt.crossingHistory = crossingHistory
 
@@ -1952,11 +1962,12 @@ export function install(rt) {
   // not (another member, no history on another harness, a Hermes route).
   async function groupCrossing(sessionId, bot, target) {
     if (!currentGroupFollow(sessionId, bot, target)) return undefined
-    const { route } = await sessionRoute(sessionId)
-    if (!route?.provider || !route.model) return undefined
+    const source = await sessionRoute(sessionId)
+    const { route } = source
+    if (!route) return undefined
     const from = `${route.provider}/${route.model}`
     if (isHermesRoute(from) || isHermesRoute(target)) return undefined
-    if (!await crossingHistory(sessionId, target)) return undefined
+    if (!historyCrosses(sessionId, target, source)) return undefined
     return { from, to: target, group: true, note: routeAttempt(bot, from, target, 'group') }
   }
   // `pick`: the person's pick of `target`, which gives a Session that failed twice its tries again.
@@ -2005,14 +2016,18 @@ export function install(rt) {
   }
   // A step about to run a Bot's own chat with history on another harness than the Bot's model
   // (a selection DSH's /model made on the Session): it is not the person's switch.
-  async function crossedInPlace(agent, place, selection) {
-    if (place?.roomId !== undefined || place?.botId === undefined || !selection?.provider || !selection?.model) return false
+  async function crossedInPlace(agent, place, candidate) {
+    if (place?.roomId !== undefined || place?.botId === undefined) return false
+    const selection = readableRoute(candidate)
+    if (!selection) return false
     const bot = rt.botOf(place.botId)
     const model = bot?.model ?? bot?.appliedModel
     if (typeof model !== 'string' || rt.chatOf(bot.id) !== agent.id || awaiting.has(agent.id)) return false
     const ref = `${selection.provider}/${selection.model}`
-    if (!crossesHarness(model, ref) || await rt.keepsCarriedRoute?.(agent.id, ref) === true) return false
-    if (!await crossingHistory(agent.id, ref)) return false
+    if (!crossesHarness(model, ref)) return false
+    const carried = await rt.keepsCarriedRoute?.(agent.id, ref)
+    if (carried === true) return false
+    if (!await crossingHistory(agent.id, ref) && carried !== 'unreadable') return false
     rt.warn('ds-bot: %s: a step on %s with this chat\'s history was not run; the chat stays on %s (an agent switch goes through the model menu)', bot.name, ref, model)
     return true
   }
@@ -2400,13 +2415,16 @@ export function install(rt) {
       }
       // The old group part never left the route it ran on: nothing is selected on it.
       const picked = group ? undefined : await freshRoute(bot, old?.session)
-      if (picked !== undefined && await rt.keepsCarriedRoute?.(entry.oldId, picked.ref) === true) {
-        // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
-        bot.appliedModel = picked.ref
-        if (picked.effort === undefined) delete bot.appliedEffort
-        else bot.appliedEffort = picked.effort
-        await rt.save()
-      } else if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
+      if (picked !== undefined) {
+        const carried = await rt.keepsCarriedRoute?.(entry.oldId, picked.ref)
+        if (carried === true) {
+          // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
+          bot.appliedModel = picked.ref
+          if (picked.effort === undefined) delete bot.appliedEffort
+          else bot.appliedEffort = picked.effort
+          await rt.save()
+        } else if (carried !== 'unreadable') await selectRoute(bot, entry.oldId, picked)
+      }
       if (old !== undefined) partBase.set(entry.oldId, tokensOf(old.session) ?? 0)
       rt.renewMemory(entry.oldId)
       // A reply the agent switch stopped goes on in the part it came from, once: the handoff
@@ -2586,16 +2604,16 @@ export function install(rt) {
     if (noCommands && commandCapableAgent(ref)) throw noBotRunner()
     if (ref !== undefined) return { ref, effort: await rt.desiredEffort(bot, ref) }
     if (target !== undefined) return { ref: target, effort: undefined }
-    const route = session?.requestHeader()?.config
+    const route = readableRoute(session?.requestHeader()?.config)
     if (noCommands) {
       if (commandCapableAgent(route?.provider)) throw noBotRunner()
-      if (!route?.provider || !route.model) {
+      if (!route) {
         const fallback = await rt.defaultModel({ noCommands })
         if (fallback === undefined || commandCapableAgent(fallback)) throw noBotRunner()
         return { ref: fallback, effort: undefined }
       }
     }
-    return route?.provider && route?.model ? { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort } : undefined
+    return route ? { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort } : undefined
   }
 
   // It answers whether the route was selected, and records what the fresh part then runs on.
@@ -3945,7 +3963,7 @@ export function install(rt) {
       }
       const lastSelection = events.findLast(event => event.type === 'model/selection')
       const laterHeaders = events.filter(event => event.type === 'request/header' && event.seq > (lastSelection?.seq ?? end))
-      const configOf = event => event?.data?.header?.config
+      const configOf = event => readableRoute(event?.data?.header?.config)
       const retired = laterHeaders.some(event => sameModelSelection(configOf(event), target))
       const alreadySelected = sameModelSelection(lastSelection?.data, target)
         && (!retired || sameModelSelection(configOf(laterHeaders.at(-1)), target))
@@ -4125,8 +4143,7 @@ export function install(rt) {
   function assertRouteAllowed(bot, target, entry) {
     if (routeAllowed(bot, target, rt.routePolicy)) return
     routeAttempt(bot, bot.model ?? bot.appliedModel, target, entry)('refused', 'route policy')
-    const route = { native: 'Native', acp: 'ACP', herdr: 'Herdr', 'hermes-remote': 'Remote Hermes' }[routeOfRef(target).route]
-    throw refused('refused', `${bot.name} cannot use the ${route} route.`)
+    throw refused('refused', `${bot.name} cannot use the ${routeLabel(target)} route.`)
   }
 
   // A missing model can stop a crossing before the usual route checks run.
@@ -4311,6 +4328,8 @@ export function install(rt) {
       note('accepted')
       return { id: botId, model: target, ...(effortId == null ? {} : { effort: effortId }), status: 'switching' }
     }
+    await rt.assertReadableRoute?.(bot, target)
+    checkCurrent()
     await rt.clearAuto?.(bot)
     checkCurrent()
     const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort, previousModel: bot.previousModel, shellHeld: bot.shellHeld }
@@ -4333,7 +4352,7 @@ export function install(rt) {
     const takeRoute = async () => {
       putRoute()
       try {
-        await rt.applyModel(bot, { force: true })
+        await rt.applyModel(bot, { force: true, requireReadable: true })
       } catch (error) {
         restore()
         note('rolled back', 'in-place selection failed')

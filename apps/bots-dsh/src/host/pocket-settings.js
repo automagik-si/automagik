@@ -21,7 +21,7 @@ export class SettingsRefusal extends Error {
   }
 }
 
-/** Only the rejection of the own chat's DSH selection can settle a write as not-applied. */
+/** The own chat refused the pick before a selection was applied. */
 export class SettingsSelectionRejected extends Error {}
 
 export function settingsRevOf(botId, bot) {
@@ -195,7 +195,7 @@ export function pocketSettingsOf(rt) {
           : refusedWrite(error.modelUnavailable === true ? 'unknown-model' : 'model-not-allowed'))
       }
       if (modelEntry && error instanceof SettingsSelectionRejected) {
-        return withSettings(refusedWrite('not-applied', { message: NOT_APPLIED }), true)
+        return withSettings(refusedWrite('not-applied', { message: error.message || NOT_APPLIED }), true)
       }
       rt.warn('pocket settings: unavailable')
       return admitted ? withSettings(PENDING, true) : refusedWrite('unavailable')

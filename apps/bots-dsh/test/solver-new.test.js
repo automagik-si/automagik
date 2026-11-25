@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { SOLVER_SHAPES } from '../src/client/characters.js'
 
 const { outputFiles } = await build({
   stdin: { contents: [
@@ -114,6 +115,8 @@ function fakeActions({ fail = {}, deleteFails = {}, fresh } = {}) {
   const actions = {
     calls,
     closeOverlay: () => calls.push(['closeOverlay']),
+    installRole: async id => { calls.push(['installRole', id]); if (fail.install) throw fail.install; return { id, version: '1.0.0' } },
+    attachRole: async (id, role) => { calls.push(['attachRole', id, role]); if (fail.attach) throw fail.attach; return [role] },
     createBot: async (payload) => {
       creates += 1
       const step = payload.role === 'Reviewer' ? 'reviewer' : 'solver'
@@ -159,12 +162,38 @@ const dialog = ({ roster = rosterOf(), actions = fakeActions(), brief = 'Compare
     },
     choose(key) { ui.select().props.onChange({ target: { value: key } }) },
     pickModel(ref) { ui.modelMenu('new-bot').props.onPick(ref) },
+    looks() {
+      const picker = find(node => node.type?.name === 'CharacterGrid')[0]
+      return picker ? picker.type(picker.props) : null
+    },
     tickNative(on = true) { ui.tick().props.onChange({ target: { checked: on } }) },
   }
   tree()
   return ui
 }
 const kinds = calls => calls.map(call => call[0])
+
+test('New Solver shows the twelve character tiles and one row of twelve swatches', () => {
+  const tree = dialog().looks()
+  const tiles = all(tree, node => node.props.className === 'bt-shape')
+  assert.deepEqual(tiles.map(tile => tile.props.key), SOLVER_SHAPES)
+  const groups = all(tree, node => node.props.className === 'bt-colors')
+  assert.equal(groups.length, 1)
+  assert.equal(all(groups[0], node => node.props.className === 'bt-color').length, 12)
+})
+
+test('New Solver creates with the picked character and swatch', async () => {
+  const ui = dialog()
+  const tile = (key) => all(ui.looks(), node => node.props.className === 'bt-shape' && node.props.key === key)[0]
+  // Move off Frog if the random start chose it.
+  if (tile('frog')?.props['aria-pressed']) tile('puff').props.onClick()
+  tile('frog').props.onClick()
+  all(ui.looks(), node => node.props.className === 'bt-color' && node.props.key === 'aurora')[0].props.onClick()
+  await ui.create()
+  const solver = ui.actions.calls.find(([kind, payload]) => kind === 'createBot' && payload.role === 'Solver')[1]
+  assert.deepEqual(solver.avatar, { shape: 'frog' })
+  assert.equal(solver.color, 'aurora')
+})
 
 test('Create makes the reviewer, then the Solver with its real name, then native tools alone, then the brief', async () => {
   const ui = dialog()
@@ -174,8 +203,8 @@ test('Create makes the reviewer, then the Solver with its real name, then native
   assert.equal(ui.tick().props.checked, true)
   await ui.create()
   const { calls } = ui.actions
-  assert.deepEqual(kinds(calls), ['createBot', 'createBot', 'updateBot', 'send'])
-  const [reviewer, solver] = [calls[0][1], calls[1][1]]
+  assert.deepEqual(kinds(calls), ['installRole', 'createBot', 'createBot', 'attachRole', 'updateBot', 'send'])
+  const [reviewer, solver] = [calls[1][1], calls[2][1]]
   assert.equal(reviewer.role, 'Reviewer')
   assert.equal(reviewer.name, 'Solver reviewer')
   assert.equal(reviewer.model, FLASH)
@@ -190,8 +219,8 @@ test('Create makes the reviewer, then the Solver with its real name, then native
   assert.ok(solver.instructions.includes('Message "Solver reviewer 7" with message_bot FIRST for every review, plan and result alike (reply_to "me").'))
   assert.ok(solver.instructions.includes('ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'))
   assert.doesNotMatch(solver.instructions, /no reviewer/i)
-  assert.deepEqual(calls[2], ['updateBot', 's-new', { nativeTools: true }])
-  assert.deepEqual(calls[3], ['send', 's-new', 'Compare two libraries'])
+  assert.deepEqual(calls[4], ['updateBot', 's-new', { nativeTools: true }])
+  assert.deepEqual(calls[5], ['send', 's-new', 'Compare two libraries'])
   assert.deepEqual(ui.created.map(bot => bot.id), ['s-new'])
 })
 
@@ -199,7 +228,7 @@ test('Create makes the reviewer, then the Solver with its real name, then native
 test('the Solver carries its reviewer Bot\'s id: the new reviewer\'s, an existing Bot\'s, none for a fresh session', async () => {
   const made = dialog()
   await made.create()
-  assert.equal(made.actions.calls[1][1].reviewerId, 'r-new')
+  assert.equal(made.actions.calls.find(([kind, payload]) => kind === 'createBot' && payload.role === 'Solver')[1].reviewerId, 'r-new')
   const existing = dialog()
   existing.choose('bot:ann')
   await existing.create()
@@ -215,15 +244,16 @@ test('the Solver carries its reviewer Bot\'s id: the new reviewer\'s, an existin
 test('unticked, the brief goes with the Solver and native tools are not touched', async () => {
   const ui = dialog()
   await ui.create()
-  assert.deepEqual(kinds(ui.actions.calls), ['createBot', 'createBot'])
-  assert.equal(ui.actions.calls[1][1].brief, 'Compare two libraries')
+  assert.deepEqual(kinds(ui.actions.calls), ['installRole', 'createBot', 'createBot', 'attachRole', 'send'])
+  assert.equal(Object.hasOwn(ui.actions.calls[2][1], 'brief'), false)
+  assert.deepEqual(ui.actions.calls[4], ['send', 's-new', 'Compare two libraries'])
 })
 
 test('a refused native switch deletes the Solver then the reviewer, and says nothing was created', async () => {
   const ui = dialog({ actions: fakeActions({ fail: { native: refusal('Not available at the Read only level.') } }) })
   ui.tickNative()
   await ui.create()
-  assert.deepEqual(ui.actions.calls.slice(3), [['deleteBot', 's-new'], ['deleteBot', 'r-new']])
+  assert.deepEqual(ui.actions.calls.slice(5), [['deleteBot', 's-new'], ['deleteBot', 'r-new']])
   assert.equal(ui.alert(), 'Native tools could not be turned on, so nothing was created: Not available at the Read only level.')
   assert.deepEqual(ui.created, [])
 })
@@ -256,7 +286,7 @@ test('(1) an existing Bot as reviewer is never deleted, whichever step fails', a
 test('(2) a refused reviewer deletes nothing and says nothing was created', async () => {
   const ui = dialog({ actions: fakeActions({ fail: { reviewer: refusal('No reviewer') } }) })
   await ui.create()
-  assert.deepEqual(kinds(ui.actions.calls), ['createBot'])
+  assert.deepEqual(kinds(ui.actions.calls), ['installRole', 'createBot'])
   assert.equal(ui.alert(), 'Nothing was created: No reviewer')
 })
 
@@ -484,4 +514,75 @@ test('the Review guard tick stays on where the guard holds nothing, with the not
   assert.match(ui.text(), /Held only for the steps Claude Code asks about\./)
   ui.tickNative(false)
   assert.doesNotMatch(ui.text(), /Held only for the steps|Not held/)
+})
+
+const K1 = 'If the Solver role is not installed yet, Create installs it first.'
+const K4 = 'Roles are turned off for this team, so this Solver uses the written method.'
+
+test('D2 F1 two Create clicks submit one Solver and one brief', async () => {
+  const ui = dialog()
+  const click = ui.go().props.onClick
+  click()
+  click()
+  await settle()
+  assert.equal(ui.actions.calls.filter(([action, payload]) => action === 'createBot' && payload.role === 'Solver').length, 1)
+  assert.equal(ui.actions.calls.filter(([action]) => action === 'send').length, 1)
+})
+
+test('D2 F2 roles off hides K1, leaves Create available, and shows K4 with Done', async () => {
+  assert.ok(dialog().text().includes(K1))
+  assert.equal(dialog({ roster: rosterOf({ roles: { solver: { version: '1.0.0' } } }) }).text().includes(K1), false)
+  const ui = dialog({ roster: rosterOf({ prefs: { roles: false }, roles: { solver: { version: '1.0.0' } } }) })
+  assert.equal(ui.text().includes(K1), false)
+  assert.equal(ui.go().props.disabled, false)
+  await ui.create()
+  assert.deepEqual(ui.notes(), [K4])
+  assert.equal(text(ui.go()), 'Done')
+  ui.go().props.onClick()
+  assert.deepEqual(ui.created.map(bot => bot.id), ['s-new'])
+})
+
+test('D2 localized roles-off refusal during install or attach selects K4 by reason', async t => {
+  const { call } = await import('../src/client/api.js')
+  const { installLocale } = await import('../src/client/i18n.js')
+  const message = 'Roles are turned off for this team.'
+  const translated = '此团队已关闭角色。'
+  const off = installLocale({
+    register: () => () => {}, getLocale: () => ({ active: 'zh' }),
+    bind: () => key => key === message ? translated : key,
+  })
+  t.after(off)
+  t.mock.method(globalThis, 'fetch', async () => Response.json({
+    ok: false, error: { code: 'bot/refused', reason: 'roles-off', message, details: {} },
+  }))
+  for (const [endpoint, step] of [['role-install', 'install'], ['role-attach', 'attach']]) {
+    let error
+    await assert.rejects(call(endpoint, { id: 'solver' }), failure => {
+      error = failure
+      assert.equal(error.message, translated)
+      assert.equal(error.reason, 'roles-off')
+      return true
+    })
+    const ui = dialog({ actions: fakeActions({ fail: { [step]: error } }) })
+    await ui.create()
+    assert.deepEqual(ui.notes(), [K4])
+    assert.equal(text(ui.go()), 'Done')
+  }
+})
+
+test('D2 a role install or attach refusal shows its own status and Done keeps the Solver', async () => {
+  const expected = [
+    ['install', 'The Solver role could not be installed now, so this Solver uses the written method. The role is attached when it can be installed.'],
+    ['attach', 'The Solver role could not be attached now, so this Solver uses the written method. The role is attached when it can be.'],
+  ]
+  for (const [step, status] of expected) {
+    const ui = dialog({ actions: fakeActions({ fail: { [step]: refusal('Unavailable') } }) })
+    await ui.create()
+    assert.deepEqual(ui.notes(), [status])
+    assert.equal(text(ui.go()), 'Done')
+    assert.deepEqual(ui.created, [])
+    assert.equal(ui.actions.calls.some(([action]) => action === 'deleteBot'), false)
+    ui.go().props.onClick()
+    assert.deepEqual(ui.created.map(bot => bot.id), ['s-new'])
+  }
 })

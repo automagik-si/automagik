@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { reminderPrompts } from '../src/client/text.js'
 import { install } from '../src/host/parts.js'
+import { install as installModels } from '../src/host/models.js'
 import { install as installModelState, OWN_TOOLS_SWITCH, SWITCH_FAILED } from '../src/host/model-state.js'
 import { install as installOwnTools } from '../src/host/own-tools.js'
 import { HANDOFF_ACK, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, SWITCH_CUT } from '../src/host/constants.js'
@@ -630,6 +631,58 @@ test('T17 a step that /model moved onto another harness with history does not ru
   assert.equal(own.passed, true)
 })
 
+for (const route of ['missing log', 'throwing live header']) {
+  test(`D2W-1 an in-place Hermes step holds its input with a ${route}`, async t => {
+    const b = bench({ target: 'hermes-remote/attach' })
+    t.after(() => b.ctx.dispose())
+    const attach = { provider: 'hermes-remote', model: 'attach' }
+    b.agent.model = { current: () => attach, select: t.mock.fn() }
+    b.session.requestHeader = () => {
+      if (route === 'throwing live header') throw new Error('header unavailable')
+    }
+    b.ctx.llm.listProviders = () => [{ id: 'deepseek' }]
+    b.ctx.llm.listModels = async () => [{ id: 'v4' }]
+    const get = b.ctx.get
+    t.mock.method(b.ctx, 'get', name => name === 'sessionPersistence' ? {
+      open: async () => { throw new Error('log missing') },
+    } : get(name))
+    const models = { ...b.rt }
+    installModels(models)
+    b.rt.keepsCarriedRoute = models.keepsCarriedRoute
+    b.rt.storedRouteOf = models.storedRouteOf
+    b.rt.reselectOwnRoute = models.reselectOwnRoute
+
+    const prompt = message('user', 'go')
+    const { decision, passed } = await b.preStep('s1', { messages: [prompt], modelSelection: attach })
+    assert.equal(passed, false)
+    assert.deepEqual(decision, { kind: 'enter', messages: [] })
+    assert.deepEqual(b.agent.inbox.nextTurn, [prompt])
+    await waitFor(() => b.agent.model.select.mock.callCount() > 0)
+    assert.deepEqual(b.agent.model.select.mock.calls.map(call => call.arguments), [[{ provider: 'deepseek', model: 'v4' }]])
+  })
+}
+
+test('D2W-1 the desktop picker refuses an in-place attach switch with no readable route', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  b.session.deriveMessages = () => []
+  b.session.requestHeader = () => undefined
+  b.ctx.llm.listProviders = () => [{ id: 'hermes-remote' }]
+  b.ctx.llm.listModels = async () => [{ id: 'attach' }]
+  const models = { ...b.rt, groupSessionsOf: () => [] }
+  installModels(models)
+  b.rt.applyModel = models.applyModel
+  b.rt.assertReadableRoute = models.assertReadableRoute
+
+  await assert.rejects(b.rt.switchRoute('b1', 'hermes-remote/attach'), {
+    code: 'bot/refused', message: /current Session route could not be read/,
+  })
+  assert.equal(b.bot.model, 'deepseek/v4')
+  assert.equal(b.bot.appliedModel, 'deepseek/v4')
+  assert.equal(b.calls.saves, 0)
+  assert.deepEqual(b.calls.selected, [])
+})
+
 // T19-T21 (MX-3, #2026): the acp_tool rule at the commit, the way back and after.
 test('T19 acp_tool saved during a switch to Antigravity is refused, and the commit refuses it too', async t => {
   const b = bench()
@@ -709,6 +762,16 @@ test('T12 a group part that moves on keeps its own route: no crossing, no record
   // An empty group part with no history takes the model as before.
   b.agents.set('g9', { ...g1, id: 'g9', session: { ...gSession, id: 'g9', deriveMessages: () => [] } })
   assert.equal(await b.rt.crossingHistory('g9', b.bot.model), false)
+})
+
+test('D2Y-1 crossing history keeps the route when the live header has a blank model', async t => {
+  const b = bench()
+  t.after(() => b.ctx.dispose())
+  assert.equal(await b.rt.crossingHistory('s1', b.bot.model), false)
+
+  b.session.requestHeader = () => ({ config: { provider: 'deepseek', model: ' ' } })
+
+  assert.equal(await b.rt.crossingHistory('s1', b.bot.model), true)
 })
 
 // T15b (MD-1): a reply cut for an agent switch whose fresh part's first call fails is never lost.

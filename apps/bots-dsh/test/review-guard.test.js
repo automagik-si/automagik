@@ -128,7 +128,7 @@ test('G2/G17/G14b: every work call is refused with the guard text and a guard st
   for (const [name, args] of [
     ['write', { file_path: 'bom.md' }], ['edit', { file_path: 'a.js' }], ['str_replace_editor', { path: 'a.js' }], ['apply_patch', {}],
     ['mcp__dsh__write', { file_path: 'bom.md' }], ['bash', { command: 'ls' }], ['mcp__dsh__bash', { command: 'ls' }], ['terminal_run', {}],
-    ['start_task', {}], ['attach_capability', {}], ['post_to_group', {}], ['create_group', {}], ['schedule_create', {}], ['schedule_edit', {}],
+    ['attach_capability', {}], ['post_to_group', {}], ['create_group', {}], ['schedule_create', {}], ['schedule_edit', {}],
     ['save_capability', {}], ['delete_capability', {}], ['generate_image', {}], ['mail_send', {}], ['mail_draft', {}], ['browser_click', {}],
     ['browser_type', {}], ['browser_exec', {}], ['mcp__github__create_issue', {}],
     // G17: an ACP agent's own call: work kinds, a command, a mode switch, any "other" call, an unknown kind.
@@ -151,6 +151,8 @@ test('G2/G17/G14b: every work call is refused with the guard text and a guard st
   assert.equal(WHY_EN.guard, REVIEW_GUARD_COPY.stop)
   assert.equal(WHY_EN['guard-request'], REVIEW_GUARD_COPY.stopRequest)
   assert.equal(rt.botOf(bot.id).reviewTrack.planVerdictAt, undefined)
+  await assert.rejects(run(bot, 'start_task', {}), /review guard is on.*turn the review guard off in .* Details/)
+  assert.equal(stops.at(-1).why, 'guard-launch')
 })
 
 test('G3/G14b/G14c: reads, research, asking the person, the notes file and the reviewer stay open', async (t) => {

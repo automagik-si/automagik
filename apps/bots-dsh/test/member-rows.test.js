@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { defaultShape } from '../src/client/characters.js'
 import { browser, bundle, load, nodes, text } from './viewer-fixture.js'
 
-const code = await bundle("export { MemberRows } from './src/client/member-root.js'")
+const code = await bundle("export { MemberRows } from './src/client/member-root.js'\nexport { BotMark } from './src/client/mark.js'")
 const expand = node => Array.isArray(node) ? node.map(expand)
   : typeof node?.type === 'function' ? expand(node.type(node.props))
     : node?.props ? { ...node, props: { ...node.props, children: expand(node.props.children) } } : node
@@ -22,4 +23,14 @@ test('MR1 member rows render literal text and inert Bot marks without any reques
     assert.ok(nodes(tree).every(node => node.type !== 'a' && node.type !== 'img' && !node.props.href && !node.props.onClick))
   }
   assert.deepEqual(f.calls, [])
+})
+
+test('member rows draw the projected Solver avatar while the owner resolver uses identity', () => {
+  const { MemberRows, BotMark } = load(code, browser().globals)
+  const bot = { id: 'b', name: 'Fixture', role: 'Solver', kind: null, avatar: { shape: 'frog' } }
+  const roster = { bots: [bot], byId: { b: bot } }
+  const tree = expand(MemberRows({ roster, botId: bot.id, pages: [[{ kind: 'bot', text: 'Reply' }]] }))
+  assert.equal(nodes(tree).find(node => node.props['data-shape']).props['data-shape'], 'frog')
+  const ordinary = expand(BotMark({ bot: { ...bot, kind: undefined, role: 'Writer' } }))
+  assert.equal(ordinary.props['data-shape'], defaultShape(bot.id))
 })

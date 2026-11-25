@@ -516,7 +516,7 @@ test('CD-1 a refused update leaves a Denied tools list saved meanwhile in place'
 // ---- Create (A-6, B-3) ----
 
 test('create refuses a Bot that would deny acp_tool on a model that runs its own tools', async (t) => {
-  const { open } = workspace(t, team({ c: record('c', SOL, { denyTools: ['acp_tool'] }) }))
+  const { open } = workspace(t, team({ c: record('c', SOL, { denyTools: ['acp_tool'] }) }, ['main', 'c']))
   const h = await open()
   const count = () => Object.keys(h.rt.state.bots).length
   const bots = count()
