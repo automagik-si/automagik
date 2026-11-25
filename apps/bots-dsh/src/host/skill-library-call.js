@@ -298,7 +298,18 @@ function sessionLedger(session) {
   if (!state) ledgers.set(session, state = { seq: 0, rows: new Map(), delivered: new Set(), refused: new Map(), activity: new Set() })
   for (; state.seq < session.seq; state.seq++) {
     const event = session.eventAt(state.seq)
+    if (event === undefined) {
+      // A missing event breaks turn and step continuity. Keep confirmed history,
+      // while waiting for a recorded turn start before admitting fresh deliveries.
+      state.incompleteTurn = true
+      state.turn = undefined
+      state.position = undefined
+      state.batch = undefined
+      state.attempt = undefined
+      continue
+    }
     if (event.type === 'turn/start') {
+      state.incompleteTurn = false
       state.turn = event.data.turn
       state.position = { turn: state.turn, step: 0 }
     } else if (event.type === 'turn/end') {
@@ -447,7 +458,7 @@ export function install(rt) {
         if (auxiliary || ref.catalog === true) return false
         if (bot === undefined || ref.botId !== botId) return false
         if (state?.delivered.has(receipt(row, part, ref))) return true
-        if (historyOnly || index < retry || row.source?.resumed === true || row.source?.retried === true) return false
+        if (state?.incompleteTurn || historyOnly || index < retry || row.source?.resumed === true || row.source?.retried === true) return false
         const fresh = row.role === 'tool' ? index > lastAnswer : index >= start
         const logged = state?.rows.get(row.id)
         if (!fresh || (logged && (state.turn === undefined || logged.turn !== state.turn ||
@@ -514,7 +525,7 @@ export function install(rt) {
 
   function admit(options, session = sessionOf(options.sessionId), { activity = true } = {}) {
     const state = sessionLedger(session)
-    if (!state) return
+    if (!state || state.incompleteTurn) return
     const delivered = new Set()
     for (const row of options.messages) for (const part of row.content ?? []) {
       const ref = marker(part)
@@ -567,6 +578,7 @@ export function install(rt) {
       const ref = marker(part)
       if (state && position && ref?.use === 'load') {
         const { eventSeq, turn, step } = position
+        if (eventSeq === undefined && state.incompleteTurn) return
         if (eventSeq !== undefined) {
           const event = session.eventAt(eventSeq)
           if (event?.type !== 'plugin:acp-dsh/bridge-outside-step' || event.data?.callId !== callId ||

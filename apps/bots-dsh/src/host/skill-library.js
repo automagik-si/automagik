@@ -352,10 +352,11 @@ export function install(rt) {
 
   function duringBotDeletion(id, remove) {
     const generation = rt.teamGeneration()
-    const earlier = botRemovals.get(id) ?? Promise.resolve()
+    const earlier = botRemovals.get(id)
+    const { promise, resolve, reject } = Promise.withResolvers()
     // Roster work can wait for ownership teardown, which itself waits for
     // the library write queue. Only the committed cleanup joins that queue.
-    const run = earlier.catch(() => {}).then(remove).then(async result => {
+    const run = promise.then(async result => {
       // The roster has committed the removal. A failure before that point
       // leaves the assignments in place for the restored Bot.
       try { await serial(() => clearOrphan(id, generation)) } catch (error) {
@@ -364,6 +365,12 @@ export function install(rt) {
       return result
     })
     botRemovals.set(id, run)
+    const start = () => {
+      try { resolve(remove()) } catch (error) { reject(error) }
+    }
+    // Before the caller can update a room, its first deletion must detach the member.
+    if (earlier === undefined) start()
+    else void earlier.then(start, start)
     return run.finally(() => {
       if (botRemovals.get(id) === run) botRemovals.delete(id)
     })
