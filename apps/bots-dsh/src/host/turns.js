@@ -1393,7 +1393,7 @@ export function install(rt) {
           if (cutOff) return reply === '' && wroteText ? CUT_OFF_NOTE : cutOffText(reply)
           return reply
         }
-        const reply = { text: replyText(), reviewText: (wroteCall ? rawTexts.map(stripWrittenCalls) : rawTexts).join('\n\n'),
+        const reply = { text: replyText(), reviewText: rawTexts.join('\n\n'),
           firstLine: reviewFirstLine, model: answerModel }
         const groupReply = () => rt.withRoomSteps?.(held, reply.text) ?? reply.text
         // Whoever the turn answers gets the same three-way rule: a failure notice,

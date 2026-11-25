@@ -1005,7 +1005,7 @@ const reviewSteerCut = { kind: 'aborted', reason: { kind: 'hook', reason: STEER_
 const acknowledgedReviewer = 'claude-sonnet-5-5'
 
 async function heldReviewReply(t, heldText, {
-  kind = 'plan', acknowledgedTurn, displayText = heldText.trim(), childText = 'The fixture is present.',
+  kind = 'plan', acknowledgedTurn, displayText = heldText.trim(), childText = 'The fixture is present.', writtenRetry = false,
 } = {}) {
   const { h, request, review, track, openReply, deliveries } = await reviewReplyFixture(t)
   if (kind === 'result') {
@@ -1026,8 +1026,19 @@ async function heldReviewReply(t, heldText, {
   }
   const exchange = await review(kind)
   h.finish('solver', 'Waiting for review.')
-  h.event('reviewer', 'turn/start', { turn: 2 })
+  let turn = 2
+  h.event('reviewer', 'turn/start', { turn })
   h.takeInput('reviewer', h.agentOf('reviewer').message)
+  if (writtenRetry) {
+    h.finish('reviewer', '<tool_call><function=read>')
+    assert.equal(await deliveries.at(-1).sent, exchange)
+    const retry = h.agentOf('reviewer').message
+    assert.equal(retry.source.retried, true)
+    assert.equal(retry.source.exchangeId, exchange)
+    assert.match(retry.content[0].text, /wrote a tool call as plain text/)
+    h.event('reviewer', 'turn/start', { turn: ++turn })
+    h.takeInput('reviewer', retry)
+  }
   await h.tool('message_bot', { to: 'other', message: 'Check the fixture.', reply_to: 'me', when: 'queue' }, 'reviewer')
   assert.equal(h.rt.waitsWork(exchange), true)
   h.finish('reviewer', heldText)
@@ -1038,7 +1049,7 @@ async function heldReviewReply(t, heldText, {
   await deliveries.at(-1).sent
   const child = h.agentOf('reviewer').message
   assert.equal(child.source.work, exchange)
-  h.event('reviewer', 'turn/start', { turn: 3 })
+  h.event('reviewer', 'turn/start', { turn: turn + 1 })
   h.takeInput('reviewer', child)
   assert.equal(h.rt.waitsWork(exchange), false)
   return { h, child, exchange, track, deliveries, openReply }
@@ -1110,6 +1121,25 @@ test('stage verdict exception: a held RESULT veto beyond the display cap withhol
   const input = h.agentOf('solver').message
   assertHeldDelivery(input, exchange, displayText)
   assert.ok(!input.content[0].text.includes('Verdict: BLOCKED'))
+  assert.equal(track().solver.review.reviewer?.model, acknowledgedReviewer)
+  assert.equal(track().solver.review.exchangeId, exchange)
+  assert.equal(track().solver.review.revision, track().solver.revision)
+  h.finish('solver', 'Finished the agreed checks and received the review.')
+  assert.deepEqual({ strict: track().solver.review.verdict, advisory: track().verdicts.at(-1)?.verdict, done: track().last?.done },
+    { strict: 'BLOCKED', advisory: 'BLOCKED', done: undefined })
+})
+
+test('stage verdict exception: a written-tool retry preserves the veto hidden from display', async t => {
+  const reply = 'RESULT SHIP\n<tool_call><function=read>\nVerdict: BLOCKED'
+  const displayText = 'RESULT SHIP'
+  const { h, exchange, track, deliveries, openReply } = await heldReviewReply(t, reply, {
+    kind: 'result', acknowledgedTurn: 3, displayText, writtenRetry: true,
+  })
+  h.finish('reviewer', '')
+  await openReply(4, deliveries.at(-1))
+  const input = h.agentOf('solver').message
+  assertHeldDelivery(input, exchange, displayText)
+  assert.doesNotMatch(input.content[0].text, /<tool_call>|Verdict: BLOCKED/)
   assert.equal(track().solver.review.reviewer?.model, acknowledgedReviewer)
   assert.equal(track().solver.review.exchangeId, exchange)
   assert.equal(track().solver.review.revision, track().solver.revision)
