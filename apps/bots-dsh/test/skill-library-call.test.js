@@ -20,7 +20,7 @@ const privateSkill = doc('private-skill', 'PRIVATE-BODY')
 const testRows = requests => requests.flatMap(request => request.messages)
 const text = rows => rows.flatMap(row => row.content?.map(part => part.text) ?? []).join('\n')
 
-async function fixture(t, { program, review = false } = {}) {
+async function fixture(t, { program, siblingProgram, review = false } = {}) {
   const root = new Context()
   t.after(() => root.fiber.dispose())
   if (program) {
@@ -55,6 +55,10 @@ async function fixture(t, { program, review = false } = {}) {
           name: program ? 'run_code' : probe ? 'review_probe' : 'load_skill',
           argumentsDelta: program ? JSON.stringify({ code, description: probe ? 'Run the fixture tool' : 'Load the checked skill' })
             : probe ? '{"note":"ordinary pending argument"}' : '{"name":"marker"}' }
+        if (siblingProgram && !probe) {
+          yield { type: 'tool-call-delta', index: 1, id: `fixture-${++call}`, name: 'run_code',
+            argumentsDelta: JSON.stringify({ code: siblingProgram, description: 'Run the ordinary sibling' }) }
+        }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
       } else {
         yield { type: 'text-delta', index: 0, text: 'fixture reply' }
@@ -62,7 +66,7 @@ async function fixture(t, { program, review = false } = {}) {
       }
     }
   }
-  root.llm.registerAdapter([route.provider], new Adapter())
+  root.llm.registerAdapter(siblingProgram ? [route.provider, 'fixture-reviewer'] : [route.provider], new Adapter())
   await mountAgentLoopTestHarness(root)
   if (program) {
     root.on('tools/result', exec => {
@@ -146,6 +150,35 @@ test('Skills row 5: the separate DSH Auto reviewer receives ordinary typed histo
   const lastWrapper = ptcProbe.findLast(entry => entry.kind === 'tool-call' && entry.name === 'run_code')
   assert.match(JSON.parse(lastWrapper.arguments).code, /tools\.review_probe/)
   assert.match(text(loaded.sent.filter(request => request.purpose === undefined).at(-1).messages), /CHECKED-BODY/)
+
+  const programWithLoad = 'const load = tools[["load", "skill"].join("_")]; return await load({ name: "marker" })'
+  const siblingProgram = 'return "ordinary sibling argument"'
+  const indirect = await fixture(t, { program: programWithLoad, siblingProgram, review: true })
+  // Let the fixture's real scheduler log the sibling before the skill review snapshots.
+  indirect.root.tools.selectExecutor().requirePtcTransport().isConcurrencySafe = () => true
+  const siblingStarted = Promise.withResolvers()
+  indirect.root.on('tools/execute', (exec, next) => {
+    if (exec.name === 'run_code' && exec.arguments.code === siblingProgram) siblingStarted.resolve()
+    if (exec.name === 'run_code' && exec.arguments.code === programWithLoad) return siblingStarted.promise.then(next)
+    return next()
+  })
+  indirect.root.on('llm/stream', (options, next) =>
+    options.purpose === 'auto-review' && options.provider === route.provider
+      ? indirect.root.llm.stream({ ...options, provider: 'fixture-reviewer' })
+      : next())
+  const indirectLoad = await indirect.run('a', user('Read via an indirect tool reference'), true)
+  const review = indirectLoad.sent.find(request => request.purpose === 'auto-review')
+  assert.ok(review, 'the pending load reached the real DSH reviewer')
+  assert.equal(review.provider, 'fixture-reviewer')
+  const reviewHistory = review.messages.slice(1).map(message => JSON.parse(message.content[0].text))
+  const wrappers = reviewHistory.filter(entry => entry.kind === 'tool-call' && entry.name === 'run_code')
+  assert.equal(wrappers.length, 2)
+  assert.equal(JSON.parse(wrappers[1].arguments).code, siblingProgram)
+  assert.deepEqual(reviewHistory.at(-1),
+    { kind: 'tool-call', role: 'fact', mode: 'ptc-inner', name: 'load_skill', arguments: '{}' })
+  assert.match(text(indirectLoad.sent.filter(request => request.purpose === undefined).at(-1).messages), /CHECKED-BODY/)
+  assert.doesNotMatch(text(review.messages), /marker/, 'the reviewer must not receive the enclosing skill argument')
+  assert.equal(wrappers[0].arguments, '{}')
 })
 
 test('native request includes only the current catalog and checked calls, while refusals are private', { timeout: 10_000 }, async t => {

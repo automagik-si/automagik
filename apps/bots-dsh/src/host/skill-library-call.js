@@ -55,10 +55,74 @@ function skillPrograms(entries) {
   return privatePrograms
 }
 
+function pendingSkillProgram(session, entries, pending) {
+  const events = session?.snapshotEvents?.()
+  if (!events) return
+  const keyOfCall = ({ turn, step }, callId) => JSON.stringify([turn, step, callId])
+  const nativeCalls = new Map()
+  const innerIds = new Set()
+  const startsByParent = new Map()
+  let openStep
+  for (const { type, data } of events) {
+    if (type === 'step/start') openStep = data
+    else if (['step/end', 'turn/start', 'turn/end'].includes(type)) openStep = undefined
+    else if (type === 'tool/call') {
+      const key = keyOfCall(data, data.callId)
+      nativeCalls.set(key, nativeCalls.has(key) ? null : data)
+    } else if (type === 'tool/ptc-dispatch-start' && openStep) {
+      const innerId = keyOfCall(openStep, data.subCallId)
+      if (innerIds.has(innerId)) return
+      innerIds.add(innerId)
+      const parentKey = keyOfCall(openStep, data.parentCallId)
+      if (!startsByParent.has(parentKey)) startsByParent.set(parentKey, [])
+      startsByParent.get(parentKey).push({ data, innerId, step: openStep })
+    }
+  }
+  if (!openStep) return
+
+  // Rebuild the pinned reviewer's call order with the logged identities attached.
+  // It emits each started native call and its inner calls in surface order, then
+  // moves just the pending inner call to the end when building a PTC review.
+  const calls = []
+  for (const seq of session.surface.nodes) {
+    const event = events[seq]
+    if (event?.type !== 'assistant/message') continue
+    for (const block of event.data.message.content) {
+      if (block.type !== 'tool-call') continue
+      const key = keyOfCall(event.data, block.id)
+      const native = nativeCalls.get(key)
+      if (native === null) return
+      if (!native) continue
+      calls.push({ mode: 'native', name: native.name, arguments: native.arguments, key })
+      for (const start of startsByParent.get(key) ?? []) {
+        calls.push({ mode: 'ptc-inner', name: start.data.name, arguments: JSON.stringify(start.data.arguments, null, 2),
+          parentKey: key, ...start })
+      }
+    }
+  }
+
+  const history = entries.filter(entry => entry?.kind === 'tool-call' && entry !== pending)
+  if (calls.length !== history.length + 1) return
+  const matches = (call, entry) => call.mode === entry.mode && call.name === entry.name && call.arguments === entry.arguments
+  // Validate both sides of the one omitted dispatch before using its logged parent key.
+  const firstDifference = history.findIndex((entry, index) => !matches(calls[index], entry))
+  const index = firstDifference === -1 ? history.length : firstDifference
+  const omitted = calls[index]
+  // Pre-execute is ordered within each program, so if identical calls occur in
+  // that program, its latest recorded start is the one still in review.
+  if (!matches(omitted, pending) || omitted.step !== openStep ||
+      startsByParent.get(omitted.parentKey)?.at(-1)?.innerId !== omitted.innerId ||
+      omitted.data.rootCallId !== omitted.data.parentCallId ||
+      nativeCalls.get(omitted.parentKey)?.name !== RUN_CODE_NAME ||
+      !history.slice(index).every((entry, offset) => matches(calls[index + offset + 1], entry))) return
+  const parentIndex = calls.findIndex(call => call.key === omitted.parentKey)
+  return history[parentIndex]
+}
+
 // DSH experimental Auto review serializes one typed history entry per user message.
 // Its final entry and matching schema are the pending action. Keep that envelope
 // even for a Skills read, with no private arguments; the executor keeps the real call.
-function projectReview(options) {
+function projectReview(options, session) {
   const { messages } = options
   if (!Array.isArray(messages)) return options
   const environment = messages[0]?.content?.[0]?.text
@@ -66,6 +130,13 @@ function projectReview(options) {
   const entries = messages.map((message, index) => index === 0 ? undefined : reviewEntry(message))
   const pending = entries.at(-1)
   const privatePrograms = skillPrograms(entries)
+  if (pending?.kind === 'tool-call' && pending.mode === 'ptc-inner' && skillToolName(pending.name)) {
+    const program = pendingSkillProgram(session, entries, pending)
+    // The reviewer treats a stream failure as a denial. Without a proven
+    // parent, sending the review could expose the program's private argument.
+    if (!program) throw new Error('Auto review cannot identify the program for the pending Skills read')
+    privatePrograms.add(program)
+  }
   let changed = false
   const projected = messages.flatMap((message, index) => {
     if (index === 0) return [message]
@@ -358,10 +429,11 @@ export function install(rt) {
     if (previous?.provider === options.provider && previous?.auxiliary === auxiliary) return next()
     const alternate = acp(options.provider)
     if (alternate && isAgentLoopRequest(options) && !auxiliary) return next()
-    const input = options.purpose === 'auto-review' ? projectReview(options) : options
+    const review = options.purpose === 'auto-review'
+    const input = review && !previous?.review ? projectReview(options, sessionOf(options.sessionId)) : options
     const outgoing = project(input, { catalog: !alternate, auxiliary })
     if (outgoing === options) return next()
-    const request = { ...outgoing, [SKILLS_PROJECTED]: { provider: options.provider, auxiliary } }
+    const request = { ...outgoing, [SKILLS_PROJECTED]: { provider: options.provider, auxiliary, review } }
     rt.carryUsageTag?.(options.messages, request.messages)
     if (!isAgentLoopRequest(options)) return ctx.llm.stream(request)
     const stream = ctx.llm.stream(markAgentLoopRequest(freezeLoopRequest(request)))
