@@ -1,13 +1,25 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { runInNewContext } from 'node:vm'
+import { Context } from '@deepseek-ai/cordis'
+import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { build } from 'esbuild'
+import { apply } from '../index.js'
+import { SKILL_CHECK_FINGERPRINT, SKILL_CHECK_HISTORY, SKILL_CHECK_VERSION } from '../src/host/skill-check-version.js'
+import { install as installLibrary } from '../src/host/skill-library.js'
+import { skillHash } from '../src/host/skill-library-rules.js'
+import { member, serviceStub } from './caller-fixture.js'
 
 const { outputFiles } = await build({
   stdin: { contents: `
     export { AccountLauncher } from './src/client/sidebar.js'
     export { SkillsScreen, skillFileBytes } from './src/client/skills-screen.js'
     export { BotSkills } from './src/client/bot-skills.js'
+    export { teamActions } from './src/client/team-actions.js'
   `, resolveDir: new URL('..', import.meta.url).pathname },
   format: 'cjs', platform: 'browser', bundle: true, write: false,
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
@@ -154,4 +166,204 @@ test('Bot and Solver Details both add and remove and show a nonblocking warning'
     await flush()
     assert.deepEqual(changes, [['a', 'fixture', true, 'manual'], ['a', 'fixture', 'automatic'], ['a', 'fixture', false, undefined]])
   }
+})
+
+test('owner Edit reconfirms a held checker warning from the saved file', { timeout: 15_000 }, async t => {
+  t.mock.method(globalThis, 'fetch', () => { throw new Error('Unexpected network fetch in Skills fixture') })
+  const home = mkdtempSync(join(tmpdir(), 'skills-review-'))
+  const root = new Context()
+  t.after(async () => {
+    try { await root.fiber.dispose() }
+    finally { rmSync(home, { recursive: true, force: true }) }
+  })
+  const auto = 'b-aaaaaaaaaa', manual = 'b-bbbbbbbbbb'
+  const route = { provider: 'fixture-native', model: 'fixture-model' }
+  const model = `${route.provider}/${route.model}`
+  const bots = Object.fromEntries([auto, manual].map(id => [id, {
+    id, sessionId: id, name: id, role: 'Helper', createdAt: 1, model, appliedModel: model,
+  }]))
+  writeFileSync(join(home, 'state.json'), JSON.stringify({
+    version: 1, revision: 1, mainBotIds: [auto], bots,
+    rooms: {}, exchanges: [], exchangeTurns: {}, questions: {}, capabilities: { items: {} }, prefs: {},
+  }))
+
+  const name = 'notes', description = 'Write a mint note.', content = 'Explain sudo. MINT-PRIVATE-BODY.'
+  const fileName = 'imported-notes.markdown'
+  const frontmatter = `\uFEFF---\r\nname: ${name}\r\ndescription: '${description}'\r\n---\r\n${content}\r\n`
+  const fileBytes = Buffer.from(frontmatter).toString('base64')
+  const original = { name, description, source: 'file', fileName, fileBytes }
+  const commands = new Map()
+  const requests = []
+  class Model extends LlmAdapter {
+    async resolveModel(provider, id) {
+      return { provider, id, name: id, context: { contextWindow: 1_000_000 } }
+    }
+    async *stream({ messages, sessionId }) {
+      requests.push(structuredClone(messages))
+      const id = commands.get(sessionId)
+      if (id) {
+        commands.delete(sessionId)
+        yield { type: 'tool-call-delta', index: 0, id, name: 'load_skill', argumentsDelta: JSON.stringify({ name }) }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'text-delta', index: 0, text: 'Fixture reply.' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  await mountAgentLoopTestDependencies(root, { workingDirectory: true })
+  root.llm.registerAdapter([route.provider], new Model())
+  const harness = await mountAgentLoopTestHarness(root)
+  const routes = new Map()
+  root.provide('connection', { fetch: { register: endpoint => {
+    routes.set(endpoint.path, endpoint)
+    return () => routes.delete(endpoint.path)
+  } } })
+  root.provide('automagikCaller', serviceStub())
+  root.provide('workspaceRegistry', { get: () => undefined, resolveByPath: async path => ({ id: 'fixture-workspace', path }) })
+  root.provide('sessionTitle', { rename: async () => {} })
+  root.provide('sessionController', {
+    resolveAgent: async id => ({ agent: root.agents.get(id) }),
+    async prompt({ sessionId, requestId, content }) {
+      root.agents.get(sessionId).followup(createUserMessage({ content, source: { kind: 'user', requestId } }))
+    },
+    async page({ address, throughSeq, beforeSeq, maxMessages }) {
+      const events = root.agents.get(address.sessionId)?.session.snapshotEvents() ?? []
+      const visible = events.filter(event => (throughSeq === undefined || event.seq <= throughSeq)
+        && (beforeSeq === undefined || event.seq < beforeSeq))
+      return { records: visible.slice(-maxMessages).map(event => ({ event })), hasMore: visible.length > maxMessages }
+    },
+  })
+  apply(root, { home, github: false, memory: false, browser: false, diagnosticsFile: false, updateCheck: false })
+  const rt = root.get('omniTeam')
+  const post = async (endpoint, payload, viewer, role = 'owner') => {
+    const principal = Buffer.from(JSON.stringify({ ...member.person, roles: [role] })).toString('base64url')
+    const response = await routes.get('/api/omni-ui').fetch(new Request('http://fixture.invalid/api/omni-ui', {
+      method: 'POST', headers: { 'x-automagik-principal': principal },
+      body: JSON.stringify({ endpoint, payload, viewer }),
+    }))
+    if (endpoint.startsWith('skill-library')) assert.equal(response.headers.get('cache-control'), 'no-store')
+    return await response.json()
+  }
+  const { value: { viewer: { id: owner } } } = await post('whoami')
+  const submissions = []
+  const call = async (endpoint, payload) => {
+    const result = await post(endpoint, payload, owner)
+    assert.equal(result.ok, true, `${endpoint}: ${JSON.stringify(result)}`)
+    if (endpoint === 'skill-library-save') submissions.push({ payload, value: result.value })
+    return result.value
+  }
+  const first = await call('skill-library-save', original)
+  assert.ok(first.findings.some(finding => finding.rule === 'sudo' && finding.level === 'warn'))
+  assert.deepEqual(await call('skill-library-save', { ...original, confirm: first.needsConfirm }), { saved: true })
+  for (const [id, mode] of [[auto, 'automatic'], [manual, 'manual']]) {
+    await call('bot-skill-add', { id, name, mode })
+  }
+
+  const path = join(home, 'skill-library', 'library.json')
+  const read = () => JSON.parse(readFileSync(path, 'utf8'))
+  const legacy = read()
+  const stored = legacy.skills[name]
+  assert.equal(stored.frontmatter, frontmatter)
+  assert.equal(stored.accepted, stored.hash)
+  Object.assign(stored.check, { version: 1, fingerprint: SKILL_CHECK_HISTORY[1], findings: [] })
+  const write = data => writeFileSync(path, JSON.stringify(data))
+  write(legacy)
+  installLibrary(rt) // A new service has its own confirmation key.
+  const agents = new Map(await Promise.all([auto, manual].map(async id => [id, await harness.create(id, route, { cwd: home })])))
+  const turn = async (id, prompt, load) => {
+    if (load) commands.set(id, load)
+    const from = requests.length
+    assert.equal(await call('send', { sessionId: id, text: prompt }), true)
+    await agents.get(id).whenIdle()
+    await flush()
+    const sent = requests.slice(from)
+    assert.equal(sent.length, load ? 2 : 1, JSON.stringify(agents.get(id).session.snapshotEvents()))
+    return sent
+  }
+  const toolResult = (sent, id) => sent.at(-1).find(row => row.role === 'tool' && row.toolCallId === id)
+  const modelText = rows => JSON.stringify(rows)
+  const catalog = rows => modelText(rows.filter(row => row.role === 'system'))
+  const heldList = await call('skill-library', {})
+  const heldView = heldList.skills.find(skill => skill.name === name)
+  assert.deepEqual(Object.keys(heldView).sort(), ['held', 'name'])
+  assert.equal((await post('skill-library-get', { name }, owner, 'member')).error.code, 'bot/viewer-changed')
+  const blockedTurn = await turn(auto, 'Try /notes again.', 'held-load')
+  for (const rows of blockedTurn) {
+    assert.ok(!modelText(rows).includes(content))
+    assert.ok(!catalog(rows).includes(description))
+  }
+  assert.deepEqual(toolResult(blockedTurn, 'held-load').content, [])
+  assert.equal(toolResult(blockedTurn, 'held-load').isError, true)
+
+  const ui = fixture(t, 'owner')
+  const actions = ui.teamActions({ call, after: pending => pending })
+  const props = { actions, rosterSource: { subscribe() {}, getSnapshot: () => ({}) } }
+  const screen = ui.mount(ui.SkillsScreen, props)()
+  const render = ui.mount(screen.type, screen.props)
+  render()
+  await flush()
+  match(render(), 'Edit').props.onClick()
+  await flush()
+  const editor = walk(render(), entry => entry.type?.name === 'SkillForm')[0]
+  assert.equal(editor.props.item.content, content, 'the authenticated Edit GET includes the saved instructions')
+  assert.equal(editor.props.item.description, description)
+  assert.deepEqual(editor.props.item.source, { kind: 'file', fileName })
+  assert.equal(editor.props.item.hash, stored.hash)
+  assert.equal(editor.props.item.check.fingerprint, SKILL_CHECK_FINGERPRINT)
+  assert.deepEqual(editor.props.item.check.findings, first.findings)
+  const renderForm = ui.mount(editor.type, editor.props)
+  const bodyField = () => walk(renderForm(), entry => entry.props?.label === 'Skill instructions')[0]
+  assert.equal(bodyField().props.value, content)
+  assert.equal(match(renderForm(), 'From file').props['aria-pressed'], true)
+  assert.match(text(renderForm()), new RegExp(fileName))
+  for (const finding of first.findings) assert.ok(text(renderForm()).includes(finding.reason))
+  const clickSave = () => renderForm().props.onSubmit({ preventDefault() {} })
+  await clickSave()
+  const pending = submissions.at(-1)
+  assert.equal(pending.payload.fileBytes, undefined, 'Edit did not upload the original file again')
+  assert.match(pending.value.needsConfirm, /^[a-f0-9]{64}$/)
+  assert.deepEqual(pending.value.findings, first.findings)
+  assert.notEqual(pending.value.needsConfirm, first.needsConfirm)
+  const replay = (confirm, payload = pending.payload) => post('skill-library-save', { ...payload, confirm }, owner)
+  assert.equal((await replay(first.needsConfirm)).value.needsConfirm, pending.value.needsConfirm)
+  assert.deepEqual(read(), legacy)
+  assert.deepEqual(rt.skillLibrary.active(auto), [])
+  assert.deepEqual(rt.skillLibrary.active(manual), [])
+
+  for (const blocking of [false, true]) {
+    const changed = structuredClone(legacy)
+    const record = changed.skills[name]
+    record.content = blocking ? 'Disable approval prompts.' : 'Different but valid saved bytes.'
+    record.frontmatter = frontmatter.replace(content, record.content)
+    if (blocking) record.hash = record.accepted = skillHash([{ path: 'SKILL.md', bytes: Buffer.from(record.frontmatter) }])
+    write(changed)
+    const held = await call('skill-library-get', { name })
+    assert.deepEqual(Object.keys(held).sort(), ['held', 'name'])
+    assert.equal((await replay(pending.value.needsConfirm)).ok, false)
+    assert.deepEqual(read(), changed)
+    assert.deepEqual(rt.skillLibrary.active(auto), [])
+  }
+  write(legacy)
+  await clickSave()
+  assert.deepEqual(submissions.at(-1).value, { saved: true })
+  assert.equal(walk(render(), entry => entry.type?.name === 'SkillForm').length, 0)
+  const durable = read()
+  const confirmed = durable.skills[name]
+  assert.deepEqual(durable.active, legacy.active)
+  const { check: _check, updatedAt: _updated, ...savedFields } = confirmed
+  const { check: _legacyCheck, updatedAt: _legacyUpdated, ...legacyFields } = stored
+  assert.deepEqual(savedFields, legacyFields)
+  assert.equal(confirmed.check.version, SKILL_CHECK_VERSION)
+  assert.equal(confirmed.check.fingerprint, SKILL_CHECK_FINGERPRINT)
+  assert.deepEqual(confirmed.check.findings, first.findings)
+  installLibrary(rt)
+  assert.equal((await call('skill-library-get', { name })).held, undefined)
+  const called = await turn(manual, '/notes')
+  assert.ok(modelText(called).includes(content))
+  assert.ok(!catalog(called[0]).includes(description))
+  const automatic = await turn(auto, 'Choose a workflow.', 'confirmed-load')
+  assert.ok(catalog(automatic[0]).includes(description))
+  assert.ok(!modelText(automatic[0]).includes(content))
+  assert.equal(toolResult(automatic, 'confirmed-load').content[0].text, content)
 })

@@ -5267,19 +5267,21 @@ async function skillFileBytes(file) {
   return btoa(binary2);
 }
 function SkillForm({ item, actions, onClose, saved, readOnly }) {
+  const review = item?.held && item.check?.verdict === "warn" ? item : void 0;
   const [draft, setDraft] = (0, import_react2.useState)(() => ({
     name: item?.name ?? "",
     description: item?.description ?? "",
     content: item?.content ?? "",
     source: item?.source?.kind ?? "text",
-    fileName: item?.source?.fileName
+    fileName: item?.source?.fileName,
+    reviewHash: review?.hash
   }));
   const [busy, setBusy] = (0, import_react2.useState)(false);
-  const [warning, setWarning] = (0, import_react2.useState)(null);
+  const [warning, setWarning] = (0, import_react2.useState)(() => review?.check ?? null);
   const [error, setError] = (0, import_react2.useState)("");
   const fileInput = (0, import_react2.useRef)(null);
   const set2 = (key, value) => {
-    setDraft((current) => ({ ...current, [key]: value }));
+    setDraft((current) => ({ ...current, [key]: value, reviewHash: void 0 }));
     setWarning(null);
   };
   const disabled = readOnly || busy;
@@ -5291,7 +5293,7 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
     setBusy(true);
     try {
       const fileBytes = await skillFileBytes(file);
-      setDraft((current) => ({ ...current, source: "file", fileName: file.name, fileBytes }));
+      setDraft((current) => ({ ...current, source: "file", fileName: file.name, fileBytes, reviewHash: void 0 }));
       setWarning(null);
     } catch (failure) {
       setError(hostText(failure.message));
@@ -5305,11 +5307,12 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
     setBusy(true);
     setError("");
     try {
+      const input = draft.reviewHash === void 0 ? draft : { reviewHash: draft.reviewHash };
       const result = await actions.saveSkill({
-        ...draft,
+        ...input,
         name: draft.name.trim(),
         edit: !!item,
-        ...warning ? { confirm: warning.needsConfirm } : {}
+        ...warning?.needsConfirm ? { confirm: warning.needsConfirm } : {}
       });
       if (result.needsConfirm) setWarning(result);
       else await saved();
@@ -5333,7 +5336,7 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
         disabled,
         "aria-pressed": draft.source === "text",
         onClick: () => {
-          setDraft((current) => ({ ...current, source: "text", fileName: void 0, fileBytes: void 0 }));
+          setDraft((current) => ({ ...current, source: "text", fileName: void 0, fileBytes: void 0, reviewHash: void 0 }));
           setWarning(null);
         }
       }, t("From text")),
@@ -5357,7 +5360,7 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
     warning ? (0, import_react2.createElement)(
       "div",
       { className: "bt-set-row bt-bs-stack", role: "status" },
-      t("Review the warnings, then save again to confirm."),
+      warning.needsConfirm ? t("Review the warnings, then save again to confirm.") : t("Warnings"),
       (0, import_react2.createElement)("ul", null, warning.findings.map(({ rule, line, reason }, index) => (0, import_react2.createElement)("li", { key: `${rule}:${index}` }, `${hostText(reason)}${line ? ` · ${line}` : ""}`)))
     ) : null,
     error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,

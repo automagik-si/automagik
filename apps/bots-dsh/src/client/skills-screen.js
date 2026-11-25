@@ -51,16 +51,18 @@ export async function skillFileBytes(file) {
 }
 
 function SkillForm({ item, actions, onClose, saved, readOnly }) {
+  const review = item?.held && item.check?.verdict === 'warn' ? item : undefined
   const [draft, setDraft] = useState(() => ({
     name: item?.name ?? '', description: item?.description ?? '', content: item?.content ?? '',
     source: item?.source?.kind ?? 'text', fileName: item?.source?.fileName,
+    reviewHash: review?.hash,
   }))
   const [busy, setBusy] = useState(false)
-  const [warning, setWarning] = useState(null)
+  const [warning, setWarning] = useState(() => review?.check ?? null)
   const [error, setError] = useState('')
   const fileInput = useRef(null)
   const set = (key, value) => {
-    setDraft(current => ({ ...current, [key]: value }))
+    setDraft(current => ({ ...current, [key]: value, reviewHash: undefined }))
     setWarning(null)
   }
   const disabled = readOnly || busy
@@ -72,7 +74,7 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
     setBusy(true)
     try {
       const fileBytes = await skillFileBytes(file)
-      setDraft(current => ({ ...current, source: 'file', fileName: file.name, fileBytes }))
+      setDraft(current => ({ ...current, source: 'file', fileName: file.name, fileBytes, reviewHash: undefined }))
       setWarning(null)
     } catch (failure) {
       setError(hostText(failure.message))
@@ -84,8 +86,9 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
     setBusy(true)
     setError('')
     try {
-      const result = await actions.saveSkill({ ...draft, name: draft.name.trim(), edit: !!item,
-        ...(warning ? { confirm: warning.needsConfirm } : {}) })
+      const input = draft.reviewHash === undefined ? draft : { reviewHash: draft.reviewHash }
+      const result = await actions.saveSkill({ ...input, name: draft.name.trim(), edit: !!item,
+        ...(warning?.needsConfirm ? { confirm: warning.needsConfirm } : {}) })
       if (result.needsConfirm) setWarning(result)
       else await saved()
     } catch (failure) {
@@ -98,7 +101,7 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
     h('div', { className: 'bt-set-row' },
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled,
         'aria-pressed': draft.source === 'text', onClick: () => {
-          setDraft(current => ({ ...current, source: 'text', fileName: undefined, fileBytes: undefined }))
+          setDraft(current => ({ ...current, source: 'text', fileName: undefined, fileBytes: undefined, reviewHash: undefined }))
           setWarning(null)
         } }, t('From text')),
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled,
@@ -108,7 +111,7 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
     draft.fileBytes === undefined ? h(Field, { label: t('Skill instructions'), value: draft.content, disabled,
       multiline: true, onChange: value => set('content', value) }) : null,
     warning ? h('div', { className: 'bt-set-row bt-bs-stack', role: 'status' },
-      t('Review the warnings, then save again to confirm.'),
+      warning.needsConfirm ? t('Review the warnings, then save again to confirm.') : t('Warnings'),
       h('ul', null, warning.findings.map(({ rule, line, reason }, index) =>
         h('li', { key: `${rule}:${index}` }, `${hostText(reason)}${line ? ` · ${line}` : ''}`)))) : null,
     error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, error) : null,

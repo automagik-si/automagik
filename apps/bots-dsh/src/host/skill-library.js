@@ -85,7 +85,7 @@ function checkFailure(check) {
   return Object.assign(reject(`Not saved: ${reason} (line ${line}). ${help}`), { auditReason: `${first?.rule ?? 'blocked'} line ${line}` })
 }
 
-function checkedRecord(name, record) {
+function checkedRecord(name, record, { reviewHeld = false } = {}) {
   const held = reason => ({ name, held: reason })
   if (!record || record.name !== name || reservedCommandOf(name) ||
       !validDescription(record.description) || !wellFormed(record.content) ||
@@ -99,8 +99,9 @@ function checkedRecord(name, record) {
   if (check.verdict === 'block') return held(checkFailure(check).message)
   if (!parsed.ok || parsed.name !== name || parsed.description !== record.description || parsed.body !== record.content ||
       check.hash !== record.hash) return held(CHANGED)
-  if (check.verdict === 'warn' && (record.accepted !== check.hash ||
-      record.check?.fingerprint !== SKILL_CHECK_FINGERPRINT)) return held(CONFIRM)
+  const needsReview = check.verdict === 'warn' && (record.accepted !== check.hash ||
+      record.check?.fingerprint !== SKILL_CHECK_FINGERPRINT)
+  if (needsReview && !reviewHeld) return held(CONFIRM)
   const current = record.check?.version === check.version && record.check?.fingerprint === check.fingerprint
   return {
     name, description: parsed.description, content: parsed.body, hash: check.hash,
@@ -108,6 +109,7 @@ function checkedRecord(name, record) {
     check: { version: check.version, fingerprint: check.fingerprint, verdict: check.verdict,
       ranAt: current && Number.isFinite(record.check?.ranAt) ? record.check.ranAt : Date.now(),
       findings: check.findings.map(findingView) },
+    ...(needsReview ? { held: CONFIRM } : {}),
   }
 }
 
@@ -208,6 +210,11 @@ export function install(rt) {
     }
   }
 
+  function warningReceipt(hash, identity, generation) {
+    return createHmac('sha256', confirmationKey)
+      .update(JSON.stringify([identity, generation, hash, SKILL_CHECK_FINGERPRINT])).digest('hex')
+  }
+
   function save(data, body, identity, generation) {
     const { name } = body
     if (!skillName(name)) throw reject('Use lowercase letters, digits and single hyphens, up to 32 characters, starting with a letter.')
@@ -215,6 +222,20 @@ export function install(rt) {
     const previous = own(data.skills, name)
     if (previous && body.edit !== true) throw reject(`A skill named ${name} already exists. Edit it, or choose another name.`)
     if (!previous && body.edit === true) throw reject('Unknown skill', 'bot/not-found')
+    if (body.reviewHash !== undefined) {
+      const review = checkedRecord(name, previous, { reviewHeld: true })
+      if (review.held !== CONFIRM || review.hash !== body.reviewHash) {
+        throw reject(CHANGED, 'bot/refused')
+      }
+      const needsConfirm = warningReceipt(review.hash, identity, generation)
+      if (body.confirm !== needsConfirm) return { needsConfirm, findings: review.check.findings }
+      // The checked document may contain imported frontmatter and formatting.
+      // Refresh only its acceptance so the exact stored bytes survive.
+      const now = Date.now()
+      data.skills[name] = { ...previous, updatedAt: now, accepted: review.hash,
+        check: { ...review.check, ranAt: now } }
+      return { saved: true }
+    }
     const { bytes, frontmatter } = documentOf(name, body)
     if (bytes.length > LIMITS.skillMd) throw reject(TOO_LARGE)
     const parsed = parseSkillMd(bytes)
@@ -222,8 +243,7 @@ export function install(rt) {
     if (check.verdict === 'block') throw checkFailure(check)
     if (!validDescription(parsed.description)) throw reject(DESCRIPTION)
     const findings = check.findings.map(findingView)
-    const needsConfirm = createHmac('sha256', confirmationKey)
-      .update(JSON.stringify([identity, generation, check.hash, SKILL_CHECK_FINGERPRINT])).digest('hex')
+    const needsConfirm = warningReceipt(check.hash, identity, generation)
     if (check.verdict === 'warn' && body.confirm !== needsConfirm) return { needsConfirm, findings }
     const now = Date.now()
     let source = { kind: 'text' }
@@ -267,6 +287,7 @@ export function install(rt) {
       if (action === 'skill-library-get') {
         const record = skills.get(body.name)
         if (!record) throw reject('Unknown skill', 'bot/not-found')
+        if (record.held === CONFIRM) return checkedRecord(body.name, own(data.skills, body.name), { reviewHeld: true })
         return record
       }
       const active = Object.fromEntries(Object.entries(data.active)
