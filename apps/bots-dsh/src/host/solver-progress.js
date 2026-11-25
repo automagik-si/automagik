@@ -15,7 +15,7 @@ const listOfIds = value => Array.isArray(value) && value.length > 0 && value.len
   && value.every(id) && new Set(value).size === value.length
 const fingerprint = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const includesAll = (ids, values) => ids.length === values.length && ids.every(key => values.includes(key))
-const commandOf = value => typeof value === 'string' && value.length <= 2_000 && value.trim() !== '' ? value.trim() : undefined
+const commandOf = value => typeof value === 'string' && value.length <= 2_000 ? value : undefined
 function checkCommands(value, checks) {
   if (!Array.isArray(value) || value.length !== checks.length || !value.every(item => record(item)
     && Object.keys(item).length === 2 && id(item.check) && commandOf(item.command))) return undefined

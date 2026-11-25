@@ -956,6 +956,22 @@ test('Ruling B round 2 requires literal shell arguments in plans and native evid
   assert.deepEqual(accepted, [])
 })
 
+test('Done rule preserves a trailing nonbreaking space in the agreed check argument', async t => {
+  const command = 'fake check-a\u00a0'
+  const h = await nativeCheck(t, command)
+  assert.equal(h.bot().reviewTrack.solver.plan.commands['check-a'], command)
+
+  assert.match(await h.start('changed-argument'), /^Recorded\./)
+  assert.equal((await h.mirror('changed-argument', { command: 'fake check-a' })).isError, false)
+  assert.match(await h.report('changed-argument'), /observed command does not match one agreed check/)
+  assert.deepEqual(h.bot().reviewTrack.solver.passed, [])
+
+  assert.match(await h.start('agreed-argument'), /^Recorded\./)
+  assert.equal((await h.mirror('agreed-argument', { command })).isError, false)
+  assert.match(await h.report('agreed-argument'), /^Recorded\./)
+  assert.deepEqual(h.bot().reviewTrack.solver.passed, ['check-a'])
+})
+
 test('Ruling B round 2 requires an initial native directory with an absolute agreed target', async t => {
   const agreed = stage6CommandIn(checkDirectory(t))
   const h = await nativeCheck(t, agreed)
