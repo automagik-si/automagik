@@ -1,3 +1,4 @@
+import { BotSkills } from './bot-skills.js'
 import { createElement as h, Fragment, useEffect, useRef, useState } from 'react'
 import { isMainOf } from './sources.js'
 import { HEADER, currentPart, runStatsOf, stripHeader, usageOf } from './text.js'
@@ -408,6 +409,7 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
         h(PermissionRow, { key: 'permission', bot, roster, actions, run }),
         h(GrantList, { key: 'grants', bot, roster, actions, useWork }),
         h(BotConnectors, { key: 'connectors', bot, roster, actions, run }),
+        h(BotSkills, { key: 'skills', bot, roster, actions }),
         h('div', { key: 'folder', className: 'bt-drawer-model' },
           h('div', { className: 'bt-section-title' }, t('Working folder')),
           h(FolderMenu, { value: bot.workDir, actions, run, wide: true, onPick: workDir => run(actions.updateBot(bot.id, { workDir })) })),

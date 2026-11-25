@@ -77,7 +77,8 @@ export function projectRecord(record, roomId, who) {
     return row
   }
   let msg
-  if (record.kind === 'approval') msg = `${name} waited for approval`
+  if (record.kind === 'automagik-skill-notice') msg = record.text
+  else if (record.kind === 'approval') msg = `${name} waited for approval`
   else if (notice && NOTICE_REASONS.has(record.reason)) {
     if (record.reason === 'failed') {
       const names = record.names?.join(' and ') || name

@@ -19,7 +19,7 @@ import { nativeCheckDirectory, normalizeCheckCommand } from './solver-check-comm
 // `message_bot` are open only in part (heldCall).
 export const OPEN_TEAM_TOOLS = Object.freeze([
   'list_bots', 'list_bot_models', 'list_capabilities', 'list_connectors', 'list_secrets', 'read_own_chat',
-  'read_group_chat', 'read_browser', 'recall', 'remember', 'forget',
+  'read_group_chat', 'read_browser', 'recall', 'remember', 'forget', 'load_skill',
   'ask_user', 'request_secret', 'request_connector', 'show_view', 'show_settings', 'propose_bot_change',
   'update_bot', 'message_bot', 'solver_progress',
 ])
@@ -48,6 +48,7 @@ const ACP_OPEN_KINDS = new Set(['read', 'search', 'fetch', 'think'])
 const ATTEMPT_READS = new Set([
   'list_bots', 'list_bot_models', 'list_capabilities', 'list_connectors', 'list_secrets',
   'read_own_chat', 'read_group_chat', 'read_browser', 'recall', 'ask_user', 'solver_progress',
+  'load_skill',
   'mail_read', 'mail_search', 'browser_snapshot', 'browser_screenshot', 'browser_tabs',
   'read', 'read_image', 'grep', 'glob', 'web_search', 'web_fetch', 'list_subagent_models', 'get_goal',
 ])

@@ -107,6 +107,7 @@ const SKIP_MCP = process.env.FAKE_ACP_SKIP_MCP === '1'
 const AUTH = process.env.FAKE_ACP_AUTH
 // A test can read what the client asked for (its servers, a fork, a close) from this file.
 const TRACE = process.env.FAKE_ACP_TRACE
+const SKILLS_PROBE = JSON.parse(process.env.FAKE_ACP_SKILLS_PROBE ?? 'null')
 const trace = (entry) => {
   if (TRACE === undefined) return
   try { appendFileSync(TRACE, `${JSON.stringify({ pid: process.pid, ...entry })}\n`) } catch {}
@@ -218,7 +219,9 @@ async function attachServer(session, server, sessionId) {
   const connection = connect(server, sessionId)
   session.mcp.set(server.name, connection)
   const tools = await connection.tools.catch(() => [])
-  trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name) })
+  session.listed?.set(server.name, tools.map(tool => tool?.name))
+  trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name),
+    ...(SKILLS_PROBE && { definitions: tools }) })
 }
 
 async function attach(session, servers, sessionId) {
@@ -388,6 +391,11 @@ const implementation = {
       servers: (params.mcpServers ?? []).map(server => server.name),
     })
     const session = newSession(sessionId, params.cwd)
+    const registryMode = process.env.FAKE_ACP_AGY_REGISTRY
+    if (registryMode) {
+      session.listed = new Map()
+      session.eager = new Set(registryMode === 'eager' ? params._meta?.antigravity?.eagerMcpServers : [])
+    }
     await attach(session, params.mcpServers, sessionId)
     agyLog()
     trace({ event: 'new-answer', sessionId, at: Date.now() })
@@ -473,9 +481,66 @@ const implementation = {
     session.cancelled = false
     session.turns++
     const said = prompt.filter(block => block.type === 'text').map(block => block.text).join(' ')
+    const current = prompt.findLast(block => block.type === 'text')?.text ?? ''
     // What the client actually sent this turn (a replayed transcript, for a crossing).
-    trace({ event: 'prompt', sessionId, turns: session.turns, text: said })
+    trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    if (session.listed) {
+      // Antigravity resolves the OFF profile against the component registry. Listing a
+      // session server is insufficient: only eagerly loaded tools become components.
+      const at = process.argv.indexOf('--agent')
+      const profile = at >= 0 ? process.argv[at + 1] : undefined
+      const file = profile && readFileSync(join(process.env.HOME, '.gemini', 'config', 'agents', profile + '.md'), 'utf8')
+      const wanted = file ? JSON.parse(/^tools: (.*)$/m.exec(file)?.[1] ?? '[]') : []
+      const registry = [...session.listed].flatMap(([server, names]) => session.eager.has(server)
+        ? names.map(name => 'mcp_' + server.replace(/[^A-Za-z0-9_]/g, '_') + '_' + name) : [])
+      trace({ event: 'registry', profile, wanted, registry })
+      const missing = wanted.find(name => !registry.includes(name))
+      if (missing !== undefined) {
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text',
+          text: '\n⚠ failed to construct executor: failed to resolve components: unknown component: tool "' + missing + '" not found in registry\n' } })
+        return { stopReason: 'end_turn' }
+      }
+    }
+    const probe = SKILLS_PROBE?.turns.find(({ text }) => prompt.some(block => block.text === text))
+    if (probe) {
+      const { claude } = SKILLS_PROBE
+      const options = [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'no', name: 'Reject', kind: 'reject_once' }]
+      const ask = async toolCall => (await conn.requestPermission({ sessionId, toolCall, options })).outcome
+      for (const [index, name] of probe.loads.entries()) {
+        const load = async retry => {
+          const toolCallId = `skills-${session.turns}-${index}-${retry}`
+          const operation = 'mcp__dsh__load_skill'
+          const toolCall = claude
+            ? { name: operation, title: operation, rawInput: { name }, _meta: { claudeCode: { toolName: operation } } }
+            : { title: 'mcp.dsh.load_skill', rawInput: { server: 'dsh', tool: 'load_skill', arguments: { name } }, _meta: { is_mcp_tool_call: true } }
+          Object.assign(toolCall, { toolCallId, kind: 'execute', status: 'pending' })
+          await update({ sessionUpdate: 'tool_call', ...toolCall })
+          if (claude) {
+            const outcome = await ask(toolCall)
+            if (outcome.optionId !== 'yes') return
+          }
+          const answer = await session.mcp.get('dsh').request('tools/call', { name: 'load_skill', arguments: { name } })
+          trace({ event: 'skills-load', sessionId, name, retry, answer })
+          await update({ sessionUpdate: 'tool_call_update', toolCallId, status: answer.isError ? 'failed' : 'completed' })
+          return answer
+        }
+        const answer = await load(false)
+        if (probe.retryEmpty && !answer?.isError) await load(true)
+      }
+      for (const [index, skill] of (probe.native ?? []).entries()) {
+        const toolCall = { toolCallId: `native-skill-${session.turns}-${index}`, name: 'Skill', title: 'Skill',
+          kind: 'other', status: 'pending', rawInput: { skill }, _meta: { claudeCode: { toolName: 'Skill' } } }
+        await update({ sessionUpdate: 'tool_call', ...toolCall })
+        const outcome = await ask(toolCall)
+        trace({ event: 'native-skill-permission', sessionId, skill, outcome })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId: toolCall.toolCallId,
+          status: outcome.optionId === 'yes' ? 'completed' : 'failed' })
+      }
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Fixture work completed.' } })
+      return { stopReason: 'end_turn' }
+    }
     // omp OFF exercises permission and notification independently. The permission
     // request comes first and neither refusal path sends a tool notification.
     if (/omp-permission-first/.test(said)) {
@@ -615,12 +680,25 @@ const implementation = {
       return { stopReason: 'end_turn' }
     }
     // codex-acp's own shapes (#1564 PR B), each checked before the generic "bridge" trigger.
-    const codexBridge = /codex-bridge (\S+)(?: (\{.*\}))?/.exec(said)
+    const codexBridge = /\b(agy-bridge) (\S+)(?: (\{.*\}))?/.exec(current)
+      ?? /\b(codex-bridge) (\S+)(?: (\{.*\}))?/.exec(said)
     if (codexBridge !== null) {
-      const name = codexBridge[1]
-      const args = codexBridge[2] === undefined ? {} : JSON.parse(codexBridge[2])
+      const [, style, name, raw] = codexBridge
+      const args = raw === undefined ? {} : JSON.parse(raw)
       const toolCallId = `codex-bridge-${session.turns}`
-      await update({ sessionUpdate: 'tool_call', toolCallId, title: `mcp.dsh.${name}`, kind: 'execute', status: 'in_progress', rawInput: { server: 'dsh', tool: name, arguments: args }, _meta: { is_mcp_tool_call: true } })
+      if (style === 'agy-bridge') {
+        const toolCall = { toolCallId, name: `mcp_dsh_${name}`, title: `mcp_dsh_${name}`, kind: 'execute',
+          rawInput: { server: 'dsh', tool: name, arguments: args } }
+        await update({ sessionUpdate: 'tool_call', ...toolCall, status: 'pending' })
+        const { outcome } = await conn.requestPermission({ sessionId, toolCall, options: [
+          { optionId: 'agy-allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'agy-reject', name: 'Reject', kind: 'reject_once' },
+        ] })
+        trace({ event: 'permission-answer', answer: outcome })
+        if (outcome.optionId !== 'agy-allow') return { stopReason: 'end_turn' }
+      } else {
+        await update({ sessionUpdate: 'tool_call', toolCallId, title: `mcp.dsh.${name}`, kind: 'execute', status: 'in_progress', rawInput: { server: 'dsh', tool: name, arguments: args }, _meta: { is_mcp_tool_call: true } })
+      }
       let text = 'the bridge is not connected'
       const connection = session.mcp.get('dsh')
       if (connection !== undefined) {
@@ -742,7 +820,6 @@ const implementation = {
     // A tool call on the `dsh` bridge, by the name Claude Code puts on the wire. With "permit"
     // the call first asks session/request_permission, as Claude Code does in Manual; without it
     // the call runs with no ACP-level request at all, as it would in Auto.
-    const current = prompt.findLast(block => block.type === 'text')?.text ?? ''
     const respawn = /\bbridge(-respawn) (\S+)/.exec(current)
     const drop = /\bbridge-drop\b/.test(current)
     if (respawn !== null || drop) {

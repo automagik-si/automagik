@@ -508,16 +508,16 @@ test('9: another agy version starts OFF and warns once; Details names the checke
   assert.equal(second.at(-1).reason.kind, 'stop')
   const warned = h.logs.filter(line => line.includes('runs with native tools off'))
   assert.deepEqual(warned, [`acp-dsh: Antigravity 9.9.9 runs with native tools off; native tools off was checked on agy ${AGY_OFF_CHECKED} only`])
-  assert.deepEqual(h.service.nativeOffNotes(AGY), { unchecked: AGY_OFF_CHECKED })
+  assert.deepEqual(h.service.nativeOffNotes(AGY), { unchecked: AGY_OFF_CHECKED, skillsUnavailable: true })
   assert.equal(h.service.nativeOffNotes('acp-omp'), undefined)
 })
 
-test('9: the checked agy version gives no warning and no Details line', unixOnly, async t => {
+test('9: the checked agy version gives no version warning and does not prove Skills availability', unixOnly, async t => {
   const h = agyWorld(t, { version: AGY_OFF_CHECKED })
   h.service.botIdentity(offBot)
   await h.chat().turn('plain version-checked')
   assert.deepEqual(h.logs.filter(line => line.includes('runs with native tools off')), [])
-  assert.deepEqual(h.service.nativeOffNotes(AGY), {})
+  assert.deepEqual(h.service.nativeOffNotes(AGY), { skillsUnavailable: true })
 })
 
 test('9: an ON start records the version too and never throws for it', unixOnly, async t => {
@@ -525,7 +525,7 @@ test('9: an ON start records the version too and never throws for it', unixOnly,
   const chunks = await h.chat().turn('plain version-on')
   assert.equal(chunks.at(-1).reason.kind, 'stop')
   assert.deepEqual(h.conversation('version-on').args, ['acp'])
-  assert.deepEqual(h.service.nativeOffNotes(AGY), { unchecked: AGY_OFF_CHECKED })
+  assert.deepEqual(h.service.nativeOffNotes(AGY), { unchecked: AGY_OFF_CHECKED, skillsUnavailable: true })
   assert.deepEqual(h.logs.filter(line => line.includes('runs with native tools off')), [])
 })
 
@@ -564,7 +564,9 @@ for (const [what, make] of [
       const config = join(h.home(), '.gemini', 'config')
       mkdirSync(config, { recursive: true })
       make(join(config, name))
-      assert.deepEqual(h.service.nativeOffNotes(AGY), name === 'plugins' ? { plugins: true, fresh: true } : { hooks: true, fresh: true })
+      assert.deepEqual(h.service.nativeOffNotes(AGY), {
+        [name === 'plugins' ? 'plugins' : 'hooks']: true, fresh: true, skillsUnavailable: true,
+      })
       const starts = h.events('start').length
       const chunks = await h.chat().turn('plain extension-refused')
       assert.equal(failure(chunks), `Antigravity (ACP) did not start: ${offRefusal(text)}`)
@@ -574,11 +576,11 @@ for (const [what, make] of [
   }
 }
 
-test('12: with neither, OFF starts and Details has no line', unixOnly, async t => {
+test('12: with neither extension, OFF starts and Details reports Skills availability', unixOnly, async t => {
   const h = agyWorld(t)
   h.service.botIdentity(offBot)
   await h.service.inspect(AGY)
-  assert.deepEqual(h.service.nativeOffNotes(AGY), {})
+  assert.deepEqual(h.service.nativeOffNotes(AGY), { skillsUnavailable: true })
   const chunks = await h.chat().turn('plain no-extensions')
   assert.equal(chunks.at(-1).reason.kind, 'stop')
 })

@@ -2,6 +2,7 @@ import { createElement as h, Fragment, useEffect, useRef, useState } from 'react
 import * as ui from '@deepseek-ai/dsh-client-ui-primitives'
 import { imPlatform } from '../shared/im-platforms.js'
 import { mentionSpans } from '../shared/mentions.js'
+import { chatPersonParts } from '../host/skill-message.js'
 import { BotMark } from './mark.js'
 import { CheckIcon, CopyIcon } from './icons.js'
 import { dateLocale, t } from './i18n.js'
@@ -91,7 +92,8 @@ export const ViaTag = ({ via }) => h('span', { className: 'bt-uvia' }, t('via {p
 export function UserMessageCell({ node, sessionId, useRoster, actions, renderMessageImages, openFile, openSkill }) {
   const roster = useRoster(value => value)
   const data = node.data ?? {}
-  const { text, attachments, rest } = contentParts(data.content)
+  const content = data.source?.automagikSkillOriginalText ? chatPersonParts(data) : data.content
+  const { text, attachments, rest } = contentParts(content)
   const referenceLabels = data.referenceLabels ?? []
   const references = openFile && openSkill ? { openFile, openSkill } : undefined
   const steering = node.kind === 'steering'

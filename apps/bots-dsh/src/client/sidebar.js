@@ -1,3 +1,4 @@
+import { canManageSkills, SKILLS_PANEL } from './skills-screen.js'
 import { CodeBarList, CodeSideSwitch, setCodeSide, useCodeSide } from './code-side.js'
 import { openStops } from './stops.js'
 import { Component, createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
@@ -5,7 +6,7 @@ import { createPortal } from 'react-dom'
 import { Lockup, OmniMark, Wordmark } from './logo.js'
 import { isMainOf } from './sources.js'
 import { currentPart, previewOf, relativeShort } from './text.js'
-import { PlusIcon, SearchIcon, SidebarIcon, GaugeIcon, PlugIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon, TasksIcon, SignOutIcon } from './icons.js'
+import { PlusIcon, SearchIcon, SidebarIcon, GaugeIcon, PlugIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon, TasksIcon, SignOutIcon, SparkIcon } from './icons.js'
 import { botState, BotAvatar, BotMark, RoomAvatar } from './mark.js'
 import { DSH_LOOK } from './characters.js'
 import { reducedMotion } from './activity-row.js'
@@ -864,6 +865,7 @@ export function AccountLauncher({ seat = true, settingsOpen, openSettings, openO
       [t('Usage'), GaugeIcon, () => actions.openSettings('usage')],
       [t('Plugins'), PlugIcon, () => actions.selectPanel('plugins')],
       [t('Apps'), ConnectorIcon, () => actions.openConnectors()],
+      ...(canManageSkills() ? [[t('Skills'), SparkIcon, () => actions.selectPanel(SKILLS_PANEL)]] : []),
       // Rows other Omni plugins add (extend.js), such as Automations.
       ...navRows.map(row => [row.label(), row.icon, () => row.run(actions)]),
       [t('Bot settings'), GearIcon, () => actions.openSettings('general')],

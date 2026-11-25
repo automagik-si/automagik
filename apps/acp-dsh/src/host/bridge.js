@@ -124,7 +124,10 @@ async function call(params, requestId) {
   inflight.set(requestId, controller)
   let answer
   try {
-    answer = await rpc('call', { name, arguments: params.arguments ?? {}, callId: typeof params._meta?.callId === 'string' ? params._meta.callId : undefined }, { signal: controller.signal })
+    const callId = typeof params._meta?.callId === 'string' ? params._meta.callId : undefined
+    answer = await rpc('call', { name, arguments: params.arguments ?? {}, callId,
+      ...(name === 'load_skill' && callId === undefined && { requestId }),
+    }, { signal: controller.signal })
   } catch (error) {
     // A cancelled request gets no response (MCP): the agent already stopped waiting for it.
     if (controller.signal.aborted) return CANCELLED

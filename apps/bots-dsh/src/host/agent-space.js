@@ -1,5 +1,6 @@
 // Safe space reads for channel.js and MCP. No arbitrary Session, file or provider config reads.
 import { botConfig, roomConfig } from './agent-access.js'
+import { SKILL_NOTICE } from './skill-message.js'
 
 const invalid = () => Object.assign(new Error('Invalid space page'), { code: 'bot/invalid' })
 export function pageOf(items, { offset = 0, limit = 50 } = {}) {
@@ -80,7 +81,7 @@ export function createSpaceReads(rt) {
     if (room) {
       // Legacy logs receive these same sequence numbers when groups.js first opens them.
       const entries = (room.log ?? []).map((row, index) => ({ ...row, seq: row.seq ?? index + 1 }))
-        .reverse().filter(row => typeof row.text === 'string'
+        .reverse().filter(row => row.kind !== SKILL_NOTICE && typeof row.text === 'string'
           && (cursor.beforeSeq === undefined || row.seq < cursor.beforeSeq))
       const items = entries.slice(0, limit).map(row => pick(row,
         ['id', 'seq', 'who', 'text', 'time']))

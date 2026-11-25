@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { judgeOf, OWN_MODE_MARKS } from '../shared/permission-levels.js'
+import { personParts, SKILL_TOOL } from './skill-message.js'
 import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
 import { changesWorkingFolder } from './folders.js'
 import { splitRef, textOf } from './text.js'
@@ -488,14 +489,15 @@ const argsOf = row => argumentValue(row.arguments, {}) ?? {}
 function payloadOf(rt, sessionId, session, step, hardAsked) {
   const events = eventsOf(session)
   const requests = events.filter(e => e.type === 'user/message' && e.data?.source?.kind === 'user').slice(-5).map(e => {
-    const text = textOf(e.data.content)
+    const text = textOf(personParts(e.data.content))
     return { from: rt.state.tasks?.[sessionId] ? 'task' : 'chat', text: credentialText(text, true) ? credentialPlaceholder : text.slice(0, 2000) }
   })
   const start = events.findLastIndex(e => e.type === 'turn/start')
   const privateCall = row => hardAsked?.has(row.callId) || credentialStep({
     tool: row.name, title: [row.title, row.commandTitle], args: argsOf(row), reason: row.reason, justification: row.justification,
   }, true)
-  const callsThisTurn = events.slice(start + 1).filter(e => e.type === 'tool/call' && e.data?.callId !== step.callId).slice(-20).map(({ data }) =>
+  const callsThisTurn = events.slice(start + 1).filter(e => e.type === 'tool/call' &&
+    e.data?.callId !== step.callId && e.data?.name !== SKILL_TOOL).slice(-20).map(({ data }) =>
     privateCall(data) ? { arguments: credentialPlaceholder }
       : { tool: data.name, arguments: JSON.stringify(cleanArgs(argsOf(data))).slice(0, 1000) })
   const written = new Set()

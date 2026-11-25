@@ -100,6 +100,8 @@ import * as genui from './src/host/genui.js'
 import * as appManifest from './src/host/app-manifest.js'
 import * as pocketChat from './src/host/pocket-chat.js'
 import * as grants from './src/host/grants.js'
+import * as skillLibrary from './src/host/skill-library.js'
+import * as skillLibraryCall from './src/host/skill-library-call.js'
 import * as seatChat from './src/host/seat-chat.js'
 import * as hermesRemote from './src/host/hermes-remote.js'
 import * as officeSkills from './src/host/office-skills.js'
@@ -141,7 +143,7 @@ const MODULES = [
   sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
   update, selfUpdate, selfUpdateCheck, selfUpdateHold, dshUpdate, thinking, agentSpace, feed, codeSide, codeStart, automations, accounts, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
-  officeSkills, goalSkills, grants,
+  officeSkills, goalSkills, grants, skillLibrary, skillLibraryCall,
 ]
 
 // Other Omni plugins inject the runtime as `omniTeam` and add to it through rt.hooks

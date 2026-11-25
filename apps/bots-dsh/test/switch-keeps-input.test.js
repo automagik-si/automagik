@@ -3,6 +3,8 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { SOURCE_KIND } from '../src/host/constants.js'
@@ -62,6 +64,12 @@ async function start({ fail = {}, services = {}, home: reuse, state: seed = TEAM
   }
 
   const ctx = fakeContext({ services })
+  // Let Cordis order and compose the production pre-step listeners, including prepend.
+  const preStepContext = new Context()
+  const on = ctx.on
+  ctx.on = (name, listener, options) => name === 'agent/pre-step'
+    ? preStepContext.on(name, listener, options)
+    : on(name, listener, options)
   const warnings = []
   const infos = []
   ctx.logger = {
@@ -160,8 +168,11 @@ async function start({ fail = {}, services = {}, home: reuse, state: seed = TEAM
     method: 'POST', body: JSON.stringify({ endpoint, payload }),
   }))).json()
   const tool = (name, args, sessionId) => rt.teamTools.find(d => d.name === name).execute(args, { agent: agentOf(sessionId), name, callId: 'c1' })
-  const preStep = (sessionId, messages = [], step = 1) => ctx.listeners.get('agent/pre-step').at(-1)(
-    { agent: agentOf(sessionId), messages, step, signal: AbortSignal.timeout(60_000) }, async () => 'next')
+  const preStep = (sessionId, messages = [], step = 1) => agentEvents(preStepContext, agentOf(sessionId)).waterfall(
+    'agent/pre-step',
+    { messages, turn: 1, step, signal: AbortSignal.timeout(60_000), modelSelection: { provider: 'test', model: 'test' } },
+    async () => ({ kind: 'enter', messages }),
+  )
   // A Session event as DSH emits it, on the Session the test's Agent holds.
   let seq = 0
   const emit = (sessionId, type, data) => {
@@ -173,6 +184,7 @@ async function start({ fail = {}, services = {}, home: reuse, state: seed = TEAM
   const state = () => JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
   const stop = async ({ keep = false } = {}) => {
     await ctx.dispose()
+    await preStepContext.fiber.dispose()
     if (!keep) rmSync(root, { recursive: true, force: true, maxRetries: 5 })
   }
   await tool('list_bots', {}, 'a')

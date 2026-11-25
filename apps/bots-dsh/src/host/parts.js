@@ -15,6 +15,9 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // The next part opens with the handoff package: the note, the latest messages word for
 // word, and where the rest is. Input that arrives meanwhile waits and moves along.
 // read_own_chat searches every part, the condensed messages included.
+import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
+import { skillActivityOf } from '../shared/skill-activity.js'
+import { legacySkillHistory, projectRoomContent } from './skill-library-call.js'
 import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
 import { randomUUID } from 'node:crypto'
@@ -179,7 +182,7 @@ export function replyText(text) {
   }).join('\n\n')
 }
 
-export function historyEntry(event, group) {
+export function historyEntry(event, group, projectInput) {
   if (event.type === 'assistant/message') {
     const text = textOf(event.data?.message?.content)
     return text === '' ? undefined : { answer: true, text }
@@ -195,7 +198,12 @@ export function historyEntry(event, group) {
     return { answer: false, who: 'user', text: replyText(textOf(event.data.content)), keepAnswers: true }
   }
   if (event.type !== 'user/message' || (source?.kind !== 'user' && source?.kind !== SOURCE_KIND)) return undefined
-  const text = textOf(event.data.content)
+  const input = projectInput?.(event.data) ?? event.data.content
+  // Group handoff text survives a later assignment change. Carry the ordinary
+  // transcript without making past skill calls part of the handoff instructions.
+  const content = group && source.skillRoomLines?.length
+    ? projectRoomContent(input, source.skillRoomLines) : input
+  const text = textOf(personParts(content))
   const ours = source.kind === SOURCE_KIND
   // The outgoing agent's handoff-note request (an agent switch) is Omni's, and so is its answer.
   const skipped = (ours && (source.handoff === true || source.role === 'kickoff' || source.role === 'goal' || source.role === 'handoff-note')) || (!group && text.startsWith('[Group chat'))
@@ -410,7 +418,7 @@ export function install(rt) {
     const text = handoffPackage({
       room,
       segment: { fallback: 'overflow', ...(previous?.note ? { note: previous.note, noteFrom: previous.noteFrom ?? previous.number } : {}) },
-      lines: await handoffLines(agent.id, { budget, group: room !== undefined, number: parts.length }),
+      lines: await handoffLines(session, { budget, group: room !== undefined, number: parts.length }),
       number: parts.length + 1,
       resume: true,
       overflow: true,
@@ -588,11 +596,11 @@ export function install(rt) {
   }
 
   // What was said in one part, newest first: the user, other Bots, and the Bot itself.
-  async function* partLines(sessionId, signal, { group = false, pages } = {}) {
+  async function* partLines(sessionId, signal, { group = false, pages, projectInput } = {}) {
     // Read backwards, a Bot's answers come before the message they answer.
     let answers = []
     for await (const event of rt.eventsBackwards(sessionId, signal, pages)) {
-      const entry = historyEntry(event, group)
+      const entry = historyEntry(event, group, projectInput)
       if (entry === undefined) continue
       if (entry.answer) {
         answers.push({ text: `You: ${entry.text}`, time: event.time, seq: event.seq, who: 'you' })
@@ -609,7 +617,7 @@ export function install(rt) {
   // messages word for word, and before them, in the Bot's own chat, every message to
   // the Bot (from the user or another Bot) as an anchored list. A group turn message
   // holds the whole round, so a group part carries only its latest messages.
-  async function handoffLines(sessionId, { budget, group, number }) {
+  async function handoffLines(session, { budget, group, number }) {
     const recent = []
     const earlier = []
     let used = 0
@@ -622,7 +630,8 @@ export function install(rt) {
     // reads as the package's own structure (a heading, a stamp, a closing line).
     const indent = text => text.replace(/\r?\n/g, '\n  ')
     try {
-      for await (const line of partLines(sessionId, AbortSignal.timeout(HANDOFF_READ_MS), { group, pages: Infinity })) {
+      const projectInput = legacySkillHistory(session)
+      for await (const line of partLines(session.id, AbortSignal.timeout(HANDOFF_READ_MS), { group, pages: Infinity, projectInput })) {
         if (!full) {
           const text = clip(line.text, RECENT_LINE_MAX, group ? 'the full text is in the saved record' : `read_own_chat around "part ${number} #${line.seq}" shows all of it`)
           const cost = estimateTokens(text)
@@ -648,7 +657,7 @@ export function install(rt) {
       // The latest messages matter most; what could not be read is only noted.
       if (recent.length === 0) throw error
       complete = false
-      rt.warn('omni-ui: reading %s for its handoff stopped early: %s', sessionId, error)
+      rt.warn('omni-ui: reading %s for its handoff stopped early: %s', session.id, error)
     }
     // `whole`: every message of the part is in `recent`.
     return { recent: recent.reverse(), earlier: earlier.reverse(), unlisted, complete, whole: complete && !full }
@@ -2688,7 +2697,7 @@ export function install(rt) {
       written = undefined
     }
     const noted = written !== undefined ? { note: written.note } : { fallback: 'recent' }
-    const carried = await handoffLines(agent.id, { budget, group: room !== undefined, number })
+    const carried = await handoffLines(session, { budget, group: room !== undefined, number })
     if (signal.aborted) throw signal.reason
     const noCommands = job.noCommands || rt.botRunnerRequired?.(session.id, agent) === true
     if (noCommands && commandCapableAgent(job.target)) throw noBotRunner()
@@ -2996,7 +3005,7 @@ export function install(rt) {
       job.noteFailed = true
       return
     }
-    const readLines = () => (job.bare ? { recent: [], earlier: [], unlisted: 0, complete: true } : handoffLines(agent.id, { budget, group: room !== undefined, number }))
+    const readLines = () => (job.bare ? { recent: [], earlier: [], unlisted: 0, complete: true } : handoffLines(session, { budget, group: room !== undefined, number }))
     let carried = job.folder ? await readLines() : undefined
     // A short part with no tool work goes over word for word, so it needs no note.
     const whole = carried?.whole === true && !session.deriveMessages().some(message => message.role === 'tool')
@@ -3590,7 +3599,7 @@ export function install(rt) {
   // Earlier parts of a Bot's own chat, newest page first, for the chat to show above
   // the current part as one conversation.
   const EARLIER_PAGE = 60
-  function displayItems(partId, events, session, seedTurn) {
+  function displayItems(partId, events, session, seedTurn, activity = false) {
     const hidden = new Set(state.exchangeTurns[partId] ?? [])
     // Call ids of the page's group_relay calls; their tool/result events carry the
     // round's replies. A result without its call on the page (the page cut between
@@ -3608,6 +3617,13 @@ export function install(rt) {
       items.push(item)
     }
     for (const event of events) {
+      if (activity) {
+        const item = skillActivityOf(event)
+        if (item !== undefined) {
+          if (item.roomId === undefined && !hidden.has(item.turn)) items.push(item)
+          continue
+        }
+      }
       if (event.type === 'turn/start') {
         if (typeof event.data?.turn === 'number' && Number.isInteger(event.data.turn)) turn = event.data.turn
         continue
@@ -3656,7 +3672,8 @@ export function install(rt) {
         const text = textOf(message?.content)
         const range = relayRange(text)
         const room = range === undefined ? undefined : rt.roomOf(partId) ?? rt.roomOf(rt.pastOwners.get(partId)?.roomId)
-        const replies = range === undefined ? parseReplies(text).replies : room === undefined ? [] : rt.groupRows(room.id, range.from, range.to, range.anchor)
+        const replies = range === undefined ? parseReplies(text).replies : room === undefined ? []
+          : rt.groupRowsView(room.id, range.from, range.to, range.anchor, activity).rows
         for (const { reply, texts, time, duration } of stackReplies(replies)) {
           // Reply rows take the reply's own time, and no seq: several rows share
           // the result event's seq, which the chat keys a post's anchor by.
@@ -3671,12 +3688,14 @@ export function install(rt) {
       if (event.type !== 'user/message') continue
       const source = event.data?.source
       if (source?.kind === 'user') {
-        const content = Array.isArray(event.data.content) ? event.data.content : []
+        const content = chatPersonParts(event.data)
         const imageRefs = content.filter(block => block?.type === 'image' && block.attachment !== undefined)
           .map(block => ({ attachmentId: block.attachment.attachmentId, mime: block.attachment.mediaType ?? block.attachment.mime ?? block.attachment.mimeType, name: block.attachment.name }))
         const images = content.filter(block => block?.type === 'image').length
         const via = viaOf(source)
         stamp(event, { kind: 'user', text: textOf(content), ...(images > 0 ? { images } : {}), ...(imageRefs.length > 0 ? { imageRefs } : {}), ...(via ? { via } : {}), time: event.time })
+      } else if (source?.kind === SKILL_NOTICE) {
+        stamp(event, { kind: SKILL_NOTICE, text: textOf(event.data.content), time: event.time })
       } else if (source?.kind === REPLY_KIND) {
         const text = textOf(event.data.content)
         const reply = readReply(text)
@@ -3737,7 +3756,7 @@ export function install(rt) {
         before = back.records[0]?.event?.seq
       }
     }
-    const items = displayItems(part.sessionId, events, agent?.session, seedTurn)
+    const items = displayItems(part.sessionId, events, agent?.session, seedTurn, true)
     const more = page.hasMore && events.length > 0
     // The line above a part's first message marks where it began, and names the agent an
     // agent switch moved the chat to (the segment of the part before it carries `switchedTo`).

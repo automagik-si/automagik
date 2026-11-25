@@ -64,7 +64,7 @@ function bench(t, { home = mkdtempSync(join(tmpdir(), 'ds-bot-review-guard-')), 
   const noteStop = rt.noteStop
   rt.noteStop = (sessionId, detail, agent) => { stops.push(detail); return noteStop?.(sessionId, detail, agent) }
   const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))).json()
-  const guard = exec => (ctx.listeners.get('tools/execute') ?? [])[0](exec, async () => 'ran')
+  const guard = (exec, next = async () => 'ran') => (ctx.listeners.get('tools/execute') ?? [])[0](exec, next)
   const run = (bot, name, args = {}) => guard({ name, callId: `c${++created}`, arguments: args, agent: { id: bot.id } })
   let seq = 0
   const event = (sessionId, type, data) => {
@@ -192,6 +192,31 @@ test('G14: every team tool is on exactly one list', () => {
   const wrong = TEAM_TOOLS.filter(name => open.has(name) === held.has(name))
   assert.deepEqual(wrong, [])
   assert.deepEqual([...open, ...held].filter(name => !TEAM_TOOLS.includes(name)), [])
+})
+
+test('Skills registry: the guarded Solver can load its Automatic skill before a verdict', async t => {
+  const { call, guard, person, solver, reviewer, plain, rt } = bench(t)
+  const bot = await solver({ reviewerId: (await reviewer()).id })
+  const other = await plain()
+  const skill = { name: 'planning-notes', description: 'Read planning notes.', content: 'Use the short plan format.' }
+  assert.equal((await call('skill-library-save', skill)).ok, true)
+  const assignment = { id: bot.id, name: skill.name }
+  assert.equal((await call('bot-skill-add', { ...assignment, mode: 'automatic' })).ok, true)
+  person(bot.id, 'Read the notes to plan this task.')
+  const registered = rt.teamTools.find(tool => tool.name === 'load_skill')
+  const load = (name, id) => {
+    const exec = { name, callId: 'skill-read', arguments: { name: skill.name }, agent: { id } }
+    return guard(exec, () => registered.execute(exec.arguments, exec))
+  }
+  const spellings = ['load_skill', 'mcp__dsh__load_skill']
+  for (const name of spellings) {
+    assert.equal((await load(name, bot.id)).text, skill.content, name)
+    assert.deepEqual(await load(name, other.id), {})
+    assert.deepEqual(await load(name, 'no-current-bot'), {})
+  }
+  assert.equal((await call('bot-skill-mode', { ...assignment, mode: 'manual' })).ok, true)
+  for (const name of spellings) assert.deepEqual(await load(name, bot.id), {})
+  assert.equal(rt.botOf(bot.id).reviewTrack.planVerdictAt, undefined)
 })
 
 test('G4: any verdict opens the request; a person\'s message mid-request does not hold it again; the next request does', async (t) => {

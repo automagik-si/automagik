@@ -1,4 +1,5 @@
 import { closesPart } from './caller-view.js'
+import { skillActivityOf } from '../shared/skill-activity.js'
 import { callerService, hasCallerLock, matchesFeedViewer } from './multiuser.js'
 import { personKey } from './people.js'
 
@@ -130,7 +131,10 @@ export function install(rt) {
     for (const feed of feeds()) enqueue(feed, revision)
   }
   const sessionEvent = (session, event) => {
-    if ((event.type !== 'user/message' && event.type !== 'assistant/message') || closesPart(event)) return
+    const activity = skillActivityOf(event)
+    const ownActivity = activity !== undefined && activity.roomId === undefined &&
+      !(rt.state.exchangeTurns[session?.id] ?? []).includes(activity.turn)
+    if ((!ownActivity && event.type !== 'user/message' && event.type !== 'assistant/message') || closesPart(event)) return
     const id = rt.chatOwners.get(session?.id)
     if (id === undefined || !rt.readableParts(id).some(part => part.sessionId === session.id)) return
     const chunk = frame('changed', { botId: id })

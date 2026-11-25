@@ -2,9 +2,10 @@ import { createElement as h, useSyncExternalStore } from 'react'
 import {
   allThemes, BotMark, BrandMark, BrandName, call, checkViewer, CONVERSATION_CSS, createSource, dayLabel, freePriority,
   catalogueLookOf, installCompiledStyles, installStyles, isRetired, LEFT_BAR_CSS, mountedViewer, Nothing, onRetire,
-  requestViewer, SHELL_CSS, Shimmer, SIDEBAR_CSS, t, themeCss,
+  requestViewer, SHELL_CSS, Shimmer, SIDEBAR_CSS, SkillActivityRow, t, themeCss,
 } from './gated-shared.js'
 import { ACP_NAME } from '../shared/routes.js'
+import { SKILL_ACTIVITY } from '../shared/skill-activity.js'
 import { applyPage, botLabels, changedBot, feedEnded, initialMember, isCurrent, pageRows, requestView, selectBot, updateRoster } from './member-model.js'
 
 const mark = bot => h(BotMark, { bot, look: { ...catalogueLookOf(bot), pet: undefined }, live: false, size: 28 })
@@ -30,6 +31,7 @@ export function MemberRows({ pages, roster, botId }) {
       return h('div', { key, className: 'bt-msg-line' }, bot ? mark(bot) : null,
         h('div', { className: 'bt-bubble' }, plain(row.text)))
     }
+    if (row.kind === SKILL_ACTIVITY) return h(SkillActivityRow, { key, name: row.name })
     return null
   })
 }

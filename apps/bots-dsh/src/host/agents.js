@@ -593,6 +593,10 @@ export function install(rt) {
         await rt.save({ required: true })
         if (currentCreation(creation) !== agent) throw refusal('The creation operation changed before membership persistence')
       }
+      // A prior committed rollback may have left cleanup to retry. Resolve it
+      // before this Session ID can own new assignments.
+      await rt.skillLibrary?.clearOrphan(chatId)
+      writeCheck()
       if (state.agents[agentId] !== agent || JSON.stringify(agent) !== before) throw refusal('The DSH bot changed during adoption; try again')
       if (agent.adoptedBotId !== undefined || rt.findBot(name) !== undefined || rt.botOf(chatId) !== undefined) throw refusal('The DSH bot or name is already adopted')
       const earlier = sessions.slice(0, -1)
@@ -840,29 +844,33 @@ export function install(rt) {
     try {
       writeCheck()
       const original = rt.own(state.agents, agentId)
-      const bot = state.bots[original?.adoptedBotId]
-      if (bot?.dshAgentId !== agentId) throw refusal('No adoption to roll back')
-      if (rt.isMain(bot.id) || Object.values(state.rooms).some(room => room.members.includes(bot.id))
-        || !adoptionHistoryMatches(bot.id)
-        || Object.values(state.tasks ?? {}).some(task => task.from === bot.id)) {
-        throw refusal('Remove Main Bot/group roles and resolve new team history before rolling back adoption')
-      }
-      const generation = rt.teamGeneration()
-      delete state.bots[bot.id]
-      rt.dropGrantsForBot?.(bot.id)
-      delete original.adoptedBotId
-      try {
-        await rt.save({ required: true })
-      } catch (error) {
-        if (!rt.canRestoreTeamInMemory(generation) || rt.own(state.agents, agentId) !== original
-          || rt.botOf(bot.id) !== undefined || (bot.reviewGuard === true && rt.groupsOf(bot.id).length > 0)) throw error
-        state.bots[bot.id] = bot
+      const id = original?.adoptedBotId
+      const remove = async () => {
+        const bot = state.bots[id]
+        if (bot?.dshAgentId !== agentId) throw refusal('No adoption to roll back')
+        if (rt.isMain(bot.id) || Object.values(state.rooms).some(room => room.members.includes(bot.id))
+          || !adoptionHistoryMatches(bot.id)
+          || Object.values(state.tasks ?? {}).some(task => task.from === bot.id)) {
+          throw refusal('Remove Main Bot/group roles and resolve new team history before rolling back adoption')
+        }
+        const generation = rt.teamGeneration()
+        delete state.bots[bot.id]
         rt.dropGrantsForBot?.(bot.id)
-        original.adoptedBotId = bot.id
-        rt.indexSessions()
-        if (rt.sameTeam(generation)) await rt.save({ required: true }).catch(() => {})
-        throw error
+        delete original.adoptedBotId
+        try {
+          await rt.save({ required: true })
+        } catch (error) {
+          if (!rt.canRestoreTeamInMemory(generation) || rt.own(state.agents, agentId) !== original
+            || rt.botOf(bot.id) !== undefined || (bot.reviewGuard === true && rt.groupsOf(bot.id).length > 0)) throw error
+          state.bots[bot.id] = bot
+          rt.dropGrantsForBot?.(bot.id)
+          original.adoptedBotId = bot.id
+          rt.indexSessions()
+          if (rt.sameTeam(generation)) await rt.save({ required: true }).catch(() => {})
+          throw error
+        }
       }
+      await (rt.skillLibrary?.duringBotDeletion(id, remove) ?? remove())
       for (const sessionId of original.sessions) await restrictTeamTools(await rt.resolveAgent(sessionId))
       return { agentId }
     } finally { leave() }

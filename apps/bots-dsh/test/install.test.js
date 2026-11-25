@@ -270,6 +270,10 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: seat chat',
     'on agent/created',
     'effect ds-bot: remote Hermes',
+    // Skills adds only the outgoing catalog and a checked, authorized body.
+    'on agent/pre-step (prepend)',
+    'on tools/pre-execute (prepend)',
+    'on llm/stream (prepend)',
     // Auto's judge, after every module, so it runs first (auto-judge.js installAhead).
     'on approval/request (prepend)',
     // The review guard, right after it, so it runs before Auto (review-guard.js installAhead).

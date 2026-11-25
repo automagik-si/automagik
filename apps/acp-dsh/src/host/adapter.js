@@ -40,6 +40,7 @@ import { checkUploadSize, prepareUpload } from './upload-content.js'
 export const CANCEL_WAIT_MS = 5000
 // A bridge that never listed its tools fails the turn: codex-acp skips a server whose name the
 // person's own Codex config defines, and a Session must not run with half a tool set.
+const SKILL_BRIDGE_PROVIDERS = new Set(['acp-claude', 'acp-codex', 'acp-antigravity', 'acp-omp'])
 const BRIDGE_READY_MS = 15_000
 const BRIDGE_READY_POLL_MS = 25
 // The MCP bridge script, spawned by the adapter as a child of its own.
@@ -232,7 +233,7 @@ function promptRows(messages) {
   // A failed request may leave no assistant row. Retry starts a new continuation even
   // then: never resend the earlier instruction to an ACP session that already accepted it.
   const retry = messages.findLastIndex(message => message.role === 'user' && message.source?.kind === 'retry')
-  const turn = messages.slice(Math.max(start, retry)).filter(message => message.source?.kind !== NOTICE_KIND)
+  const turn = messages.slice(Math.max(start, retry)).filter(message => message.source?.kind !== NOTICE_KIND && message.source?.kind !== 'automagik-skill-notice')
   const own = turn.filter(message => message.source?.kind === 'user' || message.source?.kind === 'retry' || isHandoff(message))
   // Offload is a durable DSH decision, not permission to recover an omitted image. Use
   // DSH's existing no-path placeholder for a genuine user's marked occurrence.
@@ -1347,31 +1348,33 @@ export class AcpAdapter extends LlmAdapter {
    * second bridge. Each of the fork's requests has its own deadline; `signal`, the turn's
    * Stop, ends the wait for all of them.
    */
-  async refork(agent, live, dshAgent, signal) {
+  async refork(agent, live, dshAgent, signal, { renew = false } = {}) {
     const { bridge: previous, run } = live
-    const next = this.backchannel.mint({
+    const next = previous === undefined ? undefined : this.backchannel.mint({
       sessionId: dshAgent?.session?.id,
       agent: dshAgent,
       name: agent.name,
       promptRunning: () => live.open === true && live.run?.busy === true,
+      promptSkillRefusals: () => live.open && live.run?.busy ? live.run.promptSkillRefusals : undefined,
       native: live.twinsOff === true,
+      skillOnly: previous?.skillOnly === true,
     })
     live.bridge = next
     // The source is done running tools before the fork starts.
-    this.backchannel.revoke(previous)
+    if (previous) this.backchannel.revoke(previous)
     try {
-      await run.held(() => run.fork({
-        // An OFF Codex forks where its tools were checked.
-        cwd: live.nativeOff === true && typeof live.checkedCwd === 'string' ? live.checkedCwd
-          : dshAgent?.session?.header?.cwd ?? homedir(),
-        mcpServers: [this.bridgeServer(next)],
+      // An OFF Codex opens the replacement where its tools were checked.
+      const cwd = live.checkedCwd ?? (renew ? run.spec.cwd : dshAgent?.session?.header?.cwd ?? homedir())
+      await run.held(() => run[renew ? 'renew' : 'fork']({
+        cwd,
+        mcpServers: next ? [this.bridgeServer(next)] : [],
       }), { ms: 0, signal })
     } catch (error) {
       // The fork may already have moved the run to a new ACP session (a bridge that never
       // listed). Nothing can resume that half state: revoke both credentials, end the run and
       // let the next turn start clean.
       live.bridge = previous
-      this.backchannel.revoke(next)
+      if (next) this.backchannel.revoke(next)
       this.timers.clearTimeout(live.reaper)
       run.dispose()
       const sessionId = dshAgent?.session?.id
@@ -1692,8 +1695,24 @@ export class AcpAdapter extends LlmAdapter {
       const omp = agent.nativeSwitch === 'args'
       const levelAtStart = () => this.readLevel(dshAgent?.session, managed || (omp && this.teamManaged()))
       const turnLevel = levelAtStart()
+      const skills = this.ctx.get?.('omniTeam')?.skillCalls
+      const supportsSkillBridge = SKILL_BRIDGE_PROVIDERS.has(options.provider)
+      const agy = options.provider === 'acp-antigravity'
+      const skillCatalog = state => supportsSkillBridge && (!agy || state.nativeOff !== true || state.agySkillsVersion !== undefined)
+        ? skills?.catalog(sessionId) : undefined
+      const canMountSkills = () => this.backchannel !== undefined && supportsSkillBridge &&
+        skills?.available(sessionId) === true
+      const agySkillsWanted = () => canMountSkills() ? agent.agySkillsVersion?.() : undefined
       const inputStart = turnStart(options.messages)
       const history = options.messages.slice(0, inputStart)
+      const session = dshAgent?.session
+      const skillOptions = { catalog: false, session }
+      const historyOf = rows => skills?.project({ ...options, messages: rows }, { ...skillOptions, historyOnly: true }).messages ?? rows
+      const replayOf = (rows, owed) => replayBlocks(historyOf(rows), { redact: this.redact, to: agent.name, ...owed })
+      const durableHistory = () => {
+        const saved = new Set(session?.deriveMessages?.().map(row => row.id))
+        return history.filter(row => saved.has(row.id))
+      }
       // The switch is the Bot's: every turn of its Sessions follows it, whoever sends it (#1564).
       const ompNativeAllowed = () => permitsNative(levelAtStart())
         && this.savedNativeOn(sessionId, options.provider)
@@ -1776,7 +1795,15 @@ export class AcpAdapter extends LlmAdapter {
         && !((bridged ?? this.bridgeOn(agent, sessionId)) && agent.disableBuiltInTools === true && !enabled)
         && currentLevel?.full !== true
       const asks = hardAsks(native, turnLevel)
-      const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true) && this.bridgeOn(agent, sessionId)
+      const agyOffLive = agy && live?.provider === options.provider && live.nativeOff === true
+      const wantedAgyVersion = agyOffLive ? agySkillsWanted() : undefined
+      const wantsSkills = agyOffLive ? wantedAgyVersion !== undefined : canMountSkills()
+      const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true)
+        && (this.bridgeOn(agent, sessionId) || wantsSkills)
+      const needsSkillBridge = live?.bridge === undefined && wantsSkills
+      // Antigravity OFF selects its exact tool list at process launch. When
+      // eligibility or executable proof changes, replace the child and replay delivered history.
+      const relaunchForSkills = agyOffLive && live.agySkillsVersion !== wantedAgyVersion
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       // Other ACP agents can receive the Solver's method supplement through the
       // existing identity prompt delivery, without adopting the whole Bot role.
@@ -1787,7 +1814,7 @@ export class AcpAdapter extends LlmAdapter {
       const roleChanged = live !== undefined && !sameTurn && (live.roleDigest ?? '') !== role.digest
       // A new tool set or role needs a new agent session.
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
-        || bridgeGone || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
+        || bridgeGone || needsSkillBridge || relaunchForSkills || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
       if (remade) {
         if (roleChanged) {
           try {
@@ -1854,11 +1881,33 @@ export class AcpAdapter extends LlmAdapter {
       if (live !== undefined) live.roleTurn = turn
       let fresh = false
       let crossing = false
+      let renewedForSkills = false
+      let replaySource
       const prior = lastProviderOf(options.messages)
       // The transcript before this turn: what a replay carries (plan A-5, independent of the
       // bridge; only the kill switch turns it off).
       const replaying = this.replayOn()
-      if (live === undefined) {
+      if (live !== undefined && live.skillCatalog !== undefined && live.skillCatalog !== skillCatalog(live)?.key) {
+        try {
+          if (codexRow && live.nativeOff === true) ensureCatalog(live.offCatalog)
+          await this.refork(agent, live, dshAgent, options.signal, { renew: true })
+        } catch (error) {
+          if (archived()) return yield finish('stop')
+          if (live.held !== undefined) return yield* stopped(live.held)
+          this.end(sessionId, live)
+          const left = this.unanswered(agent, error, 'refreshing its Skills catalog')
+          if (left !== undefined) return yield left
+          return yield finish('error', `${agent.name} would not refresh its session: ${error?.message ?? error}`)
+        }
+        live.skillCatalog = undefined
+        fresh = renewedForSkills = true
+        // The DSH Session and its visible transcript stay in place. Rebuild
+        // the provider context from its durable rows, which have no catalog.
+        replaySource = durableHistory()
+        live.owed = { renewed: true, skills: true }
+        const blocks = replayOf(replaySource, live.owed)
+        live.replay = blocks.length > 1 ? blocks : undefined
+      } else if (live === undefined) {
         crossing = replaying && prior !== undefined && prior !== options.provider
         const state = {
           fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox,
@@ -1910,6 +1959,13 @@ export class AcpAdapter extends LlmAdapter {
             const codexOff = codexRow && !preOn
             const nativeOff = spawnOmpManaged ? !ompNativeAllowed() : codexRow ? codexOff : undefined
             entry.nativeOff = state.nativeOff = nativeOff
+            const agyOff = agy && nativeOff === true
+            let prepareAgySkills = agyOff && agySkillsWanted() !== undefined
+            if (prepareAgySkills) {
+              await this.backchannel.listen()
+              checkArchive()
+              prepareAgySkills = canMountSkills()
+            }
             if (codexOff) {
               // ON when the turn started, OFF now: a staged image grant cannot come with it.
               if (fileOwner !== undefined) {
@@ -1927,12 +1983,15 @@ export class AcpAdapter extends LlmAdapter {
               : {
                   ...(fileContext === undefined ? {} : { sessionFiles: fileContext }),
                   ...(nativeOff === true ? { nativeOff: true } : {}),
+                  ...(prepareAgySkills ? { skillBridge: true } : {}),
                 }
             const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
             // omp's launch spec is synchronous and it has no bridge to prepare.
             // Keep its policy decision and actual spawn in the same event-loop turn.
-            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, offRecheck, ...spec } = omp ? launch : await launch
+            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, agySkillsVersion, offRecheck, ...spec } = omp ? launch : await launch
             checkArchive()
+            state.agySkillsVersion = agySkillsVersion
+            const agySkills = agySkillsVersion !== undefined
             if (spawnOmpManaged && entry.held !== undefined) return yield* stopped(entry.held)
             // The check measured these models with no tool block: kept from now on (B1-4 (b)). When
             // this turn's model is one of them it runs as today, in this same turn.
@@ -1971,7 +2030,8 @@ export class AcpAdapter extends LlmAdapter {
             const decision = this.bridgeDecision(agent, sessionId, codexOff)
             const bridged = decision.on
             state.bridgeDefault = decision.setting === undefined ? bridged : undefined
-            if (bridged) {
+            const skillOnly = !bridged && (agyOff ? agySkills : canMountSkills())
+            if ((bridged || skillOnly) && !agySkills) {
               await this.backchannel.listen()
               checkArchive()
             }
@@ -1996,8 +2056,11 @@ export class AcpAdapter extends LlmAdapter {
             const roleExtras = bridged && agent.disableBuiltInTools !== true && decision.setting !== true && this.roleToolsInDsh(sessionId)
             const twinsOff = codexRow ? !codexOff && roleExtras : spawnNative || roleExtras
             state.twinsOff = twinsOff
-            if (bridged) {
-              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true, native: twinsOff })
+            if (bridged || skillOnly) {
+              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name,
+                promptRunning: () => state.open === true && state.run?.busy === true,
+                promptSkillRefusals: () => state.open && state.run?.busy ? state.run.promptSkillRefusals : undefined,
+                native: twinsOff, skillOnly })
             }
             this.diagnostics?.started(sessionId, this, agent, state)
             const run = new AgentRun({
@@ -2014,12 +2077,14 @@ export class AcpAdapter extends LlmAdapter {
               mcpServers: state.bridge === undefined ? [] : [this.bridgeServer(state.bridge)],
               // Native-tools mode: the built-in tools stay on (`disableBuiltInTools: false`), with
               // the hard ask rules unless the level is Full.
-              ...(spawnNative && !codexRow
+              ...(agySkills ? { sessionMeta: { antigravity: { eagerMcpServers: [BRIDGE_NAME] } } }
+                : spawnNative && !codexRow
                 ? { sessionMeta: { ...(spawnAsks ? agent.hardAsk() : {}), disableBuiltInTools: false } }
                 : bridged && agent.disableBuiltInTools === true
                   ? { sessionMeta: { disableBuiltInTools: true } }
                   : spawnAsks ? { sessionMeta: agent.hardAsk() } : {}),
               dshTools: bridged,
+              skillBridge: state.bridge !== undefined && SKILL_BRIDGE_PROVIDERS.has(options.provider),
               ...(omp && nativeOff === true ? {
                 refuseTools: true,
                 onForbiddenTool: () => {
@@ -2037,9 +2102,12 @@ export class AcpAdapter extends LlmAdapter {
                 },
               } : {}),
               refresh: agent.refresh,
-              // Antigravity has no bridge: its start records agy's version and, OFF, checks that it
-              // loaded its settings, after session/new and before the first prompt.
-              onReady: agyReady ?? (state.bridge === undefined ? undefined : () => this.ready(agent, state)),
+              // Keep Antigravity's settings check before a prompt, including when
+              // session/new also mounted the Skills bridge.
+              onReady: state.bridge === undefined ? agyReady : async run => {
+                await agyReady?.(run)
+                await this.ready(agent, state)
+              },
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
               // In native-tools mode a built-in call is the point, not drift: it gets its mirror
               // card and DSH's approval like any call of an agent without the bridge.
@@ -2138,17 +2206,25 @@ export class AcpAdapter extends LlmAdapter {
         }
         live = state
         fresh = true
-        if (crossing) {
+        if (relaunchForSkills) {
+          renewedForSkills = true
+          replaySource = durableHistory()
+          live.owed = { renewed: true, skills: true }
+          const blocks = replayOf(replaySource, live.owed)
+          live.replay = blocks.length > 1 ? blocks : undefined
+        } else if (crossing) {
           this.appendBoundary(dshAgent, agent, options.provider)
           live.owed = { from: this.agents.get(prior)?.name ?? 'DSH' }
-          live.replay = replayBlocks(history, { redact: this.redact, to: agent.name, ...live.owed })
+          replaySource = history
+          live.replay = replayOf(replaySource, live.owed)
         } else if (replaying && answered(history)) {
           // A new session of the same agent in a chat that already has answers (a restart, a
           // session ended by a crossing or a flip, the first real turn of a Bot part whose
           // handoff turn the Bot team answered itself) is a crossing too: the chat, the handoff
           // package included, reaches it. No boundary row: the chat did not change providers.
-          const blocks = replayBlocks(history, { redact: this.redact, to: agent.name, renewed: true })
+          const blocks = replayOf(history, { renewed: true })
           if (blocks.length > 1) {
+            replaySource = history
             live.owed = { renewed: true }
             live.replay = blocks
           }
@@ -2156,29 +2232,34 @@ export class AcpAdapter extends LlmAdapter {
           // The kill switch carries no chat, but a Bot part's handoff package is not chat: it is the record the
           // part starts from, which the Bot team acknowledged itself, so the agent has never read it. It goes
           // ahead of the person's words in this first prompt, once, the way the replay would carry it.
-          const row = unreadHandoff(history)
+          const row = unreadHandoff(historyOf(history))
           const line = row === undefined ? undefined : renderMessage(row)
           if (line !== undefined) {
             live.owed = { renewed: true, handoff: true }
             live.replay = [{ type: 'text', text: this.redact(line) }]
           }
         }
-      } else if (replaying && live.replay !== undefined) {
+      } else if (live.owed?.skills || (replaying && live.replay !== undefined)) {
         // The last turn never reached its prompt (a refused model, a busy agent): its replay is
         // still owed, read again over the chat as it is now. Its row is already written.
-        const source = live.owed?.missed === true ? missedBy(history, options.provider) : history
-        if (source !== undefined) live.replay = replayBlocks(source, { redact: this.redact, to: agent.name, ...live.owed })
+        replaySource = live.owed?.skills ? durableHistory()
+          : live.owed?.missed === true ? missedBy(history, options.provider) : history
+        if (replaySource !== undefined) {
+          const blocks = replayOf(replaySource, live.owed)
+          live.replay = blocks.length > 1 ? blocks : undefined
+        }
       } else if (replaying) {
         // A live session resumed after the chat answered elsewhere (an agent whose session a
         // move off it keeps, Codex by default): the turns it missed are replayed before the
         // prompt, so Codex -> API -> Codex loses nothing, and the move back writes its row.
         const missed = missedBy(history, options.provider)
         const owed = { from: this.agents.get(prior)?.name ?? 'DSH', missed: true }
-        const blocks = missed === undefined ? [] : replayBlocks(missed, { redact: this.redact, to: agent.name, ...owed })
+        const blocks = missed === undefined ? [] : replayOf(missed, owed)
         if (blocks.length > 1) {
           if (prior !== undefined && prior !== options.provider) this.appendBoundary(dshAgent, agent, options.provider)
           live.owed = owed
           live.replay = blocks
+          replaySource = missed
         }
       }
       // A preset or level change since the last turn: the bridge serves the new set, and an
@@ -2326,8 +2407,10 @@ export class AcpAdapter extends LlmAdapter {
         if (live.ownSent === true || live.fileOwner) this.end(sessionId, live)
         return yield finish('error', `${agent.name} would not take DSH's permission level: ${error?.message ?? error}`)
       }
+      const currentSkills = personCalls => skills?.project(options, { ...skillOptions, turnStart: inputStart, personCalls }) ?? options
+      const beforeUploads = currentSkills()
       const uploads = uploadBlocks(
-        options.messages, this.redact, dshAgent?.session, this.ctx)
+        beforeUploads.messages, this.redact, dshAgent?.session, this.ctx)
       const uploadRun = live.run
       const uploadSession = uploadRun.sessionId
       // Only the asynchronous upload path uses this stricter ownership check. Never
@@ -2405,7 +2488,7 @@ export class AcpAdapter extends LlmAdapter {
       // A new agent session in a chat that already has answers says so once, in a row of its
       // own before the reply (bots-dsh's fallback.js writes its notice the same way). The
       // prompt below was read before it, and promptOf leaves it out of later ones.
-      if (fresh && live.replay === undefined && options.messages.some(message => message.role === 'assistant')) {
+      if (fresh && !renewedForSkills && live.replay === undefined && options.messages.some(message => message.role === 'assistant')) {
         try {
           dshAgent?.session?.append?.('user/message', freshSessionNotice(agent.name), { surfaceOp: 'append' })
         } catch (error) {
@@ -2428,15 +2511,39 @@ export class AcpAdapter extends LlmAdapter {
       }
       if (archived() || this.isArchived(sessionId)) return yield finish('stop')
       if (!uploadValid()) return yield uploadStopped()
+      const personCalls = new WeakSet()
+      const send = currentSkills(personCalls)
+      const catalog = skillCatalog(live)
+      if (agy && live.nativeOff === true && live.agySkillsVersion !== agySkillsWanted()) {
+        return yield* this.step(options, entry)
+      }
+      if (live.skillCatalog !== undefined && live.skillCatalog !== catalog?.key) {
+        // A catalog edit can land while the model or permission mode is being
+        // set. Re-enter before sending to the session with that catalog.
+        return yield* this.step(options, entry)
+      }
+      const replay = live.replay === undefined || replaySource === undefined ? live.replay : replayOf(replaySource, live.owed)
+      if (prepared !== undefined && (!isDeepStrictEqual(send.messages, beforeUploads.messages) ||
+          !isDeepStrictEqual(replay ?? [], live.replay ?? []))) return yield uploadStopped()
       const cutRows = prepared === undefined && fresh && (live.replay === undefined || live.owed?.handoff === true)
-        ? cutUserRows(options.messages, dshAgent?.session) : []
+        ? cutUserRows(send.messages, dshAgent?.session) : []
       const cutIds = new Set(cutRows.map(row => row.id))
-      const current = cutRows.length === 0 ? options.messages : options.messages.filter(row => !cutIds.has(row.id))
+      const current = cutRows.length === 0 ? send.messages : send.messages.filter(row => !cutIds.has(row.id))
       const recovered = cutRows.length === 0 ? [] : [
-        ...replayBlocks(cutRows, { redact: this.redact, to: agent.name, renewed: true }),
+        ...replayOf(cutRows, { renewed: true }),
         { type: 'text', text: 'The previous turn was interrupted. Check any tool outcomes before repeating work.' },
       ]
-      const prompt = prepared ?? [...(live.replay ?? []), ...recovered, ...promptOf(current, this.redact)]
+      const prompt = prepared ?? [...(replay ?? []), ...recovered, ...promptOf(current, this.redact)]
+      if (catalog?.text && live.skillCatalog !== catalog.key) {
+        if (live.bridge === undefined) return yield finish('error', 'Send this turn again.', 'acp_bridge_missing')
+        const block = { type: 'text', text: this.redact(catalog.text) }
+        // A prepared upload still represents these rows after the equality check
+        // above. Use the checked parts in the final selection to order either prompt.
+        const hasPersonCall = promptRows(current).rows.some(row =>
+          Array.isArray(row.content) && row.content.some(part => personCalls.has(part)))
+        if (hasPersonCall) prompt.unshift(block)
+        else prompt.push(block)
+      }
       if (prepared !== undefined) {
         try { checkUploadSize(uploadRun.sessionId, prompt) } catch (error) {
           return yield finish('error', error.message, 'acp_upload_content')
@@ -2470,6 +2577,10 @@ export class AcpAdapter extends LlmAdapter {
       if (sonnetPin && live.run.acknowledgedModel() !== SONNET_PIN) {
         return yield finish('error', `${agent.name} did not acknowledge the pinned Sonnet model.`)
       }
+      if (agy && live.nativeOff === true && live.agySkillsVersion === undefined &&
+          skills?.available(sessionId) === true && agent.agySkillsVersion?.() === undefined) {
+        skills.noticeAgyUnavailable?.(session)
+      }
       started()
       live.replay = undefined
       live.owed = undefined
@@ -2484,7 +2595,8 @@ export class AcpAdapter extends LlmAdapter {
       live.confinedReason = undefined
       live.toolIds?.clear()
       this.modelAnswers.set(live.run, { model: options.model, turn: entry.modelTurn, session: live.run.sessionId })
-      live.run.prompt(prompt).catch(() => {})
+      live.skillCatalog = catalog?.text ? catalog.key : undefined
+      live.run.prompt(prompt, () => skills?.admit({ ...send, messages: promptRows(current).rows }, session)).catch(() => {})
       // The notice belongs to this prompt, including any step after a mirror result.
       if (substitution !== undefined) live.substitution = { ...substitution, signal: options.signal }
     }
@@ -2527,14 +2639,15 @@ export class AcpAdapter extends LlmAdapter {
         // A subagent's nested call at Auto already ran through the pipeline inside its Agent
         // card's step: its card is written, so this queued update is not a second one.
         if (tool.cardExecuted !== undefined) continue
+        if (live.run.refuseUnavailableSkill(tool)) continue
         // A DSH tool call is not a mirror call: the bridge writes its rows and DSH draws the one
         // card from them. On `acp-codex` no structured name is proven, so any MCP call there is
         // left to the bridge too; its own tools keep their cards.
         // `ToolSearch` is the adapter's own deferred-tool loader (it stays with `tools: []`); it
         // is not a DSH tool and gets no card or dialog either.
-        const skip = tool.drift === true || tool.bridge === true
-          || tool.structuredName === 'ToolSearch'
-          || (agent.refresh === 'fork' && tool.mcp === true)
+        const skip = tool.skillBridge === true || (live.bridge?.skillOnly !== true && (
+          tool.drift === true || tool.structuredName === 'ToolSearch'
+          || (!tool.skillConflict && (tool.bridge === true || (agent.refresh === 'fork' && tool.mcp === true)))))
         if (live.bridge !== undefined && skip) {
           live.run.answerSkippedMcp(tool)
           if (tool.drift === true) {
@@ -2548,6 +2661,7 @@ export class AcpAdapter extends LlmAdapter {
         }
         yield* shown()
         await settle(tool, DETAIL_WAIT_MS)
+        if (live.run.refuseUnavailableSkill(tool)) continue
         if (archived()) {
           yield* blocks.close()
           return yield finish('stop')

@@ -1,3 +1,4 @@
+import { SKILLS_PANEL, SkillsScreen } from './skills-screen.js'
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
 import { bootView, checkViewer, isRetired, onRetire, requestViewer, revalidateViewerOnRefusal, startViewer } from './viewer.js'
@@ -53,7 +54,8 @@ import { AnsweredReply, WidgetDock, WIDGET_CSS } from './widget-cell.js'
 import { HandoffDock, HANDOFF_CSS } from './handoff-card.js'
 import { AppAccessDock, ComputerHandoffDock, ComputerIndicator, COMPUTER_CSS } from './computer.js'
 import { headerNavigation, installHeaderNavigation } from './header-navigation.js'
-import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
+import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, registerSkillActivity, SkillActivityCell, SkillNoticeCell, TurnTailCell, ToolCell } from './cells.js'
+import { SKILL_ACTIVITY } from '../shared/skill-activity.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
 import { SETTINGS_CARD_CSS, setSettingsPages } from './settings-card.js'
@@ -1324,6 +1326,10 @@ function applyOwner(ctx, { gated = false } = {}) {
       inject: () => ({ onBack: () => ctx.layout.selectPanel(null), onReshowCode: actions.reshowCodePane }),
     }, SeatChatPanel)),
     () => ctx.slots.inject('main', () => ctx.slots.register({
+      name: 'main', key: SKILLS_PANEL,
+      inject: () => ({ actions, rosterSource: roster, onBack: () => ctx.layout.selectPanel(null) }),
+    }, SkillsScreen)),
+    () => ctx.slots.inject('main', () => ctx.slots.register({
       name: 'main', key: CODE_PANEL,
       inject: () => ({ onBack: codePanel.close, openSeat: actions.openSeat, useSeatRoster }),
     }, CodeMainPanel)),
@@ -1416,6 +1422,8 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => shadow('conversation.composer.dock', { id: 'bot-native-note', order: 20, inject: face }, NativeControlsNote),
     () => shadow('conversation.composer.dock', { id: 'bot-review-guard-off', order: 21, inject: face }, GuardOffLine),
     () => shadow('conversation.chat.node', { key: 'assistant-step', priority: BOT_PRIORITY, locale: 'chat', inject: assistantFace }, AssistantCell),
+    () => registerSkillActivity(ctx),
+    () => shadow('conversation.chat.node', { key: SKILL_ACTIVITY, priority: BOT_PRIORITY, locale: 'chat', inject: face }, SkillActivityCell),
     () => shadow('conversation.chat.node', { key: 'turn-trigger', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TriggerCell),
     () => shadow('conversation.chat.node', { key: 'tool-call', priority: BOT_PRIORITY, locale: 'chat', inject: face }, ToolCell),
     () => simpleOnly(() => shadow('conversation.chat.node', { key: 'turn-process', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TurnProcessCell)),
@@ -1439,7 +1447,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => simpleOnly(() => shadow('conversation.chat.node', { key: 'compaction', priority: BOT_PRIORITY, locale: 'chat' }, CellEmpty)),
     // A Bot chat leaves DSH's context lines (tool updates, injected context) out; a Bot
     // message spliced in mid-turn gets an event line from the step that reads it instead.
-    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'context', priority: BOT_PRIORITY, locale: 'chat' }, CellEmpty)),
+    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'context', priority: BOT_PRIORITY, locale: 'chat' }, SkillNoticeCell)),
     ...(canDrawUserMessages() ? ['user', 'steering'].map(key => () => shadow('conversation.chat.node', { key, priority: BOT_PRIORITY, locale: 'chat', inject: face }, UserMessageCell)) : []),
     () => installPackCell('conversation.input.permission', 'permission'),
     () => simpleOnly(() => shadow('conversation.input.plan', { priority: BOT_PRIORITY }, Nothing)),

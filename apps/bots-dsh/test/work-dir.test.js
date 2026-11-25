@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { homedir, hostname, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session } from '@deepseek-ai/dsh-session'
 import { apply } from '../index.js'
@@ -10,6 +11,7 @@ import { SOURCE_KIND } from '../src/host/constants.js'
 import { dshHomeOf } from '../src/host/folders.js'
 import { escapeRegExp } from '../src/host/text.js'
 import { fakeApproval, fakeContext } from './fake-ctx.js'
+import { captureWaterfall } from './support/capture-waterfall.js'
 import { until } from './until.js'
 import { createUnfold } from './fake-unfold-bot.js'
 
@@ -52,6 +54,7 @@ async function start({ services = {}, workspaces = [], llm, team: saved = TEAM, 
   process.env.DSH_HOME = dsh
 
   const ctx = fakeContext({ services: { unfoldSession: { sessionId: 'configured-unfold', ready: Promise.resolve() }, ...services } })
+  const preStepContext = captureWaterfall(ctx, 'agent/pre-step')
   const created = []
   const archived = []
   const cwds = new Map()
@@ -116,9 +119,17 @@ async function start({ services = {}, workspaces = [], llm, team: saved = TEAM, 
     method: 'POST', body: JSON.stringify({ endpoint, payload }),
   }))).json()
   const tool = (name, args, sessionId) => rt.teamTools.find(d => d.name === name).execute(args, { agent: agentOf(sessionId), name, callId: 'c1' })
-  // Runs the parts check, registered last; 'next' means the step goes on.
-  const preStep = (sessionId, messages = [], step = 1) => ctx.listeners.get('agent/pre-step').at(-1)(
-    { agent: agentOf(sessionId), messages, step, signal: AbortSignal.timeout(60_000) }, async () => 'next')
+  const preStep = async (sessionId, messages = [], step = 1) => {
+    let reachedTerminal = false
+    const decision = await agentEvents(preStepContext, agentOf(sessionId)).waterfall('agent/pre-step',
+      { messages, turn: 1, step, signal: AbortSignal.timeout(60_000), modelSelection: { provider: 'test', model: 'test' } },
+      async () => {
+        reachedTerminal = true
+        return { kind: 'enter', messages }
+      })
+    // Distinguish DSH's normal entry from a takeover returning its own decision.
+    return reachedTerminal && decision.kind === 'enter' ? 'next' : decision
+  }
   const state = () => JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
   // Waits until the Bot's own chat runs in `dir` and its move has finished.
   const workingIn = async (botId, dir) => {

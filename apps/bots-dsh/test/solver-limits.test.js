@@ -1925,6 +1925,53 @@ test('Only a current affirmative person instruction enables request Auto', async
   assert.match(h.rt.roleRuntime.prompt('solver', h.agentOf('solver')), /Limits: 3 fix attempts/)
 })
 
+test('Skills loads are reads under the Solver attempt hold and preserve check evidence', async t => {
+  for (const name of ['load_skill', 'mcp__dsh__load_skill']) {
+    await t.test(name, async sub => {
+      const h = await setup(sub, { reviewGuard: true })
+      const { request, send, verdict, delivered } = await reviewedPlan(h, ['check-a'])
+      assert.match(await checked(h, request, 'skill-read-pass'), /^Recorded\./)
+      await send('result')
+      verdict(delivered.at(-1).exchangeId)
+      const bot = h.rt.botOf('solver')
+      const progress = () => bot.reviewTrack.solver
+      const before = structuredClone(progress())
+      assert.deepEqual(before.passed, ['check-a'])
+      assert.equal(before.review.verdict, 'SHIP')
+
+      progress().limit = { kind: 'replan', at: bot.reviewTrack.requestAt }
+      const reads = { relevant: false, checkCommand: false, compareResult: false }
+      for (const read of ['recall', 'solver_progress']) {
+        const { relevant, checkCommand, compareResult } = h.rt.solverCall(bot, read, {})
+        assert.deepEqual({ relevant, checkCommand, compareResult }, reads, read)
+        assert.equal(await h.execute(read, {}), 'ran', read)
+      }
+      for (const [work, args] of [
+        ['remember', {}], ['write', { file_path: 'out' }], ['bash', { command: 'fake work' }],
+      ]) {
+        assert.equal(h.rt.solverCall(bot, work, args).relevant, true, work)
+        await assert.rejects(h.execute(work, args), /attempt limit/, work)
+      }
+
+      const args = { name: 'planning-notes' }
+      const { relevant, checkCommand, compareResult } = h.rt.solverCall(bot, name, args)
+      const underLimit = await h.execute(name, args).catch(error => error.message)
+      const afterHeldRead = structuredClone(progress())
+      delete afterHeldRead.limit
+      delete progress().limit
+      assert.equal(await h.execute(name, args), 'ran')
+      assert.deepEqual({
+        classification: { relevant, checkCommand, compareResult },
+        underLimit,
+        passed: progress().passed,
+        verdict: progress().review?.verdict,
+      }, { classification: reads, underLimit: 'ran', passed: ['check-a'], verdict: 'SHIP' })
+      assert.deepEqual(afterHeldRead, before)
+      assert.deepEqual(progress(), before)
+    })
+  }
+})
+
 test('The attempt hold survives Bot traffic, a role change and a restart until its question is answered', async t => {
   let h = await setup(t, { reviewGuard: true })
   const request = await requestOf(h)

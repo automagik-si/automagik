@@ -1,6 +1,6 @@
 export { call } from './api.js'
 export { Card, Row } from './bot-settings.js'
-export { Nothing, Shimmer } from './cells.js'
+export { Nothing, Shimmer, SkillActivityRow } from './cells.js'
 export { t } from './i18n.js'
 export { LEFT_BAR_CSS } from './left-bar-css.js'
 export { BotMark, catalogueLookOf, lookOf } from './mark.js'

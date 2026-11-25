@@ -210,7 +210,7 @@ test('A5 a team with no Antigravity Bot loads without a write; the marker rides 
 })
 
 test('V1 the view carries acp-dsh\'s Details facts for an Antigravity Bot only, and the row shows them', async t => {
-  let notes = { unchecked: '1.5.15', hooks: true, plugins: true, fresh: true }
+  let notes = { unchecked: '1.5.15', hooks: true, plugins: true, fresh: true, skillsUnavailable: true }
   let reads = 0
   const { open } = workspace(t)
   const h = open({ acp: { nativeArgsAgents: [AGY, 'acp-omp'], nativeOffNotes: provider => { reads += 1; return provider === AGY ? notes : undefined } } })
@@ -220,9 +220,11 @@ test('V1 the view carries acp-dsh\'s Details facts for an Antigravity Bot only, 
   assert.equal(off.nativeToolsHooks, true)
   assert.equal(off.nativeToolsPlugins, true)
   assert.equal(off.nativeToolsFresh, true)
+  assert.equal(off.nativeToolsSkillsUnavailable, true)
   assert.deepEqual(notesOf(row(off)), [
     'Native tools off is checked on agy 1.5.15; this version was not checked.',
     'The check that Antigravity loaded its native-tools-off settings does not cover the first message after Antigravity starts, only the messages after it.',
+    'Skills cannot be loaded in Antigravity with native tools off on this version',
     "Antigravity can't start with native tools off while its settings hold a hooks.json file. Remove hooks.json to use it with native tools off.",
     "Antigravity can't start with native tools off while its settings hold plugins.",
     'Switch account on Antigravity in Settings starts it with empty settings; it also signs it out.',
@@ -230,7 +232,8 @@ test('V1 the view carries acp-dsh\'s Details facts for an Antigravity Bot only, 
   // ON: only the version line (no first-message line either).
   assert.deepEqual(notesOf(row(await h.view('agy'))), ['Native tools off is checked on agy 1.5.15; this version was not checked.'])
   const claude = await h.view('claude')
-  for (const key of ['nativeToolsUnchecked', 'nativeToolsHooks', 'nativeToolsPlugins', 'nativeToolsFresh']) assert.equal(Object.hasOwn(claude, key), false, key)
+  for (const key of ['nativeToolsUnchecked', 'nativeToolsHooks', 'nativeToolsPlugins', 'nativeToolsFresh',
+    'nativeToolsSkillsUnavailable']) assert.equal(Object.hasOwn(claude, key), false, key)
   // One read per view build, whatever the number of Antigravity Bots.
   reads = 0
   await h.view('agy')

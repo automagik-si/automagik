@@ -71,6 +71,9 @@ var LEGACY_LOCAL_CLIS = Object.freeze([
 ]);
 var SELECTOR_ROUTES = Object.freeze(["native", "acp", "herdr", "hermes-remote"]);
 
+// src/shared/skill-activity.js
+var SKILL_ACTIVITY = "skill-activity";
+
 // src/client/member-model.js
 var initialMember = {
   bots: [],
@@ -155,6 +158,7 @@ function MemberRows({ pages, roster, botId }) {
         (0, import_react.createElement)("div", { className: "bt-bubble" }, plain(row.text))
       );
     }
+    if (row.kind === SKILL_ACTIVITY) return (0, import_react.createElement)(import_gated_shared.SkillActivityRow, { key, name: row.name });
     return null;
   });
 }

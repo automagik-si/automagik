@@ -865,3 +865,122 @@ test('an authenticated agent can rename a Solver', async t => {
   assert.equal(rt.botOf('b').name, 'Changed')
   assert.equal(rt.botOf('b').instructions, solverInstructions())
 })
+
+test('the MCP agent cannot read or activate Skills or set them through update_bot', async t => {
+  const f = await fixture(t)
+  const form = { name: 'fixture-skill', description: 'A checked description.', content: 'CHECKED-FIXTURE-BODY' }
+  assert.equal((await f.call('skill-library-save', form)).ok, true)
+  const privateValue = 'private-untrusted-argument'
+  for (const [name, args] of [
+    ['skill-library-get', { name: form.name }],
+    ['bot-skill-add', { id: 'b', name: form.name, content: privateValue }],
+    ['bot-skill-mode', { id: 'b', name: form.name, mode: 'automatic' }],
+    ['update_bot', { id: 'b', skills: [form.name] }],
+  ]) {
+    const result = await f.tool(name, args)
+    assert.equal(result.error.code, -32602)
+    assert.doesNotMatch(JSON.stringify(result), /CHECKED-FIXTURE-BODY|private-untrusted-argument/)
+  }
+  assert.deepEqual((await f.call('skill-library', {})).value.active, {})
+  const audit = await readFile(join(f.home, 'skill-library', 'audit.jsonl'), 'utf8')
+  for (const action of ['skill-library-get', 'bot-skill-add', 'bot-skill-mode', 'update_bot']) {
+    const row = audit.trim().split('\n').map(JSON.parse).find(row => row.action === action)
+    assert.equal(row.caller, 'agent')
+    assert.equal(row.outcome, 'refused')
+  }
+  assert.doesNotMatch(audit, /CHECKED-FIXTURE-BODY|private-untrusted-argument/)
+})
+
+test('Skills data stays out of serialized judge, title and MCP inputs', async t => {
+  const f = await fixture(t, { rooms: { room: { id: 'room', name: 'Room', members: ['a', 'b'], log: [
+    { kind: 'automagik-skill-notice', text: 'PRIVATE-NOTICE', time: 1 },
+  ] } } })
+  const [{ Context }, testkit, llm, { default: SessionTitle }, FirstTitle, AllTitles, skills] = await Promise.all([
+    import('@deepseek-ai/cordis'),
+    import('@deepseek-ai/dsh-agent-loop-testkit'),
+    import('@deepseek-ai/dsh-llm'),
+    import('@deepseek-ai/dsh-session-title'),
+    import('@deepseek-ai/dsh-session-title-first-prompt-llm'),
+    import('@deepseek-ai/dsh-session-title-all-prompts-llm'),
+    import('../src/host/skill-library-call.js'),
+  ])
+  const skill = { name: 'fixture-skill', description: 'PRIVATE-CATALOG', content: 'CHECKED-FIXTURE-BODY', hash: 'fixture', mode: 'automatic' }
+  const person = '/fixture-skill hello'
+  const provider = 'deepseek-fixture'
+  const route = { provider, model: 'fixture' }
+  const root = new Context()
+  t.after(() => root.fiber.dispose())
+  await testkit.mountAgentLoopTestDependencies(root, { workingDirectory: true })
+  const outgoing = []
+  class Adapter extends llm.LlmAdapter {
+    async resolveModel(_, id) { return { provider, id, name: id, context: { contextWindow: 100_000 } } }
+    async *stream(options) {
+      outgoing.push(options)
+      yield { type: 'text-delta', index: 0, text: 'Fixture reply' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  root.llm.registerAdapter([provider], new Adapter())
+  await testkit.mountAgentLoopTestHarness(root)
+  await root.plugin(SessionTitle, { fallbackMaxWords: 8, fallbackMaxBytes: 200, maxTitleBytes: 256 })
+  skills.install({ ctx: root, selfOf: () => 'a', botOf: () => ({ id: 'a' }), load: async () => {},
+    skillLibrary: { active: () => [skill] } })
+  const agent = await root.agentLoop.create('a', route)
+  agent.followup(llm.createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: person }] }))
+  await agent.whenIdle()
+  const main = outgoing.find(request => request.purpose === undefined)
+  assert.match(JSON.stringify(main.messages), /CHECKED-FIXTURE-BODY/)
+  assert.match(JSON.stringify(main.messages), /PRIVATE-CATALOG/)
+
+  const titleConfig = { ...route, targetWords: 5, targetCjkCharacters: 12, maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 2000 }
+  for (const plugin of [FirstTitle, AllTitles]) {
+    const registration = root.plugin(plugin, titleConfig)
+    await registration
+    await root.sessionTitle.refresh(agent.session)
+    await registration.dispose()
+  }
+  const titles = outgoing.filter(request => request.purpose === 'session-title')
+  assert.equal(titles.length, 2)
+
+  const judgeRequests = []
+  f.ctx.llm = {
+    resolveModelInfo: async () => ({}),
+    async *stream(request) {
+      judgeRequests.push(request)
+      yield { type: 'text-delta', index: 0, text: '{"decision":"allow","reason":"fixture"}' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  const events = agent.session.snapshotEvents()
+  const marked = { ...events.find(event => event.type === 'user/message' && event.data.source.kind === 'user') }
+  marked.data = { ...marked.data, content: [{ type: 'text', text: person }, skills.skillPart('a', skill)] }
+  const loadCall = { type: 'tool/call', data: { callId: 'load', name: 'load_skill', arguments: { name: skill.name } } }
+  const judgement = await f.rt.autoJudge({ sessionId: 'a', session: { snapshotEvents: () => [marked, loadCall] },
+    bot: { name: 'Alpha', permissionAuto: 'own:deepseek-fixture/fixture' }, judge: 'own',
+    step: { callId: 'check', tool: 'read', args: { path: 'README.md' } } })
+  assert.equal(judgement.decision, 'allow')
+  assert.equal(judgeRequests.length, 1)
+  const judge = JSON.parse(judgeRequests[0].messages[0].content[0].text)
+
+  f.ctx.sessionController.page = async () => ({ records: [{ event: marked }], hasMore: false })
+  f.rt.roomSkillNotice('room', 'a', 'PRIVATE-NOTICE')
+  f.rt.logRoom(f.rt.roomOf('room'), { text: 'Normal group message' })
+  const chat = await f.tool('read_messages', { id: 'a' })
+  const group = await f.tool('read_messages', { id: 'room' })
+  const refusal = await f.tool('bot-skill-add', { id: 'b', name: skill.name })
+  assert.equal(refusal.error.code, -32602)
+  assert.deepEqual({
+    titles: titles.map(request => ({
+      person: JSON.stringify(request.messages).includes(person),
+      private: /CHECKED-FIXTURE-BODY|PRIVATE-CATALOG/.test(JSON.stringify(request.messages)),
+    })),
+    judge: { requests: judge.requests.map(row => row.text), calls: judge.callsThisTurn },
+    chat: chat.value?.items.map(row => row.text),
+    group: group.value?.items.map(row => row.text),
+    refusal: /Skills screen|Details/.test(JSON.stringify(refusal)),
+  }, {
+    titles: [{ person: true, private: false }, { person: true, private: false }],
+    judge: { requests: [person], calls: [] },
+    chat: [person], group: ['Normal group message'], refusal: false,
+  })
+})

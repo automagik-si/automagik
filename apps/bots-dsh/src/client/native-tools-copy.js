@@ -1,4 +1,7 @@
 import { effectiveMarkOf, NATIVE_AGENTS, nativeToolsOn } from '../shared/native-tools.js'
+import { AGY_OFF_SKILLS_NOTICE } from '../host/skill-message.js'
+
+export const AGY_OFF_SKILLS_GUIDANCE = 'Turn on Native tools to use Automatic skills in Antigravity.'
 
 // Details-only strings. Register them with the main client so the Code pane
 // keeps the same dictionary and standalone bundle.
@@ -45,12 +48,13 @@ export const NATIVE_TOOLS_HINTS = {
 // that the log check does not cover the first message after agy starts, then why an OFF start
 // refuses (hooks, plugins) and the way out (Switch account, never on Windows). The host sends
 // the facts (channel.js); a Bot not made yet has none, so only the first-message line.
-function antigravityNotes(bot, on) {
+function antigravityNotes(bot, on, skillsUnavailable) {
   const notes = []
   const copy = antigravityNativeToolsCopy
   if (typeof bot.nativeToolsUnchecked === 'string') notes.push({ key: copy.unchecked, values: { version: bot.nativeToolsUnchecked } })
   if (on) return notes
   notes.push({ key: copy.firstTurn })
+  if (skillsUnavailable) notes.push({ key: AGY_OFF_SKILLS_NOTICE })
   if (bot.nativeToolsHooks === true) notes.push({ key: copy.hooks })
   if (bot.nativeToolsPlugins === true) notes.push({ key: copy.plugins })
   if (bot.nativeToolsFresh === true && (bot.nativeToolsHooks === true || bot.nativeToolsPlugins === true)) notes.push({ key: copy.fresh })
@@ -77,9 +81,11 @@ export function nativeSwitchView(bot, roster) {
   // omp and Antigravity have no bridge: locked means no tools at all.
   const hint = blocked === undefined ? [on ? copy.on : copy.off]
     : copy.blocked !== undefined ? [blocked, copy.blocked] : [blocked]
-  const notes = mark === 'acp-antigravity' ? antigravityNotes(bot, on) : []
+  const skillsUnavailable = mark === 'acp-antigravity' && !on && bot.nativeToolsSkillsUnavailable === true
+  const notes = mark === 'acp-antigravity' ? antigravityNotes(bot, on, skillsUnavailable) : []
   return {
     mark, on, disabled: blocked !== undefined || Boolean(roster?.readOnly), blocked, hint,
+    ...(skillsUnavailable ? { skillsUnavailable } : {}),
     ...(notes.length === 0 ? {} : { notes }),
   }
 }
@@ -93,6 +99,8 @@ export const nativeToolsZh = {
   [antigravityNativeToolsCopy.hooks]: 'Antigravity 的设置中有 hooks.json 文件时，无法在关闭原生工具的情况下启动。删除 hooks.json 后即可在关闭原生工具时使用。',
   [antigravityNativeToolsCopy.plugins]: 'Antigravity 的设置中有插件时，无法在关闭原生工具的情况下启动。',
   [antigravityNativeToolsCopy.fresh]: '在设置中对 Antigravity 使用“切换账号”，会以空白设置重新开始，同时也会退出它的登录。',
+  [AGY_OFF_SKILLS_NOTICE]: '在此版本的 Antigravity 中，关闭原生工具时无法加载技能',
+  [AGY_OFF_SKILLS_GUIDANCE]: '开启原生工具即可在 Antigravity 中使用自动技能。',
   [ompNativeToolsCopy.on]: 'omp 在此 Bot 的所有对话中使用它自己的工具：单独对话、群组、任务和定时运行，无论是谁在与它对话。这些工具在 Automagik 的文件沙盒之外运行。关闭后会立即停止它正在运行的会话。',
   [ompNativeToolsCopy.off]: '关闭后，omp 在此 Bot 的所有对话中都没有任何工具，此 Bot 只能聊天。开启后，从每个对话的下一条消息起生效。',
   [ompNativeToolsCopy.blocked]: '在这里 omp 没有任何工具，此 Bot 只能聊天。',
