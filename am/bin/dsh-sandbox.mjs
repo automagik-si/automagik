@@ -121,14 +121,37 @@ export function markerProblem(text) {
 }
 
 /**
+ * The DSH template's `[]` with a trailing YAML comment: at column 0, a space or tab before the
+ * `#`, and the comment (group 1, `#` included) runs to the line end. No CR anywhere.
+ */
+const EMPTY_FLOW_COMMENT = /^\[\][ \t]+(#[^\r\n]*)$/;
+/** A blank line or a full-line comment: only spaces or tabs before the `#`, no CR anywhere. */
+const BLANK_OR_COMMENT = /^[ \t]*(?:#[^\r\n]*)?$/;
+
+/**
+ * The commented template's line, or null. It must be the only content line, with no existing
+ * managed markers, so neither the surrounding YAML nor an existing block changes its meaning.
+ */
+function commentedTemplateLine(lines) {
+  const at = lines.findIndex((line) => EMPTY_FLOW_COMMENT.test(line));
+  if (at === -1) return null;
+  return lines.every((line, index) => index === at
+    || (BLANK_OR_COMMENT.test(line) && ![BEGIN, END].includes(line.trimEnd()))) ? at : null;
+}
+
+/**
  * The layer's top-level shape, without a YAML parser: comments and blank lines are skipped, so
  * only indentation and the first character of each content line count. This is a top-level
  * shape check, not YAML validation: an indented continuation line is accepted unparsed, and the
  * managed row is generated here. Returns `{ shape, line }`: 'empty' (comments/blank only), the
- * lone '[]' ('empty-flow', line set) or a block array ('block-array'). Throws a clear error for
- * a mapping, a scalar, a flow array with entries or a '[]' mixed with other content.
+ * lone '[]' ('empty-flow', line set; also `[] # comment` at column 0 when every other line is
+ * blank or a full-line comment other than a managed marker) or a block array ('block-array').
+ * Throws a clear error for a mapping, a scalar, a flow array with entries or a '[]' mixed with
+ * other content, an indented '[]' inside a block array included.
  */
 export function layerShape(text) {
+  const commented = commentedTemplateLine(text.split('\n'));
+  if (commented !== null) return { shape: 'empty-flow', line: commented };
   const content = [];
   text.split('\n').forEach((line, index) => {
     const trimmed = line.trim();
@@ -184,7 +207,11 @@ export function applyBlock(text, block) {
   if (begins.length === 0 && ends.length === 0 && shape.shape === 'empty') {
     next = text.trim() === '' ? `${block}\n` : appendBlock(text, block);
   } else if (begins.length === 0 && ends.length === 0 && shape.shape === 'empty-flow') {
-    lines.splice(shape.line, 1, ...block.split('\n'));
+    const [, comment] = EMPTY_FLOW_COMMENT.exec(lines[shape.line]) ?? [];
+    // A comment that reads as a marker keeps one leading space: it never becomes a marker.
+    const reserved = comment !== undefined && [BEGIN, END].includes(comment.trimEnd());
+    const kept = comment === undefined ? [] : [reserved ? ` ${comment}` : comment];
+    lines.splice(shape.line, 1, ...kept, ...block.split('\n'));
     next = withFinalNewline(lines.join('\n'));
   } else if (begins.length === 0 && ends.length === 0) {
     next = appendBlock(text, block);
@@ -194,6 +221,8 @@ export function applyBlock(text, block) {
     lines.splice(begins[0], ends[0] - begins[0] + 1, ...block.split('\n'));
     next = withFinalNewline(lines.join('\n'));
   }
+  const nextProblem = markerProblem(next);
+  if (nextProblem) throw new Error(`${nextProblem}; refusing to write`);
   if (layerShape(next).shape !== 'block-array') {
     throw new Error('the profile layer would not be one top-level block array; refusing to write');
   }
@@ -245,11 +274,20 @@ export function backupPath(profile, date = new Date()) {
 export function installRow({ profile, wrapper, packRoot = null, now = new Date() }) {
   const wrapperPath = resolveWrapper(wrapper);
   const path = resolve(profile);
-  let original = null;
+  let originalBytes = null;
   try {
-    original = readFileSync(path, 'utf8');
+    originalBytes = readFileSync(path);
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
+  }
+  const original = originalBytes?.toString('utf8') ?? null;
+  if (original !== null) {
+    const commented = commentedTemplateLine(original.split('\n'));
+    if (commented !== null && !originalBytes.equals(Buffer.from(original, 'utf8'))) {
+      // Keep the original refusal if decoding lost any bytes from the commented template.
+      throw new Error(`the profile layer is a flow array with entries at line ${commented + 1}: `
+        + 'only a top-level block array is supported');
+    }
   }
   const block = sandboxBlock(wrapperPath, packRoot);
   const next = original === null ? `${block}\n` : applyBlock(original, block);

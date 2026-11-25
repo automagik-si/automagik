@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 import { afterRound } from './relay-rows.js'
 import { createRuntime } from '../index.js'
 import { fakeAttachments, fakeContext } from './fake-ctx.js'
@@ -195,9 +196,12 @@ test('a group Session made before the member\'s level applied gets it on the nex
     listModels: async () => [{ id: 'v4-flash', name: 'v4-flash', inputModalities: ['text'] }],
     resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'high' } }),
   }
+  const services = { sessionPersistence: {
+    async open(id) { throw new SessionPersistenceNotFoundError(id) },
+  } }
   // Saved state from before the fix: 'gb' already exists and the Bot-level record
-  // already says applied — the bot-wide check would never revisit the group Session.
-  const host = await start(t, { members: ['a', 'b'], sessions: { a: 'ga', b: 'gb' } }, undefined, undefined,
+  // already says applied. The group Session has yet to write a log.
+  const host = await start(t, { members: ['a', 'b'], sessions: { a: 'ga', b: 'gb' } }, services, undefined,
     { b: { model: 'deepseek/v4-flash', effort: 'low', appliedModel: 'deepseek/v4-flash', appliedEffort: 'low' } }, llm)
   await host.call('state', {})
   // The group Session gets the member's level once; the own chat is not re-selected.

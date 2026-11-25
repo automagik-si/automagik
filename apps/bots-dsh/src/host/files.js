@@ -1,4 +1,4 @@
-import { rename as move } from 'node:fs/promises'
+import { open, rename as move } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 
 // On Windows a file cannot be replaced while another program has it open: another DSH
@@ -7,6 +7,21 @@ import { setTimeout as delay } from 'node:timers/promises'
 const BUSY = new Set(['EPERM', 'EACCES', 'EBUSY'])
 const TRIES = 6
 const WAIT_MS = 40
+const NO_DIRECTORY_SYNC = new Set(['EINVAL', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'])
+
+async function syncPath(path, flags) {
+  const handle = await open(path, flags)
+  try { await handle.sync() } finally { await handle.close() }
+}
+
+export const syncFile = path => syncPath(path, 'r+')
+
+export async function syncDirectory(path) {
+  if (process.platform === 'win32') return
+  try { await syncPath(path, 'r') } catch (error) {
+    if (!NO_DIRECTORY_SYNC.has(error?.code)) throw error
+  }
+}
 
 /**
  * Moves `temp` over `path`, trying again for a moment while Windows reports `path` busy.

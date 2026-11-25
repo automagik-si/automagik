@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { defaultShape } from '../src/client/characters.js'
 
 // The show_settings card draws the very page the Settings dialog draws (SettingsPage), from
 // the live roster: one page, two places, one way to save.
@@ -154,6 +155,42 @@ test('the usage card opens UsagePage focused on the Bot it names', () => {
   }
 })
 
+test('Usage resolves live Bot glyphs and passes the catalogue look for a deleted Bot', () => {
+  const live = { ...writer, role: 'Solver', avatar: { shape: 'frog' } }
+  const deleted = { id: 'gone', name: 'Gone', deleted: true }
+  const usage = {
+    now: '2026-11-24 12',
+    owners: [live, deleted].map(bot => ({ id: bot.id, key: bot.id, name: bot.name, kind: 'bot', deleted: bot.deleted })),
+    models: [{ key: 'test-model', name: 'Test model' }],
+    kinds: ['chat'],
+    rows: [0, 1].map(owner => ['2026-11-24 12', owner, 0, 0, 10, 0, 0, 5, 1]),
+  }
+  const [page] = walk(settings.SettingsPage({
+    shown: 'usage', roster: { ...roster, byId: { [live.id]: live } }, actions: {},
+  }), node => node.type?.name === 'UsagePage')
+  states = [usage]
+  const tree = page.type(page.props)
+  const glyphs = walk(tree, node => node.props.glyph?.type?.name === 'BotAvatar').map(node => node.props.glyph)
+  assert.equal(glyphs.length, 2)
+  const markFor = (id) => {
+    const glyph = glyphs.find(node => node.props.bot.id === id)
+    assert.ok(glyph)
+    const [mark] = walk(glyph.type(glyph.props), node => node.type?.name === 'BotMark')
+    assert.ok(mark)
+    return mark
+  }
+  const shapeOfMark = (mark) => {
+    const drawn = mark.type(mark.props)
+    return drawn.type(drawn.props).props['data-shape']
+  }
+  const current = markFor(live.id)
+  assert.equal(current.props.look, undefined)
+  assert.equal(shapeOfMark(current), defaultShape(live.id))
+  const fallback = markFor(deleted.id)
+  assert.equal(fallback.props.look?.shape, defaultShape(deleted.id))
+  assert.equal(shapeOfMark(fallback), defaultShape(deleted.id))
+})
+
 test('open without the pages registered, or on a page this window lacks, it says so', () => {
   states = [true, '']
   const missing = card.SettingsCard({ target: card.settingsTarget({ page: 'plugin:gone' }, roster), roster, actions: {} })
@@ -275,4 +312,36 @@ test('C8: Apply that meets a running reply asks first; Switch resends the model 
   } finally {
     react.useState = useState
   }
+})
+
+// #2056 D1.5 (G13d): while the review guard is on, only the person moves the Bot to another model,
+// in Settings: an older card with a model row says so and cannot Apply; without the guard it can.
+test('a model card for a guarded Bot shows the guard line and a disabled Apply; Open in Settings stays', async () => {
+  const proposal = { bot: 'b2', change: { model: 'p/new', role: 'Editor' } }
+  const saved = []
+  const actions = { updateBot: async (id, patch) => { saved.push([id, patch]) }, openSettings() {} }
+  states = ['open', '']
+  const guarded = card.ProposalCard({ proposal, roster: rosterOf({ ...editor, reviewGuard: true }), actions })
+  assert.match(textOf(guarded), /The review guard is on: change the model in Settings, not here\./)
+  const [apply] = walk(guarded, node => node.type === 'button' && textOf(node) === 'Apply')
+  assert.equal(apply.props.disabled, true)
+  await apply.props.onClick()
+  assert.deepEqual(saved, [])
+  assert.equal(walk(guarded, node => node.type === 'button' && textOf(node) === 'Open in Settings').length, 1)
+  // A card without a model row, and the same card for an unguarded Bot, are unchanged.
+  states = ['open', '']
+  const roleOnly = card.ProposalCard({ proposal: { bot: 'b2', change: { role: 'Editor' } }, roster: rosterOf({ ...editor, reviewGuard: true }), actions })
+  assert.doesNotMatch(textOf(roleOnly), /review guard/)
+  assert.equal(walk(roleOnly, node => node.type === 'button' && textOf(node) === 'Apply')[0].props.disabled, false)
+  states = ['open', '']
+  const free = card.ProposalCard({ proposal, roster: rosterOf(editor), actions })
+  assert.doesNotMatch(textOf(free), /review guard/)
+  assert.equal(walk(free, node => node.type === 'button' && textOf(node) === 'Apply')[0].props.disabled, false)
+  // A guarded card never asks the running-reply question (#2061 C8): the guard line and a
+  // disabled Apply stay in its place, so no Switch can move the model.
+  states = ['asking', '', 0]
+  const held = card.ProposalCard({ proposal, roster: rosterOf({ ...editor, reviewGuard: true }), actions })
+  assert.equal(walk(held, node => node.type?.name === 'RouteConfirm').length, 0)
+  assert.match(textOf(held), /The review guard is on: change the model in Settings, not here\./)
+  assert.equal(walk(held, node => node.type === 'button' && textOf(node) === 'Apply')[0].props.disabled, true)
 })

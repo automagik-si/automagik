@@ -15,10 +15,10 @@ import { pathToFileURL } from "node:url";
 
 import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, stableRootOf, workerArgs } from "../mods/am-sidebar/workers.js";
 import { startArgs } from "../mods/am-sidebar/launchArgs.js";
-import { hcVerbOf, launchHomeOf } from "../mods/am-sidebar/hcGuard.mjs";
+import { hcVerbOf, launchHomeOf, sharedSendAllowed } from "../mods/am-sidebar/hcGuard.mjs";
 import { STABLE_FILES, STABLE_FOLDERS, stableFilesCurrent, stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
 import { observe } from "../mods/am-sidebar/agyScan.js";
-import { SYNTHETIC, trustScreen, fileScreen } from "./agy-prompt-fixture.mjs";
+import { SYNTHETIC, trustScreen, fileScreen, capture } from "./agy-prompt-fixture.mjs";
 import { GUARD_APP, quietScreen, agyHookSource } from "./agy-guard-shapes.mjs";
 
 const ID = {
@@ -2344,7 +2344,7 @@ function assertAgyForwarded(s, result, args, reads) {
   }
 }
 
-test("RFC 0042 with the shipped empty table both wrappers read a working Antigravity pane once and forward it", (t) => {
+test("RFC 0042 with the shipped shapes both wrappers read a working Antigravity pane at a synthetic screen once and forward it", (t) => {
   const s = killScene(t), st = agyStable(s);
   for (const wrapper of agyWrappers) {
     const { at } = wrapper;
@@ -2366,6 +2366,16 @@ test("RFC 0042 both wrappers refuse a working Antigravity pane at either prompt 
       assertAgyHeld(s, agySend(s, st, wrapper), wrapper.at);
     }
   }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the kill shim refuses a working Antigravity pane at the captured trust prompt with the issue 1414 line", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const wrapper = agyWrappers.find((w) => w.entry === "shim");
+  editPane(s, wrapper.at, { status: { state: "working" }, screen: capture("folder-trust.txt"), foreground: AGY_FG });
+  const result = agySend(s, st, wrapper, undefined, { armed: false });
+  assertAgyHeld(s, result, wrapper.at);
+  assert.doesNotMatch(result.stdout + result.stderr, /\/work/);
   assert.equal(stableFilesCurrent(MOD, st.dir), true);
 });
 
@@ -2647,4 +2657,12 @@ test("the guard and proxy docs say what RFC 0044 decided for keys, attach, event
   }
   assert.match(row, /linked-machine row[^|]*left out, and the `machines` inventory is empty/, "the row keeps machines out");
   assert.match(list, /as the core answered it, nested fields included/, "hcProxy.md: only the envelope is reviewed");
+});
+
+test("#628 r3 G1 shared send grants require the exact role key and value", () => {
+  const caller = { bot: ID.dev, worker: false };
+  for (const role of ["reviewer", "fixer"]) assert.equal(sharedSendAllowed(team(), caller, { role }), true);
+  for (const labels of [{ role: "Reviewer" }, { role: "reviewer " }, { Role: "reviewer" }]) {
+    assert.equal(sharedSendAllowed(team(), caller, labels), false);
+  }
 });

@@ -11,6 +11,7 @@ import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
 import { isNotesPath, isNotesWrite, isWorkCall } from '../src/host/review-mark.js'
 import { answerSender } from '../src/host/turns.js'
+import { guardVerdictOf } from '../src/shared/review-guard.js'
 import { deliveryMark, verdictOf } from '../src/shared/review-mark.js'
 import { CALLER_BOT_KEYS } from '../src/host/caller-view.js'
 import { fakeContext } from './fake-ctx.js'
@@ -21,13 +22,11 @@ const step = () => wait(3)
 
 function bench(t) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-review-mark-'))
-  const ctx = fakeContext()
   const sessions = new Map()
   const agents = new Map()
   let created = 0
-  ctx.tools.schemas = () => ['bash', 'read', 'write', 'edit'].map(name => ({ name }))
-  ctx.tools.view = () => ({ restrictableNames: new Set(['bash', 'read', 'write', 'edit']), knownNames: new Set(['bash', 'read', 'write', 'edit']) })
-  Object.assign(ctx, {
+  const services = { agents: { list: () => [...agents.values()], get: id => agents.get(id) } }
+  const props = {
     workspaceRegistry: {
       get: () => undefined,
       resolveByPath: async () => undefined,
@@ -46,24 +45,66 @@ function bench(t) {
     },
     sessionTitle: { rename: async () => {} },
     sessions: { get: sessionId => sessions.get(sessionId), flush: async () => {} },
-  })
-  let route
-  const register = ctx.connection.fetch.register
-  ctx.connection.fetch.register = (options) => {
-    if (options.path === ROUTE) route = options
-    return register(options)
   }
-  apply(ctx, { home })
-  t.after(() => {
-    ctx.dispose()
+  let ctx
+  let rt
+  let route
+  const loadPlugin = () => {
+    ctx = fakeContext({ services })
+    ctx.tools.schemas = () => ['bash', 'read', 'write', 'edit'].map(name => ({ name }))
+    ctx.tools.view = () => ({ restrictableNames: new Set(['bash', 'read', 'write', 'edit']), knownNames: new Set(['bash', 'read', 'write', 'edit']) })
+    Object.assign(ctx, props)
+    const register = ctx.connection.fetch.register
+    ctx.connection.fetch.register = (options) => {
+      if (options.path === ROUTE) route = options
+      return register(options)
+    }
+    apply(ctx, { home })
+    rt = ctx.provided.get('omniTeam')
+  }
+  loadPlugin()
+  t.after(async () => {
+    await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   })
-  const rt = ctx.provided.get('omniTeam')
+  const reload = async () => {
+    await rt.save()
+    await ctx.dispose()
+    loadPlugin()
+    await rt.load()
+    return rt
+  }
   const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))).json()
   const guard = (exec) => (ctx.listeners.get('tools/execute') ?? [])[0](exec, async () => 'ran')
   let seq = 0
   const event = (sessionId, type, data) => {
     for (const listener of ctx.listeners.get('session/event') ?? []) listener({ id: sessionId }, { type, seq: ++seq, time: Date.now(), data })
+  }
+  const recordedReplies = new Set()
+  // The mark unit cases simulate verdicts the Solver has already read. The race
+  // cases opt into real host delivery and control when their fake agent reads it.
+  const replyInbox = (sessionId) => {
+    const agent = agents.get(sessionId)
+    recordedReplies.add(sessionId)
+    const nextTurn = []
+    agent.inbox = { nextStep: [], nextTurn }
+    agent.followup = (message) => {
+      const start = nextTurn.length
+      nextTurn.push(message)
+      event(sessionId, 'agent/inbox/spliced', { target: 'next-turn', start, inserted: [message] })
+      ctx.emit('agent/inbox/inserted', { agent, message })
+    }
+    return nextTurn
+  }
+  const takeReply = (sessionId, inbox, replyTo, { admitted = true } = {}) => {
+    const message = inbox.shift()
+    assert.equal(message?.source.replyTo, replyTo)
+    assert.equal(message.source.role, 'reply')
+    const turn = seq + 1
+    event(sessionId, 'turn/start', { turn })
+    event(sessionId, 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    ctx.emit('agent/inbox/claimed', { agent: agents.get(sessionId), message, turn })
+    if (admitted) event(sessionId, 'user/message', { id: message.id, content: message.content, source: message.source })
   }
   const text = value => [{ type: 'text', text: value }]
   // A person's message in the chat, and a turn that ends with `reply` (or nothing).
@@ -73,13 +114,14 @@ function bench(t) {
   }
   const endTurn = (sessionId, reply, reason = { kind: 'completed' }) => {
     if (reply) event(sessionId, 'assistant/message', { message: { content: text(reply) } })
-    event(sessionId, 'turn/end', { turn: seq, reason })
+    event(sessionId, 'turn/end', { turn: rt.live.get(sessionId)?.turn ?? seq, reason })
   }
   // The reviewer answering the Solver's request (the path every reply takes, turns.js), on the work
   // message_bot opened for it now (`opened: false`: a reply whose work is gone; `exchangeId`: a given one).
   const reply = (fromId, toId, value, { opened = true, exchangeId = `x${++seq}`, ...extra } = {}) => {
     if (opened && rt.state.works?.[exchangeId] === undefined) rt.openWork(exchangeId, { from: toId, to: fromId })
-    return answerSender(rt, fromId, { exchangeId, senderSessionId: toId, ...extra }, value)
+    const host = recordedReplies.has(toId) ? rt : { __proto__: rt, deliver: async () => {} }
+    return answerSender(host, fromId, { exchangeId, senderSessionId: toId, ...extra }, value)
   }
   // A Solver as the dialog makes it, through the person's create-bot route.
   const solver = async ({ reviewerId, brief = '' } = {}) => {
@@ -88,7 +130,7 @@ function bench(t) {
     return rt.botOf(answer.value.id)
   }
   const reviewer = async () => rt.createBot({ name: `Reviewer ${++created}`, role: 'Reviewer', instructions: 'Review.', pickModel: true })
-  return { ctx, rt, home, call, guard, person, endTurn, reply, solver, reviewer, sessions }
+  return { ctx, rt, home, call, guard, person, endTurn, reply, solver, reviewer, sessions, event, replyInbox, takeReply, reload }
 }
 
 // F9 (APP-TEST "Recheck on 262488524"): a Codex reviewer's replies, word for word with every name
@@ -135,6 +177,25 @@ test('verdictOf reads a whole-word verdict at the start of any line, after "Verd
     // SR6-2: a dash followed by a comment, not by another verdict word, still counts.
     ['SHIP - all checks pass', 'SHIP'], ['SHIP \u2014 all checks pass', 'SHIP'],
   ]) assert.equal(verdictOf(value), verdict, value)
+})
+
+// #2056 F3: a Codex reviewer's progress sentence glued to its verdict and a spaced dash (S4).
+test('verdictOf reads a verdict glued to a sentence\'s end before a spaced dash; quoted, indented or spaced lines are not read this way', () => {
+  for (const [value, verdict] of [
+    ["I'll inspect the delivered file directly and verify the two lines.SHIP — bom.md contains two lines.", 'SHIP'],
+    ["I'll read the note and check its line count against the request.BLOCKED — bom.md was not found.", 'BLOCKED'],
+    ['**I checked the plan.SHIP** — fine', 'SHIP'],
+  ]) assert.equal(verdictOf(value), verdict, value)
+  for (const value of [
+    '“He said done.SHIP — later”', "'He said done.SHIP — later'", '‘done.SHIP — x’', '«done.SHIP — x»',
+    '„done.SHIP — x“', 'The note reads “ready.”SHIP — ok', '    I checked.SHIP — fine',
+    // S6H-1: other quote marks, and a zero-width character before a leading quote.
+    'He wrote ‘done.SHIP — x’', '‹done.SHIP — x›', '「done.SHIP — x」', "​'He said done.SHIP — later'",
+    // S6H-2: spaces then a tab indent a code line too.
+    '  \tI checked.SHIP — fine',
+    // A space before the verdict is mid-sentence, as before.
+    'Done. SHIP — later',
+  ]) assert.equal(verdictOf(value), undefined, value)
 })
 
 test('a work call on every route: DSH tools, the dsh bridge, and an ACP agent\'s own tools', () => {
@@ -768,4 +829,254 @@ test('a delivery made while the reviewer still has the work is marked pending, n
   reply(ada.id, bot.id, 'SHIP')
   endTurn(bot.id, 'Done.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
+})
+
+test('D2 G2 a pin-only Solver is tracked through delivery', async t => {
+  const b = bench(t)
+  const solver = await b.solver()
+  solver.role = 'Researcher'
+  solver.roles = [{ id: 'solver', version: '3.1.2', attachedAt: '2026-11-24T00:00:00Z', grants: [] }]
+  b.person(solver.id, 'Review the fixture')
+  b.endTurn(solver.id, 'Review: fresh session. Done.')
+  const roster = (await b.call('state')).value
+  assert.equal(roster.bots.find(bot => bot.id === solver.id).reviewMark?.review, 'fresh')
+})
+
+// ---- Track 1 (#2056 combined-2 stage 6): the RESULT verdict is never recorded when the
+// reviewer's PLAN SHIP arrives before the Solver's plan-wait turn ends. Real order from
+// /tmp/automagik-2056-combined2-stage6/EXCHANGE.json and SOLVER-CHAT-RAW.json (turns 4-6).
+
+const PLAN_REPLY = 'SHIP\n\nPLAN approved. Dividing the sum by `values.length` after the existing empty-input guard gives `12 / 3 = 4` and preserves empty-input rejection. Delivery still requires an explicit RESULT SHIP verdict from this reviewer.'
+const RESULT_REPLY = 'SHIP\n\nExplicit RESULT SHIP verdict. PLAN approval preceded the edit. The submitted diff changes only the return line in `average.mjs`.\n\nThe Solver reports that the exact requested command exited `0` with one test passed and zero failed.'
+
+test('TRACK1 PARSE: both stage-6 replies read as SHIP by verdictOf and guardVerdictOf', () => {
+  assert.equal(verdictOf(PLAN_REPLY), 'SHIP')
+  assert.equal(verdictOf(RESULT_REPLY), 'SHIP')
+  assert.equal(guardVerdictOf(PLAN_REPLY, 'R'), 'SHIP')
+  assert.equal(guardVerdictOf(RESULT_REPLY, 'R'), 'SHIP')
+})
+
+// Wait for the actual host exchange to be recorded. The fake agent keeps followups
+// in its inbox until the test lets DSH's next turn take them as input.
+async function until(predicate) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (predicate()) return
+    await step()
+  }
+  assert.ok(predicate(), 'host reply did not reach the expected boundary')
+}
+
+async function run(t, { planAnsweredInsideTurn, resultAnsweredInsideTurn = false, clarification }) {
+  const { rt, guard, person, endTurn, reply, solver, reviewer, replyInbox, takeReply } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  await rt.resolveAgent(bot.id)
+  const inbox = replyInbox(bot.id)
+  const record = exchange => rt.ledger.records(`pair-${[ada.id, bot.id].sort().join('-')}`)
+    .find(row => row.role === 'reply' && row.replyTo === exchange)
+  const waitForReply = async (exchange) => {
+    await until(() => inbox.length === 1)
+    assert.equal(inbox[0].source.exchangeId, record(exchange)?.id)
+  }
+  const marks = []
+  const finish = (text) => {
+    endTurn(bot.id, text)
+    const mark = bot.reviewTrack.last
+    if (mark !== undefined && mark !== marks.at(-1)) marks.push(mark)
+  }
+  // Turn 4: the person's request; the Solver sends the PLAN (message_bot opens the work).
+  person(bot.id, 'Fix average.mjs so average([2,4,6]) returns 4.')
+  let afterClarification
+  if (clarification !== undefined) {
+    await step()
+    reply(ada.id, bot.id, clarification, { exchangeId: 'x-clarification' })
+    await until(() => record('x-clarification'))
+    assert.equal(inbox.length, 0)
+    finish('Waiting for the reviewer to clarify.')
+    afterClarification = {
+      delivered: bot.reviewTrack.delivered === true,
+      verdicts: bot.reviewTrack.verdicts,
+      planVerdictAt: bot.reviewTrack.planVerdictAt,
+    }
+    await waitForReply('x-clarification')
+    takeReply(bot.id, inbox, 'x-clarification')
+  }
+  await step()
+  rt.openWork('x-plan', { from: bot.id, to: ada.id })
+  await step()
+  if (planAnsweredInsideTurn) {
+    reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' })
+    await until(() => record('x-plan'))
+    assert.equal(inbox.length, 0, 'a recorded answer waits until the active turn ends')
+  }
+  await step()
+  finish('PLAN review sent. I am waiting for its verdict before editing.')
+  const afterTurn4 = { delivered: bot.reviewTrack.delivered === true, last: bot.reviewTrack.last && { ...bot.reviewTrack.last, at: 0 } }
+  if (!planAnsweredInsideTurn) { await step(); reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' }) }
+  await step()
+  // Turn 5: opened by the PLAN reply; edit, test, then the RESULT review goes out and the turn ends.
+  await waitForReply('x-plan')
+  takeReply(bot.id, inbox, 'x-plan')
+  await guard({ name: 'write', arguments: { file_path: 'average.mjs' }, agent: { id: bot.id } })
+  await step()
+  await guard({ name: 'mcp__dsh__bash', arguments: { command: 'node --test average.test.mjs' }, agent: { id: bot.id } })
+  await step()
+  rt.openWork('x-result', { from: bot.id, to: ada.id })
+  await step()
+  const resultVerdictAt = Date.now()
+  const answerResult = () => reply(ada.id, bot.id, RESULT_REPLY, { exchangeId: 'x-result' })
+  if (resultAnsweredInsideTurn) {
+    answerResult()
+    await until(() => record('x-result'))
+  }
+  finish('The fix and checks are complete. I am waiting for the RESULT verdict before delivery.')
+  const afterTurn5 = bot.reviewTrack.delivered === true
+  if (!resultAnsweredInsideTurn) {
+    // The recorded run received RESULT SHIP after turn 5 ended.
+    await step()
+    answerResult()
+  }
+  await step()
+  // Turn 6: opened by the RESULT reply; the real delivery.
+  await waitForReply('x-result')
+  takeReply(bot.id, inbox, 'x-result')
+  finish('Reviewer Bot: PLAN SHIP; RESULT SHIP. Updated average.mjs.')
+  const last = bot.reviewTrack.last
+  return { afterClarification, afterTurn4, afterTurn5, last, marks, verdicts: bot.reviewTrack.verdicts.map(v => v.verdict), resultVerdictAt }
+}
+
+test('TRACK1 RACE: PLAN SHIP inside the plan-wait turn, then edit, RESULT SHIP: marked plan and result reviewed', async (t) => {
+  const { afterTurn4, afterTurn5, last, marks, verdicts, resultVerdictAt } = await run(t, { planAnsweredInsideTurn: true })
+  t.diagnostic(JSON.stringify({ afterTurn4, verdicts, last, markedBeforeResult: last?.at < resultVerdictAt }))
+  assert.equal(afterTurn4.delivered, false, `the plan-wait turn was marked as the delivery: ${JSON.stringify(afterTurn4.last)}`)
+  assert.equal(afterTurn5, false)
+  assert.deepEqual(verdicts, ['SHIP', 'SHIP'])
+  assert.ok(last.at >= resultVerdictAt)
+  assert.deepEqual({ ...last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+  assert.deepEqual(marks, [last])
+})
+
+test('TRACK1 RESULT: a RESULT SHIP inside the result-wait turn holds delivery until its reply is taken', async (t) => {
+  const { afterTurn4, afterTurn5, last, marks } = await run(t, { planAnsweredInsideTurn: false, resultAnsweredInsideTurn: true })
+  assert.equal(afterTurn4.delivered, false)
+  assert.equal(afterTurn5, false)
+  assert.deepEqual({ ...last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+  assert.deepEqual(marks, [last])
+})
+
+test('TRACK1 CONTROL: PLAN SHIP after the plan-wait turn ends: marked plan and result reviewed', async (t) => {
+  const { afterTurn4, afterTurn5, last, marks } = await run(t, { planAnsweredInsideTurn: false })
+  assert.equal(afterTurn4.delivered, false)
+  assert.equal(afterTurn5, false)
+  assert.deepEqual({ ...last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+  assert.deepEqual(marks, [last])
+})
+
+test('TRACK1 CLARIFICATION: an early clarification holds delivery through consumption and both reviews', async (t) => {
+  const { afterClarification, afterTurn4, afterTurn5, last, marks, verdicts } = await run(t, {
+    clarification: 'Which behavior is required for empty input?',
+    planAnsweredInsideTurn: true,
+  })
+  assert.deepEqual(afterClarification, { delivered: false, verdicts: [], planVerdictAt: undefined })
+  assert.equal(afterTurn4.delivered, false)
+  assert.equal(afterTurn5, false)
+  assert.deepEqual(verdicts, ['SHIP', 'SHIP'])
+  assert.deepEqual({ ...last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+  assert.deepEqual(marks, [last])
+})
+
+test('TRACK1 LIFECYCLE: a queued reply survives inbox moves until the exact input is read or withdrawn', async (t) => {
+  const { ctx, rt, person, endTurn, event, reply, solver, reviewer, replyInbox, takeReply } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  const agent = await rt.resolveAgent(bot.id)
+  const inbox = replyInbox(bot.id)
+
+  person(bot.id, 'Review a change.')
+  endTurn(bot.id)
+  reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' })
+  await until(() => inbox.length === 1)
+  const exact = inbox.shift()
+  ctx.emit('agent/inbox/discarded', { agent, message: exact })
+  agent.followup({ ...exact, id: 'other-reply', source: { ...exact.source, exchangeId: 'other-exchange' } })
+  agent.followup(exact)
+  await step()
+  takeReply(bot.id, inbox, 'x-plan') // Same work, different exchange.
+  endTurn(bot.id, 'Still waiting for the review.')
+  assert.equal(bot.reviewTrack.delivered, undefined)
+
+  // Definitive withdrawal has no matching reinsertion.
+  assert.equal(inbox.shift(), exact)
+  ctx.emit('agent/inbox/discarded', { agent, message: exact })
+  await step()
+  event(bot.id, 'turn/start', { turn: 1000 })
+  endTurn(bot.id, 'Delivered after the review reply was withdrawn.')
+  assert.equal(bot.reviewTrack.delivered, true)
+})
+
+test('TRACK1 RELOAD: an accepted reply with a failed flush remains the sole actionable reply until consumed', async (t) => {
+  const { ctx, rt, event, person, endTurn, reply, solver, reviewer, replyInbox, takeReply, reload } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  const agent = await rt.resolveAgent(bot.id)
+  const inbox = replyInbox(bot.id)
+  let flushFailed = false
+  ctx.sessions.flush = async () => {
+    if (!flushFailed && inbox.length === 1) {
+      flushFailed = true
+      throw new Error('injected flush failure after accepting the reply')
+    }
+  }
+  person(bot.id, 'Review a change.')
+  endTurn(bot.id)
+  await step()
+  reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' })
+  await until(() => flushFailed)
+  const exact = inbox[0]
+  // Let the failed batch unwind. DSH keeps the reply and the running turn across reload.
+  const workBook = `pair-${[ada.id, bot.id].sort().join('-')}`
+  await rt.ledger.written(workBook)
+  await step()
+  agent.status = 'running'
+  event(bot.id, 'turn/start', { turn: 1000 })
+  const restarted = await reload()
+  await until(() => restarted.live.get(bot.id)?.turn !== undefined)
+  const restored = restarted.botOf(bot.id)
+  const retained = restarted.unreadOf(bot.id).map(item => item.exchangeId)
+  endTurn(bot.id, 'The review is still waiting to be read.')
+  const waitingMark = restored.reviewTrack.last
+  agent.status = 'idle'
+  // Recovery must see the existing inbox entry and leave the single original reply in place.
+  await Promise.all([restarted.resumesDone, wait(3500)])
+  const actionable = inbox.map(message => message.source.exchangeId)
+  takeReply(bot.id, inbox, 'x-plan')
+  endTurn(bot.id, 'Delivered after reading the review.')
+  assert.deepEqual({ waitingMark, retained, actionable }, {
+    waitingMark: undefined,
+    retained: [exact.source.exchangeId],
+    actionable: [exact.source.exchangeId],
+  })
+  const mark = restored.reviewTrack.last
+  assert.deepEqual({ ...mark, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
+  assert.deepEqual(restarted.unreadOf(bot.id), [])
+  event(bot.id, 'turn/start', { turn: 2000 })
+  endTurn(bot.id, 'A later message.')
+  assert.deepEqual(restored.reviewTrack.last, mark)
+})
+
+test('TRACK1 REJECTED: a claimed reply whose turn rejects the input releases the hold', async (t) => {
+  const { rt, person, endTurn, event, reply, solver, reviewer, replyInbox, takeReply } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  await rt.resolveAgent(bot.id)
+  const inbox = replyInbox(bot.id)
+  person(bot.id, 'Review a change.')
+  endTurn(bot.id)
+  reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' })
+  await until(() => inbox.length === 1)
+  takeReply(bot.id, inbox, 'x-plan', { admitted: false })
+  endTurn(bot.id, undefined, { kind: 'blocked' })
+  event(bot.id, 'turn/start', { turn: 1000 })
+  endTurn(bot.id, 'Delivered after the rejected step.')
+  assert.equal(bot.reviewTrack.delivered, true)
 })

@@ -319,7 +319,7 @@ test('a result that could not be written is not claimed, and is reported after a
 
 test('closing or dropping work retains result files until its state save succeeds', async (t) => {
   const { home } = bench(t)
-  const rt = { home, state: { works: {} }, botOf: () => undefined, readOnly: () => undefined, warn() {}, save: async () => {} }
+  const rt = { home, state: { works: {} }, botOf: () => undefined, readOnly: () => undefined, warn() {}, save: async () => true }
   installHandoffs(rt)
   rt.openWork('parent', { from: 'a', to: 'b' })
   rt.openWork('child', { from: 'b', to: 'c', parent: 'parent' })
@@ -343,7 +343,7 @@ test('closing or dropping work retains result files until its state save succeed
   restarted.dropWork('parent')
   assert.deepEqual(keptIn(home), ['child.txt'])
   writeFileSync(join(home, 'state.json'), JSON.stringify(restarted.state))
-  finishSave()
+  finishSave(true)
   await delay(0)
   assert.deepEqual(keptIn(home), [])
 })

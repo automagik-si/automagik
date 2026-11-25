@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-20, approved by the owner's delegate: Q1-Q5, Q7 and Q8 answered with this RFC's recommendations; Q6 answered: post R1-R6 as one comment on herdr-core#171, in English, without offering a PR; delivery 1 approved ahead of the answers as the fix of today's defect; none merged) |
+| Status | Accepted (2026-11-20, approved by the owner's delegate: Q1-Q5, Q7 and Q8 answered with this RFC's recommendations; Q6 answered, then amended on 2026-11-21 (see "Q6 amended" under the answers); delivery 1 approved ahead of the answers as the fix of today's defect; deliveries 1 and 2 and the §F interim merged (#1959, #1993, #2032); the herdr-core work is parked; #631 closed with the §F interim's native macOS proof, and deliveries 3-9 tracked in 'Status of deliveries 3-9') |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none for this RFC (docs only). Deliveries: herdr (3.N.P), with am's byte copies when a shared file changes; `apps/dsh-sandbox/` ships only through its byte-equal copy in the pack, never alone (`scripts/lane.ts:148-151`); herdr-core for the upstream request; owner steps for enablement |
 | Created | 2026-11-20 |
@@ -50,6 +50,10 @@ hides the real core socket from the sandboxed pane and puts a per-pane proxy at 
 | Rollout controls: per-Bot `hcProxy` from the approved roster snapshot, approved workers through the proxy, doctor rows; #747's three lows fixed (off-but-proxy-up warning, malformed-roster row, linked target platform check) and #778's items (#781) | #747, #750, #771, #781 |
 | Guard identity from the pane's launch record, not `HERDR_APP_HOME` | #1752 |
 | Guard forwards the address it checked | #1766 |
+| Delivery 1: core versions 0.1.14 and 0.1.21 supported, status checked on each new upstream connection, forced sends refused | #1959 (`18e202c91`) |
+| Delivery 2: exact roster bytes previewed and confirmed by digest; rootless containerd and BuildKit sockets masked; bwrap failures without payload status reported | #1993 (`45b9493fc`) |
+| §F interim: macOS doctor warning for an approved local dsh-tui proxy configuration (the macOS mask stays open) | #2032 (`05d69a29f`) |
+| §F interim proved natively: the five macOS doctor rows run on a macOS arm64 CI runner (ci.yml herdr-macos-doctor) | #2101 ([CI job](https://github.com/automagik-si/automagik/actions/runs/45454505051/job/138679093794)) |
 
 The guard's own `ls` and plain `events` stay cross-pane (`hcGuard.mjs:49-51`): the guard is not a
 boundary, and the proxy is where a sandboxed pane's list is filtered and its subscription refused.
@@ -369,6 +373,21 @@ chooses that form for R3, become an Automagik contract in the delivery that writ
    the guest, or the switch refused there with the reason recorded.
 
 Order: 1 and 2, then 3; 4 any time; 5-7 follow upstream; 8 and 9 need the hardware.
+
+### Status of deliveries 3-9 (#631 closed)
+
+#631 closes with deliveries 1 and 2, the §F interim and its native macOS proof. The rest is tracked here, each with
+the reason it waits:
+
+| Delivery | Status | Waits on |
+|---|---|---|
+| 3. The canary | Parked | An owner step: the owner names the Bot and its computer, runs the runbook and delivery 3's checks. No agent opts a Bot in. |
+| 4. The upstream request | Parked | herdr-core (upstream; work outside this repository waits under the owner's external-repository rule). |
+| 5. Identity from the endpoint | Parked | herdr-core releasing R1 and R6 (upstream; the external-repository rule). |
+| 6. `keys` team-scoped | Moved | Tracked on #628. |
+| 7. Team Bots on linked machines | Parked | herdr-core releasing R1-R6 on both cores (upstream; the external-repository rule). |
+| 8. macOS mask | Parked | After the canary (Q7a), then a Mac for the feasibility study. |
+| 9. Windows (WSL) mask | Parked | RFC 0016's WSL container, and verification in a Windows/WSL guest. |
 
 ## Open questions (recommended answer first)
 

@@ -35,11 +35,12 @@ import { pathToFileURL } from "node:url";
 
 import { APPROVAL_REVIEW, approvedSettingsDir, readApprovedRecord, sha256Of } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
-import { parseBots, workerHomeOf } from "./model.js";
+import { BOT_LABEL, parseBots, workerHomeOf } from "./model.js";
 import { AGENTS, AGY_MODE_DEFAULT, agySettingsArgs, agySettingsPlan, choosesSession, promptByMessage, sessionIdArgs } from "./models.js";
 import { commandArgv, sessionId } from "./restart.js";
 import { approvedDataRootProblem, executionPathProblem, shimPathOf } from "./dshTui.mjs";
-import { OWNER_QUESTION_LABEL, sharedSendAllowed, teamOf } from "./hcGuard.mjs";
+import { isSendGrantRole, OWNER_QUESTION_LABEL, sharedSendAllowed, teamOf } from "./hcGuard.mjs";
+import { ROLE_LABEL } from "./launchArgs.js";
 import { DIRECT_LOGIN_PROBLEM, botLoginWords, directLoginVendor, loginLaunchProblem, loginPolicyActive, loginPolicyEnv, loginPolicyWords, loginReadIo, resolveLogin } from "./loginRecord.js";
 import { ENV, guardPathWith, stableGuardDir, stableHelper, stableKillDir, stableRootOf, stableRunner, templateAgent, workerArgs, workerPlan, WORKER_OF_LABEL } from "./workers.js";
 
@@ -538,6 +539,20 @@ function ownPaneLabelProblem(labels) {
     if (typeof value === "string" || value === null) return null;
   }
   return `the caller's own pane takes only the ${OWNER_QUESTION_LABEL} label`;
+}
+
+const isIdentityLabel = (key) => key === BOT_LABEL || key === WORKER_OF_LABEL;
+
+/** Validate the whole update before any label can reach the core. */
+function protectedLabelProblem(labels, record) {
+  if (!isObject(labels) || Object.values(labels).some((value) => value !== null && typeof value !== "string")) {
+    return "labels must be an object with string or null values";
+  }
+  for (const [key, value] of Object.entries(labels)) {
+    if (key === ROLE_LABEL && isSendGrantRole(value)) return "only the lead or the pack may set role=reviewer or role=fixer";
+    if (isIdentityLabel(key) && (!value || value !== record.labels?.[key])) return `only the lead or the pack may change ${key}`;
+  }
+  return null;
 }
 
 /** The team check for get/read/wait: the caller itself, its team graph, or its own workers. */
@@ -1364,6 +1379,19 @@ class Session {
       if (method === "terminal.label" && record.address === this.policy.terminal) {
         why = ownPaneLabelProblem(params.labels);
       } else if (!isOwnWorkerTarget(record, this.policy)) why = "the target is not the caller's own worker";
+      else if (method === "terminal.label") {
+        why = protectedLabelProblem(params.labels, record);
+        if (!why) {
+          const entries = Object.entries(params.labels);
+          const changes = entries.filter(([key]) => !isIdentityLabel(key));
+          if (!changes.length && entries.length) {
+            if (hasId(request)) await this.writeLine(`${JSON.stringify({ jsonrpc: "2.0", id,
+              result: { address: record.address, labels: params.labels } })}\n`);
+            return;
+          }
+          params.labels = Object.fromEntries(changes);
+        }
+      }
     } else if (method === "terminal.send") {
       if (!sendAllowed(record, this.policy)) why = "the target is not in the caller's team";
     } else if (TEAM_METHODS.has(method)) {

@@ -1233,6 +1233,55 @@ jobs:
             exit 1
           fi
 
+  herdr-macos-doctor:
+    # #631 (RFC 0044 §F interim): the five macOS doctor rows on a macOS arm64 runner.
+    # The Linux gate simulates Darwin. Here the rows use the native platform default.
+    # The tests use a fake core and scratch homes and sockets.
+    name: herdr macOS doctor (native macos-15)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.herdr != 'false' }}
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: herdr
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read Node version
+        id: node
+        working-directory: .
+        run: echo "version=$(jq -r '.release' .github/node-versions.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: This runner's system
+        run: |
+          set -euo pipefail
+          system=$(uname -sm)
+          echo "uname -sm: ${system}"
+          if [[ "${system}" != "Darwin arm64" ]]; then
+            echo "::error::this job must run on macOS on Apple silicon (got ${system})"
+            exit 1
+          fi
+
+      - name: macOS doctor rows
+        run: |
+          set -euo pipefail
+          export TMPDIR="${RUNNER_TEMP}"
+          out="${RUNNER_TEMP}/macos-doctor.tap"
+          status=0
+          node --test --test-reporter=tap --test-name-pattern='^macOS doctor' \
+            test/hc-pane.test.mjs > "${out}" 2>&1 || status=$?
+          cat "${out}"
+          node scripts/macos-doctor-tap.mjs "${out}" "${status}"
+
   runner-vm:
     # RFC 0038 delivery 3 (#1374): the member runner's real-uid proof on a throwaway VM. A
     # GitHub-hosted ubuntu-24.04 runner is one (ephemeral, root through sudo, systemd, linger), so
@@ -2549,8 +2598,8 @@ jobs:
     # other job, so add new jobs here too (scripts/ci-result.test.ts fails until they are listed).
     # A pull request can skip an unchanged area. On every other event, a skip fails the check.
     name: CI result
-    needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am, am-linked-native, runner-vm,
-            pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
+    needs: [changes, nodes, repo, landing, brand-font, id, privacy, herdr, scheduler, am, am-linked-native, herdr-macos-doctor,
+            runner-vm, pocket, pocket-link, pocket-link-required, meter, usagemeter, dsh-sandbox,
             plugin, reservations-macos, vault-macos, vault-windows, acp-image-read, pets, desktop, acp-windows, vault-keychain-macos, acp-macos, boot]
     if: always()
     runs-on: ubuntu-24.04
@@ -2575,6 +2624,7 @@ jobs:
             [scheduler]=scheduler
             [am]=am
             [am-linked-native]=am
+            [herdr-macos-doctor]=herdr
             [runner-vm]=runnervm
             [pocket]=pocket
             [pocket-link]=link

@@ -259,14 +259,14 @@ test('a carried-over chat that is not loaded still keeps its Hermes route', asyn
         read: async () => ({ events: [{ type: 'request/header', data: { header: { config: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } } }] }),
         release: async () => {},
       }
-      : undefined,
+      : { read: async () => ({ events: [{ type: 'model/selection', data: { provider: 'deepseek', model: 'v4-flash' } }] }) },
   }
   const get = rt.ctx.get
   rt.ctx.get = name => name === 'sessionPersistence' ? persistence : get(name)
   const carried = { id: 'b1', model: 'hermes-remote/attach', appliedModel: 'hermes-remote/attach', previousModel: 'hermes-remote/attach' }
   assert.equal(await rt.applyModel(carried, { force: true }), 'hermes-remote/attach')
   assert.deepEqual(selected, [], 'no in-place switch while the carried chat is not loaded')
-  // A new chat has no stored route: it takes attach.
+  // A fresh chat with a known selection and no request history takes attach.
   const fresh = { id: 'b2', model: 'hermes-remote/attach' }
   assert.equal(await rt.applyModel(fresh, { force: true }), 'hermes-remote/attach')
   assert.deepEqual(selected, ['b2:hermes-remote/attach'])

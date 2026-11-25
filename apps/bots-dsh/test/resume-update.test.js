@@ -939,26 +939,27 @@ test('a durable inflight replacement syncs the team directory after rename',
   const home = temp(t)
   const b = replayBench(t, home)
   const rename = fs.renameSync
-  const sync = fs.fsyncSync
+  const handle = await fs.promises.open(home)
+  const prototype = Object.getPrototypeOf(handle)
+  await handle.close()
+  const sync = prototype.sync
   const operations = []
+  let onDirectorySync = () => operations.push('directory sync')
   t.mock.method(fs, 'renameSync', (from, to) => {
     rename(from, to)
     if (to === join(home, 'inflight.json')) operations.push('rename')
   })
-  t.mock.method(fs, 'fsyncSync', fd => {
-    if (fs.fstatSync(fd).isDirectory()) operations.push('directory sync')
-    sync(fd)
+  t.mock.method(prototype, 'sync', async function () {
+    if ((await this.stat()).isDirectory()) onDirectorySync()
+    return sync.call(this)
   })
   syncBuiltinESMExports()
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
   assert.equal(await b.rt.noteHeldInput('chat', [user('durable')]), true)
   assert.deepEqual(operations, ['rename', 'directory sync'])
 
-  const failed = t.mock.method(fs, 'fsyncSync', fd => {
-    if (fs.fstatSync(fd).isDirectory()) throw new Error('directory sync failed')
-    sync(fd)
-  })
-  syncBuiltinESMExports()
+  const failed = t.mock.fn(() => { throw new Error('directory sync failed') })
+  onDirectorySync = failed
   assert.equal(await b.rt.noteHeldInput('chat', [user('directory sync fails')]), false)
   assert.equal(failed.mock.callCount(), 1)
 })

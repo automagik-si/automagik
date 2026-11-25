@@ -62,6 +62,7 @@ case "$*" in
   "scripts/version.ts next") echo 3.0.1; exit 0 ;;
   "scripts/version.ts set "*) printf '{"version":"%s"}\\n' "$3" > package.json; exit 0 ;;
   "scripts/version.ts check") exit 0 ;;
+  "scripts/lane.ts stamp-bundled-solver "*) exit 0 ;;
   "scripts/lane.ts kind "*) echo "\${FAKE_KIND:-plugins}"; exit 0 ;;
   "scripts/lane.ts herdr "*) echo "\${FAKE_HERDR:-no}"; exit 0 ;;
   "scripts/lane.ts pocket-since "*) echo v3.0.0; exit 0 ;;
@@ -324,6 +325,9 @@ describe('a cut that dev has not moved past', () => {
     try {
       const run = repo.run();
       expect(run.status).toBe(0);
+      expect(run.bun.filter(call => /version\.ts (set|check)|stamp-bundled-solver/.test(call))).toEqual([
+        'scripts/version.ts set 3.0.1', 'scripts/version.ts check', 'scripts/lane.ts stamp-bundled-solver 3.0.1',
+      ]);
       expect(run.output).toBe('version=3.0.1\nsha=' + repo.remote('rev-parse', 'refs/heads/dev') + '\npocket=no\nmeter=no\n');
       expect(run.gates).toEqual([]);
       expect(repo.remote('log', '-1', '--format=%s', 'dev')).toBe('chore(release): v3.0.1');

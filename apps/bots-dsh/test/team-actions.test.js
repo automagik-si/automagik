@@ -252,3 +252,41 @@ test('C9 a mark ends at its own deadline; a dropped one\'s timer never ends a ne
   t.mock.timers.tick(CROSSING_DEADLINE_MS / 2)
   assert.equal(b.actions.picking('p1'), false)
 })
+
+// A deleted Bot's composer state (DSH's `dsh.conversation.<part>`) leaves the page's storage
+// only once the host answered that the Bot is deleted.
+function draftBench(answer) {
+  const removed = []
+  const storage = { removeItem: key => removed.push(key) }
+  let pulls = 0
+  const call = async (name) => {
+    if (answer instanceof Error) throw answer
+    return name === 'delete-bot' ? answer : { ok: name }
+  }
+  const after = promise => promise.then((value) => { pulls++; return value })
+  const actions = teamActions({ call, after, partFor: id => id, roster: createSource({}), ui: createSource({}), storage })
+  return { actions, removed, pulls: () => pulls }
+}
+
+test('Delete removes the deleted Bot\'s composer keys after the team is read again', async () => {
+  const { actions, removed, pulls } = draftBench({ ok: 'delete-bot', deletedParts: ['b', 'b-next'] })
+  const value = await actions.deleteBot('b')
+  assert.deepEqual(removed, ['dsh.conversation.b', 'dsh.conversation.b-next'])
+  assert.equal(pulls(), 1)
+  assert.deepEqual(value.deletedParts, ['b', 'b-next'])
+})
+
+test('a refused Delete removes no composer key', async () => {
+  const { actions, removed, pulls } = draftBench(Object.assign(new Error('Unknown Bot'), { code: 'bot/refused' }))
+  await assert.rejects(actions.deleteBot('b'), /Unknown Bot/)
+  assert.deepEqual(removed, [])
+  assert.equal(pulls(), 0)
+})
+
+test('an answer without part ids removes nothing and still resolves', async () => {
+  for (const answer of [{ ok: 'delete-bot' }, { deletedParts: 'b' }, { deletedParts: [3, null, ''] }, undefined]) {
+    const { actions, removed } = draftBench(answer)
+    assert.deepEqual(await actions.deleteBot('b'), answer)
+    assert.deepEqual(removed, [])
+  }
+})

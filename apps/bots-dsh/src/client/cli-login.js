@@ -44,14 +44,15 @@ const codeStep = row => row?.stage === 'attempt' && PASTES.has(row.provider) && 
 // Welcome (and anything else outside the chat) opens the row in the selected Bot, else the Main
 // Bot, through this bridge: it only opens the chat and the offer, never starts a sign-in. A page
 // that shows an Antigravity sign-in link elsewhere (Settings, Connect AI) hands it here
-// (`remember`), so this page's composers refuse the address it ends on too.
+// (`remember`), so this page's composers refuse the address it ends on too. A Switch account
+// made there hands its own attempt over (`attemptId`, #2064), so the row reads that attempt.
 export function installCliLoginBridge({ scope = globalThis, selectedBot, mainBot, openLogin }) {
   const bridge = {
-    open(provider) {
+    open(provider, { attemptId } = {}) {
       if (!Object.hasOwn(SIGN_IN_NAMES, provider)) return false
       const bot = selectedBot() ?? mainBot()
       if (!bot) return false
-      return openLogin(bot.id, provider)
+      return openLogin(bot.id, provider, attemptId)
     },
     remember(url) { return rememberCallbackState(url) },
   }
@@ -289,6 +290,13 @@ function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef 
       case 'attempt': return h(Attempt, { bot, row, roster, manager, secretPending, fieldRef })
       case 'done': {
         if (row.taken) return h('p', null, t('Done: Bots will use this {name} account.', { name }))
+        // A Switch that ended on the account it signed out of (#2064); a key names no account.
+        if (row.sameAccount) {
+          const same = row.signedInAs?.kind === 'key' ? undefined : accountLabel(row.signedInAs)
+          return h('p', null, same
+            ? t('The account did not change: {name} is still signed in as {account}.', { name, account: same })
+            : t('The account did not change: {name} is still signed in to the same account.', { name }))
+        }
         if (row.signedInAs?.kind === 'key') return h('p', null, t('Done: {name} uses an API key.', { name }))
         const account = accountLabel(row.signedInAs)
         return h('p', null, account
@@ -299,12 +307,36 @@ function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef 
         model: modelName(roster, row.outcome?.ref) || name, reason: hostText(row.outcome?.message ?? ''), kept: modelName(roster, row.outcome?.kept) || t('its model'),
       }))
       case 'failed':
-      case 'interrupted': return h(Fragment, null,
-        h('p', { className: 'bt-cli-error' }, row.stage === 'interrupted' ? t('The sign-in was interrupted by a restart. Get a new link.') : hostText(row.message ?? 'Sign-in did not finish. Try again.')),
-        row.error ? h('p', { className: 'bt-cli-error', role: 'alert' }, hostText(row.error)) : null,
-        h('div', { className: 'bt-cli-actions' },
-          h('button', { type: 'button', className: 'bt-q-submit', disabled: row.busy, onClick: () => void manager.start(bot.id) }, t('Try again')),
-          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t('Close'))))
+      case 'interrupted': {
+        const message = h('p', { className: 'bt-cli-error' }, row.stage === 'interrupted' ? t('The sign-in was interrupted by a restart. Get a new link.') : hostText(row.message ?? 'Sign-in did not finish. Try again.'))
+        const error = row.error ? h('p', { className: 'bt-cli-error', role: 'alert' }, hostText(row.error)) : null
+        const close = h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t('Close'))
+        // A failed Switch account (#2064). Still signed in: Try again asks, then switches again.
+        if (row.switched && row.stillSignedIn && row.confirm) {
+          return h(Fragment, null,
+            h('p', null, t('This stops running Bot work for this account. Continue?')),
+            error,
+            h('div', { className: 'bt-cli-actions' },
+              h('button', { type: 'button', className: 'bt-q-submit', disabled: row.busy, onClick: () => void manager.switchAgain(bot.id) }, t('Continue')),
+              h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: row.busy, onClick: () => manager.keepAttempt(bot.id) }, t('Cancel'))))
+        }
+        if (row.switched && row.stillSignedIn) {
+          return h(Fragment, null, message, error,
+            h('div', { className: 'bt-cli-actions' },
+              h('button', { type: 'button', className: 'bt-q-submit', disabled: row.busy, onClick: () => manager.askSwitch(bot.id) }, t('Try again')), close))
+        }
+        // Signed out: its home stays paused until a sign-in, which is what the row offers.
+        if (row.switched) {
+          return h(Fragment, null, message,
+            h('p', null, t('To use {name} in this Bot, sign in to your account.', { name })),
+            error,
+            h('div', { className: 'bt-cli-actions' },
+              h('button', { type: 'button', className: 'bt-q-submit', disabled: row.busy, onClick: () => void manager.start(bot.id) }, t('Sign in')), close))
+        }
+        return h(Fragment, null, message, error,
+          h('div', { className: 'bt-cli-actions' },
+            h('button', { type: 'button', className: 'bt-q-submit', disabled: row.busy, onClick: () => void manager.start(bot.id) }, t('Try again')), close))
+      }
       default: return null
     }
   })()

@@ -1,0 +1,13 @@
+{
+  "id": "solver",
+  "version": "0.0.0",
+  "name": "Solver",
+  "description": "Takes a request to a delivery with evidence: a plan, an independent review, the work and its checks.",
+  "publisher": "automagik",
+  "entry": "role.mjs",
+  "prompt": "prompt.md",
+  "tools": [],
+  "capabilities": [],
+  "settings": [],
+  "ui": []
+}

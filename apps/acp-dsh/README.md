@@ -228,6 +228,32 @@ that makes your harness lose all your power."
   tools, in every Session; its switch shows OFF and locked. With no Bot team ever registered,
   Codex runs as before. Existing Codex Bots keep their own tools once (Bots with shell access off
   or denied tools excepted).
+- **Antigravity Bot teams (#1564).** The **Native tools** switch keeps agy's own tools, as omp's
+  does: the same Sessions, locks and Read only rule, and, with a Bot team registered, every
+  Antigravity Session without a Bot identity (Workspace chats, the Code pane, DSH subagents, Omni
+  threads and answer children, a scheduled run with no single owner) runs OFF. ON keeps `agy acp`.
+  OFF is chat only (agy has no DSH bridge): it starts `agy acp --agent automagik-native-off
+  --cli_dir_name automagik-native-off`, with our main agent with no tools
+  (`.gemini/config/agents/automagik-native-off.md`) and our settings folder denying every tool
+  action (`.gemini/antigravity-cli/automagik-native-off/settings.json`), both written 0600 into
+  the home the child runs in at each OFF start (`src/host/agy-off.js`). `--cli_dir_name` is listed
+  by `agy acp --help` but not on agy's documentation pages. Under both, acp-dsh ends the answer at
+  the first tool call agy reports and refuses every ask. An OFF start refuses while that home
+  holds `.gemini/config/hooks.json` or `.gemini/config/plugins` (agy runs hooks outside every
+  tool layer); Switch account on Antigravity in Settings starts a new home. At each OFF start, and
+  again before each later prompt of a kept OFF process, acp-dsh reads agy's own log for that
+  process (bounded, no links) and refuses when agy says it did not load the OFF settings; with no
+  such log it warns once. agy writes no line after loading its settings, so the first turn of each
+  OFF agy process is not covered by this check: a failure agy logs after the session opens is
+  caught only at the next turn. acp-dsh removes its own log files there (regular files with agy's
+  log name) once they are more than 24 hours old, except those of its live OFF processes; a `log`
+  that is a link is neither read nor pruned (no log: a warning). Native tools off was checked on
+  the agy version in `AGY_OFF_CHECKED`; another version starts OFF, warns in the host log and in
+  Details, and rests on agy honouring the two options and on acp-dsh's guard. If an agy version
+  creates `config/plugins` by itself, every OFF start refuses until Automagik changes; Switch
+  account does not help then. The Bot team shows the switch only when `nativeArgsAgents` lists
+  `acp-antigravity`. Existing Antigravity Bots keep their own tools once (Bots with shell access
+  off or denied tools excepted).
 - **Upgrade (#1564).** Once, a Bot that sat in the lock this version removes (shared with
   people, bound to an IM connection, or an active LiveShare share) with the switch on gets it
   turned off, so nothing gains native tools until the person turns it on again. A Main Bot with
@@ -477,7 +503,7 @@ A settings page reads the agents through this host service; the plugin stays hos
 | `loginCurrent(id)` | The attempt at work for that agent, from any view, or undefined. Never starts or cancels one. |
 | `loginStatus(id, attemptId)` / `loginAnswer(id, attemptId, value)` / `loginCancel(id, attemptId)` | Reads an attempt (an ended one stays readable for 60 seconds), sends Claude's pasted `code#state` to the CLI (which then has 90 seconds to confirm), or ends it. |
 | `loginTextMatches(text)` | Whether a text carries a Claude sign-in state shown in the last 24 hours. Only a boolean: the states are kept as keyed hashes in memory. |
-| `loginActive()` | How many attempts are starting or waiting. |
+| `loginActive()` | How many attempts are starting, waiting or settling (a failed Switch account's status read, #2064). |
 | `account(id, { fresh? })` | For the DSH owner's views only: `{ id, signedIn?, consent?, ref?, account?: { kind: 'account' \| 'key', email?, org?, plan? }, notice? }`. Who the CLI is signed in as, read from the CLI itself (below); never on a `status()` or `inspect()` row, in a log or in an event. `ref` names the account read and goes back with `accountConfirm`. |
 | `accountConfirm(id, { ref? })` | The person's word that the app may use the account this CLI is signed in to. Asks the CLI again, records the consent and announces `acp-dsh/login-ready`. Another account than `ref` is refused (`acp-account/changed`); a signed-out CLI too (`acp-account/signed-out`). |
 | `accountNoticed(id)` | The one-time notice of a vendor carried through an upgrade was shown. |
@@ -1039,8 +1065,8 @@ the provider's when its answer reports one (at most an hour), otherwise ten minu
 shown; the CLI has 45 seconds to print its link. The CLI keeps its own credentials: no model,
 transcript, tool or credential store is involved, and no link, code or state is logged. A sign-in
 the CLI confirms is recorded only for the executable that confirmed it and announced as
-`acp-dsh/login-ready` (the Bot team applies the model the person chose); the number at work is
-announced as `acp-dsh/login-active` (the welcome's busy file adds it, so the app's automatic
+`acp-dsh/login-ready` (the Bot team applies the model the person chose); the number at work
+(starting, waiting or settling) is announced as `acp-dsh/login-active` (the welcome's busy file adds it, so the app's automatic
 restarts wait). These methods are not tools and not listed by `status()`; the only caller is the
 Bot team's owner-only route (its README, "Signing in to Claude Code or Codex").
 

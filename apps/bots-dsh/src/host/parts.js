@@ -28,12 +28,13 @@ import { RESUME_DELAY_MS } from './resume.js'
 import { OWN_TOOLS_SWITCH, SWITCH_FAILED, switchFailure } from './model-state.js'
 import { redactorFor } from './redact.js'
 import { OWN_TOOLS_MODEL_TEXT } from '../shared/own-tools.js'
-import { turnFailure } from './turns.js'
+import { answerSender, failureLine, opensTurn, turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
-import { routeAllowed } from '../shared/route-policy.js'
+import { routeAllowed, routeLabel } from '../shared/route-policy.js'
 import { ACP_NAME, CROSSING_DEADLINE_MS, commandCapableAgent, crossesHarness, isHermesRoute, routeOfRef, shellHoldText } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
+import { readableRoute } from './session-route.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
 
 // Whether a Bot's part has something a handoff note must carry. The team's own setup kickoff
@@ -433,8 +434,8 @@ export function install(rt) {
   // Lines for the model the Session last routed to; undefined while it has not
   // routed yet.
   async function contextLines(session, { inspect = false } = {}) {
-    const route = session.requestHeader()?.config
-    if (!route?.provider || !route?.model) return undefined
+    const route = readableRoute(session.requestHeader()?.config)
+    if (!route) return undefined
     if (!inspect) rt.assertBotRunnerProvider?.(route.provider, session.id)
     const info = await ctx.llm.resolveModelInfo(route.provider, route.model)
     return linesFor({ window: info.context?.contextWindow, reserve: route.maxTokens ?? info.defaultMaxTokens, checkRatio: policyOf(session.id).checkRatio })
@@ -690,7 +691,7 @@ export function install(rt) {
   // answers only in its own chat), so they run on the team's background model then, with that
   // model's own effort and output limit. No background model: the route as it is.
   async function asideRoute(route, sessionId) {
-    if (!route?.provider || !route?.model) return route
+    if (!route) return undefined
     const resolved = rt.answersAside?.(`${route.provider}/${route.model}`) === false
       ? splitRef(await rt.backgroundModel?.(sessionId)) ?? route
       : route
@@ -704,8 +705,8 @@ export function install(rt) {
   // answers aside; otherwise they are skipped, and noted once per Session.
   const asideSkipped = new Set()
   async function asideReady(session, what) {
-    const route = await asideRoute(session.requestHeader()?.config, session.id)
-    if (!route?.provider || !route?.model || rt.answersAside?.(`${route.provider}/${route.model}`) !== false) return true
+    const route = await asideRoute(readableRoute(session.requestHeader()?.config), session.id)
+    if (!route || rt.answersAside?.(`${route.provider}/${route.model}`) !== false) return true
     if (!asideSkipped.has(session.id)) {
       asideSkipped.add(session.id)
       rt.warn('ds-bot: %s runs on an agent over ACP and no model answers beside it, so Omni makes no context check, note or checkpoint there (first skipped: %s); past the hard line it moves on with its latest messages, without a model call. A background model in Settings lifts this.', session.id, what)
@@ -741,10 +742,11 @@ export function install(rt) {
   // route. Undefined when there is no guard to pass (no automatic engine, the same
   // route, an agent on either end that is not the origin) or the destination declares
   // no usable window, which the guard reports on its own.
-  async function destinationThreshold(agent, selection, signal) {
+  async function destinationThreshold(agent, candidate, signal) {
     const previous = agent.session.requestHeader()
-    if (!selection?.provider || !selection?.model || previous?.config === undefined) return undefined
-    const from = previous.config
+    const from = readableRoute(previous?.config)
+    const selection = readableRoute(candidate)
+    if (!selection || !from) return undefined
     if (from.provider === selection.provider && from.model === selection.model) return undefined
     if (rt.answersAside?.(`${from.provider}/${from.model}`) !== false) return undefined
     // Onto another agent there is nothing to price: acp-dsh lets that switch through (A-1).
@@ -882,9 +884,10 @@ export function install(rt) {
     const session = agent.session
     if (!own && !await asideReady(session, 'handoff note')) throw noAside()
     const header = session.requestHeader()
-    const route = own ? header?.config : await asideRoute(header?.config, session.id)
-    if (own && route?.provider) rt.assertBotRunnerProvider?.(route.provider, session.id)
-    if (!route?.provider || !route?.model) throw new Error('the Session has not called a model yet')
+    const used = readableRoute(header?.config)
+    const route = own ? used : await asideRoute(used, session.id)
+    if (!route) throw new Error('the Session has not called a model yet')
+    if (own) rt.assertBotRunnerProvider?.(route.provider, session.id)
     const messages = session.deriveMessages()
     const base = folder ? FOLDER_PROMPT : HANDOFF_PROMPT
     const asked = { provider: route.provider, model: route.model, ...(route.maxTokens === undefined ? {} : { maxTokens: route.maxTokens }) }
@@ -923,8 +926,8 @@ export function install(rt) {
     if (job !== undefined) assertCheckpoint(job)
     signal?.throwIfAborted()
     if (!await asideReady(session, 'checkpoint')) throw noAside()
-    const route = await asideRoute(session.requestHeader()?.config, session.id)
-    if (!route?.provider || !route?.model) throw new Error('the Session has not called a model yet')
+    const route = await asideRoute(readableRoute(session.requestHeader()?.config), session.id)
+    if (!route) throw new Error('the Session has not called a model yet')
     // The results list grows with the work, so the checkpoint may write as much as one
     // of the Bot's own replies.
     const maxTokens = route.maxTokens
@@ -1019,8 +1022,8 @@ export function install(rt) {
   async function askSteward(agent, { midTurn }) {
     const session = agent.session
     if (!await asideReady(session, 'context steward')) return undefined
-    const route = await asideRoute(session.requestHeader()?.config, session.id)
-    if (!route?.provider || !route?.model) return undefined
+    const route = await asideRoute(readableRoute(session.requestHeader()?.config), session.id)
+    if (!route) return undefined
     const group = placeOf(agent.id)?.roomId !== undefined
     const lines = []
     for await (const line of partLines(agent.id, AbortSignal.timeout(HANDOFF_READ_MS), { group })) {
@@ -1143,7 +1146,8 @@ export function install(rt) {
       ? 'read_own_chat searches every part, reads around an anchor such as [part 2 #1234 · …], and shows the note that closed any earlier part.'
       : self ? 'the earlier part stays in the group\'s saved record.'
         : 'read_group_chat shows the group\'s latest messages, and read_own_chat your own chat.'
-    const reason = crossing !== undefined ? `the user switched this chat from ${crossing.from} to ${crossing.to}; you are ${crossing.to} now`
+    const reason = crossing?.group === true ? `the user switched you from ${crossing.from} to ${crossing.to}; in this group you are ${crossing.to} now`
+      : crossing !== undefined ? `the user switched this chat from ${crossing.from} to ${crossing.to}; you are ${crossing.to} now`
       : failed !== undefined ? `a request in the previous part kept failing (${failed})`
       : overflow ? 'the previous part overflowed the model\'s window'
         : cutoff ? 'the previous part kept being cut off at the output limit'
@@ -1277,6 +1281,7 @@ export function install(rt) {
     await rt.ensureCapabilities(target)
     const agent = await rt.resolveAgent(target)
     rt.assertBotRunnerProvider?.(currentProvider(agent), target, agent)
+    if (switches.get(from) === owner) owner.inputDestination = agent
     // A retry after a forward that stopped halfway must not deliver the same input twice.
     const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
     try {
@@ -1293,7 +1298,7 @@ export function install(rt) {
         }
         if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
         const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
-        if (kind === 'user' || kind === 'retry' || kind === SOURCE_KIND || kind === REPLY_KIND) {
+        if (opensTurn(message)) {
           agent.followup(copy)
           woke += 1
         } else agent.inject(copy)
@@ -1313,10 +1318,11 @@ export function install(rt) {
   // would fail the same way, so an unloaded failure is noted once at info instead.
   const unloaded = error => ctx.fiber?.uid === null || /in inactive context/.test(String(error?.message ?? error))
   const noteInfo = (template, ...args) => { try { ctx.logger.info(template, ...args) } catch {} }
-  const currentProvider = agent => agent.model?.current?.()?.provider ?? agent.session.requestHeader?.()?.config?.provider
+  const currentProvider = agent => readableRoute(agent.model?.current?.())?.provider
+    ?? readableRoute(agent.session.requestHeader?.()?.config)?.provider
 
   // A message's inbox boundary, the same one forward() delivers it to.
-  const inboxTargetOf = message => (message.source?.kind === 'user' || message.source?.kind === 'retry' || message.source?.kind === SOURCE_KIND || message.source?.kind === REPLY_KIND ? 'next-turn' : 'next-step')
+  const inboxTargetOf = message => (opensTurn(message) ? 'next-turn' : 'next-step')
 
   // Input a switch could not hand on goes back into the part's own durable inbox, in
   // order: input followup would deliver waits for the next turn, the rest waits for
@@ -1651,7 +1657,8 @@ export function install(rt) {
       oldId, botId: owner.botId, ...(owner.roomId === undefined ? {} : { roomId: owner.roomId }), expected: owner.target,
       job: {
         carry: held.filter(message => message.source?.kind !== 'working-directory'),
-        crossing: owner.back === undefined ? undefined : { previous: owner.back, note: () => {} },
+        crossing: owner.group === true ? { group: true, from: owner.from, previous: {}, note: () => {} }
+          : owner.back === undefined ? undefined : { previous: owner.back, note: () => {} },
         resume: owner.cut !== undefined, info: owner.cut?.info, joined: owner.cut?.joined,
       },
     }
@@ -1718,6 +1725,8 @@ export function install(rt) {
   // history (RFC 0030, Handoff note, 2026-11-23): `{ from, to, effort, effortGiven, previous,
   // note, entry }`. The fresh part opens on `target` with a handoff, the Bot's record moves to
   // it only once it holds that handoff, and the old part stays until the first real answer.
+  // `{ from, to, group: true, note }`: a group conversation of the Bot following that pick; its
+  // record is the group's, and the Bot's own fields never change with it.
   function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, cutoff = false, failed, bare = false, folder = false, fresh = false, manual = false, noNote, target, threshold, shareId, crossing, hard = overflow || folder || fresh || cutoff || manual } = {}) {
     const leave = rt.enterOwnership?.() ?? (() => {})
     let handedOff = false
@@ -1728,10 +1737,11 @@ export function install(rt) {
       try { rt.assertShellChoice?.(agentId) } catch { return false }
       const place = placeOf(agentId)
       if (place === undefined || switches.has(agentId) || checkpoints.has(agentId) || readOnly() || pinned(agentId)) return false
-      const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
+      const job = { ...place, inputAgent: agent, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
       if (crossing !== undefined) {
-        // Only a Bot's own chat crosses; the deadline counts from the pick.
-        if (place.roomId !== undefined || place.botId === undefined) return false
+        // A Bot's own chat crosses at the person's pick; a group conversation of the Bot follows
+        // it with a switch of its own (`crossing.group`). The deadline counts from the job.
+        if (place.botId === undefined || (place.roomId !== undefined) !== (crossing.group === true)) return false
         job.crossing = crossing
         job.deadline = job.since + (config.crossingDeadlineMs ?? CROSSING_DEADLINE_MS)
       }
@@ -1860,6 +1870,9 @@ export function install(rt) {
     if (entry === undefined) return false
     return turn === undefined ? entry.running !== undefined : entry.turns.has(turn)
   }
+  // Whether a Session's outgoing agent was asked for its handoff note and has not ended it:
+  // a turn there before its request is read is that note's too (turns.js, MX-12).
+  rt.writingNote = sessionId => noteWaits.has(sessionId)
   // Waits for the agent to be idle, at most until the switch's deadline.
   async function idleFor(agent, job) {
     if (job.deadline === undefined) return agent.whenIdle()
@@ -1875,52 +1888,147 @@ export function install(rt) {
   }
   // The route the old part's conversation runs on, as its last request named it.
   const routeRefOf = (session, fallback) => {
-    const config = session?.requestHeader?.()?.config
-    return config?.provider && config?.model ? `${config.provider}/${config.model}` : fallback
+    const route = readableRoute(session?.requestHeader?.()?.config)
+    return route ? `${route.provider}/${route.model}` : fallback
   }
   // A Session's own route, `{ ref, effort }`: its last request's, else its saved log's.
   async function ownRouteOf(session) {
-    const config = session?.requestHeader?.()?.config
-    const route = config?.provider && config?.model ? config : await rt.storedRouteOf?.(session?.id).catch?.(() => undefined)
-    if (!route?.provider || !route?.model) return undefined
-    return { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort }
+    try {
+      const route = readableRoute(session?.requestHeader?.()?.config)
+        ?? readableRoute(await rt.storedRouteOf?.(session?.id))
+      if (!route) return undefined
+      return { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort }
+    } catch { return undefined }
   }
-  // Whether a Session's history ran on another harness than `ref`, so a model change would
-  // carry that history across (RFC 0030, Handoff note). A carried handoff package counts as
-  // history, a fresh opening does not. A route that crosses but a log that cannot be read
-  // counts as history: the Session keeps its route (the safe side).
   // A group part opened on the route its conversation kept: before its first request the
   // route is the one selected on it.
   const keptRoutes = new Map()
-  async function crossingHistory(sessionId, ref) {
-    if (typeof sessionId !== 'string' || typeof ref !== 'string') return false
+  // A Session's last request, then its selection, kept group route, or saved log.
+  // A null route could not be read; undefined means there is no route yet.
+  async function sessionRoute(sessionId) {
     let session
-    let selection
     try {
-      session = agents.get(sessionId)?.session ?? ctx.sessions?.get?.(sessionId)
-      selection = agents.get(sessionId)?.model?.current?.()
-    } catch {}
-    const config = session?.requestHeader?.()?.config
-    const kept = splitRef(keptRoutes.get(sessionId))
-    const route = config?.provider ? config : selection?.provider ? selection : kept?.provider ? kept
-      : await Promise.resolve(rt.storedRouteOf?.(sessionId)).catch(() => undefined)
-    if (!route?.provider || !crossesHarness(`${route.provider}/${route.model ?? 'default'}`, ref)) return false
-    // A group part opened on its kept route holds that history in its handoff package, even
-    // before its first turn reads it.
+      const agent = agents.get(sessionId)
+      session = agent?.session ?? ctx.sessions?.get?.(sessionId)
+      const current = agent?.model?.current?.()
+      const selection = readableRoute(current)
+      const header = session?.requestHeader?.()
+      const used = readableRoute(header?.config)
+      if (header != null) return { session, route: used }
+      if (current != null) return { session, route: selection }
+      const kept = readableRoute(splitRef(keptRoutes.get(sessionId)))
+      if (kept) return { session, route: kept }
+      const stored = await rt.storedRouteOf?.(sessionId)
+      const route = readableRoute(stored) ?? (keptRoutes.has(sessionId) ? readableRoute(stored?.pendingSelection) : undefined)
+      return { session, route: stored === null ? null : route }
+    } catch { return { session, route: null } }
+  }
+  // A carried handoff package counts as history, a fresh opening does not. An unreadable
+  // route or a crossing route whose log cannot be read counts as history (the safe side).
+  function historyCrosses(sessionId, ref, { session, route }) {
+    if (route === null) return true
+    if (!route || !crossesHarness(`${route.provider}/${route.model}`, ref)) return false
     if (session === undefined || keptRoutes.has(sessionId)) return true
     try { return saidForCrossing(session.deriveMessages(), undefined) } catch { return true }
   }
+  async function crossingHistory(sessionId, ref) {
+    if (typeof sessionId !== 'string' || typeof ref !== 'string') return false
+    return historyCrosses(sessionId, ref, await sessionRoute(sessionId))
+  }
   rt.crossingHistory = crossingHistory
+
+  // ---- A Bot's group conversations follow its agent switch (RFC 0030, Handoff note) ----
+  // Each group Session with history on another harness than the Bot's model gets a fenced
+  // switch and a handoff of its own: an idle one at once, a busy one at its next step (never by
+  // stopping a group reply: no person is asked there). Never in place, and never onto or off a
+  // Hermes route, which keeps its refusal.
+  // Group Sessions whose switch starts at their next step: the model it follows.
+  /** @type {Map<string, string>} */
+  const pendingFollows = new Map()
+  // Failed follows per group Session and model: one more try at its next step, then the
+  // Session waits for the Bot's next pick.
+  /** @type {Map<string, {target:string, count:number}>} */
+  const followFailures = new Map()
+  // The latest follow dispatch for each Bot, even if it picked the same model again.
+  const followDispatches = new WeakMap()
+  // A pick, removal or part move can supersede a follow while it awaits a route or agent.
+  function currentGroupFollow(sessionId, bot, target) {
+    const place = placeOf(sessionId)
+    if (bot === undefined || place?.roomId === undefined || place.botId !== bot.id || typeof target !== 'string') return false
+    if (rt.botOf(bot.id) !== bot || target !== (bot.model ?? bot.appliedModel)) return false
+    const room = rt.roomOf(place.roomId)
+    return room?.sessions?.[bot.id] === sessionId && room.members.includes(bot.id)
+  }
+  // The crossing a group Session takes to follow `target`, the Bot's model; none when it does
+  // not (another member, no history on another harness, a Hermes route).
+  async function groupCrossing(sessionId, bot, target) {
+    if (!currentGroupFollow(sessionId, bot, target)) return undefined
+    const source = await sessionRoute(sessionId)
+    const { route } = source
+    if (!route) return undefined
+    const from = `${route.provider}/${route.model}`
+    if (isHermesRoute(from) || isHermesRoute(target)) return undefined
+    if (!historyCrosses(sessionId, target, source)) return undefined
+    return { from, to: target, group: true, note: routeAttempt(bot, from, target, 'group') }
+  }
+  // `pick`: the person's pick of `target`, which gives a Session that failed twice its tries again.
+  async function followGroup(sessionId, bot, target, { pick = false } = {}) {
+    if (readOnly() || !currentGroupFollow(sessionId, bot, target)) return
+    if (pick) followFailures.delete(sessionId)
+    const failed = followFailures.get(sessionId)
+    if (failed !== undefined && failed.target === target && failed.count >= 2) return
+    const crossing = await groupCrossing(sessionId, bot, target)
+    if (crossing === undefined) return
+    const agent = await rt.resolveAgent(sessionId).catch(() => undefined)
+    if (agent == null || typeof agent.whenIdle !== 'function' || typeof agent.runMaintenance !== 'function') return
+    const running = switches.get(sessionId)
+    if (running?.crossing?.group === true && running.target === target) return
+    const busy = rt.live?.get(sessionId)?.turn !== undefined || agent.status === 'running'
+    if (readOnly() || !currentGroupFollow(sessionId, bot, target)) return
+    if (!busy && !switches.has(sessionId) && startSwitch(agent, { hard: true, target, crossing })) {
+      // Consume the queued pick so a failed selection can queue a retry for this target.
+      pendingFollows.delete(sessionId)
+    } else pendingFollows.set(sessionId, target)
+  }
+  // After the person's pick moved the Bot to another harness, every group conversation of
+  // the Bot with history on another harness follows, also one an earlier pick left on its
+  // route (applyModelHeld keeps such a Session's route; models.js). Only a pick starts it: a
+  // model applied at start or by failover moves nothing.
+  async function followGroups(bot) {
+    const target = bot.model ?? bot.appliedModel
+    const dispatch = Symbol()
+    followDispatches.set(bot, dispatch)
+    for (const sessionId of rt.groupSessionsOf?.(bot.id) ?? []) {
+      if (followDispatches.get(bot) !== dispatch) return
+      await followGroup(sessionId, bot, target, { pick: true })
+        .catch(error => rt.warn('ds-bot: the group Session %s of %s did not follow its agent switch: %s', sessionId, bot.name, error?.message ?? error))
+    }
+  }
+  rt.followGroups = followGroups
+  // A group follow that did not move, or went back: the Session stays on its route (never in
+  // place, no failure on the Bot's model line) and tries once more at its next step.
+  function followFailed(sessionId, target) {
+    const failed = followFailures.get(sessionId)
+    const count = failed?.target === target ? failed.count + 1 : 1
+    followFailures.set(sessionId, { target, count })
+    // A newer pick's pending follow stays: a stale target never replaces it.
+    if (count < 2) { if (!pendingFollows.has(sessionId)) pendingFollows.set(sessionId, target) }
+    else if (pendingFollows.get(sessionId) === target) pendingFollows.delete(sessionId)
+  }
   // A step about to run a Bot's own chat with history on another harness than the Bot's model
   // (a selection DSH's /model made on the Session): it is not the person's switch.
-  async function crossedInPlace(agent, place, selection) {
-    if (place?.roomId !== undefined || place?.botId === undefined || !selection?.provider || !selection?.model) return false
+  async function crossedInPlace(agent, place, candidate) {
+    if (place?.roomId !== undefined || place?.botId === undefined) return false
+    const selection = readableRoute(candidate)
+    if (!selection) return false
     const bot = rt.botOf(place.botId)
     const model = bot?.model ?? bot?.appliedModel
     if (typeof model !== 'string' || rt.chatOf(bot.id) !== agent.id || awaiting.has(agent.id)) return false
     const ref = `${selection.provider}/${selection.model}`
-    if (!crossesHarness(model, ref) || await rt.keepsCarriedRoute?.(agent.id, ref) === true) return false
-    if (!await crossingHistory(agent.id, ref)) return false
+    if (!crossesHarness(model, ref)) return false
+    const carried = await rt.keepsCarriedRoute?.(agent.id, ref)
+    if (carried === true) return false
+    if (!await crossingHistory(agent.id, ref) && carried !== 'unreadable') return false
     rt.warn('ds-bot: %s: a step on %s with this chat\'s history was not run; the chat stays on %s (an agent switch goes through the model menu)', bot.name, ref, model)
     return true
   }
@@ -2015,6 +2123,12 @@ export function install(rt) {
     const bot = rt.botOf(job.botId)
     if (bot === undefined) return
     job.crossing.note('rolled back', job.rollback ?? 'not moved')
+    if (job.crossing.group === true) {
+      // The Bot's own model is not in doubt: no failure on its model line, one warn line.
+      rt.warn('ds-bot: %s keeps its route in group Session %s: its switch to %s did not finish (%s)', bot.name, agent.id, job.target, job.rollback ?? 'not moved')
+      followFailed(agent.id, job.target)
+      return
+    }
     rt.noteSwitchFailed?.(bot, job.target, bot.model ?? bot.appliedModel, job.failure)
   }
   // The person's reply stopped by the switch (stopReply) is resumed by the new agent unless
@@ -2051,7 +2165,8 @@ export function install(rt) {
     const cut = job.crossing === undefined ? undefined : state.switching[agent.id]?.cut
     // An agent switch also keeps where it goes and what it would go back to, so a restart can
     // go back with no live job (MG-8).
-    const way = job.crossing === undefined ? {} : {
+    // A group's follow goes back to the route its Session ran on, never to the Bot's fields.
+    const way = job.crossing === undefined ? {} : job.crossing.group === true ? { target: job.target, group: true, from: job.crossing.from } : {
       target: job.target,
       back: Object.fromEntries(Object.entries(job.crossing.previous ?? {}).filter(([, value]) => value !== undefined)),
     }
@@ -2188,21 +2303,29 @@ export function install(rt) {
       await rt.load()
       const bot = rt.botOf(entry.botId)
       const room = entry.roomId === undefined ? undefined : rt.roomOf(entry.roomId)
-      if (bot === undefined || (entry.roomId !== undefined && room === undefined) || readOnly()) return false
+      // A live way back that cannot run leaves a cut relay request unanswered (ME-1).
+      const bail = () => {
+        if (!inJob && !restart) answerCut(freshId, entry, failure)
+        return false
+      }
+      if (bot === undefined || (entry.roomId !== undefined && room === undefined) || readOnly()) return bail()
       const current = room !== undefined ? room.sessions?.[bot.id] : rt.chatOf(bot.id)
       const segments = segmentsOf(entry) ?? []
-      if (current !== freshId || segments.at(-1)?.sessionId !== entry.oldId) return false
+      if (current !== freshId || segments.at(-1)?.sessionId !== entry.oldId) return bail()
       const crossing = entry.job?.crossing
+      // A group's follow goes back to the route its Session ran on; the Bot's fields never move.
+      const group = crossing?.group === true
       if (crossing !== undefined) {
         // A Bot that denies acp_tool is not put back on an agent that runs its own tools
         // (#2026): with no way back left, the switch settles where it is.
-        const back = crossing.previous.model ?? crossing.previous.appliedModel
+        const back = group ? crossing.from : crossing.previous.model ?? crossing.previous.appliedModel
         try {
           rt.assertOwnToolsModel?.(bot, { next: back, denyTools: bot.denyTools })
         } catch {
-          rt.warn('ds-bot: %s stays on %s: going back to %s would run its own tools with acp_tool denied', bot.name, bot.model, back)
-          // After a restart the line names the new agent on both sides: it stays (MH-5).
-          if (restart) rt.noteSwitchFailed?.(bot, entry.expected, entry.expected)
+          rt.warn('ds-bot: %s stays on %s: going back to %s would run its own tools with acp_tool denied', bot.name, group ? entry.expected : bot.model, back)
+          // After a restart the line names the new agent on both sides: it stays (MH-5). A
+          // group's follow writes nothing on the Bot's model line.
+          if (restart && !group) rt.noteSwitchFailed?.(bot, entry.expected, entry.expected)
           const segment = segments.at(-1)
           if (segment?.archivePending !== undefined) {
             delete segment.archivePending
@@ -2219,6 +2342,7 @@ export function install(rt) {
             // In the job a rerun that failed leaves the marker to the restart pass; after a
             // restart this is the last try: the handoff waits for the next message (MH-5).
             if (ran !== true && !restart) return false
+            if (ran !== true) answerCut(freshId, entry, failure)
             delete state.switching[entry.oldId]
             await rt.save()
             await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
@@ -2228,13 +2352,18 @@ export function install(rt) {
           await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
             .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
           // The reply the switch stopped still goes on: here, once more, from its handoff.
-          if (entry.job?.resume === true) await rerunHandoff(freshId, bot.name)
+          if (entry.job?.resume === true && await rerunHandoff(freshId, bot.name) !== true) answerCut(freshId, entry, failure)
           return false
         }
       }
       rt.endGrants?.([freshId, entry.oldId], 'part')
       segments.pop()
-      if (crossing !== undefined) {
+      if (group) {
+        // The Bot's own model is not in doubt: nothing on its model line; the Session tries
+        // once more at its next step.
+        crossing.note('rolled back', 'first call failed')
+        followFailed(entry.oldId, entry.expected)
+      } else if (crossing !== undefined) {
         // The agent switch goes back whole: the Bot's own fields as they were before the pick.
         for (const key of ['model', 'effort', 'appliedModel', 'appliedEffort', 'previousModel', 'shellHeld']) {
           if (crossing.previous[key] === undefined) delete bot[key]
@@ -2281,15 +2410,22 @@ export function install(rt) {
       const old = await rt.resolveAgent(entry.oldId).catch(() => undefined)
       if (old !== undefined) {
         try { await takeBack(freshId, old) } catch (error) { rt.warn('ds-bot: input of the fresh part of %s not taken back: %s', bot.name, error) }
-      } else rt.warn('ds-bot: the part %s came from could not be loaded; its input stays in the fresh part', bot.name)
-      const picked = await freshRoute(bot, old?.session)
-      if (picked !== undefined && await rt.keepsCarriedRoute?.(entry.oldId, picked.ref) === true) {
-        // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
-        bot.appliedModel = picked.ref
-        if (picked.effort === undefined) delete bot.appliedEffort
-        else bot.appliedEffort = picked.effort
-        await rt.save()
-      } else if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
+      } else {
+        rt.warn('ds-bot: the part %s came from could not be loaded; its input stays in the fresh part', bot.name)
+        if (crossing !== undefined) answerCut(freshId, entry, failure)
+      }
+      // The old group part never left the route it ran on: nothing is selected on it.
+      const picked = group ? undefined : await freshRoute(bot, old?.session)
+      if (picked !== undefined) {
+        const carried = await rt.keepsCarriedRoute?.(entry.oldId, picked.ref)
+        if (carried === true) {
+          // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
+          bot.appliedModel = picked.ref
+          if (picked.effort === undefined) delete bot.appliedEffort
+          else bot.appliedEffort = picked.effort
+          await rt.save()
+        } else if (carried !== 'unreadable') await selectRoute(bot, entry.oldId, picked)
+      }
       if (old !== undefined) partBase.set(entry.oldId, tokensOf(old.session) ?? 0)
       rt.renewMemory(entry.oldId)
       // A reply the agent switch stopped goes on in the part it came from, once: the handoff
@@ -2298,8 +2434,36 @@ export function install(rt) {
       rt.warn('ds-bot: the first call in the fresh part of %s failed before any answer; it is back on the part it came from, which was not archived', bot.name)
       await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
         .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', bot.name, error))
+      if (crossing !== undefined && !group) {
+        // The agent switch goes back with its groups: a group follow of the same pick still
+        // awaiting its first answer goes back too, and one that already answered on the new
+        // agent follows the Bot back with a handoff of its own, once those reverts settled.
+        const reverts = []
+        // A snapshot on purpose: revertSwitch deletes from `awaiting` during this loop.
+        for (const [groupFresh, groupEntry] of Array.from(awaiting)) {
+          if (groupEntry.botId === bot.id && groupEntry.job?.crossing?.group === true && groupEntry.expected === entry.expected) {
+            reverts.push(revertSwitch(groupFresh, groupEntry, failure).catch(error => rt.warn('ds-bot: group part %s not taken back: %s', groupFresh, error)))
+          }
+        }
+        void Promise.allSettled(reverts).then(() => followGroups(bot))
+      }
       return 'back'
     } finally { leave() }
+  }
+
+  // A relay sender whose request an agent switch cut, when the way back cannot run that
+  // request again: one final answer, as a failed turn gives it (turns.js leaves the failed
+  // first turn's answer to the switch, switchResumes) (ME-1).
+  function answerCut(freshId, entry, failure) {
+    const job = entry.job
+    const info = job?.info
+    if (job?.crossing === undefined || job.resume !== true || job.answeredCut === true || info?.kind !== SOURCE_KIND) return
+    if (!(info.role === 'stopped' || (info.role === 'request' && info.noReply !== true)) || info.audience === 'user') return
+    job.answeredCut = true
+    const name = rt.botOf(entry.botId)?.name ?? 'The other Bot'
+    try {
+      answerSender(rt, freshId, info, `${name} could not answer your message: its model call failed (${failureLine(turnFailure(failure))}). Tell the user if it matters; do not retry right away.`)
+    } catch (error) { rt.warn('ds-bot: the sender of a request %s could not answer was not told: %s', name, error) }
   }
 
   // What a fresh part holds of the user's input goes back to the part it came from, in
@@ -2441,16 +2605,16 @@ export function install(rt) {
     if (noCommands && commandCapableAgent(ref)) throw noBotRunner()
     if (ref !== undefined) return { ref, effort: await rt.desiredEffort(bot, ref) }
     if (target !== undefined) return { ref: target, effort: undefined }
-    const route = session?.requestHeader()?.config
+    const route = readableRoute(session?.requestHeader()?.config)
     if (noCommands) {
       if (commandCapableAgent(route?.provider)) throw noBotRunner()
-      if (!route?.provider || !route.model) {
+      if (!route) {
         const fallback = await rt.defaultModel({ noCommands })
         if (fallback === undefined || commandCapableAgent(fallback)) throw noBotRunner()
         return { ref: fallback, effort: undefined }
       }
     }
-    return route?.provider && route?.model ? { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort } : undefined
+    return route ? { ref: `${route.provider}/${route.model}`, effort: route.reasoningEffort } : undefined
   }
 
   // It answers whether the route was selected, and records what the fresh part then runs on.
@@ -2474,14 +2638,22 @@ export function install(rt) {
   // part is made and selected on the picked route, the handoff is put in it while no surface
   // can reach it, and only then does the Bot's record point to it, in one save with its new
   // model. Anything that fails before that leaves the Bot on its part and model.
+  // A group conversation of the Bot following its switch takes the same steps on the group's
+  // record: the fresh group part, its handoff, then the group's pointer in one save. The Bot's
+  // own fields never change with it.
   async function crossOver(agent, job, signal) {
     const bot = rt.botOf(job.botId)
     if (bot === undefined) return
+    const room = job.roomId === undefined ? undefined : rt.roomOf(job.roomId)
+    if (job.roomId !== undefined && (room === undefined || !room.members.includes(bot.id))) {
+      job.rollback = 'group changed'
+      return
+    }
     const name = bot.name
     const session = agent.session
     const tokens = tokensOf(session)
     const lines = await contextLines(session).catch(() => undefined)
-    const number = partsOf(bot.id).length
+    const number = partsOf(bot.id, room?.id).length
     const recentTokens = policyOf(session.id).recentTokens
     const budget = Math.min(recentTokens, Math.floor((job.threshold ?? lines?.check ?? 4 * recentTokens) / 4))
     const left = () => job.deadline - Date.now()
@@ -2504,7 +2676,7 @@ export function install(rt) {
       written = undefined
     }
     const noted = written !== undefined ? { note: written.note } : { fallback: 'recent' }
-    const carried = await handoffLines(agent.id, { budget, group: false, number })
+    const carried = await handoffLines(agent.id, { budget, group: room !== undefined, number })
     if (signal.aborted) throw signal.reason
     const noCommands = job.noCommands || rt.botRunnerRequired?.(session.id, agent) === true
     if (noCommands && commandCapableAgent(job.target)) throw noBotRunner()
@@ -2513,8 +2685,8 @@ export function install(rt) {
     const effort = job.crossing.effort === null ? undefined
       : job.crossing.effortGiven ? job.crossing.effort : await rt.desiredEffort(bot, job.target)
     const picked = { ref: job.target, effort }
-    const freshId = await rt.createSession(name, {
-      dir, group: false, botId: job.botId, ...(bot.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
+    const freshId = await rt.createSession(room === undefined ? name : `${name} · ${room.name}`, {
+      dir, group: room !== undefined, botId: job.botId, ...(bot.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
       readScopeSource: session.id, continueReadScope: true,
     })
     const abandon = async (why) => {
@@ -2530,23 +2702,25 @@ export function install(rt) {
     const selected = await selectRoute(bot, freshId, picked, name, { record: false })
     // The fresh part never takes a time-boxed Auto level the pick ended.
     await job.autoCleared
-    await rt.applyPermission(bot, freshId, undefined)
+    await rt.applyPermission(bot, freshId, room)
       .catch(error => rt.warn('ds-bot: permission for the fresh part of %s not applied: %s', name, error))
     try {
       if (!selected) throw new Error(`${job.target} was not selected on the fresh part`)
-      await rt.assertNotOffCli?.(bot, freshId, undefined, { owner: { bot }, unselected: false })
+      await rt.assertNotOffCli?.(bot, freshId, undefined, { owner: room === undefined ? { bot } : { bot, room }, unselected: false })
     } catch (error) {
       rt.warn('ds-bot: no fresh part for the agent switch of %s: %s', name, error?.message ?? error)
       await abandon('selection failed')
       return
     }
-    // The Bot or its chat may have changed during the awaits above.
-    const unchanged = () => rt.botOf(bot.id) === bot && rt.chatOf(bot.id) === agent.id
+    // The Bot, its chat or its group conversation may have changed during the awaits above.
+    const currentPart = () => (room === undefined ? rt.chatOf(bot.id)
+      : rt.roomOf(room.id) === room && room.members.includes(bot.id) ? room.sessions?.[bot.id] : undefined)
+    const unchanged = () => rt.botOf(bot.id) === bot && currentPart() === agent.id
     if (!unchanged()) {
       await abandon('conversation changed')
       return
     }
-    // S3: the handoff into the fresh part while nothing can reach it.
+    // S3: queue the handoff before the Bot or group pointer moves to the fresh part.
     const resume = job.resume === true
     let fresh
     let folder
@@ -2565,16 +2739,16 @@ export function install(rt) {
       const segment = { ...noted, switchedTo: job.target }
       const redact = redactorFor(ctx)
       const build = lines => redact(handoffPackage({
-        segment, lines, number: number + 1, resume, folder,
-        crossing: { from: agentNameOf(job.crossing.from), to: agentNameOf(job.target) },
+        room, segment, lines, number: number + 1, resume, folder,
+        crossing: { from: agentNameOf(job.crossing.from), to: agentNameOf(job.target), group: room !== undefined },
       }))
       const text = routeOfRef(job.target).route === 'acp' ? capForAcp(build, carried) : build(carried)
       freshParts.set(freshId, estimateTokens(text))
-      // Durable, and it wakes nothing: the part starts only after the commit below.
+      // Prepending the handoff does not wake the fresh part.
       fresh.inbox.prepend('next-turn', createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
       await ctx.sessions.flush(fresh.session)
       // Watched from here, before anything can start the fresh part's first turn.
-      awaiting.set(freshId, { oldId: agent.id, botId: job.botId, expected: job.target, job })
+      awaiting.set(freshId, { oldId: agent.id, botId: job.botId, ...(room === undefined ? {} : { roomId: room.id }), expected: job.target, job })
       job.awaitingId = freshId
     } catch (error) {
       rt.warn('ds-bot: the handoff of the agent switch of %s failed: %s', name, error?.message ?? error)
@@ -2585,7 +2759,8 @@ export function install(rt) {
     // S4: the commit, one synchronous stretch from the checks to the save.
     if (!unchanged()) { await abandon('conversation changed'); return }
     if (Date.now() > job.deadline) { await abandon('deadline'); return }
-    if ((bot.model ?? bot.appliedModel) !== job.crossing.from) { await abandon('model changed'); return }
+    // The own chat leaves the model it was picked from; a group follows the Bot's model.
+    if ((bot.model ?? bot.appliedModel) !== (room === undefined ? job.crossing.from : job.target)) { await abandon('model changed'); return }
     try {
       rt.assertOwnToolsModel?.(bot, { next: job.target, denyTools: bot.denyTools })
     } catch {
@@ -2595,6 +2770,7 @@ export function install(rt) {
     }
     const segment = { sessionId: agent.id, endedAt: Date.now(), ...(tokens !== undefined ? { tokens } : {}), ...noted, switchedTo: job.target, archivePending: true }
     rt.endGrants?.(agent.id, 'part')
+    if (room !== undefined) return commitGroup(agent, job, { bot, room, segment, freshId, fresh, written, carried, number })
     ;(bot.segments ??= []).push(segment)
     bot.sessionId = freshId
     if (bot.permissionAuto) rt.endAuto?.(bot, [agent.id])
@@ -2701,6 +2877,76 @@ export function install(rt) {
     job.crossing.note('completed', written !== undefined ? 'handoff with a summary' : 'handoff without a summary')
     ctx.logger.info('ds-bot: %s switched from %s to %s in part %d; %s; %d latest and %d earlier messages carried', name, job.crossing.from, job.target, number + 1,
       written !== undefined ? 'summary written by the outgoing agent' : 'no summary', carried.recent.length, carried.earlier.length)
+    // The Bot's group conversations follow, each with a switch of its own.
+    void followGroups(bot)
+  }
+
+  // S4-S6 of a group's follow: the group's pointer moves to the fresh part in one save, with
+  // the group's own line "<name> switched to <agent>" (members never read it: SHOWN_ONLY in
+  // groups.js); then what the old group part held follows the handoff.
+  async function commitGroup(agent, job, { bot, room, segment, freshId, fresh, written, carried, number }) {
+    room.segments ??= {}
+    ;(room.segments[bot.id] ??= []).push(segment)
+    room.sessions[bot.id] = freshId
+    rt.logRoom?.(room, { who: 'Omni', kind: 'switched', about: bot.id, to: job.target, agent: agentNameOf(job.target), time: segment.endedAt })
+    job.freshId = freshId
+    job.expected = job.target
+    job.moved = true
+    pendingFollows.delete(agent.id)
+    followFailures.delete(agent.id)
+    await rt.save()
+    const held = [...agent.inbox.nextStep, ...agent.inbox.nextTurn].filter(message => !isNoteRequest(message))
+    const carry = []
+    let sent = 0
+    try {
+      await rt.ensureCapabilities(freshId)
+      await ctx.sessions.flush(fresh.session)
+      carry.push(...job.carry.splice(0))
+      sent += await forward(job, [...carry, ...held], agent.session.id)
+    } catch (error) {
+      job.kept = true
+      try { restore(agent, [...carry, ...job.carry.splice(0)]) } catch {}
+      throw error
+    }
+    quietly(() => { for (const message of held) agent.inbox.remove(message.id) })
+    dropNoteRequests(agent)
+    for (let late = job.carry.splice(0); late.length > 0; late = job.carry.splice(0)) {
+      sent += await forward(job, late, agent.session.id).catch((error) => {
+        job.kept = true
+        try { restore(agent, late) } catch {}
+        throw error
+      })
+    }
+    if (sent === 0) {
+      try { wakeKept(fresh) } catch (error) {
+        if (unloaded(error)) {
+          job.kept = true
+          if (awaiting.get(freshId)?.job === job) {
+            awaiting.delete(freshId)
+            acked.delete(freshId)
+          }
+          noteInfo('omni-ui: plugin unloaded while the fresh group part of %s woke; its handoff waits in part %s', bot.name, freshId)
+          return
+        }
+        rt.warn('ds-bot: the fresh group part of %s could not be woken: %s', bot.name, error)
+        if (error?.started !== true && awaiting.get(freshId)?.job === job) {
+          job.kept = true
+          reverting.set(freshId, job)
+          let outcome = false
+          try {
+            outcome = await revertSwitch(freshId, awaiting.get(freshId), error, { inJob: true }).catch((failure) => {
+              rt.warn('ds-bot: going back from the fresh part %s failed: %s', freshId, failure)
+              return false
+            })
+          } finally { reverting.delete(freshId) }
+          await drainRevert(job, outcome, agent.id, freshId)
+          return
+        }
+      }
+    }
+    job.crossing.note('completed', written !== undefined ? 'handoff with a summary' : 'handoff without a summary')
+    ctx.logger.info('ds-bot: %s in %s switched from %s to %s in part %d; %s; %d latest messages carried', bot.name, room.name, job.crossing.from, job.target, number + 1,
+      written !== undefined ? 'summary written by the outgoing agent' : 'no summary', carried.recent.length)
   }
 
   async function moveOn(agent, job, signal) {
@@ -3011,6 +3257,17 @@ export function install(rt) {
         freshParts.delete(agent.id)
         partBase.set(agent.id, (tokensOf(agent.session) ?? 0) + fresh)
       }
+      // A group conversation that was busy when its Bot switched agents follows at this step:
+      // the step's messages go with the switch, and a turn under way goes on on the new agent.
+      const follow = place.roomId === undefined ? undefined : pendingFollows.get(agent.id)
+      if (follow !== undefined && !readOnly()) {
+        pendingFollows.delete(agent.id)
+        const bot = rt.botOf(place.botId)
+        const crossing = await groupCrossing(agent.id, bot, follow)
+        if (crossing !== undefined && !readOnly() && currentGroupFollow(agent.id, bot, follow)) {
+          return switchBeforeStep(agent, payload, { hard: true, target: follow, crossing })
+        }
+      }
       if (!readOnly() && await folderMove(agent, { midTurn: payload.step > 1 }) !== undefined) return switchBeforeStep(agent, payload, { folder: true })
       if (nativeDshSession(agent.id) || pinned(agent.id)) return pass()
       // The group's own Session moves only for its folder, never for its size: its turns
@@ -3296,7 +3553,7 @@ export function install(rt) {
 
   // The handoff package opens a part as a turn of its own, so it is the first message
   // in the part's history. When nothing is left to do, that turn's reply is a fixed
-  // line instead of a model call.
+  // line instead of a model call. A batch with another opener is a real step.
   ctx.on('llm/stream', (options, next) => {
     if (options.sessionId === undefined || options.purpose !== undefined || rt.ownRequest(options)) return next()
     const messages = options.messages ?? []
@@ -3305,7 +3562,7 @@ export function install(rt) {
     // The outgoing agent's handoff-note request is answered by the agent itself, and a batch
     // that holds one is never acknowledged in its place.
     const noting = batch.some(message => message.source?.role === 'handoff-note')
-    const opened = batch.filter(message => message.source?.role !== 'handoff-note' && (message.source?.kind === 'user' || message.source?.kind === 'retry' || message.source?.kind === SOURCE_KIND))
+    const opened = batch.filter(message => message.source?.role !== 'handoff-note' && opensTurn(message))
     const bare = !noting && opened.length > 0 && opened.every(message => message.source.kind === SOURCE_KIND && message.source.handoff === true && message.source.resume !== true)
     if (!bare) return next()
     if (awaiting.has(options.sessionId)) acked.add(options.sessionId)
@@ -3707,7 +3964,7 @@ export function install(rt) {
       }
       const lastSelection = events.findLast(event => event.type === 'model/selection')
       const laterHeaders = events.filter(event => event.type === 'request/header' && event.seq > (lastSelection?.seq ?? end))
-      const configOf = event => event?.data?.header?.config
+      const configOf = event => readableRoute(event?.data?.header?.config)
       const retired = laterHeaders.some(event => sameModelSelection(configOf(event), target))
       const alreadySelected = sameModelSelection(lastSelection?.data, target)
         && (!retired || sameModelSelection(configOf(laterHeaders.at(-1)), target))
@@ -3887,8 +4144,7 @@ export function install(rt) {
   function assertRouteAllowed(bot, target, entry) {
     if (routeAllowed(bot, target, rt.routePolicy)) return
     routeAttempt(bot, bot.model ?? bot.appliedModel, target, entry)('refused', 'route policy')
-    const route = { native: 'Native', acp: 'ACP', herdr: 'Herdr', 'hermes-remote': 'Remote Hermes' }[routeOfRef(target).route]
-    throw refused('refused', `${bot.name} cannot use the ${route} route.`)
+    throw refused('refused', `${bot.name} cannot use the ${routeLabel(target)} route.`)
   }
 
   // A missing model can stop a crossing before the usual route checks run.
@@ -4073,6 +4329,8 @@ export function install(rt) {
       note('accepted')
       return { id: botId, model: target, ...(effortId == null ? {} : { effort: effortId }), status: 'switching' }
     }
+    await rt.assertReadableRoute?.(bot, target)
+    checkCurrent()
     await rt.clearAuto?.(bot)
     checkCurrent()
     const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort, previousModel: bot.previousModel, shellHeld: bot.shellHeld }
@@ -4095,7 +4353,7 @@ export function install(rt) {
     const takeRoute = async () => {
       putRoute()
       try {
-        await rt.applyModel(bot, { force: true })
+        await rt.applyModel(bot, { force: true, requireReadable: true })
       } catch (error) {
         restore()
         note('rolled back', 'in-place selection failed')
@@ -4106,6 +4364,9 @@ export function install(rt) {
     else await takeRoute()
     await rt.save()
     note('completed', 'conversation had no exchange to hand off')
+    // A group conversation with history that the change in place left on its route follows
+    // with a switch of its own.
+    void followGroups(bot)
     return { id: botId, model: target, ...(effortId === null ? {} : { effort: effortId }), status: 'switched' }
   }
 
@@ -4369,7 +4630,20 @@ export function install(rt) {
     } finally { leave() }
   }
 
-  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, freshPinnedText: bot => pinnedText(bot, 'fresh'), switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(),
+  function afterBotInputSwitch(id, settled) {
+    const job = switches.get(id)
+    if (job === undefined) return false
+    void job.finished.then(() => {
+      if (disposed) return
+      const retained = [job.inputAgent, job.inputDestination]
+        .flatMap(agent => [...(agent?.inbox?.nextStep ?? []), ...(agent?.inbox?.nextTurn ?? [])])
+      settled([...job.carry, ...retained])
+    }).catch(error => rt.warn('ds-bot: input from %s could not be checked after its switch: %s', id, error))
+    return true
+  }
+
+  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, freshPinnedText: bot => pinnedText(bot, 'fresh'), switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), afterBotInputSwitch,
+    carriesBotInput: id => switches.has(id) || checkpoints.has(id) || reverting.has(id),
     // A Bot's own chat moving to another route. `crossing: true` asks only about an agent
     // switch the person picked and answers its `{ to, since }` (the chat's lock), else false.
     switchingChat: (id, { crossing = false } = {}) => {

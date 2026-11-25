@@ -20,7 +20,7 @@ import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdi
   readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseBots, workerHomeOf } from "./model.js";
+import { isSendGrantRole, parseBots, roleOf, workerHomeOf } from "./model.js";
 import { dataRootOf } from "./workers.js";
 
 /** The record shape this pack writes and reads. */
@@ -104,12 +104,13 @@ export function recordFor({ project, roster, approvedAt, approvedBy }) {
 /** A record as its file bytes: two-space JSON and a final newline. */
 export const recordText = (record) => `${JSON.stringify(record, null, 2)}\n`;
 
-function missingRecord(project) {
-  const error = new Error(`no approved roster for ${project}: run `
-    + `\`am proxy approve --project ${project}\` from an unsandboxed terminal, `
-    + `then restart the pane; ${APPROVAL_REVIEW}`);
-  error.code = "ENOENT";
-  return error;
+export class MissingApprovedRecord extends Error {
+  constructor(project) {
+    super(`no approved roster for ${project}: run `
+      + `\`am proxy approve --project ${project}\` from an unsandboxed terminal, `
+      + `then restart the pane; ${APPROVAL_REVIEW}`);
+    this.code = "ENOENT";
+  }
 }
 
 /** The checked record in `text` for `project`; throws when it is corrupt or for another project. */
@@ -144,28 +145,39 @@ function checkedRecord(text, project) {
 
 /**
  * Read and check one project's approved record. Returns { record, file, path, text } where
- * `file` is the parsed roster. A missing record throws with code ENOENT; a corrupt one throws
- * without it, so the proxy and approve can tell them apart.
+ * `file` is the parsed roster. An absent record throws MissingApprovedRecord (ENOENT).
  */
-export function readApprovedRecord({ project, env = process.env, path = undefined }) {
+export function readApprovedRecord({ project, env = process.env, path = undefined, exactMode = false }) {
   const main = canonicalProject(project);
   const file = path ?? recordFileOf(main, env);
   let text;
   try {
-    const info = lstatSync(file);
+    const info = lstatSync(file, { throwIfNoEntry: false });
+    if (!info) throw new MissingApprovedRecord(main);
     if (!info.isFile()) throw new Error(`the approved record ${file} is not a regular file`);
-    if ((info.mode & 0o077) !== 0) {
+    if ((info.mode & 0o077) !== 0 || (exactMode && (info.mode & 0o7777) !== 0o600)) {
       throw new Error(`the approved record ${file} is not 0600; run `
         + `\`am proxy approve --project ${main}\` again; ${APPROVAL_REVIEW}`);
     }
     text = readFileSync(file, "utf8");
   } catch (e) {
-    if (e?.code === "ENOENT" || e?.code === "ENOTDIR") throw missingRecord(main);
     if (e?.code === "EACCES")
       throw new Error(`cannot read the approved record ${file}: permission denied`);
     throw e;
   }
   return { ...parseApprovedRecord(text, main), path: file, text };
+}
+
+/** A grant must agree with both rosters, including any name used to select the bot. */
+export function approvedGrant({ project, botId, workingFile, env, matches = () => true }) {
+  try {
+    const { record, file } = readApprovedRecord({ project, env, exactMode: true });
+    const role = roleOf(file, botId);
+    if (isSendGrantRole(role) && roleOf(workingFile, botId) === role && matches(file) && matches(workingFile)) {
+      return { role, sha256: record.sha256, project: record.project };
+    }
+  } catch { /* a missing, changed or unreadable approval grants nothing */ }
+  return null;
 }
 
 /** Check record bytes read on the project's own computer (including linked reads). */

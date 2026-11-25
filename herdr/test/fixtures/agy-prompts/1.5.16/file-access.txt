@@ -1,0 +1,40 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      ▄▀▀▄        Antigravity CLI 1.5.16
+     ▀▀▀▀▀▀       <EMAIL> (<TIER>)
+▀▀▀▀▀▀▀▀      Gemini 4 Neon (High)
+   ▄▀▀    ▀▀▄     /work/project
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Read the file /work/outside/note.txt and tell me its first line.
+
+○ Thought for 5.0s (Initial assumption: the active workspace is irrelevant; the full path `/work/outs...)
+● Explored 1 file (note.txt) (ctrl+o to expand)
+
+File access
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Read: /work/outside/note.txt
+Reason: outside workspace
+
+Allow access to this file?
+> 1. Yes, allow access
+  2. Yes, and always allow non-workspace access
+  3. No, deny access
+
+  ↑/↓ Navigate
+esc to cancel                                                                                       Gemini 4 Neon · high

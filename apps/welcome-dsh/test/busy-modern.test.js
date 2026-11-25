@@ -76,3 +76,13 @@ test('modern getter failure and malformed activity replace any idle reading with
     assert.deepEqual(h.writes.at(-1), { untrusted: true, at: 9 })
   }
 })
+
+// #2064 (SC2-1): a failed Switch account that is settling is counted by acp-dsh as active and
+// confirming, with a deadline of at most 90 s, so the desktop holds its restart until it ends.
+test('a settling switch is written as a confirming sign-in, then idle once it settled', () => {
+  const h = setup()
+  h.set({ active: 1, confirming: 1, confirmingUntil: 9 + 90_000 })
+  assert.deepEqual(h.writes.at(-1), { running: 0, logins: 1, confirming: 1, confirmingUntil: 90_009, at: 9 })
+  h.set({ active: 0, confirming: 0 })
+  assert.deepEqual(h.writes.at(-1), { running: 0, logins: 0, confirming: 0, at: 9 })
+})

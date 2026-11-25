@@ -73,11 +73,13 @@ export function Switch({ on, label, disabled, onChange }) {
 }
 
 // A row with a switch. Not a label: a click on the copy must not flip it twice.
-export function SwitchRow({ label, hint, on, disabled, onChange, details = false }) {
+export function SwitchRow({ label, hint, notes, on, disabled, onChange, details = false }) {
   const toggle = h(Switch, { on, label, disabled, onChange })
+  // `notes`: more lines under the hint, with the hint's own class (Details only).
   if (details) return h('div', null,
     h('div', { className: 'bt-drawer-switch-head' }, h('span', null, label), toggle),
-    hint ? h('div', { className: 'bt-note' }, hint) : null)
+    hint ? h('div', { className: 'bt-note' }, hint) : null,
+    ...(notes ?? []).map((note, index) => h('div', { key: `note-${index}`, className: 'bt-note' }, note)))
   return h('div', { className: 'bt-set-row bt-bs-row' },
     h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, label), hint ? h('span', { className: 'bt-set-hint' }, hint) : null),
     toggle)
@@ -94,11 +96,13 @@ function ShapeRing({ shape, size }) {
 }
 
 // Every character shape, six to a row, then the color swatches.
-export function CharacterGrid({ look, hasPhoto = false, onShape, onColor }) {
-  const shapes = [...PICKER_SHAPES, ...Object.keys(SHAPES).filter(id => !Object.hasOwn(CHARACTERS, id))]
-  if (!shapes.includes(look.shape)) shapes.push(look.shape)
+export function CharacterGrid({ look, shapes, hasPhoto = false, onShape, onColor }) {
+  const options = shapes === undefined
+    ? [...PICKER_SHAPES, ...Object.keys(SHAPES).filter(id => !Object.hasOwn(CHARACTERS, id))]
+    : [...shapes]
+  if (shapes === undefined && !options.includes(look.shape)) options.push(look.shape)
   const rows = []
-  for (let index = 0; index < shapes.length; index += PICKER_COLUMNS) rows.push(shapes.slice(index, index + PICKER_COLUMNS))
+  for (let index = 0; index < options.length; index += PICKER_COLUMNS) rows.push(options.slice(index, index + PICKER_COLUMNS))
   return h(Fragment, null,
     h('div', { className: 'bt-shapes', role: 'group', 'aria-label': t('Character shape') }, rows.map((row, index) => h('div', { key: index, className: 'bt-shape-row' }, row.map(id => h('button', {
       key: id, type: 'button', className: 'bt-shape', 'aria-label': t(shapeOf(id).label), title: t(shapeOf(id).label), 'aria-pressed': !hasPhoto && look.shape === id,
@@ -211,10 +215,21 @@ function RoleControls({ bot, runtime, actions, run, readOnly }) {
       setDirty(false)
     }).finally(() => setSaving(false)))
   }
-  const granted = bot.roles[0].grants.includes('audio-out')
+  const grants = bot.roles[0].grants
+  const taskStart = grants.includes('task-start')
+  const routePolicy = grants.includes('route-policy')
   return h(Fragment, null,
-    runtime.capabilities.includes('audio-out') ? h(SwitchRow, { label: t('Allow speech'), on: granted, disabled: readOnly,
+    runtime.capabilities.includes('audio-out') ? h(SwitchRow, { label: t('Allow speech'), on: grants.includes('audio-out'), disabled: readOnly,
       onChange: on => void run(actions.grantRole(bot.id, pin, 'audio-out', on)) }) : null,
+    runtime.capabilities.includes('task-start') ? h(SwitchRow, {
+      label: t('Allow starting tasks'), on: taskStart, disabled: readOnly,
+      hint: bot.reviewGuard === true ? t('Tasks require the review guard to be off.') : undefined,
+      onChange: on => void run(actions.grantRole(bot.id, pin, 'task-start', on)),
+    }) : null,
+    runtime.capabilities.includes('route-policy') ? h(SwitchRow, {
+      label: t('Allow its tasks to run on another model'), on: routePolicy, disabled: readOnly || (!taskStart && !routePolicy),
+      onChange: on => void run(actions.grantRole(bot.id, pin, 'route-policy', on)),
+    }) : null,
     values ? runtime.settings.map(({ key, kind, label }) => {
       const name = label === 'Voice' ? t('Voice') : label === 'Speed' ? t('Speed') : label
       const value = values[key]
@@ -251,7 +266,8 @@ function PackageAttachmentCard({ roster, bot, pin, recoveryId, onDetach, actions
     runtime ? h(RoleControls, { key: `${bot.id}:${pin.attachedAt}`, bot, runtime, actions, run, readOnly: roleReadOnly(roster) })
       : h(Row, { label: t('Grants requested'), hint: declarations ? declarations.capabilities.join(', ') || t('None') : t('Details unavailable') }),
     !runtime && declarations?.fromCatalog ? h(Row, { label: t('From the catalog') }) : null,
-    runtime?.acp ? h(Row, { label: t('ACP coding agents do not receive this role’s prompt.') }) : null,
+    runtime?.promptWarning ? h(Row, { label: hostText(runtime.promptWarning) })
+      : runtime?.acp ? h(Row, { label: t('ACP coding agents do not receive this role’s prompt.') }) : null,
     !runtime ? h(Row, { label: healthReason ? hostText(healthReason) : t('Its tools arrive with the role runtime.'),
       hint: recover ? t('Detach it from every Bot, uninstall, then install again.') : undefined }) : null)
 }
@@ -278,6 +294,7 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
   const teamBot = roster.bots?.some(item => item.id === bot.id)
     ?? (Object.hasOwn(roster.byId ?? {}, bot.id) && roster.byId[bot.id]?.id === bot.id)
   const showingRoles = teamBot && rolesOn(roster.prefs)
+  const canCancelSolverWait = teamBot && bot.canCancelSolverWait === true
   const requestedRoleCatalog = useRef()
   useEffect(() => {
     if (!showingRoles || !actions.roleCatalog || requestedRoleCatalog.current === bot.id) return
@@ -347,15 +364,15 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
     h(Card, { title: t('Profile') },
       h(Row, { label: t('Name') }, h(InlineText, { label: t('Name'), value: bot.name, placeholder: 'Bob', required: true, maxLength: 40, onSave: name => save({ name }) })),
       h(Row, { label: t('Description'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Description'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) })),
-      showingRoles ? h('div', { className: choices.size ? 'bt-set-row bt-bs-row bt-bs-stack' : 'bt-set-row bt-bs-row' },
+      (showingRoles || canCancelSolverWait) ? h('div', { className: choices.size ? 'bt-set-row bt-bs-row bt-bs-stack' : 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Role')),
           h('span', { className: 'bt-set-hint' }, t('What this Bot can do, on top of what every Bot has.'))),
         h(rolePicker, rolePickerProps,
-          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': activeRole === undefined, disabled: readOnly,
-            onClick: () => { if (activeRole !== undefined && !readOnly) detach() } }, t('None')),
-          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': effective.includes('genie'),
+          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': activeRole === undefined && !canCancelSolverWait, disabled: readOnly,
+            onClick: () => { if (!readOnly) detach() } }, t('None')),
+          showingRoles ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': effective.includes('genie'),
             disabled: readOnly || Boolean(genieReason), title: genieReason,
-            onClick: () => { if (activeRole === undefined && !genieReason && !readOnly) void run(actions.attachRole(bot.id, 'genie')) } }, t('Genie')),
+            onClick: () => { if (activeRole === undefined && !genieReason && !readOnly) void run(actions.attachRole(bot.id, 'genie')) } }, t('Genie')) : null,
           ...[...choices].map(([id, version]) => {
             const installed = Object.hasOwn(roster.roleDetails ?? {}, id) ? roster.roleDetails[id].installed : undefined
             const pressed = pin?.id === id && activeRole === id

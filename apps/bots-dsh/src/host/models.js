@@ -10,6 +10,7 @@ import { normalize, splitRef } from './text.js'
 import { install as installHostModels } from './host-models.js'
 import { PI_AI_CLAUDE, claudeFamilyOf, supersededClaude } from './claude-models.js'
 import { SettingsSelectionRejected } from './pocket-settings.js'
+import { readableRoute } from './session-route.js'
 
 const CATALOG_TTL_MS = 10_000
 const quiet = new AsyncLocalStorage()
@@ -418,22 +419,23 @@ export function install(rt) {
   // and a route a CLI covers; the jobs beside the chats keep their own rule.
   // DSH's default on a ChatGPT or Claude sign-in it cannot run that way is read as the same
   // model on that plan's CLI, when the CLI can run.
-  function pickDefault(entries, canRun = configured) {
+  function pickDefault(entries, canRun = configured, captured) {
     // Neither a refused route nor one that cannot run is picked.
     const usable = answerable(entries).filter(canRun)
-    const ref = defaultRef()
+    const ref = captured === undefined ? defaultRef() : captured.modelDefault
     const chosen = usable.find(entry => entry.ref === ref)
     if (chosen) return chosen.ref
     const signIn = entries.find(entry => entry.ref === ref && entry.covered === true)
     const peer = signIn === undefined ? undefined : cliPeerOf(signIn, usable)
     if (peer) return peer.ref
-    const seen = Array.isArray(state.providersSeen) ? state.providersSeen : []
+    const seen = captured === undefined ? providersSeen() : JSON.parse(captured.providersSeen)
     const rank = entry => (seen.includes(entry.provider) ? seen.indexOf(entry.provider) : seen.length)
     const ordered = usable.map((entry, index) => ({ entry, index })).sort((a, b) => rank(a.entry) - rank(b.entry) || a.index - b.index).map(({ entry }) => entry)
     const first = ordered[0]?.provider
     const own = ordered.filter(entry => entry.provider === first)
     return (own.find(entry => entry.id !== 'default' && entry.superseded !== true) ?? own.find(entry => entry.id !== 'default') ?? own[0])?.ref
   }
+  const providersSeen = () => Array.isArray(state.providersSeen) ? state.providersSeen : []
   const defaultModel = async ({ noCommands = false } = {}) => pickDefault(await catalog({ noCommands }))
 
   // The model a create that names none starts on: the team's pick while the catalog
@@ -555,12 +557,20 @@ export function install(rt) {
   // for a Bot that waits; another model of the same CLI is still taken. `aside`: a call
   // beside the chat that runs no tool (memory.js) keeps the plain rule.
   const stayed = new Set()
-  const plainModel = async (bot, noCommands) => {
-    const entries = await catalog({ noCommands })
+  function plainModelIn(bot, entries, captured) {
     if (entries.some(entry => entry.ref === bot.model)) return bot.model
     // A fallback is never one that needs a key.
-    return entries.some(entry => entry.ref === bot.appliedModel && entry.needsKey !== true) ? bot.appliedModel : pickDefault(entries)
+    return entries.some(entry => entry.ref === bot.appliedModel && entry.needsKey !== true) ? bot.appliedModel : pickDefault(entries, configured, captured)
   }
+  const plainModel = async (bot, noCommands) => plainModelIn(bot, await catalog({ noCommands }))
+  // A role task uses the same choice as desiredModel's aside route, from the
+  // captured Bot and the catalog already read for the eligibility scan.
+  const taskAskerState = bot => ({
+    model: bot.model, appliedModel: bot.appliedModel,
+    asideAllowed: Boolean(bot.model) && onDsh(bot) && !rt.switchingChat?.(bot.id),
+    modelDefault: defaultRef(), providersSeen: JSON.stringify(providersSeen()),
+  })
+  const taskAskerModel = (captured, entries) => captured.asideAllowed ? plainModelIn(captured, entries, captured) : undefined
   // Whether going from the Bot's saved model to `ref` leaves its coding CLI.
   const offCli = (bot, ref) => ref !== undefined && ref !== bot.model && leavesCli(splitRef(bot.model), splitRef(ref))
   const stays = (bot, ref) => {
@@ -656,7 +666,7 @@ export function install(rt) {
   function selectSessionModel(sessionId, { provider, model, reasoningEffort }, pocket) {
     const release = rt.holdGrants?.({ sessionIds: [sessionId] }, () => {
       const selected = sessionSelections.get(sessionId)
-        ?? ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config
+        ?? readableRoute(ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config)
       return [selected?.provider, selected?.model]
     })
     const run = selecting.then(async () => {
@@ -727,53 +737,40 @@ export function install(rt) {
 
   const sameSelection = (a, b) => a.provider === b.provider && a.model === b.model && a.reasoningEffort === b.reasoningEffort
 
-  // Read a stored route once, not on every forced apply; the live feed keeps it current.
-  // `model` and `reasoningEffort` name the whole route for a part that keeps it (parts.js).
-  const routeFields = config => ({
-    provider: config?.provider,
-    ...(typeof config?.model === 'string' ? { model: config.model } : {}),
-    ...(config?.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
-  })
-  const storedRoutes = new Map()
-  let watchingRoutes = false
+  function storedRouteEvent(route, event) {
+    if (event?.type === 'model/selection') return { ...route, pendingSelection: readableRoute(event.data) }
+    if (event?.type !== 'request/header') return route
+    const header = event.data?.header
+    const used = readableRoute(header?.config)
+    const selected = used && header?.adapterDefaults?.reasoningEffort === true ? { ...used, reasoningEffort: undefined } : used
+    // History callers read the last request. Prompt delivery follows DSH's pending choice
+    // until a request uses that choice.
+    const pending = route.pendingSelection
+    if (pending === undefined || (pending && selected && sameSelection(pending, selected))) return { used }
+    return { used, pendingSelection: pending }
+  }
   async function storedRoute(sessionId) {
-    if (storedRoutes.has(sessionId)) return storedRoutes.get(sessionId)
+    // undefined means the store confirms there is no log or the log has no events.
+    // null means the route could not be read.
     // bots-dsh does not inject sessionPersistence: in real cordis a sibling plugin's
     // service throws on a property read but is readable through ctx.get.
-    let persistence
-    try { persistence = ctx.get?.('sessionPersistence') } catch { return undefined }
-    if (typeof persistence?.open !== 'function') return undefined
-    const pending = (async () => {
-      let handle
-      try {
-        handle = await persistence.open(sessionId, 'read')
-        if (typeof handle?.read !== 'function') return { missing: true }
-        const { events } = await handle.read()
-        for (let index = events.length - 1; index >= 0; index -= 1) {
-          if (events[index]?.type === 'request/header') return routeFields(events[index].data?.header?.config)
-        }
-        return { provider: undefined }
-      } catch (error) {
-        return error?.name === 'SessionPersistenceNotFoundError' ? { missing: true } : { unreadable: true }
-      } finally {
-        try { await handle?.close?.() } catch {}
-      }
-    })()
-    watchRoutes()
-    storedRoutes.set(sessionId, pending)
-    if (storedRoutes.size > 500) storedRoutes.delete(storedRoutes.keys().next().value)
-    const stored = await pending
-    if ((stored.missing || stored.unreadable) && storedRoutes.get(sessionId) === pending) storedRoutes.delete(sessionId)
-    return stored
-  }
-  // Registered on first use, so nothing is listened to until a stored route is read.
-  function watchRoutes() {
-    if (watchingRoutes) return
-    watchingRoutes = true
-    ctx.on?.('session/event', (session, event) => {
-      if (event?.type !== 'request/header' || typeof session?.id !== 'string' || !storedRoutes.has(session.id)) return
-      storedRoutes.set(session.id, Promise.resolve(routeFields(event.data?.header?.config)))
-    })
+    let handle
+    try {
+      const persistence = ctx.get?.('sessionPersistence')
+      if (typeof persistence?.open !== 'function') return null
+      handle = await persistence.open(sessionId, 'read')
+      if (typeof handle?.read !== 'function') return null
+      const { events } = await handle.read()
+      if (!Array.isArray(events)) return null
+      if (events.length === 0) return undefined
+      const { used, pendingSelection } = events.reduce(storedRouteEvent, {})
+      if (used === null || pendingSelection === null || (used === undefined && pendingSelection === undefined)) return null
+      return pendingSelection === undefined ? used : { ...used, pendingSelection }
+    } catch (error) {
+      return error?.name === 'SessionPersistenceNotFoundError' && error.sessionId === sessionId ? undefined : null
+    } finally {
+      try { await handle?.close?.() } catch {}
+    }
   }
 
   // THE RULE: a chat already on a Remote Hermes route never takes the in-place model
@@ -782,17 +779,25 @@ export function install(rt) {
   // Session keeps its route and the exact-route guard accepts the turn. The decision is
   // the chat's ACTUAL route: the live Session's request header, or, for an unloaded
   // chat, the last request/header in its stored log. It is never the history of picks.
+  // An unreadable route blocks a selection without confirming a carried Hermes chat.
+  /** @returns {Promise<boolean | 'unreadable'>} */
   async function keepsCarriedRoute(sessionId, ref) {
     if (ref !== 'hermes-remote/attach') return false
-    let config
     try {
-      config = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config
-    } catch { return false }
-    if (config !== undefined) return config?.provider === 'hermes-remote'
+      const header = ctx.sessions?.get?.(sessionId)?.requestHeader?.()
+      const route = readableRoute(header?.config)
+      if (header != null) return route ? route.provider === 'hermes-remote' : 'unreadable'
+    } catch { return 'unreadable' }
     const stored = await storedRoute(sessionId)
-    // An unreadable log keeps its route: switching would load and measure it too.
-    // A missing log is a fresh part and takes the row.
-    return stored?.unreadable === true || stored?.provider === 'hermes-remote'
+    const route = readableRoute(stored)
+    if (route) return route.provider === 'hermes-remote'
+    // A valid selection before the first request confirms there is no carried route yet.
+    return readableRoute(stored?.pendingSelection) ? false : 'unreadable'
+  }
+
+  const unreadableRouteMessage = bot => `${bot.name} could not switch because its current Session route could not be read.`
+  async function assertReadableRoute(bot, ref) {
+    if (await keepsCarriedRoute(rt.chatOf(bot.id), ref) === 'unreadable') throw refusal(unreadableRouteMessage(bot))
   }
 
   // The store can replace a Bot while a model choice is in flight.
@@ -808,7 +813,7 @@ export function install(rt) {
 
   // Group Sessions already logged as keeping their route, so the warning comes once.
   const keptGroupRoutes = new Set()
-  async function applyModelHeld(bot, { force = false, modelEntry, checkChoice, selected } = {}) {
+  async function applyModelHeld(bot, { force = false, requireReadable = false, modelEntry, checkChoice, selected } = {}) {
     const pinned = modelEntry !== undefined
     const expectedChat = pinned ? rt.chatOf(bot.id) : undefined
     const live = () => modelTargetLive(bot) && !rt.switchingChat?.(bot.id)
@@ -836,8 +841,13 @@ export function install(rt) {
     const effort = await desiredEffort(bot, ref, modelEntry)
     const ownChanged = force || staying.size > 0 || bot.appliedModel !== ref || (bot.appliedEffort ?? undefined) !== effort
     const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
-    if (ownChanged && !staying.has(chat)) {
-      if (await keepsCarriedRoute(chat, ref)) {
+    const applyOwn = ownChanged && !staying.has(chat)
+    const carried = applyOwn ? await keepsCarriedRoute(chat, ref) : false
+    if (applyOwn) {
+      if (carried === 'unreadable') {
+        if (pinned) throw Object.assign(new SettingsSelectionRejected(unreadableRouteMessage(bot)), { code: 'bot/refused' })
+        if (requireReadable) throw refusal(unreadableRouteMessage(bot))
+      } else if (carried === true) {
         if (pinned) accept()
       } else {
         await selectSessionModel(chat, route, pinned ? { check, selected: accept } : undefined)
@@ -873,7 +883,7 @@ export function install(rt) {
     // model. A record left naming the CLI would skip the selection when the CLI is served
     // again, and the Sessions moved here would stay off it. Nothing is returned as applied.
     if (pinned) check()
-    if (!modelTargetLive(bot)) return undefined
+    if (!modelTargetLive(bot) || carried === 'unreadable') return undefined
     if (staying.size > 0 && staying.has(chat)) {
       if (bot.appliedModel === undefined || bot.appliedModel === ref) return undefined
       delete bot.appliedModel
@@ -959,9 +969,13 @@ export function install(rt) {
     assembleLlm,
     modelsEpoch: () => catalogEpoch,
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
-    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
+    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, taskAskerState, taskAskerModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
-    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, storedRouteOf: storedRoute, applyModel, waitForModel, syncModels, routeRefused,
-    dropCatalog: () => { catalogCache = { at: 0, value: [] } },
+    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, assertReadableRoute, storedRouteOf: storedRoute,
+    applyModel, waitForModel, syncModels, routeRefused,
+    dropCatalog: () => {
+      invalidate()
+      catalogCache = { at: 0, value: [] }
+    },
   })
 }

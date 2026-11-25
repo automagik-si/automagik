@@ -7,7 +7,18 @@ import { SIGN_IN_NAMES, cliLoginBotOf, signInProviderOf } from './cli-login-mode
 // source), requests to the host, and the notes the transcript keeps. The shell around the
 // views adds navigation and its own panels. `after` reads the team again once a request
 // is done; `partFor` maps a Bot id, or any part of its chat, to its current part.
-export function teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession, loginState, panelFolded, work }) {
+export function teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession, loginState, panelFolded, work,
+  storage = (() => { try { return globalThis.localStorage } catch { return null } })() }) {
+  // A deleted Bot's composer state (DSH's `dsh.conversation.<part>`), removed once the
+  // host answered that it is deleted. The host's sweep list (draft-sweep.js) also covers
+  // a key DSH writes again while the chat is still open.
+  const forgetDrafts = (ids) => {
+    if (!Array.isArray(ids)) return
+    for (const id of ids) {
+      if (typeof id !== 'string' || id === '') continue
+      try { storage?.removeItem(`dsh.conversation.${id}`) } catch { /* storage unavailable */ }
+    }
+  }
   // The person's own agent switch in this window (F4): from the host's answer on, the part it
   // leaves draws no activity row for the outgoing agent's note turn, before the state poll
   // brings the host's `noting`. Only an outgoing agent over ACP writes its note in the chat.
@@ -80,12 +91,14 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
       .then((value) => { pick.end(true); return value }, (error) => { pick.end(false); throw error }))
   // The sign-in row of a Bot's chat (cli-login.js): an explicit entry opens that Bot's chat and
   // its row; `ref` is the model the person chose, applied by the host once signed in.
-  const openCliLogin = (botId, provider, ref) => {
+  // `attemptId` is a Switch account's own attempt (#2064): the row reads that one.
+  const openCliLogin = (botId, provider, ref, attemptId) => {
     const bot = cliLoginBotOf(roster.getSnapshot(), botId)
     const manager = loginState?.()
     if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false
     openSession?.(bot.id)
-    void manager.open({ botId: bot.id, provider, ref: signInProviderOf(ref) === provider ? ref : undefined })
+    void manager.open({ botId: bot.id, provider, ref: signInProviderOf(ref) === provider ? ref : undefined,
+      ...(typeof attemptId === 'string' ? { attemptId } : {}) })
     return true
   }
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra })
@@ -291,7 +304,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     folderPick: () => call('folder-pick'),
     folderList: path => call('folder-list', { path: path ?? '' }),
     setTeamWorkspace: path => after(call('team-workspace', { path })),
-    deleteBot: id => after(call('delete-bot', { id })),
+    deleteBot: id => after(call('delete-bot', { id })).then((value) => { forgetDrafts(value?.deletedParts); return value }),
     rollbackAdoption: agentId => after(call('agent-bot-rollback', { agentId })),
     releasePrivate: id => after(call('private-release', { id })),
     duplicateBot: id => after(call('duplicate-bot', { id })),

@@ -1712,3 +1712,18 @@ test('a failed first turn that an agent switch takes back and resumes answers no
     }
   }
 })
+
+test('D2 an exact stored reviewer ID cannot fall back to a different Bot name', async t => {
+  const seed = team()
+  Object.assign(seed.bots.a, {
+    role: 'Researcher', reviewerId: 'reviewer-id',
+    roles: [{ id: 'solver', version: '3.1.2', attachedAt: '2026-11-24T00:00:00Z', grants: [] }],
+  })
+  seed.bots.b.name = 'reviewer-id'
+  const { tool, agentOf, stop } = await start(seed)
+  t.after(stop)
+  const result = await tool('message_bot', { to: 'reviewer-id', message: 'Review the fixture' }, 'a')
+  assert.match(result.text, /^No Bot named reviewer-id\./)
+  assert.deepEqual(agentOf('b').calls, [])
+  assert.match(await tool('message_bot', { to: 'b', message: 'Ordinary ID addressing' }, 'a'), /^Delivered to reviewer-id/)
+})

@@ -14,16 +14,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRuntime } from '../index.js'
 import { createAgentAccess, agentBindAddress, AGENT_TOOLS } from '../src/host/agent-access.js'
+import { createDraftSweep } from '../src/client/draft-sweep.js'
 import { fakeContext } from './fake-ctx.js'
+import { solverInstructions } from '../src/shared/solver-method.js'
 
-async function fixture(t) {
+async function fixture(t, { bots = {}, rooms = {}, empty = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'agent-access-'))
   await writeFile(join(home, 'state.json'), JSON.stringify({ version: 1, revision: 1,
-    mainBotIds: ['a'], workspaceId: 'w', bots: {
+    mainBotIds: empty ? [] : ['a'], workspaceId: 'w', bots: empty ? {} : {
       a: { id: 'a', name: 'Alpha', instructions: 'Help', capabilities: [] },
       b: { id: 'b', name: 'Beta', instructions: '', capabilities: [] },
       c: { id: 'c', name: 'Gamma', instructions: '', capabilities: [] },
-    }, rooms: {}, agents: {}, exchanges: [] }))
+      ...bots,
+    }, rooms, agents: {}, exchanges: [] }))
   const ctx = fakeContext()
   const agents = new Map()
   let count = 0
@@ -723,3 +726,130 @@ test('conversation state distinguishes running, waiting and idle without exposin
     rt.state.questions['group-member-session'] = { text: 'Private group question' }
     assert.equal((await tool('get_conversation', { id: 'r' })).value.status, 'waiting')
   })
+
+// #2056 D1.5 (G13b): while a Bot's review guard is on, an outside agent cannot move it to another
+// model; its other fields, and an unguarded Bot's model, still change.
+test('agent access cannot change a guarded Bot\'s model; other fields and unguarded Bots are unchanged', async t => {
+  const { rt, tool, view } = await fixture(t)
+  rt.resolveModel = async ref => ref
+  rt.resolveEffort = async (ref, effort) => effort
+  rt.applyModel = async () => {}
+  rt.state.bots.b.reviewerId = 'c'
+  rt.state.bots.b.reviewGuard = true
+  await rt.save({ required: true })
+  const refused = await tool('update_bot', { id: 'b', model: 'provider/model' })
+  assert.equal(refused.isError, true)
+  assert.deepEqual(refused.value, { error: 'Action refused', code: 'bot/review-guard' })
+  assert.equal(rt.botOf('b').model, undefined)
+  assert.ok((await view()).audit.some(entry => entry.action === 'update_bot' && entry.target === 'b' && entry.outcome === 'refused'))
+  const instructions = await tool('update_bot', { id: 'b', instructions: 'Still editable' })
+  assert.equal(instructions.isError, false)
+  assert.equal(rt.botOf('b').instructions, 'Still editable')
+  const free = await tool('update_bot', { id: 'c', model: 'provider/model' })
+  assert.equal(free.isError, false)
+  assert.equal(rt.botOf('c').model, 'provider/model')
+})
+
+test('a Bot an agent token deletes is listed for the page\'s composer sweep; a reading host cannot clear it', async t => {
+  const { rt, tool, call } = await fixture(t)
+  const bot = (await tool('create_bot', { name: 'Scratch', instructions: 'Temporary' })).value
+  assert.equal((await tool('delete_bot', { id: bot.id })).isError, false)
+  assert.equal((await call('state')).value.draftSweep.includes(bot.id), true)
+  rt.readOnly = () => 'Owner has read-only access'
+  const refused = await call('drafts-swept', { ids: [bot.id] })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.error.code, 'bot/read-only')
+  assert.equal(rt.state.draftSweep.includes(bot.id), true)
+})
+
+// The owner's page over the host route: a storage holding the named composer keys, and a
+// `call` that rejects a refused request.
+async function pageSweep(call, keys) {
+  const items = new Map(keys.map(key => [key, '{"draft":"x"}']))
+  const storage = { items, getItem: key => (items.has(key) ? items.get(key) : null), removeItem: (key) => { items.delete(key) } }
+  const drafts = createDraftSweep({ storage, openSession: () => undefined, call: async (endpoint, payload) => {
+    const answer = await call(endpoint, payload)
+    if (!answer.ok) throw new Error(answer.error?.message ?? 'refused')
+    return answer.value
+  } })
+  drafts.note((await call('state')).value.draftSweep)
+  await drafts.run()
+  return [...items.keys()]
+}
+
+test('a moved Bot an agent token deletes has its current chat swept by the page', async t => {
+  const { tool, call } = await fixture(t, { bots: {
+    b: { id: 'b', name: 'Beta', instructions: '', capabilities: [], sessionId: 'b-next', segments: [{ sessionId: 'b', endedAt: 1 }] },
+  } })
+  assert.equal((await tool('delete_bot', { id: 'b' })).isError, false)
+  const left = await pageSweep(call, ['dsh.conversation.b', 'dsh.conversation.b-next', 'dsh.conversation.c'])
+  assert.deepEqual(left, ['dsh.conversation.c'])
+  assert.equal(Object.hasOwn((await call('state')).value, 'draftSweep'), false)
+})
+
+test('a group an agent token deletes has its composer keys swept by the page', async t => {
+  const { tool, call } = await fixture(t, { rooms: {
+    r1: { id: 'r1', name: 'Ops', members: ['a', 'b', 'c'], mode: 'admin', admin: 'b', named: true,
+      sessionId: 'r1-next', parts: [{ sessionId: 'r1' }], sessions: { b: 'gb' } },
+  } })
+  assert.equal((await tool('delete_group', { id: 'r1' })).isError, false)
+  const left = await pageSweep(call, ['dsh.conversation.r1', 'dsh.conversation.r1-next', 'dsh.conversation.gb', 'dsh.conversation.c'])
+  assert.deepEqual(left, ['dsh.conversation.c'])
+  assert.equal(Object.hasOwn((await call('state')).value, 'draftSweep'), false)
+})
+
+const solverProfile = () => ({ role: 'Solver', instructions: solverInstructions() })
+
+test('an authenticated agent cannot create a Solver or bootstrap an empty team through it', async t => {
+  const { rt, home, ctx, tool } = await fixture(t, { empty: true })
+  const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'))
+  const create = t.mock.method(ctx.sessionController, 'create')
+  await rt.save()
+  const disk = await state()
+  const live = structuredClone(rt.state.bots)
+  const result = await tool('create_bot', { name: 'Candidate', ...solverProfile() })
+  await rt.save()
+  assert.deepEqual((await state()).bots, disk.bots)
+  assert.deepEqual((await state()).mainBotIds, [])
+  assert.deepEqual(rt.state.bots, live)
+  assert.equal(create.mock.callCount(), 0)
+  assert.equal(result.isError, true)
+  assert.equal(result.value.code, 'bot/refused')
+})
+
+test('an explicit null avatar is refused by the MCP create schema', async t => {
+  const { rt, home, ctx, tool } = await fixture(t, { empty: true })
+  const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'))
+  const create = t.mock.method(ctx.sessionController, 'create')
+  await rt.save()
+  const disk = (await state()).bots
+  const live = structuredClone(rt.state.bots)
+  const result = await tool('create_bot', { name: 'Candidate', avatar: null })
+  await rt.save()
+  assert.deepEqual((await state()).bots, disk)
+  assert.deepEqual(rt.state.bots, live)
+  assert.equal(create.mock.callCount(), 0)
+  assert.equal(result.error?.code, -32602)
+})
+
+test('an authenticated agent cannot turn an ordinary Bot into a Solver through an update', async t => {
+  const { rt, home, tool } = await fixture(t)
+  const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'))
+  await rt.save()
+  const disk = (await state()).bots.b
+  const live = structuredClone(rt.botOf('b'))
+  const result = await tool('update_bot', { id: 'b', name: 'Changed', ...solverProfile() })
+  await rt.save()
+  assert.deepEqual((await state()).bots.b, disk)
+  assert.deepEqual(rt.botOf('b'), live)
+  assert.equal(result.isError, true)
+  assert.equal(result.value.code, 'bot/refused')
+})
+
+test('an authenticated agent can rename a Solver', async t => {
+  const { rt, tool } = await fixture(t, { bots: { b: { id: 'b', name: 'Candidate', ...solverProfile() } } })
+  const result = await tool('update_bot', { id: 'b', name: 'Changed' })
+  assert.equal(result.isError, false)
+  assert.equal(rt.botOf('b').name, 'Changed')
+  assert.equal(rt.botOf('b').instructions, solverInstructions())
+})

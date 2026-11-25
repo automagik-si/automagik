@@ -62,19 +62,24 @@ export function install(rt) {
     }
   }
 
-  async function publish(id, data) {
+  async function publish(id, data, guard) {
+    guard?.()
     await mkdir(directory, { recursive: true, mode: 0o700 })
     const path = fileOf(id)
     const temporary = path + '.' + randomUUID()
+    guard?.()
+    const handle = await open(temporary, 'wx', 0o600)
     try {
-      const handle = await open(temporary, 'wx', 0o600)
       try {
+        guard?.()
         await handle.writeFile(JSON.stringify({ version: 1, id, ...data }) + '\n')
+        guard?.()
         await handle.sync()
       } finally {
         await handle.close()
       }
-      await replaceFile(temporary, path)
+      guard?.()
+      await replaceFile(temporary, path, guard)
     } finally {
       await unlink(temporary).catch(() => {})
     }
@@ -160,7 +165,7 @@ export function install(rt) {
 
   // Use DSH's reserved Session id so a new workload cannot run before its
   // association is durable. Save even an unset root so later changes reach it.
-  async function reserveReadScope(source, { continuation = false } = {}) {
+  async function reserveReadScope(source, { continuation = false, guard } = {}) {
     let scope
     try { scope = await resolveReadScope(source) }
     catch {
@@ -168,7 +173,7 @@ export function install(rt) {
       return undefined
     }
     const sessionId = `session-${randomUUID()}`
-    await publish(sessionId, { rootId: scope.rootId, continuation: continuation && scope.editable })
+    await publish(sessionId, { rootId: scope.rootId, continuation: continuation && scope.editable }, guard)
     return sessionId
   }
 
@@ -190,6 +195,84 @@ export function install(rt) {
     if (candidateRoots.length !== current?.candidateRoots?.length) await publish(sessionId, { candidateRoots })
     boundFolder({ candidateRoots })
   }
+
+  // Every readable record, by Session id. An unreadable or invalid one throws: what it names
+  // is not known, so a caller that removes records removes none.
+  function allRecords() {
+    let entries
+    try { entries = readdirSync(directory) }
+    catch (error) {
+      if (error?.code === 'ENOENT' && lstatSync(directory, { throwIfNoEntry: false }) === undefined) return new Map()
+      throw error
+    }
+    const records = new Map()
+    for (const name of entries) {
+      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue
+      const record = recordAt(join(directory, name))
+      if (record !== null) records.set(record.id, record)
+    }
+    return records
+  }
+  const namedBy = record => (record.rootId !== undefined ? [record.rootId] : record.candidateRoots ?? [])
+  // The folder a record binds its Session to through the records alone: its own, its
+  // root's, or any candidate root's. A loop counts as bound.
+  function recordFolder(records, id, seen = new Set()) {
+    if (seen.has(id)) return true
+    seen.add(id)
+    const record = records.get(id)
+    if (record === undefined) return null
+    if (rootRecord(record)) return record.folder ?? null
+    if (record.rootId !== undefined) return recordFolder(records, record.rootId, seen)
+    return record.candidateRoots.some(root => recordFolder(records, root, new Set(seen)) !== null) ? true : null
+  }
+
+  // A deleted Bot's or group's Sessions leave their records, but only a record no remaining
+  // record names (its `rootId` or `candidateRoots`): a surviving Session whose lineage
+  // points at a deleted one (a Bot the deleted Bot made, a scheduled task) keeps its root's
+  // folder. Removing one can free another (a deleted part named its first part), so the
+  // pass repeats until nothing more goes. `keep` holds back an id the caller protects.
+  // A reading host removes nothing. Returns the removed ids.
+  async function forgetReadScopes(ids, { keep = () => false } = {}) {
+    if (rt.readOnly?.() !== undefined || !Array.isArray(ids)) return []
+    const wanted = new Set(ids.filter(validId))
+    if (wanted.size === 0) return []
+    const records = allRecords()
+    const removed = []
+    for (let changed = true; changed;) {
+      changed = false
+      const named = new Set([...records.values()].flatMap(namedBy))
+      for (const id of wanted) {
+        if (!records.has(id) || named.has(id) || keep(id, records)) continue
+        await unlink(fileOf(id)).catch((error) => { if (error?.code !== 'ENOENT') throw error })
+        records.delete(id)
+        wanted.delete(id)
+        removed.push(id)
+        changed = true
+      }
+    }
+    return removed
+  }
+
+  // The records deletions before this rule left behind, by the same rule: a Session DSH
+  // holds in its archive that the team no longer knows (every deleted Bot's and group's
+  // Session is archived). An archived Session nobody deleted can look the same, so a
+  // record that binds a folder stays: only a record whose Session reads with no folder
+  // either way goes, and no Session's limit changes. Runs at each start; repeats are
+  // no-ops.
+  const teamKnows = id => rt.selfOf?.(id) !== undefined || rt.roomOwners?.has(id) || rt.pastOwners?.has(id)
+    || rt.botOf?.(id) !== undefined || rt.roomOf?.(id) !== undefined || rt.own?.(rt.state?.tasks, id) !== undefined
+    || !(rt.agentClaims?.(id)?.next().done ?? true)
+  async function forgetOrphanReadScopes() {
+    // An absent team file loads as an empty team, which would make every archived part unknown.
+    if (rt.readOnly?.() !== undefined || rt.teamHealth?.()?.present !== true) return []
+    let archived
+    try { archived = new Set(ctx.workspaceRegistry?.archivedSessionIds ?? []) } catch { return [] }
+    if (archived.size === 0) return []
+    const orphans = [...allRecords().keys()].filter(id => archived.has(id) && !teamKnows(id))
+    return forgetReadScopes(orphans, { keep: (id, records) => recordFolder(records, id) !== null })
+  }
+  rt.readScopeOrphansForgotten = Promise.resolve().then(() => rt.load()).then(forgetOrphanReadScopes)
+    .catch((error) => { rt.warn('ds-bot: earlier deleted Sessions\' file-tool records were not removed: %s', error); return [] })
 
   const prepared = new WeakMap()
   ctx.on('tools/pre-execute', async function prepareReadScope(exec, next) {
@@ -255,5 +338,5 @@ export function install(rt) {
     return { editable: true, folder: real }
   }), 'ds-bot: set-session-read-scope endpoint')
 
-  Object.assign(rt, { resolveReadScope, reserveReadScope, assertNoConfiguredReadScope, bindScheduledReadScope, markScheduledReadCandidates })
+  Object.assign(rt, { resolveReadScope, reserveReadScope, assertNoConfiguredReadScope, bindScheduledReadScope, markScheduledReadCandidates, forgetReadScopes })
 }

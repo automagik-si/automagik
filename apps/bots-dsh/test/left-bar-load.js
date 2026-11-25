@@ -16,7 +16,7 @@ const bundle = await build({
       "export * from './src/client/left-bar-faces.js'",
       "export * from './src/client/left-bar-css.js'",
       "export * from './src/client/extend.js'",
-      "export { teamOf, channelGlyph } from './src/client/left-bar.js'",
+      "export { teamOf, channelGlyph, renderArt } from './src/client/left-bar.js'",
       "export { installLocale } from './src/client/i18n.js'",
     ].join('\n'),
     resolveDir: PLUGIN,

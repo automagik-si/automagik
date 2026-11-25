@@ -8,6 +8,7 @@ import { effectiveMarkOf, NATIVE_AGENTS, nativeToolsOn, restrictedBot } from '..
 export const NATIVE_OFF_TEXT = 'Native tools were turned off for this Bot, so this answer stopped. Send your message again.'
 export const NATIVE_TOOLS_BLOCK_TEXT = Object.freeze({
   multiuser: 'Native tools are not offered in a multi-user workspace yet.',
+  unoffered: "Native tools are not offered for this Bot's agent.",
   'model-kept': "This model can't turn its native tools off.",
   managed: 'Not available for a Bot that operates Omni or that another plugin manages.',
   shared: 'Not available while this Bot is shared with other people or a sharing plugin (LiveShare) is installed.',
@@ -106,8 +107,19 @@ export function install(rt) {
     catch (error) { failed(error) }
   }
 
+  // Antigravity's switch needs an acp-dsh that has it (its launch args, #1564): one that does not
+  // list it in `nativeArgsAgents` runs agy with its own tools, so the Bot shows no row and never
+  // saves ON. A failed read is not offered.
+  const argsSwitchOffered = provider => {
+    try {
+      const list = ctx.get('acpAgents')?.nativeArgsAgents
+      return Array.isArray(list) && list.includes(provider)
+    } catch { return false }
+  }
+
   function policyBlock(bot) {
     retireRemovedLocks()
+    if (effectiveMarkOf(bot) === 'acp-antigravity' && !argsSwitchOffered('acp-antigravity')) return 'unoffered'
     if (multiuserMode() || callerService(ctx)) return 'multiuser'
     if (modelKept(bot)) return 'model-kept'
     if (bot.kind !== undefined || (rt.isMain(bot.id) && rt.omniLinked?.())) return 'managed'

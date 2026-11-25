@@ -4,13 +4,15 @@
 // on the cosmetic Solver marker and on the reviewer id the New Solver dialog stores.
 
 // The verdicts a reviewer answers with (REVIEWER_RULES), as whole words, case as written (F9):
-// at the start of a line, right after "Verdict:", or ending a line right after a sentence's end
+// at the start of a line, right after "Verdict:", ending a line right after a sentence's end
 // (a Codex reviewer's progress sentence and its verdict arrive run together on one line:
-// "I'll read the note and check it.FIX-FIRST"). Never inside a word or mid-sentence, never asked
-// ("SHIP? no."), never as one of a list of options ("SHIP, FIX-FIRST or BLOCKED.", SR5-2).
+// "I'll read the note and check it.FIX-FIRST"), or glued to a sentence's end before a spaced
+// dash ("I'll read the note.SHIP — it has two lines", GLUED_DASH). Never inside a word or
+// mid-sentence, never asked ("SHIP? no."), never as one of a list of options ("SHIP, FIX-FIRST
+// or BLOCKED.", SR5-2).
 const ANY = '(?:SHIP|FIX-FIRST|BLOCKED)'
-const MD = '[*_\\`]*'
-const WORD = `(SHIP|FIX-FIRST|BLOCKED)(?![A-Za-z0-9-]|${MD}\\s*\\?|${MD}\\s*[,;/|]\\s*${MD}${ANY}|${MD}\\s+(?:or|and|nor|vs\\.?|versus)\\s+${MD}${ANY}|${MD}\\s*[-–—(]\\s*(?:or\\s+)?${MD}${ANY})`
+export const MD = '[*_\\`]*'
+export const WORD = `(SHIP|FIX-FIRST|BLOCKED)(?![A-Za-z0-9-]|${MD}\\s*\\?|${MD}\\s*[,;/|]\\s*${MD}${ANY}|${MD}\\s+(?:or|and|nor|vs\\.?|versus)\\s+${MD}${ANY}|${MD}\\s*[-–—(]\\s*(?:or\\s+)?${MD}${ANY})`
 const AT_START = new RegExp(`^${WORD}`)
 const AFTER_LABEL = new RegExp(`(?:^|[^A-Za-z])(?:Verdict|verdict|VERDICT)[*_\`]*\\s*:\\s*[*_\`]*\\s*${WORD}`)
 const ENDS_LINE = new RegExp(`[.!?\u2026]["'\u201d\u2019)\\]]*\\s*[*_\`]*${WORD}[*_\`]*[\\s.!]*$`)
@@ -20,11 +22,25 @@ export const VERDICTS_KEPT = 4
 // A line that opens or closes a fenced code block (three backticks or three tildes), and a list
 // item (a bullet or a number): a verdict word in a fenced block or opening a list item is quoted
 // text or one of a list of options, never the reviewer's verdict (SR5-2).
-const FENCE = /^[\s>]*(?:```|~~~)/
-const LIST_ITEM = /^[\s>]*(?:[*+-]|\d+[.)])\s+/
+export const FENCE = /^[\s>]*(?:```|~~~)/
+export const LIST_ITEM = /^[\s>]*(?:[*+-]|\d+[.)])\s+/
+
+// A verdict glued to the end of a line's first sentence (#2056: a Codex reviewer's progress
+// sentence and its final answer arrive as one text, "I'll read the note.SHIP — it has two lines").
+// LEAD is the sentence before it: no leading quote, and no colon, backtick, double or typographic
+// quote, guillemet, corner bracket, `>`, zero-width character, word joiner or line break before
+// its end (copied byte for byte from the adversarial review; some of its characters are
+// invisible). Mid-line apostrophes, parentheses and HTML entities are read (accepted). An
+// indented code line (four columns, a tab counting to the next) is never read this way.
+export const LEAD = `^(?!['‘])[^:\`"“”«»„>‘‚‹›「」『』＂〝〞″​-‍⁠\r  ]*?[.!?…]["'”’]*`
+export const INDENTED = /^(?: {0,3}\t| {4})/
+const GLUED_DASH = new RegExp(`${LEAD}${MD}${WORD}${MD}\\s+[-\u2013\u2014]\\s+\\S`)
+// The glued verdict with a spaced dash and text after it, on a line not indented as code; only
+// `#`, `*`, `_` and spaces are stripped first, so a quoted line keeps its `>`.
+const gluedDash = raw => (INDENTED.test(raw) ? null : GLUED_DASH.exec(raw.replace(/^[\s#*_]+/, '')))
 
 /**
- * The reviewer's verdict in a reply, or undefined: the last line that holds one (WORD's three
+ * The reviewer's verdict in a reply, or undefined: the last line that holds one (WORD's four
  * places), each line read with any leading Markdown (`#`, `>`, `*`, `_`, backticks) and spaces
  * stripped; case-sensitive. A verdict word inside a word or mid-sentence is no verdict, nor is
  * one in a fenced code block; a list item counts only after "Verdict:".
@@ -45,7 +61,7 @@ export function verdictOf(text) {
     const line = raw.replace(/^[\s#>*_`]+/, '')
     const found = LIST_ITEM.test(raw)
       ? AFTER_LABEL.exec(line)
-      : AT_START.exec(line) ?? AFTER_LABEL.exec(line) ?? ENDS_LINE.exec(line)
+      : AT_START.exec(line) ?? AFTER_LABEL.exec(line) ?? ENDS_LINE.exec(line) ?? gluedDash(raw)
     if (found) verdict = found[1]
   }
   return verdict

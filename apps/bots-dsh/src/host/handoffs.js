@@ -21,7 +21,7 @@ export function install(rt) {
   const works = () => (state.works ??= {})
   // What came back, whole; state.json keeps the start of each.
   const whole = new Map()
-  const save = () => void rt.save().catch(() => {})
+  const save = (durable = false) => void rt.save(durable ? { durable } : undefined).catch(() => {})
   const nameOf = id => rt.botOf(id)?.name
 
   // The whole result of a work, in a file of its own: state.json is written whole on
@@ -72,6 +72,14 @@ export function install(rt) {
     } catch {}
   }
 
+  const saveBeforeDroppingResults = (results) => {
+    const generation = rt.teamGeneration?.()
+    void rt.save({ durable: true }).then(written => {
+      if (written !== true || rt.sameTeam?.(generation) === false) return
+      for (const result of results) dropResult(result.file)
+    }).catch(() => {})
+  }
+
   // What came back for a work: the whole result if it is still to be found, else the
   // start of it. A result that a restart cut, or whose file is gone, is reported as
   // such and not passed on as if it were whole.
@@ -102,7 +110,7 @@ export function install(rt) {
     const above = parent === undefined ? undefined : works()[parent]
     works()[id] = { ...(from ? { from } : {}), ...(to ? { to } : {}), ...(room ? { room } : {}), ...(above ? { parent } : {}), ...(fromRoom ? { fromRoom } : {}), ...(name ? { name } : {}), ...(child ? { child } : {}), open: [], results: [], at: Date.now() }
     if (above !== undefined) above.open.push(id)
-    save()
+    save(true)
   }
 
   // The answer to work `id` is on its way, with `result` from `name`. Returns the work
@@ -123,9 +131,7 @@ export function install(rt) {
     for (const result of work.results ?? []) whole.delete(result.id)
     // Old state can still name these files until the replacement state lands.
     // A failed save must leave them available to the next host.
-    void rt.save().then(() => {
-      for (const result of work.results ?? []) dropResult(result.file)
-    }).catch(() => {})
+    saveBeforeDroppingResults(work.results ?? [])
     return above === undefined ? undefined : work.parent
   }
   // The subagent run a settlement notice names. The notice carries only the
@@ -189,16 +195,14 @@ export function install(rt) {
     const above = works()[parent]
     if (above !== undefined) above.open = above.open.filter(other => other !== id)
     for (const result of work.results ?? []) whole.delete(result.id)
-    void rt.save().then(() => {
-      for (const result of work.results ?? []) dropResult(result.file)
-    }).catch(() => {})
+    saveBeforeDroppingResults(work.results ?? [])
   }
 
   function taken(workId, id) {
     const work = works()[workId]
     if (work === undefined || !work.open.includes(id)) return
     work.open = work.open.filter(other => other !== id)
-    save()
+    save(true)
   }
 
   // A delivery the restart delayed is marked, so the answer that comes back for
@@ -336,7 +340,7 @@ export function install(rt) {
     closeWork(id, name, text, { abandoned: true, abandonedAt: Date.now(), abandonedReason: reason })
     // The wait is over now, not when the Bot next reads the result.
     parent.open = parent.open.filter(other => other !== id)
-    save()
+    save(true)
     // The Bot that waited goes on with its work now, the same way a reply brings it back.
     const waitingBot = parent.to
     if (waitingBot !== undefined && rt.botOf(waitingBot) !== undefined) {

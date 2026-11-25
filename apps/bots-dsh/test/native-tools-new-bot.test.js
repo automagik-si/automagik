@@ -196,3 +196,20 @@ test('the view carries the field for every served model, and the models key move
   // Never stored.
   assert.equal(Object.hasOwn(h.rt.state, 'nativeToolsNew'), false)
 })
+
+// #1564: Antigravity's switch needs an acp-dsh that lists it in `nativeArgsAgents`. With an older
+// acp-dsh the block a new Bot reads is `unoffered`, so the New Solver dialog shows no tick, as its
+// Details shows no row; with one that lists it, it is offered like omp.
+test('Antigravity reads unoffered with an older acp-dsh, and offered with one that lists it', async (t) => {
+  const AGY = 'acp-antigravity/default'
+  const older = team(t)
+  assert.equal(older.rt.nativeToolsNewBotBlock(AGY), 'unoffered')
+  assert.equal(older.rt.nativeToolsNewBotBlock(OMP), undefined)
+  const listsOmp = team(t, { services: { acpAgents: { nativeModelKept: () => false, nativeArgsAgents: ['acp-omp'] } } })
+  assert.equal(listsOmp.rt.nativeToolsNewBotBlock(AGY), 'unoffered')
+  const newer = team(t, { services: { acpAgents: { nativeModelKept: () => false, nativeArgsAgents: ['acp-antigravity', 'acp-omp'] } } })
+  assert.equal(newer.rt.nativeToolsNewBotBlock(AGY), undefined)
+  // Unoffered comes before every other block, multi-user included.
+  const multi = team(t, { services: { automagikCaller: { version: 2, multiuser: true } } })
+  assert.equal(multi.rt.nativeToolsNewBotBlock(AGY), 'unoffered')
+})

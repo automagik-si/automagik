@@ -103,6 +103,8 @@ const deviceAccessMessage = 'Codex device sign-in is unavailable. Enable device-
 const deviceStartMessage = 'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.'
 const expiredMessage = 'Sign-in expired. Try again.'
 const cancelledMessage = 'Sign-in cancelled.'
+// A Switch account whose CLI ended before showing its link while it is still signed in (#2064).
+const unchangedMessage = 'The account did not change. Try again.'
 
 // Why an attempt failed, as a class for the host log (#970): every failure reads much the same
 // to the person, and what the CLI printed is never kept. The class comes from the fixed message
@@ -117,6 +119,7 @@ const FAILURE_CAUSES = new Map([
   ['The CLI did not confirm sign-in. Try again.', 'the CLI did not confirm the sign-in'],
   [deviceAccessMessage, 'device-code login is not enabled'],
   [deviceStartMessage, 'device sign-in did not start'],
+  [unchangedMessage, 'the account did not change'],
 ])
 
 /**
@@ -125,11 +128,15 @@ const FAILURE_CAUSES = new Map([
  * given); `exit` is how the CLI ended when it had (`exit 1`, `SIGTERM`). Fixed words and a
  * number only.
  */
-function failureOf(flow, message) {
-  const exited = flow.exit
+function exitOf(exited) {
   const code = Number.isInteger(exited?.code) ? `exit ${exited.code}` : undefined
   const signal = typeof exited?.signal === 'string' && /^SIG[A-Z0-9]{2,12}$/.test(exited.signal) ? exited.signal : undefined
-  const exit = code ?? signal
+  return code ?? signal
+}
+
+function failureOf(flow, message) {
+  const exited = flow.exit
+  const exit = exitOf(exited)
   return {
     id: flow.id,
     cause: FAILURE_CAUSES.get(message) ?? (exited === undefined ? 'unknown' : 'the CLI exited'),
@@ -204,18 +211,25 @@ function blockBrowser() {
  * resolve(id) snapshots { cli, env }; the same snapshot runs login and its confirmation.
  * Nothing is spawned until start(), and ordinary agent status never exposes these flows.
  * onChange() is told whenever the number of attempts at work changes (the busy signal).
- * onReady(id, selected, { existing }) is told a confirmed sign-in; `existing` says the CLI was
- * already signed in when the attempt started (no one signed in through it).
+ * onReady(id, selected, { existing, fresh, compare, valid, same }) is told a confirmed sign-in;
+ * `existing` says the CLI was already signed in when the attempt started (no one signed in
+ * through it); `fresh` says the attempt was a Switch account (#2064), and `compare` that its
+ * account may be compared with the one signed out; `same()` marks that it ended on that account.
+ * onSettled({ id, attemptId, signedIn, valid }) is told how a Switch attempt that did not sign in
+ * left the CLI (#2064): `signedIn` is the status read after its CLI tree ended, or undefined.
+ * onSwitch({ id, step, ... }) is told a Switch attempt's start and end, in fixed words only.
  * onFail({ id, cause, phase, exit? }) is told an attempt that failed, as a class for the log.
  * record lets tests exercise ownership proof with a fake process.
  */
 export class CliLogins {
-  constructor({ resolve, hintOf = id => AGENTS[id]?.signInHint, signedIn = signedInOf, onReady = () => {}, onChange = () => {}, onActivity = () => {}, onFail = () => {}, spawn = spawnProcess, record = spawn === spawnProcess ? recordLogin : () => undefined, now = Date.now, linkTtlMs = LINK_TTL_MS, startupMs = STARTUP_MS, answerMs = ANSWER_TIMEOUT_MS, retainMs = RETAIN_MS, stateTtlMs = STATE_TTL_MS, timers = globalThis } = {}) {
+  constructor({ resolve, hintOf = id => AGENTS[id]?.signInHint, signedIn = signedInOf, onReady = () => {}, onSettled = () => {}, onSwitch = () => {}, onChange = () => {}, onActivity = () => {}, onFail = () => {}, spawn = spawnProcess, record = spawn === spawnProcess ? recordLogin : () => undefined, now = Date.now, linkTtlMs = LINK_TTL_MS, startupMs = STARTUP_MS, answerMs = ANSWER_TIMEOUT_MS, retainMs = RETAIN_MS, stateTtlMs = STATE_TTL_MS, timers = globalThis } = {}) {
     this.resolve = resolve
     // The terminal command a CLI with no sign-in here names (a managed copy's by its path).
     this.hintOf = hintOf
     this.signedIn = signedIn
     this.onReady = onReady
+    this.onSettled = onSettled
+    this.onSwitch = onSwitch
     this.onChange = onChange
     this.onActivity = onActivity
     this.onFail = onFail
@@ -290,17 +304,25 @@ export class CliLogins {
     this.changed()
   }
 
+  // A Switch that ended without a sign-in counts while it settles (#2064), in `confirming` too
+  // with its own bound: the app holds its restarts only for a confirming attempt, and a restart
+  // mid-settle would leave the vendor paused although its CLI is still signed in.
   activity() {
-    const active = [...this.flows.values()].filter(flow => this.active(flow))
-    const confirming = active.filter(flow => flow.confirmingUntil !== undefined)
+    const settling = flow => flow.settling === true && !this.disposed && this.flows.get(flow.id) === flow
+    const until = flow => (this.active(flow) ? flow.confirmingUntil : settling(flow) ? flow.settlingUntil : undefined)
+    const active = [...this.flows.values()].filter(flow => this.active(flow) || settling(flow))
+    const confirming = active.filter(flow => until(flow) !== undefined)
     return { active: active.length, confirming: confirming.length,
-      ...(confirming.length ? { confirmingUntil: Math.min(...confirming.map(flow => flow.confirmingUntil)) } : {}) }
+      ...(confirming.length ? { confirmingUntil: Math.min(...confirming.map(until)) } : {}) }
   }
 
-  /** How many attempts are starting or waiting: the Automagik app does not restart DSH under one. */
+  /**
+   * How many attempts are starting, waiting or settling: the Automagik app does not restart DSH
+   * under one.
+   */
   activeAttempts() {
     let count = 0
-    if (!this.disposed) for (const flow of this.flows.values()) if (ACTIVE.has(flow.status)) count++
+    if (!this.disposed) for (const flow of this.flows.values()) if (ACTIVE.has(flow.status) || flow.settling === true) count++
     return count
   }
 
@@ -327,6 +349,11 @@ export class CliLogins {
       ...(flow.answering && this.active(flow) ? { checking: true } : {}),
       ...(flow.message ? { message: flow.message } : {}),
       ...(flow.status === 'failed' && typeof flow.cause === 'string' ? { cause: flow.cause } : {}),
+      // A Switch account attempt (#2064), in every status: its row offers the switch again.
+      ...(flow.fresh === true ? { fresh: true } : {}),
+      ...(flow.status === 'ready' && flow.sameAccount === true ? { sameAccount: true } : {}),
+      ...(flow.fresh === true && flow.settling === true ? { settling: true } : {}),
+      ...(flow.fresh === true && !this.active(flow) && typeof flow.signedInAfter === 'boolean' ? { signedInAfter: flow.signedInAfter } : {}),
     }
   }
 
@@ -347,17 +374,24 @@ export class CliLogins {
 
   /**
    * Starts an attempt, or returns the one at work for this agent, whoever opened it.
+   * A Switch account (`fresh`, #2064) never joins one: its sign-in always runs and shows its link.
    * @param {string} id
-   * @param {{ label?: string }} [options] the view that opens it (a Bot id), shown on cancel.
+   * @param {{ label?: string, fresh?: boolean, compare?: boolean }} [options] the view that opens
+   *   it (a Bot id), shown on cancel; `fresh` for a Switch account, and `compare` when the account
+   *   it signed out of may be compared with the new one.
    */
-  start(id, { label } = {}) {
+  start(id, { label, fresh = false, compare = false } = {}) {
     if (this.disposed) throw failure('disposed', 'Sign-in is unavailable while Automagik restarts.')
     if (!known(id)) throw terminalOnly(id, this.hintOf(id)) ?? failure('invalid', CHOOSE)
     const previous = this.flows.get(id)
     if (previous) this.lapse(previous)
-    if (previous && this.active(previous)) return this.view(previous)
+    if (previous && this.active(previous)) {
+      if (fresh === true) throw failure('busy', 'The Bot account is changing.')
+      return this.view(previous)
+    }
     if (previous) this.timers.clearTimeout(previous.retained)
-    const flow = { id, label: labelOf(label), attemptId: randomUUID(), status: 'starting', deadline: this.now() + this.startupMs }
+    const flow = { id, label: labelOf(label), attemptId: randomUUID(), status: 'starting', deadline: this.now() + this.startupMs,
+      ...(fresh === true ? { fresh: true, compare: compare === true } : {}) }
     this.flows.set(id, flow)
     this.armDeadline(flow)
     this.changed()
@@ -489,9 +523,15 @@ export class CliLogins {
     if (typeof selected?.cli !== 'string' || selected.cli === '') { this.finish(flow, 'failed', unavailableMessage); return }
     flow.selected = { cli: selected.cli, env: { ...selected.env } }
     if (selected.valid) flow.selected.valid = selected.valid
-    // `existing`: the CLI was signed in before this attempt, so nobody signed in here (#869).
-    if (await this.check(flow)) { flow.existing = true; await this.ready(flow); return }
+    // `existing`: the CLI was signed in before this attempt, so nobody signed in here (#869). A
+    // Switch account attempt (`fresh`) never takes that as its result (#2064): its sign-in always
+    // runs and shows its link; the status at its start is only recorded. Decided after the read.
+    const signedIn = await this.check(flow)
     if (!this.active(flow)) return
+    if (flow.fresh) {
+      flow.signedInAtStart = signedIn
+      try { this.onSwitch({ id: flow.id, step: 'start', signedIn }) } catch {}
+    } else if (signedIn) { flow.existing = true; await this.ready(flow); return }
     const args = flow.id === 'acp-codex' ? ['app-server', '--listen', 'stdio://'] : ['auth', 'login', '--claudeai']
     // DISABLE_UPDATES: a sign-in never updates the CLI on its own (clis.js asks --version the
     // same way); Automagik's own install keeps it current (CliStore).
@@ -545,6 +585,8 @@ export class CliLogins {
     flow.child.on('error', () => this.finish(flow, 'failed', 'The CLI could not start sign-in. Try again.'))
     flow.child.on('close', code => {
       if (!this.active(flow)) return
+      // A Switch whose CLI ended before showing its link signed nobody in (#2064).
+      if (flow.fresh && code === 0 && !flow.linkShown && !flow.confirming) { void this.unchanged(flow); return }
       if (flow.id === 'acp-claude' && code === 0) void this.confirm(flow)
       else if (!flow.confirming) this.finish(flow, 'failed', failedMessage)
     })
@@ -563,8 +605,15 @@ export class CliLogins {
     this.confirmationDeadline(flow)
     // A notification or an exit alone is not proof: check() asked the same CLI and env. The
     // sign-in is recorded before any view can read `ready`.
-    try { await this.onReady(flow.id, flow.selected, { existing: flow.existing === true, valid: () => this.valid(flow) }) } catch {}
-    if (this.valid(flow)) this.finish(flow, 'ready')
+    let same = false
+    try {
+      await this.onReady(flow.id, flow.selected, { existing: flow.existing === true, fresh: flow.fresh === true,
+        compare: flow.compare === true, valid: () => this.valid(flow), same: () => { same = true } })
+    } catch {}
+    if (this.valid(flow)) {
+      if (same) flow.sameAccount = true
+      this.finish(flow, 'ready')
+    }
   }
 
   async confirm(flow) {
@@ -578,12 +627,25 @@ export class CliLogins {
     else if (this.valid(flow)) this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
   }
 
+  // A Switch whose CLI ended before its link (#2064): one status read says whether the account
+  // stayed (still signed in) or the sign-in simply did not finish.
+  async unchanged(flow) {
+    if (!this.valid(flow) || flow.confirming) return
+    flow.confirming = true
+    this.confirmationDeadline(flow)
+    const signedIn = await this.check(flow)
+    flow.signedInAfter = signedIn
+    if (this.valid(flow)) this.finish(flow, 'failed', signedIn ? unchangedMessage : failedMessage)
+  }
+
   // The link is shown: the expiry starts now, the provider's own when reported.
   waiting(flow, url, { prompt, expiresAt } = {}) {
     if (!this.active(flow)) return
     if (!isLoginUrl(flow.id, url)) { this.finish(flow, 'failed', unsupportedLinkMessage); return }
     const now = this.now()
     flow.status = 'waiting'
+    // `confirm` clears the URL: this is the record that the link was shown (#2064).
+    flow.linkShown = true
     flow.url = url
     flow.prompt = prompt
     flow.expiresBy = expiresAt === undefined ? 'app' : 'provider'
@@ -692,6 +754,15 @@ export class CliLogins {
     if (!this.active(flow)) return
     // Read before the attempt's state is cleared below; told after it.
     const failed = status === 'failed' ? failureOf(flow, message) : undefined
+    // A Switch that ended without a sign-in settles (#2064): its CLI tree, then one status read
+    // that decides whether the vendor's home runs again. It counts as at work until then.
+    const settle = flow.fresh === true && status !== 'ready'
+    const selected = settle ? flow.selected : undefined
+    if (flow.fresh === true) flow.switchExit = exitOf(flow.exit) ?? 'running'
+    if (settle) {
+      flow.settling = true
+      flow.settlingUntil = this.now() + Math.min(this.answerMs, ANSWER_TIMEOUT_MS)
+    }
     flow.status = status
     flow.message = message
     // The cause the host log gets, kept on the ended attempt too: a fixed class, never what the
@@ -721,7 +792,56 @@ export class CliLogins {
     flow.retained = this.timer(() => { if (this.flows.get(flow.id) === flow) this.flows.delete(flow.id) }, this.retainMs)
     this.changed()
     if (failed !== undefined) try { this.onFail(failed) } catch {}
+    if (settle) void this.settle(flow, selected)
+    else if (flow.fresh === true) this.switchEnded(flow)
   }
+
+  // A Switch that ended without a sign-in (#2064): its CLI tree first, then one status read, which
+  // says whether the vendor's home runs again (still signed in) or stays paused (signed out).
+  // `drain` is called before any await: it stops only the trees alive now, never a newer one's.
+  async settle(flow, selected) {
+    let signedIn = flow.signedInAfter
+    try {
+      if (signedIn === undefined) {
+        await this.drain(flow.id)
+        if (selected === undefined && !this.disposed) {
+          selected = await Promise.resolve().then(() => this.resolve(flow.id)).catch(() => undefined)
+        }
+        if (!this.disposed && typeof selected?.cli === 'string' && selected.valid?.() !== false) {
+          const read = await this.signedIn(AGENTS[flow.id], selected.cli, { env: selected.env }).catch(() => undefined)
+          signedIn = read === true ? true : read === false ? false : undefined
+        }
+      }
+    } finally {
+      if (typeof signedIn === 'boolean') flow.signedInAfter = signedIn
+      if (!this.disposed) {
+        try {
+          await this.onSettled({ id: flow.id, attemptId: flow.attemptId, signedIn,
+            valid: () => !this.disposed && selected?.valid?.() !== false })
+        } catch {}
+      }
+      // Only now: a count that dropped before `onSettled` would let `onChange` end the lock first.
+      flow.settling = false
+      flow.settlingUntil = undefined
+      this.changed()
+      this.switchEnded(flow)
+    }
+  }
+
+  // How a Switch attempt ended, once per attempt (#2064): fixed words for the host log.
+  switchEnded(flow) {
+    try {
+      this.onSwitch({ id: flow.id, step: 'end', status: flow.status, linkShown: flow.linkShown === true,
+        exit: flow.switchExit ?? 'running', ...(flow.status === 'ready' ? { same: flow.sameAccount === true } : {}),
+        ...(typeof flow.signedInAfter === 'boolean' ? { signedInAfter: flow.signedInAfter } : {}) })
+    } catch {}
+  }
+
+  /** Whether this agent's last attempt is a Switch still settling (`onChange` keeps its lock). */
+  settling(id) { return this.flows.get(id)?.settling === true }
+
+  /** Whether this agent's last attempt is that one. */
+  owns(id, attemptId) { return this.flows.get(id)?.attemptId === attemptId }
 
   async stop(id) {
     const flow = this.flows.get(id)

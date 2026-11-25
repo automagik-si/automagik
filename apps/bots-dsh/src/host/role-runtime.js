@@ -1,15 +1,23 @@
 import { defineTool, parameterSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools'
 import { packageAttachment, rolesOn, sameRolePin } from '../shared/roles.js'
+import { SOLVER_ROLE_ID, solverReviewPart } from '../shared/solver-method.js'
 import { routeOf } from '../shared/routes.js'
 import { createRoleSettings } from './role-settings.js'
 import { createRoleVoice } from './role-voice.js'
 import { NO_BOT_RUNNER_REASON } from './no-runner.js'
 import { refusal } from './refusal.js'
+import { readableRoute } from './session-route.js'
 import { output } from './tools.js'
+import { BUNDLED_ROLE_CAPABILITIES, BUNDLED_ROLE_IDS } from './bundled-roles.js'
 
 const START_MS = 5_000
+const DISPLAY_READ_LIMIT = 4
 const inactive = "This Bot's role changed. Try again."
 const cancelled = 'Voice / Mouth speech was cancelled.'
+const acpWarning = 'ACP coding agents do not receive this role’s prompt.'
+const hermesWarning = "This model uses its Hermes profile's own instructions."
+const routeUnavailable = 'Model selection is unavailable.'
+const promptOnly = manifest => manifest.tools.length === 0 && manifest.settings.length === 0
 const validSpeech = text => typeof text === 'string' && text.length <= 2000 && Boolean(text.trim())
 
 function boundedStart(start) {
@@ -28,11 +36,13 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   const installedModules = new Map()
   const attachments = new Map()
   const turnPrompts = new Map()
+  let displayReads = Promise.resolve()
   let disposed = false
   let warnedRunner = false
 
   const owner = sessionId => rt.roomOwners?.has(sessionId) || rt.taskOwners?.has(sessionId) ? undefined
     : rt.chatOwners?.get(sessionId) ?? rt.groupOwners?.get(sessionId)?.botId
+  const promptOwner = sessionId => rt.roomOwners?.has(sessionId) ? undefined : rt.selfOf?.(sessionId)
   const ownBot = id => rt.own?.(state.bots, id)
   const enabled = () => !disposed && rolesOn(state.prefs) && rt.readOnly?.() === undefined && rt.holdsLock?.() === true
   const current = (id, held) => enabled() && attachments.get(id) === held && ownBot(id) === held.bot
@@ -42,12 +52,23 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     const held = attachments.get(id)
     return held?.runtime && current(id, held) ? held : undefined
   }
+  const capabilitiesOf = held => BUNDLED_ROLE_IDS.includes(held.pin.id) && packages.verifiedBundled(held.record)
+    ? BUNDLED_ROLE_CAPABILITIES[held.pin.id] : held.manifest?.capabilities ?? []
+  const heldOf = id => {
+    const held = attachments.get(id)
+    return held?.manifest && current(id, held) ? held : undefined
+  }
   const granted = (held, capability) => current(held.bot.id, held)
-    && held.runtime.manifest.capabilities.includes(capability) && held.bot.roles[0].grants.includes(capability)
+    && capabilitiesOf(held).includes(capability) && held.bot.roles[0].grants.includes(capability)
+  const grantOf = (id, capability) => {
+    const held = heldOf(id)
+    if (held === undefined || !capabilitiesOf(held).includes(capability)) return undefined
+    return held.bot.roles[0].grants.includes(capability) ? 'granted' : 'declared'
+  }
 
   async function moduleFor(details, sha256) {
     const { manifest, entryBytes } = details
-    if (!manifest.tools.length && !manifest.settings.length) return undefined
+    if (promptOnly(manifest)) return undefined
     const key = `${manifest.id}@${manifest.version}:${sha256.toLowerCase()}`
     if (!installedModules.has(key)) {
       const url = `data:text/javascript;base64,${entryBytes.toString('base64')}#${key}`
@@ -58,7 +79,6 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
 
   async function stage(details, sha256) {
     const module = await moduleFor(details, sha256)
-    // P3 also accepted declarative manifests with an empty module.
     if (typeof module?.install !== 'function') return undefined
     const declarations = new Map(details.manifest.tools.map(tool => {
       const bounds = new Map()
@@ -125,6 +145,11 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       }
       const details = await proof
       if (!current(held.bot.id, held)) return
+      if (promptOnly(details.manifest)) {
+        held.manifest = details.manifest
+        held.runtime = Object.freeze({ manifest: details.manifest, prompt: details.prompt, tools: [], dispose() {} })
+        return
+      }
       if (rt.botRunnerRequired !== undefined) {
         held.manifest = details.manifest
         return
@@ -155,7 +180,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   function reconcile() {
     for (const [id, held] of attachments) if (!current(id, held)) drop(id, held)
     for (const [sessionId, snapshot] of turnPrompts) {
-      if (owner(sessionId) !== snapshot.id || !ownBot(snapshot.id)) turnPrompts.delete(sessionId)
+      if (promptOwner(sessionId) !== snapshot.id || ownBot(snapshot.id) !== snapshot.bot) turnPrompts.delete(sessionId)
     }
     voice.cancelInvalid()
     if (!enabled()) return
@@ -179,7 +204,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     const sessionId = agent.session?.id ?? agent.id
     const id = owner(sessionId)
     const held = id === undefined ? undefined : active(id)
-    if (!held) return undefined
+    if (!held?.runtime.tools.length) return undefined
     if (held === existing) return { key: held }
     let registered = true
     let lastTurn
@@ -249,37 +274,108 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     }
   }
 
-  const acp = ref => routeOf(String(ref ?? '').split('/')[0]).connectedBy === 'acp'
-  const reaches = ref =>
-    rt.acpRolePromptProviders?.includes?.(String(ref ?? '').split('/')[0]) === true
-  function partOf(held) {
-    if (!held?.runtime.prompt) return undefined
-    return `<role-prompt id="${held.pin.id}">\n${held.runtime.prompt.trimEnd()}\n</role-prompt>`
+  const providerOf = ref => String(ref ?? '').split('/')[0]
+  const connectionOf = provider => routeOf(provider).connectedBy
+  function providerWarning(provider) {
+    const connection = connectionOf(provider)
+    if (connection === 'hermes-remote') return hermesWarning
+    if (connection === 'acp' && rt.acpRolePromptProviders?.includes?.(provider) !== true) return acpWarning
+  }
+  const savedWarning = bot => [bot.appliedModel, bot.model].map(providerOf).map(providerWarning).find(Boolean)
+  const sessionsOf = bot => [rt.chatOf?.(bot.id), ...(rt.groupSessionsOf?.(bot.id) ?? [])].filter(Boolean)
+  const isWaitingSolver = held => held.pin.id === SOLVER_ROLE_ID && held.bot.waitingRole?.id === SOLVER_ROLE_ID
+  function liveProvider(sessionId, session) {
+    try {
+      const agent = ctx.get?.('agents')?.get?.(sessionId)
+      const current = agent?.model?.current?.()
+      const currentRoute = readableRoute(current)
+      if (current != null) return currentRoute?.provider ?? null
+      const live = session ?? agent?.session ?? ctx.sessions?.get?.(sessionId)
+      if (!live) return undefined
+      let projection
+      try { projection = ctx.get?.('sessionProjections')?.snapshot?.(live, ['modelSelection']) } catch {}
+      const next = projection?.values?.modelSelection?.next
+      const nextRoute = readableRoute(next)
+      if (next != null) return nextRoute?.provider ?? null
+      const header = live.requestHeader?.()
+      const route = readableRoute(header?.config)
+      // An unreadable live route cannot be replaced by an older stored route.
+      return header == null ? undefined : route?.provider ?? null
+    } catch { return null }
+  }
+  async function readDeliveryRoutes(bots, limit = Infinity) {
+    const sessions = new Set(bots.flatMap(sessionsOf))
+    const needStoredRoute = [...sessions].filter(id => liveProvider(id) === undefined)
+    const routes = new Map()
+    for (let at = 0; at < needStoredRoute.length; at += limit) {
+      const batch = await Promise.all(needStoredRoute.slice(at, at + limit).map(async id => {
+        const stored = await rt.storedRouteOf?.(id)
+        const route = readableRoute(stored?.pendingSelection ?? stored)
+        return [id, route?.provider]
+      }))
+      for (const [id, provider] of batch) routes.set(id, provider)
+    }
+    return routes
+  }
+  function deliveryWarning(bot, routes) {
+    const sessions = sessionsOf(bot)
+    if (!sessions.length) return routeUnavailable
+    for (const id of sessions) {
+      const live = liveProvider(id)
+      const provider = live === undefined ? routes?.get(id) : live
+      if (provider == null) return routeUnavailable
+      const warning = providerWarning(provider)
+      if (warning) return warning
+    }
+  }
+  function partOf(sessionId, held) {
+    if (!held?.runtime.prompt?.trim() || (owner(sessionId) === undefined && !promptOnly(held.manifest))) return undefined
+    const tail = held.pin.id === SOLVER_ROLE_ID ? `\n${solverReviewPart(held.bot, ownBot)}` : ''
+    return `<role-prompt id="${held.pin.id}">\n${held.runtime.prompt.trimEnd()}${tail}\n</role-prompt>`
   }
   function partFor(sessionId, id) {
     const turn = turnPrompts.get(sessionId)
-    return turn?.id === id ? turn.part : partOf(active(id))
+    return turn?.id === id ? turn.part : partOf(sessionId, active(id))
   }
   function prompt(sessionId, agent) {
-    const id = owner(sessionId)
+    const id = promptOwner(sessionId)
     if (id === undefined) return undefined
     const bot = ownBot(id)
     if (!bot) return undefined
-    const provider = agent?.model?.current?.()?.provider
-    if (provider ? acp(provider) : acp(bot.appliedModel ?? bot.model)) return undefined
+    const provider = readableRoute(agent?.model?.current?.())?.provider ?? liveProvider(sessionId, agent?.session)
+      ?? providerOf(bot.appliedModel ?? bot.model)
+    if (['acp', 'hermes-remote'].includes(connectionOf(provider))) return undefined
     return partFor(sessionId, id)
   }
   function acpPrompt(sessionId, botId) {
-    if (owner(sessionId) !== botId || !ownBot(botId)) return undefined
+    if (promptOwner(sessionId) !== botId || !ownBot(botId)) return undefined
     return partFor(sessionId, botId)
   }
-  function event(sessionId, event) {
+  function instructionsFor(sessionId, bot) {
+    const turn = turnPrompts.get(sessionId)
+    return (turn?.bot === bot ? turn.instructions : undefined) ?? bot.instructions
+  }
+  function event(sessionId, event, session) {
     if (disposed) return
     voice.event(sessionId, event)
-    if (event.type === 'turn/end') turnPrompts.delete(sessionId)
+    if (event.type === 'turn/end') {
+      const turn = turnPrompts.get(sessionId)
+      turnPrompts.delete(sessionId)
+      if (turn?.instructions && turn.bot.waitingRole?.id === SOLVER_ROLE_ID) rt.solverSettle?.schedule()
+    }
     if (event.type === 'turn/start') {
-      const id = owner(sessionId)
-      if (id !== undefined) turnPrompts.set(sessionId, { id, part: partOf(active(id)) })
+      const id = promptOwner(sessionId)
+      const bot = ownBot(id)
+      if (!bot) return
+      const part = partOf(sessionId, active(id))
+      // A greeting may begin before attachment. Keep its complete method if
+      // writing the new pin later clears the instructions on the live Bot.
+      let instructions
+      if (bot.waitingRole?.id === SOLVER_ROLE_ID) {
+        const provider = liveProvider(sessionId, session)
+        if (!part || (provider ? providerWarning(provider) : savedWarning(bot))) instructions = bot.instructions
+      }
+      turnPrompts.set(sessionId, { id, bot, part, instructions })
     }
   }
 
@@ -290,8 +386,40 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     return held
   }
 
+  function view(routes) {
+    return Object.fromEntries([...attachments].flatMap(([id, held]) => {
+      if (!current(id, held) || !held.manifest
+        || (held.pin.id === SOLVER_ROLE_ID && !held.runtime?.prompt?.trim())) return []
+      const warning = isWaitingSolver(held) ? deliveryWarning(held.bot, routes) : undefined
+      const acp = warning === acpWarning || (held.pin.id !== SOLVER_ROLE_ID
+        && providerWarning(providerOf(held.bot.appliedModel ?? held.bot.model)) === acpWarning)
+      return [[id, {
+        pin: held.pin, settings: held.manifest.settings,
+        capabilities: capabilitiesOf(held),
+        tools: held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp,
+        ...(warning && warning !== acpWarning ? { promptWarning: warning } : {}),
+      }]]
+    }))
+  }
+
   return {
-    voice, event, reconcile, tools, prompt, acpPrompt, requireAttachment, settings,
+    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings, capabilitiesOf, heldOf, grantOf,
+    readDeliveryRoutes, view,
+    copyWarning: bot => savedWarning(bot) ?? providerWarning(liveProvider(bot.sessionId ?? bot.id)),
+    async publicView() {
+      const waitingSolvers = () => [...attachments].flatMap(([id, held]) =>
+        held.manifest && isWaitingSolver(held) && current(id, held) ? [held.bot] : [])
+      if (waitingSolvers().length === 0) return view()
+      // Roster windows can poll at the same time. Share the read limit across their polls.
+      const read = displayReads.then(() => readDeliveryRoutes(waitingSolvers(), DISPLAY_READ_LIMIT))
+      displayReads = read.catch(() => {})
+      return view(await read)
+    },
+    serving(id, record, pin, routes) {
+      const held = active(id)
+      return held?.record === record && sameRolePin(held?.pin, pin) && Boolean(held.runtime.prompt?.trim())
+        && !deliveryWarning(held.bot, routes)
+    },
     async prepare(details, sha256) {
       try {
         const runtime = await stage(details, sha256)
@@ -301,19 +429,13 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
         throw refusal('The role runtime could not start.')
       }
     },
+    keepProof(record, details) {
+      pins.set(record, Promise.resolve(details))
+    },
     reset(record) {
       if (record) pins.delete(record)
     },
     ready: id => id === undefined ? Promise.all([...attachments.values()].map(held => held.ready)) : attachments.get(id)?.ready,
-    view: () => Object.fromEntries([...attachments].flatMap(([id, held]) => {
-      if (!current(id, held) || !held.manifest) return []
-      const ref = held.bot.appliedModel ?? held.bot.model
-      return [[id, {
-        pin: held.pin, settings: held.manifest.settings,
-        capabilities: held.manifest.capabilities,
-        tools: held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp: acp(ref) && !reaches(ref),
-      }]]
-    })),
     dispose() {
       disposed = true
       turnPrompts.clear()

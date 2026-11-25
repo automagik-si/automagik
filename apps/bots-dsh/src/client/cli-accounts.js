@@ -154,14 +154,16 @@ export function CliAccounts({ bot, actions }) {
     setError(null)
     try {
       const { provider, action } = pending
+      let switched
       if (action === 'recover') await actions.recoverCliLogin(bot.id, provider)
-      else if (action === 'switch') await actions.cliLoginSwitch(bot.id, provider)
+      else if (action === 'switch') switched = await actions.cliLoginSwitch(bot.id, provider)
       else if (action === 'reset') await actions.cliLoginReset(bot.id, provider)
       else await actions.cliLoginSignOut(bot.id, provider)
       await actions.refreshModels?.()
       await refresh()
       setPending(null)
-      if (action === 'switch' || action === 'reset') actions.openCliLogin(bot.id, provider)
+      // The switch's own attempt (#2064): the row reads it, even when it already ended.
+      if (action === 'switch' || action === 'reset') actions.openCliLogin(bot.id, provider, ...(typeof switched?.attemptId === 'string' ? [undefined, switched.attemptId] : []))
     } catch (error) {
       if (error?.code === ACCOUNT_RECOVERY_CODE) {
         const provider = pending.provider

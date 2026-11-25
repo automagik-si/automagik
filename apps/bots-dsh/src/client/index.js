@@ -19,6 +19,7 @@ import { isHex, inkText, paintCss } from './inks.js'
 import { CHARACTERS, DEFAULT_MASK, MAIN_LOOK, SHAPES, markupCache, maskOf } from './characters.js'
 import { createSource, EMPTY_ROSTER, indexRoster, isAgentSession } from './sources.js'
 import { teamActions } from './team-actions.js'
+import { createDraftSweep, liveSessionIds, unarchivedSessionIds } from './draft-sweep.js'
 import { themeCss, shellTokens, registry, registerShape, registerTheme, allThemes, layoutOf, widthOf, flatWidthOf } from './themes.js'
 import { markConversation } from './stage.js'
 import { MENTION_ORIGIN, currentPart, relativeShort } from './text.js'
@@ -52,7 +53,7 @@ import { AnsweredReply, WidgetDock, WIDGET_CSS } from './widget-cell.js'
 import { HandoffDock, HANDOFF_CSS } from './handoff-card.js'
 import { AppAccessDock, ComputerHandoffDock, ComputerIndicator, COMPUTER_CSS } from './computer.js'
 import { headerNavigation, installHeaderNavigation } from './header-navigation.js'
-import { AssistantCell, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
+import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
 import { SETTINGS_CARD_CSS, setSettingsPages } from './settings-card.js'
@@ -300,12 +301,15 @@ function applyOwner(ctx, { gated = false } = {}) {
   // Pulls can overlap (the poll and a navigation); an older answer never wins.
   let pulls = 0
   let applied = 0
+  // Deleted Sessions' composer state, removed as the host lists them (draft-sweep.js).
+  const drafts = createDraftSweep({ call, openSession: () => mainView(), unarchived: () => unarchivedSessionIds(ctx.sessions.list.getSnapshot(), workspaces?.list?.getSnapshot()) })
   const pull = async () => {
     const order = ++pulls
     const known = roster.getSnapshot()
     const value = await call('state', { since: known.revision, models: known.modelsKey ?? '', live: liveKey, locale: language(), allowPlace: allowPlace() })
     if (order < applied || (gated && isRetired())) return
     applied = order
+    if (!value.unchanged) drafts.note(value.draftSweep, liveSessionIds(value))
     if (value.liveKey !== undefined) liveKey = value.liveKey
     if (value.activity !== undefined) {
       const nextActivity = JSON.stringify(value.activity)
@@ -343,10 +347,14 @@ function applyOwner(ctx, { gated = false } = {}) {
     if (value.sideChats !== undefined && JSON.stringify(value.sideChats) !== JSON.stringify(current.sideChats ?? {})) live.sideChats = value.sideChats
     if (value.browserHolds !== undefined && JSON.stringify(value.browserHolds) !== JSON.stringify(hostHolds.getSnapshot())) hostHolds.set(value.browserHolds)
     if (Object.keys(live).length > 0 && current.ready) roster.set({ ...current, ...live })
-    if (value.unchanged || (value.revision === current.revision && value.modelsKey === current.modelsKey)) return
+    if (value.unchanged || (value.revision === current.revision && value.modelsKey === current.modelsKey)) {
+      void drafts.run()
+      return
+    }
     // On a browser with no visit record yet, everything already there counts as seen.
     if (Object.keys(seenAt).length === 0) leaveVisits([...value.bots, ...value.rooms].map(entry => entry.id))
     roster.set(indexRoster(value))
+    void drafts.run()
     try {
       const ids = (value.agents ?? []).flatMap(agent => agent.sessions ?? [])
       localStorage.setItem(STORAGE.agentSessions, JSON.stringify(ids))
@@ -856,7 +864,7 @@ function applyOwner(ctx, { gated = false } = {}) {
       const snapshot = roster.getSnapshot()
       return [...(snapshot.mainBotIds ?? []), snapshot.mainBotId].map(id => cliLoginBotOf(snapshot, id)).find(Boolean)
     },
-    openLogin: (botId, provider) => actions.openCliLogin(botId, provider),
+    openLogin: (botId, provider, attemptId) => actions.openCliLogin(botId, provider, undefined, attemptId),
   }), 'ds-bot: CLI sign-in bridge')
   // Whether AccountLauncher holds the shell's settings seat; FooterAccount steps aside if so.
   actions.signInEntry = () => ctx.slots.entries?.('settings.models.sign-in')?.[0] ?? null
@@ -1406,6 +1414,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     installHeader,
     installNativeBotHeader,
     () => shadow('conversation.composer.dock', { id: 'bot-native-note', order: 20, inject: face }, NativeControlsNote),
+    () => shadow('conversation.composer.dock', { id: 'bot-review-guard-off', order: 21, inject: face }, GuardOffLine),
     () => shadow('conversation.chat.node', { key: 'assistant-step', priority: BOT_PRIORITY, locale: 'chat', inject: assistantFace }, AssistantCell),
     () => shadow('conversation.chat.node', { key: 'turn-trigger', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TriggerCell),
     () => shadow('conversation.chat.node', { key: 'tool-call', priority: BOT_PRIORITY, locale: 'chat', inject: face }, ToolCell),

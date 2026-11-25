@@ -63,6 +63,17 @@ export function capabilityOfArgs(raw, tool) {
 // so its reply stays in the chat (issue #62).
 export const opensByItself = source => source?.kind === 'goal'
 
+// DSH injects a schedule-change notice as context when a task changes elsewhere.
+const scheduleNotice = message => message?.source?.kind === 'schedule'
+  && textOf(message.content).startsWith('[SCHEDULE CHANGE]')
+
+// A step containing a handoff and any other opener needs a model reply.
+export const opensTurn = message => {
+  const source = message?.source
+  return source?.kind === 'user' || source?.kind === 'retry' || source?.kind === REPLY_KIND
+    || (source?.kind === 'schedule' && !scheduleNotice(message)) || source?.kind === SOURCE_KIND || opensByItself(source)
+}
+
 // Failures only the user can fix: a key, a sign-in, a balance. They block the Bot
 // until it is fixed (`bot.blocked`, for the repair card).
 export const BLOCKING_CODES = new Set(['MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'AUTH', 'QUOTA', 'ACCOUNT_QUOTA', 'ACCOUNT_SIGN_IN_REQUIRED', 'ACCOUNT_SIGNED_OUT', 'ACCOUNT_TOKEN_INVALID', 'LOCAL_AGENT_MISSING', 'LOCAL_AGENT_SIGNIN', 'LOCAL_AGENT_QUOTA', 'LOCAL_AGENT_EXIT'])
@@ -94,19 +105,23 @@ export function answerSender(rt, id, source, text, long, shouldSend) {
   const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
   // When the work this answers was opened, read before closeWork deletes it: a Solver's review
   // mark counts a verdict only for work its current request opened (review-mark.js).
-  const workAt = rt.state?.works?.[source.exchangeId]?.at
+  const answered = rt.state?.works?.[source.exchangeId]
   const work = rt.closeWork?.(source.exchangeId, name, text)
+  const fromId = rt.selfOf(id)
+  const exchangeId = randomUUID()
+  const reply = answered && answered.from === source.senderSessionId && answered.to === fromId
+    && answered.room === undefined && answered.fromRoom === undefined
+    ? { exchangeId, replyTo: source.exchangeId } : undefined
   // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
-  rt.reviewVerdict?.(rt.selfOf(id), source.senderSessionId, source.senderRoomId, text, workAt)
+  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply)
   // A reply that arrives after the user gave up the wait is a late answer: it closes
   // nothing, opens nothing, and says on it that the wait was already over.
   const late = work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
   const marker = late === undefined ? '' : LATE_ANSWER
   const body = marker === '' ? (long?.text ?? text) : `${marker}${long?.text ?? text}`
   const length = long === undefined ? undefined : late === undefined ? long.length : (long.length ?? text.length) + marker.length
-  const exchangeId = randomUUID()
   void rt.deliver({
-    fromId: rt.selfOf(id),
+    fromId,
     toId: source.senderSessionId,
     ...(back ? { sessionId: back } : {}),
     text: body,
@@ -115,7 +130,7 @@ export function answerSender(rt, id, source, text, long, shouldSend) {
     replyTo: source.exchangeId,
     exchangeId,
     ...(work ? { work } : {}),
-  }, { shouldSend }).catch((error) => {
+  }, { shouldSend, onReplyRecorded }).catch((error) => {
     if (shouldSend?.() === false) return
     rt.warn('omni-ui: reply delivery failed: %s', error)
     // The reply never reached the asker: its note goes — the notice below carries
@@ -324,7 +339,7 @@ export function install(rt) {
       label: label || existing?.label || subagentLabelFromCall(live.get(parentId)),
       since: existing?.since ?? since,
     })
-    if (rt.groupOwners.has(parentId)) rt.workRoomTurn?.(parentId, 'subagent')
+    if (countsInRound(parentId)) rt.workRoomTurn?.(parentId, 'subagent')
   }
 
   const noteSubagentEnd = (childId) => {
@@ -514,13 +529,20 @@ export function install(rt) {
   // for turns that a finished background job or a fresh part starts; a Bot's private
   // message to it is answered privately.
   const speaksInGroup = (id, info) => rt.groupOwners.has(id) && !(info !== undefined && expectsReply(info))
+  // The outgoing agent's handoff-note turn in a group Session that follows its Bot's agent
+  // switch (parts.js): it reaches the group neither while it runs nor at its end, and counts
+  // in no group round: no step lines, no touch or work on the round's waiter (RFC 0030,
+  // Handoff note; MX-12). Before its request is read, the turn is the note's too.
+  const noting = (id, turn) => rt.handoffNoteTurn?.(id, turn) === true || rt.writingNote?.(id) === true
+  // The round counter: a group Session's events keep its round's waiter alive and mark work.
+  const countsInRound = id => rt.groupOwners.has(id) && !noting(id, live.get(id)?.turn)
 
   // The group hears what the member says while it works. A text with a tool call goes
   // on at once; one without may be the turn's last, so it waits for the next text or the
   // turn's end, which shows the rest as the turn's reply.
   const showSteps = (id, entry, upTo) => {
     const info = entry.info
-    if (entry.suppressedSubagent || !speaksInGroup(id, info) || (info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))) return
+    if (entry.suppressedSubagent || !speaksInGroup(id, info) || (info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId)) || noting(id, entry.turn)) return
     for (; entry.shown < upTo; entry.shown += 1) {
       const text = stripWrittenCalls(entry.texts[entry.shown])
       if (text !== '') void rt.roomStepText?.(id, info, text, entry.shown === 0)?.catch(error => rt.warn('omni-ui: step text from %s not posted: %s', id, error))
@@ -685,7 +707,8 @@ export function install(rt) {
     }
     for (const [id, entry] of live) {
       const owner = rt.groupOwners.get(id)
-      if (entry.turn !== undefined && owner !== undefined) add(owner.roomId, owner.botId, { since: entry.since, ...doingOf(entry) })
+      // A note turn shows as the move it belongs to (the switch job below), never its own work.
+      if (entry.turn !== undefined && owner !== undefined && !noting(id, entry.turn)) add(owner.roomId, owner.botId, { since: entry.since, ...doingOf(entry) })
     }
     for (const [id] of subagentsByParent) {
       const owner = rt.groupOwners.get(id)
@@ -839,7 +862,7 @@ export function install(rt) {
       return
     }
     const entry = liveOf(id)
-    if (rt.groupOwners.has(id)) rt.touchRoomTurn?.(id)
+    if (countsInRound(id)) rt.touchRoomTurn?.(id)
     switch (event.type) {
       case 'subagent/catalog': {
         const childId = event.data?.childId
@@ -853,7 +876,7 @@ export function install(rt) {
         // A program is as quick as the tools it runs, so its sub-calls decide.
         if (name !== PROGRAM_TOOL) {
           entry.toolCount = (entry.toolCount ?? 0) + 1
-          if (rt.groupOwners.has(id)) rt.workRoomTurn?.(id, name)
+          if (countsInRound(id)) rt.workRoomTurn?.(id, name)
         }
         break
       }
@@ -861,7 +884,7 @@ export function install(rt) {
         const name = String(event.data?.name ?? '')
         startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}))
         entry.toolCount = (entry.toolCount ?? 0) + 1
-        if (rt.groupOwners.has(id)) rt.workRoomTurn?.(id, name)
+        if (countsInRound(id)) rt.workRoomTurn?.(id, name)
         break
       }
       case 'tool/ptc-dispatch':
@@ -944,11 +967,10 @@ export function install(rt) {
         // Bot relay that lands inside it may claim: the first message of a turn
         // still claims it as today, a later one only joins it.
         const opened = entry.opened === true
-        if (entry.turn !== undefined && !bare(source)
-          && (source?.kind === 'user' || source?.kind === 'retry' || source?.kind === REPLY_KIND || source?.kind === 'schedule' || source?.kind === SOURCE_KIND || opensByItself(source))) {
+        if (entry.turn !== undefined && !bare(source) && opensTurn(event.data)) {
           entry.opened = true
         }
-        if (entry.turn !== undefined && (source?.kind === 'user' || source?.kind === 'retry' || source?.kind === REPLY_KIND || source?.kind === SOURCE_KIND)) {
+        if (entry.turn !== undefined && opensTurn(event.data)) {
           if (bare(source)) {
             if (entry.answers) break
           } else {
@@ -1003,6 +1025,12 @@ export function install(rt) {
             ...(source.goalId !== undefined ? { goalId: source.goalId } : {}),
           })
         } else if (source?.kind === SOURCE_KIND) {
+          // A Bot's request in a guarded Solver's own chat, at its first arrival (a handed-back,
+          // resumed or retried one was counted then, H7-3), may open a new review (review-mark.js).
+          if (source.role === 'request' && rt.chatOwners.get(id) !== undefined && source.deferred !== true && source.resumed !== true
+            && source.resumedByUpdate !== true && source.retried !== true) {
+            rt.reviewBotRequest?.(rt.chatOwners.get(id), source.senderSessionId, { noReply: source.noReply === true })
+          }
           if (entry.turn === undefined) {
             entry.pending = source
             entry.pendingText = textOf(event.data.content).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')
@@ -1122,6 +1150,7 @@ export function install(rt) {
         break
       }
       case 'turn/end': {
+        rt.reviewReplyTurnEnd?.(id, event.data)
         setActivity(id, undefined)
         // A steer cut leaves the turn's routing state for the fresh turn that
         // claims the steer: nothing is answered or delivered for the cut one.
@@ -1290,7 +1319,9 @@ export function install(rt) {
             .catch(error => rt.warn('omni-ui: answer from %s not sent: %s', name, error))
         }
         // A retried turn answers the same waiter or sender, so this one passes nothing on.
-        if (!retry && info?.role === 'room') {
+        // A fresh part's failed first turn whose switch goes back and resumes it (goesOn)
+        // leaves the round's waiter to that resumed turn: the group hears no failure for it.
+        if (!goesOn && !retry && info?.role === 'room') {
           const waiter = roomWaiters.get(info.exchangeId)
           roomWaiters.delete(info.exchangeId)
           const stopped = stoppedRoomTurns.delete(info.exchangeId)
@@ -1302,7 +1333,7 @@ export function install(rt) {
             if (failure !== undefined) void rt.lateRoomFailure?.(id, info, failure)
             else void rt.lateRoomReply?.(id, info, groupReply(), { shown })
           }
-        } else if (!retry && speaksInGroup(id, info)) {
+        } else if (!goesOn && !retry && speaksInGroup(id, info)) {
           // A turn that failed before it took any input (DSH can turn it down before its
           // first step) never names its call, so the call waiting on this Session fails.
           const inRound = failure !== undefined && info === undefined && rt.failRoomTurn?.(id, failure) === true

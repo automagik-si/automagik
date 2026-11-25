@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
@@ -15,6 +16,7 @@ const { outputFiles } = await build({
       "export { SecretDock } from './src/client/secret-card.js'",
       "export { countCards } from './src/client/sources.js'",
       "export { ViewMenuList, WidgetView, WidgetDock } from './src/client/widget-cell.js'",
+      "export { installLocale } from './src/client/i18n.js'",
     ].join('\n'),
     resolveDir: fileURLToPath(new URL('..', import.meta.url)),
   },
@@ -1454,6 +1456,84 @@ test('a refused bash call draws the reason once, on its first call in that Sessi
   // The later call, and a call with no stop, draw nothing but the empty mark.
   assert.ok(onlyMarks(draw('y', [entry])))
   assert.ok(onlyMarks(draw('x', [])))
+  effects = []
+})
+
+// RFC 0048 (#2056 F2): a call the review guard refused in a hidden Bot-request turn draws its
+// stop line in the Solver's chat, and nothing else of the call.
+const K10 = "write did not run: the review guard waits for the reviewer's verdict on the plan; you can turn it off in Details"
+const K14 = "write did not run: the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details"
+const stopDraw = (root, stops, { hidden = true } = {}) => {
+  const roster = team({ exchangeTurns: hidden ? { chief: [1] } : {} })
+  return expand(ToolCell({ ...props(root, { roster }), useWork: select => select({ stops }) }))
+}
+const stopOf = (why, callId, extra = {}) => ({ why, tool: 'write', calls: [{ sessionId: 'chief', callId }], ...extra })
+const errorLines = tree => findAll(tree, node => node.props?.className === 'bt-event bt-event-error')
+
+test('start_task shows the whole translated retry list and the guard remedy on visible and hidden turns', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const undo = module.exports.installLocale({
+    register() {},
+    bind: () => (key, params) => (pt[key] ?? key).replace(/\{(\w+)\}/g, (token, name) => params?.[name] ?? token),
+  })
+  try {
+    const models = Array.from({ length: 20 }, (_, index) => `fixture-provider/model-${index}`).join(', ')
+    const invalid = call('start_task', 'bad-model', {
+      content: `The task did not start: The model nope/none is not in the list of models.\nModels you may name: ${models} and 4 more.`,
+    })
+    assert.match(text(show(invalid)), /O modelo nope\/none não está na lista de modelos/)
+    assert.ok(text(show(invalid)).includes(`Modelos que podem ser indicados: ${models} e mais 4.`))
+    const refused = call('start_task', 'held-task', {
+      isError: true,
+      content: "Error: Fixture cannot use start_task: its review guard is on. Do the work in your own chat, or ask the person to turn the review guard off in Fixture's Details.",
+    })
+    const stop = stopOf('guard-launch', 'held-task', { tool: 'start_task' })
+    assert.match(text(stopDraw(refused, [stop], { hidden: false })), /nos Detalhes de Fixture\./)
+    const hidden = stopDraw(refused, [stop])
+    assert.equal(errorLines(hidden).length, 1)
+    assert.match(text(hidden), /Você pode desligá-la em Detalhes/)
+    const result = call('start_task', 'failed-task', { content: 'Started task "Fixture" (session-failed) under your row.' })
+    const roster = team({ tasks: { 'session-failed': { status: 'failed', summary: 'fixture-provider/model could not be selected for the task.' } } })
+    assert.match(text(show(result, { roster })), /Não foi possível selecionar fixture-provider\/model para a tarefa/)
+  } finally {
+    undo()
+    effects = []
+  }
+})
+
+test('a hidden Bot-request turn draws the review guard\'s stop line, and no tool row', () => {
+  for (const [why, line] of [['guard-request', K14], ['guard', K10]]) {
+    const refused = call('write', 'w1', { args: { file_path: 'bom.md' }, isError: true, content: 'held' })
+    const tree = stopDraw(refused, [stopOf(why, 'w1')])
+    const lines = errorLines(tree)
+    assert.equal(lines.length, 1, why)
+    assert.equal(text(lines[0]), line)
+    assert.equal(lines[0].props.title, why)
+    assert.equal(lines[0].props.role, 'status')
+    assert.equal(text(tree), line, 'nothing else of the call is drawn')
+    assert.equal(find(tree, node => node.props?.['data-bt-empty'] === true), undefined, 'no tool row or mark beside it')
+    // Inside a program, the refused sub-call draws its line the same way.
+    const nested = stopDraw(program([call('read', 'program:ptc:1'), call('write', 'program:ptc:2', { isError: true })]), [stopOf(why, 'program:ptc:2')])
+    assert.deepEqual(errorLines(nested).map(text), [line])
+    assert.equal(text(nested), line)
+    effects = []
+  }
+})
+
+test('a hidden turn keeps every other stop and call out of the chat; a visible turn is unchanged', () => {
+  const refused = call('write', 'w1', { args: { file_path: 'bom.md' }, isError: true })
+  for (const why of ['sandbox', 'tool', 'level', 'review']) assert.ok(onlyMarks(stopDraw(refused, [stopOf(why, 'w1')])), why)
+  assert.ok(onlyMarks(stopDraw(refused, [])))
+  assert.ok(onlyMarks(stopDraw(refused, [stopOf('guard', 'other')])), 'a stop on another call')
+  // A visible turn draws the call as before, with the line under it.
+  const visible = stopDraw(refused, [stopOf('guard', 'w1')], { hidden: false })
+  assert.deepEqual(errorLines(visible).map(text), [K10])
+  assert.ok(find(visible, node => node.props?.['data-bt-empty'] === true), 'the call\'s own seat stays, as today')
+  // A count-2 entry draws once, on its first call (hidden or not).
+  const twice = stopOf('guard-request', 'x', { count: 2, calls: [{ sessionId: 'chief', callId: 'x' }, { sessionId: 'chief', callId: 'y' }] })
+  assert.deepEqual(errorLines(stopDraw(call('write', 'x', { isError: true }), [twice])).map(text),
+    ["2 steps did not run: the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details"])
+  assert.ok(onlyMarks(stopDraw(call('write', 'y', { isError: true }), [twice])))
   effects = []
 })
 

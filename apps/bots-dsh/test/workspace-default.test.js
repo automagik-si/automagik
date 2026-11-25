@@ -101,7 +101,7 @@ for (const permission of ['read-only', 'workspace-write', 'danger-full-access', 
     const inherited = permission === 'removed-preset' ? 'read-only' : permission
     let parent = 'test-parent'
     for (let generation = 1; generation <= 3; generation++) {
-      const child = await rt.createBot({ name: `the test Bot generation ${generation}`, createdBy: parent, pickModel: true })
+      const child = await rt.createBot({ name: `the test Bot generation ${generation}`, createdBy: parent, main: generation < 3, pickModel: true })
       assert.equal(child.permission, inherited)
       assert.equal(levels.get(child.id), inherited)
       parent = child.id

@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { approvalPolicyOf } from './approval-policy.js'
 
-export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule']
+export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule', 'guard', 'guard-request', 'guard-launch']
 export const STOP_KEEP_MS = 6 * 60 * 60 * 1000
 export const STOPS_MAX = 50
 export const CALLS_MAX = 20
@@ -15,6 +15,11 @@ export const WHY_EN = {
   review: 'Auto review refused it',
   sandbox: 'the sandbox blocked it',
   rule: 'a rule here refused it',
+  // The Solver's review guard (review-guard.js); `guard-request` when a Bot's new request opened
+  // the plan it waits for.
+  guard: 'the review guard waits for the reviewer\'s verdict on the plan; you can turn it off in Details',
+  'guard-request': 'the review guard waits for the reviewer\'s verdict on a new plan, because another Bot sent a new request; you can turn it off in Details',
+  'guard-launch': 'the review guard is on and prevents starting tasks; you can turn it off in Details',
 }
 
 export function stopLineEn(entry) {
@@ -125,6 +130,8 @@ export function install(rt) {
     const first = record === undefined
     if (first) {
       const { kind: _kind, ...place } = owner
+      // A step refused at its approval question (a native subagent's, review-guard.js) is a child's.
+      if (detail.child === true) place.child = true
       const entry = { id: randomUUID(), ...place, why: detail.why, tool: line(detail.tool, 64), count: 0, calls: [], text: line(detail.text, 200), at: now, last: now, open: true }
       if (inRound(owner)) entry.inRound = true
       record = { entry, turn, seen: new Set() }
@@ -146,6 +153,9 @@ export function install(rt) {
     try {
       const stop = resolved(sessionId, detail, agent)
       if (stop) noteResolved(stop)
+      // A subagent's step the review guard held: its parent is told so (who-refused.js), and never
+      // to run that step itself.
+      if (stop && (detail.why === 'guard' || detail.why === 'guard-request')) noteUnasked(sessionId, detail, agent)
     } catch {}
   }
   const stopsView = () => { prune(); return [...entries.values()].filter(({ entry }) => entry.count > 0).map(({ entry }) => copy(entry)) }

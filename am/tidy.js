@@ -29,7 +29,7 @@
 //   relabel { terminal, set } with `herdr.space` (Herdr places a terminal by that label).
 // Reports (never acted on): report { report: "orphan-helper" | "foreign" |
 //   "stale-worktree-space" | "stale-needs-owner" | "cross-machine", terminal?, space?, note }.
-import { BOT_LABEL, effectiveCategory, mainBotOf, parseBots } from "./model.js";
+import { BOT_LABEL, effectiveCategory, isSendGrantRole, mainBotOf, parseBots } from "./model.js";
 import { CATEGORY_LABEL, ROLE_LABEL, roleOf } from "./launchArgs.js";
 
 export const SPACE_LABEL = "herdr.space";
@@ -164,6 +164,7 @@ export function labelRule(ctx) {
     if (!project) continue;
     const id = ctx.idOf(t);
     const want = { [ROLE_LABEL]: roleOf(project.file, id) ?? "", [CATEGORY_LABEL]: effectiveCategory(project.file, id) ?? "" };
+    if (isSendGrantRole(want[ROLE_LABEL]) || isSendGrantRole(t.labels?.[ROLE_LABEL])) delete want[ROLE_LABEL];
     const set = Object.fromEntries(Object.entries(want).filter(([k, v]) => (t.labels?.[k] ?? "") !== v));
     if (Object.keys(set).length) {
       const words = Object.entries(set).map(([k, v]) => `${k}=${v}`).join(" ");

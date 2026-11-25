@@ -38,6 +38,38 @@ export function installReview(rt, memory) {
     }
     return cursors
   }
+  // Writes of the places land in call order, each with the newest object, so a write
+  // that began before a forget cannot rename after it and bring a key back.
+  let cursorWrite = Promise.resolve()
+  const saveCursors = () => {
+    const run = cursorWrite.then(() => writeText(cursorsPath, JSON.stringify(cursorsNow())))
+    cursorWrite = run.catch(() => {})
+    return run
+  }
+  // A deleted Bot's or group's places leave the file in one save. Each key's count of
+  // forgets is bumped, so a review that read its place before the forget never writes
+  // it back; a later review of the same id (a Session adopted again) writes normally.
+  // A failed save is warned, never thrown: the deletion goes on.
+  /** @type {Map<string, number>} */
+  const forgetGen = new Map()
+  const forgetCursors = (keys) => {
+    try {
+      let present = false
+      for (const key of keys) {
+        forgetGen.set(key, (forgetGen.get(key) ?? 0) + 1)
+        overflowed.delete(key)
+        if (Object.hasOwn(cursorsNow(), key)) {
+          present = true
+          delete cursorsNow()[key]
+        }
+      }
+      if (!present || rt.readOnly() !== undefined) return Promise.resolve()
+      return saveCursors().catch(error => rt.warn('omni-ui: memory review places not forgotten: %s', failureCode(error)))
+    } catch (error) {
+      rt.warn('omni-ui: memory review places not forgotten: %s', failureCode(error))
+      return Promise.resolve()
+    }
+  }
   const clip = (text, max) => (text.length > max ? `${text.slice(0, max)} …(cut)` : text)
   const failureCode = error => (typeof error?.code === 'string' && /^[\w./-]{1,40}$/.test(error.code) ? error.code : 'error')
   // A long message often ends with what the user wants of it, so both ends stay.
@@ -238,10 +270,12 @@ export function installReview(rt, memory) {
   const reviewEnabled = seen => seen?.roomId !== undefined ? reviewOn : seen !== undefined && chatReviewEnabled(seen.botId)
   async function reviewChat(seen) {
     const bot = rt.botOf(reviewOf(seen.sessionId)?.botId ?? seen.botId)
-    if (bot === undefined || !chatReviewEnabled(bot.id)) return
+    // A Bot being deleted has had its places forgotten; no review of it starts.
+    if (bot === undefined || rt.botDeleting?.(bot.id) || !chatReviewEnabled(bot.id)) return
     const since = cursorsNow()[seen.key]
+    const gen = forgetGen.get(seen.key) ?? 0
     await reviewBatch({
-      key: seen.key, since, batch: await chatBatch(seen.sessionId, bot, since),
+      key: seen.key, since, gen, batch: await chatBatch(seen.sessionId, bot, since),
       keeper: bot, name: bot.name, home: ownScope(bot.id), teamWrites: () => writesTeam(bot.id),
       who: `The Bot: ${bot.name}${bot.role ? `, ${bot.role}` : ''}.`,
       tag: { sessionId: rt.chatOf(bot.id), kind: 'memory' },
@@ -257,15 +291,17 @@ export function installReview(rt, memory) {
   async function reviewGroup(seen) {
     const live = rt.roomOf(seen.roomId)
     const keeper = live === undefined ? undefined : keeperOf(live)
-    if (keeper === undefined) return
+    // A group's place is forgotten only when it is deleted, and its id is never another's.
+    if (keeper === undefined || forgetGen.has(seen.key)) return
     const since = cursorsNow()[seen.key]
+    const gen = forgetGen.get(seen.key) ?? 0
     const room = withKeptLines(joinLogs(seen.room, live), await rt.groupLinesAfter(live.id, since).catch((error) => {
       rt.warn('omni-ui: the group log could not be read: %s', failureCode(error))
       return []
     }))
     const members = live.members.map(id => rt.botOf(id)).filter(Boolean).map(bot => `${bot.name}${live.admin === bot.id ? ' (admin)' : ''}`)
     await reviewBatch({
-      key: seen.key, since, batch: groupBatch(room, since),
+      key: seen.key, since, gen, batch: groupBatch(room, since),
       keeper, name: `group "${live.name}"`, home: groupScope(live.id), teamWrites: () => false, group: true,
       who: `The group chat: "${live.name}", with the user and ${members.join(', ')}.`,
       tag: { sessionId: live.id, kind: 'memory' },
@@ -277,7 +313,7 @@ export function installReview(rt, memory) {
   // One review from the conversation's place `since`: `home` is where it keeps what it
   // finds, `keeper` the Bot whose model reads, `who` whose memory it is. `alive` says
   // whether the keeper, and the group, are still there to keep it.
-  async function reviewBatch({ key, since, batch, keeper, name, home, teamWrites, group = false, who, tag, alive, next }) {
+  async function reviewBatch({ key, since, gen, batch, keeper, name, home, teamWrites, group = false, who, tag, alive, next }) {
     // The cursor only moves forward.
     if (batch.through === undefined || (since !== undefined && batch.through <= since)) return
     // A backlog past the text limit is read in passes, oldest first, so the cursor
@@ -289,9 +325,11 @@ export function installReview(rt, memory) {
     let again = more
     // A first review fixes where it starts before the model call, so a failure
     // leaves a cursor that the next review goes on from.
-    if (since === undefined && read.length > 0) {
+    // A place forgotten since the review read it (its Bot or group was deleted) stays gone.
+    const placeKept = () => (forgetGen.get(key) ?? 0) === gen
+    if (since === undefined && read.length > 0 && placeKept()) {
       cursorsNow()[key] = read[0].seq - 1
-      await writeText(cursorsPath, JSON.stringify(cursors))
+      await saveCursors()
     }
     // Only the user's words are kept, so lines without any need no model call.
     if (read.some(line => line.who === 'user')) {
@@ -336,9 +374,9 @@ export function installReview(rt, memory) {
       }
     }
     const now = cursorsNow()[key]
-    if (through !== undefined && (now === undefined || through > now)) {
+    if (placeKept() && through !== undefined && (now === undefined || through > now)) {
       cursorsNow()[key] = through
-      await writeText(cursorsPath, JSON.stringify(cursors))
+      await saveCursors()
     }
     if (again) next()
   }
@@ -422,5 +460,5 @@ export function installReview(rt, memory) {
     }, 'omni-ui: memory review')
   }
 
-  return { memoryReviews, memoryReviewStatus }
+  return { memoryReviews, memoryReviewStatus, forgetCursors }
 }

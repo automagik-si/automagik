@@ -66,14 +66,16 @@ export function historyLines(h) {
 
 /**
  * The bot menu's items, in order, by section: "configure" and "prompt" for every bot; for a
- * bot that isn't planned, Run: "focus" (it has a pane) or "start", "restart", "restart-fresh"
- * (it has a pane), "restart-on", "attach" (a focused pane that isn't its own) and "detach"
- * (it has a pane); then "inspect". `live`: the bot's own pane, `pane`: the pane focused at
- * the right-click (a local terminal), both or null.
+ * bot that isn't planned, Run: "focus" (a pane to focus, label-derived included) and/or
+ * "start" (no ledger-confirmed pane), "restart", "restart-fresh" (a ledger-confirmed pane),
+ * "restart-on", "attach" (a focused pane that isn't its confirmed one) and "detach" (a
+ * confirmed pane); then "inspect". `live`: the bot's own ledger-confirmed pane, `focus`: the
+ * pane its Focus opens (defaults to `live`; a label-only live pane is Focus but not `live`),
+ * `pane`: the pane focused at the right-click (a local terminal), both or null.
  */
-export function menuItems({ planned = false, live = null, pane = null } = {}) {
+export function menuItems({ planned = false, live = null, focus = live, pane = null } = {}) {
   const run = planned ? [] : [
-    live ? "focus" : "start", "restart", ...(live ? ["restart-fresh"] : []), "restart-on",
+    ...(focus ? ["focus"] : []), ...(live ? [] : ["start"]), "restart", ...(live ? ["restart-fresh"] : []), "restart-on",
     ...(pane && pane !== live ? ["attach"] : []), ...(live ? ["detach"] : []),
   ];
   return ["configure", "prompt", ...run, "inspect"];

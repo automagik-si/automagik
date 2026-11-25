@@ -5,6 +5,17 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { findAll, hasClass, parts, render, textOf } from './left-bar-load.js'
+import { defaultShape } from '../src/client/characters.js'
+
+test('the bar resolves owner looks and keeps linked seats on their catalogue default', () => {
+  const owner = { id: 'b', name: 'Fixture', role: 'Solver', avatar: { shape: 'frog' } }
+  const mark = node => findAll(render(node), hasClass('bt-mark'))[0].props['data-shape']
+  assert.equal(mark(parts.renderArt(owner, 28, 'idle')), defaultShape('b'))
+  assert.equal(mark(parts.renderArt({ ...owner, reviewerId: 'r' }, 28, 'idle')), 'frog')
+  const seat = parts.renderArt({ ...owner, seat: true, artId: 'b' }, 28, 'idle')
+  assert.equal(seat.props.look.shape, defaultShape('b'))
+  assert.equal(mark(seat), defaultShape('b'))
+})
 
 const { TeamRows, bakedFit, botChannels, botRowStatus, channelRows, channelStatusOf, chatStatusOf, teamOf, teamRows } = parts
 

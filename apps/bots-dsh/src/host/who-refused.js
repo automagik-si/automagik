@@ -25,18 +25,23 @@ export function rewordRefusal(exec, result, content, decided) {
   return rewritten === undefined ? undefined : [{ type: 'text', text: rewritten }]
 }
 
+const guarded = why => why === 'guard' || why === 'guard-request'
+
 export function childRefusalNote(childId, { items, more }, parentPolicy) {
   const n = items.length + more
   const list = items.map(({ tool, why, reason }) => {
     const explanation = why === 'never' ? 'approval prompts are off there'
       : why === 'unavailable' ? 'nobody could answer its approval request'
         : why === 'review' ? 'Auto review refused it' + (reason ? `: ${reason}` : '')
-          : 'the sandbox blocked it and it could not ask to widen it'
+          : guarded(why) ? 'the review guard holds work until the reviewer answers the plan'
+            : 'the sandbox blocked it and it could not ask to widen it'
     return `${tool || 'a tool call'} (${explanation})`
   }).join('; ')
-  const tail = parentPolicy === 'ask' ? 'If a step is still needed, you can do it yourself in this conversation, where approval prompts are on and its own permission level applies.'
-    : parentPolicy === 'never' ? 'Approval prompts are off in this conversation too, so a step that needs approval is refused here as well: say in your reply which steps did not run.'
-      : 'Say in your reply which steps did not run.'
+  // A step the review guard held is held in this conversation too: never "do it yourself" (H6-8).
+  const tail = items.some(({ why }) => guarded(why)) ? 'Send the plan to your reviewer with message_bot and wait for its verdict; until then work steps are refused here too.'
+    : parentPolicy === 'ask' ? 'If a step is still needed, you can do it yourself in this conversation, where approval prompts are on and its own permission level applies.'
+      : parentPolicy === 'never' ? 'Approval prompts are off in this conversation too, so a step that needs approval is refused here as well: say in your reply which steps did not run.'
+        : 'Say in your reply which steps did not run.'
   const text = `Subagent ${childId} was refused ${n === 1 ? 'a step' : `${n} steps`} without anyone being asked: ${list}${more ? `; and ${more} more` : ''}. ${tail}`
   return createUserMessage({
     content: [{ type: 'text', text }],

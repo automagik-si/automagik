@@ -65,7 +65,7 @@ async function writeSession(host, id, events) {
 
 // A team-made store that existed before the attach: written, closed, and reopened fresh.
 // `sessions` maps a Session id to its list of turns ({ route, messages, end }).
-async function storedTeam(t, sessions) {
+async function storedTeam(t, sessions, selections = {}) {
   const root = mkdtempSync(join(tmpdir(), 'ds-bot-carried-rule-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   let host = await realStore(root)
@@ -78,6 +78,9 @@ async function storedTeam(t, sessions) {
       base = written.at(-1).seq + 1; time = written.at(-1).time + 1
     }
     await writeSession(host, id, events)
+  }
+  for (const [id, data] of Object.entries(selections)) {
+    await writeSession(host, id, [{ type: 'model/selection', seq: 0, time: 1, data }])
   }
   await host.fiber.dispose()
   host = await realStore(root)
@@ -245,6 +248,7 @@ const ROWS = [
   {
     name: 'Tester 6: part roll-over, the new part takes the attach row',
     sessions: { b1: [{ route: CARRIED }] },
+    selections: { 'part-2': DEEPSEEK },
     chats: { b1: 'part-2' },
     async run({ rt, selected, accepted }) {
       await rt.applyModel(rt.state.bots.b1, { force: true })
@@ -316,7 +320,7 @@ test('a new part that picked another provider then picked attach back takes atta
   // person picks another provider, starts a new part, then picks Remote Hermes back before
   // typing. The new part is live with another provider's selection but no request yet: the
   // pick must be applied, not skipped by any last-answer fallback from the old part.
-  const host = await storedTeam(t, { b1: [{ route: CARRIED }] })
+  const host = await storedTeam(t, { b1: [{ route: CARRIED }] }, { 'part-2': DEEPSEEK })
   const bot = carries({ previousModel: ATTACH })
   const bench = await runtime(host, { bots: { b1: bot }, chats: { b1: 'part-2' }, live: { 'part-2': { requestHeader: () => undefined } } })
   bench.rt.chatOwners.set('part-2', 'b1')
@@ -329,7 +333,7 @@ test('a new part that picked another provider then picked attach back takes atta
 
 for (const row of ROWS) {
   test(row.name, async t => {
-    const host = await storedTeam(t, row.sessions)
+    const host = await storedTeam(t, row.sessions, row.selections)
     const bots = { b1: carries(row.bot) }
     Object.assign(bots, row.bots ?? {})
     const bench = await runtime(host, { bots, groups: row.groups, chats: row.chats })

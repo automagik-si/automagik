@@ -164,12 +164,10 @@ export function install(rt) {
         return false
       })
       if (remaining.length === 0) return
-      if (typeof agent.inject === 'function') {
-        for (const item of remaining.slice(0, -1)) agent.inject(item.message)
-        agent.followup(remaining.at(-1).message)
-      } else {
-        // An older host without inject still gets the replies, one turn each.
-        for (const item of remaining) agent.followup(item.message)
+      for (const [index, item] of remaining.entries()) {
+        if (typeof agent.inject === 'function' && index < remaining.length - 1) agent.inject(item.message)
+        else agent.followup(item.message)
+        item.acceptedBy = target
       }
       await ctx.sessions.flush(agent.session)
       for (const item of remaining) item.delivered(target)
@@ -194,6 +192,7 @@ export function install(rt) {
       shouldSend,
       sessionId,
       agent: undefined,
+      acceptedBy: undefined,
       ready: new Promise((resolve, reject) => { markReady = resolve; markUnready = reject }),
       sent: new Promise((resolve, reject) => { markDelivered = resolve; markFailed = reject }),
       made: () => markReady(),
@@ -236,7 +235,8 @@ export function install(rt) {
   // result that came back goes on with. `merged`: a request that takes in an earlier
   // one its recipient had not read, under that one's exchange. `uploads`: the person's
   // uploads of a group turn, for a member over ACP.
-  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, resumedByUpdate = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }, { enqueue, shouldSend, made } = {}) {
+  // `onReplyRecorded` runs at the ledger append and can return a callback for pre-inbox loss.
+  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, resumedByUpdate = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }, { enqueue, shouldSend, made, onReplyRecorded } = {}) {
     const from = rt.botOf(fromId)
     const to = rt.botOf(toId)
     if (to === undefined) throw new Error(`Unknown Bot ${toId}`)
@@ -288,9 +288,11 @@ export function install(rt) {
     // finished turn produces lands in the same batch and one turn reads them all.
     const queued = role === 'reply' && !steer && enqueue === undefined
       ? queueReply(targetSessionId, toId, work, message, shouldSend) : undefined
+    let lost
     try {
       if (book !== undefined && (merged || !rt.ledger.records(book).some(record => record.event === undefined && record.id === exchangeId))) {
         rt.ledger.append(book, { id: exchangeId, from: fromId, to: toId, role, text, time: Date.now(), ...(length !== undefined ? { length, files } : {}), ...(replyTo ? { replyTo } : {}), ...(audience === 'user' ? { audience } : {}), ...(roomId ? { roomId } : {}) })
+        if (queued !== undefined) lost = onReplyRecorded?.()
         await rt.ledger.written(book)
       }
       rt.assertShellChoice?.(targetSessionId, toId)
@@ -301,7 +303,10 @@ export function install(rt) {
         queued.agent = agent
         queued.made()
         const destination = await queued.sent
-        if (destination === false) return undefined
+        if (destination === false) {
+          lost?.()
+          return undefined
+        }
         deliveredTo = destination ?? targetSessionId
       } else if (shouldSend !== undefined && !shouldSend(agent, targetSessionId)) {
         return undefined
@@ -314,8 +319,15 @@ export function install(rt) {
         await ctx.sessions.flush(agent.session)
       }
     } catch (error) {
-      queued?.fail(error)
-      throw error
+      if (queued?.acceptedBy === undefined || lost === undefined) {
+        queued?.fail(error)
+        lost?.()
+        throw error
+      }
+      // The original review reply is already actionable. Keep its recovery note
+      // and do not replace it with a failure notice if the batch or flush failed.
+      deliveredTo = queued.acceptedBy
+      rt.warn('omni-ui: review reply %s was accepted before its batch failed: %s', exchangeId, error)
     }
     if (book !== undefined) {
       rt.ledger.append(book, { event: 'delivered', id: exchangeId, sessionId: deliveredTo, time: Date.now() })

@@ -297,10 +297,14 @@ it), and refuses to guess when the markers are duplicated or broken. `check` onl
 codes: `0` installed/current, `1` refusal or mismatch, `2` usage.
 
 The helper understands three top-level layer shapes: an empty/comments-only file, the DSH
-template's lone `[]`, and a block array. `install` replaces the lone `[]` line (keeping the
-template comments) and appends after an empty/comments-only file or an existing block array,
-then requires the result to be one block array again; it refuses a mapping, a scalar or a
-non-empty flow array without writing. This is a top-level shape check, not a YAML parser.
+template's lone `[]`, and a block array. The lone `[]` may carry a trailing comment (a space or
+tab before the `#`) only when every other line is blank or a full-line comment; `install` keeps
+that comment on its own line above the block (a comment that reads as a marker gets one leading
+space). `install` replaces the lone `[]` line (keeping the template comments) and appends after
+an empty/comments-only file or an existing block array, then requires the result to be one block
+array again; it refuses a mapping, a scalar, a non-empty flow array or a `[]` beside other
+content (an indented `[]` inside a block array included) without writing. This is a top-level
+shape check, not a YAML parser.
 `check` applies the same shape check before it compares the managed block, so the corrupted
 `[]` plus block state is never reported as current.
 

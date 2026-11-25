@@ -86,10 +86,10 @@ function repo() {
   for (const path of [
     'scripts/lane.ts', 'scripts/role-pack.ts', 'scripts/version.ts', 'am/part.json', 'meter/usagemeter/part.json',
     ...['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'multiuser-dsh', 'vault-dsh', 'welcome-dsh'].map(plugin => 'apps/' + plugin + '/package.json'),
-    ...['role-catalog.js', 'role-keys.json', 'role-package.js', 'role-tar.js', 'refusal.js', 'bounded-get.js', 'no-runner.js'].map(file => PLUGIN + '/src/host/' + file),
-    PLUGIN + '/src/shared/roles.js',
+    ...['role-catalog.js', 'role-keys.json', 'role-package.js', 'role-tar.js', 'refusal.js', 'bounded-get.js', 'no-runner.js', 'bundled-roles.js', 'bundled-roles.json', 'lane-verify.js'].map(file => PLUGIN + '/src/host/' + file),
+    PLUGIN + '/src/shared/roles.js', PLUGIN + '/src/shared/solver-method.js',
   ]) copy(root, path);
-  put(root, '.gitignore', '/out/\n');
+  put(root, '.gitignore', '/out/\n/' + PLUGIN + '/src/host/bundled-roles.json\n');
   git(root, 'init', '-q');
   git(root, 'config', 'core.autocrlf', 'false');
   git(root, 'config', 'diff.renames', 'true');
@@ -151,6 +151,8 @@ test('archives preserve Git bytes across dirty clones and have fixed small and m
     const big = Buffer.concat([MODULE, Buffer.alloc(1024 * 1024 + 19, 32)]);
     writeRole(root, 'multi-block', {}, multi);
     writeRole(root, 'large-role', {}, big);
+    // The packer imports the mapping from disk in both checkouts.
+    git(root, 'add', '--force', PLUGIN + '/src/host/bundled-roles.json');
     commit(root, 'three roles');
 
     const first = cut(fixture, A);
@@ -598,7 +600,11 @@ test('the real npm plugin tarball has no roles source paths', () => {
     expect(tarballs).toHaveLength(1);
     const paths = ok(run(root, 'tar', '-tzf', tarballs[0])).trim().split('\n');
     expect(paths).toContain('package/src/host/role-package.js');
-    expect(paths.some(path => path.startsWith('package/roles/'))).toBe(false);
+    expect(paths.filter(path => path.startsWith('package/roles/')).sort()).toEqual([
+      'package/roles/solver/prompt.md',
+      'package/roles/solver/role.json',
+      'package/roles/solver/role.mjs',
+    ]);
   } finally { clean(); }
 }, 30000);
 
@@ -689,7 +695,9 @@ test('a plugin upgrade keeps unchanged role pins attachable and flags byte-chang
       for (const file of [
         'host/role-catalog.js', 'host/role-package.js', 'host/role-runtime.js', 'host/role-tar.js', 'host/role-settings.js',
         'host/role-voice.js', 'host/roles.js', 'host/role-keys.json', 'host/refusal.js', 'host/bounded-get.js', 'host/no-runner.js',
-        'shared/roles.js', 'shared/routes.js', 'shared/machine-reservations.js', 'shared/own-tools.js', 'client/role-shop.js', 'client/i18n.js',
+        'host/bundled-roles.js', 'host/bundled-roles.json', 'host/lane-verify.js', 'host/session-route.js',
+        'shared/roles.js', 'shared/solver-method.js', 'shared/routes.js', 'shared/machine-reservations.js', 'shared/own-tools.js', 'client/role-shop.js', 'client/i18n.js',
+        'shared/guard-groups.js', 'shared/solver-looks.js',
       ]) {
         put(plugin, 'src/' + file, readFileSync(join(ROOT, PLUGIN, 'src', file)));
       }

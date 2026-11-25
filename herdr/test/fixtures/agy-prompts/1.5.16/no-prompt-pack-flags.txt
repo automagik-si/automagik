@@ -1,0 +1,40 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.16
+     ▀▀▀▀▀▀       <EMAIL>
+▀▀▀▀▀▀▀▀          Gemini 4 Neon (High)  (<TIER>)
+   ▄▀▀    ▀▀▄     /work/project
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────
+> Read the file /work/outside/note.txt and tell me its first line.──────────────────────
+
+○ Thought for 8.4s (The file path provided in the request doesn't match the active workspace. This suggests either...)
+● Explored 1 file (note.txt) (ctrl+o to expand)
+
+  The first line of /work/outside/note.txt:1 is:
+
+  outside the workspace
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                     Gemini 4 Neon · high
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -56,3 +56,17 @@ test('the reservation card has pt-BR text and keeps its project and vendor place
     assert.deepEqual(placeholders(pack[key]), placeholders(key), key)
   }
 })
+
+test('the PT-BR pack includes all four Solver look refusals', async () => {
+  const keys = await omniKeys()
+  const pack = loadDictionaries()['omni-ui']
+  for (const [key, text] of [
+    ['Only a Solver wears the Solver characters. Choose another character.', 'Só um Solver usa os personagens Solver. Escolha outro personagem.'],
+    ['A Solver wears one of the Solver characters. Choose one of those characters.', 'Um Solver usa um dos personagens Solver. Escolha um desses personagens.'],
+    ['Only the person can make a Bot a Solver.', 'Só a pessoa pode tornar um Bot um Solver.'],
+    ['That look is not valid. Choose another character.', 'Esse visual não é válido. Escolha outro personagem.'],
+  ]) {
+    assert.ok(keys.has(key), key)
+    assert.equal(pack[key], text)
+  }
+})

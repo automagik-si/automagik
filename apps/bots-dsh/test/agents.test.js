@@ -507,6 +507,29 @@ test('adoption is additive, retains registration, and rollback restores the orig
   assert.equal(restricted.length, count + 2)
 })
 
+// RFC 0048 delivery 1.5: the review fields are the New Solver dialog's and the person's, so an
+// adopted record carries none of them, whatever the DSH bot's record held (agents.js adoption).
+test('adoption drops the review guard fields from the adopted Bot', async (t) => {
+  const { call, stop, ctx } = start(TEAM)
+  t.after(stop)
+  await call('state', {})
+  ctx.provided.set('agentPresets', { serviceFor: () => undefined, list: async () => [{ id: 'standard' }, { id: 'cordis' }] })
+  const rt = ctx.provided.get('omniTeam')
+  const entry = (await call('add-agent', { name: 'Guarded', profile: 'cordis' })).value
+  const fields = ['reviewGuard', 'reviewerId', 'reviewGuardNotice', 'reviewTrack']
+  Object.assign(rt.state.agents[entry.id], {
+    reviewGuard: true,
+    reviewerId: 'reviewer-bot',
+    reviewGuardNotice: { sessionId: 'notice-session' },
+    reviewTrack: { requested: true, requestAt: 1, openedBy: 'person' },
+  })
+  const adopted = await call('agent-bot-adopt', { agentId: entry.id })
+  assert.equal(adopted.ok, true, adopted.error?.message)
+  const bot = rt.state.bots[adopted.value.botId]
+  assert.equal(bot.kind, 'dsh')
+  for (const key of fields) assert.equal(Object.hasOwn(bot, key), false, key)
+})
+
 test('adoption and rollback save failures restore both records without archiving', async (t) => {
   const { call, stop, ctx, archived } = start(TEAM)
   t.after(stop)
@@ -1721,4 +1744,38 @@ test('rfc0039 D3b [C] G24 a seat a held Session adoption may give back is not la
     } finally { release(); assert.equal((await adopting).ok, false) }
     assert.equal(rt.chatOf(botId), 'later')
   })
+})
+
+test('a deleted Bot\'s Session adopted into a DSH bot leaves the composer sweep list', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'ds-bot-agents-'))
+  const { call, stop } = start({ ...TEAM, bots: { ...TEAM.bots, b2: { id: 'b2', sessionId: 'b2', name: 'Writer', role: 'Write', instructions: '', createdAt: 2 } } }, { home })
+  t.after(stop)
+  await call('state', {})
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  assert.deepEqual((await call('state', {})).value.draftSweep, ['b2'])
+  const agent = (await call('add-agent', { name: 'Notes' })).value
+  assert.equal((await call('agent-adopt', { agentId: agent.id, sessionId: 'b2' })).ok, true)
+  assert.equal(Object.hasOwn((await call('state', {})).value, 'draftSweep'), false)
+  assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')), 'draftSweep'), false)
+})
+
+test('adoption drops a Solver shape and leaves the original agent’s avatar intact through rollback', async t => {
+  const { call, stop } = start(TEAM)
+  t.after(stop)
+  await call('state', {})
+  const added = await call('add-agent', { name: 'Candidate' })
+  assert.equal(added.ok, true, added.error?.message)
+  const original = rt.state.agents[added.value.id]
+  const image = 'data:image/png;base64,AA=='
+  const avatar = { shape: 'frog', image }
+  const snapshot = structuredClone(avatar)
+  original.avatar = avatar
+  const adopted = await call('agent-bot-adopt', { agentId: original.id })
+  assert.equal(adopted.ok, true, adopted.error?.message)
+  assert.deepEqual(rt.botOf(adopted.value.botId).avatar, { image })
+  assert.equal(original.avatar, avatar)
+  assert.deepEqual(original.avatar, snapshot)
+  assert.equal((await call('agent-bot-rollback', { agentId: original.id })).ok, true)
+  assert.equal(rt.state.agents[original.id].avatar, avatar)
+  assert.deepEqual(avatar, snapshot)
 })

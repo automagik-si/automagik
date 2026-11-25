@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { replaceFile } from './files.js'
 import { createAgentRedactor } from './agent-redaction.js'
 import { multiuserMode } from './multiuser.js'
+import { isGuardGroupRefusal } from './refusal.js'
 
 export const MCP_PATH = '/api/omni-mcp'
 const VERSION = '2025-11-25'
@@ -337,6 +338,14 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
         const current = await authenticate(candidate)
         if (!current || current.revokedAt !== undefined) return refuse(401, 'Invalid agent token')
         await rt.refresh()
+        // While a Bot's review guard is on, only the person moves it to another model (H5-1),
+        // read after the refresh, inside this transaction (H6-9).
+        if (definition.endpoint === 'update-bot' && Object.hasOwn(args, 'model') && rt.botOf(args.id)?.reviewGuard === true) {
+          await audit({ ...entry, outcome: 'refused' })
+          return reply({ isError: true, content: [
+            { type: 'text', text: JSON.stringify(clean({ error: 'Action refused', code: 'bot/review-guard' })) },
+          ] })
+        }
         const before = snapshot()
         // An intent persists before side effects. Audit failure therefore fails closed.
         await audit({ ...entry, outcome: 'started' })
@@ -356,7 +365,7 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
           ? definition.endpoint.endsWith('bot') || definition.endpoint === 'set-main'
             ? after.bots.find(bot => bot.id === target) ?? null
             : after.groups.find(group => group.id === target) ?? null
-          : { error: 'Action refused', code: result.error.code })
+          : { error: isGuardGroupRefusal(result.error) ? result.error.message : 'Action refused', code: result.error.code })
         return reply({ isError: !result.ok, content: [
           { type: 'text', text: JSON.stringify(value) },
         ] })

@@ -12,11 +12,12 @@
 // that waits for it, and an outcome that cannot be read is said to be unknown. The
 // request itself is never sent again there.
 import { randomUUID } from 'node:crypto'
-import { closeSync, fsyncSync, openSync, readFileSync, renameSync } from 'node:fs'
+import { readFileSync, renameSync } from 'node:fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
+import { syncDirectory, syncFile } from './files.js'
 import { answerSender, cutOffText, failureLine, handBackRequests, turnFailure } from './turns.js'
 import { textOf } from './text.js'
 import { startUpdateRecovery } from './self-update-recovery.js'
@@ -146,9 +147,11 @@ function mergeHeld(before, after) {
   return [...items.values()]
 }
 
-export const readNotes = (file, { strict = false } = {}) => {
+export const readNotes = (file, { strict = false, onRead } = {}) => {
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    const bytes = readFileSync(file, 'utf8')
+    onRead?.(bytes)
+    const parsed = JSON.parse(bytes)
     const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
     const readable = object(parsed?.turns) && object(parsed?.queued) && Object.values(parsed.queued).every(Array.isArray)
       && (parsed.held === undefined || (object(parsed.held) && Object.values(parsed.held).every(Array.isArray)))
@@ -164,6 +167,7 @@ export const readNotes = (file, { strict = false } = {}) => {
     }
   } catch (error) {
     if (strict && error?.code !== 'ENOENT') throw error
+    if (error?.code === 'ENOENT') onRead?.(undefined)
     return { readable: false, turns: {}, queued: {}, held: {}, cut: [] }
   }
 }
@@ -305,8 +309,11 @@ export function install(rt) {
   let writing = Promise.resolve()
   rt.holdLockUntil?.(() => writing)
   let stopped = false
-  let latest
+  const encodeNotes = ({ turns, queued, held, cut }) => JSON.stringify({ turns, queued, held, cut })
+  let latest = encodeNotes(interrupted)
   let flushLatest = false
+  let flushPending = false
+  let unconfirmedNotes
   let due = false
   let reloading
   let noteTerm
@@ -320,11 +327,12 @@ export function install(rt) {
     const term = rt.lockTerm()
     noteTerm ??= term
     const notedTurns = passTook ? { ...pendingTurns, ...turns } : { ...turns, ...interrupted.turns }
-    latest = JSON.stringify({
+    const snapshot = encodeNotes({
       turns: { ...notedTurns, ...Object.fromEntries(updateTurns) },
       queued, held, cut,
     })
-    flushLatest ||= durable
+    flushLatest ||= durable || snapshot !== latest
+    latest = snapshot
     // One write waits at a time and takes the latest notes, so a busy round does not
     // write the file once per change.
     if (due) return writing
@@ -333,33 +341,47 @@ export function install(rt) {
       due = false
       const snapshot = latest
       const changes = new Map(localHeld)
-      const flush = flushLatest
+      const requested = flushLatest
       flushLatest = false
-      await mkdir(home, { recursive: true })
       // Noted before the stop: it still lands, since the store keeps the lock until this write ends.
       const current = () => !notesFenced() && rt.lockTerm() === term
         && (term === 0 || (rt.ownsLockForPendingWrite?.() ?? rt.holdsLock()))
       if (!current()) return false
-      const options = { encoding: 'utf8', flush }
+      flushPending ||= requested
+      const flush = flushPending || unconfirmedNotes !== undefined
+      await mkdir(home, { recursive: true })
+      if (!current()) return false
       // Windows can refuse to replace the file while another process has it open for reading.
-      if (process.platform === 'win32') await writeFile(file, snapshot, options)
-      else {
+      if (process.platform === 'win32') {
+        try {
+          await writeFile(file, snapshot, { encoding: 'utf8', flush })
+        } catch (error) {
+          // A failed open leaves the previous checkpoint intact. A later failure can leave these bytes on disk.
+          if (flush && error?.syscall !== 'open') unconfirmedNotes = snapshot
+          throw error
+        }
+        unconfirmedNotes = undefined
+      } else {
         const temp = join(home, `.inflight-${randomUUID()}.tmp`)
         let renamed = false
         try {
-          await writeFile(temp, snapshot, { ...options, flag: 'wx', mode: 0o600 })
+          await writeFile(temp, snapshot, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+          if (flush) await syncFile(temp)
           if (!current()) return false
           renameSync(temp, file)
           renamed = true
           if (flush) {
-            const dir = openSync(home, 'r')
-            try { fsyncSync(dir) } finally { closeSync(dir) }
+            flushPending = false
+            unconfirmedNotes = snapshot
+            await syncDirectory(home)
+            unconfirmedNotes = undefined
           }
         } finally {
           if (!renamed) await rm(temp, { force: true }).catch(() => {})
         }
       }
       if (!current()) return false
+      flushPending = false
       for (const [id, change] of changes) if (localHeld.get(id) === change) localHeld.delete(id)
       return true
     }).catch(error => {
@@ -388,7 +410,13 @@ export function install(rt) {
     // Wait out any write already issued. Queued snapshots see the adoption fence and skip.
     const reload = writing.then(() => {
       if (stopped || !rt.holdsLock() || rt.lockTerm() !== term) return
-      interrupted = readNotes(file, { strict: true })
+      interrupted = readNotes(file, { strict: true, onRead: bytes => {
+        if (unconfirmedNotes !== bytes) unconfirmedNotes = undefined
+      } })
+      // A queued or pre-rename flush belongs to the previous owner. Only the
+      // published checkpoint can carry unconfirmed durability through adoption.
+      flushLatest = flushPending = false
+      latest = encodeNotes(interrupted)
       pendingTurns = {}
       // Startup can still replay the disk snapshot. Local deliveries already have a sender.
       // Held input from a prior owner is authoritative on disk; only apply edits made here.
@@ -528,6 +556,17 @@ export function install(rt) {
   // What a Session was sent and no turn has read yet.
   rt.unreadOf = sessionId => (queued[sessionId] ?? []).map(item => item.args)
   rt.forgetDelivery = forgetQueued
+  rt.noteReviewReply = (exchangeId, reviewReply) => {
+    const note = Object.values(queued).flat().find(item => item?.args?.exchangeId === exchangeId)
+    if (note === undefined) return
+    note.args = { ...note.args, reviewReply }
+    persist()
+  }
+  rt.unreadReviewReplies = botId => Object.values(queued).flatMap(list => Array.isArray(list)
+    ? list.map(item => item?.args).filter(args => args?.toId === botId && args.role === 'reply'
+      && args.roomId === undefined && args.fromRoomId === undefined && args.reviewReply != null
+      && typeof args.exchangeId === 'string' && typeof args.replyTo === 'string')
+    : [])
   rt.deliveryNote = (id) => {
     let marked
     for (const [sessionId, list] of Object.entries(queued)) {
@@ -547,7 +586,8 @@ export function install(rt) {
   ctx.on('agent/inbox/discarded', ({ agent, message } = {}) => {
     if (stopped || rt.updateShuttingDown?.()) return
     rt.forgetHeldInput(agent?.session?.id ?? agent?.id, message?.id)
-    if (message?.source?.kind === SOURCE_KIND && message.source.exchangeId) forgetQueued(message.source.exchangeId)
+    if (message?.source?.kind === SOURCE_KIND && message.source.exchangeId
+      && !rt.reviewReplyDiscarded?.(agent, message)) forgetQueued(message.source.exchangeId)
   })
   // Exchanges a turn took up since this start, until the resends are done, so a resend
   // never repeats one.
@@ -826,7 +866,7 @@ export function install(rt) {
         received(item)
         return false
       }
-      if ((item.liveClaim && rt.deliveryNote(id) === undefined)
+      if (((item.liveClaim || item.args.reviewReply != null) && rt.deliveryNote(id) === undefined)
         || [...(claims.get(destination)?.values() ?? [])].some(message => message.source?.exchangeId === id)) return false
       if (waitingFor(agent).has(id)) {
         received(item)

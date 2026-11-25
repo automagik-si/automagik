@@ -9,7 +9,7 @@ import { build } from 'esbuild'
 const { outputFiles } = await build({
   stdin: { contents: [
     "export { NativeToolsRow } from './src/client/details-drawer.js'",
-    "export { nativeSwitchView, nativeToolsCopy, ompNativeToolsCopy } from './src/client/native-tools-copy.js'",
+    "export { antigravityNativeToolsCopy, nativeSwitchView, nativeToolsCopy, ompNativeToolsCopy } from './src/client/native-tools-copy.js'",
     "export { solverCandidate } from './src/client/solver-draft.js'",
   ].join('\n'), resolveDir: import.meta.dirname + '/..' },
   bundle: true, platform: 'browser', format: 'cjs', write: false, logLevel: 'silent',
@@ -21,7 +21,7 @@ runInNewContext(outputFiles[0].text, {
   require: () => ({ createContext: () => ({}), createElement: (type, props, ...children) => ({ type, props, children }) }),
 })
 const bundle = module.exports
-const { NativeToolsRow, nativeToolsCopy, ompNativeToolsCopy, solverCandidate } = bundle
+const { NativeToolsRow, antigravityNativeToolsCopy, nativeToolsCopy, ompNativeToolsCopy, solverCandidate } = bundle
 // The bundle runs in its own realm: its answers are cloned into this one before deep-equal.
 const nativeSwitchView = (bot, roster) => structuredClone(bundle.nativeSwitchView(bot, roster))
 
@@ -39,7 +39,8 @@ const CASES = [
   ['level unknown', 'acp-claude/default', 'level-unknown'],
   ['multi-user', 'acp-claude/default', 'multiuser'],
   ['multi-user in a team with no Bot', 'acp-claude/default', 'multiuser', { bots: [] }],
-  ['Antigravity', 'acp-antigravity/default', null],
+  ['Antigravity, an acp-dsh that offers its switch', 'acp-antigravity/default', null],
+  ['Antigravity, an older acp-dsh', 'acp-antigravity/default', 'unoffered'],
   ['a DSH model', 'deepseek/deepseek-v4-flash', null],
   ['a read-only window', 'acp-claude/default', null, { readOnly: true }],
   ['a ref absent from the host map', 'acp-claude/opus', undefined],
@@ -93,12 +94,43 @@ test('what the tick shows in each case', () => {
   assert.equal(view('acp-claude/default', 'read-only').disabled, true)
   assert.deepEqual(view('acp-claude/opus', undefined).hint, [UNKNOWN_TEXT])
   assert.equal(view('acp-claude/opus', undefined).disabled, true)
-  // No tick at all: multi-user (even with no Bot), Antigravity until its switch lands, DSH models.
+  // No tick at all: multi-user (even with no Bot), DSH models.
   assert.equal(view('acp-claude/default', 'multiuser'), null)
   assert.equal(view('acp-claude/default', 'multiuser', false, { bots: [] }), null)
-  assert.equal(view('acp-antigravity/default', null), null)
   assert.equal(view('deepseek/deepseek-v4-flash', null), null)
   assert.equal(view('deepseek/deepseek-v4-flash', undefined), null)
+  // With `nativeArgsAgents` lacking acp-antigravity (an older acp-dsh, the host's `unoffered`), no tick.
+  assert.equal(view('acp-antigravity/default', 'unoffered'), null)
+  // With an acp-dsh that offers it, Antigravity has the tick with its own copy, as omp: unticked
+  // is chat only, and a lock says so.
+  assert.deepEqual(view('acp-antigravity/default', null).hint, [antigravityNativeToolsCopy.off])
+  assert.deepEqual(view('acp-antigravity/default', null, true).hint, [antigravityNativeToolsCopy.on])
+  assert.deepEqual(view('acp-antigravity/default', 'read-only').hint, [READ_ONLY_TEXT, antigravityNativeToolsCopy.blocked])
   // A read-only window locks it as Details does.
   assert.equal(view('acp-claude/default', null, false, { readOnly: true }).disabled, true)
+})
+
+// #1564: Antigravity's lines under its switch come from the same view. A Bot not made yet has no
+// host facts (agy version, hooks, plugins), so the dialog's candidate and the made Bot carry the
+// same lines: the first-message line while not ON. The dialog shows the hint; Details shows the
+// hint and these lines.
+test('Antigravity: the dialog and Details read the same lines from the view, ticked or not', () => {
+  const ref = 'acp-antigravity/default'
+  for (const block of [null, 'read-only']) {
+    const roster = rosterFor(ref, block)
+    for (const ticked of [false, true]) {
+      const bot = botFor(ref, block, ticked)
+      const dialog = nativeSwitchView(solverCandidate(roster, ref, ticked), roster)
+      const details = nativeSwitchView(bot, roster)
+      const expected = details.on ? undefined : [{ key: antigravityNativeToolsCopy.firstTurn }]
+      assert.deepEqual(dialog.notes, expected, `${block}, ticked ${ticked}`)
+      assert.deepEqual(details.notes, expected, `${block}, ticked ${ticked}`)
+      const row = NativeToolsRow({ bot, roster, run: () => {}, actions: {} })
+      assert.deepEqual(row.props.notes === undefined ? undefined : [...row.props.notes], expected?.map(note => note.key))
+    }
+  }
+  // No other agent carries lines.
+  for (const ref of ['acp-claude/default', 'acp-codex/gpt-5.6', 'acp-omp/default']) {
+    assert.equal(Object.hasOwn(nativeSwitchView(botFor(ref, null, false), rosterFor(ref, null)), 'notes'), false)
+  }
 })

@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { defaultShape } from '../src/client/characters.js'
 
 const bundle = await build({
   entryPoints: [fileURLToPath(new URL('../src/client/cells.js', import.meta.url))],
@@ -56,6 +57,35 @@ test('a view row renders as a view card from its blueprint', () => {
   const cell = rows[1]
   const rendered = cell.type(cell.props)
   assert.equal(rendered.props.className, 'bt-q-inline')
+})
+
+test('archived chat marks resolve live identities and keep the catalogue look for missing speakers', () => {
+  const items = [
+    { kind: 'event', botId: 'b', role: 'reply' },
+    { kind: 'post', botId: 'b', text: 'Reply' },
+    { kind: 'relay', reply: { botId: 'b', kind: 'working' } },
+  ]
+  const marks = (node) => {
+    if (Array.isArray(node)) return node.flatMap(marks)
+    if (!node || typeof node !== 'object') return []
+    return node.type?.name === 'BotMark' ? [node] : marks(node.children)
+  }
+  for (const [byId, shape] of [
+    [{ b: { id: 'b', name: 'Fixture', role: 'Solver', avatar: { shape: 'frog' } } }, defaultShape('b')],
+    [{ b: { id: 'b', name: 'Fixture', role: 'Solver', reviewerId: 'r', avatar: { shape: 'frog' } } }, 'frog'],
+    [{}, defaultShape('b')],
+  ]) {
+    const rows = ChatRows({ items, sessionId: 'room', roster: { ...roster, byId, prefs: { layout: 'flat' } }, actions: {} })
+    assert.equal(rows.length, 3)
+    for (const row of rows) {
+      const found = marks(row.type(row.props))
+      assert.equal(found.length, 1)
+      const [mark] = found
+      const drawn = mark.type(mark.props)
+      assert.equal(drawn.type(drawn.props).props['data-shape'], shape)
+      assert.equal(mark.props.look?.shape, byId.b ? undefined : shape)
+    }
+  }
 })
 
 test('with the clock, a time separator sits above the first entry and after each pause of half an hour', () => {

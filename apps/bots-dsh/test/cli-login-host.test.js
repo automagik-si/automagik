@@ -810,3 +810,65 @@ test('MY-3 Antigravity: a crossing pick waits for the reply; with acp_tool denie
     assert.match(choice.message, /denies acp_tool/)
   }
 })
+
+// #2064: Switch account.
+test('a ready Switch to the same account says so; the unchanged cause has its own sentence (B1)', () => {
+  const view = cliLoginView({ id: 'acp-codex', attemptId: ATTEMPT, status: 'ready', sameAccount: true }, 'acp-codex')
+  assert.equal(view.sameAccount, true)
+  assert.equal(Object.hasOwn(cliLoginView({ id: 'acp-codex', attemptId: ATTEMPT, status: 'waiting', url: CODEX_URL, sameAccount: true }, 'acp-codex'), 'sameAccount'), false)
+  assert.equal(Object.hasOwn(cliLoginView({ id: 'acp-codex', attemptId: ATTEMPT, status: 'ready', sameAccount: 'yes' }, 'acp-codex'), 'sameAccount'), false)
+  for (const provider of ['acp-claude', 'acp-codex']) {
+    const failed = cliLoginView({ id: provider, attemptId: ATTEMPT, status: 'failed', cause: 'the account did not change', message: 'private-cli-output' }, provider)
+    assert.equal(failed.message, 'The account did not change. Try again.')
+    assert.equal(Object.hasOwn(failed, 'sameAccount'), false)
+  }
+})
+
+test('a Switch attempt keeps its fresh mark in every status, as a boolean only (B5)', () => {
+  const base = { id: 'acp-codex', attemptId: ATTEMPT }
+  for (const status of ['starting', 'waiting', 'ready', 'failed', 'expired', 'cancelled']) {
+    assert.equal(cliLoginView({ ...base, status, fresh: true }, 'acp-codex').fresh, true, status)
+    for (const fresh of ['yes', 1, false, null]) {
+      assert.equal(Object.hasOwn(cliLoginView({ ...base, status, fresh }, 'acp-codex'), 'fresh'), false, `${status} ${fresh}`)
+    }
+  }
+})
+
+test('settling and signed in after stay on a fresh attempt that ended without a sign-in, booleans only (B15)', () => {
+  const view = extra => cliLoginView({ id: 'acp-claude', attemptId: ATTEMPT, ...extra }, 'acp-claude')
+  for (const status of ['failed', 'expired', 'cancelled']) {
+    assert.equal(view({ status, fresh: true, settling: true }).settling, true, status)
+    assert.equal(view({ status, fresh: true, signedInAfter: true }).signedInAfter, true, status)
+    assert.equal(view({ status, fresh: true, signedInAfter: false }).signedInAfter, false, status)
+    // A plain attempt never carries them, and only booleans pass.
+    const plain = view({ status, settling: true, signedInAfter: true })
+    assert.equal(Object.hasOwn(plain, 'settling') || Object.hasOwn(plain, 'signedInAfter'), false, status)
+    const odd = view({ status, fresh: true, settling: 'yes', signedInAfter: 'yes' })
+    assert.equal(Object.hasOwn(odd, 'settling') || Object.hasOwn(odd, 'signedInAfter'), false, status)
+  }
+  for (const status of ['starting', 'waiting', 'ready']) {
+    const live = view({ status, fresh: true, settling: true, signedInAfter: true })
+    assert.equal(Object.hasOwn(live, 'settling') || Object.hasOwn(live, 'signedInAfter'), false, status)
+  }
+})
+
+test('the switch hands back its own verified attempt; sign-out and reset answer as before (B14b)', async () => {
+  const h = fixture()
+  h.acp.authScope = 'isolated'
+  const attempt = { id: 'acp-codex', attemptId: ATTEMPT, status: 'failed', cause: 'the account did not change', fresh: true,
+    signedInAfter: true, url: CODEX_URL, userCode: 'ABCD-1234', raw: 'private-cli-output', token: 'token-secret' }
+  h.acp.accountSwitch = async () => ({ ...attempt })
+  h.acp.accountSignOut = async () => ({ ...attempt })
+  h.acp.accountReset = async () => ({ ...attempt })
+  const switched = await h.actions['cli-login-switch']({ botId: 'a', provider: 'acp-codex' })
+  assert.deepEqual(switched, { id: 'acp-codex', attemptId: ATTEMPT, status: 'failed', message: 'The account did not change. Try again.',
+    fresh: true, signedInAfter: true, signedIn: false })
+  for (const action of ['signout', 'reset']) {
+    assert.deepEqual(await h.actions[`cli-login-${action}`]({ botId: 'a', provider: 'acp-codex' }), { id: 'acp-codex', signedIn: false })
+  }
+  // A host answer that does not verify keeps today's reply: no attempt id to read.
+  for (const answer of [undefined, { id: 'acp-claude', attemptId: ATTEMPT, status: 'waiting' }, { id: 'acp-codex', attemptId: 'x', status: 'waiting' }]) {
+    h.acp.accountSwitch = async () => answer
+    assert.deepEqual(await h.actions['cli-login-switch']({ botId: 'a', provider: 'acp-codex' }), { id: 'acp-codex', signedIn: false })
+  }
+})

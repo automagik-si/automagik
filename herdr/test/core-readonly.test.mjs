@@ -43,14 +43,14 @@ for (const [name, args, status, calls] of [
   ["whois", ["whois", "t1", "--json"], 1, []],
   ["ls degrades", ["ls", "--json"], 0, []],
   ["start", ["start", id, "--json"], 1, []],
-  ["attach", ["attach", id, "t1", "--json"], 1, [["get", "t1", "--json"]]],
+  ["attach", ["attach", id, "t1", "--json"], 1, []],
   ["revive boot", ["revive", "--boot", "--wait", "1", "--json"], 1, []],
 ]) {
   test(`no core: ${name} does not run a status client or start a core`, (t) => {
     const s = scene(t);
     const r = s.run(args);
     assert.equal(r.status, status, r.stderr);
-    assert.deepEqual(s.calls(), calls, "the entire hc log; attach's preceding get is outside identity lookup");
+    assert.deepEqual(s.calls(), calls, "the entire hc log");
     if (args[0] === "ls") {
       const bot = JSON.parse(r.stdout).projects[0].bots[0];
       assert.match(bot.hcError, /isn't answering.*nothing was started/);

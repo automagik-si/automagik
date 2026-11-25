@@ -187,3 +187,36 @@ test("attachWords: the pane ends up matching paneLabels; only a marked squad fol
   assert.deepEqual(attachWords(f, ID.test, copied, []), ["squad=", `${SQUAD_MARK}=`]);
   assert.deepEqual(attachWords(f, ID.test, { bot: ID.test, category: "eng" }, lead), ["squad=memory", `${SQUAD_MARK}=memory`]);
 });
+
+test("#628 r3 L1 launch labels omit widening roles and keep ordinary roles", () => {
+  for (const rank of ["reviewer", "fixer", "tester"]) {
+    const edited = structuredClone(FILE);
+    edited.bots.find((b) => b.id === ID.dev).rank = rank;
+    const roster = file(edited);
+    assert.equal(paneLabels(roster, ID.dev).role, rank === "tester" ? rank : undefined);
+    assert.equal(paneLabels(roster, ID.cap).role, "captain");
+    assert.equal(paneLabels(roster, ID.main).role, "main");
+  }
+});
+
+test("#628 r3 L2 attach and edit leave an existing grant alone", () => {
+  for (const rank of ["tester", undefined, "fixer"]) {
+    const edited = structuredClone(FILE);
+    edited.bots.find((b) => b.id === ID.dev).rank = rank;
+    const roster = file(edited);
+    const have = { bot: ID.dev, role: "reviewer", category: "eng" };
+    assert.deepEqual(attachWords(roster, ID.dev, have, []), []);
+    assert.deepEqual(relabelWords({ role: "reviewer", category: "eng" }, { role: rank, category: "eng" }, have), []);
+  }
+});
+
+test("#628 r3 L3 grant words never replace or clear either existing grant", async () => {
+  const { grantWords } = await import("../mods/am-sidebar/launchArgs.js");
+  assert.equal(typeof grantWords, "function");
+  for (const role of ["reviewer", "fixer"]) {
+    assert.deepEqual(grantWords(role), [`role=${role}`]);
+    assert.deepEqual(grantWords(role, { role: "tester" }), [`role=${role}`]);
+    for (const held of ["reviewer", "fixer"]) assert.deepEqual(grantWords(role, { role: held }), []);
+  }
+  for (const role of [undefined, "tester", "Reviewer", "fixer "]) assert.deepEqual(grantWords(role), []);
+});

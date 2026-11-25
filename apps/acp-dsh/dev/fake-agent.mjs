@@ -79,10 +79,16 @@
 // with whether it was right, never its code. The listener closes when `authenticate` ends.
 // FAKE_ACP_AUTH_WINDOW_MS=<n> rejects `authenticate` after n ms (agy ending its own wait), and
 // FAKE_ACP_AUTH_EXIT=1 exits with 1 right after printing FAKE_ACP_AUTH_STDERR.
-import { spawn, spawnSync } from 'node:child_process'
+// As agy (#1564, native tools off): FAKE_ACP_AGENT_VERSION answers that `agentInfo.version` at
+// `initialize`. FAKE_ACP_AGY_LOG names a JSON file read at each `session/new`: `{ lines }` are
+// written, before the answer, to agy's own log for this process,
+// `$HOME/.gemini/antigravity-cli/<--cli_dir_name>/log/acp-server-<local YYYYMMDD_HHMMSS>-<pid>.log`;
+// `{ late: { ms, lines } }` appends more that long after the answer; no `lines` writes none;
+// `old`, `stampDaysBack`, `link` and `fifo` are described where it writes (agyLog).
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
@@ -255,6 +261,40 @@ const stream = hearing(ndJsonStream(Writable.toWeb(process.stdout), Readable.toW
 const sessions = new Map()
 let created = 0
 
+// agy's own per-process log (FAKE_ACP_AGY_LOG, above).
+function agyLog() {
+  const control = process.env.FAKE_ACP_AGY_LOG
+  if (control === undefined) return
+  let wanted
+  try { wanted = JSON.parse(readFileSync(control, 'utf8')) } catch { return }
+  const at = process.argv.indexOf('--cli_dir_name')
+  const dir = join(process.env.HOME ?? '', '.gemini', 'antigravity-cli', ...(at >= 0 ? [process.argv[at + 1]] : []), 'log')
+  const two = value => String(value).padStart(2, '0')
+  const stamp = date => `${date.getFullYear()}${two(date.getMonth() + 1)}${two(date.getDate())}_${two(date.getHours())}${two(date.getMinutes())}${two(date.getSeconds())}`
+  const day = 24 * 60 * 60 * 1000
+  const nameAt = daysBack => join(dir, `acp-server-${stamp(new Date(Date.now() - daysBack * day))}-${process.pid}.log`)
+  const text = lines => lines.map(line => `${line}\n`).join('')
+  mkdirSync(dir, { recursive: true })
+  // `{ old: { lines } }`: an older file of the same pid (another day's stamp and file time).
+  if (wanted?.old !== undefined) {
+    const file = nameAt(1)
+    appendFileSync(file, text(wanted.old.lines))
+    const then = new Date(Date.now() - day)
+    utimesSync(file, then, then)
+  }
+  // `{ stampDaysBack }`: this run's own file named with a stamp that many days back, as a clock in
+  // another zone would name it; its file time is now.
+  const file = nameAt(wanted?.stampDaysBack ?? 0)
+  // `{ link: target }` / `{ fifo: true }`: the process's file is a symlink, or a FIFO.
+  if (typeof wanted?.link === 'string') { symlinkSync(wanted.link, file); return }
+  if (wanted?.fifo === true) { execFileSync('mkfifo', [file]); return }
+  if (!Array.isArray(wanted?.lines)) return
+  appendFileSync(file, text(wanted.lines))
+  if (wanted.late !== undefined) {
+    setTimeout(() => { try { appendFileSync(file, text(wanted.late.lines)) } catch {} }, wanted.late.ms)
+  }
+}
+
 function newSession(sessionId, cwd) {
   const session = { cwd, cancelled: false, turns: 0, model: START_MODEL.value, effort: START_MODEL.effort, mode: MODES[0], mcp: new Map() }
   sessions.set(sessionId, session)
@@ -271,7 +311,10 @@ const implementation = {
         ? { sessionCapabilities: { systemPrompt: {} } } : {}),
     }
     if (process.env.FAKE_ACP_LOGOUT === '1') agentCapabilities.auth = { logout: {} }
-    return { protocolVersion, agentCapabilities, authMethods: AUTH_METHODS.map(id => ({ id, name: id })) }
+    return {
+      protocolVersion, agentCapabilities, authMethods: AUTH_METHODS.map(id => ({ id, name: id })),
+      ...(process.env.FAKE_ACP_AGENT_VERSION === undefined ? {} : { agentInfo: { name: 'Fake ACP Server', version: process.env.FAKE_ACP_AGENT_VERSION } }),
+    }
   },
   async authenticate(params) {
     trace({ event: 'authenticate', methodId: params?.methodId })
@@ -346,6 +389,7 @@ const implementation = {
     })
     const session = newSession(sessionId, params.cwd)
     await attach(session, params.mcpServers, sessionId)
+    agyLog()
     trace({ event: 'new-answer', sessionId, at: Date.now() })
     return { sessionId, ...offersOf(session) }
   },

@@ -4,9 +4,11 @@
 import { CHARACTERS, DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from './characters.js'
 import { createPayload, freshBotName, setUp, startModel } from './bot-draft.js'
 import { isRefusal } from './api.js'
-import { t } from './i18n.js'
-import { markOf } from '../shared/permission-levels.js'
-import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, solverInstructions } from '../shared/solver-method.js'
+import { dateLocale, t } from './i18n.js'
+import { AUTO, AUTO_ROW, markOf } from '../shared/permission-levels.js'
+import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isSolverBot, solverInstructions } from '../shared/solver-method.js'
+import { packageAttachment, ROLES_OFF_REASON, rolesOn, sameRolePin } from '../shared/roles.js'
+import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 
 // The Solver's character slot: avatar objects as the host's cleanAvatar keeps them, `{ shape }`
 // of a CHARACTERS key or `{ pet: { source: 'builtin', id, version } }`. The twelve Solver
@@ -122,18 +124,23 @@ export function reviewerPayload({ name, look, model, workDir }) {
 /**
  * The Solver's create-bot payload, written once its reviewer's real name is known (`reviewer`:
  * that name, or null for fresh-session reviews; `dedicated`: made by this dialog; `reviewerId`:
- * its id, which the host's "unreviewed" mark reads, review-mark.js). With native
- * tools ticked the brief is not in the payload: it is sent after the switch (`sendBrief`), so
- * the task's first turn already runs with them.
+ * its id, which the host's review mark reads). The brief is sent after the role
+ * attempt and any native tools switch. `guard`: the Review guard tick, sent only with a
+ * reviewer Bot (review-guard.js), in the Solver's own create, so it is never half made.
  */
-export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, native = false }) {
+export function solverPayload({ name, look, model, effort, workDir, brief, sectionId, reviewer = null, dedicated = false, reviewerId, guard = false }) {
   const payload = createPayload({
     name, look, model, effort, sectionId, ownLook: true, avatar: avatarOfLook(look),
-    brief: native ? '' : brief, role: SOLVER_DESCRIPTION, instructions: solverInstructions({ reviewer, dedicated }),
+    role: SOLVER_DESCRIPTION, instructions: solverInstructions({ reviewer, dedicated }),
   })
   if (workDir) payload.workDir = workDir
-  if (typeof reviewer === 'string' && reviewer !== '' && typeof reviewerId === 'string' && reviewerId !== '') payload.reviewerId = reviewerId
-  return { payload, ...(native && brief ? { sendBrief: brief } : {}) }
+  payload.waitingRole = SOLVER_ROLE_ID
+  if (typeof reviewer === 'string' && reviewer !== '' && typeof reviewerId === 'string' && reviewerId !== '') {
+    payload.reviewerId = reviewerId
+    if (dedicated) payload.reviewerMade = true
+    if (guard === true) payload.reviewGuard = true
+  }
+  return { payload, ...(brief ? { sendBrief: brief } : {}) }
 }
 
 /**
@@ -156,6 +163,41 @@ export function reviewMarkText(bot, roster) {
 }
 
 /**
+ * The Review guard row of a Bot's Details (RFC 0048 delivery 1.5), or null when it has none: a
+ * Bot with a reviewer id, the guard on, or the Solver marker (display only: a Fresh-session Solver
+ * sees why it has no guard). `level`: 'full', 'auto' or 'ask', the Bot's level. The line says how
+ * far the guard holds on the Bot's route (reviewGuardReach), never more. With no reviewer Bot on
+ * the team the switch is off and disabled, or, when it is on, says the work stays held.
+ * @returns {{ on: boolean, disabled: boolean, lines: string[] } | null}
+ */
+export function reviewGuardView(bot, roster, level) {
+  if (bot === null || typeof bot !== 'object') return null
+  const on = bot.reviewGuard === true
+  const reviewerId = typeof bot.reviewerId === 'string' && bot.reviewerId !== '' ? bot.reviewerId : undefined
+  if (!on && reviewerId === undefined && !isSolverBot(bot)) return null
+  const reviewer = reviewerId === undefined || reviewerId === bot.id ? undefined : roster?.byId?.[reviewerId]
+  const readOnly = Boolean(roster?.readOnly)
+  if (reviewer === undefined) {
+    return on ? { on, disabled: readOnly, lines: [t(REVIEW_GUARD_COPY.gone)] }
+      : { on, disabled: true, lines: [t(REVIEW_GUARD_COPY.noReviewer, { name: bot.name })] }
+  }
+  const reach = reviewGuardReach(bot, level)
+  const lines = [reach === 'hard' ? t(REVIEW_GUARD_COPY.hard, { reviewer: reviewer.name }) : t(REVIEW_GUARD_COPY[reach])]
+  if (on && typeof bot.reviewGuardWaitingSince === 'number' && Number.isFinite(bot.reviewGuardWaitingSince)) {
+    const time = new Date(bot.reviewGuardWaitingSince).toLocaleTimeString(dateLocale(), { hour: 'numeric', minute: '2-digit' })
+    lines.push(t(REVIEW_GUARD_COPY.waiting, { reviewer: reviewer.name, time }))
+  }
+  lines.push(t(REVIEW_GUARD_COPY.scope))
+  return { on, disabled: readOnly, lines }
+}
+
+/** The Review guard row's text, or null (reviewGuardView). */
+export const reviewGuardText = (bot, roster, level) => reviewGuardView(bot, roster, level)?.lines.join(' ') ?? null
+
+/** The guard's level from a saved level row: Auto, a dangerous (Full access) one, or one that asks. */
+export const guardLevelOf = (saved, danger) => (saved === AUTO_ROW || saved === AUTO ? 'auto' : danger ? 'full' : 'ask')
+
+/**
  * Whether a failure leaves it unknown what the host did: anything that is not a host refusal,
  * and a changed viewer (the answer came back for another window).
  */
@@ -169,13 +211,14 @@ export function mayHaveBeenCreated(before, fresh, known = []) {
 
 /**
  * Makes the Solver through the person's own actions, best effort (RFC 0048): 1. the new reviewer,
- * 2. the Solver, with the reviewer's real name in its instructions, 3. native tools on their own,
- * 4. the brief. A failure at 1-3 deletes, newest first, only what this run made (never an
+ * 2. the Solver with written instructions, 3. an attempt to attach the Solver role, 4. native
+ * tools, 5. the brief. Install is attempted before either Bot is created. A Bot or native-tools
+ * refusal deletes, newest first, only what this run made (never an
  * existing Bot, never by name) and reads the team again when what happened is not known. It
  * never throws: the answer says what was made, what may have been made, and what is left.
  * `before`: the Bot ids the team had before Create.
  */
-export async function createSolver({ actions, before, reviewer, reviewerPayload: firstPayload, solverPayloadFor, native = false }) {
+export async function createSolver({ actions, before, reviewer, reviewerPayload: firstPayload, solverPayloadFor, native = false, prefs }) {
   const made = []
   const unsure = []
   let step = 0
@@ -190,6 +233,18 @@ export async function createSolver({ actions, before, reviewer, reviewerPayload:
     }
   }
   let solver
+  let version
+  let roleNote
+  if (!rolesOn(prefs)) roleNote = ROLES_OFF_REASON
+  else {
+    try {
+      const install = await actions.installRole(SOLVER_ROLE_ID)
+      if (install?.installed === false) roleNote = 'install'
+      version = install?.version
+    } catch (error) {
+      roleNote = error?.reason === ROLES_OFF_REASON ? ROLES_OFF_REASON : 'install'
+    }
+  }
   try {
     let name = null
     let dedicated = false
@@ -207,15 +262,37 @@ export async function createSolver({ actions, before, reviewer, reviewerPayload:
     step = 2
     const { payload, sendBrief } = solverPayloadFor({ reviewer: name, dedicated, reviewerId })
     solver = await make(payload)
-    if (native) {
+    if (roleNote === undefined) {
       step = 3
+      try {
+        const attached = await actions.attachRole(solver.id, SOLVER_ROLE_ID)
+        if (attached?.pending) roleNote = 'attach'
+      } catch (error) {
+        if (error?.reason === ROLES_OFF_REASON) roleNote = ROLES_OFF_REASON
+        else {
+          roleNote = 'attach'
+          try {
+            const fresh = await actions.teamState()
+            const bot = fresh?.bots?.find(bot => bot.id === solver.id)
+            const pin = packageAttachment(bot)
+            const runtime = fresh?.roleRuntime?.[solver.id]
+            if (rolesOn(fresh?.prefs) && bot?.role === SOLVER_DESCRIPTION && bot.instructions === ''
+              && pin?.id === SOLVER_ROLE_ID && pin.version === version
+              && sameRolePin(pin, runtime?.pin) && runtime.acp !== true && !runtime.promptWarning) roleNote = undefined
+          } catch { /* The fallback remains in place when completion is uncertain. */ }
+        }
+      }
+    }
+    const result = { solver, ...(roleNote === undefined ? {} : { roleNote }) }
+    if (native) {
+      step = 4
       await actions.updateBot(solver.id, { nativeTools: true })
     }
     if (sendBrief) {
-      step = 4
-      try { await actions.send(solver.id, sendBrief) } catch (error) { return { solver, sendError: error } }
+      step = 5
+      try { await actions.send(solver.id, sendBrief) } catch (error) { return { ...result, sendError: error } }
     }
-    return { solver }
+    return result
   } catch (error) {
     const left = []
     for (const bot of [...made].reverse()) {

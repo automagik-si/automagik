@@ -27,6 +27,7 @@
  *   bun scripts/lane.ts roles-manifest <version> <issuedAt> [dir]  print roles.json for a versioned release
  *   bun scripts/lane.ts pack-roles <dir> <version> <sha> <history>  pack roles with an explicit predecessor decision
  *   bun scripts/lane.ts check-roles [sha]                         validate the selected role sources
+ *   bun scripts/lane.ts stamp-bundled-solver <version>            record the Solver digest for a plugin cut
  *   bun scripts/lane.ts sign <file>                             print its signature (the key in PLUGIN_LANE_KEY, PEM)
  *   bun scripts/lane.ts verify <lane.json> <lane.json.sig>       check it against plugin-lane/keys.json
  *   bun scripts/lane.ts verify-roles <roles.json> <roles.json.sig> <version>  check the catalog against plugin-lane/keys.json and the release version
@@ -756,23 +757,34 @@ if (import.meta.main) {
     const [dir, version, sha, , file, signature, previousVersion] = args;
     if (git('rev-parse', 'HEAD').trim() !== sha) throw new Error('pack-roles: HEAD must equal the cut SHA');
     if (roleArtifactNames(dir).length) throw new Error('pack-roles: output directory already holds a role artifact');
-    const { packRoleSources, predecessorRoles } = await import('./role-pack');
+    const { checkBundledSolver, packRoleSources, predecessorRoles } = await import('./role-pack');
     let predecessor;
     if (file !== undefined) {
       const catalog = verifyRoleFiles(file, signature, previousVersion);
       predecessor = predecessorRoles(catalog.roles, roleRelease(previousVersion), previousVersion);
     }
+    const { ROLE_PLUGIN_VERSION } = await import('../apps/bots-dsh/src/host/role-catalog.js');
+    if (version === ROLE_PLUGIN_VERSION) {
+      checkBundledSolver({ root: ROOT, sha, version, neverShipped, predecessorVersion: previousVersion, release: true });
+    }
     for (const role of packRoleSources({ root: ROOT, dir, version, sha, release: roleRelease(version), neverShipped, predecessor })) {
       console.log(`${role.id} ${role.version} ${role.sha256}`);
     }
+  } else if (command === 'stamp-bundled-solver' && args.length === 1) {
+    const { stampBundledSolver } = await import('./role-pack');
+    const { ROLE_PLUGIN_VERSION } = await import('../apps/bots-dsh/src/host/role-catalog.js');
+    if (args[0] !== ROLE_PLUGIN_VERSION) throw new Error('Solver release stamp must match the plugin version');
+    stampBundledSolver({ root: ROOT, sha: 'HEAD', version: args[0], neverShipped });
   } else if (command === 'check-roles' && args.length <= 1) {
-    const { packRoleSources } = await import('./role-pack');
+    const { checkBundledSolver, packRoleSources } = await import('./role-pack');
+    const sha = args[0] ?? 'HEAD';
+    checkBundledSolver({ root: ROOT, sha, neverShipped });
     const dir = mkdtempSync(join(tmpdir(), 'check-roles-'));
     // Budget for the longest version components and the release's full UTC timestamp.
     const version = `${MAX_PART}.${MAX_PART}.${MAX_PART}`;
     const issuedAt = '2000-01-01T00:00:00Z';
     try {
-      const roles = packRoleSources({ root: ROOT, dir, version, sha: args[0] ?? 'HEAD', release: roleRelease(version), neverShipped });
+      const roles = packRoleSources({ root: ROOT, dir, version, sha, release: roleRelease(version), neverShipped });
       serializeRoles(version, issuedAt, await stagedRoles(dir, version, roles.map(role => role.id)));
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -805,7 +817,7 @@ if (import.meta.main) {
     if (byId.size) throw new Error('roles.json: catalog omits a staged role package');
     console.log(`roles.json for ${catalog.version} is signed by ${catalog.keyId}`);
   } else {
-    console.error('usage: bun scripts/lane.ts kind <last-full-tag> [<last-tag>] | ships <last-tag> | herdr <last-tag> | pocket <tag> | pocket-since <last-tag> [<lane-version>] | meter <tag> | meter-since <last-tag> [<lane-version> [<prerelease-tag>...]] | next-patch | pack-addons <dir> | manifest <plugins.json> <base> <issuedAt> [addons.json] | pack-roles <dir> <version> <sha> [--predecessor <roles.json> <roles.json.sig> <tag-version> | --no-predecessor] | check-roles [<sha>] | roles-manifest <version> <issuedAt> [<dir>] | sign <file> | verify <lane.json> <lane.json.sig> | verify-roles <roles.json> <roles.json.sig> <version>');
+    console.error('usage: bun scripts/lane.ts kind <last-full-tag> [<last-tag>] | ships <last-tag> | herdr <last-tag> | pocket <tag> | pocket-since <last-tag> [<lane-version>] | meter <tag> | meter-since <last-tag> [<lane-version> [<prerelease-tag>...]] | next-patch | pack-addons <dir> | manifest <plugins.json> <base> <issuedAt> [addons.json] | pack-roles <dir> <version> <sha> [--predecessor <roles.json> <roles.json.sig> <tag-version> | --no-predecessor] | check-roles [<sha>] | stamp-bundled-solver <version> | roles-manifest <version> <issuedAt> [<dir>] | sign <file> | verify <lane.json> <lane.json.sig> | verify-roles <roles.json> <roles.json.sig> <version>');
     process.exit(2);
   }
 }

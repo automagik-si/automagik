@@ -1231,6 +1231,46 @@ test("menu Focus: the bot's pane by agent.focus when Herdr shows it", async () =
   assert.deepEqual(state.closed, ["o9"]);
 });
 
+test("menu Focus: the session the menu was drawn for is focused (#1875)", async () => {
+  seed([MAIN, OMP]);
+  state.panes = [{ terminal: "t5" }];
+  state.terminals = [{ address: "t5", state: "live", created_ms: 200 }];
+  try {
+    const { draw, click } = await menu({ live: "t5", liveCreated: 200 });
+    draw();
+    await click("menu-focus");
+  } finally { state.panes = []; state.terminals = []; }
+  assert.deepEqual(state.runs.at(-1), ["agent.focus", { terminal: "t5" }]);
+  assert.deepEqual(state.closed, ["o9"]);
+});
+
+test("menu, a label-only live pane: Focus and Start, never Detach (#1875)", async () => {
+  seed([MAIN, OMP]);
+  state.panes = [{ terminal: "t12" }];
+  try {
+    // props.live is the ledger's own answer (no binding here); props.focus is the label's pane.
+    const { draw } = await menu({ live: null, focus: "t12", focusCreated: 200 });
+    draw();
+    for (const id of ["menu-focus", "menu-start", "menu-restart"]) assert.ok(nodes.has(id), id);
+    for (const id of ["menu-detach", "menu-restart-fresh"]) assert.ok(!nodes.has(id), id);
+    assert.match(textOf(nodes.get("menu-focus")), /t12/);
+  } finally { state.panes = []; }
+});
+
+test("menu Focus: a pane reused after the menu was drawn is not focused (#1875)", async () => {
+  seed([MAIN, OMP]);
+  state.panes = [{ terminal: "t5" }];
+  state.terminals = [{ address: "t5", state: "live", created_ms: 300 }];
+  try {
+    // The menu was drawn for the t5 generated at 200; the address now names another session.
+    const { draw, click } = await menu({ live: "t5", liveCreated: 200 });
+    draw();
+    await click("menu-focus");
+  } finally { state.panes = []; state.terminals = []; }
+  assert.equal(state.runs.filter(([name]) => name === "agent.focus").length, 0, "the click is unavailable");
+  assert.deepEqual(state.closed, ["o9"], "the menu closes rather than acting on the replacement");
+});
+
 test("menu Prompt: the instructions edited in place and saved as the Edit form saves, every other field kept", async () => {
   const before = { ...OMP, instructions: "old words", worker: { agent: "codex" } };
   seed([MAIN, before]);

@@ -9,7 +9,10 @@ import { constants } from 'node:fs'
 import { access, mkdir } from 'node:fs/promises'
 import { osBlocked } from './folder-access.js'
 import { refusal } from './refusal.js'
-import { MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOTICE_MAX, SECTION_COLORS, SECTION_NAME_MAX, inUnfoldInstance } from './constants.js'
+import { instructionsDigest, unchangedSolverWaiter } from './roles.js'
+import { packageAttachment } from '../shared/roles.js'
+import { SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isWrittenSolverMethod, solverInstructions } from '../shared/solver-method.js'
+import { DRAFT_SWEEP_MAX, MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOTICE_MAX, SECTION_COLORS, SECTION_NAME_MAX, inUnfoldInstance } from './constants.js'
 import { currentColor, isColor, normalize, unquote } from './text.js'
 import { nameProblem } from '../shared/mentions.js'
 import { contextPatch } from '../shared/context-policy.js'
@@ -18,6 +21,8 @@ import { cleanPetId, shippedPet } from './pets.js'
 import { cleanDenyTools, cleanShell } from './tool-deny.js'
 import { peopleOf } from './people.js'
 import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_MODEL_TEXT, addsAcpToolDeny, deniesAcpTool } from '../shared/own-tools.js'
+import { avatarProblem, isSolverLooks } from '../shared/solver-look-policy.js'
+import { LOOK_INVALID, SOLVER_BY_PERSON, SOLVER_WEARS, solverDefaultShape } from '../shared/solver-looks.js'
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -93,19 +98,30 @@ export function install(rt) {
     return team
   }
 
-  async function ensureWorkspace() {
-    if (state.workspaceId && ctx.workspaceRegistry.get(state.workspaceId)) {
+  async function publishWorkspace(id) {
+    state.workspaceId = id
+    rt.dropAllShellGrants?.()
+    await rt.save()
+  }
+
+  async function ensureWorkspace(guard, allocation) {
+    const workspaceId = state.workspaceId
+    if (workspaceId && ctx.workspaceRegistry.get?.(workspaceId)) {
       await keepTeamFolder()
-      return state.workspaceId
+      return workspaceId
     }
     const path = rt.defaultTeamFolder()
     let blocked
     await mkdir(path, { recursive: true }).catch(error => { if (!osBlocked(error)) throw error; blocked = error })
     await rt.checkFolderAccess?.(path, blocked, { cached: true })
-    const workspace = await ctx.workspaceRegistry.resolveByPath(path) ?? await ctx.workspaceRegistry.create(path, 'Omni')
-    state.workspaceId = workspace.id
-    rt.dropAllShellGrants?.()
-    await rt.save()
+    let workspace = await ctx.workspaceRegistry.resolveByPath(path)
+    if (workspace == null) {
+      guard?.()
+      workspace = await ctx.workspaceRegistry.create(path, 'Omni')
+    }
+    guard?.()
+    if (allocation === undefined) await publishWorkspace(workspace.id)
+    else allocation.pendingWorkspace = { id: workspace.id, previousId: workspaceId }
     return workspace.id
   }
 
@@ -153,7 +169,8 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false } = {}) {
+  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false, guard, allocation } = {}) {
+    guard?.()
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
     const readOnly = rt.readOnly()
@@ -161,10 +178,11 @@ export function install(rt) {
     const usable = dir !== undefined && await sessionFolderUsable(dir)
     if (dir !== undefined && !usable) rt.warn('ds-bot: the working folder %s is unavailable; %s starts in the team workspace', dir, title)
     const known = usable ? await ctx.workspaceRegistry.resolveByPath(dir) : undefined
-    let place = known !== undefined ? { workspaceId: known.id } : usable ? { cwd: dir } : { workspaceId: await ensureWorkspace() }
+    const workspaceId = usable ? undefined : await ensureWorkspace(guard, allocation)
+    let place = known !== undefined ? { workspaceId: known.id } : usable ? { cwd: dir } : { workspaceId }
     let blockedFolder = !usable && rt.folderWarning?.(dir) ? dir : undefined
     if (!usable) {
-      const team = rt.teamFolder()
+      const team = ctx.workspaceRegistry.get?.(workspaceId)?.path
       if (team !== undefined && !await sessionFolderUsable(team)) {
         blockedFolder ??= rt.folderWarning?.(team) ? team : undefined
         const fallback = rt.defaultTeamFolder()
@@ -177,12 +195,22 @@ export function install(rt) {
     }
     const preset = await botPreset(profile, { group })
     const reserved = readScopeSource === undefined ? undefined
-      : await rt.reserveReadScope(readScopeSource, { continuation: continueReadScope })
+      : await rt.reserveReadScope(readScopeSource, { continuation: continueReadScope, guard })
+    if (allocation !== undefined) allocation.reserved = reserved
     rt.assertShellChoice?.(undefined, botId)
+    guard?.()
     const { sessionId } = await ctx.sessionController.create({
       ...place, ...preset, ...(reserved === undefined ? {} : { sessionId: reserved }),
     })
+    if (allocation !== undefined) allocation.id = sessionId
     if (reserved !== undefined && sessionId !== reserved) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
+    // A guarded create can use a new workspace before the team takes it. Keep a
+    // workspace chosen by another action while this Session was being allocated.
+    const pendingWorkspace = allocation?.pendingWorkspace
+    if (pendingWorkspace !== undefined && state.workspaceId === pendingWorkspace.previousId) {
+      guard?.()
+      await publishWorkspace(pendingWorkspace.id)
+    }
     if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
@@ -222,6 +250,7 @@ export function install(rt) {
   // Each deleteBot still running, by Bot. A second call for the same Bot gets that one,
   // so it ends with it (#376): see deleteBot.
   const deletions = new Map()
+  rt.waitForBotDeletion = id => deletions.get(id)?.catch(() => {})
   // What other modules clear of a Bot as it is deleted (btw cards, side chats). They run
   // inside deleteBot, after its checks, after the Bot left its groups and after its
   // Sessions were released, so a refused deletion, or one whose release fails, clears
@@ -319,10 +348,37 @@ export function install(rt) {
     return state.prefs.permission ?? (personDefault !== rt.permissionCatalog?.()?.defaultPreset ? personDefault : undefined)
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind: requestedKind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId }, readScopeSource) {
+  const keptReviewer = (reviewerId, id) => typeof reviewerId === 'string' && reviewerId !== '' && reviewerId !== id
+    && rt.botOf(reviewerId) !== undefined
+
+  function createLook({ role = '', instructions = '', kind: requestedKind, reviewerId, createdBy, copyOf, solverCopy, ...rest }, id) {
+    const kind = BOT_KINDS.includes(requestedKind) ? requestedKind : undefined
+    const next = { role: cleanRole(role), instructions: String(instructions).trim(),
+      ...(kind === undefined ? {} : { kind }), ...(keptReviewer(reviewerId, id) ? { reviewerId } : {}),
+      ...(solverCopy ? { roles: [solverCopy.pin] } : {}) }
+    if ((createdBy !== undefined || rt.agentCaller?.()) && isSolverLooks(next)) throw refusal(SOLVER_BY_PERSON)
+    if (copyOf !== undefined || !Object.hasOwn(rest, 'avatar') || rest.avatar === undefined) return { next }
+    const avatar = cleanAvatar(rest.avatar)
+    if (avatar === undefined) throw refusal(isSolverLooks(next) ? SOLVER_WEARS : LOOK_INVALID)
+    const problem = avatarProblem(next, avatar, undefined)
+    if (problem) throw refusal(problem)
+    return { next, avatar }
+  }
+
+  function assertCaller(createdBy) {
+    if (createdBy !== undefined && (rt.botOf(createdBy) === undefined || !rt.isMain(createdBy))) {
+      throw refusal('Only the Main Bot can create Bots. Ask the Main Bot instead.')
+    }
+  }
+
+  async function buildBot(cleanName, options, readScopeSource) {
+    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy } = options
+    if (existingSessionId !== undefined && (createdBy !== undefined || reviewerId !== undefined || reviewGuard !== undefined)) {
+      throw refusal('An adopted Session takes no creator or reviewer.')
+    }
+    const { next: { kind } } = createLook(options)
+    const copyAvatar = copyOf === undefined ? undefined : cleanAvatar(avatar)
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
-    const cleanAvatarValue = cleanAvatar(avatar)
-    const roleText = cleanRole(role)
     // Checked before the Session exists, so a bad list or shell choice creates no Bot and
     // leaves no orphan.
     const denyTools = cleanDenyTools(denyToolsInput)
@@ -331,7 +387,6 @@ export function install(rt) {
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
     // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
     // its Session exists.
-    const kind = BOT_KINDS.includes(requestedKind) ? requestedKind : undefined
     const modelRef = model ? await rt.resolveModel(model, { remember: false }) : pickModel ? undefined : await rt.defaultBotModel()
     if (model) {
       rt.assertRouteAllowed({ name: cleanName, kind }, modelRef, 'create-bot')
@@ -384,25 +439,46 @@ export function install(rt) {
     if (existingSessionId === undefined && createdBy !== undefined && readScopeSource === undefined) rt.assertNoConfiguredReadScope()
     // A host adapter may already own a configured root Session. Adopt it without creating
     // another Session or moving its workspace; this option is internal, not a user payload.
-    const id = existingSessionId ?? await createSession(cleanName, { dir, readScopeSource })
-    // Checked against the Session's own tool surface, before the Bot record exists: a name
-    // this DSH does not serve refuses the create (the catch below archives the Session).
-    if (denyTools) await rt.assertDenyTools(id, denyTools)
+    let id = existingSessionId
     if (existingSessionId !== undefined) {
+      if (denyTools) await rt.assertDenyTools(id, denyTools)
       const agent = await rt.resolveAgent(id)
       if (agent?.session?.id !== id) throw refusal('The existing Session could not be resolved')
+      createLook(options, id)
+      resolveSectionInput({ section, sectionId }, { allowCreate: false })
       await ctx.sessionTitle.rename(agent.session, cleanName)
     }
+    let bot
+    let copyPublished = false
+    const allocation = {}
+    let sectionsBefore
+    let resolvedSecId
     try {
-      const resolvedSecId = !main ? resolveSectionInput({ section, sectionId }) : undefined
-      state.bots[id] = {
+      if (id === undefined) {
+        const guard = () => {
+          assertCaller(createdBy)
+          createLook(options)
+        }
+        id = await createSession(cleanName, { dir, readScopeSource, guard, allocation })
+        // Check the new Session's own tool surface before publishing its Bot.
+        if (denyTools) await rt.assertDenyTools(id, denyTools)
+      }
+      sectionsBefore = new Set((state.sections ?? []).map(sec => sec.id))
+      assertCaller(createdBy)
+      const { next, avatar: checkedAvatar } = createLook(options, id)
+      const savedAvatar = copyOf !== undefined ? copyAvatar
+        : checkedAvatar ?? (isSolverLooks(next) ? { shape: solverDefaultShape(id) } : undefined)
+      resolvedSecId = !main ? resolveSectionInput({ section, sectionId }) : undefined
+      const waitForSolver = next.instructions !== '' && ((waitingRole === SOLVER_ROLE_ID && next.role === SOLVER_DESCRIPTION)
+        || waitingRole?.hostCopy === true)
+      bot = {
         id,
         name: cleanName,
-        role: roleText,
+        role: next.role,
         advanced: false,
         // A color is only stored when the user picks one; otherwise the id picks it.
         ...(isColor(currentColor(color)) ? { color: currentColor(color) } : {}),
-        ...(cleanAvatarValue ? { avatar: cleanAvatarValue } : {}),
+        ...(savedAvatar ? { avatar: savedAvatar } : {}),
         ...(modelRef ? { model: modelRef } : {}),
         ...(effortId ? { effort: effortId } : {}),
         ...(dir ? { workDir: dir } : {}),
@@ -422,12 +498,20 @@ export function install(rt) {
         ...(resolvedSecId ? { sectionId: resolvedSecId } : {}),
         // The Bot that reviews a Solver's work (the New Solver dialog's choice). Cosmetic: only
         // the "unreviewed" mark reads it (review-mark.js); it grants and refuses nothing.
-        ...(typeof reviewerId === 'string' && reviewerId !== id && rt.botOf(reviewerId) !== undefined ? { reviewerId } : {}),
-        instructions: String(instructions).trim(),
+        ...(next.reviewerId === undefined ? {} : { reviewerId: next.reviewerId, ...(reviewerMade === true ? { reviewerMade: true } : {}) }),
+        // The person's review guard (review-guard.js): only with that reviewer kept, and only from the
+        // person's create-bot (the New Solver tick) or a copy of a guarded Solver.
+        ...(reviewGuard === true && next.reviewerId !== undefined ? { reviewGuard: true } : {}),
+        instructions: next.instructions,
+        ...(next.roles ? { roles: next.roles } : {}),
+        ...(waitForSolver ? { waitingRole: {
+          id: SOLVER_ROLE_ID, instructions: instructionsDigest(next.instructions), role: next.role,
+        } } : {}),
         createdAt: Date.now(),
         createdBy: createdBy ?? null,
         capabilities: [],
       }
+      if (!solverCopy) state.bots[id] = bot
       if (main) state.mainBotIds.push(id)
       const original = rt.botOf(copyOf)
       const language = rt.uiLanguage?.()
@@ -444,16 +528,38 @@ export function install(rt) {
               : 'The user just created you. Greet the user in one short message, then ask in one short question what you should focus on.'
       const opening = `${kickoff}\n${OWN_RULES}`
       const text = !main && language ? `${opening}\nWrite in ${language}.` : opening
-      const bot = state.bots[id]
       rt.reviewCreated?.(bot, Boolean(brief) && !main && !original && creator === undefined)
       const greeting = { text, from: createdBy ?? null, ...(main ? { main: true } : {}) }
       // The Bot is saved by now; a failure here must not archive it in the catch below.
+      const saveBot = async () => {
+        if (solverCopy) {
+          const check = () => {
+            solverCopy.check(bot)
+            if (rt.botOf(id)) throw refusal('Session already belongs to the team')
+          }
+          // A copy with custom instructions requires the verified role before
+          // it can enter the roster or schedule a greeting.
+          await rt.saveCopy(team => {
+            check()
+            team.bots[id] = structuredClone(bot)
+          }, { beforeCommit: check, afterPublish: (current) => {
+            copyPublished = true
+            if (current) {
+              state.bots[id] = bot
+              rt.indexSessions()
+            }
+          } })
+        } else {
+          await rt.save()
+        }
+        if (waitForSolver) rt.solverSettle?.armTimer()
+      }
       const scopeTools = () => rt.resolveAgent(id)
         .catch(error => rt.warn('omni-ui: scoped tools for %s not applied: %s', cleanName, error))
       // A host-owned conversation already has its own history and turn source. Adoption
       // adds only its team identity, never a greeting or a deferred model turn.
       if (existingSessionId !== undefined) {
-        await rt.save()
+        await saveBot()
         await scopeTools()
         return bot
       }
@@ -474,12 +580,12 @@ export function install(rt) {
       }
       if (modelRef === undefined) {
         bot.kickoff = greeting
-        await rt.save()
+        await saveBot()
         // The Session was resolved before the Bot existed, so its scoped tools land now.
         await scopeTools()
         return bot
       }
-      await rt.save()
+      await saveBot()
       if (inheritAuto !== undefined && existingSessionId === undefined) await rt.markInherited?.(bot, inheritAuto.route)
       await scopeTools()
       // The greeting runs on the Bot's own model, once its provider is registered.
@@ -494,17 +600,41 @@ export function install(rt) {
         .then(() => sendKickoff(bot, greeting), error => rt.warn('ds-bot: %s does not greet: %s', cleanName, error?.message ?? error))
       return bot
     } catch (error) {
+      id ??= allocation.id
+      // Once a copy is published, its Session must survive an unconfirmed directory sync.
+      if (copyPublished || (solverCopy && rt.botOf(id) !== undefined)) throw error
+      const { reserved } = allocation
+      if (id === undefined) {
+        if (reserved !== undefined) await forgetReadScopes([reserved], cleanName)
+        throw error
+      }
       // The Bot's Session was already made: archive it instead of leaving an orphan.
       delete state.bots[id]
       rt.dropGrantsForBot?.(id)
       rt.dropGrantsForSession?.(id)
       state.mainBotIds = state.mainBotIds.filter(other => other !== id)
       rt.chatOwners.delete(id)
+      if (resolvedSecId !== undefined && !sectionsBefore.has(resolvedSecId)
+        && !Object.values(state.bots).some(bot => bot.sectionId === resolvedSecId)
+        && !Object.values(state.rooms).some(room => room.sectionId === resolvedSecId)
+        && !Object.values(state.agents).some(agent => agent.sectionId === resolvedSecId)) {
+        state.sections = state.sections.filter(sec => sec.id !== resolvedSecId)
+      }
       // A save that another change queued meanwhile still carries this Bot; a later
       // one writes the team without it.
-      void rt.save().catch(() => {})
-      if (existingSessionId === undefined) await ctx.workspaceRegistry.archiveSession(id)
-        .catch(archiveError => rt.warn('ds-bot: archiving the Session for %s failed: %s', cleanName, archiveError))
+      if (!solverCopy) void rt.save().catch(() => {})
+      if (existingSessionId === undefined) {
+        let archived = false
+        try {
+          await ctx.workspaceRegistry.archiveSession(id)
+          archived = true
+        } catch (archiveError) {
+          rt.warn('ds-bot: archiving the Session for %s failed: %s', cleanName, archiveError)
+        }
+        rt.sessionFolderWarnings?.delete(id)
+        // If the Session survived a failed archive, keep the scope it uses.
+        if (reserved !== undefined && (archived || reserved !== id)) await forgetReadScopes([reserved], cleanName)
+      }
       throw error
     }
   }
@@ -580,10 +710,20 @@ export function install(rt) {
     // A folder that went away since leaves the copy in the team workspace.
     const workDir = bot.workDir !== undefined && await rt.isFolder(bot.workDir) ? bot.workDir : undefined
     // No await from here to createBot's check, so two copies at once get different names.
-    return createBot({
+    const pin = packageAttachment(bot)
+    const solverPin = pin?.id === SOLVER_ROLE_ID
+    const waiting = bot.waitingRole?.id === SOLVER_ROLE_ID
+    const text = bot.instructions ?? ''
+    const keepWritten = (waiting || solverPin) && isWrittenSolverMethod(text)
+    const generated = keepWritten && unchangedSolverWaiter(bot, state.prefs)
+    const regenerate = generated || (solverPin && text.trim() === '')
+    const reviewer = typeof bot.reviewerId === 'string' ? rt.botOf(bot.reviewerId)?.name ?? null : null
+    const createCopy = solverCopy => createBot({
       name: freshName(`${bot.name} copy`),
       role: bot.role,
-      instructions: bot.instructions,
+      instructions: regenerate ? solverInstructions({ reviewer, dedicated: false }) : bot.instructions,
+      ...(regenerate && (generated || solverPin) ? { waitingRole: { hostCopy: true } } : {}),
+      solverCopy,
       color: bot.color,
       avatar: bot.avatar,
       model: served ? bot.model : undefined,
@@ -596,10 +736,22 @@ export function install(rt) {
       // A copy of a Solver keeps its reviewer (buildBot checks it again), so its review mark
       // reads that reviewer's verdicts, not a fresh-session review it cannot see (#2056).
       ...(typeof bot.reviewerId === 'string' ? { reviewerId: bot.reviewerId } : {}),
+      // And its review guard: a copy only narrows, and copying is the person's.
+      ...(bot.reviewGuard === true ? { reviewGuard: true } : {}),
       // A copy keeps a shell the original was denied: the copy is new, but taking a
       // capability away here would not be the user's choice either.
       ...(bot.shell === false ? { shell: false } : {}),
     })
+    if ((waiting || solverPin) && !regenerate && !keepWritten) return rt.withSolverCopy(bot, createCopy)
+    const copy = await createCopy()
+    if (solverPin) {
+      try {
+        await rt.attachRole(copy.id, SOLVER_ROLE_ID)
+      } catch {
+        // A proven written method already serves this copy. If marked, it can settle later.
+      }
+    }
+    return copy
   }
 
   // Pocket owns the model-change slot exclusively through Auto clearing, selection
@@ -641,11 +793,61 @@ export function install(rt) {
     return nextName === bot.name ? undefined : nameProblem(nextName)
   }
 
+  // Owner admission precedes the model slot, the look hold, then the grant hold.
+  // Create has no Bot to hold; a competing name fails immediately in holdName.
+  // Pet selection checks identity before I/O and takes the hold through updateBot at commit.
+  const lookChanges = new Map()
+  const lookChange = new AsyncLocalStorage()
+  async function withLookHold(id, run) {
+    const parent = lookChange.getStore()
+    if (parent?.id === id && parent.active) return run()
+    const waiting = lookChanges.get(id)
+    const { promise, resolve } = Promise.withResolvers()
+    lookChanges.set(id, promise)
+    const scope = { id, active: true }
+    try {
+      if (waiting !== undefined) await waiting
+      return await lookChange.run(scope, run)
+    } finally {
+      scope.active = false
+      if (lookChanges.get(id) === promise) lookChanges.delete(id)
+      resolve()
+    }
+  }
+
+  function checkUpdateLook(id, patch, actorId) {
+    const bot = rt.botOf(id)
+    if (bot === undefined) return
+    const next = { ...bot, role: patch.role === undefined ? bot.role : cleanRole(patch.role),
+      instructions: patch.instructions === undefined ? bot.instructions : String(patch.instructions).trim() }
+    if ((actorId !== undefined || rt.agentCaller?.()) && !isSolverLooks(bot) && isSolverLooks(next)) {
+      throw refusal(SOLVER_BY_PERSON)
+    }
+    if (patch.avatar === undefined && patch.color === undefined) return
+    const avatar = patch.avatar === undefined ? bot.avatar : cleanAvatar(patch.avatar)
+    // A colour save chooses a look. Only an explicit avatar patch can carry a legacy shape.
+    const problem = avatarProblem(next, avatar, patch.avatar === undefined ? undefined : bot.avatar)
+    if (problem) throw refusal(problem)
+    return { avatar }
+  }
+
   async function updateBot(id, patch, actorId, fromSessionId, options) {
     if (Object.hasOwn(patch, 'nativeTools')) return rt.setNativeTools(id, patch, actorId)
+    if (Object.hasOwn(patch, 'reviewGuard')) return rt.setReviewGuard(id, patch, actorId)
+    // While the review guard is on, only the person moves the Bot to another model (H5-1).
+    if (patch.model !== undefined && actorId !== undefined && rt.botOf(id)?.reviewGuard === true) {
+      throw refusal(`Only the person can move ${rt.botOf(id).name} to another model while its review guard is on.`)
+    }
     if (Object.hasOwn(patch, 'people')) throw refusal('Only the user can choose who may talk to ' + (rt.botOf(id)?.name ?? 'this Bot'))
-    const run = () => updateBotRecord(id, patch, actorId, fromSessionId, options)
-    return patch.model !== undefined || patch.effort !== undefined ? withModelChange(id, run, options?.admit !== undefined) : run()
+    const model = patch.model !== undefined || patch.effort !== undefined
+    const look = lookChange.getStore()
+    if (model && look?.id === id && look.active) {
+      throw new Error('lock order: model change inside a look hold')
+    }
+    const identity = ['role', 'instructions', 'avatar', 'color'].some(key => patch[key] !== undefined)
+    const record = checkedAvatar => updateBotRecord(id, patch, actorId, fromSessionId, { ...options, checkedAvatar })
+    const run = identity ? () => withLookHold(id, () => record(checkUpdateLook(id, patch, actorId))) : () => record()
+    return model ? withModelChange(id, run, options?.admit !== undefined) : run()
   }
 
   function updateBotRecord(id, patch, actorId, fromSessionId, options) {
@@ -662,7 +864,7 @@ export function install(rt) {
   }
 
   // `stopReply`: the person agreed to stop a running reply for an agent switch (parts.js).
-  async function updateBotHeld(id, patch, actorId, fromSessionId, { admit, modelEntry, stopReply = false } = {}) {
+  async function updateBotHeld(id, patch, actorId, fromSessionId, { admit, modelEntry, stopReply = false, checkedAvatar } = {}) {
     if (['permissionAuto', 'permissionRev', 'autoStamp'].some(key => Object.hasOwn(patch, key))) throw refusal('Only the person turns Auto on, from the Bot\'s permission choice.')
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
@@ -912,7 +1114,7 @@ export function install(rt) {
           else if (isColor(currentColor(patch.color))) bot.color = currentColor(patch.color)
         }
         if (patch.avatar !== undefined) {
-          const avatar = cleanAvatar(patch.avatar)
+          const { avatar } = checkedAvatar
           if (avatar) bot.avatar = avatar
           else delete bot.avatar
         }
@@ -1138,13 +1340,14 @@ export function install(rt) {
         }
         return
       }
+      await rt.assertReadableRoute?.(bot, modelRef === undefined ? bot.model : modelRef)
       // The live list, right before the pick is written (#2026).
       if (patch.model !== undefined && modelRef != null) {
         rt.assertOwnToolsModel?.(bot, { next: modelRef, denyTools: bot.denyTools })
       }
       choose()
       try {
-        await rt.applyModel(bot, { force: true })
+        await rt.applyModel(bot, { force: true, requireReadable: true })
       } catch (error) {
         putModelFields(bot, before)
         if (blockedBefore !== undefined) bot.blocked = blockedBefore
@@ -1302,6 +1505,7 @@ export function install(rt) {
   async function createRoom({ members: memberIds = [], name: roomName, notice, mode, admin, createdBy, section, sectionId } = {}) {
     const members = [...new Set(memberIds)].filter(isLive)
     checkMembers(members)
+    rt.checkGuardGroupJoin(members)
     const custom = cleanRoomName(roomName ?? '')
     const adminId = admin !== undefined ? admin : defaultAdmin(members, createdBy)
     if (adminId !== null && !members.includes(adminId)) throw refusal('The admin must be a member of the group')
@@ -1315,15 +1519,17 @@ export function install(rt) {
     // The group's own Session only relays; like a member's it moves to a fresh part
     // in the group's folder once the group has one (parts.js).
     const id = await createSession(title, { group: true })
+    let room
     try {
       // A member deleted while the Session was made stays out, and the group is checked
       // again as it is written.
       const live = members.filter(isLive)
       checkMembers(live)
+      rt.checkGuardGroupJoin(live)
       const lead = adminId === null || live.includes(adminId) ? adminId : defaultAdmin(live, createdBy)
       const name = custom || autoRoomName(live)
       const resolvedSecId = resolveSectionInput({ section, sectionId })
-      const room = {
+      room = {
         id,
         name,
         ...(custom ? { named: true } : {}),
@@ -1343,16 +1549,38 @@ export function install(rt) {
       return room
     } catch (error) {
       // The group's Session was already made: archive it instead of leaving an orphan.
-      for (const seat of Object.values(state.rooms[id]?.sessions ?? {})) {
-        rt.endGrants?.(seat, 'group')
+      if (room !== undefined && state.rooms[id] === room) {
+        for (const seat of Object.values(room.sessions ?? {})) rt.endGrants?.(seat, 'group')
+        delete state.rooms[id]
+        void rt.save().catch(() => {})
       }
       rt.dropGrantsForSession?.(id)
-      delete state.rooms[id]
-      void rt.save().catch(() => {})
       await ctx.workspaceRegistry.archiveSession(id)
         .catch(archiveError => rt.warn('omni-ui: archiving the Session for %s failed: %s', title, archiveError))
       throw error
     }
+  }
+
+  function roomEditorIsMain(room, actorId) {
+    const byMain = actorId === undefined || rt.isMain(actorId)
+    if (!byMain && !rt.isAdminOf(room, actorId)) {
+      throw refusal(`Only the user, a Main Bot, or the admin of "${room.name}" can change it`)
+    }
+    return byMain
+  }
+
+  function roomMembersAfter(room, patch) {
+    const members = Array.isArray(patch.members) ? [...new Set(patch.members)] : [...room.members]
+    for (const member of patch.add ?? []) if (!members.includes(member)) members.push(member)
+    return members.filter(member => !(patch.remove ?? []).includes(member) && isLive(member))
+  }
+
+  const roomAdditions = (room, members) => members.filter(member => !room.members.includes(member))
+  rt.checkRoomJoins = (room, patch, actorId) => {
+    roomEditorIsMain(room, actorId)
+    const joining = roomAdditions(room, roomMembersAfter(room, patch))
+    rt.checkGuardGroupJoin(joining)
+    return joining.map(rt.botOf)
   }
 
   // What a change would write to the group as it is now, or why it cannot be made. It
@@ -1360,15 +1588,12 @@ export function install(rt) {
   // await: another change or a deleted Bot may have come in meanwhile, and `add` and
   // `remove` apply to the members the group has then.
   function planRoomChange(room, patch, actorId) {
-    const byMain = actorId === undefined || rt.isMain(actorId)
-    const byAdmin = !byMain && rt.isAdminOf(room, actorId)
-    if (!byMain && !byAdmin) throw refusal(`Only the user, a Main Bot, or the admin of "${room.name}" can change it`)
-    let members = Array.isArray(patch.members) ? [...new Set(patch.members)] : [...room.members]
-    for (const member of patch.add ?? []) if (!members.includes(member)) members.push(member)
-    members = members.filter(member => !(patch.remove ?? []).includes(member) && isLive(member))
+    const byAdmin = !roomEditorIsMain(room, actorId)
+    const members = roomMembersAfter(room, patch)
     // A group left with one Bot by a deletion can still change its other settings.
     const current = room.members.filter(isLive)
     if (members.length !== current.length || members.some(member => !current.includes(member))) checkMembers(members)
+    rt.checkGuardGroupJoin(roomAdditions(room, members))
     let admin = room.admin ?? null
     if (patch.admin !== undefined) {
       admin = patch.admin || null
@@ -1526,6 +1751,14 @@ export function install(rt) {
   async function deleteRoomHeld(id) {
     const room = rt.roomOf(id)
     if (room === undefined) throw refusal('Unknown group chat')
+    // Every Session whose composer the group's chat may have used, read before its members'
+    // Sessions leave the room: its own earlier parts, each member's group Session and its
+    // parts, and its own current Session last.
+    const sweep = [
+      ...(room.parts ?? []).map(part => part.sessionId),
+      ...Object.entries(room.sessions ?? {}).flatMap(([botId, sessionId]) => [...(room.segments?.[botId] ?? []).map(part => part.sessionId), sessionId]),
+      rt.sessionOfRoom(room),
+    ]
     // Before the group's Sessions leave the state, which the archive reads.
     const archived = rt.archiveGroupMemory(room)
     // A fresh-Session task armed from one of these Sessions has no other lineage (#584, L5).
@@ -1548,12 +1781,27 @@ export function install(rt) {
     rt.dropGroupLines(id)
     await rt.reapplyTasks(task => rt.taskOfRoom(task, id))
     await archived
-    const failed = await saveForDelete()
+    const listed = noteDeletedParts(sweep)
+    let failed
+    try { failed = await saveForDelete() } catch (error) { unlistDraftSweep(listed); throw error }
     // Armed scheduled tasks refuse a plain archive and would keep delivering into
     // the deleted group; the session-stop that stopActivity runs removes them.
     await ctx.workspaceRegistry.archiveSession(rt.sessionOfRoom(room), { stopActivity: true })
       .catch(error => rt.warn('omni-ui: group chat %s not archived: %s', room.name, error))
+    // Only once the deletion is saved: a failed save leaves the Bot or group on disk with its records.
+    if (failed === undefined) await forgetReadScopes(sweep, room.name)
     if (failed !== undefined) throw failed
+  }
+
+  // A deleted Bot's or group's Sessions leave their file-tool folder records, except one a
+  // surviving Session's lineage still names (read-scope.js). A failure is warned and never
+  // stops the deletion.
+  async function forgetReadScopes(ids, name) {
+    try {
+      await rt.forgetReadScopes?.(ids)
+    } catch (error) {
+      rt.warn('ds-bot: the file-tool folder records of %s were not removed: %s', name, error)
+    }
   }
 
   // The first Main Bot is the sidebar tile. `replace` gives a Main Bot's place to
@@ -1651,6 +1899,7 @@ export function install(rt) {
   }
 
   async function deleteHeld(id, bot, parts, sessions) {
+    const generation = rt.teamGeneration()
     deleting.add(id)
     const left = []
     for (const room of Object.values(state.rooms)) {
@@ -1687,9 +1936,9 @@ export function install(rt) {
     } catch (error) {
       restoring.add(id)
       deleting.delete(id)
-      try { await putBack(id, left) } finally {
+      try { await putBack(bot, left, generation) } finally {
         restoring.delete(id)
-        rt.dropGrantsForBot?.(id)
+        if (rt.sameTeam(generation) && rt.botOf(id) === bot) rt.dropGrantsForBot?.(id)
       }
       throw error
     }
@@ -1710,6 +1959,8 @@ export function install(rt) {
     // Only certify the seats of the Bot this deletion began with.
     let removed
     try { removed = rt.botOf(id) } catch {}
+    // Read while the Bot is still in the team: after, its current part reads as its id.
+    const currentPart = rt.chatOf(id)
     delete state.bots[id]
     rt.forgetShare?.(id)
     rt.dropGrantsForBot?.(id)
@@ -1744,8 +1995,14 @@ export function install(rt) {
       if (archivePath !== undefined) closedArchive.archivePath = archivePath
       delete closedArchive.archiving
     }
-    const failed = await saveForDelete()
-    if (failed === undefined) rt.wakeLog?.botGone(id)
+    // In the deletion's own save, its current part last, so a cut of the list keeps it.
+    const listed = noteDeletedParts([...[...parts].filter(part => part !== currentPart), currentPart])
+    let failed
+    try { failed = await saveForDelete() } catch (error) { unlistDraftSweep(listed); throw error }
+    if (failed === undefined) {
+      rt.solverSettle?.armTimer()
+      rt.wakeLog?.botGone(id)
+    }
     // Same as deleteRoom: stopActivity removes the Session's armed scheduled tasks.
     // Past parts are archived too: a part move can leave tasks on the old Session,
     // which otherwise stays armed and invisible. Already-archived ids are a no-op.
@@ -1753,7 +2010,11 @@ export function install(rt) {
       await ctx.workspaceRegistry.archiveSession(part, { stopActivity: true })
         .catch(error => rt.warn('omni-ui: Bot %s not archived: %s', bot.name, error))
     }
+    // Only once the deletion is saved: a failed save leaves the Bot or group on disk with its records.
+    if (failed === undefined) await forgetReadScopes(sessions, bot.name)
     if (failed !== undefined) throw failed
+    // The page removes the composer state of these parts (channel.js `deletedParts`).
+    return [...parts]
   }
 
   // A deletion that fails puts the Bot back in the groups it left, as their member and
@@ -1762,7 +2023,13 @@ export function install(rt) {
   // change made meanwhile stays, in memory and on disk. The Bot counts as live again
   // before the save, so a group change that goes on meanwhile keeps it. A failed save is
   // warned, and the caller hears the deletion's own error.
-  async function putBack(id, left) {
+  async function putBack(bot, left, generation) {
+    const { id } = bot
+    if (!rt.sameTeam(generation) || rt.botOf(id) !== bot) return
+    if (left.some(({ room }) => state.rooms[room.id] === room) && rt.reviewGuardOn(id)) {
+      rt.warn('ds-bot: cannot restore the group seats of guarded Bot %s', id)
+      return
+    }
     let back = false
     for (const { room, index, admin } of left) {
       if (state.rooms[room.id] !== room) continue
@@ -1773,9 +2040,45 @@ export function install(rt) {
     if (!back) return
     try {
       await rt.save()
+      if (rt.botOf(id)?.waitingRole?.id === SOLVER_ROLE_ID) rt.solverSettle?.armTimer()
     } catch (error) {
       rt.warn('ds-bot: Bot %s is back in its groups, but that was not saved: %s', id, error)
     }
+  }
+
+  // The deleted Sessions whose composer state (DSH's `dsh.conversation.<id>` in the page's
+  // storage) the owner's page removes on its next view, whichever route deleted them: the
+  // person, another Bot's tool or an agent token. The page names the ids it removed
+  // (`drafts-swept`), and only those leave. A reading host never lists any. Returns the
+  // ids that were not listed before, which a deletion whose save is lost takes back.
+  function noteDeletedParts(ids) {
+    if (rt.readOnly() !== undefined) return []
+    const named = [...new Set(ids.filter(part => typeof part === 'string' && part !== ''))]
+    if (named.length === 0) return []
+    const before = state.draftSweep ?? []
+    const added = named.filter(part => !before.includes(part))
+    state.draftSweep = [...before.filter(part => !named.includes(part)), ...named].slice(-DRAFT_SWEEP_MAX)
+    return added
+  }
+
+  // Takes exactly the named ids off the list, with no save; says whether it changed.
+  function unlistDraftSweep(ids) {
+    const list = state.draftSweep
+    if (!Array.isArray(list) || !Array.isArray(ids)) return false
+    const named = new Set(ids.filter(part => typeof part === 'string'))
+    const next = list.filter(part => !named.has(part))
+    if (next.length === list.length) return false
+    if (next.length > 0) state.draftSweep = next
+    else delete state.draftSweep
+    return true
+  }
+
+  // The page removed these ids' composer state: they leave the list. Ids it does not
+  // hold change nothing and save nothing.
+  async function draftsSwept(ids) {
+    const named = Array.isArray(ids) ? ids.filter(part => typeof part === 'string' && part !== '').slice(0, DRAFT_SWEEP_MAX) : []
+    if (unlistDraftSweep(named)) await rt.save()
+    return true
   }
 
   // A deletion whose save fails stays in memory, and the next save writes it, so its
@@ -1837,14 +2140,15 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    pickingModel: id => picking.has(id), settlingModel: id => settling.get(id) ?? 0, whilePicking, withModelChange,
+    pickingModel: id => picking.has(id), settlingModel: id => settling.get(id) ?? 0, whilePicking, withModelChange, withLookHold,
     botNameRefusal: (id, name) => {
       const bot = rt.botOf(id)
       return bot === undefined ? 'Unknown Bot' : nameRefusal(bot, String(name).trim().slice(0, 40))
     },
-    ensureWorkspace, keepTeamFolder, createSession, createBot, newBotStoredPermission, duplicateBot, updateBot, setFlags,
+    ensureWorkspace, keepTeamFolder, createSession, createBot, checkCreateLook: options => createLook(options),
+    newBotStoredPermission, duplicateBot, updateBot, setFlags,
     saveSection, reorderSections, deleteSection,
     roomBusy, autoRoomName, retitleRoom, createRoom, updateRoom, deleteRoom,
-    setMain, deleteBot, beforeBotDelete, bootstrap, releaseKickoff, greetingOut, holdKickoffAgain, userWrote, userAnswered,
+    setMain, deleteBot, beforeBotDelete, unlistDraftSweep, draftsSwept, bootstrap, releaseKickoff, greetingOut, holdKickoffAgain, userWrote, userAnswered,
   })
 }
