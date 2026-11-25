@@ -9,7 +9,7 @@ import { closesPart } from './caller-view.js'
 import { HANDOFF_ACK, LATE_ANSWER, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
-import { splitRef, textOf } from './text.js'
+import { rawTextOf, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { reminderText } from './schedules.js'
 import { modelOf } from './solver-progress.js'
@@ -104,7 +104,7 @@ const closingReviews = new WeakSet()
 // The reply a sender waits for, sent the way a finished turn sends it: the work it was
 // for closes, and the answer goes up to the Bot that asked. `id` is the Session the
 // answer comes from; `source` is the trigger the turn answered.
-export function answerSender(rt, id, source, text, long, shouldSend, model) {
+export function answerSender(rt, id, source, text, long, shouldSend, model, firstLine) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const fromId = rt.selfOf(id)
   const name = rt.botOf(fromId)?.name ?? 'The other Bot'
@@ -120,7 +120,8 @@ export function answerSender(rt, id, source, text, long, shouldSend, model) {
     && answered.room === undefined && answered.fromRoom === undefined
     ? { exchangeId, replyTo: source.exchangeId, reviewReceipt } : undefined
   // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
-  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply, reply === undefined ? undefined : model)
+  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text,
+    answered?.at, reply, reply === undefined ? undefined : model, firstLine)
   const durableResult = onReplyRecorded?.ready !== undefined
   if (durableResult) closingReviews.add(answered)
   const generation = rt.teamGeneration?.()
@@ -582,7 +583,7 @@ export function install(rt) {
   // reply in its Session there while it is still a member. A sender that asked for it
   // while working on another Bot's request goes on with that work when it reads it.
   // `long`: the text as attachLong sends it, when it went as a file.
-  const tellSender = (id, source, text, long, model) => answerSender(rt, id, source, text, long, undefined, model)
+  const tellSender = (id, source, text, long, model, firstLine) => answerSender(rt, id, source, text, long, undefined, model, firstLine)
 
   // Runs before a deleted Bot leaves the team. Its Sessions stop with it, and the
   // turn/end that follows is no longer the team's, so their activity and turn records go
@@ -929,6 +930,7 @@ export function install(rt) {
         entry.adoptedTurn = undefined
         entry.since = event.time ?? Date.now()
         entry.texts = []
+        entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
         entry.info = undefined
@@ -957,6 +959,7 @@ export function install(rt) {
           const carry = entry.carry
           entry.carry = undefined
           entry.texts = carry.texts
+          entry.firstLine = carry.firstLine
           entry.shown = carry.shown
           entry.answers = carry.answers
           entry.joined = carry.joined
@@ -1211,8 +1214,10 @@ export function install(rt) {
         break
       case 'assistant/message': {
         const content = event.data?.message?.content
-        const text = textOf(content)
+        const raw = rawTextOf(content)
+        const text = raw.trim()
         const called = Array.isArray(content) && content.some(block => block?.type === 'tool-call')
+        if (raw !== '' && text !== HANDOFF_ACK) entry.firstLine ??= raw.split(/\r?\n/, 1)[0]
         if (text !== '' && text !== HANDOFF_ACK) {
           // What a turn says goes on to the group or the sender, read from other folders.
           entry.texts.push(absoluteLinks(text, rt.sessionFolder?.(session)))
@@ -1238,7 +1243,8 @@ export function install(rt) {
         // Read before the turn is cleared below: the outgoing agent's handoff-note turn.
         const noteTurn = rt.handoffNoteTurn?.(id, entry.turn ?? event.data?.turn) === true
         if (steerCut) {
-          entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0 }
+          entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0,
+            firstLine: cut.texts > 0 ? entry.firstLine : undefined }
         }
         const info = entry.info
         const joined = entry.joined ?? []
@@ -1248,6 +1254,8 @@ export function install(rt) {
         const wroteText = entry.texts.length > 0
         const shown = entry.shown > 0 || (info?.retried === true && promisedOpenings.delete(info.exchangeId))
         const { lastText, lastCalled } = entry
+        // Exact stage verdicts use the reviewer's own first line, before reply formatting.
+        const reviewFirstLine = entry.shown === 0 ? entry.firstLine ?? '' : ''
         const answeringTurn = event.data?.turn ?? entry.adoptedTurn ?? entry.turn
         const toolCount = entry.toolCount ?? 0
         const suppressedSubagent = entry.suppressedSubagent === true
@@ -1263,6 +1271,7 @@ export function install(rt) {
         entry.adoptedTurn = undefined
         entry.info = undefined
         entry.texts = []
+        entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
         entry.toolCount = 0
@@ -1386,7 +1395,7 @@ export function install(rt) {
           } else if (reply !== '' || reason?.kind === 'aborted') {
             // A turn stopped before it could answer still owes the sender a line,
             // or it would wait forever for a reply that never comes.
-            tellSender(id, source, reply !== '' ? reply : `${name} was stopped before it could answer your message.`, undefined, answerModel)
+            tellSender(id, source, reply !== '' ? reply : `${name} was stopped before it could answer your message.`, undefined, answerModel, reviewFirstLine)
           }
         }
         // Work a Bot asked for, also when what came back for it opens the turn: while
@@ -1400,9 +1409,9 @@ export function install(rt) {
           if (rt.waitsWork(work)) return rt.holdWork(work, reply)
           // With what came back, the answer may pass what one message carries.
           const text = rt.answerText(work, reply, name)
-          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text, undefined, answerModel)
+          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text, undefined, answerModel, reviewFirstLine)
           void rt.attachLong(text, `Answer from ${name}.txt`)
-            .then(long => tellSender(id, asker, text, long, answerModel))
+            .then(long => tellSender(id, asker, text, long, answerModel, reviewFirstLine))
             .catch(error => rt.warn('omni-ui: answer from %s not sent: %s', name, error))
         }
         // A retried turn answers the same waiter or sender, so this one passes nothing on.

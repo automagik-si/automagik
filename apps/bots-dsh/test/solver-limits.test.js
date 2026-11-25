@@ -22,6 +22,8 @@ import { answerSender } from '../src/host/turns.js'
 import { DICTIONARY, installLocale } from '../src/client/i18n.js'
 import { reviewMarkText, solverAutoView } from '../src/client/solver-draft.js'
 import { stopLine } from '../src/client/stops.js'
+import { guardVerdictOf } from '../src/shared/review-guard.js'
+import { verdictOf } from '../src/shared/review-mark.js'
 import { solverInstructions } from '../src/shared/solver-method.js'
 import { fakeContext } from './fake-ctx.js'
 import { immediate, until } from './until.js'
@@ -774,6 +776,10 @@ async function nativeMirror(t, h, provider = 'acp-codex') {
     finished._meta.terminal_exit.exit_code = exit
     if (exit !== 0) finished.status = 'failed'
     const exitSession = adjust?.(opened, finished)
+    return mirrorUpdates(runId, opened, finished, { exitSession, beforeExit, beforeMirror })
+  }
+
+  async function mirrorUpdates(runId, opened, finished, { exitSession, beforeExit, beforeMirror } = {}) {
     const run = new AgentRun({ name, cwd })
     run.sessionId = 'native-session'
     await run.onUpdate(opened, run.sessionId)
@@ -794,7 +800,7 @@ async function nativeMirror(t, h, provider = 'acp-codex') {
       toolSet.dispose()
     }
   }
-  return { cwd, mirror }
+  return { cwd, mirror, mirrorUpdates }
 }
 
 async function nativeCheck(t, agreed = 'fake check-a', { legacyPlan, provider } = {}) {
@@ -820,6 +826,156 @@ const checkDirectory = t => {
 const claudeBashInput = JSON.parse(readFileSync(new URL(
   '../src/host/live-chat/fixtures/claude.jsonl', import.meta.url), 'utf8').split('\n')[3])
   .message.content.find(block => block.type === 'tool_use' && block.name === 'Bash').input
+
+test('stage verdicts take a Claude native Solver through replan, admitted work and Done', async t => {
+  const { h, request, review, track, openReply, deliveries } = await reviewReplyFixture(t)
+  const { cwd, mirrorUpdates } = await nativeMirror(t, h, 'acp-claude')
+  const headers = []
+  const answer = async (kind, turn, text) => {
+    const exchangeId = await review(kind)
+    const input = h.agentOf('reviewer').message
+    assert.equal(input.source.exchangeId, exchangeId)
+    headers.push([kind.toUpperCase(), input.content.map(part => part.text).join('\n')])
+    h.finish('solver', `Waiting for ${kind} review.`)
+    h.event('reviewer', 'turn/start', { turn: turn - 1 })
+    h.takeInput('reviewer', input)
+    h.finish('reviewer', text)
+    const reply = deliveries.at(-1)
+    assert.equal(reply.message.replyTo, exchangeId)
+    assert.ok(reply.message.reviewReceipt)
+    await openReply(turn, reply)
+    return exchangeId
+  }
+  const bash = id => {
+    const toolCallId = `toolu_${id}`
+    const command = 'cat average.mjs'
+    const _meta = { claudeCode: { toolName: 'Bash' } }
+    return mirrorUpdates(id, {
+      sessionUpdate: 'tool_call', toolCallId, title: command, kind: 'execute', status: 'in_progress',
+      rawInput: { ...claudeBashInput, command }, _meta,
+    }, {
+      sessionUpdate: 'tool_call_update', toolCallId, status: 'completed',
+      content: [{ type: 'content', content: { type: 'text', text: 'export const average = xs => xs.reduce((a, b) => a + b, 0) / xs.length' } }], _meta,
+    })
+  }
+  writeFileSync(join(cwd, 'average.mjs'), 'export const average = xs => xs.reduce((a, b) => a + b, 0) / xs.length\n')
+  const held = await bash('before_plan')
+  assert.equal(held.isError, true)
+  assert.match(held.content[0].text, /review guard holds work/)
+
+  const fix = await answer('plan', 3, 'PLAN FIX-FIRST\nUse the exact test path.')
+  const first = structuredClone(track().solver.plan)
+  assert.equal(first.review.exchangeId, fix)
+  assert.match(await h.progress('replan', { request, run: 'replan-1' }), /^Recorded\./)
+  const checks = [
+    { check: 'average-test', command: 'node --test ./average.test.mjs' },
+    { check: 'diff-check', command: 'git diff --check' },
+  ]
+  assert.match(await plan(h, request, checks.map(({ check }) => check), checks), /^Recorded\./)
+  const ship = await answer('plan', 4, 'PLAN SHIP\nThe revised plan matches the request.')
+  assert.notEqual(fix, ship)
+  assert.equal(track().solver.plan.review.exchangeId, ship)
+  const work = await bash('after_plan')
+  assert.deepEqual({
+    firstVerdict: first.review.verdict, firstAccepted: first.accepted,
+    revisedVerdict: track().solver.plan.review.verdict, revisedAccepted: track().solver.plan.accepted,
+    guardOpened: typeof track().planVerdictAt === 'number', advisory: track().verdicts.map(({ verdict }) => verdict),
+    nativeWorkAdmitted: work.isError === false,
+  }, {
+    firstVerdict: 'FIX-FIRST', firstAccepted: false,
+    revisedVerdict: 'SHIP', revisedAccepted: true,
+    guardOpened: true, advisory: ['FIX-FIRST', 'SHIP'], nativeWorkAdmitted: true,
+  }, 'the two bound PLAN verdicts are recorded and the Claude Bash mirror is admitted')
+  assert.ok(track().firstWorkAt)
+
+  // A Claude Bash completion carries text. Verify checks through the foreground tool
+  // with an observed exit code, without attributing a terminal exit to the Claude update.
+  for (const check of checks) {
+    assert.match(await checked(h, request, check.check, check), /^Recorded\./)
+  }
+  assert.deepEqual(track().solver.passed, checks.map(({ check }) => check))
+  const result = await answer('result', 5, 'RESULT SHIP\nBoth current checks pass.')
+  const recorded = track().solver.review
+  assert.equal(recorded.exchangeId, result)
+  assert.equal(recorded.revision, track().solver.revision)
+  assert.equal(recorded.verdict, 'SHIP')
+  assert.equal(recorded.reviewer.id, 'reviewer')
+  assert.notEqual(recorded.reviewer.model, recorded.solverModel)
+  assert.deepEqual(track().verdicts.map(({ verdict }) => verdict), ['FIX-FIRST', 'SHIP', 'SHIP'])
+  h.finish('solver', 'Delivered after independent result review.')
+  assert.equal(track().last?.done, true)
+  assert.equal(track().last.resultExchangeId, result)
+  assert.equal(track().delivered, true)
+  for (const [stage, header] of headers) {
+    assert.match(header, new RegExp(`First line: exactly one of \`${stage} SHIP\`, \`${stage} FIX-FIRST\`, or \`${stage} BLOCKED\`\\.`))
+  }
+})
+
+test('stage verdict parsers keep legacy forms and refuse wrong or unbound stages', () => {
+  const parse = (text, stage) => [verdictOf(text, stage), guardVerdictOf(text, 'reviewer', stage)]
+  for (const stage of ['plan', 'result']) {
+    assert.deepEqual(parse('SHIP\nEvidence.', stage), ['SHIP', 'SHIP'])
+    assert.deepEqual(parse('Verdict: FIX-FIRST\nEvidence.', stage), ['FIX-FIRST', 'FIX-FIRST'])
+    assert.deepEqual(parse(`${stage.toUpperCase()} SHIP\nVerdict: BLOCKED`, stage), ['BLOCKED', 'SHIP'])
+    for (const verdict of ['SHIP', 'FIX-FIRST', 'BLOCKED']) {
+      const line = `${stage.toUpperCase()} ${verdict}`
+      const other = stage === 'plan' ? 'result' : 'plan'
+      assert.deepEqual(parse(`${line}\r\nVerdict: SHIP`, stage), [verdict, verdict])
+      assert.deepEqual(parse(`${line}\nVerdict: SHIP`, other), [undefined, undefined])
+      assert.deepEqual(parse(`${line}\nVerdict: SHIP`), [undefined, undefined])
+    }
+    for (const line of [`${stage.toUpperCase()}: SHIP`, `${stage.toUpperCase()}  SHIP`, `${stage.toUpperCase()} SHIP `, ` ${stage.toUpperCase()} SHIP`,
+      `${stage.toUpperCase()} SHIP.`, `**${stage.toUpperCase()} SHIP**`, `${stage} SHIP`, `\n${stage.toUpperCase()} SHIP`]) {
+      assert.deepEqual(parse(line, stage), [undefined, undefined], JSON.stringify(line))
+    }
+  }
+})
+
+test('stage verdict replies cannot borrow a later legacy label in the Solver host', async t => {
+  const { h, request, review, track, openReply, deliveries } = await reviewReplyFixture(t)
+  let turn = 2
+  const answer = async (kind, text) => {
+    const before = track().verdicts.map(({ verdict }) => verdict)
+    const exchangeId = kind ? await review(kind) : undefined
+    if (!kind) await h.tool('message_bot', { to: 'reviewer', message: 'Ordinary review.', reply_to: 'me', when: 'queue' })
+    const input = h.agentOf('reviewer').message
+    assert.equal(input.source.exchangeId, exchangeId ?? deliveries.at(-1).message.exchangeId)
+    h.finish('solver', 'Waiting for the reviewer.')
+    h.event('reviewer', 'turn/start', { turn })
+    h.takeInput('reviewer', input)
+    h.finish('reviewer', text)
+    const reply = deliveries.at(-1)
+    assert.equal(Boolean(reply.message.reviewReceipt), Boolean(kind))
+    await openReply(++turn, reply)
+    return before
+  }
+  const rejectStage = async (kind, firstLine) => {
+    const before = await answer(kind, `${firstLine}\nVerdict: SHIP`)
+    assert.deepEqual(track().verdicts.map(({ verdict }) => verdict), before, firstLine)
+  }
+  await rejectStage(undefined, 'PLAN SHIP')
+  await rejectStage('plan', 'RESULT SHIP')
+  assert.equal(track().solver.plan.review.verdict, 'unverified')
+  assert.equal(track().planVerdictAt, undefined)
+  await answer('plan', ' PLAN SHIP\nThe leading space survives verdict parsing.')
+  assert.equal(track().solver.plan.review.verdict, 'unverified')
+  await answer('plan', 'PLAN SHIP\nVerdict: FIX-FIRST')
+  assert.equal(track().solver.plan.review.verdict, 'FIX-FIRST')
+  assert.equal(track().solver.plan.accepted, false)
+  await answer('plan', 'SHIP\nLegacy approval.')
+  assert.equal(track().solver.plan.accepted, true)
+  assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
+  assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+  await rejectStage(undefined, 'RESULT SHIP')
+  await rejectStage('result', 'PLAN SHIP')
+  assert.equal(track().solver.review.verdict, 'unverified')
+  await answer('result', 'RESULT SHIP ')
+  assert.equal(track().solver.review.verdict, 'unverified')
+  await answer('result', 'RESULT SHIP\nVerdict: BLOCKED')
+  assert.equal(track().solver.review.verdict, 'BLOCKED')
+  h.finish('solver', 'The result review is unverified.')
+  assert.equal(track().last?.done, undefined)
+})
 
 test('Ruling B records the agreed outside check in Codex, Claude and zsh literal forms', async t => {
   const agreed = stage6CommandIn(checkDirectory(t))

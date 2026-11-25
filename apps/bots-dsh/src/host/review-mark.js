@@ -125,8 +125,16 @@ export function isNotesWrite(name, args, folder, base) {
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isTime = value => typeof value === 'number' && Number.isFinite(value)
-const designatedReview = (progress, reviewerId, exchangeId) => typeof exchangeId === 'string'
-  && [progress?.plan?.review, progress?.review].some(review => review?.exchangeId === exchangeId && review.reviewerId === reviewerId)
+const matchesReview = (review, reviewerId, exchangeId) => typeof exchangeId === 'string'
+  && review?.exchangeId === exchangeId && review.reviewerId === reviewerId
+const designatedReview = (progress, reviewerId, exchangeId) => [progress?.plan?.review, progress?.review]
+  .some(review => matchesReview(review, reviewerId, exchangeId))
+
+function currentReviewStage(progress, reviewerId, exchangeId) {
+  const { plan, review, revision } = progress
+  if (matchesReview(review, reviewerId, exchangeId)) return review.revision === revision ? 'result' : undefined
+  if (!plan?.superseded && matchesReview(plan?.review, reviewerId, exchangeId)) return 'plan'
+}
 
 /**
  * A stored review track, kept as the host writes it, or undefined when it is not one. Fields of
@@ -345,7 +353,7 @@ export function install(rt) {
     const issue = designateReview(progress, { kind, exchangeId, reviewerId: reviewer.id,
       model: modelOf(rt, agent), snapshot: kind === 'result' ? snapshotOf(bot) : undefined })
     if (issue) throw refusal(issue)
-    const prepared = await prepare(progress.plan.checks, progress.plan.commands)
+    const prepared = await prepare(kind, progress.plan.checks, progress.plan.commands)
     if (prepared === undefined) return
     if (runningWork.has(bot) || (kind === 'result' && progress.snapshot !== snapshotOf(bot))) {
       throw refusal('The Solver result changed. Verify the current checks before requesting a review.')
@@ -517,7 +525,7 @@ export function install(rt) {
   // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
   // The guard's own strict reading (guardVerdictOf) dates the plan's verdict once per request, for
   // every tracked Bot, so a guard turned on mid-request reads a verdict that already came.
-  function reviewVerdict(fromId, toId, roomId, text, workAt, reply, model) {
+  function reviewVerdict(fromId, toId, roomId, text, workAt, reply, model, firstLine) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     if (typeof workAt !== 'number') return
@@ -535,9 +543,13 @@ export function install(rt) {
       if (current.requestAt !== requestAt || current.delivered || bot.reviewerId !== fromId
         || rt.botOf(toId) !== bot || (request !== undefined && current.solver?.request !== request)) return
       reviewSends.delete(reply?.replyTo)
-      const verdict = verdictOf(text)
       const reviewer = rt.botOf(fromId)
-      const planVerdict = guardVerdictOf(text, reviewer?.name)
+      // The receipt binds this reply to actual reviewer work. Recheck its designation
+      // against current progress because a progress write can defer the reply.
+      const stage = typeof binding.receipt === 'string' && typeof request === 'string' && current.requested && reviewer
+        ? currentReviewStage(current.solver, fromId, reply.replyTo) : undefined
+      const verdict = verdictOf(text, stage, firstLine)
+      const planVerdict = guardVerdictOf(text, reviewer?.name, stage, firstLine)
       if (verdict === undefined && planVerdict === undefined && reply === undefined) return
       const at = Date.now()
       if (planVerdict !== undefined) current.planVerdictAt ??= at

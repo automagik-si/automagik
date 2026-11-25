@@ -11,11 +11,12 @@ export const splitRef = (ref) => {
   return index > 0 ? { provider: ref.slice(0, index), model: ref.slice(index + 1) } : undefined
 }
 
-export const textOf = content => (Array.isArray(content) ? content : [])
+export const rawTextOf = content => (Array.isArray(content) ? content : [])
   .filter(block => block?.type === 'text' && typeof block.text === 'string')
   .map(block => block.text)
   .join('\n')
-  .trim()
+
+export const textOf = content => rawTextOf(content).trim()
 
 export const normalize = value => String(value ?? '').trim().toLowerCase()
 

@@ -2,7 +2,7 @@
 // a guarded Solver's work, and how far the guard holds on the route a Bot runs on. Pure, so the
 // host and the client share it. The guard keys on the person's own `reviewGuard` field and on the
 // reviewer id the New Solver dialog stores, never on the cosmetic Solver marker.
-import { FENCE, INDENTED, LEAD, LIST_ITEM, MD, WORD } from './review-mark.js'
+import { FENCE, INDENTED, LEAD, LIST_ITEM, MD, WORD, stageVerdictOf } from './review-mark.js'
 import { effectiveMarkOf, nativeToolsOn } from './native-tools.js'
 
 // The verdict at the start of the reply's first line, or after a "Verdict:" label that starts a
@@ -15,8 +15,8 @@ const LABEL = new RegExp(`^(?:Verdict|verdict|VERDICT)[*_\`]*\\s*:\\s*[*_\`]*\\s
 const GLUED = new RegExp(`${LEAD}${MD}${WORD}${MD}(?:\\s*[.!]*$|\\s+[-\u2013\u2014]\\s+\\S)`)
 
 /**
- * The verdict that opens a guarded Solver's work, or undefined: the reviewer's own contract,
- * "Answer first with one verdict" (solver-method.js), read strictly. The reply is cut at the
+ * The verdict that opens a guarded Solver's work, or undefined. An explicit stage on the
+ * first line requires a matching designated stage. Otherwise the reply is cut at the
  * line that hands a third Bot's answers back to the reviewer (handoffs.js); lines in fenced blocks
  * are never read; the first non-empty line counts unless it is quoted (`>`); else the first line
  * that starts with a "Verdict:" label; else a verdict glued to the end of the first line's
@@ -25,11 +25,15 @@ const GLUED = new RegExp(`${LEAD}${MD}${WORD}${MD}(?:\\s*[.!]*$|\\s+[-\u2013\u20
  * before the verdict gives none: work stays held (a false block only).
  * @param {unknown} text - the reviewer's reply.
  * @param {unknown} reviewerName - the reviewer's name, for the handed-back line.
+ * @param {'plan'|'result'} [stage] - the stage of the current host-bound exchange.
+ * @param {string} [firstLine] - the original first line when the host formats the reply for delivery.
  * @returns {'SHIP'|'FIX-FIRST'|'BLOCKED'|undefined} the verdict.
  */
-export function guardVerdictOf(text, reviewerName) {
+export function guardVerdictOf(text, reviewerName, stage, firstLine) {
   if (typeof text !== 'string') return undefined
   let lines = text.split(/\r?\n/)
+  const explicit = stageVerdictOf(firstLine ?? lines[0])
+  if (explicit) return explicit.stage === stage ? explicit.verdict : undefined
   if (typeof reviewerName === 'string' && reviewerName !== '') {
     const cut = lines.indexOf(`[Handed back to ${reviewerName} for this work]`)
     if (cut >= 0) lines = lines.slice(0, cut)

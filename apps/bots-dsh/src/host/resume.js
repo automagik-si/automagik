@@ -20,7 +20,7 @@ import { join } from 'node:path'
 import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { syncDirectory, syncFile } from './files.js'
 import { answerSender, cutOffText, failureLine, handBackRequests, turnFailure } from './turns.js'
-import { textOf } from './text.js'
+import { rawTextOf, textOf } from './text.js'
 import { startUpdateRecovery } from './self-update-recovery.js'
 
 // Long enough for DSH to finish opening its workspaces after a start.
@@ -77,7 +77,9 @@ export function turnsOf(events) {
       continue
     }
     if (event.type === 'assistant/message') {
-      const text = textOf(event.data?.message?.content)
+      const raw = rawTextOf(event.data?.message?.content)
+      const text = raw.trim()
+      if (raw !== '') current.firstLine ??= raw.split(/\r?\n/, 1)[0]
       if (text !== '') current.texts.push(text)
       continue
     }
@@ -105,7 +107,8 @@ export function turnOf(events, exchangeId) {
     while (steerCut(found) && next < turns.length) {
       const follow = turns[next]
       const kept = finished(found)
-      found = { ...follow, took: [...found.took, ...follow.took], texts: [...kept, ...follow.texts], stepFrom: kept.length + (follow.stepFrom ?? follow.texts.length) }
+      found = { ...follow, took: [...found.took, ...follow.took], texts: [...kept, ...follow.texts],
+        stepFrom: kept.length + (follow.stepFrom ?? follow.texts.length), firstLine: kept.length > 0 ? found.firstLine : follow.firstLine }
       next += 1
     }
     return steerCut(found) ? { ...found, texts: finished(found), reason: undefined } : found
@@ -1338,7 +1341,7 @@ export function install(rt) {
     }
     const text = rt.answerText(workId, answer, name)
     const long = text.length > MESSAGE_INLINE_MAX ? await rt.attachLong(text, `Answer from ${name}.txt`) : undefined
-    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam)
+    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, undefined, turn.firstLine ?? '')
   }
 
   // Report the same durable notes the resume pass works from, without exposing their payloads.

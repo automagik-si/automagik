@@ -380,9 +380,11 @@ export function install(rt) {
         if (designating) {
           long = await rt.solverReview(sender, target, true, {
             kind: args.solver_review, request: args.solver_request, exchangeId: reviewExchange, agent: exec.agent,
-            prepare: (checks, commands) => {
+            prepare: (kind, checks, commands) => {
+              const stage = kind.toUpperCase()
               const evidence = commands ? `\nAgreed check commands: ${JSON.stringify(commands)}` : ''
-              text = `Designated Solver ${args.solver_review} review. Agreed check IDs: ${checks.join(', ')}.${evidence}\n\n${text}`
+              const choices = `First line: exactly one of \`${stage} SHIP\`, \`${stage} FIX-FIRST\`, or \`${stage} BLOCKED\`.`
+              text = `Designated Solver ${kind} review. ${choices}\nAgreed check IDs: ${checks.join(', ')}.${evidence}\n\n${text}`
               return rt.attachLong(text, `Message from ${sender.name}.txt`)
             },
           })
