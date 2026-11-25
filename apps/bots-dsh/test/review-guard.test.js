@@ -83,12 +83,14 @@ function bench(t, { home = mkdtempSync(join(tmpdir(), 'ds-bot-review-guard-')), 
     if (reply) event(sessionId, 'assistant/message', { message: { content: text(reply) } })
     event(sessionId, 'turn/end', { turn: seq, reason })
   }
+  // Guard cases exercise verdict admission at answer time, separate from reply delivery.
+  const verdictOnly = { __proto__: rt, deliver: async () => {} }
   const reply = (fromId, toId, value, { opened = true, exchangeId = `x${++seq}`, at, ...extra } = {}) => {
     if (opened && rt.state.works?.[exchangeId] === undefined) {
       rt.openWork(exchangeId, { from: toId, to: fromId })
       if (typeof at === 'number') rt.state.works[exchangeId].at = at
     }
-    return answerSender(rt, fromId, { exchangeId, senderSessionId: toId, ...extra }, value)
+    return answerSender(verdictOnly, fromId, { exchangeId, senderSessionId: toId, ...extra }, value)
   }
   const solver = async ({ reviewerId, reviewGuard = true, role = 'Solver' } = {}) => {
     const answer = await call('create-bot', { name: `Solver ${++created}`, role, instructions: 'Method.', ...(reviewerId ? { reviewerId } : {}), ...(reviewGuard ? { reviewGuard: true } : {}) })

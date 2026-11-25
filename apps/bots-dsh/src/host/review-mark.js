@@ -11,6 +11,7 @@ import { SOLVER_NOTES, isSolverBot } from '../shared/solver-method.js'
 import { VERDICTS_KEPT, deliveryMark, verdictOf } from '../shared/review-mark.js'
 import { guardVerdictOf } from '../shared/review-guard.js'
 import { teamToolOf } from './approvals.js'
+import { SOURCE_KIND } from './constants.js'
 import { reachesShell } from './tool-deny.js'
 
 // The tools that change files by name (as private-bots.js and auto-judge.js read them), after
@@ -123,6 +124,9 @@ export function cleanTrack(track) {
 
 export function install(rt) {
   const save = () => void rt.save?.({ durable: true }).catch?.(() => {})
+  // Unread host exchanges for each Bot's current request. A part switch can give
+  // the inbox message a new id while keeping its exchange id and replyTo.
+  const unread = new WeakMap()
   // A guarded Bot stays tracked whatever its role says: the guard never reads the marker.
   const tracked = bot => bot !== undefined && (isSolverBot(bot) || bot.reviewGuard === true)
   // The record of the request in progress: { requested, requestAt, personAt, firstWorkAt,
@@ -139,6 +143,7 @@ export function install(rt) {
     return bot.reviewTrack
   }
   const open = (bot, at) => {
+    unread.delete(bot)
     const last = cleanTrack(bot.reviewTrack)?.last
     bot.reviewTrack = { requested: true, requestAt: at, personAt: at, verdicts: [], ...(last ? { last } : {}) }
   }
@@ -187,25 +192,121 @@ export function install(rt) {
     save()
   }
 
-  // A reply going from `fromId` to the Bot `toId` that asked it. It counts only when it is the
-  // Solver's own reviewer answering a request from the Solver's own chat, and opens with a verdict.
+  function rememberReply(bot, exchangeId, reviewerId, replyTo, workAt) {
+    let replies = unread.get(bot)
+    if (replies === undefined) unread.set(bot, replies = new Map())
+    const reply = { exchangeId, reviewerId, replyTo, workAt, release: () => replies.delete(exchangeId) }
+    replies.set(exchangeId, reply)
+    return reply
+  }
+
+  // A live DSH Session can outlast the plugin. Its delivery notes keep the identity
+  // of recorded replies until the corresponding input is taken or definitively lost.
+  function unreadReplies(bot) {
+    const track = bot?.reviewTrack
+    if (track?.requested !== true || track.delivered === true) return
+    for (const args of rt.unreadReviewReplies?.(bot.id) ?? []) {
+      const { requestAt, workAt } = args.reviewReply
+      if (requestAt === track.requestAt && isTime(workAt) && workAt >= requestAt
+        && args.fromId === bot.reviewerId && !unread.get(bot)?.has(args.exchangeId)) {
+        rememberReply(bot, args.exchangeId, args.fromId, args.replyTo, workAt)
+      }
+    }
+    return unread.get(bot)
+  }
+
+  const retire = (reply) => {
+    reply.release()
+    rt.forgetDelivery?.(reply.exchangeId)
+  }
+
+  // A reply going from `fromId` to the Bot `toId` that asked it. The Solver's own reviewer
+  // answering work from its own chat can hold delivery even if the reply has no verdict.
   // `workAt`: when the work it answers was opened. A reply to work opened before this request (a
   // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
   // The guard's own strict reading (guardVerdictOf) dates the plan's verdict once per request, for
   // every tracked Bot, so a guard turned on mid-request reads a verdict that already came.
-  function reviewVerdict(fromId, toId, roomId, text, workAt) {
+  function reviewVerdict(fromId, toId, roomId, text, workAt, reply) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     if (typeof workAt !== 'number') return
     const verdict = verdictOf(text)
     const planVerdict = guardVerdictOf(text, rt.botOf(fromId)?.name)
-    if (verdict === undefined && planVerdict === undefined) return
     const track = trackOf(bot)
     if (track.delivered === true || workAt < track.requestAt) return
-    const at = Date.now()
-    if (planVerdict !== undefined) track.planVerdictAt ??= at
-    if (verdict !== undefined) track.verdicts = [...track.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
-    save()
+    if (verdict !== undefined || planVerdict !== undefined) {
+      const at = Date.now()
+      if (planVerdict !== undefined) track.planVerdictAt ??= at
+      if (verdict !== undefined) track.verdicts = [...track.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
+      save()
+    }
+    if (reply === undefined || !track.requested || !isTime(workAt)) return
+    const { requestAt } = track
+    // Only the delivery that appends this exchange can start its hold.
+    return () => {
+      if (rt.botOf(toId) !== bot || bot.reviewTrack?.requestAt !== requestAt || bot.reviewTrack.delivered === true
+        || bot.reviewerId !== fromId) return
+      const recorded = rememberReply(bot, reply.exchangeId, fromId, reply.replyTo, workAt)
+      rt.noteReviewReply?.(reply.exchangeId, { requestAt, workAt })
+      return () => retire(recorded)
+    }
+  }
+
+  const matches = (reply, source) => source?.kind === SOURCE_KIND && source.role === 'reply'
+    && source.exchangeId === reply.exchangeId && source.senderSessionId === reply.reviewerId && source.replyTo === reply.replyTo
+
+  const replyAt = (sessionId, source) => {
+    if (source?.kind !== SOURCE_KIND || source.role !== 'reply') return
+    const past = rt.pastOwners.get(sessionId)
+    const bot = rt.botOf(rt.chatOwners.get(sessionId) ?? (past?.roomId === undefined ? past?.botId : undefined))
+    const reply = unreadReplies(bot)?.get(source.exchangeId)
+    if (reply !== undefined && matches(reply, source)) return reply
+  }
+
+  const agentSession = agent => agent?.session?.id ?? agent?.id
+  rt.ctx.on('session/event', (session, event) => {
+    if (event.type === 'user/message') replyAt(session.id, event.data?.source)?.release()
+  })
+  rt.ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
+    const sessionId = agentSession(agent)
+    const reply = replyAt(sessionId, message?.source)
+    if (reply !== undefined) reply.claim = { sessionId, turn }
+  })
+  rt.ctx.on('agent/inbox/inserted', ({ agent, message }) => {
+    const reply = replyAt(agentSession(agent), message?.source)
+    if (reply === undefined) return
+    reply.claim = undefined
+    reply.withdrawal = undefined
+  })
+  function reviewReplyDiscarded(agent, message) {
+    const reply = replyAt(agentSession(agent), message?.source)
+    if (reply === undefined) return false
+    if (rt.wakeLog?.movingInbox) return true
+    // DSH edit and steer remove and reinsert in one operation. Give the matching
+    // insertion a chance to cancel the withdrawal before treating it as final.
+    const withdrawal = {}
+    reply.withdrawal = withdrawal
+    queueMicrotask(() => { if (reply.withdrawal === withdrawal) retire(reply) })
+    return true
+  }
+
+  function reviewReplyTurnEnd(sessionId, data) {
+    const bot = rt.botOf(rt.chatOwners.get(sessionId))
+    const replies = unreadReplies(bot)
+    if (!replies?.size || rt.updateHold?.closed || rt.updateShuttingDown?.()
+      || rt.cutByRestart?.(data?.reason) || data?.reason?.reason?.kind === 'disposed') return
+    for (const reply of replies.values()) {
+      const claim = reply.claim
+      if (claim?.sessionId !== sessionId || claim.turn !== data?.turn) continue
+      // The switch may have taken the proposed input in pre-step. Wait for it
+      // to finish moving input before retiring the claim that ended unread.
+      const switching = rt.afterBotInputSwitch?.(sessionId, (messages) => {
+        if (replies.get(reply.exchangeId) !== reply || reply.claim !== claim) return
+        if (messages.some(message => matches(reply, message.source))) reply.claim = undefined
+        else retire(reply)
+      })
+      if (!switching && !rt.carriesBotInput?.(sessionId)) retire(reply)
+    }
   }
 
   // Another Bot's message_bot request in a guarded Solver's own chat (turns.js, first arrival
@@ -249,6 +350,8 @@ export function install(rt) {
     const review = reviewOf(bot)
     const works = Object.values(rt.state?.works ?? {})
     if (review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && !(typeof track.personAt === 'number' && typeof work.at === 'number' && work.at < track.personAt))) return
+    if (review === 'bot' && [...(unreadReplies(bot)?.values() ?? [])].some(reply =>
+      reply.reviewerId === bot.reviewerId && !(typeof track.personAt === 'number' && reply.workAt < track.personAt))) return
     // Reviewer work this request opened, still out when the person asked: delivered before its
     // verdict (Run 3). Work left from an earlier request is not this one's.
     const pending = review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && typeof work.at === 'number' && work.at >= track.requestAt)
@@ -265,5 +368,5 @@ export function install(rt) {
     return last ? { reviewMark: { ...last } } : {}
   }
 
-  Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewTurnEnd, reviewMarkOf })
+  Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf })
 }

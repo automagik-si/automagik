@@ -714,6 +714,7 @@ export function install(rt) {
     retryTakeover: takeOver,
     currentSession,
     quiet,
+    get movingInbox() { return quietDepth > 0 },
     discardLoginCode(agent, message) {
       const report = reports.get(idOf(message))
       if (!owned() || !open(report) || unmarked(report.id)

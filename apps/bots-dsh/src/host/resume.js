@@ -556,6 +556,17 @@ export function install(rt) {
   // What a Session was sent and no turn has read yet.
   rt.unreadOf = sessionId => (queued[sessionId] ?? []).map(item => item.args)
   rt.forgetDelivery = forgetQueued
+  rt.noteReviewReply = (exchangeId, reviewReply) => {
+    const note = Object.values(queued).flat().find(item => item?.args?.exchangeId === exchangeId)
+    if (note === undefined) return
+    note.args = { ...note.args, reviewReply }
+    persist()
+  }
+  rt.unreadReviewReplies = botId => Object.values(queued).flatMap(list => Array.isArray(list)
+    ? list.map(item => item?.args).filter(args => args?.toId === botId && args.role === 'reply'
+      && args.roomId === undefined && args.fromRoomId === undefined && args.reviewReply != null
+      && typeof args.exchangeId === 'string' && typeof args.replyTo === 'string')
+    : [])
   rt.deliveryNote = (id) => {
     let marked
     for (const [sessionId, list] of Object.entries(queued)) {
@@ -575,7 +586,8 @@ export function install(rt) {
   ctx.on('agent/inbox/discarded', ({ agent, message } = {}) => {
     if (stopped || rt.updateShuttingDown?.()) return
     rt.forgetHeldInput(agent?.session?.id ?? agent?.id, message?.id)
-    if (message?.source?.kind === SOURCE_KIND && message.source.exchangeId) forgetQueued(message.source.exchangeId)
+    if (message?.source?.kind === SOURCE_KIND && message.source.exchangeId
+      && !rt.reviewReplyDiscarded?.(agent, message)) forgetQueued(message.source.exchangeId)
   })
   // Exchanges a turn took up since this start, until the resends are done, so a resend
   // never repeats one.
@@ -854,7 +866,7 @@ export function install(rt) {
         received(item)
         return false
       }
-      if ((item.liveClaim && rt.deliveryNote(id) === undefined)
+      if (((item.liveClaim || item.args.reviewReply != null) && rt.deliveryNote(id) === undefined)
         || [...(claims.get(destination)?.values() ?? [])].some(message => message.source?.exchangeId === id)) return false
       if (waitingFor(agent).has(id)) {
         received(item)
