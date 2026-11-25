@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { GONE, REVIEW_MEMORY_MAX, ROUTED, TEAM_SHARED, bodySize, cleanDay, cleanEntry, cleanTopic, isPinned, parseReview, reviewEntries } from './memory-entries.js'
 import { REVIEW_CHANGES_MAX, reviewRequest, reviewSystem, writtenIn } from './memory-copy.js'
 import { speakerOf } from '../shared/mentions.js'
+import { projectGroupSkillText } from './skill-library-call.js'
 
 // The memory review reads at most this much of what is new, newest kept first.
 const REVIEW_DELAY_MS = 2_000
@@ -112,7 +113,11 @@ export function installReview(rt, memory) {
   // What is new in a group, from its log: the members' Sessions hold the same
   // messages wrapped in turn prompts.
   function groupBatch(room, since) {
-    const log = (room.log ?? []).filter(line => line.kind === undefined && typeof line.text === 'string' && line.text.trim() !== '')
+    const ordinary = (room.log ?? []).filter(line => line.kind === undefined && typeof line.text === 'string' && line.text.trim() !== '')
+    // The keeper reviews shared memory as an auxiliary request. It needs what
+    // the person said about the work, independent of any member's assignments.
+    const log = ordinary.map(line => ({ ...line, text: projectGroupSkillText(line, line.text) }))
+      .filter(line => line.text.trim() !== '')
     // A first review reads back at least to the user's latest line, which a round of
     // replies from many members can push out of the last few.
     const lastUser = log.findLastIndex(line => line.who === 'User' && line.botId === undefined)
@@ -123,7 +128,7 @@ export function installReview(rt, memory) {
       return { who, text: `${who === 'user' ? 'User' : speakerOf(entry)}: ${entry.text}`, seq: entry.seq }
     }
     return {
-      through: log.at(-1)?.seq,
+      through: ordinary.at(-1)?.seq,
       fresh: log.slice(start).map(line),
       earlier: log.slice(Math.max(0, start - REVIEW_CONTEXT_LINES), start).map(line),
       where: `the group chat "${room.name}"`,

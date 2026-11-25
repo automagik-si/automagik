@@ -5,6 +5,7 @@ import { defineTool, RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { AUTOMATIC_SKILL_MODE } from '../shared/skill-mode.js'
 import { routeOf } from '../shared/routes.js'
 import { reservedCommandOf } from '../shared/reserved-commands.js'
+import { GROUP_MEMORY_SOURCE, MEMORY_RECALL_SOURCE, MEMORY_UPDATE_SOURCE } from './memory-copy.js'
 import { freezeLoopRequest } from './secrets.js'
 import { skillName } from './skill-library-rules.js'
 
@@ -22,8 +23,11 @@ const noticeText = name => `The skill ${name} is not active on this Bot. Add it 
 const SKILL_UNAVAILABLE = 'No skill with that name is available to this Bot.'
 const SKILLS_PROJECTED = Symbol('Skills projected')
 const DELIVERY_RECORD = 'plugin:automagik/skill-delivery'
+const CONTEXT_SOURCES = new Set(['runtime-context', 'time-context', 'ds-bot-time-context',
+  GROUP_MEMORY_SOURCE, MEMORY_RECALL_SOURCE, MEMORY_UPDATE_SOURCE])
 const marker = part => part?.automagikSkill?.kind === SKILL_SOURCE ? part.automagikSkill : undefined
-const REVIEW_SOURCE_FIELDS = ['automagikSkill', 'automagikSkillParsed', 'automagikSkillParts', 'automagikSkillOriginalText', 'skillRequests']
+const REVIEW_SOURCE_FIELDS = ['automagikSkill', 'automagikSkillParsed', 'automagikSkillParts', 'automagikSkillOriginalText',
+  'skillRequests', 'skillRoom', 'skillRoomLines']
 const skillToolName = name => name === SKILL_TOOL || name === `mcp__dsh__${SKILL_TOOL}`
 
 function reviewEntry(message) {
@@ -149,7 +153,9 @@ function projectReview(options, session) {
     const drop = () => { changed = true; return [] }
     if (entry?.kind === 'user-message' && entry.source && Array.isArray(entry.content)) {
       if ([SKILL_SOURCE, SKILL_NOTICE].includes(entry.source.kind)) return drop()
-      const content = personParts(entry.content)
+      const ordinary = entry.source.skillRoomLines?.length
+        ? projectRoomContent(entry.content, entry.source.skillRoomLines, emptySet) : entry.content
+      const content = personParts(ordinary)
       if (content.length === 0 && entry.content.length > 0) return drop()
       const fields = REVIEW_SOURCE_FIELDS.filter(key => Object.hasOwn(entry.source, key))
       if (fields.length === 0 && content.length === entry.content.length) return [message]
@@ -205,6 +211,60 @@ function withoutInactiveGestures(text, inactive, existing) {
   return result + text.slice(offset)
 }
 
+export const emptyAfterSkillCall = text => /^[\s.?!,;:]*$/.test(text)
+const onlyGesture = content => content.every(part => part.type === 'text' && emptyAfterSkillCall(part.text))
+const emptySet = new Set()
+
+export function groupSkillRequests(line) {
+  return line.kind === undefined && line.botId === undefined && line.who === 'User' && Array.isArray(line.skillRequests)
+    ? line.skillRequests : []
+}
+
+export function projectGroupSkillText(line, text, active = emptySet) {
+  const inactive = new Set(groupSkillRequests(line).filter(({ name }) => !active.has(name)).map(({ name }) => name))
+  if (inactive.size === 0 || typeof text !== 'string') return text
+  const ordinary = withoutInactiveGestures(text, inactive, emptySet)
+  return ordinary !== text && emptyAfterSkillCall(ordinary) ? '' : ordinary
+}
+
+// Parent-format refusals were appended in the same step as the inputs, after
+// the batch. A slash lookup and a phrase of the same name can have different
+// outcomes. Count the phrase inputs first, then match any remaining slash refusals.
+function rememberRefusedInputs(state) {
+  const { rows, notices } = state.batch
+  if (notices.size === 0) return
+  const candidates = new Map()
+  for (const row of rows) for (const request of requestedSkills(row.content)) {
+    if (!notices.has(request.name)) continue
+    if (!candidates.has(request.name)) candidates.set(request.name, [])
+    candidates.get(request.name).push({ id: row.id, slash: request.slash })
+  }
+  for (const [name, count] of notices) {
+    const inputs = candidates.get(name) ?? []
+    const phrases = inputs.filter(input => !input.slash)
+    if (count < phrases.length || count > inputs.length) continue
+    const slashRefused = count === inputs.length
+    for (const { id } of slashRefused ? inputs : phrases) {
+      if (!state.refused.has(id)) state.refused.set(id, { names: new Set(), keepSlashes: new Set() })
+      const refusal = state.refused.get(id)
+      refusal.names.add(name)
+      if (!slashRefused) refusal.keepSlashes.add(name)
+    }
+  }
+}
+
+export function projectRoomContent(content, lines, active = emptySet) {
+  const blocks = content.slice(0, lines.length)
+  if (blocks.length !== lines.length || blocks.some(block => block.type !== 'text')) return content
+  // Split at person-line boundaries so request redaction can change text lengths
+  // before this projection without shifting which text a refusal applies to.
+  const text = blocks.map((block, index) => {
+    const inactive = new Set(lines[index].filter(name => !active.has(name)))
+    return inactive.size ? withoutInactiveGestures(block.text, inactive, emptySet) : block.text
+  }).join('')
+  return [{ ...blocks[0], text }, ...content.slice(lines.length)]
+}
+
 export function skillPart(botId, skill, use = 'person') {
   return { type: 'text', text: skill.content,
     automagikSkill: { kind: SKILL_SOURCE, botId, name: skill.name, hash: skill.hash, use } }
@@ -253,14 +313,26 @@ export function install(rt) {
   function ledger(session) {
     if (!session?.eventAt) return
     let state = ledgers.get(session)
-    if (!state) ledgers.set(session, state = { seq: 0, rows: new Map(), delivered: new Set() })
+    if (!state) ledgers.set(session, state = { seq: 0, rows: new Map(), delivered: new Set(), refused: new Map() })
     for (; state.seq < session.seq; state.seq++) {
       const event = session.eventAt(state.seq)
       if (event.type === 'turn/start') state.turn = event.data.turn
       else if (event.type === 'turn/end') state.turn = undefined
-      else if (event.type === 'assistant/attempt') state.attempt = { seq: event.seq, turn: event.data.turn }
-      else if (event.type === 'user/message') state.rows.set(event.data.id, { seq: event.seq, turn: state.turn })
-      else if (event.type === 'tool/result') state.rows.set(event.data.message.id, { seq: event.seq, turn: event.data.turn })
+      else if (event.type === 'step/start') state.batch = { rows: [], notices: new Map() }
+      else if (event.type === 'step/end' && state.batch) {
+        rememberRefusedInputs(state)
+        state.batch = undefined
+      } else if (event.type === 'assistant/attempt') state.attempt = { seq: event.seq, turn: event.data.turn }
+      else if (event.type === 'user/message') {
+        const row = event.data
+        state.rows.set(row.id, { seq: event.seq, turn: state.turn })
+        if (state.batch && row.source?.kind === 'user' && !row.source.automagikSkillOriginalText) state.batch.rows.push(row)
+        if (state.batch && row.source?.kind === SKILL_NOTICE && row.source.form === 'notice' && row.content?.length === 1) {
+          const part = row.content[0]
+          const name = part.type === 'text' ? /^The skill ([a-z0-9-]+) is not active/.exec(part.text)?.[1] : undefined
+          if (name && skillName(name) && part.text === noticeText(name)) state.batch.notices.set(name, (state.batch.notices.get(name) ?? 0) + 1)
+        }
+      } else if (event.type === 'tool/result') state.rows.set(event.data.message.id, { seq: event.seq, turn: event.data.turn })
       else if (event.type === DELIVERY_RECORD && Array.isArray(event.data)) {
         for (const id of event.data) state.delivered.add(id)
       }
@@ -277,7 +349,7 @@ export function install(rt) {
     const records = auxiliary ? [] : activeOf(rt, options.sessionId)
     const automatic = automaticOf(records)
     const current = new Map(records.map(record => [record.name, record]))
-    const state = auxiliary ? undefined : ledger(session)
+    const state = ledger(session)
     const retry = messages.findLastIndex(row => row.source?.kind === 'retry' || row.source?.resumed === true)
     const start = turnStart ?? messages.findLastIndex(row => row.role === 'assistant' || row.role === 'tool') + 1
     const lastAnswer = messages.findLastIndex(row => row.role === 'assistant' && row.source?.synthetic !== 'acp-bridge')
@@ -290,9 +362,14 @@ export function install(rt) {
         return []
       }
       const load = row.role === 'tool' && skillCalls.has(row.toolCallId)
-      const { automagikSkillParts, automagikSkillOriginalText, ...source } = row.source ?? {}
+      const { automagikSkillParts, automagikSkillOriginalText, skillRoom, skillRoomLines, skillRequests, ...source } = row.source ?? {}
+      const legacyRefusal = state?.refused.get(row.id)
+      let ordinary = row.content
+      if (legacyRefusal) ordinary = ordinary.map(part => part.type === 'text' && part.automagikSkill === undefined
+        ? { ...part, text: withoutInactiveGestures(part.text, legacyRefusal.names, legacyRefusal.keepSlashes) } : part)
+      if (skillRoomLines?.length) ordinary = projectRoomContent(ordinary, skillRoomLines, current)
       const parts = Array.isArray(automagikSkillParts)
-        ? [...row.content, ...automagikSkillParts.filter(marker)] : row.content
+        ? [...ordinary, ...automagikSkillParts.filter(marker)] : ordinary
       const content = parts?.filter(part => {
         const ref = marker(part)
         if (!ref) return !load
@@ -308,11 +385,14 @@ export function install(rt) {
         return skill !== undefined && skill.hash === ref.hash && skill.content === part.text && (ref.use !== 'load' || skill.mode === AUTOMATIC_SKILL_MODE)
       })
       const refused = load && row.isError !== true && content?.length === 0
-      if (!refused && automagikSkillParts === undefined && automagikSkillOriginalText === undefined && content?.length === row.content?.length) return [row]
+      const privateSource = automagikSkillParts !== undefined || automagikSkillOriginalText !== undefined ||
+        skillRoom !== undefined || skillRoomLines !== undefined || skillRequests !== undefined
+      if (!refused && !privateSource && ordinary === row.content && content?.length === row.content?.length) return [row]
       changed = true
-      if (automagikSkillOriginalText && !content?.some(part => part.type !== 'text' || part.text.trim() !== '')) return []
+      if ((automagikSkillOriginalText || skillRoom === 'only') && !content?.some(part => part.type !== 'text' || part.text.trim() !== '')) return []
+      if (legacyRefusal && onlyGesture(content)) return []
       return [{ ...row, content, ...(refused && { isError: true }),
-        ...(automagikSkillParts !== undefined || automagikSkillOriginalText !== undefined ? { source } : {}) }]
+        ...(privateSource ? { source } : {}) }]
     })
     if (catalog && bot && automatic.length) {
       // Add the current section to the request's system prompt without recording a
@@ -395,7 +475,7 @@ export function install(rt) {
       const requests = input.source.kind === 'user' ? requestedSkills(input.content) :
         input.source.role === 'room' && Array.isArray(input.source.skillRequests)
           ? input.source.skillRequests.filter(request => skillName(request?.name)) : []
-      if (requests.length > 0) pending.push({ row, requests })
+      if (requests.length > 0) pending.push({ row, requests: [...new Map(requests.map(request => [request.name, request])).values()] })
     }
 
     const existing = new Set(served)
@@ -427,17 +507,17 @@ export function install(rt) {
       }
       if (parts.length === 0 && inactive.size === 0) continue
       const originalText = {}
-      let content = inactive.size === 0 ? row.content : row.content.map((part, index) => {
+      let content = inactive.size === 0 || row.source.skillRoom !== undefined ? row.content : row.content.map((part, index) => {
         if (part.type !== 'text' || part.automagikSkill !== undefined) return part
         const text = withoutInactiveGestures(part.text, inactive, row.source.kind === 'user' ? existing : served)
         if (text === part.text) return part
         if (row.source.kind === 'user') originalText[index] = part.text
         return { ...part, text }
       })
-      if (row.source.kind === 'user' && inactive.size && parts.length === 0 &&
-          content.every(part => part.type === 'text' && /^[\s.?!,;:]*$/.test(part.text))) {
+      if (inactive.size && parts.length === 0 &&
+          ((row.source.kind === 'user' && onlyGesture(content)) || row.source.skillRoom === 'only')) {
         hostOnly.add(row.id)
-        content = content.map(part => ({ ...part, text: '' }))
+        content = row.source.skillRoom === 'only' ? [] : content.map(part => ({ ...part, text: '' }))
       }
       modified.set(row.id, {
         // DSH titles read logged person content directly. The model projection
@@ -458,9 +538,15 @@ export function install(rt) {
         source: { kind: SKILL_NOTICE, form: 'notice', summary: boundContextSummary(text) },
       }))
     }
-    if (hostOnly.size && decision.messages.every(row => hostOnly.has(row.id) || row.source?.kind === 'runtime-context')) {
-      for (const row of [...decision.messages.filter(row => hostOnly.has(row.id)).map(row => modified.get(row.id)), ...privateRows]) {
+    if (hostOnly.size && decision.messages.every(row => hostOnly.has(row.id) ||
+          (!original.has(row.id) && CONTEXT_SOURCES.has(row.source?.kind)))) {
+      // A memory update has already advanced its seen cursor. Keep that update
+      // for the next real request while clocks and snapshots can be rebuilt.
+      const kept = decision.messages.flatMap(row => hostOnly.has(row.id) ? [modified.get(row.id)]
+        : row.source?.kind === MEMORY_UPDATE_SOURCE ? [row] : [])
+      for (const row of [...kept, ...privateRows]) {
         agent.session.append('user/message', row, { surfaceOp: 'append' })
+        if (row.source?.skillRoom === 'only') rt.roomSkillHandled?.(row.source.roomId, botId, row.source.exchangeId)
       }
       // An empty first step completes the turn. An existing tool continuation
       // can still finish the work that was already running when the person steered.

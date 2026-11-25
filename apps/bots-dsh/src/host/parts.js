@@ -16,6 +16,7 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // word, and where the rest is. Input that arrives meanwhile waits and moves along.
 // read_own_chat searches every part, the condensed messages included.
 import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
+import { projectRoomContent } from './skill-library-call.js'
 import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
 import { randomUUID } from 'node:crypto'
@@ -196,7 +197,11 @@ export function historyEntry(event, group) {
     return { answer: false, who: 'user', text: replyText(textOf(event.data.content)), keepAnswers: true }
   }
   if (event.type !== 'user/message' || (source?.kind !== 'user' && source?.kind !== SOURCE_KIND)) return undefined
-  const text = textOf(personParts(event.data.content))
+  // Group handoff text survives a later assignment change. Carry the ordinary
+  // transcript without making past skill calls part of the handoff instructions.
+  const content = group && source.skillRoomLines?.length
+    ? projectRoomContent(event.data.content, source.skillRoomLines) : event.data.content
+  const text = textOf(personParts(content))
   const ours = source.kind === SOURCE_KIND
   // The outgoing agent's handoff-note request (an agent switch) is Omni's, and so is its answer.
   const skipped = (ours && (source.handoff === true || source.role === 'kickoff' || source.role === 'goal' || source.role === 'handoff-note')) || (!group && text.startsWith('[Group chat'))

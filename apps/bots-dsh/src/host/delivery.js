@@ -238,12 +238,13 @@ export function install(rt) {
   // one its recipient had not read, under that one's exchange. `uploads`: the person's
   // uploads of a group turn, for a member over ACP.
   // `onReplyRecorded` runs at the ledger append and can return a callback for pre-inbox loss.
-  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, resumedByUpdate = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], skillRequests, length, work, taskSessionId, reviewReceipt, consumedResult }, { enqueue, shouldSend, made, onReplyRecorded, closeReviewWork } = {}) {
+  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, resumedByUpdate = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], skillRequests, skillRoom, skillRoomBlocks, length, work, taskSessionId, reviewReceipt, consumedResult }, { enqueue, shouldSend, made, onReplyRecorded, closeReviewWork } = {}) {
     const from = rt.botOf(fromId)
     const to = rt.botOf(toId)
     if (to === undefined) throw new Error(`Unknown Bot ${toId}`)
     const fromName = senderName ?? from?.name ?? 'You'
     const receipt = reviewReceipt ?? consumedResult?.receipt
+    const roomBlocks = role === 'room' && fromId === undefined ? skillRoomBlocks : undefined
     // Session events reject `undefined` members, so optional fields are omitted instead.
     const source = {
       kind: SOURCE_KIND,
@@ -259,6 +260,8 @@ export function install(rt) {
       ...(roomId ? { roomId } : {}),
       ...(roomId && uploads.length > 0 ? { uploads: { v: 1, roomId, items: uploads } } : {}),
       ...(role === 'room' && fromId === undefined && skillRequests?.length ? { skillRequests } : {}),
+      ...(role === 'room' && fromId === undefined && skillRoom ? { skillRoom } : {}),
+      ...(roomBlocks && { skillRoomLines: roomBlocks.map(({ names }) => names) }),
       ...(audience === 'user' ? { audience } : {}),
       ...(deferred ? { deferred: true } : {}),
       ...(noReply ? { noReply: true } : {}),
@@ -281,9 +284,12 @@ export function install(rt) {
     const book = fromId !== undefined && from !== undefined && recordExchange && EXCHANGE_ROLES.has(role) && !deferred && !resumed && !retried ? pairBook(fromId, toId) : undefined
     // A steered message cuts into a running turn at its next step; a follow-up
     // queues for the next turn (see turns.js for how each is routed).
+    const header = headerText(role, fromName, audience, note, deferred, { roomId, work, resumed, resumedByUpdate, retried, resent, abandoned, hasSender: fromId !== undefined || senderName !== undefined, noReply, plural: (joined?.length ?? 0) > 0 })
+    const textBlocks = roomBlocks === undefined ? [{ type: 'text', text: `${header}\n${text}` }]
+      : roomBlocks.map((block, index) => ({ type: 'text', text: index === 0 ? `${header}\n${block.text}` : block.text }))
     const message = createUserMessage({
       content: [
-        { type: 'text', text: `${headerText(role, fromName, audience, note, deferred, { roomId, work, resumed, resumedByUpdate, retried, resent, abandoned, hasSender: fromId !== undefined || senderName !== undefined, noReply, plural: (joined?.length ?? 0) > 0 })}\n${text}` },
+        ...textBlocks,
         ...images.map(attachment => ({ type: 'image', attachment })),
         ...files.map(attachment => ({ type: 'file', attachment })),
       ],

@@ -16,7 +16,7 @@
 // it started, or that is called while still at earlier work, lets the round go on. Its
 // turn keeps running in its group Session, and what it ends with is posted to the group,
 // where the member that asked for it answers.
-import { requestedSkills } from './skill-library-call.js'
+import { emptyAfterSkillCall, groupSkillRequests, projectGroupSkillText, requestedSkills } from './skill-library-call.js'
 import { isBotGroupPost, NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -331,12 +331,20 @@ export function install(rt) {
     if (history?.room === room && sameGeneration(history.gen, rt.teamGeneration())) note(history, record)
   }
 
-  // What a member reads of a line: all of it, up to GROUP_LINE_READ.
-  const memberText = room => (line) => {
-    const whole = line.length === undefined ? line.text : rt.ledger.record(bookOf(room.id), line.seq)?.text
-    if (whole === undefined) return `${line.text}… (cut; ${line.length} characters in all, the rest was not kept)`
-    const shown = headOf(whole, GROUP_LINE_READ)
-    return whole.length > shown.length ? `${shown}… (cut; ${whole.length} characters in all)` : shown
+  const activeSkills = botId => new Set((rt.skillLibrary?.active(botId) ?? []).map(({ name }) => name))
+  const wholeMemberText = (room, line) => line.length === undefined ? line.text : rt.ledger.record(bookOf(room.id), line.seq)?.text
+
+  // Project the whole person line before applying the reader's text limit.
+  const memberText = (room, active, { limit = GROUP_LINE_READ, latest = false } = {}) => (line) => {
+    const whole = wholeMemberText(room, line)
+    if (line.text === undefined) return ''
+    const projected = projectGroupSkillText(line, whole ?? line.text, active)
+    const shown = headOf(projected, limit)
+    if (whole === undefined && !latest) return `${shown}… (cut; ${line.length} characters in all, the rest was not kept)`
+    const length = whole === undefined ? line.length : projected.length
+    if (length <= shown.length) return shown
+    const hint = latest ? `; read_group_chat with seq ${line.seq} reads it whole` : ''
+    return `${shown}… (cut; ${length} characters in all${hint})`
   }
 
   // The start of a line for the room's log; the book has it whole.
@@ -437,6 +445,10 @@ export function install(rt) {
       const room = rt.roomOf(roomId)
       if (room) say(room, { kind: 'automagik-skill-notice', botId, text })
     },
+    roomSkillHandled(roomId, botId, exchangeId) {
+      const waiter = rt.roomWaiters.get(exchangeId)
+      if (waiter?.roomId === roomId && waiter.botId === botId) waiter.skillHandled()
+    },
     logRoom: (room, line) => say(room, line),
     onRoomLine: (listener) => {
       roomLineListeners.add(listener)
@@ -448,7 +460,7 @@ export function install(rt) {
       const record = rt.ledger.record(bookOf(roomId), seq)
       return memberLine(record) ? withoutPocketFields(record) : undefined
     },
-    searchGroupLog: async (roomId, query) => rt.ledger.search(bookOf(roomId), query).filter(memberLine).map(withoutPocketFields),
+    searchGroupLog: async (roomId, query, textOfLine) => rt.ledger.search(bookOf(roomId), query, textOfLine).filter(memberLine).map(withoutPocketFields),
   })
 
   // The folder a group was set to work in is gone: its members' Sessions move on in
@@ -568,7 +580,7 @@ export function install(rt) {
   // `finished` is what a batch woke the member for (finishedLines): its result lines, the
   // ones the prompt does not show anyway coming after the earlier lines, and the members
   // that finished without a closing message.
-  function roomPrompt(room, member, round, slot, finished = { results: [], quiet: [] }) {
+  function roomPrompt(room, member, round, slot, finished, brief) {
     const { results, quiet } = finished
     const peers = room.members.filter(id => id !== member.id).map(rt.botOf).filter(Boolean)
       .map(bot => `${bot.name}${rt.isAdminOf(room, bot.id) ? ' (admin)' : ''}`)
@@ -580,37 +592,67 @@ export function install(rt) {
     const spokeThisRound = (room.seen[member.id] ?? 0) >= round.startSeq
     const members = `Members: the user${peers.length ? `, ${peers.join(', ')}` : ''} and you${leads ? ' (admin)' : ''}. ${ROOM_CALLS}`
     const notice = room.notice ? `Group notice (shared instructions for every member):\n${room.notice}` : ''
-    if (round.kickoff) return { text: [members, notice, leads ? adminNote(room) : '', roomKickoff(rt.uiLanguage?.())].filter(Boolean).join('\n\n'), images: [], files: [] }
+    if (round.kickoff) return { text: [brief, members, notice, leads ? adminNote(room) : '', roomKickoff(rt.uiLanguage?.())].filter(Boolean).join('\n\n'), images: [], files: [] }
     const goal = rt.goalBlock?.(room, member, { nudge: round.goalNudge === true, resume: round.goalResume === true }) ?? ''
     // Members answering in this round are named with the round below.
     const answering = new Set(round.slots.filter(other => other.status === 'speaking').map(other => other.id))
     const working = workingIn(room).filter(item => item.bot.id !== member.id && !answering.has(item.bot.id))
       .map(item => ({ ...item, unread: unreadCount(room, item.bot.id) }))
-    const text = [
+    const active = activeSkills(member.id)
+    const read = memberText(room, active)
+    const render = line => ({ text: lineText(line, read(line)), names: groupSkillRequests(line).filter(({ name }) => active.has(name)).map(({ name }) => name) })
+    const references = round.shown?.includes(member.id) ? '' : referenceNote(round.references)
+    const paragraphs = [
+      brief,
       members,
       notice,
       goal,
       leads ? adminNote(room) : '',
-      earlier.length ? `Earlier in the group, before this round (context only):\n${transcript(earlier, memberText(room))}` : '',
-      owed.length ? `Results of the work you asked for that the lines here leave out (oldest first):\n${owed.map(result => (result.line
-        ? transcript([result.line], memberText(room))
-        : `[${result.name}'s result, message #${result.seq}, is not available here; read_group_chat with seq ${result.seq} reads it]`)).join('\n')}` : '',
+      earlier.length ? ['Earlier in the group, before this round (context only):', ...earlier.map(render)] : '',
+      owed.length ? ['Results of the work you asked for that the lines here leave out (oldest first):', ...owed.map(result => (result.line
+        ? render(result.line)
+        : `[${result.name}'s result, message #${result.seq}, is not available here; read_group_chat with seq ${result.seq} reads it]`))] : '',
       quiet.length ? `Finished without a closing message: ${quiet.join(' and ')}. What they said while they worked is their result; read_group_chat reads it.` : '',
       current.length
-        ? `This round so far${spokeThisRound ? ', since your last message' : ', starting with the new message'} (oldest first):\n${transcript(current, memberText(room))}`
+        ? [`This round so far${spokeThisRound ? ', since your last message' : ', starting with the new message'} (oldest first):`, ...current.map(render)]
         : 'Nothing new in this round since your last message.',
-      round.shown?.includes(member.id) ? '' : referenceNote(round.references),
+      references,
       working.length > 0 ? `Still at work on what they were asked; each posts here when done: ${working.map(item => `${item.bot.name} (${minutesSince(item.since)} min${item.unread > 0 ? `, with ${item.unread} group message(s) it has not read yet` : ''})`).join(', ')}.` : '',
       ...placeLines(round, slot),
       ROOM_REPLY,
-    ].filter(Boolean).join('\n\n')
+    ].filter(Boolean)
+    const blocks = [{ text: '', names: [] }]
+    for (const [position, paragraph] of paragraphs.entries()) {
+      if (position) blocks.at(-1).text += '\n\n'
+      const lines = Array.isArray(paragraph) ? paragraph : [paragraph]
+      for (const [index, line] of lines.entries()) {
+        if (index) blocks.at(-1).text += '\n'
+        if (typeof line === 'string') blocks.at(-1).text += line
+        else if (line.names.length) blocks.push(line, { text: '', names: [] })
+        else blocks.at(-1).text += line.text
+      }
+    }
     const shown = [...earlier, ...owed.flatMap(result => result.line ?? []), ...current]
+    const skillRequests = current.flatMap(groupSkillRequests)
+    const mentioned = room.members.map(rt.botOf).filter(Boolean)
+    const skillOnly = skillRequests.length > 0 && !slot.fromBot && !slot.by && !round.goalNudge && !round.goalResume &&
+      !owed.length && !quiet.length && !references &&
+      current.every(line => {
+        if (!groupSkillRequests(line).length || line.files?.length || line.images?.length || line.uploads?.length) return false
+        const whole = wholeMemberText(room, line)
+        if (whole === undefined) return false
+        let ordinary = projectGroupSkillText(line, whole)
+        for (const { start, end } of mentionSpans(ordinary, mentioned).reverse()) ordinary = ordinary.slice(0, start) + ordinary.slice(end)
+        return emptyAfterSkillCall(ordinary)
+      })
     return {
-      text,
+      text: blocks.map(({ text }) => text).join(''),
       images: shown.flatMap(line => line.images ?? []),
       files: shown.flatMap(line => line.files ?? []),
       uploads: shown.flatMap(line => line.uploads ?? []),
-      skillRequests: current.flatMap(line => line.skillRequests ?? []),
+      skillRequests,
+      ...(skillRequests.length && { skillRoom: skillOnly ? 'only' : 'mixed' }),
+      ...(blocks.length > 1 && { skillRoomBlocks: blocks }),
     }
   }
 
@@ -849,7 +891,7 @@ export function install(rt) {
   // called it, which answers what the turn posts after the round moved on. What the
   // member writes before its last step is posted at once and collected in `said`, and
   // `heard` takes each such line once it is posted.
-  async function roomTurn(room, member, sessionId, { text, images = [], files = [], uploads = [], skillRequests }, note, signal, round, by, said = [], heard = () => {}, onWork = () => {}) {
+  async function roomTurn(room, member, sessionId, prompt, note, signal, round, by, said = [], heard = () => {}, onWork = () => {}) {
     if (signal.aborted) return null
     const startedAt = Date.now()
     const exchangeId = randomUUID()
@@ -859,6 +901,8 @@ export function install(rt) {
     // The read position is the one of this turn's start, and moves only when the
     // delivery lands: a delivery that failed leaves the member where it was.
     const seenAt = room.seq
+    const seenBefore = room.seen[member.id]
+    let skillHandled = false
     // Checked before the delivery, which may start the turn at once.
     const busy = rt.live.get(sessionId)?.turn !== undefined || rt.hasSubagents?.(sessionId) === true
     const done = new Promise((resolve) => {
@@ -886,11 +930,13 @@ export function install(rt) {
         heard(step)
       }
       touch()
-      rt.roomWaiters.set(exchangeId, { sessionId, botId: member.id, roomId: room.id, resolve: finish, fail: failure => finish({ failure }), touch, work, say, approval: () => finish({ approval: true }) })
+      rt.roomWaiters.set(exchangeId, { sessionId, botId: member.id, roomId: room.id, resolve: finish, fail: failure => finish({ failure }), touch, work, say, approval: () => finish({ approval: true }),
+        skillHandled: () => { skillHandled = true },
+      })
       signal.addEventListener('abort', () => finish(null), { once: true })
     })
     try {
-      await rt.deliver({ fromId: undefined, toId: member.id, sessionId, role: 'room', roomId: room.id, exchangeId, note, text, images, files, uploads, ...(skillRequests?.length ? { skillRequests } : {}), steer: busy, ...(by ? { askedBy: by } : {}) })
+      await rt.deliver({ ...prompt, toId: member.id, sessionId, role: 'room', roomId: room.id, exchangeId, note, steer: busy, ...(by ? { askedBy: by } : {}) })
       // The prompt reached the member: its read position moves on.
       room.seen[member.id] = seenAt
       // Still held by an earlier request: this turn cannot start until the user answers.
@@ -911,6 +957,15 @@ export function install(rt) {
     const reply = await done
     // A turn that ended leaves nothing for a stop to cancel.
     if ((typeof reply === 'string' || reply?.failure !== undefined) && !rt.hasSubagents?.(sessionId)) started.splice(started.indexOf(turn), 1)
+    if (skillHandled && typeof reply === 'string' && isPass(reply)) {
+      // The host answered the skill call. This member has yet to read any of the
+      // earlier room context that came with that delivery.
+      if (room.seen[member.id] === seenAt) {
+        if (seenBefore === undefined) delete room.seen[member.id]
+        else room.seen[member.id] = seenBefore
+      }
+      return { skillHandled: true }
+    }
     if (reply === null || typeof reply === 'object') return reply
     return stripOwnName(member.name, String(reply ?? '').trim())
   }
@@ -1188,7 +1243,8 @@ export function install(rt) {
     delete round.nudge
     // The admin was alone with the user's message and passed: the round ends with
     // nothing said. The group says so once, so the user knows to call a member.
-    const alone = round.soleAdmin !== undefined && round.slots.find(slot => slot.id === round.soleAdmin.id)?.status === 'passed'
+    const admin = round.slots.find(slot => slot.id === round.soleAdmin?.id)
+    const alone = admin?.status === 'passed' && !admin.skillHandled
     // An answer that came, or is still coming, means the round is not left silent.
     const answered = round.slots.some(slot => ['posted', 'working', 'waiting-approval'].includes(slot.status))
     if (alone && !answered) {
@@ -1226,9 +1282,8 @@ export function install(rt) {
       dropMemberFromBatch(room, member.id)
       return
     }
-    const prompt = roomPrompt(room, member, round, slot, await finishedLines(room, slot))
+    const prompt = roomPrompt(room, member, round, slot, await finishedLines(room, slot), session.brief)
     round.shown?.push(member.id)
-    const text = session.brief === undefined ? prompt.text : `${session.brief}\n\n${prompt.text}`
     const said = []
     // The log lines this turn posted: its result for the Bot that called it.
     const posted = []
@@ -1245,7 +1300,7 @@ export function install(rt) {
       markSlotWorked(room.id, slot)
     }
     const reply = await roomTurn(
-      room, member, session.id, { ...prompt, text }, slot.note ?? 'your turn', signal, round, slot.by, said,
+      room, member, session.id, prompt, slot.note ?? 'your turn', signal, round, slot.by, said,
       (line) => {
         posted.push(room.seq)
         callFrom(room, round, member, line, called, { worked, byBot: answeredBot })
@@ -1285,6 +1340,9 @@ export function install(rt) {
         posted.push(postInRound(room, member, final, Date.now() - startedAt))
         callFrom(room, round, member, final, called, { worked, byBot: answeredBot })
       }
+    } else if (reply?.skillHandled) {
+      slot.status = 'passed'
+      slot.skillHandled = true
     } else {
       slot.status = reply === null ? 'cancelled' : typeof reply === 'string' ? 'passed' : 'missed'
       round.passed.push(member.name)
@@ -1752,22 +1810,21 @@ export function install(rt) {
       const { room, error } = rt.pickRoom(args.group, self)
       if (error) return error
       ensureRoomLog(room)
+      const active = activeSkills(self)
+      const read = memberText(room, active)
       if (args.seq !== undefined) {
         const line = room.log.find(entry => entry.seq === Number(args.seq))
-        if (line !== undefined) return lineText(line, memberText(room)(line))
+        if (line !== undefined) return lineText(line, read(line))
         const kept = await rt.groupLine(room.id, Number(args.seq)).catch(() => undefined)
-        return kept === undefined ? `"${room.name}" has no message ${args.seq}.` : lineText(kept, headOf(kept.text ?? '', GROUP_LINE_READ))
+        return kept === undefined ? `"${room.name}" has no message ${args.seq}.` : lineText(kept, read(kept))
       }
       if (typeof args.query === 'string' && args.query.trim() !== '') {
-        const found = await rt.searchGroupLog(room.id, args.query).catch(() => [])
-        return found.length === 0 ? `Nothing said in "${room.name}" has "${args.query}".` : `In "${room.name}" (newest first):\n${found.map(line => `#${line.seq} ${lineText(line, headOf(line.text, TEXT_KEPT))}`).join('\n')}`
+        const projected = line => memberLine(line) ? projectGroupSkillText(line, line.text, active) : undefined
+        const found = await rt.searchGroupLog(room.id, args.query, projected).catch(() => [])
+        return found.length === 0 ? `Nothing said in "${room.name}" has "${args.query}".` : `In "${room.name}" (newest first):\n${found.map(line => `#${line.seq} ${lineText(line, headOf(projected(line), TEXT_KEPT))}`).join('\n')}`
       }
       // Thirty whole lines could fill the context, so a long one shows its start.
-      const short = (line) => {
-        if (line.text === undefined) return ''
-        const length = line.length ?? line.text.length
-        return length <= TEXT_KEPT ? line.text : `${headOf(line.text, TEXT_KEPT)}… (cut; ${length} characters in all; read_group_chat with seq ${line.seq} reads it whole)`
-      }
+      const short = memberText(room, active, { limit: TEXT_KEPT, latest: true })
       const lines = room.log.slice(-ROOM_READ_MAX)
       return lines.length === 0 ? `"${room.name}" has no messages yet.` : `Latest in "${room.name}" (oldest first):\n${transcript(lines, short)}`
     },
