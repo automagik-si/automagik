@@ -48,6 +48,7 @@ export function asideWorld(t, options = {}) {
   const config = { codex: false, claude: false,
     ...(providers[provider] === undefined ? {} : { [provider.slice(4)]: true }) }
   let signedIn = true
+  let accountId = 'fictitious-account'
   const cliHome = join(dir, 'homes')
   apply(ctx, config, {
     catalogHome: join(dir, 'catalog'), cliHome, installation: dir,
@@ -55,7 +56,7 @@ export function asideWorld(t, options = {}) {
     store: { binOf: () => ({ path: wire, version: 'test' }), stateOf: () => ({ version: 'test' }),
       busy: () => false, update: async () => {}, settle: () => {} },
     signedIn: async () => signedIn,
-    account: async () => ({ id: 'fictitious-account', facets: { email: 'fixture@example.test' } }),
+    account: async () => ({ id: accountId, facets: { email: 'fixture@example.test' } }),
     logoutRun: (command, args, options, callback) => {
       signedIn = false
       queueMicrotask(() => callback(null, '', ''))
@@ -66,10 +67,10 @@ export function asideWorld(t, options = {}) {
     for (const handle of handles.reverse()) handle?.()
     rmSync(dir, { recursive: true, force: true })
   })
-  const cli = adapter?.agents.get(provider)
   const fake = fakeCodex()
   const contexts = []
-  if (provider === 'acp-codex' && cli) {
+  const wireCodex = (cli) => {
+    if (provider !== 'acp-codex' || !cli) return
     const spawn = cli.spawn
     cli.spawn = async (context) => {
       contexts.push(context)
@@ -80,10 +81,19 @@ export function asideWorld(t, options = {}) {
       return transform?.(launch, context) ?? launch
     }
   }
+  const cli = adapter?.agents.get(provider)
+  wireCodex(cli)
   const events = () => (existsSync(traceFile)
     ? readFileSync(traceFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [])
   const ready = async () => {
     if (provider === 'acp-codex' && confirm) await service.accountConfirm(provider)
   }
-  return { provider, service, ready, setReply, events, lookups, fake, contexts, log, dir, cli, ctx }
+  const signInAs = async id => {
+    accountId = id
+    signedIn = true
+    const current = adapter.agents.get(provider)
+    if (current !== cli) wireCodex(current)
+    await ready()
+  }
+  return { provider, service, ready, signInAs, setReply, events, lookups, fake, contexts, log, dir, cli, ctx }
 }

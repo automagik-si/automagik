@@ -1495,9 +1495,12 @@ export function install(rt) {
     const budgets = [first, retry]
     const messages = [{ role: 'user', content: [{ type: 'text', text }] }]
     if (tag !== undefined) rt.tagUsage?.(messages, tag)
+    const timedOut = () => modelFailure('The model call timed out.')
     let lastKind = 'stop'
     for (let attempt = 0; attempt < budgets.length; attempt += 1) {
       const maxTokens = budgets[attempt]
+      const timeout = AbortSignal.timeout(MODEL_TIMEOUT_MS)
+      const signal = AbortSignal.any([dispatch.signal, timeout])
       const callOptions = {
         provider: route.provider,
         model: route.model,
@@ -1508,20 +1511,30 @@ export function install(rt) {
         system,
         messages,
         maxTokens,
-        signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+        signal,
+      }
+      const attemptDispatch = {
+        ...dispatch,
+        check: () => {
+          dispatch.check()
+          signal.throwIfAborted()
+        },
       }
       let assembler
       try {
         assembler = await (rt.assembleLlm
-          ? rt.assembleLlm(callOptions, { dispatch })
-          : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff, dispatch }))
+          ? rt.assembleLlm(callOptions, { dispatch: attemptDispatch })
+          : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff, dispatch: attemptDispatch }))
       } catch (error) {
+        dispatch.signal.throwIfAborted()
+        if (timeout.aborted && (error === signal.reason || error?.cancelled === true)) throw timedOut()
         const failure = error?.failure ?? error
         if (terminalShot(error) || !QUOTA_CODES.has(failure?.code)) throw error
         throw providerFailure(failure)
       }
+      dispatch.signal.throwIfAborted()
       const finish = assembler.finish
-      // A cancelled call is the caller's decision, not a route that may answer again.
+      if (timeout.aborted && !QUOTA_CODES.has(finish.failure?.code)) throw timedOut()
       if (finish.kind === 'aborted') {
         throw Object.assign(modelFailure('The model call was aborted.'), { cancelled: true })
       }
@@ -1568,9 +1581,10 @@ export function install(rt) {
   const reserved = () => Object.assign(new Error('The account is reserved.'), {
     code: 'acp/aside-unavailable',
   })
-  async function acpShot(acp, bot, ref, route, chat, sessionId, system, text, dispatch) {
+  async function acpShot(acp, bot, ref, route, chat, sessionId, system, text, dispatch, onAdmitted) {
     if (chat === undefined || busy(chat)) return undefined
     const effort = bot.effort
+    const accountGeneration = acp.asideAccountGeneration?.(route.provider)
     const previous = asideRuns.get(bot.id) ?? Promise.resolve()
     const slot = Promise.withResolvers()
     const tail = previous.then(() => slot.promise)
@@ -1591,6 +1605,9 @@ export function install(rt) {
       let prepared = false
       const check = () => {
         if (lifetime.signal.aborted || dispatch?.signal?.aborted) throw staleShot()
+        if (acp.asideAccountGeneration?.(route.provider) !== accountGeneration) {
+          throw Object.assign(new Error('The Bot account changed.'), { code: 'acp/aside-signed-out' })
+        }
         const current = rt.botOf(bot.id)
         if (!current || current.model !== ref || current.effort !== effort || rt.chatOf(bot.id) !== chat
           || rt.switchingChat?.(bot.id) || rt.hostOwned(current)) throw staleShot()
@@ -1611,7 +1628,7 @@ export function install(rt) {
       check()
       releaseWork = reservations?.workStarted?.(route.provider)
       const answer = await acp.answerAside({
-        ...route, effort, signal, timeoutMs: MODEL_TIMEOUT_MS,
+        ...route, effort, signal, accountGeneration, timeoutMs: MODEL_TIMEOUT_MS,
         check, prepare,
         admit: async () => {
           await prepare()
@@ -1620,6 +1637,7 @@ export function install(rt) {
         },
         readPrompt: () => {
           check()
+          onAdmitted()
           const fields = { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }] }
           const masked = rt.redactModelFields?.(fields) ?? fields
           return { system: masked.system, text: masked.messages[0].content[0].text }
@@ -1647,6 +1665,9 @@ export function install(rt) {
   async function botShot(bot, system, text, tag, dispatch) {
     const sessionId = shotSession(bot, tag)
     const chat = rt.chatOf(bot.id)
+    const signal = dispatch?.signal ? AbortSignal.any([lifetime.signal, dispatch.signal]) : lifetime.signal
+    const checkActive = () => { if (signal.aborted) throw staleShot() }
+    checkActive()
     rt.assertShellChoice?.(sessionId ?? chat, bot.id)
     const mine = await rt.memoryModel(bot)
     const own = splitRef(mine)
@@ -1656,11 +1677,12 @@ export function install(rt) {
     }
     const hidden = typeof acp?.answerAside === 'function' && acp.supportsAside?.(own.provider) !== false
     const eligible = own !== undefined && (hidden || rt.answersAside(mine))
+    let ownAdmitted = eligible && !hidden
     const failures = []
     let quota = false
     const record = (ref, provider, error) => {
+      checkActive()
       if (terminalShot(error)) throw error
-      if (lifetime.signal.aborted || dispatch?.signal?.aborted) throw staleShot()
       if (error?.code === 'acp/aside-stopped') return
       if (QUOTA_CODES.has(error?.providerCode ?? error?.code)) {
         rt.noteAsideQuota(provider)
@@ -1674,9 +1696,10 @@ export function install(rt) {
       return reply
     }
     const dispatchNative = {
+      signal,
       prepare: dispatch?.prepare,
       check: () => {
-        if (lifetime.signal.aborted || dispatch?.signal?.aborted) throw staleShot()
+        checkActive()
         rt.assertShellChoice?.(sessionId ?? chat, bot.id)
         dispatch?.check?.()
       },
@@ -1693,7 +1716,8 @@ export function install(rt) {
     if (eligible && !rt.quotaHeld(own.provider)) {
       try {
         if (!hidden) return await native(own, 'own')
-        const reply = await acpShot(acp, bot, mine, own, chat, sessionId, system, text, dispatch)
+        const reply = await acpShot(acp, bot, mine, own, chat, sessionId, system, text, dispatch,
+          () => { ownAdmitted = true })
         if (reply !== undefined) {
           return answered({ ...own, model: reply.model ?? own.model }, reply.text.trim(), 'own-acp')
         }
@@ -1710,9 +1734,10 @@ export function install(rt) {
     }
     const next = failures.length ? await rt.memoryBackground(sessionId) : background
     const ownHold = eligible ? rt.quotaUntil(own.provider) : undefined
+    // A supported ACP route can still refuse admission for this account or executable.
+    const ownMayRun = ownAdmitted && !ownHold
     // The review can retry when either eligible route comes back, after its holder delay.
     const holds = [ownHold, next.retryAt].filter(Boolean)
-    const ownMayRun = eligible && !ownHold
     const retryAt = next.ref === undefined && !ownMayRun && holds.length
       ? Math.min(...holds) : undefined
     const error = failures.length > 1

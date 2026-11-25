@@ -2030,17 +2030,18 @@ export function apply(ctx, config = {}, {
 
   const generateImage = request => makeImage(request)
   const asideLifetime = new AbortController()
+  const asideAccountGeneration = provider => authVersions.get(provider) ?? 0
   const answerMemory = (request) => {
     const { provider } = request
     if (!supportsAside(provider)) {
       throw asideFailure('unavailable', 'A tools-off memory session is unavailable.')
     }
     const spec = AGENTS[provider]
-    const generation = authVersions.get(provider)
+    const generation = request.accountGeneration ?? asideAccountGeneration(provider)
     let agent
     let accountId
     const check = () => {
-      if (disposed || restarting || authVersions.get(provider) !== generation
+      if (disposed || restarting || asideAccountGeneration(provider) !== generation
         || accountChanges.has(provider) || loginLocks.has(provider)
         || (homed(spec) && (homes.paused(spec.key) || homes.changing(spec.key)))
         || signIns.get(provider) === false || consentStates.get(provider) === 'needed'
@@ -2298,6 +2299,8 @@ export function apply(ctx, config = {}, {
      * message to show as it is.
      */
     generateImage,
+    /** Bind a queued tools-off response to the account present before the wait. */
+    asideAccountGeneration,
     /** One tools-off ACP response beside the chat, with the prompt read after admission. */
     answerAside: answerMemory,
     supportsAside,

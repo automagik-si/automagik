@@ -331,6 +331,13 @@ export function installReview(rt, memory) {
       keeper, name: `group "${live.name}"`, home: groupScope(live.id), teamWrites: () => false, group: true,
       who: `The group chat: "${live.name}", with the user and ${members.join(', ')}.`,
       tag: { sessionId: live.id, kind: 'memory' },
+      checkDispatch: () => {
+        const current = rt.roomOf(live.id)
+        if (!current?.members.includes(keeper.id) || keeperOf(current)?.id !== keeper.id
+          || rt.botDeleting?.(keeper.id)) {
+          throw Object.assign(new Error('The memory review keeper changed'), { code: 'bot/stale' })
+        }
+      },
       alive: () => rt.botOf(keeper.id) !== undefined && rt.roomOf(live.id)?.members.includes(keeper.id) === true,
       next: () => queueReview({ ...seen, room }),
     })
@@ -339,7 +346,7 @@ export function installReview(rt, memory) {
   // One review from the conversation's place `since`: `home` is where it keeps what it
   // finds, `keeper` the Bot whose model reads, `who` whose memory it is. `alive` says
   // whether the keeper, and the group, are still there to keep it.
-  async function reviewBatch({ key, since, gen, batch, keeper, name, home, teamWrites, group = false, who, tag, alive, next }) {
+  async function reviewBatch({ key, since, gen, batch, keeper, name, home, teamWrites, group = false, who, tag, checkDispatch, alive, next }) {
     // The cursor only moves forward.
     if (batch.through === undefined || (since !== undefined && batch.through <= since)) return
     // A backlog past the text limit is read in passes, oldest first, so the cursor
@@ -375,6 +382,7 @@ export function installReview(rt, memory) {
         where: batch.where, earlier, fresh: fresh.texts, more, language,
       })
       const reply = await botShot(keeper, instructions, prompt, tag, {
+        check: checkDispatch,
         onAnswer: ({ provider, model }, via) => { route = { provider, model, via } },
       })
       if (!alive()) return

@@ -2,18 +2,18 @@ import { realpathSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { AgentRun } from './acp.js'
+import { AgentRun, optionOf } from './acp.js'
 import { choose } from './adapter.js'
 import { AGY_OFF_CHECKED } from './agy-off.js'
 import { assertGeneration } from './cli-generations.js'
+import { chatProfileModes } from './codex-chat-profiles.js'
 import { modelPart } from './codex-native.js'
 import { isAuthRequired } from './names.js'
 import { usageLimitOf } from './usage-limit.js'
 
 const MAX_BYTES = 64 * 1024
 
-// Claude admission is pending the owner's decision on managed hooks and the
-// subscription login. Until then only these providers have a checked OFF launch.
+// Claude Code Bots use background for memory until a hook-free subscription launch exists.
 export const supportsAside = provider => ['acp-codex', 'acp-antigravity', 'acp-omp'].includes(provider)
 
 export const asideFailure = (kind, message) => Object.assign(new Error(message), {
@@ -29,6 +29,16 @@ const real = path => {
 }
 
 class AsideRun extends AgentRun {
+  takeOptions(options, models, fallback) {
+    super.takeOptions(options, models, fallback)
+    const option = optionOf(options, 'model')
+    const sessionModelId = models?.currentModelId
+    // A later effort-only update can omit a report that already contradicted the other.
+    if (option && typeof sessionModelId === 'string' && option.currentValue !== sessionModelId) {
+      this.conflictingModels = true
+    }
+  }
+
   onPermission(params, signal) {
     const answer = super.onPermission(params, signal)
     this.spec.onForbiddenTool()
@@ -64,7 +74,7 @@ export async function answerAside({ spawn, check, name }, request) {
     const codex = provider === 'acp-codex'
     const agy = provider === 'acp-antigravity'
     const checkedCwd = codex && real(launch.checkedCwd)
-    const mode = codex ? launch.profileModes?.['read-only'] ?? 'read-only' : 'default'
+    const modes = codex ? chatProfileModes(['read-only'], launch.profileModes ?? {}) : ['default']
     if (codex && (launch.nativeOff !== true || !checkedCwd || checkedCwd !== real(cwd)
       || !launch.models?.length)) throw unavailable()
     if (agy && (!launch.agyReady || !launch.offRecheck)) throw unavailable()
@@ -73,6 +83,10 @@ export async function answerAside({ spawn, check, name }, request) {
       signal.throwIfAborted()
       assertGeneration(launch.env ?? {})
       check()
+    }
+    const readPrompt = () => {
+      dispatch()
+      return request.readPrompt()
     }
     dispatch()
     run = new AsideRun({
@@ -84,8 +98,7 @@ export async function answerAside({ spawn, check, name }, request) {
         // post-session check, so their private instructions go in the first prompt.
         if (!codex && !agy && current.init?.agentCapabilities?.sessionCapabilities?.systemPrompt != null) {
           await duringSetup(() => request.prepare?.(), signal)
-          dispatch()
-          current.spec.botIdentity = () => request.readPrompt().system
+          current.spec.botIdentity = () => readPrompt().system
         } else {
           dispatch()
         }
@@ -94,16 +107,16 @@ export async function answerAside({ spawn, check, name }, request) {
     })
     await run.start({ signal })
     await choose(run, model, effort, undefined, { signal })
-    await run.setMode([mode], { signal })
+    await run.setMode(modes, { signal })
     await duringSetup(() => request.prepare?.(), signal)
     if (agy) launch.offRecheck(run)
     const selected = run.option('model')?.currentValue
     if (model !== 'default' && selected !== model) throw unavailable()
     if (codex && (!launch.models.includes(modelPart(selected))
+      || run.conflictingModels
       || run.reportedModel?.currentValue !== selected
-      || run.modes?.currentModeId !== mode)) throw unavailable()
-    dispatch()
-    const { system, text } = request.readPrompt()
+      || !modes.includes(run.modes?.currentModeId))) throw unavailable()
+    const { system, text } = readPrompt()
     if (run.identityDelivery !== 'systemPrompt' && system) run.identityPreamble = system
     void run.prompt([{ type: 'text', text }])
     let reply = ''

@@ -23,6 +23,7 @@ const wire = serveAgent({
   },
   async newSession({ cwd, mcpServers, systemPrompt, _meta }) {
     trace('new', { cwd, mcpServers, systemPrompt, meta: _meta })
+    const reply = JSON.parse(readFileSync(replyFile, 'utf8'))
     const profileArg = args.indexOf('--cli_dir_name')
     if (profileArg >= 0) {
       const { agentFile, settingsFile, logDir } = agyOffPaths(process.env.HOME, args[profileArg + 1])
@@ -31,11 +32,15 @@ const wire = serveAgent({
         settings: JSON.parse(readFileSync(settingsFile, 'utf8')),
       })
       mkdirSync(logDir, { recursive: true })
-      const failure = JSON.parse(readFileSync(replyFile, 'utf8')).agySettingsFailed
+      const failure = reply.agySettingsFailed
       writeFileSync(join(logDir, `acp-server-20261125_120000-${process.pid}.log`),
         failure ? AGY_SETTINGS_FAILED + ' fixture failure' : 'fixture settings loaded')
     }
     return { sessionId: 'aside-fixture', configOptions: modelOption(),
+      ...(reply.sessionModel === undefined ? {} : {
+        models: { currentModelId: reply.sessionModel,
+          availableModels: modelOption()[0].options.map(({ value, name }) => ({ modelId: value, name })) },
+      }),
       modes: { currentModeId: 'other',
         availableModes: ['other', mode].map(id => ({ id, name: id })) },
     }

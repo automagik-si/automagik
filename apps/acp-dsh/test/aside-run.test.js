@@ -58,6 +58,36 @@ test('Codex cwd, resolved default and read-only profile are checked before dispa
     'permission-profile:automagik-read-fixture')
 })
 
+test('R2-3 conflicting Codex current-model reports block private text', async t => {
+  const world = asideWorld(t, { reply: { sessionModel: 'gpt-5.5' } })
+  await world.ready()
+  let reads = 0
+  const result = await installed(world, { readPrompt: () => {
+    reads++
+    return { system: 'Fixture instructions.', text: 'Fixture prompt.' }
+  } }).catch(error => error.code)
+  assert.ok(world.events().some(row => row.event === 'new'), 'the fake session reported both models')
+  assert.deepEqual({ result, reads, prompts: world.events().filter(row => row.event === 'prompt').length },
+    { result: 'acp/aside-unavailable', reads: 0, prompts: 0 })
+  world.setReply({ sessionModel: 'gpt-6.2-sol' })
+  assert.deepEqual(await installed(world), { text: 'Fixture response.', model: 'gpt-6.2-sol' })
+})
+
+test('R2-5 Codex accepts legacy read-only with the checked model and scratch cwd', async t => {
+  const world = asideWorld(t, {
+    transform: launch => ({ ...launch,
+      profileModes: { 'read-only': 'permission-profile:automagik-read-fixture' } }),
+  })
+  await world.ready()
+  const result = await installed(world, { model: 'gpt-6.2-sol' }).catch(error => error.code)
+  const session = world.events().find(row => row.event === 'new')
+  assert.equal(session.cwd, world.contexts[0].cwd)
+  assert.ok(world.fake.calls.length > 0 && world.fake.calls.every(call => call.cwd === session.cwd))
+  assert.deepEqual({ result, modes: world.events().filter(row => row.event === 'mode').map(row => row.modeId),
+    models: world.events().filter(row => row.event === 'prompt').map(row => row.model) },
+  { result: { text: 'Fixture response.', model: 'gpt-6.2-sol' }, modes: ['read-only'], models: ['gpt-6.2-sol'] })
+})
+
 test('omp uses native-off arguments and sends negotiated session creation instructions', async t => {
   const world = asideWorld(t, { provider: 'acp-omp', system: true })
   await installed(world)
