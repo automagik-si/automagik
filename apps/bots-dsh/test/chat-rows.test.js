@@ -28,7 +28,7 @@ runInNewContext(bundle.outputFiles[0].text, {
   },
   queueMicrotask,
 })
-const { ChatRows, ThinkingRow, syncGroupChains } = module.exports
+const { ChatRows, SkillNoticeCell, ThinkingRow, syncGroupChains } = module.exports
 
 const roster = { byId: { b: { id: 'b', name: 'Writer' } }, roomsById: {} }
 const MINUTE = 60_000
@@ -43,6 +43,20 @@ test('a Bot\'s messages in a row are one block', () => {
     { kind: 'bot', text: 'three', time: 4 * MINUTE },
   ]
   assert.deepEqual(shape(ChatRows({ items, sessionId: 'b', roster, actions: {} })), ['EarlierUser', 'bot:one+two', 'EarlierUser', 'bot:three'])
+})
+
+test('the private Skills remedy is visible in current and earlier Bot chat', () => {
+  const kind = 'automagik-skill-notice'
+  const text = "The skill amber is not active on this Bot. Add it in the Bot's Details, under Skills."
+  const live = SkillNoticeCell({ node: { data: { source: { kind }, content: [{ type: 'text', text }] } } })
+  const [earlier] = ChatRows({ items: [{ kind, text }], sessionId: 'b', roster, actions: {} })
+  for (const cell of [live, earlier]) {
+    const rendered = cell.type(cell.props)
+    assert.equal(rendered.props.role, 'status')
+    assert.equal(rendered.children.join(''), text)
+  }
+  const other = SkillNoticeCell({ node: { data: { source: { kind: 'runtime-context' } } } })
+  assert.equal(other.type.name, 'CellEmpty')
 })
 
 test('a view row renders as a view card from its blueprint', () => {

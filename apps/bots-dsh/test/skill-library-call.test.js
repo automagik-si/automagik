@@ -124,7 +124,7 @@ test('Skills row 5: the separate DSH Auto reviewer receives ordinary typed histo
   assert.doesNotMatch(history.join('\n'), /CHECKED-BODY|MARKED-HISTORY-BODY|automagikSkill|automagik-skill|skillRequests|private-relay-name|is not active|load_skill/)
   const entries = history.map(JSON.parse)
   assert.ok(entries.some(entry => entry.role === 'user-instruction' && entry.source.kind === 'user'
-    && entry.content[0].text === 'Use the skill marker. /not-active'))
+    && entry.content[0].text === 'Use the skill marker.'))
   assert.ok(entries.some(entry => entry.role === 'fact' && entry.source.role === 'room'
     && entry.source.roomId === 'fixture-room' && entry.content[0].text === 'Ordinary group fact'))
   assert.equal(entries.at(-2).name, 'review_probe')
@@ -248,7 +248,7 @@ test('native autonomous load returns only the checked body and Remove preserves 
   const next = await f.run('a', user('/marker again'), true)
   const rows = next.sent.at(-1).messages
   assert.doesNotMatch(text(rows.filter(row => row.role === 'system')), /Description for marker/)
-  assert.deepEqual(rows.filter(row => row.source.kind === 'user').at(-1).content.map(part => part.text), ['/marker again'])
+  assert.deepEqual(rows.filter(row => row.source.kind === 'user').at(-1).content.map(part => part.text), ['again'])
   assert.ok(rows.some(row => row.role === 'user' && row.content.some(part => part.text === x.content)), 'earlier person use stayed')
   const tools = rows.filter(row => row.role === 'tool')
   assert.equal(tools[0].content[0].text, x.content, 'earlier autonomous use stayed')

@@ -54,7 +54,7 @@ import { AnsweredReply, WidgetDock, WIDGET_CSS } from './widget-cell.js'
 import { HandoffDock, HANDOFF_CSS } from './handoff-card.js'
 import { AppAccessDock, ComputerHandoffDock, ComputerIndicator, COMPUTER_CSS } from './computer.js'
 import { headerNavigation, installHeaderNavigation } from './header-navigation.js'
-import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
+import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, SkillNoticeCell, TurnTailCell, ToolCell } from './cells.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
 import { SETTINGS_CARD_CSS, setSettingsPages } from './settings-card.js'
@@ -1444,7 +1444,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => simpleOnly(() => shadow('conversation.chat.node', { key: 'compaction', priority: BOT_PRIORITY, locale: 'chat' }, CellEmpty)),
     // A Bot chat leaves DSH's context lines (tool updates, injected context) out; a Bot
     // message spliced in mid-turn gets an event line from the step that reads it instead.
-    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'context', priority: BOT_PRIORITY, locale: 'chat' }, CellEmpty)),
+    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'context', priority: BOT_PRIORITY, locale: 'chat' }, SkillNoticeCell)),
     ...(canDrawUserMessages() ? ['user', 'steering'].map(key => () => shadow('conversation.chat.node', { key, priority: BOT_PRIORITY, locale: 'chat', inject: face }, UserMessageCell)) : []),
     () => installPackCell('conversation.input.permission', 'permission'),
     () => simpleOnly(() => shadow('conversation.input.plan', { priority: BOT_PRIORITY }, Nothing)),

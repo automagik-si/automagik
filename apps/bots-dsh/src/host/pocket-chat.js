@@ -38,7 +38,7 @@
 //   own memory, manage its own scheduled tasks, and change its name and model without a chat
 //   subscription. Its permission level is shown read-only. Each check uses the current team lock
 //   and one fresh home registry snapshot.
-import { personParts, SKILL_NOTICE } from './skill-message.js'
+import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
 import { randomUUID } from 'node:crypto'
 import { isBotId } from '../shared/registry.js'
 import { guardGroupText, guardOffNoticeOf } from '../shared/guard-groups.js'
@@ -213,7 +213,7 @@ export function rowsOf(event, scope) {
       }
       // A person's prompt only: injected context (file notices, skills, reminders) is not chat.
       if (data.role !== 'user' || data.source?.kind !== 'user') return []
-      const content = personParts(data.content)
+      const content = chatPersonParts(data)
       const text = textOf(content)
       const blocks = blocksOf(content)
       return text.trim() || blocks

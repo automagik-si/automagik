@@ -525,6 +525,7 @@ export class AgentRun {
   prompt(prompt, onDelivered) {
     if (this.busy) throw new Error(`${this.spec.name} is still answering`)
     this.queue = []
+    this.promptSkillRefusals = new Set()
     this.reviews = { denied: 0, inRow: 0, last: undefined, after: false }
     this.promptEnded = false
     this.forbiddenToolSeen = false
@@ -1042,6 +1043,14 @@ export class AgentRun {
     permission?.answer(refusal(tool.refused, permission.options))
   }
 
+  refuseUnavailableSkill(tool) {
+    if (this.spec.provider !== 'acp-claude' || tool.retired === true || tool.structuredName !== 'Skill' ||
+        tool.mcp === true || tool.mcpServer !== undefined ||
+        !this.promptSkillRefusals?.has(tool.rawInput?.skill)) return false
+    this.refuse(tool.id, false)
+    return true
+  }
+
   /**
    * A skipped fork MCP call has no mirror to answer its question. An unanswerable question is
    * cancelled first. The bridge server's call gets `allow_once` when offered and is cancelled
@@ -1083,15 +1092,16 @@ export class AgentRun {
     if (tool === undefined) return Promise.resolve(CANCELLED)
     // The question's own title ("Run command?") names the question, not the call the card shows.
     const { title, ...details } = params.toolCall ?? {}
-    if (tool.retired !== true) {
-      this.changeTool(tool, { ...details, status: undefined })
-      try { this.spec.onAsked?.(tool) } catch {}
-    }
+    if (tool.retired !== true) this.changeTool(tool, { ...details, status: undefined })
     // The queued tool event is read after this synchronous handler: mark standalone approvals
     // before the adapter can turn one into a mirror card.
     if (params._meta?.is_mcp_tool_approval === true) {
       tool.mcp = true
       if (typeof params.toolCall?.rawInput?.serverName === 'string') tool.mcpServer = params.toolCall.rawInput.serverName
+    }
+    if (this.refuseUnavailableSkill(tool)) return Promise.resolve(refusal('rejected', params.options ?? []))
+    if (tool.retired !== true) {
+      try { this.spec.onAsked?.(tool) } catch {}
     }
     // The bridge's call is not the mirror's: acp-dsh answers this ACP request itself with
     // `allow-once` or cancels a question that offers no `allow_once`: never `allow_always`,

@@ -439,6 +439,21 @@ function checkedSkillContent(ctx, record, name, requested, content) {
     current.automagikSkill.botId === part.automagikSkill.botId && current.text === part.text ? [part] : []
 }
 
+function skillRequest(ctx, record, name, requested) {
+  if (name !== 'load_skill') return
+  const skills = ctx?.get?.('omniTeam')?.skillCalls
+  if (typeof skills?.unavailable !== 'string') return
+  // Capture the prompt's set now. A late result cannot close a native call in the next prompt.
+  const refused = record.promptSkillRefusals?.()
+  return {
+    available: () => !refused?.has(requested) && skills.load(record.sessionId, requested) !== undefined,
+    refuse: () => {
+      if (typeof requested === 'string') refused?.add(requested)
+      return { content: [{ type: 'text', text: skills.unavailable }], isError: true }
+    },
+  }
+}
+
 export class Backchannel {
   /**
    * @param {{ ctx: any, log?: (message: string) => void, reviewTimeoutMs?: number, stepWaitMs?: number }} options
@@ -491,9 +506,10 @@ export class Backchannel {
    * value. The host revokes it on session end, agent exit, fork or probe end.
    * `native`: the agent keeps its own tools (native-tools mode), so this bridge offers and runs
    * only DSH's extras, never a twin of one of them (NATIVE_TWIN_TOOLS).
-   * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean, native?: boolean }} options
+   * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean,
+   *   promptSkillRefusals?: () => Set<string> | undefined, native?: boolean, skillOnly?: boolean }} options
    */
-  mint({ sessionId, agent, name, promptRunning, native = false, skillOnly = false }) {
+  mint({ sessionId, agent, name, promptRunning, promptSkillRefusals, native = false, skillOnly = false }) {
     const credential = randomBytes(32).toString('hex')
     const record = {
       credential,
@@ -502,6 +518,7 @@ export class Backchannel {
       agent,
       name: name ?? 'agent',
       promptRunning,
+      promptSkillRefusals,
       native: native === true,
       skillOnly,
       generation: 0,
@@ -880,6 +897,7 @@ export class Backchannel {
     const authority = attachmentSignal === undefined ? record.abort.signal : AbortSignal.any([record.abort.signal, attachmentSignal])
     const ended = () => record.closed || authority.aborted
     if (ended()) return { revoked: true }
+    const skill = skillRequest(this.ctx, record, name, args?.name)
     const session = record.agent?.session
     const tools = this.ctx?.get?.('tools')
     if (session === undefined || tools?.execute === undefined) return error(`DSH tools are not available to ${record.name}.`)
@@ -906,13 +924,14 @@ export class Backchannel {
     }
     const offered = offeredTools(this.ctx, record.agent, { native: record.native, skillOnly: record.skillOnly })
     if (!offered.some((tool) => tool.name === name)) return error(`Tool "${name}" is not offered to this Session.`)
+    if (skill && !skill.available()) return skill.refuse()
     const raw = JSON.stringify(args ?? {})
     // A native background task or subagent finishing after its turn ends wakes Claude Code on its
     // own: there is no DSH step open and no DSH turn to wait for. Manual and Full run the extra
     // without a card (no loadable row exists outside a step); Auto refuses, because Auto review
     // reads a call from its step. A plain refusal here would be a silent dead end for the agent.
     if (openStepOf(session) === undefined && !betweenSteps(session) && record.promptRunning?.() !== true) {
-      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended })
+      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill })
     }
     const approval = this.ctx?.get?.('approval')
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
@@ -1003,6 +1022,9 @@ export class Backchannel {
     let answered = false
     const settle = async (resultContent, isError, rawInfo) => {
       const content = checkedSkillContent(this.ctx, record, name, args?.name, resultContent)
+      const terminal = skill && content.length === 0 && (!isError || (rawInfo === undefined && !skill.available()))
+        ? skill.refuse() : undefined
+      if (terminal) isError = true
       // The row is plain JSON with string fields: a tool's own error object is not trusted to be.
       const info = infoOf(rawInfo)
       // A result is written only into its call's own step, while that step is open. Once the
@@ -1044,7 +1066,9 @@ export class Backchannel {
           }
         }
       }
-      return {
+      // The terminal sentence is an MCP result only. The durable row carries
+      // an empty error, so a later replay never turns it into an instruction.
+      return terminal ?? {
         content: name === 'load_skill' ? content.map(({ text }) => ({ type: 'text', text }))
           : await contentOf(content, this.ctx?.get?.('attachments')),
         isError,
@@ -1061,6 +1085,7 @@ export class Backchannel {
     let timedOut = false
     let levelChanged = false
     try {
+      if (skill && !skill.available()) return await settle([], false)
       // Manual and every other asking level raise the one DSH dialog here. Auto does not: the
       // pipeline's pre-execute is auto-review's gate, and its ask (if any) is the one dialog.
       if (!level.full && !level.auto) {
@@ -1100,6 +1125,7 @@ export class Backchannel {
       if (ended()) return await revoked()
       // Stopped while it waited for its approval: nothing may start now.
       if (own.signal.aborted) return await cancelled()
+      if (skill && !skill.available()) return await settle([], false)
       if (level.auto) {
         // A level that stopped being Auto before dispatch would let this call run unreviewed.
         // The subscription below also watches while the review is pending; this re-check covers
@@ -1219,7 +1245,7 @@ export class Backchannel {
    * @param {any} record
    * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean }} call
    */
-  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended }) {
+  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill }) {
     const error = text => ({ content: name === 'load_skill' ? [] : [{ type: 'text', text }], isError: true })
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
     const session = record.agent?.session
@@ -1276,6 +1302,7 @@ export class Backchannel {
       }
       if (ended()) return { revoked: true }
       if (own.signal.aborted) return cancelled()
+      if (skill && !skill.available()) return skill.refuse()
       const settled = await tools.execute({ calls: [{ id, name, arguments: raw }], agent: record.agent, signal: stopped })
       if (ended()) return { revoked: true }
       if (own.signal.aborted) return cancelled()
@@ -1285,8 +1312,12 @@ export class Backchannel {
         return error('The tool returned no result.')
       }
       const info = result.isError === true ? (result.error?.info ?? (typeof result.error?.code === 'string' ? result.error : undefined)) : undefined
-      note(result.isError === true ? 'failed' : 'ran')
       const content = checkedSkillContent(this.ctx, record, name, name === 'load_skill' ? JSON.parse(raw)?.name : undefined, result.content ?? [])
+      if (skill && content.length === 0 && (result.isError !== true || !skill.available())) {
+        note('refused')
+        return skill.refuse()
+      }
+      note(result.isError === true ? 'failed' : 'ran')
       return {
         content: name === 'load_skill' ? content.map(({ text }) => ({ type: 'text', text }))
           : await contentOf(content, this.ctx?.get?.('attachments')),

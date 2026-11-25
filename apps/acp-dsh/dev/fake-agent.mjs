@@ -107,6 +107,7 @@ const SKIP_MCP = process.env.FAKE_ACP_SKIP_MCP === '1'
 const AUTH = process.env.FAKE_ACP_AUTH
 // A test can read what the client asked for (its servers, a fork, a close) from this file.
 const TRACE = process.env.FAKE_ACP_TRACE
+const SKILLS_PROBE = JSON.parse(process.env.FAKE_ACP_SKILLS_PROBE ?? 'null')
 const trace = (entry) => {
   if (TRACE === undefined) return
   try { appendFileSync(TRACE, `${JSON.stringify({ pid: process.pid, ...entry })}\n`) } catch {}
@@ -475,8 +476,47 @@ const implementation = {
     const said = prompt.filter(block => block.type === 'text').map(block => block.text).join(' ')
     const current = prompt.findLast(block => block.type === 'text')?.text ?? ''
     // What the client actually sent this turn (a replayed transcript, for a crossing).
-    trace({ event: 'prompt', sessionId, turns: session.turns, text: said })
+    trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    const probe = SKILLS_PROBE?.turns.find(({ text }) => prompt.some(block => block.text === text))
+    if (probe) {
+      const { claude } = SKILLS_PROBE
+      const options = [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'no', name: 'Reject', kind: 'reject_once' }]
+      const ask = async toolCall => (await conn.requestPermission({ sessionId, toolCall, options })).outcome
+      for (const [index, name] of probe.loads.entries()) {
+        const load = async retry => {
+          const toolCallId = `skills-${session.turns}-${index}-${retry}`
+          const operation = 'mcp__dsh__load_skill'
+          const toolCall = claude
+            ? { name: operation, title: operation, rawInput: { name }, _meta: { claudeCode: { toolName: operation } } }
+            : { title: 'mcp.dsh.load_skill', rawInput: { server: 'dsh', tool: 'load_skill', arguments: { name } }, _meta: { is_mcp_tool_call: true } }
+          Object.assign(toolCall, { toolCallId, kind: 'execute', status: 'pending' })
+          await update({ sessionUpdate: 'tool_call', ...toolCall })
+          if (claude) {
+            const outcome = await ask(toolCall)
+            if (outcome.optionId !== 'yes') return
+          }
+          const answer = await session.mcp.get('dsh').request('tools/call', { name: 'load_skill', arguments: { name } })
+          trace({ event: 'skills-load', sessionId, name, retry, answer })
+          await update({ sessionUpdate: 'tool_call_update', toolCallId, status: answer.isError ? 'failed' : 'completed' })
+          return answer
+        }
+        const answer = await load(false)
+        if (probe.retryEmpty && !answer?.isError) await load(true)
+      }
+      for (const [index, skill] of (probe.native ?? []).entries()) {
+        const toolCall = { toolCallId: `native-skill-${session.turns}-${index}`, name: 'Skill', title: 'Skill',
+          kind: 'other', status: 'pending', rawInput: { skill }, _meta: { claudeCode: { toolName: 'Skill' } } }
+        await update({ sessionUpdate: 'tool_call', ...toolCall })
+        const outcome = await ask(toolCall)
+        trace({ event: 'native-skill-permission', sessionId, skill, outcome })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId: toolCall.toolCallId,
+          status: outcome.optionId === 'yes' ? 'completed' : 'failed' })
+      }
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Fixture work completed.' } })
+      return { stopReason: 'end_turn' }
+    }
     // omp OFF exercises permission and notification independently. The permission
     // request comes first and neither refusal path sends a tool notification.
     if (/omp-permission-first/.test(said)) {

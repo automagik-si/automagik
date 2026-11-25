@@ -15,7 +15,7 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // The next part opens with the handoff package: the note, the latest messages word for
 // word, and where the rest is. Input that arrives meanwhile waits and moves along.
 // read_own_chat searches every part, the condensed messages included.
-import { personParts } from './skill-message.js'
+import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
 import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
 import { randomUUID } from 'node:crypto'
@@ -3672,12 +3672,14 @@ export function install(rt) {
       if (event.type !== 'user/message') continue
       const source = event.data?.source
       if (source?.kind === 'user') {
-        const content = personParts(event.data.content)
+        const content = chatPersonParts(event.data)
         const imageRefs = content.filter(block => block?.type === 'image' && block.attachment !== undefined)
           .map(block => ({ attachmentId: block.attachment.attachmentId, mime: block.attachment.mediaType ?? block.attachment.mime ?? block.attachment.mimeType, name: block.attachment.name }))
         const images = content.filter(block => block?.type === 'image').length
         const via = viaOf(source)
         stamp(event, { kind: 'user', text: textOf(content), ...(images > 0 ? { images } : {}), ...(imageRefs.length > 0 ? { imageRefs } : {}), ...(via ? { via } : {}), time: event.time })
+      } else if (source?.kind === SKILL_NOTICE) {
+        stamp(event, { kind: SKILL_NOTICE, text: textOf(event.data.content), time: event.time })
       } else if (source?.kind === REPLY_KIND) {
         const text = textOf(event.data.content)
         const reply = readReply(text)

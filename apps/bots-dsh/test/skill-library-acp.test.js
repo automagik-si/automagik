@@ -234,7 +234,7 @@ for (const provider of ['acp-claude', 'acp-codex', 'acp-antigravity', 'acp-omp']
       assert.ok(deniedText.endsWith(AGY_TOOLS_OFF_TEXT))
       assert.equal(live.bridge.closed, true)
     } else {
-      assert.match(deniedText, /The bridge said: \(no text\)/)
+      assert.match(deniedText, /The bridge said: No skill with that name is available to this Bot\./)
     }
     assert.doesNotMatch(f.events('prompt').at(-1).text, /Adds the file marker|CHECKED-ACP-BODY/)
     await f.run([answer(provider), user('/marker plain', skillPart('owner-a', skill))])
@@ -269,9 +269,10 @@ test('ACP rechecks mode after the tool executes and before sending its result', 
   const loaded = await f.run([user('codex-bridge load_skill {"name":"marker"}')])
   assert.equal(f.called(), true)
   assert.match(loaded.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''),
-    /The bridge said: \(no text\)/)
+    /The bridge said: No skill with that name is available to this Bot\./)
   const results = f.agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
   assert.deepEqual(results.at(-1).data.message.content, [])
+  assert.equal(results.at(-1).data.message.isError, true)
 })
 
 test('Skills row 1: Codex refork preserves the Skills-only bridge', { timeout: 15_000 }, async t => {

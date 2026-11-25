@@ -19,10 +19,11 @@ const automaticOf = records => records.filter(record => record.mode === AUTOMATI
 const keyOf = records => records.map(({ name, hash }) => `${name}:${hash}`).join(',')
 const catalogOf = records => records.map(({ name, description }) => `${name}: ${description}`).join('\n')
 const noticeText = name => `The skill ${name} is not active on this Bot. Add it in the Bot's Details, under Skills.`
+const SKILL_UNAVAILABLE = 'No skill with that name is available to this Bot.'
 const SKILLS_PROJECTED = Symbol('Skills projected')
 const DELIVERY_RECORD = 'plugin:automagik/skill-delivery'
 const marker = part => part?.automagikSkill?.kind === SKILL_SOURCE ? part.automagikSkill : undefined
-const REVIEW_SOURCE_FIELDS = ['automagikSkill', 'automagikSkillParsed', 'automagikSkillParts', 'skillRequests']
+const REVIEW_SOURCE_FIELDS = ['automagikSkill', 'automagikSkillParsed', 'automagikSkillParts', 'automagikSkillOriginalText', 'skillRequests']
 const skillToolName = name => name === SKILL_TOOL || name === `mcp__dsh__${SKILL_TOOL}`
 
 function reviewEntry(message) {
@@ -187,6 +188,23 @@ export function requestedSkills(parts) {
   return [...requests.values()]
 }
 
+function withoutInactiveGestures(text, inactive, existing) {
+  let result = ''
+  let offset = 0
+  for (const match of text.matchAll(GESTURE)) {
+    const name = (match[2] ?? match[3] ?? match[4]).toLowerCase()
+    if (!inactive.has(name) || (match[2] !== undefined && (reservedCommandOf(name) || existing.has(name)))) continue
+    const start = match.index + (match[1]?.length ?? 0)
+    const end = match.index + match[0].length
+    result += text.slice(offset, start)
+    offset = end
+    // Retain line breaks and avoid joining words or leaving doubled separators.
+    if (/[ \t]$/.test(result) && (end === text.length || /[\s.?!,;:]/.test(text[end]))) result = result.slice(0, -1)
+    if (result === '' && /[ \t]/.test(text[end] ?? '')) offset++
+  }
+  return result + text.slice(offset)
+}
+
 export function skillPart(botId, skill, use = 'person') {
   return { type: 'text', text: skill.content,
     automagikSkill: { kind: SKILL_SOURCE, botId, name: skill.name, hash: skill.hash, use } }
@@ -272,7 +290,7 @@ export function install(rt) {
         return []
       }
       const load = row.role === 'tool' && skillCalls.has(row.toolCallId)
-      const { automagikSkillParts, ...source } = row.source ?? {}
+      const { automagikSkillParts, automagikSkillOriginalText, ...source } = row.source ?? {}
       const parts = Array.isArray(automagikSkillParts)
         ? [...row.content, ...automagikSkillParts.filter(marker)] : row.content
       const content = parts?.filter(part => {
@@ -289,9 +307,12 @@ export function install(rt) {
         const skill = current.get(ref.name)
         return skill !== undefined && skill.hash === ref.hash && skill.content === part.text && (ref.use !== 'load' || skill.mode === AUTOMATIC_SKILL_MODE)
       })
-      if (automagikSkillParts === undefined && content?.length === row.content?.length) return [row]
+      const refused = load && row.isError !== true && content?.length === 0
+      if (!refused && automagikSkillParts === undefined && automagikSkillOriginalText === undefined && content?.length === row.content?.length) return [row]
       changed = true
-      return [{ ...row, content, ...(automagikSkillParts === undefined ? {} : { source }) }]
+      if (automagikSkillOriginalText && !content?.some(part => part.type !== 'text' || part.text.trim() !== '')) return []
+      return [{ ...row, content, ...(refused && { isError: true }),
+        ...(automagikSkillParts !== undefined || automagikSkillOriginalText !== undefined ? { source } : {}) }]
     })
     if (catalog && bot && automatic.length) {
       // Add the current section to the request's system prompt without recording a
@@ -348,6 +369,7 @@ export function install(rt) {
   rt.skillCalls = {
     available: sessionId => automaticOf(activeOf(rt, sessionId)).length > 0,
     load: (sessionId, name) => loadSkill(rt, sessionId, name),
+    unavailable: SKILL_UNAVAILABLE,
     catalog(sessionId) {
       const records = automaticOf(activeOf(rt, sessionId))
       return { key: keyOf(records), text: catalogOf(records) }
@@ -390,18 +412,40 @@ export function install(rt) {
 
     const records = new Map(activeOf(rt, agent.id).map(record => [record.name, record]))
     const modified = new Map()
+    const hostOnly = new Set()
     for (const { row, requests } of pending) {
       const parts = []
+      const inactive = new Set()
       for (const { name, slash: isSlash } of requests) {
         if (!skillName(name) || served.has(name) || (isSlash && row.source.kind === 'user' && existing.has(name))) continue
         const record = records.get(name)
         if (record) parts.push(skillPart(botId, record))
-        else notices.push({ name, roomId: row.source.roomId })
+        else {
+          inactive.add(name)
+          notices.push({ name, roomId: row.source.roomId })
+        }
       }
-      if (parts.length > 0) modified.set(row.id, {
-        // DSH title providers flatten person content directly from the event log.
-        // Keep the checked parts with the source until provider dispatch.
-        ...row, source: { ...row.source, automagikSkillParsed: true, automagikSkillParts: parts },
+      if (parts.length === 0 && inactive.size === 0) continue
+      const originalText = {}
+      let content = inactive.size === 0 ? row.content : row.content.map((part, index) => {
+        if (part.type !== 'text' || part.automagikSkill !== undefined) return part
+        const text = withoutInactiveGestures(part.text, inactive, row.source.kind === 'user' ? existing : served)
+        if (text === part.text) return part
+        if (row.source.kind === 'user') originalText[index] = part.text
+        return { ...part, text }
+      })
+      if (row.source.kind === 'user' && inactive.size && parts.length === 0 &&
+          content.every(part => part.type === 'text' && /^[\s.?!,;:]*$/.test(part.text))) {
+        hostOnly.add(row.id)
+        content = content.map(part => ({ ...part, text: '' }))
+      }
+      modified.set(row.id, {
+        // DSH titles read logged person content directly. The model projection
+        // receives checked parts at dispatch and strips the original wording.
+        ...row, content, source: { ...row.source, automagikSkillParsed: true,
+          ...(parts.length > 0 && { automagikSkillParts: parts }),
+          ...(Object.keys(originalText).length > 0 && { automagikSkillOriginalText: originalText }),
+        },
       })
     }
     if (!modified.size && !notices.length) return decision
@@ -414,10 +458,21 @@ export function install(rt) {
         source: { kind: SKILL_NOTICE, form: 'notice', summary: boundContextSummary(text) },
       }))
     }
+    if (hostOnly.size && decision.messages.every(row => hostOnly.has(row.id) || row.source?.kind === 'runtime-context')) {
+      for (const row of [...decision.messages.filter(row => hostOnly.has(row.id)).map(row => modified.get(row.id)), ...privateRows]) {
+        agent.session.append('user/message', row, { surfaceOp: 'append' })
+      }
+      // An empty first step completes the turn. An existing tool continuation
+      // can still finish the work that was already running when the person steered.
+      return { kind: 'enter', messages: [] }
+    }
     return { ...decision, messages: [...decision.messages.map(row => modified.get(row.id) ?? row), ...privateRows] }
   }, { prepend: true })
 
   ctx.on('tools/pre-execute', async function refuseSkillPatch(exec, next) {
+    if (exec.name === SKILL_TOOL && !loadSkill(rt, exec.agent?.id, exec.arguments?.name)) {
+      return { kind: 'deny', reason: SKILL_UNAVAILABLE }
+    }
     if (exec.name !== 'update_bot' || !Object.hasOwn(exec.arguments ?? {}, 'skills')) return next()
     await rt.skillLibrary?.refuse('update_bot', {}, 'bot')
     return { kind: 'deny', reason: 'Invalid arguments.' }

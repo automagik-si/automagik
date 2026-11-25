@@ -1355,6 +1355,7 @@ export class AcpAdapter extends LlmAdapter {
       agent: dshAgent,
       name: agent.name,
       promptRunning: () => live.open === true && live.run?.busy === true,
+      promptSkillRefusals: () => live.open && live.run?.busy ? live.run.promptSkillRefusals : undefined,
       native: live.twinsOff === true,
       skillOnly: previous?.skillOnly === true,
     })
@@ -2050,7 +2051,9 @@ export class AcpAdapter extends LlmAdapter {
             state.twinsOff = twinsOff
             if (bridged || skillOnly) {
               state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name,
-                promptRunning: () => state.open === true && state.run?.busy === true, native: twinsOff, skillOnly })
+                promptRunning: () => state.open === true && state.run?.busy === true,
+                promptSkillRefusals: () => state.open && state.run?.busy ? state.run.promptSkillRefusals : undefined,
+                native: twinsOff, skillOnly })
             }
             this.diagnostics?.started(sessionId, this, agent, state)
             const run = new AgentRun({
@@ -2615,6 +2618,7 @@ export class AcpAdapter extends LlmAdapter {
         // A subagent's nested call at Auto already ran through the pipeline inside its Agent
         // card's step: its card is written, so this queued update is not a second one.
         if (tool.cardExecuted !== undefined) continue
+        if (live.run.refuseUnavailableSkill(tool)) continue
         // A DSH tool call is not a mirror call: the bridge writes its rows and DSH draws the one
         // card from them. On `acp-codex` no structured name is proven, so any MCP call there is
         // left to the bridge too; its own tools keep their cards.
@@ -2636,6 +2640,7 @@ export class AcpAdapter extends LlmAdapter {
         }
         yield* shown()
         await settle(tool, DETAIL_WAIT_MS)
+        if (live.run.refuseUnavailableSkill(tool)) continue
         if (archived()) {
           yield* blocks.close()
           return yield finish('stop')

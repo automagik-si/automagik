@@ -22,6 +22,7 @@ import { call } from './api.js'
 import { failureClause } from './diagnostics.js'
 import { turnReasoning, thinkingStep, opensReply, stepActivity } from './turn-reasoning.js'
 import { parseReplies, relayRange, stackReplies } from '../shared/group-replies.js'
+import { SKILL_NOTICE } from '../host/skill-message.js'
 import { FOLD_AT, FOLD_HUGE, NEVER, stripLongNote, useFold } from './fold.js'
 import { noHover, useViewport, viewBottom } from './motion.js'
 import { heldCardKey } from './sources.js'
@@ -644,6 +645,7 @@ function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDel
     case 'divider': return h(PartLine, { key, time: row.time, switchedTo: row.switchedTo, roster })
     case GUARD_OFF_NOTICE: return h(UpgradeLine, { key: row.id, name: row.name, off: row.kind })
     case 'user': return h(EarlierUser, { key, row, actions })
+    case SKILL_NOTICE: return h(SkillNotice, { key, text: row.text })
     case 'answer': return h(AnsweredReply, { key, node: { data: row } })
     // A question or view card closed without an answer on it.
     case 'closed': return row.view === undefined
@@ -868,6 +870,15 @@ export function TurnProcessCell({ node, sessionId, turnProcess, useRoster, useUi
 
 export function Nothing() { return null }
 
+function SkillNotice({ text }) {
+  return h('div', { className: 'bt-event', role: 'status' }, hostText(text))
+}
+
+export function SkillNoticeCell({ node }) {
+  const { source, content } = node.data ?? {}
+  return source?.kind === SKILL_NOTICE ? h(SkillNotice, { text: contentText(content) }) : h(CellEmpty)
+}
+
 export { CellEmpty }
 
 // A pause longer than this splits the transcript with a time separator.
@@ -1050,9 +1061,7 @@ function useLiveNote(actions, sessionId, id, entry) {
 // for a reply that is not a member's message or the user's own line. `bot` is the
 // resolved member the reply names.
 function RelayEvent({ reply, bot, roster, sessionId, actions }) {
-  if (reply.kind === 'automagik-skill-notice') {
-    return h('div', { className: 'bt-event', role: 'status' }, hostText(reply.text))
-  }
+  if (reply.kind === SKILL_NOTICE) return h(SkillNotice, { text: reply.text })
   if (reply.kind === 'permission-stop') {
     return h('div', { className: 'bt-event bt-event-error', role: 'status', title: reply.why },
       t('{name} stopped on a permission: {why}', { name: bot.name, why: whyText(reply.why) }))

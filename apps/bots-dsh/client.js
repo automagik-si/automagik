@@ -20456,6 +20456,17 @@ function stackReplies(replies) {
   return items;
 }
 
+// src/host/skill-message.js
+var SKILL_SOURCE = "automagik-skill";
+var SKILL_NOTICE = "automagik-skill-notice";
+var SKILL_TOOL = "load_skill";
+var personParts = (content) => Array.isArray(content) ? content.filter((part) => part?.automagikSkill?.kind !== SKILL_SOURCE) : [];
+function chatPersonParts({ content, source }) {
+  const original = source?.automagikSkillOriginalText;
+  if (!original || !Array.isArray(content)) return personParts(content);
+  return personParts(content.map((part, index) => part?.type === "text" && typeof original[index] === "string" ? { ...part, text: original[index] } : part));
+}
+
 // src/client/fold.js
 var import_react46 = require("react");
 var FOLD_AT = { chars: 1500, lines: 25 };
@@ -21048,7 +21059,8 @@ var ViaTag = ({ via }) => (0, import_react48.createElement)("span", { className:
 function UserMessageCell({ node, sessionId, useRoster, actions, renderMessageImages, openFile, openSkill }) {
   const roster = useRoster((value) => value);
   const data = node.data ?? {};
-  const { text: text2, attachments, rest: rest2 } = contentParts(data.content);
+  const content = data.source?.automagikSkillOriginalText ? chatPersonParts(data) : data.content;
+  const { text: text2, attachments, rest: rest2 } = contentParts(content);
   const referenceLabels = data.referenceLabels ?? [];
   const references = openFile && openSkill ? { openFile, openSkill } : void 0;
   const steering = node.kind === "steering";
@@ -22663,6 +22675,8 @@ function chatRow(row2, key, { sessionId, selfId, roster, actions, useUi, onBtwDe
       return (0, import_react50.createElement)(UpgradeLine, { key: row2.id, name: row2.name, off: row2.kind });
     case "user":
       return (0, import_react50.createElement)(EarlierUser, { key, row: row2, actions });
+    case SKILL_NOTICE:
+      return (0, import_react50.createElement)(SkillNotice, { key, text: row2.text });
     case "answer":
       return (0, import_react50.createElement)(AnsweredReply, { key, node: { data: row2 } });
     // A question or view card closed without an answer on it.
@@ -22865,6 +22879,13 @@ function TurnProcessCell({ node, sessionId, turnProcess, useRoster, useUi, useTu
 function Nothing() {
   return null;
 }
+function SkillNotice({ text: text2 }) {
+  return (0, import_react50.createElement)("div", { className: "bt-event", role: "status" }, hostText(text2));
+}
+function SkillNoticeCell({ node }) {
+  const { source, content } = node.data ?? {};
+  return source?.kind === SKILL_NOTICE ? (0, import_react50.createElement)(SkillNotice, { text: contentText(content) }) : (0, import_react50.createElement)(CellEmpty);
+}
 var SEPARATOR_GAP_MS = 30 * 60 * 1e3;
 function nextTurnOf(turns, turn) {
   let next;
@@ -23029,9 +23050,7 @@ function useLiveNote(actions, sessionId, id, entry) {
   }, [sessionId, id, key]);
 }
 function RelayEvent({ reply, bot, roster, sessionId, actions }) {
-  if (reply.kind === "automagik-skill-notice") {
-    return (0, import_react50.createElement)("div", { className: "bt-event", role: "status" }, hostText(reply.text));
-  }
+  if (reply.kind === SKILL_NOTICE) return (0, import_react50.createElement)(SkillNotice, { text: reply.text });
   if (reply.kind === "permission-stop") {
     return (0, import_react50.createElement)(
       "div",
@@ -49674,7 +49693,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => simpleOnly(() => shadow("conversation.chat.node", { key: "compaction", priority: BOT_PRIORITY, locale: "chat" }, CellEmpty)),
     // A Bot chat leaves DSH's context lines (tool updates, injected context) out; a Bot
     // message spliced in mid-turn gets an event line from the step that reads it instead.
-    () => simpleOnly(() => shadow("conversation.chat.node", { key: "context", priority: BOT_PRIORITY, locale: "chat" }, CellEmpty)),
+    () => simpleOnly(() => shadow("conversation.chat.node", { key: "context", priority: BOT_PRIORITY, locale: "chat" }, SkillNoticeCell)),
     ...canDrawUserMessages() ? ["user", "steering"].map((key) => () => shadow("conversation.chat.node", { key, priority: BOT_PRIORITY, locale: "chat", inject: face }, UserMessageCell)) : [],
     () => installPackCell("conversation.input.permission", "permission"),
     () => simpleOnly(() => shadow("conversation.input.plan", { priority: BOT_PRIORITY }, Nothing)),

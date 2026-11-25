@@ -17,6 +17,7 @@ const inactive = { name: 'amber-notes', description: 'Write a concise amber note
 const explicit = `/${skill.name}`
 const automatic = 'Choose a workflow for the note.'
 const afterRemove = `Try /${skill.name} again.`
+const afterRemoveForModel = 'Try again.'
 const catalogLine = `${skill.name}: ${skill.description}`
 const notice = `The skill ${skill.name} is not active on this Bot. Add it in the Bot's Details, under Skills.`
 
@@ -63,7 +64,7 @@ test('Skills v2 owner and Bot flow from checked creation to removal', { timeout:
       } else {
         const id = prompt === automatic ? 'automatic-load' : 'removed-load'
         const called = messages.some(row => row.role === 'assistant' && row.content.some(part => part.type === 'tool-call' && part.id === id))
-        if (!called && (prompt === afterRemove || catalogSections(messages).includes(catalogLine))) {
+        if (!called && (prompt === afterRemoveForModel || catalogSections(messages).includes(catalogLine))) {
           yield { type: 'tool-call-delta', index: 0, id, name: 'load_skill', argumentsDelta: JSON.stringify({ name: skill.name }) }
           yield { type: 'finish', reason: { kind: 'tool-calls' } }
           return
@@ -181,12 +182,13 @@ test('Skills v2 owner and Bot flow from checked creation to removal', { timeout:
   const [removed, refused] = await turn(afterRemove, 'No active skill was loaded.', 2)
   for (const request of [removed, refused]) {
     assert.ok(!JSON.stringify(request.messages).includes(skill.description))
-    assert.deepEqual(texts(personRow(request.messages)), [afterRemove])
+    assert.deepEqual(texts(personRow(request.messages)), [afterRemoveForModel])
     assert.deepEqual(bodyLocations(request.messages), delivered, 'only the two delivered history blocks remain')
   }
   const staleResult = toolRow(refused.messages, 'removed-load')
   assert.ok(staleResult, 'the stale tool call reached the Bot tool boundary')
   assert.deepEqual(staleResult.content, [], 'the removed skill returned no fresh body')
+  assert.equal(staleResult.isError, true)
 
   const notices = bot.session.surface.nodes.map(seq => bot.session.eventAt(seq))
     .filter(event => event.type === 'user/message' && event.data.source?.kind === 'automagik-skill-notice')
@@ -194,4 +196,6 @@ test('Skills v2 owner and Bot flow from checked creation to removal', { timeout:
   assert.equal(notices[0].data.source.form, 'notice')
   assert.equal(notices[0].data.source.summary, notice)
   assert.deepEqual(texts(notices[0].data), [notice])
+  assert.deepEqual((await owner('chat', { botId })).items.filter(item => item.kind === 'automagik-skill-notice')
+    .map(item => item.text), [notice])
 })
