@@ -9,7 +9,7 @@
 import { guardGroupRefusal, refusal } from './refusal.js'
 import { guardGroupText } from '../shared/guard-groups.js'
 import { teamToolOf } from './approvals.js'
-import { cleanTrack, isExplicitWorkCall, isNotesWrite } from './review-mark.js'
+import { cleanTrack, isNotesWrite } from './review-mark.js'
 import { activeSolverLimit, limitWhat, solverTracked } from './solver-progress.js'
 import { reachesShell } from './tool-deny.js'
 
@@ -161,13 +161,18 @@ export function install(rt) {
     const acpRead = name === 'acp_tool' && args?.kind !== 'think'
       && ACP_OPEN_KINDS.has(args?.kind) && !commandInput
     const nativeCommand = name === 'acp_tool' ? nativeCheckCommand(args?.input) : undefined
+    const shellCommand = ['bash', 'pwsh', 'powershell'].includes(team) && typeof args?.command === 'string'
+      ? args.command.trim() : undefined
+    // The broader admission guard also covers launches, computer use and unknown shell-capable tools.
+    const compareResult = name === 'acp_tool'
+      ? args?.kind === 'execute' && args.image !== true && commandInput && !!trimmedCommand(args.input)
+      : !!shellCommand
     return {
       relevant: !notes && (checkCommand || (!review && !acpRead && !ATTEMPT_READS.has(team))),
       checkCommand,
-      compareResult: checkCommand && !isExplicitWorkCall(name, args),
+      compareResult,
       nativeCommand,
-      shellCommand: ['bash', 'pwsh', 'powershell'].includes(team) && typeof args?.command === 'string'
-        ? args.command.trim() : undefined,
+      shellCommand,
     }
   }
 

@@ -27,7 +27,7 @@ export const solverTracked = bot => bot != null && (isSolverBot(bot) || bot.revi
   || (typeof bot.instructions === 'string' && isWrittenSolverMethod(bot.instructions)))
 
 export function newProgress(origin) {
-  return { request: randomUUID(), origin, attempts: {}, replans: 0, revision: 0, runs: {}, replanRuns: {}, passed: [] }
+  return { request: randomUUID(), origin, attempts: {}, replans: 0, revision: 0, runs: {}, replanRuns: {}, passed: [], passRuns: {} }
 }
 
 export function cleanProgress(value) {
@@ -38,15 +38,16 @@ export function cleanProgress(value) {
   const plan = record(value.plan) && count(value.plan.revision) && listOfIds(value.plan.checks) ? value.plan : undefined
   const snapshot = fingerprint(value.snapshot) ? value.snapshot : undefined
   const passed = snapshot && plan && Array.isArray(value.passed) ? plan.checks.filter(check => value.passed.includes(check)) : []
+  const passRuns = Object.fromEntries(Object.entries(record(value.passRuns) ? value.passRuns : {})
+    .filter(([check, run]) => passed.includes(check) && id(run)))
   const limit = value.limit
   return {
-    request, origin, attempts, passed,
+    request, origin, attempts, passed, passRuns,
     ...(snapshot ? { snapshot } : {}),
     replans: count(value.replans) ? value.replans : 0,
     revision: count(value.revision) ? value.revision : 0,
     runs: record(value.runs) ? value.runs : {},
     replanRuns: record(value.replanRuns) ? value.replanRuns : {},
-    ...(value.legacyRunsStale === true ? { legacyRunsStale: true } : {}),
     ...(value.auto === true ? { auto: true } : {}),
     ...(plan ? { plan } : {}),
     ...(plan && record(value.pending) && id(value.pending.run) && listOfIds(value.pending.checks)
@@ -71,10 +72,8 @@ export const limitText = limit => `Attempt limit reached (${limitWhat(limit)}). 
 
 export function invalidateResult(progress) {
   progress.revision++
-  // Older passing reports lack a revision. Once invalidated, a later check
-  // at the same snapshot cannot make those reports current again.
-  progress.legacyRunsStale = true
   progress.passed = []
+  progress.passRuns = {}
   delete progress.snapshot
   delete progress.review
 }
@@ -211,9 +210,9 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
     if (JSON.stringify(args.results) !== (prior?.reported ?? prior)) return { text: 'This run ID already has different results.' }
     if (!prior?.unverified && Array.isArray(args.results) && args.results.every(item => item?.pass === true)) {
       const snapshot = prior?.evidence?.snapshot
-      const currentRevision = prior?.revision === undefined ? !progress.legacyRunsStale : prior.revision === progress.revision
-      if (!currentRevision || !snapshot || snapshot !== progress.snapshot
-        || args.results.some(({ check }) => !progress.passed.includes(check)) || snapshot !== snapshotOf?.()) {
+      // A legacy report without per-check ownership cannot establish a current replay.
+      if (prior?.revision !== progress.revision || !snapshot || snapshot !== progress.snapshot
+        || args.results.some(({ check }) => progress.passRuns[check] !== run) || snapshot !== snapshotOf?.()) {
         return { text: 'This passing report is stale. Start a new run on the current result.' }
       }
     }
@@ -293,12 +292,14 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
       if (!reason && snapshot !== evidence.snapshot) reason = 'The result changed between the outcome and the report.'
       if (reason) {
         progress.passed = progress.passed.filter(check => !pending.checks.includes(check))
+        for (const check of pending.checks) delete progress.passRuns[check]
         Object.assign(progress.runs[run], { unverified: true, reason })
         return { changed: true, text: missingPass(reason) }
       }
       progress.runs[run].revision = progress.revision
       progress.snapshot = snapshot
       progress.passed = [...new Set([...progress.passed, ...pending.checks])]
+      for (const check of pending.checks) progress.passRuns[check] = run
     }
   } else {
     return { text: 'Unknown progress action.' }

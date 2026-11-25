@@ -437,6 +437,59 @@ test('Stage 6 full chain keeps native check and review evidence through unchange
   const saved = JSON.parse(readFileSync(join(changed.host.home, 'state.json'), 'utf8')).bots.solver.reviewTrack.solver
   assert.deepEqual(saved.passed, [])
   assert.equal(saved.snapshot, undefined)
+
+  await t.test('a computer-use launch invalidates passes and review at admission', async sub => {
+    const launch = await nativeCheck(sub)
+    await pass(launch)
+    await launch.send('result')
+    const { host } = launch
+    const execute = host.ctx.listeners.get('tools/execute')[0]
+    assert.equal(await execute({
+      name: 'cua_driver_native__launch_app', arguments: { app: 'Fixture' },
+      agent: host.agentOf('solver'), callId: 'launch-app',
+    }, async () => {
+      const progress = launch.bot().reviewTrack.solver
+      assert.deepEqual(progress.passed, [])
+      assert.equal(progress.review, undefined)
+      return 'ran'
+    }), 'ran')
+  })
+
+  await t.test('a legacy run cannot borrow a later pass at the same snapshot', async sub => {
+    const legacy = await setup(sub)
+    const { request } = await reviewedPlan(legacy, ['check-a'])
+    const progress = () => legacy.rt.botOf('solver').reviewTrack.solver
+    const replay = run => legacy.progress('checks', { request, run, results: results() })
+    assert.match(await checked(legacy, request, 'legacy-a'), /^Recorded\./)
+    const snapshot = progress().snapshot
+    assert.equal(await legacy.execute('write', { file_path: 'out' }), 'ran')
+    // Pre-upgrade invalidation kept the old report without a revision or stale marker.
+    delete progress().runs['legacy-a'].revision
+    delete progress().legacyRunsStale
+    assert.match(await checked(legacy, request, 'current-a'), /^Recorded\./)
+    assert.equal(progress().snapshot, snapshot)
+    assert.match(await replay('legacy-a'), /stale.*start a new run/i)
+    assert.match(await replay('current-a'), /^Recorded\./)
+  })
+
+  await t.test('a run cannot borrow a replacement pass in the same revision', async sub => {
+    const retry = await setup(sub)
+    const { request } = await reviewedPlan(retry)
+    const progress = () => retry.rt.botOf('solver').reviewTrack.solver
+    const replay = (run, check) => retry.progress('checks', { request, run, results: results(check) })
+    assert.match(await checked(retry, request, 'old-a'), /^Recorded\./)
+    assert.match(await checked(retry, request, 'current-b', { check: 'check-b' }), /^Recorded\./)
+    const { revision, snapshot } = progress()
+    assert.match(await runCheck(retry, request, 'unverified-a', true), /no verified passing evidence/i)
+    assert.deepEqual(progress().passed, ['check-b'])
+    assert.match(await replay('old-a'), /stale.*start a new run/i)
+    assert.match(await checked(retry, request, 'current-a'), /^Recorded\./)
+    assert.equal(progress().revision, revision)
+    assert.equal(progress().snapshot, snapshot)
+    assert.match(await replay('old-a'), /stale.*start a new run/i)
+    assert.match(await replay('current-a'), /^Recorded\./)
+    assert.match(await replay('current-b', 'check-b'), /^Recorded\./)
+  })
 })
 
 test('LA-1 requires completed passing evidence on the same result', async t => {
