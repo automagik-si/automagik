@@ -6,7 +6,7 @@ const interrupted = exit => exit.signal != null || [
   'aborted', 'cancelled', 'canceled', 'interrupted', 'stopped', 'timed_out', 'timedOut',
 ].some(key => exit[key] != null && exit[key] !== false)
 
-export function observeTerminal(tool, update, sessionId) {
+export function observeTerminal(tool, update, sessionId, observedAt) {
   if (!tool.terminalEvidence && update.kind !== 'execute') return
   const evidence = tool.terminalEvidence ??= { sessionId }
   const conflict = reason => { evidence.reason ??= reason }
@@ -29,6 +29,11 @@ export function observeTerminal(tool, update, sessionId) {
       if (item?.type === 'terminal') bindTerminal(item.terminalId ?? null)
     }
   }
+  // Capture the first live terminal start on notification intake, before the mirror can drain.
+  if (status === 'in_progress' && evidence.start === undefined && evidence.exit === undefined
+    && meta?.terminal_exit === undefined && !['completed', 'failed'].includes(evidence.status)) {
+    evidence.start = { terminalId: evidence.terminalId, at: observedAt }
+  }
   if (status != null) {
     if (['completed', 'failed'].includes(evidence.status) && status !== evidence.status) {
       conflict('The ACP execute call reported conflicting completion states.')
@@ -49,8 +54,8 @@ export function observeTerminal(tool, update, sessionId) {
   }
 }
 
-export function terminalOutcome(live, tool, args, exec) {
-  const missing = reason => ({ reason })
+export function terminalResult(live, tool, args, exec) {
+  const missing = reason => ({ terminalOutcome: { reason } })
   const { run } = live
   const sessionId = exec.agent?.session?.id
   const callId = exec.callId
@@ -64,7 +69,7 @@ export function terminalOutcome(live, tool, args, exec) {
   const evidence = tool.terminalEvidence
   if (evidence?.reason) return missing(evidence.reason)
   if (!evidence?.exit) return missing('Trusted ACP terminal exit data is missing.')
-  const { cwd, command, terminalId, exit, status } = evidence
+  const { cwd, command, terminalId, exit, status, start } = evidence
   if (evidence.sessionId !== run.sessionId || !terminalId || terminalId !== exit.terminalId) {
     return missing('The ACP terminal exit does not match the execute call.')
   }
@@ -74,5 +79,8 @@ export function terminalOutcome(live, tool, args, exec) {
   if (status !== 'completed' && !(status === 'failed' && exit.exitCode !== 0)) {
     return missing('The ACP execute call did not reach a matching completion.')
   }
-  return { sessionId, callId, toolCallId: tool.id, terminalId, cwd, exitCode: exit.exitCode }
+  return {
+    terminalOutcome: { sessionId, callId, toolCallId: tool.id, terminalId, cwd, exitCode: exit.exitCode },
+    ...(start?.terminalId === terminalId ? { terminalStart: { observedAt: tool.observedAt, startedAt: start.at } } : {}),
+  }
 }

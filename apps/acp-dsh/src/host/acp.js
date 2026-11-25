@@ -762,6 +762,7 @@ export class AgentRun {
       }
       if (this.tools.get(update.toolCallId)?.retired === true) return
     }
+    const observedAt = isTool ? performance.now() : undefined
     switch (update?.sessionUpdate) {
       case 'agent_message_chunk': {
         const text = contentText(update.content)
@@ -776,10 +777,10 @@ export class AgentRun {
         break
       }
       case 'tool_call':
-        this.seeTool(update)
+        this.seeTool(update, observedAt)
         break
       case 'tool_call_update': {
-        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update)
+        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update, observedAt)
         if (tool !== undefined) this.changeTool(tool, update)
         break
       }
@@ -794,11 +795,11 @@ export class AgentRun {
     }
     if (isTool && isToolId(sessionId) && sessionId === this.sessionId) {
       const tool = this.tools.get(update.toolCallId)
-      if (tool !== undefined) observeTerminal(tool, update, sessionId)
+      if (tool !== undefined) observeTerminal(tool, update, sessionId, observedAt)
     }
   }
 
-  seeTool(update) {
+  seeTool(update, observedAt = performance.now()) {
     if (!isToolId(update?.toolCallId)) {
       this.ignored('a tool update', update)
       return undefined
@@ -816,7 +817,7 @@ export class AgentRun {
       return undefined
     }
     if (this.reviews?.last) this.reviews.after = true
-    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now() }
+    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now(), observedAt }
     // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
     const parent = parentToolOf(update)
     if (parent !== undefined && parent !== tool.id) tool.parent = parent

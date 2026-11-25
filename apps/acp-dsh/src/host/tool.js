@@ -9,7 +9,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { contentImages, contentText, isTerminal } from './acp.js'
 import { agentImageOf, isImageCall, isPng, KEPT_TEXT } from './agent-image.js'
 import { openStepOf } from './backchannel.js'
-import { terminalOutcome } from './terminal-evidence.js'
+import { terminalResult } from './terminal-evidence.js'
 
 export const TOOL_NAME = 'acp_tool'
 const DSH_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 'fetch', 'other'])
@@ -204,6 +204,7 @@ export function mirrorTool(host) {
           diffs: { type: 'json' },
           images: { type: 'json' },
           terminalOutcome: { type: 'json' },
+          terminalStart: { type: 'json' },
         },
       },
       render: (_args, value) => [
@@ -284,7 +285,7 @@ export function mirrorTool(host) {
         // with an image (a Read, a screenshot) keeps its own result, image blocks included.
         if (isImageCall(tool)) return await imageResult(host, live, tool, exec)
         const result = await resultOf(tool, host.attachments?.())
-        if (tool.kind === 'execute') result.terminalOutcome = terminalOutcome(live, tool, args, exec)
+        if (tool.kind === 'execute') Object.assign(result, terminalResult(live, tool, args, exec))
         return result
       } finally { live.mirrorBodies -= 1 }
     },

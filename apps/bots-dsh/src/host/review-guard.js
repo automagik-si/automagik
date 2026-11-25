@@ -103,10 +103,14 @@ const BASH_WRAPPER = /^(?:\/bin\/)?bash[ \t]+-lc(?=[ \t'"]|$)/
 const CD_PREFIX = /^cd(?=[ \t'"]|$)/
 const SINGLE_COMMAND = /^(?:'[^'\r\n]*'|"(?:\\[^\r\n]|[^"\\$\x60\r\n]|\$(?!\())*"|\\[^\r\n]|[^'"\\\x60;&|()<>\r\n\0])+$/
 
+function trimmedCommand(input) {
+  const command = input?.command ?? input?.cmd
+  return typeof command === 'string' ? command.trim() : undefined
+}
+
 function nativeCheckCommand(input) {
-  const actual = input?.command ?? input?.cmd
-  if (typeof actual !== 'string' || actual.trim() === '') return { reason: 'The ACP command input is missing or ambiguous.' }
-  let command = actual.trim()
+  let command = trimmedCommand(input)
+  if (!command) return { reason: 'The ACP command input is missing or ambiguous.' }
   if (BASH_WRAPPER.test(command)) {
     const match = /^(?:\/bin\/)?bash[ \t]+-lc[ \t]+(?:'([^'\r\n]*)'|"([^"$\x60\\\r\n]*)")$/.exec(command)
     if (!match) return { reason: 'The ACP shell wrapper is ambiguous.' }
@@ -186,8 +190,10 @@ export function install(rt) {
       return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Finish recording the current Solver progress before doing more work.` }
     }
     if ((name === 'acp_tool' || checkCommand) && track?.requested && !track.delivered && track.solver?.plan?.accepted === true && !pending) {
-      const command = nativeCommand ? nativeCommand.command : args?.command ?? args?.cmd
-      if (typeof command === 'string' && Object.values(track.solver.plan.commands ?? {}).includes(command.trim())) {
+      const raw = trimmedCommand(name === 'acp_tool' ? args?.input : args)
+      const normalized = nativeCommand?.command
+      const agreed = Object.values(track.solver.plan.commands ?? {})
+      if ((raw && agreed.includes(raw)) || (normalized && agreed.includes(normalized))) {
         return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Start a check run with solver_progress before running a command for the accepted plan.` }
       }
     }

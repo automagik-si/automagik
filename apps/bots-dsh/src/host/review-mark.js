@@ -40,6 +40,15 @@ function nativeOutcome(call, value) {
   return outcome
 }
 
+function nativeStartProblem(opened, request, pending, start) {
+  if (!opened || opened.request !== request || opened.run !== pending.run || opened.revision !== pending.revision
+    || !Number.isFinite(start?.observedAt) || !Number.isFinite(start?.startedAt) || start.startedAt < start.observedAt) {
+    return 'Trusted ACP native execution start ordering is missing for this Solver run.'
+  }
+  if (start.startedAt <= opened.at) return 'The ACP native execution started before this Solver run was open.'
+  if (start.observedAt <= opened.at) return 'The ACP execute call was queued before this Solver run was open.'
+}
+
 function effectiveCwd(cwd, directory) {
   if (typeof cwd !== 'string' || !isAbsolute(cwd)) return undefined
   try {
@@ -174,6 +183,8 @@ export function install(rt) {
     return true
   }
   const runningWork = new WeakMap()
+  // Native ACP start observations use this process's monotonic clock. A reloaded run needs a fresh start.
+  const nativeRunStarts = new WeakMap()
   // The record of the request in progress: { requested, requestAt, personAt, firstWorkAt,
   // lastWorkAt, verdicts, delivered, last }. `requested`: a person asked for something (a message
   // in its own chat, or the brief it was made with), so the next delivery answers it; a greeting
@@ -312,7 +323,11 @@ export function install(rt) {
       snapshotOf: () => snapshotOf(bot),
     })
     if (changed.changed) {
-      await saveProgress(bot, before, track.solver)
+      const onStart = args.action === 'start' ? () => {
+        const { request, pending: { run, revision } } = track.solver
+        nativeRunStarts.set(bot, { request, run, revision, at: performance.now() })
+      } : undefined
+      await saveProgress(bot, before, track.solver, undefined, onStart)
       if (args.action === 'auto' && autoInstructions.get(bot) === authority) autoInstructions.delete(bot)
     }
     return changed.text
@@ -423,8 +438,12 @@ export function install(rt) {
     const value = result?.isError === false ? result.value : undefined
     const outcome = nativeCall ? nativeOutcome(nativeCall, value) : value
     const command = nativeCommand ? nativeCommand.command : shellCommand
+    const startProblem = nativeCall && nativeStartProblem(nativeRunStarts.get(bot), request, pending, value?.terminalStart)
+    const directory = nativeCommand?.directory
+    // Bash can search CDPATH unless the operand is absolute or starts with a . or .. component.
+    const cdpathSensitive = directory !== undefined && !isAbsolute(directory) && !/^\.\.?(?:\/|$)/.test(directory)
     const folder = nativeCall ? effectiveCwd(folderOf(bot)) : folderOf(bot)
-    const cwd = nativeCall ? effectiveCwd(outcome?.cwd, nativeCommand?.directory) : outcome?.cwd
+    const cwd = nativeCall ? (cdpathSensitive ? undefined : effectiveCwd(outcome?.cwd, directory)) : outcome?.cwd
     const scope = typeof folder === 'string' && typeof cwd === 'string' && isAbsolute(cwd) ? relative(folder, cwd) : undefined
     const known = nativeCall ? Number.isInteger(outcome.exitCode)
       : outcome?.kind === 'foreground' && Number.isInteger(outcome.exitCode)
@@ -435,13 +454,16 @@ export function install(rt) {
     let reason = nativeCommand?.reason
     if (!reason && (!command || command !== agreed)) reason = 'The observed command does not match one agreed check.'
     if (!reason && !known) reason = outcome?.reason ?? 'A completed foreground check outcome is missing.'
+    if (!reason && startProblem) reason = startProblem
+    if (!reason && cdpathSensitive) reason = 'The check working directory depends on CDPATH and only the initial directory is known.'
     if (!reason && !scoped) reason = 'The check working directory could not be verified within the result root.'
     if (!reason && !pending.startSnapshot) reason = 'The pre-run result snapshot is unavailable.'
     if (!reason && !snapshot) reason = 'The result snapshot at completion is unavailable.'
     if (!reason && pending.startSnapshot !== snapshot) reason = 'The result changed between the start and the outcome.'
     if (!reason && revision !== progress.revision) reason = 'The Solver revision changed during the run.'
     if (reason) invalidateResult(progress)
-    progress.pending = { ...pending, evidence: { call, ...(known && command && command === agreed ? { pass: outcome.exitCode === 0 } : {}),
+    const verifiedOutcome = known && command && command === agreed && !startProblem && !cdpathSensitive
+    progress.pending = { ...pending, evidence: { call, ...(verifiedOutcome ? { pass: outcome.exitCode === 0 } : {}),
       ...(reason ? { reason } : { snapshot }) } }
     await saveProgress(bot, before, progress)
   }
