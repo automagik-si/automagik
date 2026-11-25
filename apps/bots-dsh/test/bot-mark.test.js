@@ -125,6 +125,17 @@ test('a Genie Bot wears its pet, and its clay face where a mark is too small for
   assert.match(SHELL_CSS, /\.bt-clay-genie\{[^}]*url\("data:image\/webp;base64,/)
 })
 
+test('a Bot whose plugin is not installed does not look idle or working', () => {
+  // A crew Bot with no plugin cannot run at all: no activity and no approval make it idle.
+  assert.equal(botState(false, undefined, false, { notInstalled: true }), 'not-installed')
+  assert.equal(botState(true, 'searching', true, { notInstalled: true }), 'not-installed')
+  // It is not the failed state either: a missing plugin is not a failed turn.
+  assert.equal(botState(false, undefined, false, { failed: true, notInstalled: true }), 'not-installed')
+  const badges = state => BotAvatar({ bot: { id: 'b', name: 'Writer', installed: false }, size: 36, state }).children.slice(1).filter(Boolean).map(child => child.props.className)
+  assert.deepEqual(badges('not-installed'), ['bt-badge bt-badge-missing'])
+  assert.match(SHELL_CSS, /\.bt-mark\[data-state=not-installed\]\{[^}]*grayscale/)
+})
+
 test('a Bot whose last turn failed looks sad, and one whose reply waits to be read looks it over', () => {
   assert.equal(botState(false, undefined, false, { failed: true }), 'failed')
   assert.equal(botState(false, undefined, false, { unread: true }), 'review')

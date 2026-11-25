@@ -21,7 +21,7 @@ import { AutoMissingNote, remoteOfBot, savedLevelOf, levelsOf, pickLevel, cliOfB
 import { reopenPermissionChoice } from './permission-card.js'
 import { BotConnectors } from './connectors.js'
 import { ComputerView } from './computer.js'
-import { addStrings, t } from './i18n.js'
+import { addStrings, hostText, t } from './i18n.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import { BotPills } from './capability-pills.js'
 import { GrantList } from './grants.js'
@@ -303,6 +303,9 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
   const running = useSessionStatus(map => map.get(part)?.running === true)
   const doing = useActivity(map => map[bot?.id ?? sessionId])
   const failed = useWork ? useWork(work => work.failed?.[bot?.id ?? ''] !== undefined) : false
+  // The plugin that runs a crew Bot is missing, switched off or did not load (installed.js).
+  const notInstalled = bot?.installed === false
+  const notInstalledText = notInstalled ? [t('Not installed'), bot.reason ? hostText(bot.reason) : ''].filter(Boolean).join(' · ') : ''
   const approval = useApproval(useWork, entry => entry.botId !== undefined && entry.botId === bot?.id)
   const transcript = useSessions(list => transcriptOf(list, part, bot?.name ?? room?.name ?? t('Bot'), roster.exchangeTurns[part]))
   const usage = useSessions(list => usageOf(list, [part, ...(bot?.parts ?? room?.parts ?? [])]))
@@ -358,7 +361,7 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
   const tabs = bot ? (roster.computer?.enabled === true ? ['details', 'browser', 'computer'] : ['details', 'browser']) : ['details']
   return [h(Fragment, { key: 'top' }, top),
     h('div', { key: 'id', className: 'bt-drawer-id', 'data-move': side },
-      bot ? h(BotAvatar, { bot, size: 64, state: botState(running, doing, roster.questions?.[part] !== undefined || approval, { failed }), main: isMainBot, badge: false, gaze: true, pokeable: true })
+      bot ? h(BotAvatar, { bot, size: 64, state: botState(running, doing, roster.questions?.[part] !== undefined || approval, { failed, notInstalled }), main: isMainBot, badge: false, gaze: true, pokeable: true })
         : h(MemberPile, { room, roster }),
       editing
         ? h('input', {
@@ -381,6 +384,7 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
       room && tab === 'details' ? h(GroupOverview, { room, roster, actions, usage, useWork, openSettings: () => setView('settings') }) : null,
       bot && tab === 'computer' ? h(ComputerView, { bot, actions, hooks: { useComputer } }) : null,
       bot && tab === 'details' ? [
+        notInstalledText ? h('div', { key: 'missing', className: 'bt-note bt-note-missing', role: 'status' }, notInstalledText) : null,
         h(RunStats, { key: 'stats', bot, part, running, actions }),
         h('div', { key: 'model', className: 'bt-drawer-model' },
           h('div', { className: 'bt-section-title' }, t('Model')),

@@ -255,7 +255,7 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
     title: away ? name : undefined,
     onClick: () => (away ? selectView('chat') : memoryNotice ? actions.openMemory(changed) : actions.toggleDetails(sessionId)),
   },
-    bot ? h(BotAvatar, { bot, size: 24, state: botState(running, doing, roster.questions?.[currentPart(bot)] !== undefined || approval), badge: false })
+    bot ? h(BotAvatar, { bot, size: 24, state: botState(running, doing, roster.questions?.[currentPart(bot)] !== undefined || approval, { installed: bot.installed }), badge: false })
       : room ? h(RoomAvatar, { room, roster, size: 24 }) : null,
     goalShown
       ? h('span', { className: 'bt-pill-swap' },

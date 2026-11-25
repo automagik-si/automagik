@@ -89,7 +89,11 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const away = !running && groups.length > 0
   const failed = useWork ? useWork(work => work.failed?.[id] !== undefined) : false
   const replied = useSessionStatus(map => map.get(part)?.completionUnread === true) && !active
-  const state = botState(running || away, doing, alert, { failed, unread: replied })
+  // A crew Bot whose plugin is missing, switched off or did not load cannot run at all
+  // (installed.js in the host): it is not an idle Bot, and its row says why.
+  const notInstalled = bot.installed === false
+  const notInstalledText = notInstalled ? [t('Not installed'), bot.reason ? hostText(bot.reason) : ''].filter(Boolean).join(' · ') : ''
+  const state = botState(running || away, doing, alert, { failed, unread: replied, notInstalled })
   // A Bot running in its own chat previews what it is doing, like a group's row.
   const runningLine = running && doing ? doingLine(doing) : null
   const awayLine = away ? workLine(roster.roomsById[groups[0].id]?.name ?? t('a group chat'), groups[0], groups.length - 1) : null
@@ -108,7 +112,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const pinned = bot.pinned === true && !crowned
   const role = crowned ? bot.role : ''
   const tag = roleTagOf(bot, roster.prefs, roster, t)
-  const label = [bot.name, tag, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
+  const label = [bot.name, tag, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', notInstalled ? notInstalledText : running || away ? t('Working') : '', notInstalled ? '' : waitsFor, notInstalled ? '' : stoppedLine, notInstalled ? '' : approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: crowned ? 'bt-row bt-row-crowned' : 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
     'data-bot-id': id, title: wide ? undefined : bot.name,

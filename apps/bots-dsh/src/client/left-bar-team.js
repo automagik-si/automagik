@@ -2,7 +2,7 @@ import { createElement as h, Fragment, useEffect, useLayoutEffect, useRef, useSt
 import { BotMark, lookOf, petOf, useBaked } from './mark.js'
 import { PetSprite } from './pet.js'
 import { BODY, CELL, FLOOR } from './pet-poses.js'
-import { t } from './i18n.js'
+import { hostText, t } from './i18n.js'
 import { botChannelSource } from './extend.js'
 import { QUIET, Status, WORDED, stateOfStatus, statusOr, word, worstStatus } from './left-bar-status.js'
 
@@ -36,6 +36,9 @@ const chatStatuses = bot => (bot.channels ?? []).flatMap(channel => (channel.cha
 // row, or its folded channel's, is where the owner goes.
 export function botRowStatus(bot) {
   const status = statusOr(bot.status)
+  // A Bot whose plugin is not installed cannot answer: that outranks a folded channel asking
+  // for the person, which still says so on its own row.
+  if (status === 'not-installed') return status
   if (status === 'needs' && chatStatuses(bot).includes('needs')) return 'idle'
   // A closed Bot's chats are not read yet; a channel that needs the person still reaches the
   // row he sees all day, so it is not only one line down and inside a Bot he did not open.
@@ -262,7 +265,8 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
   const edges = useScrollEdges(ref, rows.length)
   const press = row => (onOpen && !row.bot?.remote ? () => onOpen(row) : undefined)
   // A remote row's tag says why it is inert, so its status is the ring alone: the name keeps its room.
-  const status = row => h(Status, { status: row.status, worded: row.bot?.remote ? [] : worded, quiet: row.bot?.seat ? [] : quiet })
+  // `detail` carries the installation reason a crew Bot's row adds to its status (#1771).
+  const status = (row, detail = '') => h(Status, { status: row.status, worded: row.bot?.remote ? [] : worded, quiet: row.bot?.seat ? [] : quiet, detail })
   const button = (row, className, extra, ...children) => h('button', {
     key: row.key, type: 'button', className: classes('lb-row', className), 'data-kind': row.kind, 'data-id': row.id,
     'aria-current': row.key === current ? 'page' : undefined, onClick: press(row), onMouseEnter: row.bot?.remote ? undefined : nameIfCut,
@@ -278,13 +282,16 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
         'aria-disabled': true,
         title: t('This Bot is on {machine}. It opens here once the link to that computer is scoped.', { machine: row.bot.machine }),
       } : null
-      return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), extra,
+      // Keep the button's name from its contents (including role and unread activity).
+      // The missing plugin's reason describes the row and remains on the status mark.
+      const reason = row.bot?.installed === false && typeof row.bot.reason === 'string' ? hostText(row.bot.reason) : ''
+      return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), { ...extra, 'aria-description': reason || undefined },
         h('span', { className: 'lb-art' }, renderArt(row.bot, art, state)),
         h('span', { className: 'lb-name' }, row.name),
         tag ? h('span', { className: 'bt-tag' }, tag) : null,
         row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,
         renderEnd ? renderEnd(row) : null,
-        status(row))
+        status(row, reason))
     }
     if (row.kind === 'channel') {
       return button(row, classes('lb-row-channel', row.unread && 'lb-row-unread'), { 'aria-expanded': !row.folded },

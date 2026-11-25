@@ -1174,6 +1174,7 @@ var ZH2 = {
   "Waiting for {names}": "等 {names} 交回",
   "Unread activity": "有未读",
   "Not read yet": "未读",
+  "Not installed": "未安装",
   Search: "搜索",
   "New chat": "新对话",
   "Back to chat": "返回对话",
@@ -4066,6 +4067,11 @@ Object.assign(ZH2, {
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?": "{name} 在本轮被拒绝了 {count} 次，最近一次是 {tool}。让它继续工作吗？",
   "Let it keep working?": "让它继续工作吗？",
   "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。",
+  // The roster's not-installed reasons (installed.js), worded with the plugin or its error code.
+  "the {name} plugin is missing from this DSH": "这个 DSH 里没有 {name} 插件",
+  "the {name} plugin is switched off in this DSH": "这个 DSH 里已关闭 {name} 插件",
+  "the {name} plugin did not load in this DSH": "{name} 插件在这个 DSH 里没有加载",
+  "the {name} plugin did not load in this DSH ({code})": "{name} 插件在这个 DSH 里没有加载（{code}）",
   // Claude Code's native subagents as workers under a Bot's row (native-workers.js, issue 1564).
   "Subagents {name} started": "{name} 启动的子代理",
   "{step}…": "{step}…",
@@ -4082,7 +4088,6 @@ Object.assign(ZH2, {
   "Official": "官方",
   "Install": "安装",
   "Installed": "已安装",
-  "Not installed": "未安装",
   "State": "状态",
   "SAMPLE DATA": "示例数据",
   "Included with Automagik": "随 Automagik 提供",
@@ -4283,6 +4288,12 @@ var HOST_TEMPLATES = [
   { template: "Session {session} cannot join {bot} because this window cannot change the Bot team now. {reason}", host: ["reason"] },
   '{bot} changed while Session {session} was joining it (another window or an edit). For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.',
   '{bot} changed while Session {session} was being saved. For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.',
+  // The roster's not-installed reasons (installed.js): the plugin name, and the load error's
+  // code when DSH gave one, are values in the message.
+  "the {name} plugin is missing from this DSH",
+  "the {name} plugin is switched off in this DSH",
+  "the {name} plugin did not load in this DSH ({code})",
+  "the {name} plugin did not load in this DSH",
   // Auto's refusals that name the Bot (auto.js setBotAuto).
   "{name}'s permissions changed meanwhile, so nothing was saved. Look again and choose.",
   "Auto is not offered for {name} here."
@@ -6396,6 +6407,7 @@ var ROW_OF_STATE = Object.freeze({
   review: "review",
   done: "jumping",
   failed: "failed",
+  "not-installed": "idle",
   poked: "waving",
   sleeping: "idle"
 });
@@ -6470,10 +6482,11 @@ function useLook(ref, enabled2) {
 function PetSprite({ pet, size, state: state2 = "idle", live = false, gaze = false, onOnce }) {
   const ref = (0, import_react6.useRef)(null);
   const asleep = state2 === "sleeping" && pet.sleep !== void 0;
+  const off = state2 === "not-installed";
   const row2 = petRowOf(state2);
   const [frame, setFrame] = (0, import_react6.useState)(0);
   const look = useLook(ref, live && gaze && pet.version === 2);
-  const resting = row2 === "idle" && !asleep;
+  const resting = row2 === "idle" && !asleep && !off;
   const direction = resting && look !== void 0 ? look : void 0;
   const onceRef = (0, import_react6.useRef)(onOnce);
   onceRef.current = onOnce;
@@ -6481,7 +6494,7 @@ function PetSprite({ pet, size, state: state2 = "idle", live = false, gaze = fal
     setFrame(0);
   }, [row2, asleep]);
   (0, import_react6.useEffect)(() => {
-    if (!live || direction !== void 0) return void 0;
+    if (!live || off || direction !== void 0) return void 0;
     const { ms } = asleep ? SLEEP : ROWS[row2];
     if (quiet()) {
       if (asleep || !ONCE.includes(row2)) return void 0;
@@ -6498,7 +6511,7 @@ function PetSprite({ pet, size, state: state2 = "idle", live = false, gaze = fal
       setFrame(next % ms.length);
     }, ms[frame % ms.length] * slow);
     return () => clearTimeout(timer);
-  }, [live, row2, asleep, frame, direction, state2]);
+  }, [live, off, row2, asleep, frame, direction, state2]);
   const scale = size / CELL.height;
   const width = CELL.width * scale;
   const cell = cellOf(row2, frame, direction);
@@ -6623,9 +6636,9 @@ function genieTint(color) {
 
 // src/client/mark.js
 var import_react7 = require("react");
-var STATES = ["idle", "thinking", "searching", "working", "sending", "orbit", "waiting", "alert", "done", "failed", "review", "sleeping"];
+var STATES = ["idle", "thinking", "searching", "working", "sending", "orbit", "waiting", "alert", "done", "failed", "review", "not-installed", "sleeping"];
 var WORK = ["thinking", "searching", "working", "sending", "orbit"];
-var botState = (running2, activity, alert, { failed = false, unread = false } = {}) => alert ? "alert" : running2 ? WORK.includes(activity) ? activity : "working" : failed ? "failed" : activity === "waiting" ? "waiting" : unread ? "review" : "idle";
+var botState = (running2, activity, alert, { failed = false, unread = false, notInstalled = false, installed } = {}) => notInstalled === true || installed === false ? "not-installed" : alert ? "alert" : running2 ? WORK.includes(activity) ? activity : "working" : failed ? "failed" : activity === "waiting" ? "waiting" : unread ? "review" : "idle";
 var toolState = (name) => /^(message_bot|stop_bot|create_bot|update_bot|delete_bot|create_group|update_group|delete_group|post_to_group)$/.test(name) ? "sending" : /search|fetch|browse|read|grep|glob|list|recall/i.test(name) ? "searching" : "working";
 function useGaze(ref, enabled2) {
   (0, import_react7.useEffect)(() => {
@@ -6817,13 +6830,18 @@ function Crown() {
 function BotAvatar({ bot, look, size, state: state2 = "idle", count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state2);
   if (bot === void 0) return (0, import_react7.createElement)(BotMark, { size });
-  const badgeKind = !badge ? null : state2 === "alert" ? "alert" : WORK.includes(state2) ? "working" : admin ? "admin" : main && !crown ? "main" : null;
+  const badgeKind = !badge ? null : state2 === "not-installed" ? "missing" : state2 === "alert" ? "alert" : WORK.includes(state2) ? "working" : admin ? "admin" : main && !crown ? "main" : null;
   return (0, import_react7.createElement)(
     "span",
     { className: "bt-mark", style: { width: size, height: size, "--bt-size": `${size}px` } },
     (0, import_react7.createElement)(BotMark, { bot, look, size, state: settled ? "done" : state2, live, gaze, pokeable }),
     crown ? (0, import_react7.createElement)(Crown) : null,
     badgeKind === "working" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-working", "aria-label": t("Working"), role: "img" }) : null,
+    badgeKind === "missing" ? (0, import_react7.createElement)(
+      "span",
+      { className: "bt-badge bt-badge-missing", "aria-label": t("Not installed"), role: "img" },
+      (0, import_react7.createElement)("svg", { viewBox: "0 0 12 12", "aria-hidden": true }, (0, import_react7.createElement)("circle", { cx: 6, cy: 6, r: 4.2, fill: "none", stroke: "currentColor", strokeWidth: 1.6 }), (0, import_react7.createElement)("path", { d: "M3.4 3.4l5.2 5.2", stroke: "currentColor", strokeWidth: 1.6 }))
+    ) : null,
     badgeKind === "alert" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-alert", "aria-label": count > 0 ? count === 1 ? t("1 approval waiting") : t("{count} approvals waiting", { count }) : t("Waiting for your answer"), role: "img" }, count > 0 ? count > 9 ? "9+" : String(count) : "?") : null,
     badgeKind === "admin" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-admin", "aria-label": t("Admin"), role: "img" }, (0, import_react7.createElement)(StarIcon)) : null,
     badgeKind === "main" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-main", "aria-label": t("Main Bot"), role: "img" }, (0, import_react7.createElement)(MainStar)) : null
@@ -24138,6 +24156,10 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .bt-badge-main path{fill:var(--bt-star);stroke:var(--bt-sidebar);stroke-width:2.6;stroke-linejoin:round;paint-order:stroke}
 .bt-badge-alert{background:color-mix(in srgb,var(--bt-accent) 78%,var(--bt-sidebar));color:var(--bt-accent-ink,#fff);font-size:8.5px;line-height:12px;font-weight:600;font-family:var(--bt-font)}
 .bt-badge-working{background:color-mix(in srgb,var(--bt-green) 82%,var(--bt-sidebar));width:8px;height:8px;right:1px;bottom:1px}
+.bt-badge-missing{background:color-mix(in srgb,var(--bt-ink-3) 82%,var(--bt-sidebar));color:var(--bt-sidebar)}
+.bt-badge-missing svg{width:8px;height:8px}
+.bt-mark[data-state=not-installed]{filter:grayscale(1);opacity:.62}
+.bt-mark[data-state=not-installed] :is(.bt-b,.bt-eye,.bt-eyes,.bt-pet-cell){animation:none!important}
 .bt-cluster{position:relative;display:inline-block;flex:none;line-height:0}
 .bt-cluster>*{position:absolute}
 .bt-cluster-more,.bt-cluster-you{display:inline-flex;align-items:center;justify-content:center;border-radius:50%;background:var(--bt-active);color:var(--bt-ink-3);font-family:var(--bt-font);font-weight:500;line-height:1;font-variant-numeric:tabular-nums}
@@ -24490,6 +24512,7 @@ html[data-windows-titlebar]:not([data-fullscreen]) :is(.bt-pane,.bt-panel)::befo
 .bt-input:focus{border-color:var(--bt-line-2)}
 .bt-input-area{height:auto;min-height:96px;padding:8px 10px;line-height:18px;resize:vertical}
 .bt-note{font-size:12px;line-height:16px;color:var(--bt-ink-3)}
+.bt-note-missing{color:var(--bt-ink-2)}
 .bt-soft-sm{height:28px;padding:0 12px;font-size:12px}
 .bt-set-avatar{display:flex;justify-content:center;padding:4px 0}
 .bt-avatar-anchor{position:relative}
@@ -25533,7 +25556,7 @@ body{--bt-return-fill:rgba(127,127,127,.08);--bt-return-fill-hover:rgba(127,127,
 
 // src/client/left-bar-status.js
 var import_react51 = require("react");
-var STATUSES = Object.freeze(["working", "needs", "idle", "error", "off"]);
+var STATUSES = Object.freeze(["working", "needs", "idle", "error", "off", "not-installed"]);
 var statusOr = (status) => STATUSES.includes(status) ? status : "idle";
 var SAID = {
   working: () => t("Working"),
@@ -25541,6 +25564,7 @@ var SAID = {
   error: () => t("Error"),
   idle: () => t("Idle"),
   off: () => t("Not running"),
+  "not-installed": () => t("Not installed"),
   team: () => t("Team"),
   projects: () => t("Spaces"),
   add: () => t("Create or join a space"),
@@ -25548,13 +25572,14 @@ var SAID = {
 };
 var WORDS = Object.freeze(Object.keys(SAID));
 var word = (name) => SAID[name]();
-var WORDED = Object.freeze(["needs", "off"]);
+var WORDED = Object.freeze(["needs", "off", "not-installed"]);
 var QUIET = Object.freeze(["idle"]);
-var FIRST = ["needs", "error", "working"];
+var FIRST = ["needs", "error", "not-installed", "working"];
 var worstStatus = (statuses) => FIRST.find((status) => statuses.includes(status)) ?? "idle";
 var OF_STATE = Object.freeze({
   alert: "needs",
   failed: "error",
+  "not-installed": "not-installed",
   thinking: "working",
   searching: "working",
   working: "working",
@@ -25563,7 +25588,7 @@ var OF_STATE = Object.freeze({
   waiting: "working"
 });
 var statusOfState = (state2) => OF_STATE[state2] ?? "idle";
-var STATE_OF = Object.freeze({ working: "working", needs: "alert", error: "failed" });
+var STATE_OF = Object.freeze({ working: "working", needs: "alert", error: "failed", "not-installed": "not-installed" });
 var stateOfStatus = (status) => STATE_OF[status] ?? "idle";
 var ring = () => [(0, import_react51.createElement)("circle", { key: "ring", cx: 6, cy: 6, r: 3.75, fill: "none", stroke: "currentColor", strokeWidth: 1.5 })];
 var SHAPES2 = {
@@ -25580,22 +25605,27 @@ var SHAPES2 = {
     (0, import_react51.createElement)("path", { key: "glyph", className: "lb-mark-glyph", d: "M4 4l4 4M8 4l-4 4", fill: "none", strokeWidth: 1.7, strokeLinecap: "round" })
   ],
   idle: ring,
-  off: ring
+  off: ring,
+  "not-installed": () => [
+    (0, import_react51.createElement)("circle", { key: "ring", cx: 6, cy: 6, r: 4.5, fill: "none", stroke: "currentColor", strokeWidth: 1.4, strokeDasharray: "2 2.2" }),
+    (0, import_react51.createElement)("path", { key: "slash", d: "M3.2 8.8l5.6-5.6", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round" })
+  ]
 };
-function StatusMark({ status, named = true }) {
+function StatusMark({ status, named = true, detail = "" }) {
   const kind = statusOr(status);
-  const says = word(kind);
+  const says = detail === "" ? word(kind) : `${word(kind)} · ${detail}`;
   return (0, import_react51.createElement)("span", {
     className: `lb-mark lb-mark-${kind}`,
     "data-status": kind,
     ...named ? { role: "img", "aria-label": says, title: says } : { "aria-hidden": true }
   }, (0, import_react51.createElement)("svg", { viewBox: "0 0 12 12", "aria-hidden": true, focusable: "false" }, ...SHAPES2[kind]()));
 }
-function Status({ status, worded = WORDED, quiet: quiet2 = QUIET }) {
+function Status({ status, worded = WORDED, quiet: quiet2 = QUIET, detail = "" }) {
   const kind = statusOr(status);
   if (quiet2.includes(kind)) return null;
-  if (!worded.includes(kind)) return (0, import_react51.createElement)(StatusMark, { status: kind });
-  return (0, import_react51.createElement)("span", { className: `lb-st lb-st-${kind}`, "data-status": kind }, (0, import_react51.createElement)(StatusMark, { status: kind, named: false }), word(kind));
+  const says = detail === "" ? word(kind) : `${word(kind)} · ${detail}`;
+  if (!worded.includes(kind)) return (0, import_react51.createElement)(StatusMark, { status: kind, detail });
+  return (0, import_react51.createElement)("span", { className: `lb-st lb-st-${kind}`, "data-status": kind, title: says }, (0, import_react51.createElement)(StatusMark, { status: kind, named: false }), word(kind));
 }
 
 // src/client/left-bar-faces.js
@@ -26555,6 +26585,7 @@ var chatStatusOf = (chat) => statusOr(CHAT_STATUS[chat?.status] ?? chat?.status)
 var chatStatuses = (bot) => (bot.channels ?? []).flatMap((channel) => (channel.chats ?? []).map(chatStatusOf));
 function botRowStatus(bot) {
   const status = statusOr(bot.status);
+  if (status === "not-installed") return status;
   if (status === "needs" && chatStatuses(bot).includes("needs")) return "idle";
   const channels = bot.channels ?? [];
   const closed = channels.length > 0 && channels.every((channel) => channel.chats === void 0);
@@ -26726,7 +26757,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
   const { art, duo } = useArtSizes(ref, skin, rows2.length);
   const edges = useScrollEdges(ref, rows2.length);
   const press = (row2) => onOpen && !row2.bot?.remote ? () => onOpen(row2) : void 0;
-  const status = (row2) => (0, import_react58.createElement)(Status, { status: row2.status, worded: row2.bot?.remote ? [] : worded, quiet: row2.bot?.seat ? [] : quiet2 });
+  const status = (row2, detail = "") => (0, import_react58.createElement)(Status, { status: row2.status, worded: row2.bot?.remote ? [] : worded, quiet: row2.bot?.seat ? [] : quiet2, detail });
   const button2 = (row2, className, extra, ...children) => (0, import_react58.createElement)("button", {
     key: row2.key,
     type: "button",
@@ -26751,16 +26782,17 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
         "aria-disabled": true,
         title: t("This Bot is on {machine}. It opens here once the link to that computer is scoped.", { machine: row2.bot.machine })
       } : null;
+      const reason = row2.bot?.installed === false && typeof row2.bot.reason === "string" ? hostText(row2.bot.reason) : "";
       return button2(
         row2,
         classes(row2.unread && "lb-row-unread", row2.status === "off" && "lb-row-off"),
-        extra,
+        { ...extra, "aria-description": reason || void 0 },
         (0, import_react58.createElement)("span", { className: "lb-art" }, renderArt2(row2.bot, art, state2)),
         (0, import_react58.createElement)("span", { className: "lb-name" }, row2.name),
         tag ? (0, import_react58.createElement)("span", { className: "bt-tag" }, tag) : null,
         row2.unread ? (0, import_react58.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
         renderEnd ? renderEnd(row2) : null,
-        status(row2)
+        status(row2, reason)
       );
     }
     if (row2.kind === "channel") {
@@ -26962,12 +26994,14 @@ var MARKS2 = `
 .lb-st{flex:none;display:inline-flex;align-items:center;gap:6px;font:400 12px/1 var(--bt-font);color:var(--lb-muted);white-space:nowrap;text-transform:lowercase}
 .lb-st-needs{color:var(--lb-needs-ink)}
 .lb-st-error{color:var(--st-bad-strong,var(--bt-danger))}
+.lb-st-not-installed{color:var(--lb-muted)}
 .lb-mark{flex:none;display:block;width:var(--lb-mark);height:var(--lb-mark)}
 .lb-mark svg{display:block;width:100%;height:100%;overflow:visible}
 .lb-mark-working{color:var(--st-work,var(--bt-accent))}
 .lb-mark-needs{color:var(--st-warndot,var(--bt-star,var(--bt-accent)))}
 .lb-mark-error rect{fill:var(--st-bad,var(--bt-danger))}
 .lb-mark-idle,.lb-mark-off{color:var(--lb-muted);opacity:.7}
+.lb-mark-not-installed{color:var(--lb-muted);opacity:.85}
 .lb-mark-needs .lb-mark-glyph{stroke:var(--lb-mark-ink)}
 .lb-mark-error .lb-mark-glyph{stroke:var(--bt-main)}
 .lb-mark-arc{transform-origin:6px 6px;transform:rotate(-25deg);animation:lb-turn 1.1s linear infinite}
@@ -27084,7 +27118,8 @@ function channelGlyph(channel) {
 }
 var LOCAL_SPACE = "local";
 var pack = (value) => JSON.stringify(value);
-function botStatus({ question, pending, approval, failed, running: running2, away }) {
+function botStatus({ question, pending, approval, failed, running: running2, away, notInstalled = false }) {
+  if (notInstalled) return "not-installed";
   if (question || pending || approval) return "needs";
   if (failed) return "error";
   if (running2 || away) return "working";
@@ -27127,10 +27162,11 @@ function useTeamStatus({ roster, useSessionStatus, useWork }) {
     Object.values(value.rooms ?? {}).some((entries2) => entries2.some((entry) => entry.botId === id))
   ]))) : "[]");
   const byWork = new Map(work.map(([id, approval, failed, away]) => [id, { approval, failed, away }]));
+  const notInstalled = new Map(roster.bots.map((bot) => [bot.id, bot.installed === false]));
   const bots = new Map(sessions.bots.map(([id, running2, pending, unread]) => {
     const part = parts.find(([bot]) => bot === id)?.[1];
     const { approval = false, failed = false, away = false } = byWork.get(id) ?? {};
-    return [id, { status: botStatus({ question: roster.questions?.[part] !== void 0, pending, approval, failed, running: running2, away: away && !running2 }), unread }];
+    return [id, { status: botStatus({ question: roster.questions?.[part] !== void 0, pending, approval, failed, running: running2, away: away && !running2, notInstalled: notInstalled.get(id) === true }), unread }];
   }));
   const dsh = new Map(sessions.agents.map(([id, running2, unread]) => [id, { status: running2 ? "working" : "idle", unread }]));
   const asked2 = new Map(roomWork.map(([id, approval, working]) => [id, approval ? "needs" : working ? "working" : "idle"]));
@@ -27966,7 +28002,9 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const away = !running2 && groups.length > 0;
   const failed = useWork ? useWork((work) => work.failed?.[id] !== void 0) : false;
   const replied = useSessionStatus((map) => map.get(part)?.completionUnread === true) && !active2;
-  const state2 = botState(running2 || away, doing, alert, { failed, unread: replied });
+  const notInstalled = bot.installed === false;
+  const notInstalledText = notInstalled ? [t("Not installed"), bot.reason ? hostText(bot.reason) : ""].filter(Boolean).join(" · ") : "";
+  const state2 = botState(running2 || away, doing, alert, { failed, unread: replied, notInstalled });
   const runningLine = running2 && doing ? doingLine(doing) : null;
   const awayLine = away ? workLine(roster.roomsById[groups[0].id]?.name ?? t("a group chat"), groups[0], groups.length - 1) : null;
   const waits = workKeys(useWork ? useWork((work) => JSON.stringify(work.waiting?.[id] ?? null)) : "null");
@@ -27982,7 +28020,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const pinned = bot.pinned === true && !crowned;
   const role = crowned ? bot.role : "";
   const tag = roleTagOf(bot, roster.prefs, roster, t);
-  const label = [bot.name, tag, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", running2 || away ? t("Working") : "", waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
+  const label = [bot.name, tag, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", notInstalled ? notInstalledText : running2 || away ? t("Working") : "", notInstalled ? "" : waitsFor, notInstalled ? "" : stoppedLine, notInstalled ? "" : approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
   return (0, import_react62.createElement)(
     "button",
     {
@@ -29497,7 +29535,7 @@ function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus, useSe
       title: away ? name : void 0,
       onClick: () => away ? selectView("chat") : memoryNotice ? actions.openMemory(changed) : actions.toggleDetails(sessionId)
     },
-    bot ? (0, import_react64.createElement)(BotAvatar, { bot, size: 24, state: botState(running2, doing, roster.questions?.[currentPart(bot)] !== void 0 || approval), badge: false }) : room2 ? (0, import_react64.createElement)(RoomAvatar, { room: room2, roster, size: 24 }) : null,
+    bot ? (0, import_react64.createElement)(BotAvatar, { bot, size: 24, state: botState(running2, doing, roster.questions?.[currentPart(bot)] !== void 0 || approval, { installed: bot.installed }), badge: false }) : room2 ? (0, import_react64.createElement)(RoomAvatar, { room: room2, roster, size: 24 }) : null,
     goalShown ? (0, import_react64.createElement)(
       "span",
       { className: "bt-pill-swap" },
@@ -41190,6 +41228,8 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
   const running2 = useSessionStatus((map) => map.get(part)?.running === true);
   const doing = useActivity((map) => map[bot?.id ?? sessionId]);
   const failed = useWork ? useWork((work) => work.failed?.[bot?.id ?? ""] !== void 0) : false;
+  const notInstalled = bot?.installed === false;
+  const notInstalledText = notInstalled ? [t("Not installed"), bot.reason ? hostText(bot.reason) : ""].filter(Boolean).join(" · ") : "";
   const approval = useApproval(useWork, (entry) => entry.botId !== void 0 && entry.botId === bot?.id);
   const transcript = useSessions((list) => transcriptOf(list, part, bot?.name ?? room2?.name ?? t("Bot"), roster.exchangeTurns[part]));
   const usage = useSessions((list) => usageOf(list, [part, ...bot?.parts ?? room2?.parts ?? []]));
@@ -41260,7 +41300,7 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
     (0, import_react99.createElement)(
       "div",
       { key: "id", className: "bt-drawer-id", "data-move": side },
-      bot ? (0, import_react99.createElement)(BotAvatar, { bot, size: 64, state: botState(running2, doing, roster.questions?.[part] !== void 0 || approval, { failed }), main: isMainBot, badge: false, gaze: true, pokeable: true }) : (0, import_react99.createElement)(MemberPile, { room: room2, roster }),
+      bot ? (0, import_react99.createElement)(BotAvatar, { bot, size: 64, state: botState(running2, doing, roster.questions?.[part] !== void 0 || approval, { failed, notInstalled }), main: isMainBot, badge: false, gaze: true, pokeable: true }) : (0, import_react99.createElement)(MemberPile, { room: room2, roster }),
       editing ? (0, import_react99.createElement)("input", {
         className: "bt-drawer-name-input",
         autoFocus: true,
@@ -41299,6 +41339,7 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
       room2 && tab === "details" ? (0, import_react99.createElement)(GroupOverview, { room: room2, roster, actions, usage, useWork, openSettings: () => setView("settings") }) : null,
       bot && tab === "computer" ? (0, import_react99.createElement)(ComputerView, { bot, actions, hooks: { useComputer } }) : null,
       bot && tab === "details" ? [
+        notInstalledText ? (0, import_react99.createElement)("div", { key: "missing", className: "bt-note bt-note-missing", role: "status" }, notInstalledText) : null,
         (0, import_react99.createElement)(RunStats, { key: "stats", bot, part, running: running2, actions }),
         (0, import_react99.createElement)(
           "div",

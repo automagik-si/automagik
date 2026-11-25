@@ -223,9 +223,19 @@ export function install(rt) {
       const running = runningOf(bot)
       return running.runningModel === undefined ? '' : `${bot.id}=${running.runningModel}:${running.runningEffort ?? ''}`
     }).join(','),
+    // What installed.js last said about each Bot's crew plugin (below): a change there is a
+    // new view even when the team's revision and the models did not move. Each window keeps
+    // its own modelsKey, so every window catches up, and a restarted host compares it too.
+    installationKey(),
     // Only the blocked refs: a flip between none and a block adds or removes an entry.
     Object.entries(newBlocks).filter(([, block]) => block !== null).map(([ref, block]) => `${ref}=${block}`).join(','),
   ].join('|')
+  // What the client draws for each Bot: the saved Bot plus what DSH says about the plugin
+  // that runs it (installed.js). A crew Bot whose plugin is missing is not an idle Bot.
+  const installationKey = () => Object.values(state.bots).map((bot) => {
+    const installation = rt.installationOf?.(bot)
+    return `${bot.id}:${installation?.installed === false ? `0:${installation.reason}` : '1'}`
+  }).join('|')
   const view = (roles, newBlocks = nativeToolsNewMap()) => ({
     revision: state.revision,
     workspaceId: state.workspaceId ?? null,
@@ -241,13 +251,15 @@ export function install(rt) {
     // what failed it. `blocked`: the facts of a failure only the user can fix (turns.js).
     // `adoptionHistoryMatches` (adopted originals only): rollback's history guard
     // (agents.js rollbackAdoption) would pass, so the menu offers rollback only then.
+    // `installed`/`reason` come from installed.js: a false `installed` means the plugin
+    // that runs this kind is missing, switched off or did not load, and the Bot cannot run.
     bots: Object.values(state.bots).map(source => {
       const { segments, kickoff, reviewTrack, ...bot } = publicBot(source)
       const tail = rt.chatTail(rt.chatOf(bot.id))
       const nativeToolsBlock = rt.nativeToolsBlock(bot)
       const agyNotes = antigravityNotes(bot, nativeToolsBlock)
       return {
-        ...bot, sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
+        ...bot, ...(rt.installationOf?.(bot) ?? { installed: true }), sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
         ...(source.waitingRole?.id === SOLVER_ROLE_ID ? { canCancelSolverWait: true } : {}),
         ...(bot.dshAgentId === undefined ? {} : { adoptionHistoryMatches: rt.adoptionHistoryMatches(bot.id) }),
         ...rt.permissionFallbackOf('bot', bot),
@@ -703,6 +715,12 @@ export function install(rt) {
           if (readOnly === undefined) await rt.bootstrap()
           await rt.catalog()
           await rt.loadSecrets()
+          // The roster's `installed` is read now, at most once per installed.js's own TTL:
+          // the client must not keep drawing an idle Bot after its plugin was removed, nor a
+          // missing one after it was installed. modelsKey carries that answer, so a change in
+          // it is a new view even when the team's revision did not move (and each window, and
+          // a host restarted under an open window, compares the same key).
+          await rt.refreshInstallation?.()
           const roles = await rt.roleRecordsView()
           await rt.prepareLearning()
           const answer = liveAnswer(roles, await rt.roleRuntime.publicView())

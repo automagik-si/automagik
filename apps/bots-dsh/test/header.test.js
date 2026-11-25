@@ -120,6 +120,20 @@ const byClass = (node, className) => {
   return null
 }
 
+test('Back to chat marks a missing plugin even when the session reports a running turn', () => {
+  const bot = { ...roster.byId.a, installed: false }
+  const view = header({}, {
+    useRoster: hook({ ...roster, byId: { a: bot } }),
+    useStore: hook({ view: 'study-workspace' }),
+    useConversationViews: hook([{ id: 'chat' }, { id: 'study-workspace' }]),
+    useSessionStatus: hook(new Map([['a', { running: true }]])),
+    selectView: () => {},
+  })
+  const pill = byClass(view, 'bt-pill')
+  assert.equal(pill.props['aria-label'], 'Back to chat')
+  assert.equal(find(pill, node => node.type?.name === 'BotAvatar').props.state, 'not-installed')
+})
+
 test('a Bot in another Conversation View can return to chat without changing its draft', () => {
   const state = { view: 'study-workspace', draft: 'Keep this draft', viewRequest: null }
   const views = [{ id: 'chat' }, { id: 'study-workspace' }]
