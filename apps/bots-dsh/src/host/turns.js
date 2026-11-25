@@ -104,7 +104,7 @@ const closingReviews = new WeakSet()
 // The reply a sender waits for, sent the way a finished turn sends it: the work it was
 // for closes, and the answer goes up to the Bot that asked. `id` is the Session the
 // answer comes from; `source` is the trigger the turn answered.
-export function answerSender(rt, id, source, text, long, shouldSend, model, firstLine) {
+export function answerSender(rt, id, source, text, long, shouldSend, model, review = { text }) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const fromId = rt.selfOf(id)
   const name = rt.botOf(fromId)?.name ?? 'The other Bot'
@@ -119,9 +119,11 @@ export function answerSender(rt, id, source, text, long, shouldSend, model, firs
   const reply = answered && answered.from === source.senderSessionId && answered.to === fromId
     && answered.room === undefined && answered.fromRoom === undefined
     ? { exchangeId, replyTo: source.exchangeId, reviewReceipt } : undefined
-  // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
-  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text,
-    answered?.at, reply, reply === undefined ? undefined : model, firstLine)
+  // The verdict uses the selected reviewer's own reply. Notices and child results
+  // still travel with the answer and receipt, without supplying verdict evidence.
+  const reviewText = review?.ambiguous ? undefined : review?.text
+  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, reviewText,
+    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine)
   const durableResult = onReplyRecorded?.ready !== undefined
   if (durableResult) closingReviews.add(answered)
   const generation = rt.teamGeneration?.()
@@ -583,7 +585,7 @@ export function install(rt) {
   // reply in its Session there while it is still a member. A sender that asked for it
   // while working on another Bot's request goes on with that work when it reads it.
   // `long`: the text as attachLong sends it, when it went as a file.
-  const tellSender = (id, source, text, long, model, firstLine) => answerSender(rt, id, source, text, long, undefined, model, firstLine)
+  const tellSender = (id, source, text, long, review) => answerSender(rt, id, source, text, long, undefined, review?.model, review)
 
   // Runs before a deleted Bot leaves the team. Its Sessions stop with it, and the
   // turn/end that follows is no longer the team's, so their activity and turn records go
@@ -610,7 +612,7 @@ export function install(rt) {
     for (const source of rt.forgetBotWork?.(botId) ?? []) {
       if (!waiting.has(source.exchangeId)) waiting.set(source.exchangeId, [rt.chatOf(botId), source])
     }
-    for (const [id, source] of waiting.values()) tellSender(id, source, text)
+    for (const [id, source] of waiting.values()) tellSender(id, source, text, undefined, null)
   }
 
   // A group Session is hidden as a whole, so its turns need no marking. A handoff
@@ -946,6 +948,7 @@ export function install(rt) {
         entry.later = []
         entry.steeredAt = undefined
         entry.carried = false
+        entry.carriedTexts = 0
         let claimedPending
         let claimedPendingText
         if (entry.pending !== undefined) {
@@ -967,6 +970,7 @@ export function install(rt) {
           entry.toolCount = carry.toolCount ?? 0
           entry.opened = true
           entry.carried = true
+          entry.carriedTexts = carry.texts.length
           if (carry.info !== undefined) claimTrigger(id, entry, carry.info)
           entry.joined = carry.joined
           // A request the carry displaced as this turn's trigger keeps its deferred
@@ -1256,6 +1260,7 @@ export function install(rt) {
         const { lastText, lastCalled } = entry
         // Exact stage verdicts use the reviewer's own first line, before reply formatting.
         const reviewFirstLine = entry.shown === 0 ? entry.firstLine ?? '' : ''
+        const carriesReplyText = entry.shown < (entry.carriedTexts ?? 0)
         const answeringTurn = event.data?.turn ?? entry.adoptedTurn ?? entry.turn
         const toolCount = entry.toolCount ?? 0
         const suppressedSubagent = entry.suppressedSubagent === true
@@ -1354,7 +1359,8 @@ export function install(rt) {
         const retry = (wroteCall || promisedOnly) && info?.retried !== true && !(info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))
         // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
         const model = reason?.kind === 'completed' ? modelOf(rt, undefined, session) : undefined
-        const answerModel = reason?.kind === 'completed'
+        // A reply that still contains text from the cut turn cannot use this turn's model proof.
+        const answerModel = reason?.kind === 'completed' && !carriesReplyText
           ? modelOf(rt, undefined, session, typeof answeringTurn === 'number' ? answeringTurn : null) : undefined
         if (owner !== undefined && !retry) {
           const request = entry.reviewReplyRequest ?? (info === undefined || info.role === 'continue' ? entry.solverRequest : undefined)
@@ -1383,35 +1389,39 @@ export function install(rt) {
           if (cutOff) return reply === '' && wroteText ? CUT_OFF_NOTE : cutOffText(reply)
           return reply
         }
-        const groupReply = () => rt.withRoomSteps?.(held, replyText()) ?? replyText()
+        const reply = { text: replyText(), firstLine: reviewFirstLine, model: answerModel }
+        const groupReply = () => rt.withRoomSteps?.(held, reply.text) ?? reply.text
         // Whoever the turn answers gets the same three-way rule: a failure notice,
         // the turn's text (or a stopped-before-answer line), or nothing.
         const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
-        const answer = (source, reply) => {
+        const answer = (source, response) => {
           if (!expectsReply(source) || answersUser(source) || goesOn) return
           if (failure !== undefined) {
             // The sender was told a reply comes later; without this it would wait forever.
-            tellSender(id, source, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`)
-          } else if (reply !== '' || reason?.kind === 'aborted') {
+            tellSender(id, source, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`, undefined, null)
+          } else if (response?.text) {
+            tellSender(id, source, response.text, undefined, response)
+          } else if (reason?.kind === 'aborted') {
             // A turn stopped before it could answer still owes the sender a line,
             // or it would wait forever for a reply that never comes.
-            tellSender(id, source, reply !== '' ? reply : `${name} was stopped before it could answer your message.`, undefined, answerModel, reviewFirstLine)
+            tellSender(id, source, `${name} was stopped before it could answer your message.`, undefined, null)
           }
         }
         // Work a Bot asked for, also when what came back for it opens the turn: while
         // anything handed on for it is still out, the answer waits; then it goes up with
         // what came back. A failed or stopped turn answers at once.
-        const finish = (source, reply) => {
+        const finish = source => {
           const work = rt.workOf?.(source)
           if (!rt.ownsWork?.(rt.selfOf(id), work)) return answer(source, reply)
           const asker = rt.workAsker(work)
           if (failure !== undefined || reason?.kind === 'aborted') return answer(asker, reply)
           if (rt.waitsWork(work)) return rt.holdWork(work, reply)
           // With what came back, the answer may pass what one message carries.
-          const text = rt.answerText(work, reply, name)
-          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text, undefined, answerModel, reviewFirstLine)
+          const selected = rt.workReply?.(work, reply) ?? reply
+          const text = rt.answerText(work, selected.text, name)
+          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text, undefined, selected)
           void rt.attachLong(text, `Answer from ${name}.txt`)
-            .then(long => tellSender(id, asker, text, long, answerModel, reviewFirstLine))
+            .then(long => tellSender(id, asker, text, long, selected))
             .catch(error => rt.warn('omni-ui: answer from %s not sent: %s', name, error))
         }
         // A retried turn answers the same waiter or sender, so this one passes nothing on.
@@ -1436,13 +1446,12 @@ export function install(rt) {
           if (failure !== undefined) { if (!inRound) void rt.lateRoomFailure?.(id, info ?? {}, failure) }
           else if (reason?.kind !== 'aborted') void rt.lateRoomReply?.(id, info ?? {}, groupReply(), { shown })
         } else if (!retry && info !== undefined) {
-          finish(info, replyText())
+          finish(info)
         }
         // What the turn read mid-work is answered by this turn's own text: one answer
         // covers it, and every request it read gets that answer. A turn with nothing to
         // say hands the requests it read back as one turn, never one turn each. A group
         // call still goes back to the Bot for a turn in its own chat, as it did before.
-        const reply = replyText()
         const handedBack = []
         // A turn that answers handed-back requests together (or picks such a turn up
         // after a restart) closes all of them as it closes its trigger, also when it
@@ -1457,18 +1466,18 @@ export function install(rt) {
           if (failure !== undefined || reason?.kind === 'aborted') {
             if (request.info.role === 'room') {
               if (failure !== undefined) void rt.lateRoomFailure?.(id, request.info, failure)
-            } else answer(request.info, '')
+            } else answer(request.info)
             continue
           }
           if (request.info.role !== 'room' && !recovered && !retry && batch.has(request.info.exchangeId)) {
-            finish(request.info, reply)
+            finish(request.info)
             continue
           }
-          if (request.info.role === 'room' || recovered || retry || reply === '') {
+          if (request.info.role === 'room' || recovered || retry || reply.text === '') {
             handedBack.push(request)
             continue
           }
-          finish(request.info, reply)
+          finish(request.info)
         }
         void handBackRequests(rt, id, rt.selfOf(id), handedBack)
         if (rt.groupOwners.has(id)) void rt.goalSettled?.(rt.roomOf(rt.groupOwners.get(id).roomId)).catch(error => rt.warn('omni-ui: goal settle in %s failed: %s', id, error))

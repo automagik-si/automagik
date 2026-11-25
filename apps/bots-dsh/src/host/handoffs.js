@@ -8,6 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { stageVerdictOf } from '../shared/review-mark.js'
 import { LATE_ANSWER, TEXT_KEPT } from './constants.js'
 import { headOf } from './text.js'
 
@@ -21,6 +22,8 @@ export function install(rt) {
   const works = () => (state.works ??= {})
   // What came back, whole; state.json keeps the start of each.
   const whole = new Map()
+  // Model proof belongs to the live turn that wrote this held reply.
+  const heldModels = new WeakMap()
   const save = (durable = false) => void rt.save(durable ? { durable } : undefined).catch(() => {})
   const nameOf = id => rt.botOf(id)?.name
 
@@ -230,10 +233,13 @@ export function install(rt) {
 
   const owns = (botId, workId) => workId !== undefined && works()[workId]?.to === botId
   const waits = workId => (works()[workId]?.open.length ?? 0) > 0
-  function hold(workId, text) {
+  function hold(workId, { text, firstLine, model }) {
     const work = works()[workId]
     if (work === undefined || text === '') return
     work.held = headOf(text, TEXT_KEPT)
+    // Both fields describe the same reply, and are replaced in the same state write.
+    work.heldFirstLine = firstLine.length <= TEXT_KEPT ? firstLine : ''
+    heldModels.set(work, model)
     save()
   }
   // Who asked for the work, as the turn that answers a request sees its trigger.
@@ -241,6 +247,18 @@ export function install(rt) {
     const work = works()[workId]
     return work === undefined ? undefined : { kind: 'bot', role: 'request', exchangeId: workId, senderSessionId: work.from, ...(work.fromRoom ? { senderRoomId: work.fromRoom } : {}) }
   }
+  // A silent continuation sends what the Bot held for this work, with its own evidence.
+  function workReply(workId, reply) {
+    if (reply.text !== '') return reply
+    const work = works()[workId]
+    const text = work?.held ?? ''
+    if (typeof work?.heldFirstLine === 'string') return { text, firstLine: work.heldFirstLine, model: heldModels.get(work) }
+    // An older held reply has only display text. A staged-looking opening is
+    // ambiguous, so even a later legacy label cannot establish its verdict.
+    if (stageVerdictOf(text.split(/\r?\n/, 1)[0])) return { text, ambiguous: true }
+    return { text, firstLine: '' }
+  }
+
   // The answer that goes up: what the Bot said last for this work, then what came back.
   function answerText(workId, reply, botName) {
     const work = works()[workId]
@@ -440,5 +458,5 @@ export function install(rt) {
     return lines.join('; ')
   }
 
-  Object.assign(rt, { workOf, openWork, closeWork, dropWork, takenWork: taken, lateWork, answerMissed, ownsWork: owns, waitsWork: waits, holdWork: hold, workAsker: askedBy, answerText, upstreamOf, sameWork, forgetBotWork: forgetBot, statusOf, waitingView, settleSubWork, subWorkRun, nameSubWork, abandonWork, abandonedWork: takeAbandoned })
+  Object.assign(rt, { workOf, openWork, closeWork, dropWork, takenWork: taken, lateWork, answerMissed, ownsWork: owns, waitsWork: waits, holdWork: hold, workAsker: askedBy, workReply, answerText, upstreamOf, sameWork, forgetBotWork: forgetBot, statusOf, waitingView, settleSubWork, subWorkRun, nameSubWork, abandonWork, abandonedWork: takeAbandoned })
 }

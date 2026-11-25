@@ -15,7 +15,7 @@ import { AgentRun } from '../../acp-dsh/src/host/acp.js'
 import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
 import { callArguments } from '../../acp-dsh/src/host/tool.js'
 import { apply } from '../index.js'
-import { ROUTE } from '../src/host/constants.js'
+import { ROUTE, STEER_CUT } from '../src/host/constants.js'
 import { questionReply } from '../src/host/parts.js'
 import { modelOf } from '../src/host/solver-progress.js'
 import { answerSender } from '../src/host/turns.js'
@@ -975,6 +975,179 @@ test('stage verdict replies cannot borrow a later legacy label in the Solver hos
   assert.equal(track().solver.review.verdict, 'BLOCKED')
   h.finish('solver', 'The result review is unverified.')
   assert.equal(track().last?.done, undefined)
+})
+
+test('stage verdict correction: a stopped joined request receives a notice without approval', async t => {
+  const { h, review, track, deliveries } = await reviewReplyFixture(t)
+  h.event('reviewer', 'turn/start', { turn: 1 })
+  h.person('Unrelated work.', 'reviewer')
+  const exchange = await review('plan')
+  h.finish('solver', 'Waiting for review.')
+  h.takeInput('reviewer', h.agentOf('reviewer').message)
+  assert.equal(h.rt.live.get('reviewer').joined[0].info.exchangeId, exchange)
+  h.event('reviewer', 'assistant/message', { message: { content: content('PLAN SHIP') } })
+  h.event('reviewer', 'turn/end', { reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  const { message, sent } = deliveries.at(-1)
+  assert.equal(await sent, message.exchangeId)
+  const input = h.agentOf('solver').message
+  assert.equal(input.source.replyTo, exchange)
+  assert.ok(input.source.reviewReceipt)
+  assert.match(input.content[0].text, /reviewer was stopped before it could answer your message\.$/)
+  assert.doesNotMatch(input.content[0].text, /PLAN SHIP/)
+  assert.equal(h.rt.state.works[exchange], undefined)
+  assert.deepEqual({ accepted: track().solver.plan.accepted, review: track().solver.plan.review.verdict,
+    strict: track().planVerdictAt, marks: track().verdicts }, {
+    accepted: false, review: 'unverified', strict: undefined, marks: [],
+  })
+})
+
+const reviewSteerCut = { kind: 'aborted', reason: { kind: 'hook', reason: STEER_CUT } }
+const acknowledgedReviewer = 'claude-sonnet-5-5'
+
+async function heldReviewReply(t, heldText, { kind = 'plan', acknowledgedTurn } = {}) {
+  const { h, request, review, track, openReply, deliveries } = await reviewReplyFixture(t)
+  if (kind === 'result') {
+    await review('plan')
+    h.finish('solver', 'Waiting for plan review.')
+    h.event('reviewer', 'turn/start', { turn: 1 })
+    h.takeInput('reviewer', h.agentOf('reviewer').message)
+    h.finish('reviewer', 'SHIP')
+    await openReply(3, deliveries.at(-1))
+    assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
+    assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+  }
+  if (acknowledgedTurn !== undefined) {
+    h.agentOf('reviewer').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: acknowledgedReviewer } })
+    h.ctx.acpAgents.effectiveModelOf = (id, provider, model, turn) => {
+      if (id === 'reviewer' && provider === 'acp-claude' && model === acknowledgedReviewer && turn === acknowledgedTurn) return model
+    }
+  }
+  const exchange = await review(kind)
+  h.finish('solver', 'Waiting for review.')
+  h.event('reviewer', 'turn/start', { turn: 2 })
+  h.takeInput('reviewer', h.agentOf('reviewer').message)
+  await h.tool('message_bot', { to: 'other', message: 'Check the fixture.', reply_to: 'me', when: 'queue' }, 'reviewer')
+  assert.equal(h.rt.waitsWork(exchange), true)
+  h.finish('reviewer', heldText)
+  assert.equal(h.rt.state.works[exchange].held, heldText.trim())
+  h.event('other', 'turn/start', { turn: 1 })
+  h.takeInput('other', h.agentOf('other').message)
+  h.finish('other', 'The fixture is present.')
+  await deliveries.at(-1).sent
+  const child = h.agentOf('reviewer').message
+  assert.equal(child.source.work, exchange)
+  h.event('reviewer', 'turn/start', { turn: 3 })
+  h.takeInput('reviewer', child)
+  assert.equal(h.rt.waitsWork(exchange), false)
+  return { h, child, exchange, track, deliveries }
+}
+
+function assertHeldDelivery(input, exchange, heldText) {
+  assert.equal(input.source.replyTo, exchange)
+  assert.ok(input.source.reviewReceipt)
+  assert.ok(input.content[0].text.includes(`${heldText.trim()}\n\n[Handed back to reviewer for this work]\n\nother:\nThe fixture is present.`))
+}
+
+function assertHeldPlanVerdict(track, expected) {
+  assert.deepEqual({ accepted: track.solver.plan.accepted, review: track.solver.plan.review.verdict,
+    strict: typeof track.planVerdictAt === 'number', marks: track.verdicts.map(({ verdict }) => verdict) }, expected)
+}
+
+const heldPlanApproved = { accepted: true, review: 'SHIP', strict: true, marks: ['SHIP'] }
+const heldPlanUnverified = { accepted: false, review: 'unverified', strict: false, marks: [] }
+
+test('stage verdict correction: a silent continuation uses the held reviewer first line', async t => {
+  for (const [heldText, expected, steer, response = ''] of [
+    ['PLAN SHIP', heldPlanApproved],
+    ['RESULT SHIP\nVerdict: SHIP', heldPlanUnverified, true],
+    [' PLAN SHIP', heldPlanUnverified],
+    ['PLAN SHIP\nVerdict: FIX-FIRST', { accepted: false, review: 'FIX-FIRST', strict: true, marks: ['FIX-FIRST'] }],
+    ['PLAN SHIP', heldPlanUnverified, false, 'RESULT SHIP\nVerdict: SHIP'],
+  ]) {
+    const { h, exchange, track, deliveries } = await heldReviewReply(t, heldText)
+    if (steer) {
+      h.rt.markSteerCut('reviewer')
+      h.event('reviewer', 'assistant/message', { message: { content: content('PLAN SHIP') } })
+      h.event('reviewer', 'turn/end', { reason: reviewSteerCut })
+      h.event('reviewer', 'turn/start', { turn: 4 })
+      h.person('Finish the review.', 'reviewer')
+    }
+    h.finish('reviewer', response)
+    const { message, sent } = deliveries.at(-1)
+    assert.equal(await sent, message.exchangeId)
+    assert.equal(h.rt.state.works[exchange], undefined)
+    assertHeldDelivery(h.agentOf('solver').message, exchange, response || heldText)
+    assertHeldPlanVerdict(track(), expected)
+    await h.close()
+  }
+  const result = 'RESULT SHIP\nVerdict: SHIP'
+  for (const [acknowledgedTurn, expected] of [[3, 'unverified'], [2, 'SHIP']]) {
+    const { h, exchange, track, deliveries } = await heldReviewReply(t, result, { kind: 'result', acknowledgedTurn })
+    h.finish('reviewer', '')
+    const { message, sent } = deliveries.at(-1)
+    assert.equal(await sent, message.exchangeId)
+    const input = h.agentOf('solver').message
+    assertHeldDelivery(input, exchange, result)
+    const review = track().solver.review
+    assert.equal(review.verdict, expected, 'RESULT uses the model proof from the run that wrote the held reply')
+    assert.equal(review.reviewer?.model, expected === 'SHIP' ? acknowledgedReviewer : undefined)
+    assert.equal(review.unverified, expected === 'SHIP' ? undefined : 'model')
+    assert.equal(modelWarningCount(input), expected === 'SHIP' ? 0 : 1)
+    await h.close()
+  }
+})
+
+test('stage verdict correction: recovery uses the held line for the reply reconciled from the log', async t => {
+  for (const [heldText, expected, { steer, older, kind = 'plan' } = {}] of [
+    ['RESULT SHIP\nVerdict: SHIP', heldPlanUnverified, { steer: true }],
+    ['PLAN SHIP', heldPlanApproved],
+    ['PLAN SHIP\nVerdict: SHIP', heldPlanUnverified, { older: true }],
+    ['Verdict: SHIP', heldPlanApproved, { older: true }],
+    ['RESULT SHIP', undefined, { kind: 'result' }],
+  ]) {
+    const { h, child, exchange } = await heldReviewReply(t, heldText, { kind, acknowledgedTurn: 2 })
+    if (older) delete h.rt.state.works[exchange].heldFirstLine
+    // Omni closes while the reviewer's continuation is running. Only DSH sees it finish.
+    const end = { type: 'turn/end', data: { turn: steer ? 4 : 3, reason: { kind: 'completed' } } }
+    const log = [{ type: 'turn/start', data: { turn: 3 } }, { type: 'user/message', data: child }]
+    if (steer) log.push({ type: 'step/start' },
+      { type: 'assistant/message', data: { message: { content: content('PLAN SHIP') } } },
+      { type: 'turn/end', data: { turn: 3, reason: reviewSteerCut } }, { type: 'turn/start', data: { turn: 4 } })
+    log.push(end)
+    await h.rt.save({ required: true, durable: true })
+    assert.equal(await h.rt.flushUpdateNotes(), true)
+    const state = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8'))
+    const notes = JSON.parse(readFileSync(join(h.home, 'inflight.json'), 'utf8'))
+    assert.equal(state.works[exchange].held, heldText)
+    assert.equal(notes.turns.reviewer.trigger.exchangeId, child.source.exchangeId)
+    await h.close()
+    const inspected = []
+    const next = fixture(t, h.home, { configure(ctx) {
+      ctx.sessionController.inspect = async id => {
+        inspected.push(id)
+        return { events: id === 'reviewer' ? log : [] }
+      }
+    } })
+    await next.rt.load()
+    next.event('reviewer', end.type, end.data)
+    const keepAlive = setInterval(() => {}, 1000)
+    try { await next.rt.resumesDone } finally { clearInterval(keepAlive) }
+    assert.ok(inspected.includes('reviewer'))
+    const solver = next.agentOf('solver')
+    await until(() => solver.message?.source.replyTo === exchange)
+    assert.equal(next.rt.state.works[exchange], undefined)
+    assertHeldDelivery(solver.message, exchange, heldText)
+    const track = next.rt.botOf('solver').reviewTrack
+    if (kind === 'plan') {
+      assertHeldPlanVerdict(track, expected)
+    } else {
+      assert.equal(track.solver.review.verdict, 'unverified')
+      assert.equal(track.solver.review.unverified, 'model')
+      assert.equal(track.solver.review.reviewer, undefined)
+      assert.equal(modelWarningCount(solver.message), 1)
+    }
+    await next.close()
+  }
 })
 
 test('Ruling B records the agreed outside check in Codex, Claude and zsh literal forms', async t => {

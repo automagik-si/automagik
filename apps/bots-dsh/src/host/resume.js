@@ -1268,7 +1268,7 @@ export function install(rt) {
         where: room === undefined ? 'own chat' : `group "${room.name}"`,
         sessionId,
       })
-      answerSender(rt, sessionId, asker, text, undefined, ownsTeam)
+      answerSender(rt, sessionId, asker, text, undefined, ownsTeam, undefined, null)
       return
     }
     const turn = turnOf(events, exchangeId)
@@ -1301,13 +1301,13 @@ export function install(rt) {
     if (!ownsTeam()) return
     if (reason.kind === 'error') {
       const failure = turnFailure(reason.error)
-      answerSender(rt, sessionId, asker, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`, undefined, ownsTeam)
+      answerSender(rt, sessionId, asker, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`, undefined, ownsTeam, undefined, null)
       return
     }
     if (reason.kind === 'aborted') {
       // The turn was stopped before it could answer: the sender is told, as it is told
       // when Omni watches the turn end.
-      answerSender(rt, sessionId, asker, `${name} was stopped before it could answer your message.`, undefined, ownsTeam)
+      answerSender(rt, sessionId, asker, `${name} was stopped before it could answer your message.`, undefined, ownsTeam, undefined, null)
       return
     }
     // A turn cut off at the output limit is not a finish: the answer says so, and the
@@ -1331,17 +1331,18 @@ export function install(rt) {
         sessionId,
       })
     }
-    const answer = cutOff ? cutOffText(said) : said
+    const reply = { text: cutOff ? cutOffText(said) : said, firstLine: turn.firstLine ?? '' }
     // The turn ended with what it said: the answer goes up the way a finished turn's
     // does, with the results that came back for it and the text it held. A work that
     // still waits for what it handed on keeps its part until that comes back.
     if (rt.waitsWork(workId)) {
-      rt.holdWork(workId, answer)
+      rt.holdWork(workId, reply)
       return
     }
-    const text = rt.answerText(workId, answer, name)
+    const selected = rt.workReply(workId, reply)
+    const text = rt.answerText(workId, selected.text, name)
     const long = text.length > MESSAGE_INLINE_MAX ? await rt.attachLong(text, `Answer from ${name}.txt`) : undefined
-    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, undefined, turn.firstLine ?? '')
+    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, undefined, selected)
   }
 
   // Report the same durable notes the resume pass works from, without exposing their payloads.
