@@ -240,16 +240,13 @@ for (const provider of ['acp-claude', 'acp-codex']) {
   }
 }
 
-test('person-call order in the serialized native request with a late system snapshot', async t => {
+async function captureNativeRequest(t, history) {
   const provider = 'deepseek-official'
   const model = 'fixture-model'
   const f = fixture(t, provider, { addedSkills: [manual] })
   f.active.add('owner-a')
   const called = await f.preStep(user(manualPrompt))
   const session = f.agent.session
-  const leading = 'The effective leading system snapshot.'
-  const late = 'A system snapshot sent after the person input.'
-  const earlier = 'An earlier person message.'
   const connection = resolveAdapterOptions({ baseURL: 'https://fixture.invalid',
     models: [{ id: model, name: model, systemPromptUpdate: 'in-history' }] })
   const adapter = new DeepSeekAdapter({ options: () => connection,
@@ -263,16 +260,47 @@ test('person-call order in the serialized native request with a late system snap
   })
   f.rt.ctx.llm = { stream: options => f.stream(options, () => adapter.stream(options)) }
   session.append('request/context', { provider, model, systemPromptUpdate: 'in-history' })
-  const messages = [createSystemMessage('Superseded leading snapshot.'), createSystemMessage(leading),
-    user(earlier), createSystemMessage(late), called]
+  const messages = history(provider, called)
   const options = markAgentLoopRequest({ provider, model, sessionId: session.id, messages, signal: t.signal })
   await assert.rejects(async () => Array.fromAsync(f.rt.ctx.llm.stream(options)), /400/)
   assert.equal(wire.length, 1)
   assert.equal(wire[0].model, model)
-  assert.deepEqual({ system: wire[0].system, messages: wire[0].messages }, {
+  return { system: wire[0].system, messages: wire[0].messages }
+}
+
+test('person-call order in the serialized native request with a late system snapshot', async t => {
+  const leading = 'The effective leading system snapshot.'
+  const late = 'A system snapshot sent after the person input.'
+  const earlier = 'An earlier person message.'
+  const wire = await captureNativeRequest(t, (_provider, called) => [
+    createSystemMessage('Superseded leading snapshot.'), createSystemMessage(leading),
+    user(earlier), createSystemMessage(late), called,
+  ])
+  assert.deepEqual(wire, {
     system: leading + '\n\n' + catalog,
     messages: [
       { role: 'user', content: [text(earlier), text(manualPrompt), text(manual.content)] },
+      { role: 'system', content: [text(late)] },
+    ],
+  })
+})
+
+test('person-call order in the serialized native request after an earlier assistant flush', async t => {
+  const leading = 'The initial system snapshot.'
+  const earlier = 'An earlier person message.'
+  const updated = 'A newer system snapshot.\n  Keep these spaces. '
+  const late = 'A system snapshot pending at the person call.'
+  const wire = await captureNativeRequest(t, (provider, called) => [
+    createSystemMessage(leading), user(earlier), createSystemMessage(updated), answer(provider),
+    createSystemMessage(late), called,
+  ])
+  assert.deepEqual(wire, {
+    system: leading,
+    messages: [
+      { role: 'user', content: [text(earlier)] },
+      { role: 'system', content: [text(updated + '\n\n' + catalog)] },
+      { role: 'assistant', content: [text('Earlier answer remains')] },
+      { role: 'user', content: [text(manualPrompt), text(manual.content)] },
       { role: 'system', content: [text(late)] },
     ],
   })

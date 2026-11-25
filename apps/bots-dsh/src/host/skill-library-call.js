@@ -382,13 +382,16 @@ export function skillTool(rt) {
   })
 }
 
-function leadingSystemIndex(messages) {
-  // In-history serialization uses the last snapshot before the first conversation
-  // content. Developer rows and empty turns do not end the leading section.
-  const start = messages.findIndex(row => row.role === 'tool' ||
+function systemIndexBeforeCall(messages, callIndex) {
+  const hasWireContent = row => row.role === 'tool' ||
     (row.role === 'user' || row.role === 'assistant') && row.content.some(part =>
-      part.type === 'text' ? part.text !== '' : row.role === 'assistant' || part.type === 'image' || part.type === 'file'))
-  return messages.findLastIndex((row, index) => row.role === 'system' && index < start)
+      part.type === 'text' ? part.text !== '' : row.role === 'assistant' || part.type === 'image' || part.type === 'file')
+  // The serializer flushes queued system updates before a nonempty assistant
+  // reply. Without an earlier reply, only the leading snapshot is effective.
+  const assistant = messages.findLastIndex((row, index) =>
+    index < callIndex && row.role === 'assistant' && hasWireContent(row))
+  const boundary = assistant >= 0 ? assistant : messages.findIndex(hasWireContent)
+  return messages.findLastIndex((row, index) => index < boundary && row.role === 'system')
 }
 
 export function install(rt) {
@@ -462,13 +465,11 @@ export function install(rt) {
         automagikSkill: { kind: SKILL_SOURCE, catalog: true, botId,
           skills: automatic.map(({ name, hash }) => ({ name, hash })) },
       }
-      const hasPersonCall = result.some(row => row.content?.some(part => personCalls.has(part)))
-      const request = hasPersonCall ? session?.requestContext?.() : undefined
+      const callIndex = result.findIndex(row => row.content?.some(part => personCalls.has(part)))
+      const request = callIndex >= 0 ? session?.requestContext?.() : undefined
       const inHistoryCall = request?.systemPromptUpdate === 'in-history' &&
         request.provider === options.provider && request.model === options.model
-      // In-history providers can flush an update after the called body. On a
-      // call turn, send the catalog only in the effective leading snapshot.
-      const first = inHistoryCall ? leadingSystemIndex(result) : result.findIndex(row => row.role === 'system')
+      const first = inHistoryCall ? systemIndexBeforeCall(result, callIndex) : result.findIndex(row => row.role === 'system')
       const last = inHistoryCall ? first : result.findLastIndex(row => row.role === 'system' && row.content.length > 0)
       if (first < 0) result.unshift({ ...createSystemMessage(''), content: [part] })
       else for (const index of new Set([first, Math.max(first, last)])) {
