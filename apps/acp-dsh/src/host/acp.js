@@ -322,6 +322,7 @@ export class AgentRun {
         }
         return
       }
+      if (this.spec.beforeSession !== undefined) await this.spec.beforeSession(this)
       const identity = this.spec.botIdentity?.()
       this.spec.botIdentity = undefined
       this.identityDelivery = identity

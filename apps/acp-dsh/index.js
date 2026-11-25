@@ -22,6 +22,7 @@ import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js
 import { AcpAdapter, aside, BRIDGE_PATH, SIDE_MODEL } from './src/host/adapter.js'
 import { AgentRun, isUnanswered } from './src/host/acp.js'
 import { AGENTS, cliIdOf, findCommand, isNative, isolatedSignInHintOf, isSignInUrl, launchOf, signedInOf, signInHintOf } from './src/host/agents.js'
+import { answerAside, asideFailure, supportsAside } from './src/host/aside-run.js'
 import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
@@ -2028,6 +2029,61 @@ export function apply(ctx, config = {}, {
   }
 
   const generateImage = request => makeImage(request)
+  const asideLifetime = new AbortController()
+  const answerMemory = (request) => {
+    const { provider } = request
+    if (!supportsAside(provider)) {
+      throw asideFailure('unavailable', 'A tools-off memory session is unavailable.')
+    }
+    const spec = AGENTS[provider]
+    const generation = authVersions.get(provider)
+    let agent
+    let accountId
+    const check = () => {
+      if (disposed || restarting || authVersions.get(provider) !== generation
+        || accountChanges.has(provider) || loginLocks.has(provider)
+        || (homed(spec) && (homes.paused(spec.key) || homes.changing(spec.key)))
+        || signIns.get(provider) === false || consentStates.get(provider) === 'needed'
+        || (agent && (agents.get(provider) !== agent || accountsSeen.get(provider)?.id !== accountId))) {
+        throw asideFailure('signed-out', 'The Bot account changed or is unavailable.')
+      }
+      request.check?.()
+    }
+    return answerAside({
+      name: spec.defaultName,
+      check,
+      spawn: async (context) => {
+        check()
+        await request.admit?.()
+        context.signal.throwIfAborted()
+        check()
+        reconcile({ kick: false })
+        const selected = agents.get(provider)
+        if (selected?.installed?.() !== true) {
+          throw asideFailure('unavailable', 'The memory agent is unavailable.')
+        }
+        if (!isNative(spec)) {
+          if (signIns.get(provider) === undefined) await inspect(provider)
+          context.signal.throwIfAborted()
+          check()
+          const denied = await consentGate(provider)
+          await accountRead(provider)
+          if (denied || signIns.get(provider) !== true) {
+            throw asideFailure('signed-out', 'The Bot account is unavailable.')
+          }
+        }
+        context.signal.throwIfAborted()
+        if (agents.get(provider) !== selected) {
+          throw asideFailure('unavailable', 'The memory agent changed.')
+        }
+        accountId = accountsSeen.get(provider)?.id
+        agent = selected
+        check()
+        return selected.spawn(context)
+      },
+    }, { ...request, signal: request.signal
+      ? AbortSignal.any([request.signal, asideLifetime.signal]) : asideLifetime.signal })
+  }
   const editImage = (request = {}) => {
     const image = request.image
     const invalid = () => imageRefusal(UNAVAILABLE, 'The picture to edit is not a valid PNG, JPEG or WebP image.')
@@ -2242,6 +2298,9 @@ export function apply(ctx, config = {}, {
      * message to show as it is.
      */
     generateImage,
+    /** One tools-off ACP response beside the chat, with the prompt read after admission. */
+    answerAside: answerMemory,
+    supportsAside,
     /**
      * Edits one uploaded picture with Codex: generateImage's fields plus
      * image: { base64, mimeType }, accountGeneration? -> { base64, mimeType }.
@@ -2512,6 +2571,7 @@ export function apply(ctx, config = {}, {
   // Cordis 4 has no 'dispose' event: an effect's cleanup is what runs when the plugin stops.
   const dispose = () => {
     disposed = true
+    asideLifetime.abort()
     homes?.closeRecovery()
     homes?.withdraw()
     // Restore the pressure wrapper before invoking the remaining cleanup hooks.

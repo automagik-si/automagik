@@ -491,6 +491,14 @@ through to the next candidate.
 
 ## The `acpAgents` service
 
+`answerAside` runs a Bot's memory request in one hidden tools-off ACP session, on the
+Bot's own agent, model and subscription. It opens private text after account and
+provider checks, uses no DSH Session or tool bridge, and closes the session and its
+scratch folder. The CLI may retain its own transcript. Codex requires a checked
+model, directory and read-only mode. Antigravity requires the checked agy version.
+omp uses its tools-off launch. Claude Code, ACP Hermes and custom ACP providers
+use the team's background model.
+
 A settings page reads the agents through this host service; the plugin stays host only.
 
 | Method | Does |
