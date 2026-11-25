@@ -319,7 +319,7 @@ test('The attempt hold survives Bot traffic, a role change and a restart until i
   const track = bot.reviewTrack
   h.rt.openWork('review-old', { from: bot.id, to: 'reviewer' })
   answerSender(h.rt, 'reviewer', { exchangeId: 'review-old', senderSessionId: bot.id }, 'SHIP')
-  for (const name of ['write', 'edit', 'bash', 'start_task', 'remember', 'subagent']) {
+  for (const name of ['write', 'edit', 'bash', 'create_bot', 'remember', 'subagent']) {
     await assert.rejects(h.execute(name, { file_path: 'out' }), /attempt limit/)
   }
   for (const [name, args] of [['read', {}], ['ask_user', {}], ['solver_progress', {}],
@@ -338,8 +338,13 @@ test('The attempt hold survives Bot traffic, a role change and a restart until i
   assert.match(bridge.bridgeCall.refused.reason, /exact decision/)
   assert.match(await h.progress('status', {}, 'other'), /Only a Solver/)
   h.rt.state.rooms.room = { id: 'room', members: [bot.id], sessions: { [bot.id]: 'group-solver' } }
-  await h.rt.save({ required: true })
-  assert.match(await h.progress('status', {}, 'group-solver'), /Only a Solver/)
+  h.rt.indexSessions()
+  try {
+    assert.match(await h.progress('status', {}, 'group-solver'), /Only a Solver/)
+  } finally {
+    delete h.rt.state.rooms.room
+    h.rt.indexSessions()
+  }
   await h.tool('ask_user', { question: 'Example: work alone until delivered?', options: [{ label: 'Use the input' }] }, bot.id, 'question')
   h.botMessage()
   h.event(bot.id, 'user/message', { content: content('Work alone until delivered.'), source: { kind: 'user', resumed: true } })

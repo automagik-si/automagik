@@ -183,7 +183,7 @@ export function install(rt) {
   // the record may be the other call's: a card or a false hold, never a release (the executor
   // re-checks the call's own arguments). A held bridge ask leaves the guard's text on
   // `bridgeCall.refused`, which acp-dsh hands the agent instead of "The person rejected".
-  async function reviewGuardAsk(request) {
+  function reviewGuardAsk(request) {
     const bridge = request?.toolName !== 'acp_tool' && isRecord(request?.bridgeCall)
       && typeof request.toolName === 'string' && request.toolName !== ''
     if (request?.toolName !== 'acp_tool' && !bridge) return undefined
@@ -202,6 +202,14 @@ export function install(rt) {
     if (rt.ownChatLineage?.(sessionId, agent, bot) !== true) return undefined
     // From here the question is the guarded Bot's own: an error holds it (fails closed, as the
     // executor's path does), and only this Bot's question is refused (DG-3).
+    const refuse = error => {
+      const text = error?.code === 'bot/refused' ? error.message : 'The review guard holds this call until the reviewer answers the plan.'
+      try {
+        const details = bridge ? request.bridgeCall : request.mirrorCall
+        if (isRecord(details)) details.refused = { reason: text }
+      } catch {}
+      return { why: 'guard', text }
+    }
     try {
       let base
       try { base = agent?.session === undefined ? undefined : rt.sessionFolder?.(agent.session) } catch {}
@@ -210,22 +218,25 @@ export function install(rt) {
       const args = isRecord(mirror) ? mirror : undefined
       const call = solverCallId(sessionId, 'acp_tool', args, request.callId)
       const held = reviewGuardHolds(bot, true, 'acp_tool', args, undefined, base, call)
-      if (held === undefined) {
-        if (bot.reviewTrack?.solver?.plan) {
-          await rt.solverBeforeWork?.(bot, { ...solverCall(bot, 'acp_tool', args, undefined, base), call, approvalOnly: true })
-        }
-        return undefined
+      if (held !== undefined) {
+        if (isRecord(mirror)) mirror.refused = { reason: held.text }
+        rt.noteStop?.(sessionId, { why: held.why, ...(typeof mirror?.title === 'string' ? { tool: mirror.title } : {}), callId: request.callId, text: held.text, child: true }, agent)
+        return held
       }
-      if (isRecord(mirror)) mirror.refused = { reason: held.text }
-      rt.noteStop?.(sessionId, { why: held.why, ...(typeof mirror?.title === 'string' ? { tool: mirror.title } : {}), callId: request.callId, text: held.text, child: true }, agent)
-      return held
+      if (!bot.reviewTrack?.solver?.plan) return undefined
+      const track = cleanTrack(bot.reviewTrack)
+      const progress = track?.solver
+      if (!track?.requested || track.delivered || !progress?.plan) return undefined
+      const work = solverCall(bot, 'acp_tool', args, undefined, base)
+      if (!work.relevant) return undefined
+      // Match solverBeforeWork's durable updates. The mirror may have bound this action already.
+      const pending = progress.pending
+      const needsSave = pending && work.checkCommand && call
+        ? pending.call !== call : progress.passed.length > 0 || progress.review !== undefined
+      if (!needsSave) return undefined
+      return rt.solverBeforeWork?.(bot, { ...work, call, approvalOnly: true })?.then(() => undefined, refuse)
     } catch (error) {
-      const text = error?.code === 'bot/refused' ? error.message : 'The review guard holds this call until the reviewer answers the plan.'
-      try {
-        const details = bridge ? request.bridgeCall : request.mirrorCall
-        if (isRecord(details)) details.refused = { reason: text }
-      } catch {}
-      return { why: 'guard', text }
+      return refuse(error)
     }
   }
 
@@ -356,10 +367,11 @@ export function install(rt) {
  * is refused before Auto, a person's grant, Pocket or the card can allow it (H6-1).
  */
 export function installAhead(rt) {
-  rt.ctx.on('approval/request', async (request, next) => {
+  rt.ctx.on('approval/request', (request, next) => {
     let held
-    try { held = await rt.reviewGuardAsk?.(request) } catch {}
-    return held === undefined ? next() : 'rejected'
+    try { held = rt.reviewGuardAsk?.(request) } catch {}
+    const answer = decision => decision === undefined ? next() : 'rejected'
+    return held instanceof Promise ? held.then(answer) : answer(held)
   }, { prepend: true })
   installPreExecute(rt)
 }
