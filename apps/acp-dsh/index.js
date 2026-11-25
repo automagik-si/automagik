@@ -2243,8 +2243,8 @@ export function apply(ctx, config = {}, {
     botIdentity: identityReaders.register,
     modelIdentityOf: (provider, model) => adapter.modelIdentityOf(provider, model),
     resolveModelIdentity: (provider, model) => adapter.resolveModelIdentity(provider, model),
-    /** The requested model acknowledged by the live ACP session, scoped to the answering DSH turn when supplied. */
-    effectiveModelOf: (sessionId, provider, model, turn) => adapter.effectiveModelOf(sessionId, provider, model, turn),
+    /** The live ACP acknowledgement for the answering DSH turn. A canonical resolver also checks for conflicting reports. */
+    effectiveModelOf: (sessionId, provider, model, turn, canonicalModel) => adapter.effectiveModelOf(sessionId, provider, model, turn, canonicalModel),
     /**
      * Where an image an agent makes in a chat goes (agent-image.js): `keeper` is
      * { start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) ->

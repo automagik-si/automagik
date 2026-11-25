@@ -34,6 +34,9 @@ for await (const line of createInterface({ input: process.stdin })) {
       if (acknowledgement === 'different-concrete') selected = 'claude-haiku-5-5'
       appendFileSync(trace, `${JSON.stringify({ method, sessionId, value: params.value, selected })}\n`)
       result = acknowledgement === 'echo-only' ? {} : { configOptions: configOptions() }
+      if (acknowledgement === 'dual-field-conflict') {
+        result.models = { currentModelId: 'gpt-6-sol', availableModels: [{ modelId: 'gpt-6-sol', name: 'GPT-6 Sol' }] }
+      }
       break
     case 'session/prompt':
       appendFileSync(trace, `${JSON.stringify({ method, sessionId, selected })}\n`)

@@ -17,6 +17,7 @@ import { callArguments } from '../../acp-dsh/src/host/tool.js'
 import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
 import { questionReply } from '../src/host/parts.js'
+import { modelOf } from '../src/host/solver-progress.js'
 import { answerSender } from '../src/host/turns.js'
 import { DICTIONARY, installLocale } from '../src/client/i18n.js'
 import { reviewMarkText, solverAutoView } from '../src/client/solver-draft.js'
@@ -1929,6 +1930,30 @@ test('New Solver requires Claude wire acknowledgement in its answering session',
       }
     })
   }
+})
+
+test('conflicting ACP model fields keep the reviewer pin routed and leave RESULT unverified', async t => {
+  const f = await dialogWire(t, 'dual-field-conflict')
+  const { h, bot, solver, reviewer } = f
+  let identity
+  const { exchangeId, actual } = await dialogResult(f, { beforeReply() {
+    identity = modelOf(h.rt, f.agent(reviewer.id), undefined, 3)
+  } })
+  const wire = f.wire('acp-claude')
+  const prompt = wire.filter(entry => entry.method === 'session/prompt').at(-1)
+  const pin = wire.find(entry => entry.method === 'session/set_config_option' && entry.sessionId === prompt?.sessionId)
+  assert.equal(pin?.value, 'sonnet')
+  assert.equal(prompt?.selected, 'sonnet')
+  assert.equal(f.adapter.live.get(reviewer.id).run.option('model').currentValue, 'sonnet')
+  const result = bot.reviewTrack.solver.review
+  assert.equal(result.exchangeId, exchangeId)
+  assert.equal(result.verdict, 'unverified')
+  assert.equal(result.unverified, 'model')
+  assert.equal(result.reviewer, undefined)
+  assert.equal(identity, undefined)
+  assert.match(actual.content.at(-1).text, /RESULT review is unverified/)
+  h.finish(solver.id, 'Delivered after the RESULT reply.')
+  assert.equal(bot.reviewTrack.last?.done, undefined)
 })
 
 test('an invalidated live pin gives the exact RESULT input a durable unverified notice', async t => {

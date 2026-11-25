@@ -1507,14 +1507,14 @@ export class AcpAdapter extends LlmAdapter {
       ? { status: 'offered', model } : { status: 'unresolved' }
   }
 
-  effectiveModelOf(sessionId, provider, model, turn) {
+  effectiveModelOf(sessionId, provider, model, turn, canonicalModel) {
     const state = this.live.get(sessionId)
     const answer = this.modelAnswers.get(state?.run)
     if (state?.provider !== provider || !state?.run?.alive || state.archived || state.held
       || !answer || answer.session !== state.run.sessionId
       || (model !== undefined && model !== answer.model)) return undefined
     if (turn !== undefined && (answer.turn?.turn !== turn || answer.turn !== this.roleTurns.get(sessionId))) return undefined
-    return state.run.acknowledgedModel()
+    return state.run.acknowledgedModel(canonicalModel)
   }
 
   // A model's efforts are the ones the agent offers for it; DSH turns down any other before the

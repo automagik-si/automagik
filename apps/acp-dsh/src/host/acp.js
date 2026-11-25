@@ -15,7 +15,7 @@ import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
 import { usageLimitOf } from './usage-limit.js'
-import { sonnetWire } from './model-identity.js'
+import { SONNET_PIN, sonnetWire } from './model-identity.js'
 import { observeTerminal } from './terminal-evidence.js'
 
 const STDERR_KEEP = 4000
@@ -368,6 +368,7 @@ export class AgentRun {
     this.sessionId = answer.sessionId
     this.modelProof = undefined
     this.reportedModel = undefined
+    this.reportedModelFields = undefined
     if (answer.modes !== undefined && answer.modes !== null) this.modes = answer.modes
     if (Array.isArray(answer.configOptions) || answer.models) {
       this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
@@ -558,9 +559,16 @@ export class AgentRun {
   }
 
   takeOptions(options, models, fallback) {
-    const reported = optionOf(withModels(options, models), 'model')
+    const option = optionOf(options, 'model')
+    const sessionModel = optionOf(withModels([], models), 'model')
+    const reported = option ?? sessionModel
     // The legacy session model list can be separate from an effort option update.
-    if (reported || models !== undefined || !fallback || this.reportedModel?.id !== MODEL_STATE) this.reportedModel = reported
+    if (reported || models !== undefined || !fallback || this.reportedModel?.id !== MODEL_STATE) {
+      this.reportedModel = reported
+      // Preserve both live reports from the same message for model verification.
+      this.reportedModelFields = option && typeof models?.currentModelId === 'string'
+        ? { option, sessionModelId: models.currentModelId, sessionModel } : undefined
+    }
     this.options = withModels(options, models ?? fallback)
     if (this.modelProof && !this.confirmsModel(this.modelProof)) this.modelProof = undefined
   }
@@ -577,9 +585,24 @@ export class AgentRun {
     if (wire !== undefined && this.confirmsModel(proof)) this.modelProof = proof
   }
 
-  acknowledgedModel() {
+  acknowledgedModel(canonicalModel) {
     const proof = this.modelProof
-    if (proof && proof.session === this.sessionId && this.confirmsModel(proof)) return proof.model
+    if (!proof || proof.session !== this.sessionId || !this.confirmsModel(proof)) return undefined
+    if (canonicalModel && this.modelReportsConflict(proof, canonicalModel)) return undefined
+    return proof.model
+  }
+
+  modelReportsConflict(proof, canonicalModel) {
+    const fields = this.reportedModelFields
+    if (!fields) return false
+    const { option, sessionModel, sessionModelId } = fields
+    const { provider } = this.spec
+    const configured = canonicalModel(provider, proof.sonnetPin ? SONNET_PIN : option.currentValue)
+    // The session list must establish its own affiliation for the Sonnet wire alias.
+    const sessionSonnet = provider === 'acp-claude' && sessionModelId === 'sonnet'
+      && sonnetWire(valuesOf(sessionModel).filter(choice => choice.value !== SONNET_PIN)) === sessionModelId
+    const session = canonicalModel(provider, sessionSonnet ? SONNET_PIN : sessionModelId)
+    return configured !== undefined && session !== undefined && configured !== session
   }
 
   /** The agent's own option of `category` (`model`, `thought_level`), as it last said. */
@@ -603,6 +626,7 @@ export class AgentRun {
     if (option.currentValue === value && (!requireReported || this.reportedModel?.currentValue === value)) return
     if (category === 'model') {
       this.reportedModel = undefined
+      this.reportedModelFields = undefined
       this.modelProof = undefined
     }
     if (option.id === MODEL_STATE) {

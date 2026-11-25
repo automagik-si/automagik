@@ -124,7 +124,8 @@ export function modelOf(rt, agent, session = agent?.session, answeringTurn) {
     if (!route) return undefined
     const acp = route.provider.startsWith('acp-')
     const model = acp
-      ? rt.ctx.get?.('acpAgents')?.effectiveModelOf?.(session?.id ?? agent?.id, route.provider, route.model, answeringTurn) : route.model
+      ? rt.ctx.get?.('acpAgents')?.effectiveModelOf?.(session?.id ?? agent?.id, route.provider, route.model, answeringTurn, concreteModel)
+      : route.model
     return concreteModel(route.provider, model)
   } catch {
     return undefined
