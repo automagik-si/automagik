@@ -6,8 +6,8 @@ import { reservedCommandOf } from '../shared/reserved-commands.js'
 import { freezeLoopRequest } from './secrets.js'
 import { skillName } from './skill-library-rules.js'
 
-import { SKILL_SOURCE, SKILL_NOTICE } from './skill-message.js'
-export const SKILL_TOOL = 'load_skill'
+import { SKILL_SOURCE, SKILL_NOTICE, SKILL_TOOL } from './skill-message.js'
+export { SKILL_TOOL } from './skill-message.js'
 
 const GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)|\b(?:use the skill|use a skill)\s+([a-z0-9-]+)\b|使用技能\s*([a-z0-9-]+)/gi
 const acp = provider => routeOf(provider).connectedBy === 'acp'
@@ -86,7 +86,10 @@ export function install(rt) {
         return []
       }
       const load = row.role === 'tool' && skillCalls.has(row.toolCallId)
-      const content = row.content?.filter(part => {
+      const { automagikSkillParts, ...source } = row.source ?? {}
+      const parts = Array.isArray(automagikSkillParts)
+        ? [...row.content, ...automagikSkillParts.filter(marker)] : row.content
+      const content = parts?.filter(part => {
         const ref = marker(part)
         if (!ref) return !load
         if (auxiliary || ref.catalog === true) return false
@@ -96,9 +99,9 @@ export function install(rt) {
         const skill = current.get(ref.name)
         return skill !== undefined && skill.hash === ref.hash && skill.content === part.text && (ref.use !== 'load' || skill.mode === AUTOMATIC_SKILL_MODE)
       })
-      if (content?.length === row.content?.length) return [row]
+      if (automagikSkillParts === undefined && content?.length === row.content?.length) return [row]
       changed = true
-      return [{ ...row, content }]
+      return [{ ...row, content, ...(automagikSkillParts === undefined ? {} : { source }) }]
     })
     if (catalog && bot && automatic.length) {
       // Add the current section to the request's system prompt without recording a
@@ -186,8 +189,9 @@ export function install(rt) {
         else notices.push({ name, roomId: row.source.roomId })
       }
       if (parts.length > 0) modified.set(row.id, {
-        ...row, content: [...row.content, ...parts],
-        source: { ...row.source, automagikSkillParsed: true },
+        // DSH title providers flatten person content directly from the event log.
+        // Keep the checked parts with the source until provider dispatch.
+        ...row, source: { ...row.source, automagikSkillParsed: true, automagikSkillParts: parts },
       })
     }
     if (!modified.size && !notices.length) return decision

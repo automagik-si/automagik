@@ -3672,7 +3672,7 @@ export function install(rt) {
       if (event.type !== 'user/message') continue
       const source = event.data?.source
       if (source?.kind === 'user') {
-        const content = Array.isArray(event.data.content) ? event.data.content : []
+        const content = personParts(event.data.content)
         const imageRefs = content.filter(block => block?.type === 'image' && block.attachment !== undefined)
           .map(block => ({ attachmentId: block.attachment.attachmentId, mime: block.attachment.mediaType ?? block.attachment.mime ?? block.attachment.mimeType, name: block.attachment.name }))
         const images = content.filter(block => block?.type === 'image').length
