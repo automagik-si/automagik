@@ -525,7 +525,7 @@ export function install(rt) {
 
   ctx.on('agent/pre-step', async ({ agent, messages, signal }, next) => {
     const decision = await next()
-    if (decision.kind === 'reject' || signal.aborted) return decision
+    if (signal.aborted || decision?.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
     await rt.load()
     const botId = ownerOf(rt, agent.id)
     if (!rt.botOf(botId) || signal.aborted) return decision
