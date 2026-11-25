@@ -104,6 +104,11 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: tool deny retry',
     'on agent/created',
     'on tools/execute',
+    // A Solver's unread review reply (review-mark.js): released when its turn takes the reply,
+    // claimed when a turn picks it from the inbox, and the claim cleared when it is reinserted.
+    'on session/event',
+    'on agent/inbox/claimed',
+    'on agent/inbox/inserted',
     // The four file tools' folder (read-scope.js): prepared before the call, guarded, checked
     // again at dispatch, a refusal noted, and its two endpoints.
     'on tools/pre-execute',
