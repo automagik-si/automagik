@@ -350,7 +350,7 @@ function ActivityRows({ lines, bot }) {
 export const SkillActivityRow = ({ name, bot }) => h(ActivityRows, { lines: [t('Skill: {name}', { name })], bot })
 
 export function registerSkillActivity(ctx) {
-  return ctx.uiConversation.events.register({
+  return ctx.uiConversation?.events?.register?.({
     kind: SKILL_ACTIVITY,
     target: 'chat',
     match: { [SKILL_ACTIVITY_RECORD]: event => {

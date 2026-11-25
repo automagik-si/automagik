@@ -22407,7 +22407,7 @@ function ActivityRows({ lines, bot }) {
 }
 var SkillActivityRow = ({ name, bot }) => (0, import_react50.createElement)(ActivityRows, { lines: [t("Skill: {name}", { name })], bot });
 function registerSkillActivity(ctx) {
-  return ctx.uiConversation.events.register({
+  return ctx.uiConversation?.events?.register?.({
     kind: SKILL_ACTIVITY,
     target: "chat",
     match: { [SKILL_ACTIVITY_RECORD]: (event) => {
