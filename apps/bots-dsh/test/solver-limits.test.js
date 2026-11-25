@@ -1288,11 +1288,12 @@ test('PR B recovers a base-format held RESULT or asks once more after restart', 
   const end = turn => ({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
   const route = data => ({ type: 'request/context', data })
   const input = data => ({ type: 'user/message', data })
-  for (const [name, originalCount, live] of [
+  for (const [name, originalCount, live, unreadable] of [
     ['unique original route', 1, false],
     ['unique original route in a live continuation', 1, true],
     ['missing original route', 0, false],
     ['ambiguous original route', 2, false],
+    ['unreadable reviewer log', 0, false, true],
   ]) {
     await t.test(name, async t => {
       const { h, child, exchange, track, request, reviewInput } = await heldReviewReply(t, held.held, { kind: 'result' })
@@ -1323,8 +1324,15 @@ test('PR B recovers a base-format held RESULT or asks once more after restart', 
       assert.equal(stored.heldFirstLine, held.heldFirstLine)
       await h.close()
 
+      let failedReviewerRead = false
       const next = fixture(t, h.home, { configure(ctx) {
-        ctx.sessionController.inspect = async id => ({ events: id === 'reviewer' ? reviewerLog : solverLog })
+        ctx.sessionController.inspect = async id => {
+          if (id === 'reviewer' && unreadable) {
+            failedReviewerRead = true
+            throw new Error('Fixture reviewer log read failed')
+          }
+          return { events: id === 'reviewer' ? reviewerLog : solverLog }
+        }
       } })
       const deliveries = []
       const deliver = next.rt.deliver
@@ -1344,6 +1352,11 @@ test('PR B recovers a base-format held RESULT or asks once more after restart', 
       const solver = next.agentOf('solver')
       const bot = next.rt.botOf('solver')
       await until(() => solver.message?.source.replyTo === exchange)
+      if (unreadable) {
+        assert.equal(failedReviewerRead, true)
+        assert.match(solver.message.content.at(-1).text, /Ask the designated reviewer once more on the same checked work/,
+          'an unreadable legacy RESULT prompts a fresh review of the same work')
+      }
       assertHeldDelivery(solver.message, exchange, held.held)
       assert.equal(next.rt.state.works[exchange], undefined)
       assert.deepEqual(bot.reviewTrack.last, history)
@@ -1358,8 +1371,14 @@ test('PR B recovers a base-format held RESULT or asks once more after restart', 
         assert.equal(bot.reviewTrack.last.resultExchangeId, exchange)
         assert.equal(bot.reviewTrack.last.done, true)
       } else {
-        assert.equal(bot.reviewTrack.solver.review.verdict, 'unverified')
-        assert.equal(bot.reviewTrack.solver.review.reviewer, undefined)
+        const result = bot.reviewTrack.solver.review
+        assert.equal(result.verdict, 'unverified')
+        assert.equal(result.reviewer, undefined)
+        assert.equal(result.receipt, solver.message.source.reviewReceipt)
+        const binding = next.rt.live.get('solver').consumedResult
+        assert.equal(binding?.request, request)
+        assert.equal(binding?.replyTo, exchange)
+        assert.equal(binding?.receipt, result.receipt)
         assert.deepEqual(bot.reviewTrack.verdicts, priorVerdicts)
         assert.notEqual(bot.reviewTrack.delivered, true)
         // The fake Solver acts on the host feedback through the normal review tool.
@@ -1372,6 +1391,8 @@ test('PR B recovers a base-format held RESULT or asks once more after restart', 
         assert.deepEqual(bot.reviewTrack.last, history)
         assert.equal(bot.reviewTrack.solver.review.verdict, undefined)
         assert.notEqual(bot.reviewTrack.solver.review.exchangeId, exchange)
+        assert.equal(bot.reviewTrack.solver.review.reviewerId, 'reviewer')
+        assert.equal(next.agentOf('reviewer').message.source.exchangeId, bot.reviewTrack.solver.review.exchangeId)
       }
       assert.equal(deliveries.filter(message => message.role === 'request' && message.toId === 'reviewer').length,
         originalCount === 1 ? 0 : 1)
@@ -2736,6 +2757,7 @@ test('PR B mixed-route RESULT credits the controlling verdict writer', async t =
   ]) {
     await t.test(name, async t => {
       const { h, exchange, track, deliveries, openReply } = await pendingResultReview(t, own)
+      const priorVerdicts = structuredClone(track().verdicts)
       const reviewer = h.agentOf('reviewer')
       h.event('reviewer', 'turn/start', { turn: 4 })
       h.takeInput('reviewer', reviewer.message)
@@ -2752,9 +2774,19 @@ test('PR B mixed-route RESULT credits the controlling verdict writer', async t =
         assert.equal(result.unverified, 'same')
         assert.match(h.agentOf('solver').message.content.at(-1).text, /same model as the Solver/)
       }
-      if (verdict === 'SHIP') assert.equal(result.reviewer.model, 'acp-omp/default')
+      if (verdict === 'SHIP') {
+        assert.equal(result.reviewer.model, 'acp-omp/default')
+        assert.deepEqual(track().verdicts.slice(0, -1), priorVerdicts)
+        assert.equal(track().verdicts.at(-1)?.verdict, 'SHIP')
+      }
       h.finish('solver', 'Delivered after review.')
       assert.equal(track().last?.done, verdict === 'SHIP' ? true : undefined)
+      const mark = h.rt.reviewMarkOf(h.rt.botOf('solver')).reviewMark
+      if (reason === 'same') {
+        assert.deepEqual({ verdicts: track().verdicts, reviewed: mark?.result }, { verdicts: priorVerdicts, reviewed: false },
+          'the controlling same-pair SHIP adds no credited verdict or RESULT review mark')
+      }
+      if (verdict === 'SHIP') assert.equal(mark?.result, true)
     })
   }
 })

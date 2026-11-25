@@ -1285,10 +1285,16 @@ export function install(rt) {
     const asker = rt.workAsker(workId)
     const sender = asker?.senderSessionId
     if (exchangeId === undefined || sender === undefined || rt.botOf(sender) === undefined) return void settled()
-    const name = rt.botOf(rt.selfOf(sessionId))?.name ?? 'The other Bot'
+    const reviewerId = rt.selfOf(sessionId)
+    const name = rt.botOf(reviewerId)?.name ?? 'The other Bot'
     const events = await logOf(sessionId)
     if (!ownsTeam()) return
-    if (events === undefined) {
+    // The saved answer can carry the receipt and retry notice for an active legacy
+    // RESULT even when the reviewer log cannot supply its original route.
+    const savedReply = events === undefined ? rt.workReply?.(workId, { text: '' }) : undefined
+    const held = savedReply?.legacyHeld && rt.designatedReplyRequest?.(sender, reviewerId, workId, rt.state.works[workId])
+      ? savedReply : undefined
+    if (events === undefined && held === undefined) {
       // The record of that work cannot be read: whether it answered cannot be
       // established. The sender is told that, and the work is not run again.
       await settled()
@@ -1307,11 +1313,11 @@ export function install(rt) {
       answerSender(rt, sessionId, asker, text, undefined, ownsTeam, undefined, null)
       return
     }
-    const turn = turnOf(events, exchangeId)
+    const turn = events === undefined ? undefined : turnOf(events, exchangeId)
     // The request was never taken up: it is still waiting, and the delivery that is
     // waiting for it keeps what it had.
-    if (turn === undefined) return void settled()
-    const said = turn.texts.join('\n\n')
+    if (turn === undefined && held === undefined) return void settled()
+    const said = held?.text ?? turn.texts.join('\n\n')
     // The answer went up in another run: the work closes with what it said, and
     // nothing is sent twice.
     const back = rt.roomOf(asker.senderRoomId)?.sessions?.[sender]
@@ -1321,6 +1327,18 @@ export function install(rt) {
       settled()
       rt.closeWork?.(workId, name, rt.answerText(workId, said, name))
       return
+    }
+    const sendReply = async (selected, model) => {
+      if (!ownsTeam()) return
+      const text = rt.answerText(workId, selected.text, name)
+      const long = text.length > MESSAGE_INLINE_MAX ? await rt.attachLong(text, `Answer from ${name}.txt`) : undefined
+      if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, model, selected, {
+        solverEvents: sent, heldRouteResolved: true,
+      })
+    }
+    if (held !== undefined) {
+      await settled()
+      return sendReply(held)
     }
     const reason = turn.reason
     // A turn that went on to a fresh part goes on there; it is not settled here.
@@ -1379,11 +1397,7 @@ export function install(rt) {
     }
     const selected = rt.workReply(workId, reply)
     const selectedModel = selected.legacyHeld ? heldReviewModel(events, workId, selected, name) : selected.model
-    const text = rt.answerText(workId, selected.text, name)
-    const long = text.length > MESSAGE_INLINE_MAX ? await rt.attachLong(text, `Answer from ${name}.txt`) : undefined
-    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, selectedModel, selected, {
-      solverEvents: sent, heldRouteResolved: true,
-    })
+    return sendReply(selected, selectedModel)
   }
 
   // Report the same durable notes the resume pass works from, without exposing their payloads.

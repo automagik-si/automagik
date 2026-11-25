@@ -576,7 +576,7 @@ export function install(rt) {
       const verdict = verdictOf(text, stage, firstLine, { veto: stage !== undefined })
       const planVerdict = guardVerdictOf(text, reviewer?.name, stage, firstLine)
       if (verdict === undefined && planVerdict === undefined && reply === undefined) return
-      let retryHeld = false
+      let withholdShip = false
       if (reviewer) {
         const result = current.solver?.review
         if (stage === 'result' && legacyResultReview(result) && result.verdict === undefined) {
@@ -584,12 +584,13 @@ export function install(rt) {
           if (original) current.solver = { ...current.solver, review: { ...result, solverModel: original } }
         }
         const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
-        retryHeld = recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt,
-          stage === 'result' && legacyHeld) === 'held'
+        const reason = recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt,
+          stage === 'result' && legacyHeld)
+        withholdShip = reason === 'held' || reason === 'same'
       }
       const at = Date.now()
-      if (planVerdict !== undefined && (!retryHeld || planVerdict !== 'SHIP')) current.planVerdictAt ??= at
-      if (verdict !== undefined && (!retryHeld || verdict !== 'SHIP')) {
+      if (planVerdict !== undefined && (!withholdShip || planVerdict !== 'SHIP')) current.planVerdictAt ??= at
+      if (verdict !== undefined && (!withholdShip || verdict !== 'SHIP')) {
         current.verdicts = [...current.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
       }
       bot.reviewTrack = current
