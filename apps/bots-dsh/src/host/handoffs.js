@@ -233,12 +233,18 @@ export function install(rt) {
 
   const owns = (botId, workId) => workId !== undefined && works()[workId]?.to === botId
   const waits = workId => (works()[workId]?.open.length ?? 0) > 0
-  function hold(workId, { text, firstLine, model }) {
+  function hold(workId, { text, reviewText, firstLine, model }) {
     const work = works()[workId]
     if (work === undefined || text === '') return
     work.held = headOf(text, TEXT_KEPT)
-    // Both fields describe the same reply, and are replaced in the same state write.
-    work.heldFirstLine = firstLine.length <= TEXT_KEPT ? firstLine : ''
+    // Keep full reviewer evidence beside the display copy in the same state write.
+    if (work.room === undefined && work.fromRoom === undefined && work.to === rt.botOf(work.from)?.reviewerId) {
+      work.heldReviewText = reviewText
+      work.heldFirstLine = firstLine
+    } else {
+      delete work.heldReviewText
+      work.heldFirstLine = firstLine.length <= TEXT_KEPT ? firstLine : ''
+    }
     heldModels.set(work, model)
     save()
   }
@@ -252,11 +258,16 @@ export function install(rt) {
     if (reply.text !== '') return reply
     const work = works()[workId]
     const text = work?.held ?? ''
-    if (typeof work?.heldFirstLine === 'string') return { text, firstLine: work.heldFirstLine, model: heldModels.get(work) }
-    // An older held reply has only display text. A staged-looking opening is
-    // ambiguous, so even a later legacy label cannot establish its verdict.
-    if (stageVerdictOf(text.split(/\r?\n/, 1)[0])) return { text, ambiguous: true }
-    return { text, firstLine: '' }
+    const firstLine = work?.heldFirstLine
+    const reviewText = work?.heldReviewText
+    const model = heldModels.get(work)
+    if (typeof reviewText === 'string' && typeof firstLine === 'string') return { text, reviewText, firstLine, model }
+    // Old display copies can drop a surrogate pair at the cap. Only a shorter
+    // copy is known to be complete, and a staged opening also needs its raw line.
+    if (text.length >= TEXT_KEPT - 1) return { text }
+    if (typeof firstLine === 'string') return { text, reviewText: text, firstLine, model }
+    if (stageVerdictOf(text.split(/\r?\n/, 1)[0])) return { text }
+    return { text, reviewText: text, firstLine: '' }
   }
 
   // The answer that goes up: what the Bot said last for this work, then what came back.

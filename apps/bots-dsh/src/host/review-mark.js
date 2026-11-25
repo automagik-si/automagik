@@ -548,7 +548,7 @@ export function install(rt) {
       // against current progress because a progress write can defer the reply.
       const stage = typeof binding.receipt === 'string' && typeof request === 'string' && current.requested && reviewer
         ? currentReviewStage(current.solver, fromId, reply.replyTo) : undefined
-      const verdict = verdictOf(text, stage, firstLine)
+      const verdict = verdictOf(text, stage, firstLine, { veto: stage !== undefined })
       const planVerdict = guardVerdictOf(text, reviewer?.name, stage, firstLine)
       if (verdict === undefined && planVerdict === undefined && reply === undefined) return
       const at = Date.now()

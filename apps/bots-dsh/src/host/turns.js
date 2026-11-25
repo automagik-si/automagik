@@ -104,7 +104,7 @@ const closingReviews = new WeakSet()
 // The reply a sender waits for, sent the way a finished turn sends it: the work it was
 // for closes, and the answer goes up to the Bot that asked. `id` is the Session the
 // answer comes from; `source` is the trigger the turn answered.
-export function answerSender(rt, id, source, text, long, shouldSend, model, review = { text }) {
+export function answerSender(rt, id, source, text, long, shouldSend, model, review = { reviewText: text }) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const fromId = rt.selfOf(id)
   const name = rt.botOf(fromId)?.name ?? 'The other Bot'
@@ -121,8 +121,7 @@ export function answerSender(rt, id, source, text, long, shouldSend, model, revi
     ? { exchangeId, replyTo: source.exchangeId, reviewReceipt } : undefined
   // The verdict uses the selected reviewer's own reply. Notices and child results
   // still travel with the answer and receipt, without supplying verdict evidence.
-  const reviewText = review?.ambiguous ? undefined : review?.text
-  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, reviewText,
+  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, review?.reviewText,
     answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine)
   const durableResult = onReplyRecorded?.ready !== undefined
   if (durableResult) closingReviews.add(answered)
@@ -497,7 +496,7 @@ export function install(rt) {
 
   const liveOf = id => {
     let entry = live.get(id)
-    if (entry === undefined) live.set(id, entry = { texts: [], shown: 0 })
+    if (entry === undefined) live.set(id, entry = { texts: [], rawTexts: [], shown: 0 })
     return entry
   }
 
@@ -932,6 +931,7 @@ export function install(rt) {
         entry.adoptedTurn = undefined
         entry.since = event.time ?? Date.now()
         entry.texts = []
+        entry.rawTexts = []
         entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
@@ -962,6 +962,7 @@ export function install(rt) {
           const carry = entry.carry
           entry.carry = undefined
           entry.texts = carry.texts
+          entry.rawTexts = carry.rawTexts
           entry.firstLine = carry.firstLine
           entry.shown = carry.shown
           entry.answers = carry.answers
@@ -1225,6 +1226,7 @@ export function install(rt) {
         if (text !== '' && text !== HANDOFF_ACK) {
           // What a turn says goes on to the group or the sender, read from other folders.
           entry.texts.push(absoluteLinks(text, rt.sessionFolder?.(session)))
+          entry.rawTexts.push(raw)
           if (entry.turn !== undefined) showSteps(id, entry, called ? entry.texts.length : entry.texts.length - 1)
         }
         entry.lastText = text
@@ -1248,12 +1250,13 @@ export function install(rt) {
         const noteTurn = rt.handoffNoteTurn?.(id, entry.turn ?? event.data?.turn) === true
         if (steerCut) {
           entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0,
-            firstLine: cut.texts > 0 ? entry.firstLine : undefined }
+            rawTexts: entry.rawTexts.slice(0, cut.texts), firstLine: cut.texts > 0 ? entry.firstLine : undefined }
         }
         const info = entry.info
         const joined = entry.joined ?? []
         // What the group already saw of the turn is not posted again.
         const texts = entry.texts.slice(entry.shown)
+        const rawTexts = entry.rawTexts.slice(entry.shown)
         // Whether the turn wrote any text, also text the group already saw.
         const wroteText = entry.texts.length > 0
         const shown = entry.shown > 0 || (info?.retried === true && promisedOpenings.delete(info.exchangeId))
@@ -1276,6 +1279,7 @@ export function install(rt) {
         entry.adoptedTurn = undefined
         entry.info = undefined
         entry.texts = []
+        entry.rawTexts = []
         entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
@@ -1389,7 +1393,8 @@ export function install(rt) {
           if (cutOff) return reply === '' && wroteText ? CUT_OFF_NOTE : cutOffText(reply)
           return reply
         }
-        const reply = { text: replyText(), firstLine: reviewFirstLine, model: answerModel }
+        const reply = { text: replyText(), reviewText: (wroteCall ? rawTexts.map(stripWrittenCalls) : rawTexts).join('\n\n'),
+          firstLine: reviewFirstLine, model: answerModel }
         const groupReply = () => rt.withRoomSteps?.(held, reply.text) ?? reply.text
         // Whoever the turn answers gets the same three-way rule: a failure notice,
         // the turn's text (or a stopped-before-answer line), or nothing.

@@ -62,7 +62,7 @@ export function turnsOf(events) {
   let current
   for (const event of events) {
     if (event.type === 'turn/start') {
-      current = { turn: event.data?.turn, took: [], texts: [], reason: undefined }
+      current = { turn: event.data?.turn, took: [], texts: [], rawTexts: [], reason: undefined }
       turns.push(current)
       continue
     }
@@ -80,7 +80,10 @@ export function turnsOf(events) {
       const raw = rawTextOf(event.data?.message?.content)
       const text = raw.trim()
       if (raw !== '') current.firstLine ??= raw.split(/\r?\n/, 1)[0]
-      if (text !== '') current.texts.push(text)
+      if (text !== '') {
+        current.texts.push(text)
+        current.rawTexts.push(raw)
+      }
       continue
     }
     if (event.type === 'turn/end') current.reason = event.data?.reason
@@ -108,10 +111,13 @@ export function turnOf(events, exchangeId) {
       const follow = turns[next]
       const kept = finished(found)
       found = { ...follow, took: [...found.took, ...follow.took], texts: [...kept, ...follow.texts],
+        rawTexts: [...found.rawTexts.slice(0, kept.length), ...follow.rawTexts],
         stepFrom: kept.length + (follow.stepFrom ?? follow.texts.length), firstLine: kept.length > 0 ? found.firstLine : follow.firstLine }
       next += 1
     }
-    return steerCut(found) ? { ...found, texts: finished(found), reason: undefined } : found
+    if (!steerCut(found)) return found
+    const kept = finished(found)
+    return { ...found, texts: kept, rawTexts: found.rawTexts.slice(0, kept.length), reason: undefined }
   }
   return undefined
 }
@@ -1331,7 +1337,7 @@ export function install(rt) {
         sessionId,
       })
     }
-    const reply = { text: cutOff ? cutOffText(said) : said, firstLine: turn.firstLine ?? '' }
+    const reply = { text: cutOff ? cutOffText(said) : said, reviewText: turn.rawTexts.join('\n\n'), firstLine: turn.firstLine ?? '' }
     // The turn ended with what it said: the answer goes up the way a finished turn's
     // does, with the results that came back for it and the text it held. A work that
     // still waits for what it handed on keeps its part until that comes back.

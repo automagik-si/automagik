@@ -21355,7 +21355,7 @@ function stageVerdictOf(firstLine) {
   const match = STAGE_VERDICT.exec(firstLine);
   if (match) return { stage: match[1].toLowerCase(), verdict: match[2] };
 }
-function verdictOf(text2, stage, firstLine) {
+function verdictOf(text2, stage, firstLine, { veto = false } = {}) {
   if (typeof text2 !== "string") return void 0;
   const lines = text2.split(/\r?\n/);
   const explicit = stageVerdictOf(firstLine ?? lines[0]);
@@ -21373,7 +21373,7 @@ function verdictOf(text2, stage, firstLine) {
     const found = LIST_ITEM.test(raw) ? AFTER_LABEL.exec(line) : AT_START.exec(line) ?? AFTER_LABEL.exec(line) ?? ENDS_LINE.exec(line) ?? gluedDash(raw);
     if (found) {
       verdict2 = found[1];
-      if (explicit && verdict2 !== "SHIP") return verdict2;
+      if ((veto || explicit) && verdict2 !== "SHIP") return verdict2;
     }
   }
   return verdict2;

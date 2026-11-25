@@ -56,9 +56,10 @@ export function stageVerdictOf(firstLine) {
  * @param {unknown} text - the reply as the reviewer sent it.
  * @param {'plan'|'result'} [stage] - the stage of the current host-bound exchange.
  * @param {string} [firstLine] - the original first line when the host formats the reply for delivery.
+ * @param {{veto?: boolean}} [options] - keep the first negative verdict for a bound review.
  * @returns {'SHIP'|'FIX-FIRST'|'BLOCKED'|undefined} the verdict.
  */
-export function verdictOf(text, stage, firstLine) {
+export function verdictOf(text, stage, firstLine, { veto = false } = {}) {
   if (typeof text !== 'string') return undefined
   const lines = text.split(/\r?\n/)
   const explicit = stageVerdictOf(firstLine ?? lines[0])
@@ -79,8 +80,7 @@ export function verdictOf(text, stage, firstLine) {
       : AT_START.exec(line) ?? AFTER_LABEL.exec(line) ?? ENDS_LINE.exec(line) ?? gluedDash(raw)
     if (found) {
       verdict = found[1]
-      // A legacy rejection can veto an explicit SHIP through the host's conflict check.
-      if (explicit && verdict !== 'SHIP') return verdict
+      if ((veto || explicit) && verdict !== 'SHIP') return verdict
     }
   }
   return verdict

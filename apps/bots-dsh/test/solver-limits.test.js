@@ -1004,7 +1004,9 @@ test('stage verdict correction: a stopped joined request receives a notice witho
 const reviewSteerCut = { kind: 'aborted', reason: { kind: 'hook', reason: STEER_CUT } }
 const acknowledgedReviewer = 'claude-sonnet-5-5'
 
-async function heldReviewReply(t, heldText, { kind = 'plan', acknowledgedTurn } = {}) {
+async function heldReviewReply(t, heldText, {
+  kind = 'plan', acknowledgedTurn, displayText = heldText.trim(), childText = 'The fixture is present.',
+} = {}) {
   const { h, request, review, track, openReply, deliveries } = await reviewReplyFixture(t)
   if (kind === 'result') {
     await review('plan')
@@ -1029,17 +1031,17 @@ async function heldReviewReply(t, heldText, { kind = 'plan', acknowledgedTurn } 
   await h.tool('message_bot', { to: 'other', message: 'Check the fixture.', reply_to: 'me', when: 'queue' }, 'reviewer')
   assert.equal(h.rt.waitsWork(exchange), true)
   h.finish('reviewer', heldText)
-  assert.equal(h.rt.state.works[exchange].held, heldText.trim())
+  assert.equal(h.rt.state.works[exchange].held, displayText)
   h.event('other', 'turn/start', { turn: 1 })
   h.takeInput('other', h.agentOf('other').message)
-  h.finish('other', 'The fixture is present.')
+  h.finish('other', childText)
   await deliveries.at(-1).sent
   const child = h.agentOf('reviewer').message
   assert.equal(child.source.work, exchange)
   h.event('reviewer', 'turn/start', { turn: 3 })
   h.takeInput('reviewer', child)
   assert.equal(h.rt.waitsWork(exchange), false)
-  return { h, child, exchange, track, deliveries }
+  return { h, child, exchange, track, deliveries, openReply }
 }
 
 function assertHeldDelivery(input, exchange, heldText) {
@@ -1094,6 +1096,79 @@ test('stage verdict correction: a silent continuation uses the held reviewer fir
     assert.equal(review.unverified, expected === 'SHIP' ? undefined : 'model')
     assert.equal(modelWarningCount(input), expected === 'SHIP' ? 0 : 1)
     await h.close()
+  }
+})
+
+test('stage verdict exception: a held RESULT veto beyond the display cap withholds Done', async t => {
+  const reply = readFileSync(new URL('./fixtures/held-result-2329.txt', import.meta.url), 'utf8')
+  const displayText = reply.slice(0, 2000)
+  const { h, exchange, track, deliveries, openReply } = await heldReviewReply(t, reply, {
+    kind: 'result', acknowledgedTurn: 2, displayText,
+  })
+  h.finish('reviewer', '')
+  await openReply(4, deliveries.at(-1))
+  const input = h.agentOf('solver').message
+  assertHeldDelivery(input, exchange, displayText)
+  assert.ok(!input.content[0].text.includes('Verdict: BLOCKED'))
+  assert.equal(track().solver.review.reviewer?.model, acknowledgedReviewer)
+  assert.equal(track().solver.review.exchangeId, exchange)
+  assert.equal(track().solver.review.revision, track().solver.revision)
+  h.finish('solver', 'Finished the agreed checks and received the review.')
+  assert.deepEqual({ strict: track().solver.review.verdict, advisory: track().verdicts.at(-1)?.verdict, done: track().last?.done },
+    { strict: 'BLOCKED', advisory: 'BLOCKED', done: undefined })
+})
+
+test('stage verdict exception: complete held evidence governs bound verdicts only', async t => {
+  for (const [reply, expected, childText] of [
+    ['RESULT SHIP\nVerdict: FIX-FIRST\nVerdict: SHIP', 'FIX-FIRST'],
+    ['SHIP\nVerdict: BLOCKED\nVerdict: SHIP', 'BLOCKED'],
+    ['RESULT SHIP\n[Handed back to reviewer for this work]\n> BLOCKED\nVerdict: SHIP', 'BLOCKED'],
+    ['RESULT SHIP\n~~~\nVerdict: BLOCKED\n~~~', 'SHIP', 'Verdict: BLOCKED'],
+  ]) {
+    const { h, track, deliveries, openReply } = await heldReviewReply(t, reply, {
+      kind: 'result', acknowledgedTurn: 2, childText,
+    })
+    h.finish('reviewer', '')
+    await openReply(4, deliveries.at(-1))
+    assert.equal(track().solver.review.verdict, expected, reply)
+    assert.equal(track().verdicts.at(-1)?.verdict, expected, reply)
+    if (childText) assert.ok(h.agentOf('solver').message.content[0].text.includes(`other:\n${childText}`))
+    h.finish('solver', 'Finished the agreed checks and received the review.')
+    assert.equal(track().last?.done, expected === 'SHIP' ? true : undefined, reply)
+    await h.close()
+  }
+})
+
+test('stage verdict exception: recovery keeps the full veto and refuses a legacy capped reply', async t => {
+  const reply = readFileSync(new URL('./fixtures/held-result-2329.txt', import.meta.url), 'utf8')
+  const displayText = reply.slice(0, 2000)
+  for (const older of [false, true]) {
+    const { h, child, exchange } = await heldReviewReply(t, reply, {
+      kind: 'result', acknowledgedTurn: 2, displayText,
+    })
+    if (older) delete h.rt.state.works[exchange].heldReviewText
+    await h.rt.save({ required: true, durable: true })
+    assert.equal(await h.rt.flushUpdateNotes(), true)
+    const state = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8'))
+    assert.equal(state.works[exchange].heldReviewText, older ? undefined : reply)
+    await h.close()
+    const end = { type: 'turn/end', data: { turn: 3, reason: { kind: 'completed' } } }
+    const next = fixture(t, h.home, { configure(ctx) {
+      ctx.sessionController.inspect = async id => ({ events: id === 'reviewer'
+        ? [{ type: 'turn/start', data: { turn: 3 } }, { type: 'user/message', data: child }, end] : [] })
+    } })
+    await next.rt.load()
+    next.event('reviewer', end.type, end.data)
+    const keepAlive = setInterval(() => {}, 1000)
+    try { await next.rt.resumesDone } finally { clearInterval(keepAlive) }
+    const solver = next.agentOf('solver')
+    await until(() => solver.message?.source.replyTo === exchange)
+    assertHeldDelivery(solver.message, exchange, displayText)
+    const track = next.rt.botOf('solver').reviewTrack
+    assert.equal(track.solver.review.verdict, older ? 'unverified' : 'BLOCKED')
+    assert.equal(track.verdicts.at(-1)?.verdict, older ? 'SHIP' : 'BLOCKED')
+    assert.equal(track.solver.review.reviewer, undefined)
+    await next.close()
   }
 })
 
