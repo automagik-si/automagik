@@ -192,8 +192,36 @@ export function install(rt) {
     save()
   }
 
-  // A reply going from `fromId` to the Bot `toId` that asked it. It counts only when it is the
-  // Solver's own reviewer answering a request from the Solver's own chat, and opens with a verdict.
+  function rememberReply(bot, exchangeId, reviewerId, replyTo, workAt) {
+    let replies = unread.get(bot)
+    if (replies === undefined) unread.set(bot, replies = new Map())
+    const reply = { exchangeId, reviewerId, replyTo, workAt, release: () => replies.delete(exchangeId) }
+    replies.set(exchangeId, reply)
+    return reply
+  }
+
+  // A live DSH Session can outlast the plugin. Its delivery notes keep the identity
+  // of recorded replies until the corresponding input is taken or definitively lost.
+  function unreadReplies(bot) {
+    const track = bot?.reviewTrack
+    if (track?.requested !== true || track.delivered === true) return
+    for (const args of rt.unreadReviewReplies?.(bot.id) ?? []) {
+      const { requestAt, workAt } = args.reviewReply
+      if (requestAt === track.requestAt && isTime(workAt) && workAt >= requestAt
+        && args.fromId === bot.reviewerId && !unread.get(bot)?.has(args.exchangeId)) {
+        rememberReply(bot, args.exchangeId, args.fromId, args.replyTo, workAt)
+      }
+    }
+    return unread.get(bot)
+  }
+
+  const retire = (reply) => {
+    reply.release()
+    rt.forgetDelivery?.(reply.exchangeId)
+  }
+
+  // A reply going from `fromId` to the Bot `toId` that asked it. The Solver's own reviewer
+  // answering work from its own chat can hold delivery even if the reply has no verdict.
   // `workAt`: when the work it answers was opened. A reply to work opened before this request (a
   // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
   // The guard's own strict reading (guardVerdictOf) dates the plan's verdict once per request, for
@@ -204,31 +232,35 @@ export function install(rt) {
     if (typeof workAt !== 'number') return
     const verdict = verdictOf(text)
     const planVerdict = guardVerdictOf(text, rt.botOf(fromId)?.name)
-    if (verdict === undefined && planVerdict === undefined) return
     const track = trackOf(bot)
     if (track.delivered === true || workAt < track.requestAt) return
-    const at = Date.now()
-    if (planVerdict !== undefined) track.planVerdictAt ??= at
-    if (verdict !== undefined) track.verdicts = [...track.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
-    save()
+    if (verdict !== undefined || planVerdict !== undefined) {
+      const at = Date.now()
+      if (planVerdict !== undefined) track.planVerdictAt ??= at
+      if (verdict !== undefined) track.verdicts = [...track.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
+      save()
+    }
     if (reply === undefined || !track.requested || !isTime(workAt)) return
-    let replies = unread.get(bot)
-    if (replies === undefined) unread.set(bot, replies = new Map())
+    const { requestAt } = track
     // Only the delivery that appends this exchange can start its hold.
     return () => {
-      if (unread.get(bot) !== replies || bot.reviewTrack.delivered === true || bot.reviewerId !== fromId) return
-      const release = () => replies.delete(reply.exchangeId)
-      replies.set(reply.exchangeId, { reviewerId: fromId, replyTo: reply.replyTo, workAt, release })
-      return release
+      if (rt.botOf(toId) !== bot || bot.reviewTrack?.requestAt !== requestAt || bot.reviewTrack.delivered === true
+        || bot.reviewerId !== fromId) return
+      const recorded = rememberReply(bot, reply.exchangeId, fromId, reply.replyTo, workAt)
+      rt.noteReviewReply?.(reply.exchangeId, { requestAt, workAt })
+      return () => retire(recorded)
     }
   }
+
+  const matches = (reply, source) => source?.kind === SOURCE_KIND && source.role === 'reply'
+    && source.exchangeId === reply.exchangeId && source.senderSessionId === reply.reviewerId && source.replyTo === reply.replyTo
 
   const replyAt = (sessionId, source) => {
     if (source?.kind !== SOURCE_KIND || source.role !== 'reply') return
     const past = rt.pastOwners.get(sessionId)
     const bot = rt.botOf(rt.chatOwners.get(sessionId) ?? (past?.roomId === undefined ? past?.botId : undefined))
-    const reply = unread.get(bot)?.get(source.exchangeId)
-    if (reply !== undefined && reply.reviewerId === source.senderSessionId && reply.replyTo === source.replyTo) return reply
+    const reply = unreadReplies(bot)?.get(source.exchangeId)
+    if (reply !== undefined && matches(reply, source)) return reply
   }
 
   const agentSession = agent => agent?.session?.id ?? agent?.id
@@ -246,26 +278,34 @@ export function install(rt) {
     reply.claim = undefined
     reply.withdrawal = undefined
   })
-  rt.ctx.on('agent/inbox/discarded', ({ agent, message }) => {
-    if (rt.wakeLog?.movingInbox || rt.updateShuttingDown?.()) return
+  function reviewReplyDiscarded(agent, message) {
     const reply = replyAt(agentSession(agent), message?.source)
-    if (reply === undefined) return
+    if (reply === undefined) return false
+    if (rt.wakeLog?.movingInbox) return true
     // DSH edit and steer remove and reinsert in one operation. Give the matching
     // insertion a chance to cancel the withdrawal before treating it as final.
     const withdrawal = {}
     reply.withdrawal = withdrawal
-    queueMicrotask(() => { if (reply.withdrawal === withdrawal) reply.release() })
-  })
+    queueMicrotask(() => { if (reply.withdrawal === withdrawal) retire(reply) })
+    return true
+  }
 
   function reviewReplyTurnEnd(sessionId, data) {
     const bot = rt.botOf(rt.chatOwners.get(sessionId))
-    const replies = unread.get(bot)
-    if (!replies?.size || rt.carriesBotInput?.(sessionId) || rt.updateHold?.closed || rt.updateShuttingDown?.()
+    const replies = unreadReplies(bot)
+    if (!replies?.size || rt.updateHold?.closed || rt.updateShuttingDown?.()
       || rt.cutByRestart?.(data?.reason) || data?.reason?.reason?.kind === 'disposed') return
-    // A claim without a user/message was dropped when its turn ended, unless
-    // the host is still carrying those proposed inputs through a part change.
     for (const reply of replies.values()) {
-      if (reply.claim?.sessionId === sessionId && reply.claim.turn === data?.turn) reply.release()
+      const claim = reply.claim
+      if (claim?.sessionId !== sessionId || claim.turn !== data?.turn) continue
+      // The switch may have taken the proposed input in pre-step. Wait for it
+      // to finish moving input before retiring the claim that ended unread.
+      const switching = rt.afterBotInputSwitch?.(sessionId, (messages) => {
+        if (replies.get(reply.exchangeId) !== reply || reply.claim !== claim) return
+        if (messages.some(message => matches(reply, message.source))) reply.claim = undefined
+        else retire(reply)
+      })
+      if (!switching && !rt.carriesBotInput?.(sessionId)) retire(reply)
     }
   }
 
@@ -310,7 +350,7 @@ export function install(rt) {
     const review = reviewOf(bot)
     const works = Object.values(rt.state?.works ?? {})
     if (review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && !(typeof track.personAt === 'number' && typeof work.at === 'number' && work.at < track.personAt))) return
-    if (review === 'bot' && [...(unread.get(bot)?.values() ?? [])].some(reply =>
+    if (review === 'bot' && [...(unreadReplies(bot)?.values() ?? [])].some(reply =>
       reply.reviewerId === bot.reviewerId && !(typeof track.personAt === 'number' && reply.workAt < track.personAt))) return
     // Reviewer work this request opened, still out when the person asked: delivered before its
     // verdict (Run 3). Work left from an earlier request is not this one's.
@@ -328,5 +368,5 @@ export function install(rt) {
     return last ? { reviewMark: { ...last } } : {}
   }
 
-  Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewTurnEnd, reviewMarkOf })
+  Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf })
 }

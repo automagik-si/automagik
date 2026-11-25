@@ -10,9 +10,12 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import * as instructions from '@deepseek-ai/dsh-agent-instructions'
 import * as skill from '@deepseek-ai/dsh-tool-skill'
 import { DICTIONARY, hostText, installLocale } from '../src/client/i18n.js'
+import { SOURCE_KIND } from '../src/host/constants.js'
 import { install as installFallback } from '../src/host/fallback.js'
 import { install as installMemory } from '../src/host/memory.js'
 import { install, saidSomething } from '../src/host/parts.js'
+import { install as installReviewMark } from '../src/host/review-mark.js'
+import { SOLVER_DESCRIPTION } from '../src/shared/solver-method.js'
 import { textOf } from '../src/host/text.js'
 import { install as installClock } from '../src/host/time-context.js'
 import { fakeContext } from './fake-ctx.js'
@@ -142,6 +145,70 @@ async function crossesWithHandoff(b, result, { target = 'acp-claude/default', fr
   assert.match(textOf(handoff?.content), /the user switched this chat from .+ to .+; you are .+ now/)
   return handoff
 }
+
+test('TRACK1 SWITCH: a route switch preserves a carried review claim and retires a lost one', async t => {
+  const dispositions = []
+  for (const carried of [true, false]) {
+    const b = bench()
+    t.after(() => b.ctx.dispose())
+    b.rt.state.bots.reviewer = { id: 'reviewer', name: 'Reviewer' }
+    Object.assign(b.bot, { role: SOLVER_DESCRIPTION, reviewerId: 'reviewer' })
+    installReviewMark(b.rt)
+    b.rt.reviewCreated(b.bot, 'Review this change.')
+    const message = {
+      id: 'inbox-id',
+      content: [{ type: 'text', text: 'SHIP' }],
+      source: { kind: SOURCE_KIND, role: 'reply', exchangeId: 'review-reply', replyTo: 'review-work', senderSessionId: 'reviewer' },
+    }
+    const record = b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', Date.now(), message.source)
+    record()
+    const turn = 3
+    b.rt.live = new Map([['s1', { turn }]])
+    const idle = Promise.withResolvers()
+    b.agent.status = 'running'
+    b.agent.whenIdle = () => idle.promise
+    let cancelled
+    b.agent.cancel = reason => { cancelled = reason }
+    b.ctx.emit('agent/inbox/claimed', { agent: b.agent, message, turn })
+
+    const fresh = b.freshAgent('s2')
+    const enqueue = fresh.followup
+    fresh.followup = queued => {
+      enqueue.call(fresh, queued)
+      b.ctx.emit('agent/inbox/inserted', { agent: fresh, message: queued })
+    }
+    const switched = await b.rt.switchRoute('b1', 'acp-claude/default', undefined, { stopReply: true })
+    const [job] = b.rt.switchJobs()
+    assert.equal(switched.status, 'switching')
+    assert.ok(cancelled)
+    if (carried) {
+      const preStep = b.ctx.listeners.get('agent/pre-step')[0]
+      await preStep({ agent: b.agent, step: 1, messages: [message] }, () => assert.fail('switch let the old step run'))
+    }
+    b.rt.reviewReplyTurnEnd('s1', { turn, reason: { kind: 'aborted', reason: cancelled } })
+    b.rt.live.delete('s1')
+    b.agent.status = 'idle'
+    idle.resolve()
+    await job.finished
+    await crossesWithHandoff(b, switched)
+    b.rt.chatOwners.set('s2', 'b1')
+    const awaiting = fresh.inbox.nextTurn.filter(item => item.source?.replyTo === 'review-work')
+    assert.equal(awaiting.length, Number(carried))
+    b.rt.reviewTurnEnd('b1', { completed: true, wroteText: true })
+    dispositions.push(b.bot.reviewTrack.delivered === true)
+    if (carried) {
+      const [exact] = awaiting
+      assert.equal(exact.source.exchangeId, message.source.exchangeId)
+      assert.notEqual(exact.id, message.id)
+      for (const listener of b.ctx.listeners.get('session/event')) {
+        listener(fresh.session, { type: 'user/message', data: { id: exact.id, source: exact.source } })
+      }
+      b.rt.reviewTurnEnd('b1', { completed: true, wroteText: true })
+      assert.equal(b.bot.reviewTrack.delivered, true)
+    }
+  }
+  assert.deepEqual(dispositions, [false, true], 'only the carried claim still holds delivery after settlement')
+})
 
 // A goal is the Session's, so the part that takes over starts with none: an active one moves
 // with the conversation, carrying the rounds it has left, or a long loop ends at the handoff.

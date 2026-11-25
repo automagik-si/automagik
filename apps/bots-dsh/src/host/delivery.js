@@ -167,7 +167,7 @@ export function install(rt) {
       for (const [index, item] of remaining.entries()) {
         if (typeof agent.inject === 'function' && index < remaining.length - 1) agent.inject(item.message)
         else agent.followup(item.message)
-        item.accepted = true
+        item.acceptedBy = target
       }
       await ctx.sessions.flush(agent.session)
       for (const item of remaining) item.delivered(target)
@@ -192,7 +192,7 @@ export function install(rt) {
       shouldSend,
       sessionId,
       agent: undefined,
-      accepted: false,
+      acceptedBy: undefined,
       ready: new Promise((resolve, reject) => { markReady = resolve; markUnready = reject }),
       sent: new Promise((resolve, reject) => { markDelivered = resolve; markFailed = reject }),
       made: () => markReady(),
@@ -319,10 +319,15 @@ export function install(rt) {
         await ctx.sessions.flush(agent.session)
       }
     } catch (error) {
-      queued?.fail(error)
-      // An inbox accepted this reply even if its subsequent session flush failed.
-      if (queued?.accepted !== true) lost?.()
-      throw error
+      if (queued?.acceptedBy === undefined || lost === undefined) {
+        queued?.fail(error)
+        lost?.()
+        throw error
+      }
+      // The original review reply is already actionable. Keep its recovery note
+      // and do not replace it with a failure notice if the batch or flush failed.
+      deliveredTo = queued.acceptedBy
+      rt.warn('omni-ui: review reply %s was accepted before its batch failed: %s', exchangeId, error)
     }
     if (book !== undefined) {
       rt.ledger.append(book, { event: 'delivered', id: exchangeId, sessionId: deliveredTo, time: Date.now() })

@@ -1281,6 +1281,7 @@ export function install(rt) {
     await rt.ensureCapabilities(target)
     const agent = await rt.resolveAgent(target)
     rt.assertBotRunnerProvider?.(currentProvider(agent), target, agent)
+    if (switches.get(from) === owner) owner.inputDestination = agent
     // A retry after a forward that stopped halfway must not deliver the same input twice.
     const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
     try {
@@ -1736,7 +1737,7 @@ export function install(rt) {
       try { rt.assertShellChoice?.(agentId) } catch { return false }
       const place = placeOf(agentId)
       if (place === undefined || switches.has(agentId) || checkpoints.has(agentId) || readOnly() || pinned(agentId)) return false
-      const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
+      const job = { ...place, inputAgent: agent, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
       if (crossing !== undefined) {
         // A Bot's own chat crosses at the person's pick; a group conversation of the Bot follows
         // it with a switch of its own (`crossing.group`). The deadline counts from the job.
@@ -4629,7 +4630,19 @@ export function install(rt) {
     } finally { leave() }
   }
 
-  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, freshPinnedText: bot => pinnedText(bot, 'fresh'), switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(),
+  function afterBotInputSwitch(id, settled) {
+    const job = switches.get(id)
+    if (job === undefined) return false
+    void job.finished.then(() => {
+      if (disposed) return
+      const retained = [job.inputAgent, job.inputDestination]
+        .flatMap(agent => [...(agent?.inbox?.nextStep ?? []), ...(agent?.inbox?.nextTurn ?? [])])
+      settled([...job.carry, ...retained])
+    }).catch(error => rt.warn('ds-bot: input from %s could not be checked after its switch: %s', id, error))
+    return true
+  }
+
+  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, freshPinnedText: bot => pinnedText(bot, 'fresh'), switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), afterBotInputSwitch,
     carriesBotInput: id => switches.has(id) || checkpoints.has(id) || reverting.has(id),
     // A Bot's own chat moving to another route. `crossing: true` asks only about an agent
     // switch the person picked and answers its `{ to, since }` (the chat's lock), else false.
