@@ -38,7 +38,7 @@ import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNA
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
 import { writeOmpOverlay } from './src/host/omp-overlay.js'
-import { AGY_OFF_CHECKED, AGY_OFF_SKILLS_NAME, agyExtensions, agyExtensionRefusal, agyOffCheck, writeAgyOff } from './src/host/agy-off.js'
+import { AGY_OFF_CHECKED, AGY_OFF_SKILLS_NAME, agyExtensions, agyExtensionRefusal, agyOffCheck, agySkillsProofReader, writeAgyOff } from './src/host/agy-off.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
 import { retiredLine } from './src/host/retired-home.js'
 import { callbackOf, checkCallback, deliverCallback } from './src/host/sign-in-callback.js'
@@ -188,7 +188,7 @@ export function apply(ctx, config = {}, {
   loginSpawn, loginTimers, loginRecord, loginProbe, imageSetup, account = accountOf, evidenceOf = accountEvidenceOf,
   installation = process.env.DSH_HOME,
   cliHome: override, consentFile: accountFile,
-  logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile,
+  logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile, agySkillsVersions,
   platform = process.platform,
   nativeSignInMs = 600_000, nativeLogoutMs = 30_000, nativeSignInLinkMs = 15_000,
   nativeSignInWindowMs = 240_000, nativeSignInCheckMs = 60_000,
@@ -521,6 +521,7 @@ export function apply(ctx, config = {}, {
   // How `spec` starts now (agents.js launchOf): the adapter installed at this moment, or the
   // CLI itself for a native agent.
   const launch = (spec, cli, id = idOf(spec)) => launchOf(spec, cli, { store, node: nodeCommand(), cliEnv: cliEnvironment(spec, cliDetails.get(id)), stamp: cliStamp })
+  const agySkillsProof = agySkillsProofReader(agySkillsVersions)
   // The agy version the last Antigravity start answered in this host run (`initialize`'s
   // agentInfo), for the version native tools off was checked on (agy-off.js AGY_OFF_CHECKED). An
   // OFF start on another version warns once per version and goes on (#1564, AG-2 (a)).
@@ -581,6 +582,7 @@ export function apply(ctx, config = {}, {
     // The Bot team's native-tools switch: omp by its launch args, Codex by a checked config,
     // with the models it never applies to (adapter.js nativeKept).
     ...(spec.nativeSwitch ? { nativeSwitch: spec.nativeSwitch } : {}),
+    ...(id === 'acp-antigravity' ? { agySkillsVersion: () => agySkillsProof(cli)?.version } : {}),
     ...(spec.nativeKeptModels ? { nativeKeptModels: spec.nativeKeptModels } : {}),
     // A copy Automagik installed (Antigravity) is not on PATH: the command names its path. One
     // with its own home signs in only in Settings, which the chat names instead.
@@ -659,13 +661,13 @@ export function apply(ctx, config = {}, {
         if (typeof home !== 'string' || env.HOME !== home) throw new Error(`${spec.defaultName} could not start with its tools off: its home did not match.`)
         const refused = agyExtensionRefusal(home, { platform })
         if (refused !== undefined) throw new Error(refused)
-        const skills = context.skillBridge === true
-        writeAgyOff(home, { platform, live: agyOffLive, skills })
-        const profile = skills ? AGY_OFF_SKILLS_NAME : undefined
+        const proof = context.skillBridge === true ? agySkillsProof(command) : undefined
+        writeAgyOff(home, { platform, live: agyOffLive, skills: proof !== undefined })
+        const profile = proof ? AGY_OFF_SKILLS_NAME : undefined
         const check = agyOffCheck(home, { profile, spawnedAt: Date.now(), warn: line => warn(ctx, line) })
-        const offArgs = skills ? ['--agent', profile, '--cli_dir_name', profile] : spec.offArgs
+        const offArgs = proof ? ['--agent', profile, '--cli_dir_name', profile] : spec.offArgs
         return {
-          command, args: [...args, ...offArgs], env,
+          command: proof?.command ?? command, args: [...args, ...offArgs], env, agySkillsVersion: proof?.version,
           agyReady: async run => { trackAgyOff(run); recordAgyVersion(run, true); check.start(run) },
           offRecheck: run => check.again(run),
         }
@@ -2334,13 +2336,16 @@ export function apply(ctx, config = {}, {
      * `unchecked` (the version native tools off was checked on) when the agy version seen differs
      * from it, `hooks` / `plugins` while the current Antigravity home holds them (an OFF start
      * refuses then), and `fresh` with either off Windows (Switch account starts a new home).
+     * `skillsUnavailable` uses the launch's exact executable proof.
      * Before any agy start in this host run the version is the installed folder's.
      */
     nativeOffNotes: provider => {
       if (provider !== 'acp-antigravity') return undefined
       try {
         const spec = AGENTS[provider]
-        const notes = {}
+        const notes = {
+          ...(agySkillsProof(clis.get(provider)) === undefined && { skillsUnavailable: true }),
+        }
         const version = agyVersionSeen ?? cliDetails.get(provider)?.version
         if (typeof version === 'string' && version !== AGY_OFF_CHECKED) notes.unchecked = AGY_OFF_CHECKED
         if (homedNative(spec)) {

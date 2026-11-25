@@ -20463,6 +20463,7 @@ function stackReplies(replies) {
 // src/host/skill-message.js
 var SKILL_SOURCE = "automagik-skill";
 var SKILL_NOTICE = "automagik-skill-notice";
+var AGY_OFF_SKILLS_NOTICE = "Skills cannot be loaded in Antigravity with native tools off on this version";
 var SKILL_TOOL = "load_skill";
 var personParts = (content) => Array.isArray(content) ? content.filter((part) => part?.automagikSkill?.kind !== SKILL_SOURCE) : [];
 function chatPersonParts({ content, source }) {
@@ -33661,6 +33662,7 @@ function NewGenie({ roster, actions, onBack, onCreated }) {
 }
 
 // src/client/native-tools-copy.js
+var AGY_OFF_SKILLS_GUIDANCE = "Turn on Native tools to use Automatic skills in Antigravity.";
 var nativeToolsCopy = {
   label: "Native tools",
   on: "Claude Code uses its own tools (Bash, Read, Edit…) in all of this Bot's chats: its direct chat, groups, tasks and scheduled runs, with anyone who can talk to it. They run outside Automagik's file sandbox. What asks you first depends on the permission level. Turning this off stops its running sessions at once.",
@@ -33692,12 +33694,13 @@ var NATIVE_TOOLS_HINTS = {
   "read-only": "Not available at the Read only level.",
   "level-unknown": "Not available: the permission level of this Bot's chat could not be read."
 };
-function antigravityNotes(bot, on) {
+function antigravityNotes(bot, on, skillsUnavailable) {
   const notes = [];
   const copy2 = antigravityNativeToolsCopy;
   if (typeof bot.nativeToolsUnchecked === "string") notes.push({ key: copy2.unchecked, values: { version: bot.nativeToolsUnchecked } });
   if (on) return notes;
   notes.push({ key: copy2.firstTurn });
+  if (skillsUnavailable) notes.push({ key: AGY_OFF_SKILLS_NOTICE });
   if (bot.nativeToolsHooks === true) notes.push({ key: copy2.hooks });
   if (bot.nativeToolsPlugins === true) notes.push({ key: copy2.plugins });
   if (bot.nativeToolsFresh === true && (bot.nativeToolsHooks === true || bot.nativeToolsPlugins === true)) notes.push({ key: copy2.fresh });
@@ -33710,13 +33713,15 @@ function nativeSwitchView(bot, roster) {
   const blocked = NATIVE_TOOLS_HINTS[bot.nativeToolsBlock];
   const on = blocked === void 0 && nativeToolsOn(bot);
   const hint3 = blocked === void 0 ? [on ? copy2.on : copy2.off] : copy2.blocked !== void 0 ? [blocked, copy2.blocked] : [blocked];
-  const notes = mark2 === "acp-antigravity" ? antigravityNotes(bot, on) : [];
+  const skillsUnavailable = mark2 === "acp-antigravity" && !on && bot.nativeToolsSkillsUnavailable === true;
+  const notes = mark2 === "acp-antigravity" ? antigravityNotes(bot, on, skillsUnavailable) : [];
   return {
     mark: mark2,
     on,
     disabled: blocked !== void 0 || Boolean(roster?.readOnly),
     blocked,
     hint: hint3,
+    ...skillsUnavailable ? { skillsUnavailable } : {},
     ...notes.length === 0 ? {} : { notes }
   };
 }
@@ -33729,6 +33734,8 @@ var nativeToolsZh = {
   [antigravityNativeToolsCopy.hooks]: "Antigravity 的设置中有 hooks.json 文件时，无法在关闭原生工具的情况下启动。删除 hooks.json 后即可在关闭原生工具时使用。",
   [antigravityNativeToolsCopy.plugins]: "Antigravity 的设置中有插件时，无法在关闭原生工具的情况下启动。",
   [antigravityNativeToolsCopy.fresh]: "在设置中对 Antigravity 使用“切换账号”，会以空白设置重新开始，同时也会退出它的登录。",
+  [AGY_OFF_SKILLS_NOTICE]: "在此版本的 Antigravity 中，关闭原生工具时无法加载技能",
+  [AGY_OFF_SKILLS_GUIDANCE]: "开启原生工具即可在 Antigravity 中使用自动技能。",
   [ompNativeToolsCopy.on]: "omp 在此 Bot 的所有对话中使用它自己的工具：单独对话、群组、任务和定时运行，无论是谁在与它对话。这些工具在 Automagik 的文件沙盒之外运行。关闭后会立即停止它正在运行的会话。",
   [ompNativeToolsCopy.off]: "关闭后，omp 在此 Bot 的所有对话中都没有任何工具，此 Bot 只能聊天。开启后，从每个对话的下一条消息起生效。",
   [ompNativeToolsCopy.blocked]: "在这里 omp 没有任何工具，此 Bot 只能聊天。",
@@ -41057,6 +41064,7 @@ function OwnerBotSkills({ bot, roster, actions }) {
   const attached = new Set(active2.map((item) => item.name));
   const choices = library.skills.filter((skill) => !skill.held && !attached.has(skill.name));
   const disabled = busy || !!roster.readOnly;
+  const availability = nativeSwitchView(bot, roster)?.skillsUnavailable ? t(AGY_OFF_SKILLS_GUIDANCE) : void 0;
   const save = async (action) => {
     if (disabled) return;
     setBusy(true);
@@ -41100,6 +41108,7 @@ function OwnerBotSkills({ bot, roster, actions }) {
         choices.map(({ name }) => (0, import_react98.createElement)("option", { key: name, value: name }, name))
       )
     ),
+    availability ? (0, import_react98.createElement)("p", { className: "bt-set-hint", role: "status" }, availability) : null,
     active2.length ? active2.map(({ name, mode: mode2 }) => {
       const item = library.skills.find((skill) => skill.name === name);
       return (0, import_react98.createElement)(
@@ -41125,6 +41134,7 @@ function OwnerBotSkills({ bot, roster, actions }) {
         }, t("Remove"))
       );
     }) : (0, import_react98.createElement)("p", { className: "bt-set-hint" }, t("No skills are active on this Bot.")),
+    availability && active2.length ? (0, import_react98.createElement)("p", { className: "bt-set-hint", role: "status" }, availability) : null,
     warning ? (0, import_react98.createElement)("p", { className: "bt-set-hint", role: "status" }, warning) : null,
     error ? (0, import_react98.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null
   );

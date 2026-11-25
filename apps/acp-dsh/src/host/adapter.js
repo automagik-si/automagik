@@ -1697,9 +1697,12 @@ export class AcpAdapter extends LlmAdapter {
       const turnLevel = levelAtStart()
       const skills = this.ctx.get?.('omniTeam')?.skillCalls
       const supportsSkillBridge = SKILL_BRIDGE_PROVIDERS.has(options.provider)
-      const skillCatalog = () => supportsSkillBridge ? skills?.catalog(sessionId) : undefined
+      const agy = options.provider === 'acp-antigravity'
+      const skillCatalog = state => supportsSkillBridge && (!agy || state.nativeOff !== true || state.agySkillsVersion !== undefined)
+        ? skills?.catalog(sessionId) : undefined
       const canMountSkills = () => this.backchannel !== undefined && supportsSkillBridge &&
         skills?.available(sessionId) === true
+      const agySkillsWanted = () => canMountSkills() ? agent.agySkillsVersion?.() : undefined
       const inputStart = turnStart(options.messages)
       const history = options.messages.slice(0, inputStart)
       const session = dshAgent?.session
@@ -1792,13 +1795,15 @@ export class AcpAdapter extends LlmAdapter {
         && !((bridged ?? this.bridgeOn(agent, sessionId)) && agent.disableBuiltInTools === true && !enabled)
         && currentLevel?.full !== true
       const asks = hardAsks(native, turnLevel)
+      const agyOffLive = agy && live?.provider === options.provider && live.nativeOff === true
+      const wantedAgyVersion = agyOffLive ? agySkillsWanted() : undefined
+      const wantsSkills = agyOffLive ? wantedAgyVersion !== undefined : canMountSkills()
       const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true)
-        && (this.bridgeOn(agent, sessionId) || canMountSkills())
-      const needsSkillBridge = live?.bridge === undefined && canMountSkills()
+        && (this.bridgeOn(agent, sessionId) || wantsSkills)
+      const needsSkillBridge = live?.bridge === undefined && wantsSkills
       // Antigravity OFF selects its exact tool list at process launch. When
-      // eligibility flips, use the other profile and replay the delivered history.
-      const relaunchForSkills = live?.provider === 'acp-antigravity' && options.provider === 'acp-antigravity'
-        && live.nativeOff === true && (live.bridge !== undefined) !== canMountSkills()
+      // eligibility or executable proof changes, replace the child and replay delivered history.
+      const relaunchForSkills = agyOffLive && live.agySkillsVersion !== wantedAgyVersion
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       // Other ACP agents can receive the Solver's method supplement through the
       // existing identity prompt delivery, without adopting the whole Bot role.
@@ -1882,7 +1887,7 @@ export class AcpAdapter extends LlmAdapter {
       // The transcript before this turn: what a replay carries (plan A-5, independent of the
       // bridge; only the kill switch turns it off).
       const replaying = this.replayOn()
-      if (live !== undefined && live.skillCatalog !== undefined && live.skillCatalog !== skillCatalog()?.key) {
+      if (live !== undefined && live.skillCatalog !== undefined && live.skillCatalog !== skillCatalog(live)?.key) {
         try {
           if (codexRow && live.nativeOff === true) ensureCatalog(live.offCatalog)
           await this.refork(agent, live, dshAgent, options.signal, { renew: true })
@@ -1954,12 +1959,12 @@ export class AcpAdapter extends LlmAdapter {
             const codexOff = codexRow && !preOn
             const nativeOff = spawnOmpManaged ? !ompNativeAllowed() : codexRow ? codexOff : undefined
             entry.nativeOff = state.nativeOff = nativeOff
-            const agyOff = options.provider === 'acp-antigravity' && nativeOff === true
-            let agySkills = agyOff && canMountSkills()
-            if (agySkills) {
+            const agyOff = agy && nativeOff === true
+            let prepareAgySkills = agyOff && agySkillsWanted() !== undefined
+            if (prepareAgySkills) {
               await this.backchannel.listen()
               checkArchive()
-              agySkills = canMountSkills()
+              prepareAgySkills = canMountSkills()
             }
             if (codexOff) {
               // ON when the turn started, OFF now: a staged image grant cannot come with it.
@@ -1978,13 +1983,15 @@ export class AcpAdapter extends LlmAdapter {
               : {
                   ...(fileContext === undefined ? {} : { sessionFiles: fileContext }),
                   ...(nativeOff === true ? { nativeOff: true } : {}),
-                  ...(agySkills ? { skillBridge: true } : {}),
+                  ...(prepareAgySkills ? { skillBridge: true } : {}),
                 }
             const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
             // omp's launch spec is synchronous and it has no bridge to prepare.
             // Keep its policy decision and actual spawn in the same event-loop turn.
-            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, offRecheck, ...spec } = omp ? launch : await launch
+            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, agySkillsVersion, offRecheck, ...spec } = omp ? launch : await launch
             checkArchive()
+            state.agySkillsVersion = agySkillsVersion
+            const agySkills = agySkillsVersion !== undefined
             if (spawnOmpManaged && entry.held !== undefined) return yield* stopped(entry.held)
             // The check measured these models with no tool block: kept from now on (B1-4 (b)). When
             // this turn's model is one of them it runs as today, in this same turn.
@@ -2506,7 +2513,10 @@ export class AcpAdapter extends LlmAdapter {
       if (!uploadValid()) return yield uploadStopped()
       const personCalls = new WeakSet()
       const send = currentSkills(personCalls)
-      const catalog = skillCatalog()
+      const catalog = skillCatalog(live)
+      if (agy && live.nativeOff === true && live.agySkillsVersion !== agySkillsWanted()) {
+        return yield* this.step(options, entry)
+      }
       if (live.skillCatalog !== undefined && live.skillCatalog !== catalog?.key) {
         // A catalog edit can land while the model or permission mode is being
         // set. Re-enter before sending to the session with that catalog.
@@ -2566,6 +2576,10 @@ export class AcpAdapter extends LlmAdapter {
       }
       if (sonnetPin && live.run.acknowledgedModel() !== SONNET_PIN) {
         return yield finish('error', `${agent.name} did not acknowledge the pinned Sonnet model.`)
+      }
+      if (agy && live.nativeOff === true && live.agySkillsVersion === undefined &&
+          skills?.available(sessionId) === true && agent.agySkillsVersion?.() === undefined) {
+        skills.noticeAgyUnavailable?.(session)
       }
       started()
       live.replay = undefined

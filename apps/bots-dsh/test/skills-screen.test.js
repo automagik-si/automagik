@@ -12,6 +12,7 @@ import { apply } from '../index.js'
 import { SKILL_CHECK_FINGERPRINT, SKILL_CHECK_HISTORY, SKILL_CHECK_VERSION } from '../src/host/skill-check-version.js'
 import { install as installLibrary } from '../src/host/skill-library.js'
 import { skillHash } from '../src/host/skill-library-rules.js'
+import { fakeLocale } from '../../locale-pt-br-dsh/test/fake-locale.js'
 import { member, serviceStub } from './caller-fixture.js'
 
 const { outputFiles } = await build({
@@ -19,6 +20,7 @@ const { outputFiles } = await build({
     export { AccountLauncher } from './src/client/sidebar.js'
     export { SkillsScreen, skillFileBytes } from './src/client/skills-screen.js'
     export { BotSkills } from './src/client/bot-skills.js'
+    export { hostText, installLocale } from './src/client/i18n.js'
     export { teamActions } from './src/client/team-actions.js'
   `, resolveDir: new URL('..', import.meta.url).pathname },
   format: 'cjs', platform: 'browser', bundle: true, write: false,
@@ -166,6 +168,55 @@ test('Bot and Solver Details both add and remove and show a nonblocking warning'
     await flush()
     assert.deepEqual(changes, [['a', 'fixture', true, 'manual'], ['a', 'fixture', 'automatic'], ['a', 'fixture', false, undefined]])
   }
+})
+
+test('Antigravity OFF localizes the nonblocking warning beside Add skill and active skills', async t => {
+  const f = fixture(t)
+  const locale = fakeLocale()
+  locale.addLanguage({ id: 'pt-BR', label: 'Português (Brasil)', fallback: 'en' })
+  locale.register('omni-ui', 'pt-BR', JSON.parse(readFileSync(
+    new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8')))
+  locale.setLocale('pt-BR')
+  t.after(f.installLocale(locale))
+  const guidance = 'Ative as ferramentas nativas para usar skills automáticas no Antigravity.'
+  assert.equal(f.hostText('Skills cannot be loaded in Antigravity with native tools off on this version'),
+    'Nesta versão do Antigravity, não é possível carregar skills com as ferramentas nativas desligadas')
+  const active = [{ name: 'first', mode: 'manual' }]
+  const changed = []
+  const props = {
+    bot: { id: 'a', model: 'acp-antigravity/default', nativeToolsSkillsUnavailable: true },
+    roster: {},
+    actions: {
+      skillLibrary: async () => ({ skills: [{ name: 'first' }, { name: 'second' }], active: { a: [...active] } }),
+      setBotSkill: async (id, name, attached, mode) => {
+        changed.push([id, name, attached, mode])
+        active.push({ name, mode })
+        return {}
+      },
+    },
+  }
+  const card = f.mount(f.BotSkills, props)()
+  const render = f.mount(card.type, card.props)
+  render()
+  await flush()
+  const warnings = tree => walk(tree, node => node.props?.role === 'status' && text(node) === guidance)
+  const tree = render()
+  const [before, after] = warnings(tree)
+  assert.equal(warnings(tree).length, 2)
+  const add = match(tree, locale.bind('omni-ui')('Add skill'))
+  const children = tree.props.children
+  assert.equal(children.indexOf(before), children.findIndex(node => walk(node, child => child === add).length > 0) + 1)
+  assert.equal(children.indexOf(after), children.findIndex(node => Array.isArray(node) && text(node).includes('first')) + 1)
+  assert.equal(add.props.disabled, false)
+  add.props.onChange({ target: { value: 'second' } })
+  await flush()
+  assert.deepEqual(changed, [['a', 'second', true, 'manual']])
+  assert.match(text(render()), /second/)
+
+  Object.assign(props.bot, { nativeTools: true, nativeToolsAgent: 'acp-antigravity' })
+  assert.equal(warnings(render()).length, 0)
+  Object.assign(props.bot, { model: 'acp-codex/default', nativeTools: false })
+  assert.equal(warnings(render()).length, 0)
 })
 
 test('owner Edit reconfirms a held checker warning from the saved file', { timeout: 15_000 }, async t => {

@@ -10,7 +10,7 @@ import { GROUP_MEMORY_SOURCE, MEMORY_RECALL_SOURCE, MEMORY_UPDATE_SOURCE } from 
 import { freezeLoopRequest } from './secrets.js'
 import { skillName } from './skill-library-rules.js'
 
-import { personParts, SKILL_SOURCE, SKILL_NOTICE, SKILL_TOOL } from './skill-message.js'
+import { AGY_OFF_SKILLS_NOTICE, personParts, SKILL_SOURCE, SKILL_NOTICE, SKILL_TOOL } from './skill-message.js'
 export { SKILL_TOOL } from './skill-message.js'
 
 const GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)|\b(?:use the skill|use a skill)\s+([a-z0-9-]+)\b|使用技能\s*([a-z0-9-]+)/gi
@@ -24,6 +24,10 @@ const catalogOf = records => records.length === 0 ? '' : [
   ...records.map(({ name, description }) => `${name}: ${description}`),
 ].join('\n')
 const noticeText = name => `The skill ${name} is not active on this Bot. Add it in the Bot's Details, under Skills.`
+const skillNotice = text => createUserMessage({
+  content: [{ type: 'text', text }],
+  source: { kind: SKILL_NOTICE, form: 'notice', summary: boundContextSummary(text) },
+})
 const SKILL_UNAVAILABLE = 'No skill with that name is available to this Bot.'
 const SKILLS_PROJECTED = Symbol('Skills projected')
 const DELIVERY_RECORD = 'plugin:automagik/skill-delivery'
@@ -563,6 +567,16 @@ export function install(rt) {
 
   rt.skillCalls = {
     available: sessionId => automaticOf(activeOf(rt, sessionId)).length > 0,
+    noticeAgyUnavailable(session) {
+      if (!session) return
+      try {
+        const seen = session.deriveMessages().some(row => row.source?.kind === SKILL_NOTICE &&
+          row.content?.[0]?.text === AGY_OFF_SKILLS_NOTICE)
+        if (!seen) session.append('user/message', skillNotice(AGY_OFF_SKILLS_NOTICE), { surfaceOp: 'append' })
+      } catch (error) {
+        try { rt.warn?.('Skills availability notice could not be recorded: %s', error) } catch {}
+      }
+    },
     load: (sessionId, name) => loadSkill(rt, sessionId, name),
     unavailable: SKILL_UNAVAILABLE,
     catalog(sessionId) {
@@ -669,10 +683,7 @@ export function install(rt) {
     for (const { name, roomId, lineSeqs } of notices) {
       const text = noticeText(name)
       if (roomId !== undefined) rt.roomSkillNotice?.(roomId, botId, text, { name, lineSeqs })
-      else privateRows.push(createUserMessage({
-        content: [{ type: 'text', text }],
-        source: { kind: SKILL_NOTICE, form: 'notice', summary: boundContextSummary(text) },
-      }))
+      else privateRows.push(skillNotice(text))
     }
     if (hostOnly.size && decision.messages.every(row => hostOnly.has(row.id) ||
           (!original.has(row.id) && CONTEXT_SOURCES.has(row.source?.kind)))) {

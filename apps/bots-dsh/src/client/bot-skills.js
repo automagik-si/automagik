@@ -2,6 +2,7 @@ import { createElement as h, useState } from 'react'
 import { canManageSkills, useSkillLibrary } from './skills-screen.js'
 import { AUTOMATIC_SKILL_MODE, DEFAULT_SKILL_MODE } from '../shared/skill-mode.js'
 import { hostText, t } from './i18n.js'
+import { AGY_OFF_SKILLS_GUIDANCE, nativeSwitchView } from './native-tools-copy.js'
 
 export function BotSkills({ bot, roster, actions }) {
   return canManageSkills() && typeof actions?.skillLibrary === 'function'
@@ -24,6 +25,8 @@ function OwnerBotSkills({ bot, roster, actions }) {
   const attached = new Set(active.map(item => item.name))
   const choices = library.skills.filter(skill => !skill.held && !attached.has(skill.name))
   const disabled = busy || !!roster.readOnly
+  const availability = nativeSwitchView(bot, roster)?.skillsUnavailable
+    ? t(AGY_OFF_SKILLS_GUIDANCE) : undefined
   const save = async action => {
     if (disabled) return
     setBusy(true)
@@ -52,6 +55,7 @@ function OwnerBotSkills({ bot, roster, actions }) {
         } },
       h('option', { value: '' }, t('Add skill')),
       choices.map(({ name }) => h('option', { key: name, value: name }, name)))),
+    availability ? h('p', { className: 'bt-set-hint', role: 'status' }, availability) : null,
     active.length ? active.map(({ name, mode }) => {
       const item = library.skills.find(skill => skill.name === name)
       return h('div', { key: name, className: 'bt-set-row bt-bs-row' },
@@ -62,6 +66,7 @@ function OwnerBotSkills({ bot, roster, actions }) {
         h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled,
           onClick: () => void save(() => actions.setBotSkill(bot.id, name, false)) }, t('Remove')))
     }) : h('p', { className: 'bt-set-hint' }, t('No skills are active on this Bot.')),
+    availability && active.length ? h('p', { className: 'bt-set-hint', role: 'status' }, availability) : null,
     warning ? h('p', { className: 'bt-set-hint', role: 'status' }, warning) : null,
     error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, error) : null)
 }

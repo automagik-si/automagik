@@ -60,6 +60,20 @@ test('the private Skills remedy is visible in current and earlier Bot chat', () 
   assert.equal(other.type.name, 'CellEmpty')
 })
 
+test('the Antigravity OFF Skills notice is localized in current and earlier Bot chat', t => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
+  t.after(installLocale({ register() {}, bind: () => key => pt[key] ?? key }))
+  const kind = 'automagik-skill-notice'
+  const text = 'Skills cannot be loaded in Antigravity with native tools off on this version'
+  const live = SkillNoticeCell({ node: { data: { source: { kind }, content: [{ type: 'text', text }] } } })
+  const [earlier] = ChatRows({ items: [{ kind, text }], sessionId: 'b', roster, actions: {} })
+  for (const cell of [live, earlier]) {
+    const rendered = cell.type(cell.props)
+    assert.equal(rendered.props.role, 'status')
+    assert.equal(rendered.children.join(''), 'Nesta versão do Antigravity, não é possível carregar skills com as ferramentas nativas desligadas')
+  }
+})
+
 test('Skill activity renders outside bubbles before an answer, in both layouts and loaded relay history', () => {
   const event = { type: 'plugin:automagik/skill-activity', ignorable: true, seq: 3, time: 4,
     data: { id: 'receipt', name: 'mint', turn: 1, step: 0 } }

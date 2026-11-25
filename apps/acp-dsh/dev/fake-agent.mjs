@@ -219,6 +219,7 @@ async function attachServer(session, server, sessionId) {
   const connection = connect(server, sessionId)
   session.mcp.set(server.name, connection)
   const tools = await connection.tools.catch(() => [])
+  session.listed?.set(server.name, tools.map(tool => tool?.name))
   trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name),
     ...(SKILLS_PROBE && { definitions: tools }) })
 }
@@ -390,6 +391,11 @@ const implementation = {
       servers: (params.mcpServers ?? []).map(server => server.name),
     })
     const session = newSession(sessionId, params.cwd)
+    const registryMode = process.env.FAKE_ACP_AGY_REGISTRY
+    if (registryMode) {
+      session.listed = new Map()
+      session.eager = new Set(registryMode === 'eager' ? params._meta?.antigravity?.eagerMcpServers : [])
+    }
     await attach(session, params.mcpServers, sessionId)
     agyLog()
     trace({ event: 'new-answer', sessionId, at: Date.now() })
@@ -479,6 +485,23 @@ const implementation = {
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    if (session.listed) {
+      // Antigravity resolves the OFF profile against the component registry. Listing a
+      // session server is insufficient: only eagerly loaded tools become components.
+      const at = process.argv.indexOf('--agent')
+      const profile = at >= 0 ? process.argv[at + 1] : undefined
+      const file = profile && readFileSync(join(process.env.HOME, '.gemini', 'config', 'agents', profile + '.md'), 'utf8')
+      const wanted = file ? JSON.parse(/^tools: (.*)$/m.exec(file)?.[1] ?? '[]') : []
+      const registry = [...session.listed].flatMap(([server, names]) => session.eager.has(server)
+        ? names.map(name => 'mcp_' + server.replace(/[^A-Za-z0-9_]/g, '_') + '_' + name) : [])
+      trace({ event: 'registry', profile, wanted, registry })
+      const missing = wanted.find(name => !registry.includes(name))
+      if (missing !== undefined) {
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text',
+          text: '\n⚠ failed to construct executor: failed to resolve components: unknown component: tool "' + missing + '" not found in registry\n' } })
+        return { stopReason: 'end_turn' }
+      }
+    }
     const probe = SKILLS_PROBE?.turns.find(({ text }) => prompt.some(block => block.text === text))
     if (probe) {
       const { claude } = SKILLS_PROBE

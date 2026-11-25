@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -37,8 +38,12 @@ const answer = provider => ({
   content: [{ type: 'text', text: 'Earlier answer remains' }],
 })
 
-test('Skills row 8: production Antigravity OFF admits only the Session skill read', { ...unixOnly, timeout: 15_000 }, async t => {
-  const h = agyWorld(t)
+test('Skills row 8: Antigravity OFF with exact eager proof admits only the Session skill read', { ...unixOnly, timeout: 15_000 }, async t => {
+  const agySkillsVersions = []
+  const version = '9.8.7'
+  const h = agyWorld(t, { registry: 'eager', version, deps: { agySkillsVersions } })
+  agySkillsVersions.push({ version, sha256: createHash('sha256').update(readFileSync(h.agy)).digest('hex') })
+  assert.equal(h.service.nativeOffNotes('acp-antigravity').skillsUnavailable, undefined)
   const assigned = new Set(['eligible', 'other-eligible'])
   const rt = {
     ctx: { on() {} }, load: async () => {}, selfOf: id => id,
@@ -47,7 +52,8 @@ test('Skills row 8: production Antigravity OFF admits only the Session skill rea
   }
   install(rt)
   h.services.omniTeam = rt
-  h.service.botIdentity(id => rt.botOf(id) && { name: id })
+  let nativeTools = false
+  h.service.botIdentity(id => rt.botOf(id) && { name: id, nativeTools, nativeToolsAgent: 'acp-antigravity' })
   const tool = skillTool(rt)
   const unrelated = { name: 'other_fixture_tool' }
   const executions = []
@@ -83,6 +89,7 @@ test('Skills row 8: production Antigravity OFF admits only the Session skill rea
   assert.deepEqual(launch.meta?.antigravity?.eagerMcpServers, ['dsh'])
   assert.equal(launch.systemPrompt, undefined)
   assert.deepEqual(child.find(event => event.event === 'mcp-list').tools, ['load_skill'])
+  assert.deepEqual(child.find(event => event.event === 'registry').registry, ['mcp_dsh_load_skill'])
   assert.ok(prompt.includes(catalog))
   assert.doesNotMatch(prompt.replace(catalogHeading, ''), /CHECKED-ACP-BODY|load_skill/)
 
@@ -127,6 +134,33 @@ test('Skills row 8: production Antigravity OFF admits only the Session skill rea
   assert.equal(h.adapter.live.has(a.session.id), false)
   assert.deepEqual(executions, ['eligible'])
   assert.deepEqual(h.approvals.map(request => request.toolName), ['load_skill'])
+
+  assigned.add(b.session.id)
+  await b.turn('plain before executable replacement')
+  const priorBridge = h.adapter.live.get(b.session.id).bridge
+  const priorPid = h.events('prompt').at(-1).pid
+  // Keep the reported version identical while replacing the selected executable's bytes.
+  appendFileSync(h.agy, '\n# replacement\n')
+  assert.equal(h.service.nativeOffNotes('acp-antigravity').skillsUnavailable, true)
+  const fallback = await b.turn('plain after executable replacement')
+  assert.equal(fallback.at(-1).reason.kind, 'stop')
+  const replacement = h.events('prompt').at(-1)
+  assert.notEqual(replacement.pid, priorPid)
+  assert.deepEqual(h.events('start').find(event => event.pid === replacement.pid).args, AGY_OFF_ARGS)
+  assert.deepEqual(h.events('new-session').find(event => event.pid === replacement.pid).servers, [])
+  assert.doesNotMatch(replacement.text, /Your skills|load_skill/)
+  assert.equal((await call(priorBridge, priorBridge, 'load_skill')).status, 401)
+  const unproven = await b.turn('agy-bridge load_skill {"name":"marker"}')
+  assert.ok(unproven.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('').endsWith(AGY_TOOLS_OFF_TEXT))
+  assert.deepEqual(executions, ['eligible'])
+
+  nativeTools = true
+  await b.turn('plain Native tools ON warmup')
+  const on = await b.turn('agy-bridge load_skill {"name":"marker"}')
+  assert.match(on.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), /The bridge said: CHECKED-ACP-BODY/)
+  const onPid = h.events('prompt').at(-1).pid
+  assert.deepEqual(h.events('start').find(event => event.pid === onPid).args, ['acp'])
+  assert.deepEqual(executions, ['eligible', 'other-eligible'])
 })
 
 function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, addedSkills = [] } = {}) {
@@ -176,12 +210,14 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, a
   const row = {
     name: 'Fixture agent',
     bridge: !['acp-antigravity', 'acp-omp', 'acp-hermes'].includes(provider),
+    ...(provider === 'acp-antigravity' ? { agySkillsVersion: () => '9.8.7' } : {}),
     ...(reforks ? { refresh: 'fork' } : {}),
     nativeSwitch: ['acp-antigravity', 'acp-omp'].includes(provider) ? 'args' : undefined,
     disableBuiltInTools: provider === 'acp-claude',
     catalog: { models: async () => [{ id: 'default', name: 'Fixture agent' }], dispose() {} },
     installed: () => true,
-    spawn: () => ({ command: process.execPath, args: [script],
+    spawn: ({ skillBridge } = {}) => ({ command: process.execPath, args: [script],
+      ...(provider === 'acp-antigravity' && skillBridge ? { agySkillsVersion: '9.8.7' } : {}),
       env: { PATH: process.env.PATH, HOME: dir, FAKE_ACP_TRACE: trace,
         ...(probeTurns && { FAKE_ACP_SKILLS_PROBE: JSON.stringify({ turns: probeTurns }) }) } }),
   }

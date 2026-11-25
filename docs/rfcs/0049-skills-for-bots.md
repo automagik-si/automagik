@@ -338,6 +338,8 @@ existing card, row and button styles; it is always shown, also when the library 
 | Hermes Bots | none | none | parked (decided): the standing no-Hermes-work rule; the Bot card says skills do not reach this model |
 | Linked machines | none | none | parked: later, as the owner decided |
 
+The list of Antigravity versions proven to load Automatic skills with Native tools off starts empty, so Automatic loading currently needs Native tools on.
+
 The read-only folder is added to the Bot's read scope where one is enforced
 (`apps/bots-dsh/src/host/read-scope-provider.js`) and to the read grants of restricted agent
 profiles (as the Codex profile already grants its own skills folder,

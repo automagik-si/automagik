@@ -194,6 +194,7 @@ export function install(rt) {
       ...(notes.hooks === true ? { nativeToolsHooks: true } : {}),
       ...(notes.plugins === true ? { nativeToolsPlugins: true } : {}),
       ...(notes.fresh === true ? { nativeToolsFresh: true } : {}),
+      ...(notes.skillsUnavailable === true ? { nativeToolsSkillsUnavailable: true } : {}),
     }
   }
   // Models come from DSH, not state.json, so a provider added in Harness settings
@@ -216,7 +217,8 @@ export function install(rt) {
     // Antigravity's Details lines (the checked agy version, hooks, plugins, Switch account).
     Object.values(state.bots).map(bot => {
       const notes = antigravityNotes(bot)
-      return [notes.nativeToolsUnchecked ?? '', notes.nativeToolsHooks ? 1 : 0, notes.nativeToolsPlugins ? 1 : 0, notes.nativeToolsFresh ? 1 : 0].join('')
+      return [notes.nativeToolsUnchecked ?? '', notes.nativeToolsHooks ? 1 : 0, notes.nativeToolsPlugins ? 1 : 0,
+        notes.nativeToolsFresh ? 1 : 0, notes.nativeToolsSkillsUnavailable ? 1 : 0].join('')
     }).join(','),
     // Which models run their own tools whatever the Denied tools say (#2026): Codex can measure
     // a model as kept with no new revision.

@@ -1,5 +1,6 @@
 export const SKILL_SOURCE = 'automagik-skill'
 export const SKILL_NOTICE = 'automagik-skill-notice'
+export const AGY_OFF_SKILLS_NOTICE = 'Skills cannot be loaded in Antigravity with native tools off on this version'
 export const SKILL_TOOL = 'load_skill'
 
 export const personParts = content => Array.isArray(content)

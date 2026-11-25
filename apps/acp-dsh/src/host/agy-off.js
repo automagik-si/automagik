@@ -12,10 +12,10 @@
 // The start failures are English only, as every acp-dsh start failure is (index.js): the Bot
 // team does not translate a chat's turn failure. Details shows the translated hooks, plugins and
 // Switch account lines (bots-dsh native-tools-copy.js).
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readSync,
-  renameSync, statSync, unlinkSync, writeFileSync,
+  realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
 import { AGY_SKILL_TOOL, BRIDGE_NAME } from './names.js'
@@ -27,6 +27,35 @@ export const AGY_OFF_SKILLS_NAME = `${AGY_OFF_NAME}-skills`
 // reviewed commit that a stage 6 on the new version then passes before its pull request;
 // another version still starts OFF and warns (the host log, and Details).
 export const AGY_OFF_CHECKED = '1.5.16'
+
+// Each entry identifies an exact version and executable (sha256) with an installed,
+// signed-in proof of eager ACP session MCP. Native-tools-off validation is independent.
+const AGY_EAGER_SKILLS_VERSIONS = Object.freeze([])
+
+export function agySkillsProofReader(versions = AGY_EAGER_SKILLS_VERSIONS) {
+  let last
+  return command => {
+    if (versions.length === 0 || typeof command !== 'string') return undefined
+    try {
+      const path = realpathSync(command)
+      const stamp = () => {
+        const stat = statSync(path, { bigint: true })
+        if (!stat.isFile()) return undefined
+        const { dev, ino, size, mtimeNs, ctimeNs } = stat
+        return `${dev}:${ino}:${size}:${mtimeNs}:${ctimeNs}`
+      }
+      const before = stamp()
+      if (before === undefined) return undefined
+      if (last?.path !== path || last.stamp !== before) {
+        const sha256 = createHash('sha256').update(readFileSync(path)).digest('hex')
+        if (stamp() !== before) return undefined
+        const matches = versions.filter(entry => entry.sha256 === sha256 && /^\d+\.\d+\.\d+$/.test(entry.version))
+        last = { path, stamp: before, proof: matches.length === 1 ? { command: path, version: matches[0].version } : undefined }
+      }
+      return last.proof
+    } catch { return undefined }
+  }
+}
 
 const offAgent = (profile, tools) => `---
 name: ${profile}
