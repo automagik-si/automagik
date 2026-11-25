@@ -557,6 +557,45 @@ test('adoption and rollback save failures restore both records without archiving
   assert.deepEqual(archived, [])
 })
 
+test('Skills row 10: assignments follow failed deletion, rollback and re-adoption', async t => {
+  const { call, stop, ctx } = start(TEAM)
+  t.after(stop)
+  await call('state', {})
+  const rt = ctx.provided.get('omniTeam')
+  const saveSkill = await call('skill-library-save', { name: 'notes', description: 'Take notes.', content: 'Write a note.' })
+  assert.equal(saveSkill.ok, true)
+  const attach = async id => {
+    assert.equal((await call('bot-skill-add', { id, name: 'notes', mode: 'automatic' })).ok, true)
+  }
+  const bot = (await call('create-bot', { name: 'Removable', role: 'Notes' })).value
+  assert.ok(rt.botOf(bot.id))
+  await attach(bot.id)
+  const release = rt.releaseBot
+  rt.releaseBot = async () => { throw new Error('release failed') }
+  await assert.rejects(rt.deleteBot(bot.id), /release failed/)
+  rt.releaseBot = release
+  assert.ok(rt.botOf(bot.id))
+  const kept = rt.skillLibrary.active(bot.id).map(skill => skill.name)
+
+  const entry = (await call('add-agent', { name: 'Native' })).value
+  const adopted = await rt.adoptAsBot(entry.id)
+  const id = adopted.botId
+  await attach(id)
+  const save = rt.save
+  let fail = true
+  rt.save = async options => {
+    if (fail) { fail = false; throw new Error('rollback save failed') }
+    return save(options)
+  }
+  await assert.rejects(rt.rollbackAdoption(entry.id), /rollback save failed/)
+  rt.save = save
+  assert.deepEqual(rt.skillLibrary.active(id).map(skill => skill.name), ['notes'])
+  await rt.rollbackAdoption(entry.id)
+  assert.equal((await rt.adoptAsBot(entry.id)).botId, id)
+  assert.deepEqual({ failedDeletion: kept, reAdopted: rt.skillLibrary.active(id).map(skill => skill.name) },
+    { failedDeletion: ['notes'], reAdopted: [] })
+})
+
 test('adoption rejects a host shutdown during Session resolution and retains the original registration', async (t) => {
   const { call, stop, ctx, home } = start(TEAM)
   t.after(stop)

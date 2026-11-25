@@ -10,7 +10,7 @@ import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, client, methods, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { batchSafe } from './batch-spawn.js'
 import { HOME_ENV, releaseRun, trackRun } from './cli-homes.js'
-import { BRIDGE_NAME, isBridgeName } from './names.js'
+import { BRIDGE_NAME, isBridgeName, mcpName } from './names.js'
 import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
@@ -43,9 +43,23 @@ export function structuredNameOf(update) {
   return undefined
 }
 
-function isSkillBridgeCall(update) {
-  return structuredNameOf(update) === `mcp__${BRIDGE_NAME}__load_skill` ||
-    (update?.rawInput?.server === BRIDGE_NAME && update.rawInput.tool === 'load_skill')
+const SKILL_OPERATION = mcpName(BRIDGE_NAME, 'load_skill')
+
+function skillIdentity(tool, update) {
+  const names = [tool.structuredName, update?.name, update?._meta?.claudeCode?.toolName]
+    .filter(name => typeof name === 'string' && name !== '')
+  const { server, tool: operation } = update?.rawInput ?? {}
+  const raw = server === BRIDGE_NAME && operation === 'load_skill'
+  const named = names.includes(SKILL_OPERATION)
+  const claimsSkill = named || raw || tool.skillBridge === true
+  const disagrees = names.some(name => name !== SKILL_OPERATION) ||
+    (typeof server === 'string' && server !== BRIDGE_NAME) ||
+    (typeof update?.rawInput?.serverName === 'string' && update.rawInput.serverName !== BRIDGE_NAME) ||
+    (typeof operation === 'string' && operation !== 'load_skill')
+  if (tool.skillConflict === true || (claimsSkill && disagrees)) return 'conflict'
+  // Codex's MCP updates omit the name. Its adapter labels this RPC as MCP and
+  // supplies the server and operation outside the tool's own arguments.
+  if (named || (raw && update?._meta?.is_mcp_tool_call === true) || tool.skillBridge === true) return 'verified'
 }
 
 /**
@@ -135,7 +149,7 @@ export function contentImages(content) {
 // Saved image paths still scrub later replies; the image bytes and other output can go.
 function retiredTool(tool) {
   const record = { id: tool.id, retired: true, unanswerable: true }
-  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'drift', 'refused', 'mirrored']) {
+  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'skillConflict', 'drift', 'refused', 'mirrored']) {
     if (tool[key] !== undefined) record[key] = tool[key]
   }
   record.listeners = new Set()
@@ -310,7 +324,7 @@ export class AgentRun {
       if (this.identityDelivery === 'systemPrompt') {
         this.systemPrompt = { mode: 'append', content: [{ type: 'text', text: identity }] }
       } else if (this.identityDelivery === 'preamble') {
-        this.identityPreamble = identity
+        this.sessionPreamble = this.identityPreamble = identity
       }
       this.spec.onIdentity?.(this.identityDelivery)
       const session = await this.conn.newSession({
@@ -378,6 +392,35 @@ export class AgentRun {
     if (Array.isArray(answer.configOptions) || answer.models) {
       this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
     }
+    await this.closeReplacedSession(source)
+    await this.spec.onReady?.(this)
+    return this.sessionId
+  }
+
+  // A fork retains provider context. A fresh session can take the conversation
+  // back from DSH without carrying discovery data from the retired session.
+  async renew({ cwd, mcpServers }) {
+    const source = this.sessionId
+    const { sessionMeta } = this.spec
+    const answer = await this.held(() => this.conn.newSession({
+      cwd, mcpServers,
+      ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }),
+      ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
+    }))
+    this.sessionId = answer.sessionId
+    this.modelProof = undefined
+    this.modes = answer.modes
+    this.takeOptions(answer.configOptions ?? [], answer.models)
+    this.startModel = optionOf(this.options, 'model')?.currentValue
+    this.identityPreamble = this.sessionPreamble
+    this.preambleOutcome = undefined
+    this.promptEnded = undefined
+    await this.closeReplacedSession(source)
+    await this.spec.onReady?.(this)
+    return this.sessionId
+  }
+
+  async closeReplacedSession(source) {
     for (const tool of this.tools.values()) tool.permission?.answer(CANCELLED)
     this.tools.clear()
     this.turn.clear()
@@ -392,8 +435,6 @@ export class AgentRun {
       // A source session that will not close still ends with this process, which is disposed
       // with the fork's Session.
     }
-    await this.spec.onReady?.(this)
-    return this.sessionId
   }
 
   // Each request the agent has yet to answer holds the event loop; the last answer lets it go.
@@ -474,13 +515,14 @@ export class AgentRun {
     })
   }
 
-  prompt(prompt) {
+  prompt(prompt, onDelivered) {
     if (this.busy) throw new Error(`${this.spec.name} is still answering`)
     this.queue = []
     this.reviews = { denied: 0, inRow: 0, last: undefined, after: false }
     this.promptEnded = false
     this.forbiddenToolSeen = false
     this.cancelled = false
+    this.onPromptDelivered = onDelivered
     // The calls of the prompts before this one are over for DSH too: their cards ran in turns
     // that have ended, and a call already known never gets a second card. A question for one
     // has nobody left to answer it (onPermission); one still stored is withdrawn here.
@@ -509,6 +551,7 @@ export class AgentRun {
     const run = this.conn.prompt({ sessionId: this.sessionId, prompt })
     this.prompting = Promise.race([run, this.gone]).then(
       result => {
+        if (result?.stopReason !== 'cancelled' && !this.cancelled) this.confirmPromptDelivery()
         if (carried) {
           this.preambleOutcome = result?.stopReason !== 'cancelled' && !this.cancelled
             ? 'delivered' : 'unsure'
@@ -529,6 +572,7 @@ export class AgentRun {
   }
 
   endPrompt(event) {
+    this.onPromptDelivered = undefined
     this.prompting = undefined
     // From here to the next prompt, a call seen for the first time gets no card (seeTool).
     this.promptEnded = true
@@ -541,6 +585,12 @@ export class AgentRun {
       if (!TERMINAL.has(tool.status)) this.changeTool(tool, { status: tool.status === 'pending' ? 'failed' : 'completed', ended: true })
     }
     this.push(event)
+  }
+
+  confirmPromptDelivery() {
+    const delivered = this.onPromptDelivered
+    this.onPromptDelivered = undefined
+    delivered?.()
   }
 
   /**
@@ -838,17 +888,20 @@ export class AgentRun {
     switch (update?.sessionUpdate) {
       case 'agent_message_chunk': {
         const text = contentText(update.content)
+        if (text) this.confirmPromptDelivery()
         if (text && this.reviews?.last) this.reviews.after = true
         if (text) this.push({ type: 'text', text })
         break
       }
       case 'agent_thought_chunk': {
         const text = contentText(update.content)
+        if (text) this.confirmPromptDelivery()
         if (text && this.reviews?.last) this.reviews.after = true
         if (text) this.push({ type: 'thought', text })
         break
       }
       case 'tool_call':
+        this.confirmPromptDelivery()
         this.seeTool(update, observedAt)
         break
       case 'tool_call_update': {
@@ -883,7 +936,7 @@ export class AgentRun {
       if (known.retired !== true) this.changeTool(known, update)
       return known
     }
-    if (this.spec.refuseTools === true && !(this.spec.skillBridge && isSkillBridgeCall(update))) {
+    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity({}, update) === 'verified')) {
       if (!this.forbiddenToolSeen) {
         this.forbiddenToolSeen = true
         this.spec.onForbiddenTool?.(update)
@@ -919,13 +972,17 @@ export class AgentRun {
 
   /** What an update says the call is: its structured name, whether it is MCP, the bridge's. */
   markCall(tool, update) {
+    if (this.spec.skillBridge) {
+      const identity = skillIdentity(tool, update)
+      tool.skillConflict = identity === 'conflict'
+      tool.skillBridge = identity === 'verified'
+    }
     const name = structuredNameOf(update)
     if (name !== undefined) tool.structuredName = name
     if (typeof update?.rawInput?.server === 'string') tool.mcpServer = update.rawInput.server
     if (update?._meta?.is_mcp_tool_call === true) tool.mcp = true
     if (tool.structuredName !== undefined && tool.structuredName.startsWith('mcp__')) tool.mcp = true
     if (isBridgeName(tool.structuredName)) tool.bridge = true
-    if (this.spec.skillBridge && isSkillBridgeCall(update)) tool.skillBridge = true
     if (tool.noted !== true && (tool.structuredName !== undefined || tool.mcp === true)) {
       tool.noted = true
       try {
@@ -986,7 +1043,7 @@ export class AgentRun {
    * servers get the agent's reject option, or are cancelled when none is offered.
    */
   answerSkippedMcp(tool, options) {
-    if (this.spec.dshTools !== true || this.spec.refresh !== 'fork' || tool.mcp !== true) return undefined
+    if (tool.skillConflict || this.spec.dshTools !== true || this.spec.refresh !== 'fork' || tool.mcp !== true) return undefined
     const answerFor = (choices) => {
       if (tool.unanswerable === true) return CANCELLED
       if (tool.mcpServer !== BRIDGE_NAME) return refusal('rejected', choices)
@@ -1010,10 +1067,11 @@ export class AgentRun {
    */
   onPermission(params, signal) {
     if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
-    if (this.spec.refuseTools === true && !(this.spec.skillBridge && isSkillBridgeCall(params.toolCall))) {
+    const known = this.tools.get(params.toolCall?.toolCallId)
+    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity(known ?? {}, params.toolCall) === 'verified')) {
+      if (known && known.retired !== true) this.markCall(known, params.toolCall)
       return Promise.resolve(refusal('rejected', params.options ?? []))
     }
-    const known = this.tools.get(params.toolCall?.toolCallId)
     const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall })
     if (tool === undefined) return Promise.resolve(CANCELLED)
     // The question's own title ("Run command?") names the question, not the call the card shows.
@@ -1033,7 +1091,7 @@ export class AgentRun {
     // which would let the agent record a standing rule nobody approved (RFC 0039). The ACP
     // request raises no DSH dialog. The bridge's own `approval/request` is the one dialog the
     // person sees (RFC 0003, amendment, "One dialog per call").
-    if (tool.skillBridge === true || (this.spec.dshTools === true && tool.bridge === true)) {
+    if (tool.skillBridge === true || (!tool.skillConflict && this.spec.dshTools === true && tool.bridge === true)) {
       const once = (params.options ?? []).find(option => option.kind === 'allow_once')
       return Promise.resolve(once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } })
     }
@@ -1127,7 +1185,7 @@ function connect(run, stream) {
 // list readers. Identity comes from markCall (the server and the MCP mark), never the kind.
 const OFF_READERS = new Set(['list_mcp_resources', 'list_mcp_resource_templates'])
 function allowedOff(tool) {
-  if (tool?.mcp !== true) return false
+  if (tool?.mcp !== true || tool.skillConflict) return false
   if (tool.mcpServer === BRIDGE_NAME) return true
   return tool.mcpServer === 'codex' && OFF_READERS.has(tool.rawInput?.tool)
 }

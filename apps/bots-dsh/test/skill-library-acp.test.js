@@ -20,7 +20,7 @@ const answer = provider => ({
   content: [{ type: 'text', text: 'Earlier answer remains' }],
 })
 
-function fixture(t, provider) {
+function fixture(t, provider, { reforks = false, earlierTurns = 0 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'skill-acp-'))
   const trace = join(dir, 'trace.ndjson')
   const session = Session.create('bot-a')
@@ -30,9 +30,11 @@ function fixture(t, provider) {
   let mode = 'automatic'
   let afterLoad
   let offered = false
-  let nextTurn = 0
+  let nextTurn = earlierTurns
+  let preset = 'standard'
   const rt = {
-    ctx: { on() {} }, load: async () => {}, selfOf: id => id === agent.id ? 'owner-a' : undefined,
+    ctx: { on() {}, get: key => key === 'sessions' ? { get: id => id === agent.id ? agent.session : undefined } : undefined },
+    load: async () => {}, selfOf: id => id === agent.id ? 'owner-a' : undefined,
     botOf: id => id === 'owner-a' ? { id } : undefined,
     skillLibrary: { active: id => id === 'owner-a' && active.has(id) ? [{ ...skill, mode }] : [] },
   }
@@ -57,12 +59,13 @@ function fixture(t, provider) {
       }
       if (key === 'approval') return { effectivePolicy: () => 'never' }
       if (key === 'sandboxPolicy') return { resolve: () => ({ mode: 'danger-full-access' }) }
-      if (key === 'agentPresets') return { presetForSession: () => 'standard' }
+      if (key === 'agentPresets') return { presetForSession: () => preset }
     },
   }
   const row = {
     name: 'Fixture agent',
-    bridge: !['acp-antigravity', 'acp-omp'].includes(provider),
+    bridge: !['acp-antigravity', 'acp-omp', 'acp-hermes'].includes(provider),
+    ...(reforks ? { refresh: 'fork' } : {}),
     nativeSwitch: ['acp-antigravity', 'acp-omp'].includes(provider) ? 'args' : undefined,
     disableBuiltInTools: provider === 'acp-claude',
     catalog: { models: async () => [{ id: 'default', name: 'Fixture agent' }], dispose() {} },
@@ -76,24 +79,28 @@ function fixture(t, provider) {
     teamManaged: () => ['acp-antigravity', 'acp-omp'].includes(provider),
   })
   t.after(() => { adapter.dispose(); bridge.dispose(); rmSync(dir, { recursive: true, force: true }) })
-  const run = async messages => {
+  const run = async (messages, { record = [], reply } = {}) => {
+    const session = agent.session
     const turn = ++nextTurn
     session.append('turn/start', { turn })
     session.append('step/start', { turn, step: 0 })
-    if (turn === 1) session.append('request/header', {
+    if (session.requestHeader() === undefined) session.append('request/header', {
       header: { config: { provider, model: 'default' }, tools: [tool].map(({ name, description, parameters }) => ({ name, description, parameters })) },
       reason: 'initial',
     })
+    for (const row of record) session.append('user/message', row, { surfaceOp: 'append' })
     const chunks = []
     const options = markAgentLoopRequest({ provider, model: 'default', sessionId: agent.id, messages, signal: t.signal })
     for await (const chunk of adapter.stream(options)) chunks.push(chunk)
+    if (reply) session.append('assistant/message', { turn, step: 0, message: reply, stream: [] }, { surfaceOp: 'append' })
     session.append('step/end', { turn, step: 0 })
-    session.append('turn/end', { turn, reason: 'stop' })
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
     assert.equal(chunks.at(-1)?.reason?.kind, 'stop', JSON.stringify(chunks))
     return chunks
   }
   const events = kind => readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse).filter(event => event.event === kind)
-  return { active, setMode: value => { mode = value }, onLoad: hook => { afterLoad = hook },
+  return { active, setMode: value => { mode = value }, setPreset: value => { preset = value },
+    onLoad: hook => { afterLoad = hook },
     ctx, rt, agent, run, events, adapter, bridge, called: () => offered }
 }
 
@@ -164,4 +171,97 @@ test('ACP rechecks mode after the tool executes and before sending its result', 
     /The bridge said: \(no text\)/)
   const results = f.agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
   assert.deepEqual(results.at(-1).data.message.content, [])
+})
+
+test('Skills row 1: Codex refork preserves the Skills-only bridge', { timeout: 15_000 }, async t => {
+  const provider = 'acp-codex'
+  const f = fixture(t, provider, { reforks: true })
+  f.active.add('owner-a')
+  await f.run([user('plain first request')])
+  const original = f.adapter.live.get(f.agent.id).bridge
+  assert.equal(original.skillOnly, true)
+  f.setPreset('different')
+  const result = await f.run([answer(provider), user('codex-bridge load_skill {"name":"marker"}')])
+  assert.match(result.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), /The bridge said: CHECKED-ACP-BODY/)
+  assert.equal(f.events('fork').length, 1)
+  const fork = f.events('fork')[0]
+  assert.deepEqual(f.events('mcp-list').find(event => event.sessionId === fork.sessionId)?.tools, ['load_skill'])
+  const next = f.adapter.live.get(f.agent.id).bridge
+  assert.notEqual(next, original)
+  assert.equal(original.closed, true)
+  assert.deepEqual(offeredTools(f.ctx, f.agent, { skillOnly: next.skillOnly }).map(item => item.name), ['load_skill'])
+  const denied = await f.bridge.call(next, { name: 'other_fixture_tool', arguments: {} })
+  assert.deepEqual(denied.content, [{ type: 'text', text: 'Unknown tool' }])
+})
+
+test('Skills row 3: first delivery excludes withheld history, retry and interrupted rows', { timeout: 15_000 }, async t => {
+  const provider = 'acp-codex'
+  const f = fixture(t, provider)
+  const withheld = { ...skill, name: 'withheld', hash: 'withheld-revision', content: 'WITHHELD-ACP-BODY' }
+  const person = user('plain ordinary /marker /withheld', skillPart('owner-a', skill), skillPart('owner-a', withheld))
+  f.active.add('owner-a')
+  const reply = { ...answer(provider), id: 'first-reply' }
+  await f.run([person], { record: [person], reply })
+  assert.match(f.events('prompt').at(-1).text, /CHECKED-ACP-BODY/)
+  assert.doesNotMatch(f.events('prompt').at(-1).text, /WITHHELD-ACP-BODY/)
+  f.active.clear()
+  f.adapter.endSession(f.agent.id)
+  const saved = f.agent.session
+  f.agent.session = Session.create(saved.id, JSON.parse(JSON.stringify(saved.snapshotEvents())), saved.header)
+  const retry = createUserMessage({ source: { kind: 'retry' }, content: [{ type: 'text', text: 'Continue plain' }] })
+  await f.run([person, reply, retry], { record: [retry] })
+  const replay = f.events('prompt').at(-1).text
+  assert.match(replay, /ordinary \/marker \/withheld/)
+  assert.match(replay, /CHECKED-ACP-BODY/)
+  assert.doesNotMatch(replay, /WITHHELD-ACP-BODY/)
+  const nativeReplay = f.rt.skillCalls.project({
+    sessionId: f.agent.id, messages: f.agent.session.deriveMessages(),
+  })
+  assert.match(JSON.stringify(nativeReplay.messages), /CHECKED-ACP-BODY/)
+  assert.doesNotMatch(JSON.stringify(nativeReplay.messages), /WITHHELD-ACP-BODY/)
+
+  const cut = fixture(t, provider, { earlierTurns: 1 })
+  const session = cut.agent.session
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 0 })
+  session.append('user/message', user('interrupted ordinary text', skillPart('owner-a', withheld)), { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 0 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'interrupted' } })
+  const resumed = createUserMessage({ source: { kind: 'user', resumed: true }, content: [{ type: 'text', text: 'Resume plain' }] })
+  const native = cut.rt.skillCalls.project({ sessionId: cut.agent.id, messages: [...session.deriveMessages(), answer(provider), retry] })
+  assert.doesNotMatch(JSON.stringify(native.messages), /WITHHELD-ACP-BODY/, 'native history also excludes undelivered parts')
+  await cut.run([resumed])
+  assert.match(cut.events('prompt').at(-1).text, /interrupted ordinary text/)
+  assert.doesNotMatch(cut.events('prompt').at(-1).text, /WITHHELD-ACP-BODY/)
+})
+
+test('Skills row 4: demoting the last Automatic skill clears retained discovery context', { timeout: 15_000 }, async t => {
+  const provider = 'acp-codex'
+  const f = fixture(t, provider)
+  f.active.add('owner-a')
+  const person = user('plain Earlier durable request', skillPart('owner-a', skill))
+  const reply = { ...answer(provider), id: 'earlier-reply' }
+  await f.run([person], { record: [person], reply })
+  const before = f.events('prompt').at(-1)
+  assert.match(before.text, /Adds the file marker/)
+  assert.match(before.text, /CHECKED-ACP-BODY/)
+  f.setMode('manual')
+  await f.run([person, reply, user('plain ordinary next request')])
+  const prompts = f.events('prompt')
+  const last = prompts.at(-1)
+  const context = prompts.filter(event => event.sessionId === last.sessionId).map(event => event.text).join('\n')
+  assert.doesNotMatch(context, /Adds the file marker/)
+  assert.match(context, /Earlier durable request/)
+  assert.match(context, /Earlier answer remains/)
+  assert.match(context, /CHECKED-ACP-BODY/)
+  assert.match(context, /ordinary next request/)
+})
+
+test('Skills row 9: a Hermes chat sends ordinary text with an Automatic assignment', { timeout: 15_000 }, async t => {
+  const f = fixture(t, 'acp-hermes')
+  f.active.add('owner-a')
+  await f.run([user('Hermes ordinary message, plain')])
+  assert.deepEqual(f.events('new-session')[0].servers, [])
+  assert.match(f.events('prompt').at(-1).text, /Hermes ordinary message/)
+  assert.doesNotMatch(f.events('prompt').at(-1).text, /Adds the file marker|CHECKED-ACP-BODY/)
 })

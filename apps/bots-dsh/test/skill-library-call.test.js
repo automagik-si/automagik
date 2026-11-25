@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import NodePtcRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import { crossed } from '../../acp-dsh/src/host/switch.js'
 import { install, requestedSkills, skillTool } from '../src/host/skill-library-call.js'
 import { SKILL_NOTICE } from '../src/host/skill-message.js'
 
@@ -14,13 +18,22 @@ const privateSkill = doc('private-skill', 'PRIVATE-BODY')
 const testRows = requests => requests.flatMap(request => request.messages)
 const text = rows => rows.flatMap(row => row.content?.map(part => part.text) ?? []).join('\n')
 
-async function fixture(t) {
+async function fixture(t, { program } = {}) {
   const root = new Context()
   t.after(() => root.fiber.dispose())
-  await mountAgentLoopTestDependencies(root, { workingDirectory: true })
+  if (program) {
+    await root.plugin(LocalFileSystem)
+    await root.plugin(LocalSubprocessRuntime)
+    root.provide('sandboxPolicy', { defaultMode: 'read-only',
+      resolve: ({ session } = {}) => ({ mode: 'read-only', workspaceRoot: process.cwd(), sessionId: session?.id }) })
+    root.provide('sandbox', { confine: async argv => ({ argv, enforcement: 'full', denialSignatures: [], runnerFailureRules: [] }) })
+    await root.plugin(NodePtcRuntime)
+  }
+  await mountAgentLoopTestDependencies(root, { workingDirectory: true, ...(program ? { tools: { mode: 'ptc' } } : {}) })
   const requests = []
   let autoload = false
   let call = 0
+  let afterProgram
   class Adapter extends LlmAdapter {
     async resolveModel(provider, id) {
       return { provider, id, name: id, context: { contextWindow: 1_000_000 } }
@@ -29,8 +42,8 @@ async function fixture(t) {
       requests.push(options)
       if (autoload) {
         autoload = false
-        yield { type: 'tool-call-delta', index: 0, id: `fixture-${++call}`, name: 'load_skill',
-          argumentsDelta: '{"name":"marker"}' }
+        yield { type: 'tool-call-delta', index: 0, id: `fixture-${++call}`, name: program ? 'run_code' : 'load_skill',
+          argumentsDelta: program ? JSON.stringify({ code: program, description: 'Load the checked skill' }) : '{"name":"marker"}' }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
       } else {
         yield { type: 'text-delta', index: 0, text: 'fixture reply' }
@@ -40,6 +53,11 @@ async function fixture(t) {
   }
   root.llm.registerAdapter([route.provider], new Adapter())
   await mountAgentLoopTestHarness(root)
+  if (program) {
+    root.on('tools/result', exec => {
+      if (exec.name === 'run_code') afterProgram?.()
+    })
+  }
   const active = new Map([['a', [x]]])
   const owners = new Map([['a', 'a'], ['b', 'b'], ['group-a', 'a'], ['group-b', 'b'], ['task-a', 'a']])
   const bots = new Map([['a', { id: 'a' }], ['b', { id: 'b' }]])
@@ -57,10 +75,10 @@ async function fixture(t) {
     const before = requests.length
     agent.followup(message)
     await agent.whenIdle()
-    assert.ok(requests.length > before, 'a real DSH request was sent')
+    assert.ok(requests.length > before, 'a real DSH request was sent: ' + JSON.stringify(agent.session.snapshotEvents()))
     return { agent, sent: requests.slice(before) }
   }
-  return { root, rt, active, roomNotices, run }
+  return { root, rt, active, roomNotices, requests, run, afterProgram: hook => { afterProgram = hook } }
 }
 
 test('native request includes only the current catalog and checked calls, while refusals are private', { timeout: 10_000 }, async t => {
@@ -76,6 +94,49 @@ test('native request includes only the current catalog and checked calls, while 
   assert.deepEqual(row.content.slice(1).map(part => part.text), [x, ...four].map(skill => skill.content))
   assert.doesNotMatch(text(rows), /PRIVATE-BODY|Description for private|not active|Details|The person called/)
   assert.ok(agent.session.snapshotEvents().some(event => event.data?.source?.kind === SKILL_NOTICE))
+})
+
+test('Skills row 6: programmatic loads keep checked bodies outside program values', { timeout: 15_000 }, async t => {
+  const f = await fixture(t, { program: 'return await tools.load_skill({ name: "marker" })' })
+  const permitted = await f.run('a', user('Load the skill through the program'), true)
+  const rows = permitted.sent.at(-1).messages
+  assert.match(text(rows), /CHECKED-BODY/, 'the checked body reaches the model')
+  assert.doesNotMatch(text(rows.filter(row => row.role === 'tool')), /CHECKED-BODY|automagikSkill|botId/)
+  f.afterProgram(() => f.active.set('a', [{ ...x, mode: 'manual' }]))
+  const revoked = await f.run('a', user('Load again and demote before dispatch'), true)
+  const fresh = revoked.sent.at(-1).messages
+  assert.equal(fresh.flatMap(row => row.content ?? []).filter(part => part.text?.includes(x.content)).length, 1,
+    'only the previously delivered occurrence remains')
+})
+
+test('Skills row 7: ACP crossing redaction composes with a fresh native catalog', { timeout: 10_000 }, async t => {
+  const f = await fixture(t)
+  const { sent } = await f.run('a', user('original request'))
+  let attempts = 0
+  f.root.on('llm/stream', (_options, next) => {
+    assert.ok(++attempts <= 10, 'the projection waterfall must terminate')
+    return next()
+  }, { prepend: true })
+  f.root.on('llm/stream', crossed(new Map(), f.root, value => value.replaceAll('secret-fixture', '[masked]')))
+  const { sessionId, signal, tools } = sent[0]
+  const request = markAgentLoopRequest({ ...route, sessionId, signal, tools, messages: [
+    { role: 'assistant', id: 'earlier-acp', source: { kind: 'model', provider: 'acp-claude', model: 'fixture' },
+      content: [{ type: 'text', text: 'secret-fixture' }] },
+    user('continue with native'),
+  ] })
+  const chunks = []
+  const before = f.requests.length
+  for await (const chunk of f.root.llm.stream(request)) chunks.push(chunk)
+  assert.deepEqual(chunks, [
+    { type: 'text-delta', index: 0, text: 'fixture reply' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ])
+  assert.ok(attempts <= 3, 'each projection ran at most once before dispatch')
+  assert.equal(f.requests.length, before + 1, 'the native provider dispatched once')
+  const input = text(f.requests.at(-1).messages)
+  assert.match(input, /\[masked\]/)
+  assert.match(input, /marker: Description for marker/)
+  assert.doesNotMatch(input, /secret-fixture/)
 })
 
 test('native autonomous load returns only the checked body and Remove preserves the earlier turns', { timeout: 10_000 }, async t => {

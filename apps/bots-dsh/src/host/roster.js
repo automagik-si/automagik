@@ -459,6 +459,7 @@ export function install(rt) {
       createLook(options, id)
       resolveSectionInput({ section, sectionId }, { allowCreate: false })
       await ctx.sessionTitle.rename(agent.session, cleanName)
+      await rt.skillLibrary?.clearOrphan(id)
     }
     let bot
     let copyPublished = false

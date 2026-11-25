@@ -1022,8 +1022,13 @@ export class Backchannel {
           ...(rowInfo === undefined ? {} : { error: rowInfo }),
         }, { surfaceOp: 'append', sourceEventSeqs: [callSeq] })
         try {
-          write(content, isError, info)
+          const saved = write(content, isError, info)
           answered = true
+          if (name === 'load_skill' && !isError && content.length > 0) {
+            this.ctx?.get?.('omniTeam')?.skillCalls?.admit({
+              sessionId: record.sessionId, messages: [saved.data.message],
+            }, session)
+          }
         } catch (cause) {
           // A result the log refuses must not leave the call open: record a minimal row that
           // is always valid. (The write guard already replaces data that is not plain JSON;

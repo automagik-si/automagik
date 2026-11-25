@@ -1348,31 +1348,32 @@ export class AcpAdapter extends LlmAdapter {
    * second bridge. Each of the fork's requests has its own deadline; `signal`, the turn's
    * Stop, ends the wait for all of them.
    */
-  async refork(agent, live, dshAgent, signal) {
+  async refork(agent, live, dshAgent, signal, { renew = false } = {}) {
     const { bridge: previous, run } = live
-    const next = this.backchannel.mint({
+    const next = previous === undefined ? undefined : this.backchannel.mint({
       sessionId: dshAgent?.session?.id,
       agent: dshAgent,
       name: agent.name,
       promptRunning: () => live.open === true && live.run?.busy === true,
       native: live.twinsOff === true,
+      skillOnly: previous?.skillOnly === true,
     })
     live.bridge = next
     // The source is done running tools before the fork starts.
-    this.backchannel.revoke(previous)
+    if (previous) this.backchannel.revoke(previous)
     try {
-      await run.held(() => run.fork({
-        // An OFF Codex forks where its tools were checked.
-        cwd: live.nativeOff === true && typeof live.checkedCwd === 'string' ? live.checkedCwd
-          : dshAgent?.session?.header?.cwd ?? homedir(),
-        mcpServers: [this.bridgeServer(next)],
+      // An OFF Codex opens the replacement where its tools were checked.
+      const cwd = live.checkedCwd ?? (renew ? run.spec.cwd : dshAgent?.session?.header?.cwd ?? homedir())
+      await run.held(() => run[renew ? 'renew' : 'fork']({
+        cwd,
+        mcpServers: next ? [this.bridgeServer(next)] : [],
       }), { ms: 0, signal })
     } catch (error) {
       // The fork may already have moved the run to a new ACP session (a bridge that never
       // listed). Nothing can resume that half state: revoke both credentials, end the run and
       // let the next turn start clean.
       live.bridge = previous
-      this.backchannel.revoke(next)
+      if (next) this.backchannel.revoke(next)
       this.timers.clearTimeout(live.reaper)
       run.dispose()
       const sessionId = dshAgent?.session?.id
@@ -1694,10 +1695,20 @@ export class AcpAdapter extends LlmAdapter {
       const levelAtStart = () => this.readLevel(dshAgent?.session, managed || (omp && this.teamManaged()))
       const turnLevel = levelAtStart()
       const skills = this.ctx.get?.('omniTeam')?.skillCalls
-      const canMountSkills = () => this.backchannel !== undefined && SKILL_BRIDGE_PROVIDERS.has(options.provider) &&
+      const supportsSkillBridge = SKILL_BRIDGE_PROVIDERS.has(options.provider)
+      const skillCatalog = () => supportsSkillBridge ? skills?.catalog(sessionId) : undefined
+      const canMountSkills = () => this.backchannel !== undefined && supportsSkillBridge &&
         skills?.available(sessionId) === true
       const inputStart = turnStart(options.messages)
       const history = options.messages.slice(0, inputStart)
+      const session = dshAgent?.session
+      const skillOptions = { catalog: false, session }
+      const historyOf = rows => skills?.project({ ...options, messages: rows }, { ...skillOptions, historyOnly: true }).messages ?? rows
+      const replayOf = (rows, owed) => replayBlocks(historyOf(rows), { redact: this.redact, to: agent.name, ...owed })
+      const durableHistory = () => {
+        const saved = new Set(session?.deriveMessages?.().map(row => row.id))
+        return history.filter(row => saved.has(row.id))
+      }
       // The switch is the Bot's: every turn of its Sessions follows it, whoever sends it (#1564).
       const ompNativeAllowed = () => permitsNative(levelAtStart())
         && this.savedNativeOn(sessionId, options.provider)
@@ -1860,11 +1871,33 @@ export class AcpAdapter extends LlmAdapter {
       if (live !== undefined) live.roleTurn = turn
       let fresh = false
       let crossing = false
+      let renewedForSkills = false
+      let replaySource
       const prior = lastProviderOf(options.messages)
       // The transcript before this turn: what a replay carries (plan A-5, independent of the
       // bridge; only the kill switch turns it off).
       const replaying = this.replayOn()
-      if (live === undefined) {
+      if (live !== undefined && live.skillCatalog !== undefined && live.skillCatalog !== skillCatalog()?.key) {
+        try {
+          if (codexRow && live.nativeOff === true) ensureCatalog(live.offCatalog)
+          await this.refork(agent, live, dshAgent, options.signal, { renew: true })
+        } catch (error) {
+          if (archived()) return yield finish('stop')
+          if (live.held !== undefined) return yield* stopped(live.held)
+          this.end(sessionId, live)
+          const left = this.unanswered(agent, error, 'refreshing its Skills catalog')
+          if (left !== undefined) return yield left
+          return yield finish('error', `${agent.name} would not refresh its session: ${error?.message ?? error}`)
+        }
+        live.skillCatalog = undefined
+        fresh = renewedForSkills = true
+        // The DSH Session and its visible transcript stay in place. Rebuild
+        // the provider context from its durable rows, which have no catalog.
+        replaySource = durableHistory()
+        live.owed = { renewed: true, skills: true }
+        const blocks = replayOf(replaySource, live.owed)
+        live.replay = blocks.length > 1 ? blocks : undefined
+      } else if (live === undefined) {
         crossing = replaying && prior !== undefined && prior !== options.provider
         const state = {
           fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox,
@@ -2153,14 +2186,16 @@ export class AcpAdapter extends LlmAdapter {
         if (crossing) {
           this.appendBoundary(dshAgent, agent, options.provider)
           live.owed = { from: this.agents.get(prior)?.name ?? 'DSH' }
-          live.replay = replayBlocks(history, { redact: this.redact, to: agent.name, ...live.owed })
+          replaySource = history
+          live.replay = replayOf(replaySource, live.owed)
         } else if (replaying && answered(history)) {
           // A new session of the same agent in a chat that already has answers (a restart, a
           // session ended by a crossing or a flip, the first real turn of a Bot part whose
           // handoff turn the Bot team answered itself) is a crossing too: the chat, the handoff
           // package included, reaches it. No boundary row: the chat did not change providers.
-          const blocks = replayBlocks(history, { redact: this.redact, to: agent.name, renewed: true })
+          const blocks = replayOf(history, { renewed: true })
           if (blocks.length > 1) {
+            replaySource = history
             live.owed = { renewed: true }
             live.replay = blocks
           }
@@ -2168,29 +2203,34 @@ export class AcpAdapter extends LlmAdapter {
           // The kill switch carries no chat, but a Bot part's handoff package is not chat: it is the record the
           // part starts from, which the Bot team acknowledged itself, so the agent has never read it. It goes
           // ahead of the person's words in this first prompt, once, the way the replay would carry it.
-          const row = unreadHandoff(history)
+          const row = unreadHandoff(historyOf(history))
           const line = row === undefined ? undefined : renderMessage(row)
           if (line !== undefined) {
             live.owed = { renewed: true, handoff: true }
             live.replay = [{ type: 'text', text: this.redact(line) }]
           }
         }
-      } else if (replaying && live.replay !== undefined) {
+      } else if (live.owed?.skills || (replaying && live.replay !== undefined)) {
         // The last turn never reached its prompt (a refused model, a busy agent): its replay is
         // still owed, read again over the chat as it is now. Its row is already written.
-        const source = live.owed?.missed === true ? missedBy(history, options.provider) : history
-        if (source !== undefined) live.replay = replayBlocks(source, { redact: this.redact, to: agent.name, ...live.owed })
+        replaySource = live.owed?.skills ? durableHistory()
+          : live.owed?.missed === true ? missedBy(history, options.provider) : history
+        if (replaySource !== undefined) {
+          const blocks = replayOf(replaySource, live.owed)
+          live.replay = blocks.length > 1 ? blocks : undefined
+        }
       } else if (replaying) {
         // A live session resumed after the chat answered elsewhere (an agent whose session a
         // move off it keeps, Codex by default): the turns it missed are replayed before the
         // prompt, so Codex -> API -> Codex loses nothing, and the move back writes its row.
         const missed = missedBy(history, options.provider)
         const owed = { from: this.agents.get(prior)?.name ?? 'DSH', missed: true }
-        const blocks = missed === undefined ? [] : replayBlocks(missed, { redact: this.redact, to: agent.name, ...owed })
+        const blocks = missed === undefined ? [] : replayOf(missed, owed)
         if (blocks.length > 1) {
           if (prior !== undefined && prior !== options.provider) this.appendBoundary(dshAgent, agent, options.provider)
           live.owed = owed
           live.replay = blocks
+          replaySource = missed
         }
       }
       // A preset or level change since the last turn: the bridge serves the new set, and an
@@ -2338,7 +2378,7 @@ export class AcpAdapter extends LlmAdapter {
         if (live.ownSent === true || live.fileOwner) this.end(sessionId, live)
         return yield finish('error', `${agent.name} would not take DSH's permission level: ${error?.message ?? error}`)
       }
-      const currentSkills = () => skills?.project(options, { catalog: false, turnStart: inputStart }) ?? options
+      const currentSkills = () => skills?.project(options, { ...skillOptions, turnStart: inputStart }) ?? options
       const beforeUploads = currentSkills()
       const uploads = uploadBlocks(
         beforeUploads.messages, this.redact, dshAgent?.session, this.ctx)
@@ -2419,7 +2459,7 @@ export class AcpAdapter extends LlmAdapter {
       // A new agent session in a chat that already has answers says so once, in a row of its
       // own before the reply (bots-dsh's fallback.js writes its notice the same way). The
       // prompt below was read before it, and promptOf leaves it out of later ones.
-      if (fresh && live.replay === undefined && options.messages.some(message => message.role === 'assistant')) {
+      if (fresh && !renewedForSkills && live.replay === undefined && options.messages.some(message => message.role === 'assistant')) {
         try {
           dshAgent?.session?.append?.('user/message', freshSessionNotice(agent.name), { surfaceOp: 'append' })
         } catch (error) {
@@ -2443,18 +2483,24 @@ export class AcpAdapter extends LlmAdapter {
       if (archived() || this.isArchived(sessionId)) return yield finish('stop')
       if (!uploadValid()) return yield uploadStopped()
       const send = currentSkills()
-      if (prepared !== undefined && send.messages.some((row, index) => row.id !== beforeUploads.messages[index]?.id ||
-          row.content?.length !== beforeUploads.messages[index]?.content?.length)) return yield uploadStopped()
+      const catalog = skillCatalog()
+      if (live.skillCatalog !== undefined && live.skillCatalog !== catalog?.key) {
+        // A catalog edit can land while the model or permission mode is being
+        // set. Re-enter before sending to the session with that catalog.
+        return yield* this.step(options, entry)
+      }
+      const replay = live.replay === undefined || replaySource === undefined ? live.replay : replayOf(replaySource, live.owed)
+      if (prepared !== undefined && (!isDeepStrictEqual(send.messages, beforeUploads.messages) ||
+          !isDeepStrictEqual(replay ?? [], live.replay ?? []))) return yield uploadStopped()
       const cutRows = prepared === undefined && fresh && (live.replay === undefined || live.owed?.handoff === true)
         ? cutUserRows(send.messages, dshAgent?.session) : []
       const cutIds = new Set(cutRows.map(row => row.id))
       const current = cutRows.length === 0 ? send.messages : send.messages.filter(row => !cutIds.has(row.id))
       const recovered = cutRows.length === 0 ? [] : [
-        ...replayBlocks(cutRows, { redact: this.redact, to: agent.name, renewed: true }),
+        ...replayOf(cutRows, { renewed: true }),
         { type: 'text', text: 'The previous turn was interrupted. Check any tool outcomes before repeating work.' },
       ]
-      const catalog = skills?.catalog(sessionId)
-      const prompt = prepared ?? [...(live.replay ?? []), ...recovered, ...promptOf(current, this.redact)]
+      const prompt = prepared ?? [...(replay ?? []), ...recovered, ...promptOf(current, this.redact)]
       if (catalog?.text && live.skillCatalog !== catalog.key) {
         if (live.bridge === undefined) return yield finish('error', 'Send this turn again.', 'acp_bridge_missing')
         prompt.push({ type: 'text', text: this.redact(catalog.text) })
@@ -2506,9 +2552,8 @@ export class AcpAdapter extends LlmAdapter {
       live.confinedReason = undefined
       live.toolIds?.clear()
       this.modelAnswers.set(live.run, { model: options.model, turn: entry.modelTurn, session: live.run.sessionId })
-      live.skillCatalog = catalog?.key
-      skills?.admit(send)
-      live.run.prompt(prompt).catch(() => {})
+      live.skillCatalog = catalog?.text ? catalog.key : undefined
+      live.run.prompt(prompt, () => skills?.admit({ ...send, messages: promptRows(current).rows }, session)).catch(() => {})
       // The notice belongs to this prompt, including any step after a mirror result.
       if (substitution !== undefined) live.substitution = { ...substitution, signal: options.signal }
     }
@@ -2557,8 +2602,8 @@ export class AcpAdapter extends LlmAdapter {
         // `ToolSearch` is the adapter's own deferred-tool loader (it stays with `tools: []`); it
         // is not a DSH tool and gets no card or dialog either.
         const skip = tool.skillBridge === true || (live.bridge?.skillOnly !== true && (
-          tool.drift === true || tool.bridge === true || tool.structuredName === 'ToolSearch'
-          || (agent.refresh === 'fork' && tool.mcp === true)))
+          tool.drift === true || tool.structuredName === 'ToolSearch'
+          || (!tool.skillConflict && (tool.bridge === true || (agent.refresh === 'fork' && tool.mcp === true)))))
         if (live.bridge !== undefined && skip) {
           live.run.answerSkippedMcp(tool)
           if (tool.drift === true) {

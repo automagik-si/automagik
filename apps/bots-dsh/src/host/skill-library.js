@@ -126,6 +126,7 @@ export function install(rt) {
   const confirmationKey = randomBytes(32)
   let queue = Promise.resolve()
   let cache
+  const botRemovals = new Map()
   const serial = task => {
     const run = queue.then(task)
     queue = run.catch(() => {})
@@ -319,23 +320,42 @@ export function install(rt) {
     })
   }
 
+  async function clearOrphan(id, generation) {
+    if (rt.botOf(id)) return
+    const { data, stamp } = snapshot(true)
+    if (own(data.active, id) === undefined) return
+    const next = structuredClone(data)
+    delete next.active[id]
+    await write(next, generation, stamp)
+  }
+
   function duringBotDeletion(id, remove) {
     const generation = rt.teamGeneration()
-    return serial(async () => {
-      if (!rt.botOf(id) || rt.isMain?.(id) || rt.botOf(id).dshAgentId !== undefined) return remove()
-      const { data, stamp } = snapshot(true)
-      if (own(data.active, id) !== undefined) {
-        const next = structuredClone(data)
-        delete next.active[id]
-        await write(next, generation, stamp)
+    const earlier = botRemovals.get(id) ?? Promise.resolve()
+    // Roster work can wait for ownership teardown, which itself waits for
+    // the library write queue. Only the committed cleanup joins that queue.
+    const run = earlier.catch(() => {}).then(remove).then(async result => {
+      // The roster has committed the removal. A failure before that point
+      // leaves the assignments in place for the restored Bot.
+      try { await serial(() => clearOrphan(id, generation)) } catch (error) {
+        rt.warn?.('Skills assignments for the removed Bot could not be cleared: %s', error)
       }
-      return remove()
+      return result
+    })
+    botRemovals.set(id, run)
+    return run.finally(() => {
+      if (botRemovals.get(id) === run) botRemovals.delete(id)
     })
   }
 
   rt.holdLockUntil?.(() => queue)
   rt.skillLibrary = {
     endpoint, active, duringBotDeletion,
+    async clearOrphan(id) {
+      const generation = rt.teamGeneration()
+      await botRemovals.get(id)?.catch(() => {})
+      return serial(() => clearOrphan(id, generation))
+    },
     refuse(action, body, caller) {
       return serial(() => audit(action, body, caller, 'refused', 'owner-only'))
     },

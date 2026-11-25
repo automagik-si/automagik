@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto'
 import { boundContextSummary, createSystemMessage, createUserMessage, isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AUTOMATIC_SKILL_MODE } from '../shared/skill-mode.js'
 import { routeOf } from '../shared/routes.js'
@@ -17,6 +19,13 @@ const automaticOf = records => records.filter(record => record.mode === AUTOMATI
 const keyOf = records => records.map(({ name, hash }) => `${name}:${hash}`).join(',')
 const catalogOf = records => records.map(({ name, description }) => `${name}: ${description}`).join('\n')
 const noticeText = name => `The skill ${name} is not active on this Bot. Add it in the Bot's Details, under Skills.`
+const SKILLS_PROJECTED = Symbol('Skills projected')
+const DELIVERY_RECORD = 'plugin:automagik/skill-delivery'
+const marker = part => part?.automagikSkill?.kind === SKILL_SOURCE ? part.automagikSkill : undefined
+
+function receipt(row, part, ref) {
+  return createHash('sha256').update(JSON.stringify([row.id, ref.botId, ref.name, ref.hash, ref.use, part.text])).digest('hex')
+}
 
 export function requestedSkills(parts) {
   const requests = new Map()
@@ -54,7 +63,16 @@ export function skillTool(rt) {
     async execute({ name }, exec) {
       await rt.load()
       if (exec.signal?.aborted) return {}
-      return loadSkill(rt, exec.agent?.id, name) ?? {}
+      const part = loadSkill(rt, exec.agent?.id, name)
+      if (part && exec.parent !== undefined) {
+        // PTC carries deferred context to the next model step separately from
+        // the program's return value. Only dispatch can admit this body.
+        exec.deferContext(createUserMessage({
+          content: [], source: { kind: SKILL_SOURCE, automagikSkillParts: [part] },
+        }))
+        return {}
+      }
+      return part ?? {}
     },
   })
 }
@@ -64,17 +82,39 @@ export function install(rt) {
   // The Session records injected blocks before dispatch. A permission change in that gap
   // must take effect before the current batch leaves the host. Blocks already sent belong
   // to the same conversation's history, including when it reopens.
-  const admitted = new WeakMap()
-  const marker = part => part?.automagikSkill?.kind === SKILL_SOURCE ? part.automagikSkill : undefined
-  function project(options, { catalog = true, turnStart } = {}) {
+  const ledgers = new WeakMap()
+  const sessionOf = id => ctx.get?.('sessions')?.get?.(id) ?? ctx.get?.('agents')?.get?.(id)?.session
+  const auxiliaryRequest = options => options.purpose !== undefined || rt.ownRequest?.(options) === true
+
+  function ledger(session) {
+    if (!session?.eventAt) return
+    let state = ledgers.get(session)
+    if (!state) ledgers.set(session, state = { seq: 0, rows: new Map(), delivered: new Set() })
+    for (; state.seq < session.seq; state.seq++) {
+      const event = session.eventAt(state.seq)
+      if (event.type === 'turn/start') state.turn = event.data.turn
+      else if (event.type === 'turn/end') state.turn = undefined
+      else if (event.type === 'assistant/attempt') state.attempt = { seq: event.seq, turn: event.data.turn }
+      else if (event.type === 'user/message') state.rows.set(event.data.id, { seq: event.seq, turn: state.turn })
+      else if (event.type === 'tool/result') state.rows.set(event.data.message.id, { seq: event.seq, turn: event.data.turn })
+      else if (event.type === DELIVERY_RECORD && Array.isArray(event.data)) {
+        for (const id of event.data) state.delivered.add(id)
+      }
+    }
+    return state
+  }
+
+  function project(options, { catalog = true, turnStart, historyOnly = false,
+    session = sessionOf(options.sessionId), auxiliary = auxiliaryRequest(options) } = {}) {
     const messages = options.messages
     if (!Array.isArray(messages)) return options
     const botId = ownerOf(rt, options.sessionId)
     const bot = rt.botOf(botId)
-    const auxiliary = options.purpose !== undefined || rt.ownRequest?.(options) === true
     const records = auxiliary ? [] : activeOf(rt, options.sessionId)
     const automatic = automaticOf(records)
     const current = new Map(records.map(record => [record.name, record]))
+    const state = auxiliary ? undefined : ledger(session)
+    const retry = messages.findLastIndex(row => row.source?.kind === 'retry' || row.source?.resumed === true)
     const start = turnStart ?? messages.findLastIndex(row => row.role === 'assistant' || row.role === 'tool') + 1
     const lastAnswer = messages.findLastIndex(row => row.role === 'assistant' && row.source?.synthetic !== 'acp-bridge')
     const skillCalls = new Set(messages.flatMap(row => row.role !== 'assistant' ? [] :
@@ -94,8 +134,12 @@ export function install(rt) {
         if (!ref) return !load
         if (auxiliary || ref.catalog === true) return false
         if (bot === undefined || ref.botId !== botId) return false
+        if (state?.delivered.has(receipt(row, part, ref))) return true
+        if (historyOnly || index < retry || row.source?.resumed === true || row.source?.retried === true) return false
         const fresh = row.role === 'tool' ? index > lastAnswer : index >= start
-        if (!fresh || admitted.get(options.signal)?.has(row.id)) return true
+        const logged = state?.rows.get(row.id)
+        if (!fresh || (logged && (state.turn === undefined || logged.turn !== state.turn ||
+          (state.attempt?.turn === logged.turn && state.attempt.seq > logged.seq)))) return false
         const skill = current.get(ref.name)
         return skill !== undefined && skill.hash === ref.hash && skill.content === part.text && (ref.use !== 'load' || skill.mode === AUTOMATIC_SKILL_MODE)
       })
@@ -125,13 +169,33 @@ export function install(rt) {
     return changed ? { ...options, messages: result } : options
   }
 
-  function admit(options) {
-    const { signal, messages } = options
-    if (signal === undefined) return
-    let rows = admitted.get(signal)
-    if (rows === undefined) admitted.set(signal, rows = new Set())
-    for (const row of messages) {
-      if (row.content?.some(part => marker(part) && !marker(part).catalog)) rows.add(row.id)
+  function admit(options, session = sessionOf(options.sessionId)) {
+    const state = ledger(session)
+    if (!state) return
+    const delivered = new Set()
+    for (const row of options.messages) for (const part of row.content ?? []) {
+      const ref = marker(part)
+      if (ref && !ref.catalog) {
+        const id = receipt(row, part, ref)
+        if (!state.delivered.has(id)) delivered.add(id)
+      }
+    }
+    if (delivered.size) {
+      try { appendPluginRecord(session, DELIVERY_RECORD, [...delivered]) } catch (error) {
+        rt.warn?.('Skills delivery could not be recorded: %s', error)
+      }
+    }
+  }
+
+  async function* confirmDelivery(stream, options) {
+    let confirmed = false
+    for await (const chunk of stream) {
+      if (!confirmed && (['text-delta', 'reasoning-delta', 'tool-call-delta'].includes(chunk.type) ||
+          (chunk.type === 'finish' && !['error', 'aborted'].includes(chunk.reason?.kind)))) {
+        confirmed = true
+        admit(options)
+      }
+      yield chunk
     }
   }
 
@@ -213,16 +277,18 @@ export function install(rt) {
     return { kind: 'deny', reason: 'Invalid arguments.' }
   }, { prepend: true })
 
-  const rewritten = new WeakSet()
   ctx.on('llm/stream', (options, next) => {
-    if (rewritten.has(options.messages)) return next()
+    const previous = options[SKILLS_PROJECTED]
+    const auxiliary = previous?.auxiliary === true || auxiliaryRequest(options)
+    if (previous?.provider === options.provider && previous?.auxiliary === auxiliary) return next()
     const alternate = acp(options.provider)
-    const outgoing = project(options, { catalog: !alternate })
+    if (alternate && isAgentLoopRequest(options) && !auxiliary) return next()
+    const outgoing = project(options, { catalog: !alternate, auxiliary })
     if (outgoing === options) return next()
-    if (!alternate && isAgentLoopRequest(options)) admit(outgoing)
-    rewritten.add(outgoing.messages)
-    rt.carryUsageTag?.(options.messages, outgoing.messages)
-    if (isAgentLoopRequest(options)) markAgentLoopRequest(freezeLoopRequest(outgoing))
-    return ctx.llm.stream(outgoing)
+    const request = { ...outgoing, [SKILLS_PROJECTED]: { provider: options.provider, auxiliary } }
+    rt.carryUsageTag?.(options.messages, request.messages)
+    if (!isAgentLoopRequest(options)) return ctx.llm.stream(request)
+    const stream = ctx.llm.stream(markAgentLoopRequest(freezeLoopRequest(request)))
+    return alternate ? stream : confirmDelivery(stream, outgoing)
   }, { prepend: true })
 }
