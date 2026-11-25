@@ -103,6 +103,7 @@ export const TEAM_TOOLS = [
   'request_secret', 'list_secrets', 'group_relay', 'read_own_chat', 'solver_progress',
   'read_group_chat', 'remember', 'forget', 'recall', 'read_browser',
   'list_capabilities', 'save_capability', 'delete_capability',
+  'load_skill',
   'attach_capability', 'detach_capability', 'group_goal', 'list_connectors', 'request_connector',
   'find_chats', 'list_automations', 'save_automation', 'pause_automation', 'delete_automation',
   'generate_image',
