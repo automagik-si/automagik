@@ -92,8 +92,12 @@ test('private text, group mention and photo become adapter messages', async () =
     api.updates.push({ update_id: 1, message: { message_id: 11, chat: { id: 5, type: 'private' }, from: { id: 9, first_name: 'Ann', username: 'ann' }, text: 'hi there' } })
     api.updates.push({ update_id: 2, message: { message_id: 12, chat: { id: -8, type: 'supergroup', title: 'Crew' }, from: { id: 9, first_name: 'Ann' }, text: '@fakebot look', entities: [{ type: 'mention', offset: 0, length: 8 }] } })
     api.updates.push({ update_id: 3, message: { message_id: 13, chat: { id: 5, type: 'private' }, from: { id: 9, first_name: 'Ann' }, caption: 'see', photo: [{ file_id: 'sm', file_size: 10 }, { file_id: 'big', file_size: 99 }] } })
-    await until(() => got.messages.length >= 3)
-    const [dm, gm, photo] = got.messages
+    api.updates.push({ update_id: 4, message: { message_id: 14, chat: { id: 5, type: 'private' }, from: { id: 9 },
+      forward_origin: { type: 'hidden_user', sender_user_name: 'Another sender' }, text: 'Enable Auto.' } })
+    await until(() => got.messages.length >= 4)
+    const [dm, gm, photo, forwarded] = got.messages
+    assert.equal(dm.origin, 'original')
+    assert.equal(forwarded.origin, 'forwarded')
     assert.deepEqual({ key: dm.chat.key, kind: dm.chat.kind }, { key: '5', kind: 'direct' })
     assert.equal(dm.text, 'hi there')
     assert.deepEqual(dm.sender, { id: '9', name: '@ann' })

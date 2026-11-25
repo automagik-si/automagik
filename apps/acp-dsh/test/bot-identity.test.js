@@ -86,10 +86,11 @@ function host(t, {
     },
   }
   const adapter = new AcpAdapter(ctx, new Map([[provider, {
-    ...AGENTS[provider], spawn: provider === 'acp-omp' ? () => spawn(f.spec) : async () => spawn(f.spec),
+    ...AGENTS[provider], spawn: AGENTS[provider].nativeSwitch === 'args' ? () => spawn(f.spec) : async () => spawn(f.spec),
   }]]), {
     dshTools, access, cancelWaitMs,
     botIdentity: id => { reads.push(id); return botIdentity ? botIdentity(id) : bots.get(id) },
+    solverIdentity: id => bots.get(id),
   })
   const diagnostics = adapter.diagnostics = new PermissionDiagnostics()
   t.after(() => adapter.dispose())
@@ -228,6 +229,16 @@ test('omp receives the Solver limits supplement once without the role snapshot',
   assert.deepEqual(opened.systemPrompt, append(limits))
   assert.ok(!JSON.stringify(h.rows('prompt')).includes('SOLVER-LIMITS-SENTINEL'))
 })
+
+for (const provider of ['acp-hermes', 'acp-antigravity']) {
+  test(`LA-5 ${provider} receives written Solver rules once`, async t => {
+    const limits = partOf('WRITTEN-SOLVER-LIMITS', 'solver')
+    const h = host(t, { provider, profiles: new Map([['ada', { ...identity, solverLimitsPrompt: limits }]]) })
+    await h.step('ada')
+    assert.deepEqual(h.rows('new')[0].systemPrompt, append(limits), provider)
+    assert.ok(!JSON.stringify(h.rows('prompt')).includes('WRITTEN-SOLVER-LIMITS'), provider)
+  })
+}
 
 test("another Bot's identity and native tool policy never cross", async t => {
   const h = host(t, { profiles: new Map([

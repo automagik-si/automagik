@@ -52,6 +52,7 @@ function resultText(tool) {
   if (tool.sessionFileResult !== undefined) return tool.sessionFileResult
   if (tool.confinedReason !== undefined) return tool.confinedReason
   if (tool.lastingReason !== undefined) return tool.lastingReason
+  if (tool.refusedReason !== undefined) return tool.refusedReason
   if (typeof tool.judgeReason === 'string') return judgedText(tool)
   const text = contentText(tool.content) || tool.output || (tool.rawOutput === undefined ? '' : typeof tool.rawOutput === 'string' ? tool.rawOutput : JSON.stringify(tool.rawOutput))
   return text.length > OUTPUT_LIMIT ? `${text.slice(0, OUTPUT_LIMIT)}…` : text
@@ -120,7 +121,7 @@ async function imageResult(host, live, tool, exec) {
   if (exec.signal?.aborted) return failed('The image was stopped before it was finished.')
   const base64 = agentImageOf(tool)
   if (base64 === undefined) {
-    return failed(tool.confinedReason ?? tool.lastingReason ?? (typeof tool.judgeReason === 'string' ? judgedText(tool) : tool.status === 'failed'
+    return failed(tool.confinedReason ?? tool.lastingReason ?? tool.refusedReason ?? (typeof tool.judgeReason === 'string' ? judgedText(tool) : tool.status === 'failed'
       ? `${live.name} could not make this image. Try again, or describe it differently.`
       : `${live.name} ended without an image. Try again.`))
   }
@@ -407,6 +408,7 @@ async function ask(host, live, tool, exec, permission, { review = true } = {}) {
   if (review) reviewed.delete(exec)
   tool.confinedReason = undefined
   tool.lastingReason = undefined
+  tool.refusedReason = undefined
   const options = permission?.options ?? []
   const mode = live.run?.modes?.currentModeId
   const call = permission?.call
@@ -448,17 +450,19 @@ async function ask(host, live, tool, exec, permission, { review = true } = {}) {
   const reason = `${live.name}: ${asking && asking !== tool.title ? `${asking.replace(/\?$/, '')}: ` : ''}${tool.title}`
   let mirrorCall
   try {
-    const { title, kind, input, locations } = callArguments(tool)
+    const { id, title, kind, input, locations } = callArguments(tool)
     // Plain JSON: DSH passes an approval nobody here answers on to its remote approval card only as lossless JSON (dsh-api-gateway
     // projectRemoteEventRequest), and a member left undefined (`locations` of a call that has none) fails that dispatch: the call
     // would be cancelled with no card.
-    mirrorCall = JSON.parse(JSON.stringify({ title, kind, input, locations, allowOnce: tool.permission?.options?.some(option => option.kind === 'allow_once') === true }))
+    mirrorCall = JSON.parse(JSON.stringify({ id, title, kind, input, locations, allowOnce: tool.permission?.options?.some(option => option.kind === 'allow_once') === true }))
   } catch {
     // Unreadable call details leave the question for the person.
   }
   try {
-    const outcome = await approval.request({ agent: exec.agent, toolName: TOOL_NAME, callId: exec.callId, reason, displayReason: { en: reason }, signal: exec.signal, ...(mirrorCall === undefined ? {} : { mirrorCall }) })
+    const callId = review ? exec.callId : `${exec.callId}:child:${tool.id}`
+    const outcome = await approval.request({ agent: exec.agent, toolName: TOOL_NAME, callId, reason, displayReason: { en: reason }, signal: exec.signal, ...(mirrorCall === undefined ? {} : { mirrorCall }) })
     // Auto's judge refused it (bots-dsh auto-judge.js sets `mirrorCall.judged`): the call's result says so (section 4).
+    tool.refusedReason = outcome === 'rejected' && typeof mirrorCall?.refused?.reason === 'string' ? mirrorCall.refused.reason : undefined
     tool.judgeReason = outcome === 'rejected' && typeof mirrorCall?.judged?.reason === 'string' ? mirrorCall.judged.reason : undefined
     return outcome
   } catch {

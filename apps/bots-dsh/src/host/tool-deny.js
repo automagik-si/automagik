@@ -29,6 +29,7 @@ import { changesWorkingFolder } from './folders.js'
 import { refusal } from './refusal.js'
 import { teamToolOf } from './approvals.js'
 import { solverTracked } from './solver-progress.js'
+import { solverCallId } from './review-guard.js'
 
 /** The most names one Bot may deny. */
 export const DENY_MAX = 64
@@ -549,10 +550,12 @@ export function install(rt) {
         const observed = own ? rt.solverCall?.(bot, name, exec.arguments, definition, base) : undefined
         const finish = observed?.relevant ? await rt.solverBeforeWork?.(bot, { ...observed, call }) : undefined
         rt.reviewWork?.(bot, own, name, exec.arguments, definition, base)
+        let result
         try {
-          return await (rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next))
+          result = await (rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next))
+          return result
         } finally {
-          finish?.()
+          await finish?.(result)
         }
       }
       return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
@@ -570,7 +573,7 @@ export function install(rt) {
     const base = exec.agent?.session === undefined ? undefined : rt.sessionFolder?.(exec.agent.session)
     const own = ownChatLineage(sessionId, exec.agent, bot)
     const definition = definitionOf(exec)
-    const call = typeof exec.callId === 'string' ? `${sessionId}:${exec.callId}` : undefined
+    const call = solverCallId(sessionId, name, exec.arguments, exec.callId)
     return { sessionId, base, own, definition, call, held: rt.reviewGuardHolds?.(bot, own, name, exec.arguments, definition, base, call) }
   }
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -107,11 +107,172 @@ async function setup(t, extra = {}) {
 }
 
 const requestOf = async h => /^Request: ([\w-]+)/.exec(await h.progress('status'))?.[1]
-const plan = (h, request, checks = ['check-a', 'check-b']) => h.progress('plan', { request, checks })
+const plan = (h, request, checks = ['check-a', 'check-b']) =>
+  h.progress('plan', { request, checks, commands: checks.map(check => ({ check, command: `fake ${check}` })) })
 async function runCheck(h, request, run, pass, check = 'check-a') {
   await h.progress('start', { request, run, checks: [check] })
   return h.progress('checks', { request, run, results: [{ check, pass }] })
 }
+
+
+const results = (check = 'check-a', pass = true) => [{ check, pass }]
+async function checked(h, request, run, { check = 'check-a', command = `fake ${check}`, exitCode = 0, work } = {}) {
+  await h.progress('start', { request, run, checks: [check] })
+  const cwd = h.rt.botOf('solver').workDir
+  await h.ctx.listeners.get('tools/execute')[0]({
+    name: 'bash', arguments: { command }, agent: h.agentOf('solver'), callId: run,
+  }, async () => {
+    work?.(cwd)
+    return { isError: false, value: { kind: 'foreground', cwd, exitCode, signal: null, timedOut: false, aborted: false } }
+  })
+  return h.progress('checks', { request, run, results: results(check, exitCode === 0) })
+}
+
+async function reviewedPlan(h, checks) {
+  const request = await requestOf(h)
+  const exchange = (kind, text = 'Verify the evidence.') => h.tool('message_bot', {
+    to: 'reviewer', message: text, solver_review: kind, solver_request: request, reply_to: 'me',
+  })
+  const verdict = (exchangeId, model = reviewerModel.model) => answerSender(h.rt, 'reviewer', {
+    exchangeId, senderSessionId: 'solver',
+  }, 'SHIP', undefined, undefined, model)
+  const delivered = []
+  h.rt.deliver = async message => { delivered.push(message); return true }
+  await plan(h, request, checks)
+  await exchange('plan')
+  verdict(delivered.at(-1).exchangeId)
+  return { request, send: exchange, verdict, delivered }
+}
+
+test('LA-1 requires completed passing evidence on the same result', async t => {
+  const h = await setup(t)
+  const { request, send } = await reviewedPlan(h)
+  assert.match(await h.progress('plan', {
+    request, checks: ['check-a'], commands: [{ check: 'different', command: 'fake check-a' }],
+  }), /one command for each agreed check ID/)
+  await h.progress('start', { request, run: 'unexecuted', checks: ['check-a'] })
+  const unexecuted = await h.progress('checks', { request, run: 'unexecuted', results: results() })
+  assert.match(unexecuted, /no verified passing evidence/i)
+  assert.match(await checked(h, request, 'wrong-command', { command: 'unrelated successful command' }), /no verified passing evidence/i)
+  await assert.rejects(send('result'), /every agreed check/)
+})
+
+test('LA-1 a regenerating check invalidates the earlier pass', async t => {
+  const h = await setup(t)
+  const { request, send } = await reviewedPlan(h)
+  assert.match(await checked(h, request, 'first-a'), /Recorded/)
+  await checked(h, request, 'rewrites', { check: 'check-b',
+    work: cwd => writeFileSync(join(cwd, 'out'), 'regenerated') })
+  await assert.rejects(send('result'), /every agreed check/)
+  assert.match(await checked(h, request, 'current-a'), /Recorded/)
+  assert.match(await checked(h, request, 'current-b', { check: 'check-b' }), /Recorded/)
+  await send('result')
+})
+
+test('LA-1 rejects a pass that contradicts the executed check', async t => {
+  const h = await setup(t)
+  const { request, send } = await reviewedPlan(h, ['check-a'])
+  await h.progress('start', { request, run: 'nonzero', checks: ['check-a'] })
+  const cwd = h.rt.botOf('solver').workDir
+  await h.ctx.listeners.get('tools/execute')[0]({
+    name: 'bash', arguments: { command: 'fake check-a' }, agent: h.agentOf('solver'), callId: 'nonzero',
+  }, async () => ({ isError: false, value: { kind: 'foreground', cwd, exitCode: 1, signal: null, timedOut: false, aborted: false } }))
+  assert.match(await h.progress('checks', { request, run: 'nonzero', results: results() }), /contradicts.*outcome/i)
+  assert.match(await h.progress('checks', { request, run: 'nonzero', results: results('check-a', false) }), /Recorded/)
+  await assert.rejects(send('result'), /every agreed check/)
+})
+
+test('LA-2 a Claude ACP alias cannot establish independent model identity', async t => {
+  const h = await setup(t)
+  const { request, send, delivered } = await reviewedPlan(h, ['check-a'])
+  const direct = { provider: 'anthropic', model: 'claude-sonnet-5-5' }
+  h.agentOf('solver').session.requestHeader = () => ({ config: direct })
+  h.agentOf('reviewer').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: 'sonnet' } })
+  h.ctx.acpAgents.effectiveModelOf = () => 'sonnet'
+  await checked(h, request, 'current')
+  await send('result')
+  h.event('reviewer', 'user/message', { content: content('Check the result.'), source: {
+    kind: 'bot', role: 'request', senderSessionId: 'solver', exchangeId: delivered.at(-1).exchangeId,
+  } })
+  h.event('reviewer', 'turn/start', { turn: 1 })
+  h.finish('reviewer', 'SHIP')
+  assert.equal(h.rt.botOf('solver').reviewTrack.solver.review.verdict, 'unverified')
+})
+
+test('LA-2 an undelivered designation can be retried after restart', async t => {
+  let h = await setup(t)
+  const request = await requestOf(h)
+  await plan(h, request)
+  const send = () => h.tool('message_bot', { to: 'reviewer', message: 'Review the plan.',
+    solver_review: 'plan', solver_request: request, reply_to: 'me' })
+  h.rt.attachLong = async () => undefined
+  assert.equal((await send()).sent, false)
+  await h.close()
+  h = fixture(t, h.home)
+  await h.rt.load()
+  const messages = []
+  const deliver = h.rt.deliver
+  h.rt.deliver = async message => { messages.push(message); return deliver(message) }
+  assert.match(await send(), /Delivered|Queued/)
+  assert.equal(messages.length, 1)
+  await assert.rejects(send(), /already waiting/)
+  assert.equal(h.rt.botOf('solver').reviewTrack.solver.plan.review.exchangeId, messages[0].exchangeId)
+})
+
+test('LA-3 a reply to another Bot leaves the person budget open', async t => {
+  const h = await setup(t)
+  const request = await requestOf(h)
+  await h.progress('replan', { request, run: 'first' })
+  h.botMessage()
+  h.event('solver', 'turn/start', { turn: 1 })
+  h.finish('solver', 'Reply to the other Bot.')
+  h.person('Continue my task.')
+  assert.equal(await requestOf(h), request)
+  assert.equal(h.rt.botOf('solver').reviewTrack.solver.replans, 1)
+})
+
+test('LA-3 a failed card release leaves the decision retryable', async t => {
+  const h = await setup(t)
+  const request = await requestOf(h)
+  await plan(h, request)
+  assert.match(await runCheck(h, request, 'failed-once', false), /Recorded/)
+  for (const run of ['one', 'two', 'three']) await h.progress('replan', { request, run })
+  await h.tool('ask_user', { question: 'Which input?', options: [{ label: 'Use it' }] }, 'solver', 'question')
+  const card = h.rt.state.questions.solver
+  const saveCopy = h.rt.saveCopy
+  h.rt.saveCopy = async () => { throw new Error('Fixture release save failed') }
+  await assert.rejects(h.rt.answerQuestion('solver', card.id, { selected: ['Use it'] }), /release save failed/)
+  assert.equal(h.rt.state.questions.solver, card)
+  assert.equal(h.agentOf('solver').message, undefined)
+  h.rt.saveCopy = saveCopy
+  await h.rt.answerQuestion('solver', card.id, { selected: ['Use it'] })
+  const progress = h.rt.botOf('solver').reviewTrack.solver
+  assert.equal(progress.replans, 0)
+  assert.equal(progress.attempts['check-a'], 1)
+})
+
+test('LA-5 mediated retries require an open run and ordinary plan work stays available', async t => {
+  const h = await setup(t)
+  const { request } = await reviewedPlan(h, ['check-a'])
+  assert.equal(await h.execute('write', { file_path: 'out' }), 'ran')
+  await assert.rejects(h.execute('bash', { command: 'fake retry' }), /start.*run/i)
+  assert.match(await checked(h, request, 'first', { exitCode: 1 }), /Recorded/)
+  assert.match(await h.progress('checks', { request, run: 'first', results: results('check-a', false) }), /Recorded/)
+  assert.equal(h.rt.botOf('solver').reviewTrack.solver.attempts['check-a'], 1)
+  await assert.rejects(h.execute('bash', { command: 'fake retry' }), /start.*run/i)
+})
+
+test('LA-5 a person message during durable progress preserves its count', async t => {
+  const h = await setup(t)
+  const request = await requestOf(h)
+  const saveCopy = h.rt.saveCopy
+  h.rt.saveCopy = (change, options) => saveCopy(change, { ...options, afterPublish: () => h.person('Keep going.') })
+  assert.match(await h.progress('replan', { request, run: 'overlap' }), /Recorded/)
+  h.rt.saveCopy = saveCopy
+  await h.rt.save({ required: true, durable: true })
+  assert.equal(h.rt.botOf('solver').reviewTrack.solver.replans, 1)
+  assert.equal(JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots.solver.reviewTrack.solver.replans, 1)
+})
 
 test('Normal holds the fourth failure and deduplicates the run', async t => {
   const h = await setup(t)
@@ -119,10 +280,10 @@ test('Normal holds the fourth failure and deduplicates the run', async t => {
   assert.ok(request)
   await plan(h, request)
   for (const [run, pass] of [['one', false], ['two', false], ['pass', true], ['three', false]]) {
-    assert.match(await runCheck(h, request, run, pass), /Recorded/)
+    assert.match(await checked(h, request, run, { exitCode: pass ? 0 : 1 }), /Recorded/)
   }
   assert.match(await h.progress('checks', { request, run: 'three', results: [{ check: 'check-a', pass: false }] }), /Recorded/)
-  assert.match(await runCheck(h, request, 'four', false), /failed after 3 fix attempts/)
+  assert.match(await checked(h, request, 'four', { exitCode: 1 }), /failed after 3 fix attempts/)
   await assert.rejects(h.execute('write', { file_path: 'out' }), /exact decision/)
   assert.equal(await h.execute('read', {}), 'ran')
   h.person('Use the new input.')
@@ -217,7 +378,8 @@ test('Only current complete checks and an independent designated SHIP mark Done'
   const bot = h.rt.botOf('solver')
   bot.reviewTrack.requestAt = Date.now()
   const deliveries = []
-  h.rt.deliver = async message => { deliveries.push(message); return true }
+  const deliver = h.rt.deliver
+  h.rt.deliver = async message => { deliveries.push(message); return deliver(message) }
   const review = async kind => {
     await h.tool('message_bot', { to: 'reviewer', message: 'Please verify this evidence.',
       solver_review: kind, solver_request: request, reply_to: 'me' })
@@ -229,13 +391,18 @@ test('Only current complete checks and an independent designated SHIP mark Done'
   await plan(h, request)
   const planExchange = await review('plan')
   assert.match(deliveries.at(-1).text, /Agreed check IDs: check-a, check-b/)
+  assert.match(deliveries.at(-1).text, /Agreed check commands: \{"check-a":"fake check-a","check-b":"fake check-b"\}/)
   verdict(planExchange, 'SHIP')
   await h.progress('start', { request, run: 'native', checks: ['check-a'] })
-  const mirror = { kind: 'execute', title: 'Run check', input: { command: 'fake check' } }
+  const mirror = { id: 'child-a', kind: 'execute', title: 'Run check', input: { command: 'fake check' } }
   const agent = h.agentOf('solver')
   const executeHook = h.ctx.listeners.get('tools/execute')[0]
   assert.equal(await executeHook({ name: 'acp_tool', arguments: mirror, agent, callId: 'native' }, async () => {
-    assert.equal(await h.rt.reviewGuardAsk({ toolName: 'acp_tool', mirrorCall: mirror, agent, callId: 'native' }), undefined)
+    assert.equal(await h.rt.reviewGuardAsk({ toolName: 'acp_tool', mirrorCall: mirror, agent, callId: 'parent' }), undefined)
+    const otherChild = { ...mirror, id: 'child-b' }
+    const held = await h.rt.reviewGuardAsk({ toolName: 'acp_tool', mirrorCall: otherChild, agent, callId: 'parent' })
+    assert.match(held.text, /Finish recording/)
+    assert.equal(otherChild.refused.reason, held.text)
     assert.match(await h.progress('checks', { request, run: 'native', results: [{ check: 'check-a', pass: true }] }), /finish/)
     return 'ran'
   }), 'ran')
@@ -247,13 +414,13 @@ test('Only current complete checks and an independent designated SHIP mark Done'
   assert.equal(await h.execute('bash', { command: 'fake check' }), 'ran')
   await assert.rejects(h.execute('bash', { command: 'fake second attempt' }), /Finish recording/)
   await h.progress('checks', { request, run: 'incomplete', results: [{ check: 'check-a', pass: false }, { check: 'check-b', pass: true }] })
-  await runCheck(h, request, 'pass-a', true)
+  await checked(h, request, 'pass-a')
   await assert.rejects(review('result'), /every agreed check/)
-  await runCheck(h, request, 'pass-b', true, 'check-b')
-  await runCheck(h, request, 'new-failure', false)
+  await checked(h, request, 'pass-b', { check: 'check-b' })
+  await checked(h, request, 'new-failure', { exitCode: 1 })
   await assert.rejects(review('result'), /every agreed check/)
-  await runCheck(h, request, 'repass-a', true)
-  await runCheck(h, request, 'repass-b', true, 'check-b')
+  await checked(h, request, 'repass-a')
+  await checked(h, request, 'repass-b', { check: 'check-b' })
   let exchange = await review('result')
   h.rt.openWork('late-plan', { from: 'solver', to: 'reviewer' })
   verdict('late-plan', 'SHIP')
@@ -270,8 +437,8 @@ test('Only current complete checks and an independent designated SHIP mark Done'
   verdict(exchange, 'SHIP')
   await h.execute('mcp__dsh__write', { file_path: 'out' })
   assert.equal(bot.reviewTrack.solver.review, undefined)
-  await runCheck(h, request, 'final-a', true)
-  await runCheck(h, request, 'final-b', true, 'check-b')
+  await checked(h, request, 'final-a')
+  await checked(h, request, 'final-b', { check: 'check-b' })
   exchange = await review('result')
   h.event('reviewer', 'user/message', { content: content('Review the agreed checks.'), source: {
     kind: 'bot', role: 'request', senderSessionId: 'solver', exchangeId: exchange,
@@ -284,7 +451,10 @@ test('Only current complete checks and an independent designated SHIP mark Done'
   assert.equal(mark.done, true)
   assert.deepEqual(mark.reviewer, { id: 'reviewer', name: 'reviewer', model: reviewerModel.model })
   h.rt.botOf('reviewer').name = 'Renamed'
-  assert.match(reviewMarkText({ ...bot, reviewMark: mark }, { byId: h.rt.state.bots }), /every check passed and reviewer approved/)
+  const displayed = reviewMarkText({ ...bot, reviewMark: mark }, { byId: h.rt.state.bots })
+  assert.match(displayed, /every check passed and reviewer approved/)
+  assert.doesNotMatch(displayed, /result unreviewed/i)
+  assert.equal(displayed, 'Plan and result reviewed by reviewer.\nDone: every check passed and reviewer approved.')
 })
 
 test('Auto setting permissions, Bot-started requests, and written method delivery', async t => {
@@ -314,6 +484,7 @@ test('Auto setting permissions, Bot-started requests, and written method deliver
   await h.rt.load()
   assert.match(await h.progress('auto', { request, quote: 'Work alone until delivered.' }), /own words/)
   // A delivery with no checks stays unmarked; its next Bot request has no Auto authority.
+  h.person('Continue the task.')
   h.event('solver', 'turn/start', { turn: 1 })
   h.finish('solver', 'Unable to finish.')
   const solver = h.rt.botOf('solver')

@@ -282,6 +282,10 @@ export function apply(ctx, config = {}, {
     images: () => imageKeeper,
     hostStopping: () => hostStopping.now,
     botIdentity: identityReaders.read,
+    solverIdentity: id => {
+      const identity = identityReaders.read(id)
+      if (typeof identity?.solverLimitsPrompt === 'string') return { name: identity.name, solverLimitsPrompt: identity.solverLimitsPrompt }
+    },
     teamManaged: identityReaders.everRegistered,
     // The raw tri-state: an absent setting takes each agent's own switch in AcpAdapter.
     dshTools: () => flagOf(config.dshTools),

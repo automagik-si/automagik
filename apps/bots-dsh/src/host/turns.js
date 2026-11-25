@@ -1030,7 +1030,7 @@ export function install(rt) {
           // resumed or retried one was counted then, H7-3), may open a new review (review-mark.js).
           if (source.role === 'request' && rt.chatOwners.get(id) !== undefined && source.deferred !== true && source.resumed !== true
             && source.resumedByUpdate !== true && source.retried !== true) {
-            rt.reviewBotRequest?.(rt.chatOwners.get(id), source.senderSessionId, { noReply: source.noReply === true })
+            rt.reviewBotRequest?.(rt.chatOwners.get(id), source.senderSessionId, { noReply: source.noReply === true, exchangeId: source.exchangeId })
           }
           if (entry.turn === undefined) {
             entry.pending = source
@@ -1104,24 +1104,42 @@ export function install(rt) {
           // A person's request to a Solver opens the review its delivery is marked with (review-mark.js).
           const human = source.kind === 'user'
             && !source.handoff && !source.resumed && !source.resumedByUpdate && !source.forwarded && !source.generated
+          const question = state.questions[id]
+          const closesQuestion = question !== undefined && (human || source.callId === (question.callId ?? question.id))
+          const closeQuestion = () => {
+            if (!closesQuestion || state.questions[id] !== question) return
+            rt.closeCard(id, question, 'replied')
+            delete state.questions[id]
+            void rt.save().catch(() => {})
+          }
+          let accepted
           if (own !== undefined && human) {
             const plain = event.data.content
-            rt.reviewRequest?.(own, { text: plain?.length === 1 && plain[0]?.type === 'text' ? plain[0].text : undefined })
+            accepted = rt.reviewRequest?.(own, {
+              text: plain?.length === 1 && plain[0]?.type === 'text' ? plain[0].text : undefined,
+              trustedAuto: viaOf(source) === undefined || rt.takeImAuthor?.(id, source.rpcId) === true,
+            })
           } else if (own !== undefined && source.kind === REPLY_KIND && typeof source.callId === 'string' && source.outcome === 'answered') {
             let card
             try { card = JSON.parse(textOf(event.data.content)) } catch {}
             if (card?.kind === 'answer_to_pending_question' && card.tool === 'ask_user' && card.callId === source.callId) {
-              rt.reviewRequest?.(own, { text: card.answers?.[0]?.custom, question: source.callId })
+              accepted = source.solverRequest ?? rt.reviewRequest?.(own, { text: card.answers?.[0]?.custom, question: source.callId })
             }
           }
-          // Fresh messages supersede a card. A card reply answers its matching question.
+          if (human || accepted !== undefined) entry.solverRequest = accepted
+          if (accepted?.then) {
+            const pending = accepted.then(request => {
+              if (entry.solverRequest === pending) entry.solverRequest = request
+              closeQuestion()
+              return request
+            }, error => {
+              if (entry.solverRequest === pending) entry.solverRequest = undefined
+              rt.warn('omni-ui: Solver decision could not be saved: %s', error)
+              return undefined
+            })
+            entry.solverRequest = pending
+          } else closeQuestion()
           let dropped = false
-          const question = state.questions[id]
-          if (question !== undefined && (human || source.callId === (question.callId ?? question.id))) {
-            rt.closeCard(id, question, 'replied')
-            delete state.questions[id]
-            dropped = true
-          }
           if (state.views?.[id] !== undefined) {
             rt.closeCard(id, state.views[id], 'replied')
             delete state.views[id]
@@ -1281,7 +1299,14 @@ export function install(rt) {
         const retry = (wroteCall || promisedOnly) && info?.retried !== true && !(info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))
         // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
         const model = reason?.kind === 'completed' ? modelOf(rt, undefined, session) : undefined
-        if (owner !== undefined && !retry) rt.reviewTurnEnd?.(owner, { completed: failure === undefined && reason?.kind === 'completed', wroteText, model })
+        if (owner !== undefined && !retry) {
+          const request = info === undefined || info.role === 'continue' ? entry.solverRequest : undefined
+          const mark = request => rt.reviewTurnEnd?.(owner, {
+            completed: failure === undefined && reason?.kind === 'completed', wroteText, model, request, trigger: info,
+          })
+          if (request?.then) void request.then(mark)
+          else mark(request)
+        }
         if (retry) {
           if (promisedOnly) {
             const opening = stripWrittenCalls(lastText ?? '')

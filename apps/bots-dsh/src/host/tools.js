@@ -240,6 +240,9 @@ export function install(rt) {
       request: { type: 'string', description: 'Active request ID from status, required for updates' },
       run: { type: 'string', description: 'Distinct, stable ID for a check run or re-plan' },
       checks: { type: 'array', items: { type: 'string' }, description: 'Stable check IDs for the plan or this run' },
+      commands: { type: 'array', items: { type: 'object', additionalProperties: false,
+        properties: { check: { type: 'string', required: true }, command: { type: 'string', required: true } } },
+      description: 'For plan, give each agreed check ID and its exact foreground command in the result folder' },
       results: { type: 'array', items: { type: 'object', additionalProperties: false,
         properties: { check: { type: 'string', required: true }, pass: { type: 'boolean', required: true } } } },
       quote: { type: 'string', description: 'The person’s exact affirmative instruction to turn Auto on for this request' },
@@ -374,13 +377,19 @@ export function install(rt) {
         const joinable = earlier !== undefined && (toUser || rt.sameWork(earlier.message.source.exchangeId, work))
         const before = joinable ? bodyOf(earlier.message) : undefined
         const reviewExchange = designating ? randomUUID() : undefined
+        let long
         if (designating) {
-          const checks = await rt.solverReview(sender, target, true, {
+          long = await rt.solverReview(sender, target, true, {
             kind: args.solver_review, request: args.solver_request, exchangeId: reviewExchange, agent: exec.agent,
+            prepare: (checks, commands) => {
+              const evidence = commands ? `\nAgreed check commands: ${JSON.stringify(commands)}` : ''
+              text = `Designated Solver ${args.solver_review} review. Agreed check IDs: ${checks.join(', ')}.${evidence}\n\n${text}`
+              return rt.attachLong(text, `Message from ${sender.name}.txt`)
+            },
           })
-          text = `Designated Solver ${args.solver_review} review. Agreed check IDs: ${checks.join(', ')}.\n\n${text}`
+        } else {
+          long = await rt.attachLong(before ? `${before.text}\n\n${text}` : text, `Message from ${sender.name}.txt`)
         }
-        let long = await rt.attachLong(before ? `${before.text}\n\n${text}` : text, `Message from ${sender.name}.txt`)
         // Nothing went out, so a named request must not take this as a delivered
         // receipt: admitRequest drops the pending record instead, and a retry can send.
         if (long === undefined) { if (request !== undefined) request.unsent = true; return refusedMessage(tooLong(text)) }
@@ -393,13 +402,13 @@ export function install(rt) {
         const earlierNoReply = earlier !== undefined && earlier.message.source.noReply === true
         const mergedNoReply = noReply && (joins ? earlierNoReply : true)
         if (joins) rt.forgetDelivery?.(exchangeId)
-        // A request that owes a reply needs its work, also when it grew out of an
-        // earlier no-reply message that had none.
-        if (!toUser && !mergedNoReply && state.works?.[exchangeId] === undefined) {
-          rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work,
-            ...(designating ? { name: `solver-review-${args.solver_review}` } : {}) })
-        }
         try {
+          // A request that owes a reply needs its work, also when it grew out of an
+          // earlier no-reply message that had none.
+          if (!toUser && !mergedNoReply && state.works?.[exchangeId] === undefined) {
+            rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work,
+              ...(designating ? { name: `solver-review-${args.solver_review}` } : {}) })
+          }
           await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(mergedNoReply ? { noReply: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
         } catch (error) {
           // The delivery stays noted for the next start while its Bot exists
@@ -407,6 +416,8 @@ export function install(rt) {
           // work it opened stays too. Only a target that is gone drops the work.
           if (!joins && rt.botOf(target.id) === undefined) rt.dropWork(exchangeId)
           throw error
+        } finally {
+          if (designating) rt.solverReviewSent(reviewExchange)
         }
         const sent = toUser
           ? `Delivered to ${target.name}. It will answer the user in its own chat; nothing comes back to you, so point the user to ${target.name}'s chat instead of relaying.`

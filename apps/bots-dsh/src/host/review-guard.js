@@ -91,6 +91,12 @@ export function heldCall(rt, bot, name, args, definition, base) {
   return 'work'
 }
 
+// The ACP call's own ID survives both its mirror execution and its approval.
+export function solverCallId(sessionId, name, args, callId) {
+  if (name === 'acp_tool' && typeof args?.id === 'string' && args.id !== '') return `${sessionId}:acp:${args.id}`
+  return typeof callId === 'string' ? `${sessionId}:${callId}` : undefined
+}
+
 export function install(rt) {
   const guardChanges = new Map()
   const reviewGuardOn = id => rt.botOf(id)?.reviewGuard === true
@@ -115,13 +121,19 @@ export function install(rt) {
   function solverCall(bot, name, args, definition, base) {
     const folder = bot.workDir ?? rt.teamFolder?.()
     const team = teamToolOf(name)
-    const checkCommand = name === 'acp_tool' ? args?.kind === 'execute' : reachesShell(name, definition)
+    const commandInput = isRecord(args?.input) && (Object.hasOwn(args.input, 'command') || Object.hasOwn(args.input, 'cmd'))
+    const checkCommand = name === 'acp_tool' ? args?.kind === 'execute' || commandInput : reachesShell(name, definition)
     const notes = isNotesWrite(name, args, folder, base ?? folder)
     const review = team === 'message_bot' && typeof args?.to === 'string' && !!reviewerOf(bot)
       && (args.to === bot.reviewerId || rt.findBot?.(args.to)?.id === bot.reviewerId)
     const acpRead = name === 'acp_tool' && args?.kind !== 'think'
-      && ACP_OPEN_KINDS.has(args?.kind) && args?.input?.command === undefined && args?.input?.cmd === undefined
-    return { relevant: !notes && (checkCommand || (!review && !acpRead && !ATTEMPT_READS.has(team))), checkCommand }
+      && ACP_OPEN_KINDS.has(args?.kind) && !commandInput
+    return {
+      relevant: !notes && (checkCommand || (!review && !acpRead && !ATTEMPT_READS.has(team))),
+      checkCommand,
+      shellCommand: ['bash', 'pwsh', 'powershell'].includes(team) && typeof args?.command === 'string'
+        ? args.command.trim() : undefined,
+    }
   }
 
   /**
@@ -139,9 +151,12 @@ export function install(rt) {
     }
     const pending = track?.solver?.pending
     // A native ACP mirror and its later approval can describe the same action.
-    const sameNativeCall = name === 'acp_tool' && !!call && pending?.call === call
+    const sameNativeCall = name === 'acp_tool' && !!call && pending?.call === call && !pending.evidence
     if (relevant && (rt.solverProgressBusy?.(bot) || (pending && (!checkCommand || !call || pending.call) && !sameNativeCall))) {
       return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Finish recording the current Solver progress before doing more work.` }
+    }
+    if (checkCommand && track?.requested && !track.delivered && track.solver?.plan?.accepted === true && !pending) {
+      return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Start a check run with solver_progress before running a command for the accepted plan.` }
     }
     if (bot.reviewGuard !== true) return undefined
     if (typeof track?.planVerdictAt === 'number') return undefined
@@ -193,22 +208,24 @@ export function install(rt) {
       if (bridge) return bridgeHeld(request, bot, sessionId, base)
       const mirror = request.mirrorCall
       const args = isRecord(mirror) ? mirror : undefined
-      const call = typeof request.callId === 'string' ? `${sessionId}:${request.callId}` : undefined
+      const call = solverCallId(sessionId, 'acp_tool', args, request.callId)
       const held = reviewGuardHolds(bot, true, 'acp_tool', args, undefined, base, call)
       if (held === undefined) {
         if (bot.reviewTrack?.solver?.plan) {
-          const finish = await rt.solverBeforeWork?.(bot, { ...solverCall(bot, 'acp_tool', args, undefined, base), call })
-          finish?.()
+          await rt.solverBeforeWork?.(bot, { ...solverCall(bot, 'acp_tool', args, undefined, base), call, approvalOnly: true })
         }
         return undefined
       }
+      if (isRecord(mirror)) mirror.refused = { reason: held.text }
       rt.noteStop?.(sessionId, { why: held.why, ...(typeof mirror?.title === 'string' ? { tool: mirror.title } : {}), callId: request.callId, text: held.text, child: true }, agent)
       return held
-    } catch {
-      if (bridge) {
-        try { request.bridgeCall.refused = { reason: 'The review guard holds this call until the reviewer answers the plan.' } } catch {}
-      }
-      return { why: 'guard', text: 'held' }
+    } catch (error) {
+      const text = error?.code === 'bot/refused' ? error.message : 'The review guard holds this call until the reviewer answers the plan.'
+      try {
+        const details = bridge ? request.bridgeCall : request.mirrorCall
+        if (isRecord(details)) details.refused = { reason: text }
+      } catch {}
+      return { why: 'guard', text }
     }
   }
 

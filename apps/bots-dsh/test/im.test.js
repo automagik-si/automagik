@@ -193,6 +193,27 @@ test('unpaired DM asks once, allow pairs it, next message prompts the Bot', asyn
   assert.deepEqual(s.prompts[0].content, [{ type: 'text', text: 'do a thing' }])
 })
 
+test('LA-4 forwarded and unverifiable IM cannot enable request Auto', async t => {
+  const s = await start()
+  t.after(s.stop)
+  await add(s)
+  const [conn] = Object.values(s.rt.state.im.connections)
+  await dm(s, 'u1', 'Pair me.')
+  await s.rt.imEndpoint('im-pair', { id: conn.id, senderId: 'u1', allow: true })
+  const solver = s.rt.botOf('a')
+  solver.role = 'Solver'
+  const command = 'Work alone until delivered.'
+  const receive = async origin => {
+    await dm(s, 'u1', command, { origin })
+    const prompt = s.prompts.at(-1)
+    s.emitEvent('a', 'user/message', { content: prompt.content, source: { kind: 'user', rpcId: prompt.requestId } })
+    return s.rt.solverProgress(solver, true, { action: 'auto', request: solver.reviewTrack.solver.request, quote: command })
+  }
+  assert.match(await receive('forwarded'), /own words/)
+  assert.match(await receive(undefined), /own words/)
+  assert.match(await receive('original'), /Recorded/)
+})
+
 test('unbound group mention replies unbound and records the chat; binding routes mentions', async (t) => {
   const s = await start()
   t.after(s.stop)

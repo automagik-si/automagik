@@ -1,4 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { lstatSync, readdirSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { SOLVER_FIX_LIMIT, SOLVER_REPLAN_LIMIT, isSolverBot, isWrittenSolverMethod, solverAutoOn } from '../shared/solver-method.js'
 import { readableRoute } from './session-route.js'
 
@@ -7,9 +9,18 @@ const record = value => value !== null && typeof value === 'object' && !Array.is
 const count = value => Number.isSafeInteger(value) && value >= 0
 const id = value => typeof value === 'string' && /^[a-z0-9][a-z0-9_.:-]{0,79}$/.test(value)
 const notDone = reason => ({ reason })
+const MISSING_PASS = 'No verified passing evidence for this run. Start a new run on the current result.'
 const listOfIds = value => Array.isArray(value) && value.length > 0 && value.length <= MAX_CHECKS
   && value.every(id) && new Set(value).size === value.length
+const fingerprint = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const includesAll = (ids, values) => ids.length === values.length && ids.every(key => values.includes(key))
+const commandOf = value => typeof value === 'string' && value.length <= 2_000 && value.trim() !== '' ? value.trim() : undefined
+function checkCommands(value, checks) {
+  if (!Array.isArray(value) || value.length !== checks.length || !value.every(item => record(item)
+    && Object.keys(item).length === 2 && id(item.check) && commandOf(item.command))) return undefined
+  const byCheck = Object.fromEntries(value.map(item => [item.check, commandOf(item.command)]))
+  if (includesAll(checks, Object.keys(byCheck))) return byCheck
+}
 
 export const solverTracked = bot => bot != null && (isSolverBot(bot) || bot.reviewGuard === true
   || bot.solverAuto === true || id(bot.reviewTrack?.solver?.request)
@@ -25,10 +36,12 @@ export function cleanProgress(value) {
   const attempts = Object.fromEntries(Object.entries(record(value.attempts) ? value.attempts : {})
     .filter(([check, number]) => id(check) && count(number)).slice(0, MAX_CHECKS))
   const plan = record(value.plan) && count(value.plan.revision) && listOfIds(value.plan.checks) ? value.plan : undefined
-  const passed = plan && Array.isArray(value.passed) ? plan.checks.filter(check => value.passed.includes(check)) : []
+  const snapshot = fingerprint(value.snapshot) ? value.snapshot : undefined
+  const passed = snapshot && plan && Array.isArray(value.passed) ? plan.checks.filter(check => value.passed.includes(check)) : []
   const limit = value.limit
   return {
     request, origin, attempts, passed,
+    ...(snapshot ? { snapshot } : {}),
     replans: count(value.replans) ? value.replans : 0,
     revision: count(value.revision) ? value.revision : 0,
     runs: record(value.runs) ? value.runs : {},
@@ -58,6 +71,7 @@ export const limitText = limit => `Attempt limit reached (${limitWhat(limit)}). 
 export function invalidateResult(progress) {
   progress.revision++
   progress.passed = []
+  delete progress.snapshot
   delete progress.review
 }
 
@@ -67,18 +81,47 @@ export function resumeProgress(progress, limit) {
   delete progress.limit
 }
 
-export function modelOf(rt, agent, session = agent?.session) {
-  // The actual generation route. A saved Bot pick or an unresolved local default
-  // cannot prove which model answered the review.
+// File identity and change times track local result changes without reading file contents.
+export function resultSnapshot(folder) {
+  if (typeof folder !== 'string' || !isAbsolute(folder)) return undefined
+  const hash = createHash('sha256')
+  let remaining = 20_000
+  function visit(path, name, root = false) {
+    if (--remaining < 0) throw new Error('Result has too many entries to verify.')
+    const stat = lstatSync(path, { bigint: true })
+    if (!stat.isDirectory() && !stat.isFile()) throw new Error('Result contains an unverifiable entry.')
+    hash.update(JSON.stringify([name, stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].map(String)))
+    if (stat.isDirectory()) {
+      for (const child of readdirSync(path).sort()) {
+        if (root && child === '.git') continue
+        visit(join(path, child), child)
+      }
+      if (stat.ctimeNs !== lstatSync(path, { bigint: true }).ctimeNs) throw new Error('Result changed during verification.')
+    }
+  }
   try {
-    const used = session?.requestHeader?.()?.config
-    const route = readableRoute(used ?? agent?.model?.current?.())
+    visit(folder, folder, true)
+    return hash.digest('hex')
+  } catch {
+    return undefined
+  }
+}
+
+export function modelOf(rt, agent, session = agent?.session) {
+  // Only the generation's route and the ACP option the live agent actually selected.
+  try {
+    const route = readableRoute(session?.requestHeader?.()?.config)
     if (!route) return undefined
-    const model = route.provider.startsWith('acp-')
+    const acp = route.provider.startsWith('acp-')
+    const model = acp
       ? rt.ctx.get?.('acpAgents')?.effectiveModelOf?.(session?.id ?? agent?.id, route.provider) : route.model
     if (typeof model !== 'string') return undefined
-    const slug = model.trim().toLowerCase().split('/').at(-1)
-    return slug && !/^(?:default|auto|unknown)$/.test(slug) ? slug : undefined
+    const slug = model.trim().toLowerCase().split(route.provider === 'acp-hermes' ? /[:/]/ : '/').at(-1)
+    if (!slug || slug.endsWith('-latest') || /^(?:default|auto|unknown|opus|sonnet|haiku|fable)(?:plan)?(?:\[1m\])?$/.test(slug)) return undefined
+    // A CLI's friendly choices (including "latest") cannot prove a model identity.
+    if (acp && !/^(?:claude|gpt|o[1-9]|gemini|deepseek|qwen|llama|mistral|grok)[.-][a-z0-9.-]*\d[a-z0-9.\[\]-]*$/.test(slug)) return undefined
+    return slug.replace(/\[1m\]$/, '').replace(/-\d{8}$/, '')
+      .replace(/^claude-(\d+-\d+)-(opus|sonnet|haiku)$/, 'claude-$2-$1')
   } catch {
     return undefined
   }
@@ -92,25 +135,23 @@ export function normalizedAutoInstruction(text) {
   if (/^(?:(?:please |por favor,? )?(?:work alone until delivered|turn auto on|enable auto|trabalhe sem perguntar até entregar|ative o modo auto)|请?(?:开启自动模式|独立工作直到交付))[.!。！]?$/.test(clean)) return clean
 }
 
-function passes(progress) {
-  return progress.plan?.accepted === true && !progress.pending
-    && includesAll(progress.plan.checks, progress.passed)
+function passes(progress, snapshot) {
+  return progress.plan?.accepted === true && !progress.pending && typeof snapshot === 'string'
+    && progress.snapshot === snapshot && includesAll(progress.plan.checks, progress.passed)
 }
 
-export function solverOutcome(bot, track, review, pending, model) {
+export function solverOutcome(bot, track, review, pending, model, snapshot) {
   const progress = track.solver
   const limit = activeSolverLimit(bot, track)
   if (limit) return { reason: 'limit', limit: { kind: limit.kind, ...(limit.check ? { check: limit.check } : {}) } }
-  if (!progress || !passes(progress)) return notDone('checks')
+  if (!progress || !passes(progress, snapshot)) return notDone('checks')
   const result = progress.review
   if (review !== 'bot' || pending || result?.revision !== progress.revision || result.verdict !== 'SHIP'
     || result.solverModel !== model || result.reviewer?.id !== bot.reviewerId || !result.reviewer.model) return notDone('review')
-  return { done: true, reviewer: result.reviewer }
+  return { done: true, reviewer: result.reviewer, exchangeId: result.exchangeId }
 }
 
-export function designateReview(progress, { kind, exchangeId, reviewerId, model }) {
-  const prior = kind === 'plan' ? progress.plan?.review : progress.review
-  if (prior && prior.verdict === undefined) return 'A designated review is already waiting for its answer.'
+export function designateReview(progress, { kind, exchangeId, reviewerId, model, snapshot }) {
   if (kind === 'plan') {
     if (!progress.plan || progress.plan.superseded) return 'Register the agreed checks with solver_progress plan first.'
     if (progress.pending) return 'Record the open run before asking for plan review.'
@@ -118,7 +159,7 @@ export function designateReview(progress, { kind, exchangeId, reviewerId, model 
     invalidateResult(progress)
     return
   }
-  if (!passes(progress)) return 'Record current passing runs for every agreed check before asking for result review.'
+  if (!passes(progress, snapshot)) return 'Record current passing runs for every agreed check before asking for result review.'
   if (!model) return 'The effective Solver model could not be verified for an independent result review.'
   progress.review = { exchangeId, reviewerId, revision: progress.revision, solverModel: model }
 }
@@ -141,7 +182,7 @@ export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, mod
   }
 }
 
-export function recordProgress(bot, track, args, { now, authorizedAuto, running } = {}) {
+export function recordProgress(bot, track, args, { now, authorizedAuto, running, snapshot } = {}) {
   const progress = track.solver
   const limit = activeSolverLimit(bot, track)
   const recorded = `Recorded. ${Math.max(0, SOLVER_REPLAN_LIMIT - progress.replans)} re-plans left in Normal.`
@@ -158,18 +199,23 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running 
   }
   if (action === 'checks' && id(run) && Object.hasOwn(progress.runs, run)) {
     const prior = progress.runs[run]
-    return { text: JSON.stringify(args.results) === prior ? (limit ? limitText(limit) : recorded) : 'This run ID already has different results.' }
+    if (JSON.stringify(args.results) !== (prior?.reported ?? prior)) return { text: 'This run ID already has different results.' }
+    return { text: limit ? limitText(limit) : prior?.unverified ? MISSING_PASS : recorded }
   }
   if (limit) return { text: limitText(limit) }
   if (running) return { text: 'Wait for the current work to finish before updating Solver progress.' }
   if (action === 'plan') {
     if (!listOfIds(checks)) return { text: 'Register 1 to 20 distinct, stable check IDs.' }
     if (progress.pending) return { text: 'Record the open run before replacing the plan.' }
+    const commands = checkCommands(args.commands, checks)
+    if (args.commands !== undefined && !commands) return { text: 'Give one command for each agreed check ID.' }
     if (progress.plan && !progress.plan.superseded) {
-      return { text: includesAll(progress.plan.checks, checks) ? recorded : 'Record a re-plan before replacing the agreed checks.' }
+      const sameCommands = checks.every(check => commands?.[check] === progress.plan.commands?.[check])
+      return { text: includesAll(progress.plan.checks, checks) && sameCommands
+        ? recorded : 'Record a re-plan before replacing the agreed checks or commands.' }
     }
     if (new Set([...Object.keys(progress.attempts), ...checks]).size > MAX_CHECKS) return { text: 'Use at most 20 check IDs per request.' }
-    progress.plan = { revision: progress.revision, checks: [...checks] }
+    progress.plan = { revision: progress.revision, checks: [...checks], ...(commands ? { commands } : {}) }
     return { changed: true, text: recorded }
   }
   if (!id(run)) return { text: 'Provide a stable run ID.' }
@@ -202,7 +248,13 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running 
       || !includesAll(pending.checks, results.map(item => item.check))) {
       return { text: 'Report one Boolean outcome for every check in this run.' }
     }
+    const evidence = pending.evidence
+    if (pending.checks.length === 1 && typeof evidence?.pass === 'boolean' && evidence.pass !== results[0].pass) {
+      return { text: 'The report contradicts the observed check outcome. Report the actual outcome.' }
+    }
     const failures = results.filter(item => item.pass === false).map(item => item.check)
+    delete progress.pending
+    progress.runs[run] = { reported: JSON.stringify(results), ...(evidence ? { evidence } : {}) }
     if (failures.length > 0) {
       invalidateResult(progress)
       for (const check of failures) {
@@ -210,11 +262,16 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running 
         const failuresSoFar = progress.attempts[check] = previous + 1
         if (!solverAutoOn(bot, progress) && failuresSoFar > SOLVER_FIX_LIMIT) progress.limit ??= { kind: 'fix', check, at: now }
       }
-    } else if (pending.revision === progress.revision) {
+    } else {
+      if (pending.checks.length !== 1 || evidence?.pass !== true || !fingerprint(evidence.snapshot)
+        || evidence.snapshot !== snapshot || pending.revision !== progress.revision) {
+        progress.passed = progress.passed.filter(check => !pending.checks.includes(check))
+        progress.runs[run].unverified = true
+        return { changed: true, text: MISSING_PASS }
+      }
+      progress.snapshot = snapshot
       progress.passed = [...new Set([...progress.passed, ...pending.checks])]
     }
-    progress.runs[run] = JSON.stringify(results)
-    delete progress.pending
   } else {
     return { text: 'Unknown progress action.' }
   }

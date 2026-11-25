@@ -631,7 +631,7 @@ export class AcpAdapter extends LlmAdapter {
    */
   constructor(ctx, agents, {
     dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
-    botIdentity = () => undefined, teamManaged = () => false, access, holds, ownMode = () => undefined, hostStopping = () => false,
+    botIdentity = () => undefined, solverIdentity = () => undefined, teamManaged = () => false, access, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
   } = {}) {
@@ -669,6 +669,7 @@ export class AcpAdapter extends LlmAdapter {
     // booleans. Read at each turn's start by `nativeOn`.
     this.nativeTools = nativeTools
     this.botIdentity = botIdentity
+    this.solverIdentity = solverIdentity
     this.teamManaged = teamManaged
     this.backchannel = backchannel
     this.redact = redactor ?? (text => text)
@@ -1639,7 +1640,8 @@ export class AcpAdapter extends LlmAdapter {
       const ompNativeAllowed = () => permitsNative(levelAtStart())
         && this.savedNativeOn(sessionId, options.provider)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
-      const botIdentity = takesIdentity || options.provider === 'acp-omp' ? readIdentity(this.botIdentity, sessionId) : undefined
+      const botIdentity = takesIdentity || options.provider === 'acp-omp' ? readIdentity(this.botIdentity, sessionId)
+        : readIdentity(this.solverIdentity, sessionId)
       const identityRead = takesIdentity ? botIdentity : undefined
       // Whether the Details switch could turn this turn's Codex ON, read when the text is made: any
       // Session of a Bot it is not blocked for.

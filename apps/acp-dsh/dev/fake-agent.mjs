@@ -733,6 +733,7 @@ const implementation = {
         await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'in_progress' })
         const answer = await runBash(`${toolCallId}-child`, toolCallId)
         if (session.cancelled || answer === 'cancelled') return { stopReason: 'cancelled' }
+        if (/native-agent twice/.test(said)) await runBash(`${toolCallId}-second-child`, toolCallId)
         await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: `subagent report (${answer})` } }] })
         await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` The subagent reported (${answer}).` } })
       }

@@ -6,7 +6,7 @@
 // reviewer id the New Solver dialog stores (`reviewerId`). Groups, tasks and scheduled runs of a
 // Solver are not marked: only its own chat (and the subagents under it).
 import { lstatSync, realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { SOLVER_NOTES } from '../shared/solver-method.js'
 import { VERDICTS_KEPT, deliveryMark, verdictOf } from '../shared/review-mark.js'
 import { guardVerdictOf } from '../shared/review-guard.js'
@@ -16,7 +16,7 @@ import { reachesShell } from './tool-deny.js'
 import { refusal } from './refusal.js'
 import {
   activeSolverLimit, cleanProgress, designateReview, invalidateResult, modelOf, newProgress,
-  normalizedAutoInstruction, recordProgress, recordSolverVerdict, resumeProgress, solverOutcome, solverTracked,
+  normalizedAutoInstruction, recordProgress, recordSolverVerdict, resultSnapshot, resumeProgress, solverOutcome, solverTracked,
 } from './solver-progress.js'
 
 // The tools that change files by name (as private-bots.js and auto-judge.js read them), after
@@ -120,7 +120,9 @@ export function cleanTrack(track) {
     // The review guard (review-guard.js): when the request's plan got its verdict, and whether a
     // Bot's request opened it (and which Bot).
     ...(isTime(track.planVerdictAt) ? { planVerdictAt: track.planVerdictAt } : {}),
+    ...(track.brief === true ? { brief: true } : {}),
     ...(track.openedBy === 'bot' ? { openedBy: 'bot' } : {}),
+    ...(typeof track.openerExchange === 'string' ? { openerExchange: track.openerExchange } : {}),
     ...(typeof track.openerId === 'string' && track.openerId !== '' ? { openerId: track.openerId } : {}),
     verdicts,
     ...(solver ? { solver } : {}),
@@ -137,7 +139,16 @@ export function install(rt) {
   const unread = new WeakMap()
   const tracked = solverTracked
   const autoInstructions = new WeakMap()
-  const progressWrites = new WeakSet()
+  const progressWrites = new WeakMap()
+  const reviewSends = new Set()
+  const folderOf = bot => bot.workDir ?? rt.teamFolder?.()
+  const snapshotOf = bot => resultSnapshot(folderOf(bot))
+  const deferIngress = (bot, apply) => {
+    const queue = progressWrites.get(bot)
+    if (queue === undefined) return false
+    queue.push(apply)
+    return true
+  }
   const runningWork = new WeakMap()
   // The record of the request in progress: { requested, requestAt, personAt, firstWorkAt,
   // lastWorkAt, verdicts, delivered, last }. `requested`: a person asked for something (a message
@@ -167,21 +178,29 @@ export function install(rt) {
   // A Solver just made, with the brief it was made with (its first request) or none (a greeting).
   function reviewCreated(bot, brief) {
     if (!tracked(bot)) return
-    if (brief) open(bot, bot.createdAt ?? Date.now(), bot.createdBy ? 'bot' : 'person')
-    else trackOf(bot)
+    if (brief) {
+      open(bot, bot.createdAt ?? Date.now(), bot.createdBy ? 'bot' : 'person')
+      bot.reviewTrack.brief = true
+    } else trackOf(bot)
   }
 
   // A person's message in the Solver's own chat. After a delivery, or with no request open, it
   // opens the next request; while one is open (the Solver waits for its reviewer) it only dates the
   // person's last message, so reviewer work opened before it no longer holds the delivery (SR4-1).
-  function reviewRequest(botId, { text, question } = {}) {
+  function reviewRequest(botId, input = {}) {
     const bot = rt.botOf(botId)
     if (!tracked(bot)) return
+    const { text, question, trustedAuto = true } = input
+    const queue = progressWrites.get(bot)
+    if (queue) return new Promise((resolve, reject) => {
+      queue.push(() => {
+        try { resolve(reviewRequest(botId, input)) } catch (error) { reject(error) }
+      })
+    })
     const before = bot.reviewTrack
     let track = cleanTrack(before)
-    const instruction = normalizedAutoInstruction(text)
-    // omp's native adapter has no team-tool bridge. Its own-chat instruction
-    // can still select the request's mode through this trusted input.
+    const instruction = trustedAuto ? normalizedAutoInstruction(text) : undefined
+    // omp's native adapter has no team-tool bridge.
     const noProgressTool = (bot.appliedModel ?? bot.model)?.startsWith('acp-omp/') === true
     const remember = current => {
       if (current.solver.origin === 'person' && instruction && !noProgressTool) {
@@ -189,6 +208,7 @@ export function install(rt) {
       } else {
         autoInstructions.delete(bot)
       }
+      return current.solver.request
     }
     if (track?.requested === true && track.delivered !== true) {
       track.solver ??= newProgress(track.openedBy === 'bot' ? 'bot' : 'person')
@@ -200,10 +220,7 @@ export function install(rt) {
       if (limit || directAuto) {
         if (limit) resumeProgress(track.solver, limit)
         if (directAuto) track.solver.auto = true
-        void saveProgress(bot, before, track.solver, track).then(() => {
-          if (bot.reviewTrack === track) remember(track)
-        }).catch(() => {})
-        return
+        return saveProgress(bot, before, track.solver, track, () => remember(track)).then(() => track.solver.request)
       }
       bot.reviewTrack = track
     } else {
@@ -212,18 +229,19 @@ export function install(rt) {
       track = bot.reviewTrack
       if (noProgressTool && instruction) track.solver.auto = true
     }
-    remember(track)
     save()
+    return remember(track)
   }
 
-  // Do not publish an acknowledged progress update until the selective D2 write
-  // has committed. A request or work transition during the write invalidates it.
-  async function saveProgress(bot, before, solver, next = { ...before, solver }) {
+  // Keep input and review events ordered with the durable write, including the interval
+  // between rename and directory sync. A replacement team still produces a conflict.
+  async function saveProgress(bot, before, solver, next = { ...before, solver }, onCommit) {
     if (progressWrites.has(bot)) throw refusal('A Solver progress update is still being saved.')
     const assertCurrent = () => {
       if (rt.botOf(bot.id) !== bot || bot.reviewTrack !== before) throw refusal('The Solver request changed. Read solver_progress status again.')
     }
-    progressWrites.add(bot)
+    const queue = []
+    progressWrites.set(bot, queue)
     try {
       await rt.saveCopy(copy => {
         assertCurrent()
@@ -231,10 +249,17 @@ export function install(rt) {
       }, {
         durable: true,
         beforeCommit: assertCurrent,
-        afterWrite: () => { if (bot.reviewTrack === before) bot.reviewTrack = next },
+        afterWrite: () => {
+          assertCurrent()
+          bot.reviewTrack = next
+          onCommit?.()
+        },
       })
     } finally {
       progressWrites.delete(bot)
+      for (const apply of queue) {
+        try { apply() } catch (error) { rt.warn('omni-ui: deferred Solver event failed: %s', error) }
+      }
     }
   }
 
@@ -260,6 +285,7 @@ export function install(rt) {
       now: Date.now(),
       authorizedAuto: authority?.request === args.request && authority.instruction === normalizedAutoInstruction(args.quote),
       running: runningWork.has(bot),
+      snapshot: args.action === 'checks' ? snapshotOf(bot) : undefined,
     })
     if (changed.changed) {
       await saveProgress(bot, before, track.solver)
@@ -268,7 +294,7 @@ export function install(rt) {
     return changed.text
   }
 
-  async function solverReview(bot, reviewer, own, { kind, request, exchangeId, agent }) {
+  async function solverReview(bot, reviewer, own, { kind, request, exchangeId, agent, prepare }) {
     const before = bot.reviewTrack
     const track = cleanTrack(before)
     if (!own || !tracked(bot) || bot.reviewerId !== reviewer.id || !track?.solver
@@ -277,10 +303,28 @@ export function install(rt) {
     }
     if (progressWrites.has(bot) || runningWork.has(bot)) throw refusal('Finish the current Solver work before requesting a review.')
     const progress = structuredClone(track.solver)
-    const issue = designateReview(progress, { kind, exchangeId, reviewerId: reviewer.id, model: modelOf(rt, agent) })
+    const prior = kind === 'plan' ? progress.plan?.review : progress.review
+    if (prior && prior.verdict === undefined && (reviewSends.has(prior.exchangeId) || rt.deliveryNote?.(prior.exchangeId)
+      || rt.exchangeOf?.(prior.exchangeId, bot.id, reviewer.id))) {
+      throw refusal('A designated review is already waiting for its answer.')
+    }
+    const issue = designateReview(progress, { kind, exchangeId, reviewerId: reviewer.id,
+      model: modelOf(rt, agent), snapshot: kind === 'result' ? snapshotOf(bot) : undefined })
     if (issue) throw refusal(issue)
-    await saveProgress(bot, before, progress)
-    return progress.plan.checks
+    const prepared = await prepare(progress.plan.checks, progress.plan.commands)
+    if (prepared === undefined) return
+    if (runningWork.has(bot) || (kind === 'result' && progress.snapshot !== snapshotOf(bot))) {
+      throw refusal('The Solver result changed. Verify the current checks before requesting a review.')
+    }
+    reviewSends.add(exchangeId)
+    try {
+      await saveProgress(bot, before, progress)
+      if (prior && prior.verdict === undefined) rt.dropWork(prior.exchangeId)
+    } catch (error) {
+      reviewSends.delete(exchangeId)
+      throw error
+    }
+    return prepared
   }
 
   async function solverQuestion(botId, callId) {
@@ -299,6 +343,7 @@ export function install(rt) {
     if (!own || !tracked(bot) || !isWorkCall(name, args, definition)) return
     const folder = bot.workDir ?? rt.teamFolder?.()
     const notes = isNotesWrite(name, args, folder, base ?? folder)
+    if (deferIngress(bot, () => reviewWork(bot, own, name, args, definition, base))) return
     const track = trackOf(bot)
     if (track.delivered === true) return
     const at = Date.now()
@@ -311,28 +356,60 @@ export function install(rt) {
 
   // Durably invalidate passing evidence before work can change the result. A
   // check may run one mediated command, then must report before more work.
-  async function solverBeforeWork(bot, { relevant, checkCommand, call }) {
+  async function solverBeforeWork(bot, { relevant, checkCommand, shellCommand, call, approvalOnly }) {
     const before = bot.reviewTrack
     const track = cleanTrack(before)
     if (!relevant || !track?.requested || track.delivered || !track.solver?.plan) return
     const progress = track.solver
     const pending = progress.pending
     if (pending && checkCommand && call) {
-      if (pending.call === call) return
-      progress.pending = { ...pending, call }
-      await saveProgress(bot, before, progress)
+      if (pending.call !== call) {
+        const snapshot = snapshotOf(bot)
+        if (progress.snapshot !== snapshot) invalidateResult(progress)
+        progress.pending = { ...pending, call, revision: progress.revision, ...(snapshot ? { snapshot } : {}) }
+        await saveProgress(bot, before, progress)
+      }
     } else if (progress.passed.length > 0 || progress.review) {
       invalidateResult(progress)
       await saveProgress(bot, before, progress)
     }
+    if (approvalOnly) return
     const work = runningWork.get(bot) ?? new Set()
     const token = {}
     work.add(token)
     runningWork.set(bot, work)
-    return () => {
-      work.delete(token)
-      if (work.size === 0) runningWork.delete(bot)
+    return async result => {
+      try {
+        if (pending && checkCommand && call) {
+          const agreed = pending.checks.length === 1 && progress.plan.commands?.[pending.checks[0]]
+          await observeCheck(bot, track.solver.request, pending.run, call, agreed, shellCommand, result)
+        }
+      } finally {
+        work.delete(token)
+        if (work.size === 0) runningWork.delete(bot)
+      }
     }
+  }
+
+  async function observeCheck(bot, request, run, call, agreed, command, result) {
+    const before = bot.reviewTrack
+    const progress = cleanProgress(before?.solver)
+    const pending = progress?.pending
+    if (progress?.request !== request || pending?.run !== run || pending.call !== call) return
+    const outcome = command && result?.isError === false ? result.value : undefined
+    const folder = folderOf(bot)
+    const cwd = outcome?.cwd
+    const scope = typeof folder === 'string' && typeof cwd === 'string' && isAbsolute(cwd) ? relative(folder, cwd) : undefined
+    const known = outcome?.kind === 'foreground' && Number.isInteger(outcome.exitCode)
+      && outcome.signal === null && outcome.timedOut === false && outcome.aborted === false
+      && !outcome.stopped && !outcome.sandbox?.denied && !outcome.sandbox?.runnerFailed
+    const snapshot = snapshotOf(bot)
+    const scoped = scope !== undefined && !isAbsolute(scope) && scope !== '..' && !scope.startsWith(`..${sep}`)
+    const stable = known && command === agreed && scoped && snapshot !== undefined && pending.snapshot === snapshot
+    if (!stable) invalidateResult(progress)
+    progress.pending = { ...pending, evidence: { call, ...(known && command === agreed ? { pass: outcome.exitCode === 0 } : {}),
+      ...(stable ? { snapshot } : {}) } }
+    await saveProgress(bot, before, progress)
   }
 
   function rememberReply(bot, exchangeId, reviewerId, replyTo, workAt) {
@@ -373,21 +450,26 @@ export function install(rt) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     if (typeof workAt !== 'number') return
-    const verdict = verdictOf(text)
-    const reviewer = rt.botOf(fromId)
-    const planVerdict = guardVerdictOf(text, reviewer?.name)
     const track = trackOf(bot)
     if (track.delivered === true || workAt < track.requestAt) return
-    if (verdict !== undefined || planVerdict !== undefined || reply !== undefined) {
+    const applyVerdict = () => {
+      const current = trackOf(bot)
+      if (current.requestAt !== track.requestAt || current.delivered || bot.reviewerId !== fromId) return
+      reviewSends.delete(reply?.replyTo)
+      const verdict = verdictOf(text)
+      const reviewer = rt.botOf(fromId)
+      const planVerdict = guardVerdictOf(text, reviewer?.name)
+      if (verdict === undefined && planVerdict === undefined && reply === undefined) return
       const at = Date.now()
-      if (planVerdict !== undefined) track.planVerdictAt ??= at
-      if (verdict !== undefined) track.verdicts = [...track.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
+      if (planVerdict !== undefined) current.planVerdictAt ??= at
+      if (verdict !== undefined) current.verdicts = [...current.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
       if (reviewer) {
         const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
-        recordSolverVerdict(track.solver, reply?.replyTo, reviewer, strict, model)
+        recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model)
       }
       save()
     }
+    if (!deferIngress(bot, applyVerdict)) applyVerdict()
     if (reply === undefined || !track.requested || !isTime(workAt)) return
     const { requestAt } = track
     // Only the delivery that appends this exchange can start its hold.
@@ -465,9 +547,10 @@ export function install(rt) {
   // `personAt` would let a turn end deliver past the reviewer (H7-1).
   // After a delivery (or with none asked yet) a request opens the next track; a no-reply message
   // and the reviewer's own message open nothing.
-  function reviewBotRequest(botId, senderId, { noReply = false } = {}) {
+  function reviewBotRequest(botId, senderId, { noReply = false, exchangeId } = {}) {
     const bot = rt.botOf(botId)
     if (!tracked(bot) || typeof senderId !== 'string' || senderId === botId) return
+    if (deferIngress(bot, () => reviewBotRequest(botId, senderId, { noReply, exchangeId }))) return
     const track = cleanTrack(bot.reviewTrack)
     const dates = noReply || senderId === bot.reviewerId
     if (track?.requested === true && track.delivered !== true) {
@@ -493,6 +576,7 @@ export function install(rt) {
     }
     bot.reviewTrack.openedBy = 'bot'
     bot.reviewTrack.openerId = senderId
+    if (typeof exchangeId === 'string') bot.reviewTrack.openerExchange = exchangeId
     save()
   }
 
@@ -500,12 +584,23 @@ export function install(rt) {
   // with nothing out to its reviewer, is a delivery: it is marked once per request. Reviewer work
   // opened before the person's last message does not hold it: a person who asks for the delivery
   // first gets it (SR3-3 (b)), and the late verdict on that work is dropped (SR4-1).
-  function reviewTurnEnd(botId, { completed, wroteText, model }) {
+  function reviewTurnEnd(botId, turn) {
+    const { completed, wroteText, model, request, trigger } = turn
     const bot = rt.botOf(botId)
     if (!tracked(bot) || !completed || !wroteText) return
+    if (deferIngress(bot, () => reviewTurnEnd(botId, turn))) return
     const track = cleanTrack(bot.reviewTrack)
     if (track?.requested !== true || track.delivered === true) return
-    if (activeSolverLimit(bot, track) || progressWrites.has(bot)) return
+    if (activeSolverLimit(bot, track) || runningWork.has(bot)) return
+    if (Object.hasOwn(turn, 'request') && track.solver) {
+      const progress = track.solver
+      const ownReview = trigger?.role === 'reply' && trigger.senderSessionId === bot.reviewerId
+        && typeof trigger.replyTo === 'string'
+        && [progress.plan?.review?.exchangeId, progress.review?.exchangeId].includes(trigger.replyTo)
+      const botRequest = progress.origin === 'bot' && typeof track.openerExchange === 'string' && trigger?.exchangeId === track.openerExchange
+      const brief = track.brief === true && (trigger === undefined || trigger.role === 'kickoff')
+      if (!(request === progress.request || ownReview || botRequest || brief)) return
+    }
     bot.reviewTrack = track
     const review = reviewOf(bot)
     const works = Object.values(rt.state?.works ?? {})
@@ -515,8 +610,9 @@ export function install(rt) {
     // Reviewer work this request opened, still out when the person asked: delivered before its
     // verdict (Run 3). Work left from an earlier request is not this one's.
     const pending = review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && typeof work.at === 'number' && work.at >= track.requestAt)
-    track.outcome = solverOutcome(bot, track, review, pending, model)
-    track.last = { ...deliveryMark(track, review, Date.now(), { pending }), ...(track.outcome.done ? { done: true, reviewer: track.outcome.reviewer } : {}) }
+    track.outcome = solverOutcome(bot, track, review, pending, model, track.solver?.snapshot ? snapshotOf(bot) : undefined)
+    track.last = { ...deliveryMark(track, review, Date.now(), { pending }), ...(track.outcome.done
+      ? { done: true, reviewer: track.outcome.reviewer, plan: true, result: true, resultExchangeId: track.outcome.exchangeId } : {}) }
     track.delivered = true
     save()
   }
@@ -542,5 +638,6 @@ export function install(rt) {
 
   Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf,
     solverProgress, solverReview, solverQuestion, solverStatusOf, solverBeforeWork,
+    solverReviewSent: exchangeId => reviewSends.delete(exchangeId),
     solverProgressBusy: bot => progressWrites.has(bot) })
 }

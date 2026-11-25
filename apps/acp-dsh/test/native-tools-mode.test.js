@@ -410,6 +410,25 @@ test("a subagent's nested call the person rejects never runs", async (t) => {
   assert.match(textIn(chunks), /The subagent reported \(no\)\./)
 })
 
+test('LA-6 distinct children of one parent carry independent approval IDs and refusal text', async t => {
+  let first
+  const reason = 'Attempt limit reached. Ask the person for the exact decision.'
+  const w = await world(t, { nativeTools: true, level: WRITE, answer: request => {
+    if (first === undefined) {
+      first = request.callId
+      return 'allowed-once'
+    }
+    if (request.callId === first) return 'allowed-once'
+    request.mirrorCall.refused = { reason }
+    return 'rejected'
+  } })
+  const { mirrors } = await w.chat('s1').turn('native-agent twice')
+  assert.equal(w.asked.length, 2)
+  assert.notEqual(w.asked[0].callId, w.asked[1].callId)
+  assert.equal(w.events('native-tool-ran').length, 1)
+  assert.ok(mirrors.some(mirror => resultText(mirror.result).includes(reason)))
+})
+
 test("Auto: a subagent's nested call is answered by Auto review, not the person", async (t) => {
   const w = await world(t, { nativeTools: true, level: AUTO, decision: ALLOW })
   const c = w.chat('s1')
